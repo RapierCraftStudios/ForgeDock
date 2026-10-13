@@ -936,18 +936,51 @@ has "4057: SEC-3 widen still fires when a changed source reaches no test anywher
 eq "4057: ...and the step runs" run "$(printf '%s' "$R" | jq -r '.action')"
 R=$(_scope 'bash scripts/x.test.sh' scripts/a.sh scripts/zz.sh)
 has "4057: one unreached source file among several still widens a single-test step" "$(printf '%s' "$R" | jq -r '.widen')" "scripts/zz.sh"
+# SEC-3 universe is per ecosystem: a test in another language never covers a changed source (polyglot under-block)
+r=$(blank); mkdir -p "$r/pkg" "$r/tests"
+echo 'def f(): return 1' > "$r/pkg/utils.py"; echo 'def test_core(): assert True' > "$r/tests/test_core.py"
+echo 'test("u", () => {})' > "$r/tests/utils.test.ts"
+commit_base "$r"
+echo '# c' >> "$r/pkg/utils.py"
+R=$(_scope 'pytest tests/test_core.py' pkg/utils.py)
+eq "SEC-3 ecosystem: a pytest step is not skipped because an unrelated .ts test matches the changed .py" run "$(printf '%s' "$R" | jq -r '.action')"
+has "SEC-3 ecosystem: ...it widens and names the unreached source" "$(printf '%s' "$R" | jq -r '.widen')" "pkg/utils.py"
+R=$(_scope 'pytest' pkg/utils.py)
+eq "SEC-3 ecosystem: a bare pytest runner step widens too" run "$(printf '%s' "$R" | jq -r '.action')"
+R=$(_scope 'python3 tests/test_core.py' pkg/utils.py)
+eq "SEC-3 ecosystem: a single python test step widens (no py test reaches the change)" run "$(printf '%s' "$R" | jq -r '.action')"
+# DRR-1: a single-language change never widens another ecosystem's runner step (it skips/narrows as at a0d45ae)
+r=$(blank); mkdir -p "$r/pkg" "$r/tests"
+echo 'def f(): return 1' > "$r/pkg/utils.py"; printf 'from pkg import utils\ndef test_core(): assert utils.f()\n' > "$r/tests/test_core.py"
+echo 'import test from "node:test"; test("a", () => {})' > "$r/tests/a.test.mjs"
+commit_base "$r"
+echo '# c' >> "$r/pkg/utils.py"
+R=$(_scope 'node --test tests/a.test.mjs' pkg/utils.py)
+eq "DRR-1: a node step is not widened by a Python-only change" skip "$(printf '%s' "$R" | jq -r '.action')"
+eq "DRR-1: ...and carries no widen reason" "" "$(printf '%s' "$R" | jq -r '.widen')"
+R=$(_scope 'pytest tests/test_core.py' pkg/utils.py)
+eq "DRR-1: the pytest step still runs the reaching test" run "$(printf '%s' "$R" | jq -r '.action')"
+eq "DRR-1: ...scoped, not widened" "" "$(printf '%s' "$R" | jq -r '.widen')"
 
 # FIFO slots (tickets), dead-owner reaping, deadline while queued
 _slot() { FORGE_CI_LOCAL_HOME="$SLOT_HOME" FORGE_CI_LOCAL_SLOTS=1 node --input-type=module -e "
 import('$ROOT/scripts/ci-local/run.mjs').then(async (m) => {
   const [id, hold, budget] = process.argv.slice(1).map(Number);
-  const rel = await m.acquireSlot('t' + id, Date.now() + budget);
+  const t0 = Date.now();
+  const rel = await m.acquireSlot('t' + id, t0 + budget);
   if (!rel) { console.log('timeout ' + id); return; }
-  console.log('acq ' + id); await new Promise((r) => setTimeout(r, hold)); rel();
+  console.log('acq ' + id + (process.env.SLOT_SHOW_WAIT === '1' ? ' wait=' + (Date.now() - t0) : '')); await new Promise((r) => setTimeout(r, hold)); rel();
 })" "$@"; }
 SLOT_HOME="$T/fifo-home"; mkdir -p "$SLOT_HOME"; LOG="$T/fifo.log"; : > "$LOG"
-for i in 1 2 3 4; do _slot "$i" 300 30000 >> "$LOG" 2>&1 & sleep 0.4; done; wait
-eq "4057: 4 invocations, 1 slot: acquired strictly in ticket order, none starved" "acq 1 acq 2 acq 3 acq 4" "$(tr '\n' ' ' < "$LOG" | sed 's/ $//')"  # edge_e4_fifo_order
+# hold (1500ms) exceeds the cumulative spawn spacing (3 x 0.3s), so invocations 2-4 all queue behind invocation 1
+for i in 1 2 3 4; do SLOT_SHOW_WAIT=1 _slot "$i" 1500 30000 >> "$LOG" 2>&1 & sleep 0.3; done; wait
+eq "4057: 4 invocations, 1 slot: acquired strictly in ticket order, none starved" "acq 1 acq 2 acq 3 acq 4" "$(sed 's/ wait=.*//' "$LOG" | tr '\n' ' ' | sed 's/ $//')"  # edge_e4_fifo_order
+W1=$(sed -n 's/^acq 1 wait=//p' "$LOG")
+case "$W1" in ''|*[!0-9]*) bad "4059: invocation 1 wait not recorded ('$W1')" ;; *) [ "$W1" -lt 500 ] && ok || bad "4059: invocation 1 acquired immediately (wait ${W1}ms, want < 500)" ;; esac
+for i in 2 3 4; do  # edge_e2_queued_waits
+  Wi=$(sed -n "s/^acq $i wait=//p" "$LOG")
+  case "$Wi" in ''|*[!0-9]*) bad "4059: invocation $i wait not recorded ('$Wi')" ;; *) [ "$Wi" -ge 500 ] && ok || bad "4059: invocation $i queued behind the holder (wait ${Wi}ms, want >= 500)" ;; esac
+done
 eq "4057: no ticket is left behind" 0 "$(ls "$SLOT_HOME/ci-local.lock/queue" | wc -l | tr -d ' ')"
 SLOT_HOME="$T/fifo-home2"; mkdir -p "$SLOT_HOME/ci-local.lock/slot-0" "$SLOT_HOME/ci-local.lock/queue"
 ( : ) & DEAD=$!; wait "$DEAD" 2>/dev/null
@@ -1003,6 +1036,46 @@ OUT=$(FORGE_CI_LOCAL_NO_CACHE=1 bash "$S" run --repo "$r" --base main --base-bra
 eq "4057: a failing check shared by two jobs fails the gate" 1 "$RC"
 eq "4057: ...and was executed once, not re-run by the duplicate" 1 "$(wc -l < "$r/fail.txt" | tr -d ' ')"  # edge_e5_failure_shared_once
 eq "4057: ...both jobs report the failure" 2 "$(printf '%s\n' "$OUT" | grep -c '^CI_LOCAL_JOB: fail ')"
+
+# forge#4060: jobs with the same command but different service containers must not share a dedup result or a cached pass
+mksvc() { # $1 = repo, $2 = image of job b's postgres, $3 = job c's second-service ordering flag
+  mkdir -p "$1/.github/workflows"
+  cat > "$1/.github/workflows/ci.yml" <<YML
+on: pull_request
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14
+    steps:
+      - run: echo x >> counter.txt; sleep 1
+  b:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: $2
+    steps:
+      - run: echo x >> counter.txt; sleep 1
+YML
+}
+r=$(blank); mksvc "$r" postgres:16
+echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
+: > "$FAKE_DOCKER_LOG"
+OUT=$(PATH="$T/bin:$PATH" FORGE_CI_LOCAL_NO_CACHE=1 bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
+eq "4060: different-services run passes" 0 "$RC"
+eq "4060: same command with different services ran in both jobs, no shared flight result" 2 "$(wc -l < "$r/counter.txt" | tr -d ' ')"  # edge_e4_different_services_not_deduped
+hasnt "4060: no job reports dedup" "$OUT" "dedup=1"
+r=$(blank); mksvc "$r" postgres:14
+echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
+OUT=$(PATH="$T/bin:$PATH" FORGE_CI_LOCAL_NO_CACHE=1 bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
+eq "4060: identical services still dedup (one execution)" 1 "$(wc -l < "$r/counter.txt" | tr -d ' ')"
+has "4060: the identical-services duplicate reports dedup" "$OUT" "dedup=1"
+# persisted cache: a pass for services X is not a hit for services Y
+r=$(blank); mksvc "$r" postgres:16
+echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
+OUT=$(PATH="$T/bin:$PATH" FORGE_CI_LOCAL_NO_CACHE=0 FORGE_CI_LOCAL_SLOTS=2 bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat --max-parallel 1 2>&1)
+eq "4060: persisted cache is not shared across different service sets" 2 "$(wc -l < "$r/counter.txt" | tr -d ' ')"  # edge_e5_cache_not_shared
 
 # wait_ms is reported apart from duration; cached jobs wait for nothing; cheap jobs go first once durations are known
 r=$(blank); mkdir -p "$r/.github/workflows"

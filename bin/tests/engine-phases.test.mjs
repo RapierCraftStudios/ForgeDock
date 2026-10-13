@@ -864,6 +864,20 @@ describe("pickPhase", () => {
         await remediate.buildArgs(st, { repo: "acme/widgets" }, resumed.io);
         assert.equal(resumed.posted.filter((b) => b.includes("FORGE:INPR_REMEDIATION: pr=7")).length, 0);
       });
+
+      // EDGE_TEST id: buildArgs-resume-after-the-round-2-trail (#4029)
+      it("buildArgs resume after the round-2 trail (2 markers) posts no third marker but still dispatches", async () => {
+        const posted = [];
+        const io2 = { gh: async (a) => {
+          if (a[0] === "issue" && a[1] === "comment") { posted.push(a[a.indexOf("--body") + 1]); return ""; }
+          return jsonLines([bound, inprBody, bound, inprBody].map((c) => trusted(c)));
+        }, git: async () => "" };
+        const st = { ...base, issue: 42, pr: 7, remediationKind: "inpr-fix" };
+        const args = await remediate.buildArgs(st, { repo: "acme/widgets" }, io2);
+        assert.equal(posted.filter((b) => b.includes("FORGE:INPR_REMEDIATION: pr=7")).length, 0);
+        assert.equal(posted.filter((b) => b.includes("FORGE:REMEDIATION_DISPATCH")).length, 1);
+        assert.ok(args);
+      });
     });
 
     it("entryCondition requires review committed AND terminalReason needs-human", () => {

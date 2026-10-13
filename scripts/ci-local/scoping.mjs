@@ -248,6 +248,20 @@ function allTests(sctx) {
   return sctx.cache.allTests;
 }
 
+// The SEC-3 universe is limited to the step's own ecosystem: a test in another language (tests/utils.test.ts) never
+// counts as covering a changed source of this one (pkg/utils.py), or a pytest step would skip instead of widen.
+const ECO = { js: 'js', mjs: 'js', cjs: 'js', jsx: 'js', ts: 'js', tsx: 'js', mts: 'js', cts: 'js', py: 'py', pyi: 'py', sh: 'sh', bash: 'sh', bats: 'sh', rb: 'rb', php: 'php', go: 'go', java: 'jvm', kt: 'jvm', scala: 'jvm', rs: 'rs', cs: 'cs' };
+const ecoOf = (f) => { const e = extOf(f); return ECO[e] || e; };
+// #4068 review DRR-1: the per-ecosystem universe applies only to a step whose ecosystem has a changed source file. A step
+// in another ecosystem (a node step on a Python-only change) keeps the repo-wide universe it had at a0d45ae, so it skips or
+// narrows instead of widening to a full run on every single-language change.
+function ecosystemTests(sctx, tests) {
+  const ecos = new Set(tests.map(ecoOf));
+  const touched = sctx.changed.some((f) => !isTestFile(f) && ecos.has(ecoOf(f)) && (CODE_EXT.has(extOf(f)) || /^(sh|bash)$/.test(extOf(f))));
+  if (!touched) return allTests(sctx);
+  return allTests(sctx).filter((t) => ecos.has(ecoOf(t)));
+}
+
 // Which of testFiles can this change reach? { selected, total, widen } ; widen is a reason string or ''.
 // `universe` is the repo-wide test set used only for the SEC-3 reach check: a step that runs ONE test must not widen just
 // because the change does not reach that test, only because it reaches no test anywhere. Selection stays within testFiles.
@@ -407,7 +421,7 @@ function scopeRunner(name, args, head, cmd, cwdRel, sctx, join) {
   if (sctx.widen) return full(cmd, sctx.widen, { selector: spec.sel, selected: candidates.length, total: candidates.length });
   const un = unmappedFile(sctx.changed.filter((f) => !isTestFile(f)), new Set([...spec.ext, ...SRC_EXT]));
   if (un) return full(cmd, `unknown-language: ${un}`, { selector: spec.sel, selected: candidates.length, total: candidates.length });
-  const imp = impactedTests(sctx, candidates, allTests(sctx));
+  const imp = impactedTests(sctx, candidates, ecosystemTests(sctx, universe));
   if (imp.widen) return full(cmd, imp.widen, { selector: spec.sel, selected: candidates.length, total: candidates.length });
   if (!imp.selected.length) return skipNo(0, candidates.length, spec.sel, 'no test reaches the changed files');
   const sel = imp.selected.map((f) => fromCwd(cwdRel, f));
@@ -423,7 +437,7 @@ function scopeSingleTest(rest, cmd, cwdRel, sctx) {
   if (!isTestFile(r) || !sctx.present.has(r)) return null;
   if (rest.slice(rest.indexOf(fileTok) + 1).length) return full(cmd, '', { selector: 'unscoped:test-args' });
   if (sctx.widen) return full(cmd, sctx.widen, { selector: 'single-test', selected: 1, total: 1 });
-  const imp = impactedTests(sctx, [r], allTests(sctx));
+  const imp = impactedTests(sctx, [r], ecosystemTests(sctx, [r]));
   if (imp.widen) return full(cmd, imp.widen, { selector: 'single-test', selected: 1, total: 1 });
   if (!imp.selected.length) return skipNo(0, 1, 'single-test', `${r} not reached by the change`);
   return scoped(cmd, 1, 1, 'single-test');
