@@ -4268,3 +4268,65 @@ describe("CI poll scheduler (forge#4018)", () => {
   });
 });
 function w_needsHuman(log) { return log.some((e) => e.event === "RUN_TERMINAL" && e.reason === "needs-human"); }
+
+describe("#4109: run-log replay is scoped to the path", () => {
+  const core = (extra = []) => [
+    { event: "RUN_START", issue: 42, run: "core_42_1", lane: "staging", path: "core", seq: 1 },
+    { event: "PHASE_COMMIT", phase: "review", seq: 2, outputs: { branch: "feat/issue-42-lean", pr: 9 } },
+    { event: "PHASE_COMMIT", phase: "build", seq: 3 },
+    ...extra,
+  ];
+  const full = [
+    { event: "RUN_START", issue: 42, run: "r_full", lane: "staging", seq: 4 },
+    { event: "PHASE_COMMIT", phase: "investigate", seq: 5 },
+  ];
+
+  it("core review commits followed by a full run give the full run no carried-over phases", () => {
+    const st = deriveState([...core([{ event: "RUN_TERMINAL", reason: "merged", seq: 3 }]), { event: "RUN_START", issue: 42, run: "r_full", lane: "staging", seq: 4 }]);
+    assert.deepEqual(st.committed, []);
+    assert.equal(st.terminal, false);
+    assert.equal(st.pr, null);
+    const st2 = deriveState([...core(), ...full]);
+    assert.deepEqual(st2.committed, ["investigate"]);
+    assert.equal(st2.run, "r_full");
+  });
+
+  it("the reverse: full-path events are ignored by the core path scope", () => {
+    const st = deriveState([...full, ...core()], { path: "core" });
+    assert.deepEqual(st.committed, ["review", "build"]);
+    assert.equal(st.run, "core_42_1");
+    assert.deepEqual(deriveState(full, { path: "core" }).committed, []);
+  });
+
+  it("historic logs with no path behave as before", () => {
+    const hist = [{ event: "RUN_START", issue: 42, run: "old", lane: "main", seq: 1 }, { event: "PHASE_COMMIT", phase: "investigate", seq: 2 }, { event: "PHASE_COMMIT", phase: "build", seq: 3, outputs: { branch: "b" } }, { event: "RUN_TERMINAL", reason: "needs-human", seq: 4 }];
+    const st = deriveState(hist);
+    assert.deepEqual(st.committed, ["investigate", "build"]);
+    assert.equal(st.terminalReason, "needs-human"); assert.equal(st.branch, "b");
+    // events before any RUN_START count as full
+    assert.deepEqual(deriveState([{ event: "PHASE_COMMIT", phase: "investigate", seq: 1 }]).committed, ["investigate"]);
+  });
+
+  it("a full run on an issue whose log only holds core events starts fresh (RUN_START appended, nothing replayed)", async () => {
+    const { w, io } = fakeWorld();
+    for (const e of core([{ event: "RUN_TERMINAL", reason: "merged" }])) appendEvent(dir, 42, e);
+    const ran = []; const sc = { "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); }, "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 2; }, "work-on/review": () => { w.pr = 7; w.prMerged = true; }, "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); } };
+    const runner = async ({ commandName }) => { ran.push(commandName); sc[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.ok(ran.includes("work-on/investigate"), "investigation ran: the core review commit was not replayed");
+    assert.notEqual(res.code, "path.switch_conflict");
+  });
+
+  it("full path with an open core-path PR ends needs-human with path.switch_conflict and does no work", async () => {
+    const { w, io } = fakeWorld();
+    const gh = io.gh;
+    const io2 = { ...io, gh: async (args) => (args[0] === "pr" && args[1] === "list" && args.includes("feat/issue-42-lean") ? JSON.stringify([{ number: 9, headRefName: "feat/issue-42-lean" }]) : gh(args)) };
+    const ran = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io: io2, runner: async ({ commandName }) => { ran.push(commandName); return { status: "complete" }; }, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "needs-human");
+    assert.equal(res.code, "path.switch_conflict");
+    assert.match(res.detail, /open core-path PR #9; rerun on the default path \(base-sync\) or close that PR first/);
+    assert.deepEqual(ran, []);
+    assert.deepEqual(readLog(dir, 42), []);
+  });
+});
