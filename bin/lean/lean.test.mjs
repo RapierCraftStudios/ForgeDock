@@ -11,7 +11,7 @@ import { BUILDER_SYSTEM, REVIEWER_SYSTEM, SECURITY_REVIEWER_SYSTEM, approxTokens
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
 import { runFromCli } from "../engine-cli.mjs";
-import { runCliBackend, buildLeanSessionFlags } from "../runner.mjs";
+import { runCliBackend, buildLeanSessionFlags, buildReadOnlyToolFlags } from "../runner.mjs";
 
 const WT = "/wt/lean-7";
 const finding = (o) => ({ id: "F1", severity: "LOW", confidence: "POSSIBLE", file: "a.js", line: 1, scope: "introduced", title: "t", failure_scenario: "s", ...o });
@@ -20,7 +20,7 @@ const reply = (arr) => "```json\n" + JSON.stringify(arr) + "\n```";
 /** In-memory world: fake gh, git, fs, runner, ci. `script` hooks let each test steer the builder/reviewer. */
 function world(o = {}) {
   const w = {
-    comments: [], labels: [], closed: [], edits: [], prs: [], merges: [], calls: [], telemetry: [], files: {}, ciQueue: [...(o.ci ?? [])],
+    leaseWrites: [], lease: o.lease ?? null, comments: [], labels: [], closed: [], edits: [], prs: [], merges: [], calls: [], telemetry: [], files: {}, ciQueue: [...(o.ci ?? [])],
     changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], lines: o.lines ?? 40, head: "aaaa1111aaaa1111", waits: [...(o.waits ?? [])],
     reviewReplies: [...(o.reviews ?? [])], builderHooks: [...(o.builderHooks ?? [])], issueBody: o.body ?? "Bug in foo", clock: 0, validate: o.validate ?? { status: "valid", summary: "real", evidence: ["src/foo.js:3"] },
   };
@@ -51,7 +51,8 @@ function world(o = {}) {
       return "";
     },
     runner: async (c) => {
-      w.calls.push(["runner", c.role, c.resume ?? null, c.model ?? null, c.prompt]);
+      w.calls.push(["runner", c.role, c.resume ?? null, c.model ?? null, c.prompt, c.readOnly ?? false]);
+      if (o.builderThrows && c.role === "builder") throw new Error("cli exploded");
       if (c.role === "builder") {
         if (!c.resume) { w.builderStart = c; writeBuilderFiles(); }
         else { const h = w.builderHooks.shift(); if (h) h(w); w.head = `bbbb${w.calls.length}`.padEnd(16, "0"); }
@@ -61,7 +62,8 @@ function world(o = {}) {
       return { text, sessionId: `rev-${w.calls.length}`, usage: { input_tokens: 4, output_tokens: 2 }, costUsd: 0.05, durationMs: 500, turns: 2, model: c.model };
     },
     ciLocal: async () => w.ciQueue.length ? w.ciQueue.shift() : { result: "PASS", tail: "" },
-    waitCiGreen: async () => w.waits.length ? w.waits.shift() : { rc: 0, text: "CI_GATE: PASS\nCI_GATE_HEAD: cafe1234cafe" },
+    waitCiGreen: async () => w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE: PASS\nCI_GATE_HEAD: ${w.head}` },
+    projector: { readState: async () => (w.lease ? { v: 1, lease: w.lease } : null), writeState: async (_i, st) => { w.leaseWrites.push(st); } },
     transitionLabel: async (n, s) => { w.labels.push(s); },
     fs: { read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; } },
   };
@@ -85,7 +87,7 @@ describe("lean path: happy path and knowledge graph", () => {
     const body = w.prs[0][w.prs[0].indexOf("--body") + 1];
     assert.match(body, /Closes #7/);
     for (const m of ["FORGE:VALIDATE", "FORGE:PLAN", "FORGE:IMPLEMENT", "FORGE:REVIEW"]) assert.match(body, new RegExp(`${m}: https://github.com/o/r/issues/7#issuecomment-\\d+`));
-    assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", "cafe1234cafe"]);
+    assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
     assert.deepEqual(w.labels, ["investigating", "building", "in-review", "merged"]);
     assert.ok(w.closed.length === 1);
     assert.ok(w.files["/repo/.git/info/exclude"].includes(".forge-lean/"), "scratch dir is git-excluded");
@@ -95,10 +97,13 @@ describe("lean path: happy path and knowledge graph", () => {
     const w = world();
     const r = await run(w);
     const mapped = w.telemetry.map((t) => mapRecord(t, 5)).filter(Boolean);
-    assert.deepEqual(mapped.filter((m) => m.event === "phase_attempt").map((m) => m.phase), ["validate", "architect", "implement", "review"]);
+    assert.deepEqual(mapped.filter((m) => m.event === "phase_attempt").map((m) => m.phase), ["implement", "review"]);
+    assert.equal(mapped[0].payload.stages, "validate,architect,implement");
+    assert.equal(mapped.filter((m) => m.event === "phase_attempt" && m.payload.input_tokens === undefined).length, 0, "no null-usage records");
     assert.equal(mapped.at(-1).event, "run_terminal");
     assert.equal(mapped.at(-1).payload.reason, "merged");
     const v = mapped[0].payload;
+    assert.equal(mapped[0].payload.attempt, 1);
     assert.equal(v.input_tokens, 10); assert.equal(v.cost_usd, 0.1);
     assert.ok(r.cost_usd > 0);
   });
@@ -117,6 +122,82 @@ describe("lean path: happy path and knowledge graph", () => {
     assert.equal(w.calls.find((c) => c[1] === "reviewer")[3], "claude-sonnet-5-5");
     const w2 = world(); await run(w2, { reviewerModel: "my-model" });
     assert.equal(w2.calls.find((c) => c[1] === "reviewer")[3], "my-model");
+  });
+});
+
+describe("lean path: review fixes (#4083)", () => {
+  it("merge requires the CI-gated head to equal the reviewed head and always passes the local head", async () => {
+    const w = world({ waits: [{ rc: 0, text: "CI_GATE_HEAD: deadbeefdead" }] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(w.merges.length, 0);
+    const w2 = world({ waits: [{ rc: 0, text: "CI_GATE: PASS" }] });
+    assert.equal((await run(w2)).terminalReason, "merged");
+    assert.equal(w2.merges[0].at(-1), w2.head);
+  });
+
+  it("a gate needs-human records exactly one RUN_TERMINAL and one telemetry terminal", async () => {
+    const f = { result: "FAIL", tail: "x" };
+    const w = world({ ci: [f, f, f] }); const dir = mkdtempSync(join(tmpdir(), "lean-"));
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "RUN_TERMINAL").length, 1);
+    assert.equal(w.telemetry.filter((t) => t.event === "RUN_TERMINAL").length, 1);
+  });
+
+  it("a held lease defers the run before any work; an owned lease is written and released", async () => {
+    const held = world({ lease: { by: "other_1", until: 10 ** 13 } });
+    const r = await run(held, { agentId: "me" });
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(held.calls.length, 0);
+    const w = world();
+    await run(w, { agentId: "me", leaseRenewMs: 10 ** 9 });
+    assert.equal(w.leaseWrites[0].lease.by, "me");
+    assert.equal(w.leaseWrites.at(-1).lease, null);
+    assert.equal(w.leaseWrites.at(-1).terminal, true);
+  });
+
+  it("reruns reset the lean worktree and branch instead of failing, and errors clear the in-progress label", async () => {
+    const w = world();
+    await run(w);
+    const add = w.calls.find((c) => c[1] === "worktree" && c[2] === "add");
+    assert.ok(add.includes("-B"));
+    assert.ok(w.calls.some((c) => c[1] === "worktree" && c[2] === "remove"));
+    const e = world({ builderThrows: true });
+    const r = await run(e);
+    assert.equal(r.terminalReason, "engine-error");
+    assert.ok(e.edits.some((a) => a.includes("--remove-label") && a.join(" ").includes("workflow:investigating")));
+  });
+
+  it("closes only on invalid/already-fixed WITH evidence; otherwise needs-human with the reasoning", async () => {
+    for (const validate of [{ status: "invalid", summary: "no repro", evidence: [] }, { status: "invalid", summary: "no repro", evidence: ["  "] },
+      { status: "maybe", summary: "unsure why", evidence: ["a.js:1"] }]) {
+      const w = world({ validate });
+      const r = await run(w);
+      assert.equal(r.terminalReason, "needs-human");
+      assert.equal(w.closed.length, 0);
+      assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes(validate.summary)));
+    }
+    const ok = world({ validate: { status: "already-fixed", summary: "fixed in abc", evidence: ["commit abc1234"] } });
+    assert.equal((await run(ok)).terminalReason, "invalid");
+    assert.equal(ok.closed.length, 1);
+  });
+
+  it("reviewers are read-only (Read/Grep/Glob) and the builder is not", async () => {
+    const w = world({ changed: ["src/auth/x.js", "test/x.test.js"] });
+    await run(w);
+    const rev = w.calls.filter((c) => c[0] === "runner" && c[1] !== "builder");
+    assert.ok(rev.length >= 2 && rev.every((c) => c[5] === true));
+    assert.ok(w.calls.filter((c) => c[1] === "builder").every((c) => c[5] === false));
+    assert.deepEqual(buildReadOnlyToolFlags({ strictMcp: true }), ["--tools", "Read,Grep,Glob"]);
+    assert.ok(buildReadOnlyToolFlags({ strictMcp: false }).includes("Bash"));
+  });
+
+  it("review rounds are numbered from 1", async () => {
+    const w = world({ reviews: [reply([finding({ severity: "HIGH" })]), reply([])] });
+    await run(w);
+    const revs = w.comments.filter((c) => c.includes("FORGE:REVIEW"));
+    assert.match(revs[0], /round 1 \|/); assert.match(revs[1], /round 2 \|/);
   });
 });
 

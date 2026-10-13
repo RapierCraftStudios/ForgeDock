@@ -51,9 +51,9 @@ export async function runLean(o) {
   const git = (args) => io.git(args, { cwd: wt });
   const file = (n) => `${wt}/${LEAN_DIR}/${n}`;
 
-  async function attempt(phase, n, r) {
+  async function attempt(phase, n, r, extra = {}) {
     const rec = { event: "PHASE_ATTEMPT_USAGE", phase, attempt: n, usage: r?.usage ?? null, duration_ms: num(r?.durationMs) ?? 0,
-      cost_usd: num(r?.costUsd), model: r?.model ?? null, turns: num(r?.turns) };
+      cost_usd: num(r?.costUsd), model: r?.model ?? null, turns: num(r?.turns), ...extra };
     ev(rec); await emit(rec);
     usageTotal.cost_usd += r?.costUsd ?? 0;
   }
@@ -67,11 +67,20 @@ export async function runLean(o) {
     return url;
   }
 
+  let done = null;
+  const WORKFLOW = ["investigating", "building", "in-review"].map((x) => `workflow:${x}`).join(",");
   async function finish(reason, detail = "", extra = {}) {
+    if (done) return done; // idempotent: exactly one RUN_TERMINAL and one telemetry emit
     const code = codeForTerminalReason(reason);
     ev({ event: "RUN_TERMINAL", reason, code });
     await emit({ event: "RUN_TERMINAL", reason, code });
-    return { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usageTotal.cost_usd, wall_ms: now() - t0, ...extra };
+    // A run that did not reach a success/handoff state must not leave a stale in-progress label behind.
+    if (["needs-human", "engine-error"].includes(reason)) {
+      try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", WORKFLOW]); } catch { /* best effort */ }
+    }
+    await releaseLease(reason);
+    done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usageTotal.cost_usd, wall_ms: now() - t0, ...extra };
+    return done;
   }
   async function needsHuman(why) {
     try { await post("FORGE:NEEDS_HUMAN", "", why); await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]); } catch { /* best effort */ }
@@ -88,6 +97,30 @@ export async function runLean(o) {
   }
   const readJson = async (n) => { try { return JSON.parse(await io.fs.read(file(n))); } catch { return null; } };
 
+  // Same issue lease the full path uses (FORGE:STATE lease via the projector): two runs cannot race.
+  const agentId = o.agentId ?? `lean_${process.pid}`;
+  const leaseTtlMs = o.leaseTtlMs ?? 600000;
+  let leaseState = null, leaseTimer = null;
+  const writeLease = (lease, extra = {}) => io.projector.writeState(issue, { ...leaseState, ...extra, lease });
+  async function releaseLease(reason) {
+    if (leaseTimer) { clearInterval(leaseTimer); leaseTimer = null; }
+    if (!io.projector || !leaseState) return;
+    const terminal = ["merged", "invalid", "needs-human", "engine-error"].includes(reason);
+    try { await writeLease(null, terminal ? { terminal: true, terminalReason: reason } : {}); } catch { /* best effort */ }
+  }
+  if (io.projector) {
+    let st = null;
+    try { st = await io.projector.readState(issue); } catch { /* unreadable: proceed, the write below is best effort */ }
+    if (st?.lease && st.lease.until > now() && st.lease.by !== agentId) {
+      return { terminalReason: "deferred", code: "lease-held", detail: `issue ${issue} leased by ${st.lease.by} until ${new Date(st.lease.until).toISOString()}`, branch, worktree: wt };
+    }
+    leaseState = st ?? { v: 1, run: `lean_${issue}`, issue, lane, committed: [], phase: null, branch: null, pr: null, terminal: false, terminalReason: null };
+    leaseState = { ...leaseState, terminal: false };
+    try { await writeLease({ by: agentId, until: now() + leaseTtlMs }); } catch { /* best effort */ }
+    leaseTimer = setInterval(() => { writeLease({ by: agentId, until: now() + leaseTtlMs }).catch(() => {}); }, o.leaseRenewMs ?? 120000);
+    leaseTimer.unref?.();
+  }
+
   ev({ event: "RUN_START", run: `lean_${issue}_${t0}`, issue, lane, path: "lean" });
   let iss;
   try {
@@ -98,17 +131,24 @@ export async function runLean(o) {
   try {
     await label("investigating");
     try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ }
-    await io.git(["worktree", "add", "-b", branch, wt, base], { cwd });
+    // Reruns: drop any stale lean worktree for this issue, then (re)create the branch from the base.
+    try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* none */ }
+    try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
+    await io.git(["worktree", "add", "-B", branch, wt, base], { cwd });
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
     await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
 
     // ---- builder: validate + architect + implement in one session ----
     let r = await builder("validate", 1, builderPrompt({ issue: iss, base: lane, branch }), null);
     const validate = await readJson("validate.json");
-    await attempt("validate", 1, r);
+    await attempt("implement", 1, r, { stages: "validate,architect,implement" });
     if (!validate) return await needsHuman("builder did not write validate.json");
     await post("FORGE:VALIDATE", `**Status:** ${validate.status}`, "```json\n" + JSON.stringify(validate, null, 2) + "\n```");
     if (validate.status !== "valid") {
+      const evidence = (Array.isArray(validate.evidence) ? validate.evidence : []).filter((x) => typeof x === "string" && x.trim());
+      if (!["invalid", "already-fixed"].includes(validate.status) || evidence.length === 0) {
+        return await needsHuman(`validate returned status "${validate.status}" ${evidence.length ? "" : "without evidence "}so the issue is not closed automatically.\n\nBuilder reasoning: ${validate.summary ?? "(none)"}`);
+      }
       await commit("validate");
       await ghc(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
       await label("invalid");
@@ -118,7 +158,6 @@ export async function runLean(o) {
     await label("building");
 
     const planMd = await io.fs.read(file("plan.md")).catch(() => null);
-    await attempt("architect", 1, null);
     if (!planMd) return await needsHuman("builder did not write plan.md");
     await post("FORGE:PLAN", "", planMd);
     await commit("architect");
@@ -130,7 +169,6 @@ export async function runLean(o) {
       return impl;
     };
     let impl = await postImpl();
-    await attempt("implement", 1, null);
     await commit("implement");
 
     // ---- deterministic gates, resuming the same session on failure ----
@@ -157,16 +195,17 @@ export async function runLean(o) {
     const runGates = async () => {
       for (;;) {
         const f = await gateFailure();
-        if (!f) return true;
-        if (gateRounds >= MAX_ROUNDS) { await needsHuman(`gate ${f.kind} still failing after ${MAX_ROUNDS} resume rounds:\n\n${String(f.tail).slice(-3000)}`); return false; }
+        if (!f) return null;
+        if (gateRounds >= MAX_ROUNDS) return needsHuman(`gate ${f.kind} still failing after ${MAX_ROUNDS} resume rounds:\n\n${String(f.tail).slice(-3000)}`);
         gateRounds++; implRound++;
-        if (!sessionId) { await needsHuman(`gate ${f.kind} failed and the builder session id is unknown, cannot resume`); return false; }
+        if (!sessionId) return needsHuman(`gate ${f.kind} failed and the builder session id is unknown, cannot resume`);
         const rr = await builder("implement", implRound, resumeGatePrompt(f), sessionId);
         await attempt("implement", implRound, rr);
         await postImpl();
       }
     };
-    if (!(await runGates())) return await finish("needs-human", "gates");
+    const g0 = await runGates();
+    if (g0) return g0;
 
     // ---- auto path: risky AND large escalates to the full pipeline ----
     const st = await diffStats();
@@ -182,7 +221,7 @@ export async function runLean(o) {
     const review = async (role, system, delta) => {
       for (let tryN = 0; tryN < 2; tryN++) {
         const diff = String(await git(["diff", delta ? `${reviewedHead}..HEAD` : `${base}...HEAD`]));
-        const rr = await io.runner({ role, issue, cwd: wt, model: reviewerModel, resume: null, system,
+        const rr = await io.runner({ role, issue, cwd: wt, model: reviewerModel, resume: null, system, readOnly: true,
           prompt: reviewerPrompt({ issue: iss, plan: planMd, diff, prior, delta }) });
         await attempt("review", ++reviewAttempt, rr);
         const f = parseFindings(rr?.text);
@@ -205,7 +244,7 @@ export async function runLean(o) {
       const blocking = all.filter(isBlocking);
       const notes = all.filter((x) => !isBlocking(x));
       const row = (x) => `- **${x.severity}/${x.confidence}** ${x.file ?? "?"}:${x.line ?? "?"} (${x.scope ?? "introduced"}, ${x.reviewer}) ${x.title ?? ""}${x.failure_scenario ? ` — ${x.failure_scenario}` : ""}`;
-      await post("FORGE:REVIEW", `**Verdict:** ${blocking.length ? "BLOCKING" : "APPROVED"} | round ${reviewRound} | reviewed ${head.slice(0, 12)}${delta ? " (delta)" : ""} | risk ${risk.tier}`,
+      await post("FORGE:REVIEW", `**Verdict:** ${blocking.length ? "BLOCKING" : "APPROVED"} | round ${reviewRound + 1} | reviewed ${head.slice(0, 12)}${delta ? " (delta)" : ""} | risk ${risk.tier}`,
         `### Blocking (${blocking.length})\n${blocking.map(row).join("\n") || "none"}\n\n### Notes (${notes.length}, not filed as issues)\n${notes.map(row).join("\n") || "none"}\n\n\`\`\`json\n${JSON.stringify(all, null, 2)}\n\`\`\``);
       await commit("review");
       if (!blocking.length) break;
@@ -215,7 +254,8 @@ export async function runLean(o) {
       const rr = await builder("implement", implRound, resumeReviewPrompt({ findings: blocking }), sessionId);
       await attempt("implement", implRound, rr);
       await postImpl();
-      if (!(await runGates())) return await finish("needs-human", "gates after review fix");
+      const g1 = await runGates();
+      if (g1) return g1;
     }
 
     // ---- merge and close (no model) ----
@@ -244,8 +284,11 @@ export async function runLean(o) {
       await sleep(ciPollDelayMs(pollIndex++, random));
     }
     const localHead = String(await git(["rev-parse", "HEAD"])).trim();
-    await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", gateHead ?? localHead]);
-    await post("FORGE:CLOSE", "", `Merged PR #${pr} at ${(gateHead ?? localHead).slice(0, 12)}.\n\n- Review rounds: ${reviewRound}\n- Gate rounds: ${gateRounds}\n- Cost: $${usageTotal.cost_usd.toFixed(4)}\n- Wall: ${Math.round((now() - t0) / 1000)}s\n${linkLines}`);
+    if (gateHead && !(localHead.startsWith(gateHead) || gateHead.startsWith(localHead))) {
+      return await needsHuman(`CI gate passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`);
+    }
+    await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
+    await post("FORGE:CLOSE", "", `Merged PR #${pr} at ${localHead.slice(0, 12)}.\n\n- Review rounds: ${reviewRound}\n- Gate rounds: ${gateRounds}\n- Cost: $${usageTotal.cost_usd.toFixed(4)}\n- Wall: ${Math.round((now() - t0) / 1000)}s\n${linkLines}`);
     await ghc(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
     await label("merged");
     return await finish("merged", `PR #${pr}`, { pr });

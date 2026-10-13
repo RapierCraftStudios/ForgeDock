@@ -6,17 +6,19 @@ import { promisify } from "node:util";
 import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runCliBackend, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags } from "../runner.mjs";
+import { runCliBackend, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags } from "../runner.mjs";
 import { makeIo } from "../engine-cli.mjs";
+import { makeProjector } from "../engine/projector.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
 
 /** Claude CLI session runner: fresh session, or `--resume <id>` for the warm builder. Resolves usage + session_id. */
 export function makeLeanRunner({ runCli = runCliBackend } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt }) => {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
-    const flags = buildLeanSessionFlags(getClaudeCliCapabilities(cwd));
+    const caps = getClaudeCliCapabilities(cwd);
+    const flags = [...buildLeanSessionFlags(caps), ...(readOnly ? buildReadOnlyToolFlags(caps) : [])];
     const r = runCli({ spec: { name: `lean-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
       args: [String(issue)], cwd, bin, model, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
       logger: { log() {} } });
@@ -28,7 +30,7 @@ export function makeLeanIo({ repo }) {
   const base = makeIo();
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000 })).stdout;
   return {
-    gh: run("gh"), git: run("git"), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
+    gh: run("gh"), git: run("git"), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
     async ciLocal({ cwd, base: baseRef }) {
       let out = "";
       try { out = (await pexec("bash", [script("ci-local.sh"), "run", "--repo", cwd, "--base", baseRef], { maxBuffer: 50 * 1024 * 1024, timeout: 3600000 })).stdout; }

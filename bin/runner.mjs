@@ -767,6 +767,16 @@ export function buildLeanSessionFlags(caps, env = process.env) {
 }
 
 /**
+ * Read-only reviewer tools (#4081): only Read, Grep and Glob. Uses `--tools` where the capability probe says the
+ * CLI is recent enough, else denies the mutating tools with `--disallowedTools`.
+ */
+export function buildReadOnlyToolFlags(caps) {
+  return caps?.strictMcp
+    ? ["--tools", "Read,Grep,Glob"]
+    : ["--disallowedTools", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"];
+}
+
+/**
  * Return the exact absolute `claude` executable path that
  * `isClaudeCliAvailable()` validated for `cwd` (issue #2741), ensuring the
  * probe/cache is populated or refreshed first. This is what closes the
