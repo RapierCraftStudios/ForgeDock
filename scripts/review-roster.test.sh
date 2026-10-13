@@ -131,11 +131,13 @@ expect_not "no auth path docs/author.md" auth
 run "svc/tokenizer.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_not "no-auth-path-svc/tokenizer.py" auth
 # forge#4071: weak names (session, token, permission, login) select Auth only as whole words in code files; docs never
-for f in design-tokens/colors.json src/SessionTimeline.tsx docs/permissions.md src/components/LoginButton.tsx src/editor/cursor-token.ts docs/auth.md; do
+for f in design-tokens/colors.json src/SessionTimeline.tsx docs/permissions.md src/components/LoginButton.tsx src/editor/cursor-token.ts docs/auth.md \
+    src/components/LoginForm.ts svc/tokenizer.py; do
   run "$f" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
   expect_not "no-auth-path-$f" auth
 done
-for f in src/auth/session.py api/tokens.py middleware/permissions.ts lib/jwt.go src/session/store.ts svc/login_handler.go; do
+for f in src/auth/session.py api/tokens.py middleware/permissions.ts lib/jwt.go src/session/store.ts svc/login_handler.go \
+    src/main/java/com/x/LoginController.java src/main/java/com/x/SessionManager.java src/TokenService.kt src/PermissionChecker.cs middleware/PermissionGuard.ts; do
   run "$f" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
   expect_has "auth-path-$f" auth
 done
