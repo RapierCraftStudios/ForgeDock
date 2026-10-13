@@ -44,6 +44,7 @@ Parse from $ARGUMENTS:
 
 - `--fix-consumers "<UNADDRESSED lines>"` — optional. Set only by build B6 after validate returned `consumer_unaddressed`. Skip I1–I2 planning: for each listed `UNADDRESSED: <identifier> <file:line>` site, either update that file so it no longer depends on the old identifier (the file then joins the change set) or add a `- <path>[:<line>] unaffected: <reason>` line to the `### Consumers` block of the FORGE:BUILDER comment (the match is by path, split on the literal ` unaffected: `, so any path characters work). Never edit the checker (`scripts/consumer-sweep.sh`) or its stop-lists, and never add `unaffected:` lines without reading the site. Stage the changes, return `IMPLEMENT_RESULT: status: COMPLETE`; if a site cannot be addressed, leave it: build records it as `CONSUMERS: unresolved`. This is the single repair round; there is no second one. <!-- Added: forge#4017 -->
 - `--fix-acceptance "<failed checks>"` — optional. Set only by build B6.5 after a failed acceptance gate. In this mode, skip I1–I2 planning: read the listed failing `ACCEPTANCE_CHECK` ids from the FORGE:INVESTIGATOR comment, change the code in `{WORKTREE_PATH}` until each check's target/matcher holds (do not edit the checks), update the BUILDER comment's `### Changes` list, and return `IMPLEMENT_RESULT: status: COMPLETE`. If a check is impossible as written (contradicts the contract), return `status: BLOCKED` with that reason. **Decomposition refusal** <!-- Added: forge#3543 -->: never implement work that the FORGE:INVESTIGATOR `### Decomposition Assessment` (`**YES**`) assigns to a separate sub-issue, even if a listed check targets it; return `status: BLOCKED` with blocker "check <id> belongs to decomposed item <N>" instead.
+- `--fix-selfreview "<findings>"` — optional. Set only by build B5.6 after the build-time self-review returned CONFIRMED or LIKELY findings at MEDIUM or above. <!-- Added: forge#3971 --> Skip I1–I2 planning. `<findings>` is one line per finding (`SR-<n> <CONFIDENCE> <SEVERITY> <file:line> <summary>`). For each: read the cited code, fix it in `{WORKTREE_PATH}` (the file joins the change set), or decline it when it is wrong or out of the contract's scope. Never edit a test, check or fixture to silence a finding, never touch the reviewer's comments, and add no unrequested scope. Re-read every pattern-sweep sibling of a fixed defect. Stage the changes and update the FORGE:BUILDER comment's `### Changes` list and its `### Self-review` section (see I6): one `fixed:` line per fixed finding and one `declined: <id> <reason>` line per declined one, with a real reason. Return `IMPLEMENT_RESULT: status: COMPLETE`. This is the single repair round, build guards it with `FORGE:SELFREVIEW_REPAIR`; there is no second one. If a finding cannot be addressed without contradicting the contract, decline it with that reason rather than returning BLOCKED.
 
 ## Phase I1: Load Context from GitHub
 
@@ -373,6 +374,13 @@ EDGE_TEST: id=e1 test={path}::{test_name}
 EDGE_TEST: id=e2 untestable={reason}
 
 > **Edge case block**: one line per `EDGE:` id of the architect's `FORGE:EDGE_CASES` block, each line starting at the line start (no prose before `EDGE_TEST:`). `test=` names a file and a test name (a single token with no whitespace; name the test with underscores or hyphens) that occurs in a line this change adds to that file; a pre-existing test does not count. `untestable=` needs a non-empty reason. Omit the section when the plan has no edge cases.
+
+### Self-review
+SELFREVIEW:
+- fixed: {SR-id} {file:line} {one-line what changed}
+- declined: {SR-id} {file:line} {reason}
+
+> **Self-review block** (written only by a `--fix-selfreview` round, forge#3971): one line per finding build B5.6 handed over. `declined:` lines carry the reason so the official `/review-pr` sees the finding as known; a declined finding is not a defect to hide, it is a decision to review. Omit the section when no self-review round ran.
 
 ### Testing Checklist
 - [ ] {Test scenario 1} [type:api]

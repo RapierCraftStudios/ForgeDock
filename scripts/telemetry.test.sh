@@ -61,6 +61,14 @@ check "finding_disposition carries scope" "$(grep '^{' "$TD/posted" | jq -r '.sc
 reset; FORGE_PR=9 forge_emit review_panel mode=FULL; grep -q 'issues/9/comments' "$TD/calls" && ok || bad "review_panel targets PR"
 reset; FORGE_PR=9 forge_emit diff_size lines=1; grep -q 'issues/5/comments' "$TD/calls" && ok || bad "diff_size targets issue"
 
+# build_selfreview (forge#3971) is a build-side event: posted to the issue even when a PR number is set; ids and counts only
+reset; FORGE_PR=9 forge_emit build_selfreview tier=standard agents=3 findings=4 fixed=2 declined=1 skipped=
+grep -q 'issues/5/comments' "$TD/calls" && ok || bad "build_selfreview targets issue"
+REC=$(grep '^{' "$TD/posted")
+check "build_selfreview event" "$(printf '%s' "$REC" | jq -r '.event')" "build_selfreview"
+check "build_selfreview counts typed" "$(printf '%s' "$REC" | jq -r '.agents + .findings + .fixed + .declined')" "10"
+check "build_selfreview skip reason" "$(reset; forge_emit build_selfreview skipped=small-security-only tier=small; grep '^{' "$TD/posted" | jq -r '.skipped')" "small-security-only"
+
 # 2. Sanitising: reserved keys, bad keys, backticks and newlines never reach the record.
 reset
 forge_emit x repo=evil 'a b=1' ok='a`b

@@ -43,5 +43,8 @@ t "env depth 09 decimal"           0 "SPAWN_DEPTH: OK"      CLAUDE_CODE_MAX_SUBA
 # Usage errors.
 t "bad router layer"              2 "spawn-depth-check:"   -- --router-layer x
 t "unknown flag"                  2 "usage:"               -- --nope
+# forge#3971: build is a dispatching phase too, and the FAIL text names it (exit codes unchanged)
+out=$(env -u CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH -u FORGE_RUNTIME FORGE_CLAUDE_VERSION=2.1.217 bash "$S" 2>&1)
+case "$out" in *build/review/remediate*) PASS=$((PASS+1)) ;; *) FAILN=$((FAILN+1)); echo "FAIL: FAIL text does not name build ($out)" ;; esac
 echo "spawn-depth-check: ${PASS} passed, ${FAILN} failed"
 [ "$FAILN" -eq 0 ]
