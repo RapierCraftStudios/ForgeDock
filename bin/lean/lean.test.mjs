@@ -20,7 +20,7 @@ const reply = (arr) => "```json\n" + JSON.stringify(arr) + "\n```";
 /** In-memory world: fake gh, git, fs, runner, ci. `script` hooks let each test steer the builder/reviewer. */
 function world(o = {}) {
   const w = {
-    leaseWrites: [], lease: o.lease ?? null, comments: [], labels: [], closed: [], edits: [], prs: [], merges: [], calls: [], telemetry: [], files: {}, ciQueue: [...(o.ci ?? [])],
+    prList: o.prList ?? [], remote: o.remote ?? "", apiIssues: o.apiIssues, leaseWrites: [], lease: o.lease ?? null, comments: [], labels: [], closed: [], edits: [], prs: [], merges: [], calls: [], telemetry: [], files: {}, ciQueue: [...(o.ci ?? [])],
     changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], lines: o.lines ?? 40, head: "aaaa1111aaaa1111", waits: [...(o.waits ?? [])],
     reviewReplies: [...(o.reviews ?? [])], builderHooks: [...(o.builderHooks ?? [])], issueBody: o.body ?? "Bug in foo", clock: 0, validate: o.validate ?? { status: "valid", summary: "real", evidence: ["src/foo.js:3"] },
   };
@@ -33,6 +33,9 @@ function world(o = {}) {
     now: () => w.clock, sleep: async (ms) => { w.clock += ms; },
     gh: async (a) => {
       const k = a.slice(0, 2).join(" ");
+      if (a[0] === "api") { const m = /issues\/(\d+)$/.exec(a[1]); const r = m && w.apiIssues?.[m[1]]; return r ? JSON.stringify(r) : ""; }
+      if (k === "pr list") return JSON.stringify(w.prList);
+      if (k === "issue view" && a.includes("comments")) return JSON.stringify({ comments: w.comments.map((body) => ({ body })) });
       if (k === "issue view") return JSON.stringify({ number: 7, title: "foo breaks", body: w.issueBody, state: "OPEN" });
       if (k === "issue comment") { w.comments.push(a[a.indexOf("--body") + 1]); return `https://github.com/o/r/issues/7#issuecomment-${w.comments.length}\n`; }
       if (k === "issue close") { w.closed.push(a); return ""; }
@@ -47,6 +50,7 @@ function world(o = {}) {
       if (a[0] === "rev-parse") return w.head;
       if (a[0] === "diff" && a[1] === "--name-only") return w.changed.join("\n");
       if (a[0] === "diff" && a[1] === "--numstat") return `${w.lines}\t0\tx`;
+      if (a[0] === "ls-remote") return w.remote;
       if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
       return "";
     },
@@ -198,6 +202,104 @@ describe("lean path: review fixes (#4083)", () => {
     await run(w);
     const revs = w.comments.filter((c) => c.includes("FORGE:REVIEW"));
     assert.match(revs[0], /round 1 \|/); assert.match(revs[1], /round 2 \|/);
+  });
+});
+
+describe("lean path: release review fixes (#4084)", () => {
+  const approvedAt = (w, head) => w.comments.push(`<!-- FORGE:REVIEW lean v1 -->\n## FORGE:REVIEW\n**Verdict:** APPROVED | round 1 | reviewed ${head.slice(0, 12)} | risk low\n\nx`);
+
+  it("rerun with an open PR at an already-reviewed head resumes straight to the CI wait (no builder, no reviewer, no create)", async () => {
+    const w = world({ prList: [{ number: 77, headRefOid: "aaaa1111aaaa1111" }], remote: "sha\trefs/heads/feat/issue-7-lean" });
+    w.comments.push("<!-- FORGE:PLAN lean v1 -->\n## FORGE:PLAN\nthe plan");
+    approvedAt(w, w.head);
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.calls.filter((c) => c[0] === "runner").length, 0);
+    assert.equal(w.prs.length, 0);
+    assert.equal(w.merges[0][2], "77");
+    const add = w.calls.find((c) => c[1] === "worktree" && c[2] === "add");
+    assert.ok(add.includes("origin/feat/issue-7-lean"), "checks out the remote branch, not the base");
+  });
+
+  it("rerun whose head was not reviewed continues from review, reusing the plan from the issue", async () => {
+    const w = world({ prList: [{ number: 77 }] });
+    w.comments.push("<!-- FORGE:PLAN lean v1 -->\n## FORGE:PLAN\nthe plan text");
+    approvedAt(w, "ffff0000ffff");
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    const rev = w.calls.find((c) => c[1] === "reviewer");
+    assert.ok(rev[4].includes("the plan text"));
+    assert.ok(!w.calls.some((c) => c[1] === "builder"));
+  });
+
+  it("ci-pending leaves a resumable state: the worktree is removed, the branch is kept", async () => {
+    const w = world({ waits: Array.from({ length: 500 }, () => ({ rc: 3, text: "" })) });
+    const r = await run(w, { ciMaxMinutes: 5 });
+    assert.equal(r.terminalReason, "ci-pending");
+    assert.ok(w.calls.filter((c) => c[1] === "worktree" && c[2] === "remove").length >= 2);
+    assert.ok(!w.calls.some((c) => c[1] === "branch"));
+  });
+
+  it("an open Depends-on dependency refuses the run before any worktree", async () => {
+    const own = { author_association: "OWNER", body: "x\n**Depends on**: #5", state: "open" };
+    const w = world({ apiIssues: { 7: own, 5: { state: "open" } } });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "dependency-open");
+    assert.deepEqual(r.dependencies, [5]);
+    assert.equal(w.calls.length, 0);
+    const u = world({ apiIssues: { 7: own } });
+    assert.equal((await run(u)).terminalReason, "dependency-unreadable");
+    const closed = world({ apiIssues: { 7: own, 5: { state: "closed" } } });
+    assert.equal((await run(closed)).terminalReason, "merged");
+  });
+
+  it("a broken local CI gate (no result) is needs-human with no builder resume; DEGRADED still passes", async () => {
+    const w = world({ ci: [{ result: "BROKEN", tail: "no result" }] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(resumes(w).length, 1);
+    const d = world({ ci: [{ result: "DEGRADED", tail: "" }] });
+    assert.equal((await run(d)).terminalReason, "merged");
+  });
+
+  it("parseCiLocalResult: missing or garbage output is BROKEN", async () => {
+    const { parseCiLocalResult } = await import("./effects.mjs");
+    assert.equal(parseCiLocalResult(""), "BROKEN");
+    assert.equal(parseCiLocalResult("CI_LOCAL_RESULT: ???"), "BROKEN");
+    assert.equal(parseCiLocalResult("x\nCI_LOCAL_RESULT: DEGRADED reason=t"), "DEGRADED");
+    assert.equal(parseCiLocalResult("CI_LOCAL_RESULT: PASS"), "PASS");
+    assert.equal(parseCiLocalResult("CI_LOCAL_RESULT: FAIL"), "FAIL");
+  });
+
+  it("RUN_START carries repo and version so local stats attribute lean runs", async () => {
+    const w = world(); const dir = tmpDir("lean-");
+    await run(w, { dir });
+    const rs = readLog(dir, 7).find((e) => e.event === "RUN_START");
+    assert.equal(rs.repo, "o/r"); assert.ok(rs.version && rs.forge_version);
+  });
+
+  it("the lease is renewed before and after every builder and reviewer call", async () => {
+    const w = world();
+    await run(w, { agentId: "me", leaseRenewMs: 10 ** 9 });
+    const live = w.leaseWrites.filter((x) => x.lease).length;
+    const calls = w.calls.filter((c) => c[0] === "runner").length;
+    assert.ok(live >= 1 + 2 * calls, `${live} renewals for ${calls} calls`);
+  });
+
+  it("lease TTL stays inside the projector's 30 minute honour cap", async () => {
+    const w = world(); let until = 0;
+    w.io.projector.writeState = async (_i, st) => { if (st.lease) until = st.lease.until - w.clock; };
+    await run(w, { agentId: "me", leaseRenewMs: 10 ** 9 });
+    assert.ok(until > 0 && until <= 30 * 60000);
+  });
+
+  it("--path without a value errors; --retry and --wait-lease are rejected on lean", async () => {
+    const mk = () => ({ leanModule: { runLean: async () => ({ terminalReason: "merged" }) }, leanIo: {}, dir: tmpDir("lean-cli-"),
+      emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, runIssue: async () => ({ terminalReason: "merged" }) });
+    await assert.rejects(runFromCli(["7", "--lane", "staging", "--path"], mk()), /--path requires a value/);
+    await assert.rejects(runFromCli(["7", "--lane", "staging", "--path", "--retry"], mk()), /--path requires a value/);
+    await assert.rejects(runFromCli(["7", "--lane", "staging", "--path", "lean", "--retry", "--repo", "o/r"], mk()), /not supported with the lean path/);
+    await assert.rejects(runFromCli(["7", "--lane", "staging", "--path", "auto", "--wait-lease", "--repo", "o/r"], mk()), /not supported with the lean path/);
   });
 });
 
@@ -396,7 +498,8 @@ describe("runner extension and CLI wiring", () => {
 
   it("buildLeanSessionFlags reuses the capability probe and falls back cleanly", () => {
     const f = buildLeanSessionFlags({ strictMcp: true, disableSlash: true }, {});
-    for (const x of ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands", "--setting-sources", "project,local"]) assert.ok(f.includes(x), x);
+    for (const x of ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands"]) assert.ok(f.includes(x), x);
+    assert.ok(!f.includes("--setting-sources"), "user-scope safety hooks keep running");
     assert.deepEqual(buildLeanSessionFlags({ strictMcp: false, disableSlash: false }, {}), []);
     assert.deepEqual(buildLeanSessionFlags({ strictMcp: true, disableSlash: true }, { FORGEDOCK_FULL_SESSION: "1" }), []);
   });

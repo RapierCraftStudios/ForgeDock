@@ -417,8 +417,12 @@ export async function runFromCli(argv, deps = {}) {
   // holder's lease expires or becomes reclaimable. Same flag-position guard.
   const waitLease = argv.some((a, i) => a === "--wait-lease" && !["--lane", "--repo", "--backend", "--model"].includes(argv[i - 1]));
   const pathFlag = flag(argv, "--path");
+  if (argv.includes("--path") && (!pathFlag || pathFlag.startsWith("--"))) throw new Error(`--path requires a value: ${ENGINE_PATHS.join("|")}`);
   if (pathFlag && !ENGINE_PATHS.includes(pathFlag)) throw new Error(`--path must be one of ${ENGINE_PATHS.join("|")}`);
   const enginePath = pathFlag ?? readEnginePath() ?? "full";
+  if (enginePath !== "full" && (retry || waitLease)) {
+    throw new Error("--retry and --wait-lease are not supported with the lean path (a rerun resumes from the open PR or remote branch automatically); use --path full for them");
+  }
   const io = deps.io ?? makeIo();
   await assertRepoMatchesCwd(io, repo);
   const runIssueFn = deps.runIssue ?? runIssue;
