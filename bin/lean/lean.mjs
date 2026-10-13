@@ -11,6 +11,7 @@ import { appendEvent } from "../engine/runlog.mjs";
 import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency } from "../engine/phases.mjs";
+import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, capComment, sanitizeMd } from "./render.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, PLAN_FILE, IMPLEMENTATION_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
 
@@ -214,6 +215,11 @@ export async function runCore(o) {
   }
   const readResult = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${RESULT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
 
+  // ---- host admission (#4105): before the lease, the worktree or any GitHub call ----
+  if (io.host && o.admission?.enabled !== false) {
+    const a = await checkAdmission({ cfg: o.admission, host: io.host });
+    if (!a.ok) return { terminalReason: "deferred", code: OUTCOME_CODES.HOST_BUSY, detail: a.detail, retryInSeconds: ADMISSION_RETRY_SECONDS };
+  }
   // ---- admission: Depends-on refusal, then lease ----
   {
     let dep = null;
