@@ -252,8 +252,13 @@ function allTests(sctx) {
 // counts as covering a changed source of this one (pkg/utils.py), or a pytest step would skip instead of widen.
 const ECO = { js: 'js', mjs: 'js', cjs: 'js', jsx: 'js', ts: 'js', tsx: 'js', mts: 'js', cts: 'js', py: 'py', pyi: 'py', sh: 'sh', bash: 'sh', bats: 'sh', rb: 'rb', php: 'php', go: 'go', java: 'jvm', kt: 'jvm', scala: 'jvm', rs: 'rs', cs: 'cs' };
 const ecoOf = (f) => { const e = extOf(f); return ECO[e] || e; };
+// #4068 review DRR-1: the per-ecosystem universe applies only to a step whose ecosystem has a changed source file. A step
+// in another ecosystem (a node step on a Python-only change) keeps the repo-wide universe it had at a0d45ae, so it skips or
+// narrows instead of widening to a full run on every single-language change.
 function ecosystemTests(sctx, tests) {
   const ecos = new Set(tests.map(ecoOf));
+  const touched = sctx.changed.some((f) => !isTestFile(f) && ecos.has(ecoOf(f)) && (CODE_EXT.has(extOf(f)) || /^(sh|bash)$/.test(extOf(f))));
+  if (!touched) return allTests(sctx);
   return allTests(sctx).filter((t) => ecos.has(ecoOf(t)));
 }
 

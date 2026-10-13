@@ -39,6 +39,7 @@ case "$a" in
   "api --paginate repos/o/r/pulls/"*"/files"*) cat "$FIX/pr-files.txt" 2>/dev/null || exit 1 ;;
   "api repos/o/r/pulls/"*"--jq .changed_files") cat "$FIX/changed-n" 2>/dev/null || exit 1 ;;
   "api repos/o/r/pulls/"*"--jq .head.sha") cat "$FIX/head" ;;
+  "api repos/o/r/pulls/"*"--jq .base.sha") cat "$FIX/base-sha" 2>/dev/null || exit 1 ;;
   "api repos/o/r/branches/"*"/protection"*) cat "$FIX/protection" 2>/dev/null || exit 1 ;;
   "api repos/o/r/issues/"*"/comments --paginate --jq"*) cat "$FIX/route-bodies" 2>/dev/null; exit 0 ;;
   "api repos/o/r/issues/"*"/comments --jq"*) cat "$FIX/investigator" 2>/dev/null; exit 0 ;;
@@ -320,7 +321,11 @@ want "gate2 table: a file absent from the PR and from the head is stale (gate 1)
 
 # symbol fallback (#4061): a stale or call-site cited line still scopes introduced when a named identifier is in the added lines
 reset
-printf '%s\n' '[{"filename":"s.sh","status":"modified","patch":"@@ -9,2 +9,3 @@\n ctx baseOnlyName\n+stepKey=1 stepKeyed=2 a*b $(x)\n ctx"}]' > "$FIX/pr-files.json"
+printf '%s\n' '[{"filename":"s.sh","status":"modified","patch":"@@ -9,2 +9,3 @@\n ctx baseOnlyName\n+stepKey=1 stepKeyed=2 a*b $(x) self return result computeLaneBudget\n ctx"}]' > "$FIX/pr-files.json"
+# The base version of s.sh (a dangling commit, HEAD untouched): base-present words never count as new symbols.
+_bb=$(printf 'ctx baseOnlyName\nctx\nself return result\n' | git -C "$REPO_DIR" hash-object -w --stdin)
+_bt=$(printf '100644 blob %s\ts.sh\n' "$_bb" | git -C "$REPO_DIR" mktree)
+git -C "$REPO_DIR" commit-tree "$_bt" -m base-s > "$FIX/base-sha"
 SY_PROSE=""; SY_MARKS=""; SY_N=0
 sy() {   # sy <id> <title> <extra prose line>
     SY_PROSE="${SY_PROSE}### $1 finding
@@ -338,17 +343,23 @@ sy Y-4 "delta substring" 'Wrong `stepKe` or `step` usage'
 sy Y-5 "echo plain" 'No backticks and no cause line at all'
 sy Y-6 "foxtrot meta" 'Odd `a*b` and `$(x)` and `[` tokens'
 sy Y-7 "golf rootcause" 'Root cause: stepKey is built too late'
+sy Y-8 "hotel self" 'The `self` handle leaks'
+sy Y-9 "india return" 'Missing `return` on the error path'
+sy Y-10 "juliet result" 'The `result` is discarded'
+sy Y-11 "kilo newfn" 'The new `computeLaneBudget` overflows'
 cm MEMBER User "$(agent_body security "$SHA" "$SY_PROSE" "$SY_MARKS")"; flush
 run "$GOOD" extract; rc_is "symbol fallback" "$RC" 0
 # stale cited line (outside every added hunk) naming an added identifier: Y-1, Y-7 introduced
 # generic words (this, file) and identifiers under 4 characters (abc): Y-3 never triggers the fallback
-for pair in Y-1:introduced Y-2:pre-existing Y-3:pre-existing Y-4:pre-existing Y-5:pre-existing Y-6:pre-existing Y-7:introduced; do
+for pair in Y-1:introduced Y-2:pre-existing Y-3:pre-existing Y-4:pre-existing Y-5:pre-existing Y-6:pre-existing Y-7:introduced Y-8:pre-existing Y-9:pre-existing Y-10:pre-existing Y-11:introduced; do
     want "symbol fallback: ${pair%%:*}" ".findings[] | select(.id == \"${pair%%:*}\") | .scope" findings.json "${pair#*:}"
 done
 want "symbol fallback: stale cited line naming an added identifier is introduced" '[.findings[] | select(.id == "Y-1" or .id == "Y-7") | .scope] | join(",")' findings.json "introduced,introduced"
 want "symbol fallback: generic words and short identifiers never trigger the fallback" '.findings[] | select(.id == "Y-3") | .scope' findings.json "pre-existing"
 want "symbol fallback: introduced routes file" '.findings[] | select(.id == "Y-1") | .route' findings.json "file"
 want "symbol fallback: base-only stays pre-existing route" '.findings[] | select(.id == "Y-2") | .route' findings.json "pre-existing"
+want "symbol fallback: self/return/result present in base stay pre-existing (DSEC-1/DBH-1)" '[.findings[] | select(.id == "Y-8" or .id == "Y-9" or .id == "Y-10") | .scope] | join(",")' findings.json "pre-existing,pre-existing,pre-existing"
+want "symbol fallback: a brand-new function name is introduced" '.findings[] | select(.id == "Y-11") | .scope' findings.json "introduced"
 # unreadable added text (extraction failure) keeps the line-window result
 reset; echo '[]' > "$FIX/pr-files.json"
 cm MEMBER User "$(agent_body security "$SHA" '### Y-1 f

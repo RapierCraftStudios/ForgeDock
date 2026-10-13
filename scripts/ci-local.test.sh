@@ -949,6 +949,18 @@ R=$(_scope 'pytest' pkg/utils.py)
 eq "SEC-3 ecosystem: a bare pytest runner step widens too" run "$(printf '%s' "$R" | jq -r '.action')"
 R=$(_scope 'python3 tests/test_core.py' pkg/utils.py)
 eq "SEC-3 ecosystem: a single python test step widens (no py test reaches the change)" run "$(printf '%s' "$R" | jq -r '.action')"
+# DRR-1: a single-language change never widens another ecosystem's runner step (it skips/narrows as at a0d45ae)
+r=$(blank); mkdir -p "$r/pkg" "$r/tests"
+echo 'def f(): return 1' > "$r/pkg/utils.py"; printf 'from pkg import utils\ndef test_core(): assert utils.f()\n' > "$r/tests/test_core.py"
+echo 'import test from "node:test"; test("a", () => {})' > "$r/tests/a.test.mjs"
+commit_base "$r"
+echo '# c' >> "$r/pkg/utils.py"
+R=$(_scope 'node --test tests/a.test.mjs' pkg/utils.py)
+eq "DRR-1: a node step is not widened by a Python-only change" skip "$(printf '%s' "$R" | jq -r '.action')"
+eq "DRR-1: ...and carries no widen reason" "" "$(printf '%s' "$R" | jq -r '.widen')"
+R=$(_scope 'pytest tests/test_core.py' pkg/utils.py)
+eq "DRR-1: the pytest step still runs the reaching test" run "$(printf '%s' "$R" | jq -r '.action')"
+eq "DRR-1: ...scoped, not widened" "" "$(printf '%s' "$R" | jq -r '.widen')"
 
 # FIFO slots (tickets), dead-owner reaping, deadline while queued
 _slot() { FORGE_CI_LOCAL_HOME="$SLOT_HOME" FORGE_CI_LOCAL_SLOTS=1 node --input-type=module -e "
