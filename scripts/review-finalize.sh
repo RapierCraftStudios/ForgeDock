@@ -420,6 +420,10 @@ EOF
     # Files the PR deleted or renamed (the old name too): findings on them always intersect.
     GONE_FILES_FILE="$WORKDIR/gone-files"
     jq -r '.[] | select(.status=="removed" or .status=="renamed") | .filename, (.previous_filename // empty)' "$FILES_JSON" > "$GONE_FILES_FILE" 2>/dev/null || : > "$GONE_FILES_FILE"
+    # Files whose cited line cannot be scored from the added-line map: removed files (a deletions-only patch would read as pre-existing) and old names of renames. Scope is unknown.
+    NOSCOPE_FILES_FILE="$WORKDIR/noscope-files"
+    jq -r '.[] | select(.status=="removed") | .filename, (.previous_filename // empty)' "$FILES_JSON" > "$NOSCOPE_FILES_FILE" 2>/dev/null || : > "$NOSCOPE_FILES_FILE"
+    jq -r '.[] | select(.status=="renamed") | .previous_filename // empty' "$FILES_JSON" >> "$NOSCOPE_FILES_FILE" 2>/dev/null || :
     # Files present with no `patch` (large/truncated diff): their added lines are UNKNOWN, so findings on them are always kept.
     NOPATCH_FILES_FILE="$WORKDIR/nopatch-files"
     jq -r '.[] | select(.patch == null and .status != "removed") | .filename' "$FILES_JSON" > "$NOPATCH_FILES_FILE" 2>/dev/null || : > "$NOPATCH_FILES_FILE"
@@ -494,9 +498,10 @@ SYMEOF
         ROUTE="file"
         # Validate before any arithmetic: never expand reviewer text in $(( )).
         case "$LINE" in ""|*[!0-9]*) LINE="" ;; esac
-        GONE=0; NOPATCH=0
+        GONE=0; NOPATCH=0; NOSCOPE=0
         grep -qxF -- "$FILE" "$GONE_FILES_FILE" && GONE=1
         grep -qxF -- "$FILE" "$NOPATCH_FILES_FILE" && NOPATCH=1
+        grep -qxF -- "$FILE" "$NOSCOPE_FILES_FILE" && NOSCOPE=1
         # Gate 1 (head-SHA): the cited line must exist at REVIEW_SHA. A file the PR deleted or renamed is kept (checked first).
         if [ "$GONE" -eq 0 ] && [ -n "$LINE" ]; then
             AT=$(file_lines_at_sha "$FILE")
@@ -509,12 +514,13 @@ SYMEOF
             esac
             if [ "$STALE" -eq 1 ]; then N_STALE=$((N_STALE + 1)); continue; fi
         fi
-        # Gate 2 (introduced-line): scope is computed for every finding (any severity) from the added-line map. A file the PR deleted or renamed is introduced;
-        # a patch-less file, an empty map or a missing line is unknown. MEDIUM or lower with no added line within +-5 is routed pre-existing.
+        # Gate 2 (introduced-line): scope is computed for every finding (any severity) from the added-line map. A removed file, the old name of a rename and a patch-less
+        # (pure rename) file are unknown: deleting or renaming is not evidence the PR wrote the line. A renamed file with a patch uses the map.
+        # An empty map or a missing line is unknown. MEDIUM or lower with no added line within +-5 is routed pre-existing.
         # CRITICAL/HIGH and unknown severities never are (their scope is still recorded).
         SCOPE="unknown"
-        if [ "$GONE" -eq 1 ]; then
-            SCOPE="introduced"
+        if [ "$NOSCOPE" -eq 1 ]; then
+            SCOPE="unknown"
         elif [ -n "$LINE" ] && [ "$NOPATCH" -eq 0 ] && [ -s "$ADDED_LINES_FILE" ]; then
             LO=$((LINE > 5 ? LINE - 5 : 1)); INTRODUCED=0; L="$LO"
             while [ "$L" -le $((LINE + 5)) ]; do

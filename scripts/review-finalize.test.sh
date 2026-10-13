@@ -296,7 +296,7 @@ want "unreadable diff: scope unknown" '.findings[0].scope' findings.json "unknow
 
 # gate 2 route table (ported from the retired spec sketch test): severity normalisation, deleted/renamed/patch-less files, files absent from the diff
 reset
-printf '%s\n' '[{"filename":"a.sh","status":"modified","patch":"@@ -9,2 +9,3 @@\n ctx\n+added\n ctx"},{"filename":"big.txt","status":"modified"},{"filename":"gone.txt","status":"removed"},{"filename":"new.sh","status":"renamed","previous_filename":"old.sh","patch":"@@ -1,1 +1,1 @@\n+x"}]' > "$FIX/pr-files.json"
+printf '%s\n' '[{"filename":"a.sh","status":"modified","patch":"@@ -9,2 +9,3 @@\n ctx\n+added\n ctx"},{"filename":"big.txt","status":"modified"},{"filename":"gone.txt","status":"removed","patch":"@@ -1,3 +0,0 @@\n-a\n-b\n-c"},{"filename":"new.sh","status":"renamed","previous_filename":"old.sh","patch":"@@ -1,1 +1,1 @@\n+x"},{"filename":"pure.sh","status":"renamed","previous_filename":"pure-old.sh"}]' > "$FIX/pr-files.json"
 G2_PROSE=""; G2_MARKS=""
 g2() {   # g2 <id> <severity> <file:line> <title words>
     G2_PROSE="${G2_PROSE}### $1 finding
@@ -309,12 +309,14 @@ g2 G-1 MEDIUM a.sh:10 "alpha one"; g2 G-2 MEDIUM a.sh:100 "bravo two"; g2 G-3 CR
 g2 G-5 high a.sh:140 "echo five"; g2 G-6 "HIGH " a.sh:160 "foxtrot six"; g2 G-7 "" a.sh:180 "golf seven"; g2 G-8 SEVERE a.sh:200 "hotel eight"
 g2 G-9 medium a.sh:220 "india nine"; g2 G-10 INFO a.sh:240 "juliet ten"; g2 G-11 MEDIUM old.sh:3 "kilo eleven"; g2 G-12 LOW a.sh:260 "lima twelve"
 g2 G-13 LOW gone.txt:3 "mike thirteen"; g2 G-14 MEDIUM other.sh:5 "november fourteen"
+g2 G-15 MEDIUM new.sh:1 "oscar fifteen"; g2 G-16 MEDIUM new.sh:100 "papa sixteen"; g2 G-17 MEDIUM pure.sh:7 "quebec seventeen"
+g2 G-18 MEDIUM gone.txt:40 "romeo eighteen"
 cm MEMBER User "$(agent_body security "$SHA" "$G2_PROSE" "$G2_MARKS")"; flush
 run "$GOOD" extract; rc_is "gate2 table" "$RC" 0
-for pair in G-1:file G-2:pre-existing G-3:file G-4:file G-5:file G-6:file G-7:file G-8:file G-9:pre-existing G-10:pre-existing G-11:file G-12:pre-existing G-13:file; do
+for pair in G-1:file G-2:pre-existing G-3:file G-4:file G-5:file G-6:file G-7:file G-8:file G-9:pre-existing G-10:pre-existing G-11:file G-12:pre-existing G-13:file G-15:file G-16:pre-existing G-17:file G-18:file; do
     want "gate2 table: ${pair%%:*}" ".findings[] | select(.id == \"${pair%%:*}\") | .route" findings.json "${pair#*:}"
 done
-for pair in G-1:introduced G-2:pre-existing G-3:pre-existing G-4:unknown G-7:pre-existing G-13:introduced G-12:pre-existing; do
+for pair in G-1:introduced G-2:pre-existing G-3:pre-existing G-4:unknown G-7:pre-existing G-13:unknown G-12:pre-existing G-11:unknown G-15:introduced G-16:pre-existing G-17:unknown G-18:unknown; do
     want "scope table: ${pair%%:*}" ".findings[] | select(.id == \"${pair%%:*}\") | .scope" findings.json "${pair#*:}"
 done
 want "gate2 table: a file absent from the PR and from the head is stale (gate 1), not pre-existing" '[.findings[].id] | contains(["G-14"]) | not' findings.json "true"
