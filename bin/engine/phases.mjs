@@ -977,6 +977,18 @@ export const PHASES = [
       };
       // forge#3685: a resume that ends HELD posts a non-terminal FORGE:REMEDIATION_HELD record (no COMPLETE).
       // Newest-wins between the held record and COMPLETE, by position in the (trusted, scoped) comment list.
+      // forge#3947: a trail posted after THIS dispatch's marker is this run's outcome; a push that moved the PR
+      // head after it was posted must not reclassify it. Only an older trail is judged against the live head.
+      const headStale = async () => {
+        let dispatchAt = -1, trailAt = -1;
+        const dispatchSentinel = `${REMEDIATION_DISPATCH_MARKER}: pr=${state.pr}`;
+        scoped.forEach((b, i) => {
+          if (state.pr != null && hasSentinelLine(b, dispatchSentinel)) dispatchAt = i;
+          if (startsWithHeader(b, PHASE_MARKERS.remediate.header) && hasSentinelLine(b, completion)) trailAt = i;
+        });
+        if (dispatchAt >= 0 && trailAt > dispatchAt) return false;
+        return remediationHeadStale(state, io);
+      };
       const isHeld = (b) => startsWithHeader(b, REMEDIATION_HELD_MARKER) && hasSentinelLine(b, REMEDIATION_HELD_MARKER);
       let heldAt = -1, completeAt = -1;
       scoped.forEach((b, i) => {
@@ -1039,7 +1051,7 @@ export const PHASES = [
         case "RE-ESCALATED":
         case "UNFIXABLE":
           // forge#3931: a trail recorded against an older PR head must not be replayed as this run's outcome.
-          if (await remediationHeadStale(state, io))
+          if (await headStale())
             return { status: "failed", code: OC.REMEDIATE_NO_MARKER, detail: `stale ${completion} trail: PR head moved since it was recorded` };
           // Both leave the issue at needs-human (a fresh escalation, or a
           // policy judgment call respectively) — reuse the existing
@@ -1053,7 +1065,7 @@ export const PHASES = [
         case "INPR-FIX-REQUESTED": {
           // forge#4021: the re-review approved but posted a FORGE:INPR_FIX work order. One further in-PR fix
           // remediation is allowed (never needs-human on the first request); the bound marker count caps it.
-          if (await remediationHeadStale(state, io))
+          if (await headStale())
             return { status: "failed", code: OC.REMEDIATE_NO_MARKER, detail: `stale ${completion} trail: PR head moved since it was recorded` };
           if (await prMerged()) return mergedResult(reGateOutcome);
           const round = /\*\*INPR round\*\*:\s*(\d+)/.exec(latest)?.[1] ?? null;
@@ -1065,7 +1077,7 @@ export const PHASES = [
           return { status: "committed", code: OC.REMEDIATE_INPR_REQUESTED, outputs: { ...outputs, remediation: "inpr-fix" } };
         }
         case "REREVIEW-REQUIRED":
-          if (await remediationHeadStale(state, io))
+          if (await headStale())
             return { status: "failed", code: OC.REMEDIATE_NO_MARKER, detail: `stale ${completion} trail: PR head moved since it was recorded` };
           return { status: "committed", terminalReason: "needs-human", code: OC.REMEDIATE_RE_ESCALATED, outputs: { reGateOutcome } };
         default:
