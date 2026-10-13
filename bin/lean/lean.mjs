@@ -316,10 +316,9 @@ export async function runCore(o) {
     ev({ event: "PR_OPENED", pr });
     T.pr = [`#${pr}`, resumed?.pr ? "existing" : "opened"];
     const prUrl = /https?:\/\/\S+/.exec(prOut)?.[0] ?? `https://github.com/${repo}/pull/${pr}`;
-    const localHead = String(await git(["rev-parse", "HEAD"])).trim();
+    let localHead = String(await git(["rev-parse", "HEAD"])).trim();
 
-    // ---- 6. the register comment ----
-    // merge policy: required (default) | all | none
+    // ---- 6. merge policy: required (default) | all | none ----
     let policy = mergeWait, required = [];
     if (mergeWait === "required") {
       try { required = (await io.requiredChecks?.(lane)) ?? []; } catch { required = []; }
@@ -328,42 +327,123 @@ export async function runCore(o) {
     T.merge = [policyText, "waiting"];
     T.decisions.push(`merge_wait=${mergeWait}: ${policyText}`);
 
-    // ---- 7. wait per policy, merge at the reviewed head ----
-    if (policy === "none" || (policy === "required" && !required.length)) {
-      // merge right after review
-      T.merge = [policyText, "merged right after review"];
-    } else {
-      const startedAt = now();
-      let pollIndex = 0, gateHead = null;
-      for (;;) {
-        await renew();
-        if (policy === "all") {
-          const w = await io.waitCiGreen(pr, repo, 0).catch(() => ({ rc: 2, text: "" }));
-          if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; break; }
-          if (w.rc === 1) return await needsHuman(`Remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`, OUTCOME_CODES.CI_RED);
-        } else {
-          let states = [];
-          try { states = (await io.checkStates(pr)) ?? []; } catch { states = []; }
-          const st = (n) => states.find((x) => x.name === n)?.state ?? "pending";
-          const failed = required.filter((n) => st(n) === "failure");
-          if (failed.length) return await needsHuman(`Required check(s) failed on PR #${pr}: ${failed.join(", ")}`, OUTCOME_CODES.CI_RED);
-          if (required.every((n) => st(n) === "success")) break;
-        }
-        if (now() - startedAt >= ciMaxMinutes * 60000) {
-          // Slow CI is never a needs-human: leave the PR open and resumable.
-          ev({ event: "CI_PENDING_WAIT", state: "end", pr, result: "timeout" });
-          T.anomalies.push("CI still pending at the wait budget");
-          return await finish("ci-pending", `PR #${pr} still waiting on CI after ${ciMaxMinutes} min`, { pr });
-        }
-        onProgress({ event: "phase_paused", phase: "merge", detail: `CI pending on PR #${pr}` });
-        await sleep(ciPollDelayMs(pollIndex++, random));
+    // ---- base-sync (#4100): merge the lane into the branch when the PR conflicts; merge only, never rebase or force-push ----
+    let syncs = 0;
+    const MAX_SYNCS = 2;
+    const gitOut = async (args) => { try { return String(await git(args)).trim(); } catch { return ""; } };
+    /** CONFLICTING / DIRTY, or UNKNOWN after one short re-poll. Unreadable state counts as not conflicting. */
+    const prConflicting = async () => {
+      for (let i = 0; i < 2; i++) {
+        let j;
+        try { j = JSON.parse(String(await ghc(["pr", "view", String(pr), "-R", repo, "--json", "mergeable,mergeStateStatus"])) || "{}"); } catch { return false; }
+        const m = String(j.mergeable ?? "").toUpperCase(), st = String(j.mergeStateStatus ?? "").toUpperCase();
+        if (m === "CONFLICTING" || st === "DIRTY") return "conflict";
+        if (m !== "UNKNOWN") return false;
+        if (i === 0) await sleep(2000);
       }
-      if (gateHead && !(localHead.startsWith(gateHead) || gateHead.startsWith(localHead))) {
-        return await needsHuman(`CI passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`, OUTCOME_CODES.MERGE_HEAD_MISMATCH);
+      return "unknown";
+    };
+    const conflictFiles = async () => (await gitOut(["diff", "--name-only", "--diff-filter=U"])).split("\n").map((x) => x.trim()).filter(Boolean);
+    const unresolved = async () => (await conflictFiles()).length > 0 || (await gitOut(["grep", "-n", "-e", "^<<<<<<< ", "-e", "^>>>>>>> "])) !== ""
+      || (await gitOut(["diff", "--check"])) !== "" || (await gitOut(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) !== "";
+    const syncRow = [];
+    /** Returns null to continue with the merge flow, or a terminal result. */
+    async function baseSync(trigger, soft = false) {
+      if (syncs >= MAX_SYNCS) return await needsHuman(`PR #${pr} still conflicts with ${lane} after ${MAX_SYNCS} base-syncs (${trigger}).`, OUTCOME_CODES.BASE_CONFLICT);
+      syncs++;
+      await renew();
+      try { await git(["fetch", "origin", lane]); } catch { /* offline: use the local ref */ }
+      const baseSha = (await gitOut(["rev-parse", base])).slice(0, 12);
+      const before = await gitOut(["rev-parse", "HEAD"]);
+      let clean = true, files = [];
+      try { await git(["merge", "--no-edit", base]); } catch { clean = false; files = await conflictFiles(); }
+      let how, tests = "not required (clean merge)", rereview = "not required (conflict-free base merge)";
+      if (clean) {
+        how = "clean merge of the base into the branch";
+      } else {
+        T.decisions.push(`Base-sync ${syncs}: merging ${base} conflicts in ${files.join(", ") || "unknown files"}; builder resolves`);
+        const prompt = `Merging ${base} into this branch conflicts in: ${files.join(", ") || "(see git status)"}. Resolve the conflicts preserving both this fix's intent and the base's changes, run the relevant tests, and commit the merge. Do not push.`;
+        await builder(++attemptN, prompt, sessionId ?? null);
+        if (await unresolved()) {
+          await gitOut(["merge", "--abort"]);
+          return await needsHuman(`Base-sync could not resolve the conflicts in ${files.join(", ")} (conflict markers or an unfinished merge remain).`, OUTCOME_CODES.BASE_CONFLICT);
+        }
+        how = `builder resolved ${files.length} conflicted file(s) and committed the merge`;
+        const r2 = await readResult();
+        tests = Array.isArray(r2?.tests) && r2.tests.length ? r2.tests.map((t) => (typeof t === "string" ? t : `${t.command}: ${t.result}`)).join("; ") : NR_TESTS;
+      }
+      const after = await gitOut(["rev-parse", "HEAD"]);
+      if (soft && clean && after === before) { syncs--; return null; } // UNKNOWN state and nothing to merge: not a conflict
+      if (after !== before) await git(["push", "origin", branch]); // plain push of a merge commit: never force
+      if (!clean) {
+        let rv = await doReview();
+        if (rv?.fail) {
+          T.decisions.push(`Base-sync re-review FAIL: builder resumed with the reason`);
+          await builder(++attemptN, resumeBuilderPrompt(rv.reason), sessionId ?? null);
+          if (await unresolved()) return await needsHuman("Base-sync re-review fix left conflict markers.", OUTCOME_CODES.BASE_CONFLICT);
+          if ((await gitOut(["rev-parse", "HEAD"])) !== after) await git(["push", "origin", branch]);
+          rv = await doReview();
+        }
+        if (!rv) return await needsHuman("Reviewer returned no parseable verdict after base-sync.", OUTCOME_CODES.REVIEW_NO_VERDICT);
+        if (rv.fail) return await needsHuman(`Review FAIL after base-sync: ${rv.reason}`, OUTCOME_CODES.REVIEW_FAILED);
+        rereview = `${rv.verdict}: ${rv.reason || "no concrete failure"}`;
+      }
+      localHead = await gitOut(["rev-parse", "HEAD"]);
+      syncRow.push(`${trigger}: ${clean ? "clean" : "conflicts"} (${baseSha})`);
+      T.baseSync = [`${syncs} sync(s)`, syncRow.join("; ")];
+      await post("FORGE:BASE_SYNC", `## Base Sync\n**Trigger:** ${trigger}\n**Base merged:** \`${base}\` at \`${baseSha}\`\n**Result:** ${clean ? "clean merge" : `conflicts in ${files.map((f) => `\`${f}\``).join(", ") || "unknown files"}`}\n**Resolution:** ${how}\n**Tests run:** ${tests}\n**Re-review:** ${rereview}\n**New head:** \`${localHead.slice(0, 12)}\``);
+      return null;
+    }
+    const NR_TESTS = "not reported";
+
+    // ---- 7. (sync) wait per policy, (sync) merge at the reviewed head ----
+    // A rerun on an existing PR goes through the same conflict check, so a conflicting PR from an earlier run recovers.
+    for (;;) {
+      const c0 = await prConflicting();
+      if (c0) { const r = await baseSync(c0 === "unknown" ? "PR mergeability unknown" : "PR is conflicting", c0 === "unknown"); if (r) return r; }
+      if (policy === "none" || (policy === "required" && !required.length)) {
+        // merge right after review
+        T.merge = [policyText, "merged right after review"];
+      } else {
+        const startedAt = now();
+        let pollIndex = 0, gateHead = null;
+        for (;;) {
+          await renew();
+          if (policy === "all") {
+            const w = await io.waitCiGreen(pr, repo, 0).catch(() => ({ rc: 2, text: "" }));
+            if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; break; }
+            if (w.rc === 1) return await needsHuman(`Remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`, OUTCOME_CODES.CI_RED);
+          } else {
+            let states = [];
+            try { states = (await io.checkStates(pr)) ?? []; } catch { states = []; }
+            const st = (n) => states.find((x) => x.name === n)?.state ?? "pending";
+            const failed = required.filter((n) => st(n) === "failure");
+            if (failed.length) return await needsHuman(`Required check(s) failed on PR #${pr}: ${failed.join(", ")}`, OUTCOME_CODES.CI_RED);
+            if (required.every((n) => st(n) === "success")) break;
+          }
+          if (now() - startedAt >= ciMaxMinutes * 60000) {
+            // Slow CI is never a needs-human: leave the PR open and resumable.
+            ev({ event: "CI_PENDING_WAIT", state: "end", pr, result: "timeout" });
+            T.anomalies.push("CI still pending at the wait budget");
+            return await finish("ci-pending", `PR #${pr} still waiting on CI after ${ciMaxMinutes} min`, { pr });
+          }
+          onProgress({ event: "phase_paused", phase: "merge", detail: `CI pending on PR #${pr}` });
+          await sleep(ciPollDelayMs(pollIndex++, random));
+        }
+        if (gateHead && !(localHead.startsWith(gateHead) || gateHead.startsWith(localHead))) {
+          return await needsHuman(`CI passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`, OUTCOME_CODES.MERGE_HEAD_MISMATCH);
+        }
+      }
+      if (syncs > 0 && (await prConflicting()) === "conflict") continue; // the base moved again while waiting
+      T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
+      try {
+        await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
+        break;
+      } catch (e) {
+        if (!/not mergeable|merge conflict|conflict/i.test(String(e?.stderr ?? "") + String(e?.message ?? ""))) throw e;
+        const r = await baseSync("gh pr merge reported a conflict"); if (r) return r;
       }
     }
-    T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
-    await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
     await ghc(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
     await label("merged");
     return await finish("merged", `PR #${pr}`, { pr });
