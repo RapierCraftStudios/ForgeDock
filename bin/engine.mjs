@@ -8,7 +8,7 @@ import { readFileSync, rmSync, readdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash, scryptSync } from "node:crypto";
 import { hostname as osHostname, homedir } from "node:os";
-import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
+import { appendEvent, readLog, deriveState, rewriteLog, scopeEvents } from "./engine/runlog.mjs";
 import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber, newestCycle, cycleResetProvable, remediationHeadStale, decompositionRevoked, openDependency } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
@@ -440,7 +440,8 @@ export async function runIssue(opts) {
   const projector = makeProjector(io);
 
   // 1. Load + reconcile (GitHub wins).
-  const local = readLog(dir, issue).length ? deriveState(readLog(dir, issue)) : null;
+  // #4109: only this (full) path's own events: core-path commits and terminals in the shared log are never replayed here.
+  const local = scopeEvents(readLog(dir, issue)).length ? deriveState(readLog(dir, issue)) : null;
   let remote = await projector.readState(issue);
   let { state, action } = reconcileState(local, remote);
   const leaseHeld = (r) => !!(r?.lease && r.lease.until > now() && r.lease.by !== agentId &&
@@ -492,6 +493,19 @@ export async function runIssue(opts) {
         code: OUTCOME_CODES.DEPENDENCY_OPEN,
         dependencies: dep.open,
         detail: `issue ${issue} **Depends on** ${dep.open.map((n) => `#${n}`).join(", ")} which is still open; re-run once it is closed`,
+      };
+    }
+  }
+  // #4109: an open core-path PR means the work already exists; a second implementation from the full path would duplicate it.
+  {
+    let prs = [];
+    try { prs = JSON.parse(String(await io.gh(["pr", "list", ...(repo ? ["-R", String(repo)] : []), "--head", `feat/issue-${issue}-lean`, "--state", "open", "--json", "number,headRefName"])) || "[]"); } catch { prs = []; }
+    prs = Array.isArray(prs) ? prs.filter((x) => x?.headRefName === `feat/issue-${issue}-lean`) : [];
+    if (Array.isArray(prs) && prs.length && Number.isInteger(prs[0]?.number)) {
+      return {
+        terminalReason: "needs-human",
+        code: OUTCOME_CODES.PATH_SWITCH_CONFLICT,
+        detail: `issue ${issue} has an open core-path PR #${prs[0].number}; rerun on the default path (base-sync) or close that PR first.`,
       };
     }
   }

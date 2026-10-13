@@ -510,7 +510,7 @@ export async function runFromCli(argv, deps = {}) {
     return res;
   }
   // forge#3932: refused before any state write (open or unreadable **Depends on**); nothing ran.
-  if (res.terminalReason === "dependency-open" || res.terminalReason === "dependency-unreadable") {
+  if (res.terminalReason === "dependency-open" || res.terminalReason === "dependency-unreadable" || res.code === "path.switch_conflict") {
     console.log(res.detail ?? "run refused: dependency check");
     return res;
   }
