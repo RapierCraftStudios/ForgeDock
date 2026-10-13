@@ -42,6 +42,25 @@ Pipeline agents MUST NOT use `find` (unbounded or filesystem-wide) to locate pro
 
 ---
 
+## SELF-REVIEW MODE (build-time, local diff) <!-- Added: forge#3971 -->
+
+`work-on:build` Phase B5.6 runs the same domain personas on the builder's staged diff before any PR exists, so the builder can fix adversarial-completeness findings while the plan and code are warm. The personas, the Evidence-Based Review Protocol (sections 1-7) and the Structured Findings Protocol apply unchanged; only the transport differs. This mode is entered only when the dispatch prompt says `MODE: SELF-REVIEW`. It is never the official review and never satisfies a review gate.
+
+**Inputs the dispatcher supplies**: `[AGENT_DOMAIN]` (the marker domain), `[ISSUE_NUMBER]`, `[GH_REPO]`, `[WORKTREE_PATH]`, `[PR_BASE]`, `[TREE_HASH]` (the staged tree, `git write-tree`), and `[DOMAIN_DIFF_SLICE]` (the slice of `git diff --cached origin/[PR_BASE]`, scoped exactly as in Per-Agent Input Scoping; the Security agent gets the full diff).
+
+**Substitutions** (persona text that names a PR still applies, translated):
+- No `gh pr *` call is ever made: there is no PR. Read the slice from `[DOMAIN_DIFF_SLICE]` (materialize `SLICE_FILE` with the same heredoc, using `[ISSUE_NUMBER]` and `[AGENT_DOMAIN]` in the path in place of `[PR_NUMBER]` and the SHA), and list changed files with `git -C "[WORKTREE_PATH]" diff --cached --name-only "origin/[PR_BASE]"` wherever a persona runs `gh pr diff [PR_NUMBER] --name-only`. Reads of other repo files happen inside `[WORKTREE_PATH]` with the usual bounded-output rules.
+- No `Reviewed-SHA` staleness check. The pin is the tree: include exactly one line `Tree: [TREE_HASH]` (outside the marker) in the persisted body.
+- Persist Before Post still applies, but the post is `gh issue comment [ISSUE_NUMBER] -R [GH_REPO] --body-file "$REVIEW_BODY_PATH"`, never `gh pr comment`.
+
+**Marker**: the body carries exactly one `<!-- FORGE:SELFREVIEW-AGENT:{domain} -->` marker and NEVER a `FORGE:REVIEW-AGENT` marker or any other FORGE phase marker. `/review-pr`, `scripts/review-finalize.sh` and `scripts/verify-phase-trail.sh` match only `FORGE:REVIEW-AGENT:*`, so a self-review comment never counts as a panel member or as review evidence.
+
+**Findings**: the same `<!-- REVIEW-FINDINGS-START -->` block, the same prefixes, confidence, severity, `**Failure scenario**` and `**Scope**` rules. Report the full list, including POSSIBLE and LOW (the builder acts only on CONFIRMED and LIKELY at MEDIUM or above and records the rest). Return the verdict and one line per finding to the dispatcher as usual; completion is read from the posted comment's `Tree:` line, not from a notification.
+
+**Do not**: edit any file, run `git add`/`git commit`/`git push`, post a verdict, label, or review marker, or create issues. A self-review agent is read-only.
+
+---
+
 ## Evidence-Based Review Protocol (ALL Agents Follow) <!-- allowlist:check-protocol-restatements -->
 
 Every agent MUST follow this protocol:

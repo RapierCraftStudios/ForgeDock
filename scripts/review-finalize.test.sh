@@ -39,13 +39,15 @@ case "$a" in
   "api --paginate repos/o/r/pulls/"*"/files"*) cat "$FIX/pr-files.txt" 2>/dev/null || exit 1 ;;
   "api repos/o/r/pulls/"*"--jq .changed_files") cat "$FIX/changed-n" 2>/dev/null || exit 1 ;;
   "api repos/o/r/pulls/"*"--jq .head.sha") cat "$FIX/head" ;;
+  "api repos/o/r/pulls/"*"--jq .base.sha") cat "$FIX/base-sha" 2>/dev/null || exit 1 ;;
   "api repos/o/r/branches/"*"/protection"*) cat "$FIX/protection" 2>/dev/null || exit 1 ;;
   "api repos/o/r/issues/"*"/comments --paginate --jq"*) cat "$FIX/route-bodies" 2>/dev/null; exit 0 ;;
   "api repos/o/r/issues/"*"/comments --jq"*) cat "$FIX/investigator" 2>/dev/null; exit 0 ;;
   "api repos/o/r/commits/"*) cat "$FIX/commit-sha" 2>/dev/null || exit 1 ;;
   "api repos/o/r/compare/"*) cat "$FIX/compare-files" 2>/dev/null || exit 1 ;;
   "pr comment"*) { printf '%s\n' '=====COMMENT====='; for x in "$@"; do last="$x"; done; printf '%s\n' "$last"; } >> "$FIX/posted.log"; exit 0 ;;
-  "issue comment"*) printf 'ISSUE_COMMENT %s\n' "$3" >> "$FIX/issue-comments.log"; { for x in "$@"; do last="$x"; done; printf '%s\n' "$last"; } >> "$FIX/issue-bodies.log"; exit 0 ;;
+  "issue view"*"--json state"*) [ -f "$FIX/issue-closed" ] && echo CLOSED || echo OPEN; exit 0 ;;
+  "issue comment"*) [ -f "$FIX/issue-comment-fail" ] && exit 1; printf 'ISSUE_COMMENT %s\n' "$3" >> "$FIX/issue-comments.log"; { for x in "$@"; do last="$x"; done; printf '%s\n' "$last"; } >> "$FIX/issue-bodies.log"; exit 0 ;;
   "label create"*) exit 0 ;;
   "pr view"*"headRefOid"*) cat "$FIX/head" ;;
   "pr view"*"baseRefName"*) echo main ;;
@@ -317,6 +319,55 @@ for pair in G-1:introduced G-2:pre-existing G-3:pre-existing G-4:unknown G-7:pre
 done
 want "gate2 table: a file absent from the PR and from the head is stale (gate 1), not pre-existing" '[.findings[].id] | contains(["G-14"]) | not' findings.json "true"
 
+# symbol fallback (#4061): a stale or call-site cited line still scopes introduced when a named identifier is in the added lines
+reset
+printf '%s\n' '[{"filename":"s.sh","status":"modified","patch":"@@ -9,2 +9,3 @@\n ctx baseOnlyName\n+stepKey=1 stepKeyed=2 a*b $(x) self return result computeLaneBudget\n ctx"}]' > "$FIX/pr-files.json"
+# The base version of s.sh (a dangling commit, HEAD untouched): base-present words never count as new symbols.
+_bb=$(printf 'ctx baseOnlyName\nctx\nself return result\n' | git -C "$REPO_DIR" hash-object -w --stdin)
+_bt=$(printf '100644 blob %s\ts.sh\n' "$_bb" | git -C "$REPO_DIR" mktree)
+git -C "$REPO_DIR" commit-tree "$_bt" -m base-s > "$FIX/base-sha"
+SY_PROSE=""; SY_MARKS=""; SY_N=0
+sy() {   # sy <id> <title> <extra prose line>
+    SY_PROSE="${SY_PROSE}### $1 finding
+**Failure scenario**: s
+$3
+"
+    SY_N=$((SY_N + 1))
+    SY_MARKS="${SY_MARKS}<!-- FINDING:$1|LIKELY|MEDIUM|s.sh:$((300 + SY_N * 20))|$2 -->
+"
+}
+sy Y-1 "alpha stale" 'The dedup key `stepKey` is wrong'
+sy Y-2 "bravo base" 'Calls `baseOnlyName` badly'
+sy Y-3 "charlie generic" 'Uses `this` and `file` and `abc` here'
+sy Y-4 "delta substring" 'Wrong `stepKe` or `step` usage'
+sy Y-5 "echo plain" 'No backticks and no cause line at all'
+sy Y-6 "foxtrot meta" 'Odd `a*b` and `$(x)` and `[` tokens'
+sy Y-7 "golf rootcause" 'Root cause: stepKey is built too late'
+sy Y-8 "hotel self" 'The `self` handle leaks'
+sy Y-9 "india return" 'Missing `return` on the error path'
+sy Y-10 "juliet result" 'The `result` is discarded'
+sy Y-11 "kilo newfn" 'The new `computeLaneBudget` overflows'
+cm MEMBER User "$(agent_body security "$SHA" "$SY_PROSE" "$SY_MARKS")"; flush
+run "$GOOD" extract; rc_is "symbol fallback" "$RC" 0
+# stale cited line (outside every added hunk) naming an added identifier: Y-1, Y-7 introduced
+# generic words (this, file) and identifiers under 4 characters (abc): Y-3 never triggers the fallback
+for pair in Y-1:introduced Y-2:pre-existing Y-3:pre-existing Y-4:pre-existing Y-5:pre-existing Y-6:pre-existing Y-7:introduced Y-8:pre-existing Y-9:pre-existing Y-10:pre-existing Y-11:introduced; do
+    want "symbol fallback: ${pair%%:*}" ".findings[] | select(.id == \"${pair%%:*}\") | .scope" findings.json "${pair#*:}"
+done
+want "symbol fallback: stale cited line naming an added identifier is introduced" '[.findings[] | select(.id == "Y-1" or .id == "Y-7") | .scope] | join(",")' findings.json "introduced,introduced"
+want "symbol fallback: generic words and short identifiers never trigger the fallback" '.findings[] | select(.id == "Y-3") | .scope' findings.json "pre-existing"
+want "symbol fallback: introduced routes file" '.findings[] | select(.id == "Y-1") | .route' findings.json "file"
+want "symbol fallback: base-only stays pre-existing route" '.findings[] | select(.id == "Y-2") | .route' findings.json "pre-existing"
+want "symbol fallback: self/return/result present in base stay pre-existing (DSEC-1/DBH-1)" '[.findings[] | select(.id == "Y-8" or .id == "Y-9" or .id == "Y-10") | .scope] | join(",")' findings.json "pre-existing,pre-existing,pre-existing"
+want "symbol fallback: a brand-new function name is introduced" '.findings[] | select(.id == "Y-11") | .scope' findings.json "introduced"
+# unreadable added text (extraction failure) keeps the line-window result
+reset; echo '[]' > "$FIX/pr-files.json"
+cm MEMBER User "$(agent_body security "$SHA" '### Y-1 f
+**Failure scenario**: s
+`stepKey`
+' '<!-- FINDING:Y-1|LIKELY|MEDIUM|s.sh:300|alpha stale -->')"; flush
+run "$GOOD" extract; want "symbol fallback: no diff keeps" '.findings[0].scope' findings.json "unknown"
+
 # DELTA: the earlier reviewed head's findings are read as well
 reset; mkctx 1 DELTA "$OLD_SHA"
 cm MEMBER User "$(agent_body security "$SHA" '### D-1 new
@@ -462,16 +513,49 @@ run "$GOOD" classify --auto-merge true; has "untrusted marker" "INPR_FIX=1"
 reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
 CONTRACT_BODY=$(printf '<!-- FORGE:CONTRACT -->\n### Out of Scope\n\n- `docs/` — deferred → #30: tracked there\n')
 cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
-echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 --> docs/","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/` — why","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
 mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
 run "$GOOD" classify; has "contract" "CONTRACT_DEMOTED=1"
 want "contract-deferred" '.findings[0].disposition' classified.json "NOTE contract-deferred #30"
 [ "$(cat "$FIX/issue-comments.log" 2>/dev/null)" = "ISSUE_COMMENT 30" ] && ok || bad "deferred issue comment not posted"
 posted_has "contract list line" "tracked on #30"
+# substring-only / longer-path / legacy / empty bodies must not verify (e1, e3, e4); [x] and regex-metachar paths do (e2, e3)
+for B in 'x <!-- FORGE:DEFERRED_FROM: #12 --> docs/' 'x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/guide.md.bak` — why' 'x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/x`' 'x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/`x' ''; do
+    reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
+    cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
+    echo "{\"state\":\"open\",\"body\":\"$B\",\"author_association\":\"MEMBER\",\"user\":{\"type\":\"User\"}}" > "$FIX/issue-30.json"
+    mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
+    run "$GOOD" classify; has "unverified-body '$B'" "CONTRACT_DEMOTED=0"
+done
+reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
+cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [x] `docs/`","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
+run "$GOOD" classify; has "checked-item-verifies" "CONTRACT_DEMOTED=1"
+# a failing comment on the deferred issue, or a no-longer-open one, files the finding instead of demoting it
+for _mode in issue-comment-fail issue-closed; do
+reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
+cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/` — why","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
+: > "$FIX/$_mode"
+run "$GOOD" classify; has "$_mode not counted" "CONTRACT_DEMOTED=0"
+want "$_mode falls back to the no-contract disposition" '.findings[0].disposition' classified.json "ISSUE MEDIUM-LIKELY"
+rm -f "$FIX/$_mode"
+done
+# a failing comment on a LOW/POSSIBLE finding falls back to its no-contract disposition (a NOTE), not a blanket ISSUE (DB-1)
+reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
+cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/` — why","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+mkfind K-1 POSSIBLE LOW docs/guide.md 3 "Docs example is misleading"; putfind 1
+: > "$FIX/issue-comment-fail"
+run "$GOOD" classify; has "low-fallback not counted" "CONTRACT_DEMOTED=0"
+want "low finding falls back to its NOTE" '.findings[0].class' classified.json "NOTE"
+rm -f "$FIX/issue-comment-fail"
 # an untrusted contract demotes nothing
 reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
 cm NONE User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
-echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 --> docs/","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/` — why","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
 mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
 run "$GOOD" classify; has "untrusted contract" "CONTRACT_DEMOTED=0"
 
@@ -809,9 +893,25 @@ rc_is "guard: non-boolean" "$RC" 3; has "guard: non-boolean" "merge guard state 
 # --- verdict / calibration / trust / base-conflict routing ---
 gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true
 rc_is "route: only base conflict" "$RC" 3; has "route: only base conflict" "blocker: base-conflict"; has "route: only base conflict" "MERGE_OUTCOME=base-conflict"
-logged "route: base-sync comment" issue-bodies.log "the pipeline is performing the base sync automatically"; not_logged "route: base conflict is not needs-human" edits.log "needs-human"; not_merged "route: base conflict"
+logged "route: base-sync comment" issue-bodies.log "the work-on pipeline performs the base sync"; logged "route: standalone remediate action" issue-bodies.log "--remediate"; not_logged "route: base conflict is not needs-human" edits.log "needs-human"; not_merged "route: base conflict"
 gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --other-blocking true
 rc_is "route: base conflict plus blocker" "$RC" 3; has "route: base conflict plus blocker" "MERGE_OUTCOME=needs-human"; logged "route: needs-human" edits.log "needs-human"
+# other-blocking-derived: a persisted true (written by verdict) is ORed in; a passed false never lowers it
+ob() { mkdir -p "$WORK/out"; printf '%s\n' "$1" > "$WORK/out/other-blocking.txt"; }
+gate_reset; ob true; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --other-blocking false
+rc_is "other-blocking-derived: persisted true beats passed false" "$RC" 3; has "other-blocking-derived: persisted true beats passed false" "MERGE_OUTCOME=needs-human"
+not_has() { case "$OUT" in *"$2"*) bad "$1: output has '$2'" ;; *) ok ;; esac; }
+not_has "other-blocking-derived: not base-conflict" "MERGE_OUTCOME=base-conflict"; logged "other-blocking-derived: needs-human" edits.log "needs-human"
+gate_reset; ob false; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true
+rc_is "other-blocking-derived: persisted false keeps base-conflict route" "$RC" 3; has "other-blocking-derived: persisted false" "MERGE_OUTCOME=base-conflict"
+gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true
+has "other-blocking-derived: missing file uses passed flag" "MERGE_OUTCOME=base-conflict"
+for junk in "" "maybe" "TRUE" "yes"; do
+    gate_reset; ob "$junk"; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true
+    has "other-blocking-derived: garbage file '$junk' ignored" "MERGE_OUTCOME=base-conflict"
+done
+gate_reset; ob true; mg "$GATE" --other-blocking ""
+rc_is "other-blocking-derived: unbound passed flag still fails closed" "$RC" 3; has "other-blocking-derived: unbound still fails closed" "merge guard state unbound"
 gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --trust-needs-human true --table-cell-key "feature x HIGH"
 rc_is "route: base conflict plus trust" "$RC" 3; logged "route: trust reason" issue-bodies.log "provenance trust: NOVEL_NEEDS_HUMAN tier for cell \`feature x HIGH\`"; logged "route: trust needs-human" edits.log "needs-human"
 gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --calibration-needs-human true --calibration-note "overconfident cell"
@@ -834,7 +934,7 @@ rc_is "route: CHANGES REQUESTED" "$RC" 3; logged "route: verdict reason" issue-b
 
 # --- pre-merge mergeability guard ---
 gate_reset; echo "CONFLICTING|DIRTY" > "$FIX/premerge"; mg "$GATE"
-rc_is "premerge: conflicting" "$RC" 3; has "premerge: conflicting" "blocker: base-conflict"; not_logged "premerge: conflict is not needs-human" edits.log "needs-human"; not_merged "premerge: conflicting"
+rc_is "premerge: conflicting" "$RC" 3; has "premerge: conflicting" "blocker: base-conflict"; not_logged "premerge: conflict is not needs-human" edits.log "needs-human"; logged "premerge: standalone base-sync wording" issue-bodies.log "/work-on 42 --remediate"; not_merged "premerge: conflicting"
 gate_reset; echo "MERGEABLE|BEHIND" > "$FIX/premerge"; echo true > "$FIX/protection"; mg "$GATE"
 rc_is "premerge: behind under strict protection" "$RC" 3; has "premerge: behind under strict protection" "blocker: base-conflict"
 gate_reset; echo "MERGEABLE|BEHIND" > "$FIX/premerge"; echo false > "$FIX/protection"; mg "$GATE"
@@ -896,6 +996,22 @@ reset; MH=MERGEABLE; MHS=CLEAN; vd --result clean --intensity-tier FAST --table-
 logged "verdict: trust annotation" reviews.log '**Intensity tier**: FAST | **Cell**: `bug HIGH` | **Shadow mode**: false'
 reset; MH=CONFLICTING; MHS=DIRTY; vd --result blocking --blocking-count 1
 has "verdict: blocking" "VERDICT=CHANGES REQUESTED"; logged "verdict: blocking body" reviews.log "CHANGES REQUESTED: commit"; logged "verdict: base conflict line" reviews.log "🔴 Base Conflict:"
+# other-blocking-derived: verdict resolves and persists OTHER_BLOCKING
+OBF="$WORK/out/other-blocking.txt"
+reset; MH=MERGEABLE; MHS=CLEAN; vd --result blocking --blocking-count 1 --other-blocking false
+has "other-blocking-derived: unexplained blocking forces true" "OTHER_BLOCKING=true"; [ "$(cat "$OBF" 2>/dev/null)" = "true" ] && ok || bad "other-blocking-derived: file lacks true"
+reset; MH=MERGEABLE; MHS=CLEAN; vd --result blocking --blocking-count 1
+has "other-blocking-derived: no flag still derives true" "OTHER_BLOCKING=true"
+reset; MH=CONFLICTING; MHS=DIRTY; vd --result blocking --blocking-count 1 --other-blocking false
+has "other-blocking-derived: base conflict explains the block" "OTHER_BLOCKING=false"; [ "$(cat "$OBF" 2>/dev/null)" = "false" ] && ok || bad "other-blocking-derived: file lacks false"
+reset; MH=CONFLICTING; MHS=DIRTY; vd --result blocking --blocking-count 1 --other-blocking true
+has "other-blocking-derived: reviewer true is kept" "OTHER_BLOCKING=true"
+reset; MH=MERGEABLE; MHS=CLEAN; mkdir -p "$WORK/out"; echo true > "$OBF"; vd --result clean --other-blocking true
+has "other-blocking-derived: clean result resets to false" "OTHER_BLOCKING=false"; [ "$(cat "$OBF" 2>/dev/null)" = "false" ] && ok || bad "other-blocking-derived: stale true survived a clean re-review"
+reset; MH=MERGEABLE; MHS=CLEAN; mkdir -p "$WORK/out"; echo true > "$OBF"; vd --result stale
+[ -e "$OBF" ] && bad "other-blocking-derived: stale result must remove the file" || ok
+reset; MH=MERGEABLE; MHS=CLEAN; vd --result blocking --other-blocking maybe --blocking-count 1
+has "other-blocking-derived: garbage flag, unexplained block" "OTHER_BLOCKING=true"
 reset; MH=CONFLICTING; MHS=DIRTY; vd --result clean
 has "verdict: clean coerced over a base conflict" "VERDICT_COERCED=true"; has "verdict: coerced verdict" "VERDICT=CHANGES REQUESTED"; logged "verdict: coerced body" reviews.log "CHANGES REQUESTED: commit"
 reset; MH=MERGEABLE; MHS=CLEAN; vd --result clean --has-purpose-regression true --purpose-findings "F-1"
@@ -1006,6 +1122,21 @@ IGROOT="$G_NOTRUST"; ig; has "integrity: trust script unresolvable counts zero" 
 reset; rm -f "$FIX/comments.json"; ig; has "integrity: unreadable comments count zero" "ACTUAL_AGENT_COUNT=0"
 reset; mkctx 1 BASE_SYNC_ONLY "$OLD_SHA" 42; cm MEMBER User "$(agent_body security "$SHA" 'a' '')"; flush; ig
 has "integrity: unverified carry is not reported as carried" "CARRIED_FROM: "; case "$OUT" in *"carried from"*) bad "integrity: carried requires a verified record" ;; *) ok ;; esac
+
+# forge#3971: a build-time FORGE:SELFREVIEW-AGENT comment (even a trusted one pinned to the current head) is never a panel member
+sr_body() { printf '<!-- FORGE:SELFREVIEW-AGENT:%s -->\n%s\n<!-- REVIEW-FINDINGS-START -->\n%s\n<!-- REVIEW-FINDINGS-END -->\nReviewed-SHA: %s\nTree: abc123\n' "$1" "$3" "$4" "$2"; }
+reset
+cm MEMBER User "$(sr_body security "$SHA" 'self' '<!-- FINDING:SEC-9|CONFIRMED|HIGH|a.py:9|Self-review finding -->')"; cm MEMBER Bot "<!-- FORGE:SELFREVIEW -->
+Tree: abc123"; flush
+ig; has "integrity: self-review comments never count as panel agents" "ACTUAL_AGENT_COUNT=0"
+case "$OUT" in *security*) bad "integrity: SELFREVIEW-AGENT domain leaked into the panel" ;; *) ok ;; esac
+reset
+cm MEMBER User "$(sr_body security "$SHA" 'self' '<!-- FINDING:SEC-9|CONFIRMED|HIGH|a.py:9|Self-review finding -->')"; flush
+run "$GOOD" extract
+has "extract: a self-review comment alone is no review (fail closed)" "no trusted reviewer comments"
+reset
+cm MEMBER User "$(sr_body security "$SHA" 'self' '')"; cm MEMBER User "$(agent_body api "$SHA" 'real' '')"; flush
+ig; has "integrity: only the REVIEW-AGENT counts beside a self-review" "ACTUAL_AGENT_COUNT=1"; has "integrity: only the real domain" "ACTUAL_AGENT_DOMAINS=api"
 
 # --- Phase 7-9 subcommands run without a review-prepare context (flags only) ---
 nctx() { local sub="$1"; shift; OUT=$(cd "$REPO_DIR" && FORGEDOCK_HOME="$GATE" bash "$ROOT/scripts/review-finalize.sh" "$sub" --pr 7 --repo o/r "$@" 2>"$WORK/stderr"); RC=$?; }

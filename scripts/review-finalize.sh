@@ -50,7 +50,8 @@
 #   Phase 7-9 subcommands: --context FILE is optional; without it pass --review-sha SHA, --review-mode FULL|DELTA|BASE_SYNC_ONLY, --issue N, --base B.
 #   verdict:      --merge-health S --merge-health-state S [--base B] [--head-branch H] [--is-milestone true|false] [--has-purpose-regression true|false]
 #                 [--purpose-findings-file F | --purpose-findings TEXT] [--result stale|clean|blocking] [--agents-file F | --agents TEXT] [--findings-count N] [--blocking-count N]
-#                 [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--dry-run]
+#                 [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--other-blocking true|false] [--out-dir D] [--dry-run]
+#                 (--other-blocking: the reviewer's criterion 1/2/3/5 result; resolved and persisted to OUT_DIR/other-blocking.txt, which merge-gate ORs in)
 #   calibrate:    [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--trust-needs-human B] [--dry-run]; the issue is context contract.issue or --issue N
 #   merge-gate:   --verdict "APPROVED|CHANGES REQUESTED" --has-purpose-regression B --calibration-needs-human B --trust-needs-human B
 #                 --base-conflict B --other-blocking B [--calibration-note-file F | --calibration-note T] [--table-cell-key K] [--base B] [--issue N]
@@ -407,13 +408,15 @@ EOF
     gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" --paginate > "$FILES_JSON" 2>/dev/null || : > "$FILES_JSON"
     # "path:line" for every added line; an empty file means the diff was unreadable (gates then keep every finding).
     ADDED_LINES_FILE="$WORKDIR/added-lines"
-    jq -r '.[] | select(.patch != null) | "FILE\t\(.filename)", .patch' "$FILES_JSON" 2>/dev/null | awk '
+    # Second stream from the same pass: "path<TAB>text" per added line, for the Gate 2 symbol fallback.
+    ADDED_TEXT_FILE="$WORKDIR/added-text"; : > "$ADDED_TEXT_FILE"
+    jq -r '.[] | select(.patch != null) | "FILE\t\(.filename)", .patch' "$FILES_JSON" 2>/dev/null | awk -v tf="$ADDED_TEXT_FILE" '
         /^FILE\t/{f=substr($(0),6);next}
         /^@@/{s=$(0);sub(/^@@ -[0-9,]+ \+/,"",s);sub(/[ ,].*/,"",s);n=s+0;next}
         /^\\/{next}
-        /^\+/{print f":"n;n++;next}
+        /^\+/{print f":"n; print f "\t" substr($(0),2) > tf; n++;next}
         /^-/{next}
-        {n++}' > "$ADDED_LINES_FILE" || : > "$ADDED_LINES_FILE"
+        {n++}' > "$ADDED_LINES_FILE" || { : > "$ADDED_LINES_FILE"; : > "$ADDED_TEXT_FILE"; }
     # Files the PR deleted or renamed (the old name too): findings on them always intersect.
     GONE_FILES_FILE="$WORKDIR/gone-files"
     jq -r '.[] | select(.status=="removed" or .status=="renamed") | .filename, (.previous_filename // empty)' "$FILES_JSON" > "$GONE_FILES_FILE" 2>/dev/null || : > "$GONE_FILES_FILE"
@@ -433,6 +436,52 @@ EOF
         fi
         case "$f" in *[!A-Za-z0-9._/@+-]*|"") echo UNKNOWN; return 0 ;; esac
         if gh api -H "Accept: application/vnd.github.raw" "repos/${REPO}/contents/${f}?ref=${REVIEW_SHA}" > "$t" 2>/dev/null; then awk 'END{print NR}' "$t"; else echo UNKNOWN; fi
+    }
+
+    # Gate 2 symbol fallback: 0 when an identifier the finding names occurs (whole word, fixed string) in the added lines of FILE
+    # and nowhere in the base version of FILE (a symbol the PR introduced).
+    # Candidates: backticked tokens, plus identifier-shaped tokens on "Root cause" lines; each must match an anchored identifier
+    # regex of 4+ chars and not be a common word. Reviewer text is never used in arithmetic, a glob or a regex. Any failure returns 1.
+    # A symbol counts only when it is NEW: present in the added lines AND absent from the base version of the file (#4068 review
+    # DSEC-1/DBH-1: `self`, `return`, `result` in an added line must not re-scope a pre-existing finding). The base text comes from
+    # `git show <base>:<file>` (local commit) or the raw contents API; a file the PR adds has an empty base; an unreadable base
+    # disables the fallback (the line-window result stands).
+    SYM_BASE_SHA=""
+    base_text_for() {   # base_text_for <file> <out>; 0 = out holds the base text (possibly empty), 1 = unknown
+        local f="$1" o="$2"
+        if jq -e --arg f "$f" 'any(.[]; .filename == $f and .status == "added")' "$FILES_JSON" >/dev/null 2>&1; then : > "$o"; return 0; fi
+        [ -n "$SYM_BASE_SHA" ] || SYM_BASE_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .base.sha 2>/dev/null || true)
+        case "$SYM_BASE_SHA" in *[!0-9a-f]*|"") SYM_BASE_SHA="-"; return 1 ;; -) return 1 ;; esac
+        if git rev-parse -q --verify "${SYM_BASE_SHA}^{commit}" >/dev/null 2>&1; then
+            git show "${SYM_BASE_SHA}:${f}" > "$o" 2>/dev/null && return 0
+            git cat-file -e "${SYM_BASE_SHA}:${f}" 2>/dev/null && return 1
+            : > "$o"; return 0
+        fi
+        case "$f" in *[!A-Za-z0-9._/@+-]*|"") return 1 ;; esac
+        gh api -H "Accept: application/vnd.github.raw" "repos/${REPO}/contents/${f}?ref=${SYM_BASE_SHA}" > "$o" 2>/dev/null && return 0
+        return 1
+    }
+    symbol_in_added() {
+        local f="$1" text="$2" t="$WORKDIR/sym-added" b="$WORKDIR/sym-base" c n=0
+        [ -s "$ADDED_TEXT_FILE" ] || return 1
+        awk -v f="$f" 'index($0, f "\t") == 1 { print substr($0, length(f) + 2) }' "$ADDED_TEXT_FILE" > "$t" 2>/dev/null || return 1
+        [ -s "$t" ] || return 1
+        base_text_for "$f" "$b" || return 1
+        while IFS= read -r c; do
+            case "$c" in ""|[!A-Za-z_]*) continue ;; esac
+            [ "${#c}" -ge 4 ] || continue
+            case "$(printf '%s' "$c" | tr '[:upper:]' '[:lower:]')" in
+                this|that|with|from|true|false|null|none|file|line|code|test|case|value|root|cause|when|then|which|where|there|their|error|data|name|path|type|call|only|also|into|have|does|used|uses) continue ;;
+            esac
+            n=$((n + 1)); [ "$n" -le 8 ] || break
+            if grep -qwF -- "$c" "$t" 2>/dev/null && ! grep -qwF -- "$c" "$b" 2>/dev/null; then return 0; fi
+        done <<SYMEOF
+$({
+    printf '%s\n' "$text" | grep -oE '`[^`]+`' 2>/dev/null | tr -c 'A-Za-z0-9_\n' '\n'
+    printf '%s\n' "$text" | grep -iE 'root cause' 2>/dev/null | grep -oE '[A-Za-z_][A-Za-z0-9_]*' | grep -E '_|[a-z][A-Z]|[0-9]'
+} 2>/dev/null | grep -E '^[A-Za-z_][A-Za-z0-9_]{3,}$' | awk '!seen[$0]++')
+SYMEOF
+        return 1
     }
 
     FINAL="$WORKDIR/final.jsonl"; : > "$FINAL"
@@ -472,6 +521,8 @@ EOF
                 if grep -qxF -- "${FILE}:${L}" "$ADDED_LINES_FILE"; then INTRODUCED=1; break; fi
                 L=$((L + 1))
             done
+            # The cited line is the reviewer's estimate (stale or at the call site): symbol fallback before routing pre-existing.
+            if [ "$INTRODUCED" -eq 0 ] && symbol_in_added "$FILE" "$(printf '%s' "$F" | jq -r '.text // ""')"; then INTRODUCED=1; fi
             if [ "$INTRODUCED" -eq 1 ]; then SCOPE="introduced"; else
                 SCOPE="pre-existing"
                 case "$SEV" in MEDIUM|LOW|INFO) ROUTE="pre-existing" ;; esac
@@ -561,7 +612,7 @@ do_classify() {
                && [ -s "$CONTRACT_SCOPE_FILE" ] \
                && gh pr diff "$PR_NUMBER" -R "$REPO" --name-only > "$PR_FILES_FILE" 2>/dev/null; then
                 # A deferred row counts only if issue N is OPEN, is an issue (not a PR), is not MERGE_ISSUE, and its body
-                # carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` plus the row's path, and is authored by a trusted author
+                # carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` plus a checklist line for the row's exact path (the list script strips a trailing slash, so `p` and `p/` both match; `- [ ] \`path\``, [xX] accepted, the producer format of file-deferred-followups.sh; a body that only mentions the path does not count), and is authored by a trusted author
                 # (OWNER/MEMBER/COLLABORATOR or Bot; same predicate as trusted-comments.sh; missing fields fail closed).
                 # Unverified rows are dropped.
                 _verified="$_scratch/contract-verified"; : > "$_verified"
@@ -571,7 +622,7 @@ do_classify() {
                         [ "$_n" = "${MERGE_ISSUE#\#}" ] && continue
                         gh api "repos/${REPO}/issues/$_n" 2>/dev/null \
                             | jq -e --arg m "FORGE:DEFERRED_FROM: #${MERGE_ISSUE#\#} -->" --arg p "$_ipath" \
-                                '.state == "open" and .pull_request == null and ((.body // "") | contains($m) and contains($p)) and (((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot"))' >/dev/null 2>&1 \
+                                '.state == "open" and .pull_request == null and ((.body // "") | (contains($m) and (split("\n") | any(rtrimstr("\r") as $l | ("- [ ] `","- [x] `","- [X] `") as $pre | ($p, $p + "/") as $q | ($pre + $q + "`") as $w | $l == $w or ($l | startswith($w + " ")))))) and (((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot"))' >/dev/null 2>&1 \
                             || continue
                         grep -Fxq -- "$_n" "$CONTRACT_OPEN_FILE" || echo "$_n" >> "$CONTRACT_OPEN_FILE"
                     fi
@@ -696,11 +747,32 @@ do_classify() {
         fi
         case "$DISPOSITION" in
             "NOTE contract-deferred #"*)
-                _dn="${DISPOSITION##*#}"
-                case "$_dn" in ''|*[!0-9]*) ;; *)
-                    [ "$DRY_RUN" = "true" ] || gh issue comment "$_dn" -R "$REPO" --body "Review of #${PR_NUMBER} also found this on a path declared deferred here: ${F_LOC} ${F_TITLE}" >/dev/null 2>&1 || true # allowlist:check-command-side-effects
+                # The demotion counts only after the comment on #N succeeded and #N is still OPEN; any failure files the finding (fails toward filing).
+                _dn="${DISPOSITION##*#}"; _dok=1
+                case "$_dn" in ''|*[!0-9]*) _dok=0 ;; *)
+                    if [ "$DRY_RUN" != "true" ]; then
+                        _dst=$(gh issue view "$_dn" -R "$REPO" --json state --jq .state 2>/dev/null) || _dst=""
+                        if [ "$_dst" != "OPEN" ]; then _dok=0
+                        elif ! gh issue comment "$_dn" -R "$REPO" --body "Review of #${PR_NUMBER} also found this on a path declared deferred here: ${F_LOC} ${F_TITLE}" >/dev/null 2>&1; then _dok=0 # allowlist:check-command-side-effects
+                        fi
+                    fi
                 ;; esac
-                CONTRACT_DEMOTED=$((CONTRACT_DEMOTED + 1)) ;;
+                if [ "$_dok" = "1" ]; then CONTRACT_DEMOTED=$((CONTRACT_DEMOTED + 1)); else
+                    # Fall back to what the finding would have been absent the contract (a LOW/POSSIBLE or lineage-damped finding stays a NOTE),
+                    # not a blanket ISSUE: re-run the classifier without the contract flags. An INPR_FIX or unusable result files (fails toward filing).
+                    DISPOSITION="ISSUE contract-comment-failed"
+                    _n=$#; _skip=0
+                    while [ "$_n" -gt 0 ]; do
+                        _a="$1"; shift; _n=$((_n - 1))
+                        if [ "$_skip" = "1" ]; then _skip=0; continue; fi
+                        case "$_a" in --contract-scope|--contract-open|--pr-files) _skip=1 ;; *) set -- "$@" "$_a" ;; esac
+                    done
+                    _fb=$(bash "$CLASSIFY_SCRIPT" "$@" 2>/dev/null | head -n 1) || _fb=""
+                    case "$_fb" in
+                        "NOTE reflag"*) DISPOSITION="$_fb"; NOTES_REFLAG=$((NOTES_REFLAG + 1)) ;;
+                        NOTE*|ISSUE*) DISPOSITION="$_fb" ;;
+                    esac
+                fi ;;
             "NOTE contract-accepted-risk"*) CONTRACT_DEMOTED=$((CONTRACT_DEMOTED + 1)) ;;
             "NOTE reflag-"*) NOTES_REFLAG=$((NOTES_REFLAG + 1)) ;;
             INPR_FIX*)
@@ -1021,6 +1093,20 @@ do_verdict() {
     if [ "$RESULT" = "clean" ] && { [ "$BASE_CONFLICT" = "true" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ]; }; then
         RESULT="blocking"; VERDICT_COERCED=true
     fi
+    # OTHER_BLOCKING (criteria 1, 2, 3 and 5) is reviewer-judged, so it is resolved here and persisted for merge-gate to OR in: a blocking
+    # result that BASE_CONFLICT and HAS_PURPOSE_REGRESSION do not explain was caused by another criterion, whatever the reviewer passed.
+    OTHER_BLOCKING_RESOLVED=""
+    case "$OTHER_BLOCKING" in true|false) OTHER_BLOCKING_RESOLVED="$OTHER_BLOCKING" ;; esac
+    if [ "$RESULT" = "blocking" ] && [ "$BASE_CONFLICT" != "true" ] && [ "$HAS_PURPOSE_REGRESSION" != "true" ]; then
+        OTHER_BLOCKING_RESOLVED=true
+    elif [ "$RESULT" = "clean" ]; then
+        OTHER_BLOCKING_RESOLVED=false
+    fi
+    # Rewritten (or removed) on every run so a stale value from a prior head can never survive a re-review.
+    rm -f "$OUT_DIR/other-blocking.txt" 2>/dev/null || true
+    if { [ "$RESULT" = "clean" ] || [ "$RESULT" = "blocking" ]; } && [ -n "$OTHER_BLOCKING_RESOLVED" ] && [ "$DRY_RUN" != "true" ]; then
+        printf '%s\n' "$OTHER_BLOCKING_RESOLVED" > "$OUT_DIR/other-blocking.txt" 2>/dev/null || true
+    fi
     VERDICT_OUT=""
     case "$RESULT" in
         stale) VERDICT_OUT="STALE" ;;
@@ -1055,6 +1141,7 @@ ${TRUST_ANNOTATION}${CONFLICT_LINE}${PROTECTION_LINE}${PURPOSE_LINE}${ATTRIBUTIO
     echo "HAS_PURPOSE_REGRESSION=${HAS_PURPOSE_REGRESSION}"
     echo "HAS_MERGE_CONFLICT=${HAS_MERGE_CONFLICT}"
     echo "BASE_CONFLICT=${BASE_CONFLICT}"
+    echo "OTHER_BLOCKING=${OTHER_BLOCKING_RESOLVED}"
     echo "MERGE_CONFLICT_MSG=${MERGE_CONFLICT_MSG}"
     echo "MERGE_PROTECTION_WARNING=${MERGE_PROTECTION_WARNING}"
     exit 0
@@ -1347,6 +1434,8 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
         gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
         blocked "merge guard state unbound"
     fi
+    # OR in the value `verdict` persisted: a passed `false` never overrides a persisted `true`. Anything else in the file is ignored.
+    if [ "$(head -n 1 "$OUT_DIR/other-blocking.txt" 2>/dev/null | tr -d '[:space:]')" = "true" ]; then OTHER_BLOCKING=true; fi
     # ONLY_BASE_CONFLICT: the base conflict is the ONLY reason for CHANGES REQUESTED, evaluated after every human gate is set.
     ONLY_BASE_CONFLICT=false
     if [ "$BASE_CONFLICT" = "true" ] && [ "$OTHER_BLOCKING" != "true" ] && [ "$HAS_PURPOSE_REGRESSION" != "true" ] && [ "$CALIBRATION_NEEDS_HUMAN" != "true" ] && [ "$TRUST_NEEDS_HUMAN" != "true" ]; then
@@ -1354,7 +1443,7 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
     fi
     if [ "$ONLY_BASE_CONFLICT" = "true" ] && [ "$VERDICT" = "CHANGES REQUESTED" ]; then
         # Pure base conflict: route to the base-sync path, NOT needs-human. A standalone /review-pr caller just sees the blocker.
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: base conflict with \`${BASE}\` (the only blocking reason). No operator action is needed: the pipeline is performing the base sync automatically (merging \`origin/${BASE}\` into the PR branch, merge only, no rebase, no force-push), re-running the quality gate, then re-reviewing the new head. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
+        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: base conflict with \`${BASE}\` (the only blocking reason). Base sync needed: the work-on pipeline performs the base sync (merging \`origin/${BASE}\` into the PR branch, merge only, no rebase, no force-push); a standalone \`/review-pr --auto-merge\` caller with no work-on router must run \`/work-on ${MERGE_ISSUE} --remediate\` to do it. The sync re-runs the quality gate and then re-reviews the new head. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
         echo "MERGE_OUTCOME=base-conflict"
         blocked "base-conflict"
     elif [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ] || [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] || [ "$TRUST_NEEDS_HUMAN" = "true" ]; then
@@ -1382,7 +1471,7 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
     fi
     if [ "$PRE_MERGE_BASE_CONFLICT" = "true" ]; then
         # Base moved during review: route to the base-sync path, NOT needs-human.
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: base conflict (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). No operator action is needed: the pipeline is performing the base sync automatically (merging \`origin/${BASE}\` into the PR branch, merge only, no rebase, no force-push) and then re-reviewing. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
+        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: base conflict (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). Base sync needed: the work-on pipeline performs the base sync (merging \`origin/${BASE}\` into the PR branch, merge only, no rebase, no force-push); a standalone \`/review-pr --auto-merge\` caller with no work-on router must run \`/work-on ${MERGE_ISSUE} --remediate\` to do it. The sync is followed by a re-review. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
         echo "MERGE_OUTCOME=base-conflict"
         blocked "base-conflict"
     elif [ "$PRE_MERGE_HEALTH_STATE" = "BLOCKED" ]; then

@@ -51,6 +51,8 @@ _forge_tel_record() { # event k=v... -> one JSON line on stdout
        run: ($run | str), phase: ($phase | str), event: $ev, eid: $eid} + $p' --args "${args[@]}"
 }
 
+# build_selfreview (forge#3971: tier, agents, findings, fixed, declined, skipped=<reason>; ids and counts only) has no review-side
+# routing: it defaults to the issue target below, like diff_size.
 # finding_disposition payload is generic key=value (incl. scope=introduced|pre-existing|unknown); no per-field allowlist applies.
 # Prints "<number> <repo>" of the comment target (issue or PR) for this event, or nothing when none is usable.
 _forge_tel_target() {

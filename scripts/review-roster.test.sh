@@ -58,8 +58,25 @@ expect_has "consumer repo bin/engine" concurrency; expect_not "consumer repo bin
 
 # Case 3: a fix PR gives Security only
 run "commands/orchestrate/phase-4-execution.md
-commands/work-on.md" --scores "$SC_NOISY" --changed-lines 200 --changed-files 2 --fix-pr true --source-severity MEDIUM
+commands/work-on.md" --scores "$SC_NOISY" --changed-lines 120 --changed-files 2 --fix-pr true --source-severity MEDIUM
 expect_sel "fix PR" "security"; expect_tier "fix PR" fix-pr
+
+# Case 3b (forge#3848): the fix-pr tier is capped at 150 known lines; larger or unknown-size fix PRs follow the size ladder
+SC_MULTI="AUTH=0 BILLING=5 CONCURRENCY=0 DATABASE=4 INFRA=0 FRONTEND=3 API=0"
+run "svc/x.py" --scores "$SC_MULTI" --changed-lines 900 --changed-files 30 --fix-pr true --source-severity MEDIUM
+expect_tier "fix PR 900 lines" standard; expect_has "fix PR 900 lines" billing; expect_has "fix PR 900 lines" database
+run "svc/x.py" --scores "$SC_QUIET" --changed-lines 150 --changed-files 2 --fix-pr true
+expect_tier "fix-PR-at-cap" fix-pr
+run "svc/x.py" --scores "$SC_QUIET" --changed-lines 151 --changed-files 2 --fix-pr true
+expect_tier "fix PR over cap" standard
+run "svc/x.py" --scores "$SC_MULTI" --fix-pr true
+expect_tier "fix-PR-unknown-size" standard
+run "svc/x.py" --scores "$SC_MULTI" --changed-lines abc --fix-pr true
+expect_tier "fix PR non-numeric size" standard
+run "svc/x.py" --scores "$SC_QUIET" --changed-lines 400 --changed-files 5 --fix-pr true --source-severity HIGH --source-domain Concurrency
+expect_has "capped-fix-PR,-HIGH-source" concurrency; expect_tier "capped-fix-PR,-HIGH-source" standard
+run "svc/x.py" --scores "$SC_QUIET" --changed-lines 400 --changed-files 5 --fix-pr true --contract-flags "HIGH_RISK" --review-depth EXTENDED
+expect_tier "capped-fix-PR-with-HIGH_RISK-and-EXTENDED" standard
 
 # Case 4: a fix PR whose source finding was HIGH adds the domain agent
 run "commands/work-on.md" --scores "AUTH=0 BILLING=0 CONCURRENCY=2 DATABASE=0 INFRA=0 FRONTEND=0 API=0" --changed-lines 40 --fix-pr true --source-severity HIGH --source-domain Concurrency
@@ -89,12 +106,51 @@ run "svc/app/routers/session.py" --scores "$SC_QUIET" --changed-lines 20 --chang
 expect_has "auth path" auth
 run "scripts/trusted-comments.sh" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_has "trust-filter path" auth
+run "svc/authorization.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path authorization.py" auth
+run "svc/authMiddleware.ts" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth-path-authMiddleware.ts" auth
+run "svc/oauth2.ts" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path oauth2.ts" auth
+run "svc/permissions.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path permissions.py" auth
+run "svc/rbac.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path rbac.py" auth
+run "svc/deps.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path deps.py" auth
+run "svc/tokens.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path tokens.py" auth
+run "svc/api_keys.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path api_keys.py" auth
+run "svc/auth_utils.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth-path-auth_utils.py" auth
+run "AUTHORS.md" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_not "no-auth-path-AUTHORS.md" auth
+run "docs/author.md" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_not "no auth path docs/author.md" auth
+run "svc/tokenizer.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_not "no-auth-path-svc/tokenizer.py" auth
+run "commands/review-pr.md" --scores "AUTH=3 INFRA=0 DATABASE=0 BILLING=0 CONCURRENCY=0" --changed-lines 20 --changed-files 1
+expect_not "auth-from-prose-score-alone" auth
 run "commands/review-pr.md" --scores "AUTH=3 INFRA=3 DATABASE=0 BILLING=0 CONCURRENCY=0" --changed-lines 120
 expect_not "auth from prose score alone" auth; expect_not "infra from prose score alone" infra
 run ".github/workflows/ci.yml" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_has "infra path" infra
 run "docker-compose.prod.yml" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_has "docker path" infra
+# Infra path gate covers deploy scripts, container entrypoints and Compose v2 names (basename-anchored)
+for f in scripts/deploy.sh scripts/deploy-prod.sh docker-entrypoint.sh svc/docker-entrypoint.sh compose.yaml compose.yml; do
+  run "$f" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+  expect_has "infra path: $f" infra
+done
+for f in scripts/resolve-deploy-gate.sh commands/deploy-pr.md; do
+  run "$f" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+  expect_not "no-infra-path-$f" infra
+done
+run "$(printf 'README.md\nscripts/deploy.sh')" --scores "$SC_QUIET" --changed-lines 20 --changed-files 2
+expect_has "infra-path-multi-file-list" infra
+run "Scripts/Deploy.SH" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "infra-path-case-insensitive" infra
 run "db/migrations/0042_add.sql" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_has "migration path" database
 run "sdk/node/src/index.ts" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1

@@ -15,7 +15,7 @@ ok()  { PASS=$((PASS+1)); echo "ok   - $1"; }
 bad() { FAILN=$((FAILN+1)); echo "FAIL - $1"; }
 eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got '$2', want '$3')"; fi; }
 
-SELECT_JQ='[.[][] | select((.body // "") | startswith("<!-- FORGE:ARCHITECT -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:ARCHITECT:COMPLETE -->")), other: (.body | test("<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|BUILDER)"))}]'
+SELECT_JQ='[.[][] | select((.body // "") | startswith("<!-- FORGE:ARCHITECT -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:ARCHITECT:COMPLETE -->")), other: (.body | test("\\n[ \\t]*<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|BUILDER)"))}]'
 DELETE_JQ='[.[] | select(.complete | not)] | if length == 1 and (.[0].other | not) then .[0].id else empty end'
 
 # c <id> <assoc> <type> <body>
@@ -28,7 +28,7 @@ PLAN=$'<!-- FORGE:ARCHITECT -->\n## Plan\n\n<!-- FORGE:ARCHITECT:COMPLETE -->'
 PARTIAL=$'<!-- FORGE:ARCHITECT -->\n## Plan (in progress)'
 INVEST=$'<!-- FORGE:INVESTIGATOR -->\nThe architect phase posts FORGE:ARCHITECT and FORGE:ARCHITECT:COMPLETE later.'
 CTX=$'<!-- FORGE:CONTEXT -->\nmentions <!-- FORGE:ARCHITECT -->'
-MIXED=$'<!-- FORGE:ARCHITECT -->\nquoted <!-- FORGE:INVESTIGATOR -->'
+MIXED=$'<!-- FORGE:ARCHITECT -->\nquoted:\n<!-- FORGE:INVESTIGATOR -->'
 
 eq "INVESTIGATOR mentioning FORGE:ARCHITECT is not selected" "$(arch "$(c 1 NONE Bot "$INVEST")" | jq length)" 0
 eq "INVESTIGATOR mentioning FORGE:ARCHITECT is never deleted" "$(del_id "$(c 1 NONE Bot "$INVEST")")" ""
@@ -39,9 +39,18 @@ eq "single partial plan -> delete its id" "$(del_id "$(c 4 NONE Bot "$PARTIAL")"
 eq "two partial plans -> delete nothing" "$(del_id "$(c 4 NONE Bot "$PARTIAL")"$'\n'"$(c 5 NONE Bot "$PARTIAL")")" ""
 eq "untrusted author partial ignored" "$(del_id "$(c 6 NONE User "$PARTIAL")")" ""
 eq "untrusted author complete ignored" "$(n_complete "$(c 6 NONE User "$PLAN")")" 0
-eq "partial carrying another FORGE marker is not deleted" "$(del_id "$(c 7 NONE Bot "$MIXED")")" ""
+eq "partial with another FORGE marker at a line start is not deleted" "$(del_id "$(c 7 NONE Bot "$MIXED")")" ""
 eq "investigator + partial plan -> only the plan id" "$(del_id "$(c 1 NONE Bot "$INVEST")"$'\n'"$(c 8 NONE Bot "$PARTIAL")")" 8
 eq "paginated concatenated arrays" "$(printf '[%s]\n[%s]' "$(c 1 NONE Bot "$INVEST")" "$(c 9 NONE Bot "$PLAN")" | jq -s "$SELECT_JQ" | jq '[.[] | select(.complete)] | length')" 1
+
+INLINE=$'<!-- FORGE:ARCHITECT -->\n## Approach\nFollowed the plan in `<!-- FORGE:BUILDER -->` and <!-- FORGE:INVESTIGATOR --> notes.'
+CRLF=$'<!-- FORGE:ARCHITECT -->\r\n<!-- FORGE:BUILDER -->\r\nbody'
+eq "partial quoting a marker inline is picked and deleted e1_inline_picked" "$(del_id "$(c 11 NONE Bot "$INLINE")")" 11
+eq "inline quoting partial is selected as non-other e1_inline_not_other" "$(arch "$(c 11 NONE Bot "$INLINE")" | jq -r '.[0].other')" false
+eq "marker at the start of a later line is refused e2_line_start_refused" "$(arch "$(c 12 NONE Bot "$MIXED")" | jq -r '.[0].other')" true
+eq "own first-line marker never counts as other e4_own_marker_not_other" "$(arch "$(c 13 NONE Bot "$PARTIAL")" | jq -r '.[0].other')" false
+eq "two inline-quoting partials still delete nothing e3_two_partials_none" "$(del_id "$(c 11 NONE Bot "$INLINE")"$'\n'"$(c 14 NONE Bot "$INLINE")")" ""
+eq "CRLF body with a marker line is still refused e5_crlf_refused" "$(del_id "$(c 15 NONE Bot "$CRLF")")" ""
 
 # Spec drift guard: the spec carries this exact predicate and no unanchored selector.
 ! grep -qF 'contains("FORGE:ARCHITECT")' "$SPEC" && ok "architect.md has no unanchored contains(FORGE:ARCHITECT)" || bad "architect.md still uses unanchored contains"

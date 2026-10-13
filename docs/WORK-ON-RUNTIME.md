@@ -46,7 +46,8 @@ L3) works, which is why most PRs are reviewed normally.
 ## 3. Design rules
 
 **R1 — Dispatching phases are invoked only by the router.** A *dispatching* phase is one that spawns
-`Agent(...)` sub-agents directly or through `/review-pr`: `work-on:review` and `work-on:remediate`.
+`Agent(...)` sub-agents directly or through `/review-pr`: `work-on:review`, `work-on:remediate` and, since forge#3971,
+`work-on:build` (its B5.6 self-review dispatches the risk-tier roster's domain reviewers on the staged diff).
 Only the router may invoke them, so they always run at router layer + 1 (L2 under `/orchestrate`,
 L1 solo). When another phase needs one, it returns a handoff (`status: NEXT`, `next: <phase>`) and
 the router invokes it. Concretely: review returns `next: remediate` instead of calling remediation.
@@ -59,7 +60,8 @@ re-runs the missing phases. `/review-pr` (Phase 8, via `scripts/review-finalize.
 
 **R2 — Non-dispatching forks may nest.** Phases and children that never spawn sub-agents may invoke
 further forks at any depth (F5): build → context/architect/implement/validate → quality-gate,
-review → quality-gate / missing-phase re-dispatch, remediate → close. Forking them keeps each
+review → quality-gate / missing-phase re-dispatch, remediate → close. The build children never spawn: the
+self-review reviewers are spawned by `work-on:build` itself, and its repair round is an `implement` fork. Forking them keeps each
 context small. If one of them ever needs to spawn sub-agents, it becomes a dispatching phase and
 R1 applies.
 
@@ -99,13 +101,15 @@ phase hosting `/review-pr` cannot wait on a notification. Therefore:
 | Skill | Fork | Dispatches sub-agents | Invoked by | Layer solo / orchestrated |
 |-------|------|-----------------------|------------|---------------------------|
 | `work-on` (router) | — | no | user / orchestrator worker | 0 / 1 |
-| `work-on:investigate`, `work-on:decompose`, `work-on:build`, `work-on:close` | yes | no | router | 1 / 2 |
+| `work-on:investigate`, `work-on:decompose`, `work-on:close` | yes | no | router | 1 / 2 |
+| `work-on:build` (B5.6 self-review) | yes | **yes** (self-review reviewers; degrades to a recorded skip when `Agent` is withheld) | router only (R1) | 1 / 2 |
 | `work-on:build:{context,architect,implement,validate}` | yes | no | `work-on:build` (R2) | 2 / 3 |
 | `quality-gate` | yes | no | validate (R2) | 3 / 4 |
 | `quality-gate` (stale-review re-gate) | yes | no | review (R2) | 2 / 3 |
 | `work-on:review` → `/review-pr` | yes | **yes** | router only (R1) | 1 / 2 |
 | `work-on:remediate` → `/review-pr` | yes | **yes** | router only (R1) | 1 / 2 |
 | `/review-pr` domain reviewers | Agent | no (leaves) | `/review-pr` | 2 / 3 |
+| build self-review reviewers (`FORGE:SELFREVIEW-AGENT:*`) | Agent | no (leaves) | `work-on:build` B5.6 | 2 / 3 |
 
 `/orchestrate` Step 4B item 6.4 dispatches a worker that runs `work-on <pr> --remediate`: worker L1,
 remediate L2, reviewers L3, same as the table.
@@ -113,6 +117,10 @@ remediate L2, reviewers L3, same as the table.
 ### Pre-handoff base sync and union registries (forge#3969)
 
 `work-on:review` merges `origin/<base>` into the branch before the first push, so a PR is never born stale and a conflict is resolved while the build context is warm. Hand-maintained append-only registries (test lists, cron targets) are the usual conflict source; `scripts/detect-append-registries.sh` ranks them from history and proves a `.gitattributes` `merge=union` entry safe (`--check-union`). Union is allowed only for line-independent files, never YAML/JSON maps or ordered lists (see `.gitattributes`). `scripts/review-delta.sh` still treats a hand-resolved merge as not `BASE_SYNC_ONLY`, but accepts a merge whose tree is exactly what a mechanical `git merge-tree` of the same parents produces (a clean or union merge), so union registries take the no-panel fast path.
+
+### Build-time self-review (forge#3971)
+
+`work-on:build` Phase B5.6 runs the risk-tier roster (`scripts/selfreview-plan.sh`, which calls `scripts/review-roster.sh` on the staged diff) before validate, with the same personas as `/review-pr` in SELF-REVIEW MODE (`commands/review-pr-agents/protocols.md`). It is not the official review: reviewers post `FORGE:SELFREVIEW-AGENT:{domain}` issue comments pinned to the staged tree (`Tree:`), never `FORGE:REVIEW-AGENT`, and `review-finalize.sh` / `verify-phase-trail.sh` ignore them. Like R6, completion is read from GitHub with a bounded wait, because reviewers spawned inside a fork report to the root session. A build at a layer where `Agent` is withheld, or any self-review failure, degrades to a recorded skip (`build_selfreview skipped=<reason>`) and never blocks the build.
 
 ## 5. Router routing
 

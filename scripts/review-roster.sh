@@ -17,7 +17,8 @@
 #
 # Tiers, evaluated in this order:
 #   full      THOROUGH or milestone->staging: Security plus every domain with a score > 0.
-#   fix-pr    the PR closes a `review-finding` issue: Security, plus the source finding's domain when it was HIGH+.
+#   fix-pr    the PR closes a `review-finding` issue AND has <= 150 changed lines with a known size: Security, plus the
+#             source finding's domain when it was HIGH+. Larger or unknown-size fix PRs fall to the size ladder below.
 #   small     <= 60 changed lines, or one file of <= 150 lines: Security only.
 #   medium    61-150 lines: Security plus the score-escalation table (no top-2 baseline).
 #   standard  > 150 lines, or an unknown size (fail toward more agents): top-2 domains by score plus the table.
@@ -27,7 +28,7 @@
 # exact value EXTENDED is STANDARD. An extended roster prints an extra DEPTH=extended line.
 # Path triggers escalate in EVERY tier except full (which already runs the union): CONTRACT HIGH_RISK, cross-critical
 # pairs, churn hot-spot, danger zone, bin/engine* (Concurrency + spec-cli), bin/ (spec-cli), auth/session/trust-filter
-# files (Auth), CI/docker/deploy/infra files (Infra), migration/.sql files (Database), SDK/OpenAPI files (API).
+# files (Auth: auth*, not author*; oauth, jwt, login, password, permission, rbac, acl, token(s), api_key(s), credential, deps.py), CI/docker/deploy/infra files (Infra), migration/.sql files (Database), SDK/OpenAPI files (API).
 # Auth and Infra are path-gated: a diff-text score alone never selects them. Security is a hard floor in every tier.
 # spec-cli is added only with --spec-cli true (the persona file exists in the repo under review); in the standard tier it
 # also covers commands/**. Bash 3.2 portable (no mapfile, associative arrays, grep -P).
@@ -114,7 +115,10 @@ fi
 HIGH_RISK=false
 case " $CFLAGS " in *" HIGH_RISK "*) HIGH_RISK=true ;; esac
 
-if [ "$FIX_PR" = "true" ]; then
+# The fix-pr tier is author-controlled (Closes #N), so it is capped by size: a larger or unknown-size fix PR follows the size ladder.
+FIX_PR_MAX_LINES=150
+FIX_PR_CAPPED=false
+if [ "$FIX_PR" = "true" ] && [ "$LINES_KNOWN" = "true" ] && [ "$LINES" -le "$FIX_PR_MAX_LINES" ]; then
     TIER=fix-pr; REASON="fix PR for a review-finding issue"
 elif [ "$LINES_KNOWN" = "true" ] && { [ "$LINES" -le 60 ] || { [ "$NFILES" -eq 1 ] && [ "$LINES" -le 150 ]; }; }; then
     TIER=small; REASON="lines=$LINES files=$NFILES"
@@ -123,6 +127,9 @@ elif [ "$LINES_KNOWN" = "true" ] && [ "$LINES" -le 150 ]; then
 else
     TIER=standard
     if [ "$LINES_KNOWN" = "true" ]; then REASON="lines=$LINES"; else REASON="size unknown"; fi
+fi
+if [ "$FIX_PR" = "true" ] && [ "$TIER" != "fix-pr" ]; then
+    FIX_PR_CAPPED=true; REASON="$REASON; fix-pr tier capped by size (max $FIX_PR_MAX_LINES lines, known size)"
 fi
 # CONTRACT HIGH_RISK is never narrowed: a small, medium or fix-PR roster is lifted to the standard roster.
 BASE_TIER="$TIER"
@@ -147,6 +154,12 @@ case "$TIER" in
         esac ;;
     standard) for d in $(top_domains "$TOP_N"); do add_agent "$d"; done ;;
 esac
+# A size-capped fix PR keeps the source finding's domain (size only ever ADDS depth).
+if [ "$FIX_PR_CAPPED" = "true" ] && [ -n "$SRC_DOM" ]; then
+    case "$(printf '%s' "$SRC_SEV" | tr '[:lower:]' '[:upper:]')" in
+        HIGH|CRITICAL|BLOCKER) add_agent "$SRC_DOM"; REASON="$REASON; source finding ${SRC_SEV} adds its domain" ;;
+    esac
+fi
 
 # Score escalation table (medium and standard only; diff-text signals, so never in the small or fix-pr tiers)
 if [ "$TIER" = "medium" ] || [ "$TIER" = "standard" ]; then
@@ -170,8 +183,8 @@ if [ "$CHURN" = "true" ] || [ "$DANGER" = "true" ]; then
     for d in $(top_domains 1); do add_agent "$d"; trig churn-or-danger-zone; done
 fi
 hit() { printf '%s\n' "$FILES" | grep -qiE "$1"; }
-hit '(^|[/_.-])(auth|authn|authz|session|sessions|jwt|oauth|login|logout|password|trust[-_]?filter|trusted[-_a-z]*)([/_.-]|$)' && { add_agent Auth; trig auth-path; }
-hit '^\.github/|(^|/)Dockerfile|docker-compose|(^|/)(deploy|infra|traefik|nginx|k8s|helm|terraform)/|\.tf$' && { add_agent Infra; trig infra-path; }
+hit '(^|[/_.-])(auth([^o]|o[^r]|$)|authori[sz]|oauth|session|jwt|login|logout|passw(or)?d|permission|rbac|acl([/_.-]|$)|tokens?([/_.-]|$)|api[-_]?keys?|credential|trust[-_]?filter|trusted[-_a-z]*)|(^|/)deps\.py$' && { add_agent Auth; trig auth-path; }
+hit '^\.github/|(^|/)Dockerfile|docker-compose|(^|/)(docker-)?compose[^/]*\.ya?ml$|(^|/)deploy[^/]*\.sh$|(^|/)docker-entrypoint[^/]*$|(^|/)(deploy|infra|traefik|nginx|k8s|helm|terraform)/|\.tf$' && { add_agent Infra; trig infra-path; }
 hit 'migration|\.sql$' && { add_agent Database; trig migration-path; }
 hit '^sdk/|openapi.*\.json$|openapi-versions/' && { add_agent API; trig sdk-path; }
 hit '^bin/engine' && { add_agent Concurrency; trig bin-engine; }
