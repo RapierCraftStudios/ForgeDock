@@ -4,7 +4,8 @@
  * GitHub state (phase.detectOutcome). All effects are injected → fully testable.
  */
 import { fileURLToPath } from "node:url";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createHash, scryptSync } from "node:crypto";
 import { hostname as osHostname, homedir } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
@@ -268,6 +269,46 @@ export function isLeaseHolderDead({ by, host = osHostname(), killFn = process.ki
   }
 }
 
+/**
+ * forge#3724: a dead lease-holder pid proves the engine is dead, not that its phase child is. The runner
+ * stamps every phase child with `FORGE_LEASE_HOLDER=<by>` (inherited by grandchildren), so a surviving
+ * orphan is found by scanning process environments. Returns FALSE only when the probe affirmatively finds
+ * no live process carrying the marker; unsupported platform, unreadable /proc, a failed `ps`, or any thrown
+ * error returns TRUE (fail-safe: the caller keeps waiting for `lease.until`). Per-process EACCES/ENOENT is
+ * skipped (exited, or another uid). Residual: a child that scrubs its env (`env -i`) is not detected.
+ */
+export function leaseChildAlive({ by, platform = process.platform, procRoot = "/proc", ownPid = process.pid,
+  readdirFn = readdirSync, readFileFn = readFileSync, psFn } = {}) {
+  try {
+    const marker = `FORGE_LEASE_HOLDER=${by}`;
+    if (!parseLeaseHolder(by)) return true;
+    if (platform === "linux") {
+      for (const name of readdirFn(procRoot)) {
+        if (!/^[0-9]+$/.test(name) || Number(name) === ownPid) continue;
+        let env;
+        try { env = readFileFn(`${procRoot}/${name}/environ`, "latin1"); }
+        catch (e) { if (e?.code === "EACCES" || e?.code === "ENOENT" || e?.code === "ESRCH" || e?.code === "EPERM") continue; return true; }
+        if (String(env).split("\0").includes(marker)) return true;
+      }
+      return false;
+    }
+    if (platform === "darwin") {
+      const run = psFn || (() => execFileSync("ps", ["eww", "-Ao", "pid,command"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 10000 }));
+      const out = run();
+      if (typeof out !== "string" || !out.trim()) return true;
+      for (const line of out.split("\n")) {
+        const m = /^\s*(\d+)\s/.exec(line);
+        if (!m || Number(m[1]) === ownPid) continue;
+        if (line.split(/\s+/).includes(marker)) return true;
+      }
+      return false;
+    }
+    return true;
+  } catch {
+    return true;
+  }
+}
+
 /** Max startup wait for a persisted rate-limit reset (guards a corrupt far-future resetAt). */
 export const MAX_RESUME_RATE_LIMIT_WAIT_MS = 6 * 60 * 60 * 1000;
 
@@ -330,7 +371,8 @@ export const MAX_RESUME_RATE_LIMIT_WAIT_MS = 6 * 60 * 60 * 1000;
  *   the lease, poll (via `sleep`, bounded by `leaseTtlMs`) until it expires or
  *   its holder is reclaimable, then continue; `deferred` on timeout.
  * @param {string} [opts.hostname] - injectable host name (tests).
- * @param {Function} [opts.killFn] - injectable `process.kill` (tests).
+  * @param {Function} [opts.killFn] - injectable `process.kill` (tests).
+ * @param {Function} [opts.childAliveFn] - forge#3724: injectable `leaseChildAlive` (orphaned phase-child probe; tests).
  */
 // forge#3824: stamped on RUN_START for per-release cost attribution; null when unreadable.
 export const ENGINE_VERSION = (() => {
@@ -368,6 +410,8 @@ export async function runIssue(opts) {
           waitLease = false,
           hostname = osHostname(),
           killFn = process.kill.bind(process),
+          // forge#3724: injectable orphaned-phase-child probe (tests).
+          childAliveFn = leaseChildAlive,
           onProgress = () => {},
           // forge#3696: per-attempt telemetry seam (FORGE:TELEMETRY emitter, #3834). No-op by
           // default; failures are swallowed so telemetry can never fail a phase.
@@ -400,7 +444,7 @@ export async function runIssue(opts) {
   let remote = await projector.readState(issue);
   let { state, action } = reconcileState(local, remote);
   const leaseHeld = (r) => !!(r?.lease && r.lease.until > now() && r.lease.by !== agentId &&
-    !isLeaseHolderDead({ by: r.lease.by, host: hostname, killFn }));
+    !(isLeaseHolderDead({ by: r.lease.by, host: hostname, killFn }) && !childAliveFn({ by: r.lease.by })));
   const deferredResult = (r) => ({
     terminalReason: "deferred",
     code: OUTCOME_CODES.LEASE_HELD,
@@ -1233,6 +1277,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
     try {
       result = await runner({
         commandsDir, commandName: phase.command, args: phaseArgs,
+        leaseHolder: agentId,
         // Only forwarded when explicitly provided — omitting them preserves
         // runner.mjs's existing default ("auto" backend / DEFAULT_MODEL).
         ...(backend ? { backend } : {}),

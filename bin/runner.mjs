@@ -154,6 +154,18 @@ export function withRunTmpdir(env, { issue, cwd = process.cwd() } = {}) {
   return env;
 }
 
+const LEASE_HOLDER_ENV_RE = /^cli_[A-Za-z0-9._-]+_[0-9]+$/;
+
+/**
+ * Stamp the phase child's env with `FORGE_LEASE_HOLDER=<engine lease id>` so the engine can tell, after a
+ * SIGKILL of the engine, whether an orphaned phase child is still running (env is inherited by grandchildren).
+ * An absent or malformed holder leaves the env untouched and never throws.
+ */
+export function withLeaseHolder(env, holder) {
+  if (typeof holder === "string" && LEASE_HOLDER_ENV_RE.test(holder)) env.FORGE_LEASE_HOLDER = holder;
+  return env;
+}
+
 /** First positional arg when it is an issue number (the phase arg convention), else null. */
 function issueFromArgs(args) {
   const first = Array.isArray(args) ? args[0] : String(args ?? "").trim().split(/\s+/)[0];
@@ -1430,6 +1442,7 @@ export function runCliBackend({
   spawnFn = spawnSync,
   model = null,
   maxTurns = null,
+  leaseHolder = null,
 }) {
   // forge#3589: opt-in flags, validated again here as defence in depth. Callers
   // (runCommand) are responsible for the version gate. Unset -> argv unchanged.
@@ -1496,7 +1509,7 @@ export function runCliBackend({
     // Mirrors the existing scrub in the `run_bash` tool handler below.
     // GH_TOKEN/GITHUB_TOKEN and all other env vars are intentionally left
     // intact — only the Anthropic key is removed.
-    const childEnv = withRunTmpdir(withForgedockHome({ ...process.env }), { issue: issueFromArgs(args), cwd });
+    const childEnv = withLeaseHolder(withRunTmpdir(withForgedockHome({ ...process.env }), { issue: issueFromArgs(args), cwd }), leaseHolder);
     delete childEnv.ANTHROPIC_API_KEY;
 
     // No `shell` option (defaults to false): argv is passed as discrete,
@@ -2305,9 +2318,10 @@ export function resolveBashShell() {
  *
  * @param {string} cwd
  * @param {string|null} [runIssueNumber] - issue number scoping the per-run TMPDIR (forge#3572)
+ * @param {string|null} [leaseHolder] - engine lease id stamped as FORGE_LEASE_HOLDER in the child env
  * @returns {Record<string, (input: object) => string>}
  */
-export function getToolHandlers(cwd, runIssueNumber = null) {
+export function getToolHandlers(cwd, runIssueNumber = null, leaseHolder = null) {
   return {
     read_file: ({ path }) => {
       if (!path) throw new Error("read_file requires a 'path'");
@@ -2327,7 +2341,7 @@ export function getToolHandlers(cwd, runIssueNumber = null) {
       // into the model loop, so a prompt-injection payload could otherwise issue
       // a run_bash command that exfiltrates the key. gh/git auth tokens
       // (GH_TOKEN/GITHUB_TOKEN) are intentionally left intact.
-      const childEnv = withRunTmpdir(withForgedockHome({ ...process.env }), { issue: runIssueNumber, cwd });
+      const childEnv = withLeaseHolder(withRunTmpdir(withForgedockHome({ ...process.env }), { issue: runIssueNumber, cwd }), leaseHolder);
       delete childEnv.ANTHROPIC_API_KEY;
       // Run under bash when available so bash-style commands the model emits
       // (heredocs, scripts/*.sh, single-quote semantics) behave consistently
@@ -2585,6 +2599,7 @@ export async function runCommand(opts = {}) {
     backend = process.env.FORGEDOCK_BACKEND || "auto",
     runtimeEnv = process.env,
     logger = console,
+    leaseHolder = null,
   } = opts;
 
   assertOpenCodeNativeRuntime({
@@ -2725,6 +2740,7 @@ export async function runCommand(opts = {}) {
           logger,
           model: cliModel,
           maxTurns: cliMaxTurns,
+          leaseHolder,
         },
       });
     }
@@ -2767,7 +2783,7 @@ export async function runCommand(opts = {}) {
   // is a known Linux limitation at the OS level; closing it would require
   // a native module (e.g. prctl PR_SET_DUMPABLE) or process isolation.
   // See: issue #1370 for tracking this known limitation.
-  const handlers = getToolHandlers(cwd, issueFromArgs(args));
+  const handlers = getToolHandlers(cwd, issueFromArgs(args), leaseHolder);
   const messages = [{ role: "user", content: userMessage }];
 
   // Accumulate token usage across all messages.create() calls in this run.

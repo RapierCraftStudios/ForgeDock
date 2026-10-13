@@ -6,7 +6,7 @@ import { chmodSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, 
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveRunTmpRoot, runTmpDir, withRunTmpdir, repoKey } from "../runner.mjs";
+import { resolveRunTmpRoot, runTmpDir, withRunTmpdir, repoKey, withLeaseHolder, runCliBackend, getToolHandlers, loadCommandSpec } from "../runner.mjs";
 import { cleanupRunTmpdir } from "../engine.mjs";
 import { isDiskQuotaText, isDiskQuotaError, codeForRunnerError, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 
@@ -172,5 +172,27 @@ describe("spec rules (forge#3572)", () => {
     const walk = (d) => readdirSync(d).flatMap((n) => { const f = join(d, n); return statSync(f).isDirectory() ? walk(f) : f.endsWith(".md") ? [f] : []; });
     for (const f of walk(join(REPO, "commands")))
       assert.doesNotMatch(readFileSync(f, "utf8"), /\/tmp\/[A-Za-z_$-]*(venv|env)/, f);
+  });
+});
+
+describe("orphan marker: FORGE_LEASE_HOLDER in the phase child env (forge#3724)", () => {
+  it("orphan-marker-stamps-valid-holder-only", () => {
+    assert.equal(withLeaseHolder({}, "cli_box-1.local_123").FORGE_LEASE_HOLDER, "cli_box-1.local_123");
+    for (const bad of [null, undefined, "", "cli_123", "x; rm -rf", "cli_h_5\nX=1", 5])
+      assert.deepEqual(withLeaseHolder({ A: "1" }, bad), { A: "1" }, String(bad));
+  });
+  it("orphan-marker-cli-backend-env", () => {
+    const envs = [];
+    const spawnFn = (_b, _a, o) => { envs.push(o.env); return { status: 0, stdout: "", stderr: "" }; };
+    const base = { spec: loadCommandSpec(join(REPO, "commands"), "work-on"), userMessage: "x", args: ["3724"], cwd, logger: { log: () => {} }, spawnFn };
+    runCliBackend({ ...base, leaseHolder: "cli_h_77" });
+    runCliBackend(base);
+    assert.equal(envs[0].FORGE_LEASE_HOLDER, "cli_h_77");
+    assert.equal(envs[1].FORGE_LEASE_HOLDER, undefined);
+  });
+  it("orphan-marker-run-bash-env", () => {
+    const cmd = "node -e \"process.stdout.write(process.env.FORGE_LEASE_HOLDER || 'ABSENT')\"";
+    assert.equal(getToolHandlers(cwd, null, "cli_h_77").run_bash({ command: cmd }).trim(), "cli_h_77");
+    assert.equal(getToolHandlers(cwd, null, "not valid").run_bash({ command: cmd }).trim(), "ABSENT");
   });
 });
