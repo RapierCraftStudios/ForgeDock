@@ -438,14 +438,35 @@ EOF
         if gh api -H "Accept: application/vnd.github.raw" "repos/${REPO}/contents/${f}?ref=${REVIEW_SHA}" > "$t" 2>/dev/null; then awk 'END{print NR}' "$t"; else echo UNKNOWN; fi
     }
 
-    # Gate 2 symbol fallback: 0 when an identifier the finding names occurs (whole word, fixed string) in the added lines of FILE.
+    # Gate 2 symbol fallback: 0 when an identifier the finding names occurs (whole word, fixed string) in the added lines of FILE
+    # and nowhere in the base version of FILE (a symbol the PR introduced).
     # Candidates: backticked tokens, plus identifier-shaped tokens on "Root cause" lines; each must match an anchored identifier
     # regex of 4+ chars and not be a common word. Reviewer text is never used in arithmetic, a glob or a regex. Any failure returns 1.
+    # A symbol counts only when it is NEW: present in the added lines AND absent from the base version of the file (#4068 review
+    # DSEC-1/DBH-1: `self`, `return`, `result` in an added line must not re-scope a pre-existing finding). The base text comes from
+    # `git show <base>:<file>` (local commit) or the raw contents API; a file the PR adds has an empty base; an unreadable base
+    # disables the fallback (the line-window result stands).
+    SYM_BASE_SHA=""
+    base_text_for() {   # base_text_for <file> <out>; 0 = out holds the base text (possibly empty), 1 = unknown
+        local f="$1" o="$2"
+        if jq -e --arg f "$f" 'any(.[]; .filename == $f and .status == "added")' "$FILES_JSON" >/dev/null 2>&1; then : > "$o"; return 0; fi
+        [ -n "$SYM_BASE_SHA" ] || SYM_BASE_SHA=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .base.sha 2>/dev/null || true)
+        case "$SYM_BASE_SHA" in *[!0-9a-f]*|"") SYM_BASE_SHA="-"; return 1 ;; -) return 1 ;; esac
+        if git rev-parse -q --verify "${SYM_BASE_SHA}^{commit}" >/dev/null 2>&1; then
+            git show "${SYM_BASE_SHA}:${f}" > "$o" 2>/dev/null && return 0
+            git cat-file -e "${SYM_BASE_SHA}:${f}" 2>/dev/null && return 1
+            : > "$o"; return 0
+        fi
+        case "$f" in *[!A-Za-z0-9._/@+-]*|"") return 1 ;; esac
+        gh api -H "Accept: application/vnd.github.raw" "repos/${REPO}/contents/${f}?ref=${SYM_BASE_SHA}" > "$o" 2>/dev/null && return 0
+        return 1
+    }
     symbol_in_added() {
-        local f="$1" text="$2" t="$WORKDIR/sym-added" c n=0
+        local f="$1" text="$2" t="$WORKDIR/sym-added" b="$WORKDIR/sym-base" c n=0
         [ -s "$ADDED_TEXT_FILE" ] || return 1
         awk -v f="$f" 'index($0, f "\t") == 1 { print substr($0, length(f) + 2) }' "$ADDED_TEXT_FILE" > "$t" 2>/dev/null || return 1
         [ -s "$t" ] || return 1
+        base_text_for "$f" "$b" || return 1
         while IFS= read -r c; do
             case "$c" in ""|[!A-Za-z_]*) continue ;; esac
             [ "${#c}" -ge 4 ] || continue
@@ -453,7 +474,7 @@ EOF
                 this|that|with|from|true|false|null|none|file|line|code|test|case|value|root|cause|when|then|which|where|there|their|error|data|name|path|type|call|only|also|into|have|does|used|uses) continue ;;
             esac
             n=$((n + 1)); [ "$n" -le 8 ] || break
-            if grep -qwF -- "$c" "$t" 2>/dev/null; then return 0; fi
+            if grep -qwF -- "$c" "$t" 2>/dev/null && ! grep -qwF -- "$c" "$b" 2>/dev/null; then return 0; fi
         done <<SYMEOF
 $({
     printf '%s\n' "$text" | grep -oE '`[^`]+`' 2>/dev/null | tr -c 'A-Za-z0-9_\n' '\n'
