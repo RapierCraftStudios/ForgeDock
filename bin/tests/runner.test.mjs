@@ -69,6 +69,7 @@ import {
   getClaudeCliCapabilities,
   buildMinimalSessionFlags,
   SKILL_FREE_PHASE_COMMANDS,
+  ENGINE_PHASE_COMMANDS,
   sanitizeArgvForLog,
   sanitizeOutputExcerptForLog,
   extractSessionLimitResetTime,
@@ -4127,6 +4128,17 @@ describe("minimal phase session flags (forge#4065)", () => {
     assert.deepEqual(buildMinimalSessionFlags("work-on/build", FULL, {}), MCP);
     assert.deepEqual(buildMinimalSessionFlags("work-on/investigate", FULL, {}), [...MCP, "--disable-slash-commands"]);
     assert.ok(!buildMinimalSessionFlags("work-on/build", FULL, {}).includes("--setting-sources"));
+  });
+
+  it("leaves non-engine commands (MCP-dependent specs) untouched", () => {
+    for (const n of ["qa-sweep", "analytics", "geo-audit", "autopilot", "work-on/unknown"]) {
+      assert.deepEqual(buildMinimalSessionFlags(n, FULL, {}), [], n);
+    }
+  });
+
+  it("ENGINE_PHASE_COMMANDS mirrors the engine PHASES table", async () => {
+    const { PHASES } = await import("../engine/phases.mjs");
+    assert.deepEqual([...ENGINE_PHASE_COMMANDS].sort(), PHASES.map((p) => p.command).sort());
   });
 
   it("omits the group on an unsupported CLI (edge-e1)", () => {

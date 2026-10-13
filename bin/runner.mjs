@@ -680,6 +680,13 @@ const CLI_MIN_VERSION_MINIMAL_SESSION = [2, 1, 296];
 // `--disable-slash-commands` (spec-coverage test enforces the invariant).
 export const SKILL_FREE_PHASE_COMMANDS = Object.freeze(["work-on/investigate", "work-on/close"]);
 
+// Engine phase commands (mirrors PHASES in bin/engine/phases.mjs; a test enforces it). Only these
+// get the minimal-session group: other `forgedock run` commands (qa-sweep, analytics, geo-audit,
+// autopilot) may need the operator's MCP servers and skills.
+export const ENGINE_PHASE_COMMANDS = Object.freeze([
+  "work-on/investigate", "work-on/decompose", "work-on/build", "work-on/review", "work-on/remediate", "work-on/close",
+]);
+
 const MINIMAL_SESSION_MCP_CONFIG = '{"mcpServers":{}}';
 
 /**
@@ -730,7 +737,7 @@ export function getClaudeCliCapabilities(cwd = process.cwd(), opts = {}) {
  * and, for Skill-free phases only, no slash-command/skill listing. Operator
  * settings are deliberately NOT skipped (the CLI setting-sources flag is not passed) so
  * ForgeDock's user-scope PreToolUse/SubagentStop hooks keep running.
- * `FORGEDOCK_FULL_SESSION=1` (exactly) or an unsupported CLI yields `[]`.
+ * Non-engine commands, `FORGEDOCK_FULL_SESSION=1` (exactly) or an unsupported CLI yield `[]`.
  *
  * @param {string} commandName
  * @param {{strictMcp: boolean, disableSlash: boolean}} caps
@@ -740,6 +747,7 @@ export function getClaudeCliCapabilities(cwd = process.cwd(), opts = {}) {
 export function buildMinimalSessionFlags(commandName, caps, env = process.env) {
   if (env?.FORGEDOCK_FULL_SESSION === "1" || !caps) return [];
   const name = String(commandName ?? "").trim().replace(/^\/+/, "").replace(/\.md$/i, "");
+  if (!ENGINE_PHASE_COMMANDS.includes(name)) return [];
   const flags = [];
   if (caps.strictMcp) flags.push("--strict-mcp-config", "--mcp-config", MINIMAL_SESSION_MCP_CONFIG);
   if (caps.disableSlash && SKILL_FREE_PHASE_COMMANDS.includes(name)) flags.push("--disable-slash-commands");
