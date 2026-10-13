@@ -36,6 +36,7 @@ export const OUTCOME_CODES = Object.freeze({
   BASE_CONFLICT: "base.conflict",
   RATE_LIMITED: "rate_limited",
   HOST_BUSY: "host.busy",
+  PATH_SWITCH_CONFLICT: "path.switch_conflict",
   ENGINE_ERROR: "engine.error",
   INFRA_DISK_QUOTA: "infra.disk_quota",
   INFRA_CLI_SPAWN_TRANSIENT: "infra.cli_spawn_transient",

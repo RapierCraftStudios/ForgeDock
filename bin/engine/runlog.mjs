@@ -56,7 +56,22 @@ export function readLog(dir, issue) {
 }
 
 /** Fold events into a RunState. The commit rule lives here. */
-export function deriveState(events) {
+/**
+ * #4109: the run log is shared by the full and the core path. Keep only the events of runs whose `path` (from RUN_START;
+ * missing means "full", for historic logs) equals `path`, so one path never replays the other's commits or terminals.
+ */
+export function scopeEvents(events, path = "full") {
+  let cur = "full";
+  const out = [];
+  for (const e of events) {
+    if (e.event === "RUN_START") cur = e.path ?? "full";
+    if (cur === path) out.push(e);
+  }
+  return out;
+}
+
+export function deriveState(allEvents, { path = "full" } = {}) {
+  const events = scopeEvents(allEvents, path);
   /** @type {import("./phases.mjs").RunState} */
   const s = { v: 0, run: null, issue: null, lane: "staging", committed: [],
               phase: null, branch: null, pr: null, terminal: false,
