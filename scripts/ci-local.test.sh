@@ -941,13 +941,21 @@ has "4057: one unreached source file among several still widens a single-test st
 _slot() { FORGE_CI_LOCAL_HOME="$SLOT_HOME" FORGE_CI_LOCAL_SLOTS=1 node --input-type=module -e "
 import('$ROOT/scripts/ci-local/run.mjs').then(async (m) => {
   const [id, hold, budget] = process.argv.slice(1).map(Number);
-  const rel = await m.acquireSlot('t' + id, Date.now() + budget);
+  const t0 = Date.now();
+  const rel = await m.acquireSlot('t' + id, t0 + budget);
   if (!rel) { console.log('timeout ' + id); return; }
-  console.log('acq ' + id); await new Promise((r) => setTimeout(r, hold)); rel();
+  console.log('acq ' + id + (process.env.SLOT_SHOW_WAIT === '1' ? ' wait=' + (Date.now() - t0) : '')); await new Promise((r) => setTimeout(r, hold)); rel();
 })" "$@"; }
 SLOT_HOME="$T/fifo-home"; mkdir -p "$SLOT_HOME"; LOG="$T/fifo.log"; : > "$LOG"
-for i in 1 2 3 4; do _slot "$i" 300 30000 >> "$LOG" 2>&1 & sleep 0.4; done; wait
-eq "4057: 4 invocations, 1 slot: acquired strictly in ticket order, none starved" "acq 1 acq 2 acq 3 acq 4" "$(tr '\n' ' ' < "$LOG" | sed 's/ $//')"  # edge_e4_fifo_order
+# hold (1500ms) exceeds the cumulative spawn spacing (3 x 0.3s), so invocations 2-4 all queue behind invocation 1
+for i in 1 2 3 4; do SLOT_SHOW_WAIT=1 _slot "$i" 1500 30000 >> "$LOG" 2>&1 & sleep 0.3; done; wait
+eq "4057: 4 invocations, 1 slot: acquired strictly in ticket order, none starved" "acq 1 acq 2 acq 3 acq 4" "$(sed 's/ wait=.*//' "$LOG" | tr '\n' ' ' | sed 's/ $//')"  # edge_e4_fifo_order
+W1=$(sed -n 's/^acq 1 wait=//p' "$LOG")
+case "$W1" in ''|*[!0-9]*) bad "4059: invocation 1 wait not recorded ('$W1')" ;; *) [ "$W1" -lt 500 ] && ok || bad "4059: invocation 1 acquired immediately (wait ${W1}ms, want < 500)" ;; esac
+for i in 2 3 4; do  # edge_e2_queued_waits
+  Wi=$(sed -n "s/^acq $i wait=//p" "$LOG")
+  case "$Wi" in ''|*[!0-9]*) bad "4059: invocation $i wait not recorded ('$Wi')" ;; *) [ "$Wi" -ge 500 ] && ok || bad "4059: invocation $i queued behind the holder (wait ${Wi}ms, want >= 500)" ;; esac
+done
 eq "4057: no ticket is left behind" 0 "$(ls "$SLOT_HOME/ci-local.lock/queue" | wc -l | tr -d ' ')"
 SLOT_HOME="$T/fifo-home2"; mkdir -p "$SLOT_HOME/ci-local.lock/slot-0" "$SLOT_HOME/ci-local.lock/queue"
 ( : ) & DEAD=$!; wait "$DEAD" 2>/dev/null
