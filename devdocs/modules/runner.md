@@ -122,3 +122,9 @@ Cite: #3589 / PR #3610.
 PR #3782 touched `runner`. See FORGE:BUILDER comment on issue #3778 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/runner.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3778 / PR #3782.
+
+## Entry 2026-10-13 — Fix: lease reclaim of dead engine must not run alongside an orphaned child session (#3724)
+
+PR #4050 touched `runner`. See FORGE:BUILDER comment on issue #3724 for full change list.
+Key gotcha recorded: (update this entry in a follow-up PR if the change revealed a new failure mode).
+Cite: #3724 / PR #4050.
