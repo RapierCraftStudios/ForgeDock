@@ -53,7 +53,7 @@ import {
 import { createHash } from "crypto";
 import { join, dirname, basename, resolve, relative, isAbsolute, extname, win32 as win32Path } from "path";
 import os from "os";
-import { execSync, spawnSync } from "child_process";
+import { execSync, spawnSync, spawn } from "child_process";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
 import { parseForgeYaml, resolveModelAlias } from "./forge-utils.mjs";
@@ -1918,6 +1918,55 @@ export function runCliBackend({
       rmSync(tmpDir, { recursive: true, force: true });
     }
   }
+}
+
+/**
+ * Async twin of runCliBackend (core work-on live comments): the CLI runs under child_process.spawn so the caller's event
+ * loop keeps turning while the session runs. It returns the SAME envelope (and throws the same errors) because the
+ * argv/env building and the envelope parsing are the sync function itself: pass 1 captures the spawn arguments, the
+ * child runs asynchronously, pass 2 replays the collected result through runCliBackend's `spawnFn` seam.
+ * `onSpawn(child)` receives the ChildProcess (e.g. to kill it).
+ */
+export async function runCliBackendAsync(opts) {
+  const { spawnFn: _ignored, onSpawn = null, ...rest } = opts;
+  let captured = null;
+  try {
+    runCliBackend({ ...rest, spawnFn: (bin, args, o) => {
+      const i = args.indexOf("--append-system-prompt-file");
+      let sys = null;
+      if (i >= 0) { try { sys = readFileSync(args[i + 1], "utf-8"); } catch { /* handled by the real pass */ } }
+      captured = { bin, args: [...args], o, sysIdx: i, sys };
+      return { status: 0, stdout: "{}", stderr: "" };
+    } });
+  } catch (e) { if (!captured) throw e; }
+  const { bin, args, o, sysIdx, sys } = captured;
+  let sysDir = null;
+  if (sysIdx >= 0 && sys !== null) {
+    sysDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-system-prompt-"));
+    args[sysIdx + 1] = join(sysDir, "system-prompt.txt");
+    writeFileSync(args[sysIdx + 1], sys, "utf-8");
+  }
+  let collected;
+  try {
+    collected = await new Promise((resolveP) => {
+      let stdout = "", stderr = "", settled = false, timedOut = false;
+      const max = o.maxBuffer ?? DEFAULT_SPAWN_MAX_BUFFER_BYTES;
+      let timer = null;
+      const finish = (r) => { if (settled) return; settled = true; clearTimeout(timer); resolveP(r); };
+      let child;
+      try { child = spawn(bin, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"] }); }
+      catch (error) { return finish({ status: null, signal: null, pid: 0, error, stdout: "", stderr: "" }); }
+      onSpawn?.(child);
+      timer = setTimeout(() => { timedOut = true; try { child.kill("SIGTERM"); } catch { /* gone */ } }, o.timeout);
+      const add = (cur, d) => (cur.length >= max ? cur : cur + d.toString("utf-8"));
+      child.stdout.on("data", (d) => { stdout = add(stdout, d); });
+      child.stderr.on("data", (d) => { stderr = add(stderr, d); });
+      child.on("error", (error) => finish({ status: null, signal: null, pid: child.pid ?? 0, error, stdout, stderr }));
+      child.on("close", (status, signal) => finish({ status: timedOut ? null : status, signal, pid: child.pid ?? 0, stdout, stderr,
+        ...(timedOut ? { error: Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" }) } : {}) }));
+    });
+  } finally { if (sysDir) rmSync(sysDir, { recursive: true, force: true }); }
+  return runCliBackend({ ...rest, spawnFn: () => collected });
 }
 
 // ---------------------------------------------------------------------------
