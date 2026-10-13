@@ -89,6 +89,32 @@ run "svc/app/routers/session.py" --scores "$SC_QUIET" --changed-lines 20 --chang
 expect_has "auth path" auth
 run "scripts/trusted-comments.sh" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_has "trust-filter path" auth
+run "svc/authorization.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path authorization.py" auth
+run "svc/authMiddleware.ts" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth-path-authMiddleware.ts" auth
+run "svc/oauth2.ts" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path oauth2.ts" auth
+run "svc/permissions.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path permissions.py" auth
+run "svc/rbac.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path rbac.py" auth
+run "svc/deps.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path deps.py" auth
+run "svc/tokens.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path tokens.py" auth
+run "svc/api_keys.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth path api_keys.py" auth
+run "svc/auth_utils.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "auth-path-auth_utils.py" auth
+run "AUTHORS.md" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_not "no-auth-path-AUTHORS.md" auth
+run "docs/author.md" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_not "no auth path docs/author.md" auth
+run "svc/tokenizer.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_not "no-auth-path-svc/tokenizer.py" auth
+run "commands/review-pr.md" --scores "AUTH=3 INFRA=0 DATABASE=0 BILLING=0 CONCURRENCY=0" --changed-lines 20 --changed-files 1
+expect_not "auth-from-prose-score-alone" auth
 run "commands/review-pr.md" --scores "AUTH=3 INFRA=3 DATABASE=0 BILLING=0 CONCURRENCY=0" --changed-lines 120
 expect_not "auth from prose score alone" auth; expect_not "infra from prose score alone" infra
 run ".github/workflows/ci.yml" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1

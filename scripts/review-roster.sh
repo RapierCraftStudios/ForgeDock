@@ -27,7 +27,7 @@
 # exact value EXTENDED is STANDARD. An extended roster prints an extra DEPTH=extended line.
 # Path triggers escalate in EVERY tier except full (which already runs the union): CONTRACT HIGH_RISK, cross-critical
 # pairs, churn hot-spot, danger zone, bin/engine* (Concurrency + spec-cli), bin/ (spec-cli), auth/session/trust-filter
-# files (Auth), CI/docker/deploy/infra files (Infra), migration/.sql files (Database), SDK/OpenAPI files (API).
+# files (Auth: auth*, not author*; oauth, jwt, login, password, permission, rbac, acl, token(s), api_key(s), credential, deps.py), CI/docker/deploy/infra files (Infra), migration/.sql files (Database), SDK/OpenAPI files (API).
 # Auth and Infra are path-gated: a diff-text score alone never selects them. Security is a hard floor in every tier.
 # spec-cli is added only with --spec-cli true (the persona file exists in the repo under review); in the standard tier it
 # also covers commands/**. Bash 3.2 portable (no mapfile, associative arrays, grep -P).
@@ -170,7 +170,7 @@ if [ "$CHURN" = "true" ] || [ "$DANGER" = "true" ]; then
     for d in $(top_domains 1); do add_agent "$d"; trig churn-or-danger-zone; done
 fi
 hit() { printf '%s\n' "$FILES" | grep -qiE "$1"; }
-hit '(^|[/_.-])(auth|authn|authz|session|sessions|jwt|oauth|login|logout|password|trust[-_]?filter|trusted[-_a-z]*)([/_.-]|$)' && { add_agent Auth; trig auth-path; }
+hit '(^|[/_.-])(auth([^o]|o[^r]|$)|authori[sz]|oauth|session|jwt|login|logout|passw(or)?d|permission|rbac|acl([/_.-]|$)|tokens?([/_.-]|$)|api[-_]?keys?|credential|trust[-_]?filter|trusted[-_a-z]*)|(^|/)deps\.py$' && { add_agent Auth; trig auth-path; }
 hit '^\.github/|(^|/)Dockerfile|docker-compose|(^|/)(deploy|infra|traefik|nginx|k8s|helm|terraform)/|\.tf$' && { add_agent Infra; trig infra-path; }
 hit 'migration|\.sql$' && { add_agent Database; trig migration-path; }
 hit '^sdk/|openapi.*\.json$|openapi-versions/' && { add_agent API; trig sdk-path; }
