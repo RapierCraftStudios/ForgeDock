@@ -85,7 +85,7 @@ export function readCiPendingMaxMinutes(cwd = process.cwd()) {
   } catch { return undefined; }
 }
 
-/** forge.yaml `engine.path` (full|lean|auto) from the cwd checkout; undefined when absent or invalid. */
+/** forge.yaml `engine.path` (core|full|lean|auto) from the cwd checkout; undefined when absent or invalid. */
 export function readEnginePath(cwd = process.cwd()) {
   try {
     const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.path ?? "").trim();
@@ -98,7 +98,15 @@ function readLeanSetting(key, cwd = process.cwd()) {
     return /^[A-Za-z0-9._:[\]-]+$/.test(v) ? v : undefined;
   } catch { return undefined; }
 }
-export const ENGINE_PATHS = ["full", "lean", "auto"];
+// core is the default; lean and auto are aliases of core. full is the legacy multi-phase pipeline.
+/** forge.yaml `engine.merge_wait` (required|all|none); undefined when absent or invalid. */
+export function readMergeWait(cwd = process.cwd()) {
+  try {
+    const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.merge_wait ?? "").trim();
+    return ["required", "all", "none"].includes(v) ? v : undefined;
+  } catch { return undefined; }
+}
+export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
 
 export function runDir() { return join(homedir(), ".forge", "runs"); }
 
@@ -395,7 +403,7 @@ export function lastLocalRun(dir) {
  *                          run's lease, wait (bounded by the lease TTL) until it
  *                          expires or its same-host pid is dead, then continue.
  *                          Without it, a held lease exits `deferred` (code 75).
- *   --path <full|lean|auto>  Optional (#4081). Engine path; overrides forge.yaml engine.path. Default full.
+ *   --path <core|full|lean|auto>  Engine path; overrides forge.yaml engine.path. Default core (lean work-on); lean/auto are aliases; full is the legacy multi-phase pipeline.
  *   --retry                Optional (forge#3511). Reopen a run that ended `engine-error`
  *                          (e.g. a session-limit hit) and resume from its last committed
  *                          phase. A run that ended `phase-complete` (multi-phase issue, phase merged,
@@ -419,9 +427,9 @@ export async function runFromCli(argv, deps = {}) {
   const pathFlag = flag(argv, "--path");
   if (argv.includes("--path") && (!pathFlag || pathFlag.startsWith("--"))) throw new Error(`--path requires a value: ${ENGINE_PATHS.join("|")}`);
   if (pathFlag && !ENGINE_PATHS.includes(pathFlag)) throw new Error(`--path must be one of ${ENGINE_PATHS.join("|")}`);
-  const enginePath = pathFlag ?? readEnginePath() ?? "full";
+  const enginePath = pathFlag ?? readEnginePath() ?? "core";
   if (enginePath !== "full" && (retry || waitLease)) {
-    throw new Error("--retry and --wait-lease are not supported with the lean path (a rerun resumes from the open PR or remote branch automatically); use --path full for them");
+    throw new Error("--retry and --wait-lease are not supported with the core path (a rerun resumes from the open PR or remote branch automatically); use --path full for them");
   }
   const io = deps.io ?? makeIo();
   await assertRepoMatchesCwd(io, repo);
@@ -451,20 +459,17 @@ export async function runFromCli(argv, deps = {}) {
     else if (e.event === "phase_paused") console.log(`⏸ phase ${e.phase} paused: ${e.detail ?? "session limit"}`);
   };
   if (enginePath !== "full") {
-    // #4081: lean path. `auto` escalates to the full pipeline only when the change is risky AND large.
+    // Core work-on (lean): one builder session, one reviewer, GitHub as the register.
     const leanRepo = repo ?? (await resolveDefaultRepo(io));
-    if (!leanRepo) throw new Error("lean path needs the repo: pass --repo or run inside a checkout with a GitHub remote");
-    const { runLean } = deps.leanModule ?? (await import("./lean/lean.mjs"));
+    if (!leanRepo) throw new Error("core path needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+    const { runCore } = deps.leanModule ?? (await import("./lean/lean.mjs"));
     const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo: leanRepo });
-    const lres = await runLean({ issue, repo: leanRepo, lane, cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
+    const lres = await runCore({ issue, repo: leanRepo, lane, cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
-    if (lres.terminalReason !== "route-full") {
-      console.log(`issue #${issue} → ${lres.terminalReason}`);
-      if (lres.terminalReason !== "merged") console.log(formatTerminalDiagnostics(dir, issue));
-      return lres;
-    }
-    console.log(`issue #${issue} → routing to the full pipeline (${lres.detail})`);
+      ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+    console.log(`issue #${issue} → ${lres.terminalReason}`);
+    if (!["merged", "invalid"].includes(lres.terminalReason)) console.log(lres.detail ?? "");
+    return lres;
   }
   const res = await runIssueFn({ issue, dir, agentId, lane, io,
     ...(repo ? { repo } : {}),
@@ -623,3 +628,39 @@ export async function resumeStalledFromCli(argv, deps = {}) {
 }
 
 function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : null; }
+
+/**
+ * `forgedock orchestrate <issue...> [--parallel K] [--lane L] [--repo owner/repo]`
+ * Runs core work-on per issue with K concurrency (default 3), honouring `**Depends on**: #X` among the given issues.
+ * Prints a compact summary table. Lane defaults to staging.
+ */
+export async function orchestrateFromCli(argv, deps = {}) {
+  const valued = ["--parallel", "--lane", "--repo", "--model"];
+  const issues = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (valued.includes(argv[i])) { i++; continue; }
+    if (/^#?\d+$/.test(argv[i])) issues.push(parseInt(argv[i].replace("#", ""), 10));
+  }
+  if (!issues.length) throw new Error("usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--repo owner/repo]");
+  const parallel = flag(argv, "--parallel") == null ? 3 : parseInt(flag(argv, "--parallel"), 10);
+  if (!Number.isInteger(parallel) || parallel < 1) throw new Error("--parallel must be a positive integer");
+  const lane = flag(argv, "--lane") ?? "staging";
+  const model = flag(argv, "--model");
+  const io = deps.io ?? makeIo();
+  const repo = flag(argv, "--repo") ?? (await resolveDefaultRepo(io));
+  if (!repo) throw new Error("orchestrate needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+  const dir = deps.dir ?? runDir();
+  const { runCore } = deps.leanModule ?? (await import("./lean/lean.mjs"));
+  const { orchestrate, formatTable } = await import("./lean/orchestrate.mjs");
+  const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
+  const rows = await orchestrate({
+    issues, parallel,
+    readBody: async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
+    runOne: (n) => runCore({ issue: n, repo, lane, cwd: process.cwd(), dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry,
+      ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) }),
+    onUpdate: (r) => console.log(`#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`),
+  });
+  console.log("\n" + formatTable(rows));
+  return { rows, ok: rows.every((r) => ["merged", "invalid"].includes(r.outcome)) };
+}

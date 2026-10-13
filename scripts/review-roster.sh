@@ -183,7 +183,20 @@ if [ "$CHURN" = "true" ] || [ "$DANGER" = "true" ]; then
     for d in $(top_domains 1); do add_agent "$d"; trig churn-or-danger-zone; done
 fi
 hit() { printf '%s\n' "$FILES" | grep -qiE "$1"; }
-hit '(^|[/_.-])(auth([^o]|o[^r]|$)|authori[sz]|oauth|session|jwt|login|logout|passw(or)?d|permission|rbac|acl([/_.-]|$)|tokens?([/_.-]|$)|api[-_]?keys?|credential|trust[-_]?filter|trusted[-_a-z]*)|(^|/)deps\.py$' && { add_agent Auth; trig auth-path; }
+# Auth path gate (forge#4071). Docs and prose are never auth by path (the content gate still applies). Strong names match
+# any path segment; weak names (session, login, permission, token) only as a whole word in a code file outside design-system
+# and asset dirs, so design-tokens/, SessionTimeline.tsx, LoginButton.tsx and cursor-token files do not spawn Auth. A CamelCase
+# weak name, leading or after a CamelCase prefix (LoginController.java, RefreshTokenService.java), still counts outside UI
+# component files and dirs.
+AUTH_FILES=$(printf '%s\n' "$FILES" | grep -viE '(^|/)docs?/|\.(md|mdx|markdown|rst|adoc|txt)$' || true)
+AUTH_CODE=$(printf '%s\n' "$AUTH_FILES" | grep -iE '\.(py|pyi|ts|tsx|js|jsx|mjs|cjs|go|rb|java|kt|kts|scala|rs|php|cs|ex|exs|swift|c|cc|cpp|h|hpp|sh|bash|lua|dart|groovy|pl|vue|svelte)$' \
+    | grep -viE '(^|/)(design[-_]?(system|tokens?)|assets?|static|images?|icons?|fonts?|styles?|themes?)/' || true)
+if printf '%s\n' "$AUTH_FILES" | grep -qiE '(^|[/_.-])(auth([^o]|o[^r]|$)|authori[sz]|oauth|jwt|passw(or)?d|rbac|acl([/_.-]|$)|api[-_]?keys?|credential|trust[-_]?filter|trusted[-_a-z]*)|(^|/)deps\.py$' \
+    || printf '%s\n' "$AUTH_CODE" | grep -qiE '(^|[/_])(sessions?|login|logout|permissions?|tokens?)([/_.-]|$)' \
+    || printf '%s\n' "$AUTH_CODE" | grep -viE '\.(tsx|jsx|vue|svelte)$|(^|/)(components?|pages|views|ui|widgets)/' \
+        | grep -qE '((^|[/_])([Ss]essions?|[Ll]ogin|[Ll]ogout|[Pp]ermissions?|[Tt]okens?)|[a-z0-9](Sessions?|Login|Logout|Permissions?|Tokens?))([A-Z]|[/_.-]|$)'; then
+    add_agent Auth; trig auth-path
+fi
 hit '^\.github/|(^|/)Dockerfile|docker-compose|(^|/)(docker-)?compose[^/]*\.ya?ml$|(^|/)deploy[^/]*\.sh$|(^|/)docker-entrypoint[^/]*$|(^|/)(deploy|infra|traefik|nginx|k8s|helm|terraform)/|\.tf$' && { add_agent Infra; trig infra-path; }
 hit 'migration|\.sql$' && { add_agent Database; trig migration-path; }
 hit '^sdk/|openapi.*\.json$|openapi-versions/' && { add_agent API; trig sdk-path; }

@@ -6,6 +6,10 @@ name: Shell Compatibility
 #
 # Trigger rules:
 #   pull_request / push: path-gated to .sh files and .github/workflows/
+#   macOS and Windows jobs run on push to staging/main (post-merge) and on manual
+#   dispatch, not on pull requests: they take 30+ min and gated every merge. The
+#   linux jobs (shellcheck, fixtures) still gate PRs; a portability break is caught
+#   on staging before the release PR.
 #
 # Background: grep -oP (PCRE) has been reintroduced 4 times (#786, #811, #1179,
 # #1608). This workflow catches it at CI rather than at code review. <!-- Added: forge#1608 -->
@@ -26,6 +30,7 @@ on:
       - 'commands/**'
       - '.github/workflows/**'
       - '.github/workflows/shell-compat.yml'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -48,7 +53,7 @@ jobs:
         # NOTE: the fixtures run under whichever `bash` resolves first on PATH (system or
         # Homebrew); the "Show resolved bash" step logs which one. Keep the script free of
         # bash-4+ constructs so it also works under the older system bash 3.2.
-        os: [ubuntu-latest, macos-14]
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest","macos-14"]') }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Show resolved bash
@@ -167,6 +172,7 @@ jobs:
   # ---------------------------------------------------------------------------
   windows-fixture-smoke:
     name: Windows fixture smoke (Git Bash)
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     continue-on-error: true
     defaults:
@@ -254,6 +260,7 @@ jobs:
   # ---------------------------------------------------------------------------
   macos-portability:
     name: macOS portability smoke
+    if: github.event_name != 'pull_request'
     runs-on: macos-14
 
     steps:
@@ -312,6 +319,7 @@ jobs:
   # ---------------------------------------------------------------------------
   windows-portability:
     name: Windows portability smoke (Git Bash)
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
 
     defaults:

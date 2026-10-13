@@ -1882,6 +1882,18 @@ describe("forge#3931 review blocking-ISSUE disposition and remediation head stal
     }
   });
 
+  it("a trail posted after this dispatch's marker is not reclassified when the head moves later (forge#3947)", async () => {
+    const dispatch = trusted(`<!-- FORGE:REMEDIATION_DISPATCH: pr=7 -->\nEngine dispatching remediation for PR #7.`);
+    for (const outcome of ["RE-ESCALATED", "UNFIXABLE", "REREVIEW-REQUIRED"]) {
+      const o = await remediate.detectOutcome(withPr, remIo({ comments: [dispatch, trusted(remBody(outcome, HEAD_A))] }));
+      assert.equal(o.status, "committed", outcome);
+      assert.equal(o.terminalReason, "needs-human", outcome);
+    }
+    // A trail older than this dispatch (the dispatch crashed before posting one) is still judged against the live head.
+    const stale = await remediate.detectOutcome(withPr, remIo({ comments: [trusted(remBody("RE-ESCALATED", HEAD_A)), dispatch] }));
+    assert.equal(stale.status, "failed");
+  });
+
   it("an untrusted trail cannot mark the head stale", async () => {
     const { remediationHeadStale } = await import("../engine/phases.mjs");
     assert.equal(await remediationHeadStale(withPr, remIo({ comments: [trusted(remBody("RE-ESCALATED", HEAD_A), { assoc: "NONE" })] })), false);

@@ -354,7 +354,7 @@ describe("runFromCli --repo targeting guard", () => {
     const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
 
     await assert.rejects(
-      runFromCli(["42", "--lane", "staging", "--repo", "acme/target-repo"], { io, runIssue }),
+      runFromCli(["42", "--lane", "staging", "--path", "full", "--repo", "acme/target-repo"], { io, runIssue }),
       /does not match the current repo/,
     );
     assert.equal(runIssue.mock.callCount(), 0);
@@ -368,7 +368,7 @@ describe("runFromCli --repo targeting guard", () => {
     // real ~/.forge/runs directory.
     const dir = tmpDir("engine-cli-test-");
 
-    const res = await runFromCli(["42", "--lane", "staging", "--repo", "acme/target-repo"], { io, runIssue, dir });
+    const res = await runFromCli(["42", "--lane", "staging", "--path", "full", "--repo", "acme/target-repo"], { io, runIssue, dir });
 
     assert.equal(runIssue.mock.callCount(), 1);
     assert.equal(res.terminalReason, "workflow:merged");
@@ -380,7 +380,7 @@ describe("runFromCli --repo targeting guard", () => {
     const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
     const dir = tmpDir("engine-cli-test-");
 
-    const res = await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+    const res = await runFromCli(["42", "--lane", "staging", "--path", "full"], { io, runIssue, dir });
 
     assert.equal(runIssue.mock.callCount(), 1);
     assert.equal(res.terminalReason, "workflow:merged");
@@ -396,7 +396,7 @@ describe("runFromCli OpenCode runtime guard", () => {
     const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
     try {
       await assert.rejects(
-        runFromCli(["42", "--lane", "staging"], { io: { gh }, runIssue }),
+        runFromCli(["42", "--lane", "staging", "--path", "full"], { io: { gh }, runIssue }),
         (error) => error.code === "FORGE_OPENCODE_CAPABILITY_ERROR" &&
           error.message.startsWith("FORGE_OPENCODE_CAPABILITY_ERROR: forgedock run-issue"),
       );
@@ -424,7 +424,7 @@ describe("runFromCli phase progress output (forge#2240)", () => {
     const originalLog = console.log;
     console.log = (...args) => logs.push(args.join(" "));
     try {
-      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+      await runFromCli(["42", "--lane", "staging", "--path", "full"], { io, runIssue, dir });
     } finally {
       console.log = originalLog;
       rmSync(dir, { recursive: true, force: true });
@@ -450,7 +450,7 @@ describe("runFromCli phase progress output (forge#2240)", () => {
     const originalLog = console.log;
     console.log = (...args) => logs.push(args.join(" "));
     try {
-      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+      await runFromCli(["42", "--lane", "staging", "--path", "full"], { io, runIssue, dir });
     } finally {
       console.log = originalLog;
       rmSync(dir, { recursive: true, force: true });
@@ -475,7 +475,7 @@ describe("runFromCli --backend/--model forwarding (forge#2028)", () => {
     const dir = tmpDir("engine-cli-test-");
 
     const res = await runFromCli(
-      ["42", "--lane", "staging", "--backend", "cli", "--model", "claude-test-model"],
+      ["42", "--lane", "staging", "--path", "full", "--backend", "cli", "--model", "claude-test-model"],
       { io, runIssue, dir },
     );
 
@@ -492,7 +492,7 @@ describe("runFromCli --backend/--model forwarding (forge#2028)", () => {
     const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
     const dir = tmpDir("engine-cli-test-");
 
-    await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+    await runFromCli(["42", "--lane", "staging", "--path", "full"], { io, runIssue, dir });
 
     assert.equal(runIssue.mock.callCount(), 1);
     const callArgs = runIssue.mock.calls[0].arguments[0];
@@ -709,7 +709,7 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
     const originalLog = console.log;
     console.log = (...args) => logs.push(args.join(" "));
     try {
-      const res = await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+      const res = await runFromCli(["42", "--lane", "staging", "--path", "full"], { io, runIssue, dir });
       assert.equal(res.terminalReason, "needs-human");
     } finally {
       console.log = originalLog;
@@ -732,7 +732,7 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
     const originalLog = console.log;
     console.log = (...args) => logs.push(args.join(" "));
     try {
-      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+      await runFromCli(["42", "--lane", "staging", "--path", "full"], { io, runIssue, dir });
     } finally {
       console.log = originalLog;
       rmSync(dir, { recursive: true, force: true });
@@ -765,7 +765,7 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
     const originalLog = console.log;
     console.log = (...args) => logs.push(args.join(" "));
     try {
-      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+      await runFromCli(["42", "--lane", "staging", "--path", "full"], { io, runIssue, dir });
     } finally {
       console.log = originalLog;
       rmSync(dir, { recursive: true, force: true });
@@ -791,7 +791,7 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
     const originalLog = console.log;
     console.log = (...args) => logs.push(args.join(" "));
     try {
-      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+      await runFromCli(["42", "--lane", "staging", "--path", "full"], { io, runIssue, dir });
     } finally {
       console.log = originalLog;
       rmSync(dir, { recursive: true, force: true });
@@ -817,7 +817,7 @@ describe("runFromCli — forge#3574 deferred output, agentId, --wait-lease", () 
     const detail = "issue 42 leased by cli_h_9 until 2026-10-10T16:20:14.000Z";
     const runIssue = mock.fn(async () => ({ terminalReason: "deferred", detail }));
     let res;
-    const out = await capture(async () => { res = await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir }); });
+    const out = await capture(async () => { res = await runFromCli(["42", "--lane", "staging", "--path", "full"], { io, runIssue, dir }); });
     assert.equal(res.terminalReason, "deferred");
     assert.ok(out.includes(detail));
     assert.equal((out.match(/run-log:/g) || []).length, 1, "run-log path printed once (start only)");
@@ -827,7 +827,7 @@ describe("runFromCli — forge#3574 deferred output, agentId, --wait-lease", () 
   it("agentId is cli_<hostname>_<pid> and round-trips through parseLeaseHolder", async () => {
     const dir = tmpDir("engine-cli-test-");
     const runIssue = mock.fn(async () => ({ terminalReason: "merged" }));
-    await capture(() => runFromCli(["42", "--lane", "staging"], { io, runIssue, dir }));
+    await capture(() => runFromCli(["42", "--lane", "staging", "--path", "full"], { io, runIssue, dir }));
     const { agentId } = runIssue.mock.calls[0].arguments[0];
     const { parseLeaseHolder } = await import("../engine.mjs");
     assert.equal(parseLeaseHolder(agentId)?.pid, process.pid);
@@ -837,9 +837,9 @@ describe("runFromCli — forge#3574 deferred output, agentId, --wait-lease", () 
   it("forwards --wait-lease only at a flag position", async () => {
     const dir = tmpDir("engine-cli-test-");
     const runIssue = mock.fn(async () => ({ terminalReason: "merged" }));
-    await capture(() => runFromCli(["42", "--lane", "staging", "--wait-lease"], { io, runIssue, dir }));
+    await capture(() => runFromCli(["42", "--lane", "staging", "--path", "full", "--wait-lease"], { io, runIssue, dir }));
     assert.equal(runIssue.mock.calls[0].arguments[0].waitLease, true);
-    await capture(() => runFromCli(["42", "--lane", "staging"], { io, runIssue, dir }));
+    await capture(() => runFromCli(["42", "--lane", "staging", "--path", "full"], { io, runIssue, dir }));
     assert.ok(!("waitLease" in runIssue.mock.calls[1].arguments[0]));
     rmSync(dir, { recursive: true, force: true });
   });
