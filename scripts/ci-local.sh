@@ -76,7 +76,7 @@ field() { printf '%s\n' "$RES" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -n 1; }
 STATE=$(printf '%s\n' "$RES" | awk '{print $2}')
 JR=$(field jobs_run); JD=$(field jobs_deferred); JF=$(field jobs_failed); DUR=$(field duration_ms)
 forge_emit ci_local result="${STATE:-DEGRADED}" jobs_run="${JR:-0}" jobs_deferred="${JD:-0}" jobs_failed="${JF:-0}" \
-  duration_ms="${DUR:-0}" fix_iterations="$ITER" checks="$(field checks)" cache_hits="$(field cache_hits)" \
+  duration_ms="${DUR:-0}" wait_ms="$(field wait_ms)" fix_iterations="$ITER" checks="$(field checks)" cache_hits="$(field cache_hits)" \
   narrowed="$(field narrowed)" widened="$(field widened)" selected="$(field selected)" total="$(field total)" >/dev/null 2>&1 || true
 
 # One event per scoped/widened/executed check, capped so a large plan never floods the telemetry comment.
@@ -90,7 +90,8 @@ while IFS= read -r line; do
   ch=$(printf '%s\n' "$line" | sed -n 's/.* cache=\([^ ]*\).*/\1/p')
   dm=$(printf '%s\n' "$line" | sed -n 's/.* duration_ms=\([^ ]*\).*/\1/p')
   wd=$(printf '%s\n' "$line" | sed -n 's/.* widen=\([^ ]*\).*/\1/p')
-  forge_emit ci_local_check job="$job" selector="$sel" selected="${sc:-0}" total="${tt:-0}" cache="$ch" duration_ms="${dm:-0}" widen="$wd" >/dev/null 2>&1 || true
+  wm=$(printf '%s\n' "$line" | sed -n 's/.* wait_ms=\([^ ]*\).*/\1/p')
+  forge_emit ci_local_check job="$job" selector="$sel" selected="${sc:-0}" total="${tt:-0}" cache="$ch" duration_ms="${dm:-0}" wait_ms="${wm:-0}" widen="$wd" >/dev/null 2>&1 || true
   EMITTED=$((EMITTED + 1))
 done < <(grep '^CI_LOCAL_CHECK:' "$OUT")
 
