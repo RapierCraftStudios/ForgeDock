@@ -2,46 +2,39 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { join } from "node:path";
-import { runLean, MAX_ROUNDS } from "./lean.mjs";
-import { riskTier, isDocsOnly, isTestFile, isBlocking, parseFindings, choosePath, isLargeDiff } from "./risk.mjs";
-import { BUILDER_SYSTEM, REVIEWER_SYSTEM, SECURITY_REVIEWER_SYSTEM, approxTokens } from "./prompts.mjs";
+import { runCore } from "./lean.mjs";
+import { renderValidate, renderPlan, renderReview, renderRegister, renderPrBody, cell, NR } from "./render.mjs";
+import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
+import { REVIEWER_SYSTEM, approxTokens, builderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
-import { runFromCli } from "../engine-cli.mjs";
-import { runCliBackend, buildLeanSessionFlags, buildReadOnlyToolFlags } from "../runner.mjs";
+import { runFromCli, orchestrateFromCli, ENGINE_PATHS } from "../engine-cli.mjs";
 
 const WT = "/wt/lean-7";
-const finding = (o) => ({ id: "F1", severity: "LOW", confidence: "POSSIBLE", file: "a.js", line: 1, scope: "introduced", title: "t", failure_scenario: "s", ...o });
-const reply = (arr) => "```json\n" + JSON.stringify(arr) + "\n```";
+const ok = (extra = {}) => "```json\n" + JSON.stringify({ verdict: "PASS", fixes_issue: true, regression: false, reason: "src/foo.js:3 fixed", ...extra }) + "\n```";
+const bad = (reason = "src/foo.js:9 still wrong") => ok({ verdict: "FAIL", fixes_issue: false, reason });
 
-/** In-memory world: fake gh, git, fs, runner, ci. `script` hooks let each test steer the builder/reviewer. */
+/** In-memory world with fake gh, git, fs and runner. */
 function world(o = {}) {
   const w = {
-    prList: o.prList ?? [], remote: o.remote ?? "", apiIssues: o.apiIssues, leaseWrites: [], lease: o.lease ?? null, comments: [], labels: [], closed: [], edits: [], prs: [], merges: [], calls: [], telemetry: [], files: {}, ciQueue: [...(o.ci ?? [])],
-    changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], lines: o.lines ?? 40, head: "aaaa1111aaaa1111", waits: [...(o.waits ?? [])],
-    reviewReplies: [...(o.reviews ?? [])], builderHooks: [...(o.builderHooks ?? [])], issueBody: o.body ?? "Bug in foo", clock: 0, validate: o.validate ?? { status: "valid", summary: "real", evidence: ["src/foo.js:3"] },
-  };
-  const writeBuilderFiles = () => {
-    w.files[`${WT}/.forge-lean/validate.json`] = JSON.stringify(w.validate);
-    w.files[`${WT}/.forge-lean/plan.md`] = "## Approach\nfix foo\n## Sibling sites\nbar";
-    w.files[`${WT}/.forge-lean/implement.json`] = JSON.stringify({ summary: "fixed", commit: w.head, files: w.changed });
+    comments: [], labels: [], closed: [], edits: [], prs: [], merges: [], calls: [], telemetry: [], files: {}, head: "aaaa1111aaaa1111",
+    changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], reviews: [...(o.reviews ?? [])], waits: [...(o.waits ?? [])], clock: 0,
+    result: o.result ?? { status: "fixed", summary: "fixed foo", evidence: [], tests: ["test/foo.test.js"] },
+    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [],
   };
   w.io = {
     now: () => w.clock, sleep: async (ms) => { w.clock += ms; },
     gh: async (a) => {
       const k = a.slice(0, 2).join(" ");
-      if (a[0] === "api") { const m = /issues\/(\d+)$/.exec(a[1]); const r = m && w.apiIssues?.[m[1]]; return r ? JSON.stringify(r) : ""; }
+      if (a[0] === "api") return "";
       if (k === "pr list") return JSON.stringify(w.prList);
-      if (k === "issue view" && a.includes("comments")) return JSON.stringify({ comments: w.comments.map((body) => ({ body })) });
-      if (k === "issue view") return JSON.stringify({ number: 7, title: "foo breaks", body: w.issueBody, state: "OPEN" });
-      if (k === "issue comment") { w.comments.push(a[a.indexOf("--body") + 1]); return `https://github.com/o/r/issues/7#issuecomment-${w.comments.length}\n`; }
-      if (k === "issue close") { w.closed.push(a); return ""; }
+      if (k === "issue view") return JSON.stringify({ number: 7, title: "foo breaks", body: "Bug in foo", state: "OPEN" });
+      if (k === "issue comment") { w.comments.push(a[a.indexOf("--body") + 1]); w.seq.push("comment"); return `https://github.com/o/r/issues/7#issuecomment-${w.comments.length}\n`; }
+      if (k === "issue close") { w.closed.push(a); w.seq.push("close"); return ""; }
       if (k === "issue edit") { w.edits.push(a); return ""; }
-      if (k === "pr create") { w.prs.push(a); return "https://github.com/o/r/pull/77\n"; }
-      if (k === "pr merge") { w.merges.push(a); return ""; }
+      if (k === "pr create") { w.prs.push(a); w.seq.push("pr"); return "https://github.com/o/r/pull/77\n"; }
+      if (k === "pr merge") { w.merges.push(a); w.seq.push("merge"); return ""; }
       throw new Error(`unexpected gh ${a.join(" ")}`);
     },
     git: async (a) => {
@@ -49,477 +42,444 @@ function world(o = {}) {
       if (a[0] === "rev-parse" && a[1] === "--git-path") return "/repo/.git/info/exclude";
       if (a[0] === "rev-parse") return w.head;
       if (a[0] === "diff" && a[1] === "--name-only") return w.changed.join("\n");
-      if (a[0] === "diff" && a[1] === "--numstat") return `${w.lines}\t0\tx`;
-      if (a[0] === "ls-remote") return w.remote;
       if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
+      if (a[0] === "ls-remote") return w.remote;
+      if (a[0] === "push") w.seq.push("push");
       return "";
     },
     runner: async (c) => {
-      w.calls.push(["runner", c.role, c.resume ?? null, c.model ?? null, c.prompt, c.readOnly ?? false]);
-      if (o.builderThrows && c.role === "builder") throw new Error("cli exploded");
+      w.calls.push(["runner", c.role, c.resume ?? null, c.model ?? null, c.prompt, c.readOnly ?? false, c.system]);
+      w.seq.push(c.role + (c.resume ? "-resume" : ""));
       if (c.role === "builder") {
-        if (!c.resume) { w.builderStart = c; writeBuilderFiles(); }
-        else { const h = w.builderHooks.shift(); if (h) h(w); w.head = `bbbb${w.calls.length}`.padEnd(16, "0"); }
-        return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5 }, costUsd: 0.1, durationMs: 1000, turns: 3, model: "default" };
+        const r = c.resume ? (w.resumeResult ?? w.result) : w.result;
+        if (r) w.files[`${WT}/.forge-lean/result.json`] = JSON.stringify(r);
+        if (c.resume) w.head = `bbbb${w.calls.length}`.padEnd(16, "0");
+        return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: 0.1, durationMs: 1000, turns: 3, model: "default" };
       }
-      const text = w.reviewReplies.length ? w.reviewReplies.shift() : reply([]);
-      return { text, sessionId: `rev-${w.calls.length}`, usage: { input_tokens: 4, output_tokens: 2 }, costUsd: 0.05, durationMs: 500, turns: 2, model: c.model };
+      return { text: w.reviews.length ? w.reviews.shift() : ok(), sessionId: "rev", usage: { input_tokens: 4, output_tokens: 2 }, costUsd: 0.05, durationMs: 500, turns: 2, model: c.model };
     },
-    ciLocal: async () => w.ciQueue.length ? w.ciQueue.shift() : { result: "PASS", tail: "" },
-    waitCiGreen: async () => w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE: PASS\nCI_GATE_HEAD: ${w.head}` },
-    projector: { readState: async () => (w.lease ? { v: 1, lease: w.lease } : null), writeState: async (_i, st) => { w.leaseWrites.push(st); } },
-    transitionLabel: async (n, s) => { w.labels.push(s); },
+    waitCiGreen: async () => (w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }),
+    transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
     fs: { read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; } },
   };
   return w;
 }
-
-const run = (w, extra = {}) => runLean({ issue: 7, repo: "o/r", lane: "staging", cwd: "/repo", worktreeRoot: "/wt", dir: tmpDir("lean-"),
+const run = (w, extra = {}) => runCore({ issue: 7, repo: "o/r", lane: "staging", cwd: "/repo", worktreeRoot: "/wt", dir: tmpDir("core-"),
   io: w.io, emitTelemetry: async (r) => w.telemetry.push(r), random: () => 0.5, ...extra });
-const markers = (w) => w.comments.map((c) => /FORGE:[A-Z_]+/.exec(c)[0]);
-const resumes = (w) => w.calls.filter((c) => c[0] === "runner" && c[1] === "builder");
+const builders = (w) => w.calls.filter((c) => c[0] === "runner" && c[1] === "builder");
+const reviewers = (w) => w.calls.filter((c) => c[0] === "runner" && c[1] === "reviewer");
+const registers = (w) => w.comments.filter((c) => c.startsWith("<!-- FORGE:WORK-ON -->"));
 
-describe("lean path: happy path and knowledge graph", () => {
-  it("drives an issue end to end and posts every stage comment with its marker and content", async () => {
+describe("core work-on", () => {
+  it("happy path: started comment, one register comment with everything, merge at the reviewed head", async () => {
     const w = world();
-    const r = await run(w);
+    const dir = tmpDir("core-");
+    const r = await run(w, { dir });
     assert.equal(r.terminalReason, "merged");
-    assert.deepEqual(markers(w), ["FORGE:VALIDATE", "FORGE:PLAN", "FORGE:IMPLEMENT", "FORGE:REVIEW", "FORGE:CLOSE"]);
-    assert.match(w.comments[0], /"status": "valid"/);
-    assert.match(w.comments[1], /Sibling sites/);
-    assert.match(w.comments[2], /"summary": "fixed"/);
-    const body = w.prs[0][w.prs[0].indexOf("--body") + 1];
-    assert.match(body, /Closes #7/);
-    for (const m of ["FORGE:VALIDATE", "FORGE:PLAN", "FORGE:IMPLEMENT", "FORGE:REVIEW"]) assert.match(body, new RegExp(`${m}: https://github.com/o/r/issues/7#issuecomment-\\d+`));
+    assert.equal(r.pr, 77);
+    assert.match(w.comments[0], /FORGE:STARTED/);
+    const reg = registers(w);
+    assert.equal(reg.length, 1);
+    for (const needle of ["fixed foo", "src/foo.js", "test/foo.test.js", "PASS", "src/foo.js:3 fixed", "https://github.com/o/r/pull/77", "cost $0.15", "tokens 14 in / 7 out / 100 cache", "wall"]) {
+      assert.ok(reg[0].includes(needle), `register comment lacks ${needle}:\n${reg[0]}`);
+    }
+    assert.match(w.prs[0][w.prs[0].indexOf("--body") + 1], /Closes #7/);
     assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
-    assert.deepEqual(w.labels, ["investigating", "building", "in-review", "merged"]);
-    assert.ok(w.closed.length === 1);
-    assert.ok(w.files["/repo/.git/info/exclude"].includes(".forge-lean/"), "scratch dir is git-excluded");
-  });
-
-  it("emits one phase_attempt per stage plus run_terminal, stats-compatible", async () => {
-    const w = world();
-    const r = await run(w);
-    const mapped = w.telemetry.map((t) => mapRecord(t, 5)).filter(Boolean);
-    assert.deepEqual(mapped.filter((m) => m.event === "phase_attempt").map((m) => m.phase), ["implement", "review"]);
-    assert.equal(mapped[0].payload.stages, "validate,architect,implement");
-    assert.equal(mapped.filter((m) => m.event === "phase_attempt" && m.payload.input_tokens === undefined).length, 0, "no null-usage records");
-    assert.equal(mapped.at(-1).event, "run_terminal");
-    assert.equal(mapped.at(-1).payload.reason, "merged");
-    const v = mapped[0].payload;
-    assert.equal(mapped[0].payload.attempt, 1);
-    assert.equal(v.input_tokens, 10); assert.equal(v.cost_usd, 0.1);
-    assert.ok(r.cost_usd > 0);
-  });
-
-  it("writes the run log (RUN_START, PHASE_COMMIT per stage, RUN_TERMINAL)", async () => {
-    const w = world(); const dir = tmpDir("lean-");
-    await run(w, { dir });
+    assert.equal(w.closed.length, 1);
+    assert.equal(builders(w).length, 1);
+    assert.equal(reviewers(w).length, 1);
     const ev = readLog(dir, 7).map((e) => e.event);
     assert.equal(ev[0], "RUN_START"); assert.equal(ev.at(-1), "RUN_TERMINAL");
-    assert.ok(readLog(dir, 7).filter((e) => e.event === "PHASE_COMMIT").map((e) => e.phase).includes("review"));
   });
 
-  it("builder default model, reviewer claude-sonnet-5-5 unless configured", async () => {
-    const w = world(); await run(w);
-    assert.equal(resumes(w)[0][3], null);
-    assert.equal(w.calls.find((c) => c[1] === "reviewer")[3], "claude-sonnet-5-5");
-    const w2 = world(); await run(w2, { reviewerModel: "my-model" });
-    assert.equal(w2.calls.find((c) => c[1] === "reviewer")[3], "my-model");
-  });
-});
-
-describe("lean path: review fixes (#4083)", () => {
-  it("merge requires the CI-gated head to equal the reviewed head and always passes the local head", async () => {
-    const w = world({ waits: [{ rc: 0, text: "CI_GATE_HEAD: deadbeefdead" }] });
-    const r = await run(w);
-    assert.equal(r.terminalReason, "needs-human");
-    assert.equal(w.merges.length, 0);
-    const w2 = world({ waits: [{ rc: 0, text: "CI_GATE: PASS" }] });
-    assert.equal((await run(w2)).terminalReason, "merged");
-    assert.equal(w2.merges[0].at(-1), w2.head);
+  it("validation comment is posted before the reviewer and the in-review label; content for a fixed issue; register links it", async () => {
+    const w = world({ result: { status: "fixed", summary: "fixed foo\nmore", evidence: ["src/foo.js:3 null deref"], tests: ["t"] } });
+    await run(w);
+    const vi = w.comments.findIndex((c) => c.startsWith("<!-- FORGE:VALIDATE -->"));
+    assert.ok(vi >= 0);
+    const v = w.comments[vi];
+    assert.match(v, /Verdict:\*\* valid/);
+    assert.match(v, /src\/foo.js:3 null deref/);
+    assert.match(v, /Summary:\*\* fixed foo$/);
+    assert.ok(!v.includes("more"));
+    const pos = (x) => w.seq.indexOf(x);
+    const commentSeq = w.seq.map((s, i) => (s === "comment" ? i : -1)).filter((i) => i >= 0);
+    assert.ok(commentSeq[vi] > pos("builder") && commentSeq[vi] < pos("reviewer"));
+    assert.ok(commentSeq[vi] < pos("label:in-review"));
+    assert.match(registers(w)[0], /Validation: https:\/\/github.com\/o\/r\/issues\/7#issuecomment-\d+/);
+    assert.equal(w.comments.filter((c) => c.includes("FORGE:VALIDATE")).length, 1);
   });
 
-  it("a gate needs-human records exactly one RUN_TERMINAL and one telemetry terminal", async () => {
-    const f = { result: "FAIL", tail: "x" };
-    const w = world({ ci: [f, f, f] }); const dir = tmpDir("lean-");
-    const r = await run(w, { dir });
-    assert.equal(r.terminalReason, "needs-human");
-    assert.equal(readLog(dir, 7).filter((e) => e.event === "RUN_TERMINAL").length, 1);
-    assert.equal(w.telemetry.filter((t) => t.event === "RUN_TERMINAL").length, 1);
-  });
-
-  it("a held lease defers the run before any work; an owned lease is written and released", async () => {
-    const held = world({ lease: { by: "other_1", until: 10 ** 13 } });
-    const r = await run(held, { agentId: "me" });
-    assert.equal(r.terminalReason, "deferred");
-    assert.equal(held.calls.length, 0);
-    const w = world();
-    await run(w, { agentId: "me", leaseRenewMs: 10 ** 9 });
-    assert.equal(w.leaseWrites[0].lease.by, "me");
-    assert.equal(w.leaseWrites.at(-1).lease, null);
-    assert.equal(w.leaseWrites.at(-1).terminal, true);
-  });
-
-  it("reruns reset the lean worktree and branch instead of failing, and errors clear the in-progress label", async () => {
+  it("labels transition in order, and register is posted after the PR and before the merge", async () => {
     const w = world();
     await run(w);
-    const add = w.calls.find((c) => c[1] === "worktree" && c[2] === "add");
-    assert.ok(add.includes("-B"));
-    assert.ok(w.calls.some((c) => c[1] === "worktree" && c[2] === "remove"));
-    const e = world({ builderThrows: true });
-    const r = await run(e);
-    assert.equal(r.terminalReason, "engine-error");
-    assert.ok(e.edits.some((a) => a.includes("--remove-label") && a.join(" ").includes("workflow:investigating")));
+    assert.deepEqual(w.labels, ["investigating", "building", "in-review", "merged"]);
+    const order = w.seq.filter((s) => ["label:investigating", "label:building", "builder", "label:in-review", "reviewer", "push", "pr", "merge", "label:merged"].includes(s));
+    assert.deepEqual(order, ["label:investigating", "label:building", "builder", "label:in-review", "reviewer", "push", "pr", "merge", "label:merged"]);
+    assert.ok(w.seq.indexOf("pr") < w.seq.lastIndexOf("comment") && w.seq.lastIndexOf("comment") < w.seq.indexOf("merge"));
   });
 
-  it("closes only on invalid/already-fixed WITH evidence; otherwise needs-human with the reasoning", async () => {
-    for (const validate of [{ status: "invalid", summary: "no repro", evidence: [] }, { status: "invalid", summary: "no repro", evidence: ["  "] },
-      { status: "maybe", summary: "unsure why", evidence: ["a.js:1"] }]) {
-      const w = world({ validate });
-      const r = await run(w);
-      assert.equal(r.terminalReason, "needs-human");
-      assert.equal(w.closed.length, 0);
-      assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes(validate.summary)));
-    }
-    const ok = world({ validate: { status: "already-fixed", summary: "fixed in abc", evidence: ["commit abc1234"] } });
-    assert.equal((await run(ok)).terminalReason, "invalid");
-    assert.equal(ok.closed.length, 1);
-  });
-
-  it("reviewers are read-only (Read/Grep/Glob) and the builder is not", async () => {
-    const w = world({ changed: ["src/auth/x.js", "test/x.test.js"] });
-    await run(w);
-    const rev = w.calls.filter((c) => c[0] === "runner" && c[1] !== "builder");
-    assert.ok(rev.length >= 2 && rev.every((c) => c[5] === true));
-    assert.ok(w.calls.filter((c) => c[1] === "builder").every((c) => c[5] === false));
-    assert.deepEqual(buildReadOnlyToolFlags({ strictMcp: true }), ["--tools", "Read,Grep,Glob"]);
-    assert.ok(buildReadOnlyToolFlags({ strictMcp: false }).includes("Bash"));
-  });
-
-  it("review rounds are numbered from 1", async () => {
-    const w = world({ reviews: [reply([finding({ severity: "HIGH" })]), reply([])] });
-    await run(w);
-    const revs = w.comments.filter((c) => c.includes("FORGE:REVIEW"));
-    assert.match(revs[0], /round 1 \|/); assert.match(revs[1], /round 2 \|/);
-  });
-});
-
-describe("lean path: release review fixes (#4084)", () => {
-  const approvedAt = (w, head) => w.comments.push(`<!-- FORGE:REVIEW lean v1 -->\n## FORGE:REVIEW\n**Verdict:** APPROVED | round 1 | reviewed ${head.slice(0, 12)} | risk low\n\nx`);
-
-  it("rerun with an open PR at an already-reviewed head resumes straight to the CI wait (no builder, no reviewer, no create)", async () => {
-    const w = world({ prList: [{ number: 77, headRefOid: "aaaa1111aaaa1111" }], remote: "sha\trefs/heads/feat/issue-7-lean" });
-    w.comments.push("<!-- FORGE:PLAN lean v1 -->\n## FORGE:PLAN\nthe plan");
-    approvedAt(w, w.head);
-    const r = await run(w);
-    assert.equal(r.terminalReason, "merged");
-    assert.equal(w.calls.filter((c) => c[0] === "runner").length, 0);
-    assert.equal(w.prs.length, 0);
-    assert.equal(w.merges[0][2], "77");
-    const add = w.calls.find((c) => c[1] === "worktree" && c[2] === "add");
-    assert.ok(add.includes("origin/feat/issue-7-lean"), "checks out the remote branch, not the base");
-  });
-
-  it("rerun whose head was not reviewed continues from review, reusing the plan from the issue", async () => {
-    const w = world({ prList: [{ number: 77 }] });
-    w.comments.push("<!-- FORGE:PLAN lean v1 -->\n## FORGE:PLAN\nthe plan text");
-    approvedAt(w, "ffff0000ffff");
-    const r = await run(w);
-    assert.equal(r.terminalReason, "merged");
-    const rev = w.calls.find((c) => c[1] === "reviewer");
-    assert.ok(rev[4].includes("the plan text"));
-    assert.ok(!w.calls.some((c) => c[1] === "builder"));
-  });
-
-  it("ci-pending leaves a resumable state: the worktree is removed, the branch is kept", async () => {
-    const w = world({ waits: Array.from({ length: 500 }, () => ({ rc: 3, text: "" })) });
-    const r = await run(w, { ciMaxMinutes: 5 });
-    assert.equal(r.terminalReason, "ci-pending");
-    assert.ok(w.calls.filter((c) => c[1] === "worktree" && c[2] === "remove").length >= 2);
-    assert.ok(!w.calls.some((c) => c[1] === "branch"));
-  });
-
-  it("an open Depends-on dependency refuses the run before any worktree", async () => {
-    const own = { author_association: "OWNER", body: "x\n**Depends on**: #5", state: "open" };
-    const w = world({ apiIssues: { 7: own, 5: { state: "open" } } });
-    const r = await run(w);
-    assert.equal(r.terminalReason, "dependency-open");
-    assert.deepEqual(r.dependencies, [5]);
-    assert.equal(w.calls.length, 0);
-    const u = world({ apiIssues: { 7: own } });
-    assert.equal((await run(u)).terminalReason, "dependency-unreadable");
-    const closed = world({ apiIssues: { 7: own, 5: { state: "closed" } } });
-    assert.equal((await run(closed)).terminalReason, "merged");
-  });
-
-  it("a broken local CI gate (no result) is needs-human with no builder resume; DEGRADED still passes", async () => {
-    const w = world({ ci: [{ result: "BROKEN", tail: "no result" }] });
-    const r = await run(w);
-    assert.equal(r.terminalReason, "needs-human");
-    assert.equal(resumes(w).length, 1);
-    const d = world({ ci: [{ result: "DEGRADED", tail: "" }] });
-    assert.equal((await run(d)).terminalReason, "merged");
-  });
-
-  it("parseCiLocalResult: missing or garbage output is BROKEN", async () => {
-    const { parseCiLocalResult } = await import("./effects.mjs");
-    assert.equal(parseCiLocalResult(""), "BROKEN");
-    assert.equal(parseCiLocalResult("CI_LOCAL_RESULT: ???"), "BROKEN");
-    assert.equal(parseCiLocalResult("x\nCI_LOCAL_RESULT: DEGRADED reason=t"), "DEGRADED");
-    assert.equal(parseCiLocalResult("CI_LOCAL_RESULT: PASS"), "PASS");
-    assert.equal(parseCiLocalResult("CI_LOCAL_RESULT: FAIL"), "FAIL");
-  });
-
-  it("RUN_START carries repo and version so local stats attribute lean runs", async () => {
-    const w = world(); const dir = tmpDir("lean-");
-    await run(w, { dir });
-    const rs = readLog(dir, 7).find((e) => e.event === "RUN_START");
-    assert.equal(rs.repo, "o/r"); assert.ok(rs.version && rs.forge_version);
-  });
-
-  it("the lease is renewed before and after every builder and reviewer call", async () => {
+  it("emits phase_attempt for builder and reviewer plus run_terminal, stats-compatible", async () => {
     const w = world();
-    await run(w, { agentId: "me", leaseRenewMs: 10 ** 9 });
-    const live = w.leaseWrites.filter((x) => x.lease).length;
-    const calls = w.calls.filter((c) => c[0] === "runner").length;
-    assert.ok(live >= 1 + 2 * calls, `${live} renewals for ${calls} calls`);
+    await run(w);
+    const mapped = w.telemetry.map((t) => mapRecord(t, 5)).filter(Boolean);
+    assert.deepEqual(mapped.filter((m) => m.event === "phase_attempt").map((m) => m.phase), ["implement", "review"]);
+    assert.equal(mapped[0].payload.input_tokens, 10);
+    assert.equal(mapped.at(-1).event, "run_terminal");
+    assert.equal(mapped.at(-1).payload.reason, "merged");
   });
 
-  it("lease TTL stays inside the projector's 30 minute honour cap", async () => {
-    const w = world(); let until = 0;
-    w.io.projector.writeState = async (_i, st) => { if (st.lease) until = st.lease.until - w.clock; };
-    await run(w, { agentId: "me", leaseRenewMs: 10 ** 9 });
-    assert.ok(until > 0 && until <= 30 * 60000);
-  });
-
-  it("--path without a value errors; --retry and --wait-lease are rejected on lean", async () => {
-    const mk = () => ({ leanModule: { runLean: async () => ({ terminalReason: "merged" }) }, leanIo: {}, dir: tmpDir("lean-cli-"),
-      emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, runIssue: async () => ({ terminalReason: "merged" }) });
-    await assert.rejects(runFromCli(["7", "--lane", "staging", "--path"], mk()), /--path requires a value/);
-    await assert.rejects(runFromCli(["7", "--lane", "staging", "--path", "--retry"], mk()), /--path requires a value/);
-    await assert.rejects(runFromCli(["7", "--lane", "staging", "--path", "lean", "--retry", "--repo", "o/r"], mk()), /not supported with the lean path/);
-    await assert.rejects(runFromCli(["7", "--lane", "staging", "--path", "auto", "--wait-lease", "--repo", "o/r"], mk()), /not supported with the lean path/);
-  });
-});
-
-describe("lean path: invalid issue", () => {
-  it("closes an invalid issue with evidence and never builds a PR", async () => {
-    const w = world({ validate: { status: "invalid", summary: "not reproducible", evidence: ["src/foo.js:3 already guards null"] } });
+  it("invalid with evidence closes the issue as invalid and opens no PR", async () => {
+    const w = world({ changed: [], result: { status: "invalid", summary: "not a bug", evidence: ["src/foo.js:3 already guards null"], tests: [] } });
     const r = await run(w);
     assert.equal(r.terminalReason, "invalid");
-    assert.match(w.comments[0], /already guards null/);
-    assert.equal(w.closed.length, 1); assert.ok(w.closed[0].includes("not planned"));
+    assert.deepEqual(w.labels, ["investigating", "building", "invalid"]);
+    const vs = w.comments.filter((c) => c.startsWith("<!-- FORGE:VALIDATE -->"));
+    assert.equal(vs.length, 1, "the validation comment is the evidence comment");
+    assert.match(vs[0], /Verdict:\*\* invalid/);
+    assert.match(vs[0], /src\/foo.js:3 already guards null/);
+    assert.match(vs[0], /Summary:\*\* not a bug/);
+    assert.equal(registers(w).length, 0, "no duplicate evidence comment");
+    assert.equal(w.closed.length, 1);
     assert.equal(w.prs.length, 0);
-    assert.ok(w.labels.includes("invalid"));
-  });
-});
-
-describe("lean path: gates resume the same session", () => {
-  it("ci-local FAIL -> resume with the failure tail -> pass", async () => {
-    const w = world({ ci: [{ result: "FAIL", tail: "FAILED test_foo: expected 1" }] });
-    const r = await run(w);
-    assert.equal(r.terminalReason, "merged");
-    const b = resumes(w);
-    assert.equal(b.length, 2);
-    assert.equal(b[0][2], null); assert.equal(b[1][2], "sess-1");
-    assert.match(b[1][4], /FAILED test_foo/);
-    assert.equal(b.filter((c) => c[2] === null).length, 1, "never a cold reload");
+    assert.equal(reviewers(w).length, 0);
   });
 
-  it("missing test file -> resume -> pass once the hook adds one", async () => {
-    const w = world({ changed: ["src/foo.js"], builderHooks: [(x) => x.changed.push("test/foo.test.js")] });
-    const r = await run(w);
-    assert.equal(r.terminalReason, "merged");
-    assert.match(resumes(w)[1][4], /No test file changed/);
+  it("already-fixed with evidence also closes", async () => {
+    const w = world({ changed: [], result: { status: "already-fixed", summary: "done upstream", evidence: ["a.js:1"], tests: [] } });
+    assert.equal((await run(w)).terminalReason, "invalid");
   });
 
-  it("docs-only change needs no test", async () => {
-    const w = world({ changed: ["docs/guide.md", "README.md"] });
-    assert.equal((await run(w)).terminalReason, "merged");
-    assert.equal(resumes(w).length, 1);
-  });
-
-  it(`${MAX_ROUNDS} failed gate rounds -> needs-human`, async () => {
-    const w = world({ ci: [{ result: "FAIL", tail: "x" }, { result: "FAIL", tail: "x" }, { result: "FAIL", tail: "x" }] });
+  it("invalid without evidence goes to needs-human and does not close", async () => {
+    const w = world({ changed: [], result: { status: "invalid", summary: "trust me", evidence: [], tests: [] } });
     const r = await run(w);
     assert.equal(r.terminalReason, "needs-human");
-    assert.equal(resumes(w).length, 1 + MAX_ROUNDS);
+    assert.equal(w.closed.length, 0);
     assert.ok(w.edits.some((e) => e.includes("needs-human")));
-    assert.equal(w.prs.length, 0);
+    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes("without evidence")));
   });
-});
 
-describe("lean path: review", () => {
-  it("blocking finding -> builder resumed via --resume -> delta re-review -> merge", async () => {
-    const w = world({ reviews: [reply([finding({ severity: "HIGH", title: "null deref" })]), reply([])] });
+  it("review FAIL -> builder resumed via --resume with the reason -> re-review PASS -> merge", async () => {
+    const w = world({ reviews: [bad("src/foo.js:9 still wrong"), ok()] });
     const r = await run(w);
     assert.equal(r.terminalReason, "merged");
-    const b = resumes(w);
-    assert.equal(b[1][2], "sess-1"); assert.match(b[1][4], /null deref/);
-    const reviews = w.calls.filter((c) => c[1] === "reviewer");
-    assert.equal(reviews.length, 2);
-    assert.match(reviews[1][4], /DELTA re-review/);
-    assert.equal(reviews[1][2], null, "reviewer is always a fresh session");
-    assert.deepEqual(markers(w).filter((m) => m === "FORGE:REVIEW").length, 2);
+    const b = builders(w);
+    assert.equal(b.length, 2);
+    assert.equal(b[1][2], "sess-1");
+    assert.match(b[1][4], /src\/foo.js:9 still wrong/);
+    assert.equal(reviewers(w).length, 2);
+    assert.equal(w.prs.length, 1);
+    assert.equal(registers(w).length, 1);
+    assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
   });
 
-  it("2 failed fix rounds -> needs-human", async () => {
-    const bad = reply([finding({ severity: "CRITICAL" })]);
-    const w = world({ reviews: [bad, bad, bad] });
+  it("review FAIL twice -> needs-human, no PR", async () => {
+    const w = world({ reviews: [bad(), bad("still bad")] });
     const r = await run(w);
     assert.equal(r.terminalReason, "needs-human");
-    assert.equal(resumes(w).length, 1 + MAX_ROUNDS);
+    assert.equal(builders(w).length, 2);
     assert.equal(w.prs.length, 0);
+    assert.equal(w.merges.length, 0);
+    assert.ok(w.edits.some((e) => e.includes("needs-human")));
   });
 
-  it("non-blocking findings are listed in the review comment and never filed as issues", async () => {
-    const w = world({ reviews: [reply([finding({ severity: "LOW", title: "naming nit" }), finding({ severity: "MEDIUM", confidence: "LIKELY", title: "maybe" }),
-      finding({ severity: "MEDIUM", confidence: "CONFIRMED", scope: "pre-existing", title: "old bug" })])] });
+  it("a FAIL verdict with fixes_issue true and no regression is not a failure", async () => {
+    const w = world({ reviews: [ok({ verdict: "FAIL" })] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 1);
+  });
+
+  it("builder blocked, or no commit, is needs-human", async () => {
+    assert.equal((await run(world({ result: { status: "blocked", summary: "need creds" } }))).terminalReason, "needs-human");
+    assert.equal((await run(world({ changed: [] }))).terminalReason, "needs-human");
+  });
+
+  it("red remote CI is needs-human; slow CI polls with backoff and ends ci-pending, never needs-human", async () => {
+    const w = world({ waits: [{ rc: 1, text: "lint failed" }] });
+    assert.equal((await run(w, { mergeWait: "all" })).terminalReason, "needs-human");
+    const w2 = world({ waits: Array(500).fill({ rc: 2, text: "" }) });
+    const r2 = await run(w2, { ciMaxMinutes: 10, mergeWait: "all" });
+    assert.equal(r2.terminalReason, "ci-pending");
+    assert.equal(w2.edits.length, 0);
+    const w3 = world({ waits: [{ rc: 2, text: "" }, { rc: 2, text: "" }] });
+    assert.equal((await run(w3, { mergeWait: "all" })).terminalReason, "merged");
+  });
+
+  it("refuses merge when the CI-gated head differs from the reviewed head", async () => {
+    const w = world({ waits: [{ rc: 0, text: "CI_GATE_HEAD: deadbeefdead" }] });
+    assert.equal((await run(w, { mergeWait: "all" })).terminalReason, "needs-human");
+    assert.equal(w.merges.length, 0);
+  });
+
+  it("an open Depends-on dependency refuses the run before any label or worktree", async () => {
+    const w = world();
+    const gh = w.io.gh;
+    w.io.gh = async (a) => {
+      if (a[0] === "api" && /issues\/7$/.test(a[1])) return JSON.stringify({ body: "**Depends on**: #3", user: { login: "x" }, author_association: "OWNER" });
+      if (a[0] === "api" && /issues\/3$/.test(a[1])) return JSON.stringify({ state: "open" });
+      return gh(a);
+    };
+    const r = await run(w);
+    assert.ok(["dependency-open", "dependency-unreadable"].includes(r.terminalReason));
+    assert.equal(w.labels.length, 0);
+    assert.equal(w.calls.filter((c) => c[1] === "worktree").length, 0);
+  });
+
+  it("an open PR / remote branch resumes: worktree from the branch, builder skipped, review then merge", async () => {
+    const w = world({ prList: [{ number: 77, headRefOid: "x" }], remote: "abc\trefs/heads/feat/issue-7-lean" });
     const r = await run(w);
     assert.equal(r.terminalReason, "merged");
-    const rev = w.comments.find((c) => c.includes("FORGE:REVIEW"));
-    for (const t of ["naming nit", "maybe", "old bug"]) assert.ok(rev.includes(t));
-    assert.equal(resumes(w).length, 1);
+    assert.equal(builders(w).length, 0);
+    assert.equal(w.prs.length, 0);
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add" && c.includes("origin/feat/issue-7-lean")));
   });
 
-  it("unparseable reviewer output is retried once, then needs-human", async () => {
-    const w = world({ reviews: ["no json here", "still none"] });
-    assert.equal((await run(w)).terminalReason, "needs-human");
-  });
-
-  it("blocking classification", () => {
-    assert.ok(isBlocking({ severity: "HIGH", confidence: "POSSIBLE" }));
-    assert.ok(isBlocking({ severity: "CRITICAL" }));
-    assert.ok(isBlocking({ severity: "MEDIUM", confidence: "CONFIRMED", scope: "introduced" }));
-    assert.ok(!isBlocking({ severity: "MEDIUM", confidence: "CONFIRMED", scope: "pre-existing" }));
-    assert.ok(!isBlocking({ severity: "MEDIUM", confidence: "LIKELY", scope: "introduced" }));
-    assert.ok(!isBlocking({ severity: "LOW", confidence: "CONFIRMED" }));
-    assert.deepEqual(parseFindings("x ```json\n[{\"a\":1}]\n``` y"), [{ a: 1 }]);
-    assert.equal(parseFindings("nothing"), null);
+  it("builder uses the CLI default model; reviewer is read-only Sonnet unless configured", async () => {
+    const w = world(); await run(w);
+    assert.equal(builders(w)[0][3], null);
+    assert.equal(builders(w)[0][5], false);
+    assert.equal(reviewers(w)[0][3], "claude-sonnet-5-5");
+    assert.equal(reviewers(w)[0][5], true);
+    const w2 = world(); await run(w2, { reviewerModel: "my-model" });
+    assert.equal(reviewers(w2)[0][3], "my-model");
   });
 });
 
-describe("lean path: risk tier and routing", () => {
-  it("risky path adds a security reviewer (and a calm change does not)", async () => {
-    const w = world({ changed: ["src/auth/login.js", "test/auth.test.js"] });
+describe("comment templates", () => {
+  const full = { status: "fixed", summary: "fixed foo", evidence: ["src/foo.js:3 null deref"], root_cause: "foo derefs null at src/foo.js:3",
+    approach: "guard null", sibling_sites_checked: ["src/bar.js:8: same guard added"], changes: [{ file: "src/foo.js", change: "add guard", why: "avoid crash" }],
+    tests: [{ command: "node --test test/foo.test.js", result: "pass", fails_without_fix: true }], risks: ["none"], follow_ups: ["audit baz"] };
+  const rv = { verdict: "PASS", fixes_issue: true, regression: false, reason: "src/foo.js:3 ok", checked: "callers of foo" };
+
+  it("renders full fields", () => {
+    const v = renderValidate(full, "valid"); const p = renderPlan(full, ["src/foo.js"]);
+    assert.match(v, /Root cause:\*\* foo derefs null at src\/foo.js:3/);
+    assert.match(p, /Approach:\*\* guard null/); assert.match(p, /src\/bar.js:8: same guard added/); assert.match(p, /node --test test\/foo.test.js/);
+    assert.match(renderReview(rv), /Checked:\*\* callers of foo/);
+    const reg = renderRegister({ result: full, gitFiles: [], review: rv, links: { validate: "V", plan: "P", review: "R" }, prUrl: "PRURL", usage: "cost $1", policy: "required" });
+    for (const n of ["| src/foo.js | add guard | avoid crash |", "fails without fix: yes", "Risks:** none", "Follow-ups:** audit baz", "Validation: V", "Plan: P", "Review: R", "PR: PRURL", "Merge policy:** required", "cost $1"]) assert.ok(reg.includes(n), n);
+    const pr = renderPrBody({ issue: 7, result: full });
+    assert.match(pr, /^Closes #7/); assert.match(pr, /\| file \| change \| why \|/); assert.match(pr, /node --test/);
+  });
+
+  it("missing fields render as 'not reported', never broken markdown", () => {
+    const reg = renderRegister({ result: {}, gitFiles: ["a.js"], review: { ...rv, checked: undefined }, links: {}, prUrl: "U", usage: "u", policy: "none" });
+    assert.ok(reg.includes(NR));
+    assert.match(reg, /\| a.js \| not reported \| not reported \|/);
+    assert.match(reg, /Verification\*\*\nnot reported/);
+    assert.doesNotMatch(reg, /undefined|null|\[object/);
+    assert.doesNotMatch(renderValidate(null, "blocked"), /undefined|null/);
+    assert.doesNotMatch(renderPlan(undefined), /undefined/);
+    assert.doesNotMatch(renderReview({ verdict: "PASS", fixes_issue: true, regression: false }), /undefined/);
+  });
+
+  it("escapes pipes and newlines in table cells", () => {
+    assert.equal(cell("a|b\nc"), "a\\|b c");
+    const t = renderPrBody({ issue: 1, result: { changes: [{ file: "a|b.js", change: "x\ny", why: "p|q" }] } });
+    const row = t.split("\n").find((l) => l.startsWith("| a"));
+    assert.equal(row, "| a\\|b.js | x y | p\\|q |");
+  });
+
+  it("posts VALIDATE, PLAN, REVIEW, WORK-ON in order; VALIDATE and PLAN before the reviewer", async () => {
+    const w = world({ result: full });
     await run(w);
-    const roles = w.calls.filter((c) => c[0] === "runner").map((c) => c[1]);
-    assert.ok(roles.includes("security-reviewer"));
-    const w2 = world(); await run(w2);
-    assert.ok(!w2.calls.some((c) => c[1] === "security-reviewer"));
+    const m = w.comments.map((c) => /FORGE:[A-Z_-]+/.exec(c)[0]);
+    assert.deepEqual(m, ["FORGE:STARTED", "FORGE:VALIDATE", "FORGE:PLAN", "FORGE:REVIEW", "FORGE:WORK-ON"]);
+    const idx = []; w.seq.forEach((s, i) => { if (s === "comment") idx.push(i); });
+    assert.ok(idx[1] < w.seq.indexOf("reviewer") && idx[2] < w.seq.indexOf("reviewer") && idx[3] > w.seq.indexOf("reviewer"));
+    const pr = w.prs[0][w.prs[0].indexOf("--body") + 1];
+    assert.match(pr, /Root cause/); assert.match(pr, /\| src\/foo.js \| add guard \| avoid crash \|/);
   });
 
-  it("riskTier covers auth, crypto, secret, permission, migration, payment, workflows", () => {
-    for (const f of ["lib/auth/x.py", "pkg/crypto/aes.go", "config/secrets.yml", "app/permissions.rb", "db/migrations/001.sql", "src/payment/charge.ts", ".github/workflows/ci.yml"]) {
-      assert.equal(riskTier([f]).tier, "high", f);
+  it("builder prompt with the structured fields stays within 1.2k tokens", () => {
+    assert.ok(approxTokens(builderPrompt(7)) <= 1200);
+    assert.match(builderPrompt(7), /root_cause/); assert.match(builderPrompt(7), /sibling_sites_checked/);
+  });
+});
+
+describe("merge_wait policy", () => {
+  const states = (o) => Object.entries(o).map(([name, state]) => ({ name, state }));
+  it("required with no protection (empty) merges immediately without polling", async () => {
+    const w = world(); let polled = 0;
+    w.io.requiredChecks = async () => []; w.io.checkStates = async () => { polled++; return []; };
+    w.io.waitCiGreen = async () => { polled++; return { rc: 2, text: "" }; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(polled, 0);
+    assert.match(registers(w)[0], /Merge policy:\*\* required \(no required checks/);
+  });
+  it("required with a pending required check waits (backoff) then merges", async () => {
+    const w = world(); const seqs = [states({ build: "pending" }), states({ build: "pending" }), states({ build: "success", other: "failure" })]; let sleeps = 0;
+    w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => seqs.shift();
+    const s = w.io.sleep; w.io.sleep = async (ms) => { sleeps++; return s(ms); };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(sleeps, 2);
+    assert.match(registers(w)[0], /required \(build\)/);
+    assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+  });
+  it("required with a failing required check is needs-human; slow required check is ci-pending", async () => {
+    const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "failure" });
+    assert.equal((await run(w)).terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
+    const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => states({ build: "pending" });
+    assert.equal((await run(w2, { ciMaxMinutes: 5 })).terminalReason, "ci-pending");
+  });
+  it("all waits for every check (waitCiGreen); none merges immediately", async () => {
+    const w = world({ waits: [{ rc: 2, text: "" }] }); let req = 0; w.io.requiredChecks = async () => { req++; return []; };
+    assert.equal((await run(w, { mergeWait: "all" })).terminalReason, "merged");
+    assert.equal(w.waits.length, 0); assert.equal(req, 0);
+    assert.match(registers(w)[0], /Merge policy:\*\* all/);
+    const w2 = world({ waits: [{ rc: 1, text: "red" }] });
+    assert.equal((await run(w2, { mergeWait: "none" })).terminalReason, "merged");
+    assert.equal(w2.waits.length, 1); assert.deepEqual(w2.merges[0].slice(-2), ["--match-head-commit", w2.head]);
+  });
+});
+
+describe("prompts", () => {
+  it("builder prompt is at most 1k tokens and short and plain", () => {
+    const p = builderPrompt(7);
+    assert.ok(approxTokens(p) <= 1000);
+    assert.match(p, /Resolve issue #7 \(read it with gh issue view 7 --comments\)/);
+    assert.match(p, /Do not push or touch GitHub/);
+    assert.match(p, /result\.json/);
+  });
+
+  it("reviewer system prompt is at most 1.5k tokens and holds only the two questions", () => {
+    assert.ok(approxTokens(REVIEWER_SYSTEM) <= 1500);
+    assert.match(REVIEWER_SYSTEM, /Does this change fix the issue as described\?/);
+    assert.match(REVIEWER_SYSTEM, /introduce a regression/);
+    for (const banned of [/edge/i, /style/i, /harden/i, /nice.to.have/i, /severity/i, /nit/i, /optional/i, /refactor/i, /naming/i, /performance/i, /security/i]) {
+      assert.doesNotMatch(REVIEWER_SYSTEM, banned);
     }
-    assert.equal(riskTier(["src/util/format.js"]).tier, "low");
-    assert.equal(riskTier(["src/a.js"], "rotate the secret key").tier, "high");
+    assert.equal((REVIEWER_SYSTEM.match(/^\d\. /gm) ?? []).length, 2);
   });
 
-  it("auto: full only when risk high AND diff large", async () => {
-    assert.equal(choosePath("auto", { tier: "high" }, { files: 20, lines: 10 }), "full");
-    assert.equal(choosePath("auto", { tier: "high" }, { files: 2, lines: 50 }), "lean");
-    assert.equal(choosePath("auto", { tier: "low" }, { files: 40, lines: 5000 }), "lean");
-    assert.equal(choosePath("lean", { tier: "high" }, { files: 40, lines: 5000 }), "lean");
-    assert.ok(isLargeDiff({ lines: 400 }));
-    const big = world({ changed: ["src/auth/a.js", "test/a.test.js"], lines: 900 });
-    const r = await run(big, { path: "auto" });
-    assert.equal(r.terminalReason, "route-full");
-    assert.equal(big.prs.length, 0);
-    const small = world({ changed: ["src/auth/a.js", "test/a.test.js"], lines: 30 });
-    assert.equal((await run(small, { path: "auto" })).terminalReason, "merged");
-    const calm = world({ lines: 900 });
-    assert.equal((await run(calm, { path: "auto" })).terminalReason, "merged");
+  it("the full reviewer prompt for a typical diff stays under 1.5k tokens of instructions plus content", () => {
+    const p = reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, diff: "x".repeat(2000) });
+    assert.match(p, /<diff>/);
+    assert.ok(approxTokens(REVIEWER_SYSTEM) + approxTokens(reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, diff: "" })) <= 1500);
+  });
+
+  it("parseVerdict: flags decide, garbage is null", () => {
+    assert.equal(parseVerdict(ok()).fail, false);
+    assert.equal(parseVerdict(ok({ regression: true })).fail, true);
+    assert.equal(parseVerdict(bad()).fail, true);
+    assert.equal(parseVerdict("no json"), null);
+    assert.equal(parseVerdict('{"verdict":"FAIL","reason":"x"}').fail, true);
   });
 });
 
-describe("lean path: remote CI", () => {
-  it("slow CI polls with backoff and is never a needs-human", async () => {
-    const w = world({ waits: Array.from({ length: 500 }, () => ({ rc: 3, text: "pending" })) });
-    const r = await run(w, { ciMaxMinutes: 30 });
-    assert.equal(r.terminalReason, "ci-pending");
-    assert.equal(w.edits.length, 0);
-    assert.equal(w.merges.length, 0);
-    assert.ok(w.clock >= 30 * 60000);
+describe("run-issue routing", () => {
+  const mk = () => { const seen = {}; return { seen, dir: tmpDir("core-cli-"), emitTelemetry: async () => {}, leanIo: {}, io: { gh: async () => "o/r\n" },
+    leanModule: { runCore: async (o) => { seen.core = o.path; return { terminalReason: "merged" }; } }, runIssue: async () => { seen.full = true; return { terminalReason: "merged" }; } }; };
+  const quiet = async (fn) => { const l = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = l; } };
+
+  it("default (no --path) runs the core work-on", async () => {
+    const d = mk();
+    await quiet(() => runFromCli(["7", "--lane", "staging", "--repo", "o/r"], d));
+    assert.equal(d.seen.core, "core"); assert.ok(!d.seen.full);
   });
 
-  it("pending then green merges", async () => {
-    const w = world({ waits: [{ rc: 3, text: "" }, { rc: 4, text: "" }] });
-    assert.equal((await run(w)).terminalReason, "merged");
-  });
-
-  it("red remote CI -> needs-human", async () => {
-    const w = world({ waits: [{ rc: 1, text: "CI_GATE: FAIL" }] });
-    assert.equal((await run(w)).terminalReason, "needs-human");
-    assert.equal(w.merges.length, 0);
-  });
-});
-
-describe("lean path: codebase-agnostic", () => {
-  it("works on non-FD layouts (Go, Java, Ruby)", async () => {
-    for (const changed of [["pkg/cache/cache.go", "pkg/cache/cache_test.go"], ["src/main/java/a/Foo.java", "src/test/java/a/FooTest.java"], ["app/models/foo.rb", "spec/models/foo_spec.rb"]]) {
-      const w = world({ changed });
-      assert.equal((await run(w)).terminalReason, "merged", changed.join());
+  it("--path lean and --path auto are aliases of the core", async () => {
+    for (const p of ["lean", "auto", "core"]) {
+      const d = mk();
+      await quiet(() => runFromCli(["7", "--lane", "staging", "--repo", "o/r", "--path", p], d));
+      assert.ok(d.seen.core && !d.seen.full, p);
     }
-    assert.ok(isTestFile("pkg/x_test.go") && isTestFile("tests/test_x.py") && isTestFile("src/__tests__/a.ts") && !isTestFile("src/main.go"));
-    assert.ok(isDocsOnly(["docs/a.rst", "README.md"]) && !isDocsOnly(["README.md", "src/a.go"]));
   });
 
-  it("prompts carry no ForgeDock-specific paths", () => {
-    for (const p of [BUILDER_SYSTEM, REVIEWER_SYSTEM, SECURITY_REVIEWER_SYSTEM]) assert.doesNotMatch(p, /commands\/|scripts\/|bin\/|forge\.yaml|forgedock/i);
-    const src = readFileSync(new URL("./lean.mjs", import.meta.url), "utf8");
-    assert.doesNotMatch(src, /bin\/engine\.mjs|commands\//);
+  it("--path full still routes to the old engine", async () => {
+    const d = mk();
+    await quiet(() => runFromCli(["7", "--lane", "staging", "--repo", "o/r", "--path", "full"], d));
+    assert.ok(d.seen.full); assert.equal(d.seen.core, undefined);
   });
-});
 
-describe("lean path: prompts", () => {
-  it("each phase prompt is 4k tokens or less and states the contract", () => {
-    for (const p of [BUILDER_SYSTEM, REVIEWER_SYSTEM, SECURITY_REVIEWER_SYSTEM]) assert.ok(approxTokens(p) <= 4000, `${approxTokens(p)} tokens`);
-    for (const f of ["validate.json", "plan.md", "implement.json"]) assert.ok(BUILDER_SYSTEM.includes(`.forge-lean/${f}`));
-    assert.match(BUILDER_SYSTEM, /FAILS without the fix/);
-    assert.match(BUILDER_SYSTEM, /[Ss]ibling/);
-    assert.match(REVIEWER_SYSTEM, /JSON array/);
+  it("bad --path errors; --retry is rejected on the core path", async () => {
+    await assert.rejects(runFromCli(["7", "--lane", "staging", "--path", "bogus"], mk()), /--path must be/);
+    await assert.rejects(runFromCli(["7", "--lane", "staging", "--repo", "o/r", "--retry"], mk()), /not supported with the core path/);
+    assert.deepEqual(ENGINE_PATHS, ["core", "full", "lean", "auto"]);
   });
 });
 
-describe("runner extension and CLI wiring", () => {
-  it("runCliBackend appends extraArgs and returns the envelope session_id", () => {
-    let argv;
-    const r = runCliBackend({ spec: { name: "x" }, userMessage: "go", cwd: process.cwd(), bin: "claude", logger: { log() {} },
-      extraArgs: ["--resume", "sess-9"], sessionFlags: ["--strict-mcp-config"],
-      spawnFn: (_b, a) => { argv = a; return { status: 0, stderr: "", stdout: JSON.stringify({ result: "ok", session_id: "sess-9", usage: { input_tokens: 1 } }) }; } });
-    assert.equal(argv[argv.indexOf("--resume") + 1], "sess-9");
-    assert.equal(r.sessionId, "sess-9");
-    const r2 = runCliBackend({ spec: { name: "x" }, userMessage: "go", cwd: process.cwd(), logger: { log() {} }, spawnFn: () => ({ status: 0, stdout: "{}", stderr: "" }) });
-    assert.equal(r2.sessionId, null);
+describe("orchestrate", () => {
+  const tick = () => new Promise((r) => setImmediate(r));
+  const harness = (bodies, outcomes = {}) => {
+    const log = { starts: [], ends: [], active: 0, maxActive: 0 };
+    return { log,
+      readBody: async (n) => bodies[n] ?? "",
+      runOne: async (n) => {
+        log.starts.push(n); log.active++; log.maxActive = Math.max(log.maxActive, log.active);
+        await tick(); await tick();
+        log.active--; log.ends.push(n);
+        const reason = outcomes[n] ?? "merged";
+        return { terminalReason: reason, pr: reason === "merged" ? 100 + n : null, cost_usd: 0.5, detail: reason };
+      } };
+  };
+
+  it("parseDeps reads Depends-on lines and ignores self references", () => {
+    assert.deepEqual(parseDeps("x\n**Depends on**: #4\n**Depends on**: #7\n", 7), [4]);
   });
 
-  it("buildLeanSessionFlags reuses the capability probe and falls back cleanly", () => {
-    const f = buildLeanSessionFlags({ strictMcp: true, disableSlash: true }, {});
-    for (const x of ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands"]) assert.ok(f.includes(x), x);
-    assert.ok(!f.includes("--setting-sources"), "user-scope safety hooks keep running");
-    assert.deepEqual(buildLeanSessionFlags({ strictMcp: false, disableSlash: false }, {}), []);
-    assert.deepEqual(buildLeanSessionFlags({ strictMcp: true, disableSlash: true }, { FORGEDOCK_FULL_SESSION: "1" }), []);
+  it("runs at most K at once", async () => {
+    const h = harness({});
+    const rows = await orchestrate({ issues: [1, 2, 3, 4, 5, 6], parallel: 2, ...h });
+    assert.equal(h.log.maxActive, 2);
+    assert.equal(rows.length, 6);
+    assert.ok(rows.every((r) => r.outcome === "merged"));
   });
 
-  it("run-issue --path lean dispatches to the lean engine; default stays full; auto escalates", async () => {
-    const dir = tmpDir("lean-cli-");
-    const mk = (result) => { const seen = {}; return { seen, leanModule: { runLean: async (o) => { seen.path = o.path; return result; } }, leanIo: {}, dir, emitTelemetry: async () => {},
-      io: { gh: async () => "o/r\n" }, runIssue: async () => { seen.full = true; return { terminalReason: "merged" }; } }; };
-    const silent = console.log; console.log = () => {};
+  it("default style K=3 runs three in parallel", async () => {
+    const h = harness({});
+    await orchestrate({ issues: [1, 2, 3, 4], parallel: 3, ...h });
+    assert.equal(h.log.maxActive, 3);
+  });
+
+  it("a dependent waits until its dependency has merged", async () => {
+    const h = harness({ 2: "**Depends on**: #1" });
+    await orchestrate({ issues: [2, 1, 3], parallel: 3, ...h });
+    assert.ok(h.log.ends.indexOf(1) < h.log.starts.indexOf(2), JSON.stringify(h.log));
+  });
+
+  it("a dependent is skipped, without running, when its dependency ends needs-human (transitively)", async () => {
+    const h = harness({ 2: "**Depends on**: #1", 3: "**Depends on**: #2" }, { 1: "needs-human" });
+    const rows = await orchestrate({ issues: [1, 2, 3, 4], parallel: 3, ...h });
+    assert.deepEqual(rows.map((r) => r.outcome), ["needs-human", "skipped", "skipped", "merged"]);
+    assert.ok(!h.log.starts.includes(2) && !h.log.starts.includes(3));
+    assert.match(rows[1].detail, /#1/);
+  });
+
+  it("a dependency that closed as invalid does not block", async () => {
+    const h = harness({ 2: "**Depends on**: #1" }, { 1: "invalid" });
+    const rows = await orchestrate({ issues: [1, 2], parallel: 2, ...h });
+    assert.equal(rows[1].outcome, "merged");
+  });
+
+  it("a dependency cycle is skipped rather than hanging; a thrown run is an engine-error row", async () => {
+    const h = harness({ 1: "**Depends on**: #2", 2: "**Depends on**: #1" });
+    const rows = await orchestrate({ issues: [1, 2], parallel: 2, ...h });
+    assert.ok(rows.every((r) => r.outcome === "skipped"));
+    const rows2 = await orchestrate({ issues: [9], runOne: async () => { throw new Error("boom"); }, readBody: async () => "" });
+    assert.equal(rows2[0].outcome, "engine-error");
+  });
+
+  it("formatTable prints issue, outcome, PR, cost, minutes", () => {
+    const t = formatTable([{ issue: 1, outcome: "merged", pr: 101, cost_usd: 0.5, minutes: 3.2 }, { issue: 2, outcome: "skipped", pr: null, cost_usd: 0, minutes: 0, detail: "dependency #1 ended needs-human" }]);
+    assert.match(t, /issue\s+outcome\s+PR\s+cost\s+min/);
+    assert.match(t, /#1\s+merged\s+#101\s+\$0\.50\s+3\.2/);
+    assert.match(t, /skipped \(dependency #1/);
+  });
+
+  it("orchestrateFromCli wires parallel, lane and prints the table", async () => {
+    const seen = [];
+    const logs = [];
+    const l = console.log; console.log = (s) => logs.push(String(s));
     try {
-      const a = mk({ terminalReason: "merged" });
-      await runFromCli(["7", "--lane", "staging", "--path", "lean", "--repo", "o/r"], a);
-      assert.equal(a.seen.path, "lean"); assert.ok(!a.seen.full);
-      const b = mk({ terminalReason: "route-full", detail: "x" });
-      await runFromCli(["7", "--lane", "staging", "--path", "auto", "--repo", "o/r"], b);
-      assert.equal(b.seen.path, "auto"); assert.ok(b.seen.full);
-      const c = mk({}); await runFromCli(["7", "--lane", "staging", "--repo", "o/r"], c);
-      assert.equal(c.seen.path, undefined); assert.ok(c.seen.full);
-      await assert.rejects(runFromCli(["7", "--lane", "staging", "--path", "bogus"], mk({})), /--path must be/);
-    } finally { console.log = silent; }
-    assert.ok(readdirSync(dir).length >= 0);
+      const res = await orchestrateFromCli(["1", "2", "--parallel", "2", "--lane", "main", "--repo", "o/r"], {
+        dir: tmpDir("core-orch-"), emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" },
+        leanIo: { gh: async () => JSON.stringify({ body: "" }) },
+        leanModule: { runCore: async (o) => { seen.push([o.issue, o.lane, o.repo]); return { terminalReason: "merged", pr: 50 + o.issue, cost_usd: 1, wall_ms: 1 }; } } });
+      assert.equal(res.ok, true);
+    } finally { console.log = l; }
+    assert.deepEqual(seen.sort(), [[1, "main", "o/r"], [2, "main", "o/r"]]);
+    assert.ok(logs.some((s) => /issue\s+outcome/.test(s)));
+    await assert.rejects(orchestrateFromCli([], {}), /usage/);
   });
 });
