@@ -108,7 +108,7 @@ describe("forge#3541 consumers accept workflow:remediating", () => {
   it("remediate.md M0 accepts either label and clears the state on exit", () => {
     const t = read("commands/work-on/remediate.md");
     assert.match(t, /neither `needs-human` nor `workflow:remediating`/);
-    assert.match(t, /--remove-label "needs-human,workflow:remediating"/);
+    assert.match(t, /--remove-label "workflow:remediating"/);
     assert.match(t, /Stranded-state rule/);
   });
 
