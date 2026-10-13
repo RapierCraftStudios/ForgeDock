@@ -340,9 +340,13 @@ sy Y-6 "foxtrot meta" 'Odd `a*b` and `$(x)` and `[` tokens'
 sy Y-7 "golf rootcause" 'Root cause: stepKey is built too late'
 cm MEMBER User "$(agent_body security "$SHA" "$SY_PROSE" "$SY_MARKS")"; flush
 run "$GOOD" extract; rc_is "symbol fallback" "$RC" 0
+# stale cited line (outside every added hunk) naming an added identifier: Y-1, Y-7 introduced
+# generic words (this, file) and identifiers under 4 characters (abc): Y-3 never triggers the fallback
 for pair in Y-1:introduced Y-2:pre-existing Y-3:pre-existing Y-4:pre-existing Y-5:pre-existing Y-6:pre-existing Y-7:introduced; do
     want "symbol fallback: ${pair%%:*}" ".findings[] | select(.id == \"${pair%%:*}\") | .scope" findings.json "${pair#*:}"
 done
+want "symbol fallback: stale cited line naming an added identifier is introduced" '[.findings[] | select(.id == "Y-1" or .id == "Y-7") | .scope] | join(",")' findings.json "introduced,introduced"
+want "symbol fallback: generic words and short identifiers never trigger the fallback" '.findings[] | select(.id == "Y-3") | .scope' findings.json "pre-existing"
 want "symbol fallback: introduced routes file" '.findings[] | select(.id == "Y-1") | .route' findings.json "file"
 want "symbol fallback: base-only stays pre-existing route" '.findings[] | select(.id == "Y-2") | .route' findings.json "pre-existing"
 # unreadable added text (extraction failure) keeps the line-window result
