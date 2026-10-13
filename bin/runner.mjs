@@ -1507,6 +1507,8 @@ export function runCliBackend({
   sessionFlags = [],
   // #4081: extra argv (e.g. ["--resume", id]) appended verbatim, never dropped by FORGEDOCK_FULL_SESSION.
   extraArgs = [],
+  // Core work-on: extra child env (e.g. a per-run TMPDIR) applied last.
+  env: extraEnv = null,
 }) {
   // forge#3589: opt-in flags, validated again here as defence in depth. Callers
   // (runCommand) are responsible for the version gate. Unset -> argv unchanged.
@@ -1581,6 +1583,9 @@ export function runCliBackend({
     // intact — only the Anthropic key is removed.
     const childEnv = withLeaseHolder(withRunTmpdir(withForgedockHome({ ...process.env }), { issue: issueFromArgs(args), cwd }), leaseHolder);
     delete childEnv.ANTHROPIC_API_KEY;
+    if (extraEnv && typeof extraEnv === "object") {
+      for (const [k, v] of Object.entries(extraEnv)) if (typeof v === "string" && k !== "ANTHROPIC_API_KEY") childEnv[k] = v;
+    }
 
     // No `shell` option (defaults to false): argv is passed as discrete,
     // unparsed elements — see the SECURITY note above. `bin` is expected to

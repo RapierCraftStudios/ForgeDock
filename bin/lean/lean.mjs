@@ -5,10 +5,11 @@
  * ForgeDock registers everything on GitHub (labels, one register comment, PR, merge). No investigation, synthesis,
  * severity taxonomy, risk tiers or local CI gates. All effects are injected through `io` so it is unit-testable.
  */
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
+import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
-import { ciPollDelayMs, ENGINE_VERSION } from "../engine.mjs";
+import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency } from "../engine/phases.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, capComment, sanitizeMd } from "./render.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, PLAN_FILE, IMPLEMENTATION_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
@@ -31,7 +32,7 @@ const num = (v) => (Number.isFinite(v) ? v : null);
  */
 export async function runCore(o) {
   const { issue, repo, lane, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
-    ciMaxMinutes = 360, mergeWait = "required", onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    ciMaxMinutes = 360, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const base = `origin/${lane}`;
@@ -65,10 +66,19 @@ export async function runCore(o) {
 
   // ---- lease (same FORGE:STATE lease the full path uses) ----
   const agentId = o.agentId ?? `core_${process.pid}`;
+  const myHost = o.hostName ?? osHostname();
+  const leaseObj = () => ({ by: agentId, until: now() + leaseTtlMs, host: myHost, pid: o.pid ?? process.pid });
+  /** Provably dead: same host and `kill(pid, 0)` throws ESRCH. A different host keeps the TTL behaviour. */
+  const holderDead = (l) => {
+    const parsed = parseLeaseHolder(l?.by);
+    const h = l?.host ?? parsed?.host, pid = l?.pid ?? parsed?.pid;
+    if (!h || !Number.isSafeInteger(pid) || pid <= 0 || sanitizeLeaseHost(h) !== sanitizeLeaseHost(myHost)) return false;
+    try { (o.killFn ?? process.kill.bind(process))(pid, 0); return false; } catch (e) { return e?.code === "ESRCH"; }
+  };
   const leaseTtlMs = o.leaseTtlMs ?? 25 * 60000; // below the projector's 30 min honour cap
   let leaseState = null, leaseTimer = null;
   const writeLease = (lease, extra = {}) => io.projector.writeState(issue, { ...leaseState, ...extra, lease });
-  const renew = async () => { if (io.projector && leaseState) { try { await writeLease({ by: agentId, until: now() + leaseTtlMs }); } catch { /* best effort */ } } };
+  const renew = async () => { if (io.projector && leaseState) { try { await writeLease(leaseObj()); } catch { /* best effort */ } } };
   async function releaseLease(reason) {
     if (leaseTimer) { clearInterval(leaseTimer); leaseTimer = null; }
     if (!io.projector || !leaseState) return;
@@ -79,6 +89,8 @@ export async function runCore(o) {
   // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
   const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
   let done = null, wtCreated = false;
+  const runId = `${issue}-${t0}`;
+  let runTmp = null;
   async function finish(reason, detail = "", extra = {}, codeOverride = null) {
     if (done) return done; // idempotent: exactly one RUN_TERMINAL and one telemetry emit
     const code = codeOverride ?? codeForTerminalReason(reason);
@@ -95,6 +107,7 @@ export async function runCore(o) {
       try { await post(["FORGE:TRAJECTORY", REGISTER_MARKER], renderTrajectory({ ...T, usage: usageLine() })); } catch { /* best effort */ }
     }
     await releaseLease(reason);
+    if (runTmp) { try { await io.runTmp.remove(runTmp); } catch { /* best effort */ } runTmp = null; } // every terminal, including engine-error and deferred
     if (wtCreated) {
       try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* best effort */ }
       if (reason === "invalid" && !extra.pr) { try { await io.git(["branch", "-D", branch], { cwd }); } catch { /* best effort */ } }
@@ -158,10 +171,28 @@ export async function runCore(o) {
     }
   }
 
+  /** Runner call with the per-run TMPDIR; a usage limit pauses and resumes the same step, or defers past the cap (#4101). */
+  async function callRunner(args) {
+    let pauses = 0;
+    for (;;) {
+      try { return await io.runner({ ...args, ...(runTmp ? { env: { TMPDIR: runTmp, CLAUDE_CODE_TMPDIR: runTmp } } : {}) }); }
+      catch (e) {
+        const epoch = Number.isFinite(e?.resetAtEpochMs) ? e.resetAtEpochMs : null;
+        if (!(e?.usageLimit === true || epoch !== null)) throw e;
+        const waitMs = epoch !== null && epoch > now() ? epoch - now() : DEFAULT_SESSION_LIMIT_WAIT_MS;
+        if (pauses >= maxSessionLimitPauses || waitMs > sessionLimitMaxWaitMs) { e.deferUsageLimit = true; throw e; }
+        pauses++;
+        ev({ event: "PHASE_RATE_LIMITED", phase: args.role, resetAt: epoch, resetAtDisplay: e.resetAt ?? null, waitMs });
+        onProgress({ event: "phase_paused", phase: args.role, reason: "session-limit", detail: `session limit hit; pausing until ${e.resetAt || new Date(now() + waitMs).toISOString()}` });
+        await sleep(waitMs);
+      }
+    }
+  }
+
   async function builder(n, prompt, resume, live = false) {
     onProgress({ event: "phase_enter", phase: "build" });
     await renew();
-    const call = Promise.resolve(io.runner({ role: "builder", issue, cwd: wt, model: builderModel, resume, system: "", prompt }));
+    const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: builderModel, resume, system: "", prompt }));
     let r;
     if (live && io.fs.stat) {
       let settled = false;
@@ -196,15 +227,22 @@ export async function runCore(o) {
   if (io.projector) {
     let st = null;
     try { st = await io.projector.readState(issue); } catch { /* unreadable: proceed */ }
-    if (st?.lease && st.lease.until > now() && st.lease.by !== agentId) {
+    if (st?.lease && st.lease.until > now() && st.lease.by !== agentId && holderDead(st.lease)) {
+      ev({ event: "LEASE_TAKEOVER", from: st.lease.by, host: st.lease.host ?? null, pid: st.lease.pid ?? null });
+      onProgress({ event: "lease_takeover", detail: `taking over the lease of dead holder ${st.lease.by} (pid ${st.lease.pid ?? "?"} gone)` });
+    } else if (st?.lease && st.lease.until > now() && st.lease.by !== agentId) {
       return { terminalReason: "deferred", code: "lease-held", detail: `issue ${issue} leased by ${st.lease.by} until ${new Date(st.lease.until).toISOString()}`, branch, worktree: wt };
     }
     leaseState = { ...(st ?? { v: 1, run: `core_${issue}`, issue, lane, committed: [], phase: null, branch: null, pr: null, terminalReason: null }), terminal: false };
-    try { await writeLease({ by: agentId, until: now() + leaseTtlMs }); } catch { /* best effort */ }
-    leaseTimer = setInterval(() => { writeLease({ by: agentId, until: now() + leaseTtlMs }).catch(() => {}); }, o.leaseRenewMs ?? 120000);
+    try { await writeLease(leaseObj()); } catch { /* best effort */ }
+    leaseTimer = setInterval(() => { writeLease(leaseObj()).catch(() => {}); }, o.leaseRenewMs ?? 120000);
     leaseTimer.unref?.();
   }
 
+  if (io.runTmp) {
+    try { await io.runTmp.prune?.(); } catch { /* best effort */ }
+    try { runTmp = await io.runTmp.make(issue, runId); } catch { runTmp = null; }
+  }
   ev({ event: "RUN_START", run: `core_${issue}_${t0}`, issue, lane, path: "core", version: ENGINE_VERSION, forge_version: ENGINE_VERSION, repo });
   let iss;
   try {
@@ -227,11 +265,36 @@ export async function runCore(o) {
     } catch { /* no resume info: start fresh */ }
     try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* none */ }
     try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
+    // Concurrent lanes in one repo race on .git/config.lock / index.lock during `worktree add`; retry with jitter.
+    // A leftover dir that git no longer lists as a worktree blocks `worktree add`. Remove ONLY this issue's lean dir under the lean root.
+    const wtRoot = o.worktreeRoot ?? join(cwd, ".claude", "worktrees");
+    const leftoverDir = async () => {
+      if (!io.fs.exists || !io.fs.rmdir || dirname(wt) !== wtRoot || basename(wt) !== `lean-${issue}`) return false;
+      if (!(await io.fs.exists(wt))) return false;
+      const listed = String(await io.git(["worktree", "list", "--porcelain"], { cwd }).catch(() => "")).split("\n").some((l) => l === `worktree ${wt}`);
+      if (listed) return false;
+      await io.fs.rmdir(wt);
+      ev({ event: "WORKTREE_LEFTOVER_REMOVED", path: wt });
+      return true;
+    };
+    await leftoverDir();
+    const LOCK_RE = /could not lock|cannot lock ref|\.lock'?: File exists|Unable to create .*\.lock|index\.lock|packed-refs\.lock/i;
+    const addWorktree = async (args) => {
+      let cleaned = false;
+      for (let i = 0; ; i++) {
+        try { return await io.git(args, { cwd }); } catch (e) {
+          const msg = String(e?.stderr ?? e?.message ?? e);
+          if (!cleaned && /already exists/i.test(msg) && (await leftoverDir())) { cleaned = true; continue; }
+          if (i >= 4 || !LOCK_RE.test(msg)) throw e;
+          await sleep(500 * (i + 1) + Math.floor(random() * 500));
+        }
+      }
+    };
     if (resumed) {
       await io.git(["fetch", "origin", branch], { cwd });
-      await io.git(["worktree", "add", "-B", branch, wt, `origin/${branch}`], { cwd });
+      await addWorktree(["worktree", "add", "-B", branch, wt, `origin/${branch}`]);
     } else {
-      await io.git(["worktree", "add", "-B", branch, wt, base], { cwd });
+      await addWorktree(["worktree", "add", "-B", branch, wt, base]);
     }
     wtCreated = true;
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
@@ -273,7 +336,7 @@ export async function runCore(o) {
       for (let t = 0; t < 2; t++) {
         const diff = String(await git(["diff", `${base}...HEAD`]));
         await renew();
-        const rr = await io.runner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
+        const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
           prompt: reviewerPrompt({ issue: iss, diff }) });
         await renew();
         await attempt("review", ++reviewN, rr);
@@ -307,10 +370,9 @@ export async function runCore(o) {
     ev({ event: "PR_OPENED", pr });
     T.pr = [`#${pr}`, resumed?.pr ? "existing" : "opened"];
     const prUrl = /https?:\/\/\S+/.exec(prOut)?.[0] ?? `https://github.com/${repo}/pull/${pr}`;
-    const localHead = String(await git(["rev-parse", "HEAD"])).trim();
+    let localHead = String(await git(["rev-parse", "HEAD"])).trim();
 
-    // ---- 6. the register comment ----
-    // merge policy: required (default) | all | none
+    // ---- 6. merge policy: required (default) | all | none ----
     let policy = mergeWait, required = [];
     if (mergeWait === "required") {
       try { required = (await io.requiredChecks?.(lane)) ?? []; } catch { required = []; }
@@ -319,46 +381,131 @@ export async function runCore(o) {
     T.merge = [policyText, "waiting"];
     T.decisions.push(`merge_wait=${mergeWait}: ${policyText}`);
 
-    // ---- 7. wait per policy, merge at the reviewed head ----
-    if (policy === "none" || (policy === "required" && !required.length)) {
-      // merge right after review
-      T.merge = [policyText, "merged right after review"];
-    } else {
-      const startedAt = now();
-      let pollIndex = 0, gateHead = null;
-      for (;;) {
-        await renew();
-        if (policy === "all") {
-          const w = await io.waitCiGreen(pr, repo, 0).catch(() => ({ rc: 2, text: "" }));
-          if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; break; }
-          if (w.rc === 1) return await needsHuman(`Remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`, OUTCOME_CODES.CI_RED);
-        } else {
-          let states = [];
-          try { states = (await io.checkStates(pr)) ?? []; } catch { states = []; }
-          const st = (n) => states.find((x) => x.name === n)?.state ?? "pending";
-          const failed = required.filter((n) => st(n) === "failure");
-          if (failed.length) return await needsHuman(`Required check(s) failed on PR #${pr}: ${failed.join(", ")}`, OUTCOME_CODES.CI_RED);
-          if (required.every((n) => st(n) === "success")) break;
-        }
-        if (now() - startedAt >= ciMaxMinutes * 60000) {
-          // Slow CI is never a needs-human: leave the PR open and resumable.
-          ev({ event: "CI_PENDING_WAIT", state: "end", pr, result: "timeout" });
-          T.anomalies.push("CI still pending at the wait budget");
-          return await finish("ci-pending", `PR #${pr} still waiting on CI after ${ciMaxMinutes} min`, { pr });
-        }
-        onProgress({ event: "phase_paused", phase: "merge", detail: `CI pending on PR #${pr}` });
-        await sleep(ciPollDelayMs(pollIndex++, random));
+    // ---- base-sync (#4100): merge the lane into the branch when the PR conflicts; merge only, never rebase or force-push ----
+    let syncs = 0;
+    const MAX_SYNCS = 2;
+    const gitOut = async (args) => { try { return String(await git(args)).trim(); } catch { return ""; } };
+    /** CONFLICTING / DIRTY, or UNKNOWN after one short re-poll. Unreadable state counts as not conflicting. */
+    const prConflicting = async () => {
+      for (let i = 0; i < 2; i++) {
+        let j;
+        try { j = JSON.parse(String(await ghc(["pr", "view", String(pr), "-R", repo, "--json", "mergeable,mergeStateStatus"])) || "{}"); } catch { return false; }
+        const m = String(j.mergeable ?? "").toUpperCase(), st = String(j.mergeStateStatus ?? "").toUpperCase();
+        if (m === "CONFLICTING" || st === "DIRTY") return "conflict";
+        if (m !== "UNKNOWN") return false;
+        if (i === 0) await sleep(2000);
       }
-      if (gateHead && !(localHead.startsWith(gateHead) || gateHead.startsWith(localHead))) {
-        return await needsHuman(`CI passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`, OUTCOME_CODES.MERGE_HEAD_MISMATCH);
+      return "unknown";
+    };
+    const conflictFiles = async () => (await gitOut(["diff", "--name-only", "--diff-filter=U"])).split("\n").map((x) => x.trim()).filter(Boolean);
+    const unresolved = async () => (await conflictFiles()).length > 0 || (await gitOut(["grep", "-n", "-e", "^<<<<<<< ", "-e", "^>>>>>>> "])) !== ""
+      || (await gitOut(["diff", "--check"])) !== "" || (await gitOut(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) !== "";
+    const syncRow = [];
+    /** Returns null to continue with the merge flow, or a terminal result. */
+    async function baseSync(trigger, soft = false) {
+      if (syncs >= MAX_SYNCS) return await needsHuman(`PR #${pr} still conflicts with ${lane} after ${MAX_SYNCS} base-syncs (${trigger}).`, OUTCOME_CODES.BASE_CONFLICT);
+      syncs++;
+      await renew();
+      try { await git(["fetch", "origin", lane]); } catch { /* offline: use the local ref */ }
+      const baseSha = (await gitOut(["rev-parse", base])).slice(0, 12);
+      const before = await gitOut(["rev-parse", "HEAD"]);
+      let clean = true, files = [];
+      try { await git(["merge", "--no-edit", base]); } catch { clean = false; files = await conflictFiles(); }
+      let how, tests = "not required (clean merge)", rereview = "not required (conflict-free base merge)";
+      if (clean) {
+        how = "clean merge of the base into the branch";
+      } else {
+        T.decisions.push(`Base-sync ${syncs}: merging ${base} conflicts in ${files.join(", ") || "unknown files"}; builder resolves`);
+        const prompt = `Merging ${base} into this branch conflicts in: ${files.join(", ") || "(see git status)"}. Resolve the conflicts preserving both this fix's intent and the base's changes, run the relevant tests, and commit the merge. Do not push.`;
+        await builder(++attemptN, prompt, sessionId ?? null);
+        if (await unresolved()) {
+          await gitOut(["merge", "--abort"]);
+          return await needsHuman(`Base-sync could not resolve the conflicts in ${files.join(", ")} (conflict markers or an unfinished merge remain).`, OUTCOME_CODES.BASE_CONFLICT);
+        }
+        how = `builder resolved ${files.length} conflicted file(s) and committed the merge`;
+        const r2 = await readResult();
+        tests = Array.isArray(r2?.tests) && r2.tests.length ? r2.tests.map((t) => (typeof t === "string" ? t : `${t.command}: ${t.result}`)).join("; ") : NR_TESTS;
+      }
+      const after = await gitOut(["rev-parse", "HEAD"]);
+      if (soft && clean && after === before) { syncs--; return null; } // UNKNOWN state and nothing to merge: not a conflict
+      if (after !== before) await git(["push", "origin", branch]); // plain push of a merge commit: never force
+      if (!clean) {
+        let rv = await doReview();
+        if (rv?.fail) {
+          T.decisions.push(`Base-sync re-review FAIL: builder resumed with the reason`);
+          await builder(++attemptN, resumeBuilderPrompt(rv.reason), sessionId ?? null);
+          if (await unresolved()) return await needsHuman("Base-sync re-review fix left conflict markers.", OUTCOME_CODES.BASE_CONFLICT);
+          if ((await gitOut(["rev-parse", "HEAD"])) !== after) await git(["push", "origin", branch]);
+          rv = await doReview();
+        }
+        if (!rv) return await needsHuman("Reviewer returned no parseable verdict after base-sync.", OUTCOME_CODES.REVIEW_NO_VERDICT);
+        if (rv.fail) return await needsHuman(`Review FAIL after base-sync: ${rv.reason}`, OUTCOME_CODES.REVIEW_FAILED);
+        rereview = `${rv.verdict}: ${rv.reason || "no concrete failure"}`;
+      }
+      localHead = await gitOut(["rev-parse", "HEAD"]);
+      syncRow.push(`${trigger}: ${clean ? "clean" : "conflicts"} (${baseSha})`);
+      T.baseSync = [`${syncs} sync(s)`, syncRow.join("; ")];
+      await post("FORGE:BASE_SYNC", `## Base Sync\n**Trigger:** ${trigger}\n**Base merged:** \`${base}\` at \`${baseSha}\`\n**Result:** ${clean ? "clean merge" : `conflicts in ${files.map((f) => `\`${f}\``).join(", ") || "unknown files"}`}\n**Resolution:** ${how}\n**Tests run:** ${tests}\n**Re-review:** ${rereview}\n**New head:** \`${localHead.slice(0, 12)}\``);
+      return null;
+    }
+    const NR_TESTS = "not reported";
+
+    // ---- 7. (sync) wait per policy, (sync) merge at the reviewed head ----
+    // A rerun on an existing PR goes through the same conflict check, so a conflicting PR from an earlier run recovers.
+    for (;;) {
+      const c0 = await prConflicting();
+      if (c0) { const r = await baseSync(c0 === "unknown" ? "PR mergeability unknown" : "PR is conflicting", c0 === "unknown"); if (r) return r; }
+      if (policy === "none" || (policy === "required" && !required.length)) {
+        // merge right after review
+        T.merge = [policyText, "merged right after review"];
+      } else {
+        const startedAt = now();
+        let pollIndex = 0, gateHead = null;
+        for (;;) {
+          await renew();
+          if (policy === "all") {
+            const w = await io.waitCiGreen(pr, repo, 0).catch(() => ({ rc: 2, text: "" }));
+            if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; break; }
+            if (w.rc === 1) return await needsHuman(`Remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`, OUTCOME_CODES.CI_RED);
+          } else {
+            let states = [];
+            try { states = (await io.checkStates(pr)) ?? []; } catch { states = []; }
+            const st = (n) => states.find((x) => x.name === n)?.state ?? "pending";
+            const failed = required.filter((n) => st(n) === "failure");
+            if (failed.length) return await needsHuman(`Required check(s) failed on PR #${pr}: ${failed.join(", ")}`, OUTCOME_CODES.CI_RED);
+            if (required.every((n) => st(n) === "success")) break;
+          }
+          if (now() - startedAt >= ciMaxMinutes * 60000) {
+            // Slow CI is never a needs-human: leave the PR open and resumable.
+            ev({ event: "CI_PENDING_WAIT", state: "end", pr, result: "timeout" });
+            T.anomalies.push("CI still pending at the wait budget");
+            return await finish("ci-pending", `PR #${pr} still waiting on CI after ${ciMaxMinutes} min`, { pr });
+          }
+          onProgress({ event: "phase_paused", phase: "merge", detail: `CI pending on PR #${pr}` });
+          await sleep(ciPollDelayMs(pollIndex++, random));
+        }
+        if (gateHead && !(localHead.startsWith(gateHead) || gateHead.startsWith(localHead))) {
+          return await needsHuman(`CI passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`, OUTCOME_CODES.MERGE_HEAD_MISMATCH);
+        }
+      }
+      if (syncs > 0 && (await prConflicting()) === "conflict") continue; // the base moved again while waiting
+      T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
+      try {
+        await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
+        break;
+      } catch (e) {
+        if (!/not mergeable|merge conflict|conflict/i.test(String(e?.stderr ?? "") + String(e?.message ?? ""))) throw e;
+        const r = await baseSync("gh pr merge reported a conflict"); if (r) return r;
       }
     }
-    T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
-    await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
     await ghc(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
     await label("merged");
     return await finish("merged", `PR #${pr}`, { pr });
   } catch (e) {
+    if (e?.deferUsageLimit) {
+      const when = e.resetAt || (Number.isFinite(e.resetAtEpochMs) ? new Date(e.resetAtEpochMs).toISOString() : "unknown");
+      return finish("deferred", `usage limit hit; resets at ${when}`, { code: OUTCOME_CODES.RATE_LIMITED, resetAt: when, resetAtEpochMs: Number.isFinite(e.resetAtEpochMs) ? e.resetAtEpochMs : null }, OUTCOME_CODES.RATE_LIMITED);
+    }
     return finish("engine-error", e?.message ?? String(e));
   }
 }
