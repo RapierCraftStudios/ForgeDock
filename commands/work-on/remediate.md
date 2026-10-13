@@ -42,7 +42,7 @@ Parse from $ARGUMENTS:
 - `--issue {ISSUE_NUMBER}` — linked issue number (optional). If absent, resolved in Phase M0 from the PR body's `Closes #N` reference.
 - `--repo {GH_REPO}` — GitHub repo (resolved from `forge.yaml → project` if omitted)
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag
-- `--base {PR_BASE}` — PR target branch (optional; resolved from the PR's `baseRefName` if omitted)
+- `--base {PR_BASE}` — PR target branch (optional, advisory; the base is always resolved from the PR's `baseRefName`, never from this value)
 - `--lease-holder {LEASE_HOLDER}` — the dispatching engine's own lease holder id (optional); lets the Phase M0 liveness step tell ANOTHER run's lease from the dispatcher's own.
 
 ---
@@ -55,7 +55,9 @@ Re-read current state before doing anything:
 PR_STATE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state,headRefName,baseRefName,body,mergeable,mergeStateStatus,url)
 PR_OPEN_STATE=$(echo "$PR_STATE" | jq -r '.state')
 HEAD_BRANCH=$(echo "$PR_STATE" | jq -r '.headRefName')
-PR_BASE="${PR_BASE:-$(echo "$PR_STATE" | jq -r '.baseRefName')}"
+PR_BASE=$(echo "$PR_STATE" | jq -r '.baseRefName')   # always the PR's own base: a caller --base is advisory and never overrides it, so every later fence (which re-derives from the PR) agrees with this guard-validated value
+# Ref names are attacker-chosen (git accepts `$(...)`, backticks and spaces): fail closed outside the ref charset; later fences re-derive them as data, never substituting them into shell text.
+printf '%s\n%s\n' "$HEAD_BRANCH" "$PR_BASE" | grep -qvE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' && { echo "REMEDIATE_RESULT: status: BLOCKED, blocker: bad PR ref name"; exit 1; }   # STOP
 PR_BODY=$(echo "$PR_STATE" | jq -r '.body')
 ```
 
@@ -234,25 +236,29 @@ Remediation always fixes forward on top of the PR's existing head commit — nev
 ```bash
 cd {REPO_PATH}
 git fetch origin
-WORKTREE_PATH="{WORKTREE_BASE}/remediate-{HEAD_BRANCH_SLUG}-{PR_NUMBER}"
+# refs re-derived as data, fail closed
+{ IFS= read -r HEAD_BRANCH; IFS= read -r PR_BASE; } < <(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefName,baseRefName --jq '.headRefName,.baseRefName')
+printf '%s\n%s\n' "$HEAD_BRANCH" "$PR_BASE" | grep -qvE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' && { echo "REMEDIATE_RESULT: status: BLOCKED, blocker: bad PR ref name"; exit 1; }   # STOP
+HEAD_BRANCH_SLUG=$(printf '%s' "$HEAD_BRANCH" | tr '/' '-')
+WORKTREE_PATH="{WORKTREE_BASE}/remediate-${HEAD_BRANCH_SLUG}-{PR_NUMBER}"
 if [ -d "{WORKTREE_PATH}" ]; then
   git -C "{WORKTREE_PATH}" fetch origin
-  git -C "{WORKTREE_PATH}" checkout {HEAD_BRANCH}
-  git -C "{WORKTREE_PATH}" reset --hard "origin/{HEAD_BRANCH}"
-elif ! WT_ERR=$(git worktree add "{WORKTREE_PATH}" {HEAD_BRANCH} "origin/{HEAD_BRANCH}" 2>&1); then
+  git -C "{WORKTREE_PATH}" checkout "$HEAD_BRANCH"
+  git -C "{WORKTREE_PATH}" reset --hard "origin/$HEAD_BRANCH"
+elif ! WT_ERR=$(git worktree add "{WORKTREE_PATH}" "$HEAD_BRANCH" "origin/$HEAD_BRANCH" 2>&1); then
   # Branch already checked out elsewhere: reuse that worktree (never the main checkout).
   EXISTING_WT=""; MAIN_WT=""; CUR_WT=""
   while IFS= read -r line; do
     case "$line" in
       "worktree "*) CUR_WT="${line#worktree }"; [ -z "$MAIN_WT" ] && MAIN_WT="$CUR_WT" ;;
-      "branch refs/heads/{HEAD_BRANCH}") [ -z "$EXISTING_WT" ] && EXISTING_WT="$CUR_WT" ;;
+      "branch refs/heads/$HEAD_BRANCH") [ -z "$EXISTING_WT" ] && EXISTING_WT="$CUR_WT" ;;
     esac
   done < <(git worktree list --porcelain)
   WORKTREE_PATH=""   # stays empty (BLOCKED) unless the reuse is provably safe
   if [ -n "$EXISTING_WT" ] && [ "$EXISTING_WT" != "$MAIN_WT" ] && [ -d "$EXISTING_WT" ] \
      && [ -z "$(git -C "$EXISTING_WT" status --porcelain)" ] \
-     && [ "$(git -C "$EXISTING_WT" rev-list --count "origin/{HEAD_BRANCH}..HEAD")" = "0" ]; then
-    git -C "$EXISTING_WT" fetch origin && git -C "$EXISTING_WT" reset --hard "origin/{HEAD_BRANCH}" && WORKTREE_PATH="$EXISTING_WT"
+     && [ "$(git -C "$EXISTING_WT" rev-list --count "origin/$HEAD_BRANCH..HEAD")" = "0" ]; then
+    git -C "$EXISTING_WT" fetch origin && git -C "$EXISTING_WT" reset --hard "origin/$HEAD_BRANCH" && WORKTREE_PATH="$EXISTING_WT"
   else echo "$WT_ERR" >&2; fi
   echo "WORKTREE_PATH=$WORKTREE_PATH"   # use this printed value for every later {WORKTREE_PATH}
 fi
@@ -276,32 +282,35 @@ For each FIXABLE item from Phase M1 (the base-sync item, when present, goes firs
 
 ```bash
 cd {WORKTREE_PATH}
+# refs re-derived as data, fail closed
+{ IFS= read -r HEAD_BRANCH; IFS= read -r PR_BASE; } < <(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefName,baseRefName --jq '.headRefName,.baseRefName')
+printf '%s\n%s\n' "$HEAD_BRANCH" "$PR_BASE" | grep -qvE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' && { echo "REMEDIATE_RESULT: status: BLOCKED, blocker: bad PR ref name"; exit 1; }   # STOP
 CUR_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-case "{HEAD_BRANCH}" in
-  "{PR_BASE}"|main|master|staging|milestone/*) echo "refusing base sync: {HEAD_BRANCH} is a shared branch"; BASESYNC_REFUSED=true ;;
+case "$HEAD_BRANCH" in
+  "$PR_BASE"|main|master|staging|milestone/*) echo "refusing base sync: $HEAD_BRANCH is a shared branch"; BASESYNC_REFUSED=true ;;
 esac
-[ "$CUR_BRANCH" = "{HEAD_BRANCH}" ] || BASESYNC_REFUSED=true
+[ "$CUR_BRANCH" = "$HEAD_BRANCH" ] || BASESYNC_REFUSED=true
 # Clean-tree precondition: never merge over pending edits.
 if ! { git diff --quiet && git diff --cached --quiet; }; then
   echo "refusing base sync: working tree has uncommitted changes"; BASESYNC_REFUSED=true
 fi
-git fetch origin {PR_BASE} {HEAD_BRANCH} # allowlist:check-command-side-effects
+git fetch origin "$PR_BASE" "$HEAD_BRANCH" # allowlist:check-command-side-effects
 # Durable sync state (forge#3517): every block runs in a fresh shell, so never carry rounds or the base head in shell vars.
 # Rounds = SYNC merges on the PUSHED branch's first-parent chain: merges not on the base whose second parent is an ancestor of
-# origin/{PR_BASE} (a round counts only once pushed; a manual "Update branch" or feature-branch merge is not a sync and does not
+# origin/$PR_BASE (a round counts only once pushed; a manual "Update branch" or feature-branch merge is not a sync and does not
 # burn the cap). Recorded base head = the newest sync merge's second parent. An unreadable count is the cap.
 BASESYNC_MAX_ROUNDS=2                       # hard cap on sync rounds per PR (M3 plus M6 re-syncs)
 BASESYNC_ROUNDS=0; _p2=""
-if _rl=$(git rev-list --first-parent --merges origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null); then
-  for _m in $_rl; do _q=$(git rev-parse -q --verify "$_m^2" 2>/dev/null) && git merge-base --is-ancestor "$_q" origin/{PR_BASE} 2>/dev/null && { BASESYNC_ROUNDS=$((BASESYNC_ROUNDS+1)); [ -n "$_p2" ] || _p2="$_q"; }; done
+if _rl=$(git rev-list --first-parent --merges "origin/$PR_BASE..origin/$HEAD_BRANCH" 2>/dev/null); then
+  for _m in $_rl; do _q=$(git rev-parse -q --verify "$_m^2" 2>/dev/null) && git merge-base --is-ancestor "$_q" "origin/$PR_BASE" 2>/dev/null && { BASESYNC_ROUNDS=$((BASESYNC_ROUNDS+1)); [ -n "$_p2" ] || _p2="$_q"; }; done
 else BASESYNC_ROUNDS=$BASESYNC_MAX_ROUNDS; fi
 BASESYNC_BASE_SHA="$_p2"
 if [ "$BASESYNC_ROUNDS" -ge "$BASESYNC_MAX_ROUNDS" ]; then
-  echo "refusing base sync: ${BASESYNC_ROUNDS} sync round(s) already on {HEAD_BRANCH} (cap ${BASESYNC_MAX_ROUNDS})"; BASESYNC_REFUSED=true
+  echo "refusing base sync: ${BASESYNC_ROUNDS} sync round(s) already on $HEAD_BRANCH (cap ${BASESYNC_MAX_ROUNDS})"; BASESYNC_REFUSED=true
 fi
 if [ "${BASESYNC_REFUSED:-false}" != "true" ]; then
-  BASESYNC_BASE_SHA=$(git rev-parse origin/{PR_BASE})   # the base head this round merges
-  MERGE_OUT=$(git merge origin/{PR_BASE} --no-edit 2>&1); MERGE_RC=$? # allowlist:check-command-side-effects
+  BASESYNC_BASE_SHA=$(git rev-parse "origin/$PR_BASE")   # the base head this round merges
+  MERGE_OUT=$(git merge "origin/$PR_BASE" --no-edit 2>&1); MERGE_RC=$? # allowlist:check-command-side-effects
   echo "$MERGE_OUT"
   # rc alone cannot tell a conflict from a refusal (both exit 1); MERGE_HEAD can.
   # Outcomes are NOT carried to later fences as shell flags: clean = rc 0; conflicts = MERGE_HEAD present (git state).
@@ -309,7 +318,7 @@ if [ "${BASESYNC_REFUSED:-false}" != "true" ]; then
     # rc!=0 and no MERGE_HEAD: refused, nothing was merged. Park HERE, while MERGE_RC/MERGE_OUT are still in scope.
     run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
     run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "<!-- FORGE:BASESYNC_FAILED -->
-Base sync of PR #{PR_NUMBER} (\`origin/{PR_BASE}\` into \`{HEAD_BRANCH}\`) was refused by git (rc=$MERGE_RC); no merge was started. Git output:
+Base sync of PR #{PR_NUMBER} (\`origin/$PR_BASE\` into \`$HEAD_BRANCH\`) was refused by git (rc=$MERGE_RC); no merge was started. Git output:
 
 \`\`\`
 ${MERGE_OUT}
@@ -327,11 +336,11 @@ Exactly one outcome applies, and it is read from git, never from shell flags (ea
 - **Unresolvable with confidence** (a hunk whose intent on either side you cannot reconcile, or the branch/tree is refused above): capture the file list first, then abort only if a merge is in progress, and park:
   ```bash
   run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
-  CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
+  CONFLICT_FILES=$(git diff --name-only --diff-filter=U)   # captured and aborted FIRST; the comment names no ref (ref names are attacker-chosen)
   [ -n "$CONFLICT_FILES" ] || CONFLICT_FILES="(no conflicted files reported)"
   if git rev-parse -q --verify MERGE_HEAD >/dev/null; then git merge --abort; fi # allowlist:check-command-side-effects
   run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "<!-- FORGE:BASESYNC_FAILED -->
-  Base sync of PR #{PR_NUMBER} (\`origin/{PR_BASE}\` into \`{HEAD_BRANCH}\`) could not be resolved with confidence. Conflicting files:
+  Base sync of PR #{PR_NUMBER} could not be resolved with confidence. Conflicting files:
 
   \`\`\`
   ${CONFLICT_FILES}
@@ -365,18 +374,21 @@ If still failing after 3 iterations: post a comment, re-affirm `needs-human`, EX
 ```bash
 cd {WORKTREE_PATH}
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
-git fetch origin {PR_BASE} >/dev/null 2>&1 || true
+# refs re-derived as data, fail closed
+{ IFS= read -r HEAD_BRANCH; IFS= read -r PR_BASE; } < <(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefName,baseRefName --jq '.headRefName,.baseRefName')
+printf '%s\n%s\n' "$HEAD_BRANCH" "$PR_BASE" | grep -qvE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' && { echo "REMEDIATE_RESULT: status: BLOCKED, blocker: bad PR ref name"; exit 1; }   # STOP
+git fetch origin "$PR_BASE" >/dev/null 2>&1 || true
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 ANCESTRY_SCRIPT=$(forge_resolve check-branch-ancestry.sh)
 if [ -z "$ANCESTRY_SCRIPT" ]; then
   MERGE_COMMITS="check-branch-ancestry script not resolvable (fail closed)"; ANCESTRY_RC=2
 else
-  MERGE_COMMITS=$(bash "$ANCESTRY_SCRIPT" {HEAD_BRANCH} origin/{PR_BASE} 2>&1); ANCESTRY_RC=$?
+  MERGE_COMMITS=$(bash "$ANCESTRY_SCRIPT" "$HEAD_BRANCH" "origin/$PR_BASE" 2>&1); ANCESTRY_RC=$?
 fi
 if [ "$ANCESTRY_RC" -ne 0 ]; then
   run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "## Pre-Push Ancestry Guard Failed
 
-Branch \`{HEAD_BRANCH}\` has merge commits from outside \`{PR_BASE}\`, or ancestry could not be verified (rc=${ANCESTRY_RC}). Not pushing.
+Branch \`$HEAD_BRANCH\` has merge commits from outside \`$PR_BASE\`, or ancestry could not be verified (rc=${ANCESTRY_RC}). Not pushing.
 
 \`\`\`
 ${MERGE_COMMITS}
@@ -390,9 +402,12 @@ Then commit and push. When a base sync ran, it ran first in Phase M3 on a clean 
 
 ```bash
 cd {WORKTREE_PATH}
+# refs re-derived as data, fail closed
+{ IFS= read -r HEAD_BRANCH; IFS= read -r PR_BASE; } < <(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefName,baseRefName --jq '.headRefName,.baseRefName')
+printf '%s\n%s\n' "$HEAD_BRANCH" "$PR_BASE" | grep -qvE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' && { echo "REMEDIATE_RESULT: status: BLOCKED, blocker: bad PR ref name"; exit 1; }   # STOP
 git add -u
 git diff --cached --quiet || git commit -s -m "fix(remediate): {description} (#{ISSUE_NUMBER})"
-git push origin {HEAD_BRANCH} # allowlist:check-command-side-effects
+git push origin "$HEAD_BRANCH" # allowlist:check-command-side-effects
 ```
 
 If the push fails, do NOT retry with a force flag (never force-push): post a comment, add `needs-human`, EXIT `REMEDIATE_RESULT: status: BLOCKED`. A raced remote is resolved by a re-run, which fetches and merges naturally.
@@ -451,19 +466,22 @@ If no dispatch tool resolves, a missing tool is not a human decision, so do NOT 
 
 ```bash
 cd {WORKTREE_PATH}
-git fetch origin {PR_BASE} {HEAD_BRANCH} # allowlist:check-command-side-effects
+# refs re-derived as data, fail closed
+{ IFS= read -r HEAD_BRANCH; IFS= read -r PR_BASE; } < <(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefName,baseRefName --jq '.headRefName,.baseRefName')
+printf '%s\n%s\n' "$HEAD_BRANCH" "$PR_BASE" | grep -qvE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' && { echo "REMEDIATE_RESULT: status: BLOCKED, blocker: bad PR ref name"; exit 1; }   # STOP
+git fetch origin "$PR_BASE" "$HEAD_BRANCH" # allowlist:check-command-side-effects
 BASESYNC_MAX_ROUNDS=2
 BASESYNC_ROUNDS=0; _p2=""
-if _rl=$(git rev-list --first-parent --merges origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null); then
-  for _m in $_rl; do _q=$(git rev-parse -q --verify "$_m^2" 2>/dev/null) && git merge-base --is-ancestor "$_q" origin/{PR_BASE} 2>/dev/null && { BASESYNC_ROUNDS=$((BASESYNC_ROUNDS+1)); [ -n "$_p2" ] || _p2="$_q"; }; done
+if _rl=$(git rev-list --first-parent --merges "origin/$PR_BASE..origin/$HEAD_BRANCH" 2>/dev/null); then
+  for _m in $_rl; do _q=$(git rev-parse -q --verify "$_m^2" 2>/dev/null) && git merge-base --is-ancestor "$_q" "origin/$PR_BASE" 2>/dev/null && { BASESYNC_ROUNDS=$((BASESYNC_ROUNDS+1)); [ -n "$_p2" ] || _p2="$_q"; }; done
 else BASESYNC_ROUNDS=$BASESYNC_MAX_ROUNDS; fi
 BASESYNC_BASE_SHA="$_p2"
-NOW_BASE_SHA=$(git rev-parse origin/{PR_BASE})
+NOW_BASE_SHA=$(git rev-parse "origin/$PR_BASE")
 FRESH_MERGED=false
 if [ -n "$BASESYNC_BASE_SHA" ] && [ "$NOW_BASE_SHA" != "$BASESYNC_BASE_SHA" ] && [ "$BASESYNC_ROUNDS" -lt "$BASESYNC_MAX_ROUNDS" ] \
-   && [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/{HEAD_BRANCH})" ] && git diff --quiet && git diff --cached --quiet; then
+   && [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$HEAD_BRANCH")" ] && git diff --quiet && git diff --cached --quiet; then
   echo "base advanced since the last sync (${BASESYNC_BASE_SHA} -> ${NOW_BASE_SHA}); re-merging once"
-  if git merge origin/{PR_BASE} --no-edit; then # allowlist:check-command-side-effects
+  if git merge "origin/$PR_BASE" --no-edit; then # allowlist:check-command-side-effects
     FRESH_MERGED=true
   elif git rev-parse -q --verify MERGE_HEAD >/dev/null; then git merge --abort; fi # allowlist:check-command-side-effects
 fi
@@ -478,10 +496,13 @@ Clean merges only: a conflicted or refused freshness merge is aborted (MERGE_HEA
 
    ```bash
    cd {WORKTREE_PATH}
-   if git push origin HEAD:{HEAD_BRANCH}; then echo "FRESH_PUSHED=true"; else echo "FRESH_PUSHED=false"; fi # allowlist:check-command-side-effects
+# refs re-derived as data, fail closed
+{ IFS= read -r HEAD_BRANCH; IFS= read -r PR_BASE; } < <(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefName,baseRefName --jq '.headRefName,.baseRefName')
+printf '%s\n%s\n' "$HEAD_BRANCH" "$PR_BASE" | grep -qvE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' && { echo "REMEDIATE_RESULT: status: BLOCKED, blocker: bad PR ref name"; exit 1; }   # STOP
+   if git push origin "HEAD:$HEAD_BRANCH"; then echo "FRESH_PUSHED=true"; else echo "FRESH_PUSHED=false"; fi # allowlist:check-command-side-effects
    ```
 
-If the gate does not pass, the ancestry guard fails, or the push fails, drop the unpushed merge (`git reset --hard origin/{HEAD_BRANCH}`; local only, the pushed head is untouched, never a force-push) and continue to the re-review on the pushed head. The `base-conflict` handling below then decides. The round counts against `BASESYNC_MAX_ROUNDS` only once pushed, because the count is read from `origin/{HEAD_BRANCH}`. An ancestry-guard failure still parks at `needs-human` as M4 specifies.
+If the gate does not pass, the ancestry guard fails, or the push fails, drop the unpushed merge (`git reset --hard "origin/$HEAD_BRANCH"`; local only, the pushed head is untouched, never a force-push) and continue to the re-review on the pushed head. The `base-conflict` handling below then decides. The round counts against `BASESYNC_MAX_ROUNDS` only once pushed, because the count is read from `origin/{HEAD_BRANCH}`. An ancestry-guard failure still parks at `needs-human` as M4 specifies.
 
 ```
 if DRY_RUN=true:
@@ -520,14 +541,17 @@ If the retained `REVIEW_RESULT` is `BLOCKED` with blocker "base-conflict" (forge
 
 ```bash
 cd {WORKTREE_PATH}
-git fetch origin {PR_BASE} {HEAD_BRANCH} # allowlist:check-command-side-effects
-CUR_BASE_SHA=$(git rev-parse origin/{PR_BASE})
+# refs re-derived as data, fail closed
+{ IFS= read -r HEAD_BRANCH; IFS= read -r PR_BASE; } < <(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefName,baseRefName --jq '.headRefName,.baseRefName')
+printf '%s\n%s\n' "$HEAD_BRANCH" "$PR_BASE" | grep -qvE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' && { echo "REMEDIATE_RESULT: status: BLOCKED, blocker: bad PR ref name"; exit 1; }   # STOP
+git fetch origin "$PR_BASE" "$HEAD_BRANCH" # allowlist:check-command-side-effects
+CUR_BASE_SHA=$(git rev-parse "origin/$PR_BASE")
 # Recorded head and rounds come from the pushed branch's sync merges (same derivation as M3), never from shell vars or
 # the M8 trail line, which is written after this phase (forge#3517). No recorded head is treated as advanced, but only below the cap.
 BASESYNC_MAX_ROUNDS=2
 BASESYNC_ROUNDS=0; _p2=""
-if _rl=$(git rev-list --first-parent --merges origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null); then
-  for _m in $_rl; do _q=$(git rev-parse -q --verify "$_m^2" 2>/dev/null) && git merge-base --is-ancestor "$_q" origin/{PR_BASE} 2>/dev/null && { BASESYNC_ROUNDS=$((BASESYNC_ROUNDS+1)); [ -n "$_p2" ] || _p2="$_q"; }; done
+if _rl=$(git rev-list --first-parent --merges "origin/$PR_BASE..origin/$HEAD_BRANCH" 2>/dev/null); then
+  for _m in $_rl; do _q=$(git rev-parse -q --verify "$_m^2" 2>/dev/null) && git merge-base --is-ancestor "$_q" "origin/$PR_BASE" 2>/dev/null && { BASESYNC_ROUNDS=$((BASESYNC_ROUNDS+1)); [ -n "$_p2" ] || _p2="$_q"; }; done
 else BASESYNC_ROUNDS=$BASESYNC_MAX_ROUNDS; fi
 BASESYNC_BASE_SHA="$_p2"
 echo "recorded=${BASESYNC_BASE_SHA:-none} current=${CUR_BASE_SHA} rounds=${BASESYNC_ROUNDS}/${BASESYNC_MAX_ROUNDS}"
@@ -590,7 +614,7 @@ fi
 
 **Approved head on every path (forge#3686)**: for a PR that is still open, the fence above captures `APPROVED_HEAD` (the live `headRefOid` that M6's re-review parked) once at M7 start and persists it to `${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/remediate_approved_head_{PR_NUMBER}`; the resume path overwrites it with `RESUME_APPROVED_HEAD`. The CI-gated merge reloads it (never re-reads the PR) and refuses with `CI_GATE_RC=4` when it is empty or differs from `GATED_HEAD`, so a commit pushed after approval cannot merge. Residual window: a push between M6's verdict and the M7 capture is treated as approved.
 
-**Live base (computed BEFORE the resume substitution, forge#3684)**: re-derive the base fresh — do NOT reuse `$PR_BASE` for this decision (forge#2624): `$PR_BASE` was resolved in Phase M0 and a caller-supplied `--base` wins over the PR's actual live base. This is a security-relevant decision point. Fail closed: only a KNOWN, non-empty, non-`null` live base that is not the deploy gate (as defined in the Resume-at-M7 rule above) reconciles to the fast lane (forge#2570); empty, the literal string `null` (jq stringifies JSON null, forge#2625) or the default branch is the deploy gate (strict).
+**Live base (computed BEFORE the resume substitution, forge#3684)**: re-derive the base fresh — do NOT reuse `$PR_BASE` for this decision (forge#2624): `$PR_BASE` was resolved in Phase M0 and may be stale by now. This is a security-relevant decision point. Fail closed: only a KNOWN, non-empty, non-`null` live base that is not the deploy gate (as defined in the Resume-at-M7 rule above) reconciles to the fast lane (forge#2570); empty, the literal string `null` (jq stringifies JSON null, forge#2625) or the default branch is the deploy gate (strict).
 
 ```bash
 LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
@@ -772,7 +796,7 @@ case "$RE_GATE_OUTCOME" in
     else
       AUTO_LAND_BAR_TEXT="MET (${APPROVED_COUNT:-0} APPROVED: reviews + quality gate pass)"
     fi
-    OUTCOME_DETAIL="to {PR_BASE}" ;;
+    OUTCOME_DETAIL="to $LIVE_BASE_REF" ;;
   HELD-AWAITING-MERGE) AUTO_LAND_BAR_TEXT="NOT MET (${APPROVED_COUNT:-0} APPROVED: reviews)"; OUTCOME_DETAIL="at workflow:awaiting-merge" ;;
   RE-ESCALATED)        AUTO_LAND_BAR_TEXT="N/A — re-escalated before the bar was evaluated"; OUTCOME_DETAIL="at needs-human" ;;
   UNFIXABLE)           AUTO_LAND_BAR_TEXT="N/A — unfixable (see Phase M1 classification)"; OUTCOME_DETAIL="at needs-human" ;;
@@ -792,11 +816,14 @@ REMEDIATED_HEAD_SHA=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.
 # shell, so it derives the record from durable state (pushed git history + trusted bound markers), never from a shell variable.
 TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 cd {WORKTREE_PATH}
-git fetch origin {PR_BASE} {HEAD_BRANCH} # allowlist:check-command-side-effects
+# refs re-derived as data, fail closed
+{ IFS= read -r HEAD_BRANCH; IFS= read -r PR_BASE; } < <(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefName,baseRefName --jq '.headRefName,.baseRefName')
+printf '%s\n%s\n' "$HEAD_BRANCH" "$PR_BASE" | grep -qvE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' && { echo "REMEDIATE_RESULT: status: BLOCKED, blocker: bad PR ref name"; exit 1; }   # STOP
+git fetch origin "$PR_BASE" "$HEAD_BRANCH" # allowlist:check-command-side-effects
 BASESYNC_MAX_ROUNDS=2
 BASESYNC_ROUNDS=0; _p2=""
-if _rl=$(git rev-list --first-parent --merges origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null); then
-  for _m in $_rl; do _q=$(git rev-parse -q --verify "$_m^2" 2>/dev/null) && git merge-base --is-ancestor "$_q" origin/{PR_BASE} 2>/dev/null && { BASESYNC_ROUNDS=$((BASESYNC_ROUNDS+1)); [ -n "$_p2" ] || _p2="$_q"; }; done
+if _rl=$(git rev-list --first-parent --merges "origin/$PR_BASE..origin/$HEAD_BRANCH" 2>/dev/null); then
+  for _m in $_rl; do _q=$(git rev-parse -q --verify "$_m^2" 2>/dev/null) && git merge-base --is-ancestor "$_q" "origin/$PR_BASE" 2>/dev/null && { BASESYNC_ROUNDS=$((BASESYNC_ROUNDS+1)); [ -n "$_p2" ] || _p2="$_q"; }; done
 else BASESYNC_ROUNDS=$BASESYNC_MAX_ROUNDS; fi
 BASESYNC_BASE_SHA="$_p2"
 ISSUE_COMMENTS=$(gh api --paginate repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments 2>/dev/null) || ISSUE_COMMENTS=""
@@ -851,7 +878,7 @@ gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "$REMEDIATION_BODY"
 **If the outcome was `AUTO-LANDED`**: this Skill invocation is itself the caller's terminal delegate (Phase 0A.1 of `work-on.md` already told its own routing loop to STOP after dispatching here) — so `remediate.md` must drive the close phase itself rather than assume some other inline logic will. Invoke the close subcommand directly, the same way `work-on/review.md` does when it hands off from a spawned sub-agent context:
 
 ```
-Skill("{FORGE_SKILL_PREFIX}work-on:close", args="{ISSUE_NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --pr {PR_NUMBER} --base {PR_BASE}")
+Skill("{FORGE_SKILL_PREFIX}work-on:close", args="{ISSUE_NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --pr {PR_NUMBER}")
 ```
 
 `work-on:close` handles project board update, final issue body, parent tracker, trajectory log, and worktree cleanup (including the remediation worktree at `{WORKTREE_PATH}`) — do not duplicate any of that here.
