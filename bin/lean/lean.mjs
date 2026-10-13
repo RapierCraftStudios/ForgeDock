@@ -366,8 +366,23 @@ export async function runCore(o) {
         }
       }
     };
-    if (resumed) {
-      await io.git(["fetch", "origin", branch], { cwd });
+    if (resumed) { try { await io.git(["fetch", "origin", branch], { cwd }); } catch { /* remote branch may not exist (PR-less resume) */ } }
+    // #4118: a local lane branch with commits not yet pushed (e.g. a reviewed commit whose push failed) must never be reset.
+    // Reuse it when it is ahead of the base and contains everything the remote branch has.
+    let keepLocal = false;
+    try {
+      const ahead = Number(String(await io.git(["rev-list", "--count", `${base}..refs/heads/${branch}`], { cwd })).trim());
+      if (ahead > 0) {
+        let containsRemote = true;
+        if (resumed) { try { await io.git(["merge-base", "--is-ancestor", `origin/${branch}`, `refs/heads/${branch}`], { cwd }); } catch { containsRemote = false; } }
+        keepLocal = containsRemote;
+      }
+    } catch { /* no local branch */ }
+    if (keepLocal) {
+      await addWorktree(["worktree", "add", wt, branch]);
+      resumed = resumed ?? { pr: null, local: true };
+      ev({ event: "LOCAL_BRANCH_REUSED", branch });
+    } else if (resumed) {
       await addWorktree(["worktree", "add", "-B", branch, wt, `origin/${branch}`]);
     } else {
       await addWorktree(["worktree", "add", "-B", branch, wt, base]);
