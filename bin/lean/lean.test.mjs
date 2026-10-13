@@ -9,6 +9,7 @@ import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
+import { makeRunTmp } from "./effects.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS } from "../engine-cli.mjs";
 
 const WT = "/wt/lean-7";
@@ -26,7 +27,7 @@ function world(o = {}) {
     comments: [], labels: [], closed: [], edits: [], prs: [], merges: [], calls: [], telemetry: [], files: {}, head: "aaaa1111aaaa1111",
     changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], reviews: [...(o.reviews ?? [])], waits: [...(o.waits ?? [])], clock: 0,
     result: o.result ?? { status: "fixed", summary: "fixed foo", evidence: [], tests: ["test/foo.test.js"] },
-    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], mergeInProgress: false, markers: false, mergeAttempts: 0,
+    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], mergeInProgress: false, markers: false, mergeAttempts: 0,
     stages: { ...STAGE_MD, ...(o.stages ?? {}) },
   };
   const put = (name, text) => { const p = `${WT}/.forge-lean/${name}`; if (w.files[p] !== text) w.mtimes[p] = Date.now(); w.files[p] = text; };
@@ -75,6 +76,7 @@ function world(o = {}) {
     runner: async (c) => {
       w.calls.push(["runner", c.role, c.resume ?? null, c.model ?? null, c.prompt, c.readOnly ?? false, c.system]);
       w.seq.push(c.role + (c.resume ? "-resume" : ""));
+      w.envs.push(c.env ?? null);
       if (c.role === "builder") {
         const r = c.resume ? (w.resumeResult ?? w.result) : w.result;
         if (o.live) await o.live(w, put);
@@ -760,5 +762,146 @@ describe("base-sync (#4100)", () => {
     const r = await run(w);
     assert.equal(r.terminalReason, "merged");
     assert.ok(!syncComment(w));
+  });
+});
+
+describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", () => {
+  const limitErr = (extra) => Object.assign(new Error("claude CLI exited with status 1. You've hit your session limit"), { code: "CLI_BACKEND_FAILED", usageLimit: true, ...extra });
+  const failFirstBuilder = (w, err, times = 1) => { const orig = w.io.runner; let n = 0; w.io.runner = async (c) => { if (c.role === "builder" && n++ < times) throw err; return orig(c); }; };
+  const projector = (w, lease) => { w.leaseWrites = []; w.io.projector = { readState: async () => (lease ? { v: 1, lease } : null), writeState: async (_i, st) => { w.leaseWrites.push(st); } }; };
+
+  it("#4101 a usage limit with a near reset pauses until the reset, then resumes the same step", async () => {
+    const w = world(); const sleeps = [];
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    failFirstBuilder(w, limitErr({ resetAtEpochMs: 90000, resetAt: "8:30pm" }));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(sleeps.includes(90000), `slept until the reset: ${sleeps}`);
+    assert.equal(builders(w).length, 1);
+  });
+
+  it("#4101 a usage limit with a far reset ends deferred/rate_limited with the reset time, lease released, no needs-human", async () => {
+    const w = world(); projector(w, null);
+    failFirstBuilder(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm (Asia/Kolkata)" }));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "rate_limited");
+    assert.match(r.detail, /resets at 8:30pm \(Asia\/Kolkata\)/);
+    assert.equal(w.edits.some((e) => e.includes("needs-human")), false);
+    assert.equal(traj(w).length, 0, "no trajectory comment for a deferral");
+    assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");
+    assert.equal(w.merges.length, 0);
+  });
+
+  it("#4101 unknown reset pauses a bounded number of times, then defers", async () => {
+    const w = world(); let sleeps = 0;
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps++; return s0(ms); };
+    failFirstBuilder(w, limitErr(), 99);
+    const r = await run(w, { maxSessionLimitPauses: 2 });
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "rate_limited");
+    assert.equal(sleeps, 2);
+    assert.match(r.detail, /resets at unknown/);
+  });
+
+  it("#4101 a non-limit runner error is still engine-error", async () => {
+    const w = world(); failFirstBuilder(w, new Error("boom"));
+    assert.equal((await run(w)).terminalReason, "engine-error");
+  });
+
+  it("#4102 a same-host holder whose pid is gone is taken over immediately; a live one or another host is not", async () => {
+    const future = Date.now() + 1e6;
+    const dead = Object.assign(new Error("no such process"), { code: "ESRCH" });
+    const w = world(); projector(w, { by: "core_4242", until: future, host: "h1", pid: 4242 });
+    const r = await run(w, { hostName: "h1", killFn: () => { throw dead; } });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(w.leaseWrites.some((x) => x.lease?.host === "h1" && Number.isSafeInteger(x.lease?.pid)), "lease records host and pid");
+    const w2 = world(); projector(w2, { by: "core_4242", until: 1e12, host: "h1", pid: 4242 });
+    assert.equal((await run(w2, { hostName: "h1", killFn: () => true })).terminalReason, "deferred");
+    const w3 = world(); projector(w3, { by: "core_4242", until: 1e12, host: "other-host", pid: 4242 });
+    assert.equal((await run(w3, { hostName: "h1", killFn: () => { throw dead; } })).terminalReason, "deferred");
+    assert.equal(builders(w3).length, 0);
+  });
+
+  it("#4103 a leftover unregistered worktree dir is removed (only this issue's lean dir) before add", async () => {
+    const w = world(); const removed = [];
+    w.io.fs.exists = async (p) => p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); };
+    await run(w);
+    assert.deepEqual(removed, ["/wt/lean-7"]);
+    // a registered worktree dir is left to `git worktree remove`
+    const w2 = world(); const removed2 = [];
+    w2.io.fs.exists = async () => true; w2.io.fs.rmdir = async (p) => { removed2.push(p); };
+    const g = w2.io.git; w2.io.git = async (a, o2) => (a[0] === "worktree" && a[1] === "list" ? "worktree /wt/lean-7\nHEAD abc\n" : g(a, o2));
+    await run(w2);
+    assert.deepEqual(removed2, []);
+    // a worktree root that is not the lean root never deletes anything
+    const w3 = world(); const removed3 = [];
+    w3.io.fs.exists = async () => true; w3.io.fs.rmdir = async (p) => { removed3.push(p); };
+    await run(w3, { worktreeRoot: "/wt" , issue: 7 });
+    assert.ok(removed3.every((p) => p === "/wt/lean-7"));
+  });
+
+  it("#4103 'already exists' on add cleans the leftover and retries; index.lock and packed-refs.lock are retried", async () => {
+    for (const msg of ["fatal: '/wt/lean-7' already exists", "fatal: Unable to create '/r/.git/index.lock': File exists.", "error: cannot lock ref: Unable to create '/r/.git/packed-refs.lock': File exists", "fatal: could not lock config file /r/.git/config: File exists"]) {
+      const w = world(); let failed = false; const removed = [];
+      w.io.fs.exists = async (p) => failed && p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); };
+      const g = w.io.git;
+      w.io.git = async (a, o2) => { if (a[0] === "worktree" && a[1] === "add" && !failed) { failed = true; throw Object.assign(new Error(msg), { stderr: msg }); } return g(a, o2); };
+      const r = await run(w);
+      assert.equal(r.terminalReason, "merged", msg);
+      if (/already exists/.test(msg)) assert.deepEqual(removed, ["/wt/lean-7"]);
+    }
+  });
+
+  it("#4104 the builder and reviewer run with a per-run TMPDIR that is removed on every terminal", async () => {
+    const mk = (w) => { w.tmpMade = []; w.tmpRemoved = []; w.io.runTmp = { prune: async () => { w.pruned = true; }, make: async (i, id) => { const d = `/home/x/.forge/tmp/runs/${id}`; w.tmpMade.push(d); return d; }, remove: async (d) => { w.tmpRemoved.push(d); } }; };
+    const cases = {
+      merged: (w) => w,
+      "needs-human": (w) => { w.reviews.push(bad(), bad()); return w; },
+      "engine-error": (w) => { failFirstBuilder(w, new Error("boom")); return w; },
+      deferred: (w) => { failFirstBuilder(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000 })); return w; },
+    };
+    for (const [reason, prep] of Object.entries(cases)) {
+      const w = world(); mk(w); prep(w);
+      const r = await run(w);
+      assert.equal(r.terminalReason, reason);
+      assert.equal(w.pruned, true);
+      assert.equal(w.tmpMade.length, 1);
+      assert.match(w.tmpMade[0], /\/\.forge\/tmp\/runs\/7-/);
+      assert.deepEqual(w.tmpRemoved, w.tmpMade, `${reason}: removed`);
+      for (const e of w.envs) assert.equal(e?.TMPDIR, w.tmpMade[0]);
+      if (["merged", "needs-human"].includes(reason)) assert.ok(w.envs.length >= 1);
+    }
+  });
+
+  it("#4104 makeRunTmp: removes only its own dirs; prune takes only old dirs with a dead owner and our marker", async () => {
+    const { mkdirSync, writeFileSync, existsSync, utimesSync } = await import("node:fs");
+    const root = tmpDir("core-runs-");
+    let t = 1_000_000_000_000;
+    const rt = makeRunTmp({ root, now: () => t, host: "h", alive: (pid) => pid === 111 });
+    const mine = await rt.make(7, "7-1");
+    assert.ok(existsSync(mine));
+    assert.equal(await rt.remove(mine), true); assert.ok(!existsSync(mine));
+    assert.equal(await rt.remove(`${root}/not-made`), false);
+    const outside = tmpDir("core-outside-"); writeFileSync(`${outside}/f`, "x");
+    assert.equal(await rt.remove(outside), false); assert.ok(existsSync(outside));
+    const own = (name, o2) => { mkdirSync(`${root}/${name}`); writeFileSync(`${root}/${name}/.forge-run-owner`, JSON.stringify({ host: "h", ...o2 })); };
+    own("old-dead", { pid: 999, created: t - 7 * 3600 * 1000 });
+    own("old-alive", { pid: 111, created: t - 7 * 3600 * 1000 });
+    own("fresh-dead", { pid: 999, created: t - 3600 * 1000 });
+    own("old-otherhost", { pid: 999, host: "zzz", created: t - 7 * 3600 * 1000 });
+    mkdirSync(`${root}/foreign`); writeFileSync(`${root}/foreign/data`, "not ours");
+    t += 1;
+    const removed = await rt.prune();
+    assert.deepEqual(removed.sort(), ["old-dead"]);
+    for (const keep of ["old-alive", "fresh-dead", "foreign"]) assert.ok(existsSync(`${root}/${keep}`), keep);
+  });
+
+  it("#4104 runCliBackend applies the per-run env to the child", async () => {
+    const { runCliBackend } = await import("../runner.mjs");
+    let seen;
+    runCliBackend({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: tmpDir("core-env-"), logger: { log() {} }, env: { TMPDIR: "/x/run-tmp", CLAUDE_CODE_TMPDIR: "/x/run-tmp" },
+      spawnFn: (_b, _a, o2) => { seen = o2.env; return { status: 0, stdout: "{}", stderr: "" }; } });
+    assert.equal(seen.TMPDIR, "/x/run-tmp"); assert.equal(seen.CLAUDE_CODE_TMPDIR, "/x/run-tmp");
+    assert.equal(seen.ANTHROPIC_API_KEY, undefined);
   });
 });
