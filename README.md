@@ -303,6 +303,8 @@ If you're carrying an older `--global` habit in scripts or CI, it's harmless to 
 
 </details>
 
+**After upgrading**: run `npx forgedock labels setup` once per repo. Repos created before the `workflow:remediating` state (forge#3541) lack that label; the pipeline now creates it on demand (best-effort), but the setup command is the supported way to sync all labels.
+
 ---
 
 ## For companies
