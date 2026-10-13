@@ -756,14 +756,12 @@ export function buildMinimalSessionFlags(commandName, caps, env = process.env) {
 
 /**
  * Lean-path (#4081) minimal session flags: reuses the #4065 capability probe. Every phase is Skill-free, so slash
- * commands are off too, and only project/local settings load. Unsupported CLI or FORGEDOCK_FULL_SESSION=1 yields [].
+ * commands are off too; user-scope settings and hooks still load. Unsupported CLI or FORGEDOCK_FULL_SESSION=1 yields [].
  */
 export function buildLeanSessionFlags(caps, env = process.env) {
-  if (env?.FORGEDOCK_FULL_SESSION === "1" || !caps) return [];
-  const flags = [];
-  if (caps.strictMcp) flags.push("--strict-mcp-config", "--mcp-config", MINIMAL_SESSION_MCP_CONFIG, "--setting-sources", "project,local");
-  if (caps.disableSlash) flags.push("--disable-slash-commands");
-  return flags;
+  // Same group as the Skill-free engine phases (no MCP, no slash commands). Operator settings stay loaded so the
+  // user-scope safety hooks keep running, exactly like #4077.
+  return buildMinimalSessionFlags("work-on/investigate", caps, env);
 }
 
 /**

@@ -9,7 +9,9 @@
 import { join } from "node:path";
 import { appendEvent } from "../engine/runlog.mjs";
 import { codeForTerminalReason } from "../engine/outcome-codes.mjs";
-import { ciPollDelayMs } from "../engine.mjs";
+import { ciPollDelayMs, ENGINE_VERSION } from "../engine.mjs";
+import { openDependency } from "../engine/phases.mjs";
+import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { riskTier, isDocsOnly, isTestFile, isLargeDiff, isBlocking, parseFindings } from "./risk.mjs";
 import { BUILDER_SYSTEM, REVIEWER_SYSTEM, SECURITY_REVIEWER_SYSTEM, LEAN_DIR, builderPrompt, resumeGatePrompt, resumeReviewPrompt, reviewerPrompt } from "./prompts.mjs";
 
@@ -67,7 +69,7 @@ export async function runLean(o) {
     return url;
   }
 
-  let done = null;
+  let done = null, wtCreated = false;
   const WORKFLOW = ["investigating", "building", "in-review"].map((x) => `workflow:${x}`).join(",");
   async function finish(reason, detail = "", extra = {}) {
     if (done) return done; // idempotent: exactly one RUN_TERMINAL and one telemetry emit
@@ -79,6 +81,11 @@ export async function runLean(o) {
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", WORKFLOW]); } catch { /* best effort */ }
     }
     await releaseLease(reason);
+    // The worktree is scratch; the branch stays when a PR (or a human) may need it.
+    if (wtCreated) {
+      try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* best effort */ }
+      if (reason === "invalid" && !extra.pr) { try { await io.git(["branch", "-D", branch], { cwd }); } catch { /* best effort */ } }
+    }
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usageTotal.cost_usd, wall_ms: now() - t0, ...extra };
     return done;
   }
@@ -90,8 +97,10 @@ export async function runLean(o) {
 
   async function builder(phase, n, prompt, resume) {
     onProgress({ event: "phase_enter", phase });
+    await renew();
     const r = await io.runner({ role: "builder", issue, cwd: wt, model: builderModel, resume,
       system: resume ? "" : BUILDER_SYSTEM, prompt });
+    await renew();
     if (r?.sessionId) sessionId = r.sessionId;
     return r;
   }
@@ -99,7 +108,9 @@ export async function runLean(o) {
 
   // Same issue lease the full path uses (FORGE:STATE lease via the projector): two runs cannot race.
   const agentId = o.agentId ?? `lean_${process.pid}`;
-  const leaseTtlMs = o.leaseTtlMs ?? 600000;
+  // 25 min: below the projector's 30 min honour cap. The CLI is spawned synchronously (no timer can fire), so the
+  // lease is also renewed immediately before and after every builder/reviewer/ci-local call and each CI poll.
+  const leaseTtlMs = o.leaseTtlMs ?? 25 * 60000;
   let leaseState = null, leaseTimer = null;
   const writeLease = (lease, extra = {}) => io.projector.writeState(issue, { ...leaseState, ...extra, lease });
   async function releaseLease(reason) {
@@ -107,6 +118,17 @@ export async function runLean(o) {
     if (!io.projector || !leaseState) return;
     const terminal = ["merged", "invalid", "needs-human", "engine-error"].includes(reason);
     try { await writeLease(null, terminal ? { terminal: true, terminalReason: reason } : {}); } catch { /* best effort */ }
+  }
+  const renew = async () => { if (io.projector && leaseState) { try { await writeLease({ by: agentId, until: now() + leaseTtlMs }); } catch { /* best effort */ } } };
+  // Same Depends-on admission as the full path, before any state write or worktree.
+  {
+    let dep = null;
+    try { dep = await openDependency(issue, io); } catch (e) { dep = { unreadable: true, detail: `issue ${issue} **Depends on** check failed: ${e?.message || e}` }; }
+    if (dep?.unreadable) return { terminalReason: "dependency-unreadable", code: OUTCOME_CODES.DEPENDENCY_UNREADABLE, detail: dep.detail };
+    if (dep?.open?.length) {
+      return { terminalReason: "dependency-open", code: OUTCOME_CODES.DEPENDENCY_OPEN, dependencies: dep.open,
+        detail: `issue ${issue} **Depends on** ${dep.open.map((n) => `#${n}`).join(", ")} which is still open; re-run once it is closed` };
+    }
   }
   if (io.projector) {
     let st = null;
@@ -121,7 +143,7 @@ export async function runLean(o) {
     leaseTimer.unref?.();
   }
 
-  ev({ event: "RUN_START", run: `lean_${issue}_${t0}`, issue, lane, path: "lean" });
+  ev({ event: "RUN_START", run: `lean_${issue}_${t0}`, issue, lane, path: "lean", version: ENGINE_VERSION, forge_version: ENGINE_VERSION, repo });
   let iss;
   try {
     iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state"]));
@@ -131,16 +153,83 @@ export async function runLean(o) {
   try {
     await label("investigating");
     try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ }
-    // Reruns: drop any stale lean worktree for this issue, then (re)create the branch from the base.
+    // Reruns resume: an open PR or a remote branch for this issue means earlier work exists (e.g. ci-pending).
+    let resumed = null;
+    try {
+      const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid"])) || "[]");
+      const remote = String(await io.git(["ls-remote", "--heads", "origin", branch], { cwd })).trim();
+      if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null };
+    } catch { /* no resume info: start fresh */ }
     try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* none */ }
     try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
-    await io.git(["worktree", "add", "-B", branch, wt, base], { cwd });
+    if (resumed) {
+      await io.git(["fetch", "origin", branch], { cwd });
+      await io.git(["worktree", "add", "-B", branch, wt, `origin/${branch}`], { cwd });
+    } else {
+      await io.git(["worktree", "add", "-B", branch, wt, base], { cwd });
+    }
+    wtCreated = true;
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
     await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
 
+    let planMd = null, validate = null, implRound = 1, gateRounds = 0;
+    const postImpl = async () => {
+      const impl = await readJson("implement.json");
+      await post("FORGE:IMPLEMENT", impl ? `**Round:** ${implRound}` : "**implement.json missing**", "```json\n" + JSON.stringify(impl ?? {}, null, 2) + "\n```", ` round=${implRound}`);
+      return impl;
+    };
+    const diffStats = async () => {
+      const files = String(await git(["diff", "--name-only", `${base}...HEAD`])).split("\n").map((s) => s.trim()).filter(Boolean);
+      let lines = 0;
+      for (const l of String(await git(["diff", "--numstat", `${base}...HEAD`])).split("\n")) {
+        const [a, d] = l.split("\t"); lines += (Number(a) || 0) + (Number(d) || 0);
+      }
+      return { files, lines };
+    };
+    const gateFailure = async () => {
+      const { files } = await diffStats();
+      if (files.length === 0) return { kind: "no-commit", tail: "No commit on the branch relative to the base. Commit your change." };
+      if (!(await readJson("implement.json"))) return { kind: "implement-json", tail: `${LEAN_DIR}/implement.json is missing or invalid JSON.` };
+      if (!isDocsOnly(files) && !files.some(isTestFile)) {
+        return { kind: "missing-test", tail: "No test file changed. Add a regression test that fails without the fix (and passes with it)." };
+      }
+      await renew();
+      const ci = await io.ciLocal({ cwd: wt, base });
+      await renew();
+      if (ci.result === "BROKEN") return { kind: "ci-local-broken", fatal: true, tail: ci.tail ?? "ci-local reported no result" };
+      if (ci.result === "FAIL") return { kind: "ci-local", tail: ci.tail ?? "" };
+      return null;
+    };
+    const runGates = async () => {
+      for (;;) {
+        const f = await gateFailure();
+        if (!f) return null;
+        if (f.fatal) return needsHuman(`gate ${f.kind}: the local CI gate could not report a result, so the change is unverified.\n\n${String(f.tail).slice(-2000)}`);
+        if (gateRounds >= MAX_ROUNDS) return needsHuman(`gate ${f.kind} still failing after ${MAX_ROUNDS} resume rounds:\n\n${String(f.tail).slice(-3000)}`);
+        gateRounds++; implRound++;
+        if (!sessionId) return needsHuman(`gate ${f.kind} failed and the builder session id is unknown, cannot resume`);
+        const rr = await builder("implement", implRound, resumeGatePrompt(f), sessionId);
+        await attempt("implement", implRound, rr, {});
+        await postImpl();
+      }
+    };
+
+    let approvedHead = null;
+    if (resumed) {
+      // Resume from the knowledge graph: plan and last review verdict come from the issue comments.
+      const bodies = (JSON.parse(String(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "comments"])) || "{}").comments ?? []).map((c) => String(c.body ?? ""));
+      const lastOf = (m) => bodies.filter((b) => b.includes(`<!-- ${m} ${NS}`)).pop();
+      const planC = lastOf("FORGE:PLAN");
+      planMd = planC ? planC.replace(/^[\s\S]*?## FORGE:PLAN\n/, "") : "";
+      const rev = lastOf("FORGE:REVIEW");
+      const m = rev && /\*\*Verdict:\*\* APPROVED[^\n]*reviewed ([0-9a-f]{7,40})/.exec(rev);
+      const curHead = String(await git(["rev-parse", "HEAD"])).trim();
+      if (m && curHead.startsWith(m[1])) approvedHead = curHead;
+      ev({ event: "RUN_RESUMED", pr: resumed.pr, approved: Boolean(approvedHead) });
+    } else {
     // ---- builder: validate + architect + implement in one session ----
-    let r = await builder("validate", 1, builderPrompt({ issue: iss, base: lane, branch }), null);
-    const validate = await readJson("validate.json");
+    const r = await builder("validate", 1, builderPrompt({ issue: iss, base: lane, branch }), null);
+    validate = await readJson("validate.json");
     await attempt("implement", 1, r, { stages: "validate,architect,implement" });
     if (!validate) return await needsHuman("builder did not write validate.json");
     await post("FORGE:VALIDATE", `**Status:** ${validate.status}`, "```json\n" + JSON.stringify(validate, null, 2) + "\n```");
@@ -157,60 +246,22 @@ export async function runLean(o) {
     await commit("validate");
     await label("building");
 
-    const planMd = await io.fs.read(file("plan.md")).catch(() => null);
+    planMd = await io.fs.read(file("plan.md")).catch(() => null);
     if (!planMd) return await needsHuman("builder did not write plan.md");
     await post("FORGE:PLAN", "", planMd);
     await commit("architect");
 
-    let implRound = 1;
-    const postImpl = async () => {
-      const impl = await readJson("implement.json");
-      await post("FORGE:IMPLEMENT", impl ? `**Round:** ${implRound}` : "**implement.json missing**", "```json\n" + JSON.stringify(impl ?? {}, null, 2) + "\n```", ` round=${implRound}`);
-      return impl;
-    };
-    let impl = await postImpl();
+    await postImpl();
     await commit("implement");
 
-    // ---- deterministic gates, resuming the same session on failure ----
-    const diffStats = async () => {
-      const files = String(await git(["diff", "--name-only", `${base}...HEAD`])).split("\n").map((s) => s.trim()).filter(Boolean);
-      let lines = 0;
-      for (const l of String(await git(["diff", "--numstat", `${base}...HEAD`])).split("\n")) {
-        const [a, d] = l.split("\t"); lines += (Number(a) || 0) + (Number(d) || 0);
-      }
-      return { files, lines };
-    };
-    const gateFailure = async () => {
-      const { files } = await diffStats();
-      if (files.length === 0) return { kind: "no-commit", tail: "No commit on the branch relative to the base. Commit your change." };
-      if (!(await readJson("implement.json"))) return { kind: "implement-json", tail: `${LEAN_DIR}/implement.json is missing or invalid JSON.` };
-      if (!isDocsOnly(files) && !files.some(isTestFile)) {
-        return { kind: "missing-test", tail: "No test file changed. Add a regression test that fails without the fix (and passes with it)." };
-      }
-      const ci = await io.ciLocal({ cwd: wt, base });
-      if (ci.result === "FAIL") return { kind: "ci-local", tail: ci.tail ?? "" };
-      return null;
-    };
-    let gateRounds = 0;
-    const runGates = async () => {
-      for (;;) {
-        const f = await gateFailure();
-        if (!f) return null;
-        if (gateRounds >= MAX_ROUNDS) return needsHuman(`gate ${f.kind} still failing after ${MAX_ROUNDS} resume rounds:\n\n${String(f.tail).slice(-3000)}`);
-        gateRounds++; implRound++;
-        if (!sessionId) return needsHuman(`gate ${f.kind} failed and the builder session id is unknown, cannot resume`);
-        const rr = await builder("implement", implRound, resumeGatePrompt(f), sessionId);
-        await attempt("implement", implRound, rr);
-        await postImpl();
-      }
-    };
     const g0 = await runGates();
     if (g0) return g0;
+    }
 
     // ---- auto path: risky AND large escalates to the full pipeline ----
     const st = await diffStats();
     const risk = riskTier(st.files, `${iss.title}\n${iss.body ?? ""}`);
-    if (path === "auto" && risk.tier === "high" && isLargeDiff({ files: st.files.length, lines: st.lines })) {
+    if (!resumed && path === "auto" && risk.tier === "high" && isLargeDiff({ files: st.files.length, lines: st.lines })) {
       await post("FORGE:ROUTE", "", `Risk tier high (${risk.reasons.slice(0, 5).join(", ")}) and diff large (${st.files.length} files, ${st.lines} lines): routing to the full pipeline.`);
       return await finish("route-full", "risk high and diff large");
     }
@@ -221,15 +272,17 @@ export async function runLean(o) {
     const review = async (role, system, delta) => {
       for (let tryN = 0; tryN < 2; tryN++) {
         const diff = String(await git(["diff", delta ? `${reviewedHead}..HEAD` : `${base}...HEAD`]));
+        await renew();
         const rr = await io.runner({ role, issue, cwd: wt, model: reviewerModel, resume: null, system, readOnly: true,
           prompt: reviewerPrompt({ issue: iss, plan: planMd, diff, prior, delta }) });
+        await renew();
         await attempt("review", ++reviewAttempt, rr);
         const f = parseFindings(rr?.text);
         if (f) return f.map((x) => ({ ...x, reviewer: role }));
       }
       return null;
     };
-    for (;;) {
+    for (;!approvedHead;) {
       const head = String(await git(["rev-parse", "HEAD"])).trim();
       const delta = reviewedHead !== null;
       const roles = [["reviewer", REVIEWER_SYSTEM]];
@@ -262,8 +315,8 @@ export async function runLean(o) {
     await git(["push", "-u", "origin", branch]);
     const final = await diffStats();
     const linkLines = Object.entries(links).map(([k, v]) => `- ${k}: ${v.join(", ")}`).join("\n");
-    const prOut = String(await ghc(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
-      "--title", `${(validate.title ?? iss.title)} (#${issue})`,
+    const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghc(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
+      "--title", `${(validate?.title ?? iss.title)} (#${issue})`,
       "--body", `Closes #${issue}\n\nLean path run. Knowledge graph:\n${linkLines}\n\nFiles: ${final.files.length}, lines: ${final.lines}`])).trim();
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
     if (!Number.isInteger(pr)) return await needsHuman(`could not parse PR number from: ${prOut.slice(0, 200)}`);
@@ -272,6 +325,7 @@ export async function runLean(o) {
     const startedAt = now();
     let pollIndex = 0, gateHead = null;
     for (;;) {
+      await renew();
       const w = await io.waitCiGreen(pr, repo, 0).catch(() => ({ rc: 2, text: "" }));
       if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; break; }
       if (w.rc === 1) return await needsHuman(`remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`);

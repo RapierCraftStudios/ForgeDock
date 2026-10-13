@@ -26,6 +26,11 @@ export function makeLeanRunner({ runCli = runCliBackend } = {}) {
   };
 }
 
+/** A missing or unparseable CI_LOCAL_RESULT means the gate itself is broken (BROKEN); only an explicit DEGRADED passes. */
+export function parseCiLocalResult(out) {
+  return /CI_LOCAL_RESULT:\s*(PASS|FAIL|DEGRADED)\b/.exec(String(out))?.[1] ?? "BROKEN";
+}
+
 export function makeLeanIo({ repo }) {
   const base = makeIo();
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000 })).stdout;
@@ -35,8 +40,7 @@ export function makeLeanIo({ repo }) {
       let out = "";
       try { out = (await pexec("bash", [script("ci-local.sh"), "run", "--repo", cwd, "--base", baseRef], { maxBuffer: 50 * 1024 * 1024, timeout: 3600000 })).stdout; }
       catch (e) { out = String(e.stdout ?? "") + String(e.stderr ?? ""); }
-      const result = /CI_LOCAL_RESULT:\s*(PASS|FAIL|DEGRADED)/.exec(out)?.[1] ?? "DEGRADED";
-      return { result, tail: out.split("\n").slice(-60).join("\n") };
+      return { result: parseCiLocalResult(out), tail: out.split("\n").slice(-60).join("\n") };
     },
     async transitionLabel(issue, state) { await pexec("bash", [script("transition-label.sh"), String(issue), "-R", repo, state], { timeout: 60000 }); },
     fs: {
