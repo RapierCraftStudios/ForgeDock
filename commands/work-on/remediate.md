@@ -85,7 +85,10 @@ ISSUE_LABELS=$(echo "$ISSUE_STATE" | jq -r '[.labels[].name] | join(",")')
 - **Stranded-state rule**: `workflow:remediating` must never outlive this run. Every exit that returns `BLOCKED` or `UNFIXABLE` (including exits before Phase M1; except a `RESUME_AT_M7` run, which leaves the issue at `workflow:awaiting-merge` untouched, and except a `deferred-live-run:` exit, which leaves every label untouched: a live run owns the issue) removes `workflow:remediating` and adds `needs-human`, because at that point a human really is needed:
 
   ```bash
-  gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" --remove-label "workflow:remediating" 2>/dev/null || true # allowlist:check-command-side-effects
+  # forge#3567: ensure the label, add first, then remove (a missing label cancels a whole edit)
+  gh label create "needs-human" --color "E4E669" --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
+  gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+  gh issue edit {ISSUE_NUMBER} {GH_FLAG} --remove-label "workflow:remediating" 2>/dev/null || true # allowlist:check-command-side-effects
   ```
 
 **Idempotency / resume check** — the paper trail lives on **both** the PR (primary — checked by the orchestrator's item 6.4 dispatch guard) and the linked issue (mirror — keeps `/work-on`'s standard FORGE-annotation trajectory and resume logic consistent with every other phase):
@@ -212,9 +215,11 @@ BLOCK_COMMENTS=$(gh api repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments \
 if [ "${DRY_RUN:-false}" = "true" ]; then
   echo "DRY_RUN: would replace needs-human / workflow:remediating with workflow:in-review on issue #{ISSUE_NUMBER}"
 else
-  gh issue edit {ISSUE_NUMBER} {GH_FLAG} \
-    --add-label "workflow:in-review" \
-    --remove-label "needs-human,workflow:remediating" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+  # forge#3567: ensure label, add first, single-label removes
+  gh label create "workflow:in-review" --color "5319E7" --force {GH_FLAG} 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+  gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:in-review" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+  gh issue edit {ISSUE_NUMBER} {GH_FLAG} --remove-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+  gh issue edit {ISSUE_NUMBER} {GH_FLAG} --remove-label "workflow:remediating" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
 fi
 ```
 
@@ -566,6 +571,7 @@ if [ "$(printf '%s' "$PR_LIVE" | jq -r '.state // ""' 2>/dev/null)" = "MERGED" ]
   case "$TIER" in
     universal) bash "$TRANSITION_SCRIPT" {ISSUE_NUMBER} {GH_FLAG} merged ;;
     prose|*)
+      gh label create "workflow:remediating" --color "C5DEF5" --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
       gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
       ;;
   esac
@@ -730,6 +736,7 @@ if [ "$MERGE_STATE" = "MERGED" ]; then
   case "$TIER" in
     universal) bash "$TRANSITION_SCRIPT" {ISSUE_NUMBER} {GH_FLAG} merged ;;
     prose|*)
+      gh label create "workflow:remediating" --color "C5DEF5" --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
       gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
       ;;
   esac
