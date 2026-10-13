@@ -3207,7 +3207,8 @@ function help() {
     ["npx forgedock disable [dir]", "Opt a directory out of ForgeDock"],
     ["npx forgedock status [dir]", "Show ForgeDock state for a directory"],
     ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
-    ["npx forgedock run-issue <issue> --lane <lane> [--path full|lean|auto] [--retry] [--wait-lease]", "Drive one issue through the durable engine (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
+    ["npx forgedock run-issue <issue> --lane <lane> [--path core|full] [--retry] [--wait-lease]", "Run the lean core work-on on one issue (default; --path full = legacy multi-phase pipeline) (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
+    ["npx forgedock orchestrate <issue...> [--parallel K] [--lane L]", "Run core work-on on several issues with bounded concurrency and Depends-on ordering"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
@@ -3781,10 +3782,10 @@ async function watch() {
 // The journey-routed commands render their own branded marks (hero/compact);
 // splash() would double-brand them. Engine-surface commands, help, and
 // unknown-command output keep the logo.
-const SPLASH_COMMANDS = new Set(["run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
+const SPLASH_COMMANDS = new Set(["run", "run-issue", "orchestrate", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "backend-check", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "help", "--help", "-h",
+  "run", "backend-check", "run-issue", "orchestrate", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -3976,6 +3977,17 @@ switch (command) {
       // forge#3574: a lease-held deferral did NOT run the issue; exit 75
       // (EX_TEMPFAIL) so orchestrators neither count it as done nor as a failure.
       if (result && result.terminalReason === "deferred") exitCode = 75;
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "orchestrate": {
+    const { orchestrateFromCli } = await import("./engine-cli.mjs");
+    try {
+      const result = await orchestrateFromCli(restArgs);
+      if (result && !result.ok) exitCode = 1;
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;

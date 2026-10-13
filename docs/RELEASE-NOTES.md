@@ -2,11 +2,17 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
-## Lean path engine (#4081)
+## v1.22: core work-on and orchestrate (GitHub as register)
 
-`forgedock run-issue N --lane L --path lean|full|auto` (or `engine.path` in forge.yaml; default `full`) runs validate, architect and implement in one warm, minimal builder session, then deterministic gates (a test-file change unless docs-only, ci-local), one independent Sonnet reviewer (plus a security reviewer for auth, crypto, secret, permission, migration, payment or workflow paths), then PR, remote CI wait, merge and close with no model. Gate failures and blocking findings (CRITICAL/HIGH, or CONFIRMED MEDIUM introduced) resume the same builder session with `--resume`, at most 2 rounds each, then `needs-human`; a blocking round is followed by one delta re-review. Non-blocking findings are listed in `FORGE:REVIEW` and never filed. Each stage posts `FORGE:VALIDATE`, `FORGE:PLAN`, `FORGE:IMPLEMENT`, `FORGE:REVIEW`, `FORGE:CLOSE`; telemetry is one `phase_attempt` per stage plus `run_terminal`. `auto` goes lean unless the risk tier is high and the diff is large, in which case it falls back to `full`. Slow CI is polled with backoff and ends `ci-pending` (resumable), never `needs-human`. See docs/CONFIG.md (`engine.path`).
+A blind A/B showed plain Claude Code fixes issues at equal quality for about 1/10 the cost of the multi-phase pipeline, so ForgeDock is reduced to a lean core.
 
-Action: none; the default path is unchanged.
+- **`forgedock run-issue N --lane L` now runs the core work-on by default.** One plain builder session (default model, a short developer prompt) does the work and writes `.forge-lean/result.json` (`status` fixed|already-fixed|invalid|blocked, `summary`, `evidence`, `tests`). One read-only Sonnet reviewer (Read/Grep/Glob, diff and issue in the prompt) answers two questions: does the change fix the issue, and does it introduce a regression. It fails the change only when the issue is not fixed or a regression has a concrete `file:line` failure. A FAIL resumes the builder session (`--resume`) with the reason for one re-review; a second FAIL is `needs-human`. Then push, PR (`Closes #N`), ONE register comment on the issue (`<!-- FORGE:WORK-ON -->`: summary, files, tests, review verdict, PR link, cost, tokens, wall time), CI wait (`scripts/wait-ci-green.sh`, backoff, slow CI is never `needs-human`), merge with `--match-head-commit` at the reviewed head, `workflow:merged`, close. Invalid or already-fixed with file:line evidence closes as `workflow:invalid`; without evidence it is `needs-human`.
+- **Unchanged:** the workflow labels, the issue lease, the Depends-on open-dependency refusal, rerun/resume from an open PR or remote branch, `phase_attempt` (builder as `implement`, reviewer as `review`) and `run_terminal` telemetry, the run log, and `forgedock stats`.
+- **Removed from the default path:** investigation, architect and validate phases, severity taxonomies, the security second reviewer, risk tiers, ci-local and test-required gates, and round counters beyond the single review retry.
+- **`forgedock orchestrate <issues...> [--parallel K] [--lane L]`** runs the core work-on per issue with K concurrency (default 3, lane default `staging`), in-process. An issue waits for any `**Depends on**: #X` among the given issues to merge, and is skipped if that dependency ends anything but merged/invalid (for example `needs-human`). It prints a summary table (issue, outcome, PR, cost, minutes). No investigation, synthesis or agent spawning.
+- **`--path full`** keeps the legacy multi-phase pipeline, untouched (and is required for `--retry` and `--wait-lease`). `--path lean` and `--path auto` are aliases of the core. `engine.path` in forge.yaml sets the default (see docs/CONFIG.md).
+
+Action: none for the default flow. Pin `engine.path: full` in forge.yaml to keep the old pipeline as the default.
 
 ## v1.19.1: build-time self-review, ci-local under concurrency, review roster gates
 
