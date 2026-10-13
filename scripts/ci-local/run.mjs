@@ -29,30 +29,57 @@ function slotCount() {
 }
 function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
 
-async function acquireSlot(owner, deadline) {
+let ticketSeq = 0;
+// Is this slot dir free to take (absent, or held by a dead pid / for over 3 h)? A stale one is reaped.
+function slotFree(slot) {
+  if (!fs.existsSync(slot)) return true;
+  let pid = 0; let ts = 0;
+  try { const [p, t] = fs.readFileSync(path.join(slot, 'owner'), 'utf8').split(' '); pid = Number(p); ts = Number(t); } catch { /* owner file not written yet */ }
+  const stale = pid ? !alive(pid) : (Date.now() - (fs.statSync(slot, { throwIfNoEntry: false })?.mtimeMs || 0) > 30000);
+  if (stale || (ts && Date.now() - ts > 3 * 3600 * 1000)) { try { fs.rmSync(slot, { recursive: true, force: true }); } catch { /* raced */ } return !fs.existsSync(slot); }
+  return false;
+}
+
+// forge#4057: FIFO-fair slot acquisition. Every waiter files a ticket (`<ms>-<seq>-<pid>-<rand>`) under ci-local.lock/queue and
+// only a ticket among the first N (N = number of free slots) may claim one, so an invocation can never be starved by polling
+// races. A ticket whose pid is dead is reaped; the ticket is removed on acquire, on a deadline miss and on every exit path.
+export async function acquireSlot(owner, deadline) {
   const dir = path.join(homeForgeDir(), 'ci-local.lock');
-  fs.mkdirSync(dir, { recursive: true });
+  const qdir = path.join(dir, 'queue');
+  fs.mkdirSync(qdir, { recursive: true });
   const n = slotCount();
-  for (;;) {
-    for (let i = 0; i < n; i++) {
-      const slot = path.join(dir, `slot-${i}`);
-      try {
-        fs.mkdirSync(slot);
-        fs.writeFileSync(path.join(slot, 'owner'), `${process.pid} ${Date.now()} ${owner}\n`);
-        const release = () => { try { fs.rmSync(slot, { recursive: true, force: true }); } catch { /* gone */ } cleanups.delete(release); };
-        cleanups.add(release);
-        return release;
-      } catch (e) {
-        if (e.code !== 'EEXIST') throw e;
-        let pid = 0; let ts = 0;
-        try { const [p, t] = fs.readFileSync(path.join(slot, 'owner'), 'utf8').split(' '); pid = Number(p); ts = Number(t); } catch { /* owner file not written yet */ }
-        const stale = pid ? !alive(pid) : (Date.now() - (fs.statSync(slot, { throwIfNoEntry: false })?.mtimeMs || 0) > 30000);
-        if (stale || (ts && Date.now() - ts > 3 * 3600 * 1000)) { try { fs.rmSync(slot, { recursive: true, force: true }); } catch { /* raced */ } i--; continue; }
+  const ticket = `${String(Date.now()).padStart(14, '0')}-${String(++ticketSeq).padStart(6, '0')}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const tpath = path.join(qdir, ticket);
+  fs.writeFileSync(tpath, `${process.pid} ${owner}\n`, { flag: 'wx' });
+  const dropTicket = () => { try { fs.rmSync(tpath, { force: true }); } catch { /* gone */ } cleanups.delete(dropTicket); };
+  cleanups.add(dropTicket);
+  try {
+    for (;;) {
+      const free = [];
+      for (let i = 0; i < n; i++) if (slotFree(path.join(dir, `slot-${i}`))) free.push(i);
+      const live = [];
+      for (const name of fs.readdirSync(qdir).sort()) {
+        if (name !== ticket && !alive(Number(name.split('-')[2]))) { try { fs.rmSync(path.join(qdir, name), { force: true }); } catch { /* raced */ } continue; }
+        live.push(name);
       }
+      const pos = live.indexOf(ticket);
+      if (pos === -1) { try { fs.writeFileSync(tpath, `${process.pid} ${owner}\n`, { flag: 'wx' }); } catch { /* re-filed by a racing reaper */ } }
+      else if (pos < free.length) {
+        for (const i of free) {
+          const slot = path.join(dir, `slot-${i}`);
+          try {
+            fs.mkdirSync(slot);
+            fs.writeFileSync(path.join(slot, 'owner'), `${process.pid} ${Date.now()} ${owner}\n`);
+            const release = () => { try { fs.rmSync(slot, { recursive: true, force: true }); } catch { /* gone */ } cleanups.delete(release); };
+            cleanups.add(release);
+            return release;
+          } catch (e) { if (e.code !== 'EEXIST') throw e; }
+        }
+      }
+      if (Date.now() > deadline) return null;
+      await sleep(250);
     }
-    if (Date.now() > deadline) return null;
-    await sleep(250);
-  }
+  } finally { dropTicket(); }
 }
 
 // ---- process execution ----
@@ -164,6 +191,27 @@ function stepKey(step, job, ctx) {
   return sha256(JSON.stringify([step.command, step.cwd, step.shell, Object.keys(env).sort().map((k) => `${k}=${env[k]}`), toolVersion(path.basename(first)), process.version, inputs]));
 }
 
+function durKey(step) { return sha256(`${step.command}\0${step.cwd || ''}`).slice(0, 40); }
+
+// forge#4057: cost hint for ordering. wide = some step runs unscoped or widened; est = expected execution ms (a cached step
+// costs 0, otherwise the last recorded duration of that command, else a default). Cheap and narrow jobs go first so a budget
+// hit leaves the most coverage proven.
+function jobCost(job, ctx) {
+  let wide = 0; let est = 0;
+  for (const step of job.steps) {
+    if (step.noop || step.skip) continue;
+    if (step.builtin) continue;
+    if (!step.scope || step.scope.mode === 'full' || step.scope.widen_reason) wide = 1;
+    try {
+      if (step.kind !== 'install' && !ctx.noResultCache && fs.existsSync(path.join(cacheDir(ctx.o), stepKey(step, job, ctx) + '.json'))) continue;
+    } catch { /* unknown cost */ }
+    let d = 60000;
+    try { const v = Number(fs.readFileSync(path.join(cacheDir(ctx.o), 'dur', durKey(step)), 'utf8')); if (v >= 0) d = v; } catch { /* no history */ }
+    est += d;
+  }
+  return [wide, est];
+}
+
 // ---- one job ----
 function jobEnv(job, step, ctx, ghFiles) {
   const extra = { ...job.env, ...step.env };
@@ -184,24 +232,30 @@ function absorbGhFiles(ghFiles, env) {
 }
 
 async function runJob(job, ctx) {
-  const t0 = Date.now(); const res = { id: job.id, name: job.name, source: job.source, status: 'pass', steps: [], reason: '', duration_ms: 0 };
+  const t0 = Date.now(); const res = { id: job.id, name: job.name, source: job.source, status: 'pass', steps: [], reason: '', duration_ms: 0, wait_ms: 0 };
   const jobTimeout = (job.timeout_s || ctx.jobTimeoutS) * 1000;
   const log = (m) => { res.notes = (res.notes || []).concat(m); };
   const runnableSteps = job.steps.filter((s) => !s.noop);
   if (!runnableSteps.length) { res.status = 'pass'; res.reason = 'nothing to run'; res.duration_ms = Date.now() - t0; return res; }
-  const needExec = runnableSteps.some((s) => !s.skip);
   let svc = null; let release = null;
-  try {
-    if (needExec) {
+  // forge#4040 (REG-5): the job timeout clock starts when the job starts executing, never while it waits for a slot.
+  // forge#4057: the slot is taken lazily, right before the first step that really executes, so a job made only of skipped,
+  // cached or deduplicated steps never queues for one. Time spent here is wait_ms (not duration_ms) and shifts tExec.
+  let tExec = Date.now();
+  const takeSlot = async () => {
+    const tw = Date.now();
+    try {
       release = await acquireSlot(job.id, ctx.deadline);
-      if (!release) { res.status = 'deferred'; res.budget = true; res.reason = 'budget exhausted waiting for a machine slot'; return res; }
+      res.wait_ms += Date.now() - tw;
+      if (!release) { res.status = 'deferred'; res.budget = true; res.reason = 'budget exhausted waiting for a machine slot'; return false; }
       if (job.services && job.services.length) {
         svc = await startServices(job, log);
-        if (svc.error) { res.status = 'deferred'; res.reason = `service containers: ${svc.error}`; return res; }
+        if (svc.error) { res.status = 'deferred'; res.reason = `service containers: ${svc.error}`; return false; }
       }
-    }
-    // forge#4040 (REG-5): the job timeout clock starts when the job starts executing, never while it waits for a slot.
-    const tExec = Date.now();
+      return true;
+    } finally { tExec += Date.now() - tw; }
+  };
+  try {
     const ghFiles = { env: path.join(ctx.tmp, `${job.id.replace(/[^A-Za-z0-9]/g, '_')}.env`), path: path.join(ctx.tmp, `${job.id.replace(/[^A-Za-z0-9]/g, '_')}.path`), output: path.join(ctx.tmp, `${job.id.replace(/[^A-Za-z0-9]/g, '_')}.out`), summary: path.join(ctx.tmp, `${job.id.replace(/[^A-Za-z0-9]/g, '_')}.sum`) };
     for (const f of Object.values(ghFiles)) fs.writeFileSync(f, '');
     const carried = {}; let failedGroup = null;
@@ -212,17 +266,23 @@ async function runJob(job, ctx) {
       if (step.skip) { sr.status = 'skipped'; sr.reason = step.skip; continue; }
       if (failedGroup && step.group !== failedGroup) break;
       if (Date.now() > ctx.deadline) { res.status = 'deferred'; res.budget = true; res.reason = 'budget exhausted'; return res; }
-      const s0 = Date.now();
+      let s0 = Date.now();
       if (step.builtin === 'portability') {
         const f = checkPortability({ repo: ctx.repo, from: ctx.plan.merge_base, changed: ctx.plan.changed_files, tracked: ctx.tracked });
         sr.duration_ms = Date.now() - s0;
         if (f.length) { sr.status = 'fail'; res.tail = f.slice(0, 40); res.status = 'fail'; res.failed_step = step.name; failedGroup = step.group || null; if (!failedGroup) break; }
         continue;
       }
-      let key = '';
+      let key = ''; let fkey = '';
       const cacheable = step.kind !== 'install' && !ctx.noResultCache;
+      if (step.kind !== 'install') {
+        const base = stepKey(step, job, ctx);
+        // forge#4057: identical checks (command, cwd, shell, env, input hash, carried env) run once per invocation. A step that
+        // reads or writes the GitHub Actions side files has effects beyond its exit code, so it is never shared.
+        if (!(job.source === 'github-actions' && /GITHUB_(ENV|PATH|OUTPUT|STEP_SUMMARY)/.test(step.command))) fkey = sha256(base + JSON.stringify(carried));
+        if (cacheable) key = base;
+      }
       if (cacheable) {
-        key = stepKey(step, job, ctx);
         const f = path.join(cacheDir(ctx.o), key + '.json');
         if (fs.existsSync(f)) { sr.cache = 'hit'; sr.duration_ms = 0; try { fs.utimesSync(f, new Date(), new Date()); } catch { /* ignore */ } continue; }
         sr.cache = 'miss';
@@ -233,14 +293,35 @@ async function runJob(job, ctx) {
       const env = jobEnv(job, step, ctx, ghFiles); Object.assign(env, carried);
       const cwd = path.resolve(ctx.repo, step.cwd || '.');
       if (!insideRepo(ctx.repo, cwd)) { res.status = 'deferred'; res.reason = 'step working-directory escapes the repository'; return res; }
-      const tail = new Tail();
-      const left = Math.max(1000, Math.min((step.timeout_s || ctx.jobTimeoutS) * 1000, jobTimeout - (Date.now() - tExec), ctx.deadline - Date.now()));
-      const r = await exec([...argv, scriptFile], { cwd, env, timeoutMs: left, onData: (b) => tail.push(b) });
-      sr.duration_ms = Date.now() - s0;
-      if (job.source === 'github-actions') { const e2 = { ...env }; absorbGhFiles(ghFiles, e2); for (const k of Object.keys(e2)) if (e2[k] !== env[k]) carried[k] = e2[k]; }
-      if (r.code === 0) { if (key) { try { fs.mkdirSync(cacheDir(ctx.o), { recursive: true }); fs.writeFileSync(path.join(cacheDir(ctx.o), key + '.json'), JSON.stringify({ cmd: step.command.slice(0, 300), ts: Date.now() })); } catch { /* cache is best effort */ } } continue; }
-      if (r.error) tail.push(Buffer.from(`${r.error}\n`));
-      const text = tail.text(60);
+      let prior = fkey ? ctx.flight.get(fkey) : null;
+      if (!prior && !release) {
+        if (!(await takeSlot())) return res;
+        s0 = Date.now();
+        prior = fkey ? ctx.flight.get(fkey) : null; // another job may have started the same check while this one queued
+      }
+      let r; let text; let left;
+      if (prior) {
+        // single-flight: wait for the first run of this exact check and reuse its result (a failure is shared, never re-run)
+        ({ r, text, left } = await prior);
+        sr.cache = 'dedup'; sr.duration_ms = 0;
+      } else {
+        const tail = new Tail();
+        left = Math.max(1000, Math.min((step.timeout_s || ctx.jobTimeoutS) * 1000, jobTimeout - (Date.now() - tExec), ctx.deadline - Date.now()));
+        const l0 = left;
+        const flight = (async () => { const r0 = await exec([...argv, scriptFile], { cwd, env, timeoutMs: l0, onData: (b) => tail.push(b) }); if (r0.error) tail.push(Buffer.from(`${r0.error}\n`)); return { r: r0, text: tail.text(60), left: l0 }; })();
+        if (fkey) ctx.flight.set(fkey, flight);
+        ({ r, text } = await flight);
+        sr.duration_ms = Date.now() - s0;
+        if (job.source === 'github-actions') { const e2 = { ...env }; absorbGhFiles(ghFiles, e2); for (const k of Object.keys(e2)) if (e2[k] !== env[k]) carried[k] = e2[k]; }
+        if (r.code === 0) {
+          try { // duration_ms in the entry and a per-command duration hint feed the scheduler's cost ordering
+            fs.mkdirSync(path.join(cacheDir(ctx.o), 'dur'), { recursive: true });
+            if (key) fs.writeFileSync(path.join(cacheDir(ctx.o), key + '.json'), JSON.stringify({ cmd: step.command.slice(0, 300), ts: Date.now(), duration_ms: sr.duration_ms }));
+            fs.writeFileSync(path.join(cacheDir(ctx.o), 'dur', durKey(step)), String(sr.duration_ms));
+          } catch { /* cache is best effort */ }
+        }
+      }
+      if (r.code === 0) continue;
       if (r.timedOut) { if (Date.now() > ctx.deadline) { res.status = 'deferred'; res.budget = true; res.reason = 'budget exhausted (job killed)'; return res; } sr.status = 'timeout'; res.status = 'degraded'; res.reason = `timed out after ${Math.round(left / 1000)}s (a timeout proves nothing about the code)`; res.tail = text; res.failed_step = step.name; return res; }
       if (step.kind === 'install') { res.status = 'deferred'; res.reason = `dependency install failed (offline?): ${step.command.slice(0, 60)}`; return res; }
       if (r.code === 127 && text.some((l) => /command not found|not found$|No such file or directory/.test(l)) && !step.continue_on_error) {
@@ -257,7 +338,7 @@ async function runJob(job, ctx) {
   } finally {
     if (svc && svc.finish) svc.finish();
     if (release) release();
-    res.duration_ms = Date.now() - t0;
+    res.duration_ms = Math.max(0, Date.now() - t0 - res.wait_ms);
   }
 }
 
@@ -277,23 +358,34 @@ export async function runPlan(plan, o = {}) {
     plan, repo, o, tmp: tmpRoot, deadline: t0 + budgetS * 1000, jobTimeoutS: Number(process.env.FORGE_CI_LOCAL_JOB_TIMEOUT) || Math.min(900, budgetS),
     tracked: runSync('git', ['-C', repo, 'ls-files', '--cached', '--others', '--exclude-standard', '-z']).out.split('\0').filter(Boolean),
     noResultCache: process.env.FORGE_CI_LOCAL_NO_CACHE === '1',
+    flight: new Map(),
   };
   const runnable = plan.jobs.filter((j) => !j.not_applicable && !j.deferred_reason);
   const ids = new Set(runnable.map((j) => j.id));
   const results = new Map(); const running = new Map();
   const pending = new Set(runnable.map((j) => j.id));
   const byId = new Map(runnable.map((j) => [j.id, j]));
+  const costs = new Map();
+  const cost = (id) => { if (!costs.has(id)) { let c = [1, 0]; try { c = jobCost(byId.get(id), ctx); } catch { /* ordering is a hint */ } costs.set(id, c); } return costs.get(id); };
+  const order = new Map([...pending].map((id, i) => [id, i]));
   while (pending.size || running.size) {
+    const ready = [];
     for (const id of [...pending]) {
       const j = byId.get(id);
       const needs = (j.needs || []).filter((n) => ids.has(n));
       const blocked = needs.find((n) => results.has(n) && results.get(n).status !== 'pass');
-      if (blocked) { pending.delete(id); const b = results.get(blocked); const r = { id, name: j.name, source: j.source, status: b.status === 'fail' ? 'skipped' : 'deferred', reason: b.status === 'fail' ? `needs ${blocked}, which failed` : `needs ${blocked}, which is not proven locally`, steps: [], duration_ms: 0 }; results.set(id, r); printJob(r); continue; }
+      if (blocked) { pending.delete(id); const b = results.get(blocked); const r = { id, name: j.name, source: j.source, status: b.status === 'fail' ? 'skipped' : 'deferred', reason: b.status === 'fail' ? `needs ${blocked}, which failed` : `needs ${blocked}, which is not proven locally`, steps: [], duration_ms: 0, wait_ms: 0 }; results.set(id, r); printJob(r); continue; }
       if (needs.some((n) => !results.has(n))) continue;
+      ready.push(id);
+    }
+    // narrow/scoped jobs first, then the cheapest; the widest or longest last (ties keep plan order). `needs` is honoured above.
+    ready.sort((x, y) => cost(x)[0] - cost(y)[0] || cost(x)[1] - cost(y)[1] || order.get(x) - order.get(y));
+    for (const id of ready) {
       if (running.size >= maxParallel) break;
-      if (Date.now() > ctx.deadline) { pending.delete(id); results.set(id, { id, name: j.name, source: j.source, status: 'deferred', budget: true, reason: 'budget exhausted before the job started', steps: [], duration_ms: 0 }); continue; }
+      const j = byId.get(id);
+      if (Date.now() > ctx.deadline) { pending.delete(id); results.set(id, { id, name: j.name, source: j.source, status: 'deferred', budget: true, reason: 'budget exhausted before the job started', steps: [], duration_ms: 0, wait_ms: 0 }); continue; }
       pending.delete(id);
-      const p = runJob(j, ctx).catch((e) => ({ id, name: j.name, source: j.source, status: 'deferred', reason: `runner error: ${e.message}`, steps: [], duration_ms: 0 })).then((r) => { results.set(id, r); running.delete(id); printJob(r); });
+      const p = runJob(j, ctx).catch((e) => ({ id, name: j.name, source: j.source, status: 'deferred', reason: `runner error: ${e.message}`, steps: [], duration_ms: 0, wait_ms: 0 })).then((r) => { results.set(id, r); running.delete(id); printJob(r); });
       running.set(id, p);
     }
     if (running.size) await Promise.race(running.values()); else if (pending.size) await sleep(10);
@@ -315,7 +407,7 @@ export async function runPlan(plan, o = {}) {
     if (s.scope.mode === 'scoped' || s.scope.mode === 'skip') narrowed++;
     if (s.scope.widen_reason) widened++;
     if (typeof s.scope.selected === 'number' && typeof s.scope.total === 'number') { selSel += s.scope.selected; selTotal += s.scope.total; }
-    if (checks++ < 40) console.log(`CI_LOCAL_CHECK: job=${r.id} step=${n + 1} selector=${s.scope.selector || 'none'} selected=${s.scope.selected ?? ''} total=${s.scope.total ?? ''} cache=${s.cache} duration_ms=${s.duration_ms} widen=${(s.scope.widen_reason || '').replace(/\s+/g, '_') || 'none'}`);
+    if (checks++ < 40) console.log(`CI_LOCAL_CHECK: job=${r.id} step=${n + 1} selector=${s.scope.selector || 'none'} selected=${s.scope.selected ?? ''} total=${s.scope.total ?? ''} cache=${s.cache} duration_ms=${s.duration_ms} widen=${(s.scope.widen_reason || '').replace(/\s+/g, '_') || 'none'} wait_ms=${r.wait_ms || 0}`);
   }
   const degraded = all.filter((r) => r.status === 'degraded');
   const budgetHit = all.some((r) => r.budget) || (all.some((r) => r.status === 'deferred' && /budget exhausted/.test(r.reason || '')));
@@ -325,18 +417,22 @@ export async function runPlan(plan, o = {}) {
   const degReason = degraded.length ? 'job_timeout' : budgetHit ? (capped ? 'budget_capped_at_invocation_limit' : 'budget_exhausted') : '';
   const state = failed.length ? 'FAIL' : degReason ? 'DEGRADED' : 'PASS';
   const dur = Date.now() - t0;
+  const waitTotal = all.reduce((a, r) => a + (r.wait_ms || 0), 0);
+  const dedups = all.reduce((a, r) => a + r.steps.filter((x) => x.cache === 'dedup').length, 0);
   if (plan.no_applicable_jobs && !all.length) console.log('CI_LOCAL_NOTE: no_applicable_jobs (CI definitions exist but no job applies to this change)');
-  console.log(`CI_LOCAL_RESULT: ${state} jobs_run=${run_.length} jobs_deferred=${defd.length} jobs_failed=${failed.length} jobs_degraded=${degraded.length} jobs_skipped=${skipped.length} checks=${checks} cache_hits=${hits} narrowed=${narrowed} widened=${widened} selected=${selSel} total=${selTotal} duration_ms=${dur}${Date.now() > ctx.deadline ? ' budget_exhausted=true' : ''}${plan.no_applicable_jobs && !all.length ? ' no_applicable_jobs=true' : ''}${degReason && state === 'DEGRADED' ? ` reason=${degReason}` : ''}`);
-  if (o.resultFile) { try { fs.writeFileSync(o.resultFile, JSON.stringify({ state, mode: plan.config && plan.config.mode, jobs: all, plan_key: plan.plan_key, duration_ms: dur }, null, 2)); } catch { /* ignore */ } }
+  console.log(`CI_LOCAL_RESULT: ${state} jobs_run=${run_.length} jobs_deferred=${defd.length} jobs_failed=${failed.length} jobs_degraded=${degraded.length} jobs_skipped=${skipped.length} checks=${checks} cache_hits=${hits} narrowed=${narrowed} widened=${widened} selected=${selSel} total=${selTotal} duration_ms=${dur} wait_ms=${waitTotal} dedup=${dedups}${Date.now() > ctx.deadline ? ' budget_exhausted=true' : ''}${plan.no_applicable_jobs && !all.length ? ' no_applicable_jobs=true' : ''}${degReason && state === 'DEGRADED' ? ` reason=${degReason}` : ''}`);
+  if (o.resultFile) { try { fs.writeFileSync(o.resultFile, JSON.stringify({ state, mode: plan.config && plan.config.mode, jobs: all, plan_key: plan.plan_key, duration_ms: dur, wait_ms: waitTotal }, null, 2)); } catch { /* ignore */ } }
   try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
   return failed.length ? 1 : state === 'DEGRADED' ? 2 : 0;
 }
 
 function printJob(r) {
   const secs = (r.duration_ms / 1000).toFixed(1);
+  const waitS = ((r.wait_ms || 0) / 1000).toFixed(1);
+  const dedup = r.steps.filter((s) => s.cache === 'dedup').length;
   const stepsRun = r.steps.filter((s) => s.status !== 'skipped').length;
   const hit = r.steps.filter((s) => s.cache === 'hit').length;
-  console.log(`CI_LOCAL_JOB: ${r.status === 'pass' ? 'pass' : r.status} ${r.id} | ${r.name} | ${secs}s | steps=${stepsRun}/${r.steps.length}${hit ? ` cached=${hit}` : ''}${r.reason ? ` | ${r.reason}` : ''}`);
+  console.log(`CI_LOCAL_JOB: ${r.status === 'pass' ? 'pass' : r.status} ${r.id} | ${r.name} | ${secs}s | steps=${stepsRun}/${r.steps.length}${hit ? ` cached=${hit}` : ''}${dedup ? ` dedup=${dedup}` : ''} wait=${waitS}s${r.reason ? ` | ${r.reason}` : ''}`);
   if (r.status === 'fail' || r.status === 'degraded') {
     console.log(`${r.status === 'fail' ? 'CI_LOCAL_FAIL' : 'CI_LOCAL_DEGRADED_STEP'}: ${r.id} | step: ${r.failed_step || '?'}${r.exit !== undefined ? ` | exit ${r.exit}` : ''}`);
     if (r.failed_command) console.log(`CI_LOCAL_FAIL_COMMAND: ${r.failed_command.split('\n')[0].slice(0, 300)}`);
