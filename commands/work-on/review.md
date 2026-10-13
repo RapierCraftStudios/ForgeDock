@@ -205,7 +205,7 @@ On conflict, resolve every file, keep both sides' intent, `git add`, `git commit
 **Re-gate the merged head** <!-- Added: forge#3983 -->: the `FORGE:QUALITY_GATE` PASS is bound to `HEAD^{tree}` (R1.5 `--head-tree`), so a merge that changes the tree invalidates it. After the merge and any conflict resolution, compare `PRE_SYNC_TREE` with the current `HEAD^{tree}` (fail closed if either cannot be resolved):
 
 - Unchanged: do nothing; never re-gate.
-- Changed: run the scoped quality gate on the merged head here (`work-on/build/validate` V1 loop over the PR's changed files), then post the marker via validate.md V5 Step 1 "Marker-only re-gate mode" (`**Tree**` = merged `HEAD^{tree}`, `**Commands run**` = what ran). Post the real result: on FAIL, fix and re-run within the validate bounds, else add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker "post-sync quality gate failed"; never post PASS without a run.
+- Changed: run the scoped quality gate on the merged head here (`work-on/build/validate` V1 loop over the PR's changed files), then post the marker via validate.md V5 Step 1 "Marker-only re-gate mode" (`**Tree**` = merged `HEAD^{tree}`, `**Commands run**` = what ran). Post the real result: on FAIL, fix, commit the fix (marker-only mode requires a clean worktree so the re-gated tree is the committed `HEAD^{tree}`), and re-run within the validate bounds, else add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker "post-sync quality gate failed"; never post PASS without a run.
 
 ## Phase R1: Pre-Push Ancestry Guard
 
