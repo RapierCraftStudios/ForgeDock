@@ -48,6 +48,9 @@ function world(o = {}) {
     },
     git: async (a) => {
       w.calls.push(["git", ...a]);
+      if (a[0] === "worktree" && a[1] === "add" && (w.lockFails ?? 0) > 0) {
+        w.lockFails--; const e = new Error("git failed"); e.stderr = "error: could not lock config file .git/config: File exists"; throw e;
+      }
       if (a[0] === "rev-parse" && a[1] === "--git-path") return "/repo/.git/info/exclude";
       if (a[0] === "rev-parse") return w.head;
       if (a[0] === "diff" && a[1] === "--name-only") return w.changed.join("\n");
@@ -213,6 +216,15 @@ describe("core work-on", () => {
   it("builder blocked, or no commit, is needs-human", async () => {
     assert.equal((await run(world({ result: { status: "blocked", summary: "need creds" } }))).terminalReason, "needs-human");
     assert.equal((await run(world({ changed: [] }))).terminalReason, "needs-human");
+  });
+
+  it("worktree add retries a concurrent .git lock collision, then gives up after 5 tries", async () => {
+    const w = world(); w.lockFails = 2;
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(w.calls.filter((c) => c[1] === "worktree" && c[2] === "add").length, 3);
+    const w2 = world(); w2.lockFails = 99;
+    assert.notEqual((await run(w2)).terminalReason, "merged");
+    assert.equal(w2.calls.filter((c) => c[1] === "worktree" && c[2] === "add").length, 5);
   });
 
   it("needs-human terminals carry a specific outcome code, never unclassified", async () => {

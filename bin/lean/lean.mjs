@@ -227,11 +227,20 @@ export async function runCore(o) {
     } catch { /* no resume info: start fresh */ }
     try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* none */ }
     try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
+    // Concurrent lanes in one repo race on .git/config.lock / index.lock during `worktree add`; retry with jitter.
+    const addWorktree = async (args) => {
+      for (let i = 0; ; i++) {
+        try { return await io.git(args, { cwd }); } catch (e) {
+          if (i >= 4 || !/could not lock|\.lock'?: File exists|Unable to create .*\.lock/i.test(String(e?.stderr ?? e?.message ?? e))) throw e;
+          await sleep(500 * (i + 1) + Math.floor(random() * 500));
+        }
+      }
+    };
     if (resumed) {
       await io.git(["fetch", "origin", branch], { cwd });
-      await io.git(["worktree", "add", "-B", branch, wt, `origin/${branch}`], { cwd });
+      await addWorktree(["worktree", "add", "-B", branch, wt, `origin/${branch}`]);
     } else {
-      await io.git(["worktree", "add", "-B", branch, wt, base], { cwd });
+      await addWorktree(["worktree", "add", "-B", branch, wt, base]);
     }
     wtCreated = true;
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
