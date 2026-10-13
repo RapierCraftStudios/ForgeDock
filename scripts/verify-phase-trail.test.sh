@@ -58,6 +58,7 @@ mk() {
       FP_*) items+=("{\"body\":\"<!-- FORGE:FAST_PATH -->\\n**COMPLEXITY_BAND**: ${k#FP_}\"}") ;;
       QUOTED) items+=('{"body":"see `<!-- FORGE:CONTRACT -->` `<!-- FORGE:CONTEXT -->` `<!-- FORGE:ARCHITECT -->` `<!-- FORGE:QUALITY_GATE -->` **Result**: PASS"}') ;;
       INV_INVALID) items+=('{"body":"<!-- FORGE:INVESTIGATOR -->\nInvalid\n<!-- INVESTIGATION:INVALID -->"}') ;;
+      SR) items+=('{"body":"<!-- FORGE:SELFREVIEW-AGENT:security -->\nTree: abc\n<!-- REVIEW-FINDINGS-START -->\n<!-- REVIEW-FINDINGS-END -->"}' '{"body":"<!-- FORGE:SELFREVIEW -->\n## Self-review\nTree: abc"}') ;;
       PROSE) items+=('{"body":"I ran the architect and context inline; FORGE:CONTEXT FORGE:ARCHITECT FORGE:QUALITY_GATE done"}') ;;
     esac
   done
@@ -81,6 +82,11 @@ expect_pass "TRIVIAL passes without CONTEXT/ARCHITECT" "$(mk triv INV CONTRACT F
 expect_pass "lowercase band is accepted" "$(mk lower INV CONTRACT FP_trivial QG_PASS)"
 expect_pass "Investigation band passes with only INVESTIGATOR+FAST_PATH" "$(mk invest INV FP_INVESTIGATION)"
 expect_pass "docs-only waives QUALITY_GATE" "$(mk docs INV CONTRACT FP_TRIVIAL)" --docs-only
+
+# forge#3971: build-time self-review comments are tolerated but never satisfy a required phase marker
+expect_pass "self-review comments do not disturb a full trail" "$(mk sr1 INV CONTRACT FP_COMPLEX CONTEXT ARCH QG_PASS SR)"
+expect_fail "self-review comments do not stand in for QUALITY_GATE" "$(mk sr2 INV CONTRACT FP_COMPLEX CONTEXT ARCH SR)" QUALITY_GATE
+expect_fail "self-review comments do not stand in for CONTEXT" "$(mk sr3 INV CONTRACT FP_STANDARD ARCH QG_PASS SR)" CONTEXT
 
 expect_fail "missing INVESTIGATOR" "$(mk a CONTRACT FP_COMPLEX CONTEXT ARCH QG_PASS)" INVESTIGATOR
 expect_fail "partial investigation (no COMPLETE) fails" "$(mk b INV_PARTIAL CONTRACT FP_COMPLEX CONTEXT ARCH QG_PASS)" INVESTIGATOR

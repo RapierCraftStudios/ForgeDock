@@ -21,7 +21,7 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 1. **This file is a router. Every phase runs as a forked sub-skill via `Skill(...)`; the router never executes phase logic itself.** Each phase sub-skill (`work-on:investigate`, `work-on:decompose`, `work-on:build`, `work-on:review`, `work-on:close`, `work-on:remediate`) declares `context: fork`, so Claude Code runs it in an isolated sub-agent context that holds only that phase's spec and the args you pass. The phase re-reads everything else from GitHub/git and returns exactly one `*_RESULT:` block — that block is all the router sees. Do not read phase spec files, do not re-implement a phase step here, and do not "help" a phase by posting its markers or labels. If a skill name does not resolve, STOP with "skill not found" (see Skill Name Resolution) — never run a phase inline.
 
-1a. **Dispatching phases are invoked only by this router.** `work-on:review` and `work-on:remediate` spawn sub-agents (the `/review-pr` domain reviewers), and Claude Code only grants the `Agent` tool down to a fixed depth (see Depth Budget). Invoking them from here keeps them one level below the router, where `Agent` works. No phase may invoke them; a phase that needs one returns `status: NEXT` with `next: <phase>`, and the router runs it (Phase 4R). Non-dispatching phases may nest forks freely. <!-- forge#3398 -->
+1a. **Dispatching phases are invoked only by this router.** `work-on:review` and `work-on:remediate` spawn sub-agents (the `/review-pr` domain reviewers), and `work-on:build` spawns the build-time self-review reviewers (B5.6, forge#3971; it degrades to a recorded skip when `Agent` is withheld), and Claude Code only grants the `Agent` tool down to a fixed depth (see Depth Budget). Invoking them from here keeps them one level below the router, where `Agent` works. No phase may invoke them; a phase that needs one returns `status: NEXT` with `next: <phase>`, and the router runs it (Phase 4R). Non-dispatching phases may nest forks freely. <!-- forge#3398 -->
 
 2. **Route only on `*_RESULT` blocks and GitHub state.** After each phase returns, apply the routing table for that phase (below). Never infer success from a phase's prose; never continue past a `BLOCKED`/`FAILED` result.
 
@@ -103,11 +103,11 @@ Layers are counted below the main conversation (layer 0). Claude Code grants the
 |-----------------------------|-----------|-------------------|
 | 0 / 0 | solo `/work-on` router / `/orchestrate` | orchestrate: one worker per issue |
 | — / 1 | `/work-on` router (orchestrated worker) | no (`Skill` only) |
-| 1 / 2 | every phase invoked by the router, including `work-on:review` and `work-on:remediate` | review/remediate: `/review-pr` domain reviewers |
+| 1 / 2 | every phase invoked by the router, including `work-on:build`, `work-on:review` and `work-on:remediate` | build: self-review reviewers (B5.6); review/remediate: `/review-pr` domain reviewers |
 | 2 / 3 | domain reviewers (leaves); build children (context, architect, implement, validate) | no |
 | 3 / 4 | quality gate (inside validate or review) | no |
 
-The only layer constraint that matters is the spawner: `work-on:review` and `work-on:remediate` must sit at layer ≤ 2, which Hard Rule 1a guarantees. The Phase 0A spawn-depth preflight checks the effective depth before any work starts.
+The only layer constraint that matters is the spawner: `work-on:build`, `work-on:review` and `work-on:remediate` must sit at layer ≤ 2, which Hard Rule 1a guarantees. The Phase 0A spawn-depth preflight checks the effective depth before any work starts.
 
 ### Model and Effort Tiering — What Actually Applies
 

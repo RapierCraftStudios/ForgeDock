@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# spawn-depth-check.sh — will a /work-on dispatching phase (review, remediate) have the Agent tool?
+# spawn-depth-check.sh — will a /work-on dispatching phase (build self-review, review, remediate) have the Agent tool?
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Claude Code grants the Agent tool to sub-agents down to CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH layers
 # below the main conversation (default 3 since 2.1.219; 5 for 2.1.172-2.1.216; 1 for 2.1.217-2.1.218).
-# A sub-agent at layer L can spawn only when L < depth. The router invokes review/remediate at
+# A sub-agent at layer L can spawn only when L < depth. The router invokes build/review/remediate at
 # router layer + 1, so they can spawn reviewers only when router layer + 2 <= depth (forge#3398,
-# docs/WORK-ON-RUNTIME.md).
+# docs/WORK-ON-RUNTIME.md). build (B5.6 self-review, forge#3971) uses the same arithmetic but degrades to a recorded
+# skip on FAIL instead of stopping the run.
 #
 # Usage: spawn-depth-check.sh [--router-layer N]      (N = 0 solo, 1 under /orchestrate; default 0)
 # Env:   CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH  explicit limit (wins over the version default)
@@ -69,5 +70,5 @@ if [ "$DEPTH" -ge "$REQUIRED" ]; then
   echo "SPAWN_DEPTH: OK depth=${DEPTH} required=${REQUIRED} (${SOURCE})"
   exit 0
 fi
-echo "SPAWN_DEPTH: FAIL depth=${DEPTH} required=${REQUIRED} (${SOURCE}) — review/remediate would run without the Agent tool and could not spawn /review-pr reviewers. Set CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH>=${REQUIRED}."
+echo "SPAWN_DEPTH: FAIL depth=${DEPTH} required=${REQUIRED} (${SOURCE}) — build/review/remediate would run without the Agent tool and could not spawn self-review or /review-pr reviewers. Set CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH>=${REQUIRED}."
 exit 1

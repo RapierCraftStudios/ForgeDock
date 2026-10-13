@@ -1007,6 +1007,21 @@ reset; rm -f "$FIX/comments.json"; ig; has "integrity: unreadable comments count
 reset; mkctx 1 BASE_SYNC_ONLY "$OLD_SHA" 42; cm MEMBER User "$(agent_body security "$SHA" 'a' '')"; flush; ig
 has "integrity: unverified carry is not reported as carried" "CARRIED_FROM: "; case "$OUT" in *"carried from"*) bad "integrity: carried requires a verified record" ;; *) ok ;; esac
 
+# forge#3971: a build-time FORGE:SELFREVIEW-AGENT comment (even a trusted one pinned to the current head) is never a panel member
+sr_body() { printf '<!-- FORGE:SELFREVIEW-AGENT:%s -->\n%s\n<!-- REVIEW-FINDINGS-START -->\n%s\n<!-- REVIEW-FINDINGS-END -->\nReviewed-SHA: %s\nTree: abc123\n' "$1" "$3" "$4" "$2"; }
+reset
+cm MEMBER User "$(sr_body security "$SHA" 'self' '<!-- FINDING:SEC-9|CONFIRMED|HIGH|a.py:9|Self-review finding -->')"; cm MEMBER Bot "<!-- FORGE:SELFREVIEW -->
+Tree: abc123"; flush
+ig; has "integrity: self-review comments never count as panel agents" "ACTUAL_AGENT_COUNT=0"
+case "$OUT" in *security*) bad "integrity: SELFREVIEW-AGENT domain leaked into the panel" ;; *) ok ;; esac
+reset
+cm MEMBER User "$(sr_body security "$SHA" 'self' '<!-- FINDING:SEC-9|CONFIRMED|HIGH|a.py:9|Self-review finding -->')"; flush
+run "$GOOD" extract
+has "extract: a self-review comment alone is no review (fail closed)" "no trusted reviewer comments"
+reset
+cm MEMBER User "$(sr_body security "$SHA" 'self' '')"; cm MEMBER User "$(agent_body api "$SHA" 'real' '')"; flush
+ig; has "integrity: only the REVIEW-AGENT counts beside a self-review" "ACTUAL_AGENT_COUNT=1"; has "integrity: only the real domain" "ACTUAL_AGENT_DOMAINS=api"
+
 # --- Phase 7-9 subcommands run without a review-prepare context (flags only) ---
 nctx() { local sub="$1"; shift; OUT=$(cd "$REPO_DIR" && FORGEDOCK_HOME="$GATE" bash "$ROOT/scripts/review-finalize.sh" "$sub" --pr 7 --repo o/r "$@" 2>"$WORK/stderr"); RC=$?; }
 gate_reset; nctx merge-gate --issue 42 --base main --verdict APPROVED --has-purpose-regression false --calibration-needs-human false --trust-needs-human false --base-conflict false --other-blocking false

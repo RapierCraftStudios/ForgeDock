@@ -23,7 +23,7 @@ argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --base {PR_BAS
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (classification, label transitions) stay at this tier because they are interleaved with the reasoning-heavy child phases in the same run. <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
-**CRITICAL: You MUST execute ALL phases B0–B6.5 (including B5.5) in order (the one exception is the B0 gate-resume branch, which enters at B6.5 with its state verified). Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
+**CRITICAL: You MUST execute ALL phases B0–B6.5 (including B5.5 and B5.6) in order (the one exception is the B0 gate-resume branch, which enters at B6.5 with its state verified). Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
 
 **Synchronous child consumption**: each child `Skill(...)` call (B3-B6) runs to completion in this phase's own turn, and you consume its result in that same turn. Never end or yield your turn to wait for a child, and never wait for a completion notification: notifications for forked children go to the root session, not to this phase, so a turn that yields is never resumed. A child return with no `*_RESULT:` block (running, backgrounded, empty) is not a result — re-read the GitHub markers for that child (`FORGE:CONTEXT`, `FORGE:ARCHITECT`, `FORGE:BUILDER`, `FORGE:VALIDATE`/`FORGE:QUALITY_GATE`) and apply the **bounded re-invoke rule**: re-invoke the same child with the same args at most 2 times per child on running/backgrounded/empty returns (the counter is per child and is not reset by a re-invoke). Before re-invoking, check state: if the child's marker is present, consume it instead of re-invoking; for implement and validate, also check the worktree (`git status --short` and `git log origin/{PR_BASE}..HEAD` in `{WORKTREE_PATH}`) — uncommitted in-flight edits or a fresh commit mean the original child may still be live, so wait for it by re-reading state rather than launching a second writer on the same worktree, and count that as a re-invoke attempt. After the cap is exhausted, take the Blocked exit (see Result emission and Blocked exit) with `blocker: child-stalled: <child>` (child = context|architect|implement|validate); it is terminal and is not re-invoked by the router.
 
@@ -736,7 +736,103 @@ else run gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"; fi
 `SCOPE_NOTE` carries, one per line, `out_of_plan: <path>` for each out-of-plan file (up to 50), `overrun: <ws_lines> vs estimate <N> (>{OVERRUN_PCT}%)` when `overrun=true`, the `trimmed:` line after a trim, the override justification for `OVERRIDDEN`, and `review-note: <what reviewers should check>` (for example, check the out-of-plan files first). `DEPRECATION_NOTE` is `deprecated_config: build.diff_size.*` plus a newline when an alias supplied a value. A `FORGE:DIFF_SIZE` comment never contains a `### Split Proposal` heading and never routes anywhere: no engine path reads it as a decompose signal.
 
 **Resume**: B5.5 is idempotent. A re-invoked build re-runs B5.5 only through the normal path (B0 resumes at B5/B6 by BUILDER/COMPLETE state); a repeated measure edits the same `FORGE:DIFF_SIZE` comment, and a repeated trim finds the out-of-plan files already gone from the diff.
-# MUST CONTINUE to Phase B6 — the scope check result is intermediate, NOT terminal (validation still required), except the Blocked exits above.
+# MUST CONTINUE to Phase B5.6 (self-review, then B6) — the scope check result is intermediate, NOT terminal (validation still required), except the Blocked exits above.
+
+---
+
+## Phase B5.6: Self-Review (same roster, warm context; never the official review) <!-- Added: forge#3971 -->
+
+**Goal**: move adversarial-completeness defects (trust-boundary and bypass forms, domain semantics) to the cheapest point. The risk-tier roster's domain agents review the **staged diff** with the same personas and protocols as `/review-pr` (`commands/review-pr-agents/protocols.md` § SELF-REVIEW MODE), the builder fixes CONFIRMED/LIKELY findings at MEDIUM or above in place (one round), and declined findings are recorded for the official review. This is **not** the official review: it posts no review marker, no verdict, no label, and `FORGE:SELFREVIEW-AGENT:*` never satisfies `review-finalize.sh` or `verify-phase-trail.sh`. It runs before B6, so validate's gate covers the change and any fix together. build is a dispatching phase (router-only, `docs/WORK-ON-RUNTIME.md` R1); its children stay non-dispatching.
+
+**Degrade, never block**: every failure here (plan error, no `Agent` tool, no reviewer comment in time, repair trouble) records a skip or missing-domain reason in `build_selfreview` and continues to B6. Skip this phase entirely for Investigation (B5 already exited).
+
+**Step 1 — plan.** Paste the Script resolution block and the `cycle_slice` function from B0 first (shell state does not persist). `AGENT_AVAILABLE` is `false` when you have no `Agent` tool or `spawn-depth-check.sh --router-layer 1` exits 1 (conservative: build's own layer is unknown), else `true`. The plan script wraps `scripts/review-roster.sh` (the same roster `/review-pr` picks for this diff) and reads the staged diff only (no network), so `DONE_TREES` comes from the trusted `FORGE:SELFREVIEW` summaries of the current cycle (their `Tree:` and `Final-Tree:` values):
+
+```bash
+# <Script resolution block from above goes here, verbatim>
+# <cycle_slice function from B0, verbatim>
+WT="{WORKTREE_PATH}"; AGENT_AVAILABLE=true   # set false when no Agent tool, or the depth check below fails
+SD=$(forge_resolve spawn-depth-check.sh); [ -n "$SD" ] && { bash "$SD" --router-layer 1 >/dev/null 2>&1; [ $? -eq 1 ] && AGENT_AVAILABLE=false; }
+TREE=$(git -C "$WT" write-tree 2>/dev/null) || TREE=""
+FILES_FILE=$(mktemp "${TMPDIR:-/tmp}/forge-sr-{NUMBER}.XXXXXX")
+git -C "$WT" diff --cached --name-only "origin/{PR_BASE}" > "$FILES_FILE" 2>/dev/null
+NLINES=$(git -C "$WT" diff --cached --numstat "origin/{PR_BASE}" 2>/dev/null | awk '{ a += $(1); d += $(2) } END { print a + d + 0 }')
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+SLICE=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments | cycle_slice) || SLICE="[]"
+CFLAGS=""; CONTRACT=$(printf '%s' "$SLICE" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:CONTRACT' 2>/dev/null | jq -r 'select(type == "string")' 2>/dev/null)
+[ -n "$TRUSTED_SCRIPT" ] || CFLAGS="HIGH_RISK"   # cannot read the contract trust-filtered: widen, never narrow
+printf '%s\n' "$CONTRACT" | grep -qiE 'Risk.*(HIGH|CRITICAL)' && CFLAGS="HIGH_RISK"
+printf '%s\n' "$CONTRACT" | grep -qiE 'auth|session|jwt' && CFLAGS="$CFLAGS CONTRACT_AUTH"
+DEPTH=STANDARD; printf '%s' "$SLICE" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE' 2>/dev/null | jq -r 'select(type == "string")' | grep -qE '^review_depth: *EXTENDED' && DEPTH=EXTENDED
+SPEC_CLI=false; [ -f "$WT/commands/review-pr-agents/spec-cli.md" ] && SPEC_CLI=true
+DONE_TREES=$(printf '%s' "$SLICE" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:SELFREVIEW -->' 2>/dev/null | jq -r 'select(type == "string")' | sed -n 's/^\(Final-\)\{0,1\}Tree: *//p' | tr '\n' ' ')
+PLAN_SCRIPT=$(forge_resolve selfreview-plan.sh)
+if [ -n "$PLAN_SCRIPT" ]; then
+  bash "$PLAN_SCRIPT" --files-file "$FILES_FILE" --changed-lines "$NLINES" --contract-flags "$CFLAGS" --spec-cli "$SPEC_CLI" --review-depth "$DEPTH" --agent-available "$AGENT_AVAILABLE" --tree "$TREE" --done-trees "$DONE_TREES"
+else echo "SELFREVIEW=skip"; echo "SKIP_REASON=plan-unavailable"; fi
+rm -f "$FILES_FILE"
+```
+
+`SELFREVIEW=skip` (any `SKIP_REASON`, including a missing plan script or a plan call that fails) → go to Step 5 with `skipped=<reason>`. A skip is never an error. `FORGE_SELFREVIEW=off` is the operator off switch.
+
+**Step 2 — dispatch** (`SELFREVIEW=run`). In ONE message, spawn one reviewer per `SELECTED_AGENTS` domain with the `Agent` tool (`model: "{DEFAULT_MODEL}"`; the effort gate applies). Each prompt is the domain persona file `commands/review-pr-agents/{domain}.md` plus `protocols.md`, with `MODE: SELF-REVIEW`, `[AGENT_DOMAIN]`, `[ISSUE_NUMBER]={NUMBER}`, `[GH_REPO]`, `[WORKTREE_PATH]`, `[PR_BASE]`, `[TREE_HASH]=$TREE`, and `[DOMAIN_DIFF_SLICE]` cut from `git -C "{WORKTREE_PATH}" diff --cached "origin/{PR_BASE}"` per the protocol's input scoping (Security gets the full diff). Resolve the persona files from the install root (`$FORGE_ROOT/commands/review-pr-agents/`), never by `find`. Reviewers are read-only. Their completion notifications go to the root session (`docs/WORK-ON-RUNTIME.md` F6), so never wait on one: use Step 3.
+
+**Step 3 — bounded wait, one poll pass per Bash call.** A reviewer is done when a trusted comment starting `<!-- FORGE:SELFREVIEW-AGENT:{domain} -->` carries `Tree: ${TREE}` and a findings block. Re-run the pass while it prints `SELFREVIEW_WAIT: WAITING`; paste the Script resolution block first. The first pass records an epoch deadline (`SELFREVIEW_WAIT_SECS`, default 600, max 1800) in a private file keyed by issue and tree; `DONE` and `TIMEOUT` remove it. A domain with no matching comment at the deadline, or only a stale-`Tree:` one, is **missing**: record it and continue (never re-review inline):
+
+```bash
+# <Script resolution block from above goes here, verbatim>
+ISSUE={NUMBER}; TREE="{TREE}"; SELECTED="{SELECTED_AGENTS}"
+case "$TREE" in *[!0-9a-f]*|"") echo "SELFREVIEW_WAIT: DONE missing=all (bad tree)"; exit 0 ;; esac
+WAIT_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/forge-selfreview-wait-$(id -u)"; mkdir -m 700 -p "$WAIT_DIR" 2>/dev/null
+{ [ -d "$WAIT_DIR" ] && [ -O "$WAIT_DIR" ] && [ ! -L "$WAIT_DIR" ]; } || { echo "SELFREVIEW_WAIT: DONE missing=all (no private wait dir)"; exit 0; }
+DL="${WAIT_DIR}/${ISSUE}_${TREE}"; W="${SELFREVIEW_WAIT_SECS:-600}"; case "$W" in ''|*[!0-9]*) W=600 ;; esac; [ "$W" -gt 1800 ] && W=1800
+NOW=$(date +%s); [ -s "$DL" ] || echo $(( NOW + W )) > "$DL"; DEADLINE=$(cat "$DL" 2>/dev/null); case "$DEADLINE" in ''|*[!0-9]*) DEADLINE=$NOW ;; esac
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh); CJ=$(gh api --paginate repos/{GH_REPO}/issues/${ISSUE}/comments 2>/dev/null || echo "")
+MISSING=""; GOT=0; OUTF=$(mktemp "${TMPDIR:-/tmp}/forge-sr-find.XXXXXX")
+for D in $SELECTED; do
+  B=""; [ -n "$TRUSTED_SCRIPT" ] && [ -n "$CJ" ] && B=$(printf '%s' "$CJ" | bash "$TRUSTED_SCRIPT" bodies "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:SELFREVIEW-AGENT:${D} -->[\\s\\S]*(^|\\n)Tree: ${TREE}(\\r?\\n|$)" 2>/dev/null | jq -r 'select(type == "string")' 2>/dev/null)
+  if [ -n "$B" ]; then GOT=$((GOT+1)); printf '%s\n' "$B" | sed -n 's/^<!-- FINDING:\(.*\) -->$/SR_FINDING: '"$D"'|\1/p' >> "$OUTF"; else MISSING="$MISSING $D"; fi
+done
+N=$(printf '%s' "$SELECTED" | tr ' ' '\n' | grep -c . || true)
+if [ -z "$MISSING" ]; then rm -f "$DL"; cat "$OUTF"; echo "SELFREVIEW_WAIT: DONE ${GOT}/${N}"
+elif [ "$(date +%s)" -ge "$DEADLINE" ]; then rm -f "$DL"; cat "$OUTF"; echo "SELFREVIEW_WAIT: TIMEOUT ${GOT}/${N} missing:${MISSING}"
+else echo "SELFREVIEW_WAIT: WAITING ${GOT}/${N} missing:${MISSING}"; sleep 30; fi
+rm -f "$OUTF"
+```
+
+`DONE` and `TIMEOUT` print one `SR_FINDING: {domain}|{id}|{CONFIDENCE}|{SEVERITY}|{file:line}|{summary}` line per finding of the reviewers that did deliver. Dedupe findings that name the same `file:line` and defect across domains.
+
+**Step 4 — one repair round.** The actionable set is every finding with confidence CONFIRMED or LIKELY **and** severity MEDIUM, HIGH or CRITICAL. POSSIBLE and LOW findings are never fixed here; they go into the summary comment as `noted:`. Skip the repair when the set is empty. Otherwise run exactly one round guarded by a `<!-- FORGE:SELFREVIEW_REPAIR: issue={NUMBER} -->` marker (count trusted markers in the current-cycle slice first; if one exists the round is spent, so go to Step 5 with `declined` = the whole set, reason `repair round already spent`):
+1. Post the marker.
+2. `Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE} --fix-selfreview \"<one SR-<n> line per finding>\"")`. Apply the bounded re-invoke rule if it returns running/empty. `BLOCKED` or a skill-not-found result does not block the build: record `skipped=repair-failed` and continue.
+3. Re-derive `{CHANGED_FILES}` with the B6 command (never reuse the pre-repair value), read `fixed` and `declined` from the `### Self-review` section of the FORGE:BUILDER comment, and re-stage (`git add`). Do not re-run the reviewers: validate gates the result.
+
+**Step 5 — record.** Post (or edit, on resume, the latest trusted) one `<!-- FORGE:SELFREVIEW -->` summary comment, then emit the event. `Final-Tree` is `git write-tree` after the repair (equal to `Tree` when none ran); both feed `DONE_TREES` so a re-run never dispatches again:
+
+```bash
+# <Script resolution block from above goes here, verbatim>
+FINAL_TREE=$(git -C "{WORKTREE_PATH}" write-tree 2>/dev/null || echo "")
+BODY="<!-- FORGE:SELFREVIEW -->
+## Self-review (build-time; not the official review)
+
+Tree: ${TREE}
+Final-Tree: ${FINAL_TREE:-$TREE}
+Tier: ${TIER:-none}
+Agents: ${SELECTED_AGENTS:-none}
+Missing: ${MISSING:-none}
+Skipped: ${SKIP_REASON:-none}
+Findings: ${FINDINGS:-0} (fixed ${FIXED:-0}, declined ${DECLINED:-0})
+${NOTED_LINES:-}"
+CID=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" --jq '[.[] | select(.body | startswith("<!-- FORGE:SELFREVIEW -->")) | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.type == "Bot"))] | last | .id // ""' 2>/dev/null || true)
+if [ -n "$CID" ]; then gh api "repos/{GH_REPO}/issues/comments/${CID}" -X PATCH -f body="$BODY" >/dev/null 2>&1 || gh issue comment {NUMBER} {GH_FLAG} --body "$BODY" # allowlist:check-command-side-effects
+else gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"; fi # allowlist:check-command-side-effects
+_t=$(forge_resolve lib/telemetry.sh); FORGE_REPO="{GH_REPO}" FORGE_ISSUE="{NUMBER}" FORGE_PHASE=build bash "${_t:-/dev/null}" build_selfreview tier="${TIER:-none}" agents="${AGENT_COUNT:-0}" findings="${FINDINGS:-0}" fixed="${FIXED:-0}" declined="${DECLINED:-0}" skipped="${SKIP_REASON:-}" >/dev/null 2>&1 || true # forge#3971 telemetry (ids and counts only; compare with review-found in-PR fixes)
+```
+
+Emit on **every** outcome, including skips (`skipped=<reason>`, counts 0). Fill `NOTED_LINES` with one `noted: <id> <file:line> <summary>` line per sub-threshold finding and one `missing: <domain>` per reviewer that never delivered; the official `/review-pr` reads this comment as known context, never as review evidence. If the repair changed the tree, the next B6 `Skill(...)` call (with the re-derived `{CHANGED_FILES}`) gates it.
+
+**Resume**: B5.6 is idempotent. A re-invoked build finds the trusted `FORGE:SELFREVIEW` summary, the plan script reports `already-done` for its `Tree:`/`Final-Tree:`, and the spent `FORGE:SELFREVIEW_REPAIR` marker forbids a second repair round.
+# MUST CONTINUE to Phase B6 — the self-review result is intermediate, NOT terminal (validation still required). Any failure here is a recorded skip, never a Blocked exit.
 
 ---
 
@@ -1096,6 +1192,7 @@ BUILD_RESULT:
 - `COMPLETE` — B0–B6.5 all passed (a DEGRADED acceptance gate, `FORGE:ACCEPTANCE_GATE:DEGRADED`, counts as passed here); `FORGE:BUILDER:COMPLETE` is on the issue.
 - `ALREADY_DONE` — B0 found `FORGE:BUILDER:COMPLETE`.
 - `INVESTIGATION_COMPLETE` — the implement child created the deliverable issues (B5); no review follows.
+- B5.6 never produces a `BUILD_RESULT` status of its own either: every outcome (ran, skipped, degraded) is recorded in `FORGE:SELFREVIEW` and the `build_selfreview` event, then the build continues to B6. <!-- Added: forge#3971 -->
 - B5.5 never produces a `BUILD_RESULT` status of its own: its scope-check outcome (`OK`, `EXTENDED_REVIEW`, `SCOPE_FLAGGED`, `OVERRIDDEN`) is recorded in `FORGE:DIFF_SIZE`, then the build continues to B6 and ends `COMPLETE`. A finished build is never routed to decompose or discarded. <!-- Added: forge#3862 -->
 - `BLOCKED` — any guard or failure; `needs-human` is set and the blocker is posted.
 
@@ -1106,7 +1203,7 @@ BUILD_RESULT:
 Position in the work-on pipeline (label `workflow:ready-to-build` or `workflow:building`):
 
 ```
-investigate → [THIS MODULE] worktree + classify + contract + context + architect + implement + validate + acceptance-gate
+investigate → [THIS MODULE] worktree + classify + contract + context + architect + implement + self-review + validate + acceptance-gate
               → posts FORGE:FAST_PATH, FORGE:CONTRACT, FORGE:BUILDER(:COMPLETE), FORGE:ACCEPTANCE_GATE; writes FORGE:CHECKPOINT next_phase=REVIEW
             → work-on:review (push branch, create PR, review, merge)
             → work-on:close

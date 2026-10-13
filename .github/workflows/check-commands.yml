@@ -31,7 +31,9 @@ on:
       - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/review-pr-domain-map.test.sh'
       - 'scripts/review-roster.sh'
+      - 'scripts/selfreview-plan.sh'
       - 'scripts/review-roster.test.sh'
+      - 'scripts/selfreview-plan.test.sh'
       - 'scripts/review-prepare.sh'
       - 'scripts/review-prepare.test.sh'
       - 'scripts/review-finalize.sh'
@@ -91,7 +93,9 @@ on:
       - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/review-pr-domain-map.test.sh'
       - 'scripts/review-roster.sh'
+      - 'scripts/selfreview-plan.sh'
       - 'scripts/review-roster.test.sh'
+      - 'scripts/selfreview-plan.test.sh'
       - 'scripts/review-prepare.sh'
       - 'scripts/review-prepare.test.sh'
       - 'scripts/review-finalize.sh'
@@ -380,6 +384,7 @@ jobs:
           bash scripts/review-pr-arguments.test.sh
           bash scripts/review-pr-domain-map.test.sh
           bash scripts/review-roster.test.sh
+          bash scripts/selfreview-plan.test.sh
           bash scripts/review-prepare.test.sh
           bash scripts/review-finalize.test.sh
           bash scripts/close-parent-c3.test.sh
