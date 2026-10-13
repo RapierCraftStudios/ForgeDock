@@ -93,7 +93,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   Select with ONE anchored, trusted selector (body must start with the marker; author must be a Bot or OWNER/MEMBER/COLLABORATOR; mirrors `scripts/trusted-comments.sh`). A comment that merely mentions the marker (INVESTIGATOR, CONTEXT, ARCHITECT) never matches. Delete ONLY when exactly one non-complete candidate exists and it carries no other FORGE phase marker; unparsable, zero, or multiple matches delete nothing (fail closed). <!-- Added: forge#3668 -->
   ```bash
   # only a current-cycle partial is ever deleted; prior-cycle comments are never touched
-  BLD=$(printf '%s' "$CYCLE_SLICE" | jq -s '[.[][] | select((.body // "") | startswith("<!-- FORGE:BUILDER -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:BUILDER:COMPLETE -->")), other: (.body | test("<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|ARCHITECT)"))}]') || BLD=""
+  BLD=$(printf '%s' "$CYCLE_SLICE" | jq -s '[.[][] | select((.body // "") | startswith("<!-- FORGE:BUILDER -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:BUILDER:COMPLETE -->")), other: (.body | test("\\n[ \\t]*<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|ARCHITECT)"))}]') || BLD=""
   PARTIAL_ID=$(printf '%s' "$BLD" | jq -r '[.[] | select(.complete | not)] | if length == 1 and (.[0].other | not) then .[0].id else empty end' 2>/dev/null)
   if [ -n "$PARTIAL_ID" ]; then
     gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
