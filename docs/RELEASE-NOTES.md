@@ -2,6 +2,12 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Core work-on: per-phase comments (GitHub as the knowledge graph)
+
+The core builder now writes three markdown stage notes with fixed heading templates (`.forge-lean/investigation.md`, `plan.md`, `implementation.md`) next to the machine-readable `result.json`. The engine posts each as its own comment, live while the builder session runs (the CLI call is now asynchronous; a file is posted once its mtime is stable for 2 s) and the rest in order right after the session, before review: `FORGE:INVESTIGATION` (`## Investigation Report`, also carries the `FORGE:VALIDATE` alias marker), `FORGE:PLAN` (`## Implementation Plan`), `FORGE:IMPLEMENTATION` (`## Implementation Complete`, with branch and files changed computed by the engine), then `FORGE:REVIEW` (`## Review`: fixes the issue yes/no with evidence, regression check with what was checked, notes). A missing or blank file is rendered from the `result.json` fields ("not reported" for gaps); builder-written `<!-- FORGE:` markers are stripped and each comment is capped at 60k characters. At the end (merged, invalid or needs-human) one `FORGE:TRAJECTORY` comment (`## Pipeline Trajectory`, also carrying the `FORGE:WORK-ON` alias marker) replaces the old register comment: phase table, decisions, anomalies, cost, tokens, wall time. The PR body shows the root cause, the deliverables table and the verification. No extra model sessions.
+
+Action: none.
+
 ## v1.22: core work-on and orchestrate (GitHub as register)
 
 A blind A/B showed plain Claude Code fixes issues at equal quality for about 1/10 the cost of the multi-phase pipeline, so ForgeDock is reduced to a lean core.

@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { runCore } from "./lean.mjs";
-import { renderValidate, renderPlan, renderReview, renderRegister, renderPrBody, cell, NR } from "./render.mjs";
+import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
@@ -12,6 +12,11 @@ import { readLog } from "../engine/runlog.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS } from "../engine-cli.mjs";
 
 const WT = "/wt/lean-7";
+const STAGE_MD = {
+  investigation: "**Verdict**: CONFIRMED\n**Confidence**: high\n**Severity**: medium\n**Task Type**: bug\n\n### What Was Claimed\nfoo breaks\n\n### What We Found\n- src/foo.js:3 derefs null\n\n### Root Cause\nfoo derefs null at src/foo.js:3\n\n### Affected Files\n- src/foo.js: add guard\n\n### Sibling Sweep\n- src/bar.js:8 same guard\n\n### History\nintroduced in abc123\n\n### Recommendation\nguard null\n\n### Related Issues\nnone",
+  plan: "### Approach\nguard null in foo\n\n### Deliverables\n| File | Change | Why |\n| --- | --- | --- |\n| src/foo.js | add guard | avoid crash |\n\n### Acceptance Criteria\n- [ ] foo handles null\n\n### Implementation Order\n1. guard\n\n### Out of Scope\nrefactor: later\n\n### Risk Assessment\n| Risk | Severity | Mitigation |\n| --- | --- | --- |\n| none | low | test |",
+  implementation: "### Approach\nadded a guard\n\n### Changes\n- src/foo.js: guard\n\n### Acceptance Criteria Status\n- ✅ foo handles null\n\n### Verification\n- node --test test/foo.test.js: pass, fails without fix: yes\n\n### Notes\nnone",
+};
 const ok = (extra = {}) => "```json\n" + JSON.stringify({ verdict: "PASS", fixes_issue: true, regression: false, reason: "src/foo.js:3 fixed", ...extra }) + "\n```";
 const bad = (reason = "src/foo.js:9 still wrong") => ok({ verdict: "FAIL", fixes_issue: false, reason });
 
@@ -21,8 +26,12 @@ function world(o = {}) {
     comments: [], labels: [], closed: [], edits: [], prs: [], merges: [], calls: [], telemetry: [], files: {}, head: "aaaa1111aaaa1111",
     changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], reviews: [...(o.reviews ?? [])], waits: [...(o.waits ?? [])], clock: 0,
     result: o.result ?? { status: "fixed", summary: "fixed foo", evidence: [], tests: ["test/foo.test.js"] },
-    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [],
+    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {},
+    stages: { ...STAGE_MD, ...(o.stages ?? {}) },
   };
+  const put = (name, text) => { const p = `${WT}/.forge-lean/${name}`; if (w.files[p] !== text) w.mtimes[p] = Date.now(); w.files[p] = text; };
+  const writeStages = (keys) => { for (const k of keys) if (w.stages[k] != null) put(`${k}.md`, w.stages[k]); };
+  w.writeStages = writeStages;
   w.io = {
     now: () => w.clock, sleep: async (ms) => { w.clock += ms; },
     gh: async (a) => {
@@ -52,7 +61,9 @@ function world(o = {}) {
       w.seq.push(c.role + (c.resume ? "-resume" : ""));
       if (c.role === "builder") {
         const r = c.resume ? (w.resumeResult ?? w.result) : w.result;
-        if (r) w.files[`${WT}/.forge-lean/result.json`] = JSON.stringify(r);
+        if (o.live) await o.live(w, put);
+        else if (!c.resume && !o.noStages) writeStages(["investigation", "plan", "implementation"]);
+        if (r) put("result.json", JSON.stringify(r));
         if (c.resume) w.head = `bbbb${w.calls.length}`.padEnd(16, "0");
         return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: 0.1, durationMs: 1000, turns: 3, model: "default" };
       }
@@ -60,7 +71,7 @@ function world(o = {}) {
     },
     waitCiGreen: async () => (w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }),
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
-    fs: { read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; } },
+    fs: { stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; } },
   };
   return w;
 }
@@ -68,22 +79,34 @@ const run = (w, extra = {}) => runCore({ issue: 7, repo: "o/r", lane: "staging",
   io: w.io, emitTelemetry: async (r) => w.telemetry.push(r), random: () => 0.5, ...extra });
 const builders = (w) => w.calls.filter((c) => c[0] === "runner" && c[1] === "builder");
 const reviewers = (w) => w.calls.filter((c) => c[0] === "runner" && c[1] === "reviewer");
-const registers = (w) => w.comments.filter((c) => c.startsWith("<!-- FORGE:WORK-ON -->"));
+const traj = (w) => w.comments.filter((c) => c.includes("<!-- FORGE:TRAJECTORY -->"));
+const markerOf = (c) => /<!-- (FORGE:[A-Z_-]+) -->/.exec(c)[1];
 
 describe("core work-on", () => {
-  it("happy path: started comment, one register comment with everything, merge at the reviewed head", async () => {
+  it("happy path: investigation, plan, implementation, review, trajectory in order; merge at the reviewed head", async () => {
     const w = world();
     const dir = tmpDir("core-");
     const r = await run(w, { dir });
     assert.equal(r.terminalReason, "merged");
     assert.equal(r.pr, 77);
-    assert.match(w.comments[0], /FORGE:STARTED/);
-    const reg = registers(w);
-    assert.equal(reg.length, 1);
-    for (const needle of ["fixed foo", "src/foo.js", "test/foo.test.js", "PASS", "src/foo.js:3 fixed", "https://github.com/o/r/pull/77", "cost $0.15", "tokens 14 in / 7 out / 100 cache", "wall"]) {
-      assert.ok(reg[0].includes(needle), `register comment lacks ${needle}:\n${reg[0]}`);
+    assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:PLAN", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:TRAJECTORY"]);
+    assert.match(w.comments[1], /<!-- FORGE:VALIDATE -->/, "VALIDATE stays as an alias marker");
+    assert.match(w.comments[1], /^<!-- FORGE:INVESTIGATION -->\n<!-- FORGE:VALIDATE -->\n## Investigation Report\n\*\*Verdict\*\*: CONFIRMED/);
+    assert.match(w.comments[2], /## Implementation Plan\n### Approach/);
+    assert.match(w.comments[3], /## Implementation Complete\n\*\*Branch:\*\* `feat\/issue-7-lean`\n\*\*Files changed:\*\*\n- `src\/foo.js`\n- `test\/foo.test.js`/);
+    assert.match(w.comments[4], /## Review\n\*\*Verdict:\*\* PASS/);
+    assert.match(w.comments[4], /Fixes the issue:\*\* yes \(src\/foo.js:3 fixed\)/);
+    const t = traj(w);
+    assert.equal(t.length, 1);
+    assert.match(t[0], /<!-- FORGE:TRAJECTORY -->\n<!-- FORGE:WORK-ON -->\n## Pipeline Trajectory — #7/);
+    for (const needle of ["| Validate | CONFIRMED |", "| Plan | posted |", "| Implement |", "| Review | PASS |", "| PR | #77 |", "| Merge |", "| Close | issue closed (completed) |", "**Decisions**", "**Anomalies**", "cost $0.1500", "tokens 14 in / 7 out / 100 cache", "wall"]) {
+      assert.ok(t[0].includes(needle), `trajectory lacks ${needle}:\n${t[0]}`);
     }
-    assert.match(w.prs[0][w.prs[0].indexOf("--body") + 1], /Closes #7/);
+    const body = w.prs[0][w.prs[0].indexOf("--body") + 1];
+    assert.match(body, /## Root cause\nfoo derefs null at src\/foo.js:3/);
+    assert.match(body, /## Deliverables\n\| File \| Change \| Why \|/);
+    assert.match(body, /## Verification\n- node --test/);
+    assert.match(body, /Closes #7$/);
     assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
     assert.equal(w.closed.length, 1);
     assert.equal(builders(w).length, 1);
@@ -92,22 +115,14 @@ describe("core work-on", () => {
     assert.equal(ev[0], "RUN_START"); assert.equal(ev.at(-1), "RUN_TERMINAL");
   });
 
-  it("validation comment is posted before the reviewer and the in-review label; content for a fixed issue; register links it", async () => {
-    const w = world({ result: { status: "fixed", summary: "fixed foo\nmore", evidence: ["src/foo.js:3 null deref"], tests: ["t"] } });
+  it("investigation and plan comments are posted before the reviewer runs and before the in-review label", async () => {
+    const w = world();
     await run(w);
-    const vi = w.comments.findIndex((c) => c.startsWith("<!-- FORGE:VALIDATE -->"));
-    assert.ok(vi >= 0);
-    const v = w.comments[vi];
-    assert.match(v, /Verdict:\*\* valid/);
-    assert.match(v, /src\/foo.js:3 null deref/);
-    assert.match(v, /Summary:\*\* fixed foo$/);
-    assert.ok(!v.includes("more"));
-    const pos = (x) => w.seq.indexOf(x);
-    const commentSeq = w.seq.map((s, i) => (s === "comment" ? i : -1)).filter((i) => i >= 0);
-    assert.ok(commentSeq[vi] > pos("builder") && commentSeq[vi] < pos("reviewer"));
-    assert.ok(commentSeq[vi] < pos("label:in-review"));
-    assert.match(registers(w)[0], /Validation: https:\/\/github.com\/o\/r\/issues\/7#issuecomment-\d+/);
-    assert.equal(w.comments.filter((c) => c.includes("FORGE:VALIDATE")).length, 1);
+    const idx = []; w.seq.forEach((x, i) => { if (x === "comment") idx.push(i); });
+    const rv = w.seq.indexOf("reviewer");
+    assert.ok(idx[1] < rv && idx[2] < rv && idx[3] < rv, "investigation, plan, implementation precede the reviewer");
+    assert.ok(idx[3] < w.seq.indexOf("label:in-review"));
+    assert.ok(idx[4] > rv, "review comment follows the reviewer");
   });
 
   it("labels transition in order, and register is posted after the PR and before the merge", async () => {
@@ -116,7 +131,7 @@ describe("core work-on", () => {
     assert.deepEqual(w.labels, ["investigating", "building", "in-review", "merged"]);
     const order = w.seq.filter((s) => ["label:investigating", "label:building", "builder", "label:in-review", "reviewer", "push", "pr", "merge", "label:merged"].includes(s));
     assert.deepEqual(order, ["label:investigating", "label:building", "builder", "label:in-review", "reviewer", "push", "pr", "merge", "label:merged"]);
-    assert.ok(w.seq.indexOf("pr") < w.seq.lastIndexOf("comment") && w.seq.lastIndexOf("comment") < w.seq.indexOf("merge"));
+    assert.ok(w.seq.lastIndexOf("comment") > w.seq.indexOf("merge"), "the trajectory is posted last");
   });
 
   it("emits phase_attempt for builder and reviewer plus run_terminal, stats-compatible", async () => {
@@ -129,17 +144,17 @@ describe("core work-on", () => {
     assert.equal(mapped.at(-1).payload.reason, "merged");
   });
 
-  it("invalid with evidence closes the issue as invalid and opens no PR", async () => {
-    const w = world({ changed: [], result: { status: "invalid", summary: "not a bug", evidence: ["src/foo.js:3 already guards null"], tests: [] } });
+  it("invalid with evidence: the investigation is the evidence comment, closes, trajectory rows", async () => {
+    const w = world({ changed: [], stages: { investigation: "**Verdict**: INVALID\n**Confidence**: high\n\n### What We Found\n- src/foo.js:3 already guards null\n\n### Root Cause\nnone, not a bug" },
+      result: { status: "invalid", summary: "not a bug", evidence: ["src/foo.js:3 already guards null"], tests: [] } });
     const r = await run(w);
     assert.equal(r.terminalReason, "invalid");
     assert.deepEqual(w.labels, ["investigating", "building", "invalid"]);
-    const vs = w.comments.filter((c) => c.startsWith("<!-- FORGE:VALIDATE -->"));
-    assert.equal(vs.length, 1, "the validation comment is the evidence comment");
-    assert.match(vs[0], /Verdict:\*\* invalid/);
-    assert.match(vs[0], /src\/foo.js:3 already guards null/);
-    assert.match(vs[0], /Summary:\*\* not a bug/);
-    assert.equal(registers(w).length, 0, "no duplicate evidence comment");
+    assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:TRAJECTORY"]);
+    assert.match(w.comments[1], /Verdict\*\*: INVALID/);
+    assert.match(w.comments[1], /src\/foo.js:3 already guards null/);
+    const t = traj(w)[0];
+    for (const needle of ["| Validate | INVALID |", "| Plan | skipped |", "| Implement | skipped |", "| Review | skipped |", "| PR | none |", "| Close | issue closed (not planned) |"]) assert.ok(t.includes(needle), needle);
     assert.equal(w.closed.length, 1);
     assert.equal(w.prs.length, 0);
     assert.equal(reviewers(w).length, 0);
@@ -157,6 +172,10 @@ describe("core work-on", () => {
     assert.equal(w.closed.length, 0);
     assert.ok(w.edits.some((e) => e.includes("needs-human")));
     assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes("without evidence")));
+    const t = traj(w)[0];
+    assert.match(t, /\| Close \| left open \| label needs-human \|/);
+    assert.match(t, /\*\*Anomalies\*\*\n- needs-human: Builder reported "invalid" without evidence/);
+    assert.match(t, /\| Plan \| not reached \|/);
   });
 
   it("review FAIL -> builder resumed via --resume with the reason -> re-review PASS -> merge", async () => {
@@ -169,7 +188,9 @@ describe("core work-on", () => {
     assert.match(b[1][4], /src\/foo.js:9 still wrong/);
     assert.equal(reviewers(w).length, 2);
     assert.equal(w.prs.length, 1);
-    assert.equal(registers(w).length, 1);
+    assert.equal(traj(w).length, 1);
+    assert.match(traj(w)[0], /2 rounds/);
+    assert.match(traj(w)[0], /Review FAIL \(round 1\)/);
     assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
   });
 
@@ -260,54 +281,131 @@ describe("core work-on", () => {
 });
 
 describe("comment templates", () => {
-  const full = { status: "fixed", summary: "fixed foo", evidence: ["src/foo.js:3 null deref"], root_cause: "foo derefs null at src/foo.js:3",
-    approach: "guard null", sibling_sites_checked: ["src/bar.js:8: same guard added"], changes: [{ file: "src/foo.js", change: "add guard", why: "avoid crash" }],
-    tests: [{ command: "node --test test/foo.test.js", result: "pass", fails_without_fix: true }], risks: ["none"], follow_ups: ["audit baz"] };
-  const rv = { verdict: "PASS", fixes_issue: true, regression: false, reason: "src/foo.js:3 ok", checked: "callers of foo" };
+  const rv = { verdict: "PASS", fixes_issue: true, regression: false, reason: "src/foo.js:3 ok", evidence: "src/foo.js:3 guard", checked: "callers of foo, test/foo.test.js" };
+  const result = { status: "fixed", summary: "fixed foo", evidence: ["src/foo.js:3 null deref"], root_cause: "derefs null at src/foo.js:3", changes: [{ file: "src/foo.js", change: "add guard", why: "avoid crash" }],
+    tests: [{ command: "node --test test/foo.test.js", result: "pass", fails_without_fix: true }], risks: ["none"], follow_ups: ["audit baz"], approach: "guard null" };
 
-  it("renders full fields", () => {
-    const v = renderValidate(full, "valid"); const p = renderPlan(full, ["src/foo.js"]);
-    assert.match(v, /Root cause:\*\* foo derefs null at src\/foo.js:3/);
-    assert.match(p, /Approach:\*\* guard null/); assert.match(p, /src\/bar.js:8: same guard added/); assert.match(p, /node --test test\/foo.test.js/);
-    assert.match(renderReview(rv), /Checked:\*\* callers of foo/);
-    const reg = renderRegister({ result: full, gitFiles: [], review: rv, links: { validate: "V", plan: "P", review: "R" }, prUrl: "PRURL", usage: "cost $1", policy: "required" });
-    for (const n of ["| src/foo.js | add guard | avoid crash |", "fails without fix: yes", "Risks:** none", "Follow-ups:** audit baz", "Validation: V", "Plan: P", "Review: R", "PR: PRURL", "Merge policy:** required", "cost $1"]) assert.ok(reg.includes(n), n);
-    const pr = renderPrBody({ issue: 7, result: full });
-    assert.match(pr, /^Closes #7/); assert.match(pr, /\| file \| change \| why \|/); assert.match(pr, /node --test/);
+  it("renders builder-written files under the fixed headings", () => {
+    assert.match(renderInvestigation(STAGE_MD.investigation, null), /^## Investigation Report\n\*\*Verdict\*\*: CONFIRMED/);
+    assert.match(renderPlan(STAGE_MD.plan, null), /^## Implementation Plan\n### Approach/);
+    const im = renderImplementation(STAGE_MD.implementation, null, { branch: "b", files: ["a.js"] });
+    assert.match(im, /^## Implementation Complete\n\*\*Branch:\*\* `b`\n\*\*Files changed:\*\*\n- `a.js`\n\n### Approach/);
+    const r = renderReview(rv);
+    assert.match(r, /^## Review\n\*\*Verdict:\*\* PASS/);
+    assert.match(r, /Fixes the issue:\*\* yes \(src\/foo.js:3 guard\)/);
+    assert.match(r, /Regression check:\*\* no regression \(checked: callers of foo, test\/foo.test.js\)/);
+    assert.match(r, /Notes:\*\* src\/foo.js:3 ok/);
+    assert.match(renderReview({ ...rv, verdict: "FAIL", fixes_issue: false, regression: true }), /Fixes the issue:\*\* no[\s\S]*Regression check:\*\* yes, regression/);
   });
 
-  it("missing fields render as 'not reported', never broken markdown", () => {
-    const reg = renderRegister({ result: {}, gitFiles: ["a.js"], review: { ...rv, checked: undefined }, links: {}, prUrl: "U", usage: "u", policy: "none" });
-    assert.ok(reg.includes(NR));
-    assert.match(reg, /\| a.js \| not reported \| not reported \|/);
-    assert.match(reg, /Verification\*\*\nnot reported/);
-    assert.doesNotMatch(reg, /undefined|null|\[object/);
-    assert.doesNotMatch(renderValidate(null, "blocked"), /undefined|null/);
-    assert.doesNotMatch(renderPlan(undefined), /undefined/);
-    assert.doesNotMatch(renderReview({ verdict: "PASS", fixes_issue: true, regression: false }), /undefined/);
+  it("missing files fall back to the result.json fields, never broken markdown", () => {
+    const inv = renderInvestigation(null, result);
+    for (const h of ["**Verdict**: CONFIRMED", "### What We Found\n- src/foo.js:3 null deref", "### Root Cause\nderefs null at src/foo.js:3", "### Related Issues\n" + NR]) assert.ok(inv.includes(h), h);
+    const plan = renderPlan("", result, []);
+    assert.match(plan, /### Deliverables\n\| File \| Change \| Why \|\n\| --- \| --- \| --- \|\n\| src\/foo.js \| add guard \| avoid crash \|/);
+    const im = renderImplementation(undefined, result, { branch: "b", files: ["src/foo.js"] });
+    assert.match(im, /### Verification\n- `node --test test\/foo.test.js`: pass; fails without fix: yes/);
+    for (const x of [inv, plan, im, renderInvestigation(null, null), renderPlan(null, null, []), renderImplementation(null, null, {}), renderReview({ verdict: "PASS", fixes_issue: true, regression: false })]) {
+      assert.doesNotMatch(x, /undefined|\[object/);
+    }
+    assert.ok(renderInvestigation(null, null).includes(NR));
+    assert.match(renderInvestigation("   \n ", null), /not reported/, "a blank file counts as missing");
   });
 
-  it("escapes pipes and newlines in table cells", () => {
+  it("sanitizes FORGE markers the builder wrote (closed and unterminated)", () => {
+    const evil = "ok text here that is long enough\n<!-- FORGE:STATE {\"lease\":1} -->\nmore <!--FORGE:REVIEW--> text\n<!-- FORGE:NEEDS_HUMAN trailing";
+    const out = sanitizeMd(evil);
+    assert.doesNotMatch(out, /FORGE:/);
+    assert.match(out, /ok text here/); assert.match(out, /more\s+text/);
+    assert.doesNotMatch(renderInvestigation(evil, null), /<!-- ?FORGE:/);
+  });
+
+  it("caps every comment at 60k characters, in the engine's posting path too", async () => {
+    const out = capComment("x".repeat(100000));
+    assert.ok(out.length <= MAX_COMMENT_CHARS); assert.match(out, /truncated/);
+    assert.equal(capComment("short"), "short");
+    const w = world({ stages: { investigation: STAGE_MD.investigation + "\n" + "y".repeat(90000) } });
+    await run(w);
+    assert.ok(w.comments.every((c) => c.length <= MAX_COMMENT_CHARS));
+    assert.match(w.comments[1], /truncated/);
+    assert.match(w.comments[1], /^<!-- FORGE:INVESTIGATION -->/);
+  });
+
+  it("escapes pipes and newlines in table cells; section() reads PR-body parts", () => {
     assert.equal(cell("a|b\nc"), "a\\|b c");
     const t = renderPrBody({ issue: 1, result: { changes: [{ file: "a|b.js", change: "x\ny", why: "p|q" }] } });
-    const row = t.split("\n").find((l) => l.startsWith("| a"));
-    assert.equal(row, "| a\\|b.js | x y | p\\|q |");
+    assert.equal(t.split("\n").find((l) => l.startsWith("| a")), "| a\\|b.js | x y | p\\|q |");
+    assert.equal(section(STAGE_MD.investigation, "Root Cause"), "foo derefs null at src/foo.js:3");
+    assert.match(renderPrBody({ issue: 1, result: null }), /## Root cause\nnot reported[\s\S]*Closes #1$/);
   });
 
-  it("posts VALIDATE, PLAN, REVIEW, WORK-ON in order; VALIDATE and PLAN before the reviewer", async () => {
-    const w = world({ result: full });
+  it("trajectory rows: merged, invalid, needs-human; missing rows read 'not reached'", () => {
+    const base = { issue: 9, validate: ["CONFIRMED", "2 evidence item(s)"], plan: "posted", implement: ["2 file(s)", "b"], review: ["PASS", "1 round"], pr: ["#5", "opened"], merge: ["all", "merged at abc"], close: ["issue closed (completed)", "label workflow:merged"], decisions: ["d1"], anomalies: [], usage: "cost $1" };
+    const m = renderTrajectory(base);
+    assert.match(m, /^## Pipeline Trajectory — #9\n\n\| Phase \| Result \| Notes \|/);
+    for (const row of ["| Validate | CONFIRMED | 2 evidence item(s) |", "| Review | PASS | 1 round |", "| PR | #5 | opened |", "| Merge | all | merged at abc |", "| Close | issue closed (completed) | label workflow:merged |", "- d1", "- none", "_cost $1_"]) assert.ok(m.includes(row), row);
+    const nh = renderTrajectory({ issue: 9, validate: "CONFIRMED", anomalies: ["needs-human: Review FAIL twice"], close: ["left open", "label needs-human"] });
+    assert.match(nh, /\| Implement \| not reached \| - \|/);
+    assert.match(nh, /\*\*Anomalies\*\*\n- needs-human: Review FAIL twice/);
+    assert.match(renderTrajectory({ issue: 9, validate: ["a|b", "x\ny"] }), /\| Validate \| a\\\|b \| x y \|/);
+  });
+
+  it("a merged run's trajectory and a needs-human run's trajectory carry the right rows", async () => {
+    const w = world({ reviews: [bad(), bad("still bad")] });
     await run(w);
-    const m = w.comments.map((c) => /FORGE:[A-Z_-]+/.exec(c)[0]);
-    assert.deepEqual(m, ["FORGE:STARTED", "FORGE:VALIDATE", "FORGE:PLAN", "FORGE:REVIEW", "FORGE:WORK-ON"]);
-    const idx = []; w.seq.forEach((s, i) => { if (s === "comment") idx.push(i); });
-    assert.ok(idx[1] < w.seq.indexOf("reviewer") && idx[2] < w.seq.indexOf("reviewer") && idx[3] > w.seq.indexOf("reviewer"));
-    const pr = w.prs[0][w.prs[0].indexOf("--body") + 1];
-    assert.match(pr, /Root cause/); assert.match(pr, /\| src\/foo.js \| add guard \| avoid crash \|/);
+    const t = traj(w)[0];
+    assert.match(t, /\| Validate \| CONFIRMED \|/);
+    assert.match(t, /\| Plan \| posted \|/);
+    assert.match(t, /\| Review \| not reached \|/);
+    assert.match(t, /\| Close \| left open \| label needs-human \|/);
+    assert.match(t, /Review FAIL twice/);
   });
 
-  it("builder prompt with the structured fields stays within 1.2k tokens", () => {
-    assert.ok(approxTokens(builderPrompt(7)) <= 1200);
-    assert.match(builderPrompt(7), /root_cause/); assert.match(builderPrompt(7), /sibling_sites_checked/);
+  it("missing stage files in a real run are rendered from result.json and noted as anomalies", async () => {
+    const w = world({ noStages: true, result: { status: "fixed", summary: "fixed foo", evidence: ["src/foo.js:3 x"], root_cause: "bad at src/foo.js:3", changes: [{ file: "src/foo.js", change: "guard", why: "w" }], tests: [{ command: "t", result: "pass", fails_without_fix: false }] } });
+    await run(w);
+    assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:PLAN", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:TRAJECTORY"]);
+    assert.match(w.comments[1], /Root Cause\nbad at src\/foo.js:3/);
+    assert.match(w.comments[3], /fails without fix: no/);
+    assert.match(traj(w)[0], /investigation.md missing or empty: rendered from result.json/);
+    for (const c of w.comments) assert.doesNotMatch(c, /undefined|\[object/);
+  });
+
+  it("live posting: stage notes appear while the builder session is still running", async () => {
+    const w = world({ live: async (wd, put) => {
+      const until = async (marker) => { for (let i = 0; i < 300 && !wd.comments.some((c) => c.includes(`<!-- ${marker} -->`)); i++) await new Promise((r) => setTimeout(r, 10)); return wd.comments.map(markerOf); };
+      wd.liveSeen = {};
+      put("investigation.md", STAGE_MD.investigation); wd.liveSeen.afterInvestigation = await until("FORGE:INVESTIGATION");
+      put("plan.md", STAGE_MD.plan); wd.liveSeen.afterPlan = await until("FORGE:PLAN");
+      put("implementation.md", STAGE_MD.implementation); wd.liveSeen.afterImplementation = await until("FORGE:IMPLEMENTATION");
+    } });
+    const r = await run(w, { livePollMs: 10, stableMs: 30 });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(w.liveSeen.afterInvestigation.includes("FORGE:INVESTIGATION"), "investigation posted before the session ended");
+    assert.ok(w.liveSeen.afterPlan.includes("FORGE:PLAN"));
+    assert.ok(w.liveSeen.afterImplementation.includes("FORGE:IMPLEMENTATION"));
+    assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:PLAN", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:TRAJECTORY"], "each posted exactly once, in order");
+  });
+
+  it("a file still being written is not posted until its mtime is stable", async () => {
+    let seenEarly = null;
+    const w = world({ live: async (wd, put) => {
+      const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+      for (let i = 0; i < 6; i++) { put("investigation.md", STAGE_MD.investigation + "\n".repeat(i)); await sleepMs(15); }
+      seenEarly = wd.comments.map(markerOf);
+      await sleepMs(900);
+    } });
+    await run(w, { livePollMs: 10, stableMs: 400 });
+    assert.ok(!seenEarly.includes("FORGE:INVESTIGATION"), "not posted while the file keeps changing");
+    assert.equal(w.comments.filter((c) => c.includes("FORGE:INVESTIGATION")).length, 1);
+  });
+
+  it("builder prompt (three stage templates) stays within 2.5k tokens", () => {
+    const p = builderPrompt(7);
+    assert.ok(approxTokens(p) <= 2500, `builder prompt is ${approxTokens(p)} tokens`);
+    for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
+      "### Approach", "### Deliverables", "### Acceptance Criteria", "### Implementation Order", "### Out of Scope", "### Risk Assessment", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes",
+      "investigation.md", "plan.md", "implementation.md", "result.json", "BEFORE coding", "BEFORE editing code"]) assert.ok(p.includes(h), h);
   });
 });
 
@@ -319,7 +417,7 @@ describe("merge_wait policy", () => {
     w.io.waitCiGreen = async () => { polled++; return { rc: 2, text: "" }; };
     const r = await run(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(polled, 0);
-    assert.match(registers(w)[0], /Merge policy:\*\* required \(no required checks/);
+    assert.match(traj(w)[0], /\| Merge \| required \(no required checks: merged right after review\) \|/);
   });
   it("required with a pending required check waits (backoff) then merges", async () => {
     const w = world(); const seqs = [states({ build: "pending" }), states({ build: "pending" }), states({ build: "success", other: "failure" })]; let sleeps = 0;
@@ -327,7 +425,7 @@ describe("merge_wait policy", () => {
     const s = w.io.sleep; w.io.sleep = async (ms) => { sleeps++; return s(ms); };
     const r = await run(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(sleeps, 2);
-    assert.match(registers(w)[0], /required \(build\)/);
+    assert.match(traj(w)[0], /\| Merge \| required \(build\) \|/);
     assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
   });
   it("required with a failing required check is needs-human; slow required check is ci-pending", async () => {
@@ -340,7 +438,7 @@ describe("merge_wait policy", () => {
     const w = world({ waits: [{ rc: 2, text: "" }] }); let req = 0; w.io.requiredChecks = async () => { req++; return []; };
     assert.equal((await run(w, { mergeWait: "all" })).terminalReason, "merged");
     assert.equal(w.waits.length, 0); assert.equal(req, 0);
-    assert.match(registers(w)[0], /Merge policy:\*\* all/);
+    assert.match(traj(w)[0], /\| Merge \| all \|/);
     const w2 = world({ waits: [{ rc: 1, text: "red" }] });
     assert.equal((await run(w2, { mergeWait: "none" })).terminalReason, "merged");
     assert.equal(w2.waits.length, 1); assert.deepEqual(w2.merges[0].slice(-2), ["--match-head-commit", w2.head]);
@@ -348,9 +446,8 @@ describe("merge_wait policy", () => {
 });
 
 describe("prompts", () => {
-  it("builder prompt is at most 1k tokens and short and plain", () => {
+  it("builder prompt keeps the short developer opening and the no-push rule", () => {
     const p = builderPrompt(7);
-    assert.ok(approxTokens(p) <= 1000);
     assert.match(p, /Resolve issue #7 \(read it with gh issue view 7 --comments\)/);
     assert.match(p, /Do not push or touch GitHub/);
     assert.match(p, /result\.json/);
@@ -373,6 +470,7 @@ describe("prompts", () => {
   });
 
   it("parseVerdict: flags decide, garbage is null", () => {
+    assert.equal(parseVerdict(ok({ evidence: "a.js:1", checked: "c" })).evidence, "a.js:1");
     assert.equal(parseVerdict(ok()).fail, false);
     assert.equal(parseVerdict(ok({ regression: true })).fail, true);
     assert.equal(parseVerdict(bad()).fail, true);
@@ -495,5 +593,32 @@ describe("orchestrate", () => {
     assert.deepEqual(seen.sort(), [[1, "main", "o/r"], [2, "main", "o/r"]]);
     assert.ok(logs.some((s) => /issue\s+outcome/.test(s)));
     await assert.rejects(orchestrateFromCli([], {}), /usage/);
+  });
+});
+
+describe("runCliBackendAsync", () => {
+  it("returns the same envelope as runCliBackend, without blocking the event loop", async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackend, runCliBackendAsync } = await import("../runner.mjs");
+    const d = tmpDir("core-async-");
+    const bin = `${d}/fake-claude`;
+    writeFileSync(bin, '#!/bin/sh\nsleep 0.3\necho \'{"result":"hello","session_id":"s-1","total_cost_usd":0.25,"num_turns":2,"duration_ms":300,"usage":{"input_tokens":3,"output_tokens":4}}\'\n');
+    chmodSync(bin, 0o755);
+    const base = { spec: { name: "t" }, userMessage: "go", systemPrompt: "sys", args: ["1"], cwd: d, bin, logger: { log() {} } };
+    let ticks = 0; const iv = setInterval(() => { ticks++; }, 20);
+    const a = await runCliBackendAsync(base);
+    clearInterval(iv);
+    const s = runCliBackend(base);
+    assert.ok(ticks >= 5, `event loop kept turning (${ticks} ticks)`);
+    assert.deepEqual({ ...a, durationMs: 0 }, { ...s, durationMs: 0 });
+    assert.equal(a.sessionId, "s-1"); assert.equal(a.text, "hello"); assert.equal(a.costUsd, 0.25);
+  });
+
+  it("surfaces a failing CLI as the same CLI_BACKEND_FAILED error", async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const d = tmpDir("core-async-");
+    writeFileSync(`${d}/bad`, "#!/bin/sh\necho boom >&2\nexit 3\n"); chmodSync(`${d}/bad`, 0o755);
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/bad`, logger: { log() {} } }), (e) => e.code === "CLI_BACKEND_FAILED" && /boom/.test(e.message));
   });
 });
