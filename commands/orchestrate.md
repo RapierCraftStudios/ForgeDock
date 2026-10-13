@@ -43,14 +43,17 @@ Do this yourself from issue text and the code. Spawn no sub-agents here.
    - **Logical:** one issue's fix is needed by another (for example, it adds the helper the other uses).
 
    If you find a cycle, break it at the weakest (conflict) edge and say so.
-4. **Show the plan** as one table: issue, title, size, likely files, waits-on, wave. Then proceed
+4. **Show the plan** as one table: issue, title, size, likely files, waits-on. There are no waves. Then proceed
    without asking.
 
 `K` = `--parallel` (default 3). `L` = `--lane` if given, otherwise the repo's base lane from forge.yaml.
 
 ## 3. Launch lanes
 
-Keep at most K lanes running. Start issues in DAG order: every issue whose waits-on have all merged.
+Schedule from the DAG, not in waves. An issue is **ready** when every issue it waits on has merged (or it
+waits on nothing). Keep at most K lanes running. Whenever a lane is free, start the highest-priority ready
+issue right away (priority label first, then the smaller size). Never hold a ready issue back until other
+lanes finish.
 
 - **Shell lane (default, when `forgedock` is on PATH).** One `Bash` call per issue with
   `run_in_background: true`:

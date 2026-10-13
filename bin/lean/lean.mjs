@@ -76,9 +76,9 @@ export async function runCore(o) {
   }
 
   let done = null, wtCreated = false;
-  async function finish(reason, detail = "", extra = {}) {
+  async function finish(reason, detail = "", extra = {}, codeOverride = null) {
     if (done) return done; // idempotent: exactly one RUN_TERMINAL and one telemetry emit
-    const code = codeForTerminalReason(reason);
+    const code = codeOverride ?? codeForTerminalReason(reason);
     ev({ event: "RUN_TERMINAL", reason, code });
     await emit({ event: "RUN_TERMINAL", reason, code });
     if (["needs-human", "engine-error"].includes(reason)) {
@@ -93,12 +93,12 @@ export async function runCore(o) {
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, ...extra };
     return done;
   }
-  async function needsHuman(why) {
+  async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR) {
     try {
       await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}\n\n_${usageLine()}_`);
       await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
     } catch { /* best effort */ }
-    return finish("needs-human", why);
+    return finish("needs-human", why, { code }, code);
   }
 
   async function builder(n, prompt, resume) {
@@ -178,7 +178,7 @@ export async function runCore(o) {
       const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
       const verdict = result ? (result.status === "fixed" ? "valid" : result.status) : null;
       const closing = ["invalid", "already-fixed"].includes(result?.status);
-      if (closing && !evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`);
+      if (closing && !evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_NO_EVIDENCE);
       // The validation comment (no model call): verdict, evidence, one-line summary. For invalid/already-fixed it IS the evidence comment.
       if (verdict) validateUrl = await post("FORGE:VALIDATE", renderValidate(result, verdict));
       if (closing) {
@@ -186,8 +186,8 @@ export async function runCore(o) {
         await label("invalid");
         return await finish("invalid", result.summary ?? result.status);
       }
-      if (result?.status === "blocked") return await needsHuman(`Builder is blocked: ${result.summary ?? "(no summary)"}`);
-      if (!files0.length) return await needsHuman(`Builder made no commit${result ? ` (status "${result.status}")` : " and wrote no result.json"}.\n\n${result?.summary ?? ""}`);
+      if (result?.status === "blocked") return await needsHuman(`Builder is blocked: ${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_BLOCKED);
+      if (!files0.length) return await needsHuman(`Builder made no commit${result ? ` (status "${result.status}")` : " and wrote no result.json"}.\n\n${result?.summary ?? ""}`, OUTCOME_CODES.BUILDER_NO_COMMIT);
       planUrl = await post("FORGE:PLAN", renderPlan(result, files0));
     }
 
@@ -208,14 +208,14 @@ export async function runCore(o) {
       return null;
     };
     review = await doReview();
-    if (!review) return await needsHuman("Reviewer returned no parseable verdict twice.");
+    if (!review) return await needsHuman("Reviewer returned no parseable verdict twice.", OUTCOME_CODES.REVIEW_NO_VERDICT);
     if (review.fail) {
-      if (!sessionId) return await needsHuman(`Review FAIL and the builder session id is unknown, cannot resume: ${review.reason}`);
+      if (!sessionId) return await needsHuman(`Review FAIL and the builder session id is unknown, cannot resume: ${review.reason}`, OUTCOME_CODES.REVIEW_FAILED);
       await builder(++attemptN, resumeBuilderPrompt(review.reason), sessionId);
       result = (await readResult()) ?? result;
       review = await doReview();
-      if (!review) return await needsHuman("Reviewer returned no parseable verdict twice (re-review).");
-      if (review.fail) return await needsHuman(`Review FAIL twice. Last reason: ${review.reason}`);
+      if (!review) return await needsHuman("Reviewer returned no parseable verdict twice (re-review).", OUTCOME_CODES.REVIEW_NO_VERDICT);
+      if (review.fail) return await needsHuman(`Review FAIL twice. Last reason: ${review.reason}`, OUTCOME_CODES.REVIEW_FAILED);
     }
     reviewUrl = await post("FORGE:REVIEW", renderReview(review));
     ev({ event: "PHASE_COMMIT", phase: "review" });
@@ -251,13 +251,13 @@ export async function runCore(o) {
         if (policy === "all") {
           const w = await io.waitCiGreen(pr, repo, 0).catch(() => ({ rc: 2, text: "" }));
           if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; break; }
-          if (w.rc === 1) return await needsHuman(`Remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`);
+          if (w.rc === 1) return await needsHuman(`Remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`, OUTCOME_CODES.CI_RED);
         } else {
           let states = [];
           try { states = (await io.checkStates(pr)) ?? []; } catch { states = []; }
           const st = (n) => states.find((x) => x.name === n)?.state ?? "pending";
           const failed = required.filter((n) => st(n) === "failure");
-          if (failed.length) return await needsHuman(`Required check(s) failed on PR #${pr}: ${failed.join(", ")}`);
+          if (failed.length) return await needsHuman(`Required check(s) failed on PR #${pr}: ${failed.join(", ")}`, OUTCOME_CODES.CI_RED);
           if (required.every((n) => st(n) === "success")) break;
         }
         if (now() - startedAt >= ciMaxMinutes * 60000) {
@@ -269,7 +269,7 @@ export async function runCore(o) {
         await sleep(ciPollDelayMs(pollIndex++, random));
       }
       if (gateHead && !(localHead.startsWith(gateHead) || gateHead.startsWith(localHead))) {
-        return await needsHuman(`CI passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`);
+        return await needsHuman(`CI passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`, OUTCOME_CODES.MERGE_HEAD_MISMATCH);
       }
     }
     await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
