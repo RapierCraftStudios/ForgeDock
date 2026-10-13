@@ -43,6 +43,12 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `dependency.unreadable` | The issue body or a declared dependency could not be read, so the run was refused (fail closed) | engine | Failed or unparsable `gh api` read |
 | `invalid` | Issue is invalid or in a divergent closed state | investigate, engine | `INVESTIGATION:INVALID` marker, or live snapshot |
 | `decomposed` | Issue was decomposed into sub-issues | investigate, decompose | `FORGE:DECOMPOSED` or the decomposition assessment |
+| `builder.blocked` | Core work-on: the builder reported it cannot proceed without a human decision (design, credentials, infra) | lean | `result.json` status `blocked` |
+| `builder.no_evidence` | Core work-on: the builder reported invalid/already-fixed without file:line evidence, so the issue was not closed | lean | `result.json` with empty `evidence` |
+| `builder.no_commit` | Core work-on: the builder made no commit for a fix | lean | No changed files after the builder session |
+| `review.failed` | Core work-on: the fix/regression review failed twice (or could not resume the builder) | lean | Reviewer verdict FAIL |
+| `review.no_verdict` | Core work-on: the reviewer returned no parseable verdict twice | lean | Unparsable reviewer output |
+| `merge.head_mismatch` | Core work-on: CI passed for a head other than the reviewed head; merge refused | lean | Gate head differs from the reviewed head |
 | `completed` | Non-failure terminal (merged, phase-complete, investigation) | engine | Terminal reason |
 | `awaiting_merge` | Clean result held for a merge decision | remediate | Terminal reason `awaiting-merge` |
 | `unclassified` | Fallback for an absent or unknown code | engine | The raw reason is kept alongside |

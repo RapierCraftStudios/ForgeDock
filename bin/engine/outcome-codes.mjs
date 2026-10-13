@@ -44,6 +44,13 @@ export const OUTCOME_CODES = Object.freeze({
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
   INVALID: "invalid",
   DECOMPOSED: "decomposed",
+  // Lean core work-on (bin/lean) needs-human causes.
+  BUILDER_BLOCKED: "builder.blocked",
+  BUILDER_NO_EVIDENCE: "builder.no_evidence",
+  BUILDER_NO_COMMIT: "builder.no_commit",
+  REVIEW_FAILED: "review.failed",
+  REVIEW_NO_VERDICT: "review.no_verdict",
+  MERGE_HEAD_MISMATCH: "merge.head_mismatch",
   // Non-failure terminals, so a RUN_TERMINAL for a healthy run is not counted as a gap.
   COMPLETED: "completed",
   AWAITING_MERGE: "awaiting_merge",
@@ -115,7 +122,9 @@ export function codeForTerminalReason(reason) {
     case "phase-complete":
     case "investigation":
       return OUTCOME_CODES.COMPLETED;
-    case "awaiting-merge": return OUTCOME_CODES.AWAITING_MERGE;
+    case "awaiting-merge":
+    case "ci-pending":
+      return OUTCOME_CODES.AWAITING_MERGE;
     case "invalid": return OUTCOME_CODES.INVALID;
     case "decomposed": return OUTCOME_CODES.DECOMPOSED;
     case "engine-error": return OUTCOME_CODES.ENGINE_ERROR;
