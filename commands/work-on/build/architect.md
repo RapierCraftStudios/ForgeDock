@@ -83,7 +83,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 Before doing any work, select the architect comments with ONE anchored, trusted selector (body must start with the marker; author must be a Bot or OWNER/MEMBER/COLLABORATOR; mirrors `scripts/trusted-comments.sh`). A comment that merely mentions the marker (an INVESTIGATOR report, a CONTEXT briefing) never matches. <!-- Added: forge#3648 -->
 
 ```bash
-ARCH=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments | jq -s '[.[][] | select((.body // "") | startswith("<!-- FORGE:ARCHITECT -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:ARCHITECT:COMPLETE -->")), other: (.body | test("<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|BUILDER)"))}]') || ARCH=""
+ARCH=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments | jq -s '[.[][] | select((.body // "") | startswith("<!-- FORGE:ARCHITECT -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:ARCHITECT:COMPLETE -->")), other: (.body | test("\\n[ \\t]*<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|BUILDER)"))}]') || ARCH=""
 ```
 
 - If `ARCH` is empty (unparsable) → fail closed: delete nothing and treat as no plan.
