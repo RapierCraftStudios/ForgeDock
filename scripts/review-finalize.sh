@@ -408,13 +408,15 @@ EOF
     gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" --paginate > "$FILES_JSON" 2>/dev/null || : > "$FILES_JSON"
     # "path:line" for every added line; an empty file means the diff was unreadable (gates then keep every finding).
     ADDED_LINES_FILE="$WORKDIR/added-lines"
-    jq -r '.[] | select(.patch != null) | "FILE\t\(.filename)", .patch' "$FILES_JSON" 2>/dev/null | awk '
+    # Second stream from the same pass: "path<TAB>text" per added line, for the Gate 2 symbol fallback.
+    ADDED_TEXT_FILE="$WORKDIR/added-text"; : > "$ADDED_TEXT_FILE"
+    jq -r '.[] | select(.patch != null) | "FILE\t\(.filename)", .patch' "$FILES_JSON" 2>/dev/null | awk -v tf="$ADDED_TEXT_FILE" '
         /^FILE\t/{f=substr($(0),6);next}
         /^@@/{s=$(0);sub(/^@@ -[0-9,]+ \+/,"",s);sub(/[ ,].*/,"",s);n=s+0;next}
         /^\\/{next}
-        /^\+/{print f":"n;n++;next}
+        /^\+/{print f":"n; print f "\t" substr($(0),2) > tf; n++;next}
         /^-/{next}
-        {n++}' > "$ADDED_LINES_FILE" || : > "$ADDED_LINES_FILE"
+        {n++}' > "$ADDED_LINES_FILE" || { : > "$ADDED_LINES_FILE"; : > "$ADDED_TEXT_FILE"; }
     # Files the PR deleted or renamed (the old name too): findings on them always intersect.
     GONE_FILES_FILE="$WORKDIR/gone-files"
     jq -r '.[] | select(.status=="removed" or .status=="renamed") | .filename, (.previous_filename // empty)' "$FILES_JSON" > "$GONE_FILES_FILE" 2>/dev/null || : > "$GONE_FILES_FILE"
@@ -434,6 +436,31 @@ EOF
         fi
         case "$f" in *[!A-Za-z0-9._/@+-]*|"") echo UNKNOWN; return 0 ;; esac
         if gh api -H "Accept: application/vnd.github.raw" "repos/${REPO}/contents/${f}?ref=${REVIEW_SHA}" > "$t" 2>/dev/null; then awk 'END{print NR}' "$t"; else echo UNKNOWN; fi
+    }
+
+    # Gate 2 symbol fallback: 0 when an identifier the finding names occurs (whole word, fixed string) in the added lines of FILE.
+    # Candidates: backticked tokens, plus identifier-shaped tokens on "Root cause" lines; each must match an anchored identifier
+    # regex of 4+ chars and not be a common word. Reviewer text is never used in arithmetic, a glob or a regex. Any failure returns 1.
+    symbol_in_added() {
+        local f="$1" text="$2" t="$WORKDIR/sym-added" c n=0
+        [ -s "$ADDED_TEXT_FILE" ] || return 1
+        awk -v f="$f" 'index($0, f "\t") == 1 { print substr($0, length(f) + 2) }' "$ADDED_TEXT_FILE" > "$t" 2>/dev/null || return 1
+        [ -s "$t" ] || return 1
+        while IFS= read -r c; do
+            case "$c" in ""|[!A-Za-z_]*) continue ;; esac
+            [ "${#c}" -ge 4 ] || continue
+            case "$(printf '%s' "$c" | tr '[:upper:]' '[:lower:]')" in
+                this|that|with|from|true|false|null|none|file|line|code|test|case|value|root|cause|when|then|which|where|there|their|error|data|name|path|type|call|only|also|into|have|does|used|uses) continue ;;
+            esac
+            n=$((n + 1)); [ "$n" -le 8 ] || break
+            if grep -qwF -- "$c" "$t" 2>/dev/null; then return 0; fi
+        done <<SYMEOF
+$({
+    printf '%s\n' "$text" | grep -oE '`[^`]+`' 2>/dev/null | tr -c 'A-Za-z0-9_\n' '\n'
+    printf '%s\n' "$text" | grep -iE 'root cause' 2>/dev/null | grep -oE '[A-Za-z_][A-Za-z0-9_]*' | grep -E '_|[a-z][A-Z]|[0-9]'
+} 2>/dev/null | grep -E '^[A-Za-z_][A-Za-z0-9_]{3,}$' | awk '!seen[$0]++')
+SYMEOF
+        return 1
     }
 
     FINAL="$WORKDIR/final.jsonl"; : > "$FINAL"
@@ -473,6 +500,8 @@ EOF
                 if grep -qxF -- "${FILE}:${L}" "$ADDED_LINES_FILE"; then INTRODUCED=1; break; fi
                 L=$((L + 1))
             done
+            # The cited line is the reviewer's estimate (stale or at the call site): symbol fallback before routing pre-existing.
+            if [ "$INTRODUCED" -eq 0 ] && symbol_in_added "$FILE" "$(printf '%s' "$F" | jq -r '.text // ""')"; then INTRODUCED=1; fi
             if [ "$INTRODUCED" -eq 1 ]; then SCOPE="introduced"; else
                 SCOPE="pre-existing"
                 case "$SEV" in MEDIUM|LOW|INFO) ROUTE="pre-existing" ;; esac

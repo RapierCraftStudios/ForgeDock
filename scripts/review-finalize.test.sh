@@ -318,6 +318,41 @@ for pair in G-1:introduced G-2:pre-existing G-3:pre-existing G-4:unknown G-7:pre
 done
 want "gate2 table: a file absent from the PR and from the head is stale (gate 1), not pre-existing" '[.findings[].id] | contains(["G-14"]) | not' findings.json "true"
 
+# symbol fallback (#4061): a stale or call-site cited line still scopes introduced when a named identifier is in the added lines
+reset
+printf '%s\n' '[{"filename":"s.sh","status":"modified","patch":"@@ -9,2 +9,3 @@\n ctx baseOnlyName\n+stepKey=1 stepKeyed=2 a*b $(x)\n ctx"}]' > "$FIX/pr-files.json"
+SY_PROSE=""; SY_MARKS=""; SY_N=0
+sy() {   # sy <id> <title> <extra prose line>
+    SY_PROSE="${SY_PROSE}### $1 finding
+**Failure scenario**: s
+$3
+"
+    SY_N=$((SY_N + 1))
+    SY_MARKS="${SY_MARKS}<!-- FINDING:$1|LIKELY|MEDIUM|s.sh:$((300 + SY_N * 20))|$2 -->
+"
+}
+sy Y-1 "alpha stale" 'The dedup key `stepKey` is wrong'
+sy Y-2 "bravo base" 'Calls `baseOnlyName` badly'
+sy Y-3 "charlie generic" 'Uses `this` and `file` and `abc` here'
+sy Y-4 "delta substring" 'Wrong `stepKe` or `step` usage'
+sy Y-5 "echo plain" 'No backticks and no cause line at all'
+sy Y-6 "foxtrot meta" 'Odd `a*b` and `$(x)` and `[` tokens'
+sy Y-7 "golf rootcause" 'Root cause: stepKey is built too late'
+cm MEMBER User "$(agent_body security "$SHA" "$SY_PROSE" "$SY_MARKS")"; flush
+run "$GOOD" extract; rc_is "symbol fallback" "$RC" 0
+for pair in Y-1:introduced Y-2:pre-existing Y-3:pre-existing Y-4:pre-existing Y-5:pre-existing Y-6:pre-existing Y-7:introduced; do
+    want "symbol fallback: ${pair%%:*}" ".findings[] | select(.id == \"${pair%%:*}\") | .scope" findings.json "${pair#*:}"
+done
+want "symbol fallback: introduced routes file" '.findings[] | select(.id == "Y-1") | .route' findings.json "file"
+want "symbol fallback: base-only stays pre-existing route" '.findings[] | select(.id == "Y-2") | .route' findings.json "pre-existing"
+# unreadable added text (extraction failure) keeps the line-window result
+reset; echo '[]' > "$FIX/pr-files.json"
+cm MEMBER User "$(agent_body security "$SHA" '### Y-1 f
+**Failure scenario**: s
+`stepKey`
+' '<!-- FINDING:Y-1|LIKELY|MEDIUM|s.sh:300|alpha stale -->')"; flush
+run "$GOOD" extract; want "symbol fallback: no diff keeps" '.findings[0].scope' findings.json "unknown"
+
 # DELTA: the earlier reviewed head's findings are read as well
 reset; mkctx 1 DELTA "$OLD_SHA"
 cm MEMBER User "$(agent_body security "$SHA" '### D-1 new
