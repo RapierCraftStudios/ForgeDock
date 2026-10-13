@@ -10,11 +10,11 @@ import { appendEvent } from "../engine/runlog.mjs";
 import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION } from "../engine.mjs";
 import { openDependency } from "../engine/phases.mjs";
-import { renderValidate, renderPlan, renderReview, renderRegister, renderPrBody } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
+import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, capComment, sanitizeMd } from "./render.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, PLAN_FILE, IMPLEMENTATION_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
-export const REGISTER_MARKER = "FORGE:WORK-ON";
+export const REGISTER_MARKER = "FORGE:WORK-ON"; // alias marker carried by the FORGE:TRAJECTORY comment
 const num = (v) => (Number.isFinite(v) ? v : null);
 
 /**
@@ -56,7 +56,8 @@ export async function runCore(o) {
     usage.cache += (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
   }
   const post = async (marker, body) => {
-    const out = String(await ghc(["issue", "comment", String(issue), "-R", repo, "--body", `<!-- ${marker} -->\n${body}`])).trim();
+    const marks = (Array.isArray(marker) ? marker : [marker]).map((m) => `<!-- ${m} -->`).join("\n");
+    const out = String(await ghc(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`${marks}\n${body}`)])).trim();
     return /https?:\/\/\S+/.exec(out)?.[0] ?? null;
   };
   const label = async (state) => { try { await io.transitionLabel(issue, state); } catch { /* labels are best effort */ } };
@@ -75,6 +76,8 @@ export async function runCore(o) {
     try { await writeLease(null, terminal ? { terminal: true, terminalReason: reason } : {}); } catch { /* best effort */ }
   }
 
+  // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
+  const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
   let done = null, wtCreated = false;
   async function finish(reason, detail = "", extra = {}, codeOverride = null) {
     if (done) return done; // idempotent: exactly one RUN_TERMINAL and one telemetry emit
@@ -84,6 +87,12 @@ export async function runCore(o) {
     if (["needs-human", "engine-error"].includes(reason)) {
       const wf = ["investigating", "building", "in-review"].map((x) => `workflow:${x}`).join(",");
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", wf]); } catch { /* best effort */ }
+    }
+    if (["merged", "invalid", "needs-human"].includes(reason)) {
+      if (reason === "merged") T.close = ["issue closed (completed)", "label workflow:merged"];
+      else if (reason === "invalid") T.close = ["issue closed (not planned)", "label workflow:invalid"];
+      else { T.close = ["left open", "label needs-human"]; T.anomalies.push(`needs-human: ${String(detail).split("\n")[0].slice(0, 300)}`); }
+      try { await post(["FORGE:TRAJECTORY", REGISTER_MARKER], renderTrajectory({ ...T, usage: usageLine() })); } catch { /* best effort */ }
     }
     await releaseLease(reason);
     if (wtCreated) {
@@ -101,10 +110,71 @@ export async function runCore(o) {
     return finish("needs-human", why, { code }, code);
   }
 
-  async function builder(n, prompt, resume) {
+  // ---- stage notes: investigation.md, plan.md, implementation.md become their own comments ----
+  const STAGES = [
+    { key: "investigation", file: INVESTIGATION_FILE, marker: ["FORGE:INVESTIGATION", "FORGE:VALIDATE"], render: (md, ctx) => renderInvestigation(md, ctx.result) },
+    { key: "plan", file: PLAN_FILE, marker: ["FORGE:PLAN"], render: (md, ctx) => renderPlan(md, ctx.result, ctx.files) },
+    { key: "implementation", file: IMPLEMENTATION_FILE, marker: ["FORGE:IMPLEMENTATION"], render: (md, ctx) => renderImplementation(md, ctx.result, { branch, files: ctx.files }) },
+  ];
+  const posted = {}; // key -> comment url (or "" when posted without a link)
+  const readStage = async (st) => { try { return await io.fs.read(`${wt}/${st.file}`); } catch { return null; } };
+  const usableMd = (md) => sanitizeMd(md).replace(/\s+/g, " ").length >= 20;
+  const stageFiles = async () => {
+    const out = String(await git(["diff", "--name-only", `${base}...HEAD`]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
+    if (out.length) return out;
+    return String(await git(["diff", "--name-only", "HEAD"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
+  };
+  async function postStage(st, result, md) {
+    const files = st.key === "implementation" ? await stageFiles() : [];
+    const url = await post(st.marker, st.render(md, { result, files }));
+    posted[st.key] = url ?? "";
+  }
+  /** Post stage notes in order that exist, are stable (mtime unchanged for stableMs) and not yet posted. */
+  const seen = {};
+  async function livePoll() {
+    for (const st of STAGES) {
+      if (st.key in posted) continue;
+      let m = null;
+      try { m = await io.fs.stat(`${wt}/${st.file}`); } catch { m = null; }
+      if (!m) return;
+      const e = seen[st.key];
+      if (!e || e.mtime !== m.mtimeMs) { seen[st.key] = { mtime: m.mtimeMs, since: Date.now() }; return; }
+      if (Date.now() - e.since < (o.stableMs ?? 2000)) return;
+      const md = await readStage(st);
+      if (!usableMd(md)) return;
+      try { await postStage(st, null, md); } catch { return; }
+    }
+  }
+  /** Post whatever was not posted live, in order; a missing file falls back to the result.json fields. */
+  async function flushStages(result, keys) {
+    for (const st of STAGES) {
+      if (!keys.includes(st.key) || st.key in posted) continue;
+      const md = await readStage(st);
+      if (!usableMd(md)) {
+        if (!result && st.key === "investigation") continue; // nothing to render
+        T.anomalies.push(`${st.file} missing or empty: rendered from result.json`);
+      }
+      await postStage(st, result, md);
+    }
+  }
+
+  async function builder(n, prompt, resume, live = false) {
     onProgress({ event: "phase_enter", phase: "build" });
     await renew();
-    const r = await io.runner({ role: "builder", issue, cwd: wt, model: builderModel, resume, system: "", prompt });
+    const call = Promise.resolve(io.runner({ role: "builder", issue, cwd: wt, model: builderModel, resume, system: "", prompt }));
+    let r;
+    if (live && io.fs.stat) {
+      let settled = false;
+      const tracked = call.then((v) => { settled = true; return v; }, (e) => { settled = true; throw e; });
+      tracked.catch(() => {});
+      while (!settled) {
+        let t;
+        await Promise.race([tracked.catch(() => {}), new Promise((res) => { t = setTimeout(res, o.livePollMs ?? 1000); })]);
+        clearTimeout(t);
+        if (!settled) { try { await livePoll(); } catch { /* live posting is best effort */ } }
+      }
+      r = await tracked;
+    } else r = await call;
     await renew();
     if (r?.sessionId) sessionId = r.sessionId;
     await attempt("implement", n, r);
@@ -169,31 +239,36 @@ export async function runCore(o) {
     const changedFiles = async () => String(await git(["diff", "--name-only", `${base}...HEAD`])).split("\n").map((s) => s.trim()).filter(Boolean);
 
     // ---- 3. builder ----
-    let result = null, attemptN = 0, validateUrl = null, planUrl = null, reviewUrl = null;
+    let result = null, attemptN = 0, reviewN = 0;
     if (!(resumed && (await changedFiles()).length > 0)) {
       await label("building");
-      await builder(++attemptN, builderPrompt(issue), null);
+      await builder(++attemptN, builderPrompt(issue), null, true);
       result = await readResult();
       const files0 = await changedFiles();
       const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
-      const verdict = result ? (result.status === "fixed" ? "valid" : result.status) : null;
       const closing = ["invalid", "already-fixed"].includes(result?.status);
+      await flushStages(result, ["investigation"]); // first stage note: the evidence comment for invalid/already-fixed
+      T.validate = [result ? (result.status === "fixed" ? "CONFIRMED" : String(result.status).toUpperCase()) : "no result.json", `${evidence.length} evidence item(s)`];
+      T.decisions.push(`Builder verdict: ${result?.status ?? "none"}`);
       if (closing && !evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_NO_EVIDENCE);
-      // The validation comment (no model call): verdict, evidence, one-line summary. For invalid/already-fixed it IS the evidence comment.
-      if (verdict) validateUrl = await post("FORGE:VALIDATE", renderValidate(result, verdict));
       if (closing) {
+        T.plan = "skipped"; T.implement = "skipped"; T.review = "skipped"; T.pr = "none"; T.merge = "n/a";
         await ghc(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
         await label("invalid");
         return await finish("invalid", result.summary ?? result.status);
       }
       if (result?.status === "blocked") return await needsHuman(`Builder is blocked: ${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_BLOCKED);
       if (!files0.length) return await needsHuman(`Builder made no commit${result ? ` (status "${result.status}")` : " and wrote no result.json"}.\n\n${result?.summary ?? ""}`, OUTCOME_CODES.BUILDER_NO_COMMIT);
-      planUrl = await post("FORGE:PLAN", renderPlan(result, files0));
+      await flushStages(result, ["plan", "implementation"]);
+      T.plan = "posted"; T.implement = [`${files0.length} file(s)`, branch];
+    } else {
+      T.validate = "resumed (existing branch)"; T.plan = "skipped (resumed)"; T.implement = ["existing commits", branch];
+      T.decisions.push("Open PR or remote branch found: builder skipped, reviewing existing commits");
     }
 
     // ---- 4. review (one retry through the same builder session) ----
     await label("in-review");
-    let review = null, reviewN = 0;
+    let review = null;
     const doReview = async () => {
       for (let t = 0; t < 2; t++) {
         const diff = String(await git(["diff", `${base}...HEAD`]));
@@ -211,23 +286,26 @@ export async function runCore(o) {
     if (!review) return await needsHuman("Reviewer returned no parseable verdict twice.", OUTCOME_CODES.REVIEW_NO_VERDICT);
     if (review.fail) {
       if (!sessionId) return await needsHuman(`Review FAIL and the builder session id is unknown, cannot resume: ${review.reason}`, OUTCOME_CODES.REVIEW_FAILED);
+      T.decisions.push(`Review FAIL (round 1): builder resumed with the reason: ${String(review.reason).slice(0, 200)}`);
       await builder(++attemptN, resumeBuilderPrompt(review.reason), sessionId);
       result = (await readResult()) ?? result;
       review = await doReview();
       if (!review) return await needsHuman("Reviewer returned no parseable verdict twice (re-review).", OUTCOME_CODES.REVIEW_NO_VERDICT);
       if (review.fail) return await needsHuman(`Review FAIL twice. Last reason: ${review.reason}`, OUTCOME_CODES.REVIEW_FAILED);
     }
-    reviewUrl = await post("FORGE:REVIEW", renderReview(review));
+    T.review = [review.verdict, `${reviewN} reviewer run(s), ${attemptN > 1 ? "2 rounds" : "1 round"}`];
+    await post("FORGE:REVIEW", renderReview(review));
     ev({ event: "PHASE_COMMIT", phase: "review" });
 
     // ---- 5. push + PR ----
     const files = await changedFiles();
     await git(["push", "-u", "origin", branch]);
     const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghc(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
-      "--title", `${iss.title} (#${issue})`, "--body", renderPrBody({ issue, result, gitFiles: files })])).trim();
+      "--title", `${iss.title} (#${issue})`, "--body", renderPrBody({ issue, investigation: await readStage(STAGES[0]), plan: await readStage(STAGES[1]), implementation: await readStage(STAGES[2]), result, gitFiles: files })])).trim();
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
     if (!Number.isInteger(pr)) return await needsHuman(`Could not parse the PR number from: ${prOut.slice(0, 200)}`);
     ev({ event: "PR_OPENED", pr });
+    T.pr = [`#${pr}`, resumed?.pr ? "existing" : "opened"];
     const prUrl = /https?:\/\/\S+/.exec(prOut)?.[0] ?? `https://github.com/${repo}/pull/${pr}`;
     const localHead = String(await git(["rev-parse", "HEAD"])).trim();
 
@@ -238,11 +316,13 @@ export async function runCore(o) {
       try { required = (await io.requiredChecks?.(lane)) ?? []; } catch { required = []; }
     }
     const policyText = mergeWait === "required" ? (required.length ? `required (${required.join(", ")})` : "required (no required checks: merged right after review)") : mergeWait;
-    await post(REGISTER_MARKER, renderRegister({ result, gitFiles: files, review, links: { validate: validateUrl, plan: planUrl, review: reviewUrl }, prUrl, usage: usageLine(), policy: policyText }));
+    T.merge = [policyText, "waiting"];
+    T.decisions.push(`merge_wait=${mergeWait}: ${policyText}`);
 
     // ---- 7. wait per policy, merge at the reviewed head ----
     if (policy === "none" || (policy === "required" && !required.length)) {
       // merge right after review
+      T.merge = [policyText, "merged right after review"];
     } else {
       const startedAt = now();
       let pollIndex = 0, gateHead = null;
@@ -263,6 +343,7 @@ export async function runCore(o) {
         if (now() - startedAt >= ciMaxMinutes * 60000) {
           // Slow CI is never a needs-human: leave the PR open and resumable.
           ev({ event: "CI_PENDING_WAIT", state: "end", pr, result: "timeout" });
+          T.anomalies.push("CI still pending at the wait budget");
           return await finish("ci-pending", `PR #${pr} still waiting on CI after ${ciMaxMinutes} min`, { pr });
         }
         onProgress({ event: "phase_paused", phase: "merge", detail: `CI pending on PR #${pr}` });
@@ -272,6 +353,7 @@ export async function runCore(o) {
         return await needsHuman(`CI passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`, OUTCOME_CODES.MERGE_HEAD_MISMATCH);
       }
     }
+    T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
     await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
     await ghc(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
     await label("merged");
