@@ -1,6 +1,6 @@
 ---
 description: Sweep closed issues for stale labels, missing workflow state, and Project board gaps — plus prune worktrees, branches, and milestones
-argument-hint: "[labels | branches | milestones | board | orphans | all]"
+argument-hint: "[labels | branches | milestones | board | orphans | dossiers | all]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -8,9 +8,11 @@ install: extras
 
 # /cleanup — Full Hygiene Sweep
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
-Scan the entire development environment for rot and fix it. This is a maintenance command — run periodically or after large orchestration batches. It covers 6 domains: stale labels, orphaned issues and dead claims boards, worktree/branch pruning, milestone hygiene, and Project board sync.
+Scan the entire development environment for rot and fix it. This is a maintenance command — run periodically or after large orchestration batches. It covers 7 domains: stale labels, orphaned issues and dead claims boards, worktree/branch pruning, milestone hygiene, Project board sync, and the legacy dossier PR backlog.
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
@@ -50,6 +52,7 @@ All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD
 | `branches` | Prune worktrees and remote branches for merged PRs |
 | `milestones` | Report milestones with 0 open issues (advisory — never closes) |
 | `board` | Sync closed issues to Project board with correct terminal state |
+| `dossiers` | Fold open per-issue `docs(dossier):` PRs into the single rolling dossier PR (`docs/dossier-rolling`) and close the originals as superseded (Phase 4C) |
 | `batch-p3` | Sweep: fold stale unbatched P3 review findings into surface-area-grouped batch issues (same file, then leaf directory) |
 | `all` | All of the above, in order |
 
@@ -626,6 +629,36 @@ Total P3 findings batched: {N}
 
 ---
 
+## Phase 4C: Dossier PR Backlog Sweep (if `dossiers` or `all`)
+
+**Skip if**: Input is not `dossiers` and not `all`.
+
+`work-on` close Phase C1.7 appends every module dossier entry to ONE rolling branch, `docs/dossier-rolling`, carried by one PR. Earlier versions opened one `docs/dossier-<N>` PR per issue that nothing merged. This sweep folds those legacy PRs into the rolling PR so at most one open dossier PR remains. <!-- Added: forge#3698 -->
+
+**Selection** (all conditions required): PR is open, head branch matches `docs/dossier-*` and is not `docs/dossier-rolling`, and the title starts with `docs(dossier):`. Head repository must be this repo (no fork PRs). Anything else is never touched.
+
+**Never touch the main checkout**: work in a temporary detached worktree (`git -C "{REPO_PATH}" worktree add --detach`), removed on every exit path (EXIT trap), exactly as close.md C1.7 does. No raw `gh pr merge`: the rolling PR is merged only by the normal gate.
+
+**Honor DRY_RUN**: when `DRY_RUN=true`, list the PRs that would be folded and stop.
+
+**Procedure**:
+
+1. List candidates:
+   ```bash
+   gh pr list {GH_FLAG} --state open --limit 200 --json number,title,headRefName,headRepositoryOwner,baseRefName \
+     --jq '.[] | select((.headRefName | startswith("docs/dossier-")) and .headRefName != "docs/dossier-rolling" and (.title | startswith("docs(dossier):"))) | "\(.number)|\(.headRefName)|\(.baseRefName)"'
+   ```
+   Zero candidates: report "no dossier backlog" and stop.
+2. Build the rolling branch in the temporary worktree: if an open PR for `docs/dossier-rolling` exists, fetch it and base the worktree on `origin/docs/dossier-rolling`; otherwise base on `origin/{STAGING_BRANCH}` (use the candidate's base branch) and create the branch with `checkout -B docs/dossier-rolling`.
+3. For each candidate, in ascending PR number order, transfer its entries: for every file the PR changes under the devdocs modules path, take the lines the PR ADDED (`git diff origin/<base>...origin/<head> -- <file>`, the `## Entry ...` blocks) and append them to the same file in the worktree unless an identical `## Entry` heading line is already present (idempotent). Conflicts are never a failure: the entries are appends, so keep both sides. If a candidate touches a file outside the devdocs modules path, leave that PR open and report it as `not foldable`.
+4. Commit once in the worktree (`git commit -s -m "docs(dossier): fold backlog entries from PRs #A, #B"`) and push with `--force-with-lease="refs/heads/docs/dossier-rolling"` after fetching the branch (never a bare force). Create the rolling PR (`docs(dossier): rolling module dossier entries`) when none is open.
+5. Only after the push succeeded and each candidate's entries are confirmed present on the pushed branch (`git show origin/docs/dossier-rolling:<file>` contains every transferred heading), close the original with `gh pr close <N> {GH_FLAG} --comment "Superseded by rolling dossier PR #<ROLLING>" --delete-branch 2>/dev/null || true # allowlist:check-command-side-effects`. A candidate whose entries are not confirmed stays open.
+6. Hand the rolling PR to the normal gate: `Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="<ROLLING> --auto-merge --base <base> --gh-flag {GH_FLAG}")`. Non-blocking.
+
+Every failure logs `Phase 4C: skipped - <reason>` and the sweep continues to Phase 5. Counters: PRs folded, PRs left open (not foldable / unconfirmed).
+
+---
+
 ## Phase 5: Sync Project Board (if `board` or `all`)
 
 **Skip if `project_board` is not configured** — check resolved vars before proceeding:
@@ -698,6 +731,12 @@ fi
 | Milestone | Issues (closed) | Recommended Action |
 |-----------|-----------------|-------------------|
 | {title} | {N} | `/milestone ship {slug}` or `/milestone close {slug}` |
+
+### Dossier PRs Folded
+| Action | Count |
+|--------|-------|
+| Folded into rolling PR #{ROLLING} and closed | {N} |
+| Left open (not foldable / unconfirmed) | {N} |
 
 ### Board Synced
 | Action | Count |
