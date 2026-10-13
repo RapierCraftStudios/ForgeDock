@@ -707,7 +707,22 @@ do_classify() {
                         fi
                     fi
                 ;; esac
-                if [ "$_dok" = "1" ]; then CONTRACT_DEMOTED=$((CONTRACT_DEMOTED + 1)); else DISPOSITION="ISSUE contract-comment-failed"; fi ;;
+                if [ "$_dok" = "1" ]; then CONTRACT_DEMOTED=$((CONTRACT_DEMOTED + 1)); else
+                    # Fall back to what the finding would have been absent the contract (a LOW/POSSIBLE or lineage-damped finding stays a NOTE),
+                    # not a blanket ISSUE: re-run the classifier without the contract flags. An INPR_FIX or unusable result files (fails toward filing).
+                    DISPOSITION="ISSUE contract-comment-failed"
+                    _n=$#; _skip=0
+                    while [ "$_n" -gt 0 ]; do
+                        _a="$1"; shift; _n=$((_n - 1))
+                        if [ "$_skip" = "1" ]; then _skip=0; continue; fi
+                        case "$_a" in --contract-scope|--contract-open|--pr-files) _skip=1 ;; *) set -- "$@" "$_a" ;; esac
+                    done
+                    _fb=$(bash "$CLASSIFY_SCRIPT" "$@" 2>/dev/null | head -n 1) || _fb=""
+                    case "$_fb" in
+                        "NOTE reflag"*) DISPOSITION="$_fb"; NOTES_REFLAG=$((NOTES_REFLAG + 1)) ;;
+                        NOTE*|ISSUE*) DISPOSITION="$_fb" ;;
+                    esac
+                fi ;;
             "NOTE contract-accepted-risk"*) CONTRACT_DEMOTED=$((CONTRACT_DEMOTED + 1)) ;;
             "NOTE reflag-"*) NOTES_REFLAG=$((NOTES_REFLAG + 1)) ;;
             INPR_FIX*)

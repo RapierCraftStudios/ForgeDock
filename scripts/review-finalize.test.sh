@@ -490,9 +490,18 @@ echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/`
 mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
 : > "$FIX/$_mode"
 run "$GOOD" classify; has "$_mode not counted" "CONTRACT_DEMOTED=0"
-want "$_mode falls back to ISSUE" '.findings[0].disposition' classified.json "ISSUE contract-comment-failed"
+want "$_mode falls back to the no-contract disposition" '.findings[0].disposition' classified.json "ISSUE MEDIUM-LIKELY"
 rm -f "$FIX/$_mode"
 done
+# a failing comment on a LOW/POSSIBLE finding falls back to its no-contract disposition (a NOTE), not a blanket ISSUE (DB-1)
+reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
+cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/` — why","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+mkfind K-1 POSSIBLE LOW docs/guide.md 3 "Docs example is misleading"; putfind 1
+: > "$FIX/issue-comment-fail"
+run "$GOOD" classify; has "low-fallback not counted" "CONTRACT_DEMOTED=0"
+want "low finding falls back to its NOTE" '.findings[0].class' classified.json "NOTE"
+rm -f "$FIX/issue-comment-fail"
 # an untrusted contract demotes nothing
 reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
 cm NONE User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
