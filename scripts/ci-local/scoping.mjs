@@ -242,8 +242,16 @@ function reachFile(sctx, f) {
   return out;
 }
 
+// Every tracked, present test file in the repo: the universe the SEC-3 "reaches at least one test" check runs against.
+function allTests(sctx) {
+  if (!sctx.cache.allTests) sctx.cache.allTests = sctx.tracked.filter((f) => isTestFile(f) && sctx.present.has(f));
+  return sctx.cache.allTests;
+}
+
 // Which of testFiles can this change reach? { selected, total, widen } ; widen is a reason string or ''.
-export function impactedTests(sctx, testFiles) {
+// `universe` is the repo-wide test set used only for the SEC-3 reach check: a step that runs ONE test must not widen just
+// because the change does not reach that test, only because it reaches no test anywhere. Selection stays within testFiles.
+export function impactedTests(sctx, testFiles, universe = testFiles) {
   const r = reach(sctx);
   if (r.widen) return { selected: [...testFiles], total: testFiles.length, widen: r.widen };
   const selected = new Set();
@@ -254,10 +262,11 @@ export function impactedTests(sctx, testFiles) {
   // never hide it. The reason names the file.
   const srcFiles = sctx.changed.filter((f) => !isTestFile(f) && (CODE_EXT.has(extOf(f)) || /^(sh|bash)$/.test(extOf(f))));
   const unreached = [];
+  if (universe !== testFiles) universe = [...new Set([...universe, ...testFiles])];
   for (const f of srcFiles) {
     const rf = reachFile(sctx, f);
     if (rf.widen) return { selected: [...testFiles], total: testFiles.length, widen: rf.widen };
-    const hit = testFiles.some((t) => rf.files.has(t) && sctx.present.has(t)) || siblingTests(f, testFiles).length > 0;
+    const hit = universe.some((t) => rf.files.has(t) && sctx.present.has(t)) || siblingTests(f, universe).length > 0;
     if (!hit) unreached.push(f);
   }
   if (unreached.length) return { selected: [...testFiles], total: testFiles.length, widen: `empty-selection: no test reaches ${unreached.slice(0, 5).join(', ')}${unreached.length > 5 ? ` (+${unreached.length - 5} more)` : ''}` };
@@ -398,7 +407,7 @@ function scopeRunner(name, args, head, cmd, cwdRel, sctx, join) {
   if (sctx.widen) return full(cmd, sctx.widen, { selector: spec.sel, selected: candidates.length, total: candidates.length });
   const un = unmappedFile(sctx.changed.filter((f) => !isTestFile(f)), new Set([...spec.ext, ...SRC_EXT]));
   if (un) return full(cmd, `unknown-language: ${un}`, { selector: spec.sel, selected: candidates.length, total: candidates.length });
-  const imp = impactedTests(sctx, candidates);
+  const imp = impactedTests(sctx, candidates, allTests(sctx));
   if (imp.widen) return full(cmd, imp.widen, { selector: spec.sel, selected: candidates.length, total: candidates.length });
   if (!imp.selected.length) return skipNo(0, candidates.length, spec.sel, 'no test reaches the changed files');
   const sel = imp.selected.map((f) => fromCwd(cwdRel, f));
@@ -414,7 +423,7 @@ function scopeSingleTest(rest, cmd, cwdRel, sctx) {
   if (!isTestFile(r) || !sctx.present.has(r)) return null;
   if (rest.slice(rest.indexOf(fileTok) + 1).length) return full(cmd, '', { selector: 'unscoped:test-args' });
   if (sctx.widen) return full(cmd, sctx.widen, { selector: 'single-test', selected: 1, total: 1 });
-  const imp = impactedTests(sctx, [r]);
+  const imp = impactedTests(sctx, [r], allTests(sctx));
   if (imp.widen) return full(cmd, imp.widen, { selector: 'single-test', selected: 1, total: 1 });
   if (!imp.selected.length) return skipNo(0, 1, 'single-test', `${r} not reached by the change`);
   return scoped(cmd, 1, 1, 'single-test');

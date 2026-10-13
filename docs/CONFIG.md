@@ -823,7 +823,11 @@ import forms. `${{ github.* }}` expressions in `run:` scripts are passed to the 
 substituted into the script text. CircleCI secondary containers run on a per-job docker network and publish only declared
 (or well-known default) ports on 127.0.0.1, never `--network host`.
 Passing results are cached by input hash under `~/.forge/ci-local/results` and reused across build iterations, lanes and
-issues on the same base.
+issues on the same base. An identical check (command, cwd, shell, env, input hash) that appears in several jobs of one invocation
+runs once; the later jobs reuse its result (`cache=dedup`, a failure is shared). Machine slots are granted in FIFO ticket order
+across invocations (`~/.forge/ci-local.lock/queue`; tickets of dead processes are reaped), and a slot is taken only right before a
+step really executes. Job lines, `CI_LOCAL_CHECK`, `CI_LOCAL_RESULT` and the `ci_local` telemetry report `wait_ms` (time queued
+for a slot) separately from `duration_ms` (execution). Ready jobs run narrow/scoped first, then cheapest first (cached durations).
 
 **Environment** (all optional): `FORGE_CI_LOCAL_SLOTS` (machine-wide concurrent jobs across all runs, default
 `max(2, min(8, cpus/2))`; slots live under `~/.forge/ci-local.lock` and stale ones are reclaimed), `FORGE_CI_LOCAL_BUDGET_MINUTES`,
