@@ -3,27 +3,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tmpDir } from './_tmp.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'build-knowledge-index.mjs');
 const hasYq = spawnSync('yq', ['--version']).status === 0;
 
 function run(yaml, extra = []) {
-  const dir = mkdtempSync(join(tmpdir(), 'bki-repo-'));
-  try {
-    if (yaml !== null) writeFileSync(join(dir, 'forge.yaml'), yaml);
-    return spawnSync('node', [SCRIPT, '--issue', '1', '--dry-run', '--no-mirror', ...extra], {
-      cwd: dir,
-      encoding: 'utf8',
-      timeout: 20000,
-      env: { ...process.env, FORGE_REPO_PATH: dir, FORGE_DEBUG: '' },
-    });
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  const dir = tmpDir('bki-repo-');
+  if (yaml !== null) writeFileSync(join(dir, 'forge.yaml'), yaml);
+  return spawnSync('node', [SCRIPT, '--issue', '1', '--dry-run', '--no-mirror', ...extra], {
+    cwd: dir,
+    encoding: 'utf8',
+    timeout: 20000,
+    env: { ...process.env, FORGE_REPO_PATH: dir, FORGE_DEBUG: '' },
+  });
 }
 
 function assertCleanFailure(r) {
