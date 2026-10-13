@@ -1,86 +1,82 @@
 ---
-description: Orchestrate parallel work on multiple issues or an entire milestone — spawns sub-agents that each run the full /work-on pipeline
-argument-hint: "[milestone <slug> | #1 #2 #3 | next <N> | fast-lane | priority:P0] [--auto|--confirm]"
+description: Orchestrate several issues in parallel — launches one lean work-on lane per issue (background shell or agent), GitHub is the register
+argument-hint: "<#1 #2 #3 | milestone <slug> | label <name>> [--parallel K] [--lane L] [--path full]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
-# /orchestrate — Multi-Issue Parallel Orchestrator
+# /orchestrate — parallel lean work-on lanes
 
 **Input**: $ARGUMENTS
 
-`--auto` and `--confirm` authorize the dispatch checkpoint; they are control
-flags, not part of the issue-set query. `--deep-plan` requests the full analysis
-path, and `--max-concurrent N` only tunes the dispatch cap.
+You are the orchestrator. Resolve the issues, order them, and run each one in its own lane. Each lane
+runs the lean work-on (validate → plan → implement → fix/regression review → PR → merge), which records
+every step on the issue. You triage and order the set yourself (no sub-agent investigations), but never implement an
+issue yourself.
 
-This file is the slim dispatcher. Detailed phase content lives in `commands/orchestrate/`.
+## 1. Legacy path
 
-## OpenCode Preflight
+If the input contains `--path full`, stop: read `${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/legacy.md`
+and follow it instead (the previous multi-phase orchestrator).
 
-When `FORGE_RUNTIME=opencode` (or an OpenCode runtime marker is present), run the
-deterministic preflight at `$FORGE_HOME/bin/orchestrate-preflight.mjs` immediately,
-before reading `orchestrate/config.md`, this workflow, or any phase spec. The helper
-resolves the repository from `forge.yaml`, including a parent config when the target
-is a nested Git worktree:
+## 2. Resolve, triage and build the DAG
 
-```bash
-node "$FORGE_HOME/bin/orchestrate-preflight.mjs" \
-  --repo "$GH_REPO" \
-  --args "$ARGUMENTS"
-```
+Do this yourself from issue text and the code. Spawn no sub-agents here.
 
-The preflight is a compact mechanical adapter for issue resolution, eligibility,
-explicit dependencies, scoped issue-body file overlap, database serialization, and
-the initial ready queue. If it returns a supported plan with `requiresDeepPlan: false`
-and `confirmed: true`, launch `dispatchNow` with native background `task` calls
-immediately. Without an explicit `--auto` or `--confirm` argument, present the
-compact plan and ask for one confirmation; after the user confirms, launch the
-plan's ready queue without re-reading the large phase files. Do not load the full
-Phase 3 or Phase 4 prose just to ask that question.
+1. **Resolve.**
+   - Explicit numbers (`#12 13 14`) are used as given.
+   - `milestone <slug>` uses `gh issue list --milestone "<slug>" --state open --json number --jq '.[].number'`.
+   - `label <name>` uses the same with `--label`.
 
-Continue through the phase files when the plan says `requiresDeepPlan`, the input is
-unsupported, preflight fails, or a task-result event requires recovery. This adapter
-never closes, deduplicates, or edits issues; the full shared workflow remains the
-authority for investigations, review-finding cascade handling, recovery, cleanup,
-and reporting.
+   Keep only plain integers and drop closed issues.
+2. **Triage.** For each issue, read it once (`gh issue view N --json title,body,labels`) and record:
+   - **Ready / skip.** Skip when it is labelled `needs-human` or `workflow:merged`, or an open PR already
+     closes it (`gh pr list --search "Closes #N" --state open`). Say why.
+   - **Files.** The files or areas it will likely touch: paths named in the issue, or a quick
+     `git grep` of the symbols it names. Keep this to a few greps per issue, not an investigation.
+   - **Size.** S, M or L, from the scope the issue describes.
+3. **Build the DAG.** Edge X → N means N waits until X merges:
+   - **Explicit:** `Depends on #X` / `Blocked by #X` where X is in the set. An open X outside the set
+     means N is skipped as blocked.
+   - **Conflict:** two issues that will edit the same file or the same function run one after the
+     other (smaller first), so their PRs don't conflict. Different files run in parallel.
+   - **Logical:** one issue's fix is needed by another (for example, it adds the helper the other uses).
 
-For a supported compact OpenCode plan, stop after the fast-path dispatch. The phase
-execution order below is the fallback path for deep plans, unsupported inputs,
-preflight failures, and task-result recovery; do not read it merely to confirm or
-dispatch a compact plan.
+   If you find a cycle, break it at the weakest (conflict) edge and say so.
+4. **Show the plan** as one table: issue, title, size, likely files, waits-on, wave. Then proceed
+   without asking.
 
-## Execution Order
+`K` = `--parallel` (default 3). `L` = `--lane` if given, otherwise the repo's base lane from forge.yaml.
 
-Read and execute phases in sequence. Each phase file is self-contained. Resolve every path from the spec root defined in the Quick Reference below.
+## 3. Launch lanes
 
-| Step | File | Description |
-|------|------|-------------|
-| 0 | `orchestrate/config.md` | Hard rules, config resolution, multi-repo support — READ FIRST |
-| 1 | `orchestrate/phase-1-resolve.md` | Resolve the issue set from input |
-| 2 | `orchestrate/phase-2-triage.md` | Investigation-first triage, Wave 0 |
-| 2.5 | `orchestrate/phase-2.5-synthesis.md` | Investigation synthesis and deconfliction |
-| 3 | `orchestrate/phase-3-dependency.md` | Dependency analysis, DAG construction, execution plan |
-| 4 | `orchestrate/phase-4-execution.md` | Streaming DAG execution, agent dispatch, stall detection |
-| 5 | `orchestrate/phase-5-cleanup.md` | Post-batch cleanup sweep and agent audit |
-| 6 | `orchestrate/phase-6-report.md` | Consolidated report and pipeline summary |
-| — | `orchestrate/safety.md` | Safety rules and examples (reference) |
+Keep at most K lanes running. Start issues in DAG order: every issue whose waits-on have all merged.
 
-## Quick Reference
+- **Shell lane (default, when `forgedock` is on PATH).** One `Bash` call per issue with
+  `run_in_background: true`:
 
-**Spec root (MANDATORY)**: read every file below from `${CLAUDE_PLUGIN_ROOT}` — the install root of the ForgeDock plugin that is running this command (Claude Code fills it in when it loads the spec). Only if that path does not start with `/` (not a Claude Code plugin session: install.sh, Codex, OpenCode) use `$FORGE_HOME` instead. Never read sub-files from `$FORGE_HOME` when the plugin root resolved: an exported `FORGE_HOME` can point at a different, older ForgeDock checkout, and mixing roots runs stale phase specs.
+  ```bash
+  forgedock run-issue <N> --lane <L>
+  ```
 
-**Raw reads are not substituted (MANDATORY)**: Claude Code fills in the plugin root only in the spec it loads (this file), never in files you open with Read. The phase files contain the placeholder written as `$` immediately followed by `{CLAUDE_PLUGIN_ROOT}`. Before running any bash block taken from a phase file, replace every occurrence of that placeholder with `${CLAUDE_PLUGIN_ROOT}` (the resolved root shown here), exactly as Claude Code would have. Left unreplaced it is rejected as a non-absolute path and resolution falls back to `$FORGE_HOME`, which may be stale.
+  The harness notifies you when the lane exits. Its last line is `issue #N → <outcome>`.
+- **Agent lane (only when the `forgedock` CLI is unavailable).** Spawn one background agent per issue.
+  The prompt is:
 
-```
-Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/config.md       # ALWAYS READ FIRST
-Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-1-resolve.md
-Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-2-triage.md
-Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-2.5-synthesis.md
-Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-3-dependency.md
-Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-4-execution.md
-Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-5-cleanup.md
-Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-6-report.md
-```
+  > Resolve issue #N (gh issue view N --comments). If already fixed or invalid, comment the file:line
+  > evidence and stop. Otherwise fix it with a regression test, run the relevant tests, commit on a
+  > branch, push, open a PR with Closes #N, and comment a summary (root cause, changes, tests, PR) on
+  > the issue.
 
-The orchestrator reads only the phase file(s) relevant to the current step rather than
-loading the full 2300-line monolith upfront.
+  The agent does not merge.
+
+When a lane finishes:
+- `merged` or `invalid`: start the next ready issue.
+- `needs-human`: read the issue's last comment for the reason, and mark its dependents skipped.
+- `engine-error`: relaunch it once.
+- `ci-pending` or `deferred`: leave it. A later `/orchestrate` resumes it.
+
+## 4. Report
+
+When all lanes have finished, print one table: issue, outcome, PR, minutes. Then list each
+`needs-human` or skipped issue with its one-line reason. Nothing else.
