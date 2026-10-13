@@ -173,12 +173,14 @@ function readForgeYaml(repoPath) {
   const yamlPath = join(repoPath, 'forge.yaml');
   if (!existsSync(yamlPath)) return null;
   try {
-    const result = spawnSync('yq', ['-r', '.project.owner + "/" + .project.repo', yamlPath], {
+    const result = spawnSync('yq', ['-r', '.project.owner, .project.repo', yamlPath], {
       encoding: 'utf8',
       timeout: 5000,
     });
-    if (result.status === 0 && result.stdout.trim()) {
-      return result.stdout.trim();
+    if (result.status === 0) {
+      const [owner, name] = result.stdout.split('\n').map(l => l.trim());
+      // Both halves must be real values: a partial forge.yaml must not yield "/" or "null/x"
+      if (owner && name && owner !== 'null' && name !== 'null') return `${owner}/${name}`;
     }
   } catch (_) {
     // ignore
@@ -1576,7 +1578,7 @@ async function main() {
     repo = readForgeYaml(repoPath);
   }
   if (!repo) {
-    process.stderr.write('[ledger] ERROR: Cannot determine GitHub repo. Pass --repo owner/repo or ensure forge.yaml is present.\n');
+    process.stderr.write('[ledger] ERROR: Cannot determine GitHub repo. Pass --repo owner/repo or ensure forge.yaml has project.owner and project.repo (yq required).\n');
     process.exit(1);
   }
 
@@ -1760,6 +1762,7 @@ async function main() {
 }
 
 main().catch(e => {
-  process.stderr.write(`[ledger] FATAL: ${e.message}\n${e.stack}\n`);
+  const showStack = process.argv.includes('--verbose') || !!process.env.FORGE_DEBUG;
+  process.stderr.write(`[ledger] FATAL: ${e && e.message ? e.message : e}\n${showStack && e && e.stack ? e.stack + '\n' : ''}`);
   process.exit(1);
 });
