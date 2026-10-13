@@ -462,16 +462,29 @@ run "$GOOD" classify --auto-merge true; has "untrusted marker" "INPR_FIX=1"
 reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
 CONTRACT_BODY=$(printf '<!-- FORGE:CONTRACT -->\n### Out of Scope\n\n- `docs/` — deferred → #30: tracked there\n')
 cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
-echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 --> docs/","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/` — why","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
 mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
 run "$GOOD" classify; has "contract" "CONTRACT_DEMOTED=1"
 want "contract-deferred" '.findings[0].disposition' classified.json "NOTE contract-deferred #30"
 [ "$(cat "$FIX/issue-comments.log" 2>/dev/null)" = "ISSUE_COMMENT 30" ] && ok || bad "deferred issue comment not posted"
 posted_has "contract list line" "tracked on #30"
+# substring-only / longer-path / legacy / empty bodies must not verify (e1, e3, e4); [x] and regex-metachar paths do (e2, e3)
+for B in 'x <!-- FORGE:DEFERRED_FROM: #12 --> docs/' 'x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/guide.md.bak` — why' 'x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/x`' 'x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/`x' ''; do
+    reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
+    cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
+    echo "{\"state\":\"open\",\"body\":\"$B\",\"author_association\":\"MEMBER\",\"user\":{\"type\":\"User\"}}" > "$FIX/issue-30.json"
+    mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
+    run "$GOOD" classify; has "unverified-body '$B'" "CONTRACT_DEMOTED=0"
+done
+reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
+cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [x] `docs/`","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
+run "$GOOD" classify; has "checked-item-verifies" "CONTRACT_DEMOTED=1"
 # an untrusted contract demotes nothing
 reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
 cm NONE User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
-echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 --> docs/","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/` — why","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
 mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
 run "$GOOD" classify; has "untrusted contract" "CONTRACT_DEMOTED=0"
 
