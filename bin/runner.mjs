@@ -728,7 +728,7 @@ export function getClaudeCliCapabilities(cwd = process.cwd(), opts = {}) {
 /**
  * Build the minimal-session argv group (forge#4065): no operator MCP servers
  * and, for Skill-free phases only, no slash-command/skill listing. Operator
- * settings are deliberately NOT skipped (no `--setting-sources`) so
+ * settings are deliberately NOT skipped (the CLI setting-sources flag is not passed) so
  * ForgeDock's user-scope PreToolUse/SubagentStop hooks keep running.
  * `FORGEDOCK_FULL_SESSION=1` (exactly) or an unsupported CLI yields `[]`.
  *
