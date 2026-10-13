@@ -160,7 +160,7 @@ describe("orchestrate runtime helper paths", () => {
 
   it("documents the compact OpenCode preflight", () => {
     const orchestrate = readFileSync(
-      new URL("../../commands/orchestrate.md", import.meta.url),
+      new URL("../../commands/orchestrate/legacy.md", import.meta.url),
       "utf8",
     );
     assert.match(orchestrate, /orchestrate-preflight\.mjs/);
