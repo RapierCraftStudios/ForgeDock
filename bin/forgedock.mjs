@@ -3207,7 +3207,7 @@ function help() {
     ["npx forgedock disable [dir]", "Opt a directory out of ForgeDock"],
     ["npx forgedock status [dir]", "Show ForgeDock state for a directory"],
     ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
-    ["npx forgedock run-issue <issue> --lane <lane> [--retry] [--wait-lease]", "Drive one issue through the durable engine (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
+    ["npx forgedock run-issue <issue> --lane <lane> [--path full|lean|auto] [--retry] [--wait-lease]", "Drive one issue through the durable engine (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],

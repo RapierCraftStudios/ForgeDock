@@ -85,6 +85,21 @@ export function readCiPendingMaxMinutes(cwd = process.cwd()) {
   } catch { return undefined; }
 }
 
+/** forge.yaml `engine.path` (full|lean|auto) from the cwd checkout; undefined when absent or invalid. */
+export function readEnginePath(cwd = process.cwd()) {
+  try {
+    const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.path ?? "").trim();
+    return ENGINE_PATHS.includes(v) ? v : undefined;
+  } catch { return undefined; }
+}
+function readLeanSetting(key, cwd = process.cwd()) {
+  try {
+    const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.[`lean_${key}`] ?? "").trim();
+    return /^[A-Za-z0-9._:[\]-]+$/.test(v) ? v : undefined;
+  } catch { return undefined; }
+}
+export const ENGINE_PATHS = ["full", "lean", "auto"];
+
 export function runDir() { return join(homedir(), ".forge", "runs"); }
 
 /**
@@ -380,6 +395,7 @@ export function lastLocalRun(dir) {
  *                          run's lease, wait (bounded by the lease TTL) until it
  *                          expires or its same-host pid is dead, then continue.
  *                          Without it, a held lease exits `deferred` (code 75).
+ *   --path <full|lean|auto>  Optional (#4081). Engine path; overrides forge.yaml engine.path. Default full.
  *   --retry                Optional (forge#3511). Reopen a run that ended `engine-error`
  *                          (e.g. a session-limit hit) and resume from its last committed
  *                          phase. A run that ended `phase-complete` (multi-phase issue, phase merged,
@@ -396,10 +412,13 @@ export async function runFromCli(argv, deps = {}) {
   const backend = flag(argv, "--backend");
   const model = flag(argv, "--model");
   // Boolean flag: only counts at a flag position, never as another flag's value.
-  const retry = argv.some((a, i) => a === "--retry" && !["--lane", "--repo", "--backend", "--model"].includes(argv[i - 1]));
+  const retry = argv.some((a, i) => a === "--retry" && !["--lane", "--repo", "--backend", "--model", "--path"].includes(argv[i - 1]));
   // forge#3574: --wait-lease blocks (bounded by the lease TTL) until a live
   // holder's lease expires or becomes reclaimable. Same flag-position guard.
   const waitLease = argv.some((a, i) => a === "--wait-lease" && !["--lane", "--repo", "--backend", "--model"].includes(argv[i - 1]));
+  const pathFlag = flag(argv, "--path");
+  if (pathFlag && !ENGINE_PATHS.includes(pathFlag)) throw new Error(`--path must be one of ${ENGINE_PATHS.join("|")}`);
+  const enginePath = pathFlag ?? readEnginePath() ?? "full";
   const io = deps.io ?? makeIo();
   await assertRepoMatchesCwd(io, repo);
   const runIssueFn = deps.runIssue ?? runIssue;
@@ -427,6 +446,22 @@ export async function runFromCli(argv, deps = {}) {
     // from "phase actually failed".
     else if (e.event === "phase_paused") console.log(`⏸ phase ${e.phase} paused: ${e.detail ?? "session limit"}`);
   };
+  if (enginePath !== "full") {
+    // #4081: lean path. `auto` escalates to the full pipeline only when the change is risky AND large.
+    const leanRepo = repo ?? (await resolveDefaultRepo(io));
+    if (!leanRepo) throw new Error("lean path needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+    const { runLean } = deps.leanModule ?? (await import("./lean/lean.mjs"));
+    const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo: leanRepo });
+    const lres = await runLean({ issue, repo: leanRepo, lane, cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
+      emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
+      ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+    if (lres.terminalReason !== "route-full") {
+      console.log(`issue #${issue} → ${lres.terminalReason}`);
+      if (lres.terminalReason !== "merged") console.log(formatTerminalDiagnostics(dir, issue));
+      return lres;
+    }
+    console.log(`issue #${issue} → routing to the full pipeline (${lres.detail})`);
+  }
   const res = await runIssueFn({ issue, dir, agentId, lane, io,
     ...(repo ? { repo } : {}),
     runner: (await import("./runner.mjs")).runCommand, now: () => Date.now(),
