@@ -25,6 +25,7 @@ import {
   rmSync,
   readFileSync,
   existsSync,
+  readdirSync,
   symlinkSync,
   chmodSync } from "node:fs";
 import { join } from "node:path";
@@ -66,6 +67,8 @@ import {
   resolveCommandEngineSettings,
   parseCliVersion,
   getClaudeCliCapabilities,
+  buildMinimalSessionFlags,
+  SKILL_FREE_PHASE_COMMANDS,
   sanitizeArgvForLog,
   sanitizeOutputExcerptForLog,
   extractSessionLimitResetTime,
@@ -4068,8 +4071,8 @@ describe("per-command CLI model/max-turns (forge#3589)", () => {
     const cwdOk = tmpDir("fd-3589-cap-");
     const cwdBad = tmpDir("fd-3589-cap-");
     try {
-      assert.deepEqual(getClaudeCliCapabilities(cwdOk, { execImpl: () => "2.1.296 (Claude Code)" }), { model: true, maxTurns: true });
-      assert.deepEqual(getClaudeCliCapabilities(cwdBad, { execImpl: () => "garbage" }), { model: false, maxTurns: false });
+      assert.deepEqual(getClaudeCliCapabilities(cwdOk, { execImpl: () => "2.1.296 (Claude Code)" }), { model: true, maxTurns: true, strictMcp: true, disableSlash: true });
+      assert.deepEqual(getClaudeCliCapabilities(cwdBad, { execImpl: () => "garbage" }), { model: false, maxTurns: false, strictMcp: false, disableSlash: false });
     } finally {
       rmSync(cwdOk, { recursive: true, force: true });
       rmSync(cwdBad, { recursive: true, force: true });
@@ -4110,4 +4113,143 @@ describe("per-command CLI model/max-turns (forge#3589)", () => {
       }
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// forge#4065: minimal phase sessions
+// ---------------------------------------------------------------------------
+describe("minimal phase session flags (forge#4065)", () => {
+  const quiet = { log() {}, warn() {}, error() {} };
+  const FULL = { strictMcp: true, disableSlash: true };
+  const MCP = ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}'];
+
+  it("emits strict MCP for every phase and disable-slash only for Skill-free phases", () => {
+    assert.deepEqual(buildMinimalSessionFlags("work-on/build", FULL, {}), MCP);
+    assert.deepEqual(buildMinimalSessionFlags("work-on/investigate", FULL, {}), [...MCP, "--disable-slash-commands"]);
+    assert.ok(!buildMinimalSessionFlags("work-on/build", FULL, {}).includes("--setting-sources"));
+  });
+
+  it("omits the group on an unsupported CLI (edge-e1)", () => {
+    assert.deepEqual(buildMinimalSessionFlags("work-on/investigate", { strictMcp: false, disableSlash: false }, {}), []);
+    assert.deepEqual(buildMinimalSessionFlags("work-on/investigate", undefined, {}), []);
+  });
+
+  it("FORGEDOCK_FULL_SESSION=1 omits everything, other values do not (edge-e2)", () => {
+    assert.deepEqual(buildMinimalSessionFlags("work-on/investigate", FULL, { FORGEDOCK_FULL_SESSION: "1" }), []);
+    assert.notDeepEqual(buildMinimalSessionFlags("work-on/investigate", FULL, { FORGEDOCK_FULL_SESSION: "true" }), []);
+  });
+
+  it("normalises command name variants before the allow-list lookup (edge-e3)", () => {
+    for (const n of ["/work-on/investigate", "work-on/investigate.md", "  work-on/close  "]) {
+      assert.ok(buildMinimalSessionFlags(n, FULL, {}).includes("--disable-slash-commands"), n);
+    }
+  });
+
+  it("does not leak disable-slash between phases sharing cached caps (edge-e4)", () => {
+    const a = buildMinimalSessionFlags("work-on/investigate", FULL, {});
+    const b = buildMinimalSessionFlags("work-on/review", FULL, {});
+    assert.ok(a.includes("--disable-slash-commands"));
+    assert.ok(!b.includes("--disable-slash-commands"));
+  });
+
+  it("runCliBackend passes sessionFlags as discrete argv elements in both branches (edge-e5)", () => {
+    const d = tmpDir("fd-4065-argv-");
+    try {
+      const script = join(d, "dump.mjs");
+      writeFileSync(script, 'import {writeFileSync} from "node:fs";writeFileSync(process.argv[2],JSON.stringify(process.argv.slice(3)));console.log(\'{"result":"ok"}\');');
+      const withFlags = (systemPrompt) => {
+        const out = join(d, `argv-${systemPrompt ? "sp" : "nosp"}.json`);
+        const wrapper = join(d, `wrap-${systemPrompt ? "sp" : "nosp"}`);
+        writeFileSync(wrapper, `#!/bin/sh\nnode '${script}' '${out}' "$@"\n`);
+        chmodSync(wrapper, 0o755);
+        runCliBackend({ spec: "s", userMessage: "m", systemPrompt, cwd: d, logger: quiet, bin: wrapper,
+          sessionFlags: [...MCP, "--disable-slash-commands"] });
+        return JSON.parse(readFileSync(out, "utf-8"));
+      };
+      if (process.platform === "win32") return;
+      for (const sp of ["", "system prompt"]) {
+        const argv = withFlags(sp);
+        const i = argv.indexOf("--strict-mcp-config");
+        assert.ok(i >= 0);
+        assert.equal(argv[i + 1], "--mcp-config");
+        assert.equal(argv[i + 2], '{"mcpServers":{}}');
+        assert.ok(argv.includes("--disable-slash-commands"));
+        assert.ok(!argv.includes("--setting-sources"));
+      }
+      // default: argv unchanged
+      const out = join(d, "argv-default.json");
+      const wrapper = join(d, "wrap-default");
+      writeFileSync(wrapper, `#!/bin/sh\nnode '${script}' '${out}' "$@"\n`);
+      chmodSync(wrapper, 0o755);
+      runCliBackend({ spec: "s", userMessage: "m", cwd: d, logger: quiet, bin: wrapper });
+      assert.ok(!JSON.parse(readFileSync(out, "utf-8")).includes("--strict-mcp-config"));
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  const posix = process.platform !== "win32";
+  const e2e = async (commandName, version, env = {}) => {
+    const root = tmpDir("fd-4065-e2e-");
+    const oldPath = process.env.PATH;
+    const oldEnv = process.env.FORGEDOCK_FULL_SESSION;
+    try {
+      mkdirSync(join(root, "bin"));
+      mkdirSync(join(root, "commands", "work-on"), { recursive: true });
+      writeFileSync(join(root, "commands", `${commandName}.md`), "# spec");
+      writeFileSync(join(root, "forge.yaml"), "project: x/y\n");
+      const argvFile = join(root, "argv.txt");
+      const fake = join(root, "bin", "claude");
+      writeFileSync(fake,
+        `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "${version} (Claude Code)"; exit 0; fi\n` +
+        `printf '%s\\n' "$@" > '${argvFile}'\necho '{"result":"ok","num_turns":1}'\n`);
+      chmodSync(fake, 0o755);
+      process.env.PATH = `${join(root, "bin")}:${oldPath}`;
+      if (env.FORGEDOCK_FULL_SESSION) process.env.FORGEDOCK_FULL_SESSION = env.FORGEDOCK_FULL_SESSION;
+      else delete process.env.FORGEDOCK_FULL_SESSION;
+      await runCommand({ commandsDir: join(root, "commands"), commandName, args: ["1"], cwd: root, backend: "cli", logger: quiet });
+      return readFileSync(argvFile, "utf-8").split("\n");
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldEnv === undefined) delete process.env.FORGEDOCK_FULL_SESSION; else process.env.FORGEDOCK_FULL_SESSION = oldEnv;
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it("runCommand wires per-phase flags via a fake claude", { skip: !posix }, async () => {
+    const inv = await e2e("work-on/investigate", "2.1.296");
+    assert.ok(inv.includes("--strict-mcp-config") && inv.includes("--disable-slash-commands"));
+    const build = await e2e("work-on/build", "2.1.296");
+    assert.ok(build.includes("--strict-mcp-config") && !build.includes("--disable-slash-commands"));
+    const old = await e2e("work-on/investigate", "2.0.0");
+    assert.ok(!old.includes("--strict-mcp-config") && !old.includes("--disable-slash-commands"));
+    const full = await e2e("work-on/investigate", "2.1.296", { FORGEDOCK_FULL_SESSION: "1" });
+    assert.ok(!full.includes("--strict-mcp-config") && !full.includes("--disable-slash-commands"));
+    assert.ok(!inv.includes("--setting-sources"));
+  });
+
+  describe("spec coverage", () => {
+    const repoCommands = join(import.meta.dirname, "..", "..", "commands");
+    const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith(".md") ? [join(dir, e.name)] : []);
+    // A real call is a `Skill(` outside the "Invoked by" / "Agent model policy" prose lines.
+    const realSkillCall = (text) => text.split("\n").some((l) =>
+      /Skill\(/.test(l) && !/^\*\*(Invoked by|Agent model policy)\*\*/.test(l));
+
+    it("Skill-free phases exist and contain no executable Skill( call", () => {
+      for (const c of SKILL_FREE_PHASE_COMMANDS) {
+        const f = join(repoCommands, `${c}.md`);
+        assert.ok(existsSync(f), `${c} spec exists`);
+        assert.ok(!realSkillCall(readFileSync(f, "utf-8")), `${c} must not call Skill(`);
+      }
+    });
+
+    it("phase specs reference no mcp__ tools", () => {
+      const phaseSpecs = walk(repoCommands).filter((f) => /[\\/](work-on|review-pr|quality-gate)/.test(f));
+      assert.ok(phaseSpecs.length > 0);
+      for (const f of phaseSpecs) {
+        assert.ok(!/mcp__/.test(readFileSync(f, "utf-8")), `${f} references mcp__`);
+      }
+    });
+  });
 });
