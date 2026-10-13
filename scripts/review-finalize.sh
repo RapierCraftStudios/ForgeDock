@@ -561,7 +561,7 @@ do_classify() {
                && [ -s "$CONTRACT_SCOPE_FILE" ] \
                && gh pr diff "$PR_NUMBER" -R "$REPO" --name-only > "$PR_FILES_FILE" 2>/dev/null; then
                 # A deferred row counts only if issue N is OPEN, is an issue (not a PR), is not MERGE_ISSUE, and its body
-                # carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` plus the row's path, and is authored by a trusted author
+                # carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` plus a checklist line for the row's exact path (the list script strips a trailing slash, so `p` and `p/` both match; `- [ ] \`path\``, [xX] accepted, the producer format of file-deferred-followups.sh; a body that only mentions the path does not count), and is authored by a trusted author
                 # (OWNER/MEMBER/COLLABORATOR or Bot; same predicate as trusted-comments.sh; missing fields fail closed).
                 # Unverified rows are dropped.
                 _verified="$_scratch/contract-verified"; : > "$_verified"
@@ -571,7 +571,7 @@ do_classify() {
                         [ "$_n" = "${MERGE_ISSUE#\#}" ] && continue
                         gh api "repos/${REPO}/issues/$_n" 2>/dev/null \
                             | jq -e --arg m "FORGE:DEFERRED_FROM: #${MERGE_ISSUE#\#} -->" --arg p "$_ipath" \
-                                '.state == "open" and .pull_request == null and ((.body // "") | contains($m) and contains($p)) and (((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot"))' >/dev/null 2>&1 \
+                                '.state == "open" and .pull_request == null and ((.body // "") | (contains($m) and (split("\n") | any(rtrimstr("\r") as $l | ("- [ ] `","- [x] `","- [X] `") as $pre | ($p, $p + "/") as $q | ($pre + $q + "`") as $w | $l == $w or ($l | startswith($w + " ")))))) and (((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot"))' >/dev/null 2>&1 \
                             || continue
                         grep -Fxq -- "$_n" "$CONTRACT_OPEN_FILE" || echo "$_n" >> "$CONTRACT_OPEN_FILE"
                     fi
