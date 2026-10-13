@@ -753,6 +753,8 @@ ISSUE_STATE=$(gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state')
 
 **If `REMAINING_AFTER > 0`** (multi-phase: uncompleted phases remain):
 ```bash
+# Fresh shell: re-derive the base from the PR as data (same charset guard as Phase C0); never substituted into shell text.
+PR_BASE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName // ""' 2>/dev/null || echo ""); printf '%s\n' "$PR_BASE" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || PR_BASE=""
 # Post phase-complete marker — the router's continuation rule re-reads labels and continues to the next phase
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:PHASE:COMPLETE -->
 Phase complete. PR #{PR_NUMBER} merged to \`${PR_BASE}\`. ${REMAINING_AFTER} phase item(s) remain — leaving issue open for next pipeline iteration." # allowlist:check-command-side-effects
@@ -780,7 +782,10 @@ CLOSE_RESULT:
 If state is `OPEN`:
 ```bash
 if [ "$ISSUE_STATE" = "OPEN" ]; then
-  if [ -n "$PR_NUMBER" ]; then CLOSE_COMMENT="Closed: PR #{PR_NUMBER} merged to \`${PR_BASE}\`. Closes #{NUMBER}."
+  if [ -n "$PR_NUMBER" ]; then
+    # Fresh shell: re-derive the base from the PR as data (same charset guard as Phase C0); never substituted into shell text.
+    PR_BASE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName // ""' 2>/dev/null || echo ""); printf '%s\n' "$PR_BASE" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || PR_BASE=""
+    CLOSE_COMMENT="Closed: PR #{PR_NUMBER} merged to \`${PR_BASE}\`. Closes #{NUMBER}."
   else CLOSE_COMMENT="Closed: investigation complete (no PR). Closes #{NUMBER}."; fi
   gh issue close {NUMBER} {GH_FLAG} --comment "$CLOSE_COMMENT" # allowlist:check-command-side-effects
 fi
