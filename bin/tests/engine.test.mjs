@@ -6,7 +6,7 @@ import { rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runIssue, ciPollDelayMs, ciRateLimitSleepMs, backendIdentity, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, isLeaseHolderDead } from "../engine.mjs";
+import { runIssue, ciPollDelayMs, ciRateLimitSleepMs, backendIdentity, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, isLeaseHolderDead, leaseChildAlive } from "../engine.mjs";
 import { readLog, deriveState, appendEvent } from "../engine/runlog.mjs";
 import { pickPhase } from "../engine/phases.mjs";
 import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
@@ -1567,7 +1567,7 @@ describe("runIssue", () => {
     for (const call of calls) {
       assert.ok(!("backend" in call), "backend key must be absent from runner() call when not supplied to runIssue");
       assert.ok(!("model" in call), "model key must be absent from runner() call when not supplied to runIssue");
-      assert.deepEqual(Object.keys(call).sort(), ["args", "commandName", "commandsDir"].sort());
+      assert.deepEqual(Object.keys(call).sort(), ["args", "commandName", "commandsDir", "leaseHolder"].sort());
     }
   });
 
@@ -3659,9 +3659,105 @@ describe("runIssue — forge#3574 stale lease / wait-lease / rate-limit resume",
   it("reclaims a dead same-host holder's lease immediately", async () => {
     const { w, io } = fakeWorld();
     w.body = leaseState("cli_h_99", Date.now() + 60000);
-    const { res, calls } = await run(w, io, { killFn: () => { throw errno("ESRCH"); } });
+    const { res, calls } = await run(w, io, { killFn: () => { throw errno("ESRCH"); }, childAliveFn: () => false });
     assert.notEqual(res.terminalReason, "deferred");
     assert.ok(calls.length >= 1, "phase runner must run after reclaim");
+  });
+
+  // forge#3724: a dead holder pid does not prove its phase child is gone.
+  const dead = () => { throw errno("ESRCH"); };
+  const fakeProc = (procs, { unreadable = [], listThrows = false } = {}) => ({
+    procRoot: "/p", ownPid: 1,
+    readdirFn: () => { if (listThrows) throw errno("ENOENT"); return [...Object.keys(procs), "self", "net"]; },
+    readFileFn: (f) => {
+      const pid = f.split("/")[2];
+      if (unreadable.includes(pid)) throw errno("EACCES");
+      if (!(pid in procs)) throw errno("ENOENT");
+      return procs[pid].join("\0") + "\0";
+    },
+  });
+
+  it("orphan-e1 dead holder with a live marked child stays deferred until TTL", async () => {
+    const { w, io } = fakeWorld();
+    const until = Date.now() + 60000;
+    w.body = leaseState("cli_h_99", until);
+    const { res, calls } = await run(w, io, { killFn: dead, childAliveFn: ({ by }) => by === "cli_h_99" });
+    assert.equal(res.terminalReason, "deferred");
+    assert.equal(res.leaseUntil, until);
+    assert.equal(calls.length, 0);
+  });
+
+  it("orphan-e2 dead holder with no marked process reclaims immediately", async () => {
+    const { w, io } = fakeWorld();
+    w.body = leaseState("cli_h_99", Date.now() + 60000);
+    const { res, calls } = await run(w, io, { killFn: dead, childAliveFn: () => false });
+    assert.notEqual(res.terminalReason, "deferred");
+    assert.ok(calls.length >= 1);
+  });
+
+  it("orphan-e3 probe unavailable or throwing is treated as alive (TTL fallback)", () => {
+    const by = "cli_h_99";
+    assert.equal(leaseChildAlive({ by, platform: "linux", ...fakeProc({}, { listThrows: true }) }), true);
+    assert.equal(leaseChildAlive({ by, platform: "win32" }), true);
+    assert.equal(leaseChildAlive({ by, platform: "freebsd" }), true);
+    assert.equal(leaseChildAlive({ by, platform: "darwin", psFn: () => { throw new Error("ps failed"); } }), true);
+    assert.equal(leaseChildAlive({ by, platform: "darwin", psFn: () => "" }), true);
+    assert.equal(leaseChildAlive({ by, platform: "linux", readdirFn: () => ["7"], readFileFn: () => { throw errno("EIO"); }, ownPid: 1 }), true);
+  });
+
+  it("orphan-e4 unreadable or vanished per-process environ is skipped, not a probe failure", () => {
+    const procs = { 10: ["A=1"], 11: ["B=1"], 12: ["FORGE_LEASE_HOLDER=cli_h_9"] };
+    assert.equal(leaseChildAlive({ by: "cli_h_9", platform: "linux", ...fakeProc(procs, { unreadable: ["10", "11"] }) }), true);
+    assert.equal(leaseChildAlive({ by: "cli_h_9", platform: "linux", ...fakeProc({ 10: ["A=1"] }, { unreadable: ["10"] }) }), false);
+    const vanishing = fakeProc({ 10: ["A=1"] });
+    assert.equal(leaseChildAlive({ by: "cli_h_9", platform: "linux", ...vanishing, readdirFn: () => ["10", "77"] }), false);
+  });
+
+  it("orphan-e5 marker match is whole-entry: cli_h_5 does not match cli_h_55", () => {
+    const procs = { 10: ["FORGE_LEASE_HOLDER=cli_h_55", "X=FORGE_LEASE_HOLDER=cli_h_5"] };
+    assert.equal(leaseChildAlive({ by: "cli_h_5", platform: "linux", ...fakeProc(procs) }), false);
+    assert.equal(leaseChildAlive({ by: "cli_h_55", platform: "linux", ...fakeProc(procs) }), true);
+    const ps = "  10 node FOO=1 FORGE_LEASE_HOLDER=cli_h_55 BAR=2\n";
+    assert.equal(leaseChildAlive({ by: "cli_h_5", platform: "darwin", psFn: () => ps, ownPid: 1 }), false);
+    assert.equal(leaseChildAlive({ by: "cli_h_55", platform: "darwin", psFn: () => ps, ownPid: 1 }), true);
+  });
+
+  it("orphan-e6 orphan exiting during wait-lease polling lets the next poll reclaim", async () => {
+    const { w, io } = fakeWorld();
+    let t = 1_000_000;
+    w.body = leaseState("cli_h_99", t + 600000);
+    let polls = 0;
+    const childAliveFn = () => ++polls < 3;
+    const sleeps = [];
+    const sleep = async (ms) => { sleeps.push(ms); t += ms; };
+    const calls = [];
+    const runner = async ({ commandName }) => { calls.push(commandName); throw new Error("stop"); };
+    const res = await runIssue({ issue: 42, dir, agentId: "cli_h_1", lane: "staging", io, runner,
+      now: () => t, maxAttempts: 1, hostname: "h", waitLease: true, sleep, leaseTtlMs: 600000, killFn: dead, childAliveFn });
+    assert.notEqual(res.terminalReason, "deferred");
+    assert.ok(sleeps.length >= 1 && calls.length >= 1);
+  });
+
+  it("orphan-e7 other-host or unparseable holder never consults the probe", async () => {
+    for (const by of ["cli_otherhost_99", "cli_99"]) {
+      const { w, io } = fakeWorld();
+      w.body = leaseState(by, Date.now() + 60000);
+      let probed = 0;
+      const { res } = await run(w, io, { killFn: dead, childAliveFn: () => { probed++; return false; } });
+      assert.equal(res.terminalReason, "deferred", by);
+      assert.equal(probed, 0, by);
+    }
+  });
+
+  it("orphan-probe never matches its own pid and passes the agent id to the runner", async () => {
+    const procs = { 10: ["FORGE_LEASE_HOLDER=cli_h_9"] };
+    assert.equal(leaseChildAlive({ by: "cli_h_9", platform: "linux", ...fakeProc(procs), ownPid: 10 }), false);
+    const { w, io } = fakeWorld();
+    w.body = leaseState("cli_h_99", Date.now() - 1);
+    const seen = [];
+    const runner = async (o) => { seen.push(o.leaseHolder); throw new Error("stop"); };
+    await runIssue({ issue: 42, dir, agentId: "cli_h_1", lane: "staging", io, runner, now: () => Date.now(), maxAttempts: 1, hostname: "h" });
+    assert.ok(seen.length >= 1 && seen.every((x) => x === "cli_h_1"));
   });
 
   it("still defers (with reason + leaseUntil) for alive, EPERM, other-host and legacy holders", async () => {
