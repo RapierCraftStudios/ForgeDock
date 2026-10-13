@@ -771,8 +771,11 @@ PLAN_SCRIPT=$(forge_resolve selfreview-plan.sh)
 if [ -n "$PLAN_SCRIPT" ]; then
   bash "$PLAN_SCRIPT" --files-file "$FILES_FILE" --changed-lines "$NLINES" --contract-flags "$CFLAGS" --spec-cli "$SPEC_CLI" --review-depth "$DEPTH" --agent-available "$AGENT_AVAILABLE" --tree "$TREE" --done-trees "$DONE_TREES"
 else echo "SELFREVIEW=skip"; echo "SKIP_REASON=plan-unavailable"; fi
+echo "TREE=$TREE"
 rm -f "$FILES_FILE"
 ```
+
+Keep the printed `TREE=`, `TIER=`, `SELECTED_AGENTS=` and `SKIP_REASON=` values: shell state does not persist, so Steps 2, 3 and 5 take them as the literal `{TREE}`, `{TIER}`, `{SELECTED_AGENTS}` and `{SKIP_REASON}` values. <!-- Added: forge#4068 review CQ-1 -->
 
 `SELFREVIEW=skip` (any `SKIP_REASON`, including a missing plan script or a plan call that fails) → go to Step 5 with `skipped=<reason>`. A skip is never an error. `FORGE_SELFREVIEW=off` is the operator off switch.
 
@@ -812,6 +815,15 @@ rm -f "$OUTF"
 
 ```bash
 # <Script resolution block from above goes here, verbatim>
+# Inline the values from Steps 1-4 (shell state does not persist); counts are integers, 0 when none.
+TREE="{TREE}"; TIER="{TIER}"; SELECTED_AGENTS="{SELECTED_AGENTS}"; SKIP_REASON="{SKIP_REASON}"; MISSING="{MISSING}"
+FINDINGS="{FINDINGS}"; FIXED="{FIXED}"; DECLINED="{DECLINED}"; AGENT_COUNT="{AGENT_COUNT}"
+for _v in FINDINGS FIXED DECLINED AGENT_COUNT; do eval "_x=\${$_v}"; case "$_x" in ''|*[!0-9]*) eval "$_v=0" ;; esac; done
+case "$TREE" in *[!0-9a-f]*) TREE="" ;; esac
+NOTED_LINES=$(cat <<'NOTED_EOF'
+{NOTED_LINES}
+NOTED_EOF
+)
 FINAL_TREE=$(git -C "{WORKTREE_PATH}" write-tree 2>/dev/null || echo "")
 BODY="<!-- FORGE:SELFREVIEW -->
 ## Self-review (build-time; not the official review)
@@ -830,7 +842,7 @@ else gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"; fi # allowlist:check-co
 _t=$(forge_resolve lib/telemetry.sh); FORGE_REPO="{GH_REPO}" FORGE_ISSUE="{NUMBER}" FORGE_PHASE=build bash "${_t:-/dev/null}" build_selfreview tier="${TIER:-none}" agents="${AGENT_COUNT:-0}" findings="${FINDINGS:-0}" fixed="${FIXED:-0}" declined="${DECLINED:-0}" skipped="${SKIP_REASON:-}" >/dev/null 2>&1 || true # forge#3971 telemetry (ids and counts only; compare with review-found in-PR fixes)
 ```
 
-Emit on **every** outcome, including skips (`skipped=<reason>`, counts 0). Fill `NOTED_LINES` with one `noted: <id> <file:line> <summary>` line per sub-threshold finding and one `missing: <domain>` per reviewer that never delivered; the official `/review-pr` reads this comment as known context, never as review evidence. If the repair changed the tree, the next B6 `Skill(...)` call (with the re-derived `{CHANGED_FILES}`) gates it.
+Emit on **every** outcome, including skips (`skipped=<reason>`, counts 0). Fill `{NOTED_LINES}` (the heredoc body) with one `noted: <id> <file:line> <summary>` line per sub-threshold finding and one `missing: <domain>` per reviewer that never delivered; the official `/review-pr` reads this comment as known context, never as review evidence. If the repair changed the tree, the next B6 `Skill(...)` call (with the re-derived `{CHANGED_FILES}`) gates it.
 
 **Resume**: B5.6 is idempotent. A re-invoked build finds the trusted `FORGE:SELFREVIEW` summary, the plan script reports `already-done` for its `Tree:`/`Final-Tree:`, and the spent `FORGE:SELFREVIEW_REPAIR` marker forbids a second repair round.
 # MUST CONTINUE to Phase B6 — the self-review result is intermediate, NOT terminal (validation still required). Any failure here is a recorded skip, never a Blocked exit.

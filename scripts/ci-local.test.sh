@@ -936,6 +936,19 @@ has "4057: SEC-3 widen still fires when a changed source reaches no test anywher
 eq "4057: ...and the step runs" run "$(printf '%s' "$R" | jq -r '.action')"
 R=$(_scope 'bash scripts/x.test.sh' scripts/a.sh scripts/zz.sh)
 has "4057: one unreached source file among several still widens a single-test step" "$(printf '%s' "$R" | jq -r '.widen')" "scripts/zz.sh"
+# SEC-3 universe is per ecosystem: a test in another language never covers a changed source (polyglot under-block)
+r=$(blank); mkdir -p "$r/pkg" "$r/tests"
+echo 'def f(): return 1' > "$r/pkg/utils.py"; echo 'def test_core(): assert True' > "$r/tests/test_core.py"
+echo 'test("u", () => {})' > "$r/tests/utils.test.ts"
+commit_base "$r"
+echo '# c' >> "$r/pkg/utils.py"
+R=$(_scope 'pytest tests/test_core.py' pkg/utils.py)
+eq "SEC-3 ecosystem: a pytest step is not skipped because an unrelated .ts test matches the changed .py" run "$(printf '%s' "$R" | jq -r '.action')"
+has "SEC-3 ecosystem: ...it widens and names the unreached source" "$(printf '%s' "$R" | jq -r '.widen')" "pkg/utils.py"
+R=$(_scope 'pytest' pkg/utils.py)
+eq "SEC-3 ecosystem: a bare pytest runner step widens too" run "$(printf '%s' "$R" | jq -r '.action')"
+R=$(_scope 'python3 tests/test_core.py' pkg/utils.py)
+eq "SEC-3 ecosystem: a single python test step widens (no py test reaches the change)" run "$(printf '%s' "$R" | jq -r '.action')"
 
 # FIFO slots (tickets), dead-owner reaping, deadline while queued
 _slot() { FORGE_CI_LOCAL_HOME="$SLOT_HOME" FORGE_CI_LOCAL_SLOTS=1 node --input-type=module -e "
