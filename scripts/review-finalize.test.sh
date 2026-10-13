@@ -462,16 +462,29 @@ run "$GOOD" classify --auto-merge true; has "untrusted marker" "INPR_FIX=1"
 reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
 CONTRACT_BODY=$(printf '<!-- FORGE:CONTRACT -->\n### Out of Scope\n\n- `docs/` — deferred → #30: tracked there\n')
 cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
-echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 --> docs/","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/` — why","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
 mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
 run "$GOOD" classify; has "contract" "CONTRACT_DEMOTED=1"
 want "contract-deferred" '.findings[0].disposition' classified.json "NOTE contract-deferred #30"
 [ "$(cat "$FIX/issue-comments.log" 2>/dev/null)" = "ISSUE_COMMENT 30" ] && ok || bad "deferred issue comment not posted"
 posted_has "contract list line" "tracked on #30"
+# substring-only / longer-path / legacy / empty bodies must not verify (e1, e3, e4); [x] and regex-metachar paths do (e2, e3)
+for B in 'x <!-- FORGE:DEFERRED_FROM: #12 --> docs/' 'x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/guide.md.bak` — why' 'x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/x`' 'x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/`x' ''; do
+    reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
+    cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
+    echo "{\"state\":\"open\",\"body\":\"$B\",\"author_association\":\"MEMBER\",\"user\":{\"type\":\"User\"}}" > "$FIX/issue-30.json"
+    mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
+    run "$GOOD" classify; has "unverified-body '$B'" "CONTRACT_DEMOTED=0"
+done
+reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
+cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [x] `docs/`","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
+run "$GOOD" classify; has "checked-item-verifies" "CONTRACT_DEMOTED=1"
 # an untrusted contract demotes nothing
 reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
 cm NONE User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
-echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 --> docs/","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/` — why","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
 mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
 run "$GOOD" classify; has "untrusted contract" "CONTRACT_DEMOTED=0"
 
@@ -809,9 +822,25 @@ rc_is "guard: non-boolean" "$RC" 3; has "guard: non-boolean" "merge guard state 
 # --- verdict / calibration / trust / base-conflict routing ---
 gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true
 rc_is "route: only base conflict" "$RC" 3; has "route: only base conflict" "blocker: base-conflict"; has "route: only base conflict" "MERGE_OUTCOME=base-conflict"
-logged "route: base-sync comment" issue-bodies.log "the pipeline is performing the base sync automatically"; not_logged "route: base conflict is not needs-human" edits.log "needs-human"; not_merged "route: base conflict"
+logged "route: base-sync comment" issue-bodies.log "the work-on pipeline performs the base sync"; logged "route: standalone remediate action" issue-bodies.log "--remediate"; not_logged "route: base conflict is not needs-human" edits.log "needs-human"; not_merged "route: base conflict"
 gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --other-blocking true
 rc_is "route: base conflict plus blocker" "$RC" 3; has "route: base conflict plus blocker" "MERGE_OUTCOME=needs-human"; logged "route: needs-human" edits.log "needs-human"
+# other-blocking-derived: a persisted true (written by verdict) is ORed in; a passed false never lowers it
+ob() { mkdir -p "$WORK/out"; printf '%s\n' "$1" > "$WORK/out/other-blocking.txt"; }
+gate_reset; ob true; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --other-blocking false
+rc_is "other-blocking-derived: persisted true beats passed false" "$RC" 3; has "other-blocking-derived: persisted true beats passed false" "MERGE_OUTCOME=needs-human"
+not_has() { case "$OUT" in *"$2"*) bad "$1: output has '$2'" ;; *) ok ;; esac; }
+not_has "other-blocking-derived: not base-conflict" "MERGE_OUTCOME=base-conflict"; logged "other-blocking-derived: needs-human" edits.log "needs-human"
+gate_reset; ob false; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true
+rc_is "other-blocking-derived: persisted false keeps base-conflict route" "$RC" 3; has "other-blocking-derived: persisted false" "MERGE_OUTCOME=base-conflict"
+gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true
+has "other-blocking-derived: missing file uses passed flag" "MERGE_OUTCOME=base-conflict"
+for junk in "" "maybe" "TRUE" "yes"; do
+    gate_reset; ob "$junk"; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true
+    has "other-blocking-derived: garbage file '$junk' ignored" "MERGE_OUTCOME=base-conflict"
+done
+gate_reset; ob true; mg "$GATE" --other-blocking ""
+rc_is "other-blocking-derived: unbound passed flag still fails closed" "$RC" 3; has "other-blocking-derived: unbound still fails closed" "merge guard state unbound"
 gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --trust-needs-human true --table-cell-key "feature x HIGH"
 rc_is "route: base conflict plus trust" "$RC" 3; logged "route: trust reason" issue-bodies.log "provenance trust: NOVEL_NEEDS_HUMAN tier for cell \`feature x HIGH\`"; logged "route: trust needs-human" edits.log "needs-human"
 gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --calibration-needs-human true --calibration-note "overconfident cell"
@@ -834,7 +863,7 @@ rc_is "route: CHANGES REQUESTED" "$RC" 3; logged "route: verdict reason" issue-b
 
 # --- pre-merge mergeability guard ---
 gate_reset; echo "CONFLICTING|DIRTY" > "$FIX/premerge"; mg "$GATE"
-rc_is "premerge: conflicting" "$RC" 3; has "premerge: conflicting" "blocker: base-conflict"; not_logged "premerge: conflict is not needs-human" edits.log "needs-human"; not_merged "premerge: conflicting"
+rc_is "premerge: conflicting" "$RC" 3; has "premerge: conflicting" "blocker: base-conflict"; not_logged "premerge: conflict is not needs-human" edits.log "needs-human"; logged "premerge: standalone base-sync wording" issue-bodies.log "/work-on 42 --remediate"; not_merged "premerge: conflicting"
 gate_reset; echo "MERGEABLE|BEHIND" > "$FIX/premerge"; echo true > "$FIX/protection"; mg "$GATE"
 rc_is "premerge: behind under strict protection" "$RC" 3; has "premerge: behind under strict protection" "blocker: base-conflict"
 gate_reset; echo "MERGEABLE|BEHIND" > "$FIX/premerge"; echo false > "$FIX/protection"; mg "$GATE"
@@ -896,6 +925,22 @@ reset; MH=MERGEABLE; MHS=CLEAN; vd --result clean --intensity-tier FAST --table-
 logged "verdict: trust annotation" reviews.log '**Intensity tier**: FAST | **Cell**: `bug HIGH` | **Shadow mode**: false'
 reset; MH=CONFLICTING; MHS=DIRTY; vd --result blocking --blocking-count 1
 has "verdict: blocking" "VERDICT=CHANGES REQUESTED"; logged "verdict: blocking body" reviews.log "CHANGES REQUESTED: commit"; logged "verdict: base conflict line" reviews.log "🔴 Base Conflict:"
+# other-blocking-derived: verdict resolves and persists OTHER_BLOCKING
+OBF="$WORK/out/other-blocking.txt"
+reset; MH=MERGEABLE; MHS=CLEAN; vd --result blocking --blocking-count 1 --other-blocking false
+has "other-blocking-derived: unexplained blocking forces true" "OTHER_BLOCKING=true"; [ "$(cat "$OBF" 2>/dev/null)" = "true" ] && ok || bad "other-blocking-derived: file lacks true"
+reset; MH=MERGEABLE; MHS=CLEAN; vd --result blocking --blocking-count 1
+has "other-blocking-derived: no flag still derives true" "OTHER_BLOCKING=true"
+reset; MH=CONFLICTING; MHS=DIRTY; vd --result blocking --blocking-count 1 --other-blocking false
+has "other-blocking-derived: base conflict explains the block" "OTHER_BLOCKING=false"; [ "$(cat "$OBF" 2>/dev/null)" = "false" ] && ok || bad "other-blocking-derived: file lacks false"
+reset; MH=CONFLICTING; MHS=DIRTY; vd --result blocking --blocking-count 1 --other-blocking true
+has "other-blocking-derived: reviewer true is kept" "OTHER_BLOCKING=true"
+reset; MH=MERGEABLE; MHS=CLEAN; mkdir -p "$WORK/out"; echo true > "$OBF"; vd --result clean --other-blocking true
+has "other-blocking-derived: clean result resets to false" "OTHER_BLOCKING=false"; [ "$(cat "$OBF" 2>/dev/null)" = "false" ] && ok || bad "other-blocking-derived: stale true survived a clean re-review"
+reset; MH=MERGEABLE; MHS=CLEAN; mkdir -p "$WORK/out"; echo true > "$OBF"; vd --result stale
+[ -e "$OBF" ] && bad "other-blocking-derived: stale result must remove the file" || ok
+reset; MH=MERGEABLE; MHS=CLEAN; vd --result blocking --other-blocking maybe --blocking-count 1
+has "other-blocking-derived: garbage flag, unexplained block" "OTHER_BLOCKING=true"
 reset; MH=CONFLICTING; MHS=DIRTY; vd --result clean
 has "verdict: clean coerced over a base conflict" "VERDICT_COERCED=true"; has "verdict: coerced verdict" "VERDICT=CHANGES REQUESTED"; logged "verdict: coerced body" reviews.log "CHANGES REQUESTED: commit"
 reset; MH=MERGEABLE; MHS=CLEAN; vd --result clean --has-purpose-regression true --purpose-findings "F-1"

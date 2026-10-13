@@ -667,7 +667,7 @@ A standalone issue per LOW/POSSIBLE note makes the cascade amplify (each merged 
 - **Review-finding lineage** (`MERGE_ISSUE` carries `review-finding`: this PR fixes a finding): only MEDIUM findings that are CONFIRMED, or LIKELY and safety-exempt, become issues; the rest are NOTEs. A MEDIUM tagged `**Fix efficacy**: fails|regresses` (the linked issue is not fixed) is never damped.
 - **Cross-head re-flag** (`NOTE reflag-*`): a finding an earlier head's trusted review or `FORGE:NOTE_DISPOSITION` already covered is not filed again; never for HIGH/CRITICAL or rows whose linked issue is closed.
 - **Per-review cap**: at most `review.max_filed_findings` ISSUEs (default 2; 1 under lineage; `0` valid), ranked by severity, confidence, safety domain; the overflow is `NOTE capped` (listed, never filed or dropped). HIGH/CRITICAL are never capped and still block via §7B.
-- **Contract scope**: a finding under a verified `deferred → #N` item of the trusted FORGE:CONTRACT (`scripts/check-contract-scope.sh list`) is `NOTE contract-deferred #N` (commented there, not filed), under `accepted-risk` it is `NOTE contract-accepted-risk`; never for HIGH/CRITICAL, `not-affected`, safety-exempt or this PR's own files, nor on missing, untrusted or closed contract input.
+- **Contract scope**: a finding under a verified `deferred → #N` item (verified = open non-PR issue by a trusted author with the `FORGE:DEFERRED_FROM` marker and an exact checklist line `- [ ] \`path\`` for that path, never a body substring) of the trusted FORGE:CONTRACT (`scripts/check-contract-scope.sh list`) is `NOTE contract-deferred #N` (commented there, not filed), under `accepted-risk` it is `NOTE contract-accepted-risk`; never for HIGH/CRITICAL, `not-affected`, safety-exempt or this PR's own files, nor on missing, untrusted or closed contract input.
 
 Each NOTE gets one disposition: (1) **fix in this PR**, only comment, documentation or test-only changes as a follow-up commit (any executable change is filed or re-reviewed in full; never push unreviewed code under `--auto-merge`); (2) **list in the PR body** under `## Non-blocking notes` (edit, never replace; `mktemp` file named for the PR number, read back to confirm); (3) **drop** duplicates, stale-comment nits and speculation. NOTES never reach the filing call. The 6A dry run printed the NOTE list: decide the fixed and dropped counts (`NOTES_FIXED`, `NOTES_DROPPED`, default 0; other plain NOTEs count as listed), then the 6C fence runs `classify` for real.
 
@@ -816,7 +816,8 @@ VERDICT_OUT=$(bash "$RF" verdict --pr "$PR_NUMBER" --repo "$REPO" --review-sha "
   --merge-health "$MERGE_HEALTH" --merge-health-state "$MERGE_HEALTH_STATE" --is-milestone "{IS_MILESTONE_TO_STAGING}" \
   --has-purpose-regression "{HAS_PURPOSE_REGRESSION}" --purpose-findings-file "$OUT_DIR/purpose-findings.txt" \
   --result "{RESULT}" --agents-file "$OUT_DIR/agents.txt" --findings-count "{M}" --blocking-count "{N_BLOCKING}" \
-  --intensity-tier "$INTENSITY_TIER" --table-cell-key "$TABLE_CELL_KEY" --trust-shadow-mode "$TRUST_SHADOW_MODE"); VERDICT_RC=$?
+  --intensity-tier "$INTENSITY_TIER" --table-cell-key "$TABLE_CELL_KEY" --trust-shadow-mode "$TRUST_SHADOW_MODE" \
+  --other-blocking "{OTHER_BLOCKING}" --out-dir "$OUT_DIR"); VERDICT_RC=$?
 printf '%s\n' "$VERDICT_OUT"
 [ "$VERDICT_RC" -eq 0 ] || exit 1   # STOP: REVIEW_RESULT: status: BLOCKED was printed
 # 7B.5: reads task type and confidence from the linked issue's FORGE:INVESTIGATOR, consults origin/forge-knowledge, records FORGE:CALIBRATION_CHECK.
@@ -824,7 +825,7 @@ bash "$RF" calibrate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --o
   --intensity-tier "$INTENSITY_TIER" --table-cell-key "$TABLE_CELL_KEY" --trust-shadow-mode "$TRUST_SHADOW_MODE" --trust-needs-human "$TRUST_NEEDS_HUMAN"
 ```
 
-`verdict` computes `BASE_CONFLICT` (the single source of truth for the Phase 8 guards), posts the verdict with the trust annotation, and never posts a clean verdict over a base conflict or purpose regression (it downgrades to CHANGES REQUESTED, `VERDICT_COERCED=true`). Read `VERDICT=`, `BASE_CONFLICT=`, `HAS_PURPOSE_REGRESSION=` and, from `calibrate`, `CALIBRATION_NEEDS_HUMAN=` / `CALIBRATION_NOTE=`: they are the Phase 8 flags. The note itself is also written to `$OUT_DIR/calibration-note.txt`, which Phase 8 passes by path; free text is never placed in a shell word.
+`verdict` computes `BASE_CONFLICT` (the single source of truth for the Phase 8 guards), posts the verdict with the trust annotation, and never posts a clean verdict over a base conflict or purpose regression (it downgrades to CHANGES REQUESTED, `VERDICT_COERCED=true`). `{OTHER_BLOCKING}` is `true` when criterion 1, 2, 3 or 5 fired, else `false`; `verdict` forces it `true` for a blocking result that the base conflict and purpose regression do not explain, persists the resolved value to `$OUT_DIR/other-blocking.txt` and prints `OTHER_BLOCKING=`, and `merge-gate` ORs the persisted value in, so the reviewer cannot lower it. Read `VERDICT=`, `BASE_CONFLICT=`, `HAS_PURPOSE_REGRESSION=`, `OTHER_BLOCKING=` and, from `calibrate`, `CALIBRATION_NEEDS_HUMAN=` / `CALIBRATION_NOTE=`: they are the Phase 8 flags. The note itself is also written to `$OUT_DIR/calibration-note.txt`, which Phase 8 passes by path; free text is never placed in a shell word.
 
 ---
 
@@ -846,7 +847,7 @@ RF=$(forge_resolve review-finalize.sh)   # install roots only, never the PR chec
 OUT_DIR="$(dirname "$CTX")/review-finalize-${PR_NUMBER}"
 GATE_OUT=$(bash "$RF" merge-gate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --base "$MERGE_BASE" \
   --verdict "$VERDICT" --has-purpose-regression "$HAS_PURPOSE_REGRESSION" --calibration-needs-human "$CALIBRATION_NEEDS_HUMAN" --calibration-note-file "$OUT_DIR/calibration-note.txt" \
-  --trust-needs-human "$TRUST_NEEDS_HUMAN" --base-conflict "$BASE_CONFLICT" --other-blocking "$OTHER_BLOCKING" --table-cell-key "$TABLE_CELL_KEY"); GATE_RC=$?
+  --trust-needs-human "$TRUST_NEEDS_HUMAN" --base-conflict "$BASE_CONFLICT" --other-blocking "$OTHER_BLOCKING" --table-cell-key "$TABLE_CELL_KEY" --out-dir "$OUT_DIR"); GATE_RC=$?
 printf '%s\n' "$GATE_OUT"
 # 8B: only for a milestone->staging PR whose merge just succeeded: clears the milestone on its open review-finding issues so they flow through the fast lane.
 if [ "$GATE_RC" -eq 0 ] && printf '%s\n' "$GATE_OUT" | grep -q '^MERGE_STATE=MERGED$'; then
@@ -857,7 +858,7 @@ exit "$GATE_RC"
 
 **Outcome mapping.** Report the script's output; never re-run its gates by hand and never `gh pr merge` yourself.
 - Exit 0, `MERGE_OUTCOME=merged` (`MERGE_STATE=MERGED`): merged. `merge-failed`: the merge did not land (the script commented on the issue). `parked-awaiting-merge`: parked per the previously-escalated guard; the script performs the transition itself (`transition-label.sh ... awaiting-merge`, prose fallback `gh issue edit --add-label "workflow:awaiting-merge"`).
-- Exit 3: print the `REVIEW_RESULT: status: BLOCKED, blocker: ...` line and stop; `MERGE_OUTCOME=` names the case (`base-conflict`, `needs-human`, `protection-blocked`, `stale-review`, `ci-not-green`). A CI gate TIMEOUT prints `CI_GATE_TIMEOUT`: re-run the same fence up to 3 more times. A phase-trail blocker with no MISSING lines (`phase trail unreadable (rc=N)`, `auto-merge requires --issue`) is an infrastructure or usage failure: callers neither re-run phases nor merge manually.
+- Exit 3: print the `REVIEW_RESULT: status: BLOCKED, blocker: ...` line and stop; `MERGE_OUTCOME=` names the case (`base-conflict`, `needs-human`, `protection-blocked`, `stale-review`, `ci-not-green`). A `base-conflict` blocker carries no label (the autonomous base sync is pipeline work, not a human decision), so every caller of `--auto-merge` MUST map it explicitly: `work-on:review` R4, the router's Phase 0A.1 re-review fallback and `orchestrate` re-review Step 3 each set `workflow:remediating` (falling back to `needs-human`), and a standalone caller runs `/work-on <issue> --remediate`. A caller never leaves the issue unlabelled at `workflow:in-review`. A CI gate TIMEOUT prints `CI_GATE_TIMEOUT`: re-run the same fence up to 3 more times. A phase-trail blocker with no MISSING lines (`phase trail unreadable (rc=N)`, `auto-merge requires --issue`) is an infrastructure or usage failure: callers neither re-run phases nor merge manually.
 - Exit 3 with `blocker: degraded-gate-unreviewed` (`needs-human` added): the linked issue's gate is DEGRADED and no trusted review comment for the current head has a `### Degraded Paths Reviewed` section with a `- name: how reviewed` item for every degraded check. Not a code defect: `work-on:review` (R4) re-runs the review once so the section is added. Never merge by hand. <!-- Added: forge#3628 -->
 - Exit 4: `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` plus the `MISSING:` lines. Return that status and stop: this phase never re-runs the missing phases and never escalates to `needs-human`; `work-on:review` (R4) alone owns re-dispatching them (forge#3102).
 

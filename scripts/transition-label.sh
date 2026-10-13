@@ -278,6 +278,32 @@ fi
 # ---------------------------------------------------------------------------
 # Add target label
 # ---------------------------------------------------------------------------
+# forge#3567: `gh issue edit --add-label` fails when the label is absent from the repo (a
+# consumer repo not re-synced via `forgedock labels setup`), aborting the transition under
+# `set -e`. Best-effort ensure first: `--force` is a create-or-update, a failure (permissions,
+# rate limit, concurrent create) is ignored so the add below surfaces its own error. Only
+# ForgeDock-managed names are created (fixed table mirroring bin/labels.json, kept in sync by
+# bin/tests/label-bootstrap.test.mjs); a custom FORGE_LABEL_MAP name is never created.
+ensure_label() {
+  local name="$1" LBL_COLOR="" LBL_DESC=""
+  case "$name" in
+    "workflow:investigating") LBL_COLOR="1D76DB"; LBL_DESC="Pipeline: investigation phase in progress. Managed by ForgeDock." ;;
+    "workflow:ready-to-build") LBL_COLOR="0075CA"; LBL_DESC="Pipeline: investigation complete, ready for build. Managed by ForgeDock." ;;
+    "workflow:building") LBL_COLOR="0052CC"; LBL_DESC="Pipeline: implementation in progress. Managed by ForgeDock." ;;
+    "workflow:in-review") LBL_COLOR="5319E7"; LBL_DESC="Pipeline: PR created, under review. Managed by ForgeDock." ;;
+    "workflow:remediating") LBL_COLOR="C5DEF5"; LBL_DESC="Pipeline: autonomous remediation pending (no human action needed). Managed by ForgeDock." ;;
+    "workflow:awaiting-merge") LBL_COLOR="FF8C00"; LBL_DESC="Pipeline: remediated + re-reviewed, awaiting a human merge decision. Managed by ForgeDock." ;;
+    "workflow:merged") LBL_COLOR="0E8A16"; LBL_DESC="Pipeline: PR merged, issue closed. Managed by ForgeDock." ;;
+    "workflow:decomposed") LBL_COLOR="BFD4F2"; LBL_DESC="Pipeline: decomposed into sub-issues. Managed by ForgeDock." ;;
+    "workflow:invalid") LBL_COLOR="CCCCCC"; LBL_DESC="Pipeline: issue closed as invalid after investigation. Managed by ForgeDock." ;;
+    "needs-human") LBL_COLOR="E4E669"; LBL_DESC="Pipeline stalled — requires human intervention. Managed by ForgeDock." ;;
+    "workflow:engine-error") LBL_COLOR="B60205"; LBL_DESC="Pipeline stalled — engine/tool failure (not a genuine human-judgment block). Managed by ForgeDock." ;;
+    *) return 0 ;;
+  esac
+  gh label create "$name" --color "$LBL_COLOR" --description "$LBL_DESC" --force "${GH_ARGS[@]}" >/dev/null 2>&1 || true
+}
+ensure_label "$EFFECTIVE_LABEL"
+
 echo "Adding $EFFECTIVE_LABEL to issue #$ISSUE_NUMBER..."
 gh issue edit "$ISSUE_NUMBER" "${GH_ARGS[@]}" --add-label "$EFFECTIVE_LABEL"
 

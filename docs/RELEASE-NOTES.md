@@ -2,6 +2,12 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Deferred follow-up lookup no longer duplicates issues (#3606)
+
+`scripts/file-deferred-followups.sh` now finds an existing follow-up through the `FORGE:DEFERRED_ISSUE` claim marker it posts on the parent issue (REST comments, read-after-write consistent) before falling back to the lagging search index, searches closed issues as well as open ones (a closed follow-up is reopened), and after creating re-checks once: if a concurrent build filed a lower-numbered trusted follow-up, the items move to it and the newer issue is closed as a duplicate. Failed lookups still exit non-zero (`DEFERRED_LOOKUP=FAILED`).
+
+Action: none. Output rows and the `DEFERRED_TELEMETRY` line are unchanged.
+
 ## Review specs call the prepare and finalize scripts (#3841)
 
 `commands/review-pr.md` is now under 100 KB: Phases 1-3B and 6 run through `scripts/review-prepare.sh` and `scripts/review-finalize.sh`, and `commands/review-pr-staging.md` reuses both (`review-prepare.sh --no-delta` in 0C, then `review-finalize.sh extract|classify|file-prepare|file-verify` with `--scope-files` and `--prior-prs` in Phase 7) instead of carrying its own template resolution, slicing, classifier and cap copies. A staging bundle whose API diff is too large is read from `origin/<base>...origin/<head>`. CI now runs `--fence-funcs` over `commands/review-pr*.md` and `--fence-state` over the staging spec. Engine: `close.detectOutcome` reports `merged` only for a CLOSED issue that also carries `workflow:merged` (a stale label on an open issue no longer counts).
