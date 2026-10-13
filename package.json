@@ -1,6 +1,6 @@
 {
   "name": "forgedock",
-  "version": "1.19.0",
+  "version": "1.20.0",
   "description": "Autonomous development pipeline for coding agents. GitHub as institutional memory, with native Claude Code and OpenCode entrypoints.",
   "bin": {
     "forgedock": "bin/forgedock.mjs"
