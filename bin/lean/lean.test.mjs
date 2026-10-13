@@ -1116,6 +1116,26 @@ describe("batch robustness (#4112-#4115)", () => {
     }
   });
 
+  it("#4118 GitHub's transient '[remote rejected] ... (failed)' and pack write errors are retried, then merge", async () => {
+    for (const msg of ["To github.com:o/r.git\n ! [remote rejected] feat/issue-7-lean -> feat/issue-7-lean (failed)",
+      "remote: error: unable to write file ./objects/pack/pack-1.pack: No such file or directory\n ! [remote rejected] x -> x (failed)"]) {
+      const w = world({ pushErrors: [msg] });
+      assert.equal((await run(w)).terminalReason, "merged", msg);
+      assert.equal(w.pushes, 2, msg);
+    }
+  });
+
+  it("#4118 a rerun reuses a local lane branch with unpushed commits instead of resetting it to the base", async () => {
+    const w = world();
+    const git0 = w.io.git;
+    w.io.git = async (a, o) => (a[0] === "rev-list" && a[1] === "--count" && String(a[2]).includes("refs/heads/feat/issue-7-lean")) ? "1\n" : git0(a, o);
+    await run(w);
+    const adds = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add");
+    assert.ok(adds.length >= 1);
+    assert.ok(adds.every((c) => !c.includes("-B")), JSON.stringify(adds));
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add" && c.at(-1) === "feat/issue-7-lean"));
+  });
+
   it("#4114 gh writes (comment) retry on 5xx and secondary rate limits; non-transient errors do not", async () => {
     const w = world({ commentErrors: ["HTTP 502: Bad Gateway", "You have exceeded a secondary rate limit. Please wait a few minutes"] });
     assert.equal((await run(w)).terminalReason, "merged");
