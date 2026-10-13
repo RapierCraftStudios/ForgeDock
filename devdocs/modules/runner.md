@@ -122,3 +122,9 @@ Cite: #3589 / PR #3610.
 PR #3782 touched `runner`. See FORGE:BUILDER comment on issue #3778 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/runner.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3778 / PR #3782.
+
+## Entry  — engine: minimal phase sessions (#4065)
+
+PR #4077 touched `runner`. See FORGE:BUILDER comment on issue #4065 for full change list.
+Key gotcha recorded: version-gated flags (--strict-mcp-config always, --disable-slash-commands only for skill-free phases investigate/close); FORGEDOCK_FULL_SESSION=1 is the escape hatch; do not add --setting-sources (FD hooks must keep running).
+Cite: #4065 / PR #4077.
