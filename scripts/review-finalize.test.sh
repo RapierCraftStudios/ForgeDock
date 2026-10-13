@@ -809,7 +809,7 @@ rc_is "guard: non-boolean" "$RC" 3; has "guard: non-boolean" "merge guard state 
 # --- verdict / calibration / trust / base-conflict routing ---
 gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true
 rc_is "route: only base conflict" "$RC" 3; has "route: only base conflict" "blocker: base-conflict"; has "route: only base conflict" "MERGE_OUTCOME=base-conflict"
-logged "route: base-sync comment" issue-bodies.log "the pipeline is performing the base sync automatically"; not_logged "route: base conflict is not needs-human" edits.log "needs-human"; not_merged "route: base conflict"
+logged "route: base-sync comment" issue-bodies.log "the work-on pipeline performs the base sync"; logged "route: standalone remediate action" issue-bodies.log "--remediate"; not_logged "route: base conflict is not needs-human" edits.log "needs-human"; not_merged "route: base conflict"
 gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --other-blocking true
 rc_is "route: base conflict plus blocker" "$RC" 3; has "route: base conflict plus blocker" "MERGE_OUTCOME=needs-human"; logged "route: needs-human" edits.log "needs-human"
 gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --trust-needs-human true --table-cell-key "feature x HIGH"
@@ -834,7 +834,7 @@ rc_is "route: CHANGES REQUESTED" "$RC" 3; logged "route: verdict reason" issue-b
 
 # --- pre-merge mergeability guard ---
 gate_reset; echo "CONFLICTING|DIRTY" > "$FIX/premerge"; mg "$GATE"
-rc_is "premerge: conflicting" "$RC" 3; has "premerge: conflicting" "blocker: base-conflict"; not_logged "premerge: conflict is not needs-human" edits.log "needs-human"; not_merged "premerge: conflicting"
+rc_is "premerge: conflicting" "$RC" 3; has "premerge: conflicting" "blocker: base-conflict"; not_logged "premerge: conflict is not needs-human" edits.log "needs-human"; logged "premerge: standalone base-sync wording" issue-bodies.log "/work-on 42 --remediate"; not_merged "premerge: conflicting"
 gate_reset; echo "MERGEABLE|BEHIND" > "$FIX/premerge"; echo true > "$FIX/protection"; mg "$GATE"
 rc_is "premerge: behind under strict protection" "$RC" 3; has "premerge: behind under strict protection" "blocker: base-conflict"
 gate_reset; echo "MERGEABLE|BEHIND" > "$FIX/premerge"; echo false > "$FIX/protection"; mg "$GATE"
