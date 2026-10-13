@@ -81,6 +81,12 @@ lanes finish.
 When a lane finishes:
 - `deferred` (lease held by another or a dead session): put it back in the queue and retry after the
   lease time printed in its output.
+- `deferred` with "host busy" (code `host.busy`: the host is short of memory, tmp space or CPU headroom;
+  no lease was taken and nothing was posted): put the issue back in the queue and lower the effective K by
+  1 for the next 5 minutes, never below 1. Before raising K back, start one lane and check that it is not
+  host busy again.
+- `deferred` with `rate_limited` (usage limit; the last output line carries the reset time): stop launching
+  new lanes until that reset time, let running lanes finish, then resume the queue.
 - `dependency-open`: the engine found a dependency you missed. Add the edge and requeue the issue behind it.
 - `merged` or `invalid`: start the next ready issue.
 - `needs-human`: read the issue's last comment for the reason, and mark its dependents skipped.

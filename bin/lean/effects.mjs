@@ -4,7 +4,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
+import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags } from "../runner.mjs";
@@ -70,11 +71,33 @@ export function makeRunTmp({ root = runTmpRoot(), now = () => Date.now(), alive 
   };
 }
 
+/** Real host probes for admission (#4105). MemAvailable from /proc/meminfo (fallback os.freemem), statfs for tmp. */
+export function makeHostProbe() {
+  return {
+    memAvailableMb() {
+      try {
+        const m = /^MemAvailable:\s+(\d+)\s+kB/m.exec(readFileSync("/proc/meminfo", "utf8"));
+        if (m) return Math.floor(Number(m[1]) / 1024);
+      } catch { /* not Linux */ }
+      return Math.floor(freemem() / 1048576);
+    },
+    async freeMb(p) {
+      let dir = p;
+      while (dir && !existsSync(dir) && dirname(dir) !== dir) dir = dirname(dir);
+      const s = await fsp.statfs(dir);
+      return Math.floor((Number(s.bavail) * Number(s.bsize)) / 1048576);
+    },
+    loadAvg1: () => loadavg()[0],
+    cores: () => cpus().length || 1,
+    tmpPaths: () => [...new Set([join(homedir(), ".forge", "tmp"), tmpdir(), "/tmp"].filter((x) => existsSync(x) || x === join(homedir(), ".forge", "tmp")))],
+  };
+}
+
 export function makeLeanIo({ repo }) {
   const base = makeIo();
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000 })).stdout;
   return {
-    gh: run("gh"), git: run("git"), runTmp: makeRunTmp(), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
+    gh: run("gh"), git: run("git"), runTmp: makeRunTmp(), host: makeHostProbe(), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
     /** Names of the checks the base branch requires (contexts + checks). [] on 404 / no protection. */
     async requiredChecks(lane) {
       try {

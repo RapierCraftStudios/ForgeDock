@@ -10,6 +10,9 @@ import { REVIEWER_SYSTEM, approxTokens, builderPrompt, reviewerPrompt, parseVerd
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
 import { makeRunTmp } from "./effects.mjs";
+import { checkAdmission } from "./admission.mjs";
+import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { readAdmission } from "../engine-cli.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS } from "../engine-cli.mjs";
 
 const WT = "/wt/lean-7";
@@ -903,5 +906,76 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
       spawnFn: (_b, _a, o2) => { seen = o2.env; return { status: 0, stdout: "{}", stderr: "" }; } });
     assert.equal(seen.TMPDIR, "/x/run-tmp"); assert.equal(seen.CLAUDE_CODE_TMPDIR, "/x/run-tmp");
     assert.equal(seen.ANTHROPIC_API_KEY, undefined);
+  });
+});
+
+describe("host admission (#4105)", () => {
+  const host = (o = {}) => ({ memAvailableMb: () => o.mem ?? 8192, freeMb: async (p) => (o.free ?? { "/tmp": 8192, "/home/x/.forge/tmp": 8192 })[p], loadAvg1: () => o.load ?? 1, cores: () => o.cores ?? 8, tmpPaths: () => ["/home/x/.forge/tmp", "/tmp"] });
+  const withHost = (w, h) => { w.io.host = h; w.ghCalls = 0; w.leaseWrites = []; w.io.projector = { readState: async () => { w.leaseReads = (w.leaseReads ?? 0) + 1; return null; }, writeState: async (_i, st) => { w.leaseWrites.push(st); } };
+    const g = w.io.gh; w.io.gh = async (a) => { w.ghCalls++; return g(a); }; return w; };
+
+  it("the outcome code is registered", async () => {
+    assert.equal(OUTCOME_CODES.HOST_BUSY, "host.busy");
+    const { readFileSync } = await import("node:fs");
+    assert.match(readFileSync(new URL("../../docs/OUTCOME-CODES.md", import.meta.url), "utf8"), /`host\.busy`/);
+  });
+
+  it("passes with headroom and runs normally", async () => {
+    const w = withHost(world(), host());
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.ok(w.ghCalls > 0);
+  });
+
+  it("low memory: deferred host.busy, no lease, no GitHub call, no worktree", async () => {
+    const w = withHost(world(), host({ mem: 1228 }));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "host.busy");
+    assert.equal(r.detail, "host busy: mem 1.2G < 2G; retry in 60s");
+    assert.equal(w.ghCalls, 0); assert.equal(w.leaseWrites.length, 0); assert.equal(w.leaseReads ?? 0, 0);
+    assert.equal(w.calls.length, 0, "no git or runner calls");
+    assert.deepEqual(w.labels, []);
+  });
+
+  it("low tmp space on the run TMPDIR filesystem or on /tmp is deferred host.busy", async () => {
+    for (const free of [{ "/tmp": 8192, "/home/x/.forge/tmp": 512 }, { "/tmp": 100, "/home/x/.forge/tmp": 8192 }]) {
+      const w = withHost(world(), host({ free }));
+      const r = await run(w);
+      assert.equal(r.code, "host.busy"); assert.match(r.detail, /tmp \S+ \S+G < 1G/);
+      assert.equal(w.ghCalls, 0);
+    }
+  });
+
+  it("high load per core is deferred; disabled admission runs even on a starved host", async () => {
+    const wl = withHost(world(), host({ load: 40, cores: 8 }));
+    assert.match((await run(wl)).detail, /load 5\.0\/core > 4/);
+    const wd = withHost(world(), host({ mem: 1, free: { "/tmp": 1, "/home/x/.forge/tmp": 1 }, load: 99 }));
+    assert.equal((await run(wd, { admission: { enabled: false } })).terminalReason, "merged");
+  });
+
+  it("thresholds are configurable; a failing probe does not block", async () => {
+    assert.equal((await checkAdmission({ cfg: { min_free_mem_mb: 100 }, host: host({ mem: 500 }) })).ok, true);
+    assert.equal((await checkAdmission({ cfg: { min_free_mem_mb: 1000 }, host: host({ mem: 500 }) })).ok, false);
+    assert.equal((await checkAdmission({ host: { memAvailableMb: () => { throw new Error("x"); }, tmpPaths: () => { throw new Error("y"); } } })).ok, true);
+  });
+
+  it("forge.yaml engine.admission is read (nested or flat) and the CLI prints the deferral as the last line", async () => {
+    const { writeFileSync } = await import("node:fs");
+    const d = tmpDir("core-adm-");
+    writeFileSync(`${d}/forge.yaml`, "engine:\n  admission:\n    enabled: false\n    min_free_mem_mb: 4096\n");
+    const a = readAdmission(d);
+    assert.equal(a.enabled, false); assert.equal(a.min_free_mem_mb, 4096);
+    const lines = []; const l = console.log; console.log = (x) => lines.push(String(x));
+    try {
+      await runFromCli(["7", "--lane", "staging", "--repo", "o/r"], { dir: tmpDir("core-adm-"), emitTelemetry: async () => {}, leanIo: {}, io: { gh: async () => "o/r\n" },
+        leanModule: { runCore: async () => ({ terminalReason: "deferred", code: "host.busy", detail: "host busy: mem 1.2G < 2G; retry in 60s" }) } });
+    } finally { console.log = l; }
+    assert.equal(lines.at(-1), "issue #7 → deferred (host busy: mem 1.2G < 2G; retry in 60s)");
+  });
+
+  it("/orchestrate spec requeues host-busy lanes with a lower K and pauses on rate_limited", async () => {
+    const { readFileSync } = await import("node:fs");
+    const spec = readFileSync(new URL("../../commands/orchestrate.md", import.meta.url), "utf8");
+    assert.match(spec, /host busy[\s\S]*lower the effective K by\s+1 for the next 5 minutes, never below 1/);
+    assert.match(spec, /rate_limited[\s\S]*stop launching\s+new lanes until that reset time/);
   });
 });

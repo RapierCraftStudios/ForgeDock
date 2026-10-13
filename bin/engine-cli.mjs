@@ -99,6 +99,20 @@ function readLeanSetting(key, cwd = process.cwd()) {
   } catch { return undefined; }
 }
 // core is the default; lean and auto are aliases of core. full is the legacy multi-phase pipeline.
+/**
+ * forge.yaml `engine.admission` (#4105). The parser flattens one nested level into `engine`, so the keys are read as
+ * `engine.enabled|min_free_mem_mb|min_free_tmp_mb|max_load_per_core`, or flat `admission_*` equivalents.
+ */
+export function readAdmission(cwd = process.cwd()) {
+  try {
+    const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine ?? {};
+    const num = (v) => { const n = Number(v); return v !== undefined && v !== "" && Number.isFinite(n) && n >= 0 ? n : undefined; };
+    const en = String(e.admission_enabled ?? e.enabled ?? "").trim().toLowerCase();
+    return { ...(en === "false" ? { enabled: false } : {}),
+      min_free_mem_mb: num(e.min_free_mem_mb ?? e.admission_min_free_mem_mb), min_free_tmp_mb: num(e.min_free_tmp_mb ?? e.admission_min_free_tmp_mb),
+      max_load_per_core: num(e.max_load_per_core ?? e.admission_max_load_per_core) };
+  } catch { return {}; }
+}
 /** forge.yaml `engine.merge_wait` (required|all|none); undefined when absent or invalid. */
 export function readMergeWait(cwd = process.cwd()) {
   try {
@@ -466,7 +480,8 @@ export async function runFromCli(argv, deps = {}) {
     const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo: leanRepo });
     const lres = await runCore({ issue, repo: leanRepo, lane, cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+    if (lres.code === "host.busy") { console.log(`issue #${issue} → deferred (${lres.detail})`); return lres; }
     console.log(`issue #${issue} → ${lres.terminalReason}`);
     if (!["merged", "invalid"].includes(lres.terminalReason)) console.log(lres.detail ?? "");
     return lres;
@@ -658,7 +673,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
     issues, parallel,
     readBody: async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
     runOne: (n) => runCore({ issue: n, repo, lane, cwd: process.cwd(), dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry,
-      ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) }),
+      admission: readAdmission(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) }),
     onUpdate: (r) => console.log(`#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`),
   });
   console.log("\n" + formatTable(rows));
