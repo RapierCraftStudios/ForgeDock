@@ -1372,7 +1372,7 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
     fi
     if [ "$ONLY_BASE_CONFLICT" = "true" ] && [ "$VERDICT" = "CHANGES REQUESTED" ]; then
         # Pure base conflict: route to the base-sync path, NOT needs-human. A standalone /review-pr caller just sees the blocker.
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: base conflict with \`${BASE}\` (the only blocking reason). No operator action is needed: the pipeline is performing the base sync automatically (merging \`origin/${BASE}\` into the PR branch, merge only, no rebase, no force-push), re-running the quality gate, then re-reviewing the new head. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
+        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: base conflict with \`${BASE}\` (the only blocking reason). Base sync needed: the work-on pipeline performs the base sync (merging \`origin/${BASE}\` into the PR branch, merge only, no rebase, no force-push); a standalone \`/review-pr --auto-merge\` caller with no work-on router must run \`/work-on ${MERGE_ISSUE} --remediate\` to do it. The sync re-runs the quality gate and then re-reviews the new head. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
         echo "MERGE_OUTCOME=base-conflict"
         blocked "base-conflict"
     elif [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ] || [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] || [ "$TRUST_NEEDS_HUMAN" = "true" ]; then
@@ -1400,7 +1400,7 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
     fi
     if [ "$PRE_MERGE_BASE_CONFLICT" = "true" ]; then
         # Base moved during review: route to the base-sync path, NOT needs-human.
-        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: base conflict (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). No operator action is needed: the pipeline is performing the base sync automatically (merging \`origin/${BASE}\` into the PR branch, merge only, no rebase, no force-push) and then re-reviewing. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
+        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⛔ Auto-merge aborted for PR #${PR_NUMBER}: base conflict (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). Base sync needed: the work-on pipeline performs the base sync (merging \`origin/${BASE}\` into the PR branch, merge only, no rebase, no force-push); a standalone \`/review-pr --auto-merge\` caller with no work-on router must run \`/work-on ${MERGE_ISSUE} --remediate\` to do it. The sync is followed by a re-review. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
         echo "MERGE_OUTCOME=base-conflict"
         blocked "base-conflict"
     elif [ "$PRE_MERGE_HEALTH_STATE" = "BLOCKED" ]; then

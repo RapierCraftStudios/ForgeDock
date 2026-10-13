@@ -122,10 +122,26 @@ describe("forge#3541 consumers accept workflow:remediating", () => {
     assert.match(t, /\[ "\$PRED_CURRENT_LABEL" = "workflow:remediating" \]/);
   });
 
-  it("review-pr base-conflict comments say the pipeline performs the sync", () => {
+  it("review-pr base-conflict comments say the work-on pipeline performs the sync", () => {
     const t = read("scripts/review-finalize.sh"); // forge#3840: the merge-gate comments moved into the script
-    const hits = t.match(/the pipeline is performing the base sync/g) || [];
+    const hits = t.match(/the work-on pipeline performs the base sync/g) || [];
     assert.ok(hits.length >= 2, "both base-conflict comments reworded");
+    assert.ok((t.match(/\/work-on \$\{MERGE_ISSUE\} --remediate/g) || []).length >= 2, "standalone callers are told to run --remediate");
+  });
+
+  it("forge#3516:_non-router_callers_map_a_base-conflict_blocker_to_remediating_with_a_needs-human_fallback", () => {
+    for (const f of ["commands/orchestrate/phase-4-execution.md", "commands/work-on.md"]) {
+      const t = read(f);
+      const i = t.indexOf("mapping (forge#3516)");
+      assert.ok(i >= 0, `${f} has no base-conflict mapping`);
+      const m = t.slice(i, i + 2200);
+      assert.match(m, /base-conflict/);
+      assert.match(m, /transition-label\.sh .* remediating/);
+      assert.match(m, /needs-human/);
+      assert.match(m, /DRY_RUN=true/);
+      assert.match(m, /idempotent|skip/);
+    }
+    assert.match(read("commands/review-pr.md"), /every caller of `--auto-merge` MUST map it/);
   });
 });
 

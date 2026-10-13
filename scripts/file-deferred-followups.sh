@@ -4,8 +4,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # The builder decides fold-vs-defer (judgment, build.md B2.0); this script does the mechanics for the items
-# that stay deferred: trusted lookup of an open follow-up carrying <!-- FORGE:DEFERRED_FROM: #N -->, append the
-# missing items to it as checklist entries (exact path match), or create ONE issue with a checklist.
+# that stay deferred: trusted lookup (claim marker <!-- FORGE:DEFERRED_ISSUE: #M --> on the parent, then a state-all search) of a follow-up carrying
+# <!-- FORGE:DEFERRED_FROM: #N -->, append the missing items (exact path match; a closed one is reopened), or create ONE issue
+# with a checklist, claim it on the parent and re-check once for a concurrent lower-numbered duplicate.
 #
 # Usage: file-deferred-followups.sh --parent N --repo OWNER/REPO [--items FILE|-] [--folded N]
 #   items TSV, one per line: <path> TAB <why> TAB <known-flaw flag: known-flaw|1|yes|true, else empty>
@@ -71,27 +72,60 @@ finish() { # $1 = batched_into number or empty, $2 = filed count
 }
 
 # --- Trusted lookup (author predicate applied before path match), one retry ---------------------------------
-do_lookup() {
-  gh api -X GET search/issues -f per_page=50 \
-    -f q="\"FORGE:DEFERRED_FROM: #${PARENT}\" in:body repo:${REPO} is:issue is:open" 2>/dev/null \
-  | jq -c --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg m "$MARKER" '
-      ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
-      | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
-      | [.items[]
-          | select(((.author_association // "") as $x | $A | index($x) != null)
-                   or ((.user.type // "") == "Bot")
-                   or ((.user.login // "") as $x | $L | index($x) != null))
-          | select((.body // "") | contains($m))
-          | {number, body: (.body // "")}]
-      | sort_by(.number)' 2>/dev/null
+# Sources, in order: (1) claim markers `<!-- FORGE:DEFERRED_ISSUE: #M -->` on the parent's REST comments (read-after-write
+# consistent), (2) a search over ALL issue states (eventually consistent, so only a fallback). Every candidate is then
+# verified by number over REST (trusted author, DEFERRED_FROM marker, not a PR); the lowest number is canonical.
+JQ_PRE='def lst: split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0));
+  def trusted: ((.author_association // "") as $x | ($assoc | lst) | index($x) != null)
+    or ((.user.type // "") == "Bot")
+    or ((.user.login // "") as $x | ($logins | lst) | index($x) != null);'
+CLAIM_RE='^\s*<!-- FORGE:DEFERRED_ISSUE: #(?<n>[0-9]+) -->'
+claim_nums() {
+  gh api --paginate "repos/${REPO}/issues/${PARENT}/comments" 2>/dev/null \
+  | jq -s -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg re "$CLAIM_RE" "$JQ_PRE"'
+      [.[][] | select(trusted) | (.body // "") | capture($re) | .n | tonumber] | unique | .[]' 2>/dev/null
 }
-LOOKUP=""
+search_nums() {
+  gh api -X GET search/issues -f per_page=50 \
+    -f q="\"FORGE:DEFERRED_FROM: #${PARENT}\" in:body repo:${REPO} is:issue" 2>/dev/null \
+  | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg m "$MARKER" "$JQ_PRE"'
+      [.items[] | select(trusted) | select((.body // "") | contains($m)) | .number] | sort | .[]' 2>/dev/null
+}
+verify_num() { # number -> `number<TAB>state` when a trusted, non-PR issue carries the marker; empty when not (a 404 is "not it")
+  local out rc
+  out=$(gh api "repos/${REPO}/issues/$1" 2>"$TMP/verr"); rc=$?
+  if [ "$rc" -ne 0 ]; then grep -qE '404|Not Found|410' "$TMP/verr" 2>/dev/null && return 0; return 1; fi
+  printf '%s' "$out" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg m "$MARKER" "$JQ_PRE"'
+      select(.pull_request == null) | select(trusted) | select((.body // "") | contains($m))
+      | "\(.number)\t\(.state)"' 2>/dev/null
+}
+CANON=""; CSTATE=""
+pick_verified() { # numbers... ; sets CANON/CSTATE from the first verified one; non-zero only when a fetch failed
+  local n r
+  for n in "$@"; do
+    r=$(verify_num "$n") || return 1
+    if [ -n "$r" ]; then CANON="${r%%$'\t'*}"; CSTATE="${r#*$'\t'}"; return 0; fi
+  done
+  return 0
+}
+find_canonical() {
+  local cands
+  CANON=""; CSTATE=""
+  cands=$(claim_nums) || return 1
+  # shellcheck disable=SC2086
+  pick_verified $cands || return 1
+  [ -n "$CANON" ] && return 0
+  cands=$(search_nums) || return 1
+  # shellcheck disable=SC2086
+  pick_verified $cands || return 1
+  return 0
+}
+LOOKUP_OK=""
 for attempt in 1 2; do
-  LOOKUP=$(do_lookup) && [ -n "$LOOKUP" ] && break
-  LOOKUP=""
+  if find_canonical; then LOOKUP_OK=1; break; fi
   [ "$attempt" = 1 ] && sleep "${FORGE_DEFERRED_RETRY_SLEEP:-2}"
 done
-if [ -z "$LOOKUP" ]; then
+if [ -z "$LOOKUP_OK" ]; then
   echo "DEFERRED_LOOKUP=FAILED"
   exit 3
 fi
@@ -108,27 +142,35 @@ has_entry() { # body-file path : exact checklist-line match, not substring
   grep -F -- "\`$2\`" "$1" | grep -qE "^- \[[ xX]\] \`$(printf '%s' "$2" | sed 's/[][\.*^$+?(){}|]/\\&/g')\`( |\$)"
 }
 
-NUM=$(printf '%s' "$LOOKUP" | jq -r 'first | .number // empty' 2>/dev/null)
-
-if [ -n "$NUM" ]; then
+# Append the missing items to follow-up $1 (state $2), then reopen it when closed (review-finalize needs it open).
+append_items() { # number state ; non-zero = failure
+  local num="$1" state="$2" note=""
   # Re-read the body immediately before editing (parallel builds of the same parent), then append what is missing.
-  if ! gh api "repos/${REPO}/issues/${NUM}" --jq '.body // ""' > "$TMP/body" 2>/dev/null; then
-    echo "DEFERRED_FILE=FAILED"; exit 4
-  fi
+  gh api "repos/${REPO}/issues/${num}" --jq '.body // ""' > "$TMP/body" 2>/dev/null || return 1
   : > "$TMP/add"
   while IFS="$SEP" read -r p w k; do
     has_entry "$TMP/body" "$p" || entry "$p" "$w" "$k" >> "$TMP/add"
   done < "$TMP/items"
+  [ "$state" = "closed" ] && note=" (follow-up was closed; reopened)"
   if [ -s "$TMP/add" ]; then
-    { cat "$TMP/body"; printf '\n### Added by a later build of #%s\n\n' "$PARENT"; cat "$TMP/add"; } > "$TMP/newbody"
+    { cat "$TMP/body"; printf '\n### Added by a later build of #%s%s\n\n' "$PARENT" "$note"; cat "$TMP/add"; } > "$TMP/newbody"
     if [ -n "${DRY_RUN:-}" ]; then
-      echo "DRY_RUN: gh issue edit $NUM (append $(wc -l < "$TMP/add" | tr -d ' ') item(s))" >&2
-    elif ! gh issue edit "$NUM" -R "$REPO" --body-file "$TMP/newbody" >/dev/null 2>&1; then
-      echo "DEFERRED_FILE=FAILED"; exit 4
+      echo "DRY_RUN: gh issue edit $num (append $(wc -l < "$TMP/add" | tr -d ' ') item(s))" >&2
+    else
+      gh issue edit "$num" -R "$REPO" --body-file "$TMP/newbody" >/dev/null 2>&1 || return 1
     fi
   fi
-  while IFS="$SEP" read -r p w k; do printf '%s\t%s\n' "$p" "$NUM"; done < "$TMP/items"
-  finish "$NUM" 0
+  if [ "$state" = "closed" ]; then
+    if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: gh issue reopen $num" >&2
+    else gh issue reopen "$num" -R "$REPO" >/dev/null 2>&1 || return 1; fi
+  fi
+  return 0
+}
+
+if [ -n "$CANON" ]; then
+  append_items "$CANON" "$CSTATE" || { echo "DEFERRED_FILE=FAILED"; exit 4; }
+  while IFS="$SEP" read -r p w k; do printf '%s\t%s\n' "$p" "$CANON"; done < "$TMP/items"
+  finish "$CANON" 0
   exit 0
 fi
 
@@ -153,6 +195,25 @@ else
     --body-file "$TMP/newissue" 2>/dev/null) || URL=""
   NUM=$(printf '%s' "$URL" | grep -oE '[0-9]+$' | tail -n 1)
   [ -n "$NUM" ] || { echo "DEFERRED_FILE=FAILED"; exit 4; }
+fi
+if [ -z "${DRY_RUN:-}" ]; then
+  # Claim the follow-up on the parent (REST comments are read-after-write consistent; best effort, the search still finds it).
+  gh issue comment "$PARENT" -R "$REPO" --body "<!-- FORGE:DEFERRED_ISSUE: #${NUM} -->" >/dev/null 2>&1 \
+    || echo "file-deferred-followups: warning: could not post claim marker for #${NUM} on #${PARENT}" >&2
+  # Post-create re-check: a concurrent build may have filed first. The lowest trusted number is canonical; the newer one is closed.
+  if find_canonical; then
+    if [ -n "$CANON" ] && [ "$CANON" -lt "$NUM" ]; then
+      if append_items "$CANON" "$CSTATE"; then
+        gh issue close "$NUM" -R "$REPO" --reason "not planned" --comment "Duplicate of #${CANON}: deferred items of #${PARENT} are tracked there." >/dev/null 2>&1 \
+          || echo "file-deferred-followups: warning: could not close duplicate #${NUM}" >&2
+        NUM="$CANON"
+      else
+        echo "file-deferred-followups: warning: could not move items to #${CANON}; keeping #${NUM}" >&2
+      fi
+    fi
+  else
+    echo "file-deferred-followups: warning: post-create re-check failed; keeping #${NUM}" >&2
+  fi
 fi
 while IFS="$SEP" read -r p w k; do printf '%s\t%s\n' "$p" "$NUM"; done < "$TMP/items"
 finish "$NUM" 1
