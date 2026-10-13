@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, readdirSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { runLean, MAX_ROUNDS } from "./lean.mjs";
 import { riskTier, isDocsOnly, isTestFile, isBlocking, parseFindings, choosePath, isLargeDiff } from "./risk.mjs";
@@ -70,7 +70,7 @@ function world(o = {}) {
   return w;
 }
 
-const run = (w, extra = {}) => runLean({ issue: 7, repo: "o/r", lane: "staging", cwd: "/repo", worktreeRoot: "/wt", dir: mkdtempSync(join(tmpdir(), "lean-")),
+const run = (w, extra = {}) => runLean({ issue: 7, repo: "o/r", lane: "staging", cwd: "/repo", worktreeRoot: "/wt", dir: tmpDir("lean-"),
   io: w.io, emitTelemetry: async (r) => w.telemetry.push(r), random: () => 0.5, ...extra });
 const markers = (w) => w.comments.map((c) => /FORGE:[A-Z_]+/.exec(c)[0]);
 const resumes = (w) => w.calls.filter((c) => c[0] === "runner" && c[1] === "builder");
@@ -109,7 +109,7 @@ describe("lean path: happy path and knowledge graph", () => {
   });
 
   it("writes the run log (RUN_START, PHASE_COMMIT per stage, RUN_TERMINAL)", async () => {
-    const w = world(); const dir = mkdtempSync(join(tmpdir(), "lean-"));
+    const w = world(); const dir = tmpDir("lean-");
     await run(w, { dir });
     const ev = readLog(dir, 7).map((e) => e.event);
     assert.equal(ev[0], "RUN_START"); assert.equal(ev.at(-1), "RUN_TERMINAL");
@@ -138,7 +138,7 @@ describe("lean path: review fixes (#4083)", () => {
 
   it("a gate needs-human records exactly one RUN_TERMINAL and one telemetry terminal", async () => {
     const f = { result: "FAIL", tail: "x" };
-    const w = world({ ci: [f, f, f] }); const dir = mkdtempSync(join(tmpdir(), "lean-"));
+    const w = world({ ci: [f, f, f] }); const dir = tmpDir("lean-");
     const r = await run(w, { dir });
     assert.equal(r.terminalReason, "needs-human");
     assert.equal(readLog(dir, 7).filter((e) => e.event === "RUN_TERMINAL").length, 1);
@@ -402,7 +402,7 @@ describe("runner extension and CLI wiring", () => {
   });
 
   it("run-issue --path lean dispatches to the lean engine; default stays full; auto escalates", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "lean-cli-"));
+    const dir = tmpDir("lean-cli-");
     const mk = (result) => { const seen = {}; return { seen, leanModule: { runLean: async (o) => { seen.path = o.path; return result; } }, leanIo: {}, dir, emitTelemetry: async () => {},
       io: { gh: async () => "o/r\n" }, runIssue: async () => { seen.full = true; return { terminalReason: "merged" }; } }; };
     const silent = console.log; console.log = () => {};
