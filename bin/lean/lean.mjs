@@ -168,16 +168,22 @@ export async function runCore(o) {
     const changedFiles = async () => String(await git(["diff", "--name-only", `${base}...HEAD`])).split("\n").map((s) => s.trim()).filter(Boolean);
 
     // ---- 3. builder ----
-    let result = null, attemptN = 0;
+    let result = null, attemptN = 0, validateUrl = null;
     if (!(resumed && (await changedFiles()).length > 0)) {
       await label("building");
       await builder(++attemptN, builderPrompt(issue), null);
       result = await readResult();
       const files0 = await changedFiles();
-      if (result && ["invalid", "already-fixed"].includes(result.status)) {
-        const evidence = (Array.isArray(result.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
-        if (!evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`);
-        await post(REGISTER_MARKER, `## Work-on: ${result.status}\n${result.summary ?? ""}\n\n**Evidence**\n${evidence.map((e) => `- ${e}`).join("\n")}\n\n_${usageLine()}_`);
+      const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
+      const verdict = result ? (result.status === "fixed" ? "valid" : result.status) : null;
+      const closing = ["invalid", "already-fixed"].includes(result?.status);
+      if (closing && !evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`);
+      // The validation comment (no model call): verdict, evidence, one-line summary. For invalid/already-fixed it IS the evidence comment.
+      if (verdict) {
+        const oneLine = String(result.summary ?? "").split("\n")[0].slice(0, 300);
+        validateUrl = await post("FORGE:VALIDATE", `## Validation: ${verdict}\n**Verdict:** ${verdict}\n\n**Evidence**\n${evidence.map((e) => `- ${e}`).join("\n") || "- none reported"}\n\n**Summary:** ${oneLine}`);
+      }
+      if (closing) {
         await ghc(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
         await label("invalid");
         return await finish("invalid", result.summary ?? result.status);
@@ -227,7 +233,7 @@ export async function runCore(o) {
 
     // ---- 6. the register comment ----
     const tests = Array.isArray(result?.tests) ? result.tests : [];
-    await post(REGISTER_MARKER, `## Work-on: fixed\n${result?.summary ?? ""}\n\n**Files changed**\n${files.map((f) => `- \`${f}\``).join("\n")}\n\n**Tests**\n${tests.map((t) => `- ${t}`).join("\n") || "- none reported"}\n\n**Review:** ${review.verdict} (fixes issue: ${review.fixes_issue}, regression: ${review.regression}) ${review.reason}\n\n**PR:** ${prUrl}\n\n_${usageLine()}_`);
+    await post(REGISTER_MARKER, `## Work-on: fixed\n${result?.summary ?? ""}\n\n**Files changed**\n${files.map((f) => `- \`${f}\``).join("\n")}\n\n**Tests**\n${tests.map((t) => `- ${t}`).join("\n") || "- none reported"}\n\n**Review:** ${review.verdict} (fixes issue: ${review.fixes_issue}, regression: ${review.regression}) ${review.reason}\n\n**PR:** ${prUrl}\n${validateUrl ? `**Validation:** ${validateUrl}\n` : ""}\n_${usageLine()}_`);
 
     // ---- 7. wait for CI, merge at the reviewed head ----
     const startedAt = now();

@@ -91,6 +91,24 @@ describe("core work-on", () => {
     assert.equal(ev[0], "RUN_START"); assert.equal(ev.at(-1), "RUN_TERMINAL");
   });
 
+  it("validation comment is posted before the reviewer and the in-review label; content for a fixed issue; register links it", async () => {
+    const w = world({ result: { status: "fixed", summary: "fixed foo\nmore", evidence: ["src/foo.js:3 null deref"], tests: ["t"] } });
+    await run(w);
+    const vi = w.comments.findIndex((c) => c.startsWith("<!-- FORGE:VALIDATE -->"));
+    assert.ok(vi >= 0);
+    const v = w.comments[vi];
+    assert.match(v, /Verdict:\*\* valid/);
+    assert.match(v, /src\/foo.js:3 null deref/);
+    assert.match(v, /Summary:\*\* fixed foo$/);
+    assert.ok(!v.includes("more"));
+    const pos = (x) => w.seq.indexOf(x);
+    const commentSeq = w.seq.map((s, i) => (s === "comment" ? i : -1)).filter((i) => i >= 0);
+    assert.ok(commentSeq[vi] > pos("builder") && commentSeq[vi] < pos("reviewer"));
+    assert.ok(commentSeq[vi] < pos("label:in-review"));
+    assert.match(registers(w)[0], /Validation:\*\* https:\/\/github.com\/o\/r\/issues\/7#issuecomment-\d+/);
+    assert.equal(w.comments.filter((c) => c.includes("FORGE:VALIDATE")).length, 1);
+  });
+
   it("labels transition in order, and register is posted after the PR and before the merge", async () => {
     const w = world();
     await run(w);
@@ -115,10 +133,15 @@ describe("core work-on", () => {
     const r = await run(w);
     assert.equal(r.terminalReason, "invalid");
     assert.deepEqual(w.labels, ["investigating", "building", "invalid"]);
+    const vs = w.comments.filter((c) => c.startsWith("<!-- FORGE:VALIDATE -->"));
+    assert.equal(vs.length, 1, "the validation comment is the evidence comment");
+    assert.match(vs[0], /Verdict:\*\* invalid/);
+    assert.match(vs[0], /src\/foo.js:3 already guards null/);
+    assert.match(vs[0], /Summary:\*\* not a bug/);
+    assert.equal(registers(w).length, 0, "no duplicate evidence comment");
     assert.equal(w.closed.length, 1);
     assert.equal(w.prs.length, 0);
     assert.equal(reviewers(w).length, 0);
-    assert.match(registers(w)[0], /src\/foo.js:3 already guards null/);
   });
 
   it("already-fixed with evidence also closes", async () => {
