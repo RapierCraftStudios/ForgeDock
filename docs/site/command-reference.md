@@ -155,19 +155,16 @@ Deterministically verifies a staging→main bundle's acceptance criteria against
 
 ### `/orchestrate`
 
-**Parallel multi-issue pipeline.**
+**Parallel lean work-on lanes.**
 
-Spawns sub-agents that each run the full `/work-on` pipeline in parallel.
+Resolves the issues, triages them and builds a dependency DAG (explicit `Depends on`, same-file conflicts, logical order), then launches one lane per issue (`forgedock run-issue N` as a background shell, or an agent when the CLI is unavailable), at most K at a time. Each lane runs the lean work-on and records every step on its issue.
 
 ```bash
-/orchestrate milestone launch-campaign   # All issues in a milestone
 /orchestrate #42 #43 #44                 # Specific issues
-/orchestrate next 5                      # Top 5 priority issues
-/orchestrate fast-lane                   # All staging-lane issues
-/orchestrate P0                          # All P0 issues
+/orchestrate milestone launch-campaign   # All open issues in a milestone
+/orchestrate label bug --parallel 4      # All open issues with a label, 4 lanes
+/orchestrate #42 #43 --path full         # Legacy multi-phase orchestrator
 ```
-
-Each sub-agent gets its own git worktree and GitHub issue thread. No interference between parallel agents.
 
 ---
 
