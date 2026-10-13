@@ -85,9 +85,8 @@ ISSUE_LABELS=$(echo "$ISSUE_STATE" | jq -r '[.labels[].name] | join(",")')
 - **Stranded-state rule**: `workflow:remediating` must never outlive this run. Every exit that returns `BLOCKED` or `UNFIXABLE` (including exits before Phase M1; except a `RESUME_AT_M7` run, which leaves the issue at `workflow:awaiting-merge` untouched, and except a `deferred-live-run:` exit, which leaves every label untouched: a live run owns the issue) removes `workflow:remediating` and adds `needs-human`, because at that point a human really is needed:
 
   ```bash
-  # forge#3567: `gh issue edit` is atomic, so a label missing from the repo cancels the whole call.
-  # Ensure needs-human exists, then add it and remove workflow:remediating as separate edits (add first).
-  gh label create "needs-human" --color "E4E669" --description "Pipeline stalled — requires human intervention. Managed by ForgeDock." --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
+  # forge#3567: ensure the label, add first, then remove (a missing label cancels a whole edit)
+  gh label create "needs-human" --color "E4E669" --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --remove-label "workflow:remediating" 2>/dev/null || true # allowlist:check-command-side-effects
   ```
@@ -216,9 +215,8 @@ BLOCK_COMMENTS=$(gh api repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments \
 if [ "${DRY_RUN:-false}" = "true" ]; then
   echo "DRY_RUN: would replace needs-human / workflow:remediating with workflow:in-review on issue #{ISSUE_NUMBER}"
 else
-  # forge#3567: ensure the target label, then add and remove as separate single-label edits (add first)
-  # so one label missing from the repo cannot cancel the others.
-  gh label create "workflow:in-review" --color "5319E7" --description "Pipeline: PR created, under review. Managed by ForgeDock." --force {GH_FLAG} 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+  # forge#3567: ensure label, add first, single-label removes
+  gh label create "workflow:in-review" --color "5319E7" --force {GH_FLAG} 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:in-review" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --remove-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --remove-label "workflow:remediating" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
@@ -573,8 +571,7 @@ if [ "$(printf '%s' "$PR_LIVE" | jq -r '.state // ""' 2>/dev/null)" = "MERGED" ]
   case "$TIER" in
     universal) bash "$TRANSITION_SCRIPT" {ISSUE_NUMBER} {GH_FLAG} merged ;;
     prose|*)
-      # forge#3567: the remove list below is atomic and names workflow:remediating; ensure it exists so an un-synced repo does not skip the cleanup
-      gh label create "workflow:remediating" --color "C5DEF5" --description "Pipeline: autonomous remediation pending (no human action needed). Managed by ForgeDock." --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
+      gh label create "workflow:remediating" --color "C5DEF5" --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
       gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
       ;;
   esac
@@ -739,8 +736,7 @@ if [ "$MERGE_STATE" = "MERGED" ]; then
   case "$TIER" in
     universal) bash "$TRANSITION_SCRIPT" {ISSUE_NUMBER} {GH_FLAG} merged ;;
     prose|*)
-      # forge#3567: the remove list below is atomic and names workflow:remediating; ensure it exists so an un-synced repo does not skip the cleanup
-      gh label create "workflow:remediating" --color "C5DEF5" --description "Pipeline: autonomous remediation pending (no human action needed). Managed by ForgeDock." --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
+      gh label create "workflow:remediating" --color "C5DEF5" --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
       gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
       ;;
   esac

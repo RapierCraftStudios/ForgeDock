@@ -459,7 +459,7 @@ Use the existing PR number and continue.
 RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
 case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} in-review ;;
-  prose) gh label create "workflow:remediating" --color "C5DEF5" --description "Pipeline: autonomous remediation pending (no human action needed). Managed by ForgeDock." --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
+  prose) gh label create "workflow:remediating" --color "C5DEF5" --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
          gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:in-review" 2>/dev/null || true # allowlist:check-command-side-effects
          gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:investigating" --remove-label "workflow:ready-to-build" --remove-label "workflow:building" --remove-label "workflow:awaiting-merge" --remove-label "workflow:remediating" --remove-label "workflow:merged" --remove-label "workflow:invalid" --remove-label "workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects ;;
 esac
@@ -572,9 +572,8 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 - **Remediation-pending handoff (shared by the ci-gate, in-pr-fix and base-conflict cases below)** <!-- Added: forge#3541 -->: these three cases are autonomous pipeline work, not a human decision, so the issue must NOT carry `needs-human` while remediation is pending. `needs-human` is a human-gate signal (operators alert on it, and orchestrate holds DAG dependents as GATED on it). Mark the handoff with the non-human state `workflow:remediating` instead, and clear any `needs-human` that review-pr Phase 8 already set for the ci-gate refusal. `work-on:remediate` accepts either label (a bare `needs-human` from an older run still works), clears `workflow:remediating` on every exit, and re-asserts `needs-human` only when it cannot fix the PR. Run this block, then return `REVIEW_RESULT: status: NEXT`:
   ```bash
-  # forge#3567: a repo not re-synced via `forgedock labels setup` lacks workflow:remediating, and
-  # `gh issue edit` fails atomically on a missing label; ensure it first (best-effort, add before remove).
-  gh label create "workflow:remediating" --color "C5DEF5" --description "Pipeline: autonomous remediation pending (no human action needed). Managed by ForgeDock." --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
+  # forge#3567: ensure the label first, add before remove
+  gh label create "workflow:remediating" --color "C5DEF5" --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
   RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
   case "$TIER" in
     adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} remediating ;;
@@ -596,8 +595,7 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
   - **Bound already used** (including the re-invocation after a remediation that did not land): first read `max_severity=` from the latest trusted `FORGE:INPR_FIX` marker on the PR (`gh pr view {PR_NUMBER} {GH_FLAG} --json comments`, author-trusted as elsewhere in this phase; absent means MEDIUM). **HIGH/CRITICAL are never waived**: remove `workflow:remediating`, label the issue `needs-human`, leave the PR unmerged and return `REVIEW_RESULT: status: BLOCKED` with blocker "in-pr fix not landed (HIGH/CRITICAL, no waiver)". The `FORGE:INPR_FIX` work order stays on the PR for the human. For MEDIUM, waive the gate for the current head. Remove `needs-human` and `workflow:remediating` (restoring `workflow:in-review`), post `<!-- FORGE:INPR_FIX_WAIVED: head=<current head SHA> -->` on the **PR**, then re-invoke Phase R3 once under the `STALE_REREVIEW` bound. That review files the remaining findings as issues and merges as it would have before this gate. Only if `STALE_REREVIEW` is also exhausted, label the issue `needs-human`.
     ```bash
     INPR_WAIVE_HEAD=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq .headRefOid)
-    # forge#3567: add first, then single-label removes, so one missing label cannot cancel the swap
-    gh label create "workflow:in-review" --color "5319E7" --description "Pipeline: PR created, under review. Managed by ForgeDock." --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
+    gh label create "workflow:in-review" --color "5319E7" --force {GH_FLAG} 2>/dev/null || true # allowlist:check-command-side-effects
     gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:in-review" 2>/dev/null || true # allowlist:check-command-side-effects
     gh issue edit {NUMBER} {GH_FLAG} --remove-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
     gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:remediating" 2>/dev/null || true # allowlist:check-command-side-effects
