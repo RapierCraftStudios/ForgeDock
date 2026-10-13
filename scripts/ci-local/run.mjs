@@ -180,6 +180,16 @@ function changeHash(ctx) {
   if (!ctx.changeHash) ctx.changeHash = sha256(JSON.stringify([ctx.plan.merge_base, ctx.plan.changed_files.map((f) => `${f}:${fileHash(ctx.repo, f)}`)]));
   return ctx.changeHash;
 }
+// forge#4060: service containers are an execution-environment input; they must enter every key derived from stepKey
+// (single-flight, persisted result cache, cost probe). Order-insensitive; absent, undefined and [] fingerprint identically.
+function servicesFp(job) {
+  const svcs = Array.isArray(job.services) ? job.services : [];
+  return JSON.stringify(svcs.map((s) => {
+    const v = s || {};
+    const env = v.env || {};
+    return [v.name, v.image, Object.keys(env).sort().map((k) => `${k}=${env[k]}`), (v.ports || []).map(String), v.options || ''];
+  }).sort((a, b) => JSON.stringify(a) < JSON.stringify(b) ? -1 : 1));
+}
 function stepKey(step, job, ctx) {
   const sel = step.scope || {};
   const first = (shellSplit(step.command) || [])[0] || '';
@@ -188,7 +198,7 @@ function stepKey(step, job, ctx) {
     ? { files: sel.files.map((f) => `${f}:${fileHash(ctx.repo, f)}`), config: configFilesHash(ctx) }
     : { change: changeHash(ctx), selected: sel.files || sel.selector || '' };
   const env = { ...job.env, ...step.env };
-  return sha256(JSON.stringify([step.command, step.cwd, step.shell, Object.keys(env).sort().map((k) => `${k}=${env[k]}`), toolVersion(path.basename(first)), process.version, inputs]));
+  return sha256(JSON.stringify([step.command, step.cwd, step.shell, Object.keys(env).sort().map((k) => `${k}=${env[k]}`), toolVersion(path.basename(first)), process.version, inputs, servicesFp(job)]));
 }
 
 function durKey(step) { return sha256(`${step.command}\0${step.cwd || ''}`).slice(0, 40); }
