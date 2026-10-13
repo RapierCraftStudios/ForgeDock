@@ -221,3 +221,8 @@ Cite: #3699 / PR #3885.
 
 PR #3912 touched `orchestrate` (commands/orchestrate/phase-4-execution.md). See FORGE:BUILDER comment on issue #3873 for full change list.
 Cite: #3873 / PR #3912.
+
+## Entry 2026-10-13 — fix: base-conflict BLOCKED strands issue (#3516)
+
+PR #4047 touched `orchestrate`. See FORGE:BUILDER comment on issue #3516 for full change list.
+Cite: #3516 / PR #4047.
