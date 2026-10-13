@@ -56,7 +56,7 @@
 #                 lists the deferred issue numbers confirmed open, one per line; a deferred item
 #                 demotes only when its number is listed (closed, unreadable or absent: no demotion).
 #                 The caller lists a number only after verifying it is an open issue (not a PR) whose
-#                 body carries `FORGE:DEFERRED_FROM: #<merge issue>` and the path.
+#                 body carries `FORGE:DEFERRED_FROM: #<merge issue>` and a checklist line for the exact path.
 #                 `--merge-issue <N>` is the PR's linked issue: `deferred → #N` never demotes (that
 #                 issue is always open during review, so it is no follow-up).
 #                 Never demoted: CRITICAL/HIGH, `not-affected` items, safety-exempt findings
