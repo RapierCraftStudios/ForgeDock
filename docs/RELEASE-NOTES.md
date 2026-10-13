@@ -2,6 +2,15 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## v1.19.1: build-time self-review, ci-local under concurrency, review roster gates
+
+- **Build-time self-review (B5.6, #3971).** After implement, the risk-tier review roster's domain agents review the staged diff, and the builder fixes CONFIRMED/LIKELY findings at MEDIUM or above in one repair round before validate. Small or docs-only diffs skip. Each build that runs it spends extra reviewer tokens, which the official review should save back through fewer findings and remediation rounds. Off switch: `FORGE_SELFREVIEW=off`. Wait budget: `SELFREVIEW_WAIT_SECS` (default 600, max 1800). Telemetry: `build_selfreview`.
+- **ci-local (#4057).** The SEC-3 "every changed source reaches a test" check uses the step's own ecosystem tests, not only the step's candidates, so unrelated single-test steps are skipped instead of widened. Identical checks in several jobs run once per invocation (`cache=dedup`). Machine slots are granted in FIFO ticket order. Job lines and `ci_local_check` carry `wait_ms` apart from execution `duration_ms`. Jobs run shortest first.
+- **Review roster.** The Auth path gate also matches common auth file names (session, token, permission, login, API key) (#3847). The Infra gate covers deploy scripts, entrypoints and `compose.yaml` (#3851). The Security-only fix-PR roster applies only to fix PRs of at most 150 changed lines with a known size; larger or unknown-size fix PRs get the standard roster (#3848).
+- **Merge gate.** `review-finalize.sh verdict` derives OTHER_BLOCKING itself and persists it for `merge-gate`, so a blocking result that a base conflict or purpose regression does not explain can no longer be merged on a missing flag (#3514).
+
+Action: none required. Expect more reviewer agents per build (self-review) and per large fix PR (roster cap).
+
 ## Deferred follow-up lookup no longer duplicates issues (#3606)
 
 `scripts/file-deferred-followups.sh` now finds an existing follow-up through the `FORGE:DEFERRED_ISSUE` claim marker it posts on the parent issue (REST comments, read-after-write consistent) before falling back to the lagging search index, searches closed issues as well as open ones (a closed follow-up is reopened), and after creating re-checks once: if a concurrent build filed a lower-numbered trusted follow-up, the items move to it and the newer issue is closed as a duplicate. Failed lookups still exit non-zero (`DEFERRED_LOOKUP=FAILED`).

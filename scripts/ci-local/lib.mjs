@@ -29,10 +29,18 @@ export function commandExists(name) {
   return r.code === 0;
 }
 
+// Memoized per process: stepKey runs for every step (twice: cost ordering and execution), and an unmemoized
+// `<tool> --version` is a synchronous spawn that blocks the scheduler and burns the budget (#4068 review CONC-1).
+const TOOL_VERSIONS = new Map();
 export function toolVersion(name) {
-  if (!/^[A-Za-z0-9._+-]+$/.test(name) || !commandExists(name)) return '';
-  const r = run(name, ['--version'], { timeout: 5000 });
-  return (r.out || r.err).split('\n')[0].slice(0, 120);
+  if (TOOL_VERSIONS.has(name)) return TOOL_VERSIONS.get(name);
+  let v = '';
+  if (/^[A-Za-z0-9._+-]+$/.test(name) && commandExists(name)) {
+    const r = run(name, ['--version'], { timeout: 5000 });
+    v = (r.out || r.err).split('\n')[0].slice(0, 120);
+  }
+  TOOL_VERSIONS.set(name, v);
+  return v;
 }
 
 export function hostClass() {
