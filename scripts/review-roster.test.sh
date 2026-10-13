@@ -95,6 +95,19 @@ run ".github/workflows/ci.yml" --scores "$SC_QUIET" --changed-lines 20 --changed
 expect_has "infra path" infra
 run "docker-compose.prod.yml" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_has "docker path" infra
+# Infra path gate covers deploy scripts, container entrypoints and Compose v2 names (basename-anchored)
+for f in scripts/deploy.sh scripts/deploy-prod.sh docker-entrypoint.sh svc/docker-entrypoint.sh compose.yaml compose.yml; do
+  run "$f" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+  expect_has "infra path: $f" infra
+done
+for f in scripts/resolve-deploy-gate.sh commands/deploy-pr.md; do
+  run "$f" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+  expect_not "no-infra-path-$f" infra
+done
+run "$(printf 'README.md\nscripts/deploy.sh')" --scores "$SC_QUIET" --changed-lines 20 --changed-files 2
+expect_has "infra-path-multi-file-list" infra
+run "Scripts/Deploy.SH" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+expect_has "infra-path-case-insensitive" infra
 run "db/migrations/0042_add.sql" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_has "migration path" database
 run "sdk/node/src/index.ts" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1

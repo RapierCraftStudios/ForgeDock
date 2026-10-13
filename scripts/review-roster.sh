@@ -171,7 +171,7 @@ if [ "$CHURN" = "true" ] || [ "$DANGER" = "true" ]; then
 fi
 hit() { printf '%s\n' "$FILES" | grep -qiE "$1"; }
 hit '(^|[/_.-])(auth|authn|authz|session|sessions|jwt|oauth|login|logout|password|trust[-_]?filter|trusted[-_a-z]*)([/_.-]|$)' && { add_agent Auth; trig auth-path; }
-hit '^\.github/|(^|/)Dockerfile|docker-compose|(^|/)(deploy|infra|traefik|nginx|k8s|helm|terraform)/|\.tf$' && { add_agent Infra; trig infra-path; }
+hit '^\.github/|(^|/)Dockerfile|docker-compose|(^|/)(docker-)?compose[^/]*\.ya?ml$|(^|/)deploy[^/]*\.sh$|(^|/)docker-entrypoint[^/]*$|(^|/)(deploy|infra|traefik|nginx|k8s|helm|terraform)/|\.tf$' && { add_agent Infra; trig infra-path; }
 hit 'migration|\.sql$' && { add_agent Database; trig migration-path; }
 hit '^sdk/|openapi.*\.json$|openapi-versions/' && { add_agent API; trig sdk-path; }
 hit '^bin/engine' && { add_agent Concurrency; trig bin-engine; }
