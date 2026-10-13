@@ -671,6 +671,23 @@ export function isClaudeCliAvailable(
 // gated on the cached `claude --version` probe, never on help-text scraping.
 const CLI_MIN_VERSION_MODEL_FLAG = [1, 0, 0];
 const CLI_MIN_VERSION_MAX_TURNS_FLAG = [1, 0, 0];
+// forge#4065: minimal phase sessions. Conservative floor: the oldest version
+// known to accept `--strict-mcp-config`, `--mcp-config` and
+// `--disable-slash-commands` together. Unparseable/older => flags omitted.
+const CLI_MIN_VERSION_MINIMAL_SESSION = [2, 1, 296];
+
+// Phase commands whose spec never invokes `Skill(...)`; only these run with
+// `--disable-slash-commands` (spec-coverage test enforces the invariant).
+export const SKILL_FREE_PHASE_COMMANDS = Object.freeze(["work-on/investigate", "work-on/close"]);
+
+// Engine phase commands (mirrors PHASES in bin/engine/phases.mjs; a test enforces it). Only these
+// get the minimal-session group: other `forgedock run` commands (qa-sweep, analytics, geo-audit,
+// autopilot) may need the operator's MCP servers and skills.
+export const ENGINE_PHASE_COMMANDS = Object.freeze([
+  "work-on/investigate", "work-on/decompose", "work-on/build", "work-on/review", "work-on/remediate", "work-on/close",
+]);
+
+const MINIMAL_SESSION_MCP_CONFIG = '{"mcpServers":{}}';
 
 /**
  * Extract a `major.minor.patch` version from probe output (the text after the
@@ -702,7 +719,7 @@ function versionAtLeast(version, min) {
  *
  * @param {string} [cwd]
  * @param {object} [opts] - Forwarded to `isClaudeCliAvailable()` (test seams).
- * @returns {{model: boolean, maxTurns: boolean}}
+ * @returns {{model: boolean, maxTurns: boolean, strictMcp: boolean, disableSlash: boolean}}
  */
 export function getClaudeCliCapabilities(cwd = process.cwd(), opts = {}) {
   isClaudeCliAvailable(cwd, opts);
@@ -710,7 +727,51 @@ export function getClaudeCliCapabilities(cwd = process.cwd(), opts = {}) {
   return {
     model: versionAtLeast(version, CLI_MIN_VERSION_MODEL_FLAG),
     maxTurns: versionAtLeast(version, CLI_MIN_VERSION_MAX_TURNS_FLAG),
+    strictMcp: versionAtLeast(version, CLI_MIN_VERSION_MINIMAL_SESSION),
+    disableSlash: versionAtLeast(version, CLI_MIN_VERSION_MINIMAL_SESSION),
   };
+}
+
+/**
+ * Build the minimal-session argv group (forge#4065): no operator MCP servers
+ * and, for Skill-free phases only, no slash-command/skill listing. Operator
+ * settings are deliberately NOT skipped (the CLI setting-sources flag is not passed) so
+ * ForgeDock's user-scope PreToolUse/SubagentStop hooks keep running.
+ * Non-engine commands, `FORGEDOCK_FULL_SESSION=1` (exactly) or an unsupported CLI yield `[]`.
+ *
+ * @param {string} commandName
+ * @param {{strictMcp: boolean, disableSlash: boolean}} caps
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string[]}
+ */
+export function buildMinimalSessionFlags(commandName, caps, env = process.env) {
+  if (env?.FORGEDOCK_FULL_SESSION === "1" || !caps) return [];
+  const name = String(commandName ?? "").trim().replace(/^\/+/, "").replace(/\.md$/i, "");
+  if (!ENGINE_PHASE_COMMANDS.includes(name)) return [];
+  const flags = [];
+  if (caps.strictMcp) flags.push("--strict-mcp-config", "--mcp-config", MINIMAL_SESSION_MCP_CONFIG);
+  if (caps.disableSlash && SKILL_FREE_PHASE_COMMANDS.includes(name)) flags.push("--disable-slash-commands");
+  return flags;
+}
+
+/**
+ * Lean-path (#4081) minimal session flags: reuses the #4065 capability probe. Every phase is Skill-free, so slash
+ * commands are off too; user-scope settings and hooks still load. Unsupported CLI or FORGEDOCK_FULL_SESSION=1 yields [].
+ */
+export function buildLeanSessionFlags(caps, env = process.env) {
+  // Same group as the Skill-free engine phases (no MCP, no slash commands). Operator settings stay loaded so the
+  // user-scope safety hooks keep running, exactly like #4077.
+  return buildMinimalSessionFlags("work-on/investigate", caps, env);
+}
+
+/**
+ * Read-only reviewer tools (#4081): only Read, Grep and Glob. Uses `--tools` where the capability probe says the
+ * CLI is recent enough, else denies the mutating tools with `--disallowedTools`.
+ */
+export function buildReadOnlyToolFlags(caps) {
+  return caps?.strictMcp
+    ? ["--tools", "Read,Grep,Glob"]
+    : ["--disallowedTools", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"];
 }
 
 /**
@@ -1443,6 +1504,9 @@ export function runCliBackend({
   model = null,
   maxTurns = null,
   leaseHolder = null,
+  sessionFlags = [],
+  // #4081: extra argv (e.g. ["--resume", id]) appended verbatim, never dropped by FORGEDOCK_FULL_SESSION.
+  extraArgs = [],
 }) {
   // forge#3589: opt-in flags, validated again here as defence in depth. Callers
   // (runCommand) are responsible for the version gate. Unset -> argv unchanged.
@@ -1451,6 +1515,12 @@ export function runCliBackend({
   const optionalFlags = [
     ...(modelFlag ? ["--model", modelFlag] : []),
     ...(maxTurnsFlag ? ["--max-turns", String(maxTurnsFlag)] : []),
+    // forge#4065: minimal-session group, built by buildMinimalSessionFlags().
+    // Re-checked here so FORGEDOCK_FULL_SESSION=1 always wins.
+    ...(process.env.FORGEDOCK_FULL_SESSION === "1" || !Array.isArray(sessionFlags)
+      ? []
+      : sessionFlags.map(String)),
+    ...(Array.isArray(extraArgs) ? extraArgs.map(String) : []),
   ];
   const rawTimeout = parseInt(process.env.FORGEDOCK_CLI_TIMEOUT_MS, 10);
   const configuredTimeout = resolveConfiguredCliTimeout(cwd);
@@ -1738,6 +1808,7 @@ export function runCliBackend({
     // bin/batch-runner.mjs's `tokenCost()` (`input + output`).
     const stdoutTrimmed = stdout.trim();
     let parsedResult = null;
+    let sessionId = null;
     let usage = null;
     let turns = null;
     // forge#3696: envelope cost/duration per attempt (null when absent or non-finite).
@@ -1750,6 +1821,7 @@ export function runCliBackend({
         if (Number.isFinite(parsed.total_cost_usd)) costUsd = parsed.total_cost_usd;
         if (Number.isFinite(parsed.duration_ms)) durationMs = parsed.duration_ms;
         parsedResult = typeof parsed.result === "string" ? parsed.result : null;
+        if (typeof parsed.session_id === "string" && parsed.session_id) sessionId = parsed.session_id;
         if (parsed.usage && typeof parsed.usage === "object") {
           usage = {
             input_tokens: toFiniteUsageNumber(parsed.usage.input_tokens),
@@ -1835,6 +1907,7 @@ export function runCliBackend({
       turns,
       costUsd,
       durationMs,
+      sessionId,
       backend: "cli",
       // forge#3521: the phase's final reply (the CLI envelope's `.result`), so
       // callers can read its structured `*_RESULT` block. Additive; "" when absent.
@@ -2715,10 +2788,13 @@ export async function runCommand(opts = {}) {
       : null;
     let cliModel = commandSettings.model ?? runLevelModel;
     let cliMaxTurns = commandSettings.maxTurns;
-    if (resolvedBin && (cliModel || cliMaxTurns)) {
+    // forge#4065: minimal phase session flags, computed per call (never cached).
+    let sessionFlags = [];
+    if (resolvedBin) {
       const caps = getClaudeCliCapabilities(cwd);
       if (cliModel && !caps.model) cliModel = null;
       if (cliMaxTurns && !caps.maxTurns) cliMaxTurns = null;
+      sessionFlags = buildMinimalSessionFlags(commandName, caps);
     }
     if (!resolvedBin && backend === "auto") {
       resolvedBackend = "api";
@@ -2741,6 +2817,7 @@ export async function runCommand(opts = {}) {
           model: cliModel,
           maxTurns: cliMaxTurns,
           leaseHolder,
+          sessionFlags,
         },
       });
     }

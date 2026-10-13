@@ -913,12 +913,14 @@ export const PHASES = [
         // forge#3542: only a full-line marker in a trusted comment counts.
         // forge#4021: an in-PR fix re-armed by the re-gate (the newest trail after the newest marker reports
         // INPR-FIX-REQUESTED) needs a FRESH marker, or M0's per-kind guard sees the first trail as this dispatch's
-        // and returns ALREADY_DONE. The marker count is also the bound (detectOutcome allows one re-arm).
+        // and returns ALREADY_DONE. The marker count is also the bound (detectOutcome allows one re-arm); it is
+        // enforced here too, where the marker is posted, so a crash-resume after round 2 never posts marker 3.
         const sentinel = `FORGE:${boundMarker}: pr=${pr}`;
         let markerAt = -1;
         comments.forEach((b, i) => { if (hasSentinelLine(b, sentinel)) markerAt = i; });
         const trailAfter = markerAt < 0 ? null : latestMarked(comments.slice(markerAt + 1), PHASE_MARKERS.remediate.header, PHASE_MARKERS.remediate.completionMarker);
-        const rearmed = kind === "inpr-fix" && trailAfter !== null && INPR_REQUESTED_RE.test(trailAfter);
+        const priorMarkers = comments.filter((b) => hasSentinelLine(b, sentinel)).length;
+        const rearmed = kind === "inpr-fix" && trailAfter !== null && INPR_REQUESTED_RE.test(trailAfter) && priorMarkers < 2;
         if (markerAt < 0 || rearmed) {
           await io.gh(["issue", "comment", String(state.issue), "--body",
             `${marker}\nReview handed PR #${pr} to remediation (${kind}); the engine is dispatching it once.`]);
