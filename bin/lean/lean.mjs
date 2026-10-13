@@ -10,6 +10,7 @@ import { appendEvent } from "../engine/runlog.mjs";
 import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION } from "../engine.mjs";
 import { openDependency } from "../engine/phases.mjs";
+import { renderValidate, renderPlan, renderReview, renderRegister, renderPrBody } from "./render.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
@@ -30,7 +31,7 @@ const num = (v) => (Number.isFinite(v) ? v : null);
  */
 export async function runCore(o) {
   const { issue, repo, lane, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
-    ciMaxMinutes = 360, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    ciMaxMinutes = 360, mergeWait = "required", onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const base = `origin/${lane}`;
@@ -168,7 +169,7 @@ export async function runCore(o) {
     const changedFiles = async () => String(await git(["diff", "--name-only", `${base}...HEAD`])).split("\n").map((s) => s.trim()).filter(Boolean);
 
     // ---- 3. builder ----
-    let result = null, attemptN = 0, validateUrl = null;
+    let result = null, attemptN = 0, validateUrl = null, planUrl = null, reviewUrl = null;
     if (!(resumed && (await changedFiles()).length > 0)) {
       await label("building");
       await builder(++attemptN, builderPrompt(issue), null);
@@ -179,10 +180,7 @@ export async function runCore(o) {
       const closing = ["invalid", "already-fixed"].includes(result?.status);
       if (closing && !evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`);
       // The validation comment (no model call): verdict, evidence, one-line summary. For invalid/already-fixed it IS the evidence comment.
-      if (verdict) {
-        const oneLine = String(result.summary ?? "").split("\n")[0].slice(0, 300);
-        validateUrl = await post("FORGE:VALIDATE", `## Validation: ${verdict}\n**Verdict:** ${verdict}\n\n**Evidence**\n${evidence.map((e) => `- ${e}`).join("\n") || "- none reported"}\n\n**Summary:** ${oneLine}`);
-      }
+      if (verdict) validateUrl = await post("FORGE:VALIDATE", renderValidate(result, verdict));
       if (closing) {
         await ghc(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
         await label("invalid");
@@ -190,6 +188,7 @@ export async function runCore(o) {
       }
       if (result?.status === "blocked") return await needsHuman(`Builder is blocked: ${result.summary ?? "(no summary)"}`);
       if (!files0.length) return await needsHuman(`Builder made no commit${result ? ` (status "${result.status}")` : " and wrote no result.json"}.\n\n${result?.summary ?? ""}`);
+      planUrl = await post("FORGE:PLAN", renderPlan(result, files0));
     }
 
     // ---- 4. review (one retry through the same builder session) ----
@@ -218,13 +217,14 @@ export async function runCore(o) {
       if (!review) return await needsHuman("Reviewer returned no parseable verdict twice (re-review).");
       if (review.fail) return await needsHuman(`Review FAIL twice. Last reason: ${review.reason}`);
     }
+    reviewUrl = await post("FORGE:REVIEW", renderReview(review));
     ev({ event: "PHASE_COMMIT", phase: "review" });
 
     // ---- 5. push + PR ----
     const files = await changedFiles();
     await git(["push", "-u", "origin", branch]);
     const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghc(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
-      "--title", `${iss.title} (#${issue})`, "--body", `Closes #${issue}\n\n${result?.summary ?? ""}`])).trim();
+      "--title", `${iss.title} (#${issue})`, "--body", renderPrBody({ issue, result, gitFiles: files })])).trim();
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
     if (!Number.isInteger(pr)) return await needsHuman(`Could not parse the PR number from: ${prOut.slice(0, 200)}`);
     ev({ event: "PR_OPENED", pr });
@@ -232,27 +232,45 @@ export async function runCore(o) {
     const localHead = String(await git(["rev-parse", "HEAD"])).trim();
 
     // ---- 6. the register comment ----
-    const tests = Array.isArray(result?.tests) ? result.tests : [];
-    await post(REGISTER_MARKER, `## Work-on: fixed\n${result?.summary ?? ""}\n\n**Files changed**\n${files.map((f) => `- \`${f}\``).join("\n")}\n\n**Tests**\n${tests.map((t) => `- ${t}`).join("\n") || "- none reported"}\n\n**Review:** ${review.verdict} (fixes issue: ${review.fixes_issue}, regression: ${review.regression}) ${review.reason}\n\n**PR:** ${prUrl}\n${validateUrl ? `**Validation:** ${validateUrl}\n` : ""}\n_${usageLine()}_`);
-
-    // ---- 7. wait for CI, merge at the reviewed head ----
-    const startedAt = now();
-    let pollIndex = 0, gateHead = null;
-    for (;;) {
-      await renew();
-      const w = await io.waitCiGreen(pr, repo, 0).catch(() => ({ rc: 2, text: "" }));
-      if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; break; }
-      if (w.rc === 1) return await needsHuman(`Remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`);
-      if (now() - startedAt >= ciMaxMinutes * 60000) {
-        // Slow CI is never a needs-human: leave the PR open and resumable.
-        ev({ event: "CI_PENDING_WAIT", state: "end", pr, result: "timeout" });
-        return await finish("ci-pending", `PR #${pr} still waiting on CI after ${ciMaxMinutes} min`, { pr });
-      }
-      onProgress({ event: "phase_paused", phase: "merge", detail: `CI pending on PR #${pr}` });
-      await sleep(ciPollDelayMs(pollIndex++, random));
+    // merge policy: required (default) | all | none
+    let policy = mergeWait, required = [];
+    if (mergeWait === "required") {
+      try { required = (await io.requiredChecks?.(lane)) ?? []; } catch { required = []; }
     }
-    if (gateHead && !(localHead.startsWith(gateHead) || gateHead.startsWith(localHead))) {
-      return await needsHuman(`CI passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`);
+    const policyText = mergeWait === "required" ? (required.length ? `required (${required.join(", ")})` : "required (no required checks: merged right after review)") : mergeWait;
+    await post(REGISTER_MARKER, renderRegister({ result, gitFiles: files, review, links: { validate: validateUrl, plan: planUrl, review: reviewUrl }, prUrl, usage: usageLine(), policy: policyText }));
+
+    // ---- 7. wait per policy, merge at the reviewed head ----
+    if (policy === "none" || (policy === "required" && !required.length)) {
+      // merge right after review
+    } else {
+      const startedAt = now();
+      let pollIndex = 0, gateHead = null;
+      for (;;) {
+        await renew();
+        if (policy === "all") {
+          const w = await io.waitCiGreen(pr, repo, 0).catch(() => ({ rc: 2, text: "" }));
+          if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; break; }
+          if (w.rc === 1) return await needsHuman(`Remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`);
+        } else {
+          let states = [];
+          try { states = (await io.checkStates(pr)) ?? []; } catch { states = []; }
+          const st = (n) => states.find((x) => x.name === n)?.state ?? "pending";
+          const failed = required.filter((n) => st(n) === "failure");
+          if (failed.length) return await needsHuman(`Required check(s) failed on PR #${pr}: ${failed.join(", ")}`);
+          if (required.every((n) => st(n) === "success")) break;
+        }
+        if (now() - startedAt >= ciMaxMinutes * 60000) {
+          // Slow CI is never a needs-human: leave the PR open and resumable.
+          ev({ event: "CI_PENDING_WAIT", state: "end", pr, result: "timeout" });
+          return await finish("ci-pending", `PR #${pr} still waiting on CI after ${ciMaxMinutes} min`, { pr });
+        }
+        onProgress({ event: "phase_paused", phase: "merge", detail: `CI pending on PR #${pr}` });
+        await sleep(ciPollDelayMs(pollIndex++, random));
+      }
+      if (gateHead && !(localHead.startsWith(gateHead) || gateHead.startsWith(localHead))) {
+        return await needsHuman(`CI passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`);
+      }
     }
     await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
     await ghc(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});

@@ -99,6 +99,13 @@ function readLeanSetting(key, cwd = process.cwd()) {
   } catch { return undefined; }
 }
 // core is the default; lean and auto are aliases of core. full is the legacy multi-phase pipeline.
+/** forge.yaml `engine.merge_wait` (required|all|none); undefined when absent or invalid. */
+export function readMergeWait(cwd = process.cwd()) {
+  try {
+    const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.merge_wait ?? "").trim();
+    return ["required", "all", "none"].includes(v) ? v : undefined;
+  } catch { return undefined; }
+}
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
 
 export function runDir() { return join(homedir(), ".forge", "runs"); }
@@ -459,7 +466,7 @@ export async function runFromCli(argv, deps = {}) {
     const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo: leanRepo });
     const lres = await runCore({ issue, repo: leanRepo, lane, cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     console.log(`issue #${issue} → ${lres.terminalReason}`);
     if (!["merged", "invalid"].includes(lres.terminalReason)) console.log(lres.detail ?? "");
     return lres;
@@ -651,7 +658,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
     issues, parallel,
     readBody: async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
     runOne: (n) => runCore({ issue: n, repo, lane, cwd: process.cwd(), dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry,
-      ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) }),
+      ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) }),
     onUpdate: (r) => console.log(`#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`),
   });
   console.log("\n" + formatTable(rows));

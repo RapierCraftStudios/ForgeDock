@@ -31,6 +31,22 @@ export function makeLeanIo({ repo }) {
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000 })).stdout;
   return {
     gh: run("gh"), git: run("git"), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
+    /** Names of the checks the base branch requires (contexts + checks). [] on 404 / no protection. */
+    async requiredChecks(lane) {
+      try {
+        const j = JSON.parse(await run("gh")(["api", `repos/${repo}/branches/${lane}/protection/required_status_checks`]));
+        return [...new Set([...(j.contexts ?? []), ...(j.checks ?? []).map((c) => c.context)].filter(Boolean))];
+      } catch { return []; }
+    },
+    /** [{name, state: success|failure|pending}] for the PR's checks. */
+    async checkStates(pr) {
+      const j = JSON.parse(await run("gh")(["pr", "view", String(pr), "-R", repo, "--json", "statusCheckRollup"]));
+      return (j.statusCheckRollup ?? []).map((c) => {
+        const v = String(c.conclusion || c.state || "").toUpperCase();
+        const state = ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(v) ? "success" : ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(v) ? "failure" : "pending";
+        return { name: c.name ?? c.context, state };
+      });
+    },
     async transitionLabel(issue, state) { await pexec("bash", [script("transition-label.sh"), String(issue), "-R", repo, state], { timeout: 60000 }); },
     fs: {
       read: async (p) => readFileSync(p, "utf8"),

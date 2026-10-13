@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { runCore } from "./lean.mjs";
+import { renderValidate, renderPlan, renderReview, renderRegister, renderPrBody, cell, NR } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
@@ -105,7 +106,7 @@ describe("core work-on", () => {
     const commentSeq = w.seq.map((s, i) => (s === "comment" ? i : -1)).filter((i) => i >= 0);
     assert.ok(commentSeq[vi] > pos("builder") && commentSeq[vi] < pos("reviewer"));
     assert.ok(commentSeq[vi] < pos("label:in-review"));
-    assert.match(registers(w)[0], /Validation:\*\* https:\/\/github.com\/o\/r\/issues\/7#issuecomment-\d+/);
+    assert.match(registers(w)[0], /Validation: https:\/\/github.com\/o\/r\/issues\/7#issuecomment-\d+/);
     assert.equal(w.comments.filter((c) => c.includes("FORGE:VALIDATE")).length, 1);
   });
 
@@ -195,18 +196,18 @@ describe("core work-on", () => {
 
   it("red remote CI is needs-human; slow CI polls with backoff and ends ci-pending, never needs-human", async () => {
     const w = world({ waits: [{ rc: 1, text: "lint failed" }] });
-    assert.equal((await run(w)).terminalReason, "needs-human");
+    assert.equal((await run(w, { mergeWait: "all" })).terminalReason, "needs-human");
     const w2 = world({ waits: Array(500).fill({ rc: 2, text: "" }) });
-    const r2 = await run(w2, { ciMaxMinutes: 10 });
+    const r2 = await run(w2, { ciMaxMinutes: 10, mergeWait: "all" });
     assert.equal(r2.terminalReason, "ci-pending");
     assert.equal(w2.edits.length, 0);
     const w3 = world({ waits: [{ rc: 2, text: "" }, { rc: 2, text: "" }] });
-    assert.equal((await run(w3)).terminalReason, "merged");
+    assert.equal((await run(w3, { mergeWait: "all" })).terminalReason, "merged");
   });
 
   it("refuses merge when the CI-gated head differs from the reviewed head", async () => {
     const w = world({ waits: [{ rc: 0, text: "CI_GATE_HEAD: deadbeefdead" }] });
-    assert.equal((await run(w)).terminalReason, "needs-human");
+    assert.equal((await run(w, { mergeWait: "all" })).terminalReason, "needs-human");
     assert.equal(w.merges.length, 0);
   });
 
@@ -241,6 +242,94 @@ describe("core work-on", () => {
     assert.equal(reviewers(w)[0][5], true);
     const w2 = world(); await run(w2, { reviewerModel: "my-model" });
     assert.equal(reviewers(w2)[0][3], "my-model");
+  });
+});
+
+describe("comment templates", () => {
+  const full = { status: "fixed", summary: "fixed foo", evidence: ["src/foo.js:3 null deref"], root_cause: "foo derefs null at src/foo.js:3",
+    approach: "guard null", sibling_sites_checked: ["src/bar.js:8: same guard added"], changes: [{ file: "src/foo.js", change: "add guard", why: "avoid crash" }],
+    tests: [{ command: "node --test test/foo.test.js", result: "pass", fails_without_fix: true }], risks: ["none"], follow_ups: ["audit baz"] };
+  const rv = { verdict: "PASS", fixes_issue: true, regression: false, reason: "src/foo.js:3 ok", checked: "callers of foo" };
+
+  it("renders full fields", () => {
+    const v = renderValidate(full, "valid"); const p = renderPlan(full, ["src/foo.js"]);
+    assert.match(v, /Root cause:\*\* foo derefs null at src\/foo.js:3/);
+    assert.match(p, /Approach:\*\* guard null/); assert.match(p, /src\/bar.js:8: same guard added/); assert.match(p, /node --test test\/foo.test.js/);
+    assert.match(renderReview(rv), /Checked:\*\* callers of foo/);
+    const reg = renderRegister({ result: full, gitFiles: [], review: rv, links: { validate: "V", plan: "P", review: "R" }, prUrl: "PRURL", usage: "cost $1", policy: "required" });
+    for (const n of ["| src/foo.js | add guard | avoid crash |", "fails without fix: yes", "Risks:** none", "Follow-ups:** audit baz", "Validation: V", "Plan: P", "Review: R", "PR: PRURL", "Merge policy:** required", "cost $1"]) assert.ok(reg.includes(n), n);
+    const pr = renderPrBody({ issue: 7, result: full });
+    assert.match(pr, /^Closes #7/); assert.match(pr, /\| file \| change \| why \|/); assert.match(pr, /node --test/);
+  });
+
+  it("missing fields render as 'not reported', never broken markdown", () => {
+    const reg = renderRegister({ result: {}, gitFiles: ["a.js"], review: { ...rv, checked: undefined }, links: {}, prUrl: "U", usage: "u", policy: "none" });
+    assert.ok(reg.includes(NR));
+    assert.match(reg, /\| a.js \| not reported \| not reported \|/);
+    assert.match(reg, /Verification\*\*\nnot reported/);
+    assert.doesNotMatch(reg, /undefined|null|\[object/);
+    assert.doesNotMatch(renderValidate(null, "blocked"), /undefined|null/);
+    assert.doesNotMatch(renderPlan(undefined), /undefined/);
+    assert.doesNotMatch(renderReview({ verdict: "PASS", fixes_issue: true, regression: false }), /undefined/);
+  });
+
+  it("escapes pipes and newlines in table cells", () => {
+    assert.equal(cell("a|b\nc"), "a\\|b c");
+    const t = renderPrBody({ issue: 1, result: { changes: [{ file: "a|b.js", change: "x\ny", why: "p|q" }] } });
+    const row = t.split("\n").find((l) => l.startsWith("| a"));
+    assert.equal(row, "| a\\|b.js | x y | p\\|q |");
+  });
+
+  it("posts VALIDATE, PLAN, REVIEW, WORK-ON in order; VALIDATE and PLAN before the reviewer", async () => {
+    const w = world({ result: full });
+    await run(w);
+    const m = w.comments.map((c) => /FORGE:[A-Z_-]+/.exec(c)[0]);
+    assert.deepEqual(m, ["FORGE:STARTED", "FORGE:VALIDATE", "FORGE:PLAN", "FORGE:REVIEW", "FORGE:WORK-ON"]);
+    const idx = []; w.seq.forEach((s, i) => { if (s === "comment") idx.push(i); });
+    assert.ok(idx[1] < w.seq.indexOf("reviewer") && idx[2] < w.seq.indexOf("reviewer") && idx[3] > w.seq.indexOf("reviewer"));
+    const pr = w.prs[0][w.prs[0].indexOf("--body") + 1];
+    assert.match(pr, /Root cause/); assert.match(pr, /\| src\/foo.js \| add guard \| avoid crash \|/);
+  });
+
+  it("builder prompt with the structured fields stays within 1.2k tokens", () => {
+    assert.ok(approxTokens(builderPrompt(7)) <= 1200);
+    assert.match(builderPrompt(7), /root_cause/); assert.match(builderPrompt(7), /sibling_sites_checked/);
+  });
+});
+
+describe("merge_wait policy", () => {
+  const states = (o) => Object.entries(o).map(([name, state]) => ({ name, state }));
+  it("required with no protection (empty) merges immediately without polling", async () => {
+    const w = world(); let polled = 0;
+    w.io.requiredChecks = async () => []; w.io.checkStates = async () => { polled++; return []; };
+    w.io.waitCiGreen = async () => { polled++; return { rc: 2, text: "" }; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(polled, 0);
+    assert.match(registers(w)[0], /Merge policy:\*\* required \(no required checks/);
+  });
+  it("required with a pending required check waits (backoff) then merges", async () => {
+    const w = world(); const seqs = [states({ build: "pending" }), states({ build: "pending" }), states({ build: "success", other: "failure" })]; let sleeps = 0;
+    w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => seqs.shift();
+    const s = w.io.sleep; w.io.sleep = async (ms) => { sleeps++; return s(ms); };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(sleeps, 2);
+    assert.match(registers(w)[0], /required \(build\)/);
+    assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+  });
+  it("required with a failing required check is needs-human; slow required check is ci-pending", async () => {
+    const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => states({ build: "failure" });
+    assert.equal((await run(w)).terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
+    const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => states({ build: "pending" });
+    assert.equal((await run(w2, { ciMaxMinutes: 5 })).terminalReason, "ci-pending");
+  });
+  it("all waits for every check (waitCiGreen); none merges immediately", async () => {
+    const w = world({ waits: [{ rc: 2, text: "" }] }); let req = 0; w.io.requiredChecks = async () => { req++; return []; };
+    assert.equal((await run(w, { mergeWait: "all" })).terminalReason, "merged");
+    assert.equal(w.waits.length, 0); assert.equal(req, 0);
+    assert.match(registers(w)[0], /Merge policy:\*\* all/);
+    const w2 = world({ waits: [{ rc: 1, text: "red" }] });
+    assert.equal((await run(w2, { mergeWait: "none" })).terminalReason, "merged");
+    assert.equal(w2.waits.length, 1); assert.deepEqual(w2.merges[0].slice(-2), ["--match-head-commit", w2.head]);
   });
 });
 
