@@ -50,7 +50,8 @@
 #   Phase 7-9 subcommands: --context FILE is optional; without it pass --review-sha SHA, --review-mode FULL|DELTA|BASE_SYNC_ONLY, --issue N, --base B.
 #   verdict:      --merge-health S --merge-health-state S [--base B] [--head-branch H] [--is-milestone true|false] [--has-purpose-regression true|false]
 #                 [--purpose-findings-file F | --purpose-findings TEXT] [--result stale|clean|blocking] [--agents-file F | --agents TEXT] [--findings-count N] [--blocking-count N]
-#                 [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--dry-run]
+#                 [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--other-blocking true|false] [--out-dir D] [--dry-run]
+#                 (--other-blocking: the reviewer's criterion 1/2/3/5 result; resolved and persisted to OUT_DIR/other-blocking.txt, which merge-gate ORs in)
 #   calibrate:    [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--trust-needs-human B] [--dry-run]; the issue is context contract.issue or --issue N
 #   merge-gate:   --verdict "APPROVED|CHANGES REQUESTED" --has-purpose-regression B --calibration-needs-human B --trust-needs-human B
 #                 --base-conflict B --other-blocking B [--calibration-note-file F | --calibration-note T] [--table-cell-key K] [--base B] [--issue N]
@@ -1021,6 +1022,20 @@ do_verdict() {
     if [ "$RESULT" = "clean" ] && { [ "$BASE_CONFLICT" = "true" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ]; }; then
         RESULT="blocking"; VERDICT_COERCED=true
     fi
+    # OTHER_BLOCKING (criteria 1, 2, 3 and 5) is reviewer-judged, so it is resolved here and persisted for merge-gate to OR in: a blocking
+    # result that BASE_CONFLICT and HAS_PURPOSE_REGRESSION do not explain was caused by another criterion, whatever the reviewer passed.
+    OTHER_BLOCKING_RESOLVED=""
+    case "$OTHER_BLOCKING" in true|false) OTHER_BLOCKING_RESOLVED="$OTHER_BLOCKING" ;; esac
+    if [ "$RESULT" = "blocking" ] && [ "$BASE_CONFLICT" != "true" ] && [ "$HAS_PURPOSE_REGRESSION" != "true" ]; then
+        OTHER_BLOCKING_RESOLVED=true
+    elif [ "$RESULT" = "clean" ]; then
+        OTHER_BLOCKING_RESOLVED=false
+    fi
+    # Rewritten (or removed) on every run so a stale value from a prior head can never survive a re-review.
+    rm -f "$OUT_DIR/other-blocking.txt" 2>/dev/null || true
+    if { [ "$RESULT" = "clean" ] || [ "$RESULT" = "blocking" ]; } && [ -n "$OTHER_BLOCKING_RESOLVED" ] && [ "$DRY_RUN" != "true" ]; then
+        printf '%s\n' "$OTHER_BLOCKING_RESOLVED" > "$OUT_DIR/other-blocking.txt" 2>/dev/null || true
+    fi
     VERDICT_OUT=""
     case "$RESULT" in
         stale) VERDICT_OUT="STALE" ;;
@@ -1055,6 +1070,7 @@ ${TRUST_ANNOTATION}${CONFLICT_LINE}${PROTECTION_LINE}${PURPOSE_LINE}${ATTRIBUTIO
     echo "HAS_PURPOSE_REGRESSION=${HAS_PURPOSE_REGRESSION}"
     echo "HAS_MERGE_CONFLICT=${HAS_MERGE_CONFLICT}"
     echo "BASE_CONFLICT=${BASE_CONFLICT}"
+    echo "OTHER_BLOCKING=${OTHER_BLOCKING_RESOLVED}"
     echo "MERGE_CONFLICT_MSG=${MERGE_CONFLICT_MSG}"
     echo "MERGE_PROTECTION_WARNING=${MERGE_PROTECTION_WARNING}"
     exit 0
@@ -1347,6 +1363,8 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
         gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
         blocked "merge guard state unbound"
     fi
+    # OR in the value `verdict` persisted: a passed `false` never overrides a persisted `true`. Anything else in the file is ignored.
+    if [ "$(head -n 1 "$OUT_DIR/other-blocking.txt" 2>/dev/null | tr -d '[:space:]')" = "true" ]; then OTHER_BLOCKING=true; fi
     # ONLY_BASE_CONFLICT: the base conflict is the ONLY reason for CHANGES REQUESTED, evaluated after every human gate is set.
     ONLY_BASE_CONFLICT=false
     if [ "$BASE_CONFLICT" = "true" ] && [ "$OTHER_BLOCKING" != "true" ] && [ "$HAS_PURPOSE_REGRESSION" != "true" ] && [ "$CALIBRATION_NEEDS_HUMAN" != "true" ] && [ "$TRUST_NEEDS_HUMAN" != "true" ]; then

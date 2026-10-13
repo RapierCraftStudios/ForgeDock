@@ -816,7 +816,8 @@ VERDICT_OUT=$(bash "$RF" verdict --pr "$PR_NUMBER" --repo "$REPO" --review-sha "
   --merge-health "$MERGE_HEALTH" --merge-health-state "$MERGE_HEALTH_STATE" --is-milestone "{IS_MILESTONE_TO_STAGING}" \
   --has-purpose-regression "{HAS_PURPOSE_REGRESSION}" --purpose-findings-file "$OUT_DIR/purpose-findings.txt" \
   --result "{RESULT}" --agents-file "$OUT_DIR/agents.txt" --findings-count "{M}" --blocking-count "{N_BLOCKING}" \
-  --intensity-tier "$INTENSITY_TIER" --table-cell-key "$TABLE_CELL_KEY" --trust-shadow-mode "$TRUST_SHADOW_MODE"); VERDICT_RC=$?
+  --intensity-tier "$INTENSITY_TIER" --table-cell-key "$TABLE_CELL_KEY" --trust-shadow-mode "$TRUST_SHADOW_MODE" \
+  --other-blocking "{OTHER_BLOCKING}" --out-dir "$OUT_DIR"); VERDICT_RC=$?
 printf '%s\n' "$VERDICT_OUT"
 [ "$VERDICT_RC" -eq 0 ] || exit 1   # STOP: REVIEW_RESULT: status: BLOCKED was printed
 # 7B.5: reads task type and confidence from the linked issue's FORGE:INVESTIGATOR, consults origin/forge-knowledge, records FORGE:CALIBRATION_CHECK.
@@ -824,7 +825,7 @@ bash "$RF" calibrate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --o
   --intensity-tier "$INTENSITY_TIER" --table-cell-key "$TABLE_CELL_KEY" --trust-shadow-mode "$TRUST_SHADOW_MODE" --trust-needs-human "$TRUST_NEEDS_HUMAN"
 ```
 
-`verdict` computes `BASE_CONFLICT` (the single source of truth for the Phase 8 guards), posts the verdict with the trust annotation, and never posts a clean verdict over a base conflict or purpose regression (it downgrades to CHANGES REQUESTED, `VERDICT_COERCED=true`). Read `VERDICT=`, `BASE_CONFLICT=`, `HAS_PURPOSE_REGRESSION=` and, from `calibrate`, `CALIBRATION_NEEDS_HUMAN=` / `CALIBRATION_NOTE=`: they are the Phase 8 flags. The note itself is also written to `$OUT_DIR/calibration-note.txt`, which Phase 8 passes by path; free text is never placed in a shell word.
+`verdict` computes `BASE_CONFLICT` (the single source of truth for the Phase 8 guards), posts the verdict with the trust annotation, and never posts a clean verdict over a base conflict or purpose regression (it downgrades to CHANGES REQUESTED, `VERDICT_COERCED=true`). `{OTHER_BLOCKING}` is `true` when criterion 1, 2, 3 or 5 fired, else `false`; `verdict` forces it `true` for a blocking result that the base conflict and purpose regression do not explain, persists the resolved value to `$OUT_DIR/other-blocking.txt` and prints `OTHER_BLOCKING=`, and `merge-gate` ORs the persisted value in, so the reviewer cannot lower it. Read `VERDICT=`, `BASE_CONFLICT=`, `HAS_PURPOSE_REGRESSION=`, `OTHER_BLOCKING=` and, from `calibrate`, `CALIBRATION_NEEDS_HUMAN=` / `CALIBRATION_NOTE=`: they are the Phase 8 flags. The note itself is also written to `$OUT_DIR/calibration-note.txt`, which Phase 8 passes by path; free text is never placed in a shell word.
 
 ---
 
@@ -846,7 +847,7 @@ RF=$(forge_resolve review-finalize.sh)   # install roots only, never the PR chec
 OUT_DIR="$(dirname "$CTX")/review-finalize-${PR_NUMBER}"
 GATE_OUT=$(bash "$RF" merge-gate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --base "$MERGE_BASE" \
   --verdict "$VERDICT" --has-purpose-regression "$HAS_PURPOSE_REGRESSION" --calibration-needs-human "$CALIBRATION_NEEDS_HUMAN" --calibration-note-file "$OUT_DIR/calibration-note.txt" \
-  --trust-needs-human "$TRUST_NEEDS_HUMAN" --base-conflict "$BASE_CONFLICT" --other-blocking "$OTHER_BLOCKING" --table-cell-key "$TABLE_CELL_KEY"); GATE_RC=$?
+  --trust-needs-human "$TRUST_NEEDS_HUMAN" --base-conflict "$BASE_CONFLICT" --other-blocking "$OTHER_BLOCKING" --table-cell-key "$TABLE_CELL_KEY" --out-dir "$OUT_DIR"); GATE_RC=$?
 printf '%s\n' "$GATE_OUT"
 # 8B: only for a milestone->staging PR whose merge just succeeded: clears the milestone on its open review-finding issues so they flow through the fast lane.
 if [ "$GATE_RC" -eq 0 ] && printf '%s\n' "$GATE_OUT" | grep -q '^MERGE_STATE=MERGED$'; then
