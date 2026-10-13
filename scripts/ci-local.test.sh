@@ -1004,6 +1004,46 @@ eq "4057: a failing check shared by two jobs fails the gate" 1 "$RC"
 eq "4057: ...and was executed once, not re-run by the duplicate" 1 "$(wc -l < "$r/fail.txt" | tr -d ' ')"  # edge_e5_failure_shared_once
 eq "4057: ...both jobs report the failure" 2 "$(printf '%s\n' "$OUT" | grep -c '^CI_LOCAL_JOB: fail ')"
 
+# forge#4060: jobs with the same command but different service containers must not share a dedup result or a cached pass
+mksvc() { # $1 = repo, $2 = image of job b's postgres, $3 = job c's second-service ordering flag
+  mkdir -p "$1/.github/workflows"
+  cat > "$1/.github/workflows/ci.yml" <<YML
+on: pull_request
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14
+    steps:
+      - run: echo x >> counter.txt; sleep 1
+  b:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: $2
+    steps:
+      - run: echo x >> counter.txt; sleep 1
+YML
+}
+r=$(blank); mksvc "$r" postgres:16
+echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
+: > "$FAKE_DOCKER_LOG"
+OUT=$(PATH="$T/bin:$PATH" FORGE_CI_LOCAL_NO_CACHE=1 bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
+eq "4060: different-services run passes" 0 "$RC"
+eq "4060: same command with different services ran in both jobs, no shared flight result" 2 "$(wc -l < "$r/counter.txt" | tr -d ' ')"  # edge_e4_different_services_not_deduped
+hasnt "4060: no job reports dedup" "$OUT" "dedup=1"
+r=$(blank); mksvc "$r" postgres:14
+echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
+OUT=$(PATH="$T/bin:$PATH" FORGE_CI_LOCAL_NO_CACHE=1 bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
+eq "4060: identical services still dedup (one execution)" 1 "$(wc -l < "$r/counter.txt" | tr -d ' ')"
+has "4060: the identical-services duplicate reports dedup" "$OUT" "dedup=1"
+# persisted cache: a pass for services X is not a hit for services Y
+r=$(blank); mksvc "$r" postgres:16
+echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
+OUT=$(PATH="$T/bin:$PATH" FORGE_CI_LOCAL_NO_CACHE=0 FORGE_CI_LOCAL_SLOTS=2 bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat --max-parallel 1 2>&1)
+eq "4060: persisted cache is not shared across different service sets" 2 "$(wc -l < "$r/counter.txt" | tr -d ' ')"  # edge_e5_cache_not_shared
+
 # wait_ms is reported apart from duration; cached jobs wait for nothing; cheap jobs go first once durations are known
 r=$(blank); mkdir -p "$r/.github/workflows"
 cat > "$r/.github/workflows/ci.yml" <<'YML'
