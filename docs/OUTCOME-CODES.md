@@ -34,6 +34,9 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `ci.timeout` | CI timed out | reserved | `REVIEW_RESULT` carries no CI field yet |
 | `base.conflict` | Base-branch conflict blocked the PR | reserved | `REVIEW_RESULT` carries no conflict field yet |
 | `path.switch_conflict` | The full path was started on an issue that has an open core-path PR (`feat/issue-<n>-lean`); refused to avoid a second implementation. Rerun on the default path (base-sync) or close that PR first | engine | `bin/engine.mjs` admission |
+| `merge.transient` | `gh pr merge` kept failing with a transient error (`Base branch was modified`, GraphQL or 5xx) after the retry budget; the run is `deferred` and a rerun resumes at the merge | lean | `bin/lean/lean.mjs` |
+| `push.transient` | `git push` kept failing with a transient error (`remote unpack failed`, `index-pack failed`, `RPC failed`, 5xx, reset, timeout) after 4 attempts; `deferred`, rerun resumes | lean | `bin/lean/lean.mjs` |
+| `cli.idle` | The builder CLI showed no stream activity for `engine.cli_idle_minutes` and was killed; uncommitted work was checkpointed to the lane branch; `deferred` after one automatic retry | lean | `bin/runner.mjs` |
 | `host.busy` | Core run deferred at admission: free memory, free tmp space or load per core outside `engine.admission` limits; no lease taken, nothing posted | lean | `bin/lean/admission.mjs` |
 | `rate_limited` | Session or usage limit outlasted the pause budget | engine | `err.usageLimit` / `err.resetAtEpochMs` |
 | `engine.error` | Engine or tool failure (missing key/SDK, CLI crash, max turns, unresolved args, runner threw every attempt) | engine | `err.code` |

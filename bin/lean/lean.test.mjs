@@ -9,7 +9,8 @@ import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
-import { makeRunTmp } from "./effects.mjs";
+import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner } from "./effects.mjs";
+import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { readAdmission } from "../engine-cli.mjs";
@@ -30,7 +31,7 @@ function world(o = {}) {
     comments: [], labels: [], closed: [], edits: [], prs: [], merges: [], calls: [], telemetry: [], files: {}, head: "aaaa1111aaaa1111",
     changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], reviews: [...(o.reviews ?? [])], waits: [...(o.waits ?? [])], clock: 0,
     result: o.result ?? { status: "fixed", summary: "fixed foo", evidence: [], tests: ["test/foo.test.js"] },
-    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], mergeInProgress: false, markers: false, mergeAttempts: 0,
+    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], pushes: 0, pushErrors: [...(o.pushErrors ?? [])], commentErrors: [...(o.commentErrors ?? [])], dirty: o.dirty ?? false, lastSubject: o.lastSubject ?? "", prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], mergeInProgress: false, markers: false, mergeAttempts: 0,
     stages: { ...STAGE_MD, ...(o.stages ?? {}) },
   };
   const put = (name, text) => { const p = `${WT}/.forge-lean/${name}`; if (w.files[p] !== text) w.mtimes[p] = Date.now(); w.files[p] = text; };
@@ -43,6 +44,7 @@ function world(o = {}) {
       if (a[0] === "api") return "";
       if (k === "pr list") return JSON.stringify(w.prList);
       if (k === "issue view") return JSON.stringify({ number: 7, title: "foo breaks", body: "Bug in foo", state: "OPEN" });
+      if (k === "issue comment" && w.commentErrors.length) throw new Error(w.commentErrors.shift());
       if (k === "issue comment") { w.comments.push(a[a.indexOf("--body") + 1]); w.seq.push("comment"); return `https://github.com/o/r/issues/7#issuecomment-${w.comments.length}\n`; }
       if (k === "issue close") { w.closed.push(a); w.seq.push("close"); return ""; }
       if (k === "issue edit") { w.edits.push(a); return ""; }
@@ -59,6 +61,9 @@ function world(o = {}) {
         w.lockFails--; const e = new Error("git failed"); e.stderr = "error: could not lock config file .git/config: File exists"; throw e;
       }
       if (a[0] === "rev-parse" && a[1] === "--git-path") return "/repo/.git/info/exclude";
+      if (a[0] === "status" && a[1] === "--porcelain") return w.dirty ? " M src/foo.js\n" : "";
+      if (a[0] === "log" && a.includes("--format=%s")) return w.lastSubject;
+      if (a[0] === "push") { w.pushes++; if (w.pushErrors.length) { const m = w.pushErrors.shift(); throw Object.assign(new Error(m), { stderr: m }); } }
       if (a[0] === "merge" && a[1] === "--no-edit") {
         const r = w.mergeResults.shift() ?? "clean";
         if (r === "clean") { w.head = `cccc${w.calls.length}`.padEnd(16, "0"); return ""; }
@@ -739,7 +744,7 @@ describe("base-sync (#4100)", () => {
   });
 
   it("an unrelated gh pr merge error is not a base-sync", async () => {
-    const w = world({ mergeErrors: ["HTTP 500 boom"] });
+    const w = world({ mergeErrors: ["GraphQL: validation failed (422)"] });
     const r = await run(w);
     assert.equal(r.terminalReason, "engine-error");
     assert.ok(!syncComment(w));
@@ -977,5 +982,217 @@ describe("host admission (#4105)", () => {
     const spec = readFileSync(new URL("../../commands/orchestrate.md", import.meta.url), "utf8");
     assert.match(spec, /host busy[\s\S]*lower the effective K by\s+1 for the next 5 minutes, never below 1/);
     assert.match(spec, /rate_limited[\s\S]*stop launching\s+new lanes until that reset time/);
+  });
+});
+
+describe("batch robustness (#4112-#4115)", () => {
+  const mergeCount = (w) => w.merges.length;
+
+  // ---- #4115 ----
+  it("#4115a the builder prompt pins targeted tests, no extra checkouts, no browsers, scratch in $TMPDIR (within budget)", () => {
+    const p = builderPrompt(7);
+    for (const needle of ["run only targeted tests", "never the full suite", "Never create extra checkouts, copies or base clones", "git show or git diff origin/<base>", "Never install browsers", "$TMPDIR"]) assert.ok(p.includes(needle), needle);
+    assert.ok(approxTokens(p) <= 2800, `builder prompt is ${approxTokens(p)} tokens`);
+  });
+
+  it("#4115b lane limits wrap the spawn in systemd-run; unset or invalid limits do not", () => {
+    const w = wrapLaneLimits("claude", ["--print", "x"], { memory_max: "3G", cpu_quota: "150%" });
+    assert.deepEqual(w, { bin: "systemd-run", args: ["--user", "--scope", "-q", "-p", "MemoryMax=3G", "-p", "CPUQuota=150%", "--", "claude", "--print", "x"] });
+    assert.deepEqual(wrapLaneLimits("claude", ["a"], null), { bin: "claude", args: ["a"] });
+    assert.deepEqual(wrapLaneLimits("claude", ["a"], { memory_max: "lots; rm -rf /", cpu_quota: "x" }), { bin: "claude", args: ["a"] });
+    assert.equal(wrapLaneLimits("claude", ["a"], { memory_max: "1G" }).args.includes("CPUQuota=150%"), false);
+  });
+
+  it("#4115b the runner wraps only when limits are set AND systemd-run probes available (clean fallback)", async () => {
+    const seen = [];
+    const runCli = async (o) => { seen.push(o.wrap ? o.wrap("claude", ["a"]).bin : null); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
+    const base = { role: "builder", issue: 1, cwd: process.cwd(), prompt: "p", system: "" };
+    await makeLeanRunner({ runCli, probe: () => true })({ ...base, laneLimits: { memory_max: "3G" } });
+    await makeLeanRunner({ runCli, probe: () => false })({ ...base, laneLimits: { memory_max: "3G" } });
+    await makeLeanRunner({ runCli, probe: () => true })({ ...base });
+    assert.deepEqual(seen, ["systemd-run", null, null]);
+  });
+
+  it("#4115b integration: a lane under systemd-run --scope really runs in a capped scope (skipped without systemd-run)", { skip: !systemdRunAvailable() }, async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const d = tmpDir("core-scope-");
+    writeFileSync(`${d}/fake-claude`, '#!/bin/sh\nprintf \'{"result":"%s"}\\n\' "$(cat /proc/self/cgroup | tr -d \'\\n\' | tr / :)"\n'); chmodSync(`${d}/fake-claude`, 0o755);
+    const r = await runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, wrap: (b, a) => wrapLaneLimits(b, a, { memory_max: "512M", cpu_quota: "100%" }) });
+    assert.match(r.text, /\.scope/);
+  });
+
+  const hostFor = (state) => ({ memAvailableMb: () => 99999, freeMb: async () => 99999, tmpPaths: () => ["/t"], loadAvg1: () => state.load(), cores: () => 2 });
+  const slowBuilder = (w, ms, hook) => { const orig = w.io.runner; w.io.runner = async (c) => { if (c.role !== "builder") return orig(c); hook?.(c); await new Promise((r) => setTimeout(r, ms)); return orig(c); }; };
+
+  it("#4115c the governor pauses the builder's process group over the ceiling and resumes under it; never pauses past the max", async () => {
+    const w = world(); const calls = [];
+    let load = 20;
+    w.io.host = hostFor({ load: () => load });
+    slowBuilder(w, 400, (c) => { c.control.pause = () => { calls.push("pause"); return true; }; c.control.resume = () => { calls.push("resume"); load = 1; return true; }; setTimeout(() => { load = 1; }, 150); });
+    // host starts under the ceiling at admission, then goes over while the builder runs
+    let first = true; const lf = w.io.host.loadAvg1; w.io.host.loadAvg1 = () => { if (first) { first = false; return 1; } return lf(); };
+    const r = await run(w, { governorPollMs: 20, admission: { max_load_per_core: 4 } });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(calls.slice(0, 2), ["pause", "resume"]);
+    // max pause: stays over the whole time; resumed anyway after maxPauseMs and not re-paused
+    const w2 = world(); const calls2 = [];
+    w2.io.host = hostFor({ load: () => 20 }); let f2 = true; const l2 = w2.io.host.loadAvg1; w2.io.host.loadAvg1 = () => { if (f2) { f2 = false; return 1; } return l2(); };
+    slowBuilder(w2, 500, (c) => { c.control.pause = () => { calls2.push("pause"); return true; }; c.control.resume = () => { calls2.push("resume"); return true; }; });
+    await run(w2, { governorPollMs: 20, maxPauseMs: 100, admission: { max_load_per_core: 4 } });
+    assert.deepEqual(calls2, ["pause", "resume"], "one pause, one forced resume, no flapping");
+  });
+
+  it("#4115c 3 CPU-heavy lanes on a 2-core host: admission refuses the third, the governor pauses/resumes the running ones, load stays bounded", async () => {
+    const st = { running: 0, paused: 0, peak: 0 };
+    const load = () => (st.running - st.paused) * 1.5; // each active lane adds 1.5 load; 2 cores; ceiling 1.0 per core
+    const lane = async (i) => {
+      const w = world(); w.io.host = hostFor({ load });
+      w.io.runner = (orig => async (c) => {
+        if (c.role !== "builder") return orig(c);
+        st.running++; let paused = false;
+        c.control.pause = () => { if (paused) return false; paused = true; st.paused++; return true; };
+        c.control.resume = () => { if (!paused) return false; paused = false; st.paused--; return true; };
+        st.peak = Math.max(st.peak, load());
+        await new Promise((r) => setTimeout(r, 300));
+        if (paused) { paused = false; st.paused--; }
+        st.running--;
+        return orig(c);
+      })(w.io.runner);
+      return { w, r: await run(w, { issue: 7, governorPollMs: 80, maxPauseMs: 60, admission: { max_load_per_core: 1 } }) };
+    };
+    const a = lane(1); await new Promise((r) => setTimeout(r, 20)); const b = lane(2); await new Promise((r) => setTimeout(r, 20)); const c = lane(3);
+    const res = await Promise.all([a, b, c]);
+    assert.equal(res[2].r.code, "host.busy", "third lane refused at admission while two run");
+    assert.deepEqual(res.slice(0, 2).map((x) => x.r.terminalReason), ["merged", "merged"]);
+    assert.ok(st.peak <= 2 * 1.0 + 1.0, `observed load stays near the ceiling (${st.peak})`);
+  });
+
+  // ---- #4113 ----
+  it("#4113 a merge failing once with 'Base branch was modified' then succeeding ends merged in a single run", async () => {
+    const w = world({ mergeErrors: ["GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)"] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.mergeAttempts, 2);
+    assert.match(traj(w)[0], /gh pr merge transient failure/);
+  });
+
+  it("#4113 persistent transient merge failures end deferred merge.transient, never engine-error", async () => {
+    const w = world({ mergeErrors: Array(20).fill("HTTP 502: Bad Gateway") });
+    const r = await run(w, { maxMergeRetries: 3 });
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "merge.transient");
+    assert.equal(w.mergeAttempts, 4);
+    assert.equal(w.edits.some((e) => e.includes("needs-human")), false);
+  });
+
+  it("#4113 conflicts still route through base-sync", async () => {
+    const w = world({ prView: [{ mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" }], mergeErrors: ["GraphQL: Pull request is not mergeable (mergePullRequest)"], mergeResults: ["clean"] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.ok(w.comments.some((c) => c.includes("FORGE:BASE_SYNC")));
+  });
+
+  // ---- #4114 ----
+  it("#4114 a push failing once with 'remote unpack failed' then succeeding completes the run", async () => {
+    const w = world({ pushErrors: ["error: remote unpack failed: unable to create temporary object directory"] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.pushes, 2);
+  });
+
+  it("#4114 exhausted push retries end deferred push.transient after 4 attempts", async () => {
+    const w = world({ pushErrors: Array(10).fill("fatal: the remote end hung up unexpectedly\nerror: RPC failed; HTTP 503") });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "push.transient");
+    assert.equal(w.pushes, 4);
+    assert.equal(w.prs.length, 0);
+  });
+
+  it("#4114 a protected-branch or permission rejection fails immediately with no retries", async () => {
+    for (const msg of ["remote: error: GH006: Protected branch update failed for refs/heads/x", "fatal: unable to access: The requested URL returned error: 403", "! [remote rejected] x -> x (pre-receive hook declined)"]) {
+      const w = world({ pushErrors: [msg, msg, msg] });
+      const r = await run(w);
+      assert.equal(w.pushes, 1, msg);
+      assert.equal(r.terminalReason, "needs-human");
+    }
+  });
+
+  it("#4114 gh writes (comment) retry on 5xx and secondary rate limits; non-transient errors do not", async () => {
+    const w = world({ commentErrors: ["HTTP 502: Bad Gateway", "You have exceeded a secondary rate limit. Please wait a few minutes"] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.ok(w.comments.length >= 5);
+    let n = 0;
+    await assert.rejects(retrying(async () => { n++; throw new Error("HTTP 404 Not Found"); }, { transient: PUSH_TRANSIENT_RE, attempts: 4, sleep: async () => {} }), /404/);
+    assert.equal(n, 1);
+  });
+
+  // ---- #4112 ----
+  const fakeCli = async (name, body) => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const d = tmpDir("core-cli-"); writeFileSync(`${d}/${name}`, `#!/bin/sh\n${body}\n`); chmodSync(`${d}/${name}`, 0o755);
+    return { d, bin: `${d}/${name}` };
+  };
+  const TOOL = `echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"pytest -x"}}]}}'`;
+  const RESULT = `echo '{"type":"result","result":"all done","session_id":"s-9","total_cost_usd":0.5,"num_turns":3,"usage":{"input_tokens":1,"output_tokens":2}}'`;
+
+  it("#4112 no stream activity past the idle threshold is killed as CLI_IDLE; the last tool call and live children are recorded", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { d, bin } = await fakeCli("idle", `${TOOL}\nsleep 30 &\nwait`);
+    const t0 = Date.now();
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 400, maxMs: 20000 }), (e) => {
+      assert.equal(e.code, "CLI_IDLE");
+      assert.equal(e.lastTool.name, "Bash"); assert.match(e.lastTool.input, /pytest -x/);
+      assert.ok(e.children.some((c) => /sleep 30/.test(c.cmd)), JSON.stringify(e.children));
+      return true;
+    });
+    assert.ok(Date.now() - t0 < 8000, "killed promptly, not at the ceiling");
+  });
+
+  it("#4112 a session that keeps making progress is not idle-killed; the final stream result is the envelope", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { d, bin } = await fakeCli("busy", `for i in 1 2 3 4 5 6 7 8; do ${TOOL}; sleep 0.15; done\n${RESULT}`);
+    const r = await runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 500, maxMs: 20000 });
+    assert.equal(r.text, "all done"); assert.equal(r.sessionId, "s-9"); assert.equal(r.costUsd, 0.5);
+  });
+
+  it("#4112 the absolute ceiling still kills a session that never goes idle (CLI_TIMEOUT)", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { d, bin } = await fakeCli("forever", `while true; do ${TOOL}; sleep 0.1; done`);
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 800, maxMs: 700 }), (e) => e.code === "CLI_TIMEOUT");
+  });
+
+  it("#4112 idle kill: uncommitted work is checkpointed and pushed, the builder retries once from the checkpoint, run log names the last tool", async () => {
+    const w = world({ dirty: true }); const dir = tmpDir("core-idle-");
+    const orig = w.io.runner; let n = 0;
+    w.io.runner = async (c) => { if (c.role === "builder" && n++ === 0) throw Object.assign(new Error("idle"), { code: "CLI_IDLE", lastTool: { name: "Bash", input: "pytest" }, children: [{ pid: 9, cmd: "pytest" }] }); return orig(c); };
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const g = w.calls.filter((c) => c[0] === "git").map((c) => c.slice(1));
+    assert.ok(g.some((x) => x[0] === "add" && x[1] === "-A"));
+    assert.ok(g.some((x) => x[0] === "commit" && x.includes("wip(forge): checkpoint after idle timeout")));
+    assert.ok(w.pushes >= 2, "checkpoint push plus the final push");
+    assert.match(builders(w)[0][4], /Continue from it/);
+    const killEv = readLog(dir, 7).find((e) => e.event === "CLI_IDLE_KILL");
+    assert.equal(killEv.lastTool.name, "Bash"); assert.equal(killEv.children[0].cmd, "pytest");
+    assert.match(traj(w)[0], /builder idle timeout: checkpointed, retried once/);
+  });
+
+  it("#4112 a second idle or timeout kill ends deferred with cli.idle / cli.timeout (not engine-error), work checkpointed", async () => {
+    for (const [code, expected] of [["CLI_IDLE", "cli.idle"], ["CLI_TIMEOUT", "cli.timeout"]]) {
+      const w = world({ dirty: true });
+      w.io.runner = async (c) => { if (c.role === "builder") throw Object.assign(new Error(code), { code }); return { text: "" }; };
+      const r = await run(w);
+      assert.equal(r.terminalReason, "deferred", code); assert.equal(r.code, expected);
+      assert.equal(w.edits.some((e) => e.includes("needs-human")), false);
+      assert.ok(w.pushes >= 1);
+    }
+  });
+
+  it("#4112 a rerun resumes from the checkpoint branch and tells the builder to continue", async () => {
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", lastSubject: "wip(forge): checkpoint after idle timeout" });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(builders(w).length, 1, "builder runs again (a checkpoint is not finished work)");
+    assert.match(builders(w)[0][4], /Continue from it/);
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add" && c.includes("origin/feat/issue-7-lean")));
   });
 });
