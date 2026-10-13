@@ -12,6 +12,7 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency } from "../engine/phases.mjs";
 import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
+import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, capComment, sanitizeMd } from "./render.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, PLAN_FILE, IMPLEMENTATION_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
 
@@ -33,7 +34,7 @@ const num = (v) => (Number.isFinite(v) ? v : null);
  */
 export async function runCore(o) {
   const { issue, repo, lane, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
-    ciMaxMinutes = 360, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    ciMaxMinutes = 360, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const base = `origin/${lane}`;
@@ -46,6 +47,9 @@ export async function runCore(o) {
   const ev = (e) => appendEvent(dir, issue, e);
   const emit = async (rec) => { try { await emitTelemetry?.({ ...rec, issue }); } catch { /* never fails a run */ } };
   const ghc = (args) => io.gh(args);
+  const sleepFn = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  /** gh writes (comment, pr create, issue edit/close): retried for 5xx and secondary rate limits (#4114). */
+  const ghw = (args) => retrying(() => io.gh(args), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random });
   const git = (args) => io.git(args, { cwd: wt });
 
   async function attempt(phase, n, r) {
@@ -59,10 +63,10 @@ export async function runCore(o) {
   }
   const post = async (marker, body) => {
     const marks = (Array.isArray(marker) ? marker : [marker]).map((m) => `<!-- ${m} -->`).join("\n");
-    const out = String(await ghc(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`${marks}\n${body}`)])).trim();
+    const out = String(await ghw(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`${marks}\n${body}`)])).trim();
     return /https?:\/\/\S+/.exec(out)?.[0] ?? null;
   };
-  const label = async (state) => { try { await io.transitionLabel(issue, state); } catch { /* labels are best effort */ } };
+  const label = async (state) => { try { await retrying(() => io.transitionLabel(issue, state), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random }); } catch { /* labels are best effort */ } };
   const usageLine = () => `cost $${usage.cost_usd.toFixed(4)}, tokens ${usage.input} in / ${usage.output} out / ${usage.cache} cache, wall ${Math.round((now() - t0) / 60000 * 10) / 10} min`;
 
   // ---- lease (same FORGE:STATE lease the full path uses) ----
@@ -190,11 +194,76 @@ export async function runCore(o) {
     }
   }
 
+  /** git push with transient retry (#4114): 4 attempts; permission/protected-branch rejections fail at once. */
+  const gitPush = async (args) => {
+    try { return await retrying(() => git(args), { transient: PUSH_TRANSIENT_RE, permanent: PUSH_PERMANENT_RE, attempts: 4, sleep: sleepFn, random }); }
+    catch (e) {
+      if (e?.transientExhausted) { e.deferCode = OUTCOME_CODES.PUSH_TRANSIENT; e.deferDetail = `git push kept failing transiently after 4 attempts: ${String(e?.stderr ?? e?.message ?? e).slice(0, 300)}`; }
+      else if (e?.permanent) e.pushRejected = true;
+      throw e;
+    }
+  };
+
+  /** After a timeout/idle kill: commit uncommitted work as a checkpoint and push the lane branch so a rerun resumes from it (#4112). */
+  async function checkpoint(reason) {
+    try {
+      const dirty = String(await git(["status", "--porcelain"])).trim();
+      if (dirty) { await git(["add", "-A"]); await git(["commit", "--no-verify", "-m", `wip(forge): checkpoint after ${reason}`]); }
+      const ahead = String(await git(["diff", "--name-only", `${base}...HEAD`])).trim();
+      if (ahead) await gitPush(["push", "-u", "origin", branch]);
+      ev({ event: "CHECKPOINT", reason, dirty: Boolean(dirty), pushed: Boolean(ahead) });
+    } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); }
+  }
+  const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over.";
+
+  /** Continuous admission (#4115): while the builder runs, pause its process group when the host is over the ceiling, resume when under. */
+  function startGovernor(control) {
+    if (!io.host || o.governor === false || o.admission?.enabled === false) return { stop() {} };
+    const pollMs = o.governorPollMs ?? 15000, maxPauseMs = o.maxPauseMs ?? 600000;
+    let stopped = false, paused = false, forced = false, pausedAt = 0, wake = null, t = null;
+    const loop = (async () => {
+      while (!stopped) {
+        await new Promise((res) => { wake = res; t = setTimeout(res, pollMs); });
+        clearTimeout(t);
+        if (stopped) break;
+        let ok = true;
+        try { ok = (await checkAdmission({ cfg: o.admission, host: io.host })).ok; } catch { ok = true; }
+        const nowMs = Date.now();
+        if (!ok && !paused && !forced && control.pause) { if (control.pause()) { paused = true; pausedAt = nowMs; ev({ event: "LANE_PAUSED", reason: "host over ceiling" }); onProgress({ event: "phase_paused", phase: "builder", reason: "host-busy", detail: "host over the admission ceiling; lane paused" }); } }
+        else if (ok && paused) { control.resume?.(); paused = false; forced = false; ev({ event: "LANE_RESUMED", reason: "host recovered" }); }
+        else if (ok) forced = false;
+        else if (paused && nowMs - pausedAt >= maxPauseMs) { control.resume?.(); paused = false; forced = true; ev({ event: "LANE_RESUMED", reason: "max pause reached" }); }
+      }
+    })();
+    return { async stop() { stopped = true; wake?.(); clearTimeout(t); await loop; if (paused) { control.resume?.(); paused = false; } } };
+  }
+
   async function builder(n, prompt, resume, live = false) {
+    let timeoutRetries = 0, p = prompt;
+    for (;;) {
+      try { return await builderOnce(n, p, resume, live); } catch (e) {
+        if (!(e?.code === "CLI_IDLE" || e?.code === "CLI_TIMEOUT")) throw e;
+        const idle = e.code === "CLI_IDLE";
+        const reason = idle ? "idle timeout" : "timeout";
+        ev({ event: idle ? "CLI_IDLE_KILL" : "CLI_TIMEOUT_KILL", reason, lastTool: e.lastTool ?? null, children: e.children ?? [] });
+        await checkpoint(reason);
+        if (timeoutRetries++ >= 1) { e.deferCode = idle ? OUTCOME_CODES.CLI_IDLE : OUTCOME_CODES.CLI_TIMEOUT; e.deferDetail = `builder ${reason}; work checkpointed to ${branch}; rerun resumes from it. ${String(e.message).slice(0, 300)}`; throw e; }
+        T.anomalies.push(`builder ${reason}: checkpointed, retried once`);
+        T.decisions.push(`Builder ${reason}: uncommitted work checkpointed to the lane branch; retrying once from the checkpoint`);
+        p = builderPrompt(issue) + CONTINUE_NOTE.replace("BASE", base); resume = null;
+      }
+    }
+  }
+
+  async function builderOnce(n, prompt, resume, live = false) {
     onProgress({ event: "phase_enter", phase: "build" });
     await renew();
-    const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: builderModel, resume, system: "", prompt }));
+    const control = {};
+    const governor = startGovernor(control);
+    const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: builderModel, resume, system: "", prompt, control,
+      idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits }));
     let r;
+    call.catch(() => governor.stop());
     if (live && io.fs.stat) {
       let settled = false;
       const tracked = call.then((v) => { settled = true; return v; }, (e) => { settled = true; throw e; });
@@ -206,7 +275,8 @@ export async function runCore(o) {
         if (!settled) { try { await livePoll(); } catch { /* live posting is best effort */ } }
       }
       r = await tracked;
-    } else r = await call;
+    } else { try { r = await call; } finally { /* governor stops below */ } }
+    await governor.stop();
     await renew();
     if (r?.sessionId) sessionId = r.sessionId;
     await attempt("implement", n, r);
@@ -309,9 +379,11 @@ export async function runCore(o) {
 
     // ---- 3. builder ----
     let result = null, attemptN = 0, reviewN = 0;
-    if (!(resumed && (await changedFiles()).length > 0)) {
+    const lastSubject = resumed ? String(await git(["log", "-1", "--format=%s"]).catch(() => "")).trim() : "";
+    const fromCheckpoint = lastSubject.startsWith("wip(forge): checkpoint");
+    if (!(resumed && (await changedFiles()).length > 0) || fromCheckpoint) {
       await label("building");
-      await builder(++attemptN, builderPrompt(issue), null, true);
+      await builder(++attemptN, builderPrompt(issue) + (fromCheckpoint ? CONTINUE_NOTE.replace("BASE", base) : ""), null, true);
       result = await readResult();
       const files0 = await changedFiles();
       const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
@@ -322,7 +394,7 @@ export async function runCore(o) {
       if (closing && !evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_NO_EVIDENCE);
       if (closing) {
         T.plan = "skipped"; T.implement = "skipped"; T.review = "skipped"; T.pr = "none"; T.merge = "n/a";
-        await ghc(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
+        await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
         await label("invalid");
         return await finish("invalid", result.summary ?? result.status);
       }
@@ -368,8 +440,8 @@ export async function runCore(o) {
 
     // ---- 5. push + PR ----
     const files = await changedFiles();
-    await git(["push", "-u", "origin", branch]);
-    const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghc(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
+    await gitPush(["push", "-u", "origin", branch]);
+    const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghw(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
       "--title", `${iss.title} (#${issue})`, "--body", renderPrBody({ issue, investigation: await readStage(STAGES[0]), plan: await readStage(STAGES[1]), implementation: await readStage(STAGES[2]), result, gitFiles: files })])).trim();
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
     if (!Number.isInteger(pr)) return await needsHuman(`Could not parse the PR number from: ${prOut.slice(0, 200)}`);
@@ -388,7 +460,7 @@ export async function runCore(o) {
     T.decisions.push(`merge_wait=${mergeWait}: ${policyText}`);
 
     // ---- base-sync (#4100): merge the lane into the branch when the PR conflicts; merge only, never rebase or force-push ----
-    let syncs = 0;
+    let syncs = 0, mergeRetries = 0;
     const MAX_SYNCS = 2;
     const gitOut = async (args) => { try { return String(await git(args)).trim(); } catch { return ""; } };
     /** CONFLICTING / DIRTY, or UNKNOWN after one short re-poll. Unreadable state counts as not conflicting. */
@@ -434,14 +506,14 @@ export async function runCore(o) {
       }
       const after = await gitOut(["rev-parse", "HEAD"]);
       if (soft && clean && after === before) { syncs--; return null; } // UNKNOWN state and nothing to merge: not a conflict
-      if (after !== before) await git(["push", "origin", branch]); // plain push of a merge commit: never force
+      if (after !== before) await gitPush(["push", "origin", branch]); // plain push of a merge commit: never force
       if (!clean) {
         let rv = await doReview();
         if (rv?.fail) {
           T.decisions.push(`Base-sync re-review FAIL: builder resumed with the reason`);
           await builder(++attemptN, resumeBuilderPrompt(rv.reason), sessionId ?? null);
           if (await unresolved()) return await needsHuman("Base-sync re-review fix left conflict markers.", OUTCOME_CODES.BASE_CONFLICT);
-          if ((await gitOut(["rev-parse", "HEAD"])) !== after) await git(["push", "origin", branch]);
+          if ((await gitOut(["rev-parse", "HEAD"])) !== after) await gitPush(["push", "origin", branch]);
           rv = await doReview();
         }
         if (!rv) return await needsHuman("Reviewer returned no parseable verdict after base-sync.", OUTCOME_CODES.REVIEW_NO_VERDICT);
@@ -500,11 +572,19 @@ export async function runCore(o) {
         await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
         break;
       } catch (e) {
-        if (!/not mergeable|merge conflict|conflict/i.test(String(e?.stderr ?? "") + String(e?.message ?? ""))) throw e;
+        const msg = `${e?.stderr ?? ""}${e?.message ?? ""}`;
+        if (MERGE_TRANSIENT_RE.test(msg) && !/not mergeable|merge conflict/i.test(msg)) {
+          // "Base branch was modified", GraphQL and 5xx are transient: back off, then the loop top re-reads mergeable and the head.
+          if (++mergeRetries > maxMergeRetries) return await finish("deferred", `gh pr merge kept failing transiently (${mergeRetries - 1} retries): ${msg.slice(0, 300)}`, { pr, code: OUTCOME_CODES.MERGE_TRANSIENT }, OUTCOME_CODES.MERGE_TRANSIENT);
+          T.anomalies.push(`gh pr merge transient failure (retry ${mergeRetries}): ${msg.split("\n")[0].slice(0, 120)}`);
+          await sleepFn(Math.min(60000, 1000 * 2 ** (mergeRetries - 1)) + Math.floor(random() * 250));
+          continue;
+        }
+        if (!MERGE_CONFLICT_RE.test(msg)) throw e;
         const r = await baseSync("gh pr merge reported a conflict"); if (r) return r;
       }
     }
-    await ghc(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
+    await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
     await label("merged");
     return await finish("merged", `PR #${pr}`, { pr });
   } catch (e) {
@@ -512,6 +592,8 @@ export async function runCore(o) {
       const when = e.resetAt || (Number.isFinite(e.resetAtEpochMs) ? new Date(e.resetAtEpochMs).toISOString() : "unknown");
       return finish("deferred", `usage limit hit; resets at ${when}`, { code: OUTCOME_CODES.RATE_LIMITED, resetAt: when, resetAtEpochMs: Number.isFinite(e.resetAtEpochMs) ? e.resetAtEpochMs : null }, OUTCOME_CODES.RATE_LIMITED);
     }
+    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode }, e.deferCode);
+    if (e?.pushRejected) return await needsHuman(`git push was rejected (no retry): ${String(e?.stderr ?? e?.message ?? e).slice(0, 400)}`);
     return finish("engine-error", e?.message ?? String(e));
   }
 }
