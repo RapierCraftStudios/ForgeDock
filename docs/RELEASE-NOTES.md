@@ -2,6 +2,12 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Lean path engine (#4081)
+
+`forgedock run-issue N --lane L --path lean|full|auto` (or `engine.path` in forge.yaml; default `full`) runs validate, architect and implement in one warm, minimal builder session, then deterministic gates (a test-file change unless docs-only, ci-local), one independent Sonnet reviewer (plus a security reviewer for auth, crypto, secret, permission, migration, payment or workflow paths), then PR, remote CI wait, merge and close with no model. Gate failures and blocking findings (CRITICAL/HIGH, or CONFIRMED MEDIUM introduced) resume the same builder session with `--resume`, at most 2 rounds each, then `needs-human`; a blocking round is followed by one delta re-review. Non-blocking findings are listed in `FORGE:REVIEW` and never filed. Each stage posts `FORGE:VALIDATE`, `FORGE:PLAN`, `FORGE:IMPLEMENT`, `FORGE:REVIEW`, `FORGE:CLOSE`; telemetry is one `phase_attempt` per stage plus `run_terminal`. `auto` goes lean unless the risk tier is high and the diff is large, in which case it falls back to `full`. Slow CI is polled with backoff and ends `ci-pending` (resumable), never `needs-human`. See docs/CONFIG.md (`engine.path`).
+
+Action: none; the default path is unchanged.
+
 ## v1.19.1: build-time self-review, ci-local under concurrency, review roster gates
 
 - **Build-time self-review (B5.6, #3971).** After implement, the risk-tier review roster's domain agents review the staged diff, and the builder fixes CONFIRMED/LIKELY findings at MEDIUM or above in one repair round before validate. Small or docs-only diffs skip. Each build that runs it spends extra reviewer tokens, which the official review should save back through fewer findings and remediation rounds. Off switch: `FORGE_SELFREVIEW=off`. Wait budget: `SELFREVIEW_WAIT_SECS` (default 600, max 1800). Telemetry: `build_selfreview`.

@@ -755,6 +755,28 @@ export function buildMinimalSessionFlags(commandName, caps, env = process.env) {
 }
 
 /**
+ * Lean-path (#4081) minimal session flags: reuses the #4065 capability probe. Every phase is Skill-free, so slash
+ * commands are off too, and only project/local settings load. Unsupported CLI or FORGEDOCK_FULL_SESSION=1 yields [].
+ */
+export function buildLeanSessionFlags(caps, env = process.env) {
+  if (env?.FORGEDOCK_FULL_SESSION === "1" || !caps) return [];
+  const flags = [];
+  if (caps.strictMcp) flags.push("--strict-mcp-config", "--mcp-config", MINIMAL_SESSION_MCP_CONFIG, "--setting-sources", "project,local");
+  if (caps.disableSlash) flags.push("--disable-slash-commands");
+  return flags;
+}
+
+/**
+ * Read-only reviewer tools (#4081): only Read, Grep and Glob. Uses `--tools` where the capability probe says the
+ * CLI is recent enough, else denies the mutating tools with `--disallowedTools`.
+ */
+export function buildReadOnlyToolFlags(caps) {
+  return caps?.strictMcp
+    ? ["--tools", "Read,Grep,Glob"]
+    : ["--disallowedTools", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"];
+}
+
+/**
  * Return the exact absolute `claude` executable path that
  * `isClaudeCliAvailable()` validated for `cwd` (issue #2741), ensuring the
  * probe/cache is populated or refreshed first. This is what closes the
@@ -1485,6 +1507,8 @@ export function runCliBackend({
   maxTurns = null,
   leaseHolder = null,
   sessionFlags = [],
+  // #4081: extra argv (e.g. ["--resume", id]) appended verbatim, never dropped by FORGEDOCK_FULL_SESSION.
+  extraArgs = [],
 }) {
   // forge#3589: opt-in flags, validated again here as defence in depth. Callers
   // (runCommand) are responsible for the version gate. Unset -> argv unchanged.
@@ -1498,6 +1522,7 @@ export function runCliBackend({
     ...(process.env.FORGEDOCK_FULL_SESSION === "1" || !Array.isArray(sessionFlags)
       ? []
       : sessionFlags.map(String)),
+    ...(Array.isArray(extraArgs) ? extraArgs.map(String) : []),
   ];
   const rawTimeout = parseInt(process.env.FORGEDOCK_CLI_TIMEOUT_MS, 10);
   const configuredTimeout = resolveConfiguredCliTimeout(cwd);
@@ -1785,6 +1810,7 @@ export function runCliBackend({
     // bin/batch-runner.mjs's `tokenCost()` (`input + output`).
     const stdoutTrimmed = stdout.trim();
     let parsedResult = null;
+    let sessionId = null;
     let usage = null;
     let turns = null;
     // forge#3696: envelope cost/duration per attempt (null when absent or non-finite).
@@ -1797,6 +1823,7 @@ export function runCliBackend({
         if (Number.isFinite(parsed.total_cost_usd)) costUsd = parsed.total_cost_usd;
         if (Number.isFinite(parsed.duration_ms)) durationMs = parsed.duration_ms;
         parsedResult = typeof parsed.result === "string" ? parsed.result : null;
+        if (typeof parsed.session_id === "string" && parsed.session_id) sessionId = parsed.session_id;
         if (parsed.usage && typeof parsed.usage === "object") {
           usage = {
             input_tokens: toFiniteUsageNumber(parsed.usage.input_tokens),
@@ -1882,6 +1909,7 @@ export function runCliBackend({
       turns,
       costUsd,
       durationMs,
+      sessionId,
       backend: "cli",
       // forge#3521: the phase's final reply (the CLI envelope's `.result`), so
       // callers can read its structured `*_RESULT` block. Additive; "" when absent.
