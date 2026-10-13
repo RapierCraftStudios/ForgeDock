@@ -3962,13 +3962,22 @@ describe("runIssue — forge#3931: cycle-aware hydration and head-aware --retry"
     return { status: "complete" };
   };
 
+  // forge#3948: the stale cycle's PR 7 was CLOSED unmerged; a live (OPEN/MERGED) PR is same-cycle evidence.
+  const closedOldPr = (io, w) => {
+    const gh = io.gh;
+    io.gh = async (args) => (args[0] === "pr" && args[1] === "view" && !w.pr ? JSON.stringify({ number: 7, state: "CLOSED" }) : gh(args));
+  };
+
   it("hydrate with a trusted FORGE:CYCLE resets cycle-scoped phases and builds the new cycle", async () => {
     const { w, io } = fakeWorld();
     w.body = serializeState(staleIndex);
     withExtraComments(io, w, cycleComment(1));
+    closedOldPr(io, w);
     const ran = [];
     const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner: script(w, ran), now: () => 1000, maxAttempts: 1 });
     assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 1);
+    assert.deepEqual(w.posted?.filter((b) => b.includes("FORGE:CYCLE")), ["<!-- FORGE:CYCLE: 2 -->"],
+      "forge#3948: the next FORGE:CYCLE is published before the hydrate reset");
     assert.ok(ran.includes("work-on/build"), "cycle 2 builds instead of ending needs-human");
     assert.equal(res.terminalReason, "merged");
   });
@@ -3992,6 +4001,55 @@ describe("runIssue — forge#3931: cycle-aware hydration and head-aware --retry"
       assert.ok(!ran.includes("work-on/build"), "same-cycle state must not rebuild");
       rmSync(dir, { recursive: true, force: true }); dir = tmpDir("fd-engine-");
     }
+  });
+
+  it("forge#3948: same-cycle terminals and unprovable PR state never reset", async () => {
+    let ci = 0;
+    for (const mut of [
+      // merged PR on the branch (same-cycle phase-complete whose PR merged)
+      (w) => { w.prList = () => [{ number: 7, state: "MERGED" }]; },
+      // recorded PR still OPEN or MERGED even though the branch lists nothing
+      (w) => { w.prList = () => []; w.pr = 7; },
+      (w) => { w.prList = () => []; w.pr = 7; w.prMerged = true; },
+      // no branch recorded (engine-error before build committed one)
+      (w) => { w.body = serializeState({ ...staleIndex, branch: null, pr: null }); },
+      // same-cycle engine-error / phase-complete terminals are --retry's job
+      (w) => { w.body = serializeState({ ...staleIndex, terminalReason: "engine-error" }); },
+      (w) => { w.body = serializeState({ ...staleIndex, terminalReason: "phase-complete" }); },
+      // unparsable / failing PR lookups fail closed
+      (w) => { w.prList = () => ({ not: "an array" }); },
+      (w) => { w.prList = () => { throw new Error("gh down"); }; },
+    ]) {
+      const { w, io } = fakeWorld();
+      w.body = serializeState(staleIndex);
+      mut(w);
+      withExtraComments(io, w, cycleComment(1));
+      if (!w.pr) closedOldPr(io, w);
+      const ran = [];
+      await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner: script(w, ran), now: () => 1000, maxAttempts: 1 });
+      assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 0, `case ${ci}`);
+      assert.ok(!ran.includes("work-on/build"), `case ${ci}: same-cycle state must not rebuild`);
+      assert.ok(!(w.posted || []).some((b) => b.includes("FORGE:CYCLE")), `case ${ci}: no cycle marker posted`);
+      ci++;
+      rmSync(dir, { recursive: true, force: true }); dir = tmpDir("fd-engine-");
+    }
+  });
+
+  it("forge#3948: a FORGE:CYCLE post failure appends no RUN_NEXT_CYCLE", async () => {
+    const { w, io } = fakeWorld();
+    w.body = serializeState(staleIndex);
+    withExtraComments(io, w, cycleComment(1));
+    closedOldPr(io, w);
+    const gh = io.gh;
+    io.gh = async (args) => {
+      if (args[0] === "issue" && args[1] === "comment" && args.join(" ").includes("FORGE:CYCLE")) throw new Error("post failed");
+      return gh(args);
+    };
+    const ran = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner: script(w, ran), now: () => 1000, maxAttempts: 1 });
+    assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 0);
+    assert.ok(!ran.includes("work-on/build"));
+    assert.equal(res.terminalReason, "needs-human");
   });
 
   it("an untrusted FORGE:CYCLE comment does not reset the hydrated state", async () => {
