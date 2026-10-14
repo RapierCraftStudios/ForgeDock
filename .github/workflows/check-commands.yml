@@ -36,6 +36,8 @@ on:
       - 'scripts/selfreview-plan.test.sh'
       - 'scripts/review-prepare.sh'
       - 'scripts/review-prepare.test.sh'
+      - 'scripts/code-index.sh'
+      - 'scripts/code-index.test.sh'
       - 'scripts/review-finalize.sh'
       - 'scripts/review-finalize.test.sh'
       - 'scripts/lib/pr-issue-number.sh'
@@ -98,6 +100,8 @@ on:
       - 'scripts/selfreview-plan.test.sh'
       - 'scripts/review-prepare.sh'
       - 'scripts/review-prepare.test.sh'
+      - 'scripts/code-index.sh'
+      - 'scripts/code-index.test.sh'
       - 'scripts/review-finalize.sh'
       - 'scripts/review-finalize.test.sh'
       - 'scripts/lib/pr-issue-number.sh'
@@ -386,6 +390,7 @@ jobs:
           bash scripts/review-roster.test.sh
           bash scripts/selfreview-plan.test.sh
           bash scripts/review-prepare.test.sh
+          bash scripts/code-index.test.sh
           bash scripts/review-finalize.test.sh
           bash scripts/close-parent-c3.test.sh
           bash scripts/review-delta.test.sh
