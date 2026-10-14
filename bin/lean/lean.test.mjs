@@ -1470,3 +1470,107 @@ describe("lane entry points (#4125)", () => {
     }
   });
 });
+
+describe("large diffs never reach argv (#4129)", () => {
+  const ARGV_SAFE = 128 * 1024; // Linux MAX_ARG_STRLEN is 131072 bytes per argument
+  const bigDiff = (files, perFile) => Array.from({ length: files }, (_, i) =>
+    `diff --git a/corpus/f${i}.txt b/corpus/f${i}.txt\n--- a/corpus/f${i}.txt\n+++ b/corpus/f${i}.txt\n@@ -0,0 +1 @@\n+${"golden — ".repeat(Math.ceil(perFile / 11))}\n`).join("");
+
+  it("review of a branch whose diff is over 256 KiB completes, with every CLI argv element under the bound", async () => {
+    const { runCliBackend } = await import("../runner.mjs");
+    const diff = bigDiff(8, 40 * 1024);
+    assert.ok(Buffer.byteLength(diff) > 256 * 1024);
+    const w = world();
+    const g = w.io.git;
+    w.io.git = async (a, o2) => {
+      if (a[0] === "diff" && a[1] === "--stat=200") return " corpus/f0.txt | 1 +\n 8 files changed";
+      if (a[0] === "diff" && a.length === 2) return diff;
+      return g(a, o2);
+    };
+    const spawned = [];
+    const r0 = w.io.runner;
+    w.io.runner = async (c) => {
+      if (c.role !== "reviewer") return r0(c);
+      w.calls.push(["runner", c.role, null, c.model ?? null, c.prompt, c.readOnly ?? false, c.system]);
+      const env = runCliBackend({ spec: { name: "core-reviewer" }, userMessage: c.prompt, systemPrompt: c.system, args: ["7"], cwd: tmpDir("core-4129-"), logger: { log() {} },
+        spawnFn: (bin, args, o2) => { spawned.push({ args, input: o2.input }); return { status: 0, stdout: JSON.stringify({ result: ok(), session_id: "rev" }), stderr: "" }; } });
+      return { text: env.text, sessionId: "rev", usage: {}, costUsd: 0, durationMs: 1, turns: 1, model: c.model };
+    };
+    const res = await run(w);
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(spawned.length, 1);
+    for (const a of spawned[0].args) assert.ok(Buffer.byteLength(String(a)) <= ARGV_SAFE, `argv element of ${Buffer.byteLength(String(a))} bytes`);
+    const prompt = reviewers(w)[0][4];
+    assert.ok(Buffer.byteLength(prompt) < 160 * 1024, `bounded prompt (${Buffer.byteLength(prompt)} bytes)`);
+    assert.match(prompt, /<stat>[\s\S]*8 files changed/);
+    assert.match(prompt, /<omitted_files>[\s\S]*corpus\/f7\.txt/);
+    assert.match(prompt, /Read them in your worktree/);
+  });
+
+  it("boundDiff keeps a fitting diff unchanged and otherwise keeps whole file diffs only", async () => {
+    const { boundDiff } = await import("./prompts.mjs");
+    const small = bigDiff(2, 100);
+    assert.equal(boundDiff(small, { maxBytes: 10000 }), small);
+    const d = bigDiff(5, 3000);
+    const out = boundDiff(d, { stat: "5 files changed", base: "origin/staging", maxBytes: 7000 });
+    assert.ok(Buffer.byteLength(out) < 7000 + 1000);
+    const shown = (out.match(/^diff --git /gm) ?? []).length;
+    assert.ok(shown >= 1 && shown < 5);
+    assert.equal((out.match(/^- corpus\//gm) ?? []).length, 5 - shown);
+    assert.match(out, /base origin\/staging/);
+  });
+
+  it("runCliBackend sends a prompt over the argv bound on stdin, a small one stays in argv", async () => {
+    const { runCliBackend, CLI_ARGV_PROMPT_MAX_BYTES } = await import("../runner.mjs");
+    assert.ok(CLI_ARGV_PROMPT_MAX_BYTES <= ARGV_SAFE);
+    const seen = [];
+    const call = (msg) => runCliBackend({ spec: { name: "t" }, userMessage: msg, systemPrompt: "sys", args: ["1"], cwd: tmpDir("core-4129-"), logger: { log() {} },
+      spawnFn: (_b, args, o2) => { seen.push({ args, input: o2.input }); return { status: 0, stdout: "{}", stderr: "" }; } });
+    const big = "é".repeat(200 * 1024);
+    call(big);
+    assert.equal(seen[0].input, big);
+    assert.ok(!seen[0].args.includes(big));
+    for (const a of seen[0].args) assert.ok(Buffer.byteLength(String(a)) <= CLI_ARGV_PROMPT_MAX_BYTES);
+    assert.equal(seen[0].args[0], "--print"); assert.equal(seen[0].args[1], "--output-format");
+    call("go");
+    assert.equal(seen[1].args[1], "go"); assert.equal(seen[1].input, undefined);
+  });
+
+  it("runCliBackendAsync pipes a 300 KiB prompt to a real child (no E2BIG)", async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const d = tmpDir("core-4129-");
+    const bin = `${d}/fake-claude`;
+    writeFileSync(bin, '#!/bin/sh\nn=$(wc -c | tr -d " ")\necho "{\\"result\\":\\"$n $#\\",\\"session_id\\":\\"s\\"}"\n');
+    chmodSync(bin, 0o755);
+    const msg = "x".repeat(300 * 1024);
+    const r = await runCliBackendAsync({ spec: { name: "t" }, userMessage: msg, systemPrompt: "sys", args: ["1"], cwd: d, bin, logger: { log() {} } });
+    const [n] = r.text.split(" ");
+    assert.equal(Number(n), msg.length);
+    const small = await runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} } });
+    assert.equal(small.text.split(" ")[0], "0"); // small prompt: argv, stdin ignored
+  });
+
+  it("a deterministic spawn failure is CLI_SPAWN_FAILED and ends needs-human with cli.spawn_failed, not engine-error", async () => {
+    const { runCliBackend } = await import("../runner.mjs");
+    assert.throws(() => runCliBackend({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: tmpDir("core-4129-"), logger: { log() {} },
+      spawnFn: () => ({ status: null, error: Object.assign(new Error("spawn E2BIG"), { code: "E2BIG" }) }) }),
+    (e) => e.code === "CLI_SPAWN_FAILED" && e.spawnErrno === "E2BIG" && /E2BIG/.test(e.message));
+    assert.throws(() => runCliBackend({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: tmpDir("core-4129-"), logger: { log() {} },
+      spawnFn: () => ({ status: null, error: Object.assign(new Error("spawn EACCES"), { code: "EACCES" }) }) }),
+    (e) => e.code === "EACCES" && e.spawnDeterministic === true);
+    const w = world();
+    const r0 = w.io.runner;
+    w.io.runner = async (c) => { if (c.role === "reviewer") throw Object.assign(new Error("Failed to invoke claude CLI: spawn E2BIG"), { code: "CLI_SPAWN_FAILED", spawnErrno: "E2BIG" }); return r0(c); };
+    const res = await run(w);
+    assert.equal(res.terminalReason, "needs-human");
+    assert.equal(res.code, OUTCOME_CODES.CLI_SPAWN_FAILED);
+    const w2 = world();
+    const r2 = w2.io.runner;
+    w2.io.runner = async (c) => { if (c.role === "builder") throw Object.assign(new Error("Failed to invoke claude CLI: spawn ENOENT"), { code: "ENOENT", spawnErrno: "ENOENT", spawnDeterministic: true }); return r2(c); };
+    assert.equal((await run(w2)).code, OUTCOME_CODES.CLI_SPAWN_FAILED);
+    assert.equal(OUTCOME_CODES.CLI_SPAWN_FAILED, "cli.spawn_failed");
+    const { readFileSync } = await import("node:fs");
+    assert.match(readFileSync(new URL("../../docs/OUTCOME-CODES.md", import.meta.url), "utf8"), /`cli\.spawn_failed`/);
+  });
+});
