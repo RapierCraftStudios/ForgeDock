@@ -43,6 +43,8 @@ function world(o = {}) {
       const k = a.slice(0, 2).join(" ");
       if (a[0] === "api") return "";
       if (k === "pr list") return JSON.stringify(w.prList);
+      if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
+      if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
       if (k === "issue view") return JSON.stringify({ number: 7, title: "foo breaks", body: "Bug in foo", state: "OPEN" });
       if (k === "issue comment" && w.commentErrors.length) throw new Error(w.commentErrors.shift());
       if (k === "issue comment") { w.comments.push(a[a.indexOf("--body") + 1]); w.seq.push("comment"); return `https://github.com/o/r/issues/7#issuecomment-${w.comments.length}\n`; }
@@ -77,6 +79,7 @@ function world(o = {}) {
       if (a[0] === "rev-parse") return w.head;
       if (a[0] === "diff" && a[1] === "--name-only") return w.changed.join("\n");
       if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
+      if (a[0] === "ls-remote" && String(a.at(-1)).startsWith("refs/heads/")) { const b = a.at(-1).slice("refs/heads/".length); return (o.branchesOnOrigin ?? ["staging", "main"]).includes(b) ? `abc\trefs/heads/${b}\n` : ""; }
       if (a[0] === "ls-remote") return w.remote;
       if (a[0] === "push") w.seq.push("push");
       return "";
@@ -742,20 +745,46 @@ describe("orchestrate", () => {
     assert.match(t, /skipped \(dependency #1/);
   });
 
-  it("orchestrateFromCli wires parallel, lane and prints the table", async () => {
+  it("orchestrateFromCli routes each issue to its own lane (no --lane), reports cross-lane edges, refuses --lane main", async () => {
     const seen = [];
     const logs = [];
+    const milestones = { 1: "M One", 2: null, 3: "M One" };
+    const leanIo = {
+      gh: async (a) => {
+        if (a[0] === "repo" && a[1] === "view") return "main\n";
+        if (a.includes("milestone")) return JSON.stringify({ milestone: milestones[a[2]] ? { title: milestones[a[2]] } : null });
+        return JSON.stringify({ body: a[2] === "1" ? "**Depends on**: #2" : "" });
+      },
+      git: async (a) => (a[0] === "ls-remote" && ["refs/heads/staging", "refs/heads/milestone/m-one"].includes(a.at(-1)) ? "abc\tref\n" : ""),
+    };
+    const deps = { dir: tmpDir("core-orch-"), emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo,
+      leanModule: { runCore: async (o) => { seen.push([o.issue, o.lane, o.repo]); return { terminalReason: "merged", pr: 50 + o.issue, cost_usd: 1, wall_ms: 1 }; } } };
     const l = console.log; console.log = (s) => logs.push(String(s));
-    try {
-      const res = await orchestrateFromCli(["1", "2", "--parallel", "2", "--lane", "main", "--repo", "o/r"], {
-        dir: tmpDir("core-orch-"), emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" },
-        leanIo: { gh: async () => JSON.stringify({ body: "" }) },
-        leanModule: { runCore: async (o) => { seen.push([o.issue, o.lane, o.repo]); return { terminalReason: "merged", pr: 50 + o.issue, cost_usd: 1, wall_ms: 1 }; } } });
-      assert.equal(res.ok, true);
-    } finally { console.log = l; }
-    assert.deepEqual(seen.sort(), [[1, "main", "o/r"], [2, "main", "o/r"]]);
+    let res;
+    try { res = await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--no-prefilter"], deps); } finally { console.log = l; }
+    assert.equal(res.ok, true);
+    assert.deepEqual(seen.sort((a, b) => a[0] - b[0]), [[1, "milestone/m-one", "o/r"], [2, "staging", "o/r"], [3, "milestone/m-one", "o/r"]]);
+    assert.deepEqual(res.crossLane, [{ issue: 1, lane: "milestone/m-one", dependency: 2, dependencyLane: "staging" }]);
+    assert.ok(logs.some((s) => /^cross-lane: #1 \(milestone\/m-one\) depends on #2 \(staging\)/.test(s)), logs.join("\n"));
     assert.ok(logs.some((s) => /issue\s+outcome/.test(s)));
+    // --lane is an assertion per issue: the staging issue matches, the milestone issues are refused without a run.
+    seen.length = 0;
+    console.log = () => {};
+    try { res = await orchestrateFromCli(["2", "3", "--repo", "o/r", "--lane", "staging", "--no-prefilter"], deps); } finally { console.log = l; }
+    assert.deepEqual(res.rows.map((r) => [r.issue, r.outcome, r.code ?? null]), [[2, "merged", null], [3, "lane-refused", "lane.mismatch"]]);
+    assert.deepEqual(seen, [[2, "staging", "o/r"]]);
+    await assert.rejects(orchestrateFromCli(["1", "--lane", "main", "--repo", "o/r"], { ...deps, io: { gh: async () => "main\n" } }), /lane\.default_branch/);
     await assert.rejects(orchestrateFromCli([], {}), /usage/);
+  });
+
+  it("#4125 a lane-refused issue starts no run and its dependents are skipped, not reported as a cycle", async () => {
+    const runs = [];
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 2, readBody: async (n) => (n === 2 ? "**Depends on**: #1" : ""),
+      resolveLane: async (n) => (n === 1 ? { ok: false, code: "lane.branch_missing", detail: "milestone/x missing" } : { ok: true, lane: "staging" }),
+      runOne: async (n, lane) => { runs.push([n, lane]); return { terminalReason: "merged" }; } });
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "lane-refused"], [2, "skipped"], [3, "merged"]]);
+    assert.match(rows[1].detail, /dependency #1 ended lane-refused/);
+    assert.deepEqual(runs, [[3, "staging"]]);
   });
 });
 
@@ -1342,5 +1371,95 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.equal(builders(w).length, 1, "builder runs again (a checkpoint is not finished work)");
     assert.match(builders(w)[0][4], /Continue from it/);
     assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add" && c.includes("origin/feat/issue-7-lean")));
+  });
+});
+
+describe("lane resolution in core work-on (#4125)", () => {
+  const leased = (w) => { w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } }; return w; };
+  const touched = (w) => ({ comments: w.comments.length, leases: w.leaseWrites.length, worktree: w.calls.filter((c) => c[1] === "worktree").length,
+    runner: w.calls.filter((c) => c[0] === "runner").length, labels: w.labels.length, prs: w.prs.length, merges: w.merges.length });
+  const nothing = { comments: 0, leases: 0, worktree: 0, runner: 0, labels: 0, prs: 0, merges: 0 };
+
+  it("a milestone issue with no --lane builds on and opens its PR against milestone/<slug>", async () => {
+    const w = leased(world({ milestone: "Adaptive Unblocking Control Loop", branchesOnOrigin: ["staging", "milestone/adaptive-unblocking-control-loop"] }));
+    const r = await run(w, { lane: undefined });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.prs[0][w.prs[0].indexOf("--base") + 1], "milestone/adaptive-unblocking-control-loop");
+    assert.match(w.comments[0], /base `milestone\/adaptive-unblocking-control-loop`/);
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "worktree" && c.includes("origin/milestone/adaptive-unblocking-control-loop")), "worktree based on the milestone lane");
+    assert.equal(w.leaseWrites[0].lane, "milestone/adaptive-unblocking-control-loop");
+  });
+
+  it("--lane staging on a milestone issue is refused (lane.mismatch) before any lease, comment or worktree", async () => {
+    const w = leased(world({ milestone: "M1", branchesOnOrigin: ["staging", "milestone/m1"] }));
+    const r = await run(w, { lane: "staging" });
+    assert.deepEqual([r.terminalReason, r.code], ["lane-refused", "lane.mismatch"]);
+    assert.deepEqual(touched(w), nothing);
+    // An explicit override is allowed and recorded in the trajectory.
+    const w2 = leased(world({ milestone: "M1", branchesOnOrigin: ["staging", "milestone/m1"] }));
+    const r2 = await run(w2, { lane: "staging", laneOverride: true });
+    assert.equal(r2.terminalReason, "merged");
+    assert.equal(w2.prs[0][w2.prs[0].indexOf("--base") + 1], "staging");
+    assert.ok(traj(w2)[0].includes("Lane override: staging instead of the resolved milestone/m1"));
+  });
+
+  it("--lane main (or the configured default branch) is refused, even with an override", async () => {
+    for (const [extra, o] of [[{ lane: "main" }, {}], [{ lane: "main", laneOverride: true }, {}], [{ lane: "prod", branches: { default: "prod" } }, { branchesOnOrigin: ["staging", "prod"] }]]) {
+      const w = leased(world(o));
+      const r = await run(w, extra);
+      assert.deepEqual([r.terminalReason, r.code], ["lane-refused", "lane.default_branch"], JSON.stringify(extra));
+      assert.deepEqual(touched(w), nothing);
+    }
+  });
+
+  it("a missing milestone/<slug> branch fails closed with lane.branch_missing", async () => {
+    const w = leased(world({ milestone: "Not Yet" }));
+    const r = await run(w, { lane: undefined });
+    assert.deepEqual([r.terminalReason, r.code], ["lane-refused", "lane.branch_missing"]);
+    assert.match(r.detail, /milestone\/not-yet/);
+    assert.deepEqual(touched(w), nothing);
+  });
+
+  it("an open PR targeting the default branch (or another lane) is never merged", async () => {
+    for (const [base, code] of [["main", "lane.default_branch"], ["milestone/other", "lane.mismatch"]]) {
+      const w = world({ prList: [{ number: 77, headRefOid: "aaaa1111aaaa1111", baseRefName: base }], remote: "abc\trefs/heads/feat/issue-7-lean" });
+      const r = await run(w);
+      assert.equal(r.terminalReason, "needs-human", base);
+      assert.equal(r.code, code);
+      assert.equal(w.merges.length, 0); assert.equal(w.prs.length, 0);
+      assert.equal(builders(w).length, 0);
+    }
+  });
+});
+
+describe("lane entry points (#4125)", () => {
+  const quiet = async (fn) => { const l = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = l; } };
+  const deps = () => ({ dir: tmpDir("core-cli-"), emitTelemetry: async () => {}, leanIo: {}, io: { gh: async (a) => (a.includes("defaultBranchRef") ? "main\n" : "o/r\n") },
+    leanModule: { runCore: async (o) => ({ terminalReason: "merged", seen: o }) }, runIssue: async () => ({ terminalReason: "merged" }) });
+
+  it("run-issue refuses --lane main on the core and full paths; the core path needs no --lane", async () => {
+    await assert.rejects(runFromCli(["7", "--lane", "main", "--repo", "o/r"], deps()), /lane\.default_branch/);
+    await assert.rejects(runFromCli(["7", "--lane", "main", "--path", "full"], deps()), /lane\.default_branch/);
+    await assert.rejects(runFromCli(["7", "--path", "full"], deps()), /--lane is required with --path full/);
+    const r = await quiet(() => runFromCli(["7", "--repo", "o/r"], deps()));
+    assert.equal(r.seen.lane, undefined); assert.equal(r.seen.laneOverride, false);
+    const r2 = await quiet(() => runFromCli(["7", "--repo", "o/r", "--lane", "staging", "--lane-override"], deps()));
+    assert.deepEqual([r2.seen.lane, r2.seen.laneOverride], ["staging", true]);
+  });
+
+  it("the core run-issue prints lane-refused with its code", async () => {
+    const d = deps(); d.leanModule = { runCore: async () => ({ terminalReason: "lane-refused", code: "lane.mismatch", detail: "--lane staging does not match" }) };
+    const lines = []; const l = console.log; console.log = (x) => lines.push(String(x));
+    try { await runFromCli(["7", "--repo", "o/r", "--lane", "staging"], d); } finally { console.log = l; }
+    assert.equal(lines.at(-1), "issue #7 → lane-refused lane.mismatch (--lane staging does not match)");
+  });
+
+  it("no staging lane default remains in engine.mjs, runlog.mjs or engine-cli.mjs", async () => {
+    const { readFileSync } = await import("node:fs");
+    for (const f of ["../engine.mjs", "../engine/runlog.mjs", "../engine-cli.mjs"]) {
+      const src = readFileSync(new URL(f, import.meta.url), "utf8");
+      assert.doesNotMatch(src, /lane\s*=\s*"staging"|lane:\s*"staging"|"--lane"\)\s*\?\?\s*"staging"/, f);
+      assert.doesNotMatch(src, /--lane main/, f);
+    }
   });
 });

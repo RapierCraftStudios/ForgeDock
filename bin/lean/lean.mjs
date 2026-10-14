@@ -12,6 +12,7 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency } from "../engine/phases.mjs";
 import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
+import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, capComment, sanitizeMd } from "./render.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, PLAN_FILE, IMPLEMENTATION_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, parseVerdict, blockCorrectionPrompt, HUMAN_BLOCK_REASONS } from "./prompts.mjs";
@@ -50,7 +51,9 @@ export function classifyBlock(result, issue) {
  * @param {object} o
  * @param {number} o.issue
  * @param {string} o.repo            "owner/repo"
- * @param {string} o.lane            base branch (staging|main)
+ * @param {string} [o.lane]          requested lane: an assertion checked against the lane resolved from the issue (#4125)
+ * @param {boolean} [o.laneOverride] accept a requested lane that differs from the resolved one (never the default branch)
+ * @param {object} [o.branches]      forge.yaml branches {default, staging, featurePattern} (lane.mjs readBranches)
  * @param {string} o.cwd             main checkout (worktrees are added from here)
  * @param {string} o.dir             run-log dir
  * @param {object} o.io              injected effects: gh, git, runner, waitCiGreen, transitionLabel, fs, projector?, now?, sleep?
@@ -59,11 +62,11 @@ export function classifyBlock(result, issue) {
  * @param {number} [o.ciMaxMinutes]  remote-CI wait budget (default 360); exhaustion is NOT needs-human
  */
 export async function runCore(o) {
-  const { issue, repo, lane, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
+  const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
     ciMaxMinutes = 360, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-  const base = `origin/${lane}`;
+  let lane = null, base = null, defaults = []; // set by lane resolution, before the lease
   const branch = `feat/issue-${issue}-lean`;
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
@@ -369,6 +372,17 @@ export async function runCore(o) {
     const a = await checkAdmission({ cfg: o.admission, host: io.host });
     if (!a.ok) return { terminalReason: "deferred", code: OUTCOME_CODES.HOST_BUSY, detail: a.detail, retryInSeconds: ADMISSION_RETRY_SECONDS };
   }
+  // ---- lane (#4125): worked out from the issue before any lease, comment or worktree; fail closed ----
+  {
+    const r = await resolveLane({ issue, repo, io, cwd, branches, requested: requestedLane, override: laneOverride });
+    if (!r.ok) return { terminalReason: "lane-refused", code: r.code, detail: r.detail };
+    lane = r.lane; base = `origin/${lane}`; defaults = r.defaults;
+    if (r.overridden) T.decisions.push(`Lane override: ${lane} instead of the resolved ${r.expected}`);
+  }
+  /** Last guard before a PR is created or merged: the default branch is never a lane. */
+  const laneGuard = (target, what) => {
+    if (isDefaultLane(target, defaults)) throw Object.assign(new Error(`refusing to ${what} into the default branch ${target}`), { laneCode: OUTCOME_CODES.LANE_DEFAULT_BRANCH });
+  };
   // ---- admission: Depends-on refusal, then lease ----
   {
     let dep = null;
@@ -414,10 +428,15 @@ export async function runCore(o) {
     try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ }
     let resumed = null;
     try {
-      const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid"])) || "[]");
+      const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid,baseRefName"])) || "[]");
       const remote = String(await io.git(["ls-remote", "--heads", "origin", branch], { cwd })).trim();
-      if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null };
+      if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null };
     } catch { /* no resume info: start fresh */ }
+    // An open PR on another base (a hand-retargeted PR, or one opened before lane resolution) is never merged (#4125).
+    if (resumed?.base && resumed.base !== lane) {
+      return await needsHuman(`Open PR #${resumed.pr} targets \`${resumed.base}\`, but #${issue}'s lane is \`${lane}\`; retarget or close it before rerunning.`,
+        isDefaultLane(resumed.base, defaults) ? OUTCOME_CODES.LANE_DEFAULT_BRANCH : OUTCOME_CODES.LANE_MISMATCH);
+    }
     try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* none */ }
     try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
     // Concurrent lanes in one repo race on .git/config.lock / index.lock during `worktree add`; retry with jitter.
@@ -542,6 +561,7 @@ export async function runCore(o) {
     // ---- 5. push + PR ----
     const files = await changedFiles();
     await gitPush(["push", "-u", "origin", branch]);
+    laneGuard(lane, "open a PR");
     const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghw(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
       "--title", `${iss.title} (#${issue})`, "--body", renderPrBody({ issue, investigation: await readStage(STAGES[0]), plan: await readStage(STAGES[1]), implementation: await readStage(STAGES[2]), result, gitFiles: files })])).trim();
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
@@ -669,6 +689,7 @@ export async function runCore(o) {
       }
       if (syncs > 0 && (await prConflicting()) === "conflict") continue; // the base moved again while waiting
       T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
+      laneGuard(resumed?.base ?? lane, "merge");
       try {
         await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
         break;
@@ -694,6 +715,7 @@ export async function runCore(o) {
       return finish("deferred", `usage limit hit; resets at ${when}`, { code: OUTCOME_CODES.RATE_LIMITED, resetAt: when, resetAtEpochMs: Number.isFinite(e.resetAtEpochMs) ? e.resetAtEpochMs : null }, OUTCOME_CODES.RATE_LIMITED);
     }
     if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode }, e.deferCode);
+    if (e?.laneCode) return await needsHuman(e.message, e.laneCode);
     if (e?.pushRejected) return await needsHuman(`git push was rejected (no retry): ${String(e?.stderr ?? e?.message ?? e).slice(0, 400)}`);
     return finish("engine-error", e?.message ?? String(e));
   }

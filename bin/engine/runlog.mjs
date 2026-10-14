@@ -73,7 +73,7 @@ export function scopeEvents(events, path = "full") {
 export function deriveState(allEvents, { path = "full" } = {}) {
   const events = scopeEvents(allEvents, path);
   /** @type {import("./phases.mjs").RunState} */
-  const s = { v: 0, run: null, issue: null, lane: "staging", committed: [],
+  const s = { v: 0, run: null, issue: null, lane: null, committed: [],
               phase: null, branch: null, pr: null, terminal: false,
               terminalReason: null, lease: null, lastRateLimit: null,
               remediationKind: null, outcomeCode: null };

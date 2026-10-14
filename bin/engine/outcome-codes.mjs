@@ -48,6 +48,11 @@ export const OUTCOME_CODES = Object.freeze({
   DEPENDENCY_OPEN: "dependency.open",
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
   DEPENDENCY_BLOCKED: "dependency.blocked",
+  // Lane resolution refusals (#4125): before any lease, comment or worktree; terminal reason `lane-refused`.
+  LANE_MISMATCH: "lane.mismatch",
+  LANE_DEFAULT_BRANCH: "lane.default_branch",
+  LANE_BRANCH_MISSING: "lane.branch_missing",
+  LANE_UNRESOLVED: "lane.unresolved",
   INVALID: "invalid",
   DECOMPOSED: "decomposed",
   // Lean core work-on (bin/lean) needs-human causes.

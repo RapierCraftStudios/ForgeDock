@@ -19,6 +19,7 @@ function world(o = {}) {
       const k = a.slice(0, 2).join(" ");
       if (k === "issue view") { const n = Number(a[2]); return JSON.stringify({ number: n, state: "OPEN", labels: [], title: "", body: "", ...w.issues[n] }); }
       if (k === "search prs") return JSON.stringify(w.prs);
+      if (k === "repo view") return "main\n";
       if (a[0] === "api") {
         const m = /actions\/runs\/(\d+)$/.exec(a[1]);
         if (m) return JSON.stringify(w.runs[m[1]]);
@@ -34,6 +35,7 @@ function world(o = {}) {
       if (a[0] === "log") return w.commits;
       if (a[0] === "cat-file") { if (w.paths.has(a[2].replace(/^origin\/staging:/, ""))) return ""; throw new Error("missing"); }
       if (a[0] === "fetch") return "";
+      if (a[0] === "ls-remote") return a.at(-1) === "refs/heads/staging" ? "abc\trefs/heads/staging\n" : "";
       throw new Error(`unexpected git ${a.join(" ")}`);
     },
     runner: async (args) => { w.runner.push(args); return { text: w.verdict ? fence(w.verdict) : "no json", costUsd: 0.02 }; },
@@ -190,5 +192,19 @@ describe("orchestrate with the pre-filter (#4123)", () => {
     assert.ok(logs.some((s) => /^pre-filter: 2 checked, 1 candidate\(s\), 1 closed/.test(s)));
     assert.deepEqual(w.closed, [[12, "not planned"]]);
     await assert.rejects(triageFromCli([], {}), /usage/);
+  });
+
+  it("#4125 triage checks each issue against its own lane: a refused lane (--lane main, missing milestone branch) is reported and dropped", async () => {
+    const w = world({ issues: { 12: { body: "x" }, 13: { body: "y", milestone: { title: "Later" } } } });
+    const logs = []; const l = console.log; console.log = (s) => logs.push(String(s));
+    let res, res2;
+    try {
+      res = await triageFromCli(["12", "13", "--repo", "o/r", "--dry-run"], { leanIo: w.io });
+      res2 = await triageFromCli(["12", "--repo", "o/r", "--lane", "main", "--dry-run"], { leanIo: w.io });
+    } finally { console.log = l; }
+    assert.deepEqual(res.lanes, [12]);
+    assert.ok(logs.some((s) => /^#13 → lane-refused \(lane\.branch_missing: lane branch milestone\/later/.test(s)), logs.join("\n"));
+    assert.deepEqual(res2.lanes, []);
+    assert.ok(logs.some((s) => /^#12 → lane-refused \(lane\.default_branch/.test(s)));
   });
 });

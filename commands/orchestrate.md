@@ -1,6 +1,6 @@
 ---
 description: Orchestrate several issues in parallel — launches one lean work-on lane per issue (background shell or agent), GitHub is the register
-argument-hint: "<#1 #2 #3 | milestone <slug> | label <name>> [--parallel K] [--lane L] [--path full]"
+argument-hint: "<#1 #2 #3 | milestone <slug> | label <name>> [--parallel K] [--path full]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -33,7 +33,7 @@ Do this yourself from issue text and the code. Spawn no sub-agents here.
    for the whole set:
 
    ```bash
-   forgedock triage <N...> --lane <L>
+   forgedock triage <N...>
    ```
 
    It closes, with the evidence on the issue and no lane, every issue that a merged PR already fixed (one
@@ -62,7 +62,14 @@ Do this yourself from issue text and the code. Spawn no sub-agents here.
 
 `K` = `--parallel` if given, otherwise `orchestration.max_concurrent` from the repo's `forge.yaml`
 (`yq '.orchestration.max_concurrent' forge.yaml`), otherwise 3. State the value of K and where it came
-from in the plan. `L` = `--lane` if given, otherwise the repo's base lane from forge.yaml.
+from in the plan.
+
+**Lanes (base branches).** Each issue has its own lane, and ForgeDock works it out: an issue with a milestone
+goes to forge.yaml `branches.feature_pattern` (`milestone/<slug>`, which must exist on origin), any other issue
+to `branches.staging`. The default (production) branch is never a lane. Do not pass `--lane`; a `--lane` that
+differs from the issue's lane is refused (`lane-refused`, `lane.mismatch`). A dependency edge between two lanes
+(for example a milestone issue waiting on a staging-lane fix) never gets that fix on its base: list it in the
+plan and either re-milestone the dependency or wait for a milestone sync. Never mix lanes silently.
 
 ## 3. Launch lanes
 
@@ -78,7 +85,7 @@ same minute; start another ready issue first instead of waiting.
   start a lane, and when a lane's completion notification arrives, start the next ready issue.
 
   ```bash
-  forgedock run-issue <N> --lane <L>
+  forgedock run-issue <N>
   ```
 
   The harness notifies you when the lane exits. Its last line is `issue #N → <outcome>`.
@@ -104,6 +111,9 @@ When a lane finishes:
 - `dependency-open`: the engine or the builder found a dependency you missed (its output names it). This is a
   scheduling fact, not a failure: add the edge and requeue the issue behind it. Do not skip its dependents.
   If the dependency is outside the set and agents can resolve it, add it to the batch and launch it.
+- `lane-refused` (codes `lane.mismatch`, `lane.default_branch`, `lane.branch_missing`, `lane.unresolved`): nothing
+  ran (no lease, comment or worktree). Report the code and its detail (for example a missing `milestone/<slug>`
+  branch), and mark the issue's dependents skipped. Do not retry it with a different `--lane`.
 - `dependency-blocked`: its dependency is open and labelled `needs-human`. Report it as blocked by that issue,
   do not label it `needs-human`, and mark its dependents skipped.
 - `decomposed`: the builder split the issue and the engine filed sub-issues (listed in its output, each with
