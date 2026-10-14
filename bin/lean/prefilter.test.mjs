@@ -194,6 +194,24 @@ describe("orchestrate with the pre-filter (#4123)", () => {
     await assert.rejects(triageFromCli([], {}), /usage/);
   });
 
+  it("#4141 triage runs a bounded parallel pool, fetches each lane once, and prints rows in input order", async () => {
+    const issues = {}; for (let n = 1; n <= 6; n++) issues[n] = { body: `b${n}` };
+    const w = world({ issues, prs: [], verdict: { verdict: "VALID", evidence: [] } });
+    let live = 0, peak = 0, fetches = 0;
+    const gh0 = w.io.gh, git0 = w.io.git;
+    w.io.gh = async (a, o) => { live++; peak = Math.max(peak, live); await new Promise((r) => setTimeout(r, 5 + (Number(a.find((x) => /^\d+$/.test(x))) || 0) % 3)); live--; return gh0(a, o); };
+    w.io.git = async (a, o) => { if (a[0] === "fetch") fetches++; return git0(a, o); };
+    const logs = []; const l = console.log; console.log = (s) => logs.push(String(s));
+    let res;
+    try { res = await triageFromCli(["1", "2", "3", "4", "5", "6", "--repo", "o/r", "--lane", "staging", "--parallel", "3"], { leanIo: w.io }); } finally { console.log = l; }
+    const order = logs.filter((s) => /^#\d+ → /.test(s)).map((s) => Number(s.slice(1, s.indexOf(" "))));
+    assert.deepEqual(order, [1, 2, 3, 4, 5, 6]);
+    assert.ok(peak > 1 && peak <= 3, `peak ${peak}`);
+    assert.equal(fetches, 1);
+    assert.deepEqual(res.rows.map((r) => r.issue), [1, 2, 3, 4, 5, 6]);
+    await assert.rejects(triageFromCli(["1", "--repo", "o/r", "--parallel", "0"], { leanIo: w.io }), /--parallel/);
+  });
+
   it("#4125 triage checks each issue against its own lane: a refused lane (--lane main, missing milestone branch) is reported and dropped", async () => {
     const w = world({ issues: { 12: { body: "x" }, 13: { body: "y", milestone: { title: "Later" } } } });
     const logs = []; const l = console.log; console.log = (s) => logs.push(String(s));
