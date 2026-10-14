@@ -33,12 +33,14 @@ Do this yourself from issue text and the code. Spawn no sub-agents here.
    for the whole set:
 
    ```bash
-   forgedock triage <N...>
+   forgedock triage <N...> --parallel <K>
    ```
 
    It closes, with the evidence on the issue and no lane, every issue that a merged PR already fixed (one
    short read-only validation on a small model) or an auto-filed CI failure whose workflow is green again
-   (the green run link). Its last line is `lanes: #A #B ...`: continue with only those issues. Keep its
+   (the green run link). It checks K issues at a time. Its last line is `lanes: #A #B ...`: continue with only
+   those issues. This is the only pre-filter in this command: lanes run `forgedock run-issue`, which does not
+   pre-filter again. Keep its
    `pre-filter:` line for the report.
 3. **Triage.** For each issue, read it once (`gh issue view N --json title,body,labels`) and record:
    - **Ready / skip.** Skip when it is labelled `needs-human` or `workflow:merged`, or an open PR already
