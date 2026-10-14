@@ -825,13 +825,14 @@ function prefilterModel(argv) {
 }
 
 /**
- * `forgedock triage <issue...> [--lane L] [--repo owner/repo] [--dry-run] [--prefilter-model M]` (#4123)
+ * `forgedock triage <issue...> [--parallel K] [--lane L] [--repo owner/repo] [--dry-run] [--prefilter-model M]` (#4123)
+ * Issues are checked through a bounded pool of K (default 8, #4141); each lane is fetched once; rows print in input order.
  * Each issue is checked against its own lane (#4125); `--lane` is an assertion, a refused lane is reported and dropped.
  * Runs only the already-fixed pre-filter: closes issues it proves fixed (with evidence) and prints the issues that
  * still need a lane as the last line (`lanes: #1 #2`). `--dry-run` reports candidates without a model call or close.
  */
 export async function triageFromCli(argv, deps = {}) {
-  const valued = ["--lane", "--repo", "--prefilter-model"];
+  const valued = ["--lane", "--repo", "--prefilter-model", "--parallel"];
   const issues = [];
   for (let i = 0; i < argv.length; i++) {
     if (valued.includes(argv[i])) { i++; continue; }
@@ -845,17 +846,36 @@ export async function triageFromCli(argv, deps = {}) {
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   const { prefilterIssue, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
   const branches = readBranches();
-  const fetched = new Set();
-  const rows = [];
-  for (const n of [...new Set(issues)]) {
+  const parallel = flag(argv, "--parallel") == null ? 8 : parseInt(flag(argv, "--parallel"), 10);
+  if (!Number.isInteger(parallel) || parallel < 1) throw new Error("--parallel must be a positive integer");
+  // #4141: bounded pool. Each lane is fetched once (memoized promise); output stays in input order.
+  const fetched = new Map();
+  const fetchLane = (l) => {
+    if (!fetched.has(l)) fetched.set(l, leanIo.git(["fetch", "origin", l], { cwd: process.cwd() }).catch(() => { /* offline: use the local ref */ }));
+    return fetched.get(l);
+  };
+  const uniq = [...new Set(issues)];
+  const out = new Array(uniq.length);
+  const checkOne = async (n) => {
     // #4125: each issue's own lane; `--lane` is an assertion. A refused lane never reaches the pre-filter or a lane.
     const ln = await resolveLane({ issue: n, repo, io: leanIo, cwd: process.cwd(), branches, requested: lane, override: argv.includes("--lane-override") });
-    if (!ln.ok) { console.log(`#${n} → lane-refused (${ln.code}: ${ln.detail})`); rows.push({ issue: n, outcome: "lane-refused", cost_usd: 0, prefilter: null }); continue; }
-    if (!fetched.has(ln.lane)) { fetched.add(ln.lane); try { await leanIo.git(["fetch", "origin", ln.lane], { cwd: process.cwd() }); } catch { /* offline: use the local ref */ } }
+    if (!ln.ok) return { line: `#${n} → lane-refused (${ln.code}: ${ln.detail})`, row: { issue: n, outcome: "lane-refused", cost_usd: 0, prefilter: null } };
+    await fetchLane(ln.lane);
     const pf = await prefilterIssue({ issue: n, repo, lane: ln.lane, cwd: process.cwd(), io: leanIo, dryRun: argv.includes("--dry-run"), ...prefilterModel(argv) });
-    console.log(`#${n} → ${pf.closed ? "closed" : pf.candidate ? "candidate" : "lane"} (${pf.detail})`);
-    rows.push({ issue: n, outcome: pf.closed ? "invalid" : "pending", cost_usd: pf.cost_usd, prefilter: pf });
-  }
+    return { line: `#${n} → ${pf.closed ? "closed" : pf.candidate ? "candidate" : "lane"} (${pf.detail})`, row: { issue: n, outcome: pf.closed ? "invalid" : "pending", cost_usd: pf.cost_usd, prefilter: pf } };
+  };
+  let next = 0, printed = 0;
+  const flush = () => { while (printed < out.length && out[printed]) console.log(out[printed++].line); };
+  await Promise.all(Array.from({ length: Math.min(parallel, uniq.length) }, async () => {
+    while (next < uniq.length) {
+      const i = next++;
+      try { out[i] = await checkOne(uniq[i]); } catch (e) {
+        out[i] = { line: `#${uniq[i]} → lane (pre-filter error: ${String(e?.message ?? e).slice(0, 120)})`, row: { issue: uniq[i], outcome: "pending", cost_usd: 0, prefilter: { closed: false, candidate: false, detail: "pre-filter error", cost_usd: 0 } } };
+      }
+      flush();
+    }
+  }));
+  const rows = out.map((r) => r.row);
   const lanes = rows.filter((r) => r.prefilter && !r.prefilter.closed).map((r) => r.issue);
   console.log(formatPrefilterSummary(rows));
   console.log(`lanes: ${lanes.map((n) => `#${n}`).join(" ") || "(none)"}`);
