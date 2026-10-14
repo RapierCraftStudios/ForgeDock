@@ -3975,7 +3975,7 @@ switch (command) {
       // an uncaught throw, which already set exitCode = 1 below. Now that
       // runIssue() resolves cleanly with a terminalReason instead of throwing,
       // preserve that same non-zero exit code for this reason too.
-      if (result && (result.terminalReason === "needs-human" || result.terminalReason === "engine-error" || result.terminalReason === "not-retryable" || result.terminalReason === "dependency-open" || result.terminalReason === "dependency-unreadable")) exitCode = 1;
+      if (result && (result.terminalReason === "needs-human" || result.terminalReason === "engine-error" || result.terminalReason === "not-retryable" || result.terminalReason === "dependency-open" || result.terminalReason === "dependency-unreadable" || result.terminalReason === "dependency-blocked")) exitCode = 1;
       // forge#3574: a lease-held deferral did NOT run the issue; exit 75
       // (EX_TEMPFAIL) so orchestrators neither count it as done nor as a failure.
       if (result && result.terminalReason === "deferred") exitCode = 75;

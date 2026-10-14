@@ -170,6 +170,16 @@ describe("orchestrate with the pre-filter (#4123)", () => {
     assert.deepEqual(rows.map((r) => r.outcome), ["invalid", "merged"]);
   });
 
+  it("a dependency-open issue requeued by #4124 is pre-filtered once, and its validation cost counted once", async () => {
+    const checks = [];
+    let first = true;
+    const rows = await orchestrate({ issues: [2], readBody: async () => "",
+      prefilter: async (n) => { checks.push(n); return { issue: n, closed: false, candidate: true, cost_usd: 0.02, detail: "confirmed: lane" }; },
+      runOne: async (n) => (n === 2 && first ? ((first = false), { terminalReason: "dependency-open", dependencies: [1] }) : { terminalReason: "merged", pr: 10 + n, cost_usd: 1 }) });
+    assert.deepEqual(checks, [2, 1]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.cost_usd]), [[2, "merged", 1.02], [1, "merged", 1.02]]);
+  });
+
   it("forgedock triage closes the fixed issue and prints the issues that still need a lane", async () => {
     const w = world({ issues: { 12: { body: "x" }, 13: { body: "y" } }, prs: [{ number: 90, title: "Fixes #12", body: "" }], verdict: { verdict: "ALREADY-FIXED", evidence: ["a:1"] } });
     const logs = []; const l = console.log; console.log = (s) => logs.push(String(s));
