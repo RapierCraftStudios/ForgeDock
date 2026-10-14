@@ -41,6 +41,7 @@ function world(o = {}) {
     now: () => w.clock, sleep: async (ms) => { w.clock += ms; },
     gh: async (a) => {
       const k = a.slice(0, 2).join(" ");
+      if (a[0] === "api" && o.repoMerge && /^repos\/[^/]+\/[^/]+$/.test(a[1])) { w.repoReads = (w.repoReads ?? 0) + 1; return JSON.stringify(o.repoMerge); }
       if (a[0] === "api") return "";
       if (k === "pr list") return JSON.stringify(w.prList);
       if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
@@ -142,6 +143,19 @@ describe("core work-on", () => {
     assert.equal(reviewers(w).length, 1);
     const ev = readLog(dir, 7).map((e) => e.event);
     assert.equal(ev[0], "RUN_START"); assert.equal(ev.at(-1), "RUN_TERMINAL");
+  });
+
+  it("merges with the method the repo allows: --merge by default, --squash on a squash-only repo, read once", async () => {
+    const plain = world();
+    await run(plain, { dir: tmpDir("core-") });
+    assert.equal(plain.merges[0][5], "--merge", "unreadable repo settings keep --merge");
+    const squashOnly = world({ repoMerge: { merge: false, squash: true, rebase: false } });
+    assert.equal((await run(squashOnly, { dir: tmpDir("core-") })).terminalReason, "merged");
+    assert.equal(squashOnly.merges[0][5], "--squash");
+    assert.equal(squashOnly.repoReads, 1);
+    const rebaseOnly = world({ repoMerge: { merge: false, squash: false, rebase: true } });
+    await run(rebaseOnly, { dir: tmpDir("core-") });
+    assert.equal(rebaseOnly.merges[0][5], "--rebase");
   });
 
   it("investigation and plan comments are posted before the reviewer runs and before the in-review label", async () => {
