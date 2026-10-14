@@ -46,7 +46,22 @@ If the verdict is not CONFIRMED, stop after this file and change nothing.
 ### Verification   (each command, its result, and whether the new test fails without the fix)
 ### Notes   (behavior changes, env vars, follow-ups)
 
-Finally write ${RESULT_FILE}: {"status":"fixed|already-fixed|invalid|blocked","summary":"one line","evidence":["file:line ..."],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}]}`;
+Finally write ${RESULT_FILE}: {"status":"fixed|already-fixed|invalid|blocked","summary":"one line","evidence":["file:line ..."],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}]}
+
+${BLOCK_RULES}`;
+}
+
+/** Human-only block reasons (#4124). Everything else agents resolve: a dependency, a split, prod data monitoring can read. */
+export const HUMAN_BLOCK_REASONS = Object.freeze(["credentials", "spend", "promotion", "customer", "product-decision"]);
+
+const BLOCK_RULES = `"blocked" needs a typed "block" in ${RESULT_FILE}, one of:
+- {"kind":"dependency","issues":[N]}: an open upstream issue must land first. The engine requeues this issue behind it.
+- {"kind":"split-required","subissues":[{"title":"","body":"","depends_on":[0]}]}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues).
+- {"kind":"human","why":"${HUMAN_BLOCK_REASONS.join("|")}"}: only an external action agents cannot take, or a product decision too critical for agents.
+"An upstream issue must land first", "needs a split" and "needs prod data that read-only monitoring can read" are never "human".`;
+
+export function blockCorrectionPrompt(problem) {
+  return `Your ${RESULT_FILE} says "blocked", but ${String(problem).slice(0, 1000)}. That is not a block that needs a human.\n\n${BLOCK_RULES}\n\nEither do the work (fix, commit, update the stage notes and ${RESULT_FILE}) or write a valid typed "block". Do not push or touch GitHub.`;
 }
 
 export function resumeBuilderPrompt(reason) {

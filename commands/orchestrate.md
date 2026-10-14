@@ -90,9 +90,17 @@ When a lane finishes:
   host busy again.
 - `deferred` with `rate_limited` (usage limit; the last output line carries the reset time): stop launching
   new lanes until that reset time, let running lanes finish, then resume the queue.
-- `dependency-open`: the engine found a dependency you missed. Add the edge and requeue the issue behind it.
+- `dependency-open`: the engine or the builder found a dependency you missed (its output names it). This is a
+  scheduling fact, not a failure: add the edge and requeue the issue behind it. Do not skip its dependents.
+  If the dependency is outside the set and agents can resolve it, add it to the batch and launch it.
+- `dependency-blocked`: its dependency is open and labelled `needs-human`. Report it as blocked by that issue,
+  do not label it `needs-human`, and mark its dependents skipped.
+- `decomposed`: the builder split the issue and the engine filed sub-issues (listed in its output, each with
+  `**Parent**` and `**Depends on**` lines). Add them to the DAG, launch them, and let the parent's dependents
+  wait on the sub-issues.
 - `merged` or `invalid`: start the next ready issue.
-- `needs-human`: read the issue's last comment for the reason, and mark its dependents skipped. Only
+- `needs-human`: an external action agents cannot take (credentials, spend, promotion, customer) or a product
+  decision too critical for agents. Read the issue's last comment for the reason, and mark its dependents skipped. Only
   explicit or logical edges skip a dependent; an issue that merely overlaps the same file keeps running.
 - `engine-error`: relaunch it once.
 - `ci-pending` or `deferred`: leave it. A later `/orchestrate` resumes it.

@@ -236,9 +236,84 @@ describe("core work-on", () => {
     assert.equal(builders(w).length, 1);
   });
 
-  it("builder blocked, or no commit, is needs-human", async () => {
-    assert.equal((await run(world({ result: { status: "blocked", summary: "need creds" } }))).terminalReason, "needs-human");
+  it("builder blocked on a typed human reason, or no commit, is needs-human", async () => {
+    assert.equal((await run(world({ result: { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } } }))).terminalReason, "needs-human");
     assert.equal((await run(world({ changed: [] }))).terminalReason, "needs-human");
+  });
+
+  // #4124: a builder block is typed; only kind "human" with an allowed reason may reach needs-human.
+  const depWorld = (o, deps) => {
+    const w = world(o);
+    const gh = w.io.gh;
+    w.created = [];
+    w.io.gh = async (a) => {
+      if (a[0] === "issue" && a[1] === "view" && deps[a[2]]) return JSON.stringify(deps[a[2]]);
+      if (a[0] === "issue" && a[1] === "create") { w.created.push(a); return `https://github.com/o/r/issues/${200 + w.created.length}\n`; }
+      return gh(a);
+    };
+    return w;
+  };
+  const noNeedsHuman = (w) => {
+    assert.ok(!w.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")), JSON.stringify(w.edits));
+    assert.ok(!w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN")));
+  };
+
+  it("#4124 a builder block naming an open issue ends dependency-open with dependencies, not needs-human", async () => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "needs #34927 first", block: { kind: "dependency", issues: ["#3", 7] } } },
+      { 3: { state: "OPEN", labels: [] } });
+    const dir = tmpDir("lean-dep-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "dependency-open");
+    assert.equal(r.code, "dependency.open");
+    assert.deepEqual(r.dependencies, [3]);
+    assert.equal(readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL").code, "dependency.open");
+    assert.ok(w.comments.some((c) => c.includes("FORGE:DEPENDENCY") && c.includes("#3")));
+    assert.ok(w.edits.some((e) => e.includes("--remove-label")), "workflow labels are cleared");
+    assert.equal(builders(w).length, 1);
+    noNeedsHuman(w);
+  });
+
+  it("#4124 an open dependency that is itself needs-human ends dependency-blocked; this issue is not labelled needs-human", async () => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "upstream", block: { kind: "dependency", issues: [3] } } },
+      { 3: { state: "OPEN", labels: [{ name: "needs-human" }] } });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "dependency-blocked");
+    assert.equal(r.code, "dependency.blocked");
+    assert.deepEqual(r.blockers, [3]);
+    noNeedsHuman(w);
+  });
+
+  it("#4124 split-required files sub-issues with Parent / Depends-on lines and ends decomposed", async () => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [
+      { title: "part A", body: "do A" }, { title: "part B", body: "do B", depends_on: [0] }] } } }, {});
+    const r = await run(w);
+    assert.equal(r.terminalReason, "decomposed");
+    assert.deepEqual(r.subissues, [201, 202]);
+    const bodyB = w.created[1][w.created[1].indexOf("--body") + 1];
+    assert.match(bodyB, /^\*\*Parent\*\*: #7$/m);
+    assert.match(bodyB, /^\*\*Depends on\*\*: #201$/m);
+    assert.ok(w.labels.includes("decomposed"));
+    noNeedsHuman(w);
+  });
+
+  it("#4124 a prod-data (non-human) or untyped block gets one corrective resume; a builder that then proceeds merges", async () => {
+    const w = world({ result: { status: "blocked", summary: "needs live wire capture and prod baselines", block: { kind: "human", why: "prod-data" } },
+      resumeResult: { status: "fixed", summary: "captured via read-only monitoring", evidence: [], tests: [] } });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    const resumed = builders(w).filter((c) => c[2]);
+    assert.equal(resumed.length, 1);
+    assert.match(resumed[0][4], /not a block that needs a human/);
+    noNeedsHuman(w);
+  });
+
+  it("#4124 a block that stays untyped after the correction is needs-human with builder.block_untyped; a closed dependency is not a block", async () => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "upstream", block: { kind: "dependency", issues: [3] } } },
+      { 3: { state: "CLOSED", labels: [] } });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, "builder.block_untyped");
+    assert.equal(builders(w).filter((c) => c[2]).length, 1);
   });
 
   it("worktree add retries a concurrent .git lock collision, then gives up after 5 tries", async () => {
@@ -259,7 +334,8 @@ describe("core work-on", () => {
       assert.equal(term[0].code, r.code);
       return term[0].code;
     };
-    assert.equal(await code(world({ result: { status: "blocked", summary: "need creds" } })), "builder.blocked");
+    assert.equal(await code(world({ result: { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } } })), "builder.blocked");
+    assert.equal(await code(world({ result: { status: "blocked", summary: "need creds" } })), "builder.block_untyped");
     assert.equal(await code(world({ changed: [] })), "builder.no_commit");
     assert.equal(await code(world({ waits: [{ rc: 1, text: "lint failed" }] }), { mergeWait: "all" }), "ci.red");
   });
@@ -591,6 +667,42 @@ describe("orchestrate", () => {
     assert.deepEqual(rows.map((r) => r.outcome), ["needs-human", "skipped", "skipped", "merged"]);
     assert.ok(!h.log.starts.includes(2) && !h.log.starts.includes(3));
     assert.match(rows[1].detail, /#1/);
+  });
+
+  it("#4124 dependency-open requeues the issue behind an out-of-set dependency and does not skip its dependents", async () => {
+    const log = [];
+    let firstRun = true;
+    const rows = await orchestrate({ issues: [1, 2], parallel: 2,
+      readBody: async (n) => (n === 2 ? "**Depends on**: #1" : ""),
+      runOne: async (n) => {
+        log.push(n);
+        if (n === 1 && firstRun) { firstRun = false; return { terminalReason: "dependency-open", dependencies: [9], detail: "depends on #9" }; }
+        return { terminalReason: "merged", pr: 100 + n };
+      } });
+    assert.deepEqual(log, [1, 9, 1, 2]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [9, "merged"]]);
+  });
+
+  it("#4124 a repeated dependency-open stops after the requeue cap", async () => {
+    const h = harness({}, { 1: "dependency-open" });
+    let runs = 0;
+    const rows = await orchestrate({ issues: [1], readBody: h.readBody,
+      runOne: async (n) => { if (n === 1) { runs++; return { terminalReason: "dependency-open", dependencies: [5] }; } return { terminalReason: "merged" }; } });
+    assert.equal(runs, 3);
+    assert.equal(rows[0].outcome, "dependency-open");
+  });
+
+  it("#4124 decomposed runs its sub-issues and the parent's dependents wait on them", async () => {
+    const log = [];
+    const rows = await orchestrate({ issues: [1, 2], parallel: 3,
+      readBody: async (n) => ({ 2: "**Depends on**: #1", 12: "**Parent**: #1\n**Depends on**: #11" })[n] ?? "",
+      runOne: async (n) => {
+        log.push(`start ${n}`); await new Promise((r) => setImmediate(r)); log.push(`end ${n}`);
+        return n === 1 ? { terminalReason: "decomposed", subissues: [11, 12] } : { terminalReason: "merged" };
+      } });
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "decomposed"], [2, "merged"], [11, "merged"], [12, "merged"]]);
+    assert.ok(log.indexOf("end 11") < log.indexOf("start 12"));
+    assert.ok(log.indexOf("end 12") < log.indexOf("start 2"));
   });
 
   it("a dependency that closed as invalid does not block", async () => {

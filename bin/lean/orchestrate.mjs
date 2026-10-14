@@ -3,11 +3,15 @@
 /**
  * Thin orchestrate: run core work-on for several issues with bounded concurrency, honouring `**Depends on**: #X`
  * among the given issues (wait for the dependency to merge; skip when it ends anywhere but merged/invalid).
+ * A `dependency-open` run is requeued behind its dependencies, pulling an out-of-set one into the batch; a
+ * `decomposed` run adds its sub-issues and its dependents wait on them instead (#4124).
  * No investigation, synthesis or agent spawning. `runOne(issue)` and `readBody(issue)` are injected.
  */
 const DEP_RE = /^\*\*Depends on\*\*:[ \t]*#(\d+)\b/gm;
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
+// Times one issue may be requeued behind a dependency before its dependency-open row is final.
+export const MAX_REQUEUES = 2;
 
 export function parseDeps(body, issue) {
   return [...new Set([...String(body ?? "").replace(/\r\n/g, "\n").matchAll(DEP_RE)].map((m) => Number(m[1])))].filter((n) => n > 0 && n !== issue);
@@ -17,16 +21,25 @@ export function parseDeps(body, issue) {
  * @returns {Promise<Array<{issue:number, outcome:string, pr:?number, cost_usd:number, minutes:number, detail?:string}>>}
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, now = () => Date.now(), onUpdate = () => {} }) {
-  const set = new Set(issues);
-  const deps = new Map();
-  for (const n of issues) {
+  const order = [...new Set(issues)];
+  const set = new Set(order);
+  const deps = new Map(); // issue -> declared dependencies (any issue); only those in `set` are edges
+  const readDeps = async (n) => {
     let body = "";
     try { body = await readBody(n); } catch { /* unreadable: no ordering info, work-on's own check still applies */ }
-    deps.set(n, parseDeps(body, n).filter((d) => set.has(d)));
-  }
+    deps.set(n, parseDeps(body, n));
+  };
+  for (const n of order) await readDeps(n);
+  const edges = (n) => deps.get(n).filter((d) => set.has(d));
   const results = new Map(); // issue -> row
   const running = new Map(); // issue -> promise
-  const pending = [...new Set(issues)];
+  const pending = [...order];
+  const requeues = new Map();
+  const addIssues = async (ns) => {
+    const fresh = ns.filter((d) => !set.has(d));
+    for (const d of fresh) { set.add(d); order.push(d); }
+    for (const d of fresh) { await readDeps(d); pending.push(d); }
+  };
 
   const skip = (n, detail) => { results.set(n, { issue: n, outcome: "skipped", pr: null, cost_usd: 0, minutes: 0, detail }); onUpdate(results.get(n)); };
   const start = (n) => {
@@ -35,6 +48,20 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, now 
       let r;
       try { r = await runOne(n); } catch (e) { r = { terminalReason: "engine-error", detail: e?.message ?? String(e) }; }
       const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: r?.cost_usd ?? 0, minutes: Math.round((now() - t0) / 6000) / 10, detail: r?.detail };
+      const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
+      const subs = (Array.isArray(r?.subissues) ? r.subissues : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
+      if (row.outcome === "dependency-open" && depList.length && (requeues.get(n) ?? 0) < MAX_REQUEUES) {
+        // A scheduling fact, not a failure: add the edge, pull the dependency in, and run this issue again after it.
+        requeues.set(n, (requeues.get(n) ?? 0) + 1);
+        deps.set(n, [...new Set([...deps.get(n), ...depList])]);
+        await addIssues(depList);
+        pending.push(n); running.delete(n); onUpdate({ ...row, detail: `requeued behind ${depList.map((d) => `#${d}`).join(", ")}` });
+        return;
+      }
+      if (row.outcome === "decomposed" && subs.length) {
+        await addIssues(subs);
+        for (const [m, ds] of deps) if (ds.includes(n)) deps.set(m, [...new Set(ds.flatMap((d) => (d === n ? subs : [d])))]);
+      }
       results.set(n, row); running.delete(n); onUpdate(row);
     })();
     running.set(n, p);
@@ -44,12 +71,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, now 
     // Resolve skips first: a dependency that finished unsatisfied (or never can) skips its dependents.
     for (let i = pending.length - 1; i >= 0; i--) {
       const n = pending[i];
-      const bad = deps.get(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome));
+      const bad = edges(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome));
       if (bad !== undefined) { pending.splice(i, 1); skip(n, `dependency #${bad} ended ${results.get(bad).outcome}`); }
     }
     for (let i = 0; i < pending.length && running.size < parallel;) {
       const n = pending[i];
-      if (deps.get(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome))) { pending.splice(i, 1); start(n); }
+      if (edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome))) { pending.splice(i, 1); start(n); }
       else i++;
     }
     if (running.size) await Promise.race(running.values());
@@ -57,7 +84,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, now 
       for (const n of pending.splice(0)) skip(n, "dependency cycle");
     }
   }
-  return issues.filter((n, i) => issues.indexOf(n) === i).map((n) => results.get(n));
+  return order.map((n) => results.get(n));
 }
 
 export function formatTable(rows) {

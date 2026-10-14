@@ -665,6 +665,7 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
 /**
  * `forgedock orchestrate <issue...> [--parallel K] [--lane L] [--repo owner/repo]`
  * Runs core work-on per issue with K concurrency (default 3), honouring `**Depends on**: #X` among the given issues.
+ * A `dependency-open` issue is requeued behind its dependency; a `decomposed` one adds its sub-issues (#4124).
  * Prints a compact summary table. Lane defaults to staging.
  */
 export async function orchestrateFromCli(argv, deps = {}) {
@@ -695,5 +696,5 @@ export async function orchestrateFromCli(argv, deps = {}) {
     onUpdate: (r) => console.log(`#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`),
   });
   console.log("\n" + formatTable(rows));
-  return { rows, ok: rows.every((r) => ["merged", "invalid"].includes(r.outcome)) };
+  return { rows, ok: rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome)) };
 }

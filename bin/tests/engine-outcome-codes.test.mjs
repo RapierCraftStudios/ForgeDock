@@ -65,9 +65,9 @@ const COVERAGE = {
   "remediate.deferred_live_run": "remediate.detectOutcome", "remediate.re_escalated": "remediate.detectOutcome",
   "remediate.unfixable": "remediate.detectOutcome", "remediate.inpr_requested": "remediate.detectOutcome", "infra.cli_spawn_transient": "engine", "cli.timeout": "engine", "ci.red": "reserved", "ci.timeout": "reserved",
   "base.conflict": "reserved", "rate_limited": "engine", "host.busy": "lean", "merge.transient": "lean", "push.transient": "lean", "cli.idle": "lean", "path.switch_conflict": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
-  "dependency.open": "engine", "dependency.unreadable": "engine",
+  "dependency.open": "engine", "dependency.unreadable": "engine", "dependency.blocked": "lean",
   "invalid": "engine", "decomposed": "investigate.detectOutcome", "completed": "engine",
-  "builder.blocked": "lean", "builder.no_evidence": "lean", "builder.no_commit": "lean",
+  "builder.blocked": "lean", "builder.block_untyped": "lean", "builder.no_evidence": "lean", "builder.no_commit": "lean",
   "review.failed": "lean", "review.no_verdict": "lean", "merge.head_mismatch": "lean",
   "awaiting_merge": "codeForTerminalReason", "unclassified": "engine",
 };
@@ -104,6 +104,7 @@ describe("outcome-codes module", () => {
     assert.equal(codeForTerminalReason("deferred"), "lease.held");
     assert.equal(codeForTerminalReason("dependency-open"), "dependency.open");
     assert.equal(codeForTerminalReason("dependency-unreadable"), "dependency.unreadable");
+    assert.equal(codeForTerminalReason("dependency-blocked"), "dependency.blocked");
     assert.equal(codeForTerminalReason("needs-human"), "unclassified");
   });
   it("docs/OUTCOME-CODES.md and the enum agree in both directions, and carry the version", () => {
