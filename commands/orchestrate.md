@@ -29,13 +29,24 @@ Do this yourself from issue text and the code. Spawn no sub-agents here.
    - `label <name>` uses the same with `--label`.
 
    Keep only plain integers and drop closed issues.
-2. **Triage.** For each issue, read it once (`gh issue view N --json title,body,labels`) and record:
+2. **Pre-filter already-fixed issues** (when `forgedock` is on PATH). Before reading anything else, run once
+   for the whole set:
+
+   ```bash
+   forgedock triage <N...> --lane <L>
+   ```
+
+   It closes, with the evidence on the issue and no lane, every issue that a merged PR already fixed (one
+   short read-only validation on a small model) or an auto-filed CI failure whose workflow is green again
+   (the green run link). Its last line is `lanes: #A #B ...`: continue with only those issues. Keep its
+   `pre-filter:` line for the report.
+3. **Triage.** For each issue, read it once (`gh issue view N --json title,body,labels`) and record:
    - **Ready / skip.** Skip when it is labelled `needs-human` or `workflow:merged`, or an open PR already
      closes it (`gh pr list --search "Closes #N" --state open`). Say why.
    - **Files.** The files or areas it will likely touch: paths named in the issue, or a quick
      `git grep` of the symbols it names. Keep this to a few greps per issue, not an investigation.
    - **Size.** S, M or L, from the scope the issue describes.
-3. **Build the DAG.** Edge X → N means N waits until X merges:
+4. **Build the DAG.** Edge X → N means N waits until X merges:
    - **Explicit:** `Depends on #X` / `Blocked by #X` where X is in the set. Match it case-insensitively and
      also in bold or list form (`**Depends on** #X`, `- Depends on: #X, #Y`). An open X outside the set
      means N is skipped as blocked.
@@ -46,7 +57,7 @@ Do this yourself from issue text and the code. Spawn no sub-agents here.
    resolves the conflict itself. Note the overlap in the plan table as a warning only.
 
    If you find a cycle, break it at the weakest (logical) edge and say so.
-4. **Show the plan** as one table: issue, title, size, likely files, waits-on (explicit/logical only),
+5. **Show the plan** as one table: issue, title, size, likely files, waits-on (explicit/logical only),
    overlaps (warning). There are no waves. Then proceed without asking.
 
 `K` = `--parallel` if given, otherwise `orchestration.max_concurrent` from the repo's `forge.yaml`
@@ -99,5 +110,6 @@ When a lane finishes:
 
 ## 4. Report
 
-When all lanes have finished, print one table: issue, outcome, PR, minutes. Then list each
-`needs-human` or skipped issue with its one-line reason. Nothing else.
+When all lanes have finished, print one table: issue, outcome, PR, minutes (issues the pre-filter closed
+show `invalid (pre-filter)`). Then the `pre-filter:` line from step 2.2 (count closed and spend avoided), then
+list each `needs-human` or skipped issue with its one-line reason. Nothing else.
