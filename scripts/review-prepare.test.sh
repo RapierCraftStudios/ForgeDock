@@ -300,5 +300,21 @@ setup feat/x staging "README.md" "$DIFF_PLAIN"
 CTX=$(cd "$WORK/hostile" && FORGEDOCK_HOME="$ROOT" FORGE_CONFIG="$CFG" bash "$ROOT/scripts/review-prepare.sh" --pr 7 --repo o/r --out-dir "$WORK/out" 2>/dev/null)
 eq "a hostile cwd roster script is never used" '.roster.agents | index("evil") != null' false
 
+# --- code index build is bounded and visible (forge#4126) ---
+setup feat/x staging "services/api/auth.py" "$DIFF_AUTH_BILL"
+prep "$ROOT"
+eq "real index fills the auth slice" '.index_slices.auth | startswith("Domain files (auth):")' true
+if grep -q "review-prepare: building code index" "$WORK/stderr"; then ok; else bad "index build must print a progress line on stderr"; fi
+if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+    mkroot "$WORK/root-slowindex" "" "" templates
+    printf '#!/usr/bin/env bash\nsleep 30\n' > "$WORK/root-slowindex/scripts/code-index.sh"
+    t0=$(date +%s)
+    REVIEW_PREPARE_INDEX_TIMEOUT=1 prep "$WORK/root-slowindex"; t1=$(date +%s)
+    rc_is "hung index build" 0
+    if [ $((t1 - t0)) -lt 20 ]; then ok; else bad "hung index build was not bounded ($((t1 - t0))s)"; fi
+    eq "timed-out index falls back to grep slices" .index_slices.auth "Code index not available — agent will use grep exploration"
+    if grep -q "code index timed out after 1s" "$WORK/stderr"; then ok; else bad "index timeout must be reported on stderr"; fi
+fi
+
 echo "review-prepare tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

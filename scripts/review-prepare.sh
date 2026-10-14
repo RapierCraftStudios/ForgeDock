@@ -23,7 +23,9 @@
 #   --no-delta      skip the FULL/DELTA/BASE_SYNC_ONLY resolver: the review mode is always FULL (a staging bundle review always reviews the
 #                   whole bundle), without widening the roster to the full union the way --thorough does
 # Env: FORGE_CONFIG (forge.yaml path; default: the main checkout's forge.yaml, then the git top-level one),
-#      REVIEW_PREPARE_SLEEP (seconds between mergeability retries, default 5).
+#      REVIEW_PREPARE_SLEEP (seconds between mergeability retries, default 5),
+#      REVIEW_PREPARE_INDEX_TIMEOUT (seconds the code-index build may take, default 120; on timeout or failure the slices say
+#      "Code index not available" and agents grep instead — forge#4126).
 # Exit: 0 context emitted (status OK) | 3 context emitted with status BLOCKED (the caller must stop, never skip) | 2 usage error
 #
 # Moved from the spec and still in the spec (the caller keeps running them): Phase 2 lint/typecheck/test/build EXECUTION (long-running,
@@ -463,10 +465,21 @@ if [ "$REVIEW_MODE" != "BASE_SYNC_ONLY" ]; then
         gh pr comment "$PR_NUMBER" -R "$REPO" --body "$_msg" >/dev/null 2>&1 || true # allowlist:check-command-side-effects
         [ -z "$MERGE_ISSUE" ] || gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label needs-human >/dev/null 2>&1 || true # allowlist:check-command-side-effects
     fi
-    if [ -n "$CODE_INDEX_SCRIPT" ]; then bash "$CODE_INDEX_SCRIPT" --repo-path "$REPO_PATH" >/dev/null 2>&1 || true; fi
+    # forge#4126: the index build is bounded and visible. A hung build used to block review prep silently (output was discarded).
+    INDEX_OK=0
+    if [ -n "$CODE_INDEX_SCRIPT" ]; then
+        _ito="${REVIEW_PREPARE_INDEX_TIMEOUT:-120}"; case "$_ito" in ''|*[!0-9]*|0) _ito=120 ;; esac
+        _tbin=$(command -v timeout || command -v gtimeout || true)
+        echo "review-prepare: building code index (limit ${_ito}s)" >&2
+        if [ -n "$_tbin" ]; then "$_tbin" "$_ito" bash "$CODE_INDEX_SCRIPT" --repo-path "$REPO_PATH" >/dev/null 2>&1; _irc=$?
+        else bash "$CODE_INDEX_SCRIPT" --repo-path "$REPO_PATH" >/dev/null 2>&1; _irc=$?; fi
+        if [ "$_irc" -eq 0 ]; then INDEX_OK=1
+        elif [ "$_irc" -eq 124 ]; then echo "review-prepare: code index timed out after ${_ito}s — skipping index slices (agents grep instead)" >&2
+        else echo "review-prepare: code index failed (exit $_irc) — skipping index slices (agents grep instead)" >&2; fi
+    fi
     build_index_slice() {
         local domain="${1}" files
-        if [ -n "$CODE_INDEX_SCRIPT" ]; then
+        if [ "$INDEX_OK" -eq 1 ]; then
             files=$(bash "$CODE_INDEX_SCRIPT" query --domain "$domain" --repo-path "$REPO_PATH" 2>/dev/null | awk -F'\t' '{print $1}' | head -30 | tr '\n' ' ')
             echo "Domain files (${domain}): ${files:-none}"
         else echo "Code index not available — agent will use grep exploration"; fi

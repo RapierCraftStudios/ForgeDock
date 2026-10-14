@@ -63,11 +63,12 @@ const COVERAGE = {
   "build.acceptance_malformed": "reserved", "build.size_over_gate": "reserved",
   "build.cohesive": "reserved", "remediate.no_marker": "remediate.detectOutcome",
   "remediate.deferred_live_run": "remediate.detectOutcome", "remediate.re_escalated": "remediate.detectOutcome",
-  "remediate.unfixable": "remediate.detectOutcome", "remediate.inpr_requested": "remediate.detectOutcome", "infra.cli_spawn_transient": "engine", "cli.timeout": "engine", "ci.red": "reserved", "ci.timeout": "reserved",
+  "remediate.unfixable": "remediate.detectOutcome", "remediate.inpr_requested": "remediate.detectOutcome", "infra.cli_spawn_transient": "engine", "cli.timeout": "engine", "cli.spawn_failed": "lean", "ci.red": "reserved", "ci.timeout": "reserved",
   "base.conflict": "reserved", "rate_limited": "engine", "host.busy": "lean", "merge.transient": "lean", "push.transient": "lean", "cli.idle": "lean", "path.switch_conflict": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
-  "dependency.open": "engine", "dependency.unreadable": "engine",
+  "dependency.open": "engine", "dependency.unreadable": "engine", "dependency.blocked": "lean",
+  "lane.mismatch": "lean", "lane.default_branch": "lean", "lane.branch_missing": "lean", "lane.unresolved": "lean",
   "invalid": "engine", "decomposed": "investigate.detectOutcome", "completed": "engine",
-  "builder.blocked": "lean", "builder.no_evidence": "lean", "builder.no_commit": "lean",
+  "builder.blocked": "lean", "builder.block_untyped": "lean", "builder.no_evidence": "lean", "builder.no_commit": "lean",
   "review.failed": "lean", "review.no_verdict": "lean", "merge.head_mismatch": "lean",
   "awaiting_merge": "codeForTerminalReason", "unclassified": "engine",
 };
@@ -92,6 +93,7 @@ describe("outcome-codes module", () => {
       assert.equal(codeForRunnerError({ code, message: "rate limit hit" }), "engine.error");
     assert.equal(codeForRunnerError({ code: "CLI_BACKEND_FAILED", usageLimit: true }), "rate_limited");
     assert.equal(codeForRunnerError({ code: "CLI_BACKEND_FAILED", resetAtEpochMs: 5 }), "rate_limited");
+    assert.equal(codeForRunnerError({ code: "CLI_SPAWN_FAILED", spawnErrno: "E2BIG" }), "cli.spawn_failed");
     assert.equal(codeForRunnerError(new Error("x")), "unclassified");
     assert.equal(codeForRunnerError(null), "unclassified");
   });
@@ -104,6 +106,7 @@ describe("outcome-codes module", () => {
     assert.equal(codeForTerminalReason("deferred"), "lease.held");
     assert.equal(codeForTerminalReason("dependency-open"), "dependency.open");
     assert.equal(codeForTerminalReason("dependency-unreadable"), "dependency.unreadable");
+    assert.equal(codeForTerminalReason("dependency-blocked"), "dependency.blocked");
     assert.equal(codeForTerminalReason("needs-human"), "unclassified");
   });
   it("docs/OUTCOME-CODES.md and the enum agree in both directions, and carry the version", () => {

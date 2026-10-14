@@ -44,13 +44,21 @@ export const OUTCOME_CODES = Object.freeze({
   INFRA_DISK_QUOTA: "infra.disk_quota",
   INFRA_CLI_SPAWN_TRANSIENT: "infra.cli_spawn_transient",
   CLI_TIMEOUT: "cli.timeout",
+  CLI_SPAWN_FAILED: "cli.spawn_failed", // forge#4129: deterministic spawn failure (E2BIG, ENOENT, EACCES, ...)
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
+  DEPENDENCY_BLOCKED: "dependency.blocked",
+  // Lane resolution refusals (#4125): before any lease, comment or worktree; terminal reason `lane-refused`.
+  LANE_MISMATCH: "lane.mismatch",
+  LANE_DEFAULT_BRANCH: "lane.default_branch",
+  LANE_BRANCH_MISSING: "lane.branch_missing",
+  LANE_UNRESOLVED: "lane.unresolved",
   INVALID: "invalid",
   DECOMPOSED: "decomposed",
   // Lean core work-on (bin/lean) needs-human causes.
   BUILDER_BLOCKED: "builder.blocked",
+  BUILDER_BLOCK_UNTYPED: "builder.block_untyped",
   BUILDER_NO_EVIDENCE: "builder.no_evidence",
   BUILDER_NO_COMMIT: "builder.no_commit",
   REVIEW_FAILED: "review.failed",
@@ -106,6 +114,8 @@ export function codeForRunnerError(err) {
       return OUTCOME_CODES.INFRA_CLI_SPAWN_TRANSIENT;
     case "CLI_TIMEOUT":
       return OUTCOME_CODES.CLI_TIMEOUT;
+    case "CLI_SPAWN_FAILED":
+      return OUTCOME_CODES.CLI_SPAWN_FAILED;
     case "NO_API_KEY":
     case "NO_SDK":
     case "CLI_BACKEND_FAILED":
@@ -136,6 +146,7 @@ export function codeForTerminalReason(reason) {
     case "deferred": return OUTCOME_CODES.LEASE_HELD;
     case "dependency-open": return OUTCOME_CODES.DEPENDENCY_OPEN;
     case "dependency-unreadable": return OUTCOME_CODES.DEPENDENCY_UNREADABLE;
+    case "dependency-blocked": return OUTCOME_CODES.DEPENDENCY_BLOCKED;
     default: return UNCLASSIFIED;
   }
 }

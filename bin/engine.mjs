@@ -381,7 +381,7 @@ export const ENGINE_VERSION = (() => {
 })();
 
 export async function runIssue(opts) {
-  const { issue, dir, agentId, lane = "staging", io, runner,
+  const { issue, dir, agentId, lane, io, runner,
           now = () => Date.now(), maxAttempts = DEFAULT_MAX_ATTEMPTS,
           commandsDir = fileURLToPath(new URL("../commands", import.meta.url)),
           // Optional execution-backend override for every phase's `runner()`
@@ -436,6 +436,8 @@ export async function runIssue(opts) {
   // any state I/O or timer creation, unchanged from the inline block this
   // replaces).
   validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, maxSessionLimitPauses, sessionLimitDefaultWaitMs });
+  // #4125: no silent lane default; the caller (run-issue --lane) names it, and the CLI refuses the default branch.
+  if (typeof lane !== "string" || !lane.trim()) throw new Error("runIssue: lane is required (staging or milestone/<slug>); there is no default");
 
   const projector = makeProjector(io);
 

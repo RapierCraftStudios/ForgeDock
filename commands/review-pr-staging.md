@@ -243,9 +243,23 @@ MERGE_PRS=$(git log origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH --merges --on
   | grep -oP '(?<=pull request #)\d+' \
   | sort -u)
 
-ALL_PR_NUMBERS=$(echo "$BUNDLE_PRS $MERGE_PRS" | tr ' ' '\n' | sort -u | grep -E '^[0-9]+$')
+# BEGIN bundle-pr-set
+# Conventional commit subjects cite issues too ("fix(x): ... (#123)"), so a subject-only number is kept only when it is not a confirmed issue.
+# Merge-subject numbers are PRs by construction; an unclassifiable number is kept (fail open: it may be a PR). forge#4127
+# BEGIN bundle-pr-kind
+# Prints "pr" or "issue" for #$2 in repo $1; prints nothing and returns 1 when the read fails or is malformed.
+bundle_pr_kind() { local k; k=$(gh api "repos/$1/issues/$2" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
+# END bundle-pr-kind
+SUBJECT_PRS=""; SKIPPED_ISSUES=""
+for n in $BUNDLE_PRS; do
+  case " $(echo $MERGE_PRS) " in *" $n "*) continue ;; esac
+  if [ "$(bundle_pr_kind "{GH_REPO}" "$n")" = issue ]; then SKIPPED_ISSUES="$SKIPPED_ISSUES $n"; else SUBJECT_PRS="$SUBJECT_PRS $n"; fi
+done
+ALL_PR_NUMBERS=$(echo "$SUBJECT_PRS $MERGE_PRS" | tr ' ' '\n' | sort -u | grep -E '^[0-9]+$')
+# END bundle-pr-set
 
 echo "PRs in staging→main bundle: $(echo $ALL_PR_NUMBERS | tr '\n' ' ')"
+[ -z "$SKIPPED_ISSUES" ] || echo "Issue numbers cited in commit subjects (not bundle PRs, skipped):$SKIPPED_ISSUES"
 # Persist for the 0B.1 fence (a later Bash call is a fresh shell); keyed by the PR number resolved in Phase -1.
 if [ -n "${PR_NUMBER:-}" ]; then
   _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"
@@ -456,10 +470,19 @@ bundle_delta_credit() {
   return 0
 }
 # END bundle-delta-credit
+# BEGIN bundle-pr-kind
+# Prints "pr" or "issue" for #$2 in repo $1; prints nothing and returns 1 when the read fails or is malformed.
+bundle_pr_kind() { local k; k=$(gh api "repos/$1/issues/$2" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
+# END bundle-pr-kind
+# BEGIN bundle-scope-loop
+_WHY=""
 if [ -n "$TRUSTED_SCRIPT" ] && [ -n "${ALL_PR_NUMBERS:-}" ] && [ -n "${PR_NUMBER:-}" ] && [ -n "${GH_REPO:-}" ]; then
   SCOPE_MODE=scoped
   for pr in $ALL_PR_NUMBERS; do
-    _J=$(gh pr view "$pr" -R $GH_REPO --json headRefOid,mergeCommit,commits,state,baseRefName,labels 2>/dev/null) || { SCOPE_MODE=full; break; }
+    # A number 0A could not classify may be an issue (subjects cite issues): a confirmed issue is skipped, only a genuine read failure falls open (forge#4127).
+    _J=$(gh pr view "$pr" -R $GH_REPO --json headRefOid,mergeCommit,commits,state,baseRefName,labels 2>/dev/null) || {
+      if [ "$(bundle_pr_kind "$GH_REPO" "$pr")" = issue ]; then echo "0B.1: #$pr is an issue, not a bundle PR: skipped"; continue; fi
+      _WHY="gh pr view failed and #$pr is not a confirmed issue"; SCOPE_MODE=full; break; }
     _HEAD=$(printf '%s' "$_J" | jq -r '.headRefOid')
     case "$_HEAD" in *[!0-9a-f]*|"") SCOPE_MODE=full; break ;; esac   # a malformed head id would make the sha match accept any comment (fail open): review everything
     [ "${#_HEAD}" -eq 40 ] || [ "${#_HEAD}" -eq 64 ] || { SCOPE_MODE=full; break; }
@@ -491,7 +514,9 @@ if [ -n "$TRUSTED_SCRIPT" ] && [ -n "${ALL_PR_NUMBERS:-}" ] && [ -n "${PR_NUMBER
     fi
     printf '%s\n' "$_FILES" | sort -u | sed "s|^|$pr |" >> "$_PF"
   done
+  [ "$SCOPE_MODE" = scoped ] || echo "SCOPE_MODE=full: scoping fell open at bundle PR #$pr (${_WHY:-a gh read or marker count failed or returned malformed data})"
 fi
+# END bundle-scope-loop
 if [ "$SCOPE_MODE" = "scoped" ]; then
   # Cross-PR interactions: files touched by 2+ bundle PRs.
   CROSS_PR_FILES=$(cut -d' ' -f2- "$_PF" | sort | uniq -d)
@@ -527,7 +552,7 @@ printf 'SCOPE_MODE=%q\nCROSS_PR_FILES=%q\nUNREVIEWED_FILES=%q\nDEPLOY_WIRING_FIL
 echo "SCOPE_MODE=$SCOPE_MODE reviewed_prs=$REVIEWED_PR_COUNT unreviewed_commits=$(echo $UNREVIEWED_COMMITS | wc -w) unreviewed_files=$(echo "$UNREVIEWED_FILES" | grep -c .) cross_pr_files=$(echo "$CROSS_PR_FILES" | grep -c .)"
 ```
 
-**Fail-open (never silently review less)**: every `gh`, `git log`, `git diff`, `git diff-tree` and marker-count read above is captured into a variable and tested on its own exit status (never through a pipe, where `||` sees only the last stage). If the trust script cannot be resolved, any such read fails, or a marker count is not an integer, `SCOPE_MODE=full` and Phases 2-6 review the full bundle diff as before. Only `SCOPE_MODE=scoped` narrows review.
+**Fail-open (never silently review less)**: every `gh`, `git log`, `git diff`, `git diff-tree` and marker-count read above is captured into a variable and tested on its own exit status (never through a pipe, where `||` sees only the last stage). If the trust script cannot be resolved, any such read fails, or a marker count is not an integer, `SCOPE_MODE=full` and Phases 2-6 review the full bundle diff as before. Only `SCOPE_MODE=scoped` narrows review. A bundle number that the issues API positively identifies as an issue (commit subjects cite issues) is skipped, not a read failure; every fall-open prints the PR number and reason. <!-- Added: forge#4127 -->
 
 **Stale-head delta credit (fail-closed)**: delta credit only ever moves commits out of UNREVIEWED, and only on a positive, trusted resolver answer. A resolver `FULL`, an error, malformed output, a force-push (reviewed sha not an ancestor), an untrusted or absent `FORGE:REVIEW-CARRIED` record, a degraded/blocked PR, 100+ commits or an unresolved `review-delta.sh` all leave the PR's commits UNREVIEWED (today's behaviour) and never force `SCOPE_MODE=full` by themselves. `DELTA <reviewed>..<head>` credits only the PR commits that are ancestors of `<reviewed>` (never its merge commit); `BASE_SYNC_ONLY` credits the whole PR only with a trusted carried record naming this head and that reviewed sha. A bundle that changes the review specs gets `FULL` from the resolver by design. <!-- Added: forge#3638 -->
 

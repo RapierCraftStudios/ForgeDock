@@ -398,6 +398,8 @@ orchestration:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `max_concurrent` | integer | No | Max concurrent top-level `/work-on` dispatches. It does not bound cascade growth; under `policy: all` it raises drain and spawn throughput together. Default: 12. |
+| `breaker.errors` / `breaker.window_min` | integer | No | `forgedock orchestrate` circuit breaker (#4121): after `errors` engine-errors within `window_min` minutes the batch stops admitting lanes, lets running lanes finish, and keeps the rest pending for `--resume`. `errors: 0` turns it off. Default: 3 in 30 |
+| `max_deferrals` | integer | No | `forgedock orchestrate`: requeues of one issue after a non-host `deferred` (usage limit, merge/push transient, CLI idle, lease held) before its row is final. `host.busy` deferrals are not capped. Default: 3 |
 | `cascade.policy` | string | No | `all` \| `balanced` \| `conservative`. Default: `balanced` |
 | `cascade.max_generation` | integer or `"unlimited"` | No | Max cascade generation admitted at Phase 1 resolve time. Default: 1 |
 | `cascade.batch_max_generation` | integer | No | Finite maximum member generation that an automated P3 batch may aggregate. Default: 2 |

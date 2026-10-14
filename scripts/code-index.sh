@@ -155,6 +155,29 @@ echo "INFO: Building code index for HEAD ${HEAD_SHA:0:8}..."
 mkdir -p "$CACHE_DIR"
 
 # ---------------------------------------------------------------------------
+# Step 0: File list (forge#4126)
+# ---------------------------------------------------------------------------
+# Enumerate files ONCE, from the git index when available: a filesystem walk also descends into nested
+# worktrees (.forge/worktrees, .claude/worktrees), virtualenvs and build output inside the checkout —
+# ~30x the tracked tree on a real repo. Outside git, fall back to a find that prunes those directories.
+# Every step below reads this list (paths relative to REPO_PATH); none walks the tree itself.
+FILE_LIST="${CACHE_DIR}/.files"
+if command -v git >/dev/null 2>&1 && git -C "$REPO_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git -C "$REPO_PATH" -c core.quotepath=off ls-files > "$FILE_LIST" 2>/dev/null || true
+else
+  (cd "$REPO_PATH" && find . \( -name .git -o -name node_modules -o -name __pycache__ -o -name .forge \
+    -o -name .claude -o -name .venv -o -name venv \) -prune -o -type f -print 2>/dev/null | sed 's|^\./||') \
+    > "$FILE_LIST" || true
+fi
+
+# src_files <ext>... — absolute paths of listed files with one of the given extensions.
+src_files() {
+  local re
+  re="\\.($(IFS='|'; echo "$*"))\$"
+  grep -E "$re" "$FILE_LIST" 2>/dev/null | awk -v p="$REPO_PATH" '{print p "/" $0}' || true
+}
+
+# ---------------------------------------------------------------------------
 # Step 1: Symbol extraction
 # ---------------------------------------------------------------------------
 SYMBOLS_FILE="${CACHE_DIR}/symbols.tsv"
@@ -163,12 +186,13 @@ SYMBOLS_FILE="${CACHE_DIR}/symbols.tsv"
 echo "INFO: Extracting symbols..."
 
 if command -v ctags >/dev/null 2>&1; then
-  # Use ctags for precise symbol extraction
   # --fields=+ne adds line number and end-of-scope — portable across universal-ctags
-  ctags -R --output-format=json \
+  # Use ctags for precise symbol extraction over the listed files only (-L, never -R: forge#4126).
+  # Paths are relative to REPO_PATH, matching the grep fallback and the caller graph.
+  (cd "$REPO_PATH" && ctags --output-format=json \
     --fields='nkz' \
     --languages=Python,JavaScript,TypeScript,Go,Rust,Java,C,C++ \
-    -f - "$REPO_PATH" 2>/dev/null \
+    -L "$FILE_LIST" -f - 2>/dev/null) \
   | grep -v '^!' \
   | while IFS= read -r line; do
       # Parse JSON output from universal-ctags. Portable (non-PCRE) extraction —
@@ -205,8 +229,7 @@ if [[ ! -s "$SYMBOLS_FILE" ]] || ! command -v ctags >/dev/null 2>&1; then
   echo "INFO: Falling back to grep-based symbol extraction"
 
   # Python: functions and classes
-  find "$REPO_PATH" -name "*.py" -not -path "*/.git/*" -not -path "*/node_modules/*" \
-    -not -path "*/__pycache__/*" 2>/dev/null | while read -r f; do
+  src_files py | while read -r f; do
     grep -n "^def \|^    def \|^class " "$f" 2>/dev/null | while IFS=: read -r lnum content; do
       # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
       # grep build on Windows, so use a bash regex instead of a lookbehind.
@@ -222,8 +245,7 @@ if [[ ! -s "$SYMBOLS_FILE" ]] || ! command -v ctags >/dev/null 2>&1; then
   done >> "$SYMBOLS_FILE" 2>/dev/null || true
 
   # JavaScript/TypeScript: functions and classes
-  find "$REPO_PATH" \( -name "*.js" -o -name "*.ts" -o -name "*.tsx" -o -name "*.jsx" \) \
-    -not -path "*/.git/*" -not -path "*/node_modules/*" 2>/dev/null | while read -r f; do
+  src_files js ts tsx jsx | while read -r f; do
     grep -n "^export function \|^function \|^export class \|^class \|^const .* = \(function\|async function\|() =>\)" \
       "$f" 2>/dev/null | while IFS=: read -r lnum content; do
       # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
@@ -250,8 +272,7 @@ IMPORTS_FILE="${CACHE_DIR}/imports.tsv"
 echo "INFO: Building import graph..."
 
 # Python imports
-find "$REPO_PATH" -name "*.py" -not -path "*/.git/*" -not -path "*/__pycache__/*" \
-  2>/dev/null | while read -r f; do
+src_files py | while read -r f; do
   rel_path="${f#$REPO_PATH/}"
   grep -n "^import \|^from " "$f" 2>/dev/null | while IFS=: read -r lnum content; do
     # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
@@ -271,8 +292,7 @@ find "$REPO_PATH" -name "*.py" -not -path "*/.git/*" -not -path "*/__pycache__/*
 done >> "$IMPORTS_FILE" 2>/dev/null || true
 
 # JavaScript/TypeScript imports
-find "$REPO_PATH" \( -name "*.js" -o -name "*.ts" -o -name "*.tsx" -o -name "*.jsx" \) \
-  -not -path "*/.git/*" -not -path "*/node_modules/*" 2>/dev/null | while read -r f; do
+src_files js ts tsx jsx | while read -r f; do
   rel_path="${f#$REPO_PATH/}"
   grep -n "^import \|^} from \|require(" "$f" 2>/dev/null | while IFS=: read -r lnum content; do
     # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
@@ -289,7 +309,7 @@ find "$REPO_PATH" \( -name "*.js" -o -name "*.ts" -o -name "*.tsx" -o -name "*.j
 done >> "$IMPORTS_FILE" 2>/dev/null || true
 
 # Go imports
-find "$REPO_PATH" -name "*.go" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
+src_files go | while read -r f; do
   rel_path="${f#$REPO_PATH/}"
   grep -n '"[^"]*"' "$f" 2>/dev/null | grep -v "//\|fmt.Print\|errors.New" | while IFS=: read -r lnum content; do
     # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
@@ -311,28 +331,32 @@ CALLERS_FILE="${CACHE_DIR}/callers.tsv"
 
 echo "INFO: Building caller graph..."
 
-# For each symbol, find files that call it (grep for usage)
+# One pass (forge#4126): collect every `name(` occurrence across the listed sources with a single grep, then
+# join it in awk against the first 500 symbols. The old loop ran one full find|grep tree walk per symbol.
+# One row per (symbol, caller file) at the first call line; files defining the symbol are skipped.
 if [[ -s "$SYMBOLS_FILE" ]]; then
-  # Process a sample of top symbols (cap at 500 to avoid timeout)
-  head -500 "$SYMBOLS_FILE" | while IFS=$'\t' read -r sym_name sym_file sym_line sym_kind; do
-    # Skip very short or generic names to avoid false positives
-    if [[ ${#sym_name} -lt 3 ]]; then continue; fi
-    # Search for callers (function calls, not definitions)
-    find "$REPO_PATH" -type f \( -name "*.py" -o -name "*.js" -o -name "*.ts" \
-      -o -name "*.go" -o -name "*.rs" -o -name "*.java" \) \
-      -not -path "*/.git/*" -not -path "*/node_modules/*" 2>/dev/null | \
-      xargs grep -l "\b${sym_name}(" 2>/dev/null | while read -r caller_file; do
-        rel_caller="${caller_file#$REPO_PATH/}"
-        # Skip the file where the symbol is defined
-        if [[ "$rel_caller" == "$sym_file" ]]; then continue; fi
-        caller_line=$(grep -n "\b${sym_name}(" "$caller_file" 2>/dev/null | head -1 | cut -d: -f1 || echo "0")
-        echo -e "${sym_name}\t${rel_caller}\t${caller_line}"
-      done || true
-      # ^ `xargs grep -l` returning 1 (zero callers found for this symbol) propagates
-      # through `pipefail` into this `while` compound statement, which is subject to
-      # `set -e` — guard it here so one symbol with no callers doesn't abort the
-      # remaining symbols in the outer loop.
-  done >> "$CALLERS_FILE" 2>/dev/null || true
+  CALLEE_FILE="${CACHE_DIR}/.callees"
+  head -500 "$SYMBOLS_FILE" > "$CALLEE_FILE"
+  (cd "$REPO_PATH" && grep -E '\.(py|js|ts|go|rs|java)$' "$FILE_LIST" | tr '\n' '\0' \
+    | xargs -0 grep -n -o -H -E '[A-Za-z_][A-Za-z0-9_]*\(' -- 2>/dev/null) \
+  | awk -v syms="$CALLEE_FILE" '
+      BEGIN {
+        while ((getline l < syms) > 0) {
+          split(l, s, "\t")
+          # Skip very short or generic names to avoid false positives
+          if (length(s[1]) >= 3) { want[s[1]] = 1; def[s[1] SUBSEP s[2]] = 1 }
+        }
+      }
+      {
+        # file:line:name(  — split from the right so a ":" in the file name survives.
+        n = split($0, a, ":"); id = a[n]; sub(/\($/, "", id); ln = a[n-1]
+        f = substr($0, 1, length($0) - length(a[n]) - length(ln) - 2)
+        k = id SUBSEP f
+        if (!(id in want) || (k in def) || (k in seen)) next
+        seen[k] = 1
+        print id "\t" f "\t" ln
+      }' >> "$CALLERS_FILE" 2>/dev/null || true
+  # ^ grep exits 1 when nothing matches; guard so `set -e`/`pipefail` never aborts the build here.
 fi
 
 # ---------------------------------------------------------------------------
@@ -375,9 +399,8 @@ if [[ -f "$FORGE_YAML" ]]; then
 fi
 
 # Map each file to its domain
-find "$REPO_PATH" -type f -not -path "*/.git/*" -not -path "*/node_modules/*" \
-  -not -path "*/__pycache__/*" -not -path "*/.forge/*" 2>/dev/null | while read -r f; do
-  rel_path="${f#$REPO_PATH/}"
+while IFS= read -r rel_path; do
+  case "$rel_path" in .forge/*|*/node_modules/*|node_modules/*|*/__pycache__/*) continue ;; esac
   domain="unclassified"
   for pattern in "${!DOMAIN_PATTERNS[@]}"; do
     if [[ "$rel_path" == $pattern* ]]; then
@@ -386,7 +409,7 @@ find "$REPO_PATH" -type f -not -path "*/.git/*" -not -path "*/node_modules/*" \
     fi
   done
   echo -e "${rel_path}\t${domain}"
-done >> "$DOMAIN_FILE" 2>/dev/null || true
+done < "$FILE_LIST" >> "$DOMAIN_FILE" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Step 5: Write index manifest
@@ -401,9 +424,7 @@ FILE_COUNT=$(wc -l < "$DOMAIN_FILE" 2>/dev/null || echo 0)
 # found, but extraction came back empty, a loop was truncated somewhere above
 # (or a tool like grep -oP is unavailable/incompatible on this platform) — flag
 # it instead of letting "Index built successfully" silently paper over data loss.
-SRC_FILE_COUNT=$(find "$REPO_PATH" \( -name "*.py" -o -name "*.js" -o -name "*.ts" \
-  -o -name "*.tsx" -o -name "*.jsx" -o -name "*.go" \) -not -path "*/.git/*" \
-  -not -path "*/node_modules/*" -not -path "*/__pycache__/*" 2>/dev/null | wc -l | tr -d ' ')
+SRC_FILE_COUNT=$(src_files py js ts tsx jsx go | wc -l | tr -d ' ')
 INDEX_TRUNCATED=0
 if [[ "$SRC_FILE_COUNT" -gt 0 && "$SYMBOL_COUNT" -eq 0 ]]; then
   INDEX_TRUNCATED=1

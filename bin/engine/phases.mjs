@@ -308,12 +308,29 @@ async function readIssueRecord(n, io) {
   } catch { return null; }
 }
 
+// A declaration line: optional list marker, optional bold, "Depends on" or "Blocked by" (any case), optional colon
+// inside or after the bold, then one or more `#N` separated by commas, "and", "&" or spaces (#4121).
+const DEPENDS_ON_RE = /^[ \t]*(?:[-*+][ \t]+)?(?:\*\*|__)?(?:depends on|blocked by)[ \t]*:?(?:\*\*|__)?[ \t]*:?[ \t]*(#\d+\b(?:[ \t]*(?:,|&|\band\b)?[ \t]*#\d+\b)*)/gim;
+
 /**
- * forge#3932: does the issue declare a `**Depends on**: #N` dependency that is still OPEN?
+ * Issue numbers an issue body declares it waits on: `**Depends on**: #X`, `**Depends on** #X, #Y`, `Depends on #X`,
+ * `- Depends on: #X and #Y`, `Blocked by #X`. Only declaration lines count; a mid-line mention is prose. Shared by the
+ * engine's admission (`openDependency`) and `forgedock orchestrate` so both agree on what blocks what.
+ * @returns {number[]} unique, positive, never `issue` itself
+ */
+export function parseDependsOn(body, issue = null) {
+  const out = new Set();
+  for (const m of String(body ?? "").replace(/\r\n/g, "\n").matchAll(DEPENDS_ON_RE)) {
+    for (const r of m[1].matchAll(/#(\d+)/g)) out.add(Number(r[1]));
+  }
+  return [...out].filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue));
+}
+
+/**
+ * forge#3932: does the issue declare a `Depends on` / `Blocked by` dependency that is still OPEN?
  * Honoured only when the issue BODY's author is trusted (`isTrustedComment`: OWNER/MEMBER/COLLABORATOR,
- * Bot, or FORGE_TRAIL_TRUSTED_LOGINS) and only for the exact line decompose.md emits
- * (`**Depends on**: #N` at line start; loose "depends on/after" prose is ignored). A self-reference is
- * ignored. Returns `null` (nothing blocking), `{ open: [N, ...] }`, or `{ unreadable: true, detail }`
+ * Bot, or FORGE_TRAIL_TRUSTED_LOGINS) and only for a declaration line `parseDependsOn` accepts (mid-line
+ * prose is ignored). A self-reference is ignored. Returns `null` (nothing blocking), `{ open: [N, ...] }`, or `{ unreadable: true, detail }`
  * when the issue or a declared dependency cannot be read (fail closed: the caller refuses the run).
  * An empty read of the issue itself means "no body to trust" and yields `null`.
  */
@@ -324,8 +341,7 @@ export async function openDependency(issue, io) {
   }
   if (rec === null) return { unreadable: true, detail: `issue ${issue} could not be parsed for its **Depends on** line` };
   if (rec.empty || typeof rec.body !== "string" || !isTrustedComment(rec)) return null;
-  const deps = [...new Set([...rec.body.replace(/\r\n/g, "\n").matchAll(/^\*\*Depends on\*\*:[ \t]*#(\d+)\b/gm)].map((m) => Number(m[1])))]
-    .filter((n) => n > 0 && n !== Number(issue));
+  const deps = parseDependsOn(rec.body, issue);
   const open = [];
   for (const dep of deps) {
     let d;

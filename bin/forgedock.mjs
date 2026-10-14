@@ -3207,8 +3207,10 @@ function help() {
     ["npx forgedock disable [dir]", "Opt a directory out of ForgeDock"],
     ["npx forgedock status [dir]", "Show ForgeDock state for a directory"],
     ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
-    ["npx forgedock run-issue <issue> --lane <lane> [--path core|full] [--retry] [--wait-lease]", "Run the lean core work-on on one issue (default; --path full = legacy multi-phase pipeline) (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
-    ["npx forgedock orchestrate <issue...> [--parallel K] [--lane L]", "Run core work-on on several issues with bounded concurrency and Depends-on ordering"],
+    ["npx forgedock run-issue <issue> [--lane <lane>] [--lane-override] [--path core|full] [--retry] [--wait-lease]", "Run the lean core work-on on one issue (default; --path full = legacy multi-phase pipeline; the lane comes from the issue: milestone → milestone/<slug>, else staging; --lane is an assertion, never the default branch) (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
+    ["npx forgedock orchestrate <issue...> [--parallel K] [--lane L]", "Run core work-on on several issues with bounded concurrency and Depends-on ordering; each issue on its own lane, cross-lane dependencies reported"],
+    ["npx forgedock orchestrate --resume <id> | --set-parallel <id> K", "Continue a batch after the dispatcher died (live lanes re-adopted), or change its concurrency live"],
+    ["npx forgedock triage <issue...> [--lane L] [--dry-run]", "Already-fixed pre-filter: close issues a merged PR or green CI already resolved; print the rest"],
     ["npx forgedock gc", "Prune stale per-run scratch dirs under ~/.forge/tmp/runs (older than 6h, owner dead)"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
@@ -3783,10 +3785,10 @@ async function watch() {
 // The journey-routed commands render their own branded marks (hero/compact);
 // splash() would double-brand them. Engine-surface commands, help, and
 // unknown-command output keep the logo.
-const SPLASH_COMMANDS = new Set(["run", "run-issue", "orchestrate", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
+const SPLASH_COMMANDS = new Set(["run", "run-issue", "orchestrate", "triage", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "backend-check", "run-issue", "orchestrate", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "help", "--help", "-h",
+  "run", "backend-check", "run-issue", "orchestrate", "triage", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -3974,7 +3976,7 @@ switch (command) {
       // an uncaught throw, which already set exitCode = 1 below. Now that
       // runIssue() resolves cleanly with a terminalReason instead of throwing,
       // preserve that same non-zero exit code for this reason too.
-      if (result && (result.terminalReason === "needs-human" || result.terminalReason === "engine-error" || result.terminalReason === "not-retryable" || result.terminalReason === "dependency-open" || result.terminalReason === "dependency-unreadable")) exitCode = 1;
+      if (result && (result.terminalReason === "needs-human" || result.terminalReason === "engine-error" || result.terminalReason === "not-retryable" || result.terminalReason === "dependency-open" || result.terminalReason === "dependency-unreadable" || result.terminalReason === "dependency-blocked" || result.terminalReason === "lane-refused")) exitCode = 1;
       // forge#3574: a lease-held deferral did NOT run the issue; exit 75
       // (EX_TEMPFAIL) so orchestrators neither count it as done nor as a failure.
       if (result && result.terminalReason === "deferred") exitCode = 75;
@@ -3996,6 +3998,16 @@ switch (command) {
     try {
       const result = await orchestrateFromCli(restArgs);
       if (result && !result.ok) exitCode = 1;
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "triage": {
+    const { triageFromCli } = await import("./engine-cli.mjs");
+    try {
+      await triageFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;

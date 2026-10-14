@@ -225,3 +225,16 @@ describe("runlog timestamps (forge#3696)", () => {
     assert.deepEqual(withNew.committed, old.committed, "PHASE_ATTEMPT_USAGE must not affect derived state");
   });
 });
+
+describe("#4125 no silent staging lane", () => {
+  it("runIssue without a lane throws before any state I/O; deriveState carries no lane default", async () => {
+    const calls = [];
+    const io = { gh: async (a) => { calls.push(a); return ""; }, git: async (a) => { calls.push(a); return ""; } };
+    await assert.rejects(runIssue({ issue: 42, dir, agentId: "a1", io, runner: async () => ({}), now: () => 1000 }), /lane is required/);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(readLog(dir, 42), []);
+    assert.equal(deriveState([]).lane, null);
+    appendEvent(dir, 9, { event: "RUN_START", issue: 9, run: "r" });
+    assert.equal(deriveState(readLog(dir, 9)).lane, null);
+  });
+});

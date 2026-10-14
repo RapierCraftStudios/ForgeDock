@@ -12,19 +12,48 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency } from "../engine/phases.mjs";
 import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
+import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, capComment, sanitizeMd } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, PLAN_FILE, IMPLEMENTATION_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, PLAN_FILE, IMPLEMENTATION_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, parseVerdict, blockCorrectionPrompt, HUMAN_BLOCK_REASONS } from "./prompts.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 export const REGISTER_MARKER = "FORGE:WORK-ON"; // alias marker carried by the FORGE:TRAJECTORY comment
 const num = (v) => (Number.isFinite(v) ? v : null);
+export const MAX_SUBISSUES = 8;
+
+/**
+ * Typed builder block (#4124), from result.json `block`. Returns {kind:"dependency", issues} | {kind:"split", subissues}
+ * | {kind:"human", why} | {kind:"untyped", problem}. Only `human` with an allowed reason may end as needs-human.
+ */
+export function classifyBlock(result, issue) {
+  const b = result?.block;
+  if (!b || typeof b !== "object" || Array.isArray(b)) return { kind: "untyped", problem: "it has no typed \"block\" object" };
+  if (b.kind === "dependency") {
+    const issues = [...new Set((Array.isArray(b.issues) ? b.issues : []).map((x) => Number(String(x).replace(/^#/, ""))))].filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue));
+    return issues.length ? { kind: "dependency", issues } : { kind: "untyped", problem: "the dependency block names no other issue number" };
+  }
+  if (b.kind === "split-required") {
+    const subs = (Array.isArray(b.subissues) ? b.subissues : []).filter((x) => x && typeof x.title === "string" && x.title.trim() && typeof x.body === "string");
+    if (!subs.length) return { kind: "untyped", problem: "the split-required block lists no sub-issues with a title and body" };
+    if (subs.length > MAX_SUBISSUES) return { kind: "untyped", problem: `the split-required block lists ${subs.length} sub-issues (at most ${MAX_SUBISSUES})` };
+    return { kind: "split", subissues: subs.map((x, i) => ({ title: x.title.trim(), body: x.body,
+      dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))] })) };
+  }
+  if (b.kind === "human") {
+    return HUMAN_BLOCK_REASONS.includes(b.why) ? { kind: "human", why: b.why }
+      : { kind: "untyped", problem: `"${String(b.why ?? "").slice(0, 80)}" is not a human-only reason (${HUMAN_BLOCK_REASONS.join(", ")})` };
+  }
+  return { kind: "untyped", problem: `block kind "${String(b.kind ?? "").slice(0, 40)}" is unknown` };
+}
 
 /**
  * @param {object} o
  * @param {number} o.issue
  * @param {string} o.repo            "owner/repo"
- * @param {string} o.lane            base branch (staging|main)
+ * @param {string} [o.lane]          requested lane: an assertion checked against the lane resolved from the issue (#4125)
+ * @param {boolean} [o.laneOverride] accept a requested lane that differs from the resolved one (never the default branch)
+ * @param {object} [o.branches]      forge.yaml branches {default, staging, featurePattern} (lane.mjs readBranches)
  * @param {string} o.cwd             main checkout (worktrees are added from here)
  * @param {string} o.dir             run-log dir
  * @param {object} o.io              injected effects: gh, git, runner, waitCiGreen, transitionLabel, fs, projector?, now?, sleep?
@@ -33,11 +62,11 @@ const num = (v) => (Number.isFinite(v) ? v : null);
  * @param {number} [o.ciMaxMinutes]  remote-CI wait budget (default 360); exhaustion is NOT needs-human
  */
 export async function runCore(o) {
-  const { issue, repo, lane, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
+  const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
     ciMaxMinutes = 360, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-  const base = `origin/${lane}`;
+  let lane = null, base = null, defaults = []; // set by lane resolution, before the lease
   const branch = `feat/issue-${issue}-lean`;
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
@@ -101,7 +130,7 @@ export async function runCore(o) {
     const code = codeOverride ?? codeForTerminalReason(reason);
     ev({ event: "RUN_TERMINAL", reason, code });
     await emit({ event: "RUN_TERMINAL", reason, code });
-    if (["needs-human", "engine-error"].includes(reason)) {
+    if (["needs-human", "engine-error", "dependency-open", "dependency-blocked", "dependency-unreadable", "decomposed"].includes(reason)) {
       const wf = ["investigating", "building", "in-review"].map((x) => `workflow:${x}`).join(",");
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", wf]); } catch { /* best effort */ }
     }
@@ -285,11 +314,75 @@ export async function runCore(o) {
   }
   const readResult = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${RESULT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
 
+  /** Live-checks a builder block (#4124). Dependency issues are re-read, so a closed or unknown number is not a block. */
+  async function resolveBlock(r) {
+    const b = classifyBlock(r, issue);
+    if (b.kind !== "dependency") return b;
+    const open = [], blockers = [];
+    for (const d of b.issues) {
+      let v;
+      try { v = JSON.parse(String(await ghc(["issue", "view", String(d), "-R", repo, "--json", "state,labels"]))); } catch (e) {
+        return { kind: "unreadable", detail: `dependency #${d} named by the builder could not be read: ${String(e?.message ?? e).slice(0, 200)}` };
+      }
+      if (String(v?.state).toUpperCase() !== "OPEN") continue;
+      open.push(d);
+      if ((v.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) blockers.push(d);
+    }
+    if (!open.length) return { kind: "untyped", problem: `its dependencies ${b.issues.map((n) => `#${n}`).join(", ")} are not open` };
+    return { kind: "dependency", issues: open, blockers };
+  }
+  /** Ends a run whose builder stayed blocked: only a typed human reason is needs-human. */
+  async function endBlocked(b, summary) {
+    const s = summary ?? "(no summary)";
+    const refs = (ns) => ns.map((n) => `#${n}`).join(", ");
+    if (b.kind === "human") return await needsHuman(`Builder is blocked (${b.why}): ${s}`, OUTCOME_CODES.BUILDER_BLOCKED);
+    if (b.kind === "unreadable") return await finish("dependency-unreadable", b.detail);
+    if (b.kind === "dependency") {
+      const blocked = b.blockers.length > 0;
+      const detail = blocked
+        ? `blocked by ${refs(b.blockers)} (needs-human); depends on ${refs(b.issues)}. ${s}`
+        : `depends on ${refs(b.issues)} which is still open; requeue behind it. ${s}`;
+      T.decisions.push(`Builder block: dependency on ${refs(b.issues)}${blocked ? ` (needs-human: ${refs(b.blockers)})` : ""}`);
+      try { await post("FORGE:DEPENDENCY", `## ${blocked ? "Blocked by" : "Waiting on"} ${refs(blocked ? b.blockers : b.issues)}\n${detail}\n\n_${usageLine()}_`); } catch { /* best effort */ }
+      return blocked
+        ? await finish("dependency-blocked", detail, { code: OUTCOME_CODES.DEPENDENCY_BLOCKED, dependencies: b.issues, blockers: b.blockers }, OUTCOME_CODES.DEPENDENCY_BLOCKED)
+        : await finish("dependency-open", detail, { code: OUTCOME_CODES.DEPENDENCY_OPEN, dependencies: b.issues }, OUTCOME_CODES.DEPENDENCY_OPEN);
+    }
+    if (b.kind === "split") {
+      const filed = [];
+      try {
+        for (const sub of b.subissues) {
+          const lines = [`**Parent**: #${issue}`, ...sub.dependsOn.map((j) => `**Depends on**: #${filed[j]}`)];
+          const out = String(await ghw(["issue", "create", "-R", repo, "--title", sub.title, "--body", `${sub.body.trim()}\n\n${lines.join("\n")}`]));
+          const n = Number(/\/issues\/(\d+)/.exec(out)?.[1]);
+          if (!Number.isSafeInteger(n)) throw new Error(`cannot parse the sub-issue number from: ${out.slice(0, 200)}`);
+          filed.push(n);
+        }
+      } catch (e) { return await finish("engine-error", `filing sub-issues failed after ${refs(filed) || "none"}: ${e?.message ?? e}`, { subissues: filed }); }
+      T.decisions.push(`Builder block: split into ${refs(filed)}`);
+      try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\n${s}`); } catch { /* best effort */ }
+      await label("decomposed");
+      return await finish("decomposed", `split into ${refs(filed)}`, { code: OUTCOME_CODES.DECOMPOSED, subissues: filed });
+    }
+    return await needsHuman(`Builder is blocked without a valid typed reason after one correction (${b.problem}): ${s}`, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED);
+  }
+
   // ---- host admission (#4105): before the lease, the worktree or any GitHub call ----
   if (io.host && o.admission?.enabled !== false) {
     const a = await checkAdmission({ cfg: o.admission, host: io.host });
     if (!a.ok) return { terminalReason: "deferred", code: OUTCOME_CODES.HOST_BUSY, detail: a.detail, retryInSeconds: ADMISSION_RETRY_SECONDS };
   }
+  // ---- lane (#4125): worked out from the issue before any lease, comment or worktree; fail closed ----
+  {
+    const r = await resolveLane({ issue, repo, io, cwd, branches, requested: requestedLane, override: laneOverride });
+    if (!r.ok) return { terminalReason: "lane-refused", code: r.code, detail: r.detail };
+    lane = r.lane; base = `origin/${lane}`; defaults = r.defaults;
+    if (r.overridden) T.decisions.push(`Lane override: ${lane} instead of the resolved ${r.expected}`);
+  }
+  /** Last guard before a PR is created or merged: the default branch is never a lane. */
+  const laneGuard = (target, what) => {
+    if (isDefaultLane(target, defaults)) throw Object.assign(new Error(`refusing to ${what} into the default branch ${target}`), { laneCode: OUTCOME_CODES.LANE_DEFAULT_BRANCH });
+  };
   // ---- admission: Depends-on refusal, then lease ----
   {
     let dep = null;
@@ -335,10 +428,15 @@ export async function runCore(o) {
     try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ }
     let resumed = null;
     try {
-      const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid"])) || "[]");
+      const prs = JSON.parse(String(await ghc(["pr", "list", "-R", repo, "--head", branch, "--state", "open", "--json", "number,headRefOid,baseRefName"])) || "[]");
       const remote = String(await io.git(["ls-remote", "--heads", "origin", branch], { cwd })).trim();
-      if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null };
+      if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null };
     } catch { /* no resume info: start fresh */ }
+    // An open PR on another base (a hand-retargeted PR, or one opened before lane resolution) is never merged (#4125).
+    if (resumed?.base && resumed.base !== lane) {
+      return await needsHuman(`Open PR #${resumed.pr} targets \`${resumed.base}\`, but #${issue}'s lane is \`${lane}\`; retarget or close it before rerunning.`,
+        isDefaultLane(resumed.base, defaults) ? OUTCOME_CODES.LANE_DEFAULT_BRANCH : OUTCOME_CODES.LANE_MISMATCH);
+    }
     try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* none */ }
     try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
     // Concurrent lanes in one repo race on .git/config.lock / index.lock during `worktree add`; retry with jitter.
@@ -400,6 +498,13 @@ export async function runCore(o) {
       await label("building");
       await builder(++attemptN, builderPrompt(issue) + (fromCheckpoint ? CONTINUE_NOTE.replace("BASE", base) : ""), null, true);
       result = await readResult();
+      let block = result?.status === "blocked" ? await resolveBlock(result) : null;
+      if (block?.kind === "untyped" && sessionId) { // #4124: one corrective resume before any untyped block can reach needs-human
+        T.decisions.push(`Builder block rejected (${block.problem}); resumed once`);
+        await builder(++attemptN, blockCorrectionPrompt(block.problem), sessionId);
+        result = await readResult();
+        block = result?.status === "blocked" ? await resolveBlock(result) : null;
+      }
       const files0 = await changedFiles();
       const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
       const closing = ["invalid", "already-fixed"].includes(result?.status);
@@ -413,7 +518,7 @@ export async function runCore(o) {
         await label("invalid");
         return await finish("invalid", result.summary ?? result.status);
       }
-      if (result?.status === "blocked") return await needsHuman(`Builder is blocked: ${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_BLOCKED);
+      if (block) return await endBlocked(block, result.summary);
       if (!files0.length) return await needsHuman(`Builder made no commit${result ? ` (status "${result.status}")` : " and wrote no result.json"}.\n\n${result?.summary ?? ""}`, OUTCOME_CODES.BUILDER_NO_COMMIT);
       await flushStages(result, ["plan", "implementation"]);
       T.plan = "posted"; T.implement = [`${files0.length} file(s)`, branch];
@@ -428,9 +533,11 @@ export async function runCore(o) {
     const doReview = async () => {
       for (let t = 0; t < 2; t++) {
         const diff = String(await git(["diff", `${base}...HEAD`]));
+        // #4129: an over-budget diff is bounded in the prompt; the stat keeps every changed file visible.
+        const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
-          prompt: reviewerPrompt({ issue: iss, diff }) });
+          prompt: reviewerPrompt({ issue: iss, diff, stat, base }) });
         await renew();
         await attempt("review", ++reviewN, rr);
         const v = parseVerdict(rr?.text);
@@ -456,6 +563,7 @@ export async function runCore(o) {
     // ---- 5. push + PR ----
     const files = await changedFiles();
     await gitPush(["push", "-u", "origin", branch]);
+    laneGuard(lane, "open a PR");
     const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghw(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
       "--title", `${iss.title} (#${issue})`, "--body", renderPrBody({ issue, investigation: await readStage(STAGES[0]), plan: await readStage(STAGES[1]), implementation: await readStage(STAGES[2]), result, gitFiles: files })])).trim();
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
@@ -583,6 +691,7 @@ export async function runCore(o) {
       }
       if (syncs > 0 && (await prConflicting()) === "conflict") continue; // the base moved again while waiting
       T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
+      laneGuard(resumed?.base ?? lane, "merge");
       try {
         await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
         break;
@@ -608,6 +717,10 @@ export async function runCore(o) {
       return finish("deferred", `usage limit hit; resets at ${when}`, { code: OUTCOME_CODES.RATE_LIMITED, resetAt: when, resetAtEpochMs: Number.isFinite(e.resetAtEpochMs) ? e.resetAtEpochMs : null }, OUTCOME_CODES.RATE_LIMITED);
     }
     if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode }, e.deferCode);
+    if (e?.laneCode) return await needsHuman(e.message, e.laneCode);
+    if (e?.code === "CLI_SPAWN_FAILED" || e?.spawnDeterministic === true) { // #4129: certain to fail again, so not engine-error (orchestrate would relaunch it)
+      return await needsHuman(`The claude CLI could not be started (${e.spawnErrno ?? "spawn error"}); a rerun fails the same way: ${String(e.message).slice(0, 400)}`, OUTCOME_CODES.CLI_SPAWN_FAILED);
+    }
     if (e?.pushRejected) return await needsHuman(`git push was rejected (no retry): ${String(e?.stderr ?? e?.message ?? e).slice(0, 400)}`);
     return finish("engine-error", e?.message ?? String(e));
   }

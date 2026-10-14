@@ -118,8 +118,21 @@ describe("scanStalls", () => {
 });
 
 describe("resumeStalledFromCli", () => {
-  it("throws when --lane is not provided", () => {
-    return assert.rejects(resumeStalledFromCli([]), /--lane is required/);
+  it("#4125 refuses --lane main (the default branch) before enumerating or dispatching", async () => {
+    const calls = [];
+    const io = { gh: async (args) => { calls.push(args); if (args.includes("defaultBranchRef")) return "main\n"; throw new Error(`unexpected gh call: ${args.join(" ")}`); } };
+    const dispatch = mock.fn(async () => ({}));
+    await assert.rejects(resumeStalledFromCli(["--lane", "main"], { io, dispatch }), /lane\.default_branch/);
+    assert.equal(dispatch.mock.callCount(), 0);
+    assert.ok(!calls.some((c) => c[0] === "issue"));
+  });
+
+  it("#4125 without --lane, each stalled issue is re-dispatched without one (its lane is worked out from the issue)", async () => {
+    const io = makeFakeIo({ 100: { terminal: false, lease: { by: "a", until: 1_000 } } });
+    const dispatch = mock.fn(async () => ({ terminalReason: "merged" }));
+    const l = console.log; console.log = () => {};
+    try { await resumeStalledFromCli([], { io, dispatch }); } finally { console.log = l; }
+    assert.deepEqual(dispatch.mock.calls.map((c) => c.arguments[0]), [["100"]]);
   });
 
   it("continues dispatching remaining issues after one issue's dispatch rejects", async () => {
@@ -235,7 +248,8 @@ describe("resumeStalledFromCli", () => {
 
       await resumeStalledFromCli(["--lane", "staging"], { io, dispatch });
 
-      assert.ok(!io.calls.some((c) => c[0] === "repo" && c[1] === "view"));
+      // The cross-repo check (nameWithOwner) is skipped; only the #4125 default-branch read may run.
+      assert.ok(!io.calls.some((c) => c[0] === "repo" && c[1] === "view" && !c.includes("defaultBranchRef")));
     });
   });
 });
