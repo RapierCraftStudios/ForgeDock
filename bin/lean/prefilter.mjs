@@ -130,9 +130,9 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
   }
 }
 
-/** Per-issue hook for `orchestrate({ prefilter })`. */
+/** Per-issue hook for `orchestrate({ prefilter })`; `lane` is the issue's own resolved lane (#4125). */
 export function makePrefilter(opts) {
-  return (issue) => prefilterIssue({ ...opts, issue });
+  return (issue, lane) => prefilterIssue({ ...opts, issue, ...(lane ? { lane } : {}) });
 }
 
 /** One report line: how many the pre-filter checked, flagged and closed, what validation cost, and the spend avoided. */

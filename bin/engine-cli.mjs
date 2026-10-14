@@ -16,6 +16,7 @@ import { readLog, deriveState } from "./engine/runlog.mjs";
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
+import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 
 /**
  * Workflow labels that mark an issue as "in the pipeline" (not yet terminal).
@@ -265,6 +266,19 @@ async function resolveDefaultRepo(io) {
 }
 
 /**
+ * #4125: the default (production) branch is never a lane, on any path or entry point. Checks forge.yaml
+ * `branches.default` and GitHub's default branch (best effort here; the core path re-checks it fail-closed).
+ */
+export async function assertLaneNotDefault(io, lane, repo = null, cwd = process.cwd()) {
+  if (!lane) return;
+  let gh = null;
+  try { gh = String(await io.gh(["repo", "view", ...(repo ? [repo] : []), "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"])).trim() || null; } catch { gh = null; }
+  if (isDefaultLane(lane, [readBranches(cwd).default, gh].filter(Boolean))) {
+    throw new Error(`lane.default_branch: --lane ${lane} is the default branch. Lanes are staging or milestone/<slug>; promotion to the default branch is a human-merged release PR.`);
+  }
+}
+
+/**
  * Guards against cross-repo state confusion (forge#1593): `--repo` used to be
  * threaded into the `gh issue list` enumeration call but never into the
  * projector's state reads/writes or into re-dispatch, so a mismatched
@@ -418,7 +432,11 @@ export function lastLocalRun(dir) {
  *   `runIssue` engine driver.
  *
  * Flags:
- *   --lane <lane>          Required — e.g. `main` or `staging`.
+ *   --lane <lane>          Core path: optional assertion. The lane is worked out from the issue (milestone →
+ *                          forge.yaml branches.feature_pattern, else branches.staging); a different --lane is refused
+ *                          (`lane-refused`, lane.mismatch) unless --lane-override. Full path: required.
+ *                          The default branch is never accepted (#4125).
+ *   --lane-override        Core path: accept a --lane that differs from the resolved lane (recorded in the trajectory).
  *   --repo <owner/repo>    Optional — must match the cwd-resolved repo (forge#1593).
  *   --backend <cli|api|auto>  Optional (forge#2028). Forwarded to every phase's
  *                          `runCommand()` call. Omit to keep runner.mjs's own
@@ -444,10 +462,11 @@ export function lastLocalRun(dir) {
  */
 export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> --lane <lane> [--retry] [--wait-lease]");
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--retry] [--wait-lease]");
   assertOpenCodeNativeRuntime({ operation: "forgedock run-issue" });
   const lane = flag(argv, "--lane");
-  if (!lane) throw new Error("--lane is required: e.g. --lane main or --lane staging. No default to prevent accidental production targeting.");
+  if (argv.includes("--lane") && (!lane || lane.startsWith("--"))) throw new Error("--lane requires a value: staging or milestone/<slug>");
+  const laneOverride = argv.includes("--lane-override");
   const repo = flag(argv, "--repo");
   const backend = flag(argv, "--backend");
   const model = flag(argv, "--model");
@@ -463,8 +482,11 @@ export async function runFromCli(argv, deps = {}) {
   if (enginePath !== "full" && (retry || waitLease)) {
     throw new Error("--retry and --wait-lease are not supported with the core path (a rerun resumes from the open PR or remote branch automatically); use --path full for them");
   }
+  // The full path takes the lane as given (its spec runs classify-lane), so it must be explicit; no default.
+  if (enginePath === "full" && !lane) throw new Error("--lane is required with --path full: staging or milestone/<slug>. No default to prevent accidental production targeting.");
   const io = deps.io ?? makeIo();
   await assertRepoMatchesCwd(io, repo);
+  await assertLaneNotDefault(io, lane, repo);
   const runIssueFn = deps.runIssue ?? runIssue;
   const agentId = `cli_${sanitizeLeaseHost(hostname())}_${process.pid}`;
   // Injectable for tests (forge#2175) — defaults to the real ~/.forge/runs dir.
@@ -496,10 +518,11 @@ export async function runFromCli(argv, deps = {}) {
     if (!leanRepo) throw new Error("core path needs the repo: pass --repo or run inside a checkout with a GitHub remote");
     const { runCore } = deps.leanModule ?? (await import("./lean/lean.mjs"));
     const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo: leanRepo });
-    const lres = await runCore({ issue, repo: leanRepo, lane, cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
+    const lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
       admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     if (lres.code === "host.busy") { console.log(`issue #${issue} → deferred (${lres.detail})`); return lres; }
+    if (lres.terminalReason === "lane-refused") { console.log(`issue #${issue} → lane-refused ${lres.code} (${lres.detail})`); return lres; }
     console.log(`issue #${issue} → ${lres.terminalReason}`);
     if (!["merged", "invalid"].includes(lres.terminalReason)) console.log(lres.detail ?? "");
     return lres;
@@ -565,7 +588,8 @@ export async function runFromCli(argv, deps = {}) {
  *
  * Flags:
  *   --dry-run   Print the stalled list and exit 0 without dispatching anything.
- *   --lane      Lane to pass to run-issue (required — no default to prevent accidental production targeting).
+ *   --lane      Optional lane assertion passed to run-issue. Omit it to let each issue's lane be worked out from
+ *               its milestone (#4125); the default branch is refused.
  *   --repo      GitHub repo (owner/repo). Must match the repo `gh` resolves by default
  *               (the cwd git remote) — cross-repo dispatch is refused (forge#1593),
  *               since state reads/writes are cwd-scoped and would otherwise silently
@@ -584,11 +608,12 @@ export async function runFromCli(argv, deps = {}) {
 export async function resumeStalledFromCli(argv, deps = {}) {
   const dryRun = argv.includes("--dry-run");
   const lane   = flag(argv, "--lane");
-  if (!lane) throw new Error("--lane is required for resume-stalled: e.g. --lane main or --lane staging.");
+  if (argv.includes("--lane") && (!lane || lane.startsWith("--"))) throw new Error("--lane requires a value: staging or milestone/<slug>");
   const repo   = flag(argv, "--repo");
 
   const io = deps.io ?? makeIo();
   await assertRepoMatchesCwd(io, repo);
+  await assertLaneNotDefault(io, lane, repo);
   const dispatch = deps.dispatch ?? runFromCli;
   const projector = makeProjector(io);
   const now = Date.now();
@@ -641,7 +666,7 @@ export async function resumeStalledFromCli(argv, deps = {}) {
   for (const issue of stalled) {
     console.log(`resume-stalled: dispatching #${issue} …`);
     try {
-      await dispatch([String(issue), "--lane", lane, ...(repo ? ["--repo", repo] : [])]);
+      await dispatch([String(issue), ...(lane ? ["--lane", lane] : []), ...(repo ? ["--repo", repo] : [])]);
       dispatched.push(issue);
     } catch (err) {
       const message = err?.message ?? String(err);
@@ -663,11 +688,12 @@ export async function resumeStalledFromCli(argv, deps = {}) {
 function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : null; }
 
 /**
- * `forgedock orchestrate <issue...> [--parallel K] [--lane L] [--repo owner/repo] [--no-prefilter]`
+ * `forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] [--no-prefilter]`
  * Runs core work-on per issue with K concurrency (default 3), honouring `**Depends on**: #X` among the given issues.
  * A `dependency-open` issue is requeued behind its dependency; a `decomposed` one adds its sub-issues (#4124).
  * The already-fixed pre-filter (#4123) runs before each lane unless `--no-prefilter`.
- * Prints a compact summary table. Lane defaults to staging.
+ * Each issue gets its own lane, worked out from its milestone (#4125); `--lane` is an assertion checked per issue (a
+ * mismatch ends `lane-refused`). Dependency edges between lanes are printed before any lane starts. Prints a summary table.
  */
 export async function orchestrateFromCli(argv, deps = {}) {
   const valued = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model"];
@@ -676,14 +702,16 @@ export async function orchestrateFromCli(argv, deps = {}) {
     if (valued.includes(argv[i])) { i++; continue; }
     if (/^#?\d+$/.test(argv[i])) issues.push(parseInt(argv[i].replace("#", ""), 10));
   }
-  if (!issues.length) throw new Error("usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--repo owner/repo]");
+  if (!issues.length) throw new Error("usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo]");
   const parallel = flag(argv, "--parallel") == null ? 3 : parseInt(flag(argv, "--parallel"), 10);
   if (!Number.isInteger(parallel) || parallel < 1) throw new Error("--parallel must be a positive integer");
-  const lane = flag(argv, "--lane") ?? "staging";
+  const lane = flag(argv, "--lane");
+  const laneOverride = argv.includes("--lane-override");
   const model = flag(argv, "--model");
   const io = deps.io ?? makeIo();
   const repo = flag(argv, "--repo") ?? (await resolveDefaultRepo(io));
   if (!repo) throw new Error("orchestrate needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+  await assertLaneNotDefault(io, lane, repo);
   const dir = deps.dir ?? runDir();
   const { runCore } = deps.leanModule ?? (await import("./lean/lean.mjs"));
   const { orchestrate, formatTable } = await import("./lean/orchestrate.mjs");
@@ -691,19 +719,31 @@ export async function orchestrateFromCli(argv, deps = {}) {
   const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
   const { makePrefilter, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
   const prefilter = argv.includes("--no-prefilter") ? null
-    : makePrefilter({ repo, lane, cwd: process.cwd(), io: leanIo, ...prefilterModel(argv) });
-  if (prefilter) { try { await leanIo.git(["fetch", "origin", lane], { cwd: process.cwd() }); } catch { /* offline: use the local ref */ } }
+    : makePrefilter({ repo, cwd: process.cwd(), io: leanIo, ...prefilterModel(argv) });
+  const branches = readBranches();
+  const fetched = new Set();
+  const laneOf = async (n) => {
+    const r = await resolveLane({ issue: n, repo, io: leanIo, cwd: process.cwd(), branches, requested: lane, override: laneOverride });
+    if (r.ok && prefilter && !fetched.has(r.lane)) { fetched.add(r.lane); try { await leanIo.git(["fetch", "origin", r.lane], { cwd: process.cwd() }); } catch { /* offline: use the local ref */ } }
+    return r;
+  };
+  const crossLane = [];
   const rows = await orchestrate({
-    issues, parallel, prefilter,
+    issues, parallel, prefilter, resolveLane: laneOf,
+    onCrossLane: (e) => {
+      crossLane.push(e);
+      console.log(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
+    },
     readBody: async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
-    runOne: (n) => runCore({ issue: n, repo, lane, cwd: process.cwd(), dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry,
+    runOne: (n, ln) => runCore({ issue: n, repo, lane: ln, laneOverride, branches, cwd: process.cwd(), dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry,
       admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) }),
     onUpdate: (r) => console.log(`#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`),
   });
   console.log("\n" + formatTable(rows));
   const pfLine = formatPrefilterSummary(rows);
   if (pfLine) console.log(pfLine);
-  return { rows, ok: rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome)) };
+  if (crossLane.length) console.log(`cross-lane edges: ${crossLane.map((e) => `#${e.issue} (${e.lane}) → #${e.dependency} (${e.dependencyLane})`).join(", ")}`);
+  return { rows, crossLane, ok: rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome)) };
 }
 
 /** `--prefilter-model M`, else forge.yaml `engine.lean_prefilter_model`, else the pre-filter default. */
@@ -714,6 +754,7 @@ function prefilterModel(argv) {
 
 /**
  * `forgedock triage <issue...> [--lane L] [--repo owner/repo] [--dry-run] [--prefilter-model M]` (#4123)
+ * Each issue is checked against its own lane (#4125); `--lane` is an assertion, a refused lane is reported and dropped.
  * Runs only the already-fixed pre-filter: closes issues it proves fixed (with evidence) and prints the issues that
  * still need a lane as the last line (`lanes: #1 #2`). `--dry-run` reports candidates without a model call or close.
  */
@@ -725,20 +766,25 @@ export async function triageFromCli(argv, deps = {}) {
     if (/^#?\d+$/.test(argv[i])) issues.push(parseInt(argv[i].replace("#", ""), 10));
   }
   if (!issues.length) throw new Error("usage: forgedock triage <issue...> [--lane L] [--repo owner/repo] [--dry-run]");
-  const lane = flag(argv, "--lane") ?? "staging";
+  const lane = flag(argv, "--lane");
   const io = deps.io ?? makeIo();
   const repo = flag(argv, "--repo") ?? (await resolveDefaultRepo(io));
   if (!repo) throw new Error("triage needs the repo: pass --repo or run inside a checkout with a GitHub remote");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   const { prefilterIssue, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
-  try { await leanIo.git(["fetch", "origin", lane], { cwd: process.cwd() }); } catch { /* offline: use the local ref */ }
+  const branches = readBranches();
+  const fetched = new Set();
   const rows = [];
   for (const n of [...new Set(issues)]) {
-    const pf = await prefilterIssue({ issue: n, repo, lane, cwd: process.cwd(), io: leanIo, dryRun: argv.includes("--dry-run"), ...prefilterModel(argv) });
+    // #4125: each issue's own lane; `--lane` is an assertion. A refused lane never reaches the pre-filter or a lane.
+    const ln = await resolveLane({ issue: n, repo, io: leanIo, cwd: process.cwd(), branches, requested: lane, override: argv.includes("--lane-override") });
+    if (!ln.ok) { console.log(`#${n} → lane-refused (${ln.code}: ${ln.detail})`); rows.push({ issue: n, outcome: "lane-refused", cost_usd: 0, prefilter: null }); continue; }
+    if (!fetched.has(ln.lane)) { fetched.add(ln.lane); try { await leanIo.git(["fetch", "origin", ln.lane], { cwd: process.cwd() }); } catch { /* offline: use the local ref */ } }
+    const pf = await prefilterIssue({ issue: n, repo, lane: ln.lane, cwd: process.cwd(), io: leanIo, dryRun: argv.includes("--dry-run"), ...prefilterModel(argv) });
     console.log(`#${n} → ${pf.closed ? "closed" : pf.candidate ? "candidate" : "lane"} (${pf.detail})`);
     rows.push({ issue: n, outcome: pf.closed ? "invalid" : "pending", cost_usd: pf.cost_usd, prefilter: pf });
   }
-  const lanes = rows.filter((r) => !r.prefilter.closed).map((r) => r.issue);
+  const lanes = rows.filter((r) => r.prefilter && !r.prefilter.closed).map((r) => r.issue);
   console.log(formatPrefilterSummary(rows));
   console.log(`lanes: ${lanes.map((n) => `#${n}`).join(" ") || "(none)"}`);
   return { rows, lanes };

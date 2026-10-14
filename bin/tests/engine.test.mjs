@@ -3177,7 +3177,7 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
   });
 
   describe("forge#3528 RUN_REOPEN restores the last handoff reason", () => {
-    const start = { event: "RUN_START", issue: 1 };
+    const start = { event: "RUN_START", issue: 1, lane: "staging" }; // #4125: no lane default in deriveState
     const commit = (seq, phase, extra = {}) => ({ seq, event: "PHASE_COMMIT", phase, outputs: {}, ...extra });
     const crash = (seq) => ({ seq, event: "RUN_TERMINAL", reason: "engine-error" });
     const reopen = (seq) => ({ seq, event: "RUN_REOPEN" });
