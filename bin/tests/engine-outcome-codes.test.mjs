@@ -63,7 +63,7 @@ const COVERAGE = {
   "build.acceptance_malformed": "reserved", "build.size_over_gate": "reserved",
   "build.cohesive": "reserved", "remediate.no_marker": "remediate.detectOutcome",
   "remediate.deferred_live_run": "remediate.detectOutcome", "remediate.re_escalated": "remediate.detectOutcome",
-  "remediate.unfixable": "remediate.detectOutcome", "remediate.inpr_requested": "remediate.detectOutcome", "infra.cli_spawn_transient": "engine", "cli.timeout": "engine", "ci.red": "reserved", "ci.timeout": "reserved",
+  "remediate.unfixable": "remediate.detectOutcome", "remediate.inpr_requested": "remediate.detectOutcome", "infra.cli_spawn_transient": "engine", "cli.timeout": "engine", "cli.spawn_failed": "lean", "ci.red": "reserved", "ci.timeout": "reserved",
   "base.conflict": "reserved", "rate_limited": "engine", "host.busy": "lean", "merge.transient": "lean", "push.transient": "lean", "cli.idle": "lean", "path.switch_conflict": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
   "dependency.open": "engine", "dependency.unreadable": "engine", "dependency.blocked": "lean",
   "lane.mismatch": "lean", "lane.default_branch": "lean", "lane.branch_missing": "lean", "lane.unresolved": "lean",
@@ -93,6 +93,7 @@ describe("outcome-codes module", () => {
       assert.equal(codeForRunnerError({ code, message: "rate limit hit" }), "engine.error");
     assert.equal(codeForRunnerError({ code: "CLI_BACKEND_FAILED", usageLimit: true }), "rate_limited");
     assert.equal(codeForRunnerError({ code: "CLI_BACKEND_FAILED", resetAtEpochMs: 5 }), "rate_limited");
+    assert.equal(codeForRunnerError({ code: "CLI_SPAWN_FAILED", spawnErrno: "E2BIG" }), "cli.spawn_failed");
     assert.equal(codeForRunnerError(new Error("x")), "unclassified");
     assert.equal(codeForRunnerError(null), "unclassified");
   });

@@ -44,6 +44,7 @@ export const OUTCOME_CODES = Object.freeze({
   INFRA_DISK_QUOTA: "infra.disk_quota",
   INFRA_CLI_SPAWN_TRANSIENT: "infra.cli_spawn_transient",
   CLI_TIMEOUT: "cli.timeout",
+  CLI_SPAWN_FAILED: "cli.spawn_failed", // forge#4129: deterministic spawn failure (E2BIG, ENOENT, EACCES, ...)
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
@@ -113,6 +114,8 @@ export function codeForRunnerError(err) {
       return OUTCOME_CODES.INFRA_CLI_SPAWN_TRANSIENT;
     case "CLI_TIMEOUT":
       return OUTCOME_CODES.CLI_TIMEOUT;
+    case "CLI_SPAWN_FAILED":
+      return OUTCOME_CODES.CLI_SPAWN_FAILED;
     case "NO_API_KEY":
     case "NO_SDK":
     case "CLI_BACKEND_FAILED":

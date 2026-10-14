@@ -15,7 +15,7 @@ import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, capComment, sanitizeMd } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, PLAN_FILE, IMPLEMENTATION_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, parseVerdict, blockCorrectionPrompt, HUMAN_BLOCK_REASONS } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, PLAN_FILE, IMPLEMENTATION_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, parseVerdict, blockCorrectionPrompt, HUMAN_BLOCK_REASONS } from "./prompts.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 export const REGISTER_MARKER = "FORGE:WORK-ON"; // alias marker carried by the FORGE:TRAJECTORY comment
@@ -533,9 +533,11 @@ export async function runCore(o) {
     const doReview = async () => {
       for (let t = 0; t < 2; t++) {
         const diff = String(await git(["diff", `${base}...HEAD`]));
+        // #4129: an over-budget diff is bounded in the prompt; the stat keeps every changed file visible.
+        const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
-          prompt: reviewerPrompt({ issue: iss, diff }) });
+          prompt: reviewerPrompt({ issue: iss, diff, stat, base }) });
         await renew();
         await attempt("review", ++reviewN, rr);
         const v = parseVerdict(rr?.text);
@@ -716,6 +718,9 @@ export async function runCore(o) {
     }
     if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode }, e.deferCode);
     if (e?.laneCode) return await needsHuman(e.message, e.laneCode);
+    if (e?.code === "CLI_SPAWN_FAILED" || e?.spawnDeterministic === true) { // #4129: certain to fail again, so not engine-error (orchestrate would relaunch it)
+      return await needsHuman(`The claude CLI could not be started (${e.spawnErrno ?? "spawn error"}); a rerun fails the same way: ${String(e.message).slice(0, 400)}`, OUTCOME_CODES.CLI_SPAWN_FAILED);
+    }
     if (e?.pushRejected) return await needsHuman(`git push was rejected (no retry): ${String(e?.stderr ?? e?.message ?? e).slice(0, 400)}`);
     return finish("engine-error", e?.message ?? String(e));
   }

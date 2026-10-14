@@ -1492,6 +1492,16 @@ function toFiniteUsageNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+/**
+ * forge#4129: largest user prompt (UTF-8 bytes) passed as an argv element. Linux caps one argument at
+ * MAX_ARG_STRLEN (131072 bytes) and `spawn` throws E2BIG above it; larger prompts go over stdin, which
+ * `claude --print` reads when no prompt argument is given.
+ */
+export const CLI_ARGV_PROMPT_MAX_BYTES = 64 * 1024;
+
+/** forge#4129: spawn errnos that fail the same way on every rerun (argv too big, binary missing or not executable). */
+export const DETERMINISTIC_SPAWN_ERRNOS = Object.freeze(["E2BIG", "ENOENT", "EACCES", "ENOEXEC", "ENAMETOOLONG"]);
+
 export function runCliBackend({
   spec,
   userMessage,
@@ -1545,9 +1555,12 @@ export function runCliBackend({
   // `writeFileSync` still leaves `tmpDir` set and the already-created
   // directory gets cleaned up.
   let tmpDir = null;
+  // forge#4129: a prompt over the argv bound is sent on stdin instead of as the `--print` argument.
+  const promptViaStdin = Buffer.byteLength(String(userMessage ?? ""), "utf-8") > CLI_ARGV_PROMPT_MAX_BYTES;
+  const promptArgs = promptViaStdin ? [] : [userMessage];
   let cliArgs = [
     "--print",
-    userMessage,
+    ...promptArgs,
     "--output-format",
     "json",
     ...optionalFlags,
@@ -1562,7 +1575,7 @@ export function runCliBackend({
       writeFileSync(systemPromptPath, systemPrompt, "utf-8");
       cliArgs = [
         "--print",
-        userMessage,
+        ...promptArgs,
         "--output-format",
         "json",
         ...optionalFlags,
@@ -1599,6 +1612,7 @@ export function runCliBackend({
       maxBuffer: DEFAULT_SPAWN_MAX_BUFFER_BYTES,
       timeout: timeoutMs,
       env: childEnv,
+      ...(promptViaStdin ? { input: String(userMessage) } : {}),
     });
 
     const stdout = result.stdout ? String(result.stdout) : "";
@@ -1666,6 +1680,12 @@ export function runCliBackend({
       if (["EAGAIN", "ENOMEM", "EMFILE"].includes(result.error.code)) {
         error.spawnErrno = result.error.code;
         error.code = "CLI_SPAWN_TRANSIENT";
+      } else if (DETERMINISTIC_SPAWN_ERRNOS.includes(result.error.code)) {
+        // forge#4129: certain to fail again on a rerun; flagged so callers do not retry it. E2BIG (argv too large) gets
+        // its own code; ENOENT and the other errnos keep theirs (forge#4021 contract).
+        error.spawnErrno = result.error.code;
+        error.spawnDeterministic = true;
+        if (result.error.code === "E2BIG") error.code = "CLI_SPAWN_FAILED";
       }
       throw error;
     }
@@ -1984,8 +2004,10 @@ export async function runCliBackendAsync(opts) {
       let lastActivity = startedAt, pausedAt = 0, pausedTotal = 0, timer = null;
       const finish = (r) => { if (settled) return; settled = true; clearInterval(timer); resolveP(r); };
       let child;
-      try { child = spawn(bin, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"], detached: true }); }
+      const input = typeof o.input === "string" ? o.input : null; // forge#4129: large prompt over stdin
+      try { child = spawn(bin, args, { cwd: o.cwd, env: o.env, stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"], detached: true }); }
       catch (error) { return finish({ status: null, signal: null, pid: 0, error, stdout: "", stderr: "" }); }
+      if (input !== null) { child.stdin.on("error", () => { /* child exited before reading: surfaced by close */ }); child.stdin.end(input); }
       const signalGroup = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };
       const ctl = {
         pause() { if (paused || settled) return false; paused = true; pausedAt = Date.now(); signalGroup("SIGSTOP"); return true; },
