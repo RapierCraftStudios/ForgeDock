@@ -247,8 +247,8 @@ MERGE_PRS=$(git log origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH --merges --on
 # Conventional commit subjects cite issues too ("fix(x): ... (#123)"), so a subject-only number is kept only when it is not a confirmed issue.
 # Merge-subject numbers are PRs by construction; an unclassifiable number is kept (fail open: it may be a PR). forge#4127
 # BEGIN bundle-pr-kind
-# Prints "pr" or "issue" for #$2 in repo $1; prints nothing and returns 1 when the read fails or is malformed.
-bundle_pr_kind() { local k; k=$(gh api "repos/$1/issues/$2" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
+# Prints "pr" or "issue" for issue number ${2} in repo ${1}; prints nothing and returns 1 when the read fails or is malformed.
+bundle_pr_kind() { local k; k=$(gh api "repos/${1}/issues/${2}" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
 # END bundle-pr-kind
 SUBJECT_PRS=""; SKIPPED_ISSUES=""
 for n in $BUNDLE_PRS; do
@@ -471,8 +471,8 @@ bundle_delta_credit() {
 }
 # END bundle-delta-credit
 # BEGIN bundle-pr-kind
-# Prints "pr" or "issue" for #$2 in repo $1; prints nothing and returns 1 when the read fails or is malformed.
-bundle_pr_kind() { local k; k=$(gh api "repos/$1/issues/$2" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
+# Prints "pr" or "issue" for issue number ${2} in repo ${1}; prints nothing and returns 1 when the read fails or is malformed.
+bundle_pr_kind() { local k; k=$(gh api "repos/${1}/issues/${2}" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
 # END bundle-pr-kind
 # BEGIN bundle-scope-loop
 _WHY=""
