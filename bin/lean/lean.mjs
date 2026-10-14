@@ -14,11 +14,37 @@ import { openDependency } from "../engine/phases.mjs";
 import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, capComment, sanitizeMd } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, PLAN_FILE, IMPLEMENTATION_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, PLAN_FILE, IMPLEMENTATION_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, parseVerdict, blockCorrectionPrompt, HUMAN_BLOCK_REASONS } from "./prompts.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 export const REGISTER_MARKER = "FORGE:WORK-ON"; // alias marker carried by the FORGE:TRAJECTORY comment
 const num = (v) => (Number.isFinite(v) ? v : null);
+export const MAX_SUBISSUES = 8;
+
+/**
+ * Typed builder block (#4124), from result.json `block`. Returns {kind:"dependency", issues} | {kind:"split", subissues}
+ * | {kind:"human", why} | {kind:"untyped", problem}. Only `human` with an allowed reason may end as needs-human.
+ */
+export function classifyBlock(result, issue) {
+  const b = result?.block;
+  if (!b || typeof b !== "object" || Array.isArray(b)) return { kind: "untyped", problem: "it has no typed \"block\" object" };
+  if (b.kind === "dependency") {
+    const issues = [...new Set((Array.isArray(b.issues) ? b.issues : []).map((x) => Number(String(x).replace(/^#/, ""))))].filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue));
+    return issues.length ? { kind: "dependency", issues } : { kind: "untyped", problem: "the dependency block names no other issue number" };
+  }
+  if (b.kind === "split-required") {
+    const subs = (Array.isArray(b.subissues) ? b.subissues : []).filter((x) => x && typeof x.title === "string" && x.title.trim() && typeof x.body === "string");
+    if (!subs.length) return { kind: "untyped", problem: "the split-required block lists no sub-issues with a title and body" };
+    if (subs.length > MAX_SUBISSUES) return { kind: "untyped", problem: `the split-required block lists ${subs.length} sub-issues (at most ${MAX_SUBISSUES})` };
+    return { kind: "split", subissues: subs.map((x, i) => ({ title: x.title.trim(), body: x.body,
+      dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))] })) };
+  }
+  if (b.kind === "human") {
+    return HUMAN_BLOCK_REASONS.includes(b.why) ? { kind: "human", why: b.why }
+      : { kind: "untyped", problem: `"${String(b.why ?? "").slice(0, 80)}" is not a human-only reason (${HUMAN_BLOCK_REASONS.join(", ")})` };
+  }
+  return { kind: "untyped", problem: `block kind "${String(b.kind ?? "").slice(0, 40)}" is unknown` };
+}
 
 /**
  * @param {object} o
@@ -101,7 +127,7 @@ export async function runCore(o) {
     const code = codeOverride ?? codeForTerminalReason(reason);
     ev({ event: "RUN_TERMINAL", reason, code });
     await emit({ event: "RUN_TERMINAL", reason, code });
-    if (["needs-human", "engine-error"].includes(reason)) {
+    if (["needs-human", "engine-error", "dependency-open", "dependency-blocked", "dependency-unreadable", "decomposed"].includes(reason)) {
       const wf = ["investigating", "building", "in-review"].map((x) => `workflow:${x}`).join(",");
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", wf]); } catch { /* best effort */ }
     }
@@ -285,6 +311,59 @@ export async function runCore(o) {
   }
   const readResult = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${RESULT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
 
+  /** Live-checks a builder block (#4124). Dependency issues are re-read, so a closed or unknown number is not a block. */
+  async function resolveBlock(r) {
+    const b = classifyBlock(r, issue);
+    if (b.kind !== "dependency") return b;
+    const open = [], blockers = [];
+    for (const d of b.issues) {
+      let v;
+      try { v = JSON.parse(String(await ghc(["issue", "view", String(d), "-R", repo, "--json", "state,labels"]))); } catch (e) {
+        return { kind: "unreadable", detail: `dependency #${d} named by the builder could not be read: ${String(e?.message ?? e).slice(0, 200)}` };
+      }
+      if (String(v?.state).toUpperCase() !== "OPEN") continue;
+      open.push(d);
+      if ((v.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) blockers.push(d);
+    }
+    if (!open.length) return { kind: "untyped", problem: `its dependencies ${b.issues.map((n) => `#${n}`).join(", ")} are not open` };
+    return { kind: "dependency", issues: open, blockers };
+  }
+  /** Ends a run whose builder stayed blocked: only a typed human reason is needs-human. */
+  async function endBlocked(b, summary) {
+    const s = summary ?? "(no summary)";
+    const refs = (ns) => ns.map((n) => `#${n}`).join(", ");
+    if (b.kind === "human") return await needsHuman(`Builder is blocked (${b.why}): ${s}`, OUTCOME_CODES.BUILDER_BLOCKED);
+    if (b.kind === "unreadable") return await finish("dependency-unreadable", b.detail);
+    if (b.kind === "dependency") {
+      const blocked = b.blockers.length > 0;
+      const detail = blocked
+        ? `blocked by ${refs(b.blockers)} (needs-human); depends on ${refs(b.issues)}. ${s}`
+        : `depends on ${refs(b.issues)} which is still open; requeue behind it. ${s}`;
+      T.decisions.push(`Builder block: dependency on ${refs(b.issues)}${blocked ? ` (needs-human: ${refs(b.blockers)})` : ""}`);
+      try { await post("FORGE:DEPENDENCY", `## ${blocked ? "Blocked by" : "Waiting on"} ${refs(blocked ? b.blockers : b.issues)}\n${detail}\n\n_${usageLine()}_`); } catch { /* best effort */ }
+      return blocked
+        ? await finish("dependency-blocked", detail, { code: OUTCOME_CODES.DEPENDENCY_BLOCKED, dependencies: b.issues, blockers: b.blockers }, OUTCOME_CODES.DEPENDENCY_BLOCKED)
+        : await finish("dependency-open", detail, { code: OUTCOME_CODES.DEPENDENCY_OPEN, dependencies: b.issues }, OUTCOME_CODES.DEPENDENCY_OPEN);
+    }
+    if (b.kind === "split") {
+      const filed = [];
+      try {
+        for (const sub of b.subissues) {
+          const lines = [`**Parent**: #${issue}`, ...sub.dependsOn.map((j) => `**Depends on**: #${filed[j]}`)];
+          const out = String(await ghw(["issue", "create", "-R", repo, "--title", sub.title, "--body", `${sub.body.trim()}\n\n${lines.join("\n")}`]));
+          const n = Number(/\/issues\/(\d+)/.exec(out)?.[1]);
+          if (!Number.isSafeInteger(n)) throw new Error(`cannot parse the sub-issue number from: ${out.slice(0, 200)}`);
+          filed.push(n);
+        }
+      } catch (e) { return await finish("engine-error", `filing sub-issues failed after ${refs(filed) || "none"}: ${e?.message ?? e}`, { subissues: filed }); }
+      T.decisions.push(`Builder block: split into ${refs(filed)}`);
+      try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\n${s}`); } catch { /* best effort */ }
+      await label("decomposed");
+      return await finish("decomposed", `split into ${refs(filed)}`, { code: OUTCOME_CODES.DECOMPOSED, subissues: filed });
+    }
+    return await needsHuman(`Builder is blocked without a valid typed reason after one correction (${b.problem}): ${s}`, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED);
+  }
+
   // ---- host admission (#4105): before the lease, the worktree or any GitHub call ----
   if (io.host && o.admission?.enabled !== false) {
     const a = await checkAdmission({ cfg: o.admission, host: io.host });
@@ -400,6 +479,13 @@ export async function runCore(o) {
       await label("building");
       await builder(++attemptN, builderPrompt(issue) + (fromCheckpoint ? CONTINUE_NOTE.replace("BASE", base) : ""), null, true);
       result = await readResult();
+      let block = result?.status === "blocked" ? await resolveBlock(result) : null;
+      if (block?.kind === "untyped" && sessionId) { // #4124: one corrective resume before any untyped block can reach needs-human
+        T.decisions.push(`Builder block rejected (${block.problem}); resumed once`);
+        await builder(++attemptN, blockCorrectionPrompt(block.problem), sessionId);
+        result = await readResult();
+        block = result?.status === "blocked" ? await resolveBlock(result) : null;
+      }
       const files0 = await changedFiles();
       const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
       const closing = ["invalid", "already-fixed"].includes(result?.status);
@@ -413,7 +499,7 @@ export async function runCore(o) {
         await label("invalid");
         return await finish("invalid", result.summary ?? result.status);
       }
-      if (result?.status === "blocked") return await needsHuman(`Builder is blocked: ${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_BLOCKED);
+      if (block) return await endBlocked(block, result.summary);
       if (!files0.length) return await needsHuman(`Builder made no commit${result ? ` (status "${result.status}")` : " and wrote no result.json"}.\n\n${result?.summary ?? ""}`, OUTCOME_CODES.BUILDER_NO_COMMIT);
       await flushStages(result, ["plan", "implementation"]);
       T.plan = "posted"; T.implement = [`${files0.length} file(s)`, branch];

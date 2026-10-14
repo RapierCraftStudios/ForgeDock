@@ -47,10 +47,12 @@ export const OUTCOME_CODES = Object.freeze({
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
+  DEPENDENCY_BLOCKED: "dependency.blocked",
   INVALID: "invalid",
   DECOMPOSED: "decomposed",
   // Lean core work-on (bin/lean) needs-human causes.
   BUILDER_BLOCKED: "builder.blocked",
+  BUILDER_BLOCK_UNTYPED: "builder.block_untyped",
   BUILDER_NO_EVIDENCE: "builder.no_evidence",
   BUILDER_NO_COMMIT: "builder.no_commit",
   REVIEW_FAILED: "review.failed",
@@ -136,6 +138,7 @@ export function codeForTerminalReason(reason) {
     case "deferred": return OUTCOME_CODES.LEASE_HELD;
     case "dependency-open": return OUTCOME_CODES.DEPENDENCY_OPEN;
     case "dependency-unreadable": return OUTCOME_CODES.DEPENDENCY_UNREADABLE;
+    case "dependency-blocked": return OUTCOME_CODES.DEPENDENCY_BLOCKED;
     default: return UNCLASSIFIED;
   }
 }
