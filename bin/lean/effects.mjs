@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags } from "../runner.mjs";
 import { makeIo } from "../engine-cli.mjs";
 import { makeProjector } from "../engine/projector.mjs";
+import { makePiRunner } from "./pi-runner.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -111,11 +112,11 @@ export function makeHostProbe() {
   };
 }
 
-export function makeLeanIo({ repo }) {
+export function makeLeanIo({ repo, runtime = "claude" }) {
   const base = makeIo();
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000 })).stdout;
   return {
-    gh: run("gh"), git: run("git"), runTmp: makeRunTmp(), host: makeHostProbe(), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
+    gh: run("gh"), git: run("git"), runTmp: makeRunTmp(), host: makeHostProbe(), projector: makeProjector({ gh: base.gh }), runner: runtime === "pi" ? makePiRunner() : makeLeanRunner(), waitCiGreen: base.waitCiGreen,
     /** Names of the checks the base branch requires (contexts + checks). [] on 404 / no protection. */
     async requiredChecks(lane) {
       try {

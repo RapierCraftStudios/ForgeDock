@@ -97,8 +97,20 @@ export function readEnginePath(cwd = process.cwd()) {
 function readLeanSetting(key, cwd = process.cwd()) {
   try {
     const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.[`lean_${key}`] ?? "").trim();
-    return /^[A-Za-z0-9._:[\]-]+$/.test(v) ? v : undefined;
+    return /^[A-Za-z0-9._:[\]\/-]+$/.test(v) ? v : undefined;
   } catch { return undefined; }
+}
+/** forge.yaml `engine.lean_runtime` (env FORGEDOCK_LEAN_RUNTIME wins): the harness core work-on sessions run on, `claude` (default) or `pi`. */
+export function readLeanRuntime(cwd = process.cwd(), env = process.env) {
+  const v = String(env.FORGEDOCK_LEAN_RUNTIME || readLeanSetting("runtime", cwd) || "claude").trim().toLowerCase();
+  if (v !== "claude" && v !== "pi") throw new Error(`engine.lean_runtime must be claude or pi, got "${v}"`);
+  return v;
+}
+/** Reviewer model option for runCore: the configured one, else the runtime's own default on pi (the Claude default model id is not a pi model). */
+function leanReviewerModel(cwd = process.cwd()) {
+  const m = readLeanSetting("reviewer_model", cwd);
+  if (m) return { reviewerModel: m };
+  return readLeanRuntime(cwd) === "pi" ? { reviewerModel: null } : {};
 }
 // core is the default; lean and auto are aliases of core. full is the legacy multi-phase pipeline.
 /**
@@ -520,7 +532,7 @@ export async function runFromCli(argv, deps = {}) {
     const leanRepo = repo ?? (await resolveDefaultRepo(io));
     if (!leanRepo) throw new Error("core path needs the repo: pass --repo or run inside a checkout with a GitHub remote");
     const { runCore } = deps.leanModule ?? (await import("./lean/lean.mjs"));
-    const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo: leanRepo });
+    const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo: leanRepo, runtime: readLeanRuntime() });
     // #4121: a batch lane reports its result through --result-file (written atomically, also for a thrown run).
     const resultFile = flag(argv, "--result-file");
     const report = (r) => { if (resultFile) (deps.writeAtomic ?? writeResultAtomic)(resultFile, JSON.stringify(r) + "\n"); return r; };
@@ -528,7 +540,7 @@ export async function runFromCli(argv, deps = {}) {
     try {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...leanReviewerModel() });
     } catch (e) { report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     report(lres);
     if (lres.code === "host.busy") { console.log(`issue #${issue} → deferred (${lres.detail})`); return lres; }
@@ -763,7 +775,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
   console.log(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
   const dir = deps.dir ?? runDir();
   const { orchestrate, formatTable } = await import("./lean/orchestrate.mjs");
-  const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo, runtime: readLeanRuntime(cwd) });
   const { makePrefilter, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
   const prefilter = argv.includes("--no-prefilter") ? null
     : makePrefilter({ repo, cwd, io: leanIo, ...prefilterModel(argv) });
@@ -780,7 +792,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln) => runCore({ issue: n, repo, lane: ln, laneOverride, branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry,
-      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(model ? { builderModel: model } : {}), ...leanReviewerModel(cwd) }) };
   } else {
     lanes = batchMod.detachedLanes({ batch, cwd, script: deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), bin: deps.laneBin, pollMs: deps.pollMs,
       laneArgs: (n, ln) => ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])] });
@@ -821,7 +833,8 @@ export function readOrchestration(cwd = process.cwd()) {
 /** `--prefilter-model M`, else forge.yaml `engine.lean_prefilter_model`, else the pre-filter default. */
 function prefilterModel(argv) {
   const m = flag(argv, "--prefilter-model") ?? readLeanSetting("prefilter_model");
-  return m ? { model: m } : {};
+  if (m) return { model: m };
+  return readLeanRuntime() === "pi" ? { model: null } : {}; // the Claude default model id is not a pi model
 }
 
 /**
@@ -843,7 +856,7 @@ export async function triageFromCli(argv, deps = {}) {
   const io = deps.io ?? makeIo();
   const repo = flag(argv, "--repo") ?? (await resolveDefaultRepo(io));
   if (!repo) throw new Error("triage needs the repo: pass --repo or run inside a checkout with a GitHub remote");
-  const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo, runtime: readLeanRuntime() });
   const { prefilterIssue, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
   const branches = readBranches();
   const parallel = flag(argv, "--parallel") == null ? 8 : parseInt(flag(argv, "--parallel"), 10);
