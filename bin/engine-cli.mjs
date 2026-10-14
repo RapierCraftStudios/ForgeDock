@@ -663,13 +663,14 @@ export async function resumeStalledFromCli(argv, deps = {}) {
 function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : null; }
 
 /**
- * `forgedock orchestrate <issue...> [--parallel K] [--lane L] [--repo owner/repo]`
+ * `forgedock orchestrate <issue...> [--parallel K] [--lane L] [--repo owner/repo] [--no-prefilter]`
  * Runs core work-on per issue with K concurrency (default 3), honouring `**Depends on**: #X` among the given issues.
  * A `dependency-open` issue is requeued behind its dependency; a `decomposed` one adds its sub-issues (#4124).
+ * The already-fixed pre-filter (#4123) runs before each lane unless `--no-prefilter`.
  * Prints a compact summary table. Lane defaults to staging.
  */
 export async function orchestrateFromCli(argv, deps = {}) {
-  const valued = ["--parallel", "--lane", "--repo", "--model"];
+  const valued = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model"];
   const issues = [];
   for (let i = 0; i < argv.length; i++) {
     if (valued.includes(argv[i])) { i++; continue; }
@@ -688,13 +689,57 @@ export async function orchestrateFromCli(argv, deps = {}) {
   const { orchestrate, formatTable } = await import("./lean/orchestrate.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
+  const { makePrefilter, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
+  const prefilter = argv.includes("--no-prefilter") ? null
+    : makePrefilter({ repo, lane, cwd: process.cwd(), io: leanIo, ...prefilterModel(argv) });
+  if (prefilter) { try { await leanIo.git(["fetch", "origin", lane], { cwd: process.cwd() }); } catch { /* offline: use the local ref */ } }
   const rows = await orchestrate({
-    issues, parallel,
+    issues, parallel, prefilter,
     readBody: async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
     runOne: (n) => runCore({ issue: n, repo, lane, cwd: process.cwd(), dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry,
       admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) }),
     onUpdate: (r) => console.log(`#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`),
   });
   console.log("\n" + formatTable(rows));
+  const pfLine = formatPrefilterSummary(rows);
+  if (pfLine) console.log(pfLine);
   return { rows, ok: rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome)) };
+}
+
+/** `--prefilter-model M`, else forge.yaml `engine.lean_prefilter_model`, else the pre-filter default. */
+function prefilterModel(argv) {
+  const m = flag(argv, "--prefilter-model") ?? readLeanSetting("prefilter_model");
+  return m ? { model: m } : {};
+}
+
+/**
+ * `forgedock triage <issue...> [--lane L] [--repo owner/repo] [--dry-run] [--prefilter-model M]` (#4123)
+ * Runs only the already-fixed pre-filter: closes issues it proves fixed (with evidence) and prints the issues that
+ * still need a lane as the last line (`lanes: #1 #2`). `--dry-run` reports candidates without a model call or close.
+ */
+export async function triageFromCli(argv, deps = {}) {
+  const valued = ["--lane", "--repo", "--prefilter-model"];
+  const issues = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (valued.includes(argv[i])) { i++; continue; }
+    if (/^#?\d+$/.test(argv[i])) issues.push(parseInt(argv[i].replace("#", ""), 10));
+  }
+  if (!issues.length) throw new Error("usage: forgedock triage <issue...> [--lane L] [--repo owner/repo] [--dry-run]");
+  const lane = flag(argv, "--lane") ?? "staging";
+  const io = deps.io ?? makeIo();
+  const repo = flag(argv, "--repo") ?? (await resolveDefaultRepo(io));
+  if (!repo) throw new Error("triage needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+  const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  const { prefilterIssue, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
+  try { await leanIo.git(["fetch", "origin", lane], { cwd: process.cwd() }); } catch { /* offline: use the local ref */ }
+  const rows = [];
+  for (const n of [...new Set(issues)]) {
+    const pf = await prefilterIssue({ issue: n, repo, lane, cwd: process.cwd(), io: leanIo, dryRun: argv.includes("--dry-run"), ...prefilterModel(argv) });
+    console.log(`#${n} → ${pf.closed ? "closed" : pf.candidate ? "candidate" : "lane"} (${pf.detail})`);
+    rows.push({ issue: n, outcome: pf.closed ? "invalid" : "pending", cost_usd: pf.cost_usd, prefilter: pf });
+  }
+  const lanes = rows.filter((r) => !r.prefilter.closed).map((r) => r.issue);
+  console.log(formatPrefilterSummary(rows));
+  console.log(`lanes: ${lanes.map((n) => `#${n}`).join(" ") || "(none)"}`);
+  return { rows, lanes };
 }
