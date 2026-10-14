@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # review-pr-staging-scope.test.sh — cases for the review-pr-staging scoped-review gates (forge#3451):
 #   (1) the 7B out-of-scope rule may only demote MEDIUM/LOW/INFO, never HIGH/CRITICAL or unknown severity;
-#   (2) the 0B.1 "reviewed" test needs the full-length Reviewed-SHA line, not a 7-char substring.
+#   (2) the 0B.1 "reviewed" test needs the full-length Reviewed-SHA line, not a 7-char substring;
+#   (11) issue numbers cited in commit subjects never make 0B.1 fall open (forge#4127).
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -uo pipefail
@@ -264,6 +265,40 @@ vh10 blocking "PASS"
 case "$VH10_OUT" in *rc=0*) [ "$VH10_V" = "PASS" ] && ok || bad "a valid persisted PASS must stay PASS" ;; *) bad "a valid persisted PASS must not block" ;; esac
 vh10 blocking "SKIP"
 case "$VH10_OUT" in *rc=0*) [ "$VH10_V" = "SKIP" ] && ok || bad "a valid persisted SKIP must stay SKIP" ;; *) bad "a valid persisted SKIP must not block" ;; esac
+# (11) bundle PR set vs issue numbers (forge#4127): conventional subjects cite issues ("(#28668)"); an issue is skipped, never a reason to fall open.
+# Stub gh: PRs 5 (reviewed at head) and 6; 28668 is an issue; 77 fails every read.
+H11=0123456789abcdef0123456789abcdef01234567
+gh11() {
+  case "$*" in
+    "pr view 5 "*|"pr view 6 "*) jq -n --arg h "$H11" '{headRefOid:$h,mergeCommit:{oid:"m"},commits:[{oid:"c"}],state:"MERGED",baseRefName:"staging",labels:[]}' ;;
+    "pr view "*) return 1 ;;
+    "api repos/o/r/issues/5 "*|"api repos/o/r/issues/6 "*) echo pr ;;
+    "api repos/o/r/issues/28668 "*) echo issue ;;
+    "api --paginate repos/o/r/issues/5/comments") printf '%s\n' "$(cm9 "<!-- FORGE:REVIEW_ROUTE mode=full spec=review-pr.md sha=${H11:0:7} -->")" "$(cm9 "$(agent9 security "$H11")")" | jq -s . ;;
+    "api --paginate repos/o/r/issues/"*/comments) echo '[]' ;;
+    "pr diff "*) echo "f$3.txt" ;;
+    *) return 1 ;;
+  esac
+}
+[ "$(grep -c '^# BEGIN bundle-pr-kind$' "$SPEC")" -eq 2 ] && [ "$(awk '/^# BEGIN bundle-pr-kind$/{f=1;n++} f{print > ("'"$TMP"'/kind" n ".sh")} /^# END bundle-pr-kind$/{f=0}' "$SPEC"; cmp -s "$TMP/kind1.sh" "$TMP/kind2.sh" && echo same)" = same ] && ok || bad "0A and 0B.1 must carry identical bundle_pr_kind blocks"
+awk '/^# BEGIN bundle-pr-set$/{f=1;next} /^# END bundle-pr-set$/{f=0} f' "$SPEC" | sed 's/{GH_REPO}/o\/r/g' > "$TMP/prset.sh"
+[ -s "$TMP/prset.sh" ] && ok || bad "bundle-pr-set block not found in Phase 0A"
+OUT11=$( gh() { gh11 "$@"; }; BUNDLE_PRS="5 6 28668 77 90"; MERGE_PRS="90"; . "$TMP/prset.sh"; echo $ALL_PR_NUMBERS "|$SKIPPED_ISSUES" )
+[ "$OUT11" = "5 6 77 90 | 28668" ] && ok || bad "0A must drop the confirmed issue and keep PRs, merge PRs and unclassifiable numbers (got '$OUT11')"
+awk '/^# BEGIN bundle-scope-loop$/{f=1;next} /^# END bundle-scope-loop$/{f=0} f' "$SPEC" > "$TMP/loop.sh"
+[ -s "$TMP/loop.sh" ] && ok || bad "bundle-scope-loop block not found in 0B.1"
+scope11() { # $1 = ALL_PR_NUMBERS; prints "<SCOPE_MODE> <REVIEWED_PR_COUNT>" then the loop output
+  ( gh() { gh11 "$@"; }; bundle_delta_credit() { DELTA_COMMITS=""; DELTA_FULL=0; }; . "$TMP/kind1.sh"
+    SCOPE_MODE=full; REVIEWED_COMMITS=""; REVIEWED_MERGES=""; REVIEWED_PR_COUNT=0; _PF="$TMP/pf11"; : > "$_PF"
+    TRUSTED_SCRIPT="$TC" ALL_PR_NUMBERS="$1" PR_NUMBER=9 GH_REPO=o/r _SD="$TMP" REVIEW_DELTA_SCRIPT=""
+    LOG11=$(. "$TMP/loop.sh"; echo "@@$SCOPE_MODE $REVIEWED_PR_COUNT"); echo "${LOG11##*@@}"; echo "${LOG11%@@*}" )
+}
+OUT11=$(scope11 "28668 5 6")
+[ "$(printf '%s\n' "$OUT11" | head -1)" = "scoped 1" ] && ok || bad "an issue number in the bundle list must be skipped, not fall open (got '$OUT11')"
+case "$OUT11" in *"#28668 is an issue"*) ok ;; *) bad "0B.1 must announce the skipped issue (got '$OUT11')" ;; esac
+OUT11=$(scope11 "5 77")
+[ "$(printf '%s\n' "$OUT11" | head -1 | cut -d' ' -f1)" = "full" ] && ok || bad "a genuine read failure must still fall open (got '$OUT11')"
+case "$OUT11" in *"fell open at bundle PR #77"*"not a confirmed issue"*) ok ;; *) bad "a fall-open must print the PR and reason (got '$OUT11')" ;; esac
 else echo "review-pr-staging-scope.test.sh: git missing, delta section skipped"; fi
 echo "review-pr-staging-scope.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]
