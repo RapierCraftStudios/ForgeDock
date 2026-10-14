@@ -607,6 +607,22 @@ describe("orchestrate", () => {
     assert.equal(rows2[0].outcome, "engine-error");
   });
 
+  it("#4122 same-file issues run in parallel; a needs-human peer does not skip them", async () => {
+    const h = harness({ 1: "Fix `app/scrape_phases.py` retry", 2: "Also touches `app/scrape_phases.py`", 3: "See app/scrape_phases.py" }, { 1: "needs-human" });
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 3, ...h });
+    assert.equal(h.log.maxActive, 3);
+    assert.deepEqual(rows.map((r) => r.outcome), ["needs-human", "merged", "merged"]);
+  });
+
+  it("#4122 /orchestrate spec builds no blocking edge from file overlap and skips only through explicit/logical edges", async () => {
+    const { readFileSync } = await import("node:fs");
+    const spec = readFileSync(new URL("../../commands/orchestrate.md", import.meta.url), "utf8");
+    assert.doesNotMatch(spec, /\*\*Conflict:\*\*/);
+    assert.doesNotMatch(spec, /run one after the\s+other/);
+    assert.match(spec, /File overlap is \*\*never\*\* an edge/);
+    assert.match(spec, /needs-human[\s\S]*Only\s+explicit or logical edges skip a dependent/);
+  });
+
   it("formatTable prints issue, outcome, PR, cost, minutes", () => {
     const t = formatTable([{ issue: 1, outcome: "merged", pr: 101, cost_usd: 0.5, minutes: 3.2 }, { issue: 2, outcome: "skipped", pr: null, cost_usd: 0, minutes: 0, detail: "dependency #1 ended needs-human" }]);
     assert.match(t, /issue\s+outcome\s+PR\s+cost\s+min/);

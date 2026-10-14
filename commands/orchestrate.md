@@ -39,13 +39,15 @@ Do this yourself from issue text and the code. Spawn no sub-agents here.
    - **Explicit:** `Depends on #X` / `Blocked by #X` where X is in the set. Match it case-insensitively and
      also in bold or list form (`**Depends on** #X`, `- Depends on: #X, #Y`). An open X outside the set
      means N is skipped as blocked.
-   - **Conflict:** two issues that will edit the same file or the same function run one after the
-     other (smaller first), so their PRs don't conflict. Different files run in parallel.
    - **Logical:** one issue's fix is needed by another (for example, it adds the helper the other uses).
 
-   If you find a cycle, break it at the weakest (conflict) edge and say so.
-4. **Show the plan** as one table: issue, title, size, likely files, waits-on. There are no waves. Then proceed
-   without asking.
+   These are the only edges. File overlap is **never** an edge: two issues that touch the same file or
+   function still run in parallel, because each lane merges `origin/<lane>` into a conflicting PR and
+   resolves the conflict itself. Note the overlap in the plan table as a warning only.
+
+   If you find a cycle, break it at the weakest (logical) edge and say so.
+4. **Show the plan** as one table: issue, title, size, likely files, waits-on (explicit/logical only),
+   overlaps (warning). There are no waves. Then proceed without asking.
 
 `K` = `--parallel` if given, otherwise `orchestration.max_concurrent` from the repo's `forge.yaml`
 (`yq '.orchestration.max_concurrent' forge.yaml`), otherwise 3. State the value of K and where it came
@@ -56,7 +58,8 @@ from in the plan. `L` = `--lane` if given, otherwise the repo's base lane from f
 Schedule from the DAG, not in waves. An issue is **ready** when every issue it waits on has merged (or it
 waits on nothing). Keep at most K lanes running. Whenever a lane is free, start the highest-priority ready
 issue right away (priority label first, then the smaller size). Never hold a ready issue back until other
-lanes finish.
+lanes finish. To reduce simultaneous base-syncs, don't start two lanes that name the same function within the
+same minute; start another ready issue first instead of waiting.
 
 - **Shell lane (default, when `forgedock` is on PATH).** Each lane is its own `Bash` call with
   `run_in_background: true`, so every running lane appears as its own background shell in this session.
@@ -89,7 +92,8 @@ When a lane finishes:
   new lanes until that reset time, let running lanes finish, then resume the queue.
 - `dependency-open`: the engine found a dependency you missed. Add the edge and requeue the issue behind it.
 - `merged` or `invalid`: start the next ready issue.
-- `needs-human`: read the issue's last comment for the reason, and mark its dependents skipped.
+- `needs-human`: read the issue's last comment for the reason, and mark its dependents skipped. Only
+  explicit or logical edges skip a dependent; an issue that merely overlaps the same file keeps running.
 - `engine-error`: relaunch it once.
 - `ci-pending` or `deferred`: leave it. A later `/orchestrate` resumes it.
 
