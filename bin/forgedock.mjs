@@ -3209,6 +3209,7 @@ function help() {
     ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
     ["npx forgedock run-issue <issue> [--lane <lane>] [--lane-override] [--path core|full] [--retry] [--wait-lease]", "Run the lean core work-on on one issue (default; --path full = legacy multi-phase pipeline; the lane comes from the issue: milestone → milestone/<slug>, else staging; --lane is an assertion, never the default branch) (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
     ["npx forgedock orchestrate <issue...> [--parallel K] [--lane L]", "Run core work-on on several issues with bounded concurrency and Depends-on ordering; each issue on its own lane, cross-lane dependencies reported"],
+    ["npx forgedock orchestrate --resume <id> | --set-parallel <id> K", "Continue a batch after the dispatcher died (live lanes re-adopted), or change its concurrency live"],
     ["npx forgedock triage <issue...> [--lane L] [--dry-run]", "Already-fixed pre-filter: close issues a merged PR or green CI already resolved; print the rest"],
     ["npx forgedock gc", "Prune stale per-run scratch dirs under ~/.forge/tmp/runs (older than 6h, owner dead)"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],

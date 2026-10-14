@@ -79,16 +79,23 @@ issue right away (priority label first, then the smaller size). Never hold a rea
 lanes finish. To reduce simultaneous base-syncs, don't start two lanes that name the same function within the
 same minute; start another ready issue first instead of waiting.
 
-- **Shell lane (default, when `forgedock` is on PATH).** Each lane is its own `Bash` call with
-  `run_in_background: true`, so every running lane appears as its own background shell in this session.
-  Do NOT write a scheduler, wrapper or queue script that launches lanes for you. You are the scheduler:
-  start a lane, and when a lane's completion notification arrives, start the next ready issue.
+- **Batch runner (default, when `forgedock` is on PATH).** Launch the whole set as one durable batch in a single
+  `Bash` call with `run_in_background: true`. Do NOT write a scheduler, wrapper or queue script, and do not launch one
+  `run-issue` per issue yourself: the runner schedules from the issues' `Depends on` / `Blocked by` lines.
 
   ```bash
-  forgedock run-issue <N>
+  forgedock orchestrate <N...> --parallel K
   ```
 
-  The harness notifies you when the lane exits. Its last line is `issue #N → <outcome>`.
+  Its first line is `batch: <id> (...)`. The batch state lives in `~/.forge/batches/<id>/` and every lane runs in its
+  own session, so the batch survives this session: if the runner dies, run `forgedock orchestrate --resume <id>`
+  (live lanes are re-adopted, nothing is launched twice). Change K of a running batch with
+  `forgedock orchestrate --set-parallel <id> K`. The runner requeues `deferred` lanes by code (host busy after its
+  retry-in, a usage limit holds all admissions until the reset, transient merge/push/idle failures back off; non-host
+  deferrals stop after `orchestration.max_deferrals`), relaunches an `engine-error` once, and stops admitting after
+  `orchestration.breaker` engine-errors (`errors` within `window_min`; held issues continue on `--resume`). Logical
+  edges you found in step 2.4 must be written to the dependent issue as a `Depends on #X` line before launching. The
+  last lines are the report table.
 - **Agent lane (only when the `forgedock` CLI is unavailable).** Spawn one background agent per issue.
   The prompt is:
 
@@ -99,7 +106,7 @@ same minute; start another ready issue first instead of waiting.
 
   The agent does not merge.
 
-When a lane finishes:
+When a lane finishes (agent lanes; the batch runner applies the same rules itself):
 - `deferred` (lease held by another or a dead session): put it back in the queue and retry after the
   lease time printed in its output.
 - `deferred` with "host busy" (code `host.busy`: the host is short of memory, tmp space or CPU headroom;

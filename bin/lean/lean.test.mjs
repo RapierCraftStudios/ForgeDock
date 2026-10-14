@@ -644,6 +644,11 @@ describe("orchestrate", () => {
     assert.deepEqual(parseDeps("x\n**Depends on**: #4\n**Depends on**: #7\n", 7), [4]);
   });
 
+  it("#4121 parseDeps reads every declaration form, all numbers, and ignores mid-line prose", () => {
+    assert.deepEqual(parseDeps("Depends on #3, #5\n**Depends on** #6\nBlocked by #8\n- depends on: #9 and #10\n**Blocked by:** #11 — why", 1), [3, 5, 6, 8, 9, 10, 11]);
+    assert.deepEqual(parseDeps("This is blocked by #2 and depends on #4\nsee **Depends on**: #5", 1), []);
+  });
+
   it("runs at most K at once", async () => {
     const h = harness({});
     const rows = await orchestrate({ issues: [1, 2, 3, 4, 5, 6], parallel: 2, ...h });
@@ -688,11 +693,13 @@ describe("orchestrate", () => {
 
   it("#4124 a repeated dependency-open stops after the requeue cap", async () => {
     const h = harness({}, { 1: "dependency-open" });
-    let runs = 0;
-    const rows = await orchestrate({ issues: [1], readBody: h.readBody,
-      runOne: async (n) => { if (n === 1) { runs++; return { terminalReason: "dependency-open", dependencies: [5] }; } return { terminalReason: "merged" }; } });
-    assert.equal(runs, 3);
+    const clock = { t: 0 }, starts = [];
+    const rows = await orchestrate({ issues: [1], readBody: h.readBody, now: () => clock.t, sleep: async (ms) => { clock.t += ms; },
+      runOne: async (n) => { if (n === 1) { starts.push(clock.t); return { terminalReason: "dependency-open", dependencies: [5] }; } return { terminalReason: "merged" }; } });
+    assert.equal(starts.length, 3);
     assert.equal(rows[0].outcome, "dependency-open");
+    // #4121: #5 already merged but #1 still reports it open: wait before relaunching instead of a hot loop.
+    assert.ok(starts[2] - starts[1] >= 60_000, JSON.stringify(starts));
   });
 
   it("#4124 decomposed runs its sub-issues and the parent's dependents wait on them", async () => {
@@ -757,7 +764,7 @@ describe("orchestrate", () => {
       },
       git: async (a) => (a[0] === "ls-remote" && ["refs/heads/staging", "refs/heads/milestone/m-one"].includes(a.at(-1)) ? "abc\tref\n" : ""),
     };
-    const deps = { dir: tmpDir("core-orch-"), emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo,
+    const deps = { dir: tmpDir("core-orch-"), batchRoot: tmpDir("core-orch-batch-"), allowTmpfs: true, emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo,
       leanModule: { runCore: async (o) => { seen.push([o.issue, o.lane, o.repo]); return { terminalReason: "merged", pr: 50 + o.issue, cost_usd: 1, wall_ms: 1 }; } } };
     const l = console.log; console.log = (s) => logs.push(String(s));
     let res;

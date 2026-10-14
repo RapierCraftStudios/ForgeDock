@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
- * Thin orchestrate: run core work-on for several issues with bounded concurrency, honouring `**Depends on**: #X`
+ * Thin orchestrate: run core work-on for several issues with bounded concurrency, honouring `Depends on` / `Blocked by`
  * among the given issues (wait for the dependency to merge; skip when it ends anywhere but merged/invalid).
  * A `dependency-open` run is requeued behind its dependencies, pulling an out-of-set one into the batch; a
  * `decomposed` run adds its sub-issues and its dependents wait on them instead (#4124).
@@ -9,32 +9,105 @@
  * Optional `prefilter(issue, lane)` (#4123) runs in the lane slot before `runOne`: when it closed the issue, no lane starts.
  * Optional `resolveLane(issue)` (#4125) works out each issue's own lane (milestone branch or staging): an issue whose
  * lane is refused ends `lane-refused` without a run, and a dependency edge between two lanes goes to `onCrossLane`.
+ *
+ * Durable batch runner (#4121): with a `store` every transition is persisted, so a restarted dispatcher continues the
+ * batch; lanes it launched that are still alive are re-attached through `adopt(issue, rec)` instead of relaunched.
+ * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
+ * limit holds all admissions until its reset, and non-host deferrals stop after `maxDeferrals`. An `engine-error` is
+ * relaunched once; `breaker` ({errors, window_min}) stops admissions after a burst and lets running lanes finish, the
+ * rest stay pending (outcome `held`) for a resume. `getParallel()` is read on every pass, so K can change live.
  */
-const DEP_RE = /^\*\*Depends on\*\*:[ \t]*#(\d+)\b/gm;
+import { parseDependsOn } from "../engine/phases.mjs";
+
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
 // Times one issue may be requeued behind a dependency before its dependency-open row is final.
 export const MAX_REQUEUES = 2;
+// Non-host deferrals (anything but host.busy) one issue may take before its deferred row is final.
+export const DEFAULT_MAX_DEFERRALS = 3;
+// Relaunches of an issue whose lane ended engine-error.
+export const ENGINE_ERROR_RELAUNCHES = 1;
+export const HOST_BUSY_RETRY_S = 60;
+export const RATE_LIMIT_FALLBACK_S = 15 * 60;
+export const DEFER_BACKOFF_S = 120;
+export const DEFER_BACKOFF_MAX_S = 30 * 60;
+// A dependency-open whose dependencies already finished satisfied (GitHub not yet closed): wait before relaunching.
+export const DEP_REQUEUE_DELAY_S = 60;
 
+/** Declared dependencies of an issue body; the same parser as the engine's admission (`openDependency`). */
 export function parseDeps(body, issue) {
-  return [...new Set([...String(body ?? "").replace(/\r\n/g, "\n").matchAll(DEP_RE)].map((m) => Number(m[1])))].filter((n) => n > 0 && n !== issue);
+  return parseDependsOn(body, issue);
 }
+
+const posNum = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : null; };
+
+/**
+ * When to run a `deferred` issue again. `deferrals` counts this issue's earlier non-host deferrals.
+ * @returns {{delayMs:number, host?:true, hold?:true} | {capped:true}}
+ */
+export function deferPolicy(r, { now, deferrals = 0, maxDeferrals = DEFAULT_MAX_DEFERRALS }) {
+  const code = r?.code ?? null;
+  if (code === "host.busy") return { delayMs: (posNum(r?.retryInSeconds) ?? HOST_BUSY_RETRY_S) * 1000, host: true };
+  const k = deferrals + 1;
+  if (k > maxDeferrals) return { capped: true };
+  if (code === "rate_limited") {
+    const at = posNum(r?.resetAtEpochMs) && r.resetAtEpochMs > now ? r.resetAtEpochMs : now + (posNum(r?.retryInSeconds) ?? RATE_LIMIT_FALLBACK_S) * 1000;
+    return { delayMs: at - now, hold: true };
+  }
+  if (posNum(r?.retryInSeconds)) return { delayMs: r.retryInSeconds * 1000 };
+  // lease-held: "leased by X until <ISO>"
+  const until = /\buntil (\d{4}-\d\d-\d\dT[\d:.]+Z)/.exec(String(r?.detail ?? ""))?.[1];
+  const at = until ? Date.parse(until) : NaN;
+  if (Number.isFinite(at) && at > now) return { delayMs: Math.min(at - now + 5000, DEFER_BACKOFF_MAX_S * 1000) };
+  return { delayMs: Math.min(DEFER_BACKOFF_S * 2 ** (k - 1), DEFER_BACKOFF_MAX_S) * 1000 };
+}
+
+const cancellableSleep = (ms, signal) => new Promise((res) => {
+  const t = setTimeout(res, ms);
+  signal?.addEventListener("abort", () => { clearTimeout(t); res(); }, { once: true });
+});
+
+const toObj = (m) => Object.fromEntries([...m].map(([k, v]) => [String(k), v]));
+const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k), v]));
 
 /**
  * @returns {Promise<Array<{issue:number, outcome:string, pr:?number, cost_usd:number, minutes:number, detail?:string}>>}
  */
-export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {} }) {
-  const order = [...new Set(issues)];
+export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
+  store = null, adopt = null, getParallel = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000 }) {
+  const saved = store?.load?.() ?? null;
+  const order = saved ? [...saved.order] : [];
   const set = new Set(order);
-  const deps = new Map(); // issue -> declared dependencies (any issue); only those in `set` are edges
+  const deps = toMap(saved?.deps); // issue -> declared dependencies (any issue); only those in `set` are edges
+  const lanes = toMap(saved?.lanes); // issue -> resolveLane result
+  const crossSeen = new Set(saved?.crossSeen ?? []);
+  const results = toMap(saved?.results); // issue -> final row
+  const running = new Map(); // issue -> promise
+  const runRecs = toMap(saved?.running); // issue -> {startedAt, lane, pid?}: persisted so a restart can adopt the lane
+  const pending = [...(saved?.pending ?? [])];
+  const notBefore = toMap(saved?.notBefore);
+  const requeues = toMap(saved?.requeues);
+  const deferrals = toMap(saved?.deferrals);
+  const engineErrors = toMap(saved?.engineErrors);
+  const checked = toMap(saved?.prefilter); // issue -> pre-filter result
+  let errorTimes = [...(saved?.errorTimes ?? [])];
+  let holdUntil = saved?.holdUntil ?? null;
+  let tripped = saved?.breaker ?? null;
+
+  const save = () => {
+    if (!store) return;
+    store.save({ v: 1, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
+      pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
+      prefilter: toObj(checked), errorTimes, holdUntil, breaker: tripped });
+  };
+  const update = (row) => { store?.log?.(row); onUpdate(row); };
   const readDeps = async (n) => {
     let body = "";
     try { body = await readBody(n); } catch { /* unreadable: no ordering info, work-on's own check still applies */ }
     deps.set(n, parseDeps(body, n));
     if (resolveLane) { let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e) }; } lanes.set(n, l); }
   };
-  const lanes = new Map(); // issue -> resolveLane result
-  const crossSeen = new Set();
+  const edges = (n) => (deps.get(n) ?? []).filter((d) => set.has(d));
   // A milestone issue waiting on a staging fix (or the reverse) never sees that fix on its own base: surface the edge.
   const noteCrossLane = () => {
     for (const n of order) for (const d of edges(n)) {
@@ -44,84 +117,152 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       onCrossLane({ issue: n, lane: a.lane, dependency: d, dependencyLane: b.lane });
     }
   };
-  for (const n of order) await readDeps(n);
-  const edges = (n) => deps.get(n).filter((d) => set.has(d));
-  noteCrossLane();
-  const results = new Map(); // issue -> row
-  const running = new Map(); // issue -> promise
-  const pending = [...order];
-  const requeues = new Map();
-  const checked = new Map(); // issue -> pre-filter result
   const addIssues = async (ns) => {
     const fresh = ns.filter((d) => !set.has(d));
     for (const d of fresh) { set.add(d); order.push(d); }
     for (const d of fresh) { await readDeps(d); pending.push(d); }
     noteCrossLane();
   };
+  // New issues (a fresh batch, or extra issues passed to a resume) join the queue.
+  for (const n of issues) if (!set.has(n)) { set.add(n); order.push(n); pending.push(n); }
+  for (const n of order) if (!deps.has(n)) await readDeps(n);
+  noteCrossLane();
+  save();
 
-  const skip = (n, detail) => { results.set(n, { issue: n, outcome: "skipped", pr: null, cost_usd: 0, minutes: 0, detail }); onUpdate(results.get(n)); };
+  const skip = (n, detail) => { results.set(n, { issue: n, outcome: "skipped", pr: null, cost_usd: 0, minutes: 0, detail }); update(results.get(n)); };
+  const requeue = (n, delayMs) => { pending.push(n); if (delayMs > 0) notBefore.set(n, now() + delayMs); else notBefore.delete(n); };
+  const noteEngineError = () => {
+    if (!breaker) return;
+    const t = now(), windowMs = breaker.window_min * 60000;
+    errorTimes = [...errorTimes.filter((x) => t - x < windowMs), t];
+    if (!tripped && errorTimes.length >= breaker.errors) {
+      tripped = { at: t, detail: `circuit breaker: ${errorTimes.length} engine-errors within ${breaker.window_min} min; admissions stopped` };
+      update({ issue: null, outcome: "breaker", detail: tripped.detail });
+    }
+  };
+
+  // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
+  const settle = async (n, r, rec, pf) => {
+    const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + (pf?.cost_usd ?? 0), minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}) };
+    const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
+    const subs = (Array.isArray(r?.subissues) ? r.subissues : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
+    const done = () => { running.delete(n); runRecs.delete(n); };
+    if (row.outcome === "dependency-open" && depList.length && (requeues.get(n) ?? 0) < MAX_REQUEUES) {
+      // A scheduling fact, not a failure: add the edge, pull the dependency in, and run this issue again after it.
+      requeues.set(n, (requeues.get(n) ?? 0) + 1);
+      deps.set(n, [...new Set([...(deps.get(n) ?? []), ...depList])]);
+      await addIssues(depList);
+      // Dependencies already done but still open on GitHub: a delay instead of a hot relaunch loop.
+      const allDone = depList.every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome));
+      requeue(n, allDone ? DEP_REQUEUE_DELAY_S * 1000 : 0); done(); save();
+      update({ ...row, detail: `requeued behind ${depList.map((d) => `#${d}`).join(", ")}` });
+      return;
+    }
+    if (row.outcome === "deferred") {
+      const pol = deferPolicy(r, { now: now(), deferrals: deferrals.get(n) ?? 0, maxDeferrals });
+      if (!pol.capped) {
+        if (!pol.host) deferrals.set(n, (deferrals.get(n) ?? 0) + 1);
+        if (pol.hold) holdUntil = Math.max(holdUntil ?? 0, now() + pol.delayMs);
+        requeue(n, pol.delayMs); done(); save();
+        update({ ...row, detail: `requeued in ${Math.round(pol.delayMs / 1000)}s${pol.hold ? " (admissions held)" : ""}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
+        return;
+      }
+      row.detail = `gave up after ${deferrals.get(n) ?? 0} deferrals: ${r?.detail ?? r?.code ?? ""}`;
+    }
+    if (row.outcome === "engine-error") {
+      noteEngineError();
+      if ((engineErrors.get(n) ?? 0) < ENGINE_ERROR_RELAUNCHES) {
+        engineErrors.set(n, (engineErrors.get(n) ?? 0) + 1);
+        requeue(n, 0); done(); save();
+        update({ ...row, detail: `relaunching once: ${row.detail ?? ""}` });
+        return;
+      }
+    }
+    if (row.outcome === "decomposed" && subs.length) {
+      await addIssues(subs);
+      for (const [m, ds] of deps) if (ds.includes(n)) deps.set(m, [...new Set(ds.flatMap((d) => (d === n ? subs : [d])))]);
+      noteCrossLane();
+    }
+    results.set(n, row); done(); save(); update(row);
+  };
+
+  const track = (n, p) => { running.set(n, p.catch((e) => settle(n, { terminalReason: "engine-error", detail: e?.message ?? String(e) }, runRecs.get(n), null))); };
   const start = (n) => {
-    const t0 = now();
     const ln = lanes.get(n);
     if (ln && !ln.ok) { // settled synchronously: nothing runs, no lease, no comment
       const row = { issue: n, outcome: "lane-refused", pr: null, cost_usd: 0, minutes: 0, detail: `${ln.code}: ${ln.detail}`, code: ln.code };
-      results.set(n, row); onUpdate(row);
+      results.set(n, row); save(); update(row);
       return;
     }
     const lane = ln?.lane;
-    const p = (async () => {
-      let r;
-      // Pre-filter once per issue (a requeued dependency-open issue is not re-checked); fail-open: an error means a normal lane.
-      if (prefilter && !checked.has(n)) { let pf = null; try { pf = await prefilter(n, lane); } catch { pf = null; } checked.set(n, pf); }
+    const rec = { startedAt: now(), ...(lane ? { lane } : {}) };
+    runRecs.set(n, rec); notBefore.delete(n); save();
+    track(n, (async () => {
+      // Pre-filter once per issue (a requeued issue is not re-checked); fail-open: an error means a normal lane.
+      if (prefilter && !checked.has(n)) { let pf = null; try { pf = await prefilter(n, lane); } catch { pf = null; } checked.set(n, pf); save(); }
       const pf = checked.get(n) ?? null;
+      let r;
       if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
-      else { try { r = await runOne(n, lane); } catch (e) { r = { terminalReason: "engine-error", detail: e?.message ?? String(e) }; } }
-      const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + (pf?.cost_usd ?? 0), minutes: Math.round((now() - t0) / 6000) / 10, detail: r?.detail, ...(pf ? { prefilter: pf } : {}) };
-      const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
-      const subs = (Array.isArray(r?.subissues) ? r.subissues : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
-      if (row.outcome === "dependency-open" && depList.length && (requeues.get(n) ?? 0) < MAX_REQUEUES) {
-        // A scheduling fact, not a failure: add the edge, pull the dependency in, and run this issue again after it.
-        requeues.set(n, (requeues.get(n) ?? 0) + 1);
-        deps.set(n, [...new Set([...deps.get(n), ...depList])]);
-        await addIssues(depList);
-        pending.push(n); running.delete(n); onUpdate({ ...row, detail: `requeued behind ${depList.map((d) => `#${d}`).join(", ")}` });
-        return;
+      else {
+        try { r = await runOne(n, lane, { onStart: (info) => { Object.assign(rec, info ?? {}); save(); } }); }
+        catch (e) { r = { terminalReason: "engine-error", detail: e?.message ?? String(e) }; }
       }
-      if (row.outcome === "decomposed" && subs.length) {
-        await addIssues(subs);
-        for (const [m, ds] of deps) if (ds.includes(n)) deps.set(m, [...new Set(ds.flatMap((d) => (d === n ? subs : [d])))]);
-        noteCrossLane();
-      }
-      results.set(n, row); running.delete(n); onUpdate(row);
-    })();
-    running.set(n, p);
+      await settle(n, r, rec, pf);
+    })());
   };
 
+  // Lanes launched by an earlier dispatcher: re-attach to the live ones, queue the rest again (no result was recorded).
+  for (const [n, rec] of [...runRecs]) {
+    let p = null;
+    if (adopt && rec?.pid) { try { p = await adopt(n, rec); } catch { p = null; } }
+    if (p) track(n, Promise.resolve(p).then((r) => settle(n, r, rec, checked.get(n) ?? null)));
+    else { runRecs.delete(n); if (!pending.includes(n) && !results.has(n)) pending.unshift(n); }
+  }
+  save();
+
+  const K = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
   while (pending.length || running.size) {
     // Resolve skips first: a dependency that finished unsatisfied (or never can) skips its dependents.
     for (let i = pending.length - 1; i >= 0; i--) {
       const n = pending[i];
+      if (results.has(n)) { pending.splice(i, 1); continue; }
       const bad = edges(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome));
       if (bad !== undefined) { pending.splice(i, 1); skip(n, `dependency #${bad} ended ${results.get(bad).outcome}`); }
     }
+    const t = now();
+    if (holdUntil && t >= holdUntil) { holdUntil = null; save(); }
     let started = 0;
-    for (let i = 0; i < pending.length && running.size < parallel;) {
-      const n = pending[i];
-      if (edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome))) { pending.splice(i, 1); start(n); started++; }
-      else i++;
+    if (!tripped && !holdUntil) {
+      for (let i = 0; i < pending.length && running.size < K();) {
+        const n = pending[i];
+        if ((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome))) { pending.splice(i, 1); start(n); started++; }
+        else i++;
+      }
     }
-    if (running.size) await Promise.race(running.values());
-    else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
-    else if (pending.length) { // nothing runnable and nothing running: a dependency cycle
+    if (tripped && !running.size) break; // breaker: let running lanes finish, keep the rest pending for a resume
+    // Wake for a delayed issue, the end of a usage-limit hold, or (with a live K) a poll.
+    const waits = pending.map((n) => notBefore.get(n) ?? 0).filter((x) => x > t);
+    if (holdUntil) waits.push(holdUntil);
+    let wake = waits.length ? Math.max(0, Math.min(...waits) - t) : null;
+    if (getParallel && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
+    if (tripped) wake = null;
+    if (running.size) {
+      if (wake === null) await Promise.race(running.values());
+      else { const ac = new AbortController(); await Promise.race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
+    } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
+    else if (pending.length && waits.length) await sleep(Math.max(0, Math.min(...waits) - t));
+    else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle
       for (const n of pending.splice(0)) skip(n, "dependency cycle");
+      save();
     }
   }
-  return order.map((n) => results.get(n));
+  save();
+  return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: tripped?.detail ?? "not run" });
 }
 
 export function formatTable(rows) {
   const head = ["issue", "outcome", "PR", "cost", "min"];
-  const body = rows.map((r) => [`#${r.issue}`, r.outcome + (r.outcome === "skipped" && r.detail ? ` (${r.detail})` : r.prefilter?.closed ? " (pre-filter)" : ""), r.pr ? `#${r.pr}` : "-", `$${(r.cost_usd ?? 0).toFixed(2)}`, String(r.minutes ?? 0)]);
+  const body = rows.map((r) => [`#${r.issue}`, r.outcome + (["skipped", "held"].includes(r.outcome) && r.detail ? ` (${r.detail})` : r.prefilter?.closed ? " (pre-filter)" : ""), r.pr ? `#${r.pr}` : "-", `$${(r.cost_usd ?? 0).toFixed(2)}`, String(r.minutes ?? 0)]);
   const w = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)));
   const line = (c) => c.map((x, i) => x.padEnd(w[i])).join("  ").trimEnd();
   return [line(head), line(w.map((n) => "-".repeat(n))), ...body.map(line)].join("\n");
