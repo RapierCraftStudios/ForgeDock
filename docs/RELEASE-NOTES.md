@@ -2,6 +2,13 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Core work-on on the Pi harness, and merge methods
+
+- **`engine.lean_runtime: pi`** (or `FORGEDOCK_LEAN_RUNTIME=pi`) runs the core builder and reviewer sessions on Pi (`pi -p --mode json`) instead of `claude -p`. The engine, prompts, stage comments and labels are unchanged; only the harness and model change, so `--model openai-codex/gpt-6-luna` (or any model Pi can reach) works. Sessions run bare: no Pi extensions, skills, prompt templates or project-local `.pi` settings. The reviewer gets only `read,grep,find,ls`; a review FAIL resumes the same Pi session. Without `lean_reviewer_model` the reviewer and pre-filter use Pi's configured default model. On a one-line test fix, Pi with `gpt-6-luna` produced the same diff as the Claude builder.
+- **Merge method.** Core work-on used `gh pr merge --merge`, which fails on repositories that disallow merge commits. It now reads the repo's allowed methods once and uses a merge commit when allowed, else squash, else rebase.
+
+Action: none. Set `engine.lean_runtime: pi` to try Pi.
+
 ## Core work-on: per-phase comments (GitHub as the knowledge graph)
 
 The core builder now writes three markdown stage notes with fixed heading templates (`.forge-lean/investigation.md`, `plan.md`, `implementation.md`) next to the machine-readable `result.json`. The engine posts each as its own comment, live while the builder session runs (the CLI call is now asynchronous; a file is posted once its mtime is stable for 2 s) and the rest in order right after the session, before review: `FORGE:INVESTIGATION` (`## Investigation Report`, also carries the `FORGE:VALIDATE` alias marker), `FORGE:PLAN` (`## Implementation Plan`), `FORGE:IMPLEMENTATION` (`## Implementation Complete`, with branch and files changed computed by the engine), then `FORGE:REVIEW` (`## Review`: fixes the issue yes/no with evidence, regression check with what was checked, notes). A missing or blank file is rendered from the `result.json` fields ("not reported" for gaps); builder-written `<!-- FORGE:` markers are stripped and each comment is capped at 60k characters. At the end (merged, invalid or needs-human) one `FORGE:TRAJECTORY` comment (`## Pipeline Trajectory`, also carrying the `FORGE:WORK-ON` alias marker) replaces the old register comment: phase table, decisions, anomalies, cost, tokens, wall time. The PR body shows the root cause, the deliverables table and the verification. No extra model sessions.

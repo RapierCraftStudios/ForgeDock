@@ -80,6 +80,16 @@ export async function runCore(o) {
   /** gh writes (comment, pr create, issue edit/close): retried for 5xx and secondary rate limits (#4114). */
   const ghw = (args) => retrying(() => io.gh(args), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random });
   const git = (args) => io.git(args, { cwd: wt });
+  /** gh pr merge method the repo allows: merge commit when allowed (the default), else squash, else rebase. Read once; an unreadable repo keeps --merge. */
+  let mergeFlag = null;
+  const mergeMethod = async () => {
+    if (mergeFlag) return mergeFlag;
+    try {
+      const j = JSON.parse(String(await ghc(["api", `repos/${repo}`, "--jq", "{merge: .allow_merge_commit, squash: .allow_squash_merge, rebase: .allow_rebase_merge}"])));
+      mergeFlag = j?.merge !== false ? "--merge" : j?.squash ? "--squash" : j?.rebase ? "--rebase" : "--merge";
+    } catch { return "--merge"; }
+    return mergeFlag;
+  };
 
   async function attempt(phase, n, r) {
     const rec = { event: "PHASE_ATTEMPT_USAGE", phase, attempt: n, usage: r?.usage ?? null, duration_ms: num(r?.durationMs) ?? 0,
@@ -693,7 +703,7 @@ export async function runCore(o) {
       T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
       laneGuard(resumed?.base ?? lane, "merge");
       try {
-        await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
+        await ghc(["pr", "merge", String(pr), "-R", repo, await mergeMethod(), "--match-head-commit", localHead]);
         break;
       } catch (e) {
         const msg = `${e?.stderr ?? ""}${e?.message ?? ""}`;
