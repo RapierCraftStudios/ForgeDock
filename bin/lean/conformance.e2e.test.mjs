@@ -147,7 +147,7 @@ function oracle(c) {
   const lineOf = (p, s) => read(p).split("\n").findIndex((l) => l.includes(s)) + 1;
   const R = { R1: "scrape", R2: "search", R3: "export" };
   const rows = k.requirements.map((r) => {
-    if (r.disposition !== "deliver") return { id: r.id, status: r.disposition === "defer" ? "deferred" : r.disposition };
+    if (r.disposition !== "deliver") return { id: r.id, status: r.disposition === "defer" ? "deferred" : r.disposition, deferral_ok: Boolean(r.why) };
     if (R[r.id]) { const p = `src/routes/${R[r.id]}.js`; return read(p).includes("release(id)") ? { id: r.id, status: "implemented", evidence: `${p}:${lineOf(p, "release(id)")}`, validated_by: "V1" } : { id: r.id, status: "missing", evidence: `${p}:${lineOf(p, "check(")}`, note: "no release on 429" }; }
     if (r.id === "R4") return { id: "R4", status: "implemented", evidence: `src/routes/scrape.js:${lineOf("src/routes/scrape.js", "throw e")}`, validated_by: "V1" };
     return { id: r.id, status: read("test/leak.test.js") ? "implemented" : "missing", evidence: "test/leak.test.js:5", validated_by: "V1" };
@@ -162,10 +162,10 @@ function oracle(c) {
 }
 const generic = () => "```json\n" + JSON.stringify({ verdict: "PASS", fixes_issue: true, regression: false, reason: "looks good" }) + "\n```";
 
-async function runCase(cs) {
+async function runCase(cs, conformance = "enforce") {
   const dir = tmpDir("conf-e2e-");
   const w = makeWorld(dir, { builder: builderScript(cs), reviewer: (n, c) => (cs.generic ? generic() : oracle(c)) });
-  const ret = await runCore({ issue: 101, repo: "o/r", lane: "staging", cwd: w.repo, worktreeRoot: path.join(dir, "wt"), dir: path.join(dir, "runs"), io: w.io, random: () => 0.5, stableMs: 0, livePollMs: 20 });
+  const ret = await runCore({ issue: 101, repo: "o/r", lane: "staging", cwd: w.repo, worktreeRoot: path.join(dir, "wt"), dir: path.join(dir, "runs"), io: w.io, random: () => 0.5, stableMs: 0, livePollMs: 20, conformance });
   return w.observe(ret);
 }
 const blocked = (o, code) => {
@@ -212,11 +212,18 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
     merged(o); assert.equal(o.followups.length, 1); assert.equal(o.followups[0].state, "OPEN");
     assert.match(o.pr.body, new RegExp(`Remaining work tracked\\n- #${o.followups[0].number}`)); assert.ok(o.markers.includes("FORGE:TRACKED"));
   });
-  it("5 a contracted deferral is filed before the freeze and the issue closes with the link", async () => {
+  it("5 a contracted deferral is filed once the reviewer accepts it, and the issue closes with the link", async () => {
     const o = await runCase({ contract: DEFER, impl: (t) => fix(t, ["scrape", "search"]) });
     merged(o); assert.equal(o.followups.length, 1); assert.deepEqual(o.followups[0].items, [`R3: ${Q.R3}`]);
-    assert.match(o.issue.comments.find((c) => c.includes("FORGE:CONTRACT")), new RegExp(`defer → #${o.followups[0].number}`));
+    assert.match(o.issue.comments.find((c) => c.includes("FORGE:CONTRACT")), /defer \(filed after review accepts it\)/);
+    assert.match(o.pr.body, new RegExp(`Remaining work tracked\\n- #${o.followups[0].number}`));
     assert.ok(o.issue.comments.some((c) => c.includes("FORGE:TRACKED") && c.includes(`#${o.followups[0].number}`)));
+  });
+  it("shadow (default): an omission merges as today, and the posted review says the gate would block it", async () => {
+    const o = await runCase({ contract: OMIT, impl: (t) => fix(t, ["scrape", "search"]) }, "shadow");
+    merged(o); assert.equal(o.staging.export, false, "the omitted route still leaks, exactly as today");
+    assert.match(o.issue.comments.find((c) => c.includes("FORGE:REVIEW")), /would BLOCK \(nonconforming\)[\s\S]*conformance\.omission/);
+    assert.deepEqual([o.counts.builder, o.counts.reviewer], [2, 1]);
   });
   it("6 a generic PASS over an incomplete implementation never merges (review.incomplete)", async () => {
     const o = await runCase({ contract: FULL, impl: (t) => fix(t, ["scrape", "export"]), generic: true });

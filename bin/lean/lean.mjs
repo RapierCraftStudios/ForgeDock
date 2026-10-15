@@ -12,14 +12,18 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, isTrustedComment } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
-import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, closePlan, followupItems } from "./conformance.mjs";
+import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, closePlan, followupItems, pendingTracking } from "./conformance.mjs";
 import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
-import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, parseContractComment, contractJson, capComment, sanitizeMd } from "./render.mjs";
+import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS } from "./prompts.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
+/** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
+export const CONFORMANCE_MODES = Object.freeze(["shadow", "enforce"]);
+/** In shadow mode only what the previous two-question reviewer blocked on still blocks: a requirement not done, a regression. */
+const SHADOW_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CONFORMANCE_REGRESSION];
 export const REGISTER_MARKER = "FORGE:WORK-ON"; // alias marker carried by the FORGE:TRAJECTORY comment
 const num = (v) => (Number.isFinite(v) ? v : null);
 export const MAX_SUBISSUES = 8;
@@ -64,10 +68,11 @@ export function classifyBlock(result, issue) {
  * @param {string} [o.builderModel]  default: CLI default
  * @param {string} [o.reviewerModel] default claude-sonnet-5-5
  * @param {number} [o.ciMaxMinutes]  remote-CI wait budget (default 360); exhaustion is NOT needs-human
+ * @param {"shadow"|"enforce"} [o.conformance] conformance gate mode (default shadow)
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
-    ciMaxMinutes = 360, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    ciMaxMinutes = 360, conformance = "shadow", mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let lane = null, base = null, defaults = []; // set by lane resolution, before the lease
@@ -179,6 +184,19 @@ export async function runCore(o) {
     const url = await post(st.marker, st.render(md, { result, files }));
     posted[st.key] = url ?? "";
   }
+  /** Re-render a stage note that changed after a resume: edit the posted comment in place; post it when it was never posted or the edit fails. */
+  async function upsertStage(key) {
+    const st = STAGES.find((x) => x.key === key);
+    const id = /#issuecomment-(\d+)/.exec(posted[key] ?? "")?.[1];
+    const res = await readResult(), md = await readStage(st);
+    if (id) {
+      const files = key === "implementation" ? await stageFiles() : [];
+      const marks = st.marker.map((m) => `<!-- ${m} -->`).join("\n");
+      try { await ghw(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${capComment(`${marks}\n${st.render(usableMd(md) ? md : null, { result: res, files })}`)}`]); return; } catch { /* fall back to a new comment */ }
+    }
+    delete posted[key];
+    await flushStages(res, [key]);
+  }
   /** Post stage notes in order that exist, are stable (mtime unchanged for stableMs) and not yet posted. */
   const seen = {};
   let liveKeys = ["investigation"]; // which stage notes the running builder call may publish live (plan: investigation; implement: implementation)
@@ -249,6 +267,7 @@ export async function runCore(o) {
     } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); }
   }
   const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over.";
+  const PLAN_RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD` to see what exists, but plan against the issue itself. This step is still planning only: do not edit code, do not commit, and do not write the result file unless the issue is invalid, already fixed or blocked.";
   const RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD`, verify that work against the contract, complete what is missing, re-run every validate command and write the result file. Do not start over.";
 
   /** Continuous admission (#4115): while the builder runs, pause its process group when the host is over the ceiling, resume when under. */
@@ -504,7 +523,12 @@ export async function runCore(o) {
     const lastSubject = resumed ? String(await git(["log", "-1", "--format=%s"]).catch(() => "")).trim() : "";
     const fromCheckpoint = lastSubject.startsWith("wip(forge): checkpoint");
     const hasCommits = resumed ? (await changedFiles()).length > 0 : false;
-    const issueText = [iss.title, iss.body ?? "", ...(iss.comments ?? []).map((c) => c?.body ?? "")].join("\n\n");
+    // Requirements may only be quoted from the issue and trusted comments: an untrusted commenter cannot add a contract requirement.
+    const trustedComments = (iss.comments ?? []).filter((c) => {
+      const login = String(c?.author?.login ?? c?.user?.login ?? "");
+      return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
+    });
+    const issueText = [iss.title, iss.body ?? "", ...trustedComments.map((c) => c?.body ?? "")].join("\n\n");
     /** A typed block (with one corrective resume for an untyped one) ends the run; returns the terminal or null. */
     async function endIfBlocked() {
       let block = result?.status === "blocked" ? await resolveBlock(result) : null;
@@ -554,7 +578,7 @@ export async function runCore(o) {
     }
     await label("building");
     if (!frozen) {
-      await builder(++attemptN, builderPlanPrompt(issue) + (hasCommits ? RERUN_NOTE.replace("BASE", lane) : ""), null, true, () => builderPlanPrompt(issue));
+      await builder(++attemptN, builderPlanPrompt(issue) + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : ""), null, true, () => builderPlanPrompt(issue));
       planned = true;
       result = await readResult();
       const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
@@ -581,13 +605,14 @@ export async function runCore(o) {
       }
       await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
       if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID);
-      const pending = contract.requirements.filter((r) => TRACKED.includes(r.disposition));
-      if (pending.length) await track(pending, "contracted");
       frozen = contract;
       hash = contractHash(contractJson(frozen));
-      await post(["FORGE:CONTRACT", "FORGE:PLAN"], renderContract(frozen, hash));
-      ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, tracked: pending.length });
-      T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${pending.length} tracked`);
+      let body = renderContract(frozen, hash);
+      if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true }); // the JSON must survive the comment cap
+      await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
+      const deferredN = frozen.requirements.filter((r) => TRACKED.includes(r.disposition)).length;
+      ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
+      T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
     } else {
       T.validate = "resumed (existing branch)";
     }
@@ -608,25 +633,24 @@ export async function runCore(o) {
     T.decisions.push(`Builder verdict: ${result?.status ?? "none"}`);
 
     // ---- 4. conformance: typed amendments, deterministic precheck, structured review; the engine computes the verdict ----
+    // enforce: every failure class blocks (one builder resume, then needs-human). shadow: the verdict is computed and posted,
+    // but only what the previous reviewer enforced blocks (a review that finds a requirement not implemented, or a regression).
     await label("in-review");
-    const amendTracked = {};
-    let effective = frozen, review = null, lastAmend = "", resumes = 0;
+    const shadow = conformance !== "enforce";
+    let effective = frozen, review = null, lastAmend = "", resumes = 0, verdict = null;
     async function amend() {
-      const a = applyAmendments(frozen, result?.amendments);
-      const fresh = [];
-      for (const r of a.toTrack) { if (amendTracked[r.id]) r.tracked = amendTracked[r.id]; else fresh.push(r); }
-      if (fresh.length) { await track(fresh, "typed amendment"); for (const r of fresh) amendTracked[r.id] = r.tracked; }
-      for (const r of a.contract.requirements) if (amendTracked[r.id]) r.tracked = amendTracked[r.id];
+      const a = applyAmendments(frozen, result?.amendments, issueText);
       const sig = JSON.stringify(a.applied);
       if (a.applied.length && sig !== lastAmend) {
         lastAmend = sig;
-        await post("FORGE:AMENDMENT", renderAmendments(a.applied, amendTracked));
+        await post("FORGE:AMENDMENT", renderAmendments(a.applied));
         T.decisions.push(`Contract amended: ${a.applied.map((x) => `${x.kind} ${x.target}`).join(", ")}`);
       }
       effective = a.contract;
       return a.problems.map((d) => ({ code: OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, detail: d }));
     }
     const IGNORE = [`${LEAN_DIR}/`];
+    /** Up to two reviewer runs; a reply without usable rows (unparseable, incomplete, inconsistent) is re-asked, never charged to the builder. */
     async function reviewOnce() {
       const diff = String(await git(["diff", `${base}...HEAD`]));
       const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
@@ -636,47 +660,68 @@ export async function runCore(o) {
       for (let t = 0; t < 2; t++) {
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
-          prompt: reviewerPrompt({ issue: iss, comments: iss.comments ?? [], contract: effective, result, files, diff, stat, base }) });
+          prompt: reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base }) });
         await renew();
         await attempt("review", ++reviewN, rr);
         review = parseReview(rr?.text);
         d = decide(review, ctx);
-        ev({ event: "CONFORMANCE", round: reviewN, state: d.state, failures: d.failures.map((x) => x.code) });
+        ev({ event: "CONFORMANCE", round: reviewN, state: d.state, failures: d.failures.map((x) => x.code), mode: shadow ? "shadow" : "enforce" });
         if (!d.state.startsWith("review.")) return d;
       }
       return d;
     }
-    /** Shape the base-sync path expects: null when no usable review, else {fail, verdict, reason, failures}. */
-    const doReview = async () => {
-      const d = await reviewOnce();
-      if (d.state.startsWith("review.")) return null;
-      return { fail: d.state !== "conforms", verdict: d.state === "conforms" ? "CONFORMS" : "NONCONFORMING", reason: d.failures.map((f) => `${f.code}: ${f.detail}`).join("; "), failures: d.failures };
-    };
-    const NH_FIRST = (fs) => fs.find((f) => f.code !== OUTCOME_CODES.REVIEW_INCONSISTENT)?.code ?? fs[0].code;
-    for (;;) {
+    /** Precheck then review, on the current result and changed files (also the base-sync re-review). */
+    async function gate() {
+      result = (await readResult()) ?? result;
+      files = await changedFiles();
       const amendProblems = await amend();
       const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE });
       const pre = [...pc.failures, ...amendProblems];
-      let outcome;
-      if (pre.length) { outcome = { state: "nonconforming", by: "precheck", failures: pre }; ev({ event: "PRECHECK", failures: pre.map((f) => f.code) }); }
-      else outcome = { ...(await reviewOnce()), by: "review" };
+      if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
+      if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
+      const d = await reviewOnce();
+      if (!shadow) return { ...d, by: "review" };
+      // shadow: record what enforce would have done; block only on what the previous reviewer blocked on
+      const would = d.state === "conforms" && !pre.length ? "conforms" : d.state.startsWith("review.") ? d.state : "nonconforming";
+      const wouldFail = [...pre, ...(d.state === "conforms" ? [] : d.failures)];
+      const blocking = d.state === "nonconforming" ? d.failures.filter((f) => SHADOW_BLOCKS.includes(f.code)) : [];
+      return { state: d.state === "review.unparseable" ? d.state : blocking.length ? "nonconforming" : "conforms", by: "review", failures: blocking, would, wouldFail, reviewState: d.state };
+    }
+    /** Shape the base-sync path expects: null when no usable review, else {fail, verdict, reason, failures}. */
+    const doReview = async () => {
+      const d = await gate();
+      if (d.state.startsWith("review.")) return null;
+      return { fail: d.state !== "conforms", verdict: d.state === "conforms" ? "CONFORMS" : "NONCONFORMING", reason: d.failures.map((f) => `${f.code}: ${f.detail}`).join("; "), failures: d.failures };
+    };
+    for (;;) {
+      const outcome = await gate();
+      verdict = outcome;
       if (outcome.state === "conforms") break;
       const list = outcome.failures.slice(0, 15).map((f) => `- ${f.code}: ${f.detail}`).join("\n");
       if (outcome.state === "review.unparseable") return await needsHuman(`The conformance reviewer returned no parseable JSON twice; nothing merged.`, OUTCOME_CODES.REVIEW_NO_VERDICT);
       if (outcome.state === "review.incomplete") return await needsHuman(`The conformance review was incomplete twice (a review without complete rows cannot pass); nothing merged:\n${list}`, OUTCOME_CODES.REVIEW_INCOMPLETE);
-      if (resumes >= 1 || !sessionId) return await needsHuman(`The change does not conform to the issue and its frozen contract after ${resumes ? "one builder resume" : "the build (no session to resume)"} (${outcome.by}); nothing merged:\n${list}`, NH_FIRST(outcome.failures));
+      if (outcome.state === "review.inconsistent") return await needsHuman(`The conformance reviewer twice said NONCONFORMING without a failing row; nothing merged.`, OUTCOME_CODES.REVIEW_INCONSISTENT);
+      if (resumes >= 1 || !sessionId) return await needsHuman(`The change does not conform to the issue and its frozen contract after ${resumes ? "one builder resume" : "the build (no session to resume)"} (${outcome.by}); nothing merged:\n${list}`, outcome.failures[0].code);
       resumes++;
       T.decisions.push(`Not conforming (${outcome.by}${outcome.inconsistent ? ", reviewer verdict contradicted its rows" : ""}): ${[...new Set(outcome.failures.map((f) => f.code))].join(", ")}; builder resumed once`);
       await builder(++attemptN, conformanceResumePrompt(outcome.failures), sessionId);
-      result = (await readResult()) ?? result;
-      files = await changedFiles();
-      delete posted.implementation; // the published note follows the code after every resume
-      await flushStages(result, ["implementation"]);
+      await upsertStage("implementation"); // the published note follows the code after every resume
     }
-    T.review = ["CONFORMS", `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
-    await post("FORGE:REVIEW", renderReview(review, effective));
+    // Deferrals the reviewer accepted are filed now, before any PR: the batched follow-up must exist and be linked.
+    const toFile = pendingTracking(effective);
+    if (!shadow && toFile.length) await track(toFile, "accepted by the conformance review");
+    if (shadow) {
+      const wf = verdict.wouldFail ?? [];
+      ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
+      await emit({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
+      T.review = [`shadow: would ${verdict.would === "conforms" ? "pass" : `block (${verdict.would})`}`, `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
+      await post("FORGE:REVIEW", renderShadowReview({ would: verdict.would, failures: wf, review: verdict.reviewState === "conforms" || verdict.reviewState === "nonconforming" ? review : null, contract: effective, unfiled: toFile }));
+    } else {
+      T.review = ["CONFORMS", `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
+      await post("FORGE:REVIEW", renderReview(review, effective));
+    }
     ev({ event: "PHASE_COMMIT", phase: "review" });
-    const closing = closePlan(effective);
+    const closing = closePlan(shadow ? { requirements: [] } : effective);
 
     // ---- 5. push + PR ----
     files = await changedFiles();

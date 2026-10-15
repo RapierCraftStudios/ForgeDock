@@ -76,11 +76,14 @@ describe("precheck (deterministic, no reviewer)", () => {
     const r = { ...res, requirements: [{ id: "R1", status: "deferred" }, { id: "R2", status: "partial" }] };
     assert.deepEqual(codes(precheck({ contract: C, result: r, changedFiles: files })), ["conformance.untracked_deferral", "conformance.unimplemented"]);
   });
-  it("a contracted defer must carry a tracking issue", () => {
+  it("a typed deferral is not a precheck failure: the reviewer judges it, then it is filed", () => {
     const k = { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "w" }] };
-    assert.deepEqual(codes(precheck({ contract: k, result: res, changedFiles: files })), ["conformance.untracked_deferral"]);
-    k.requirements[1].tracked = "#9";
     assert.equal(precheck({ contract: k, result: res, changedFiles: files }).ok, true);
+  });
+  it("deliverables may be directories or globs; changelogs and lockfiles are always allowed", () => {
+    const k = { ...C, deliverables: [{ id: "D1", path: "src/" }, { id: "D2", path: "./lib/**/*.go" }] };
+    assert.equal(precheck({ contract: k, result: res, changedFiles: ["src/a/b.js", "lib/x/y/z.go", "CHANGELOG.md", "web/package-lock.json", "go.sum"] }).ok, true);
+    assert.deepEqual(codes(precheck({ contract: k, result: res, changedFiles: ["lib/x.py"] })), ["conformance.scope_creep"]);
   });
 });
 
@@ -115,15 +118,34 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.deepEqual(codes(decide(row("R2", { status: "deferred" }), ctx)), ["conformance.untracked_deferral"]);
   });
   it("scope creep, preserve violated or unverified, and regressions fail", () => {
-    assert.deepEqual(codes(decide({ ...good, scope: [...good.scope.slice(0, 2), { file: "test/leak.test.js", authorized_by: "none", note: "rewrites fixtures" }] }, ctx)), ["conformance.scope_creep"]);
+    assert.deepEqual(codes(decide({ ...good, scope: [{ ...good.scope[0], authorized_by: "none", note: "rewrites pricing inside scrape.js" }, ...good.scope.slice(1)] }, ctx)), ["conformance.scope_creep"]);
+    assert.equal(decide({ ...good, scope: [...good.scope.slice(0, 2), { file: "test/leak.test.js", authorized_by: "none" }] }, ctx).state, "conforms", "a reviewer 'none' on a test file is a misreading, not creep");
     assert.deepEqual(codes(decide({ ...good, preserve: [{ id: "P1", status: "violated", evidence: "src/billing.js:1" }] }, ctx)), ["conformance.preserve_violated"]);
     assert.deepEqual(codes(decide({ ...good, preserve: [{ id: "P1", status: "unverified" }] }, ctx)), ["conformance.preserve_violated"]);
     assert.deepEqual(codes(decide({ ...good, regressions: [{ at: "src/x.js:3", failure: "caller passes null" }] }, ctx)), ["conformance.regression"]);
   });
-  it("CONFORMS with a failing row is nonconforming and flagged inconsistent; NONCONFORMING with no failing row fails closed", () => {
+  it("CONFORMS with a failing row is nonconforming and flagged inconsistent; NONCONFORMING with no failing row is re-asked (review.inconsistent)", () => {
     const d = decide(row("R1", { status: "partial" }), ctx);
     assert.equal(d.state, "nonconforming"); assert.equal(d.inconsistent, true);
-    assert.deepEqual(codes(decide({ ...good, verdict: "NONCONFORMING" }, ctx)), ["review.inconsistent"]);
+    const i = decide({ ...good, verdict: "NONCONFORMING" }, ctx);
+    assert.equal(i.state, "review.inconsistent"); assert.deepEqual(codes(i), ["review.inconsistent"]);
+  });
+  it("a deferred requirement needs the reviewer's deferral_ok; false is an unjustified deferral", () => {
+    const k = { ...C, requirements: [C.requirements[0], { ...C.requirements[1], disposition: "defer", why: "w" }] };
+    const c2 = { ...ctx, contract: k };
+    const rv = (extra) => ({ ...good, requirements: [good.requirements[0], { id: "R2", status: "deferred", ...extra }] });
+    assert.equal(decide(rv({}), c2).state, "review.incomplete");
+    assert.equal(decide(rv({ deferral_ok: true }), c2).state, "conforms");
+    assert.deepEqual(codes(decide(rv({ deferral_ok: false, note: "two lines in the same file" }), c2)), ["conformance.unjustified_deferral"]);
+  });
+  it("short quotes are accepted only as a whole issue line or list item", () => {
+    const t = "Do this:\n- [ ] add --dry-run\n2. keep -v";
+    assert.ok(inIssue("add --dry-run", t)); assert.ok(inIssue("keep -v", t)); assert.ok(!inIssue("dry-run", t)); assert.ok(!inIssue("do", t));
+  });
+  it("add-requirement quotes are checked against the issue; an oversized contract is invalid", () => {
+    assert.equal(applyAmendments(C, [{ kind: "add-requirement", requirement: { id: "R9", quote: "something nobody asked for at all", disposition: "defer" }, why: "w" }], ISSUE).problems.length, 1);
+    assert.equal(applyAmendments(C, [{ kind: "add-requirement", requirement: { id: "R9", quote: "Billing pricing is unchanged." }, why: "w" }], ISSUE).problems.length, 0);
+    assert.match(validateContract({ ...C, deliverables: [...C.deliverables, { id: "DX", path: "x".repeat(41000) }] }, ISSUE).problems.join(), /over 40000 characters/);
   });
   it("checkCompleteness lists every problem", () => assert.ok(checkCompleteness({}, ctx).problems.length >= 5));
 });

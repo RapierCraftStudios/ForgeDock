@@ -20,6 +20,8 @@ export function runWithInput(bin, args, input, timeout = 120000) {
     const child = execFile(bin, args, { timeout, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) { err.stdout = stdout; err.stderr = stderr; rej(err); } else res(String(stdout));
     });
+    // A child that exits before reading stdin closes the pipe: EPIPE must reject via the exit callback, never crash the lane.
+    child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
 }

@@ -71,6 +71,7 @@ export const OUTCOME_CODES = Object.freeze({
   CONFORMANCE_UNIMPLEMENTED: "conformance.unimplemented",
   CONFORMANCE_SCOPE_CREEP: "conformance.scope_creep",
   CONFORMANCE_UNTRACKED_DEFERRAL: "conformance.untracked_deferral",
+  CONFORMANCE_UNJUSTIFIED_DEFERRAL: "conformance.unjustified_deferral",
   CONFORMANCE_PRESERVE_VIOLATED: "conformance.preserve_violated",
   CONFORMANCE_REGRESSION: "conformance.regression",
   FOLLOWUP_UNAVAILABLE: "followup.unavailable",

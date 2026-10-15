@@ -89,11 +89,13 @@ export const contractJson = (c) => JSON.stringify(c, null, 1).replace(/</g, "\\u
 const CONTRACT_BLOCK_RE = /<summary>contract\.json \(sha256 ([0-9a-f]{12})\)<\/summary>\s*```json\n([\s\S]*?)\n```/;
 
 /** FORGE:CONTRACT body: readable tables plus the frozen JSON and its hash (read back on a rerun). */
-export function renderContract(c, hash) {
-  const disp = (r) => `${r.disposition}${r.tracked ? ` → ${r.tracked}` : ""}${r.why ? ` (${escl(r.why)})` : ""}`;
+export function renderContract(c, hash, { compact = false } = {}) {
+  const json = `<details><summary>contract.json (sha256 ${hash})</summary>\n\n\`\`\`json\n${contractJson(c)}\n\`\`\`\n</details>`;
+  if (compact) return `## Builder Contract (frozen \`${hash}\`)\n\n${c.requirements.length} requirement(s), ${(c.deliverables ?? []).length} deliverable(s); the tables are omitted because the contract is large.\n\n${json}`;
+  const disp = (r) => `${r.disposition}${r.tracked ? ` → ${r.tracked}` : ["defer", "post-deploy"].includes(r.disposition) ? " (filed after review accepts it)" : ""}${r.why ? ` (${escl(r.why)})` : ""}`;
   const req = c.requirements.map((r) => `| ${esc(r.id)} | ${esc(r.quote)} | ${esc(disp(r))} |`).join("\n");
   const del = (c.deliverables ?? []).map((d) => `| ${esc(d.id)} | \`${esc(d.path)}\` | ${esc(d.change)} | ${esc((d.requirements ?? []).join(", "))} |`).join("\n");
-  return `## Builder Contract (frozen \`${hash}\`)\n\n### Requirements\n| Id | From the issue | Disposition |\n| --- | --- | --- |\n${req}\n\n### Deliverables\n${del ? `| Id | Path | Change | Requirements |\n| --- | --- | --- | --- |\n${del}` : "None."}\n\n### Preserve\n${(c.preserve ?? []).map((p) => `- ${escl(p.id)}: ${escl(p.what)}`).join("\n") || "None."}\n\n### Validate\n${(c.validate ?? []).map((v) => `- ${escl(v.id)}: \`${escl(v.command).replace(/`/g, "'")}\``).join("\n") || NR}\n\n<details><summary>contract.json (sha256 ${hash})</summary>\n\n\`\`\`json\n${contractJson(c)}\n\`\`\`\n</details>`;
+  return `## Builder Contract (frozen \`${hash}\`)\n\n### Requirements\n| Id | From the issue | Disposition |\n| --- | --- | --- |\n${req}\n\n### Deliverables\n${del ? `| Id | Path | Change | Requirements |\n| --- | --- | --- | --- |\n${del}` : "None."}\n\n### Preserve\n${(c.preserve ?? []).map((p) => `- ${escl(p.id)}: ${escl(p.what)}`).join("\n") || "None."}\n\n### Validate\n${(c.validate ?? []).map((v) => `- ${escl(v.id)}: \`${escl(v.command).replace(/`/g, "'")}\``).join("\n") || NR}\n\n${json}`;
 }
 /** {contract, hash, text} from a FORGE:CONTRACT comment body, or null. */
 export function parseContractComment(body) {
@@ -115,6 +117,15 @@ export function renderReview(rv, contract) {
   }).join("\n");
   const cov = rv.issue_coverage ?? [];
   return `## Conformance Review\n**Verdict:** CONFORMS (computed by the engine from the rows below)\n\n| Requirement | Status | Evidence | Validated by |\n| --- | --- | --- | --- |\n${rows}\n\n**Issue coverage:** ${cov.filter((c) => c.status === "covered").length}/${cov.length} issue requirement(s) covered by the contract\n**Scope:** ${(rv.scope ?? []).map((s) => `\`${escl(s.file)}\` ← ${escl(s.authorized_by)}`).join(", ") || NR}\n**Preserve:** ${(rv.preserve ?? []).map((p) => `${escl(p.id)} ${escl(p.status)}`).join(", ") || "none"}\n**Regressions:** none\n\n**Notes:** ${escl(rv.summary)}`;
+}
+
+/** FORGE:REVIEW in shadow mode: what the enforced gate would have done, without enforcing it. */
+export function renderShadowReview({ would, failures = [], review, contract, unfiled = [] }) {
+  const head = would === "conforms" ? "would PASS" : `would BLOCK (${escl(would)})`;
+  const rows = review ? `\n\n${renderReview(review, contract).split("\n").slice(2).join("\n")}` : "";
+  const fl = failures.length ? `\n\n**What the enforced gate would have flagged:**\n${failures.slice(0, 30).map((f) => `- \`${escl(f.code)}\`: ${escl(f.detail)}`).join("\n")}` : "";
+  const uf = unfiled.length ? `\n\n**Deferrals not filed in shadow mode:** ${unfiled.map((r) => `${escl(r.id)} (${escl(r.disposition)})`).join(", ")}` : "";
+  return `## Conformance Review (shadow mode: not enforced)\n**Gate verdict:** ${head}. Only a requirement found not implemented, or a regression, blocks in shadow mode.${fl}${uf}${rows}`;
 }
 
 // ---- PR body ----
