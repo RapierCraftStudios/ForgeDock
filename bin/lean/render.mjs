@@ -81,17 +81,51 @@ export function renderImplementation(md, result, { branch, files = [] } = {}) {
   return `## Implementation Complete\n**Branch:** \`${branch ?? NR}\`\n**Files changed:**\n${bullets(files.map((f) => `\`${f}\``))}\n\n${usable(md) ? sanitizeMd(md) : implementationFallback(result, files)}`;
 }
 
-export function renderReview(rv) {
-  const yn = (b) => (b ? "yes" : "no");
-  return `## Review\n**Verdict:** ${rv.verdict}\n\n**Fixes the issue:** ${yn(rv.fixes_issue)} (${line(rv.evidence || rv.reason)})\n\n**Regression check:** ${rv.regression ? "yes, regression" : "no regression"} (checked: ${line(rv.checked)})\n\n**Notes:** ${line(rv.reason)}`;
+/** Builder/reviewer text in a comment: `<` escaped so it can never open an HTML or FORGE marker comment. */
+const esc = (v) => cell(v).replace(/</g, "&lt;");
+const escl = (v) => line(v).replace(/</g, "&lt;");
+/** Canonical contract JSON: stable, and `<` escaped so builder text can never open an HTML/FORGE comment. */
+export const contractJson = (c) => JSON.stringify(c, null, 1).replace(/</g, "\\u003c");
+const CONTRACT_BLOCK_RE = /<summary>contract\.json \(sha256 ([0-9a-f]{12})\)<\/summary>\s*```json\n([\s\S]*?)\n```/;
+
+/** FORGE:CONTRACT body: readable tables plus the frozen JSON and its hash (read back on a rerun). */
+export function renderContract(c, hash) {
+  const disp = (r) => `${r.disposition}${r.tracked ? ` → ${r.tracked}` : ""}${r.why ? ` (${escl(r.why)})` : ""}`;
+  const req = c.requirements.map((r) => `| ${esc(r.id)} | ${esc(r.quote)} | ${esc(disp(r))} |`).join("\n");
+  const del = (c.deliverables ?? []).map((d) => `| ${esc(d.id)} | \`${esc(d.path)}\` | ${esc(d.change)} | ${esc((d.requirements ?? []).join(", "))} |`).join("\n");
+  return `## Builder Contract (frozen \`${hash}\`)\n\n### Requirements\n| Id | From the issue | Disposition |\n| --- | --- | --- |\n${req}\n\n### Deliverables\n${del ? `| Id | Path | Change | Requirements |\n| --- | --- | --- | --- |\n${del}` : "None."}\n\n### Preserve\n${(c.preserve ?? []).map((p) => `- ${escl(p.id)}: ${escl(p.what)}`).join("\n") || "None."}\n\n### Validate\n${(c.validate ?? []).map((v) => `- ${escl(v.id)}: \`${escl(v.command).replace(/`/g, "'")}\``).join("\n") || NR}\n\n<details><summary>contract.json (sha256 ${hash})</summary>\n\n\`\`\`json\n${contractJson(c)}\n\`\`\`\n</details>`;
+}
+/** {contract, hash, text} from a FORGE:CONTRACT comment body, or null. */
+export function parseContractComment(body) {
+  const m = CONTRACT_BLOCK_RE.exec(String(body ?? ""));
+  if (!m) return null;
+  try { return { hash: m[1], text: m[2], contract: JSON.parse(m[2]) }; } catch { return null; }
+}
+
+/** Typed amendments, posted visibly before review. */
+export function renderAmendments(applied, filed = {}) {
+  return `## Contract Amendments\n| Kind | Target | Why |\n| --- | --- | --- |\n${applied.map((a) => `| ${esc(a.kind)} | ${esc(a.target)}${filed[a.target] ? ` → ${filed[a.target]}` : ""} | ${esc(a.why)} |`).join("\n")}`;
+}
+
+/** FORGE:REVIEW for a conforming change: the engine-computed verdict and the reviewer's rows. */
+export function renderReview(rv, contract) {
+  const rows = contract.requirements.map((r) => {
+    const x = (rv.requirements ?? []).find((y) => y.id === r.id) ?? {};
+    return `| ${esc(r.id)} | ${esc(x.status)}${r.tracked ? ` (tracked ${r.tracked})` : ""} | ${esc(x.evidence)} | ${esc(x.validated_by)} |`;
+  }).join("\n");
+  const cov = rv.issue_coverage ?? [];
+  return `## Conformance Review\n**Verdict:** CONFORMS (computed by the engine from the rows below)\n\n| Requirement | Status | Evidence | Validated by |\n| --- | --- | --- | --- |\n${rows}\n\n**Issue coverage:** ${cov.filter((c) => c.status === "covered").length}/${cov.length} issue requirement(s) covered by the contract\n**Scope:** ${(rv.scope ?? []).map((s) => `\`${escl(s.file)}\` ← ${escl(s.authorized_by)}`).join(", ") || NR}\n**Preserve:** ${(rv.preserve ?? []).map((p) => `${escl(p.id)} ${escl(p.status)}`).join(", ") || "none"}\n**Regressions:** none\n\n**Notes:** ${escl(rv.summary)}`;
 }
 
 // ---- PR body ----
-export function renderPrBody({ issue, investigation, plan, implementation, result, gitFiles = [] }) {
+export function renderPrBody({ issue, investigation, contract, implementation, result, gitFiles = [], tracked = [] }) {
   const root = section(investigation, "Root Cause") || line(norm(result).root_cause);
-  const deliver = section(plan, "Deliverables") || planFallback(result, gitFiles).split("### Deliverables\n")[1].split("\n\n### ")[0];
+  const dels = contract?.deliverables ?? [];
+  const deliver = dels.length ? ["| File | Change | Requirements |", "| --- | --- | --- |", ...dels.map((d) => `| ${esc(d.path)} | ${esc(d.change)} | ${esc((d.requirements ?? []).join(", "))} |`)].join("\n")
+    : planFallback(result, gitFiles).split("### Deliverables\n")[1].split("\n\n### ")[0];
   const verify = section(implementation, "Verification") || verification(result);
-  return `## Root cause\n${root}\n\n## Deliverables\n${deliver}\n\n## Verification\n${verify}\n\nCloses #${issue}`;
+  const remaining = tracked.length ? `\n\n## Remaining work tracked\n${tracked.map((t) => `- ${t}`).join("\n")}` : "";
+  return `## Root cause\n${root}\n\n## Deliverables\n${deliver}\n\n## Verification\n${verify}${remaining}\n\nCloses #${issue}`;
 }
 
 // ---- trajectory ----

@@ -63,6 +63,17 @@ export const OUTCOME_CODES = Object.freeze({
   BUILDER_NO_COMMIT: "builder.no_commit",
   REVIEW_FAILED: "review.failed",
   REVIEW_NO_VERDICT: "review.no_verdict",
+  // Core work-on conformance gate (bin/lean/conformance.mjs).
+  CONTRACT_INVALID: "contract.invalid",
+  REVIEW_INCOMPLETE: "review.incomplete",
+  REVIEW_INCONSISTENT: "review.inconsistent",
+  CONFORMANCE_OMISSION: "conformance.omission",
+  CONFORMANCE_UNIMPLEMENTED: "conformance.unimplemented",
+  CONFORMANCE_SCOPE_CREEP: "conformance.scope_creep",
+  CONFORMANCE_UNTRACKED_DEFERRAL: "conformance.untracked_deferral",
+  CONFORMANCE_PRESERVE_VIOLATED: "conformance.preserve_violated",
+  CONFORMANCE_REGRESSION: "conformance.regression",
+  FOLLOWUP_UNAVAILABLE: "followup.unavailable",
   MERGE_HEAD_MISMATCH: "merge.head_mismatch",
   // Non-failure terminals, so a RUN_TERMINAL for a healthy run is not counted as a gap.
   COMPLETED: "completed",
