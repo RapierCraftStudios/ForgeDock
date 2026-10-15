@@ -14,6 +14,17 @@ import { makeProjector } from "../engine/projector.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
+/** Argv-only child with stdin input; resolves stdout, rejects on a non-zero exit with stderr attached. */
+export function runWithInput(bin, args, input, timeout = 120000) {
+  return new Promise((res, rej) => {
+    const child = execFile(bin, args, { timeout, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) { err.stdout = stdout; err.stderr = stderr; rej(err); } else res(String(stdout));
+    });
+    // A child that exits before reading stdin closes the pipe: EPIPE must reject via the exit callback, never crash the lane.
+    child.stdin.on("error", () => {});
+    child.stdin.end(input);
+  });
+}
 
 /** Claude CLI session runner: fresh session, or `--resume <id>` for the builder. Resolves usage + session_id. */
 let systemdProbe = null;
@@ -133,12 +144,24 @@ export function makeLeanIo({ repo }) {
       });
     },
     async transitionLabel(issue, state) { await pexec("bash", [script("transition-label.sh"), String(issue), "-R", repo, state], { timeout: 60000 }); },
+    /**
+     * File (or append to) the parent's ONE batched follow-up issue (scripts/file-deferred-followups.sh: trusted lookup,
+     * append, create, claim marker, duplicate re-check). items: [{key, why}]. Returns {key: issueNumber}; throws on exit 3/4.
+     */
+    async fileFollowups({ parent, items }) {
+      const tsv = items.map((i) => `${i.key}\t${i.why}\t`).join("\n") + "\n";
+      const out = await runWithInput("bash", [script("file-deferred-followups.sh"), "--parent", String(parent), "--repo", repo], tsv, 180000);
+      const map = {};
+      for (const l of out.split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) map[k] = Number(n); }
+      return map;
+    },
     fs: {
       read: async (p) => readFileSync(p, "utf8"),
       exists: async (p) => existsSync(p),
       rmdir: async (p) => rmSync(p, { recursive: true, force: true }),
       stat: async (p) => { try { return { mtimeMs: statSync(p).mtimeMs }; } catch { return null; } },
       append: async (p, t) => { mkdirSync(dirname(p), { recursive: true }); appendFileSync(p, t); },
+      write: async (p, t) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, t); },
     },
   };
 }

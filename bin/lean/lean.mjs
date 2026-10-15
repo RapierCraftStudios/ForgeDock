@@ -10,17 +10,25 @@ import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
-import { openDependency } from "../engine/phases.mjs";
+import { openDependency, isTrustedComment } from "../engine/phases.mjs";
+import { createHash } from "node:crypto";
+import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, closePlan, followupItems, pendingTracking } from "./conformance.mjs";
 import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
-import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, capComment, sanitizeMd } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, PLAN_FILE, IMPLEMENTATION_FILE, builderPrompt, resumeBuilderPrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, parseVerdict, blockCorrectionPrompt, HUMAN_BLOCK_REASONS } from "./prompts.mjs";
+import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS } from "./prompts.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
+/** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
+export const CONFORMANCE_MODES = Object.freeze(["shadow", "enforce"]);
+/** In shadow mode only what the previous two-question reviewer blocked on still blocks: a requirement not done, a regression. */
+const SHADOW_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CONFORMANCE_REGRESSION];
 export const REGISTER_MARKER = "FORGE:WORK-ON"; // alias marker carried by the FORGE:TRAJECTORY comment
 const num = (v) => (Number.isFinite(v) ? v : null);
 export const MAX_SUBISSUES = 8;
+/** 12-hex sha256 of the canonical contract JSON text (renderContract embeds the same text). */
+export const contractHash = (text) => createHash("sha256").update(String(text)).digest("hex").slice(0, 12);
 
 /**
  * Typed builder block (#4124), from result.json `block`. Returns {kind:"dependency", issues} | {kind:"split", subissues}
@@ -60,10 +68,11 @@ export function classifyBlock(result, issue) {
  * @param {string} [o.builderModel]  default: CLI default
  * @param {string} [o.reviewerModel] default claude-sonnet-5-5
  * @param {number} [o.ciMaxMinutes]  remote-CI wait budget (default 360); exhaustion is NOT needs-human
+ * @param {"shadow"|"enforce"} [o.conformance] conformance gate mode (default shadow)
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
-    ciMaxMinutes = 360, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    ciMaxMinutes = 360, conformance = "shadow", mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let lane = null, base = null, defaults = []; // set by lane resolution, before the lease
@@ -160,7 +169,6 @@ export async function runCore(o) {
   // ---- stage notes: investigation.md, plan.md, implementation.md become their own comments ----
   const STAGES = [
     { key: "investigation", file: INVESTIGATION_FILE, marker: ["FORGE:INVESTIGATION", "FORGE:VALIDATE"], render: (md, ctx) => renderInvestigation(md, ctx.result) },
-    { key: "plan", file: PLAN_FILE, marker: ["FORGE:PLAN"], render: (md, ctx) => renderPlan(md, ctx.result, ctx.files) },
     { key: "implementation", file: IMPLEMENTATION_FILE, marker: ["FORGE:IMPLEMENTATION"], render: (md, ctx) => renderImplementation(md, ctx.result, { branch, files: ctx.files }) },
   ];
   const posted = {}; // key -> comment url (or "" when posted without a link)
@@ -176,10 +184,25 @@ export async function runCore(o) {
     const url = await post(st.marker, st.render(md, { result, files }));
     posted[st.key] = url ?? "";
   }
+  /** Re-render a stage note that changed after a resume: edit the posted comment in place; post it when it was never posted or the edit fails. */
+  async function upsertStage(key) {
+    const st = STAGES.find((x) => x.key === key);
+    const id = /#issuecomment-(\d+)/.exec(posted[key] ?? "")?.[1];
+    const res = await readResult(), md = await readStage(st);
+    if (id) {
+      const files = key === "implementation" ? await stageFiles() : [];
+      const marks = st.marker.map((m) => `<!-- ${m} -->`).join("\n");
+      try { await ghw(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${capComment(`${marks}\n${st.render(usableMd(md) ? md : null, { result: res, files })}`)}`]); return; } catch { /* fall back to a new comment */ }
+    }
+    delete posted[key];
+    await flushStages(res, [key]);
+  }
   /** Post stage notes in order that exist, are stable (mtime unchanged for stableMs) and not yet posted. */
   const seen = {};
+  let liveKeys = ["investigation"]; // which stage notes the running builder call may publish live (plan: investigation; implement: implementation)
   async function livePoll() {
     for (const st of STAGES) {
+      if (!liveKeys.includes(st.key)) continue;
       if (st.key in posted) continue;
       let m = null;
       try { m = await io.fs.stat(`${wt}/${st.file}`); } catch { m = null; }
@@ -244,6 +267,8 @@ export async function runCore(o) {
     } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); }
   }
   const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over.";
+  const PLAN_RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD` to see what exists, but plan against the issue itself. This step is still planning only: do not edit code, do not commit, and do not write the result file unless the issue is invalid, already fixed or blocked.";
+  const RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD`, verify that work against the contract, complete what is missing, re-run every validate command and write the result file. Do not start over.";
 
   /** Continuous admission (#4115): while the builder runs, pause its process group when the host is over the ceiling, resume when under. */
   function startGovernor(control) {
@@ -267,7 +292,9 @@ export async function runCore(o) {
     return { async stop() { stopped = true; wake?.(); clearTimeout(t); await loop; if (paused) { control.resume?.(); paused = false; } } };
   }
 
-  async function builder(n, prompt, resume, live = false) {
+  /** A timeout restart starts a fresh session; by default it continues the implementation against the frozen contract. */
+  const implementRestart = () => builderImplementPrompt() + CONTINUE_NOTE.replace("BASE", lane);
+  async function builder(n, prompt, resume, live = false, restart = implementRestart) {
     let timeoutRetries = 0, p = prompt;
     for (;;) {
       try { return await builderOnce(n, p, resume, live); } catch (e) {
@@ -279,7 +306,7 @@ export async function runCore(o) {
         if (timeoutRetries++ >= 1) { e.deferCode = idle ? OUTCOME_CODES.CLI_IDLE : OUTCOME_CODES.CLI_TIMEOUT; e.deferDetail = `builder ${reason}; work checkpointed to ${branch}; rerun resumes from it. ${String(e.message).slice(0, 300)}`; throw e; }
         T.anomalies.push(`builder ${reason}: checkpointed, retried once`);
         T.decisions.push(`Builder ${reason}: uncommitted work checkpointed to the lane branch; retrying once from the checkpoint`);
-        p = builderPrompt(issue) + CONTINUE_NOTE.replace("BASE", base); resume = null;
+        p = restart(); resume = null;
       }
     }
   }
@@ -312,6 +339,7 @@ export async function runCore(o) {
     onProgress({ event: "phase_exit", phase: "build", status: "committed" });
     return r;
   }
+  const readContract = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${CONTRACT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
   const readResult = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${RESULT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
 
   /** Live-checks a builder block (#4124). Dependency issues are re-read, so a closed or unknown number is not a block. */
@@ -415,7 +443,7 @@ export async function runCore(o) {
   ev({ event: "RUN_START", run: `core_${issue}_${t0}`, issue, lane, path: "core", version: ENGINE_VERSION, forge_version: ENGINE_VERSION, repo });
   let iss;
   try {
-    iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state"]));
+    iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments"]));
   } catch (e) { return finish("engine-error", `cannot read issue: ${e.message}`); }
   if (String(iss.state).toUpperCase() === "CLOSED") return finish("invalid", "issue already closed");
 
@@ -490,14 +518,19 @@ export async function runCore(o) {
     await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
     const changedFiles = async () => String(await git(["diff", "--name-only", `${base}...HEAD`])).split("\n").map((s) => s.trim()).filter(Boolean);
 
-    // ---- 3. builder ----
+    // ---- 3. builder: plan call -> frozen contract -> implement call in the same session ----
     let result = null, attemptN = 0, reviewN = 0;
     const lastSubject = resumed ? String(await git(["log", "-1", "--format=%s"]).catch(() => "")).trim() : "";
     const fromCheckpoint = lastSubject.startsWith("wip(forge): checkpoint");
-    if (!(resumed && (await changedFiles()).length > 0) || fromCheckpoint) {
-      await label("building");
-      await builder(++attemptN, builderPrompt(issue) + (fromCheckpoint ? CONTINUE_NOTE.replace("BASE", base) : ""), null, true);
-      result = await readResult();
+    const hasCommits = resumed ? (await changedFiles()).length > 0 : false;
+    // Requirements may only be quoted from the issue and trusted comments: an untrusted commenter cannot add a contract requirement.
+    const trustedComments = (iss.comments ?? []).filter((c) => {
+      const login = String(c?.author?.login ?? c?.user?.login ?? "");
+      return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
+    });
+    const issueText = [iss.title, iss.body ?? "", ...trustedComments.map((c) => c?.body ?? "")].join("\n\n");
+    /** A typed block (with one corrective resume for an untyped one) ends the run; returns the terminal or null. */
+    async function endIfBlocked() {
       let block = result?.status === "blocked" ? await resolveBlock(result) : null;
       if (block?.kind === "untyped" && sessionId) { // #4124: one corrective resume before any untyped block can reach needs-human
         T.decisions.push(`Builder block rejected (${block.problem}); resumed once`);
@@ -505,70 +538,204 @@ export async function runCore(o) {
         result = await readResult();
         block = result?.status === "blocked" ? await resolveBlock(result) : null;
       }
-      const files0 = await changedFiles();
+      return block ? await endBlocked(block, result.summary) : null;
+    }
+    /** File (or append to) the parent's one batched follow-up issue for these requirements, then verify each tracking issue is open. */
+    async function track(reqs, why) {
+      const fail = (detail) => Object.assign(new Error(detail), { deferCode: OUTCOME_CODES.FOLLOWUP_UNAVAILABLE, deferDetail: `${detail}; nothing merged, rerun to retry` });
+      if (!io.fileFollowups) throw fail("no follow-up filing effect is configured");
+      const items = followupItems(reqs);
+      let filed;
+      try { filed = await io.fileFollowups({ parent: issue, repo, items }); } catch (e) { throw fail(`filing the follow-up issue failed: ${String(e?.message ?? e).slice(0, 200)}`); }
+      for (const [i, r] of reqs.entries()) {
+        const n = Number(filed?.[items[i].key]);
+        if (!Number.isSafeInteger(n) || n <= 0) throw fail(`no tracking issue was returned for ${r.id}`);
+        let st = null;
+        try { st = JSON.parse(String(await ghc(["issue", "view", String(n), "-R", repo, "--json", "number,state"]))); } catch { st = null; }
+        if (String(st?.state).toUpperCase() !== "OPEN") throw fail(`tracking issue #${n} for ${r.id} is not open or unreadable`);
+        r.tracked = `#${n}`;
+      }
+      T.decisions.push(`Tracked ${reqs.map((r) => `${r.id} (${r.disposition})`).join(", ")} in ${[...new Set(reqs.map((r) => r.tracked))].join(", ")} (${why})`);
+    }
+    /** The frozen contract posted by an earlier run of this issue, verified against its hash; null when absent. */
+    async function readFrozenContract() {
+      let out = "";
+      try { out = String(await ghc(["api", "--paginate", `repos/${repo}/issues/${issue}/comments`, "--jq", ".[] | {body, author_association, user: {type: .user.type, login: .user.login}}"])); } catch { return null; }
+      let found = null;
+      for (const l of out.split("\n")) {
+        let c; try { c = JSON.parse(l); } catch { continue; }
+        if (!String(c?.body ?? "").startsWith("<!-- FORGE:CONTRACT -->") || !isTrustedComment(c)) continue;
+        const fc = parseContractComment(c.body);
+        if (fc && contractHash(fc.text) === fc.hash) found = fc;
+      }
+      return found;
+    }
+
+    let frozen = null, hash = null, planned = false;
+    if (resumed) {
+      const fc = await readFrozenContract();
+      if (fc) { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
+    }
+    await label("building");
+    if (!frozen) {
+      await builder(++attemptN, builderPlanPrompt(issue) + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : ""), null, true, () => builderPlanPrompt(issue));
+      planned = true;
+      result = await readResult();
       const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
-      const closing = ["invalid", "already-fixed"].includes(result?.status);
-      await flushStages(result, ["investigation"]); // first stage note: the evidence comment for invalid/already-fixed
-      T.validate = [result ? (result.status === "fixed" ? "CONFIRMED" : String(result.status).toUpperCase()) : "no result.json", `${evidence.length} evidence item(s)`];
-      T.decisions.push(`Builder verdict: ${result?.status ?? "none"}`);
-      if (closing && !evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_NO_EVIDENCE);
-      if (closing) {
+      const closes = ["invalid", "already-fixed"].includes(result?.status);
+      if (closes || result?.status === "blocked") await flushStages(result, ["investigation"]); // the evidence comment for invalid/already-fixed
+      T.validate = [result?.status ? String(result.status === "fixed" ? "CONFIRMED" : result.status).toUpperCase() : "CONFIRMED", `${evidence.length} evidence item(s)`];
+      if (closes && !evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_NO_EVIDENCE);
+      if (closes) {
         T.plan = "skipped"; T.implement = "skipped"; T.review = "skipped"; T.pr = "none"; T.merge = "n/a";
+        T.decisions.push(`Builder verdict: ${result.status}`);
         await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
         await label("invalid");
         return await finish("invalid", result.summary ?? result.status);
       }
-      if (block) return await endBlocked(block, result.summary);
-      if (!files0.length) return await needsHuman(`Builder made no commit${result ? ` (status "${result.status}")` : " and wrote no result.json"}.\n\n${result?.summary ?? ""}`, OUTCOME_CODES.BUILDER_NO_COMMIT);
-      await flushStages(result, ["plan", "implementation"]);
-      T.plan = "posted"; T.implement = [`${files0.length} file(s)`, branch];
+      const blocked = await endIfBlocked();
+      if (blocked) return blocked;
+      let contract = await readContract();
+      let vc = validateContract(contract, issueText);
+      if (!vc.ok && sessionId) {
+        T.decisions.push(`Contract rejected (${vc.problems[0]}); resumed once`);
+        await builder(++attemptN, contractCorrectionPrompt(vc.problems), sessionId, false, () => builderPlanPrompt(issue));
+        contract = await readContract();
+        vc = validateContract(contract, issueText);
+      }
+      await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
+      if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID);
+      frozen = contract;
+      hash = contractHash(contractJson(frozen));
+      let body = renderContract(frozen, hash);
+      if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true }); // the JSON must survive the comment cap
+      await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
+      const deferredN = frozen.requirements.filter((r) => TRACKED.includes(r.disposition)).length;
+      ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
+      T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
     } else {
-      T.validate = "resumed (existing branch)"; T.plan = "skipped (resumed)"; T.implement = ["existing commits", branch];
-      T.decisions.push("Open PR or remote branch found: builder skipped, reviewing existing commits");
+      T.validate = "resumed (existing branch)";
     }
+    T.plan = [`contract ${hash}`, `${frozen.requirements.length} requirement(s)`];
+    if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
+    const implementPrompt = builderImplementPrompt() + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane));
+    liveKeys = ["implementation"];
+    await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);
+    result = await readResult();
+    {
+      const blocked = await endIfBlocked();
+      if (blocked) return blocked;
+    }
+    let files = await changedFiles();
+    if (!files.length) return await needsHuman(`Builder made no commit${result ? ` (status "${result.status}")` : " and wrote no result.json"}.\n\n${result?.summary ?? ""}`, OUTCOME_CODES.BUILDER_NO_COMMIT);
+    await flushStages(result, ["implementation"]);
+    T.implement = [`${files.length} file(s)`, branch];
+    T.decisions.push(`Builder verdict: ${result?.status ?? "none"}`);
 
-    // ---- 4. review (one retry through the same builder session) ----
+    // ---- 4. conformance: typed amendments, deterministic precheck, structured review; the engine computes the verdict ----
+    // enforce: every failure class blocks (one builder resume, then needs-human). shadow: the verdict is computed and posted,
+    // but only what the previous reviewer enforced blocks (a review that finds a requirement not implemented, or a regression).
     await label("in-review");
-    let review = null;
-    const doReview = async () => {
+    const shadow = conformance !== "enforce";
+    let effective = frozen, review = null, lastAmend = "", resumes = 0, verdict = null;
+    async function amend() {
+      const a = applyAmendments(frozen, result?.amendments, issueText);
+      const sig = JSON.stringify(a.applied);
+      if (a.applied.length && sig !== lastAmend) {
+        lastAmend = sig;
+        await post("FORGE:AMENDMENT", renderAmendments(a.applied));
+        T.decisions.push(`Contract amended: ${a.applied.map((x) => `${x.kind} ${x.target}`).join(", ")}`);
+      }
+      effective = a.contract;
+      return a.problems.map((d) => ({ code: OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, detail: d }));
+    }
+    const IGNORE = [`${LEAN_DIR}/`];
+    /** Up to two reviewer runs; a reply without usable rows (unparseable, incomplete, inconsistent) is re-asked, never charged to the builder. */
+    async function reviewOnce() {
+      const diff = String(await git(["diff", `${base}...HEAD`]));
+      const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
+      const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
+      const ctx = { contract: effective, changedFiles: files, issueText, pathExists: (x) => listed.has(x), ignore: IGNORE };
+      let d = null;
       for (let t = 0; t < 2; t++) {
-        const diff = String(await git(["diff", `${base}...HEAD`]));
-        // #4129: an over-budget diff is bounded in the prompt; the stat keeps every changed file visible.
-        const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
-          prompt: reviewerPrompt({ issue: iss, diff, stat, base }) });
+          prompt: reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base }) });
         await renew();
         await attempt("review", ++reviewN, rr);
-        const v = parseVerdict(rr?.text);
-        if (v) return v;
+        review = parseReview(rr?.text);
+        d = decide(review, ctx);
+        ev({ event: "CONFORMANCE", round: reviewN, state: d.state, failures: d.failures.map((x) => x.code), mode: shadow ? "shadow" : "enforce" });
+        if (!d.state.startsWith("review.")) return d;
       }
-      return null;
-    };
-    review = await doReview();
-    if (!review) return await needsHuman("Reviewer returned no parseable verdict twice.", OUTCOME_CODES.REVIEW_NO_VERDICT);
-    if (review.fail) {
-      if (!sessionId) return await needsHuman(`Review FAIL and the builder session id is unknown, cannot resume: ${review.reason}`, OUTCOME_CODES.REVIEW_FAILED);
-      T.decisions.push(`Review FAIL (round 1): builder resumed with the reason: ${String(review.reason).slice(0, 200)}`);
-      await builder(++attemptN, resumeBuilderPrompt(review.reason), sessionId);
-      result = (await readResult()) ?? result;
-      review = await doReview();
-      if (!review) return await needsHuman("Reviewer returned no parseable verdict twice (re-review).", OUTCOME_CODES.REVIEW_NO_VERDICT);
-      if (review.fail) return await needsHuman(`Review FAIL twice. Last reason: ${review.reason}`, OUTCOME_CODES.REVIEW_FAILED);
+      return d;
     }
-    T.review = [review.verdict, `${reviewN} reviewer run(s), ${attemptN > 1 ? "2 rounds" : "1 round"}`];
-    await post("FORGE:REVIEW", renderReview(review));
+    /** Precheck then review, on the current result and changed files (also the base-sync re-review). */
+    async function gate() {
+      result = (await readResult()) ?? result;
+      files = await changedFiles();
+      const amendProblems = await amend();
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE });
+      const pre = [...pc.failures, ...amendProblems];
+      if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
+      if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
+      const d = await reviewOnce();
+      if (!shadow) return { ...d, by: "review" };
+      // shadow: record what enforce would have done; block only on what the previous reviewer blocked on
+      const would = d.state === "conforms" && !pre.length ? "conforms" : d.state.startsWith("review.") ? d.state : "nonconforming";
+      const wouldFail = [...pre, ...(d.state === "conforms" ? [] : d.failures)];
+      const blocking = d.state === "nonconforming" ? d.failures.filter((f) => SHADOW_BLOCKS.includes(f.code)) : [];
+      return { state: d.state === "review.unparseable" ? d.state : blocking.length ? "nonconforming" : "conforms", by: "review", failures: blocking, would, wouldFail, reviewState: d.state };
+    }
+    /** Shape the base-sync path expects: null when no usable review, else {fail, verdict, reason, failures}. */
+    const doReview = async () => {
+      const d = await gate();
+      if (d.state.startsWith("review.")) return null;
+      return { fail: d.state !== "conforms", verdict: d.state === "conforms" ? "CONFORMS" : "NONCONFORMING", reason: d.failures.map((f) => `${f.code}: ${f.detail}`).join("; "), failures: d.failures };
+    };
+    for (;;) {
+      const outcome = await gate();
+      verdict = outcome;
+      if (outcome.state === "conforms") break;
+      const list = outcome.failures.slice(0, 15).map((f) => `- ${f.code}: ${f.detail}`).join("\n");
+      if (outcome.state === "review.unparseable") return await needsHuman(`The conformance reviewer returned no parseable JSON twice; nothing merged.`, OUTCOME_CODES.REVIEW_NO_VERDICT);
+      if (outcome.state === "review.incomplete") return await needsHuman(`The conformance review was incomplete twice (a review without complete rows cannot pass); nothing merged:\n${list}`, OUTCOME_CODES.REVIEW_INCOMPLETE);
+      if (outcome.state === "review.inconsistent") return await needsHuman(`The conformance reviewer twice said NONCONFORMING without a failing row; nothing merged.`, OUTCOME_CODES.REVIEW_INCONSISTENT);
+      if (resumes >= 1 || !sessionId) return await needsHuman(`The change does not conform to the issue and its frozen contract after ${resumes ? "one builder resume" : "the build (no session to resume)"} (${outcome.by}); nothing merged:\n${list}`, outcome.failures[0].code);
+      resumes++;
+      T.decisions.push(`Not conforming (${outcome.by}${outcome.inconsistent ? ", reviewer verdict contradicted its rows" : ""}): ${[...new Set(outcome.failures.map((f) => f.code))].join(", ")}; builder resumed once`);
+      await builder(++attemptN, conformanceResumePrompt(outcome.failures), sessionId);
+      await upsertStage("implementation"); // the published note follows the code after every resume
+    }
+    // Deferrals the reviewer accepted are filed now, before any PR: the batched follow-up must exist and be linked.
+    const toFile = pendingTracking(effective);
+    if (!shadow && toFile.length) await track(toFile, "accepted by the conformance review");
+    if (shadow) {
+      const wf = verdict.wouldFail ?? [];
+      ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
+      await emit({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
+      T.review = [`shadow: would ${verdict.would === "conforms" ? "pass" : `block (${verdict.would})`}`, `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
+      await post("FORGE:REVIEW", renderShadowReview({ would: verdict.would, failures: wf, review: verdict.reviewState === "conforms" || verdict.reviewState === "nonconforming" ? review : null, contract: effective, unfiled: toFile }));
+    } else {
+      T.review = ["CONFORMS", `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
+      await post("FORGE:REVIEW", renderReview(review, effective));
+    }
     ev({ event: "PHASE_COMMIT", phase: "review" });
+    const closing = closePlan(shadow ? { requirements: [] } : effective);
 
     // ---- 5. push + PR ----
-    const files = await changedFiles();
+    files = await changedFiles();
     await gitPush(["push", "-u", "origin", branch]);
     laneGuard(lane, "open a PR");
     const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghw(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
-      "--title", `${iss.title} (#${issue})`, "--body", renderPrBody({ issue, investigation: await readStage(STAGES[0]), plan: await readStage(STAGES[1]), implementation: await readStage(STAGES[2]), result, gitFiles: files })])).trim();
+      "--title", `${iss.title} (#${issue})`, "--body", renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked })])).trim();
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
     if (!Number.isInteger(pr)) return await needsHuman(`Could not parse the PR number from: ${prOut.slice(0, 200)}`);
     ev({ event: "PR_OPENED", pr });
+    if (resumed?.pr && closing.tracked.length) { // an existing PR still has to link the tracking issues visibly
+      try { await ghw(["pr", "edit", String(pr), "-R", repo, "--body", renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked })]); }
+      catch (e) { e.deferCode = OUTCOME_CODES.FOLLOWUP_UNAVAILABLE; e.deferDetail = `could not link the tracking issues on PR #${pr}; nothing merged, rerun to retry`; throw e; }
+    }
     T.pr = [`#${pr}`, resumed?.pr ? "existing" : "opened"];
     const prUrl = /https?:\/\/\S+/.exec(prOut)?.[0] ?? `https://github.com/${repo}/pull/${pr}`;
     let localHead = String(await git(["rev-parse", "HEAD"])).trim();
@@ -634,7 +801,7 @@ export async function runCore(o) {
         let rv = await doReview();
         if (rv?.fail) {
           T.decisions.push(`Base-sync re-review FAIL: builder resumed with the reason`);
-          await builder(++attemptN, resumeBuilderPrompt(rv.reason), sessionId ?? null);
+          await builder(++attemptN, conformanceResumePrompt(rv.failures), sessionId ?? null);
           if (await unresolved()) return await needsHuman("Base-sync re-review fix left conflict markers.", OUTCOME_CODES.BASE_CONFLICT);
           if ((await gitOut(["rev-parse", "HEAD"])) !== after) await gitPush(["push", "origin", branch]);
           rv = await doReview();
@@ -709,6 +876,9 @@ export async function runCore(o) {
       }
     }
     await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
+    if (closing.tracked.length) {
+      try { await post("FORGE:TRACKED", `## Remaining work tracked\nClosed as completed by PR #${pr}. The contracted deferred and post-deploy requirements are tracked in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }
+    }
     await label("merged");
     return await finish("merged", `PR #${pr}`, { pr });
   } catch (e) {
