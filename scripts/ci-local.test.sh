@@ -513,7 +513,10 @@ if [ -z "$P" ]; then bad "plan on ForgeDock's own workflows produced no output";
   eq "ForgeDock: the Windows job is not run on PRs" not-applicable "$(state "$P" gha:shell-compat:windows-fixture-smoke)"
   eq "ForgeDock: the macOS portability job is not run on PRs" not-applicable "$(state "$P" gha:shell-compat:macos-portability)"
   eq "ForgeDock: portability checks run" runnable "$(state "$P" portability:builtin)"
-  eq "ForgeDock: the unit-test step is narrowed by the reference graph" scoped "$(printf '%s' "$P" | jq -r '[.jobs[] | select(.id == "gha:ci:unit-tests") | .steps[] | select(.scope.selector == "refgraph-nodetest") | .scope.mode][0]')"
+  # Narrowing is asserted on a spec with a small reference reach. build.md sits near the 600-file fan-out cap, so any
+  # growth in the engine's neighbourhood correctly widens it to the full suite; that is the cap working, not a regression.
+  PN=$(bash "$S" plan --repo "$ROOT" --base HEAD --base-branch staging --head-branch feat/spec-change --files "commands/review-pr-staging.md" --json --no-cache 2>/dev/null)
+  eq "ForgeDock: the unit-test step is narrowed by the reference graph" scoped "$(printf '%s' "$PN" | jq -r '[.jobs[] | select(.id == "gha:ci:unit-tests") | .steps[] | select(.scope.selector == "refgraph-nodetest") | .scope.mode][0]')"
 fi
 
 # ------------------------------------------------------------------------------------------------ compound-line denylist (forge#3998)

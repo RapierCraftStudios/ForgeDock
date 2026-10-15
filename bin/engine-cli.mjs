@@ -94,6 +94,13 @@ export function readEnginePath(cwd = process.cwd()) {
     return ENGINE_PATHS.includes(v) ? v : undefined;
   } catch { return undefined; }
 }
+/** forge.yaml `engine.conformance` (shadow|enforce) for the core work-on gate; undefined when absent or invalid (the core defaults to shadow). */
+export function readConformanceMode(cwd = process.cwd()) {
+  try {
+    const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.conformance ?? "").trim();
+    return ["shadow", "enforce"].includes(v) ? v : undefined;
+  } catch { return undefined; }
+}
 function readLeanSetting(key, cwd = process.cwd()) {
   try {
     const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.[`lean_${key}`] ?? "").trim();
@@ -528,7 +535,7 @@ export async function runFromCli(argv, deps = {}) {
     try {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     } catch (e) { report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     report(lres);
     if (lres.code === "host.busy") { console.log(`issue #${issue} → deferred (${lres.detail})`); return lres; }
@@ -780,7 +787,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln) => runCore({ issue: n, repo, lane: ln, laneOverride, branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry,
-      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
     lanes = batchMod.detachedLanes({ batch, cwd, script: deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), bin: deps.laneBin, pollMs: deps.pollMs,
       laneArgs: (n, ln) => ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])] });
