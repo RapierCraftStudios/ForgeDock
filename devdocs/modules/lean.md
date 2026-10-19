@@ -174,3 +174,13 @@ Contracts may carry `decisions: [{id, choice, justification, source: doc|lint|pr
 which `validateContract` checks only when present. `forgedock stats --edge FROM:TO` /
 `--milestone M` (`bin/stats/query.mjs`) answer audit queries from these records.
 Rationale: `devdocs/decisions/4165-structure-delta-telemetry.md`.
+
+## Entry 2026-10-20 — Account-scoped usage-limit holds (#4190)
+
+`limits.mjs` keeps a host-level store (`~/.forge/limits.json`, atomic writes) of
+`rate_limited` holds keyed by `backendIdentity({backend, env})`. A lane's
+`rate_limited` result carries `backendId`; `orchestrate.mjs` admission consults the
+hold for the identity the next lane would use, so batches on the same account share
+one hold and a lane on another account is admitted. Legacy per-batch `holdUntil` in
+`state.json` is ignored on `--resume`. CLI: `forgedock limits show|clear [<id>|--all]`
+(`engine-cli.mjs` `limitsFromCli`).
