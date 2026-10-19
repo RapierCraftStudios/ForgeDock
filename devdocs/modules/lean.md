@@ -3,7 +3,7 @@ module: lean
 glob: "bin/lean/*"
 authority: required
 token_cost: 900
-last_compacted: "2026-10-19"
+last_compacted: "2026-10-20"
 ---
 
 # Module Dossier: bin/lean/ (core work-on engine)
@@ -98,6 +98,15 @@ as `makeHostProbe().activeLanes()`.
 - ci-local passes the variable through `scrubbedEnv` and caps its slot count
   and job `maxParallel` at it (`lib.mjs` `capParallel`).
 
+## Dependency cache (#4220)
+
+`depcache.mjs` `prepare` (after the worktree exists) keys each lockfile (pnpm/npm/yarn
+non-PnP, uv/poetry) by sha256 of lock + manifests + runtime + platform. Hit: hardlink the
+read-only snapshot `~/.forge/depcache/<repoKey>/<eco>-<key>/` in (bin scripts copied, build
+path rewritten), then a warm repair install. Miss: frozen install under the key lock, publish
+via tmp + atomic rename. Never fails the run (`DEPS_PREPARED`); runner env gets the shared
+stores; `forgedock gc` prunes; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
+
 ## FORGE:STATE lease
 
 Stored in the issue body by `io.projector.writeState`:
@@ -138,20 +147,4 @@ push/gh/merge retry patterns).
 
 ## Entries
 
-## Entry 2026-10-19 — Dossier created (#4185)
-
-Initial dossier written with NORTHSTAR.md and the devdocs freshness gate.
-
-## Entry 2026-10-19 — Verify-by-CI (#4167)
-
-Opt-in `verify:` section (`engine-cli.mjs` `readVerify` → `verify.mjs` `parseVerify`).
-`lean.mjs` `ciVerify` runs before each conformance gate and after a base-sync push;
-`precheck({ciVerified})` accepts `ci:true` validate ids at the verified head. Seams:
-`effects.mjs` `dispatchWorkflow`/`workflowRuns`/`commitChecks`/`failedLogs`. Rationale:
-`devdocs/decisions/4167-verify-by-ci.md`.
-
-## Entry 2026-10-20 — Host-aware verification concurrency (#4182)
-
-Added `FORGE_HOST_PARALLELISM`: it is derived from the ledger lane count,
-injected into the runner env, named in the builder host rules, and used to cap
-ci-local slots and job parallelism.
+- 2026-10-19/20: dossier (#4185); verify-by-CI (#4167, `decisions/4167-verify-by-ci.md`); `FORGE_HOST_PARALLELISM` (#4182); dependency cache (#4220).

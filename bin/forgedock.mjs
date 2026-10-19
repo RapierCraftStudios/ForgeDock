@@ -4050,6 +4050,10 @@ switch (command) {
     const { makeRunTmp } = await import("./lean/effects.mjs");
     const removed = await makeRunTmp().prune();
     process.stdout.write(`gc: removed ${removed.length} stale run tmp dir(s)\n`);
+    // #4220: dependency cache snapshots unused for 7 days (unlocked), dead publishers' tmp dirs, stale locks.
+    const { makeDepCache } = await import("./lean/depcache.mjs");
+    const deps = await makeDepCache({ exec: async () => "" }).prune();
+    process.stdout.write(`gc: removed ${deps.length} stale dependency cache snapshot(s)\n`);
     break;
   }
   case "orchestrate": {
