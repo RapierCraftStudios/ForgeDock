@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { run as runSync, commandExists, scrubbedEnv, homeForgeDir, sha256, fileHash, toolVersion, shellSplit } from './lib.mjs';
+import { run as runSync, commandExists, scrubbedEnv, capParallel, homeForgeDir, sha256, fileHash, toolVersion, shellSplit } from './lib.mjs';
 import { shellArgv } from './adapters/common.mjs';
 import { checkPortability } from './adapters/portability.mjs';
 
@@ -25,7 +25,7 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { clean
 // ---- machine-wide slot semaphore ----
 function slotCount() {
   const n = Number(process.env.FORGE_CI_LOCAL_SLOTS);
-  return n > 0 ? n : Math.max(2, Math.min(8, Math.floor(os.cpus().length / 2)));
+  return capParallel(n > 0 ? n : Math.max(2, Math.min(8, Math.floor(os.cpus().length / 2))));
 }
 function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
 
@@ -117,6 +117,16 @@ class Tail {
 async function portFree(port) { return new Promise((res) => { const s = net.createServer(); s.once('error', () => res(false)); s.listen(port, '127.0.0.1', () => s.close(() => res(true))); }); }
 const HEALTH_FLAGS = new Set(['--health-cmd', '--health-interval', '--health-timeout', '--health-retries', '--health-start-period', '--shm-size']);
 
+// forge#4181: ownership labels from the lane (FORGE_DOCKER_LABELS); a standalone run fills in defaults so it is labelled too.
+const LABEL_KEYS = ['owner', 'batch', 'lane', 'issue', 'expires'];
+export function dockerLabelArgs(env = process.env, now = Date.now()) {
+  const got = new Map();
+  for (const e of String(env.FORGE_DOCKER_LABELS || '').split(/\s+/)) { const m = /^forgedock\.([a-z]+)=([A-Za-z0-9_.-]+)$/.exec(e); if (m && !got.has(m[1])) got.set(m[1], m[2]); }
+  const dflt = { owner: '1', batch: 'adhoc', lane: `ci-local-${process.pid}`, issue: '0', expires: String(now + 6 * 3600 * 1000) };
+  for (const k of LABEL_KEYS) if (!got.has(k)) got.set(k, dflt[k]);
+  return [...got].flatMap(([k, v]) => ['--label', `forgedock.${k}=${v}`]);
+}
+
 async function startServices(job, log) {
   const started = [];
   const stop = () => { for (const n of started) runSync('docker', ['rm', '-f', n], { timeout: 30000 }); started.length = 0; };
@@ -128,11 +138,12 @@ async function startServices(job, log) {
   if (!commandExists('docker') || runSync('docker', ['info'], { timeout: 20000 }).code !== 0) return { error: 'docker is not available', finish };
   // forge#4040 (SEC-6): one docker network per job; nothing runs with --network host.
   net = `forge-ci-net-${process.pid}-${job.id.replace(/[^A-Za-z0-9_.-]/g, '-')}`.slice(0, 120);
-  const nr = runSync('docker', ['network', 'create', net], { timeout: 30000 });
+  const labels = dockerLabelArgs();
+  const nr = runSync('docker', ['network', 'create', ...labels, net], { timeout: 30000 });
   if (nr.code !== 0) { net = ''; return { error: `docker network create failed: ${(nr.err || nr.out).split('\n')[0]}`, finish }; }
   for (const svc of job.services) {
     const name = `forge-ci-${process.pid}-${job.id.replace(/[^A-Za-z0-9_.-]/g, '-')}-${svc.name}`.slice(0, 120);
-    const args = ['run', '-d', '--rm', '--name', name, '--network', net, '--network-alias', svc.name];
+    const args = ['run', '-d', '--rm', ...labels, '--name', name, '--network', net, '--network-alias', svc.name];
     const hostPorts = [];
     for (const p of svc.ports || []) {
       const m = /^(?:(\d+):)?(\d+)(?:\/(tcp|udp))?$/.exec(String(p).trim());
@@ -361,7 +372,7 @@ export async function runPlan(plan, o = {}) {
   // (DEGRADED) and a re-run resumes from the result cache.
   const maxInvS = Number(process.env.FORGE_CI_LOCAL_MAX_INVOCATION_SECONDS) || 540;
   const budgetS = Math.min(requestedS, maxInvS); const capped = requestedS > maxInvS;
-  const maxParallel = o.maxParallel || plan.config.max_parallel || Number(process.env.FORGE_CI_LOCAL_MAX_PARALLEL) || 4;
+  const maxParallel = capParallel(o.maxParallel || plan.config.max_parallel || Number(process.env.FORGE_CI_LOCAL_MAX_PARALLEL) || 4);
   const tmpRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'forge-ci-local.'));
   cleanups.add(() => { try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ } });
   const ctx = {

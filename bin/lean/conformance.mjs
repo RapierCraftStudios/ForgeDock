@@ -124,7 +124,11 @@ export function applyAmendments(frozen, amendments, issueText = null) {
     const tag = JSON.stringify(a ?? null).slice(0, 100);
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
-      if (!c.deliverables.some((d) => d.path === a.path)) c.deliverables.push({ id: a.id ?? `A${c.deliverables.length + 1}`, path: a.path, change: a.why, amended: true });
+      const have = c.deliverables.find((d) => d.path === a.path);
+      // An existing deliverable keeps its id and gains the why, so an amendment naming a package on an already-listed
+      // package.json declares the edge (forge#4159); before, it was reported as applied but changed nothing.
+      if (have) { have.change = have.change ? `${have.change}; ${a.why}` : a.why; have.amended = true; }
+      else c.deliverables.push({ id: a.id ?? `A${c.deliverables.length + 1}`, path: a.path, change: a.why, amended: true });
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {
       if (c.requirements.some((r) => r.id === a.requirement.id)) { problems.push(`add-requirement reuses id ${a.requirement.id}`); continue; }
       if (issueText != null && !inIssue(a.requirement.quote, issueText)) { problems.push(`add-requirement ${a.requirement.id}: quote is not verbatim from the issue`); continue; }
@@ -147,16 +151,20 @@ export function applyAmendments(frozen, amendments, issueText = null) {
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
  * requirements not implemented, and deferrals without a tracking issue. Returns {ok, failures[]}; each failure carries a
  * `kind` (scope_creep, validate_missing, validate_failed, requirement_unimplemented, untracked_deferral) so callers can
- * tell the builder's own failed checks apart from bookkeeping gaps.
+ * tell the builder's own failed checks apart from bookkeeping gaps. `ciVerified` (#4167): the current head passed the
+ * engine's CI verification, so a validate id left to CI is not missing; a recorded non-zero exit still fails.
  */
-export function precheck({ contract, result, changedFiles, ignore = [] }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false }) {
   const failures = [];
   const creep = changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(contract, f));
   if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
   const runs = Array.isArray(result?.validation) ? result.validation : [];
   for (const v of contract.validate ?? []) {
     const r = runs.find((x) => x?.id === v.id);
-    if (!r) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
+    // #4167: a head the engine verified on CI covers validate ids the builder left to CI (no result, or ci:true without an exit)
+    const leftToCi = !r || (r.ci === true && r.exit === undefined);
+    if (ciVerified && leftToCi) continue;
+    if (leftToCi) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
     else if (r.exit !== 0) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} failed (exit ${r.exit})` });
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];

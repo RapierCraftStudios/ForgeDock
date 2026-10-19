@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: agents, repos, project_board, orchestration, pipeline, build, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
+# Optional sections: agents, repos, project_board, orchestration, maintenance, pipeline, build, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -325,6 +325,25 @@ branches:
 # batched or auto-admitted by ANY cascade.policy, including "all" — that
 # exclusion is a hard invariant enforced upstream of this section, not a
 # configurable key.
+
+# =============================================================================
+# MAINTENANCE (OPTIONAL, off by default)
+# Reserves a share of `forgedock orchestrate` lane starts for maintenance-labelled
+# issues: P0/P1 features > maintenance share > P2+ features. Issues come from
+# scripts/maintenance-scan.sh (deterministic: hotspots, package cycles, dead code,
+# oversized docs), /upgrade-deps and /cleanup. Block form only: the parser does
+# not read `maintenance: { share: 0.2, when_idle: true, scan: weekly }`.
+# Commands: orchestrate, autopilot, upgrade-deps, cleanup
+# =============================================================================
+
+# maintenance:
+#   enabled: false                    # nothing changes until this is true
+#   share: 0.2                        # 0.2 = 1 lane start in 5 goes to maintenance when any is queued
+#   when_idle: true                   # also drain maintenance once no feature is pending
+#   scan: weekly                      # /autopilot runs maintenance-scan.sh this often (weekly | off)
+#   labels: maintenance,refactor:split,dead-code   # labels that mark an issue as maintenance
+#   file_lines: 2000                  # hotspot threshold (lines in a recently changed file)
+#   doc_kb: 64                        # oversized-doc threshold (KB)
 
 # =============================================================================
 # PIPELINE (OPTIONAL)
