@@ -55,7 +55,7 @@ done
 # Flag mode only when a token is exactly a known flag: free text that mentions "--verbose" is not a flag typo.
 FLAG_MODE=false
 for t in ${TOKENS[@]+"${TOKENS[@]}"}; do
-  case "$t" in --dry-run|--title|--body|--body-file|--label|--milestone|--exclude) FLAG_MODE=true; break ;; esac
+  case "$t" in --dry-run|--greenfield|--spike|--title|--body|--body-file|--label|--milestone|--exclude) FLAG_MODE=true; break ;; esac
 done
 [ "$FLAG_MODE" = true ] || usage "no recognised flag: free-text /issue requests are drafted interactively (commands/issue.md), not by this script"
 
@@ -64,7 +64,8 @@ while [ "$i" -lt "$n" ]; do
   arg="${TOKENS[$i]}"
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
-    --title|--body|--body-file|--label|--milestone|--exclude)
+    --greenfield) ;;   # interactive draft validation only (forge#4172); accepted, no effect on a programmatic create
+    --title|--body|--body-file|--label|--milestone|--exclude|--spike)
       [ $((i + 1)) -lt "$n" ] || usage "$arg requires a value"
       i=$((i + 1)); v="${TOKENS[$i]}"
       case "$arg" in
@@ -74,6 +75,7 @@ while [ "$i" -lt "$n" ]; do
         --label) LABELS+=("$v") ;;
         --milestone) MILESTONE="$v" ;;
         --exclude) EXCLUDE="$v" ;;
+        --spike) ;;   # see --greenfield
       esac ;;
     --*) usage "unrecognized flag: $arg" ;;
     *) ;;   # stray words are ignored, as in the spec's flag loop

@@ -107,6 +107,10 @@ log_has "issue added to the board" "|project|item-add|7|--owner|cfg-owner|--url|
 rm -f "$TMP/work/forge.yaml"
 run "no repo is a usage error" 2 --title "fix: a" --body-file "$GOOD"
 
+# --- greenfield flags (forge#4172) are accepted, not unrecognized ---------------------
+run "--greenfield/--spike accepted" 0 --repo o/r --args "--greenfield --spike docs/spike.md --title \"fix: a\" --body-file \"$GOOD\""
+run "--spike without a value" 2 --repo o/r --title "fix: a" --body-file "$GOOD" --spike
+
 # --- usage errors: nothing created ---------------------------------------------
 run "--title without a value" 2 --repo o/r --body-file "$GOOD" --title
 log_lacks "no POST on usage error" "|api|"

@@ -22,6 +22,8 @@ You create GitHub issues with the structure the `/work-on` pipeline expects. Eve
 |------|--------|
 | (none) | Interactive: read code, draft, then create through the script (below). |
 | `--dry-run` | Validate and print the draft; create nothing. Never bypasses the dedup STOP. |
+| `--greenfield` | Affected Files may be *planned* paths, validated against the spike doc's declared repo layout (Validate, below). Also on automatically when the spike doc has a `Repo layout` heading. <!-- Added: forge#4172 --> |
+| `--spike <path>` | Spike doc for greenfield mode (implies `--greenfield`). Default `docs/engineering/technical-spike.md`, repo-relative. |
 | `--title "..."` | **The sole programmatic-mode trigger.** Final title; skips drafting. |
 | `--body "..."` / `--body-file <path>` | Final body; exactly one is required with `--title`. |
 | `--label "..."` | One label; repeatable. |
@@ -85,7 +87,7 @@ Duplicates: the script's token-overlap dedup is authoritative. Before drafting, 
 
 **Title**: `{prefix}({scope}): {specific description}`, max 80 characters, no vague verbs ("improve", "update", "handle") without specifics.
 
-**Body** (pipeline template; `## Problem`, `## Affected Files` and `## Acceptance Criteria` are mandatory, the rest optional):
+**Body** (pipeline template; `## Problem`, `## Affected Files` and `## Acceptance Criteria` are mandatory, the rest optional; in greenfield mode Affected Files may list *planned* paths inside the spike's declared repo layout):
 
 ```markdown
 ## Problem
@@ -113,7 +115,25 @@ Depends on #{N} — {reason}   (omit when none)
 
 Investigation issues use `## Scope`, `## Questions to Answer` (checkboxes), `## Starting Points`, `## Deliverable`, `## Context`. Keep domain-specific sections (Evidence Trail, Validation Checklist, ...) and wrap the mandatory ones around them; `milestone.md`, `orchestrate.md` and `work-on/decompose.md` use this same template.
 
-**Validate**: conventional prefix; every path exists (`git show origin/staging:{path}`); no placeholder sections; each criterion is testable; override files included; priority matches severity.
+**Validate**: conventional prefix; no placeholder sections; each criterion is testable; override files included; priority matches severity. **Affected files are real**: every backticked path in `## Affected Files` exists at `origin/staging` or `origin/main`; in greenfield mode a missing path passes as `PLANNED` when it is declared in, or sits under a directory declared in, the spike doc's `Repo layout` section. Write the draft to an entity-scoped `mktemp` body file, then run from the target repo (`{GREENFIELD}`/`{SPIKE_DOC}` are the parsed values). Exit 1 (`MISSING <path>`): fix the path, or in greenfield mode add it to the spike layout. Exit 2: the spike doc is missing or declares no layout; fix it or drop `--greenfield`. If the helper does not resolve, check each path with `git show origin/staging:{path}` / `git show origin/main:{path}`.
+
+```bash
+cd "{REPO_PATH}" || exit 1
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+AF_CHECK_SCRIPT=$(forge_resolve affected-files-check.sh)
+GREENFIELD="{GREENFIELD}"; SPIKE_DOC="{SPIKE_DOC}"
+# Declared spike layout auto-enables greenfield mode; without one, brownfield (existence only) applies.
+[ -f "$SPIKE_DOC" ] && grep -qiE '^#+[[:space:]].*repo layout' "$SPIKE_DOC" && GREENFIELD=true
+SPIKE_ARGS=()
+[ "$GREENFIELD" = "true" ] && SPIKE_ARGS=(--spike "$SPIKE_DOC")
+git fetch -q origin {STAGING_BRANCH} {DEFAULT_BRANCH} 2>/dev/null || true
+if [ -n "$AF_CHECK_SCRIPT" ]; then
+  bash "$AF_CHECK_SCRIPT" "{DRAFT_BODY_FILE}" --ref "origin/{STAGING_BRANCH}" --ref "origin/{DEFAULT_BRANCH}" "${SPIKE_ARGS[@]}"
+  echo "AF_CHECK_EXIT=$?"
+else
+  echo "affected-files-check.sh unresolved: check each path with git show (brownfield rule)"
+fi
+```
 
 ### 4. Create
 
