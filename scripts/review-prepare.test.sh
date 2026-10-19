@@ -287,6 +287,20 @@ CROSS_REPO=true setup pr-branch main "README.md" "$DIFF_PLAIN"; : > "$FIX/difffa
 prep "$ROOT" --no-delta; rc_is "--no-delta fallback refuses a cross-repository PR" 3
 setup feat/x staging "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
 prep "$ROOT" --no-delta; rc_is "--no-delta with unfetchable branches still fails closed" 3; eq "unfetchable blocked" .status BLOCKED
+# forge#4154: a milestone->staging PR (always FULL) gets the same pinned fallback without --no-delta; other per-PR lanes still block
+git -C "$REPO_DIR" branch -f milestone/m1 "$SHA_B"; git -C "$REPO_DIR" branch -f staging "$SHA_A"
+setup milestone/m1 staging "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
+prep "$ROOT"; rc_is "milestone->staging falls back to git when the API diff fails" 0; eq "milestone fallback status" .status OK
+eq "milestone fallback lane" .lane.is_milestone_to_staging true; eq "milestone fallback mode is FULL" .delta.mode FULL
+eq "milestone fallback file list comes from git" '.full_files | index("services/api/auth.py") != null' true
+setup milestone/m1 staging "README.md" "$DIFF_PLAIN" "0000000000000000000000000000000000000000"; : > "$FIX/difffail"
+prep "$ROOT"; rc_is "milestone fallback refuses a branch tip that is not the review SHA" 3
+CROSS_REPO=true setup milestone/m1 staging "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
+prep "$ROOT"; rc_is "milestone fallback refuses a cross-repository PR" 3
+git -C "$REPO_DIR" branch -f feat/x "$SHA_B"
+setup feat/x staging "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
+prep "$ROOT"; rc_is "a fetchable feat->staging per-PR review still blocks without --no-delta" 3; eq "feat blocked" '.blockers | join(" ") | test("gh pr diff failed")' true
+git -C "$REPO_DIR" branch -D milestone/m1 staging feat/x >/dev/null
 setup feat/x staging "README.md" "$DIFF_PLAIN"
 for bad_args in "--pr abc --repo o/r" "--pr 7 --repo noslash" "--pr 7 --repo o/r;x/y" "--pr 7 --repo o/r --bogus" "--repo o/r --pr"; do
     # shellcheck disable=SC2086

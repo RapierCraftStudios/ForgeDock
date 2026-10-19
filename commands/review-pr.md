@@ -294,7 +294,7 @@ Substitute each printed value into later fences as `{NAME}` (`{CONTEXT_FILE}`, `
 The 2D env-var, 2E secrets and 2F SQL scans ran in Phase 1 (`PHASE2_FINDINGS`): **a secrets hit is CRITICAL and BLOCKING**; an env var missing from `.env.example` and a migration hazard (`FOR UPDATE` with an aggregate, `DROP` without `IF EXISTS`, `NOT NULL` without `DEFAULT`) are findings. Execution (format, lint, typecheck, build, tests) stays here: it is long-running and needs a throwaway checkout (HARD RULE 7). Commands come from the main checkout's `forge.yaml → verification.commands.*` and run for the changed languages only; a missing command prints `SKIPPED`, never a silent pass, and exit codes are printed so the verdict is not inferred from truncated output.
 
 ```bash
-PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"; REQUIRES_FULL_BUILD="{REQUIRES_FULL_BUILD}"
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"; REQUIRES_FULL_BUILD="{REQUIRES_FULL_BUILD}"; CTX="{CONTEXT_FILE}"
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 MAIN_ROOT="$(cd "$(git rev-parse --path-format=absolute --git-common-dir)/.." && pwd)"   # main checkout even when run from a linked worktree
 REVIEW_WT="${TMPDIR:-/tmp}/forge-review-wt-${PR_NUMBER}-$$"
@@ -304,7 +304,7 @@ git worktree add --detach "$REVIEW_WT" "$REVIEW_SHA" 2>/dev/null
 { cd "$REVIEW_WT" && [ "$(git rev-parse HEAD)" = "$(git -C "$MAIN_ROOT" rev-parse "$REVIEW_SHA")" ]; } || { echo "SKIPPED — could not create per-PR worktree at $REVIEW_SHA"; exit 0; }
 CFG="${FORGE_CONFIG:-$MAIN_ROOT/forge.yaml}"
 vcmd() { yq ".verification.commands.${1}.${2} // \"\"" "$CFG" 2>/dev/null || echo ''; }
-CHANGED=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
+CHANGED=$(jq -r '.full_files[]?' "$CTX" 2>/dev/null); [ -n "$CHANGED" ] || CHANGED=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)   # Phase 1 list survives an API 406 (forge#4154)
 [ -d "$MAIN_ROOT/node_modules" ] && [ ! -e node_modules ] && ln -s "$MAIN_ROOT/node_modules" node_modules
 run_step() { # run_step <lang> <step> <tail-lines>: prints the exit code; empty command = SKIPPED
   local c; c=$(vcmd "${1}" "${2}")
