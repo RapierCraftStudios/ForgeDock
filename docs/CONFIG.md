@@ -55,6 +55,7 @@ If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pi
 | [`review`](#review-optional) | No | Context injected into review agents |
 | [`devdocs`](#devdocs-optional) | No | Devdocs knowledge tree path |
 | [`verification`](#verification-optional) | No | Health-check patterns |
+| [`verify`](#verify-optional) | No | Core work-on: run lane verification on CI runners instead of the host (`mode: local\|ci\|hybrid`) |
 | [`billing`](#billing-optional) | No | Enable financial integrity audit phase |
 | [`adaptive_scripts`](#adaptive_scripts-optional) | No | Per-repo script override configuration |
 
@@ -511,6 +512,43 @@ engine:
 **Minimal phase sessions** (forge#4065): on a supported CLI (`claude --version` >= 2.1.296, probed once and cached like the flags above) every engine phase (`work-on/*`) runs with `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`, so operator MCP servers and connectors are not loaded. Phases whose spec never calls `Skill(...)` (`work-on/investigate`, `work-on/close`) also get `--disable-slash-commands`; skill-using phases keep skills. Operator settings are intentionally not skipped (no `--setting-sources`), because ForgeDock's user-scope PreToolUse/SubagentStop hooks must keep running. Set `FORGEDOCK_FULL_SESSION=1` to restore the previous full session (no flags). Other `forgedock run` commands (qa-sweep, analytics, geo-audit, autopilot) keep the full session because they may need MCP servers. An old or unparseable CLI version also omits the flags.
 
 **Commands that use this section**: CLI backend (`runCommand` in `bin/runner.mjs`)
+
+---
+
+## `verify` (OPTIONAL)
+
+Verify-by-CI for the core work-on path (forge#4167). It moves a lane's heavy verification (type-checks, test suites, docker test containers) off the host and onto CI runners, and it catches CI-class failures (lock files, suite wiring, hangs, formatting) before the lane merges into staging. Write it as a block-style section: `parseForgeYaml` does not read inline `{ ... }` maps.
+
+```yaml
+verify:
+  mode: ci                      # local (default) | ci | hybrid
+  workflow: forgedock-verify.yml  # optional; needs an `on: workflow_dispatch` trigger
+  paths_input: changed_paths    # optional workflow_dispatch input that receives the changed paths (newline-separated)
+  skip_paths: "*.md,docs/**"    # optional, comma-separated; default *.md,*.mdx,*.rst,*.txt,docs/**,devdocs/**
+  max_rounds: 2                 # optional CI fix rounds before needs-human (default 2)
+```
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `mode` | string | No | `local` (default): today's behaviour; the builder runs every validate command on the host and no CI is started before review. `ci`: the builder runs only formatters and linters on the files it changed (no type-checks, test suites or test containers) and records validate ids it left to CI as `{"id","command","ci":true}`; the engine verifies on CI. `hybrid`: the builder runs the targeted validate commands too, and CI also verifies. |
+| `workflow` | string | No | Workflow file name or id dispatched on the lane branch (`gh workflow run <workflow> --ref <branch>`). The engine waits for the `workflow_dispatch` run of the lane's head commit. Without it, the engine waits on the head commit's push-triggered check runs. |
+| `paths_input` | string | No | Name of a `workflow_dispatch` input that receives the changed paths, so the workflow can scope its jobs to the change. |
+| `skip_paths` | string | No | Comma-separated globs. A glob without `/` matches the basename anywhere; `**` spans directories. When every changed file matches, the lane skips CI verification (a docs-only lane runs no CI matrix). |
+| `max_rounds` | integer | No | Builder fix rounds for red CI (0–10, default 2). |
+
+**Flow** (`ci`/`hybrid`, `bin/lean/verify.mjs` `runCiVerify`):
+
+1. After the build and before every conformance review, the engine pushes the lane branch (a plain push, never forced) and runs CI on the head. A base-sync that moves the head is verified again.
+2. Green (or skipped by `skip_paths`): the review runs. The precheck accepts validate ids left to CI for that head, but a recorded non-zero exit still fails.
+3. Red: the failed jobs' logs (`gh run view --log-failed`, tails capped at about 12 KB) go back to the builder session. The builder fixes and commits, and the engine pushes and verifies again. Still red after `max_rounds`, or a fix round with no new commit, ends as `needs-human` (`ci.red`) and nothing merges.
+4. Slow CI: once the core CI wait budget (360 min, the same budget the merge wait uses) is used up, the lane ends `ci-pending` and can be resumed. Slow CI is never `needs-human`.
+5. CI unavailable (dispatch refused, or no run or check for the head within 5 minutes): one local fallback. The builder runs every validate command on the host and records real exit codes.
+
+Each verification emits a `CI_VERIFY` run-log/telemetry event (`mode`, `round`, `result`, `skipped`, `run_url`) and adds a **Verify** row to the trajectory.
+
+**Cost:** `ci`/`hybrid` spend GitHub Actions minutes before review, so they are opt-in per repo. On the green path they add no LLM calls; each red CI round adds one builder resume. The merge gate (`engine.merge_wait`) is unchanged.
+
+**Commands that use this section**: core work-on (`forgedock run-issue`, `forgedock orchestrate`; `bin/engine-cli.mjs` `readVerify`)
 
 ---
 

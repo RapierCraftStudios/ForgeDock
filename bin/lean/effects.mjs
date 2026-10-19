@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags } from "../runner.mjs";
 import { makeIo } from "../engine-cli.mjs";
 import { makeProjector } from "../engine/projector.mjs";
-import { makeLedger } from "./ledger.mjs";
+import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -159,6 +159,8 @@ export function makeHostProbe() {
     },
     loadAvg1: () => loadavg()[0],
     cores: () => cpus().length || 1,
+    /** Live lanes on this host from the ledger (#4182), this lane included once it registered. */
+    activeLanes: () => countLiveLanes({ root: ledgerRoot(), host: hostname() }),
     tmpPaths: () => [...new Set([join(homedir(), ".forge", "tmp"), tmpdir(), "/tmp"].filter((x) => existsSync(x) || x === join(homedir(), ".forge", "tmp")))],
   };
 }
@@ -199,6 +201,28 @@ export function makeLeanIo({ repo }) {
         const state = ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(v) ? "success" : ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(v) ? "failure" : "pending";
         return { name: c.name ?? c.context, state };
       });
+    },
+    /** #4167 verify-by-CI: `gh workflow run` on the lane branch; inputs become -f key=value. */
+    async dispatchWorkflow({ workflow, ref, inputs = {} }) {
+      await run("gh")(["workflow", "run", String(workflow), "-R", repo, "--ref", String(ref), ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
+    },
+    /** Recent workflow_dispatch runs of `workflow` on `branch`, newest first: [{databaseId, headSha, status, conclusion, url, name}]. */
+    async workflowRuns({ workflow, branch }) {
+      return JSON.parse(await run("gh")(["run", "list", "-R", repo, "--workflow", String(workflow), "--branch", String(branch), "--event", "workflow_dispatch",
+        "--limit", "10", "--json", "databaseId,headSha,status,conclusion,url,name"]) || "[]");
+    },
+    /** Check runs on a commit (push-triggered CI): [{name, state: success|failure|pending, url}], same mapping as checkStates. */
+    async commitChecks(sha) {
+      const out = String(await run("gh")(["api", "--paginate", `repos/${repo}/commits/${sha}/check-runs`, "--jq", ".check_runs[] | {name, status, conclusion, url: .html_url} | @json"]));
+      return out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)).map((c) => {
+        const v = String(c.status === "completed" ? c.conclusion ?? "" : "").toUpperCase();
+        const state = ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(v) ? "success" : ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"].includes(v) ? "failure" : "pending";
+        return { name: c.name, state, url: c.url ?? null };
+      });
+    },
+    /** Failed-job logs of an Actions run (`gh run view --log-failed`), tail-capped; "" when unreadable. */
+    async failedLogs(runId) {
+      try { const out = String(await run("gh")(["run", "view", String(runId), "-R", repo, "--log-failed"])); return out.length > 64000 ? out.slice(-64000) : out; } catch { return ""; }
     },
     async transitionLabel(issue, state) { await pexec("bash", [script("transition-label.sh"), String(issue), "-R", repo, state], { timeout: 60000 }); },
     /**

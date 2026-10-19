@@ -8,17 +8,17 @@ import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
-import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
+import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
 import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir } from "./effects.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
-import { checkAdmission } from "./admission.mjs";
+import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete } from "../engine-cli.mjs";
-import { runFromCli, orchestrateFromCli, ENGINE_PATHS } from "../engine-cli.mjs";
+import { runFromCli, orchestrateFromCli, ENGINE_PATHS, readMaintenance } from "../engine-cli.mjs";
 
 const WT = "/wt/lean-7";
 const STAGE_MD = {
@@ -1454,6 +1454,109 @@ describe("orchestrate", () => {
   });
 });
 
+describe("orchestrate maintenance budget (#4197)", () => {
+  const memStore = () => { let st = null; return { load: () => st, save: (s) => { st = JSON.parse(JSON.stringify(s)); }, get: () => st }; };
+  const serial = (classes, extra = {}) => {
+    const starts = [];
+    return { starts, opts: { parallel: 1, readBody: async () => "", classify: async (n) => classes[n] ?? { maintenance: false, priority: 2 },
+      runOne: async (n) => { starts.push(n); await new Promise((r) => setImmediate(r)); return { terminalReason: "merged" }; }, ...extra } };
+  };
+
+  it("pickNext: share 0.2 gives 2 maintenance starts in 10 when queued; P0/P1 features always first", () => {
+    const classes = new Map([[1, { maintenance: false, priority: 2 }], [2, { maintenance: true, priority: 2 }], [3, { maintenance: false, priority: 1 }]]);
+    let started = 0, maint = 0;
+    const picks = [];
+    for (let i = 0; i < 10; i++) {
+      const n = pickNext([2, 1], { classes, share: 0.2, started, maint });
+      picks.push(n); started++; if (n === 2) maint++;
+    }
+    assert.equal(picks.filter((n) => n === 2).length, 2);
+    assert.deepEqual(picks, [1, 1, 1, 1, 2, 1, 1, 1, 1, 2]);
+    // The share is due, yet a ready P1 feature still goes first; a P0 maintenance label is still maintenance.
+    assert.equal(pickNext([2, 1, 3], { classes, share: 0.2, started: 4, maint: 0 }), 3);
+    assert.equal(pickNext([2], { classes, share: 0.2, started: 0, maint: 0, whenIdle: true, featuresPending: true }), null);
+    assert.equal(pickNext([2], { classes, share: 0.2, started: 0, maint: 0, whenIdle: true, featuresPending: false }), 2);
+    assert.equal(pickNext([2], { classes, share: 0.2, started: 0, maint: 0, whenIdle: false, featuresPending: false }), null);
+  });
+
+  it("orchestrate dispatches 2 of 10 lanes to queued maintenance with share 0.2, P1 first, and persists the ratio", async () => {
+    const classes = { 20: { maintenance: false, priority: 1 } };
+    for (const n of [11, 12, 13, 14]) classes[n] = { maintenance: true, priority: 2 };
+    const store = memStore();
+    const h = serial(classes);
+    const feats = [1, 2, 3, 4, 5, 6, 7, 8];
+    const rows = await orchestrate({ issues: [11, 12, 13, 14, ...feats, 20], store, maintenance: { share: 0.2, whenIdle: false }, ...h.opts });
+    assert.equal(h.starts[0], 20, "P1 feature first");
+    const first10 = h.starts.slice(0, 10);
+    assert.equal(first10.filter((n) => classes[n]?.maintenance).length, 2, JSON.stringify(h.starts));
+    // 11 starts: 9 features + 2 maintenance; the other 2 maintenance issues are held by the budget, not a cycle.
+    assert.equal(h.starts.length, 11);
+    const held = rows.filter((r) => r.outcome === "held");
+    assert.deepEqual(held.map((r) => r.issue), [13, 14]);
+    assert.ok(held.every((r) => r.detail === "maintenance share"));
+    assert.ok(!rows.some((r) => r.detail === "dependency cycle"));
+    assert.deepEqual(store.get().dispatch, { started: 11, maint: 2 });
+    assert.equal(store.get().classes["11"].maintenance, true);
+  });
+
+  it("when_idle drains maintenance once the feature queue is empty", async () => {
+    const h = serial({ 5: { maintenance: true }, 6: { maintenance: true } });
+    const rows = await orchestrate({ issues: [5, 6, 1], maintenance: { share: 0.2, whenIdle: true }, ...h.opts });
+    assert.deepEqual(h.starts, [1, 5, 6]);
+    assert.ok(rows.every((r) => r.outcome === "merged"));
+  });
+
+  it("off by default: no maintenance option means FIFO admission, no classify call and no new store keys", async () => {
+    let classified = 0;
+    const store = memStore();
+    const h = serial({ 5: { maintenance: true } }, { classify: async () => { classified++; return { maintenance: true, priority: 0 }; } });
+    await orchestrate({ issues: [5, 6, 1], store, ...h.opts });
+    assert.deepEqual(h.starts, [5, 6, 1]);
+    assert.equal(classified, 0);
+    assert.ok(!("classes" in store.get()) && !("dispatch" in store.get()));
+  });
+
+  it("readMaintenance: null without config, block form parsed, inline flow map not enabled", () => {
+    const d = tmpDir("maint-cfg-");
+    assert.equal(readMaintenance(d), null);
+    writeFileSync(join(d, "forge.yaml"), "maintenance:\n  enabled: false\n  share: 0.5\n");
+    assert.equal(readMaintenance(d), null);
+    writeFileSync(join(d, "forge.yaml"), "maintenance:\n  enabled: true\n  share: 0.25\n  when_idle: false\n  labels: maintenance,dead-code\n  file_lines: 1500\n");
+    assert.deepEqual(readMaintenance(d), { share: 0.25, whenIdle: false, labels: ["maintenance", "dead-code"], scan: "weekly", fileLines: 1500, docKb: 64 });
+    writeFileSync(join(d, "forge.yaml"), "maintenance:\n  enabled: true\n  share: 7\n");
+    assert.equal(readMaintenance(d).share, 0.2);
+    writeFileSync(join(d, "forge.yaml"), "maintenance: { enabled: true, share: 0.2 }\n");
+    assert.equal(readMaintenance(d), null);
+  });
+
+  it("orchestrateFromCli pulls open maintenance-labelled issues only when the budget is configured", async () => {
+    const calls = [];
+    const leanIo = {
+      gh: async (a) => {
+        calls.push(a.join(" "));
+        if (a[0] === "repo") return "main\n";
+        if (a.includes("milestone")) return JSON.stringify({ milestone: null });
+        if (a[0] === "issue" && a[1] === "list") return JSON.stringify(a.includes("maintenance") ? [{ number: 9, labels: [{ name: "maintenance" }] }, { number: 8, labels: [{ name: "maintenance" }, { name: "needs-human" }] }] : []);
+        return JSON.stringify({ body: "", labels: a[2] === "9" ? [{ name: "maintenance" }] : [{ name: "priority:P1" }] });
+      },
+      git: async (a) => (a[0] === "ls-remote" && a.at(-1) === "refs/heads/staging" ? "abc\tref\n" : ""),
+    };
+    const ran = [];
+    const mk = () => ({ dir: tmpDir("maint-orch-"), batchRoot: tmpDir("maint-orch-batch-"), allowTmpfs: true, emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo,
+      leanModule: { runCore: async (o) => { ran.push(o.issue); return { terminalReason: "merged", cost_usd: 0, wall_ms: 1 }; } } });
+    const l = console.log; console.log = () => {};
+    try {
+      await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...mk(), maintenance: null });
+      assert.deepEqual(ran, [1]);
+      assert.ok(!calls.some((c) => c.startsWith("issue list") || c.includes("body,labels")), calls.join("\n"));
+      ran.length = 0; calls.length = 0;
+      const res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...mk(), maintenance: { share: 0.5, whenIdle: true, labels: ["maintenance"] } });
+      assert.deepEqual(ran, [1, 9]);
+      assert.deepEqual(res.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [9, "merged"]]);
+    } finally { console.log = l; }
+  });
+});
+
 describe("runCliBackendAsync", () => {
   it("returns the same envelope as runCliBackend, without blocking the event loop", async () => {
     const { writeFileSync, chmodSync } = await import("node:fs");
@@ -2342,6 +2445,102 @@ describe("large diffs never reach argv (#4129)", () => {
   });
 });
 
+describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds failures to the builder", () => {
+  const CI = { mode: "ci", workflow: "verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 2 };
+  /** Adds the CI seams to a world: each dispatch creates a run for the current head; `conclusions` is consumed per run. */
+  const withCi = (w, { conclusions = ["success"], dispatchError = null, log = "ERROR: poetry.lock is not up to date" } = {}) => {
+    w.ci = { dispatched: [], runs: [], logsFor: [], conclusions: [...conclusions] };
+    Object.assign(w.io, {
+      dispatchWorkflow: async (a) => { w.seq.push("dispatch"); if (dispatchError) throw new Error(dispatchError); w.ci.dispatched.push(a); const id = 100 + w.ci.runs.length;
+        const c = w.ci.conclusions.length > 1 ? w.ci.conclusions.shift() : w.ci.conclusions[0]; w.ci.runs.unshift({ databaseId: id, headSha: w.head, status: c === "pending" ? "in_progress" : "completed", conclusion: c === "pending" ? null : c, url: `https://github.com/o/r/actions/runs/${id}`, name: "verify" }); },
+      workflowRuns: async () => w.ci.runs,
+      failedLogs: async (id) => { w.ci.logsFor.push(id); return log; },
+    });
+    return w;
+  };
+  const ciValidation = [{ id: "V1", command: "node --test test/foo.test.js", ci: true }];
+  const events = (dir) => readLog(dir, 7).filter((e) => e.event === "CI_VERIFY");
+
+  it("green CI: the builder is told not to run test suites, the branch is pushed and verified before review, validate left to CI passes enforce", async () => {
+    const w = withCi(world({ validation: ciValidation }));
+    const dir = tmpDir("core-ci-");
+    const r = await run(w, { verify: CI, dir });
+    assert.equal(r.terminalReason, "merged");
+    const impl = builders(w)[1][4];
+    assert.match(impl, /Do NOT run type-checks .*test suites .*docker\/test containers/);
+    assert.doesNotMatch(impl, /run every validate command/);
+    assert.deepEqual(w.ci.dispatched, [{ workflow: "verify.yml", ref: "feat/issue-7-lean", inputs: { changed_paths: "src/foo.js\ntest/foo.test.js" } }]);
+    assert.ok(w.seq.indexOf("dispatch") < w.seq.indexOf("reviewer"), "CI runs before the conformance review");
+    assert.ok(w.pushes >= 1);
+    assert.deepEqual(events(dir).map((e) => [e.result, e.mode]), [["pass", "ci"]]);
+    assert.match(traj(w)[0], /\| Verify \| CI green at /);
+  });
+
+  it("red CI: the failed job's log goes back to the builder, the fix is re-verified, then merged", async () => {
+    const w = withCi(world({ validation: ciValidation }), { conclusions: ["failure", "success"] });
+    const r = await run(w, { verify: CI });
+    assert.equal(r.terminalReason, "merged");
+    const fix = builders(w).find((b) => /CI failed on the pushed branch/.test(b[4]));
+    assert.ok(fix, "a CI-fix resume ran"); assert.equal(fix[2], "sess-1");
+    assert.match(fix[4], /poetry\.lock is not up to date/); assert.match(fix[4], /actions\/runs\/100/);
+    assert.deepEqual(w.ci.logsFor, [100]);
+    assert.equal(w.ci.dispatched.length, 2, "the fixed head is verified again");
+    assert.notEqual(w.ci.runs[0].headSha, w.ci.runs[1].headSha);
+  });
+
+  it("CI still red after max_rounds: needs-human ci.red and nothing merges to the lane", async () => {
+    const w = withCi(world({ validation: ciValidation }), { conclusions: ["failure"] });
+    const r = await run(w, { verify: { ...CI, maxRounds: 1 } });
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "ci.red");
+    assert.equal(w.prs.length, 0); assert.equal(w.merges.length, 0); assert.equal(reviewers(w).length, 0);
+  });
+
+  it("without the fix, a validate id left to CI is missing under enforce (the regression this guards)", async () => {
+    const w = world({ validation: ciValidation });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
+  });
+
+  it("docs-only lane: no push for CI, no dispatch; the decision is recorded", async () => {
+    const w = withCi(world({ changed: ["README.md", "docs/guide.md"], validation: ciValidation }));
+    const r = await run(w, { verify: CI, conformance: "shadow" });
+    assert.equal(r.terminalReason, "merged"); assert.equal(w.ci.dispatched.length, 0);
+    assert.match(traj(w)[0], /CI verification skipped/);
+  });
+
+  it("CI unavailable: falls back once to local validation in the builder session", async () => {
+    const w = withCi(world({ validation: ciValidation, resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] }), { dispatchError: "HTTP 422: Workflow does not have 'workflow_dispatch' trigger" });
+    w.resumeResult = { ...w.result };
+    const r = await run(w, { verify: CI, conformance: "shadow" });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(builders(w).some((b) => /CI verification is unavailable/.test(b[4])));
+    assert.match(traj(w)[0], /local fallback/);
+  });
+
+  it("slow CI ends ci-pending (never needs-human) before any PR", async () => {
+    const w = withCi(world({ validation: ciValidation }), { conclusions: ["pending"] });
+    const r = await run(w, { verify: CI, ciMaxMinutes: 10 });
+    assert.equal(r.terminalReason, "ci-pending"); assert.equal(w.prs.length, 0);
+  });
+
+  it("local (default): no CI seam is touched and the implement prompt is unchanged", async () => {
+    const w = withCi(world());
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(w.ci.dispatched.length, 0);
+    assert.equal(builders(w)[1][4], builderImplementPrompt());
+    assert.doesNotMatch(traj(w)[0], /\| Verify \|/);
+  });
+
+  it("forge.yaml verify: block section is read; absent section is undefined", async () => {
+    const { readVerify } = await import("../engine-cli.mjs");
+    const d = tmpDir("verify-yaml-");
+    writeFileSync(`${d}/forge.yaml`, "engine:\n  conformance: shadow\n");
+    assert.equal(readVerify(d), undefined);
+    writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n");
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3 });
+  });
+});
+
 describe("lane resource ledger + teardown on every exit path (#4179)", () => {
   /** A world with a real on-disk ledger, fake docker/kill, a run tmp with a known path and a builder that reports its pid + a container. */
   const ledgered = (o = {}) => {
@@ -2483,5 +2682,64 @@ describe("lane resource ledger + teardown on every exit path (#4179)", () => {
       assert.deepEqual(w.killed, [[4242, "claude"]], "the builder's process group is signalled");
       tornDown(w, sig);
     }
+  });
+});
+
+describe("host-aware verification concurrency (#4182)", () => {
+  const host = (o = {}) => ({ memAvailableMb: () => 8192, freeMb: async () => 8192, loadAvg1: () => o.load ?? 1, cores: () => o.cores ?? 4, activeLanes: o.activeLanes ?? (() => o.lanes ?? 2), tmpPaths: () => ["/tmp"] });
+  const withEnv = async (v, fn) => { const prev = process.env.FORGE_HOST_PARALLELISM; if (v === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = v;
+    try { return await fn(); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; } };
+
+  it("#4182 hostParallelism = max(1, floor(cores / lanes)); bad inputs count as 1", () => {
+    assert.equal(hostParallelism({ cores: 4, lanes: 2 }), 2);
+    assert.equal(hostParallelism({ cores: 4, lanes: 0 }), 4);
+    assert.equal(hostParallelism({ cores: 1, lanes: 8 }), 1);
+    assert.equal(hostParallelism({ cores: 7, lanes: 2 }), 3);
+    assert.equal(hostParallelism({ cores: NaN, lanes: NaN }), 1);
+    assert.equal(hostParallelism(), 1);
+  });
+
+  it("#4182 a 4-core host with 2 lanes gives every runner call FORGE_HOST_PARALLELISM=2, with or without a run tmp", async () => {
+    await withEnv(undefined, async () => {
+      const w = world(); w.io.host = host();
+      assert.equal((await run(w, { governor: false })).terminalReason, "merged");
+      assert.ok(w.envs.length >= 1);
+      for (const e of w.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, "2");
+      const w2 = world(); w2.io.host = host(); w2.io.runTmp = { prune: async () => {}, make: async (i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async () => {} };
+      await run(w2, { governor: false });
+      for (const e of w2.envs) { assert.equal(e?.FORGE_HOST_PARALLELISM, "2"); assert.match(e?.TMPDIR ?? "", /runs\/7-/); }
+    });
+  });
+
+  it("#4182 an operator-set FORGE_HOST_PARALLELISM wins; a failing lane probe or no host never breaks the run", async () => {
+    await withEnv("3", async () => {
+      const w = world(); w.io.host = host(); await run(w, { governor: false });
+      for (const e of w.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, "3");
+    });
+    await withEnv("0", async () => {
+      const w = world(); w.io.host = host({ cores: 8, lanes: 4 }); await run(w, { governor: false });
+      for (const e of w.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, "2", "an invalid override is ignored");
+    });
+    await withEnv(undefined, async () => {
+      const w = world(); w.io.host = host({ activeLanes: () => { throw new Error("ledger unreadable"); } });
+      assert.equal((await run(w, { governor: false })).terminalReason, "merged");
+      for (const e of w.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, undefined, "a probe error injects nothing");
+      const w2 = world(); assert.equal((await run(w2)).terminalReason, "merged");
+      for (const e of w2.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, undefined);
+    });
+  });
+
+  it("#4182 both builder prompts tell verification to cap workers at $FORGE_HOST_PARALLELISM (within budget)", () => {
+    for (const p of [builderPlanPrompt(7), builderImplementPrompt()]) {
+      for (const needle of ["$FORGE_HOST_PARALLELISM", "turbo --concurrency", "--maxWorkers", "playwright --workers", "--test-concurrency", "eslint via turbo"]) assert.ok(p.includes(needle), needle);
+      assert.ok(approxTokens(p) <= 2800, `builder prompt is ${approxTokens(p)} tokens`);
+    }
+  });
+
+  it("#4182 2 lanes x 2 workers on a 4-core host stay under the admission ceiling; all-core pools are the old load", async () => {
+    const cores = 4, lanes = 2, workers = hostParallelism({ cores, lanes });
+    assert.ok(workers <= 2);
+    assert.equal((await checkAdmission({ host: host({ cores, load: lanes * workers }) })).ok, true);
+    assert.equal((await checkAdmission({ host: host({ cores, load: lanes * workers }) })).reasons.length, 0);
   });
 });

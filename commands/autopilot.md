@@ -28,6 +28,8 @@ You are a fully autonomous deploy loop for this project. Your job is to **detect
 
 **Issue selection and priority**: Phase 2 (Fast Lane Loop) dispatches all eligible open issues **concurrently** via the durable engine — ordering is irrelevant at dispatch time because all issues start simultaneously. For scenarios requiring sequential, priority-ordered dispatch (P0 before P1 before P2, unlabeled excluded), use `scripts/select-fix-targets.sh` as the entry point. This script will be the substitution point when #1743 (economic scheduling) implements value/cost-based ordering. <!-- Added: forge#1752 -->
 
+**Maintenance budget** (#4197, only with forge.yaml `maintenance.enabled: true`): the batch runner admits P0/P1 features > maintenance-labelled issues within `maintenance.share` of lane starts (0.2 = 1 in 5) > P2+ features, and `when_idle` drains maintenance when no feature is pending. When `maintenance.scan: weekly` and the newest issue carrying a `FORGE:MAINT` marker (open or closed: `gh issue list --state all --search "FORGE:MAINT in:body" --limit 1 --json createdAt`) is older than 7 days, or none exists, run `scripts/maintenance-scan.sh --print-issue-args` once before Phase 2 and file each printed line through `/issue` programmatic mode, `Skill(skill="{FORGE_SKILL_PREFIX}issue", args=<line>)`; never raw `gh issue create`. The scan is deterministic, already deduplicated by marker, and prints nothing under threshold.
+
 **This command overrides the standard "never merge to main" rule.** `/autopilot` IS the authorized deploy system. It ships staging→main and milestone→staging→main as part of normal operation.
 
 **This command resumes from wherever the pipeline is stuck.** It always reads current GitHub state before taking any action.

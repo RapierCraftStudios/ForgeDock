@@ -12,7 +12,30 @@ export const PLAN_FILE = `${LEAN_DIR}/plan.md`;
 export const IMPLEMENTATION_FILE = `${LEAN_DIR}/implementation.md`;
 export const CONTRACT_FILE = `${LEAN_DIR}/contract.json`;
 
-const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR.`;
+const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo).`;
+
+/** Verify-by-CI (#4167): in ci/hybrid mode the engine runs the repo's CI on GitHub runners; the host runs only light checks. */
+const LIGHT = "run only formatters and linters on the files you changed";
+const VERIFY_RUN = { ci: `${LIGHT} (no type-checks, test suites or test containers)`, hybrid: "run the targeted validate commands" };
+const VERIFY_RULES = {
+  ci: `Verification runs on CI (forge.yaml verify.mode: ci). Do NOT run type-checks (tsc and the like), test suites (pytest, jest, node --test and the like) or docker/test containers on this host: ${LIGHT}. The engine pushes the branch, runs CI and sends failures back to you. In ${RESULT_FILE} record each validate id you did not run as {"id":"V1","command":"","ci":true}.`,
+  hybrid: `Verification also runs on CI (forge.yaml verify.mode: hybrid). Run the targeted validate commands and ${LIGHT}; never the full suite and no docker/test containers. The engine pushes the branch, runs CI and sends failures back to you. Record each validate id you did not run as {"id":"V1","command":"","ci":true}.`,
+};
+const rerun = (mode) => (mode === "ci" ? `Re-run the light checks only (${LIGHT}); the engine re-verifies on CI` : "Re-run the validate commands");
+
+/** Base-sync conflict resolution: which checks to run after resolving (#4167: ci mode runs light checks only). */
+export const syncChecks = (mode = "local") => (mode === "ci" ? `${LIGHT} (the engine re-verifies on CI)` : "run the relevant tests");
+
+/** CI failed on the pushed branch (#4167): one fix round in the builder's own session. */
+export function ciFailurePrompt(failures, mode = "local") {
+  const list = failures.slice(0, 10).map((f) => `#### ${f.job ?? "check"}${f.url ? ` (${f.url})` : ""}\n${f.log ? `\`\`\`\n${f.log}\n\`\`\`` : "(no log available: open the url)"}`).join("\n\n");
+  return `CI failed on the pushed branch:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** CI could not run (no workflow run, no checks, dispatch refused): the local fallback (#4167). */
+export function ciUnavailablePrompt() {
+  return `CI verification is unavailable for this branch, so verification falls back to this host. Run every validate command locally (targeted, as the host rules say), fix any failure, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE} with each command's real exit code. Do not push or touch GitHub.`;
+}
 
 /** Builder call 1: investigate and write the contract. No code edits. */
 export function builderPlanPrompt(n) {
@@ -48,10 +71,11 @@ ${BLOCK_RULES}`;
 }
 
 /** Builder call 2, same session: implement the frozen contract. */
-export function builderImplementPrompt() {
-  return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, run every validate command, and commit. Do not push or touch GitHub.
+export function builderImplementPrompt(mode = "local") {
+  const remote = mode === "ci" || mode === "hybrid";
+  return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, and commit. Do not push or touch GitHub.
 
-${HOST_RULES}
+${HOST_RULES}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why, which the engine posts on the issue:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file you must change that the contract did not list.
@@ -78,13 +102,13 @@ export function contractCorrectionPrompt(problems) {
 }
 
 /** The one bounded correction round, in the builder's own session. */
-export function conformanceResumePrompt(failures) {
-  return `The change does not conform to the frozen contract and the issue:\n${failures.slice(0, 30).map((f) => `- ${f.code}: ${String(f.detail).slice(0, 500)}`).join("\n")}\n\nFix each item in the code, or record a typed amendment with a why in ${RESULT_FILE}. Re-run the validate commands, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+export function conformanceResumePrompt(failures, mode = "local") {
+  return `The change does not conform to the frozen contract and the issue:\n${failures.slice(0, 30).map((f) => `- ${f.code}: ${String(f.detail).slice(0, 500)}`).join("\n")}\n\nFix each item in the code, or record a typed amendment with a why in ${RESULT_FILE}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /** forge#4159: the one resume for package.json edges between workspace packages the contract does not name. */
-export function structurePrompt(edges) {
-  return `This change adds dependencies between workspace packages that the frozen contract does not name:\n${edges.slice(0, 30).map((e) => `- ${e.from} -> ${e.to} (${e.kind}, ${e.manifest})`).join("\n")}\n\nFor each one, add it to the contract with a reason, or remove it: either record {"kind":"add-deliverable","path":"<that package.json>","why":"<names the package and why this dependency is right>"} in ${RESULT_FILE}, or drop the dependency from the package.json and the code that needs it. Re-run the validate commands, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+export function structurePrompt(edges, mode = "local") {
+  return `This change adds dependencies between workspace packages that the frozen contract does not name:\n${edges.slice(0, 30).map((e) => `- ${e.from} -> ${e.to} (${e.kind}, ${e.manifest})`).join("\n")}\n\nFor each one, add it to the contract with a reason, or remove it: either record {"kind":"add-deliverable","path":"<that package.json>","why":"<names the package and why this dependency is right>"} in ${RESULT_FILE}, or drop the dependency from the package.json and the code that needs it. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /** Human-only block reasons (#4124). Everything else agents resolve: a dependency, a split, prod data monitoring can read. */

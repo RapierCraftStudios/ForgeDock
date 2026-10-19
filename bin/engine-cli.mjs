@@ -17,6 +17,7 @@ import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
+import { parseVerify } from "./lean/verify.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
 
@@ -153,6 +154,16 @@ export function readMergeWait(cwd = process.cwd()) {
   try {
     const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.merge_wait ?? "").trim();
     return ["required", "all", "none"].includes(v) ? v : undefined;
+  } catch { return undefined; }
+}
+/**
+ * forge.yaml `verify:` section (#4167, block style: `verify:` then `  mode: ci`, `  workflow: verify.yml`, `  paths_input`,
+ * `  skip_paths` comma-separated, `  max_rounds`) for the core path; undefined when the section is absent or unreadable.
+ */
+export function readVerify(cwd = process.cwd()) {
+  try {
+    const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
+    return sec && typeof sec === "object" ? parseVerify(sec) : undefined;
   } catch { return undefined; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
@@ -587,7 +598,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -770,6 +781,9 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * `--resume <id>` continues after the dispatcher dies, re-adopting live lanes. `deferred` lanes are requeued by code,
  * forge.yaml `orchestration.breaker` ({errors, window_min}, default 3 in 30) stops admissions on an engine-error
  * burst, and `--set-parallel <id> K` changes K of a running batch.
+ * Maintenance budget (#4197), only with forge.yaml `maintenance.enabled: true` (or `deps.maintenance`): open issues carrying
+ * a `maintenance.labels` label join the batch, each issue is classified from its labels (maintenance; `priority:P<n>`,
+ * unlabelled = P2) and admission reserves `maintenance.share` of lane starts for maintenance (`when_idle` drains the rest).
  */
 export async function orchestrateFromCli(argv, deps = {}) {
   const batchMod = await import("./lean/batch.mjs");
@@ -841,21 +855,45 @@ export async function orchestrateFromCli(argv, deps = {}) {
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln) => runCore({ issue: n, repo, lane: ln, laneOverride, branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
     lanes = batchMod.detachedLanes({ batch, cwd, script: deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), bin: deps.laneBin, pollMs: deps.pollMs,
       laneArgs: (n, ln) => ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])] });
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
+  const maint = deps.maintenance !== undefined ? deps.maintenance : readMaintenance(cwd);
+  const labelsOf = new Map(); // issue -> label names, filled by readBody (one gh call per issue)
+  let budget = {};
+  if (maint) {
+    const mLabels = maint.labels ?? DEFAULT_MAINTENANCE_LABELS;
+    for (const l of mLabels) {
+      let listed = [];
+      try { listed = JSON.parse(await leanIo.gh(["issue", "list", "-R", repo, "--state", "open", "--label", l, "--json", "number,labels", "--limit", "100"])); } catch { listed = []; }
+      for (const it of Array.isArray(listed) ? listed : []) {
+        const names = (it.labels ?? []).map((x) => x.name);
+        if (!labelsOf.has(it.number)) labelsOf.set(it.number, names);
+        if (!names.includes("needs-human") && !issues.includes(it.number)) issues.push(it.number);
+      }
+    }
+    const classify = async (n) => {
+      if (!labelsOf.has(n)) labelsOf.set(n, (JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])).labels ?? []).map((x) => x.name));
+      const names = labelsOf.get(n);
+      const p = names.map((x) => /^priority:P(\d+)$/i.exec(x)?.[1]).find((x) => x !== undefined);
+      return { maintenance: names.some((x) => mLabels.includes(x)), priority: p === undefined ? 2 : Number(p) };
+    };
+    budget = { classify, maintenance: { share: maint.share ?? 0.2, whenIdle: maint.whenIdle ?? true } };
+  }
   const crossLane = [];
   const rows = await orchestrate({
     issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
-    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}),
+    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget,
     onCrossLane: (e) => {
       crossLane.push(e);
       console.log(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
     },
-    readBody: async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
+    readBody: maint
+      ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); return v.body; }
+      : async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
     onUpdate: (r) => console.log(r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`),
   });
   console.log("\n" + formatTable(rows));
@@ -877,6 +915,24 @@ export function readOrchestration(cwd = process.cwd()) {
   const int = (v, d) => { const n = Number(v); return v !== undefined && v !== "" && Number.isInteger(n) && n >= 0 ? n : d; };
   const errors = int(o.breaker_errors ?? o.errors, 3), windowMin = int(o.breaker_window_min ?? o.window_min, 30);
   return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3) };
+}
+
+export const DEFAULT_MAINTENANCE_LABELS = ["maintenance", "refactor:split", "dead-code"];
+
+/**
+ * forge.yaml `maintenance:` (#4197): null unless `enabled: true`. `share` in (0,1] (default 0.2), `when_idle` (default
+ * true), `labels` comma-separated (default maintenance,refactor:split,dead-code), `scan` (default weekly), and the
+ * maintenance-scan thresholds `file_lines` (2000) / `doc_kb` (64). Block form only: the parser does not read `{ ... }`.
+ */
+export function readMaintenance(cwd = process.cwd()) {
+  let m = null;
+  try { m = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.maintenance ?? null; } catch { m = null; }
+  if (!m || typeof m !== "object" || String(m.enabled ?? "").trim() !== "true") return null;
+  const num = (v, d, ok) => { const n = Number(v); return v !== undefined && v !== "" && ok(n) ? n : d; };
+  const labels = String(m.labels ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+  return { share: num(m.share, 0.2, (n) => n > 0 && n <= 1), whenIdle: String(m.when_idle ?? "true").trim() !== "false",
+    labels: labels.length ? labels : [...DEFAULT_MAINTENANCE_LABELS], scan: String(m.scan ?? "weekly").trim() || "weekly",
+    fileLines: num(m.file_lines, 2000, (n) => Number.isInteger(n) && n > 0), docKb: num(m.doc_kb, 64, (n) => n > 0) };
 }
 
 /** `--prefilter-model M`, else forge.yaml `engine.lean_prefilter_model`, else the pre-filter default. */
