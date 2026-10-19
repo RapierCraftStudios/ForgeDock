@@ -533,18 +533,26 @@ export async function runIssue(opts) {
     // and regress committed/issue/v (C2).
     rewriteLog(dir, issue, eventsFromIndex(state, await runMeta()));
     state = deriveState(readLog(dir, issue));
-    // forge#3931: the index does not carry the cycle, so a hydrated log always starts at cycle 0. When a
-    // trusted FORGE:CYCLE exists, cycle-scoped progress (or a needs-human/phase-complete/engine-error terminal)
-    // belongs to an older cycle ONLY when provably so (cycleResetProvable: terminal index, issue OPEN, no needs-human/remediating label, no open PR): reset via the existing RUN_NEXT_CYCLE event so build runs again instead of
-    // terminating. An unreadable trail resets nothing (fail closed). merged/decomposed/invalid terminals stay.
+    // forge#3931/forge#3948: the index does not carry the cycle, so a hydrated log always starts at cycle 0.
+    // When a trusted FORGE:CYCLE exists, cycle-scoped progress under a needs-human terminal belongs to an
+    // older cycle ONLY when provably so (cycleResetProvable: needs-human terminal, branch known, issue OPEN,
+    // no needs-human/remediating label, no OPEN or MERGED PR). Same-cycle phase-complete/engine-error
+    // terminals are never reset here; `--retry` reopens them explicitly. The next FORGE:CYCLE is published
+    // BEFORE the RUN_NEXT_CYCLE append (as --retry does), so build never re-adopts older-cycle evidence.
+    // An unreadable trail or a failed marker post resets nothing (fail closed). merged/decomposed/invalid stay.
     if (state.committed.some((p) => ["build", "review", "remediate", "close"].includes(p)) &&
-        state.terminal && ["needs-human", "phase-complete", "engine-error"].includes(state.terminalReason) &&
+        state.terminal && state.terminalReason === "needs-human" &&
         await cycleResetProvable(state, io)) {
       let cyc = 0;
       try { cyc = await newestCycle(issue, io); } catch { cyc = 0; }
       if (cyc > 0) {
-        appendEvent(dir, issue, { event: "RUN_NEXT_CYCLE", issue });
-        state = deriveState(readLog(dir, issue));
+        const localCycles = readLog(dir, issue).filter((e) => e.event === "RUN_NEXT_CYCLE").length;
+        let published = false;
+        try { await postCycleMarker(issue, await nextCycleNumber(issue, localCycles, io), io); published = true; } catch { published = false; }
+        if (published) {
+          appendEvent(dir, issue, { event: "RUN_NEXT_CYCLE", issue });
+          state = deriveState(readLog(dir, issue));
+        }
       }
     }
   }

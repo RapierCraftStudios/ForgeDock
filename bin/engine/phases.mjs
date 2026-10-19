@@ -1374,18 +1374,24 @@ export async function remediationHeadStale(state, io) {
 /**
  * forge#3931 (CONC-1): hydrate-time cycle reset is safe only when the hydrated progress is provably from an
  * OLDER cycle. The index carries no cycle number, so a same-cycle mid-flight or blocked run must not reset.
- * Provable = a terminal index AND live GitHub state showing the issue OPEN with `needs-human` and
- * `workflow:remediating` both clear AND no OPEN PR on the branch. Any unreadable input returns false.
+ * forge#3948: phase-complete/engine-error terminals (merged PR, pre-PR failure) are indistinguishable from
+ * same-cycle ones, so only a `needs-human` terminal qualifies (`--retry` reopens the others explicitly).
+ * Provable = a needs-human terminal index with a known branch AND live GitHub state showing the issue OPEN
+ * with `needs-human` and `workflow:remediating` both clear AND no OPEN or MERGED PR on the branch or as
+ * `state.pr`. Any missing or unreadable input returns false.
  */
 export async function cycleResetProvable(state, io) {
-  if (!state?.terminal) return false;
+  if (!state?.terminal || state.terminalReason !== "needs-human" || !state.branch) return false;
   try {
     const snap = await issueSnapshot(state.issue, io);
     if (!snap.ok || snap.state !== "OPEN") return false;
     if (snap.labels.includes("needs-human") || snap.labels.includes("workflow:remediating")) return false;
-    if (state.branch) {
-      const a = JSON.parse((await io.gh(["pr", "list", "--head", state.branch, "--json", "number,state", "--state", "all"])) || "[]");
-      if (!Array.isArray(a) || a.some((p) => p && p.state === "OPEN")) return false;
+    const live = (p) => typeof p?.state !== "string" || p.state === "OPEN" || p.state === "MERGED";
+    const a = JSON.parse((await io.gh(["pr", "list", "--head", state.branch, "--json", "number,state", "--state", "all"])) || "[]");
+    if (!Array.isArray(a) || a.some(live)) return false;
+    if (state.pr != null) {
+      const j = JSON.parse((await io.gh(["pr", "view", String(state.pr), "--json", "state"])) || "{}");
+      if (live(j)) return false;
     }
     return true;
   } catch { return false; }
