@@ -3,7 +3,8 @@
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Builds a throwaway git repo from scripts/fixtures/symbol-move/gen_big.py (~3k-line module + unittest suite), moves
-# four symbol groups into pkg/big_parts/ and proves the move with scripts/refactor-verify.sh; then checks refusals.
+# four symbol groups into pkg/big_parts/ and proves the move with scripts/refactor-verify.sh; then checks refusals and
+# the --extend chain step (forge#4211).
 # Interpreter with libcst: $SYMBOL_MOVE_PYTHON, else python3 if it has libcst, else `uv run --no-project --with libcst
 # python`. Without one the libcst cases are skipped; SYMBOL_MOVE_REQUIRE_LIBCST=1 turns that skip into a failure.
 set -uo pipefail
@@ -128,6 +129,39 @@ else
   eq "verify failures" "$(q '.failures')" '[]'
   (cd "$R" && $TEST_CMD >"$TMP/after.txt" 2>&1); eq "tests after move" "$?" 0
   eq "identical test result" "$(tail -1 "$TMP/after.txt")" "OK (skipped=1)"
+
+  # ---- 5. --extend (forge#4211 chain step): a second PR adds modules to the package the first one created ----
+  R2="$TMP/repo2"; B2="$TMP/baseline2.json"
+  g2() { git -C "$R2" -c user.name=t -c user.email=t@example.invalid "$@"; }
+  mkdir -p "$R2"; git init -q "$R2"; printf '__pycache__/\n' > "$R2/.gitignore"
+  python3 "$GEN" "$R2" && g2 add -A && g2 commit -qm base
+  plan '{"consts":['"$(printf '"LIMIT_%02d",' $(seq 0 89))"'"_SEPARATOR"]}' "$TMP/step1.json"
+  mover --src "$R2/pkg/big.py" --plan "$TMP/step1.json"
+  eq "chain step 1 rc" "$RC" 0
+  g2 add -A && g2 commit -qm step1 && g2 tag step1
+  plan '{"helpers":['"$(for i in $(seq -w 0 89); do printf '"_scale_%s","compute_%s",' "$i" "$i"; done)"'"join_parts"]}' "$TMP/step2.json"
+  mover --src "$R2/pkg/big.py" --plan "$TMP/step2.json"
+  eq "existing package without --extend: rc" "$RC" 3
+  eq "existing package without --extend: reason" "$(q '.reason|contains("already exists")')" true
+  eq "existing package without --extend: untouched" "$(git -C "$R2" status --porcelain)" ""
+  jq -c '{consts: .helpers}' "$TMP/step2.json" > "$TMP/step2bad.json"
+  mover --src "$R2/pkg/big.py" --plan "$TMP/step2bad.json" --extend
+  eq "--extend colliding module: rc" "$RC" 3
+  eq "--extend colliding module: reason" "$(q '.reason|contains("module already exists")')" true
+  eq "--extend colliding module: untouched" "$(git -C "$R2" status --porcelain)" ""
+  run bash "$RV" baseline --root "$R2" --target pkg/big.py --test-cmd "$TEST_CMD" --out "$B2"
+  eq "chain baseline rc" "$RC" 0
+  INIT_SHA="$(git -C "$R2" hash-object pkg/big_parts/__init__.py)"
+  mover --src "$R2/pkg/big.py" --plan "$TMP/step2.json" --extend
+  eq "--extend rc" "$RC" 0
+  eq "--extend package" "$(q '.package')" '"pkg.big_parts"'
+  eq "--extend modules" "$(q '.modules|keys')" '["helpers"]'
+  eq "--extend keeps __init__" "$(git -C "$R2" hash-object pkg/big_parts/__init__.py)" "$INIT_SHA"
+  eq "--extend keeps step-1 module" "$(git -C "$R2" status --porcelain pkg/big_parts/consts.py)" ""
+  g2 add -A && g2 commit -qm step2
+  run bash "$RV" verify --baseline "$B2" --base step1
+  eq "--extend verify rc" "$RC" 0
+  eq "--extend verify failures" "$(q '.failures')" '[]'
 fi
 
 echo "symbol-move.test.sh: $PASS passed, $FAILN failed"

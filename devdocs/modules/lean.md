@@ -45,6 +45,16 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    forge.yaml `env.toolchain`) become a shim dir first on every runner PATH;
    an unsatisfied node pin is a trajectory anomaly; `env.setup` runs once
    before the builder, failure → `needs-human` / `env.setup_failed`.
+4a. **`refactor:split` lane** (#4211, `refactor.mjs`) — an issue labelled
+   `refactor:split` (labels come from the issue read `runCore` already makes)
+   skips steps 5–7: `runSplitStep` indexes the target (`symbol-index.py`), makes
+   ONE tool-less grouping call over the compact index (`noTools`, empty cwd; none
+   for a chained `FORGE:SPLIT-PLAN`), moves ≤ `splitMaxLines` (4000) whole modules
+   (`symbol-move.py`, `--extend` on chain steps), commits and proves it
+   (`refactor-verify.sh`). Refusals → `needs-human` `split.*`, worktree reset,
+   nothing pushed. No builder session: every fix path (precheck, CI, base-sync
+   conflict) is `needs-human`; a clean base-sync re-verifies; no reviewer. After
+   the merge the rest is filed as one chained `refactor:split` issue.
 5. **Builder: plan → contract** — plan call writes `.forge-lean/`
    `investigation.md` + `contract.json`; `conformance.mjs` `validateContract`
    checks quotes against the issue and trusted comments; the engine freezes it
@@ -153,7 +163,8 @@ docs), deduplicated by a `FORGE:MAINT:<kind>:<key>` marker.
 
 `checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),
 `prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`),
-`prompts.mjs` (builder/reviewer prompts, `.forge-lean/` file names),
+`prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
+`refactor.mjs` (`refactor:split` step, #4211),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
 push/gh/merge retry patterns).
 
@@ -290,3 +301,12 @@ build is followed by the repo's declared check commands (`learned.test_commands`
 `effects.mjs` `checkStates` (+`url`, `head`), `runCommand`. Cost: green path +0 LLM
 calls; each red round is one builder resume (+ one reviewer run at merge), replacing a
 `needs-human` and a manual `/fix-ci` + relaunch. `merge_wait: all` is unchanged.
+
+## Entry 2026-10-20 — refactor:split lane (#4211)
+
+`refactor:split` issues no longer go through the builder. `lean.mjs` routes them by label to
+`refactor.mjs` `runSplitStep`: deterministic index, move and proof around one `noTools` grouping
+call (`effects.mjs` `noToolFlags`, `prompts.mjs` `groupingPrompt`), then the usual PR/merge.
+Chains: `slicePlan` + `symbol-move.py --extend` + a `FORGE:SPLIT-PLAN` follow-up issue. Codes
+`split.unsupported|plan_invalid|verify_failed`. Cost: one index-sized call, 0 reviewer runs per
+split, instead of a builder session plus a reviewer. ADR `decisions/4211-refactor-split-lane.md`.
