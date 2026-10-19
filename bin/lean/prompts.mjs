@@ -82,6 +82,7 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 - {"kind":"defer|post-deploy","requirement":"R#","why":""}: a contracted requirement that becomes separate work or a post-deploy check. The engine files it as a tracked follow-up.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
 A new dependency between workspace packages in a package.json that no deliverable names (that package.json, with the package in its change) is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
+If the repository has scripts/check-devdocs-freshness.sh, its docs must move with the code: a behaviour change under the paths it checks needs the matching module dossier (devdocs/modules/*.md, per devdocs/index.yaml) updated in the same change. Run it against the base before writing the result; the engine runs it too and resumes you once if it fails.
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):
 ### Approach
@@ -108,6 +109,11 @@ export function conformanceResumePrompt(failures, mode = "local") {
 /** forge#4159: the one resume for package.json edges between workspace packages the contract does not name. */
 export function structurePrompt(edges, mode = "local") {
   return `This change adds dependencies between workspace packages that the frozen contract does not name:\n${edges.slice(0, 30).map((e) => `- ${e.from} -> ${e.to} (${e.kind}, ${e.manifest})`).join("\n")}\n\nFor each one, add it to the contract with a reason, or remove it: either record {"kind":"add-deliverable","path":"<that package.json>","why":"<names the package and why this dependency is right>"} in ${RESULT_FILE}, or drop the dependency from the package.json and the code that needs it. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** The repo's devdocs freshness rule failed on the committed change: update the named dossier(s) and commit. */
+export function docsPrompt(output, mode = "local") {
+  return `The repository's docs freshness check (scripts/check-devdocs-freshness.sh) fails on this change:\n${String(output ?? "").slice(0, 4000)}\n\nUpdate the module dossier it names (devdocs/modules/*.md; devdocs/index.yaml maps files to dossiers) to describe the behaviour you changed, in the dossier's existing style and in a few lines. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /** Human-only block reasons (#4124). Everything else agents resolve: a dependency, a split, prod data monitoring can read. */

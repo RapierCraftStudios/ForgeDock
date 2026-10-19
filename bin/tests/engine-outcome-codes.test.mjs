@@ -72,7 +72,7 @@ const COVERAGE = {
   "review.failed": "lean", "review.no_verdict": "lean", "merge.head_mismatch": "lean",
   "contract.invalid": "lean", "review.incomplete": "lean", "review.inconsistent": "lean", "conformance.omission": "lean",
   "conformance.unimplemented": "lean", "conformance.scope_creep": "lean", "conformance.untracked_deferral": "lean", "conformance.unjustified_deferral": "lean",
-  "conformance.preserve_violated": "lean", "conformance.regression": "lean", "structure.undeclared_edge": "lean", "followup.unavailable": "lean",
+  "conformance.preserve_violated": "lean", "conformance.regression": "lean", "structure.undeclared_edge": "lean", "docs.stale": "lean", "followup.unavailable": "lean",
   "awaiting_merge": "codeForTerminalReason", "unclassified": "engine",
 };
 

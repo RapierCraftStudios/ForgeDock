@@ -59,6 +59,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
    (`max_rounds`, then `ci.red`), slow → `ci-pending`, unavailable → local fallback;
    docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI.
+   **Docs freshness**: when the target repo has `scripts/check-devdocs-freshness.sh`,
+   the engine runs it on `base...HEAD` after implement (`io.docsFreshness`, empty
+   `PR_BODY`). Exit 1 resumes the builder once with the script's output (`docsPrompt`);
+   still failing is `needs-human` / `docs.stale`, before any PR or reviewer run. No
+   script, or exit 2+, never blocks.
 7. **Conformance** — `precheck` (deterministic: changed files vs deliverables,
    validate results, requirement statuses; each failure has a `kind`),
    structured review (`parseReview`), `decide` computes the verdict. The
