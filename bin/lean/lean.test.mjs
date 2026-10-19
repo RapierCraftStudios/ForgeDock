@@ -15,7 +15,7 @@ import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
 import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir } from "./effects.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
-import { checkAdmission } from "./admission.mjs";
+import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { readAdmission, readConformanceMode } from "../engine-cli.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS, readMaintenance } from "../engine-cli.mjs";
@@ -2628,5 +2628,64 @@ describe("lane resource ledger + teardown on every exit path (#4179)", () => {
       assert.deepEqual(w.killed, [[4242, "claude"]], "the builder's process group is signalled");
       tornDown(w, sig);
     }
+  });
+});
+
+describe("host-aware verification concurrency (#4182)", () => {
+  const host = (o = {}) => ({ memAvailableMb: () => 8192, freeMb: async () => 8192, loadAvg1: () => o.load ?? 1, cores: () => o.cores ?? 4, activeLanes: o.activeLanes ?? (() => o.lanes ?? 2), tmpPaths: () => ["/tmp"] });
+  const withEnv = async (v, fn) => { const prev = process.env.FORGE_HOST_PARALLELISM; if (v === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = v;
+    try { return await fn(); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; } };
+
+  it("#4182 hostParallelism = max(1, floor(cores / lanes)); bad inputs count as 1", () => {
+    assert.equal(hostParallelism({ cores: 4, lanes: 2 }), 2);
+    assert.equal(hostParallelism({ cores: 4, lanes: 0 }), 4);
+    assert.equal(hostParallelism({ cores: 1, lanes: 8 }), 1);
+    assert.equal(hostParallelism({ cores: 7, lanes: 2 }), 3);
+    assert.equal(hostParallelism({ cores: NaN, lanes: NaN }), 1);
+    assert.equal(hostParallelism(), 1);
+  });
+
+  it("#4182 a 4-core host with 2 lanes gives every runner call FORGE_HOST_PARALLELISM=2, with or without a run tmp", async () => {
+    await withEnv(undefined, async () => {
+      const w = world(); w.io.host = host();
+      assert.equal((await run(w, { governor: false })).terminalReason, "merged");
+      assert.ok(w.envs.length >= 1);
+      for (const e of w.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, "2");
+      const w2 = world(); w2.io.host = host(); w2.io.runTmp = { prune: async () => {}, make: async (i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async () => {} };
+      await run(w2, { governor: false });
+      for (const e of w2.envs) { assert.equal(e?.FORGE_HOST_PARALLELISM, "2"); assert.match(e?.TMPDIR ?? "", /runs\/7-/); }
+    });
+  });
+
+  it("#4182 an operator-set FORGE_HOST_PARALLELISM wins; a failing lane probe or no host never breaks the run", async () => {
+    await withEnv("3", async () => {
+      const w = world(); w.io.host = host(); await run(w, { governor: false });
+      for (const e of w.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, "3");
+    });
+    await withEnv("0", async () => {
+      const w = world(); w.io.host = host({ cores: 8, lanes: 4 }); await run(w, { governor: false });
+      for (const e of w.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, "2", "an invalid override is ignored");
+    });
+    await withEnv(undefined, async () => {
+      const w = world(); w.io.host = host({ activeLanes: () => { throw new Error("ledger unreadable"); } });
+      assert.equal((await run(w, { governor: false })).terminalReason, "merged");
+      for (const e of w.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, undefined, "a probe error injects nothing");
+      const w2 = world(); assert.equal((await run(w2)).terminalReason, "merged");
+      for (const e of w2.envs) assert.equal(e?.FORGE_HOST_PARALLELISM, undefined);
+    });
+  });
+
+  it("#4182 both builder prompts tell verification to cap workers at $FORGE_HOST_PARALLELISM (within budget)", () => {
+    for (const p of [builderPlanPrompt(7), builderImplementPrompt()]) {
+      for (const needle of ["$FORGE_HOST_PARALLELISM", "turbo --concurrency", "--maxWorkers", "playwright --workers", "--test-concurrency", "eslint via turbo"]) assert.ok(p.includes(needle), needle);
+      assert.ok(approxTokens(p) <= 2800, `builder prompt is ${approxTokens(p)} tokens`);
+    }
+  });
+
+  it("#4182 2 lanes x 2 workers on a 4-core host stay under the admission ceiling; all-core pools are the old load", async () => {
+    const cores = 4, lanes = 2, workers = hostParallelism({ cores, lanes });
+    assert.ok(workers <= 2);
+    assert.equal((await checkAdmission({ host: host({ cores, load: lanes * workers }) })).ok, true);
+    assert.equal((await checkAdmission({ host: host({ cores, load: lanes * workers }) })).reasons.length, 0);
   });
 });
