@@ -473,6 +473,27 @@ pipeline:
 
 ---
 
+## `execution` (OPTIONAL)
+
+Owner opt-in for the paid API agent backend (#4257). The API backend is **never the default**: under `--backend auto` (the default) ForgeDock uses the `claude` CLI, and when no CLI is available it fails with `CLI_BACKEND_UNAVAILABLE` instead of billing `ANTHROPIC_API_KEY`.
+
+```yaml
+execution:
+  # Use the API backend when `auto` finds no usable claude CLI. Takes effect only
+  # together with the env var FORGEDOCK_ALLOW_API_BACKEND=1 on the host.
+  agent_backend: api
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `agent_backend` | string | No | `api` approves the API backend as the `auto` fallback, only when `FORGEDOCK_ALLOW_API_BACKEND=1` is also set. Any other value, or no value, means `auto` never selects `api`. |
+
+An explicit `--backend api` / `FORGEDOCK_BACKEND=api` still selects the API backend without this section; that flag is itself the explicit choice.
+
+**Commands that use this section**: `forgedock run`, `forgedock run-issue`, `forgedock backend-check`
+
+---
+
 ## `engine` (OPTIONAL)
 
 Per-command `--model` and `--max-turns` for the CLI backend (`forgedock run-issue` phases and `forgedock run <command>`). Opt-in: with no keys set, the `claude` invocation is unchanged and uses the CLI's own default model with no turn bound. `forge.yaml` is parsed one level deep, so settings are **flat** keys under `engine:`, named `<key>_model` and `<key>_max_turns`, where `<key>` is the command name with every non-alphanumeric character replaced by `_`.
@@ -1197,6 +1218,7 @@ These variables are read from the operator's runner environment, not from `forge
 | `FORGE_TRAIL_OVERRIDE_ASSOCIATIONS` | the resolved `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` value | Comma-separated `author_association` values prefiltering break-glass override candidates (the permission API stays authoritative). Never affects which FORGE markers count toward the gate. An approver with concealed org membership can show `CONTRIBUTOR`/`NONE`, so widen this variable (not the trail list) to accept them. An explicitly empty value means no override candidates. |
 | `FORGE_TRAIL_PIPELINE_LOGINS` | empty | Comma-separated GitHub logins (case-insensitive) that are the pipeline's own identity and can never approve a phase-trail break-glass override. The authors of trusted FORGE marker comments on the issue are added automatically. |
 | `FORGE_TRAIL_QG_SINCE` | `2026-10-07T03:40:12Z` | ISO-8601 UTC cutoff for the legacy `FORGE:QUALITY_GATE` grace. An issue whose trusted `FORGE:BUILDER:COMPLETE` comment was last updated before this time has `QUALITY_GATE` waived. Set to an empty string to disable the grace. A malformed or future value (including a runner clock earlier than this default) fails closed: the verifier exits 2, an infrastructure block rather than `MISSING`. |
+| `FORGEDOCK_ALLOW_API_BACKEND` | unset | Set to `1` (host owner approval) together with forge.yaml `execution.agent_backend: api` to let `--backend auto` use the paid API backend when no `claude` CLI is available. Without both, `auto` never selects `api` (#4257). |
 | `FORGE_TELEMETRY` | `on` | Set to `off` to disable gate telemetry. Gate scripts append one structured record per decision to a trusted `FORGE:TELEMETRY v1` comment; emission is best-effort and never changes a gate's output or exit code. See [TELEMETRY.md](TELEMETRY.md). |
 
 ### Install root resolution

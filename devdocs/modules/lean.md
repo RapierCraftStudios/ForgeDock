@@ -25,8 +25,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 
 ## Flow (`lean.mjs` `runCore`)
 
-1. **Host admission** — `admission.mjs` `checkAdmission` (free mem/tmp, load);
+1. **Host admission** — `admission.mjs` `checkAdmission` (free mem/tmp; load
+   average only when `max_load_per_core` is configured, #4169);
    busy host → `deferred` / `host.busy`, before any lease or GitHub call.
+   Heavy steps are gated separately by the host heavy-step semaphore (`heavy.mjs`).
 2. **Lane** — `lane.mjs` `resolveLane`: milestone → `branches.feature_pattern`
    (`milestone/{slug}`), else `branches.staging`; never the default branch;
    fail closed with `lane.*` codes → `lane-refused`.
@@ -118,8 +120,11 @@ host, a live pid and an unexpired `expires`. That includes the lane itself,
 which registers its run tmp before the first runner call. The scan is exposed
 as `makeHostProbe().activeLanes()`.
 
+- Since #4169 a heavy-step shim overrides the value per step with
+  `max(1, floor(cores / live heavy holders))`, so lanes in LLM phases or
+  waiting for a heavy slot no longer shrink a running step's workers.
 - A positive-integer `FORGE_HOST_PARALLELISM` already set in the environment
-  wins as an operator override.
+  wins as an operator override (shims leave it alone too).
 - When the probe fails, or there is no host probe, the variable is not set.
 - `HOST_RULES` in `prompts.mjs` tells the builder to cap verification at the
   value: `turbo --concurrency`, `vitest`/`jest --maxWorkers`,
@@ -325,6 +330,52 @@ missing = 1), set with `forgedock sched weight <owner/repo> N|--clear`
 (`engine-cli.mjs` `schedFromCli`) and printed by `sched show`. Running lanes are
 never revoked, so a newly set weight converges as lanes end. Rationale:
 `devdocs/decisions/4193-sched-fair-weights.md`.
+
+## Entry 2026-10-20 — Phase-aware admission: heavy-step semaphore (#4169)
+
+Steps have two classes (`heavy.mjs` `classifyStep`). **llm** covers the lane's
+`claude` sessions and everything unknown; nothing gates it beyond the host lane cap
+(#4191) and account holds (#4190). **heavy** covers pm install/test/run/exec/build,
+npx, tsc, eslint, jest, vitest, playwright, pytest, mypy, pyright, tox, cargo/go
+build/test, docker run/build/compose, gradle and mvn. A heavy step takes a slot of one
+host semaphore, `schedDir()/heavy.json`, which uses the same lock, atomic-write and
+dead-pid discipline as the lane registry. A grant needs all of:
+
+- live holders < `max`, which defaults to max(1, cores − 1);
+- first among waiters, ordered by priority and then FIFO;
+- MemAvailable − Σ reservations of holders younger than 60 s ≥ `step_mem_mb`
+  (2048) + `reserve_mb` (1024).
+
+Swap never counts as free memory. With no holder, one step may run while
+MemAvailable ≥ reserve. The semaphore fails open. A waiter gives up after
+`max_wait_s` (1800) and runs ungated. Config is forge.yaml `engine.heavy_enabled|
+heavy_max|heavy_step_mem_mb|heavy_reserve_mb` (`engine-cli.mjs` `readHeavy`), passed
+as `o.heavy`, or env `FORGE_HEAVY_MAX|STEP_MEM_MB|RESERVE_MB`.
+
+The steps are gated in two places:
+
+- **Builder-run commands:** after the toolchain step, `lean.mjs` writes per-run
+  PATH shims (`<runTmp>/heavy/bin`, `writeHeavyShims`). A shim calls
+  `node heavy.mjs run --name <n> -- <real>`, which acquires a slot, runs the command
+  with `FORGE_HEAVY_HELD=1` (nested calls pass through) and per-holder
+  `FORGE_HOST_PARALLELISM`, then releases and propagates the exit code.
+- **Engine-side steps:** `env.setup`, precheck commands and the split tests go
+  through `io.heavy` (`effects.mjs` `makeHeavyIo`). The split grouper's LLM call
+  hands its slot back while it runs.
+
+Runner env adds `FORGE_LANE_PHASE` (plan, implement, fix, or the reviewer/grouper
+role), `FORGE_LANE_ISSUE`, `FORGE_LANE_PRIORITY` and `FORGE_HEAVY_WAITS`.
+
+Load average is off by default (`ADMISSION_DEFAULTS.max_load_per_core: null`), so
+the governor pauses a builder only on the mem/tmp floors. Its pause time is
+counted as a wait.
+
+Metrics: the lane result carries `waits` ({phase: ms}) and `heavyQueueMax`, and
+orchestrate rows keep both. The batch report adds `formatWaitSummary`: `waits by
+phase: …; heavy queue: now N, max M`.
+
+Cost: 0 LLM calls; one node process (~40 MB) per heavy step while it runs.
+ADR `decisions/4169-heavy-step-semaphore.md`.
 
 ## Entry 2026-10-20 — Execution modes and the sandbox-provider seam (#4253)
 

@@ -137,10 +137,10 @@ Separately, `npx forgedock run <command>` (the standalone, non-Claude-Code comma
 | Backend | When used | Credential needed |
 |---------|-----------|--------------------|
 | `cli` (via `--backend cli` or `FORGEDOCK_BACKEND=cli`) | Explicit, or auto-selected when a working `claude` CLI is detected on PATH | None — reuses the CLI's own authentication (Pro/Max OAuth or a CLI-managed key) |
-| `api` (via `--backend api` or `FORGEDOCK_BACKEND=api`) | Explicit, or auto-selected fallback when `claude` is not detected | `ANTHROPIC_API_KEY` |
-| `auto` (default) | No `--backend` / `FORGEDOCK_BACKEND` given | Prefers `cli`, falls back to `api` |
+| `api` (via `--backend api` or `FORGEDOCK_BACKEND=api`) | Explicit only, or the `auto` fallback when the owner opted in (forge.yaml `execution.agent_backend: api` plus `FORGEDOCK_ALLOW_API_BACKEND=1`) | `ANTHROPIC_API_KEY` |
+| `auto` (default) | No `--backend` / `FORGEDOCK_BACKEND` given | Uses `cli`; never falls back to `api` without the owner opt-in. With no CLI it fails with `CLI_BACKEND_UNAVAILABLE` |
 
-**When CI still needs `ANTHROPIC_API_KEY` for `forgedock run`**: CI runners generally do not have an interactively-authenticated `claude` CLI (no browser/OAuth flow available in a headless job), so `auto` detection will typically fall back to `api` there anyway. If your CI runner does install and log in the `claude` CLI (e.g. via a headless API-key-based login), you can force `--backend cli` to skip the SDK/API path entirely. Otherwise, keep `ANTHROPIC_API_KEY` configured as a repository secret (see Setup above) and either let `auto` fall back naturally or set `--backend api` / `FORGEDOCK_BACKEND=api` explicitly for a deterministic CI backend regardless of what happens to be on the runner's PATH.
+**When CI still needs `ANTHROPIC_API_KEY` for `forgedock run`**: CI runners generally do not have an interactively-authenticated `claude` CLI (no browser/OAuth flow available in a headless job), so `auto` there fails with `CLI_BACKEND_UNAVAILABLE`: the API backend is never the default, because it bills an API key (#4257). If your CI runner does install and log in the `claude` CLI (e.g. via a headless API-key-based login), you can force `--backend cli` to skip the SDK/API path entirely. Otherwise, keep `ANTHROPIC_API_KEY` configured as a repository secret (see Setup above) and set `--backend api` / `FORGEDOCK_BACKEND=api` explicitly, or opt in to the `auto` fallback with forge.yaml `execution.agent_backend: api` plus `FORGEDOCK_ALLOW_API_BACKEND=1`.
 
 `npx forgedock run <command> --dry-run` always reports which backend it resolved to, without making any network call or requiring a key either way.
 

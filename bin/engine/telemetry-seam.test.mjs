@@ -14,6 +14,12 @@ function harness(over = {}) {
 }
 
 describe("engine telemetry seam", () => {
+  it("forge#4257: phase_attempt carries the backend, omitted when unreported", () => {
+    assert.equal(mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1, backend: "api" }, 0).payload.backend, "api");
+    assert.equal("backend" in mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1, backend: null }, 0).payload, false);
+    assert.equal("backend" in mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1 }, 0).payload, false);
+  });
+
   it("flattens usage, omits nulls and passes repo/issue/run/phase as ctx (not payload)", async () => {
     const { calls, emit } = harness();
     await emit(attempt);
