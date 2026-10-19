@@ -36,6 +36,7 @@ export const OUTCOME_CODES = Object.freeze({
   BASE_CONFLICT: "base.conflict",
   RATE_LIMITED: "rate_limited",
   HOST_BUSY: "host.busy",
+  GH_UNAVAILABLE: "gh.unavailable", // forge#4157: `gh` unreachable after retries during the --repo identity check; run deferred, nothing posted
   MERGE_TRANSIENT: "merge.transient",
   PUSH_TRANSIENT: "push.transient",
   CLI_IDLE: "cli.idle",

@@ -18,6 +18,7 @@ import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
+import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
 
 /**
  * Workflow labels that mark an issue as "in the pipeline" (not yet terminal).
@@ -256,21 +257,36 @@ export function formatTerminalDiagnostics(dir, issue) {
   return lines.join("\n");
 }
 
+// forge#4157: backoff between `gh repo view` attempts. Under host load one call can exceed makeIo's exec timeout.
+export const REPO_VIEW_BACKOFF_MS = [2000, 4000];
+// forge#4157: how long an orchestrate lane waits before rerunning after `gh` stayed unreachable.
+export const GH_UNAVAILABLE_RETRY_S = 60;
+const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 /**
  * Resolves the repo `gh` would target by default (i.e. resolved from the cwd
  * git remote), via `gh repo view`. Used to validate an explicit `--repo` flag
- * against the ambient context — see `assertRepoMatchesCwd`.
+ * against the ambient context — see `assertRepoMatchesCwd`. A failed call is
+ * retried with backoff (forge#4157: it is usually a transient timeout under load).
  * @param {{gh: Function}} io
- * @returns {Promise<string|null>} "owner/repo", or null if it can't be determined
+ * @param {{sleep?: (ms:number)=>Promise<void>, detail?: boolean}} [opts] - `detail: true` returns
+ *   `{repo, failed}` so a caller can tell "every attempt errored" from an answer.
+ * @returns {Promise<string|null|{repo:string|null, failed:boolean}>} "owner/repo", or null if it can't be determined
  */
-async function resolveDefaultRepo(io) {
-  try {
-    const out = await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
-    const repo = String(out).trim();
-    return repo || null;
-  } catch {
-    return null;
+async function resolveDefaultRepo(io, { sleep = realSleep, detail = false } = {}) {
+  let failed = false;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const out = await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+      const repo = String(out).trim() || null;
+      return detail ? { repo, failed: false } : repo;
+    } catch {
+      failed = true;
+      if (attempt >= REPO_VIEW_BACKOFF_MS.length) break;
+      await sleep(REPO_VIEW_BACKOFF_MS[attempt]);
+    }
   }
+  return detail ? { repo: null, failed } : null;
 }
 
 /**
@@ -298,16 +314,20 @@ export async function assertLaneNotDefault(io, lane, repo = null, cwd = process.
  * default, refuse to run at all rather than silently mixing repos.
  * @param {{gh: Function}} io
  * @param {string|null} repo
+ * @param {{sleep?: Function}} [opts] - backoff seam for the `gh repo view` retries
  * @returns {Promise<void>}
  */
-async function assertRepoMatchesCwd(io, repo) {
+async function assertRepoMatchesCwd(io, repo, { sleep } = {}) {
   if (!repo) return;
-  const defaultRepo = await resolveDefaultRepo(io);
+  const { repo: defaultRepo, failed } = await resolveDefaultRepo(io, { sleep, detail: true });
   if (defaultRepo === null) {
-    throw new Error(
+    const err = new Error(
       `--repo ${repo} was given, but the current repo could not be determined (\`gh repo view\` failed) to ` +
       `verify it matches. Refusing to run cross-repo without verification.`
     );
+    // forge#4157: `gh` kept failing after retries; transient, so run-issue defers instead of erroring.
+    if (failed) err.code = OUTCOME_CODES.GH_UNAVAILABLE;
+    throw err;
   }
   if (defaultRepo !== repo) {
     throw new Error(
@@ -495,7 +515,17 @@ export async function runFromCli(argv, deps = {}) {
   // The full path takes the lane as given (its spec runs classify-lane), so it must be explicit; no default.
   if (enginePath === "full" && !lane) throw new Error("--lane is required with --path full: staging or milestone/<slug>. No default to prevent accidental production targeting.");
   const io = deps.io ?? makeIo();
-  await assertRepoMatchesCwd(io, repo);
+  const resultFile = flag(argv, "--result-file");
+  const report = (r) => { if (resultFile) (deps.writeAtomic ?? writeResultAtomic)(resultFile, JSON.stringify(r) + "\n"); return r; };
+  try {
+    await assertRepoMatchesCwd(io, repo, { sleep: deps.sleep });
+  } catch (e) {
+    if (e?.code !== OUTCOME_CODES.GH_UNAVAILABLE) throw e;
+    // forge#4157: a scheduling fact, not an engine error; the batch requeues it and the breaker never sees it.
+    const res = report({ terminalReason: "deferred", code: OUTCOME_CODES.GH_UNAVAILABLE, detail: e.message, retryInSeconds: GH_UNAVAILABLE_RETRY_S });
+    console.log(`issue #${issue} → deferred (${res.detail})`);
+    return res;
+  }
   await assertLaneNotDefault(io, lane, repo);
   const runIssueFn = deps.runIssue ?? runIssue;
   const agentId = `cli_${sanitizeLeaseHost(hostname())}_${process.pid}`;
@@ -529,8 +559,6 @@ export async function runFromCli(argv, deps = {}) {
     const { runCore } = deps.leanModule ?? (await import("./lean/lean.mjs"));
     const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo: leanRepo });
     // #4121: a batch lane reports its result through --result-file (written atomically, also for a thrown run).
-    const resultFile = flag(argv, "--result-file");
-    const report = (r) => { if (resultFile) (deps.writeAtomic ?? writeResultAtomic)(resultFile, JSON.stringify(r) + "\n"); return r; };
     let lres;
     try {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
@@ -629,7 +657,7 @@ export async function resumeStalledFromCli(argv, deps = {}) {
   const repo   = flag(argv, "--repo");
 
   const io = deps.io ?? makeIo();
-  await assertRepoMatchesCwd(io, repo);
+  await assertRepoMatchesCwd(io, repo, { sleep: deps.sleep });
   await assertLaneNotDefault(io, lane, repo);
   const dispatch = deps.dispatch ?? runFromCli;
   const projector = makeProjector(io);

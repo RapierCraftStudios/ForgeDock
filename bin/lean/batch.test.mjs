@@ -87,6 +87,22 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.deepEqual(deferPolicy({ code: "host.busy" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
   });
 
+  it("gh.unavailable deferrals (forge#4157) are requeued, never relaunched as engine-error, and never trip the breaker", async () => {
+    const { now, sleep } = fakeClock();
+    const updates = [];
+    let calls = 0;
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3, breaker: { errors: 3, window_min: 30 },
+      onUpdate: (r) => updates.push(r),
+      runOne: async () => (++calls <= 3
+        ? { terminalReason: "deferred", code: "gh.unavailable", retryInSeconds: 60, detail: "gh repo view failed" }
+        : { terminalReason: "merged", pr: 5 }) });
+    assert.equal(calls, 4);
+    assert.equal(rows[0].outcome, "merged");
+    assert.ok(!updates.some((u) => u.outcome === "breaker" || u.outcome === "engine-error"));
+    assert.equal(updates.filter((u) => /requeued in 60s: gh.unavailable/.test(u.detail ?? "")).length, 3);
+    assert.deepEqual(deferPolicy({ code: "gh.unavailable", retryInSeconds: 60 }, { now: 0 }), { delayMs: 60000 });
+  });
+
   it("a usage limit holds every admission until its reset; a deferred issue's dependents wait instead of being skipped", async () => {
     const { now, sleep, c } = fakeClock();
     const t0 = c.t, starts = {};
