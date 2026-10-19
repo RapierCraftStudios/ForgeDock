@@ -120,12 +120,12 @@ export function renderReview(rv, contract) {
 }
 
 /** FORGE:REVIEW in shadow mode: what the enforced gate would have done, without enforcing it. */
-export function renderShadowReview({ would, failures = [], review, contract, unfiled = [] }) {
+export function renderShadowReview({ would, failures = [], review, contract, degraded = null }) {
   const head = would === "conforms" ? "would PASS" : `would BLOCK (${escl(would)})`;
   const rows = review ? `\n\n${renderReview(review, contract).split("\n").slice(2).join("\n")}` : "";
   const fl = failures.length ? `\n\n**What the enforced gate would have flagged:**\n${failures.slice(0, 30).map((f) => `- \`${escl(f.code)}\`: ${escl(f.detail)}`).join("\n")}` : "";
-  const uf = unfiled.length ? `\n\n**Deferrals not filed in shadow mode:** ${unfiled.map((r) => `${escl(r.id)} (${escl(r.disposition)})`).join(", ")}` : "";
-  return `## Conformance Review (shadow mode: not enforced)\n**Gate verdict:** ${head}. Only a requirement found not implemented, or a regression, blocks in shadow mode.${fl}${uf}${rows}`;
+  const dg = degraded ? `\n\n**Review degraded:** the review stayed incomplete after the targeted re-ask; merged with label \`review-degraded\`, follow-up ${escl(degraded)}.` : "";
+  return `## Conformance Review (shadow mode: not enforced)\n**Gate verdict:** ${head}. In shadow mode a requirement not implemented (found by the review or the precheck), a regression, or a review without complete rows blocks; accepted deferrals are filed as follow-ups.${fl}${dg}${rows}`;
 }
 
 // ---- PR body ----

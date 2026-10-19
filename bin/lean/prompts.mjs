@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /** Core work-on prompts: a plan call that writes the contract, an implement call in the same session, and the conformance reviewer. */
 
+import { reviewSkeleton } from "./conformance.mjs";
+
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
 export const LEAN_DIR = ".forge-lean";
 export const RESULT_FILE = `${LEAN_DIR}/result.json`;
@@ -91,10 +93,10 @@ export function blockCorrectionPrompt(problem) {
 
 export const REVIEWER_SYSTEM = `You are an independent conformance reviewer of one change. You did not write it. Read-only: use Read, Grep and Glob in the worktree.
 
-You receive the GitHub issue with its comments, the frozen contract (requirements quoted from the issue, deliverables, preserve constraints, validate commands) with typed amendments, the builder's result with validation output, the changed files, and the diff. The engine computes the verdict from your rows; a reply without rows is rejected, so fill EVERY row:
-- issue_coverage: one row per requirement or acceptance criterion in the issue, quoted verbatim, saying whether the contract covers it, narrows it, or misses it.
-- requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with path:line evidence and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change.
-- scope: one row per changed file: the deliverable id that authorizes it (deliverables may be directories or globs), "test", "incidental" (changelog, lockfile), or "none" with what it changes.
+You receive the GitHub issue with its comments, the frozen contract (requirements quoted from the issue, deliverables, preserve constraints, validate commands) with typed amendments, the builder's result with validation output, the changed files, the diff, and a row skeleton with one row per contract id and changed file. The engine computes the verdict from your rows; a reply without rows is rejected, so fill EVERY row of the skeleton (replace each "a|b" placeholder with one value; keep the ids and files as given):
+- issue_coverage: one row per requirement or acceptance criterion in the issue, quoted verbatim, saying whether the contract covers it, narrows it, or misses it. The skeleton lists the contract's quotes; add a row for any issue requirement the contract does not quote.
+- requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with repo-relative path:line evidence (e.g. src/app/route.ts:12, not route.ts:12) and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change.
+- scope: one row per changed file, pre-filled with the engine's authorization: the deliverable id that authorizes it (deliverables may be directories or globs), "test", "incidental" (changelog, lockfile), or "none" with what it changes. Change it only if the diff shows the file does something its deliverable does not cover.
 - preserve: one row per preserve id: intact|violated|unverified, with path:line.
 - regressions: concrete breakages only, each with path:line.
 
@@ -132,9 +134,18 @@ export function boundDiff(diff, { stat = "", base = "", maxBytes = REVIEW_DIFF_M
     + (list.length ? `\n<omitted_files>\n${list.join("\n")}\n</omitted_files>` : "");
 }
 
-export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "" }) {
+export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", ignore = [`${LEAN_DIR}/`] }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
-  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>`;
+  const skeleton = JSON.stringify(reviewSkeleton(contract ?? {}, files, ignore), null, 1);
+  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<row_skeleton>\n${cap(skeleton, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>`;
+}
+
+/**
+ * #4160: the targeted re-ask after an incomplete or inconsistent reply. Only the missing or invalid ids are asked
+ * for, with the reviewer's previous rows; no diff is re-sent (the worktree still holds the change).
+ */
+export function reviewerRepairPrompt({ missing = [], problems = [], rows = null }) {
+  return `Your conformance review is incomplete. The engine keeps your other rows; answer ONLY for these ids or sections: ${missing.join(", ") || "(see the problems)"}.\n\n<problems>\n${problems.slice(0, 40).map((p) => `- ${String(p).slice(0, 300)}`).join("\n")}\n</problems>\n\n<previous_rows>\n${cap(JSON.stringify(rows ?? {}, null, 1), 20000)}\n</previous_rows>\n\nRead the changed files in your worktree as needed. Output ONLY a JSON object in a json code fence with just the rows for those ids (requirements rows by id, preserve rows by id, scope rows by file, issue_coverage in full if it is listed) plus "verdict":"CONFORMS|NONCONFORMING" consistent with all rows. Evidence is repo-relative path:line.`;
 }
 
 /** Pre-filter (#4123): one read-only, single-turn check of an issue a cheap signal flagged as possibly already fixed. */

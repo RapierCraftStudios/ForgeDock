@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -95,10 +95,43 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.ok(d.failures.every((f) => f.code === "review.incomplete"));
   });
   it("no JSON is unparseable", () => { assert.equal(parseReview("LGTM"), null); assert.equal(decide(null, ctx).state, "review.unparseable"); });
-  it("incomplete: missing requirement row, missing scope row for a changed file, missing preserve row", () => {
-    assert.equal(decide({ ...good, requirements: good.requirements.slice(1) }, ctx).state, "review.incomplete");
-    assert.equal(decide({ ...good, scope: good.scope.slice(1) }, ctx).state, "review.incomplete");
-    assert.equal(decide({ ...good, preserve: [] }, ctx).state, "review.incomplete");
+  it("incomplete: a missing requirement row (only the reviewer can judge it), and missing lists that id for the re-ask", () => {
+    const d = decide({ ...good, requirements: good.requirements.slice(1) }, ctx);
+    assert.equal(d.state, "review.incomplete"); assert.deepEqual(d.missing, ["R1"]);
+  });
+  it("#4160 missing scope and preserve rows are filled by the engine: complete, with the honest verdict", () => {
+    assert.equal(decide({ ...good, scope: good.scope.slice(1) }, ctx).state, "conforms", "an authorized file needs no reviewer row");
+    const creep = decide({ ...good }, { ...ctx, changedFiles: [...files, "src/pricing.js"] });
+    assert.deepEqual(codes(creep), ["conformance.scope_creep"], "an unauthorized file without a row is still creep");
+    const noPres = decide({ ...good, preserve: [] }, ctx);
+    assert.deepEqual(codes(noPres), ["conformance.preserve_violated"], "a missing preserve row is unverified, not incomplete");
+    assert.match(noPres.failures[0].detail, /P1 unverified/);
+    assert.equal(decide({ ...good, scope: undefined, preserve: undefined }, ctx).state, "nonconforming");
+  });
+  it("#4160 basename and wrapped evidence are normalized to the repo path; an ambiguous or unknown name is still incomplete", () => {
+    assert.equal(decide(row("R1", { evidence: "scrape.js:7" }), ctx).state, "conforms");
+    assert.equal(decide(row("R1", { evidence: "see `src/scrape.js:7` (guard)" }), ctx).state, "conforms");
+    assert.equal(decide(row("R1", { evidence: "billing.js:1" }), { ...ctx, repoFiles: ["src/billing.js"], pathExists: (p) => p === "src/billing.js" }).state, "conforms");
+    assert.equal(decide(row("R1", { evidence: "nope.js:3" }), ctx).state, "review.incomplete");
+    assert.equal(normalizeEvidencePath("route.ts", { changedFiles: ["app/a/route.ts", "app/b/route.ts"] }), "route.ts", "ambiguous stays as is");
+    assert.equal(normalizeEvidencePath("b/route.ts", { changedFiles: ["app/a/route.ts", "app/b/route.ts"] }), "app/b/route.ts");
+    assert.equal(decide(row("R1", { evidence: "scrape.js:7" }), ctx).review.requirements[0].evidence, "src/scrape.js:7");
+  });
+  it("#4160 a targeted re-ask merges by id: the repair rows complete the first reply", () => {
+    const first = { ...good, requirements: [good.requirements[1]], preserve: [] };
+    const d1 = decide(first, ctx);
+    assert.equal(d1.state, "review.incomplete"); assert.deepEqual(d1.missing, ["R1"]);
+    const merged = mergeReviewRows(first, { requirements: [good.requirements[0]], preserve: good.preserve });
+    assert.equal(decide(merged, ctx).state, "conforms");
+    assert.equal(mergeReviewRows(first, null), first, "an unparseable repair keeps the first reply");
+    assert.equal(decide(mergeReviewRows({ ...good, verdict: "NONCONFORMING" }, { verdict: "CONFORMS" }), ctx).state, "conforms");
+  });
+  it("#4160 the skeleton has one row per requirement, preserve id and changed file, scope pre-filled by the engine", () => {
+    const s = reviewSkeleton(C, [...files, ".forge-lean/x", "src/pricing.js"], [".forge-lean/"]);
+    assert.deepEqual(s.requirements.map((r) => r.id), ["R1", "R2"]);
+    assert.deepEqual(s.preserve.map((r) => r.id), ["P1"]);
+    assert.deepEqual(s.scope.map((r) => [r.file, r.authorized_by]), [["src/scrape.js", "D1"], ["src/search.js", "D2"], ["test/leak.test.js", "test"], ["src/pricing.js", "none"]]);
+    assert.deepEqual(s.issue_coverage.map((r) => r.quote), [Q1, Q2]);
   });
   it("incomplete: implemented without path:line, with evidence in a nonexistent file, or without validation", () => {
     assert.equal(decide(row("R1", { evidence: "looks fine" }), ctx).state, "review.incomplete");

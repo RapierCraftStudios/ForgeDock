@@ -15,7 +15,8 @@ export const TRACKED = Object.freeze(["defer", "post-deploy"]);
 const REQ_STATUS = ["implemented", "partial", "missing", "deferred", "post-deploy", "not-applicable"];
 const COVER_STATUS = ["covered", "narrowed", "missing"];
 const PRESERVE_STATUS = ["intact", "violated", "unverified"];
-const EVIDENCE_RE = /^([^\s:]+):(\d+)/;
+/** The first path:line anywhere in the evidence text (backticks, quotes and brackets around it are ignored). */
+const EVIDENCE_RE = /([^\s:`'"()[\]<>,;]+):(\d+)/;
 /** Test files in any common ecosystem: test dirs, *.test.* / *.spec.*, test_*.*, *_test.*, *Test(s).java|kt|cs|php|scala, *_spec.rb, tests.rs, conftest.py, snapshots. */
 const TEST_RE = /(^|\/)(test|tests|__tests__|spec|specs|testdata|__snapshots__)\/|\.(test|spec)\.[a-z0-9]+$|(^|\/)test_[^/]+\.[a-z0-9]+$|_test\.[a-z0-9]+$|Tests?\.(java|kt|kts|cs|php|scala|swift)$|_spec\.rb$|(^|\/)tests\.rs$|(^|\/)conftest\.py$|\.bats$|\.snap$/;
 /** Files any change may touch without being a deliverable: changelogs and dependency lockfiles. */
@@ -153,52 +154,103 @@ export function parseReview(text) {
   return null;
 }
 
+/**
+ * A basename or path suffix in reviewer evidence, resolved to the one repo path it names (changed files first, then
+ * `repoFiles`). An exact match, an ambiguous name or an unknown name is returned unchanged.
+ */
+export function normalizeEvidencePath(path, { changedFiles = [], repoFiles = [] } = {}) {
+  const p = cleanPath(path);
+  if (!p) return p;
+  for (const pool of [changedFiles, repoFiles]) {
+    const files = [...pool];
+    if (files.includes(p)) return p;
+    const hits = [...new Set(files.filter((f) => String(f).endsWith(`/${p}`)))];
+    if (hits.length === 1) return hits[0];
+    if (hits.length > 1) return p;
+  }
+  return p;
+}
+/** The path:line in an evidence string, with the path normalized; null when there is none. */
+function evidenceOf(text, ctx) {
+  const m = EVIDENCE_RE.exec(String(text ?? ""));
+  return m ? { path: normalizeEvidencePath(m[1], ctx), line: m[2] } : null;
+}
+const reviewedFiles = (changedFiles, ignore) => changedFiles.filter((x) => !ignore.some((pre) => x.startsWith(pre)));
+
+/**
+ * The rows the engine can fill itself, so bookkeeping is never "incomplete": a scope row per changed file from the
+ * contract's own authorization ("none" when unauthorized, still scope creep), a preserve row per id as "unverified"
+ * (still preserve_violated), and implemented evidence rewritten to `path:line` with the repo path. Returns a new object.
+ */
+export function fillEngineRows(rv, { contract, changedFiles = [], repoFiles = [], ignore = [] }) {
+  if (!rv || typeof rv !== "object") return rv;
+  const out = { ...rv };
+  const scope = Array.isArray(rv.scope) ? [...rv.scope] : [];
+  for (const f of reviewedFiles(changedFiles, ignore)) if (!scope.some((s) => s?.file === f)) scope.push({ file: f, authorized_by: authorizationOf(contract, f) ?? "none", note: "row filled by the engine", filled: true });
+  out.scope = scope;
+  const pres = Array.isArray(rv.preserve) ? [...rv.preserve] : [];
+  for (const c of contract.preserve ?? []) if (!pres.some((x) => x?.id === c.id)) pres.push({ id: c.id, status: "unverified", note: "no row from the reviewer", filled: true });
+  out.preserve = pres;
+  if (Array.isArray(rv.requirements)) {
+    out.requirements = rv.requirements.map((r) => {
+      if (r?.status !== "implemented") return r;
+      const e = evidenceOf(r.evidence, { changedFiles, repoFiles });
+      return e ? { ...r, evidence: `${e.path}:${e.line}` } : r;
+    });
+  }
+  return out;
+}
+
 /** Row completeness: every contract requirement, preserve item and changed file has a well-formed row. */
-export function checkCompleteness(rv, { contract, changedFiles, issueText, pathExists = () => false, ignore = [] }) {
-  const p = [];
+export function checkCompleteness(rv, { contract, changedFiles, issueText, pathExists = () => false, ignore = [], repoFiles = [] }) {
+  const p = [], ids = new Set();
+  const miss = (id, msg) => { p.push(msg); ids.add(id); };
   const arr = (k) => (Array.isArray(rv?.[k]) ? rv[k] : null);
-  if (!["CONFORMS", "NONCONFORMING"].includes(rv?.verdict)) p.push("verdict must be CONFORMS or NONCONFORMING");
+  if (!["CONFORMS", "NONCONFORMING"].includes(rv?.verdict)) miss("verdict", "verdict must be CONFORMS or NONCONFORMING");
   const cov = arr("issue_coverage");
-  if (!cov?.length) p.push("issue_coverage is missing or empty");
+  if (!cov?.length) miss("issue_coverage", "issue_coverage is missing or empty");
   for (const c of cov ?? []) {
-    if (!COVER_STATUS.includes(c?.status)) p.push(`issue_coverage status invalid: ${c?.status}`);
-    if (!inIssue(c?.quote, issueText)) p.push(`issue_coverage quote is not verbatim from the issue: "${String(c?.quote ?? "").slice(0, 60)}"`);
+    if (!COVER_STATUS.includes(c?.status)) miss("issue_coverage", `issue_coverage status invalid: ${c?.status}`);
+    if (!inIssue(c?.quote, issueText)) miss("issue_coverage", `issue_coverage quote is not verbatim from the issue: "${String(c?.quote ?? "").slice(0, 60)}"`);
   }
   const reqs = arr("requirements");
   if (!reqs) p.push("requirements rows are missing");
   for (const r of contract.requirements) {
     const rows = (reqs ?? []).filter((x) => x?.id === r.id);
-    if (rows.length !== 1) { p.push(`requirement ${r.id} needs exactly one row (has ${rows.length})`); continue; }
+    if (rows.length !== 1) { miss(r.id, `requirement ${r.id} needs exactly one row (has ${rows.length})`); continue; }
     const row = rows[0];
-    if (!REQ_STATUS.includes(row.status)) { p.push(`${r.id}: status invalid: ${row.status}`); continue; }
-    if (TRACKED.includes(r.disposition) && typeof row.deferral_ok !== "boolean") p.push(`${r.id}: a ${r.disposition} requirement needs deferral_ok true|false (is deferring it justified?)`);
+    if (!REQ_STATUS.includes(row.status)) { miss(r.id, `${r.id}: status invalid: ${row.status}`); continue; }
+    if (TRACKED.includes(r.disposition) && typeof row.deferral_ok !== "boolean") miss(r.id, `${r.id}: a ${r.disposition} requirement needs deferral_ok true|false (is deferring it justified?)`);
     if (row.status === "implemented") {
-      const m = EVIDENCE_RE.exec(String(row.evidence ?? ""));
-      if (!m) p.push(`${r.id}: implemented needs path:line evidence`);
-      else if (!changedFiles.includes(m[1]) && !pathExists(m[1])) p.push(`${r.id}: evidence path ${m[1]} does not exist`);
-      if (blank(row.validated_by)) p.push(`${r.id}: implemented needs validated_by (a validate id or test)`);
+      const e = evidenceOf(row.evidence, { changedFiles, repoFiles });
+      if (!e) miss(r.id, `${r.id}: implemented needs path:line evidence`);
+      else if (!changedFiles.includes(e.path) && !pathExists(e.path)) miss(r.id, `${r.id}: evidence path ${e.path} does not exist`);
+      if (blank(row.validated_by)) miss(r.id, `${r.id}: implemented needs validated_by (a validate id or test)`);
     }
   }
   const scope = arr("scope");
-  if (!scope) p.push("scope rows are missing");
-  for (const f of changedFiles.filter((x) => !ignore.some((pre) => x.startsWith(pre)))) if (!(scope ?? []).some((s) => s?.file === f)) p.push(`changed file ${f} has no scope row`);
+  if (!scope) miss("scope", "scope rows are missing");
+  for (const f of reviewedFiles(changedFiles, ignore)) if (!(scope ?? []).some((s) => s?.file === f)) miss(f, `changed file ${f} has no scope row`);
   const pres = arr("preserve") ?? [];
   for (const c of contract.preserve ?? []) {
     const row = pres.find((x) => x?.id === c.id);
-    if (!row || !PRESERVE_STATUS.includes(row.status)) p.push(`preserve ${c.id} needs a row with status ${PRESERVE_STATUS.join("|")}`);
+    if (!row || !PRESERVE_STATUS.includes(row.status)) miss(c.id, `preserve ${c.id} needs a row with status ${PRESERVE_STATUS.join("|")}`);
   }
-  if (rv && rv.regressions != null && !Array.isArray(rv.regressions)) p.push("regressions must be an array");
-  return { complete: p.length === 0, problems: p };
+  if (rv && rv.regressions != null && !Array.isArray(rv.regressions)) miss("regressions", "regressions must be an array");
+  if (!reqs) for (const r of contract.requirements) ids.add(r.id);
+  return { complete: p.length === 0, problems: p, missing: [...ids] };
 }
 
 /**
- * The engine's decision from the reviewer's rows. state: conforms | nonconforming | review.unparseable | review.incomplete.
- * failures[] are {code, detail}; `inconsistent` marks a CONFORMS verdict whose rows fail.
+ * The engine's decision from the reviewer's rows. state: conforms | nonconforming | review.unparseable | review.incomplete
+ * | review.inconsistent. failures[] are {code, detail}; `inconsistent` marks a CONFORMS verdict whose rows fail;
+ * `missing` lists the ids (or sections) a targeted re-ask must fill; `review` is the reply with the engine-filled rows.
  */
-export function decide(rv, ctx) {
-  if (!rv) return { state: "review.unparseable", failures: [{ code: C.REVIEW_NO_VERDICT, detail: "no JSON object in the reviewer reply" }] };
+export function decide(raw, ctx) {
+  if (!raw) return { state: "review.unparseable", failures: [{ code: C.REVIEW_NO_VERDICT, detail: "no JSON object in the reviewer reply" }] };
+  const rv = fillEngineRows(raw, ctx);
   const comp = checkCompleteness(rv, ctx);
-  if (!comp.complete) return { state: "review.incomplete", failures: comp.problems.map((d) => ({ code: C.REVIEW_INCOMPLETE, detail: d })) };
+  if (!comp.complete) return { state: "review.incomplete", failures: comp.problems.map((d) => ({ code: C.REVIEW_INCOMPLETE, detail: d })), missing: comp.missing, review: rv };
   const f = [];
   for (const c of rv.issue_coverage) if (c.status !== "covered") f.push({ code: C.CONFORMANCE_OMISSION, detail: `issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
   for (const r of ctx.contract.requirements) {
@@ -216,10 +268,44 @@ export function decide(rv, ctx) {
   }
   for (const p of rv.preserve ?? []) if (p.status !== "intact") f.push({ code: C.CONFORMANCE_PRESERVE_VIOLATED, detail: `${p.id} ${p.status}${p.evidence ? ` (${p.evidence})` : ""}${p.note ? `: ${p.note}` : ""}` });
   for (const r of rv.regressions ?? []) f.push({ code: C.CONFORMANCE_REGRESSION, detail: `${r?.at ?? "?"}: ${r?.failure ?? ""}` });
-  if (f.length) return { state: "nonconforming", failures: f, inconsistent: rv.verdict === "CONFORMS" };
+  if (f.length) return { state: "nonconforming", failures: f, inconsistent: rv.verdict === "CONFORMS", review: rv };
   // A NONCONFORMING verdict with every row passing gives the builder nothing to fix: re-ask the reviewer.
-  if (rv.verdict !== "CONFORMS") return { state: "review.inconsistent", failures: [{ code: C.REVIEW_INCONSISTENT, detail: "verdict NONCONFORMING with no failing row" }] };
-  return { state: "conforms", failures: [] };
+  if (rv.verdict !== "CONFORMS") return { state: "review.inconsistent", failures: [{ code: C.REVIEW_INCONSISTENT, detail: "verdict NONCONFORMING with no failing row" }], missing: ["verdict"], review: rv };
+  return { state: "conforms", failures: [], review: rv };
+}
+
+/**
+ * The reviewer's first reply with the rows of a targeted re-ask applied: a repair row replaces the row with the same id
+ * (scope: file), issue_coverage is replaced when the repair sends any, verdict and summary follow the repair when valid.
+ */
+export function mergeReviewRows(first, repair) {
+  if (!first || typeof first !== "object") return repair ?? null;
+  if (!repair || typeof repair !== "object") return first;
+  const out = { ...first };
+  for (const [k, key] of [["requirements", "id"], ["preserve", "id"], ["scope", "file"]]) {
+    if (!Array.isArray(repair[k])) continue;
+    const rows = Array.isArray(first[k]) ? first[k].filter((x) => !x?.filled) : [];
+    for (const r of repair[k]) { const i = rows.findIndex((x) => x?.[key] === r?.[key]); if (i >= 0) rows[i] = r; else rows.push(r); }
+    out[k] = rows;
+  }
+  if (Array.isArray(repair.issue_coverage) && repair.issue_coverage.length) out.issue_coverage = repair.issue_coverage;
+  if (Array.isArray(repair.regressions)) out.regressions = [...(Array.isArray(first.regressions) ? first.regressions : []), ...repair.regressions];
+  if (["CONFORMS", "NONCONFORMING"].includes(repair.verdict)) { out.verdict = repair.verdict; if (repair.summary) out.summary = repair.summary; }
+  return out;
+}
+
+/** The row skeleton the reviewer fills: one row per requirement, preserve id and changed file, one coverage row per quote. */
+export function reviewSkeleton(contract, changedFiles = [], ignore = []) {
+  const reqs = contract?.requirements ?? [];
+  return {
+    issue_coverage: reqs.map((r) => ({ quote: r.quote, contract_ids: [r.id], status: "covered|narrowed|missing" })),
+    requirements: reqs.map((r) => ({ id: r.id, status: TRACKED.includes(r.disposition) ? `${r.disposition === "defer" ? "deferred" : r.disposition}|implemented|missing` : "implemented|partial|missing|not-applicable", evidence: "repo/relative/path:line", validated_by: "V?", ...(TRACKED.includes(r.disposition) ? { deferral_ok: "true|false" } : {}), note: "" })),
+    scope: reviewedFiles(changedFiles, ignore).map((f) => ({ file: f, authorized_by: authorizationOf(contract ?? {}, f) ?? "none", note: "" })),
+    preserve: (contract?.preserve ?? []).map((p) => ({ id: p.id, status: "intact|violated|unverified", evidence: "path:line" })),
+    regressions: [],
+    verdict: "CONFORMS|NONCONFORMING",
+    summary: "one line",
+  };
 }
 
 /** Requirements the reviewer accepted as deferred or post-deploy that still need a tracking issue. */

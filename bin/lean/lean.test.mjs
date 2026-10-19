@@ -15,7 +15,7 @@ import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner } from 
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
-import { readAdmission, readConformanceMode } from "../engine-cli.mjs";
+import { readAdmission, readConformanceMode, readReviewIncomplete } from "../engine-cli.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS } from "../engine-cli.mjs";
 
 const WT = "/wt/lean-7";
@@ -69,6 +69,7 @@ function world(o = {}) {
       if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
       if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [] });
       if (k === "pr edit") { w.prEdits.push(a); return ""; }
+      if (k === "label create") { w.labelCreates = [...(w.labelCreates ?? []), a]; return ""; }
       if (k === "issue comment" && w.commentErrors.length) throw new Error(w.commentErrors.shift());
       if (k === "issue comment") { w.comments.push(a[a.indexOf("--body") + 1]); w.seq.push("comment"); return `https://github.com/o/r/issues/7#issuecomment-${w.comments.length}\n`; }
       if (k === "issue close") { w.closed.push(a); w.seq.push("close"); return ""; }
@@ -100,6 +101,7 @@ function world(o = {}) {
       if (a[0] === "grep") return w.markers ? "src/foo.js:3:<<<<<<< HEAD" : "";
       if (a[0] === "merge" && a[1] === "--abort") { w.mergeInProgress = false; return ""; }
       if (a[0] === "rev-parse") return w.head;
+      if (a[0] === "diff" && a[1] === "--name-only" && !a.some((x) => String(x).includes("..."))) return w.changed.filter((f) => !(o.equalToBase ?? []).includes(f)).join("\n");
       if (a[0] === "diff" && a[1] === "--name-only") return w.changed.join("\n");
       if (a[0] === "ls-files") return [...new Set(["src/foo.js", "src/bar.js", "test/foo.test.js", ...w.changed])].join("\n");
       if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
@@ -658,13 +660,54 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(traj(w)[0], /\| Review \| shadow: would block \(nonconforming\) \|/);
   });
 
-  it("scope creep and a generic PASS do not block in shadow (as today) but are recorded", async () => {
+  it("scope creep does not block in shadow (as today) but is recorded", async () => {
     const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"], reviews: [conf({}, CONTRACT, ["src/foo.js", "src/billing.js", "test/foo.test.js"])] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
     assert.match(shadowNote(w), /would BLOCK[\s\S]*conformance\.scope_creep[\s\S]*src\/billing\.js/);
-    const w2 = world({ reviews: [genericPass(), genericPass()] });
-    assert.equal((await runShadow(w2)).terminalReason, "merged");
-    assert.match(shadowNote(w2), /would BLOCK \(review\.incomplete\)/);
+  });
+
+  it("#4160 an incomplete review gets one targeted re-ask with only the missing ids, then needs-human; never merges in shadow", async () => {
+    const w = world({ reviews: [genericPass(), genericPass()] });
+    const r = await runShadow(w);
+    assert.equal(r.code, "review.incomplete"); assert.equal(w.merges.length, 0); assert.equal(w.prs.length, 0);
+    const rv = reviewers(w);
+    assert.equal(rv.length, 2); assert.equal(builders(w).length, 2);
+    assert.match(rv[0][4], /<row_skeleton>/); assert.match(rv[0][4], /<diff>/);
+    assert.match(rv[1][4], /answer ONLY for these ids or sections: verdict, issue_coverage, R1/);
+    assert.doesNotMatch(rv[1][4], /<diff>/, "the re-ask is not a full re-review");
+    const w2 = world({ reviews: [conf({ verdict: "NONCONFORMING" }), conf({ verdict: "NONCONFORMING" })] });
+    assert.equal((await runShadow(w2)).code, "review.inconsistent"); assert.equal(w2.merges.length, 0);
+  });
+
+  it("#4160 the targeted re-ask completes the first reply: its rows are merged by id and the change merges", async () => {
+    const partial = fence({ ...JSON.parse(ok().slice(8, -4)), requirements: [] });
+    const w = world({ reviews: [partial, fence({ requirements: [{ id: "R1", status: "implemented", evidence: "foo.js:3", validated_by: "V1" }], verdict: "CONFORMS" })] });
+    assert.equal((await runShadow(w)).terminalReason, "merged");
+    assert.match(reviewers(w)[1][4], /answer ONLY for these ids or sections: R1\./);
+    assert.match(shadowNote(w), /would PASS/);
+  });
+
+  it("#4160 engine.review_incomplete degraded: an incomplete review merges with the review-degraded label and a tracked follow-up", async () => {
+    const w = world({ reviews: [genericPass(), genericPass()] });
+    const r = await runShadow(w, { reviewIncomplete: "degraded" });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^REVIEW: conformance review review\.incomplete/);
+    assert.ok(w.prEdits.some((a) => a.includes("--add-label") && a.includes("review-degraded")));
+    assert.match(shadowNote(w), /Review degraded:[\s\S]*#900/);
+    assert.match(w.prs[0].join(" "), /Remaining work tracked\n- #900/);
+    const e = world({ reviews: [genericPass(), genericPass()] });
+    assert.equal((await run(e, { reviewIncomplete: "degraded" })).code, "review.incomplete", "enforce ignores the degraded setting");
+  });
+
+  it("#4160 a precheck-found unimplemented requirement blocks in shadow like a reviewer-found one: one resume, then needs-human", async () => {
+    const w = world({ validation: [] });
+    const r = await runShadow(w);
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
+    assert.equal(builders(w).length, 3, "one builder resume");
+    assert.match(builders(w)[2][4], /validate V1 .* has no recorded result/);
+    assert.equal(reviewers(w).length, 0, "no reviewer tokens on a precheck block");
+    const a = world({ amendments: [{ kind: "add-deliverable", path: "src/x.js" }] });
+    assert.equal((await runShadow(a)).code, "conformance.unimplemented", "an amendment problem blocks too");
   });
 
   it("shadow still blocks what the previous reviewer blocked on: a requirement not implemented gets one resume, then needs-human", async () => {
@@ -675,13 +718,20 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal((await runShadow(w2)).terminalReason, "merged"); assert.equal(builders(w2).length, 3, "a regression is resumed in shadow too");
   });
 
-  it("shadow files nothing: accepted deferrals are listed as not filed, and the PR links nothing", async () => {
+  it("#4160 shadow files accepted deferrals with track(), the same as enforce, and the PR links them", async () => {
     const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w" }] };
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
-    assert.equal(w.followups.length, 0);
-    assert.match(shadowNote(w), /Deferrals not filed in shadow mode:\*\* R2 \(defer\)/);
-    assert.doesNotMatch(w.prs[0].join(" "), /Remaining work tracked/);
+    assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^R2: /);
+    assert.doesNotMatch(shadowNote(w), /not filed/);
+    assert.match(w.prs[0].join(" "), /Remaining work tracked\n- #900/);
+    assert.ok(w.seq.indexOf("pr") > -1 && traj(w)[0].includes("Tracked R2 (defer) in #900"));
+  });
+
+  it("#4160 base-sync merge files (equal to the base) drop out of the scope check", async () => {
+    const w = world({ changed: ["src/foo.js", "src/merged-from-base.js", "test/foo.test.js"], equalToBase: ["src/merged-from-base.js"] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.doesNotMatch(reviewers(w)[0][4], /merged-from-base/);
   });
 
   it("an unparseable reviewer still ends needs-human in shadow (as today)", async () => {
@@ -708,6 +758,10 @@ describe("conformance gate: base-sync and contract size", () => {
   it("forge.yaml engine.conformance selects shadow or enforce; anything else is ignored", () => {
     const d = tmpDir("conf-yaml-");
     for (const [v, want] of [["enforce", "enforce"], ["shadow", "shadow"], ["strict", undefined]]) { writeFileSync(`${d}/forge.yaml`, `engine:\n  conformance: ${v}\n`); assert.equal(readConformanceMode(d), want); }
+  });
+  it("#4160 forge.yaml engine.review_incomplete selects needs-human or degraded; anything else is ignored", () => {
+    const d = tmpDir("rev-inc-yaml-");
+    for (const [v, want] of [["degraded", "degraded"], ["needs-human", "needs-human"], ["merge", undefined]]) { writeFileSync(`${d}/forge.yaml`, `engine:\n  review_incomplete: ${v}\n`); assert.equal(readReviewIncomplete(d), want); }
   });
 });
 
