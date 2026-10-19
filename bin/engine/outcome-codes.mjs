@@ -40,6 +40,7 @@ export const OUTCOME_CODES = Object.freeze({
   MERGE_TRANSIENT: "merge.transient",
   PUSH_TRANSIENT: "push.transient",
   CLI_IDLE: "cli.idle",
+  RUN_INTERRUPTED: "run.interrupted", // forge#4179: SIGTERM/SIGINT on a core run; teardown ran from the ledger, lane requeued
   PATH_SWITCH_CONFLICT: "path.switch_conflict",
   ENGINE_ERROR: "engine.error",
   INFRA_DISK_QUOTA: "infra.disk_quota",
@@ -75,6 +76,7 @@ export const OUTCOME_CODES = Object.freeze({
   CONFORMANCE_UNJUSTIFIED_DEFERRAL: "conformance.unjustified_deferral",
   CONFORMANCE_PRESERVE_VIOLATED: "conformance.preserve_violated",
   CONFORMANCE_REGRESSION: "conformance.regression",
+  STRUCTURE_UNDECLARED_EDGE: "structure.undeclared_edge", // forge#4159: a workspace package.json edge the contract does not name
   FOLLOWUP_UNAVAILABLE: "followup.unavailable",
   MERGE_HEAD_MISMATCH: "merge.head_mismatch",
   // Non-failure terminals, so a RUN_TERMINAL for a healthy run is not counted as a gap.

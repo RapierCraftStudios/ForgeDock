@@ -12,18 +12,24 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
-import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, closePlan, followupItems, pendingTracking } from "./conformance.mjs";
+import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt } from "./prompts.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
 export const CONFORMANCE_MODES = Object.freeze(["shadow", "enforce"]);
 /** In shadow mode only what the previous two-question reviewer blocked on still blocks: a requirement not done, a regression. */
 const SHADOW_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CONFORMANCE_REGRESSION];
+/**
+ * Precheck failures that block in shadow mode too (#4160): the builder's own validate command failed, or it reported a
+ * contracted requirement as not done. These are the precheck's form of "a requirement not done". Missing validate results
+ * (often CI-only steps), scope creep and amendment problems stay recorded-only in shadow.
+ */
+const SHADOW_PRE_BLOCKS = ["validate_failed", "requirement_unimplemented"];
 export const REGISTER_MARKER = "FORGE:WORK-ON"; // alias marker carried by the FORGE:TRAJECTORY comment
 const num = (v) => (Number.isFinite(v) ? v : null);
 export const MAX_SUBISSUES = 8;
@@ -53,6 +59,15 @@ export function classifyBlock(result, issue) {
       : { kind: "untyped", problem: `"${String(b.why ?? "").slice(0, 80)}" is not a human-only reason (${HUMAN_BLOCK_REASONS.join(", ")})` };
   }
   return { kind: "untyped", problem: `block kind "${String(b.kind ?? "").slice(0, 40)}" is unknown` };
+}
+
+/**
+ * Never a branch-deletion target (#4179): anything but the issue's own `feat/issue-<n>-lean`, and never main, master,
+ * staging, the lane, forge.yaml's default/staging branch, `milestone/*` or a default branch of the repo.
+ */
+export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, defaults = [] } = {}) {
+  if (typeof b !== "string" || b !== `feat/issue-${issue}-lean`) return true;
+  return ["main", "master", "staging", lane, branches?.default, branches?.staging].includes(b) || /^milestone\//.test(b) || isDefaultLane(b, defaults);
 }
 
 /**
@@ -121,7 +136,7 @@ export async function runCore(o) {
   const leaseTtlMs = o.leaseTtlMs ?? 25 * 60000; // below the projector's 30 min honour cap
   let leaseState = null, leaseTimer = null;
   const writeLease = (lease, extra = {}) => io.projector.writeState(issue, { ...leaseState, ...extra, lease });
-  const renew = async () => { if (io.projector && leaseState) { try { await writeLease(leaseObj()); } catch { /* best effort */ } } };
+  const renew = async () => { if (io.projector && leaseState && !finishing) { /* never re-take a lease a finish (or signal) released */ try { await writeLease(leaseObj()); } catch { /* best effort */ } } };
   async function releaseLease(reason) {
     if (leaseTimer) { clearInterval(leaseTimer); leaseTimer = null; }
     if (!io.projector || !leaseState) return;
@@ -131,11 +146,52 @@ export async function runCore(o) {
 
   // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
   const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
-  let done = null, wtCreated = false;
+  let done = null, finishing = null, wtCreated = false;
   const runId = `${issue}-${t0}`;
   let runTmp = null;
-  async function finish(reason, detail = "", extra = {}, codeOverride = null) {
-    if (done) return done; // idempotent: exactly one RUN_TERMINAL and one telemetry emit
+  // ---- lane resource ledger (#4179): every owned resource is registered before it is created, released after its teardown ----
+  let ledger = null, deleteLocalBranch = false;
+  const ledgerDo = (fn) => { if (!ledger) return; try { fn(ledger); } catch (e) { ev({ event: "LEDGER_ERROR", error: String(e?.message ?? e).slice(0, 300) }); } };
+  const protectedBranch = (b) => isProtectedLaneBranch(b, { issue, lane, branches, defaults });
+  /** Teardown from the ledger (#4179), on every exit path: builder pids, checkpoint of unpushed work, run tmp, worktree, branch, docker. */
+  async function teardown(reason, extra) {
+    for (const p of ledger ? ledger.entries("pid") : []) {
+      try { if (await io.killGroup?.(p.value, p.marker)) ledgerDo((l) => l.release("pid", p.value)); } catch { /* keep it listed */ }
+    }
+    // Never discard work silently: an unmerged lane commits and pushes what is left before its worktree goes.
+    const saved = !wtCreated || reason === "merged" || (await checkpoint(`exit (${reason})`));
+    if (runTmp) {
+      try { if ((await io.runTmp.remove(runTmp)) !== false) ledgerDo((l) => l.release("tmp", runTmp)); } catch { /* best effort */ }
+      runTmp = null;
+    } // every terminal, including engine-error and deferred
+    if (wtCreated && saved) {
+      let removed = false;
+      try { await io.git(["worktree", "remove", "--force", wt], { cwd }); removed = true; } catch { /* best effort */ }
+      try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
+      if (removed) ledgerDo((l) => l.release("worktree", wt));
+      let branchDone = true;
+      if ((reason === "invalid" && !extra.pr) || (reason === "merged" && deleteLocalBranch)) {
+        try { await io.git(["branch", "-D", branch], { cwd }); } catch { branchDone = reason !== "merged"; }
+      }
+      if (branchDone) ledgerDo((l) => l.release("branch", branch));
+    } else if (wtCreated) {
+      ev({ event: "TEARDOWN_KEPT", reason: "checkpoint failed: worktree and branch kept so no work is lost", worktree: wt });
+    }
+    for (const kind of ["container", "volume"]) {
+      for (const r of ledger ? ledger.entries(kind) : []) {
+        if (!io.docker) continue;
+        try { await io.docker(kind === "container" ? ["rm", "-f", String(r.value)] : ["volume", "rm", String(r.value)]); ledgerDo((l) => l.release(kind, r.value)); } catch { /* docker absent or busy: keep it listed */ }
+      }
+    }
+    ledgerDo((l) => { if (l.remove()) ev({ event: "LEDGER_CLEARED", path: l.path }); else ev({ event: "LEDGER_KEPT", path: l.path, resources: l.entries().map((r) => `${r.kind}:${r.value}`) }); });
+  }
+  function finish(...args) {
+    if (done) return Promise.resolve(done);
+    finishing ??= finishOnce(...args); // a signal during a normal finish waits for the same teardown
+    return finishing;
+  }
+  async function finishOnce(reason, detail = "", extra = {}, codeOverride = null) {
+    await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
     const code = codeOverride ?? codeForTerminalReason(reason);
     ev({ event: "RUN_TERMINAL", reason, code });
     await emit({ event: "RUN_TERMINAL", reason, code });
@@ -150,11 +206,6 @@ export async function runCore(o) {
       try { await post(["FORGE:TRAJECTORY", REGISTER_MARKER], renderTrajectory({ ...T, usage: usageLine() })); } catch { /* best effort */ }
     }
     await releaseLease(reason);
-    if (runTmp) { try { await io.runTmp.remove(runTmp); } catch { /* best effort */ } runTmp = null; } // every terminal, including engine-error and deferred
-    if (wtCreated) {
-      try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* best effort */ }
-      if (reason === "invalid" && !extra.pr) { try { await io.git(["branch", "-D", branch], { cwd }); } catch { /* best effort */ } }
-    }
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, ...extra };
     return done;
   }
@@ -264,7 +315,8 @@ export async function runCore(o) {
       const ahead = String(await git(["diff", "--name-only", `${base}...HEAD`])).trim();
       if (ahead) await gitPush(["push", "-u", "origin", branch]);
       ev({ event: "CHECKPOINT", reason, dirty: Boolean(dirty), pushed: Boolean(ahead) });
-    } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); }
+      return true;
+    } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return false; }
   }
   const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over.";
   const PLAN_RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD` to see what exists, but plan against the issue itself. This step is still planning only: do not edit code, do not commit, and do not write the result file unless the issue is invalid, already fixed or blocked.";
@@ -316,8 +368,11 @@ export async function runCore(o) {
     await renew();
     const control = {};
     const governor = startGovernor(control);
-    const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: builderModel, resume, system: "", prompt, control,
+    let spawned = null;
+    const onSpawn = (child) => { if (Number.isSafeInteger(child?.pid) && !finishing) { spawned = child.pid; ledgerDo((l) => l.register("pid", child.pid, { marker: basename(String(child.spawnfile ?? "")) || null })); } };
+    const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: builderModel, resume, system: "", prompt, control, onSpawn,
       idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits }));
+    call.then(() => {}, () => {}).finally(() => { if (spawned) ledgerDo((l) => l.release("pid", spawned)); });
     let r;
     call.catch(() => governor.stop());
     if (live && io.fs.stat) {
@@ -334,6 +389,7 @@ export async function runCore(o) {
     } else { try { r = await call; } finally { /* governor stops below */ } }
     await governor.stop();
     await renew();
+    await registerReported();
     if (r?.sessionId) sessionId = r.sessionId;
     await attempt("implement", n, r);
     onProgress({ event: "phase_exit", phase: "build", status: "committed" });
@@ -341,6 +397,17 @@ export async function runCore(o) {
   }
   const readContract = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${CONTRACT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
   const readResult = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${RESULT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
+  /** Containers/volumes the builder reported in result.json `resources` go into the ledger, so teardown removes them. */
+  async function registerReported() {
+    if (!ledger || finishing) return; // after teardown nothing new is owned
+    const res = (await readResult())?.resources;
+    if (!res || typeof res !== "object") return;
+    for (const [key, kind] of [["containers", "container"], ["volumes", "volume"]]) {
+      for (const v of Array.isArray(res[key]) ? res[key] : []) {
+        if (typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(v)) ledgerDo((l) => l.register(kind, v));
+      }
+    }
+  }
 
   /** Live-checks a builder block (#4124). Dependency issues are re-read, so a closed or unknown number is not a block. */
   async function resolveBlock(r) {
@@ -449,9 +516,17 @@ export async function runCore(o) {
     leaseTimer.unref?.();
   }
 
+  if (io.ledger) {
+    try { ledger = io.ledger({ batch: o.batchId ?? "adhoc", lane: `lean-${issue}`, owner: agentId, issue, host: myHost }); } catch { ledger = null; }
+  }
+  // A signal (engine-cli SIGTERM/SIGINT) runs the same teardown and lease release as any other exit.
+  o.onTeardown?.((signal) => finish("deferred", `interrupted by ${signal}`, { code: OUTCOME_CODES.RUN_INTERRUPTED }, OUTCOME_CODES.RUN_INTERRUPTED));
   if (io.runTmp) {
     try { await io.runTmp.prune?.(); } catch { /* best effort */ }
+    const planned = io.runTmp.path?.(runId);
+    if (planned) ledgerDo((l) => l.register("tmp", planned));
     try { runTmp = await io.runTmp.make(issue, runId); } catch { runTmp = null; }
+    if (runTmp && runTmp !== planned) ledgerDo((l) => l.register("tmp", runTmp));
   }
   ev({ event: "RUN_START", run: `core_${issue}_${t0}`, issue, lane, path: "core", version: ENGINE_VERSION, forge_version: ENGINE_VERSION, repo });
   let iss;
@@ -517,6 +592,7 @@ export async function runCore(o) {
         keepLocal = containsRemote;
       }
     } catch { /* no local branch */ }
+    ledgerDo((l) => { l.register("branch", branch); l.register("worktree", wt); });
     if (keepLocal) {
       await addWorktree(["worktree", "add", wt, branch]);
       resumed = resumed ?? { pr: null, local: true };
@@ -537,11 +613,25 @@ export async function runCore(o) {
     const fromCheckpoint = lastSubject.startsWith("wip(forge): checkpoint");
     const hasCommits = resumed ? (await changedFiles()).length > 0 : false;
     // Requirements may only be quoted from the issue and trusted comments: an untrusted commenter cannot add a contract requirement.
-    const trustedComments = (iss.comments ?? []).filter((c) => {
+    const trustedOf = (i) => (i.comments ?? []).filter((c) => {
       const login = String(c?.author?.login ?? c?.user?.login ?? "");
       return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
     });
-    const issueText = [iss.title, iss.body ?? "", ...trustedComments.map((c) => c?.body ?? "")].join("\n\n");
+    const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => c?.body ?? "")].join("\n\n");
+    let trustedComments = trustedOf(iss);
+    let issueText = textOf(iss, trustedComments);
+    /** #4188: the builder reads the live issue, so quotes are checked against the current text, not the RUN_START snapshot. Best effort. */
+    async function refreshIssue(stage) {
+      let next;
+      try { next = JSON.parse(String(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments"]))); } catch { return; }
+      if (!next || typeof next !== "object") return;
+      const tc = trustedOf(next), text = textOf(next, tc);
+      const old = contractHash(issueText), now = contractHash(text);
+      if (old === now) return;
+      iss = next; trustedComments = tc; issueText = text;
+      ev({ event: "ISSUE_EDITED", old, new: now, stage });
+      T.decisions.push(`Issue edited during the run (${old} -> ${now}); ${stage} uses the current text`);
+    }
     /** A typed block (with one corrective resume for an untyped one) ends the run; returns the terminal or null. */
     async function endIfBlocked() {
       let block = result?.status === "blocked" ? await resolveBlock(result) : null;
@@ -609,11 +699,13 @@ export async function runCore(o) {
       const blocked = await endIfBlocked();
       if (blocked) return blocked;
       let contract = await readContract();
+      await refreshIssue("contract validation");
       let vc = validateContract(contract, issueText);
       if (!vc.ok && sessionId) {
         T.decisions.push(`Contract rejected (${vc.problems[0]}); resumed once`);
         await builder(++attemptN, contractCorrectionPrompt(vc.problems), sessionId, false, () => builderPlanPrompt(issue));
         contract = await readContract();
+        await refreshIssue("contract validation");
         vc = validateContract(contract, issueText);
       }
       await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
@@ -645,9 +737,41 @@ export async function runCore(o) {
     T.implement = [`${files.length} file(s)`, branch];
     T.decisions.push(`Builder verdict: ${result?.status ?? "none"}`);
 
+    // ---- 3b. structure delta (forge#4159): deterministic, before the conformance review; no reviewer run of its own ----
+    // A package.json edge between workspace packages the contract does not name blocks (one builder resume) in either
+    // conformance mode; import-pair growth and boundary-config loosening only add one line to the reviewer prompt.
+    const structureOf = async () => {
+      if (!io.structureDelta) return null;
+      const d = await io.structureDelta({ cwd: wt, base }).catch(() => null);
+      return d && typeof d === "object" && Array.isArray(d.package_edges_added) ? d : null; // `{}`: no workspace packages
+    };
+    let structure = await structureOf();
+    if (structure) {
+      const pairs = structure.import_pairs ?? [], sum = (k) => pairs.reduce((n, p) => n + (Number(p?.[k]) || 0), 0);
+      const rec = { event: "STRUCTURE_DELTA", edges_added: structure.package_edges_added.length, edges_removed: (structure.package_edges_removed ?? []).length,
+        import_files_added: sum("files_added"), import_files_removed: sum("files_removed"), boundary_changed: Boolean(structure.boundary_config_changed?.changed), boundary_loosened: Boolean(structure.boundary_config_changed?.loosens) };
+      ev(rec);
+      await emit({ ...rec, phase: "implement" });
+      const undeclared = () => unnamedEdges(applyAmendments(frozen, result?.amendments, issueText).contract, structure);
+      let edges = undeclared();
+      if (edges.length && sessionId) {
+        T.decisions.push(`Undeclared package edge(s) ${edges.map((e) => `${e.from}→${e.to}`).join(", ")}; builder resumed once`);
+        await builder(++attemptN, structurePrompt(edges), sessionId);
+        await upsertStage("implementation");
+        result = (await readResult()) ?? result;
+        structure = (await structureOf()) ?? structure;
+        edges = undeclared();
+      }
+      if (edges.length) {
+        return await needsHuman(`The change adds dependencies between workspace packages that the frozen contract does not name${sessionId ? ", after one builder resume" : ""}; nothing merged:\n${edges.slice(0, 15).map((e) => `- ${e.from} → ${e.to} (${e.kind}, \`${e.manifest}\`)`).join("\n")}\n\nAdd each to the contract with a reason, or remove it.`, OUTCOME_CODES.STRUCTURE_UNDECLARED_EDGE);
+      }
+    }
+    const structureLine = structureNote(structure);
+
     // ---- 4. conformance: typed amendments, deterministic precheck, structured review; the engine computes the verdict ----
     // enforce: every failure class blocks (one builder resume, then needs-human). shadow: the verdict is computed and posted,
-    // but only what the previous reviewer enforced blocks (a review that finds a requirement not implemented, or a regression).
+    // but only what the previous reviewer enforced blocks (a review that finds a requirement not implemented, or a regression),
+    // plus the precheck's equivalent: a failed validate command or a requirement the builder reported as not done (#4160).
     await label("in-review");
     const shadow = conformance !== "enforce";
     let effective = frozen, review = null, lastAmend = "", resumes = 0, verdict = null;
@@ -673,7 +797,7 @@ export async function runCore(o) {
       for (let t = 0; t < 2; t++) {
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
-          prompt: reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base }) });
+          prompt: reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine }) });
         await renew();
         await attempt("review", ++reviewN, rr);
         review = parseReview(rr?.text);
@@ -685,6 +809,7 @@ export async function runCore(o) {
     }
     /** Precheck then review, on the current result and changed files (also the base-sync re-review). */
     async function gate() {
+      await refreshIssue("conformance");
       result = (await readResult()) ?? result;
       files = await changedFiles();
       const amendProblems = await amend();
@@ -692,6 +817,9 @@ export async function runCore(o) {
       const pre = [...pc.failures, ...amendProblems];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
+      // shadow: the builder's own failed checks block before any reviewer tokens are spent (#4160)
+      const hard = shadow ? pre.filter((f) => SHADOW_PRE_BLOCKS.includes(f.kind)) : [];
+      if (hard.length) return { state: "nonconforming", by: "precheck", failures: hard };
       const d = await reviewOnce();
       if (!shadow) return { ...d, by: "review" };
       // shadow: record what enforce would have done; block only on what the previous reviewer blocked on
@@ -778,6 +906,13 @@ export async function runCore(o) {
       }
       return "unknown";
     };
+    /** #4158: MERGEABLE but BLOCKED is a base branch policy block (ruleset / required checks pending), not a conflict. */
+    const policyBlocked = async () => {
+      let j;
+      try { j = JSON.parse(String(await ghc(["pr", "view", String(pr), "-R", repo, "--json", "mergeable,mergeStateStatus"])) || "{}"); } catch { return false; }
+      return String(j.mergeable ?? "").toUpperCase() === "MERGEABLE" && String(j.mergeStateStatus ?? "").toUpperCase() === "BLOCKED";
+    };
+    let blockStartedAt = null, blockPollIndex = 0;
     const conflictFiles = async () => (await gitOut(["diff", "--name-only", "--diff-filter=U"])).split("\n").map((x) => x.trim()).filter(Boolean);
     const unresolved = async () => (await conflictFiles()).length > 0 || (await gitOut(["grep", "-n", "-e", "^<<<<<<< ", "-e", "^>>>>>>> "])) !== ""
       || (await gitOut(["diff", "--check"])) !== "" || (await gitOut(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) !== "";
@@ -830,6 +965,19 @@ export async function runCore(o) {
       return null;
     }
     const NR_TESTS = "not reported";
+    /** After the merge (#4179): delete the lane branch on origin; finish() deletes it locally after the worktree is gone. */
+    async function deleteMergedBranch() {
+      const skip = (why) => { ev({ event: "BRANCH_DELETE_SKIPPED", branch, why }); T.decisions.push(`Lane branch kept: ${why}`); };
+      if (protectedBranch(branch)) return skip("protected branch name");
+      for (const side of ["--head", "--base"]) {
+        let open;
+        try { open = JSON.parse(String(await ghc(["pr", "list", "-R", repo, side, branch, "--state", "open", "--json", "number"])) || "[]"); } catch { return skip("open-PR check failed"); }
+        if (open.length) return skip(`open PR #${open[0].number} uses it as ${side.slice(2)}`);
+      }
+      deleteLocalBranch = true;
+      try { await io.git(["push", "origin", "--delete", branch], { cwd }); ev({ event: "BRANCH_DELETED", branch, where: "origin" }); }
+      catch (e) { ev({ event: "BRANCH_DELETE_FAILED", branch, where: "origin", error: String(e?.stderr ?? e?.message ?? e).slice(0, 300) }); }
+    }
 
     // ---- 7. (sync) wait per policy, (sync) merge at the reviewed head ----
     // A rerun on an existing PR goes through the same conflict check, so a conflicting PR from an earlier run recovers.
@@ -884,10 +1032,27 @@ export async function runCore(o) {
           await sleepFn(Math.min(60000, 1000 * 2 ** (mergeRetries - 1)) + Math.floor(random() * 250));
           continue;
         }
+        if (await policyBlocked()) {
+          // Policy block: wait and retry at the reviewed head; never base-sync, never base.conflict (#4158).
+          if (blockStartedAt === null) {
+            blockStartedAt = now();
+            T.decisions.push("merge blocked by base branch policy (ruleset/required checks); waiting");
+            T.anomalies.push(`gh pr merge blocked by base branch policy: ${msg.split("\n")[0].slice(0, 120)}`);
+          }
+          if (now() - blockStartedAt >= ciMaxMinutes * 60000) {
+            T.merge = [policyText, "blocked by base branch policy"];
+            return await finish("ci-pending", `PR #${pr} blocked by base branch policy after ${ciMaxMinutes} min (checks pending or ruleset requirement unmet)`, { pr });
+          }
+          onProgress({ event: "phase_paused", phase: "merge", detail: `PR #${pr} blocked by base branch policy` });
+          await sleep(ciPollDelayMs(blockPollIndex++, random));
+          await renew();
+          continue;
+        }
         if (!MERGE_CONFLICT_RE.test(msg)) throw e;
         const r = await baseSync("gh pr merge reported a conflict"); if (r) return r;
       }
     }
+    await deleteMergedBranch();
     await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
     if (closing.tracked.length) {
       try { await post("FORGE:TRACKED", `## Remaining work tracked\nClosed as completed by PR #${pr}. The contracted deferred and post-deploy requirements are tracked in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }

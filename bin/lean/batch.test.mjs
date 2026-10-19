@@ -7,7 +7,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S } from "./orchestrate.mjs";
-import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic } from "./batch.mjs";
+import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane } from "./batch.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration } from "../engine-cli.mjs";
 
 const quiet = async (fn) => { const l = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = l; } };
@@ -215,5 +215,18 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     await assert.rejects(quiet(() => runFromCli(["7", "--repo", "o/r", "--result-file", rf], { ...base, leanModule: { runCore: async () => { throw new Error("kaboom"); } } })), /kaboom/);
     assert.equal(JSON.parse(readFileSync(rf, "utf8")).terminalReason, "engine-error");
     assert.ok(!existsSync(`${rf}.tmp-${process.pid}`));
+  });
+});
+
+describe("lane launch env (#4179)", () => {
+  it("launchLane passes FORGEDOCK_BATCH_ID (the ledger dir) in the lane env and keeps the rest of the env and argv", () => {
+    const batch = openBatch(tmpDir("batch-"), "b20261019-120000-1");
+    const spawned = [];
+    const { pid } = launchLane({ batch, issue: 7, args: ["--repo", "o/r"], script: "/x/forgedock.mjs", bin: "node", env: { PATH: "/bin", KEEP: "1" },
+      spawnFn: (bin, argv, opts) => { spawned.push({ bin, argv, opts }); return { pid: 99, unref() {}, on() {} }; } });
+    assert.equal(pid, 99);
+    assert.equal(spawned[0].opts.env.FORGEDOCK_BATCH_ID, batch.id);
+    assert.equal(spawned[0].opts.env.KEEP, "1");
+    assert.deepEqual(spawned[0].argv, ["/x/forgedock.mjs", "run-issue", "7", "--repo", "o/r", "--result-file", batch.resultFile(7)]);
   });
 });
