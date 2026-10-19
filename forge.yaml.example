@@ -270,6 +270,26 @@ branches:
 #   review_pr_staging_max_turns: 80
 
 # =============================================================================
+# ENV (OPTIONAL)
+# Lane environment for the core work-on (#4163). Without these keys lanes still
+# pin the repo's own toolchain: package.json `packageManager` (else .tool-versions)
+# becomes a corepack/npx shim first on the builder's PATH, so validate commands
+# and git hooks run the pinned pnpm/yarn/npm; a node pin (.nvmrc, .node-version,
+# .tool-versions, engines.node) the host doesn't satisfy is a trajectory warning.
+# See docs/CONFIG.md -> `env`.
+#   toolchain: override the package-manager pin ("pnpm@10.4.1"), or "off"
+#   setup:     command run once per fresh lane worktree, before the builder
+#              (e.g. a dev-DB reconcile script). A failure ends the lane
+#              needs-human with code env.setup_failed (an environment error,
+#              not a build failure).
+# Commands: run-issue, orchestrate
+# =============================================================================
+
+# env:
+#   toolchain: "pnpm@10.4.1"
+#   setup: "bash scripts/reconcile-dev-db.sh"
+
+# =============================================================================
 # ORCHESTRATION (OPTIONAL)
 # Concurrency limits and cascade admission policy for the /orchestrate batch
 # engine. `max_concurrent` already existed at runtime but was undocumented

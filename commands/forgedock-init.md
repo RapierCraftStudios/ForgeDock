@@ -544,6 +544,13 @@ verification:
     - "{SERVICE_PREFIX}"
 ```
 
+**env** (optional, off by default; never auto-filled): lanes already read the repo's toolchain pins (`packageManager`, `.nvmrc`, `.node-version`, `.tool-versions`, `engines.node`) at lane setup. Write this section only when the user asks for it (`--interactive`). `toolchain` overrides the pinned package manager (or `off`); `setup` runs once per fresh lane worktree before the builder, e.g. a dev-DB reconcile script. See docs/CONFIG.md → `env`.
+```yaml
+env:
+  toolchain: "{PM}@{VERSION}"
+  setup: "{SETUP_COMMAND}"
+```
+
 ### 5C: Section merge strategy
 
 For each optional section that is ALREADY ACTIVE in forge.yaml (detected in Phase 1C):

@@ -47,6 +47,7 @@ export const OUTCOME_CODES = Object.freeze({
   INFRA_CLI_SPAWN_TRANSIENT: "infra.cli_spawn_transient",
   CLI_TIMEOUT: "cli.timeout",
   CLI_SPAWN_FAILED: "cli.spawn_failed", // forge#4129: deterministic spawn failure (E2BIG, ENOENT, EACCES, ...)
+  ENV_SETUP_FAILED: "env.setup_failed", // forge#4163: forge.yaml env.setup failed before the builder; an environment error, not a build failure
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
