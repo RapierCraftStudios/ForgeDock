@@ -486,8 +486,9 @@ jobs:
         run: bash scripts/check-test-wiring.sh
 
   spec-size-budget:
-    name: Spec-size budget (review specs may not grow)
+    name: Spec-size budget (every command spec is budgeted)
     runs-on: ubuntu-latest
+    # Every commands/**/*.md: growth <= 2% and <= 4 KB, new specs <= 4 KB, per-file ceilings in the script (#4164).
     # Release PRs (staging -> main) carry cumulative growth already checked per PR.
     if: github.event_name == 'pull_request' && !(github.head_ref == 'staging' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)
 
