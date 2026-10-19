@@ -241,7 +241,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
 
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
   const settle = async (n, r, rec, pf) => {
-    const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + (pf?.cost_usd ?? 0), minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}) };
+    const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + (pf?.cost_usd ?? 0), minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
+      ...(r?.waits && typeof r.waits === "object" ? { waits: r.waits } : {}), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}) };
     const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
     const subs = (Array.isArray(r?.subissues) ? r.subissues : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
     const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); };
@@ -415,4 +416,18 @@ export function formatTable(rows) {
   const w = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)));
   const line = (c) => c.map((x, i) => x.padEnd(w[i])).join("  ").trimEnd();
   return [line(head), line(w.map((n) => "-".repeat(n))), ...body.map(line)].join("\n");
+}
+
+/**
+ * #4169 batch-report line: wait time per phase summed over the rows' lane `waits` ({phase: ms}), and the heavy-step
+ * semaphore queue: `now` live from `heavyStats.queued`, `max` the longest queue a lane of this batch saw. Null when nothing waited or queued.
+ */
+export function formatWaitSummary(rows, heavyStats = null) {
+  const by = {};
+  for (const r of rows ?? []) for (const [p, ms] of Object.entries(r?.waits ?? {})) if (Number.isFinite(ms) && ms >= 0) by[p] = (by[p] ?? 0) + ms;
+  const seen = Math.max(0, ...(rows ?? []).map((r) => (Number.isInteger(r?.heavyQueueMax) ? r.heavyQueueMax : 0)));
+  const hasRows = Object.keys(by).length > 0, hasStats = heavyStats && typeof heavyStats === "object";
+  if (!hasRows && !seen && !(hasStats && heavyStats.queued > 0)) return null; // nothing waited, nothing queued: no line
+  const waits = hasRows ? Object.entries(by).sort(([a], [b]) => (a < b ? -1 : 1)).map(([p, ms]) => `${p} ${(ms / 60000).toFixed(1)}m`).join(", ") : "none";
+  return `waits by phase: ${waits}; heavy queue: now ${hasStats && Number.isInteger(heavyStats.queued) ? heavyStats.queued : "?"}, max ${seen}`;
 }
