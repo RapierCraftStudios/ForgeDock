@@ -1369,6 +1369,25 @@ describe("pickPhase", () => {
       assert.equal((await openDependency(42, io({ 42: rec({ body: dep }), 7: "" }))).unreadable, true);
       assert.equal((await openDependency(42, io({ 42: "not json" }))).unreadable, true);
     });
+    it("#4153 an open workflow:decomposed dependency resolves to its sub-issues", async () => {
+      const decomposedParent = rec({ labels: [{ name: "workflow:decomposed" }] });
+      const split = { body: "<!-- FORGE:DECOMPOSED -->\n## Split into sub-issues\n- #71 part A\n- #72: part B\n", author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
+      const withComments = (records, comments) => ({ git: async () => "0", gh: async (args) => {
+        if (args.some((a) => /issues\/7\/comments$/.test(a))) return comments.map((c) => JSON.stringify(c)).join("\n");
+        const r = records[/issues\/(\d+)$/.exec(args[args.length - 1])?.[1]];
+        return r ?? "";
+      } });
+      const body = rec({ body: dep });
+      assert.deepEqual(await openDependency(42, withComments({ 42: body, 7: decomposedParent, 71: rec({ state: "closed" }), 72: rec() }, [split])), { open: [72] });
+      assert.equal(await openDependency(42, withComments({ 42: body, 7: decomposedParent, 71: rec({ state: "closed" }), 72: rec({ state: "closed" }) }, [split])), null);
+      // no trusted FORGE:DECOMPOSED record (none, untrusted, or revoked): the parent itself stays open (fail closed)
+      assert.deepEqual(await openDependency(42, withComments({ 42: body, 7: decomposedParent }, [])), { open: [7] });
+      assert.deepEqual(await openDependency(42, withComments({ 42: body, 7: decomposedParent }, [{ ...split, user: { type: "User", login: "x" } }])), { open: [7] });
+      assert.deepEqual(await openDependency(42, withComments({ 42: body, 7: decomposedParent }, [split, { ...split, body: "<!-- FORGE:DECOMPOSED:REVOKED -->\nre-plan" }])), { open: [7] });
+      // without the label, the comment alone does not re-point the edge; an unreadable sub fails closed
+      assert.deepEqual(await openDependency(42, withComments({ 42: body, 7: rec(), 71: rec({ state: "closed" }), 72: rec({ state: "closed" }) }, [split])), { open: [7] });
+      assert.equal((await openDependency(42, withComments({ 42: body, 7: decomposedParent, 71: rec({ state: "closed" }) }, [split]))).unreadable, true);
+    });
   });
 
   describe("build — within-comment **Branch** field match order (#2193)", () => {

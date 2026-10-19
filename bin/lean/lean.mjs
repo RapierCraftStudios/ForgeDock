@@ -10,7 +10,7 @@ import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
-import { openDependency, isTrustedComment } from "../engine/phases.mjs";
+import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
 import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, closePlan, followupItems, pendingTracking } from "./conformance.mjs";
 import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
@@ -75,7 +75,7 @@ export async function runCore(o) {
     ciMaxMinutes = 360, conformance = "shadow", mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-  let lane = null, base = null, defaults = []; // set by lane resolution, before the lease
+  let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
   const branch = `feat/issue-${issue}-lean`;
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
@@ -353,8 +353,20 @@ export async function runCore(o) {
         return { kind: "unreadable", detail: `dependency #${d} named by the builder could not be read: ${String(e?.message ?? e).slice(0, 200)}` };
       }
       if (String(v?.state).toUpperCase() !== "OPEN") continue;
-      open.push(d);
-      if ((v.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) blockers.push(d);
+      // #4153: an open decomposed parent resolves to its open sub-issues; it is satisfied once they all close.
+      const subs = isDecomposedRecord(v) ? await decomposedSubissues(d, io) : null;
+      const recs = [];
+      if (!subs) recs.push([d, v]);
+      else for (const n of subs) {
+        try { recs.push([n, JSON.parse(String(await ghc(["issue", "view", String(n), "-R", repo, "--json", "state,labels"])))]); } catch (e) {
+          return { kind: "unreadable", detail: `sub-issue #${n} of decomposed dependency #${d} could not be read: ${String(e?.message ?? e).slice(0, 200)}` };
+        }
+      }
+      for (const [n, rec] of recs) {
+        if (String(rec?.state).toUpperCase() !== "OPEN" || n === Number(issue) || open.includes(n)) continue;
+        open.push(n);
+        if ((rec.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) blockers.push(n);
+      }
     }
     if (!open.length) return { kind: "untyped", problem: `its dependencies ${b.issues.map((n) => `#${n}`).join(", ")} are not open` };
     return { kind: "dependency", issues: open, blockers };
@@ -381,7 +393,8 @@ export async function runCore(o) {
       try {
         for (const sub of b.subissues) {
           const lines = [`**Parent**: #${issue}`, ...sub.dependsOn.map((j) => `**Depends on**: #${filed[j]}`)];
-          const out = String(await ghw(["issue", "create", "-R", repo, "--title", sub.title, "--body", `${sub.body.trim()}\n\n${lines.join("\n")}`]));
+          // #4153: the parent's milestone, so each sub-issue derives the parent's lane before any lane runs.
+          const out = String(await ghw(["issue", "create", "-R", repo, "--title", sub.title, "--body", `${sub.body.trim()}\n\n${lines.join("\n")}`, ...(milestone ? ["--milestone", milestone] : [])]));
           const n = Number(/\/issues\/(\d+)/.exec(out)?.[1]);
           if (!Number.isSafeInteger(n)) throw new Error(`cannot parse the sub-issue number from: ${out.slice(0, 200)}`);
           filed.push(n);
@@ -404,7 +417,7 @@ export async function runCore(o) {
   {
     const r = await resolveLane({ issue, repo, io, cwd, branches, requested: requestedLane, override: laneOverride });
     if (!r.ok) return { terminalReason: "lane-refused", code: r.code, detail: r.detail };
-    lane = r.lane; base = `origin/${lane}`; defaults = r.defaults;
+    lane = r.lane; base = `origin/${lane}`; defaults = r.defaults; milestone = r.milestone ?? null;
     if (r.overridden) T.decisions.push(`Lane override: ${lane} instead of the resolved ${r.expected}`);
   }
   /** Last guard before a PR is created or merged: the default branch is never a lane. */

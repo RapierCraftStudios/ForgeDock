@@ -218,6 +218,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (p) track(n, Promise.resolve(p).then((r) => settle(n, r, rec, checked.get(n) ?? null)));
     else { runRecs.delete(n); if (!pending.includes(n) && !results.has(n)) pending.unshift(n); }
   }
+  // A resume re-derives each unfinished issue's lane from its current milestone (#4153): a re-milestone takes effect.
+  if (saved && resolveLane) {
+    for (const n of order) {
+      if (results.has(n) || running.has(n)) continue;
+      let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e) }; }
+      lanes.set(n, l);
+    }
+    noteCrossLane();
+  }
   save();
 
   const K = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
