@@ -310,3 +310,17 @@ call (`effects.mjs` `noToolFlags`, `prompts.mjs` `groupingPrompt`), then the usu
 Chains: `slicePlan` + `symbol-move.py --extend` + a `FORGE:SPLIT-PLAN` follow-up issue. Codes
 `split.unsupported|plan_invalid|verify_failed`. Cost: one index-sized call, 0 reviewer runs per
 split, instead of a builder session plus a reviewer. ADR `decisions/4211-refactor-split-lane.md`.
+
+## Entry 2026-10-20 — Cross-repo fairness weights in the host registry (#4193)
+
+`sched.mjs` `grantOrder(s)` replaces the static (priority, seq) sort for both
+`tryAcquire`'s rank check and `list().queue`. Priority still comes first, so a P0
+from any repo is granted next. Within a priority, the next entry comes from the repo
+(entry `repo`, else `batch`, else key) with the smallest (live slots of that repo
+across all priorities + entries already ordered ahead) / weight. Ties go to the
+heavier repo, then FIFO; inside a repo the order is FIFO. A single-repo queue orders
+exactly as before. Weights live in the registry (`weights: {"owner/repo": N}`,
+missing = 1), set with `forgedock sched weight <owner/repo> N|--clear`
+(`engine-cli.mjs` `schedFromCli`) and printed by `sched show`. Running lanes are
+never revoked, so a newly set weight converges as lanes end. Rationale:
+`devdocs/decisions/4193-sched-fair-weights.md`.

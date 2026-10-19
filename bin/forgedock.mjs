@@ -3271,7 +3271,7 @@ function help() {
     ["npx forgedock orchestrate --resume <id> | --set-parallel <id> K", "Reattach to a batch hosted by the schedd daemon (a finished one replays its report, an orphaned one is resumed with live lanes re-adopted), or change its concurrency live"],
     ["npx forgedock triage <issue...> [--lane L] [--dry-run]", "Already-fixed pre-filter: close issues a merged PR or green CI already resolved; print the rest"],
     ["npx forgedock limits show | clear <id>|--all", "Show or clear per-account usage-limit holds shared by orchestrate batches"],
-    ["npx forgedock sched show | cap <N>|--clear", "Show the host lane registry, or set the host-wide lane cap shared by orchestrate batches"],
+    ["npx forgedock sched show | cap <N>|--clear | weight <owner/repo> <N>|--clear", "Show the host lane registry, set the host-wide lane cap shared by orchestrate batches, or set a repo's share of slots within a priority (default equal)"],
     ["npx forgedock schedd [status]", "Host scheduler daemon hosting every orchestrate batch (auto-spawned by orchestrate; run in the foreground for a systemd-user unit); status shows its pid and batches"],
     ["npx forgedock gc [--apply] [--older-than 6h] [--docker] [--worktrees] [--branches] [--tmp] [--processes]", "Report (dry-run default) and reclaim ForgeDock-owned leftovers: stale lane ledgers, forgedock-labelled containers/volumes, lean-*/agent-* worktrees, abandoned lane branches, ~/.forge/tmp scratch, orphaned lane processes; unowned resources and unpushed work are only reported"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],

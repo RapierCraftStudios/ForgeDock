@@ -3,17 +3,20 @@
 /**
  * Host lane registry (#4191): one host-wide cap on running `forgedock orchestrate` lanes across every batch and repo,
  * and cross-batch priority admission. State is one file, `~/.forge/sched/registry.json` (or `FORGEDOCK_SCHED_DIR`):
- * `{v, cap, seq, slots:{key:{pid, lanePid?, batch, repo, issue, priority, at}}, queue:{key:{pid, batch, repo, issue,
- * priority, seq, enqueuedAt}}}` with key `<batch>#<issue>`. Every mutation is a read-modify-write under an exclusive
- * lock file (`registry.lock`, holding the owner pid; a dead owner's lock is taken over) and `writeAtomic`.
+ * `{v, cap, weights, seq, slots:{key:{pid, lanePid?, batch, repo, issue, priority, at}}, queue:{key:{pid, batch, repo,
+ * issue, priority, seq, enqueuedAt}}}` with key `<batch>#<issue>`. Every mutation is a read-modify-write under an
+ * exclusive lock file (`registry.lock`, holding the owner pid; a dead owner's lock is taken over) and `writeAtomic`.
  *
  * A dispatcher offers the issues it could start now; `tryAcquire` grants a slot only while live slots < cap and the
- * key ranks within the free slots of the queue, ordered by (priority, seq): a P0 offered last is granted next, FIFO
- * within a priority. Running lanes are never revoked. A queued entry dies with its dispatcher pid; a slot dies with its
- * dispatcher unless its detached lane (`lanePid`) still runs, so an orphaned lane keeps counting until it exits or a
- * `--resume` adopts it. Cap: the registry's own (`forgedock sched cap N`), else the caller's forge.yaml
- * `orchestration.global_parallel`, else none. Fail-open: an unreadable registry or a lock not taken within
- * `lockWaitMs` grants (`fallback: true`), since a stuck registry would stall every batch on the host.
+ * key ranks within the free slots of the queue in grant order (`grantOrder`): priority first, so a P0 offered last is
+ * granted next. Within a priority, slots are shared across repos by the registry's `weights` (#4193; `{"owner/repo": N}`,
+ * `forgedock sched weight`, unset = 1): the next entry comes from the repo with the smallest (live slots + entries
+ * ordered ahead) / weight, FIFO inside a repo; an entry without a repo groups by batch. Running lanes are never revoked.
+ * A queued entry dies with its dispatcher pid; a slot dies with its dispatcher unless its detached lane (`lanePid`)
+ * still runs, so an orphaned lane keeps counting until it exits or a `--resume` adopts it. Cap: the registry's own
+ * (`forgedock sched cap N`), else the caller's forge.yaml `orchestration.global_parallel`, else none. Fail-open: an
+ * unreadable registry or a lock not taken within `lockWaitMs` grants (`fallback: true`), since a stuck registry would
+ * stall every batch on the host.
  */
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
@@ -46,10 +49,46 @@ export function pidAlive(pid) {
 const posInt = (k) => (Number.isInteger(k) && k >= 1 ? k : null);
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const byRank = ([ka, a], [kb, b]) => (a.priority - b.priority) || (a.seq - b.seq) || (ka < kb ? -1 : ka > kb ? 1 : 0);
+const groupOf = (k, e) => e?.repo ?? e?.batch ?? k;
+
+/**
+ * Queue entries `[key, entry]` in grant order: priority ascending, then a weighted fair share across repos within each
+ * priority (smallest load/weight first, load = live slots + entries already ordered; ties: higher weight, then FIFO).
+ */
+export function grantOrder(s) {
+  const weight = (g) => posInt(s.weights?.[g]) ?? 1;
+  const load = new Map();
+  for (const [k, e] of Object.entries(s.slots ?? {})) { const g = groupOf(k, e); load.set(g, (load.get(g) ?? 0) + 1); }
+  const levels = new Map(); // priority -> Map(group -> FIFO entries)
+  for (const ent of Object.entries(s.queue ?? {}).sort(byRank)) {
+    const [k, e] = ent;
+    if (!levels.has(e.priority)) levels.set(e.priority, new Map());
+    const groups = levels.get(e.priority), g = groupOf(k, e);
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(ent);
+  }
+  const out = [];
+  for (const p of [...levels.keys()].sort((a, b) => a - b)) {
+    const groups = levels.get(p);
+    while (groups.size) {
+      let best = null;
+      for (const [g, list] of groups) {
+        if (!best) { best = g; continue; }
+        const lg = (load.get(g) ?? 0) * weight(best), lb = (load.get(best) ?? 0) * weight(g);
+        if (lg < lb || (lg === lb && (weight(g) > weight(best) || (weight(g) === weight(best) && byRank(list[0], groups.get(best)[0]) < 0)))) best = g;
+      }
+      const list = groups.get(best);
+      out.push(list.shift());
+      load.set(best, (load.get(best) ?? 0) + 1);
+      if (!list.length) groups.delete(best);
+    }
+  }
+  return out;
+}
 
 /**
  * Handle on the registry. `pid` is this dispatcher; `alive(pid)` is the liveness probe (injected in tests).
- * @returns {{dir, tryAcquire, offer, withdraw, release, setLanePid, adoptSlot, cap, setCap, list}}
+ * @returns {{dir, tryAcquire, offer, withdraw, release, setLanePid, adoptSlot, cap, setCap, weights, setWeight, list}}
  */
 export function openSched(dir = schedDir(), { now = () => Date.now(), pid = process.pid, alive = pidAlive, lockWaitMs = LOCK_WAIT_MS } = {}) {
   const file = join(dir, "registry.json"), lockFile = join(dir, "registry.lock");
@@ -93,7 +132,8 @@ export function openSched(dir = schedDir(), { now = () => Date.now(), pid = proc
       o = {};
     }
     const obj = (x) => (x && typeof x === "object" && !Array.isArray(x) ? x : {});
-    return { v: 1, cap: posInt(o?.cap), seq: Number.isInteger(o?.seq) ? o.seq : 0, slots: obj(o?.slots), queue: obj(o?.queue) };
+    const weights = Object.fromEntries(Object.entries(obj(o?.weights)).filter(([, n]) => posInt(n)));
+    return { v: 1, cap: posInt(o?.cap), weights, seq: Number.isInteger(o?.seq) ? o.seq : 0, slots: obj(o?.slots), queue: obj(o?.queue) };
   };
   // Drop queued entries of dead dispatchers, and slots whose dispatcher and lane are both gone.
   const reclaim = (s) => {
@@ -131,7 +171,7 @@ export function openSched(dir = schedDir(), { now = () => Date.now(), pid = proc
           const cap = effCap(s, callerCap);
           if (cap !== null) {
             const free = cap - Object.keys(s.slots).length;
-            const rank = Object.entries(s.queue).sort(byRank).findIndex(([k]) => k === key);
+            const rank = grantOrder(s).findIndex(([k]) => k === key);
             if (free <= 0) return { ok: false, reason: `host cap ${cap} reached` };
             if (rank >= free) return { ok: false, reason: `queued behind ${rank} higher-ranked issue(s)` };
           }
@@ -163,11 +203,19 @@ export function openSched(dir = schedDir(), { now = () => Date.now(), pid = proc
       if (k !== null && !posInt(k)) throw new Error("cap must be a positive integer");
       return mutate((s) => { s.cap = k; return k; });
     },
-    /** Live state after reclaim: `{cap, slots:[{key,...}], queue:[{key,...}] in grant order}`. Throws when unreadable. */
+    weights: () => read().weights,
+    /** Set the fair-share weight of `repo` (a positive integer), or null to reset it to 1. Throws. */
+    setWeight: (repo, n) => {
+      if (typeof repo !== "string" || !repo.trim()) throw new Error("repo must be a non-empty string");
+      if (n !== null && !posInt(n)) throw new Error("weight must be a positive integer");
+      return mutate((s) => { if (n === null) delete s.weights[repo]; else s.weights[repo] = n; return n; });
+    },
+    /** Live state after reclaim: `{cap, weights, slots:[{key,...}], queue:[{key,...}] in grant order}`. Throws when unreadable. */
     list: () => mutate((s) => ({
       cap: s.cap,
+      weights: { ...s.weights },
       slots: Object.entries(s.slots).map(([key, e]) => ({ key, ...e })),
-      queue: Object.entries(s.queue).sort(byRank).map(([key, e]) => ({ key, ...e })),
+      queue: grantOrder(s).map(([key, e]) => ({ key, ...e })),
     })),
   };
 }
