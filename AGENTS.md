@@ -1,3 +1,5 @@
+Read NORTHSTAR.md first: purpose, non-negotiables, where a fix belongs, runtime map.
+
 # ForgeDock for Codex
 
 ForgeDock is a workflow-spec repository. The shared source of truth lives in `commands/`.
