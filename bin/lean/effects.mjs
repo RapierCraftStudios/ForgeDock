@@ -122,18 +122,34 @@ export function makeHostProbe() {
   };
 }
 
+/**
+ * Required status checks for `lane` (#4158): the union of classic branch protection (contexts + checks) and the
+ * repository rulesets that apply to the branch (`rules/branches/{lane}`, type required_status_checks). Each source
+ * fails independently to [] (404, no protection, no rulesets, bad JSON), so one never hides the other.
+ */
+export async function requiredChecksFor({ gh, repo, lane }) {
+  const classic = async () => {
+    const j = JSON.parse(String(await gh(["api", `repos/${repo}/branches/${lane}/protection/required_status_checks`])));
+    return [...(j.contexts ?? []), ...(j.checks ?? []).map((c) => c?.context)];
+  };
+  const rulesets = async () => {
+    // --jq emits one context per line across all pages, so pagination needs no JSON stitching.
+    const out = String(await gh(["api", "--paginate", `repos/${repo}/rules/branches/${lane}`,
+      "--jq", '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context']));
+    return out.split("\n").map((x) => x.trim());
+  };
+  const safe = async (f) => { try { const v = await f(); return Array.isArray(v) ? v : []; } catch { return []; } };
+  const all = [...(await safe(classic)), ...(await safe(rulesets))];
+  return [...new Set(all.filter((x) => typeof x === "string" && x))];
+}
+
 export function makeLeanIo({ repo }) {
   const base = makeIo();
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000 })).stdout;
   return {
     gh: run("gh"), git: run("git"), runTmp: makeRunTmp(), host: makeHostProbe(), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
-    /** Names of the checks the base branch requires (contexts + checks). [] on 404 / no protection. */
-    async requiredChecks(lane) {
-      try {
-        const j = JSON.parse(await run("gh")(["api", `repos/${repo}/branches/${lane}/protection/required_status_checks`]));
-        return [...new Set([...(j.contexts ?? []), ...(j.checks ?? []).map((c) => c.context)].filter(Boolean))];
-      } catch { return []; }
-    },
+    /** Names of the checks the base branch requires: classic protection plus rulesets (#4158). [] when neither has any. */
+    async requiredChecks(lane) { return requiredChecksFor({ gh: run("gh"), repo, lane }); },
     /** [{name, state: success|failure|pending}] for the PR's checks. */
     async checkStates(pr) {
       const j = JSON.parse(await run("gh")(["pr", "view", String(pr), "-R", repo, "--json", "statusCheckRollup"]));
@@ -154,6 +170,10 @@ export function makeLeanIo({ repo }) {
       const map = {};
       for (const l of out.split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) map[k] = Number(n); }
       return map;
+    },
+    /** forge#4159: scripts/structure-delta.sh over base...HEAD in cwd; null on any failure (never fails a run). */
+    async structureDelta({ cwd, base }) {
+      try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
     fs: {
       read: async (p) => readFileSync(p, "utf8"),

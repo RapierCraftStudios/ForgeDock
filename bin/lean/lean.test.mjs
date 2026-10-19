@@ -8,10 +8,10 @@ import { runCore, contractHash } from "./lean.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt } from "./prompts.mjs";
-import { parseReview } from "./conformance.mjs";
+import { parseReview, unnamedEdges, structureNote } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
-import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner } from "./effects.mjs";
+import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor } from "./effects.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
@@ -67,6 +67,7 @@ function world(o = {}) {
       if (k === "pr list") return JSON.stringify(w.prList);
       if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
       if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
+      if (k === "issue view" && o.issueBodies && a[2] === "7" && a.includes("number,title,body,state,comments")) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: "foo breaks", body: b, state: "OPEN", comments: [] }); }
       if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [] });
       if (k === "pr edit") { w.prEdits.push(a); return ""; }
       if (k === "label create") { w.labelCreates = [...(w.labelCreates ?? []), a]; return ""; }
@@ -133,7 +134,7 @@ function world(o = {}) {
           if (/Merging origin\//.test(c.prompt) && o.syncChanged) w.changed = o.syncChanged;
           if (r?.status === "blocked" || ["invalid", "already-fixed"].includes(r?.status)) put("result.json", JSON.stringify(r));
           else if (r) put("result.json", JSON.stringify({ ...r, requirements: o.claims ?? w.contract.requirements.filter((x) => x.disposition === "deliver").map((x) => ({ id: x.id, status: "implemented", evidence: "src/foo.js:3" })),
-            validation: o.validation ?? (w.contract.validate ?? []).map((v) => ({ id: v.id, command: v.command, exit: 0 })), amendments: (c.resume && n > 2 ? o.resumeAmendments : null) ?? o.amendments ?? [] }));
+            validation: (c.resume && n > 2 ? o.resumeValidation : null) ?? o.validation ?? (w.contract.validate ?? []).map((v) => ({ id: v.id, command: v.command, exit: 0 })), amendments: (c.resume && n > 2 ? o.resumeAmendments : null) ?? o.amendments ?? [] }));
         }
         if (c.resume || /Merging origin\//.test(c.prompt)) { w.head = `bbbb${w.calls.length}`.padEnd(16, "0"); if (!o.leaveConflicts) { w.conflictFiles = []; w.mergeInProgress = false; } }
         return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: 0.1, durationMs: 1000, turns: 3, model: "default" };
@@ -409,6 +410,29 @@ describe("core work-on", () => {
     noNeedsHuman(w);
   });
 
+  it("#4153 a split of a milestone issue files every sub-issue with the parent's milestone; no milestone passes none", async () => {
+    const split = { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A" }, { title: "part B", body: "do B", depends_on: [0] }] } };
+    const w = depWorld({ changed: [], result: split, milestone: "Remote MCP Server", branchesOnOrigin: ["staging", "milestone/remote-mcp-server"] }, {});
+    const r = await run(w, { lane: null });
+    assert.equal(r.terminalReason, "decomposed");
+    assert.equal(w.created.length, 2);
+    for (const c of w.created) assert.equal(c[c.indexOf("--milestone") + 1], "Remote MCP Server", c.join(" "));
+    const w2 = depWorld({ changed: [], result: split }, {});
+    assert.equal((await run(w2)).terminalReason, "decomposed");
+    assert.ok(w2.created.every((c) => !c.includes("--milestone")));
+  });
+
+  it("#4153 a dependency block on an open decomposed parent resolves to its open sub-issues", async () => {
+    const decomposed = { body: "<!-- FORGE:DECOMPOSED -->\n## Split into sub-issues\n- #31 part A\n- #32 part B\n", author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
+    const parent = { state: "OPEN", labels: [{ name: "workflow:decomposed" }] };
+    const w = depWorld({ changed: [], issueComments: [decomposed], result: { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: [3] } } },
+      { 3: parent, 31: { state: "CLOSED", labels: [] }, 32: { state: "OPEN", labels: [] } });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "dependency-open");
+    assert.deepEqual(r.dependencies, [32]);
+    noNeedsHuman(w);
+  });
+
   it("#4124 a prod-data (non-human) or untyped block gets one corrective resume; a builder that then proceeds merges", async () => {
     const w = world({ result: { status: "blocked", summary: "needs live wire capture and prod baselines", block: { kind: "human", why: "prod-data" } },
       resumeResult: { status: "fixed", summary: "captured via read-only monitoring", evidence: [], tests: [] } });
@@ -636,9 +660,37 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
   });
 });
 
+describe("issue edited mid-run (#4188)", () => {
+  const BODY_B = "foo now also needs a bar mode.\n\n- foo must accept a bar flag and return bar output.\n- Existing callers of foo keep working.";
+  const contractB = { ...CONTRACT, requirements: [{ id: "R1", quote: "foo must accept a bar flag and return bar output.", disposition: "deliver" }] };
+  const reviewB = () => conf({ issue_coverage: [{ quote: "foo must accept a bar flag and return bar output.", status: "covered" }] }, contractB);
+
+  it("body A at RUN_START, body B at validation, contract quoting B: validates against B, logs ISSUE_EDITED, merges", async () => {
+    const dir = tmpDir("issue-edited-");
+    const w = world({ contract: contractB, issueBodies: [ISSUE_BODY, BODY_B], reviews: [reviewB()] });
+    const r = await run(w, { dir });
+    assert.notEqual(r.code, "contract.invalid");
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(builders(w).length, 2, "plan + implement, no contract correction");
+    const edits = readLog(dir, 7).filter((e) => e.event === "ISSUE_EDITED");
+    assert.equal(edits.length, 1);
+    assert.match(edits[0].old, /^[0-9a-f]{12}$/); assert.match(edits[0].new, /^[0-9a-f]{12}$/);
+    assert.notEqual(edits[0].old, edits[0].new);
+    assert.match(traj(w).at(-1), /Issue edited during the run \([0-9a-f]{12} -> [0-9a-f]{12}\)/);
+  });
+
+  it("an unchanged issue emits no ISSUE_EDITED", async () => {
+    const dir = tmpDir("issue-unedited-");
+    const w = world({ issueBodies: [ISSUE_BODY] });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "ISSUE_EDITED").length, 0);
+  });
+});
+
 describe("conformance shadow mode (the default)", () => {
   const runShadow = (w, extra = {}) => run(w, { conformance: "shadow", ...extra });
   const shadowNote = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")) ?? "";
+  const nhBody = (w) => w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
   const omission = () => conf({ issue_coverage: [{ quote: "foo must handle a null argument without throwing.", status: "covered" }, { quote: "Existing callers of foo keep working.", status: "missing" }] }, { ...CONTRACT, preserve: [] }, ["src/foo.js", "test/foo.test.js"]);
 
   it("runCore defaults to shadow", async () => {
@@ -699,23 +751,46 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal((await run(e, { reviewIncomplete: "degraded" })).code, "review.incomplete", "enforce ignores the degraded setting");
   });
 
-  it("#4160 a precheck-found unimplemented requirement blocks in shadow like a reviewer-found one: one resume, then needs-human", async () => {
-    const w = world({ validation: [] });
-    const r = await runShadow(w);
-    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
-    assert.equal(builders(w).length, 3, "one builder resume");
-    assert.match(builders(w)[2][4], /validate V1 .* has no recorded result/);
-    assert.equal(reviewers(w).length, 0, "no reviewer tokens on a precheck block");
-    const a = world({ amendments: [{ kind: "add-deliverable", path: "src/x.js" }] });
-    assert.equal((await runShadow(a)).code, "conformance.unimplemented", "an amendment problem blocks too");
-  });
-
   it("shadow still blocks what the previous reviewer blocked on: a requirement not implemented gets one resume, then needs-human", async () => {
     const w = world({ reviews: [bad("still null-derefs"), bad("still null-derefs")] });
     const r = await runShadow(w);
     assert.equal(r.code, "conformance.unimplemented"); assert.equal(builders(w).length, 3); assert.equal(w.merges.length, 0);
     const w2 = world({ reviews: [conf({ regressions: [{ at: "src/bar.js:4", failure: "caller passes undefined" }] }), ok()] });
     assert.equal((await runShadow(w2)).terminalReason, "merged"); assert.equal(builders(w2).length, 3, "a regression is resumed in shadow too");
+  });
+
+  it("shadow blocks a failed validate command (#4160): one resume, then needs-human, and no reviewer tokens are spent", async () => {
+    const failed = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    const w = world({ validation: failed });
+    const r = await runShadow(w);
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
+    assert.equal(builders(w).length, 3, "plan + implement + one resume"); assert.equal(reviewers(w).length, 0);
+    assert.match(builders(w)[2][4], /validate V1 failed \(exit 1\)/);
+    assert.match(nhBody(w), /validate V1 failed \(exit 1\)/);
+  });
+
+  it("shadow: a failed validate fixed by the resume merges", async () => {
+    const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
+    assert.equal((await runShadow(w)).terminalReason, "merged"); assert.equal(builders(w).length, 3);
+  });
+
+  it("shadow blocks a deliver requirement the builder reported as partial (#4160)", async () => {
+    const w = world({ claims: [{ id: "R1", status: "partial" }] });
+    const r = await runShadow(w);
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0); assert.equal(builders(w).length, 3);
+    assert.match(nhBody(w), /R1 reported "partial"/);
+  });
+
+  it("shadow still only records a validate step with no recorded result (CI-only steps) and does not block on it", async () => {
+    const w = world({ validation: [] });
+    assert.equal((await runShadow(w)).terminalReason, "merged");
+    assert.match(shadowNote(w), /validate V1 .*has no recorded result/);
+  });
+
+  it("enforce blocks a failed validate exactly as before", async () => {
+    const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }] });
+    const r = await run(w, { conformance: "enforce" });
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
   });
 
   it("#4160 shadow files accepted deferrals with track(), the same as enforce, and the PR links them", async () => {
@@ -762,6 +837,98 @@ describe("conformance gate: base-sync and contract size", () => {
   it("#4160 forge.yaml engine.review_incomplete selects needs-human or degraded; anything else is ignored", () => {
     const d = tmpDir("rev-inc-yaml-");
     for (const [v, want] of [["degraded", "degraded"], ["needs-human", "needs-human"], ["merge", undefined]]) { writeFileSync(`${d}/forge.yaml`, `engine:\n  review_incomplete: ${v}\n`); assert.equal(readReviewIncomplete(d), want); }
+  });
+});
+
+describe("structure delta (forge#4159): undeclared package edges block, import growth only reports", () => {
+  const EDGE = { from: "@s/db", to: "@s/core", kind: "dependencies", manifest: "packages/db/package.json" };
+  const delta = (o = {}) => ({ package_edges_added: [], package_edges_removed: [], import_pairs: [], boundary_config_changed: { changed: false, files: [], loosens: false, tightens: false }, ...o });
+  /** world whose io.structureDelta returns the given deltas in order (the last one repeats). */
+  const sworld = (deltas, o = {}) => {
+    const w = world(o); const q = [...deltas]; w.structureCalls = [];
+    w.io.structureDelta = async (x) => { w.structureCalls.push(x); return q.length > 1 ? q.shift() : q[0]; };
+    return w;
+  };
+  const nh = (w) => w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
+  const withEdgeDeliverable = (change) => ({ ...CONTRACT, deliverables: [...CONTRACT.deliverables, { id: "D2", path: "packages/db/package.json", change }] });
+
+  it("a new package edge the contract does not name gets one builder resume; removed on the resume, it merges", async () => {
+    const dir = tmpDir("struct-");
+    const w = sworld([delta({ package_edges_added: [EDGE] }), delta()]);
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(builders(w).length, 3); assert.equal(reviewers(w).length, 1);
+    assert.match(builders(w)[2][4], /@s\/db -> @s\/core \(dependencies, packages\/db\/package\.json\)[\s\S]*add it to the contract with a reason, or remove it/);
+    assert.equal(builders(w)[2][2], "sess-1", "resumed in the builder's own session");
+    assert.deepEqual(w.structureCalls[0], { cwd: "/wt/lean-7", base: "origin/staging" });
+    const e = readLog(dir, 7).find((x) => x.event === "STRUCTURE_DELTA");
+    assert.equal(e.edges_added, 1);
+    assert.ok(readLog(dir, 7).findIndex((x) => x.event === "STRUCTURE_DELTA") < readLog(dir, 7).findIndex((x) => x.event === "CONFORMANCE"), "before the conformance review");
+  });
+
+  it("an undeclared edge that survives the resume is needs-human structure.undeclared_edge, in enforce and in shadow, with no reviewer run", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      const w = sworld([delta({ package_edges_added: [EDGE] })]);
+      const r = await run(w, { conformance });
+      assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, OUTCOME_CODES.STRUCTURE_UNDECLARED_EDGE);
+      assert.equal(builders(w).length, 3, "exactly one builder resume"); assert.equal(reviewers(w).length, 0);
+      assert.equal(w.prs.length, 0); assert.equal(w.merges.length, 0);
+      assert.match(nh(w), /@s\/db → @s\/core \(dependencies, `packages\/db\/package\.json`\)/);
+    }
+  });
+
+  it("an edge the contract names (a deliverable on the manifest whose change names the package) passes with no resume", async () => {
+    const w = sworld([delta({ package_edges_added: [EDGE] })], { contract: withEdgeDeliverable("add @s/core: db needs the tenant constants (docs/architecture.md: db depends on core)") });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 2);
+    // the manifest alone, without the package named, is not naming the edge
+    assert.equal(unnamedEdges(withEdgeDeliverable("bump versions"), delta({ package_edges_added: [EDGE] })).length, 1);
+    assert.equal(unnamedEdges(withEdgeDeliverable("add @s/core"), delta({ package_edges_added: [EDGE] })).length, 0);
+  });
+
+  it("an add-deliverable amendment naming the package on the resume declares the edge", async () => {
+    const w = sworld([delta({ package_edges_added: [EDGE] })], { resumeAmendments: [{ kind: "add-deliverable", path: "packages/db/package.json", why: "add @s/core: the architecture doc lets db depend on core" }],
+      changed: ["src/foo.js", "test/foo.test.js"] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 3);
+  });
+
+  it("import-pair growth and boundary loosening never block: one <structure> line in the one reviewer prompt, telemetry recorded", async () => {
+    const d = delta({ import_pairs: [{ from: "@s/web", to: "@s/db", files_added: 8, files_removed: 0 }], boundary_config_changed: { changed: true, files: ["eslint.config.mjs"], loosens: true, tightens: false } });
+    for (const conformance of ["enforce", "shadow"]) {
+      const w = sworld([d]);
+      const r = await run(w, { conformance });
+      assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 2); assert.equal(reviewers(w).length, 1, "no extra reviewer run");
+      const lines = reviewers(w)[0][4].split("\n").filter((l) => l.includes("<structure>"));
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], /^<structure>Structure \(report only\): this PR adds 8 value imports @s\/web→@s\/db \(files\); the repo's boundary config was loosened in this PR \(eslint\.config\.mjs\); flag only if the contract or the architecture doc says otherwise\.<\/structure>$/);
+      const t = w.telemetry.find((x) => x.event === "STRUCTURE_DELTA");
+      assert.deepEqual([t.import_files_added, t.boundary_loosened, t.phase], [8, true, "implement"]);
+      assert.deepEqual(mapRecord(t, 5).payload, { edges_added: 0, edges_removed: 0, import_files_added: 8, import_files_removed: 0, boundary_changed: 1, boundary_loosened: 1 });
+    }
+  });
+
+  it("no workspace packages ({}), a failed script or no io.structureDelta: no event, no prompt line, the same reviewer prompt", async () => {
+    const base = world(); await run(base);
+    for (const d of [{}, null]) {
+      const dir = tmpDir("struct-none-");
+      const w = sworld([d]);
+      assert.equal((await run(w, { dir })).terminalReason, "merged");
+      assert.equal(reviewers(w)[0][4], reviewers(base)[0][4]);
+      assert.ok(!readLog(dir, 7).some((x) => x.event === "STRUCTURE_DELTA")); assert.ok(!w.telemetry.some((x) => x.event === "STRUCTURE_DELTA"));
+      assert.equal(builders(w).length, 2);
+    }
+    assert.equal(structureNote({}), ""); assert.equal(structureNote(null), ""); assert.equal(structureNote(delta()), "");
+    assert.equal(structureNote(delta({ import_pairs: [{ from: "a", to: "b", files_added: 0, files_removed: 3 }] })), "", "removals are not growth");
+  });
+
+  it("the reviewer prompt is byte-identical without a structure line, and the planner and builder are told what declares an edge", () => {
+    const args = { issue: { number: 7, title: "t", body: "b" }, contract: CONTRACT, result: {}, files: ["a"], diff: "d" };
+    assert.equal(reviewerPrompt(args), reviewerPrompt({ ...args, structure: "" }));
+    assert.ok(reviewerPrompt({ ...args, structure: "x\ny" }).endsWith("</diff>\n<structure>x y</structure>"));
+    assert.match(builderPlanPrompt(7), /"the lint allows it" or "there is a precedent" is not a reason on its own/);
+    assert.match(builderPlanPrompt(7), /must be a deliverable on that package\.json whose change names the package and gives the reason/);
+    assert.match(builderImplementPrompt(), /blocked by the engine: add it through add-deliverable with a why naming the package/);
   });
 });
 
@@ -1195,6 +1362,46 @@ describe("runCliBackendAsync", () => {
   });
 });
 
+describe("requiredChecksFor: classic protection + rulesets (#4158)", () => {
+  const RULES_JQ = '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context';
+  const jqRules = (rules) => rules.filter((r) => r.type === "required_status_checks").flatMap((r) => r.parameters.required_status_checks.map((c) => c.context)).join("\n") + "\n";
+  const stub = ({ classic, rules }) => {
+    const calls = [];
+    const gh = async (a) => {
+      calls.push(a);
+      if (a[1] === "repos/o/r/branches/staging/protection/required_status_checks") { if (classic instanceof Error) throw classic; return JSON.stringify(classic); }
+      if (a.includes("repos/o/r/rules/branches/staging")) {
+        assert.ok(a.includes("--paginate")); assert.equal(a[a.indexOf("--jq") + 1], RULES_JQ);
+        if (rules instanceof Error) throw rules; return jqRules(rules);
+      }
+      throw new Error(`unexpected gh ${a.join(" ")}`);
+    };
+    return { gh, calls };
+  };
+  it("ruleset-only required checks are found when classic protection 404s", async () => {
+    const { gh } = stub({ classic: new Error("HTTP 404: Branch not protected"), rules: [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "build" }] } }, { type: "pull_request", parameters: {} }] });
+    assert.deepEqual(await requiredChecksFor({ gh, repo: "o/r", lane: "staging" }), ["build"]);
+  });
+  it("classic and ruleset checks are unioned without duplicates", async () => {
+    const { gh } = stub({ classic: { contexts: ["a"], checks: [{ context: "b" }] }, rules: [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "b" }, { context: "c" }] } }] });
+    assert.deepEqual(await requiredChecksFor({ gh, repo: "o/r", lane: "staging" }), ["a", "b", "c"]);
+  });
+  it("both sources failing yields [] and never throws", async () => {
+    const { gh } = stub({ classic: new Error("HTTP 404"), rules: new Error("HTTP 404") });
+    assert.deepEqual(await requiredChecksFor({ gh, repo: "o/r", lane: "staging" }), []);
+  });
+  it("a ruleset-derived required check is polled before the merge", async () => {
+    const w = world();
+    const { gh } = stub({ classic: new Error("HTTP 404"), rules: [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "build" }] } }] });
+    w.io.requiredChecks = (lane) => requiredChecksFor({ gh, repo: "o/r", lane });
+    const seqs = [[{ name: "build", state: "pending" }], [{ name: "build", state: "success" }]]; let polls = 0;
+    w.io.checkStates = async () => { polls++; return seqs.shift(); };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(polls, 2);
+    assert.match(traj(w)[0], /\| Merge \| required \(build\) \|/);
+  });
+});
+
 describe("base-sync (#4100)", () => {
   const CONFLICTING = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" };
   const OKSTATE = { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" };
@@ -1285,6 +1492,27 @@ describe("base-sync (#4100)", () => {
     const r = await run(w);
     assert.equal(r.terminalReason, "engine-error");
     assert.ok(!syncComment(w));
+  });
+
+  const BLOCKED = { mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" };
+  const POLICY = "GraphQL: Pull request is not mergeable: the base branch policy prohibits the merge (mergePullRequest)";
+  it("#4158 a policy block (MERGEABLE + BLOCKED) waits and retries the merge; no base-sync", async () => {
+    const w = world({ prView: [BLOCKED], mergeErrors: [POLICY] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.mergeAttempts, 2);
+    assert.equal(gitCalls(w).filter((x) => x[0] === "merge" && x[1] === "--no-edit").length, 0, "no base-sync");
+    assert.ok(!syncComment(w));
+    assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+  });
+  it("#4158 a persistent policy block ends ci-pending, never base.conflict", async () => {
+    const w = world({ prView: [BLOCKED], mergeErrors: Array(50).fill(POLICY) });
+    const r = await run(w, { ciMaxMinutes: 5 });
+    assert.equal(r.terminalReason, "ci-pending");
+    assert.notEqual(r.code, "base.conflict");
+    assert.equal(gitCalls(w).filter((x) => x[0] === "merge" && x[1] === "--no-edit").length, 0, "no base-sync");
+    assert.equal(w.merges.length, 0); assert.ok(!syncComment(w));
+    assert.ok(!w.edits.some((e) => e.includes("needs-human")));
   });
 
   it("a resumed run with a conflicting PR re-plans, verifies, then syncs in the same session", async () => {

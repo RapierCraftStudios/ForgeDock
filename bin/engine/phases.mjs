@@ -349,11 +349,47 @@ export async function openDependency(issue, io) {
       return { unreadable: true, detail: `dependency #${dep} of issue ${issue} could not be read: ${e?.message || e}` };
     }
     const st = typeof d?.state === "string" ? d.state.toLowerCase() : "";
-    if (st === "open") open.push(dep);
+    if (st === "open") {
+      // #4153: an open decomposed parent is a tracker; the edge resolves to its sub-issues (satisfied when all close).
+      const subs = isDecomposedRecord(d) ? await decomposedSubissues(dep, io) : null;
+      if (!subs) { open.push(dep); continue; }
+      for (const s of subs) {
+        let sr;
+        try { sr = await readIssueRecord(s, io); } catch (e) {
+          return { unreadable: true, detail: `sub-issue #${s} of decomposed dependency #${dep} could not be read: ${e?.message || e}` };
+        }
+        const ss = typeof sr?.state === "string" ? sr.state.toLowerCase() : "";
+        if (ss === "open") open.push(s);
+        else if (ss !== "closed") return { unreadable: true, detail: `sub-issue #${s} of decomposed dependency #${dep} has no readable state` };
+      }
+    }
     else if (st !== "closed") return { unreadable: true, detail: `dependency #${dep} of issue ${issue} has no readable state` };
   }
-  return open.length ? { open } : null;
+  return open.length ? { open: [...new Set(open)].filter((n) => n !== Number(issue)) } : null;
 }
+
+/**
+ * #4153: sub-issues of a decomposed parent, from the `- #N` lines of its newest trusted `<!-- FORGE:DECOMPOSED -->`
+ * comment (lean `- #N title` and decompose.md `- #N: title`). `null` when there is none, it lists no issue, it was
+ * revoked, or the trail is unreadable: the caller then keeps the parent as the dependency (fail closed).
+ */
+export async function decomposedSubissues(issue, io) {
+  let comments;
+  try { comments = (await issueMarkers(issue, io)).comments; } catch { return null; }
+  const head = /^\s*<!--\s*FORGE:DECOMPOSED\s*-->/;
+  const revoked = /^\s*<!--\s*FORGE:DECOMPOSED:REVOKED(?![A-Za-z0-9_])/;
+  let rec = null;
+  for (let i = comments.length - 1; i >= 0; i--) {
+    if (revoked.test(comments[i])) return null;
+    if (head.test(comments[i])) { rec = comments[i]; break; }
+  }
+  if (!rec) return null;
+  const subs = [...new Set([...rec.matchAll(/^[ \t]*[-*][ \t]+#(\d+)\b/gm)].map((m) => Number(m[1])))].filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue));
+  return subs.length ? subs : null;
+}
+
+/** True when a REST/`gh --json` issue record carries the `workflow:decomposed` label. */
+export const isDecomposedRecord = (rec) => (rec?.labels ?? []).some((l) => (l?.name ?? l) === "workflow:decomposed");
 
 /**
  * Decompose loop guard (mirrors decompose.md Guard 1; forge#3676). Returns a

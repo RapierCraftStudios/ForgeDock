@@ -71,6 +71,7 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `conformance.unjustified_deferral` | Core work-on: the reviewer judged a deferred or post-deploy requirement unjustified (it belongs in this change), after one builder resume; nothing is filed or merged | lean | Review requirement row `deferral_ok: false` |
 | `conformance.preserve_violated` | Core work-on: a preserve constraint is violated or unverified, after one builder resume | lean | Review `preserve` row not `intact` |
 | `conformance.regression` | Core work-on: the reviewer named a concrete regression, after one builder resume | lean | Review `regressions` row |
+| `structure.undeclared_edge` | Core work-on: the change adds a package.json dependency between workspace packages that the frozen contract does not name, still present after one builder resume | lean | `unnamedEdges` over `scripts/structure-delta.sh` `package_edges_added` |
 | `followup.unavailable` | Core work-on: filing or verifying the tracking issue for a deferral failed; the run is deferred with nothing merged, never needs-human | lean | `file-deferred-followups.sh` exit 3/4 or an unreadable tracking issue |
 | `merge.head_mismatch` | Core work-on: CI passed for a head other than the reviewed head; merge refused | lean | Gate head differs from the reviewed head |
 | `completed` | Non-failure terminal (merged, phase-complete, investigation) | engine | Terminal reason |

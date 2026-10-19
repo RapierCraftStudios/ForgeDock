@@ -10,23 +10,29 @@ import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
-import { openDependency, isTrustedComment } from "../engine/phases.mjs";
+import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
-import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, mergeReviewRows, closePlan, followupItems, pendingTracking } from "./conformance.mjs";
+import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, mergeReviewRows, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt } from "./prompts.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
 export const CONFORMANCE_MODES = Object.freeze(["shadow", "enforce"]);
 /**
- * In shadow mode only what the previous two-question reviewer blocked on still blocks: a requirement not done (found by
- * the reviewer, the precheck or a bad amendment), a regression. A review without usable rows never merges either.
+ * In shadow mode only what the previous two-question reviewer blocked on still blocks: a requirement not done, a regression
+ * (precheck form: SHADOW_PRE_BLOCKS). A review without usable rows never merges either.
  */
 const SHADOW_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CONFORMANCE_REGRESSION];
+/**
+ * Precheck failures that block in shadow mode too (#4160): the builder's own validate command failed, or it reported a
+ * contracted requirement as not done. These are the precheck's form of "a requirement not done". Missing validate results
+ * (often CI-only steps), scope creep and amendment problems stay recorded-only in shadow.
+ */
+const SHADOW_PRE_BLOCKS = ["validate_failed", "requirement_unimplemented"];
 /** forge.yaml engine.review_incomplete (#4160): "needs-human" (default), or "degraded": in shadow, merge an incomplete review with a review-degraded label and a tracked follow-up. */
 export const REVIEW_INCOMPLETE_MODES = Object.freeze(["needs-human", "degraded"]);
 export const REVIEW_DEGRADED_LABEL = "review-degraded";
@@ -83,7 +89,7 @@ export async function runCore(o) {
     ciMaxMinutes = 360, conformance = "shadow", reviewIncomplete = "needs-human", mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
-  let lane = null, base = null, defaults = []; // set by lane resolution, before the lease
+  let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
   const branch = `feat/issue-${issue}-lean`;
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
@@ -361,8 +367,20 @@ export async function runCore(o) {
         return { kind: "unreadable", detail: `dependency #${d} named by the builder could not be read: ${String(e?.message ?? e).slice(0, 200)}` };
       }
       if (String(v?.state).toUpperCase() !== "OPEN") continue;
-      open.push(d);
-      if ((v.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) blockers.push(d);
+      // #4153: an open decomposed parent resolves to its open sub-issues; it is satisfied once they all close.
+      const subs = isDecomposedRecord(v) ? await decomposedSubissues(d, io) : null;
+      const recs = [];
+      if (!subs) recs.push([d, v]);
+      else for (const n of subs) {
+        try { recs.push([n, JSON.parse(String(await ghc(["issue", "view", String(n), "-R", repo, "--json", "state,labels"])))]); } catch (e) {
+          return { kind: "unreadable", detail: `sub-issue #${n} of decomposed dependency #${d} could not be read: ${String(e?.message ?? e).slice(0, 200)}` };
+        }
+      }
+      for (const [n, rec] of recs) {
+        if (String(rec?.state).toUpperCase() !== "OPEN" || n === Number(issue) || open.includes(n)) continue;
+        open.push(n);
+        if ((rec.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) blockers.push(n);
+      }
     }
     if (!open.length) return { kind: "untyped", problem: `its dependencies ${b.issues.map((n) => `#${n}`).join(", ")} are not open` };
     return { kind: "dependency", issues: open, blockers };
@@ -389,7 +407,8 @@ export async function runCore(o) {
       try {
         for (const sub of b.subissues) {
           const lines = [`**Parent**: #${issue}`, ...sub.dependsOn.map((j) => `**Depends on**: #${filed[j]}`)];
-          const out = String(await ghw(["issue", "create", "-R", repo, "--title", sub.title, "--body", `${sub.body.trim()}\n\n${lines.join("\n")}`]));
+          // #4153: the parent's milestone, so each sub-issue derives the parent's lane before any lane runs.
+          const out = String(await ghw(["issue", "create", "-R", repo, "--title", sub.title, "--body", `${sub.body.trim()}\n\n${lines.join("\n")}`, ...(milestone ? ["--milestone", milestone] : [])]));
           const n = Number(/\/issues\/(\d+)/.exec(out)?.[1]);
           if (!Number.isSafeInteger(n)) throw new Error(`cannot parse the sub-issue number from: ${out.slice(0, 200)}`);
           filed.push(n);
@@ -412,7 +431,7 @@ export async function runCore(o) {
   {
     const r = await resolveLane({ issue, repo, io, cwd, branches, requested: requestedLane, override: laneOverride });
     if (!r.ok) return { terminalReason: "lane-refused", code: r.code, detail: r.detail };
-    lane = r.lane; base = `origin/${lane}`; defaults = r.defaults;
+    lane = r.lane; base = `origin/${lane}`; defaults = r.defaults; milestone = r.milestone ?? null;
     if (r.overridden) T.decisions.push(`Lane override: ${lane} instead of the resolved ${r.expected}`);
   }
   /** Last guard before a PR is created or merged: the default branch is never a lane. */
@@ -540,11 +559,25 @@ export async function runCore(o) {
     const fromCheckpoint = lastSubject.startsWith("wip(forge): checkpoint");
     const hasCommits = resumed ? (await changedFiles()).length > 0 : false;
     // Requirements may only be quoted from the issue and trusted comments: an untrusted commenter cannot add a contract requirement.
-    const trustedComments = (iss.comments ?? []).filter((c) => {
+    const trustedOf = (i) => (i.comments ?? []).filter((c) => {
       const login = String(c?.author?.login ?? c?.user?.login ?? "");
       return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
     });
-    const issueText = [iss.title, iss.body ?? "", ...trustedComments.map((c) => c?.body ?? "")].join("\n\n");
+    const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => c?.body ?? "")].join("\n\n");
+    let trustedComments = trustedOf(iss);
+    let issueText = textOf(iss, trustedComments);
+    /** #4188: the builder reads the live issue, so quotes are checked against the current text, not the RUN_START snapshot. Best effort. */
+    async function refreshIssue(stage) {
+      let next;
+      try { next = JSON.parse(String(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments"]))); } catch { return; }
+      if (!next || typeof next !== "object") return;
+      const tc = trustedOf(next), text = textOf(next, tc);
+      const old = contractHash(issueText), now = contractHash(text);
+      if (old === now) return;
+      iss = next; trustedComments = tc; issueText = text;
+      ev({ event: "ISSUE_EDITED", old, new: now, stage });
+      T.decisions.push(`Issue edited during the run (${old} -> ${now}); ${stage} uses the current text`);
+    }
     /** A typed block (with one corrective resume for an untyped one) ends the run; returns the terminal or null. */
     async function endIfBlocked() {
       let block = result?.status === "blocked" ? await resolveBlock(result) : null;
@@ -612,11 +645,13 @@ export async function runCore(o) {
       const blocked = await endIfBlocked();
       if (blocked) return blocked;
       let contract = await readContract();
+      await refreshIssue("contract validation");
       let vc = validateContract(contract, issueText);
       if (!vc.ok && sessionId) {
         T.decisions.push(`Contract rejected (${vc.problems[0]}); resumed once`);
         await builder(++attemptN, contractCorrectionPrompt(vc.problems), sessionId, false, () => builderPlanPrompt(issue));
         contract = await readContract();
+        await refreshIssue("contract validation");
         vc = validateContract(contract, issueText);
       }
       await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
@@ -648,10 +683,42 @@ export async function runCore(o) {
     T.implement = [`${files.length} file(s)`, branch];
     T.decisions.push(`Builder verdict: ${result?.status ?? "none"}`);
 
+    // ---- 3b. structure delta (forge#4159): deterministic, before the conformance review; no reviewer run of its own ----
+    // A package.json edge between workspace packages the contract does not name blocks (one builder resume) in either
+    // conformance mode; import-pair growth and boundary-config loosening only add one line to the reviewer prompt.
+    const structureOf = async () => {
+      if (!io.structureDelta) return null;
+      const d = await io.structureDelta({ cwd: wt, base }).catch(() => null);
+      return d && typeof d === "object" && Array.isArray(d.package_edges_added) ? d : null; // `{}`: no workspace packages
+    };
+    let structure = await structureOf();
+    if (structure) {
+      const pairs = structure.import_pairs ?? [], sum = (k) => pairs.reduce((n, p) => n + (Number(p?.[k]) || 0), 0);
+      const rec = { event: "STRUCTURE_DELTA", edges_added: structure.package_edges_added.length, edges_removed: (structure.package_edges_removed ?? []).length,
+        import_files_added: sum("files_added"), import_files_removed: sum("files_removed"), boundary_changed: Boolean(structure.boundary_config_changed?.changed), boundary_loosened: Boolean(structure.boundary_config_changed?.loosens) };
+      ev(rec);
+      await emit({ ...rec, phase: "implement" });
+      const undeclared = () => unnamedEdges(applyAmendments(frozen, result?.amendments, issueText).contract, structure);
+      let edges = undeclared();
+      if (edges.length && sessionId) {
+        T.decisions.push(`Undeclared package edge(s) ${edges.map((e) => `${e.from}→${e.to}`).join(", ")}; builder resumed once`);
+        await builder(++attemptN, structurePrompt(edges), sessionId);
+        await upsertStage("implementation");
+        result = (await readResult()) ?? result;
+        structure = (await structureOf()) ?? structure;
+        edges = undeclared();
+      }
+      if (edges.length) {
+        return await needsHuman(`The change adds dependencies between workspace packages that the frozen contract does not name${sessionId ? ", after one builder resume" : ""}; nothing merged:\n${edges.slice(0, 15).map((e) => `- ${e.from} → ${e.to} (${e.kind}, \`${e.manifest}\`)`).join("\n")}\n\nAdd each to the contract with a reason, or remove it.`, OUTCOME_CODES.STRUCTURE_UNDECLARED_EDGE);
+      }
+    }
+    const structureLine = structureNote(structure);
+
     // ---- 4. conformance: typed amendments, deterministic precheck, structured review; the engine computes the verdict ----
     // enforce: every failure class blocks (one builder resume, then needs-human). shadow: the verdict is computed and posted,
-    // but only what the previous reviewer enforced blocks (a requirement not implemented, from the precheck or the review, or a
-    // regression), and a review without usable rows ends needs-human (or, with engine.review_incomplete: degraded, merges flagged).
+    // but only what the previous reviewer enforced blocks (a review that finds a requirement not implemented, or a regression),
+    // plus the precheck's equivalent: a failed validate command or a requirement the builder reported as not done (#4160).
+    // A review without usable rows ends needs-human (or, with engine.review_incomplete: degraded, merges flagged).
     await label("in-review");
     const shadow = conformance !== "enforce";
     let effective = frozen, review = null, lastAmend = "", resumes = 0, verdict = null, degraded = null;
@@ -680,7 +747,7 @@ export async function runCore(o) {
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
           prompt: repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first })
-            : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, ignore: IGNORE }) });
+            : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE }) });
         await renew();
         await attempt("review", ++reviewN, rr);
         const parsed = parseReview(rr?.text);
@@ -695,6 +762,7 @@ export async function runCore(o) {
     }
     /** Precheck then review, on the current result and changed files (also the base-sync re-review). */
     async function gate() {
+      await refreshIssue("conformance");
       result = (await readResult()) ?? result;
       files = await changedFiles();
       const amendProblems = await amend();
@@ -702,9 +770,9 @@ export async function runCore(o) {
       const pre = [...pc.failures, ...amendProblems];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
-      // shadow blocks a precheck/amend failure the same way it blocks a reviewer-found one, before any reviewer tokens
-      const preBlocking = pre.filter((f) => SHADOW_BLOCKS.includes(f.code));
-      if (preBlocking.length) return { state: "nonconforming", by: "precheck", failures: preBlocking, would: "nonconforming", wouldFail: pre, reviewState: null };
+      // shadow: the builder's own failed checks block before any reviewer tokens are spent (#4160)
+      const hard = shadow ? pre.filter((f) => SHADOW_PRE_BLOCKS.includes(f.kind)) : [];
+      if (hard.length) return { state: "nonconforming", by: "precheck", failures: hard, would: "nonconforming", wouldFail: pre, reviewState: null };
       const d = await reviewOnce();
       if (!shadow) return { ...d, by: "review" };
       // shadow: record what enforce would have done; block only on what the previous reviewer blocked on
@@ -805,6 +873,13 @@ export async function runCore(o) {
       }
       return "unknown";
     };
+    /** #4158: MERGEABLE but BLOCKED is a base branch policy block (ruleset / required checks pending), not a conflict. */
+    const policyBlocked = async () => {
+      let j;
+      try { j = JSON.parse(String(await ghc(["pr", "view", String(pr), "-R", repo, "--json", "mergeable,mergeStateStatus"])) || "{}"); } catch { return false; }
+      return String(j.mergeable ?? "").toUpperCase() === "MERGEABLE" && String(j.mergeStateStatus ?? "").toUpperCase() === "BLOCKED";
+    };
+    let blockStartedAt = null, blockPollIndex = 0;
     const conflictFiles = async () => (await gitOut(["diff", "--name-only", "--diff-filter=U"])).split("\n").map((x) => x.trim()).filter(Boolean);
     const unresolved = async () => (await conflictFiles()).length > 0 || (await gitOut(["grep", "-n", "-e", "^<<<<<<< ", "-e", "^>>>>>>> "])) !== ""
       || (await gitOut(["diff", "--check"])) !== "" || (await gitOut(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) !== "";
@@ -909,6 +984,22 @@ export async function runCore(o) {
           if (++mergeRetries > maxMergeRetries) return await finish("deferred", `gh pr merge kept failing transiently (${mergeRetries - 1} retries): ${msg.slice(0, 300)}`, { pr, code: OUTCOME_CODES.MERGE_TRANSIENT }, OUTCOME_CODES.MERGE_TRANSIENT);
           T.anomalies.push(`gh pr merge transient failure (retry ${mergeRetries}): ${msg.split("\n")[0].slice(0, 120)}`);
           await sleepFn(Math.min(60000, 1000 * 2 ** (mergeRetries - 1)) + Math.floor(random() * 250));
+          continue;
+        }
+        if (await policyBlocked()) {
+          // Policy block: wait and retry at the reviewed head; never base-sync, never base.conflict (#4158).
+          if (blockStartedAt === null) {
+            blockStartedAt = now();
+            T.decisions.push("merge blocked by base branch policy (ruleset/required checks); waiting");
+            T.anomalies.push(`gh pr merge blocked by base branch policy: ${msg.split("\n")[0].slice(0, 120)}`);
+          }
+          if (now() - blockStartedAt >= ciMaxMinutes * 60000) {
+            T.merge = [policyText, "blocked by base branch policy"];
+            return await finish("ci-pending", `PR #${pr} blocked by base branch policy after ${ciMaxMinutes} min (checks pending or ruleset requirement unmet)`, { pr });
+          }
+          onProgress({ event: "phase_paused", phase: "merge", detail: `PR #${pr} blocked by base branch policy` });
+          await sleep(ciPollDelayMs(blockPollIndex++, random));
+          await renew();
           continue;
         }
         if (!MERGE_CONFLICT_RE.test(msg)) throw e;
