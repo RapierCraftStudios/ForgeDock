@@ -163,7 +163,7 @@ async function* listIssuePages(gh, repo, startSince) {
 }
 
 const meta = (it) => ({ number: it.number, isPr: Boolean(it.pull_request), createdAt: it.created_at ?? null, closedAt: it.closed_at ?? null,
-  updatedAt: it.updated_at ?? null, labels: (it.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean), authorType: it.user?.type ?? null });
+  updatedAt: it.updated_at ?? null, milestone: it.milestone?.title ?? null, labels: (it.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean), authorType: it.user?.type ?? null });
 
 const CHECKPOINT_EVERY = 1000;
 const RATE_CHECK_EVERY = 50;

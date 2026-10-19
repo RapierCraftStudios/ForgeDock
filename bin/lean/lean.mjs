@@ -153,6 +153,7 @@ export async function runCore(o) {
 
   // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
   const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
+  let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
   const runId = `${issue}-${t0}`;
   let runTmp = null;
@@ -239,8 +240,11 @@ export async function runCore(o) {
   async function finishOnce(reason, detail = "", extra = {}, codeOverride = null) {
     await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
     const code = codeOverride ?? codeForTerminalReason(reason);
-    ev({ event: "RUN_TERMINAL", reason, code });
-    await emit({ event: "RUN_TERMINAL", reason, code });
+    // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
+    const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}),
+      conformance_mode: conformance === "enforce" ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}) };
+    ev(term);
+    await emit(term);
     if (["needs-human", "engine-error", "dependency-open", "dependency-blocked", "dependency-unreadable", "decomposed"].includes(reason)) {
       const wf = ["investigating", "building", "in-review"].map((x) => `workflow:${x}`).join(",");
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", wf]); } catch { /* best effort */ }
@@ -811,8 +815,7 @@ export async function runCore(o) {
       const pairs = structure.import_pairs ?? [], sum = (k) => pairs.reduce((n, p) => n + (Number(p?.[k]) || 0), 0);
       const rec = { event: "STRUCTURE_DELTA", edges_added: structure.package_edges_added.length, edges_removed: (structure.package_edges_removed ?? []).length,
         import_files_added: sum("files_added"), import_files_removed: sum("files_removed"), boundary_changed: Boolean(structure.boundary_config_changed?.changed), boundary_loosened: Boolean(structure.boundary_config_changed?.loosens) };
-      ev(rec);
-      await emit({ ...rec, phase: "implement" });
+      ev(rec); // run log only: the telemetry write is the merge-time record (forge#4165)
       const undeclared = () => unnamedEdges(applyAmendments(frozen, result?.amendments, issueText).contract, structure);
       let edges = undeclared();
       if (edges.length && sessionId) {
@@ -975,6 +978,7 @@ export async function runCore(o) {
     if (!shadow && toFile.length) await track(toFile, "accepted by the conformance review");
     if (shadow) {
       const wf = verdict.wouldFail ?? [];
+      shadowWould = verdict.would;
       ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
       await emit({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
       T.review = [`shadow: would ${verdict.would === "conforms" ? "pass" : `block (${verdict.would})`}`, `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
@@ -1103,6 +1107,34 @@ export async function runCore(o) {
       catch (e) { ev({ event: "BRANCH_DELETE_FAILED", branch, where: "origin", error: String(e?.stderr ?? e?.message ?? e).slice(0, 300) }); }
     }
 
+    /**
+     * forge#4165: one STRUCTURE_DELTA telemetry record per merged run, from scripts/structure-delta.sh (the only place the
+     * delta is computed) plus one local `git diff --numstat` for growth and the contract's decision provenance. Local git
+     * only: the single telemetry write is the run's one extra API call. Also feeds the trajectory's Structure table.
+     */
+    async function recordStructure(pr) {
+      const d = (await structureOf()) ?? {};
+      const numstat = String(await git(["diff", "--numstat", "--no-renames", `${base}...HEAD`]).catch(() => ""));
+      const top_growth = numstat.split("\n").map((l) => l.split("\t")).filter((x) => x.length >= 3 && /^\d+$/.test(x[0]) && Number(x[0]) > 0 && !x[2].startsWith(`${LEAN_DIR}/`))
+        .map(([a, , file]) => ({ file, lines: Number(a) })).sort((a, b) => b.lines - a.lines || a.file.localeCompare(b.file)).slice(0, 5);
+      const pairs = Array.isArray(d.import_pairs) ? d.import_pairs : [], sum = (k) => pairs.reduce((n, x) => n + (Number(x?.[k]) || 0), 0);
+      const edge = (e) => ({ from: e?.from, to: e?.to });
+      const s = {
+        deps_added: (d.package_edges_added ?? []).map((e) => ({ ...edge(e), kind: e?.kind, manifest: e?.manifest })),
+        deps_removed: (d.package_edges_removed ?? []).map((e) => ({ ...edge(e), kind: e?.kind, manifest: e?.manifest })),
+        new_edges: pairs.filter((x) => x?.files_added > 0).map((x) => ({ ...edge(x), file: Array.isArray(x.files) ? x.files[0] ?? null : null, files: x.files_added })),
+        removed_edges: pairs.filter((x) => x?.files_removed > 0).map((x) => ({ ...edge(x), files: x.files_removed })),
+        top_growth,
+        decisions: (Array.isArray(effective?.decisions) ? effective.decisions : []).filter((k) => k?.id).map((k) => ({ id: k.id, source: k.source ?? null })),
+      };
+      T.structure = s;
+      const rec = { event: "STRUCTURE_DELTA", phase: "merge", pr, ...(milestone ? { milestone } : {}), ...s,
+        edges_added: s.deps_added.length, edges_removed: s.deps_removed.length, import_files_added: sum("files_added"), import_files_removed: sum("files_removed"),
+        boundary_changed: Boolean(d.boundary_config_changed?.changed), boundary_loosened: Boolean(d.boundary_config_changed?.loosens) };
+      ev(rec);
+      await emit(rec);
+    }
+
     // ---- 7. (sync) wait per policy, (sync) merge at the reviewed head ----
     // A rerun on an existing PR goes through the same conflict check, so a conflicting PR from an earlier run recovers.
     for (;;) {
@@ -1176,6 +1208,7 @@ export async function runCore(o) {
         const r = await baseSync("gh pr merge reported a conflict"); if (r) return r;
       }
     }
+    try { await recordStructure(pr); } catch (e) { ev({ event: "STRUCTURE_DELTA_FAILED", error: String(e?.message ?? e).slice(0, 300) }); }
     await deleteMergedBranch();
     await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
     if (closing.tracked.length) {
