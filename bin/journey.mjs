@@ -2,11 +2,12 @@
  * bin/journey.mjs — The five-act onboarding journey for ForgeDock.
  *
  * Acts (added across Tasks 4–8):
- *   preflight() → forge() → read() → review() → celebrate()
+ *   preflight() → forge() → read() → setupRepo() → review() → celebrate()
+ *   (setupRepo, forge#4173: interactive repo creation / main push / staging)
  *
  * This file owns forge.yaml generation (single source of truth, driven from
  * detection values) and orchestrates the existing modules:
- *   init-detect.mjs, init-enrich-api.mjs, tui.annotatedReviewScreen, registry.mjs
+ *   init-detect.mjs, init-enrich-api.mjs, init-repo.mjs, tui.annotatedReviewScreen, registry.mjs
  */
 
 import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
@@ -15,6 +16,24 @@ import { join, basename } from "path";
 // ---------------------------------------------------------------------------
 // forge.yaml generation (Task 4)
 // ---------------------------------------------------------------------------
+
+/**
+ * Resolve the Claude Code configuration directory (forge#4173): a non-empty
+ * CLAUDE_CONFIG_DIR wins (Claude Code reads commands, settings.json and MCP
+ * config from there), otherwise `<home>/.claude`. Shared by the installer
+ * here and by doctor/status/uninstall in forgedock.mjs and the engine, so
+ * every path agrees on one directory (no #1589 split-brain).
+ *
+ * @param {Record<string, string|undefined>} [env]
+ * @param {string} [home]
+ * @returns {string}
+ */
+export function resolveClaudeConfigDir(env = process.env, home = env.HOME || env.USERPROFILE || os.homedir()) {
+  return env.CLAUDE_CONFIG_DIR || join(home, ".claude");
+}
+
+/** Claude config dir for a journey ctx. */
+const claudeDirOf = (ctx) => resolveClaudeConfigDir(ctx.env ?? process.env, ctx.home);
 
 const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r/g, "\\r").replace(/\n/g, "\\n");
 
@@ -508,45 +527,86 @@ export function validateForgeYamlShape(cwd) {
 }
 
 // ---------------------------------------------------------------------------
-// Description detection (moved from forgedock.mjs init(), Task 4)
+// Description detection (forge#4173)
 // ---------------------------------------------------------------------------
+//
+// The description comes from explicit project metadata only. README/CLAUDE.md
+// prose is never used: its first paragraph is routinely a badge line, a
+// tagline, or setup text, and was written into forge.yaml as if it were the
+// project description (field-test friction in #4155).
 
-function firstParagraph(content) {
-  const lines = content.split("\n");
-  let started = false;
-  const out = [];
-  for (const line of lines) {
-    if (!started && line.match(/^#/)) continue;
-    if (!started && line.trim() === "") continue;
-    if (!started && line.match(/^[!<\[`|]/)) continue;
-    if (!started && line.match(/^---/)) continue;
-    if (!started) started = true;
-    if (line.trim() === "") break;
-    out.push(line.trim());
-  }
-  if (out.length === 0) return "";
-  return out
-    .join(" ")
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/`([^`]+)`/g, "$1")
-    .slice(0, 200)
-    .trim();
+const MAX_DESCRIPTION = 200;
+
+function clean(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, MAX_DESCRIPTION).trim();
 }
 
 /**
- * Detect a project description from README.md, falling back to CLAUDE.md.
- * @returns {{ value: string, source: 'README.md'|'CLAUDE.md'|'' }}
+ * Read `description = "..."` from the first matching TOML table.
+ * Minimal line-based reader: handles basic and literal single-line strings.
+ * @param {string} content
+ * @param {string[]} tables - e.g. ["project", "tool.poetry"]
+ * @returns {string}
  */
-export function detectDescription(cwd) {
-  for (const file of ["README.md", "CLAUDE.md"]) {
+function tomlTableDescription(content, tables) {
+  let current = "";
+  const found = new Map();
+  for (const raw of content.split("\n")) {
+    const line = raw.trim();
+    const header = line.match(/^\[([^\[\]]+)\]\s*(#.*)?$/);
+    if (header) {
+      current = header[1].trim();
+      continue;
+    }
+    if (!tables.includes(current) || found.has(current)) continue;
+    const m = line.match(/^description\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')/);
+    if (m) found.set(current, m[1] !== undefined ? m[1].replace(/\\(["\\])/g, "$1") : m[2]);
+  }
+  for (const t of tables) if (found.get(t)) return found.get(t);
+  return "";
+}
+
+const MANIFEST_SOURCES = [
+  {
+    file: "package.json",
+    read: (content) => {
+      const pkg = JSON.parse(content);
+      return typeof pkg.description === "string" ? pkg.description : "";
+    },
+  },
+  { file: "pyproject.toml", read: (content) => tomlTableDescription(content, ["project", "tool.poetry"]) },
+  { file: "Cargo.toml", read: (content) => tomlTableDescription(content, ["package"]) },
+];
+
+/**
+ * Detect a project description from project metadata: package.json,
+ * pyproject.toml, Cargo.toml, then (best effort) the GitHub repository
+ * description. Never reads README.md or CLAUDE.md.
+ *
+ * @param {string} cwd
+ * @param {object} [opts]
+ * @param {Function} [opts.exec] - exec(cmd, args) → stdout. When given with
+ *   opts.repo, used for `gh repo view <repo> --json description`.
+ * @param {string} [opts.repo] - "owner/name" of a detected GitHub remote.
+ * @returns {{ value: string, source: string }}
+ */
+export function detectDescription(cwd, { exec, repo } = {}) {
+  for (const { file, read } of MANIFEST_SOURCES) {
     try {
       const p = join(cwd, file);
       if (!existsSync(p)) continue;
-      const value = firstParagraph(readFileSync(p, "utf-8").slice(0, 2048));
+      const value = clean(read(readFileSync(p, "utf-8")));
       if (value) return { value, source: file };
     } catch {
       // best-effort only
+    }
+  }
+  if (exec && repo) {
+    try {
+      const value = clean(exec("gh", ["repo", "view", repo, "--json", "description", "--jq", ".description"]));
+      if (value) return { value, source: "GitHub repository" };
+    } catch {
+      // gh missing, unauthenticated, or repo not on GitHub — no description
     }
   }
   return { value: "", source: "" };
@@ -685,10 +745,10 @@ export async function preflight(ctx) {
     {
       label: "Claude Code",
       run: async () => {
-        const claudeDir = join(ctx.home, ".claude");
+        const claudeDir = claudeDirOf(ctx);
         return existsSync(claudeDir)
-          ? { ok: true, detail: "~/.claude found" }
-          : { ok: false, detail: "~/.claude not found", fix: ["Install Claude Code: https://claude.com/claude-code"] };
+          ? { ok: true, detail: `${claudeDir} found` }
+          : { ok: false, detail: `${claudeDir} not found`, fix: ["Install Claude Code: https://claude.com/claude-code"] };
       },
     },
     {
@@ -1701,7 +1761,7 @@ export async function persistHome(ctx) {
  */
 async function linkPipelineScripts(ctx) {
   const scriptsSourceDir = join(ctx.forgeHome, "scripts");
-  const scriptsTargetDir = join(ctx.home, ".claude", "scripts");
+  const scriptsTargetDir = join(claudeDirOf(ctx), "scripts");
   const wantSymlink = ctx.linkStrategy !== "copy";
 
   await mkdir(scriptsTargetDir, { recursive: true });
@@ -2157,7 +2217,7 @@ function renderForgeReceipt(ctx, results) {
     const scriptsDetail = scriptsChanged > 0
       ? `(new ${scriptsResult.installed}, updated ${scriptsResult.updated}, copied ${scriptsResult.copied}, unchanged ${scriptsResult.skipped})`
       : `(unchanged ${scriptsResult.skipped})`;
-    w.write(`  ${glyph(true)} ${scriptsResult.total} pipeline scripts linked into ~/.claude/scripts ${dimLine(ctx, scriptsDetail)}\n`);
+    w.write(`  ${glyph(true)} ${scriptsResult.total} pipeline scripts linked into ${join(claudeDirOf(ctx), "scripts")} ${dimLine(ctx, scriptsDetail)}\n`);
   }
   if (manifestSaveFailed) {
     w.write("  " + dimLine(ctx, "manifest not saved — re-runs may warn about copied files") + "\n");
@@ -2253,8 +2313,8 @@ function renderForgeReceipt(ctx, results) {
 export async function forge(ctx) {
   const { stdout: w } = ctx;
   const commandsDir = join(ctx.forgeHome, "commands");
-  const targetDir = join(ctx.home, ".claude", "commands");
-  const manifestPath = join(ctx.home, ".claude", "forgedock", "copied-commands.json");
+  const targetDir = join(claudeDirOf(ctx), "commands");
+  const manifestPath = join(claudeDirOf(ctx), "forgedock", "copied-commands.json");
   const wantSymlink = ctx.linkStrategy !== "copy";
 
   w.write("\n  " + ember("Forging commands", ctx.mode) + " " + dimLine(ctx, `into ${targetDir}`) + "\n\n");
@@ -2382,7 +2442,7 @@ export async function forge(ctx) {
   const scriptsResult = await linkPipelineScripts(ctx);
 
   const hookScript = join(ctx.forgeHome, "bin", "hooks", "session-start.mjs");
-  const settingsPath = join(ctx.home, ".claude", "settings.json");
+  const settingsPath = join(claudeDirOf(ctx), "settings.json");
   const { status: hookStatus } = installSessionStartHook(settingsPath, hookScript);
 
   // Install enforcement hooks (#1250): PreToolUse (branch/label validation)
@@ -2426,7 +2486,11 @@ export async function forge(ctx) {
 import { detectConfig } from "./init-detect.mjs";
 import { enrich, resolveEnrichBackend } from "./init-enrich.mjs";
 import { isClaudeCliAvailable } from "./runner.mjs";
-import { annotatedReviewScreen, box, confirm, getLogoTagline } from "./tui.mjs";
+import { annotatedReviewScreen, box, confirm, getLogoTagline, input, select } from "./tui.mjs";
+import {
+  defaultExec as repoExec, listOwners, listAppInstallations, ownerCoverageWarning,
+  createRepo, ensureInitialCommit, pushMain, createStaging,
+} from "./init-repo.mjs";
 
 const badgeOf = (field) => field.confidence;
 
@@ -2440,7 +2504,7 @@ export async function read(ctx) {
   w.write("\n  " + ember("Reading your repository", ctx.mode) + "\n\n");
 
   let draft = await detectConfig(ctx.cwd);
-  const description = detectDescription(ctx.cwd);
+  const description = detectDescription(ctx.cwd, descriptionOpts(ctx, draft));
 
   const rows = [
     { label: "owner/repo", run: async () => ({ ok: true, detail: `${draft.project.owner.value}/${draft.project.repo.value}`, badge: badgeOf(draft.project.owner) }) },
@@ -2466,7 +2530,9 @@ export async function read(ctx) {
     try {
       w.write("  " + dimLine(ctx, "✦ enriching with AI…") + "\n");
       const enriched = await ctx.enrichFn(draft, { backend: enrichBackend, cwd: ctx.cwd, env: ctx.env });
-      if (enriched && typeof enriched === "object") draft = enriched;
+      // meta holds detection facts (remote/commit/staging state) that drive
+      // setupRepo() — never let model output rewrite or drop them (#4173).
+      if (enriched && typeof enriched === "object") draft = { ...enriched, meta: draft.meta };
     } catch {
       w.write("  " + dimLine(ctx, "✦ AI enrichment unavailable — continuing with detection only") + "\n");
     }
@@ -2475,6 +2541,163 @@ export async function read(ctx) {
   }
 
   return { draft, description };
+}
+
+/** gh lookup options for detectDescription — only with a detected GitHub remote. */
+function descriptionOpts(ctx, draft) {
+  return draft?.meta?.remoteDetected
+    ? { exec: ctx.exec, repo: `${draft.project.owner.value}/${draft.project.repo.value}` }
+    : {};
+}
+
+// ---------------------------------------------------------------------------
+// Act III.5 — Repository setup (forge#4173)
+// ---------------------------------------------------------------------------
+
+/**
+ * Bind the bin/init-repo.mjs helpers to one exec. Default uses
+ * init-repo's own exec (longer timeout than ctx.exec — pushes and
+ * `gh repo create` can take a while).
+ * @param {Function} [exec]
+ */
+export function bindRepoOps(exec = repoExec) {
+  return {
+    listOwners: () => listOwners(exec),
+    listAppInstallations: (owners) => listAppInstallations(exec, owners),
+    createRepo: (opts) => createRepo(exec, opts),
+    ensureInitialCommit: (root) => ensureInitialCommit(exec, root),
+    pushMain: (root, branch) => pushMain(exec, root, branch),
+    createStaging: (root, from) => createStaging(exec, root, from),
+  };
+}
+
+const COVERAGE_BADGE = {
+  installed: "ForgeDock App installed",
+  "not-installed": "App NOT installed",
+  unknown: "App status unknown",
+};
+
+/**
+ * Act III.5: when the repo has no GitHub remote, no commits, or no
+ * `staging` branch, offer to fix that instead of writing placeholders and
+ * TODOs into forge.yaml:
+ *   - create the GitHub repo (private by default) under an owner picked from
+ *     a list that shows where the ForgeDock GitHub App is installed, warning
+ *     when the chosen owner is not covered;
+ *   - make an empty initial commit when HEAD is unborn, push `main`;
+ *   - create `staging` from the default branch (fast-lane convention).
+ * Then re-runs detection so the draft carries the real values.
+ *
+ * Interactive only: non-TTY and --fast runs return the draft untouched and
+ * make no git/GitHub calls. Declining any step stops there and keeps the
+ * existing placeholder/TODO behaviour. Failures are reported, never thrown.
+ *
+ * Injectable: ctx.confirmFn, ctx.selectFn, ctx.inputFn, ctx.repoOps,
+ * ctx.isTTY (defaults to process.stdin.isTTY).
+ *
+ * @returns {Promise<{ draft: object, changed: boolean, created?: string, error?: string }>}
+ */
+export async function setupRepo(ctx, draft) {
+  const { stdout: w } = ctx;
+  const meta = draft?.meta ?? {};
+  const isTTY = ctx.isTTY ?? process.stdin.isTTY === true;
+  const needsRepo = meta.remoteDetected === false;
+  const needsCommit = meta.hasCommits === false;
+  const needsStaging = meta.stagingMissing === true;
+  if (!isTTY || ctx.argv.includes("--fast") || !(needsRepo || needsCommit || needsStaging)) {
+    return { draft, changed: false };
+  }
+
+  const ops = ctx.repoOps ?? bindRepoOps();
+  const confirmFn = ctx.confirmFn ?? confirm;
+  const selectFn = ctx.selectFn ?? select;
+  const inputFn = ctx.inputFn ?? input;
+  const root = draft.paths.root.value;
+  const branch = meta.unbornBranch || draft.branches.default.value || "main";
+  const note = (s) => w.write("  " + dimLine(ctx, s) + "\n");
+  const warnLine = (s) => w.write(`  ${ctx.mode === "none" ? "⚠" : "\x1b[38;2;255;179;71m⚠\x1b[0m"} ${s}\n`);
+
+  w.write("\n  " + ember("Setting up your repository", ctx.mode) + "\n\n");
+
+  let created;
+  let changed = false;
+  try {
+    if (needsRepo) {
+      const yes = await confirmFn("No GitHub repository is connected. Create one now?", true);
+      if (!yes) {
+        note("Skipped — forge.yaml will keep placeholder owner/repo values.");
+        return { draft, changed: false };
+      }
+      const owners = ops.listOwners();
+      if (owners.length === 0) {
+        note("Could not list GitHub accounts — run `gh auth login`, then `npx forgedock init` again.");
+        return { draft, changed: false };
+      }
+      const coverage = ops.listAppInstallations(owners);
+      const choices = owners.map((o) => ({
+        label: `${o.login}  (${o.type === "Organization" ? "org" : "personal"} · ${COVERAGE_BADGE[coverage.get(o.login) ?? "unknown"]})`,
+        value: o.login,
+      }));
+      const firstCovered = owners.findIndex((o) => coverage.get(o.login) === "installed");
+      let owner;
+      for (;;) {
+        owner = await selectFn("Repository owner", choices, { initialIndex: Math.max(firstCovered, 0) });
+        if (!owner) {
+          note("Skipped — no owner chosen.");
+          return { draft, changed: false };
+        }
+        const warning = ownerCoverageWarning(owner, coverage.get(owner));
+        if (!warning) break;
+        warnLine(warning);
+        if (await confirmFn(`Create the repository under '${owner}' anyway?`, false)) break;
+      }
+      const name = await inputFn("Repository name", basename(root));
+      const isPrivate = await confirmFn("Make the repository private?", true);
+      const repo = ops.createRepo({ owner, name, private: isPrivate, root, branch });
+      created = repo.fullName;
+      changed = true;
+      w.write(`  ✔ Created ${repo.visibility} repository ${repo.fullName}\n`);
+    }
+
+    if (needsCommit) {
+      const yes = await confirmFn(`The repository has no commits. Create an empty initial commit on '${branch}' so it can be pushed?`, true);
+      if (!yes) {
+        note(`Skipped — push '${branch}' and create 'staging' yourself once you have a commit.`);
+        return await finish();
+      }
+      ops.ensureInitialCommit(root);
+      changed = true;
+    }
+
+    if (needsRepo || needsCommit) {
+      ops.pushMain(root, branch);
+      changed = true;
+      w.write(`  ✔ Pushed ${branch}\n`);
+    }
+
+    if (needsStaging || needsRepo) {
+      const yes = await confirmFn(`Create a 'staging' branch from '${branch}'? (ForgeDock fast-lane PRs merge into staging)`, true);
+      if (yes) {
+        const res = ops.createStaging(root, branch);
+        changed = true;
+        w.write(`  ✔ ${res.created ? "Created" : "Found"} staging\n`);
+      } else {
+        note(`Skipped — branches.staging will default to '${branch}'.`);
+      }
+    }
+  } catch (err) {
+    const msg = String(err?.stderr || err?.message || err).trim().split("\n")[0];
+    warnLine(`Repository setup failed: ${msg}`);
+    note("Continuing with the detected values — fix this and re-run `npx forgedock init`.");
+    return await finish(msg);
+  }
+  return await finish();
+
+  async function finish(error) {
+    if (!changed) return { draft, changed: false, ...(error ? { error } : {}) };
+    const redetected = await detectConfig(ctx.cwd);
+    return { draft: redetected, changed: true, ...(created ? { created } : {}), ...(error ? { error } : {}) };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2516,7 +2739,7 @@ export async function review(ctx, draft, description) {
   }
 
   const extraFields = description.value
-    ? { description: { value: description.value, confidence: "medium", source: description.source, why: `First paragraph of ${description.source}` } }
+    ? { description: { value: description.value, confidence: "medium", source: description.source, why: `Description from ${description.source}` } }
     : {};
 
   const accepted = await annotatedReviewScreen(draft, {
@@ -2574,7 +2797,7 @@ export function celebrate(ctx, summary) {
     w.write(`  ${glyph} ${summary.total} commands · hook ${summary.hookStatus === "skipped-malformed" ? "skipped" : "active"}   ${dimLine(ctx, hookNote)}\n`);
   }
   if (summary.scriptsResult && summary.scriptsResult.total > 0) {
-    w.write(`  ${glyph} ${summary.scriptsResult.total} pipeline scripts   ${dimLine(ctx, "~/.claude/scripts — classify-lane, transition-label, validate-pr-target")}\n`);
+    w.write(`  ${glyph} ${summary.scriptsResult.total} pipeline scripts   ${dimLine(ctx, `${join(claudeDirOf(ctx), "scripts")} — classify-lane, transition-label, validate-pr-target`)}\n`);
   }
   w.write("\n");
   if (summary.isMinimal) {
@@ -2840,6 +3063,18 @@ export async function maybeOfferDemo(ctx) {
  * Acts I→V. Returns the process exit code.
  * SIGINT: restore cursor, summarize partial state, exit 130.
  */
+/**
+ * Run setupRepo() on read()'s result; when it changed the repository,
+ * re-detect the description against the new state.
+ * @returns {Promise<{ draft: object, description: { value: string, source: string } }>}
+ */
+export async function setupAfterRead(ctx, { draft, description }) {
+  const setup = await setupRepo(ctx, draft);
+  if (!setup.changed) return { draft, description };
+  const fresh = description.value ? description : detectDescription(ctx.cwd, descriptionOpts(ctx, setup.draft));
+  return { draft: setup.draft, description: fresh };
+}
+
 export async function runJourney(ctx) {
   const onSigint = () => {
     ctx.stdout.write("\x1b[0m\x1b[?25h\n  Interrupted. Partial state: commands may be installed; config not written.\n  Finish anytime with: npx forgedock init\n");
@@ -2860,7 +3095,7 @@ export async function runJourney(ctx) {
       ctx.forgeHome = persistResult.forgeHome;
     }
     const forged = await forge(ctx);
-    const { draft, description } = await read(ctx);
+    const { draft, description } = await setupAfterRead(ctx, await read(ctx));
     const reviewed = await review(ctx, draft, description);
     const connected = await connect(ctx);
     celebrate(ctx, { ...reviewed, ...connected, total: forged.total, hookStatus: forged.hookStatus, scriptsResult: forged.scriptsResult });

@@ -3,17 +3,17 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { writeFileSync, existsSync, readFileSync } from "node:fs";
+import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt } from "./prompts.mjs";
-import { parseReview, unnamedEdges, structureNote } from "./conformance.mjs";
+import { parseReview, unnamedEdges, structureNote, applyAmendments } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
-import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor } from "./effects.mjs";
+import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir } from "./effects.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
@@ -56,6 +56,7 @@ function world(o = {}) {
     result: o.result ?? { status: "fixed", summary: "fixed foo", evidence: [], tests: ["test/foo.test.js"] },
     prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], pushes: 0, pushErrors: [...(o.pushErrors ?? [])], commentErrors: [...(o.commentErrors ?? [])], dirty: o.dirty ?? false, lastSubject: o.lastSubject ?? "", prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], mergeInProgress: false, markers: false, mergeAttempts: 0, branchDeletes: [],
     stages: { ...STAGE_MD, ...(o.stages ?? {}) }, builderN: 0,
+    salvageTrees: [...(o.salvageTrees ?? [])], alive: new Set((o.procs ?? []).map((p) => p.pid)), kills: [],
   };
   const put = (name, text) => { const p = `${WT}/.forge-lean/${name}`; if (w.files[p] !== text) w.mtimes[p] = Date.now(); w.files[p] = text; };
   const writeStages = (keys) => { for (const k of keys) if (w.stages[k] != null) put(`${k}.md`, w.stages[k]); };
@@ -89,6 +90,8 @@ function world(o = {}) {
       if (a[0] === "worktree" && a[1] === "add" && (w.lockFails ?? 0) > 0) {
         w.lockFails--; const e = new Error("git failed"); e.stderr = "error: could not lock config file .git/config: File exists"; throw e;
       }
+      if (a[0] === "worktree" && a[1] === "remove") w.seq.push("worktree-remove");
+      if (a[0] === "update-ref") w.seq.push(`update-ref ${a[1]}`);
       if (a[0] === "rev-parse" && a[1] === "--git-path") return "/repo/.git/info/exclude";
       if (a[0] === "status" && a[1] === "--porcelain") return w.dirty ? " M src/foo.js\n" : "";
       if (a[0] === "log" && a.includes("--format=%s")) return w.lastSubject;
@@ -100,6 +103,9 @@ function world(o = {}) {
         w.conflictFiles = o.conflictFiles ?? ["src/foo.js"]; w.mergeInProgress = true; throw new Error("CONFLICT (content): Merge conflict in src/foo.js");
       }
       if (a[0] === "rev-parse" && a.includes("MERGE_HEAD")) return w.mergeInProgress ? "deadbeef" : "";
+      if (a[0] === "write-tree") return w.salvageTrees.length ? w.salvageTrees.shift() : "";
+      if (a[0] === "rev-parse" && a[1] === "HEAD^{tree}") return "0".repeat(40);
+      if (a.includes("commit-tree")) return "c".repeat(40);
       if (a[0] === "diff" && a.includes("--diff-filter=U")) return w.conflictFiles.join("\n");
       if (a[0] === "diff" && a[1] === "--check") return "";
       if (a[0] === "grep") return w.markers ? "src/foo.js:3:<<<<<<< HEAD" : "";
@@ -146,7 +152,8 @@ function world(o = {}) {
     },
     waitCiGreen: async () => (w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }),
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
-    fs: { stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; } },
+    ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
+    fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; } },
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw new Error(o.followupError); return Object.fromEntries(items.map((i) => [i.key, o.followupIssue ?? 900])); },
   };
   return w;
@@ -690,6 +697,95 @@ describe("issue edited mid-run (#4188)", () => {
   });
 });
 
+describe("review row skeleton and targeted retry (#4160)", () => {
+  it("the reviewer prompt carries a pre-filled skeleton with every requirement and preserve id", async () => {
+    const w = world();
+    assert.equal((await run(w)).terminalReason, "merged");
+    const p = reviewers(w)[0][4];
+    const sk = JSON.parse(/<row_skeleton>\n([\s\S]*?)\n<\/row_skeleton>/.exec(p)[1]);
+    assert.deepEqual(sk.requirements.map((r) => r.id), CONTRACT.requirements.map((r) => r.id));
+    assert.deepEqual(sk.preserve.map((x) => x.id), (CONTRACT.preserve ?? []).map((x) => x.id));
+    assert.doesNotMatch(p, /previous_reply_problems/);
+  });
+  it("an incomplete first reply gets one retry that lists exactly what was missing, and the complete second reply decides", async () => {
+    const w = world({ reviews: [genericPass(), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 2);
+    const p2 = reviewers(w)[1][4];
+    assert.match(p2, /<previous_reply_problems>[\s\S]*requirement R1 needs exactly one row/);
+    assert.match(p2, /<previous_reply>[\s\S]*"verdict":"PASS"/);
+  });
+  it("a complete first reply needs no second reviewer run", async () => {
+    const w = world();
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1);
+  });
+});
+
+describe("worktree salvage and orphaned processes (#4162)", () => {
+  const T1 = "1".repeat(40), T2 = "2".repeat(40);
+  const salvageRefs = (w) => w.calls.filter((c) => c[0] === "git" && c[1] === "update-ref").map((c) => c[2]);
+
+  it("uncommitted work in an earlier run's worktree is saved to a salvage ref before the worktree is removed, and the implementer is told", async () => {
+    const dir = tmpDir("salvage-");
+    const w = world({ wtExists: true, salvageTrees: [T1] });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    const refs = salvageRefs(w);
+    assert.equal(refs.length, 1); assert.match(refs[0], /^refs\/forge\/salvage\/7\/\d+$/);
+    assert.ok(w.seq.indexOf(`update-ref ${refs[0]}`) < w.seq.indexOf("worktree-remove"), "saved before removal");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "add" && c[2] === "-f" && c.includes(".forge-lean")), ".forge-lean is included");
+    assert.ok(builders(w).some((b) => b[4].includes(`saved at \`${refs[0]}\``)), "implement prompt names the ref");
+    assert.match(traj(w).at(-1), /Uncommitted work from an earlier run saved to `refs\/forge\/salvage\/7\//);
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "WORKTREE_SALVAGED").length, 1);
+  });
+
+  it("a clean earlier worktree (tree equals HEAD) saves nothing and the prompt is unchanged", async () => {
+    const w = world({ wtExists: true, salvageTrees: ["0".repeat(40)] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(salvageRefs(w).length, 0);
+    assert.ok(builders(w).every((b) => !b[4].includes("saved at")));
+  });
+
+  it("no worktree on disk: nothing is staged or saved", async () => {
+    const w = world({ salvageTrees: [T1] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(salvageRefs(w).length, 0);
+    assert.ok(!w.calls.some((c) => c[0] === "git" && c[1] === "write-tree"));
+  });
+
+  it("processes still running in the worktree are stopped (SIGTERM) before the worktree is removed", async () => {
+    const w = world({ procs: [{ pid: 4242, cmd: "claude --print" }] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.deepEqual(w.kills, [[4242, "SIGTERM"]]);
+    assert.ok(w.seq.indexOf("kill-SIGTERM") < w.seq.indexOf("worktree-remove"));
+    assert.match(traj(w).at(-1), /Stopped 1 process\(es\) still running in the worktree from an earlier run: 4242 claude --print/);
+  });
+
+  it("a process that ignores SIGTERM is killed with SIGKILL", async () => {
+    const w = world({ procs: [{ pid: 4243, cmd: "node x" }], stubborn: true });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.deepEqual(w.kills, [[4243, "SIGTERM"], [4243, "SIGKILL"]]);
+  });
+
+  it("salvage runs only at the start: teardown at the end is the #4179 checkpoint, not a salvage ref", async () => {
+    const w = world({ wtExists: true, salvageTrees: ["0".repeat(40), T2] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(salvageRefs(w).length, 0);
+  });
+
+  it("procsInDir reads cwd links from a /proc tree and skips this process and its ancestors", () => {
+    const root = tmpDir("proc-"), wtDir = tmpDir("wt-");
+    const mk = (pid, cwdTarget, ppid, cmd) => { mkdirSync(join(root, String(pid)), { recursive: true }); symlinkSync(cwdTarget, join(root, String(pid), "cwd")); writeFileSync(join(root, String(pid), "stat"), `${pid} (x y) S ${ppid} 0`); writeFileSync(join(root, String(pid), "cmdline"), cmd.split(" ").join("\0")); };
+    mk(100, wtDir, 1, "claude --print");
+    mk(101, join(wtDir, "src"), 1, "node test");
+    mk(102, "/elsewhere", 1, "bash");
+    mk(200, wtDir, 1, "self");
+    mkdirSync(join(root, "self")); // non-numeric entries are ignored
+    assert.deepEqual(procsInDir(wtDir, { procRoot: root, self: 200 }).map((p) => [p.pid, p.cmd]).sort(), [[100, "claude --print"], [101, "node test"]]);
+    assert.deepEqual(procsInDir(wtDir, { procRoot: join(root, "missing") }), []);
+  });
+});
+
 describe("conformance shadow mode (the default)", () => {
   const runShadow = (w, extra = {}) => run(w, { conformance: "shadow", ...extra });
   const shadowNote = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")) ?? "";
@@ -898,6 +994,15 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     // the manifest alone, without the package named, is not naming the edge
     assert.equal(unnamedEdges(withEdgeDeliverable("bump versions"), delta({ package_edges_added: [EDGE] })).length, 1);
     assert.equal(unnamedEdges(withEdgeDeliverable("add @s/core"), delta({ package_edges_added: [EDGE] })).length, 0);
+  });
+
+  it("an add-deliverable amendment on a package.json the contract already lists (for another change) declares the edge", () => {
+    const frozen = { requirements: [], deliverables: [{ id: "D1", path: "packages/db/package.json", change: "bump versions" }] };
+    const r = applyAmendments(frozen, [{ kind: "add-deliverable", path: "packages/db/package.json", why: "add @s/core: the architecture doc lets db depend on core" }]);
+    assert.equal(r.contract.deliverables.length, 1); assert.equal(r.contract.deliverables[0].id, "D1");
+    assert.match(r.contract.deliverables[0].change, /^bump versions; add @s\/core/);
+    assert.equal(unnamedEdges(r.contract, delta({ package_edges_added: [EDGE] })).length, 0);
+    assert.equal(frozen.deliverables[0].change, "bump versions", "the frozen contract is not mutated");
   });
 
   it("an add-deliverable amendment naming the package on the resume declares the edge", async () => {
@@ -1658,6 +1763,26 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
       for (const e of w.envs) assert.equal(e?.TMPDIR, w.tmpMade[0]);
       if (["merged", "needs-human"].includes(reason)) assert.ok(w.envs.length >= 1);
     }
+  });
+
+  it("#4181 the builder and reviewer get FORGE_DOCKER_LABELS with the ledger's batch and lane, with or without a run tmp", async () => {
+    for (const withTmp of [false, true]) {
+      const w = world();
+      if (withTmp) w.io.runTmp = { prune: async () => {}, make: async (i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async () => {} };
+      assert.equal((await run(w, { batchId: "b1" })).terminalReason, "merged");
+      assert.ok(w.envs.length >= 1);
+      for (const e of w.envs) {
+        const labels = String(e?.FORGE_DOCKER_LABELS ?? "").split(" ");
+        assert.deepEqual(labels.slice(0, 4), ["forgedock.owner=1", "forgedock.batch=b1", "forgedock.lane=lean-7", "forgedock.issue=7"]);
+        assert.match(labels[4], /^forgedock\.expires=\d+$/);
+        if (withTmp) assert.match(e.TMPDIR, /\/runs\/7-/); else assert.equal(e.TMPDIR, undefined);
+      }
+    }
+  });
+
+  it("#4181 the implement prompt tells the builder to use --rm, the labels and a trap teardown", () => {
+    const p = builderImplementPrompt();
+    for (const needle of ["FORGE_DOCKER_LABELS", "--rm", "--label", "trap", "volume create", "network create", "build"]) assert.ok(p.includes(needle), needle);
   });
 
   it("#4104 makeRunTmp: removes only its own dirs; prune takes only old dirs with a dead owner and our marker", async () => {

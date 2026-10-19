@@ -13,6 +13,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "forgedock.mjs");
 
+// The installer, doctor and status resolve the Claude config dir from
+// CLAUDE_CONFIG_DIR when set (forge#4173). Clear any ambient value so these
+// tests only ever touch their sandbox HOME, never the developer's profile.
+delete process.env.CLAUDE_CONFIG_DIR;
+
 function runCli(args, { cli = CLI, cwd, home, extraEnv } = {}) {
   return spawnSync(process.execPath, [cli, ...args], {
     cwd: cwd ?? tmpDir("fd-cli-cwd-"),
@@ -695,6 +700,30 @@ describe("router", () => {
     // baked-in hook script path genuinely exists.
     assert.match(doctorRes.stdout, /SessionStart hook script path/i);
     assert.doesNotMatch(doctorRes.stdout, /no longer exists/i);
+  });
+
+  it("install, status and doctor all honour CLAUDE_CONFIG_DIR (forge#4173)", () => {
+    const home = tmpDir("fd-ccd-home-");
+    const cwd = tmpDir("fd-ccd-cwd-");
+    const cfg = join(tmpDir("fd-ccd-cfg-"), "profile");
+    writeFileSync(join(home, ".gitconfig"), "[user]\n\tname = Test User\n\temail = test@example.com\n", "utf-8");
+    const stubBin = tmpDir("fd-ccd-stub-bin-");
+    writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
+    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
+    const extraEnv = { PATH: `${stubBin}:${process.env.PATH}`, CLAUDE_CONFIG_DIR: cfg };
+
+    const installRes = runCli(["install", "--fast"], { cwd, home, extraEnv });
+    assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
+    assert.ok(existsSync(join(cfg, "commands", "work-on.md")), "commands must be installed under CLAUDE_CONFIG_DIR");
+    assert.ok(existsSync(join(cfg, "settings.json")), "hook must be registered under CLAUDE_CONFIG_DIR");
+    assert.equal(existsSync(join(home, ".claude", "commands")), false, "~/.claude must not be used when CLAUDE_CONFIG_DIR is set");
+
+    const statusRes = runCli(["status"], { cwd, home, extraEnv });
+    assert.match(statusRes.stdout, new RegExp(`installed at ${join(cfg, "commands").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+
+    const doctorRes = runCli(["doctor"], { cwd, home, extraEnv });
+    assert.equal(doctorRes.status, 0, doctorRes.stdout + doctorRes.stderr);
+    assert.ok(doctorRes.stdout.includes(`registered in ${cfg}/settings.json`), doctorRes.stdout);
   });
 
   it("install/status/doctor agree on location when cwd has its own unrelated .claude/commands/ (#1589)", () => {

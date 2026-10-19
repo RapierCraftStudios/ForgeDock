@@ -3,7 +3,7 @@
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -56,6 +56,28 @@ export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRun
       idleMs, maxMs, stream: idleMs > 0, control, onSpawn, wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default" };
   };
+}
+
+/** Parent pid from /proc/<pid>/stat (the field after the parenthesised command name); 0 when unreadable. */
+const ppidOf = (root, pid) => { try { const st = readFileSync(join(root, String(pid), "stat"), "utf8"); return Number(st.slice(st.lastIndexOf(")") + 2).split(" ")[1]) || 0; } catch { return 0; } };
+/**
+ * #4162: processes whose cwd is `dir` or inside it, from /proc (Linux). Excludes this process and its ancestors.
+ * Returns [{pid, cmd}]; [] where /proc is unavailable (the caller then skips stopping them).
+ */
+export function procsInDir(dir, { procRoot = "/proc", self = process.pid } = {}) {
+  if (!dir || !existsSync(procRoot)) return [];
+  try { dir = realpathSync(dir); } catch { /* not on disk: compare as given */ } // /proc cwd links are resolved paths
+  const skip = new Set();
+  for (let p = self, i = 0; p > 1 && i < 64 && !skip.has(p); i++) { skip.add(p); p = ppidOf(procRoot, p); }
+  const out = [];
+  for (const e of readdirSync(procRoot)) {
+    if (!/^\d+$/.test(e) || skip.has(Number(e))) continue;
+    let at; try { at = readlinkSync(join(procRoot, e, "cwd")); } catch { continue; }
+    if (at !== dir && !at.startsWith(`${dir}/`)) continue;
+    let cmd = ""; try { cmd = readFileSync(join(procRoot, e, "cmdline"), "utf8").split("\0").filter(Boolean).join(" ").slice(0, 200); } catch { /* exited */ }
+    out.push({ pid: Number(e), cmd });
+  }
+  return out;
 }
 
 export const RUN_TMP_MAX_AGE_MS = 6 * 3600 * 1000;
@@ -194,6 +216,8 @@ export function makeLeanIo({ repo }) {
     async structureDelta({ cwd, base }) {
       try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
+    /** #4162: processes left running inside a lane worktree (Linux /proc). */
+    proc: { inDir: async (dir) => procsInDir(dir), alive: pidAlive, kill: (pid, sig) => { try { process.kill(pid, sig); } catch { /* already gone */ } } },
     fs: {
       read: async (p) => readFileSync(p, "utf8"),
       exists: async (p) => existsSync(p),

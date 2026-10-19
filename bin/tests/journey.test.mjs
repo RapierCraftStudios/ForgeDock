@@ -8,8 +8,13 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries } from "../journey.mjs";
+import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries, resolveClaudeConfigDir, setupRepo, setupAfterRead } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
+
+// The installer, doctor and status resolve the Claude config dir from
+// CLAUDE_CONFIG_DIR when set (forge#4173). Clear any ambient value so these
+// tests only ever touch their sandbox HOME, never the developer's profile.
+delete process.env.CLAUDE_CONFIG_DIR;
 
 const VALUES = {
   owner: "RapierCraftStudios",
@@ -287,20 +292,52 @@ describe("backupExisting", () => {
 });
 
 describe("detectDescription", () => {
-  it("extracts the first README paragraph, stripping markdown", () => {
-    writeFileSync(
-      join(dir, "README.md"),
-      "# Title\n\n**Turn** a [GitHub issue](https://x) into a `merged PR`.\n\nMore.\n",
-      "utf-8",
-    );
-    const res = detectDescription(dir);
-    assert.equal(res.value, "Turn a GitHub issue into a merged PR.");
-    assert.equal(res.source, "README.md");
-  });
-  it("falls back to CLAUDE.md, then empty", () => {
-    assert.deepEqual(detectDescription(dir), { value: "", source: "" });
+  // forge#4173: README/CLAUDE.md prose is never used as the description.
+  it("ignores README.md and CLAUDE.md prose", () => {
+    writeFileSync(join(dir, "README.md"), "# Title\n\n[![CI](x)](y) badges first.\n", "utf-8");
     writeFileSync(join(dir, "CLAUDE.md"), "# T\n\nProject brain.\n", "utf-8");
-    assert.deepEqual(detectDescription(dir), { value: "Project brain.", source: "CLAUDE.md" });
+    assert.deepEqual(detectDescription(dir), { value: "", source: "" });
+  });
+  it("reads package.json description", () => {
+    writeFileSync(join(dir, "README.md"), "# Title\n\nREADME prose.\n", "utf-8");
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "x", description: "  Turn issues\ninto PRs. " }), "utf-8");
+    assert.deepEqual(detectDescription(dir), { value: "Turn issues into PRs.", source: "package.json" });
+  });
+  it("reads pyproject.toml [project] then [tool.poetry], and Cargo.toml [package]", () => {
+    writeFileSync(join(dir, "pyproject.toml"), '[tool.poetry]\ndescription = "Poetry desc"\n\n[project]\nname = "x"\ndescription = "PEP 621 \\"desc\\""\n', "utf-8");
+    assert.deepEqual(detectDescription(dir), { value: 'PEP 621 "desc"', source: "pyproject.toml" });
+    const d2 = tmpDir("fd-desc-cargo-");
+    writeFileSync(join(d2, "Cargo.toml"), "[package]\nname = 'x'\ndescription = 'A crate'\n[dependencies]\ndescription = 'nope'\n", "utf-8");
+    assert.deepEqual(detectDescription(d2), { value: "A crate", source: "Cargo.toml" });
+  });
+  it("skips an unparseable package.json and falls through", () => {
+    writeFileSync(join(dir, "package.json"), "{not json", "utf-8");
+    writeFileSync(join(dir, "Cargo.toml"), '[package]\ndescription = "fallback"\n', "utf-8");
+    assert.deepEqual(detectDescription(dir), { value: "fallback", source: "Cargo.toml" });
+  });
+  it("falls back to the GitHub repo description only when exec + repo are given", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push([cmd, ...args].join(" ")); return "From GitHub\n"; };
+    assert.deepEqual(detectDescription(dir, { exec }), { value: "", source: "" });
+    assert.equal(calls.length, 0);
+    assert.deepEqual(detectDescription(dir, { exec, repo: "o/r" }), { value: "From GitHub", source: "GitHub repository" });
+    assert.deepEqual(calls, ["gh repo view o/r --json description --jq .description"]);
+    const failing = () => { throw new Error("gh: not found"); };
+    assert.deepEqual(detectDescription(dir, { exec: failing, repo: "o/r" }), { value: "", source: "" });
+  });
+});
+
+describe("resolveClaudeConfigDir (forge#4173)", () => {
+  it("honours a non-empty CLAUDE_CONFIG_DIR", () => {
+    assert.equal(resolveClaudeConfigDir({ CLAUDE_CONFIG_DIR: "/cfg/profile" }, "/home/u"), "/cfg/profile");
+  });
+  it("falls back to <home>/.claude when unset or empty", () => {
+    assert.equal(resolveClaudeConfigDir({}, "/home/u"), join("/home/u", ".claude"));
+    assert.equal(resolveClaudeConfigDir({ CLAUDE_CONFIG_DIR: "" }, "/home/u"), join("/home/u", ".claude"));
+  });
+  it("derives home from HOME/USERPROFILE when not passed", () => {
+    assert.equal(resolveClaudeConfigDir({ HOME: "/h1" }), join("/h1", ".claude"));
+    assert.equal(resolveClaudeConfigDir({ USERPROFILE: "/h2" }), join("/h2", ".claude"));
   });
 });
 
@@ -2540,11 +2577,13 @@ describe("forge (Act II)", () => {
 describe("read (Act III)", () => {
   it("returns a draft + description without a git repo (placeholders, low confidence)", async () => {
     const cwd = tmpDir("fd-read-");
-    writeFileSync(join(cwd, "README.md"), "# X\n\nA test project.\n", "utf-8");
+    writeFileSync(join(cwd, "README.md"), "# X\n\nREADME prose is not a description.\n", "utf-8");
+    writeFileSync(join(cwd, "package.json"), JSON.stringify({ description: "A test project." }), "utf-8");
     const { ctx, w } = stubCtx({ cwd, isCliAvailableFn: () => false });
     const res = await read(ctx);
     assert.equal(res.draft.project.owner.value, "your-github-org");
     assert.equal(res.description.value, "A test project.");
+    assert.equal(res.description.source, "package.json");
     assert.match(w.text, /\[low\]/); // badge rendered for placeholder
   });
 
@@ -2565,6 +2604,20 @@ describe("read (Act III)", () => {
     const res = await read(ctx);
     assert.equal(res.draft.project.name.value, "ENRICHED");
     assert.match(w.text, /enriching with AI/);
+  });
+
+  it("keeps detection meta even when enrichment rewrites or drops it (forge#4173)", async () => {
+    const cwd = tmpDir("fd-read-enrich-meta-");
+    const { ctx } = stubCtx({
+      cwd,
+      env: { ANTHROPIC_API_KEY: "test-key" },
+      isCliAvailableFn: () => false,
+      enrichFn: (draft) => ({ ...structuredClone(draft), meta: { remoteDetected: true } }),
+    });
+    const res = await read(ctx);
+    assert.equal(res.draft.meta.remoteDetected, false);
+    assert.equal(res.draft.meta.isGitRepo, false);
+    assert.equal(res.draft.meta.stagingMissing, true);
   });
 
   it("enrichFn throws: draft stays original, error message written", async () => {
@@ -3338,5 +3391,190 @@ describe("writeInstallReceipt", () => {
     assert.equal(receipt.hooks.sessionStart, null);
     assert.equal(receipt.hooks.preToolUse, null);
     assert.equal(receipt.hooks.subagentStopEnforce, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// forge#4173: CLAUDE_CONFIG_DIR-aware install + repo setup act
+// ---------------------------------------------------------------------------
+
+describe("forge honours CLAUDE_CONFIG_DIR (forge#4173)", () => {
+  it("installs commands, scripts target and hook into CLAUDE_CONFIG_DIR, not <home>/.claude", async () => {
+    const home = tmpDir("fd-ccd-home-");
+    const cfg = tmpDir("fd-ccd-cfg-");
+    const forgeHome = tmpDir("fd-ccd-src-");
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const { ctx } = stubCtx({ home, env: { CLAUDE_CONFIG_DIR: cfg } });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.total, 1);
+    assertInstalled(join(cfg, "commands", "a.md"), "A");
+    assert.ok(existsSync(join(cfg, "settings.json")), "hook must be registered in CLAUDE_CONFIG_DIR/settings.json");
+    assert.ok(existsSync(join(cfg, "scripts")), "scripts target must live under CLAUDE_CONFIG_DIR");
+    assert.equal(existsSync(join(home, ".claude")), false, "<home>/.claude must not be touched");
+  });
+
+  it("preflight checks CLAUDE_CONFIG_DIR for Claude Code", async () => {
+    const home = tmpDir("fd-ccd-pre-home-");
+    const cfg = tmpDir("fd-ccd-pre-cfg-");
+    const execMap = { "git --version": "git version 2.45.0" };
+    const ok = await preflight(stubCtx({ home, execMap, env: { CLAUDE_CONFIG_DIR: cfg } }).ctx);
+    assert.equal(ok.checks.find((c) => c.name === "Claude Code").ok, true, "CLAUDE_CONFIG_DIR exists → Claude Code found");
+    const missing = await preflight(stubCtx({ home, execMap, env: { CLAUDE_CONFIG_DIR: join(cfg, "absent") } }).ctx);
+    assert.equal(missing.checks.find((c) => c.name === "Claude Code").ok, false);
+  });
+});
+
+function emptyRepoDraft(root, meta = {}) {
+  const f = (value, confidence = "low") => ({ value, confidence, source: "test", why: "test" });
+  return {
+    project: { owner: f("your-github-org"), repo: f("your-repo-name"), name: f("Your Repo Name", "medium") },
+    paths: { root: f(root, "high"), worktreeBase: f(join(root, ".claude", "worktrees"), "high") },
+    branches: { default: f("main", "medium"), staging: f("main") },
+    meta: { remoteDetected: false, isGitRepo: true, hasCommits: false, unbornBranch: "main", stagingMissing: true, ...meta },
+  };
+}
+
+/** Recording stubs for setupRepo's injectable prompts and repo ops. */
+function setupStubs({ answers = {}, selections = [], owners, coverage, failOn } = {}) {
+  const calls = [];
+  const prompts = [];
+  const ops = {
+    listOwners: () => { calls.push("listOwners"); return owners ?? [{ login: "me", type: "User" }, { login: "my-org", type: "Organization" }]; },
+    listAppInstallations: (o) => { calls.push(`listAppInstallations:${o.map((x) => x.login).join(",")}`); return coverage ?? new Map([["me", "not-installed"], ["my-org", "installed"]]); },
+    createRepo: (opts) => {
+      calls.push(`createRepo:${opts.owner}/${opts.name}:${opts.private ? "private" : "public"}:${opts.branch}`);
+      if (failOn === "createRepo") throw Object.assign(new Error("boom"), { stderr: "HTTP 422: name already exists\nmore" });
+      return { fullName: `${opts.owner}/${opts.name}`, visibility: opts.private ? "private" : "public" };
+    },
+    ensureInitialCommit: (root) => { calls.push(`ensureInitialCommit:${root}`); return { created: true }; },
+    pushMain: (root, branch) => { calls.push(`pushMain:${branch}`); },
+    createStaging: (root, from) => { calls.push(`createStaging:${from}`); return { created: true }; },
+  };
+  const selectQueue = [...selections];
+  return {
+    calls,
+    prompts,
+    overrides: {
+      isTTY: true,
+      repoOps: ops,
+      confirmFn: async (msg, def) => {
+        prompts.push(msg);
+        for (const [needle, value] of Object.entries(answers)) if (msg.includes(needle)) return value;
+        return def;
+      },
+      selectFn: async (msg, choices, opts) => {
+        prompts.push(`select:${msg}:${choices.map((c) => c.label).join("|")}:initial=${opts?.initialIndex}`);
+        return selectQueue.length ? selectQueue.shift() : choices[opts?.initialIndex ?? 0].value;
+      },
+      inputFn: async (msg, def) => { prompts.push(`input:${msg}:${def}`); return def; },
+    },
+  };
+}
+
+describe("setupRepo (Act III.5, forge#4173)", () => {
+  it("no remote + no commits: creates a private repo under the App-covered owner, pushes main, creates staging", async () => {
+    const cwd = tmpDir("fd-setup-");
+    const st = setupStubs();
+    const { ctx, w } = stubCtx({ cwd, ...st.overrides });
+    const res = await setupRepo(ctx, emptyRepoDraft(cwd));
+
+    const name = cwd.split(/[\\/]/).pop();
+    assert.deepEqual(st.calls, [
+      "listOwners",
+      "listAppInstallations:me,my-org",
+      `createRepo:my-org/${name}:private:main`,
+      `ensureInitialCommit:${cwd}`,
+      "pushMain:main",
+      "createStaging:main",
+    ]);
+    const picker = st.prompts.find((p) => p.startsWith("select:"));
+    assert.match(picker, /me {2}\(personal · App NOT installed\)/);
+    assert.match(picker, /my-org {2}\(org · ForgeDock App installed\)/);
+    assert.match(picker, /initial=1$/, "picker must preselect the first App-covered owner");
+    assert.equal(res.changed, true);
+    assert.equal(res.created, `my-org/${name}`);
+    assert.match(w.text, /Created private repository/);
+    assert.doesNotMatch(w.text, /not installed on/);
+  });
+
+  it("warns when the chosen owner is not covered and re-prompts when the user does not proceed", async () => {
+    const cwd = tmpDir("fd-setup-warn-");
+    const st = setupStubs({ selections: ["me", "my-org"], answers: { anyway: false } });
+    const { ctx, w } = stubCtx({ cwd, ...st.overrides });
+    await setupRepo(ctx, emptyRepoDraft(cwd));
+    assert.match(w.text, /ForgeDock GitHub App is not installed on 'me'.*installations\/new/);
+    assert.equal(st.prompts.filter((p) => p.startsWith("select:")).length, 2);
+    assert.ok(st.calls.some((c) => c.startsWith("createRepo:my-org/")));
+  });
+
+  it("creates under an uncovered owner when the user confirms, and honours an explicit public choice", async () => {
+    const cwd = tmpDir("fd-setup-pub-");
+    const st = setupStubs({ selections: ["me"], answers: { anyway: true, private: false } });
+    const { ctx, w } = stubCtx({ cwd, ...st.overrides });
+    await setupRepo(ctx, emptyRepoDraft(cwd));
+    assert.match(w.text, /not installed on 'me'/);
+    assert.ok(st.calls.some((c) => /^createRepo:me\/.+:public:main$/.test(c)));
+  });
+
+  it("existing remote with commits but no staging: only offers staging", async () => {
+    const cwd = tmpDir("fd-setup-stg-");
+    const st = setupStubs();
+    const { ctx } = stubCtx({ cwd, ...st.overrides });
+    await setupRepo(ctx, emptyRepoDraft(cwd, { remoteDetected: true, hasCommits: true, unbornBranch: "" }));
+    assert.deepEqual(st.calls, ["createStaging:main"]);
+  });
+
+  it("non-TTY, --fast, declined, or nothing-to-do runs make no git/GitHub calls", async () => {
+    const cwd = tmpDir("fd-setup-noop-");
+    for (const extra of [{ isTTY: false }, { argv: ["--fast"] }]) {
+      const st = setupStubs();
+      const { ctx } = stubCtx({ cwd, ...st.overrides, ...extra });
+      const draft = emptyRepoDraft(cwd);
+      const res = await setupRepo(ctx, draft);
+      assert.equal(res.changed, false);
+      assert.equal(res.draft, draft);
+      assert.deepEqual(st.calls, []);
+      assert.deepEqual(st.prompts, []);
+    }
+    const declined = setupStubs({ answers: { "Create one now": false } });
+    const { ctx: c2 } = stubCtx({ cwd, ...declined.overrides });
+    assert.equal((await setupRepo(c2, emptyRepoDraft(cwd))).changed, false);
+    assert.deepEqual(declined.calls, []);
+    const idle = setupStubs();
+    const { ctx: c3 } = stubCtx({ cwd, ...idle.overrides });
+    await setupRepo(c3, emptyRepoDraft(cwd, { remoteDetected: true, hasCommits: true, stagingMissing: false }));
+    assert.deepEqual(idle.prompts, []);
+  });
+
+  it("reports a failed step without throwing and keeps the detected draft", async () => {
+    const cwd = tmpDir("fd-setup-fail-");
+    const st = setupStubs({ failOn: "createRepo" });
+    const { ctx, w } = stubCtx({ cwd, ...st.overrides });
+    const draft = emptyRepoDraft(cwd);
+    const res = await setupRepo(ctx, draft);
+    assert.equal(res.changed, false);
+    assert.equal(res.draft, draft);
+    assert.equal(res.error, "HTTP 422: name already exists");
+    assert.match(w.text, /Repository setup failed: HTTP 422/);
+  });
+
+  it("setupAfterRead re-detects the draft after a change and passes through otherwise", async () => {
+    const cwd = tmpDir("fd-setup-after-");
+    const st = setupStubs();
+    const { ctx } = stubCtx({ cwd, ...st.overrides });
+    const draft = emptyRepoDraft(cwd);
+    const res = await setupAfterRead(ctx, { draft, description: { value: "", source: "" } });
+    assert.notEqual(res.draft, draft, "a changed repo must be re-detected");
+    assert.ok(res.draft.meta, "re-detected draft carries meta");
+    const { ctx: quiet } = stubCtx({ cwd, isTTY: false });
+    const same = await setupAfterRead(quiet, { draft, description: { value: "d", source: "package.json" } });
+    assert.equal(same.draft, draft);
+    assert.equal(same.description.value, "d");
   });
 });

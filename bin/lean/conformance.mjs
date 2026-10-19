@@ -98,7 +98,11 @@ export function applyAmendments(frozen, amendments, issueText = null) {
     const tag = JSON.stringify(a ?? null).slice(0, 100);
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
-      if (!c.deliverables.some((d) => d.path === a.path)) c.deliverables.push({ id: a.id ?? `A${c.deliverables.length + 1}`, path: a.path, change: a.why, amended: true });
+      const have = c.deliverables.find((d) => d.path === a.path);
+      // An existing deliverable keeps its id and gains the why, so an amendment naming a package on an already-listed
+      // package.json declares the edge (forge#4159); before, it was reported as applied but changed nothing.
+      if (have) { have.change = have.change ? `${have.change}; ${a.why}` : a.why; have.amended = true; }
+      else c.deliverables.push({ id: a.id ?? `A${c.deliverables.length + 1}`, path: a.path, change: a.why, amended: true });
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {
       if (c.requirements.some((r) => r.id === a.requirement.id)) { problems.push(`add-requirement reuses id ${a.requirement.id}`); continue; }
       if (issueText != null && !inIssue(a.requirement.quote, issueText)) { problems.push(`add-requirement ${a.requirement.id}: quote is not verbatim from the issue`); continue; }
@@ -173,6 +177,14 @@ export function normalizeEvidencePath(path, { changedFiles = [], repoFiles = [],
   }
   return p;
 }
+/**
+ * #4160: an evidence path the reviewer gave as a bare or partial name (`route.ts`, `pdf/route.ts`) resolves to the one
+ * changed file it names. Returns the repo path, or null when it is not a unique match.
+ */
+export function resolveEvidencePath(p, changedFiles = []) {
+  const n = normalizeEvidencePath(p, { changedFiles });
+  return n && changedFiles.includes(n) ? n : null;
+}
 /** The path:line in an evidence string, with the path normalized; null when there is none. */
 function evidenceOf(text, ctx) {
   const m = EVIDENCE_RE.exec(String(text ?? ""));
@@ -233,7 +245,9 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
   }
   const scope = arr("scope");
   if (!scope) miss("scope", "scope rows are missing");
-  for (const f of reviewedFiles(changedFiles, ignore)) if (!(scope ?? []).some((s) => s?.file === f)) miss(f, `changed file ${f} has no scope row`);
+  // #4160: a file the contract authorizes (deliverable, test, incidental) is already settled by the deterministic precheck;
+  // a row is required only for the files it could not authorize (decide() fills those as "none"). A given row is still judged.
+  for (const f of reviewedFiles(changedFiles, ignore).filter((x) => !authorizationOf(contract, x))) if (!(scope ?? []).some((s) => s?.file === f)) miss(f, `changed file ${f} has no scope row`);
   const pres = arr("preserve") ?? [];
   for (const c of contract.preserve ?? []) {
     const row = pres.find((x) => x?.id === c.id);
@@ -303,17 +317,21 @@ export function mergeReviewRows(first, repair) {
   return out;
 }
 
-/** The row skeleton the reviewer fills: one row per requirement, preserve id and changed file, one coverage row per quote. */
+/**
+ * #4160: the rows the engine requires, pre-filled with every id so the reviewer fills statuses instead of composing rows:
+ * one requirement row per R id (status empty), one preserve row per P id ("unverified" until checked), one scope row per
+ * changed file pre-filled with the engine's authorization, and one issue_coverage row per contract quote (the reviewer adds
+ * any the contract missed). Called as (contract, changedFiles, ignore) or ({contract, changedFiles, ignore}).
+ */
 export function reviewSkeleton(contract, changedFiles = [], ignore = []) {
+  if (contract && !Array.isArray(contract.requirements) && "contract" in contract) ({ contract, changedFiles = [], ignore = [] } = contract);
   const reqs = contract?.requirements ?? [];
   return {
-    issue_coverage: reqs.map((r) => ({ quote: r.quote, contract_ids: [r.id], status: "covered|narrowed|missing" })),
-    requirements: reqs.map((r) => ({ id: r.id, status: "", evidence: "repo/relative/path:line", validated_by: "V?", ...(TRACKED.includes(r.disposition) ? { deferral_ok: "true|false" } : {}), note: "" })),
+    issue_coverage: reqs.map((r) => ({ quote: r.quote, contract_ids: [r.id], status: "" })),
+    requirements: reqs.map((r) => ({ id: r.id, status: "", evidence: "", validated_by: "", ...(TRACKED.includes(r.disposition) ? { deferral_ok: null } : {}), note: "" })),
     scope: reviewedFiles(changedFiles, ignore).map((f) => ({ file: f, authorized_by: authorizationOf(contract ?? {}, f) ?? "none", note: "" })),
-    preserve: (contract?.preserve ?? []).map((p) => ({ id: p.id, status: "unverified", evidence: "path:line" })),
-    regressions: [],
-    verdict: "CONFORMS|NONCONFORMING",
-    summary: "one line",
+    preserve: (contract?.preserve ?? []).map((x) => ({ id: x.id, status: "unverified", evidence: "" })),
+    regressions: [], verdict: "", summary: "",
   };
 }
 

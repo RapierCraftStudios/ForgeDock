@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { makeLedger, safeSegment, LEDGER_TTL_MS } from "./ledger.mjs";
+import { makeLedger, safeSegment, LEDGER_TTL_MS, dockerLabels } from "./ledger.mjs";
 
 describe("lane resource ledger (#4179)", () => {
   it("register/release round trip carries owner, batch, lane, issue, created and expires", () => {
@@ -51,5 +51,15 @@ describe("lane resource ledger (#4179)", () => {
     const after = makeLedger({ root, batch: "b1", lane: "lean-9", issue: 9 }).read();
     assert.equal(after.owner, "core_9");
     assert.deepEqual(after.resources.map((r) => r.kind), ["tmp", "branch", "worktree", "pid"]);
+  });
+});
+
+describe("docker ownership labels (#4181)", () => {
+  it("owner, batch, lane, issue and expires, in order; values cannot inject", () => {
+    assert.deepEqual(dockerLabels({ batch: "b1", lane: "lean-7", issue: 7, expires: 123 }),
+      ["forgedock.owner=1", "forgedock.batch=b1", "forgedock.lane=lean-7", "forgedock.issue=7", "forgedock.expires=123"]);
+    const l = dockerLabels({ batch: "a b;rm -rf", lane: "", issue: null, expires: undefined });
+    assert.equal(l[1], "forgedock.batch=a-b-rm--rf"); assert.equal(l[2], "forgedock.lane=unknown"); assert.equal(l[3], "forgedock.issue=unknown");
+    for (const e of l) assert.match(e, /^forgedock\.[a-z]+=[A-Za-z0-9_.-]+$/);
   });
 });

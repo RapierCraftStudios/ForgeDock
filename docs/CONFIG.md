@@ -227,6 +227,12 @@ repos:
 
 GitHub Projects v2 integration. When configured, ForgeDock automatically adds issues to the project board and updates Status, Lane, Component, Priority, and Workflow fields as issues progress through the pipeline.
 
+`/forgedock-init` fills this section for you: it links an existing board or creates a new one, links it to the repo, adds any missing Lane/Priority/Workflow/Component fields (Status is built in), and writes the IDs below. Projects v2 needs the `read:project`/`project` token scope, which `gh auth login` does not grant by default. If the scope is missing, `/forgedock-init` prints the fix:
+
+```bash
+gh auth refresh -h github.com -s read:project,project
+```
+
 ```yaml
 project_board:
   owner: "acme-org"
@@ -977,7 +983,12 @@ npx forgedock labels setup
 
 # Or target a specific repo explicitly:
 npx forgedock labels setup --repo owner/repo
+
+# Also create per-repo domain labels (comma-separated):
+npx forgedock labels setup --domain frontend,backend,infra,design,legal-gated
 ```
+
+Domain labels are optional and per-repo. They are not part of `bin/labels.json`, so `forgedock doctor` never requires them. Each one gets the description `Domain: <name>. Managed by ForgeDock.`. `frontend`, `backend`, `infra`, `design` and `legal-gated` have fixed colors; any other name is grey (`#EDEDED`). A name that is already in the manifest is not created twice. `/forgedock-init` derives the list from your spec or takes it from `--domain-labels`.
 
 Running this command is idempotent — it creates labels that don't exist and updates the color/description of labels that do. Safe to re-run at any time.
 
