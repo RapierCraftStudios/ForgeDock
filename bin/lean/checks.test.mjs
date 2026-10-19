@@ -170,3 +170,14 @@ test("withCacheFlags: tsc -p and eslint get cache flags relative to cwd; tsc -b 
   fs.rmSync(path.join(r, "node_modules"), { recursive: true });
   assert.equal(withCacheFlags({ command: "eslint a.ts", cwd: "." }, r).command, "eslint a.ts");
 });
+
+test("discovery: declared workspace packages' scripts win over the root; undeclared package.json files are ignored", () => {
+  const r = repo({
+    "package.json": JSON.stringify({ name: "root", private: true, scripts: { test: "node --test" } }),
+    "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    "pnpm-workspace.yaml": "packages:\n  - 'apps/*'\n",
+    "apps/web/package.json": JSON.stringify({ name: "web", scripts: { typecheck: "tsc --noEmit" } }),
+    "scripts/fixtures/demo/package.json": JSON.stringify({ name: "demo", scripts: { test: "jest", lint: "eslint ." } }),
+  });
+  assert.deepEqual(discoverChecks(r).map((c) => `${c.kind}:${c.command}:${c.cwd}`), ["typecheck:pnpm run typecheck:apps/web", "test:pnpm run test:."]);
+});

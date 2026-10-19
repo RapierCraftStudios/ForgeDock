@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { git, changedFiles, sha256, homeForgeDir, shellSplit, shellQuote } from "../../scripts/ci-local/lib.mjs";
+import { git, changedFiles, sha256, homeForgeDir, shellSplit, shellQuote, globToRegex } from "../../scripts/ci-local/lib.mjs";
 import { makeScopeCtx, scopeCommand } from "../../scripts/ci-local/scoping.mjs";
 
 const px = path.posix;
@@ -22,6 +22,8 @@ export const LOCAL_CACHE = "node_modules/.cache/forge-verify";
 const SCRIPT_KINDS = { typecheck: "typecheck", "type-check": "typecheck", tsc: "typecheck", lint: "lint", test: "test" };
 /** Runs a resolved script body's binary from node_modules/.bin, as `<pm> run` would. */
 const EXEC = { pnpm: "pnpm exec", yarn: "yarn", npm: "npx" };
+/** Commands a script body runs from PATH, never from node_modules/.bin. */
+const SYSTEM_BINS = new Set(["pnpm", "yarn", "npx", "npm", "bun", "bunx", "node", "bash", "sh", "env", "make", "python", "python3", "uv", "poetry"]);
 const exists = (repo, f) => fs.existsSync(path.join(repo, f));
 const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; } };
 const readText = (file) => { try { return fs.readFileSync(file, "utf8"); } catch { return ""; } };
@@ -37,6 +39,20 @@ function turboTasks(repo) {
   return new Set(Object.keys((t && (t.tasks || t.pipeline)) || {}));
 }
 
+/** The root package plus its declared workspace packages (package.json `workspaces`, pnpm-workspace.yaml `packages`). */
+function workspaceDirs(repo, tracked) {
+  const root = readJson(path.join(repo, "package.json"));
+  if (!root) return [];
+  const ws = root.workspaces;
+  const globs = Array.isArray(ws) ? ws : Array.isArray(ws?.packages) ? ws.packages : [];
+  const pnpm = readText(path.join(repo, "pnpm-workspace.yaml"));
+  for (const m of pnpm.matchAll(/^\s*-\s*['"]?([^'"\s#]+)['"]?/gm)) globs.push(m[1]);
+  const res = globs.filter((g) => typeof g === "string" && !g.startsWith("!")).map((g) => globToRegex(g.replace(/^\.\//, "").replace(/\/$/, "")));
+  const dirs = tracked.filter((f) => px.basename(f) === "package.json" && f !== "package.json" && !f.split("/").includes("node_modules") && exists(repo, f))
+    .map((f) => px.dirname(f)).filter((d) => res.some((re) => re.test(d)));
+  return [".", ...dirs];
+}
+
 /**
  * The repo's typecheck/lint/test commands: [{kind, command, cwd}] (cwd repo-relative). JS: a turbo task when turbo.json
  * defines it, else the workspace packages' scripts when any defines it, else the root script. Python: pytest and ruff
@@ -45,7 +61,7 @@ function turboTasks(repo) {
 export function discoverChecks(repo) {
   const out = [];
   const tracked = git(repo, ["ls-files", "--cached", "--others", "--exclude-standard"]).out.split("\n").filter(Boolean);
-  const pkgDirs = tracked.filter((f) => px.basename(f) === "package.json" && !f.split("/").includes("node_modules") && exists(repo, f)).map((f) => px.dirname(f));
+  const pkgDirs = workspaceDirs(repo, tracked);
   if (pkgDirs.length) {
     const pm = packageManager(repo);
     const turbo = turboTasks(repo);
@@ -141,7 +157,7 @@ export function scopedChecks({ repo, base, checks = discoverChecks(repo) }) {
   return checks.map((c) => {
     const r = scopeCommand(c.command, c.cwd === "." ? "" : c.cwd, sctx);
     // A resolved script body (`pnpm run typecheck` -> `tsc -p apps/web`) runs its binary through the package manager.
-    const resolved = r.action !== "skip" && c.exec && r.command !== c.command && !/^(pnpm|yarn|npx|npm|bunx?) /.test(r.command);
+    const resolved = r.action !== "skip" && c.exec && r.command !== c.command && !SYSTEM_BINS.has(px.basename((shellSplit(r.command) || [""])[0]));
     const out = { kind: c.kind, cwd: c.cwd, command: r.action === "skip" ? "" : resolved ? `${c.exec} ${r.command}` : r.command, mode: r.mode, widen_reason: r.widen_reason || "", selector: r.selector || "" };
     if (r.reason) out.reason = r.reason;
     return r.action === "skip" ? out : withCacheFlags(out, repo);
