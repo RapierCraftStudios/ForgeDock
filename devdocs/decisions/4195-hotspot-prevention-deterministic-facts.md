@@ -30,3 +30,11 @@ lines with hundreds of commits per quarter. Nothing in core work-on looked at fi
   semantics differ from `rev-list --count` per path, so the counts would not be exact.
 - Reading `maintenance.hotspot` with `parseForgeYaml`: it flattens nested blocks and arrays (`exclude_globs`).
 - Report-only in shadow: a warning nobody reads (NORTHSTAR anti-goal); the growth is cheap to move at resume time.
+
+## Merge with the maintenance budget (#4197)
+
+#4197 added a flat `maintenance:` block (`enabled`, `file_lines`, ...) read by `parseForgeYaml` and by `yaml_maint` in
+`scripts/maintenance-scan.sh`. `parseForgeYaml` flattens one nested level on purpose (`engine.admission.*`,
+`lane_limits.*` rely on it), so `maintenance.hotspot.enabled: true` would have turned the budget on and overwritten
+its `file_lines`. The fix is local: `readMaintenance` drops the `hotspot:` sub-map before parsing, and `yaml_maint`
+reads direct children of `maintenance:` only. The shared parser is unchanged.

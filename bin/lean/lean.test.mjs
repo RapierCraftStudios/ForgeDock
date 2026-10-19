@@ -1541,6 +1541,11 @@ describe("orchestrate maintenance budget (#4197)", () => {
     assert.equal(readMaintenance(d).share, 0.2);
     writeFileSync(join(d, "forge.yaml"), "maintenance: { enabled: true, share: 0.2 }\n");
     assert.equal(readMaintenance(d), null);
+    // forge#4195: the maintenance.hotspot sub-map's enabled/file_lines are not the budget's own keys
+    writeFileSync(join(d, "forge.yaml"), "maintenance:\n  enabled: false\n  file_lines: 3000\n  hotspot:\n    enabled: true\n    file_lines: 1500\n    exclude_globs:\n      - \"a/*\"\n");
+    assert.equal(readMaintenance(d), null, "hotspot.enabled does not turn the budget on");
+    writeFileSync(join(d, "forge.yaml"), "maintenance:\n  enabled: true\n  hotspot:\n    file_lines: 1500\n  file_lines: 3000\n");
+    assert.equal(readMaintenance(d).fileLines, 3000);
   });
 
   it("orchestrateFromCli pulls open maintenance-labelled issues only when the budget is configured", async () => {

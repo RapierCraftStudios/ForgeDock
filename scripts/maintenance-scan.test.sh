@@ -42,6 +42,9 @@ check "integrity marker" "$(grep -cE '<!-- FORGE:BODY-INTEGRITY:[^>]+ -->' "$bf"
 # thresholds from forge.yaml (block form)
 printf 'maintenance:\n  enabled: true\n  file_lines: 100\n' > forge.yaml; git add . && git commit -qm cfg
 check "forge.yaml threshold" "$(scan | jq -c '[.[].key]')" '["big.py"]'
+# a sub-map's key (maintenance.hotspot.file_lines, forge#4195) is not the section's own threshold
+printf 'maintenance:\n  enabled: true\n  hotspot:\n    file_lines: 5000\n  file_lines: 100\n' > forge.yaml; git add . && git commit -qm cfg2
+check "sub-map key ignored" "$(scan | jq -c '[.[].key]')" '["big.py"]'
 
 # ---- 3. dedup: an open issue carrying the marker, or the exact title ----
 jq -n --arg b "x <!-- FORGE:MAINT:refactor:split:big.py --> y" '[{number: 1, title: "other", body: $b}]' > "$TMP/open1.json"

@@ -910,6 +910,21 @@ export function readOrchestration(cwd = process.cwd()) {
   return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3) };
 }
 
+/**
+ * forge.yaml text without the `maintenance.hotspot:` sub-map (forge#4195, read by scripts/hotspots.sh via yq). The
+ * parser flattens one nested level, so its `enabled`/`file_lines` would otherwise overwrite the budget's own keys.
+ */
+function withoutHotspotMap(raw) {
+  let inMaint = false, sub = -1;
+  return String(raw).split(/\r?\n/).filter((l) => {
+    if (/^[A-Za-z_][A-Za-z0-9_]*:/.test(l)) { inMaint = /^maintenance:\s*(?:#.*)?$/.test(l); sub = -1; return true; }
+    const indent = /^\s*/.exec(l)[0].length;
+    if (sub >= 0) { if (/^\s*(?:#.*)?$/.test(l) || indent > sub) return false; sub = -1; }
+    if (inMaint && /^\s+hotspot:\s*(?:#.*)?$/.test(l)) { sub = indent; return false; }
+    return true;
+  }).join("\n");
+}
+
 export const DEFAULT_MAINTENANCE_LABELS = ["maintenance", "refactor:split", "dead-code"];
 
 /**
@@ -919,7 +934,7 @@ export const DEFAULT_MAINTENANCE_LABELS = ["maintenance", "refactor:split", "dea
  */
 export function readMaintenance(cwd = process.cwd()) {
   let m = null;
-  try { m = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.maintenance ?? null; } catch { m = null; }
+  try { m = parseForgeYaml(withoutHotspotMap(readFileSync(join(cwd, "forge.yaml"), "utf8")))?.maintenance ?? null; } catch { m = null; }
   if (!m || typeof m !== "object" || String(m.enabled ?? "").trim() !== "true") return null;
   const num = (v, d, ok) => { const n = Number(v); return v !== undefined && v !== "" && ok(n) ? n : d; };
   const labels = String(m.labels ?? "").split(",").map((x) => x.trim()).filter(Boolean);
