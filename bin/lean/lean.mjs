@@ -28,11 +28,11 @@ export const CONFORMANCE_MODES = Object.freeze(["shadow", "enforce"]);
  */
 const SHADOW_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CONFORMANCE_REGRESSION];
 /**
- * Precheck failures that block in shadow mode too (#4160): the builder's own validate command failed, or it reported a
- * contracted requirement as not done. These are the precheck's form of "a requirement not done". Missing validate results
- * (often CI-only steps), scope creep and amendment problems stay recorded-only in shadow.
+ * Precheck failures that block in shadow mode too (#4160): every precheck or amendment failure coded
+ * conformance.unimplemented (a validate command that failed or has no recorded result, a deliver requirement reported as
+ * not done, an invalid amendment), the precheck's form of "a requirement not done". Scope creep stays recorded-only.
  */
-const SHADOW_PRE_BLOCKS = ["validate_failed", "requirement_unimplemented"];
+const SHADOW_PRE_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED];
 /** forge.yaml engine.review_incomplete (#4160): "needs-human" (default), or "degraded": in shadow, merge an incomplete review with a review-degraded label and a tracked follow-up. */
 export const REVIEW_INCOMPLETE_MODES = Object.freeze(["needs-human", "degraded"]);
 export const REVIEW_DEGRADED_LABEL = "review-degraded";
@@ -771,7 +771,7 @@ export async function runCore(o) {
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
       // shadow: the builder's own failed checks block before any reviewer tokens are spent (#4160)
-      const hard = shadow ? pre.filter((f) => SHADOW_PRE_BLOCKS.includes(f.kind)) : [];
+      const hard = shadow ? pre.filter((f) => SHADOW_PRE_BLOCKS.includes(f.code)) : [];
       if (hard.length) return { state: "nonconforming", by: "precheck", failures: hard, would: "nonconforming", wouldFail: pre, reviewState: null };
       const d = await reviewOnce();
       if (!shadow) return { ...d, by: "review" };

@@ -781,10 +781,21 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(nhBody(w), /R1 reported "partial"/);
   });
 
-  it("shadow still only records a validate step with no recorded result (CI-only steps) and does not block on it", async () => {
+  it("#4160 shadow blocks a validate step with no recorded result and an invalid amendment like a reviewer-found unimplemented requirement", async () => {
     const w = world({ validation: [] });
+    const r = await runShadow(w);
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
+    assert.equal(builders(w).length, 3, "one builder resume"); assert.equal(reviewers(w).length, 0, "no reviewer tokens on a precheck block");
+    assert.match(builders(w)[2][4], /validate V1 .*has no recorded result/);
+    const fixed = world({ validation: [], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
+    assert.equal((await runShadow(fixed)).terminalReason, "merged", "recorded by the resume, then merges");
+    const a = world({ amendments: [{ kind: "add-deliverable", path: "src/x.js" }] });
+    const ra = await runShadow(a);
+    assert.equal(ra.code, "conformance.unimplemented"); assert.match(nhBody(a), /amendment without why/);
+  });
+  it("#4160 scope creep found by the precheck stays recorded-only in shadow", async () => {
+    const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"], reviews: [conf({}, CONTRACT, ["src/foo.js", "src/billing.js", "test/foo.test.js"])] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
-    assert.match(shadowNote(w), /validate V1 .*has no recorded result/);
   });
 
   it("enforce blocks a failed validate exactly as before", async () => {
