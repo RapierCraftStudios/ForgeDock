@@ -3,9 +3,9 @@
 // forgedock gc reaper (#4180): injected docker/git/gh/ps/fs probes; real temp dirs, never real docker/git/gh/kill.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, utimesSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, utimesSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { tmpDir } from "./_tmp.mjs";
 import { parseGcArgs, parseDuration, planGc, applyGc, runGc, parseDockerTime, GC_SCOPES } from "../gc.mjs";
 
 const H = 3600e3, NOW = Date.parse("2026-10-20T12:00:00Z"), HOST = "testhost";
@@ -16,7 +16,7 @@ const DESTRUCTIVE = /^(rm|volume rm|worktree remove|branch -D|push origin --dele
  * checks; `branches.local/remote` = [[name, unixSeconds]]; `issues[n]` = state or "INVALID"; `openPrs` = head names.
  */
 function world(over = {}) {
-  const base = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "gc-test-"));
+  const base = tmpDir("gc-test-");
   const home = join(base, "home"), repo = join(base, "repo");
   const wtRoot = join(repo, ".claude", "worktrees");
   mkdirSync(wtRoot, { recursive: true }); mkdirSync(join(home, ".forge", "tmp"), { recursive: true });
