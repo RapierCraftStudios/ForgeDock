@@ -40,6 +40,7 @@ export const OUTCOME_CODES = Object.freeze({
   MERGE_TRANSIENT: "merge.transient",
   PUSH_TRANSIENT: "push.transient",
   CLI_IDLE: "cli.idle",
+  RUN_INTERRUPTED: "run.interrupted", // forge#4179: SIGTERM/SIGINT on a core run; teardown ran from the ledger, lane requeued
   PATH_SWITCH_CONFLICT: "path.switch_conflict",
   ENGINE_ERROR: "engine.error",
   INFRA_DISK_QUOTA: "infra.disk_quota",

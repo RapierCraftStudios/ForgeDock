@@ -109,7 +109,8 @@ export function launchLane({ batch, issue, args = [], bin = process.execPath, sc
   rmSync(rf, { force: true });
   const out = openSync(batch.logFile(issue), "a");
   try {
-    const child = spawnFn(bin, [script, "run-issue", String(issue), ...args, "--result-file", rf], { cwd, env, detached: true, stdio: ["ignore", out, out] });
+    // FORGEDOCK_BATCH_ID names the lane's resource ledger dir (~/.forge/ledger/<batch>/, #4179).
+    const child = spawnFn(bin, [script, "run-issue", String(issue), ...args, "--result-file", rf], { cwd, env: { ...env, FORGEDOCK_BATCH_ID: batch.id }, detached: true, stdio: ["ignore", out, out] });
     child.on?.("error", () => { /* surfaces as a dead pid without a result */ });
     child.unref?.();
     return { pid: child.pid };
