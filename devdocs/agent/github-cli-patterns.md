@@ -76,7 +76,7 @@ gh api repos/{OWNER}/{REPO}/issues/{N}/comments --paginate --jq '.[] | {id:.id,b
 Skill(skill="issue", args="--title \"fix: ...\" --body-file /path/to/body.md --label bug --label P2 [--milestone \"...\"] [--dry-run]")
 ```
 
-`/issue` is the enforced path, not just a convention — it runs mandatory-section validation and dedup (`scripts/issue-dedup.sh`) on every invocation, interactive or programmatic. A raw `gh issue create` call bypasses both checks. See `devdocs/agent/using-forgedock.md` for a worked example of the programmatic form.
+`/issue` is the enforced path, not just a convention — both forms create through `scripts/issue-create.sh`, which runs dedup (`scripts/issue-dedup.sh`), mandatory-section validation, the `gh api` create and its token read-back on every invocation, interactive or programmatic. A raw `gh issue create` call bypasses both checks. See `devdocs/agent/using-forgedock.md` for a worked example of the programmatic form.
 
 **Exception**: `gh issue create` (and `gh issue comment`) remain the correct tool for non-issue GitHub artifacts that are not going through the pipeline's issue lifecycle — e.g. writing to the orchestrate claims board (issue #2039, see #2072) is a `gh issue comment` call on an existing tracking issue, not issue creation, and is unaffected by this rule.
 
