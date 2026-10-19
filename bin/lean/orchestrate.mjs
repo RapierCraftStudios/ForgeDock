@@ -78,8 +78,15 @@ const cancellableSleep = (ms, signal) => new Promise((res) => {
 const memoryLimits = (now) => {
   const holds = new Map();
   return {
-    holdUntil: (id) => { const u = holds.get(id); return u > now() ? u : null; },
-    set: (id, untilMs) => { holds.set(id, Math.max(holds.get(id) ?? 0, untilMs)); return holds.get(id); },
+    holdUntil: (id) => { const u = holds.get(id)?.until; return u > now() ? u : null; },
+    set: (id, untilMs, source = null) => {
+      const prev = holds.get(id);
+      if (!(prev?.until > untilMs)) holds.set(id, { until: untilMs, source, setAt: now() });
+      return holds.get(id).until;
+    },
+    clear: (id) => { const live = !!(holds.get(id)?.until > now()); holds.delete(id); return live; },
+    clearAll: () => { const n = [...holds.values()].filter((h) => h.until > now()).length; holds.clear(); return n; },
+    list: () => [...holds].filter(([, h]) => h.until > now()).map(([id, h]) => ({ id, ...h })),
   };
 };
 
