@@ -417,8 +417,8 @@ transport (`launch/status/logs/result/usage/destroy`, addressed by ForgeDock's o
 env (secret names resolved via `credentials.mjs` `resolveCredential`: env, then
 keychain service `forgedock`) and the `run-issue` argv. Logs stream into the batch
 lane log redacted; billable minutes go on `handle.minutes` and `providerLanes`
-copies them to the lane result as `sandbox: {provider, id, minutes}` (#4255 reports
-them). `remote` is never a default provider; `remoteTransportFor` refuses a GitHub
+copies them to the lane result as `sandbox: {provider, id, minutes, cost_usd}` (#4255
+reports them). `remote` is never a default provider; `remoteTransportFor` refuses a GitHub
 Actions endpoint without `allow_actions: true`. `providerLanes` maps a throwing
 `start` to `needs-human` `sandbox.start_failed` (or `deferred` `sandbox.capacity`
 for a retryable error) instead of engine-error, and tears down after the result is
@@ -427,3 +427,20 @@ sandboxes through the checkout's forge.yaml transport (probe `sandboxTransport`
 in tests). Contract suite: `sandbox-provider.contract.test.mjs` (container over a
 fake docker, remote over a fake transport). Rationale:
 `devdocs/decisions/4254-remote-sandbox-provider.md`.
+
+## Entry 2026-10-20 — Sandbox cost and the execution budget (#4255)
+
+Providers may implement `usage(handle, {startedAt, endedAt}) -> {minutes, cost_usd}`.
+`providerLanes` stamps `startedAt` on the handle (persisted, so adopt measures from
+the real start) and attaches `sandbox: {provider, id, minutes, cost_usd}` to every
+result. Without a usage report it uses wall clock × `execution.cost_per_minute`.
+`orchestrate` sums it per issue (state key `sandbox`, over attempts) onto the row and
+calls `remote.onUsage`. `runBatch` records each attempt in the host-day store
+(`openExecutionBudget`, `execution-budget.json` in the sched dir, keyed
+`batch#sandbox#startedAt` so a repeat is a no-op) and emits FORGE:TELEMETRY
+`sandbox_usage`. Before admitting a remote lane, `orchestrate` asks `remote.admit`
+with settled + running usage. On refusal, `on_budget: stop` holds the rest
+(`held`, "execution budget: ..."); `local` sends them through the host path
+(`ctx.remote` false, composite lanes in `runBatch`). `formatTable` adds
+`sbx-min`/`sbx-$` only when a row has `sandbox`; `formatSandboxSummary` prints the
+totals and the budget. Rationale: `devdocs/decisions/4255-sandbox-cost-budget.md`.

@@ -33,6 +33,13 @@
  * Remote lanes (#4253), off unless `remote: {max, isRemote(issue)}` is passed (execution.mjs): a lane `isRemote` places
  * in a sandbox takes no host registry slot; it starts only while fewer than `max` remote lanes of this batch run (the
  * batch K still applies). Its run record keeps `remote: true` and the provider handle, so a resume re-counts and adopts it.
+ * `runOne` gets `ctx.remote` (true for a lane admitted remote).
+ *
+ * Execution budget (#4255): a lane result's `sandbox: {minutes, cost_usd}` is summed per issue (persisted as `sandbox`,
+ * over attempts) onto the row and handed to `remote.onUsage(issue, sandbox, rec)`. Before a remote lane is admitted,
+ * `remote.admit(usage)` gets the batch's settled usage plus the running remote lanes' elapsed minutes
+ * (× `remote.costPerMinute`); when it refuses, running lanes finish and the queue either runs the rest locally
+ * (`remote.onBudget: "local"`, host path) or stops: the rest end `held` ("execution budget: ...") for a resume.
  */
 import { parseDependsOn } from "../engine/phases.mjs";
 
@@ -156,14 +163,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
   const remoteMax = remote && Number.isInteger(remote.max) && remote.max >= 0 ? remote.max : 0;
   const remoteRun = new Set(); // remote lanes running now (#4253): admitted against remoteMax, never the host cap
-  const isRemote = (n) => { if (!remote) return false; try { return !!remote.isRemote?.(n); } catch { return false; } };
+  let budgetLocal = false; // the execution budget refused a remote lane under on_budget local: the rest run on the host
+  const isRemote = (n) => { if (!remote || budgetLocal) return false; try { return !!remote.isRemote?.(n); } catch { return false; } };
+  const sandboxUse = toMap(saved?.sandbox); // issue -> {minutes, cost_usd, attempts} (#4255)
+  const remoteCpm = Number(remote?.costPerMinute) > 0 ? Number(remote.costPerMinute) : 0;
+  let budgetStop = null, budgetHit = null; // this pass's refusal under on_budget stop; the last refusal reason
 
   const save = () => {
     if (!store) return;
     store.save({ v: 1, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
-      ...(reg ? { priorities: toObj(priorities) } : {}) });
+      ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
   const classifyOne = async (n) => {
@@ -224,10 +235,34 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     reg.withdraw(gone.map(keyOf));
     for (const n of gone) offered.delete(n);
   };
+  // The batch's sandbox usage: settled (persisted) plus the running remote lanes' elapsed minutes so far.
+  const remoteUsage = () => {
+    let minutes = 0, cost_usd = 0, rm = 0;
+    for (const u of sandboxUse.values()) { minutes += Number(u?.minutes) || 0; cost_usd += Number(u?.cost_usd) || 0; }
+    const t = now();
+    for (const n of remoteRun) { const st = runRecs.get(n)?.startedAt; if (Number.isFinite(st)) rm += Math.max(0, t - st) / 60000; }
+    return { minutes: minutes + rm, cost_usd: cost_usd + rm * remoteCpm, running: { minutes: rm, cost_usd: rm * remoteCpm } };
+  };
+  // A thrown budget check refuses: the cap is hard.
+  const admitRemote = () => {
+    if (typeof remote?.admit !== "function") return { ok: true };
+    try { const a = remote.admit(remoteUsage()); return a?.ok === false ? { ok: false, reason: a.reason ?? "cap reached" } : { ok: true }; }
+    catch (e) { return { ok: false, reason: `budget check failed: ${e?.message ?? e}` }; }
+  };
+  const noteBudget = (reason) => {
+    if (budgetHit === null) update({ issue: null, outcome: "budget", detail: `execution budget reached: ${reason}; ${remote?.onBudget === "local" ? "remaining lanes run locally" : "no further remote lanes admitted"}` });
+    budgetHit = reason;
+  };
   // A host slot for `n` (a lane-refused issue runs nothing and needs none); refused: `n` stays queued in the registry.
   const grant = (n, wanted) => {
     if (lanes.get(n)?.ok === false) return true;
-    if (isRemote(n)) { if (remoteRun.size >= remoteMax) return false; remoteRun.add(n); return true; }
+    if (isRemote(n)) {
+      const adm = admitRemote();
+      if (adm.ok) { if (remoteRun.size >= remoteMax) return false; remoteRun.add(n); return true; }
+      noteBudget(adm.reason);
+      if (remote.onBudget !== "local") { budgetStop = adm.reason; return false; }
+      budgetLocal = true; // falls through to the host path
+    }
     if (!reg) return true;
     const r = reg.tryAcquire(keyOf(n), entryOf(n), sched.cap);
     if (!r?.ok) { offered.add(n); wanted.add(n); return false; }
@@ -254,6 +289,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(r?.waits && typeof r.waits === "object" ? { waits: r.waits } : {}), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}) };
     const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
     const subs = (Array.isArray(r?.subissues) ? r.subissues : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
+    if (r?.sandbox && typeof r.sandbox === "object") {
+      const prev = sandboxUse.get(n) ?? { minutes: 0, cost_usd: 0, attempts: 0 };
+      const m = Number(r.sandbox.minutes) >= 0 ? Number(r.sandbox.minutes) : 0, c = Number(r.sandbox.cost_usd) >= 0 ? Number(r.sandbox.cost_usd) : 0;
+      sandboxUse.set(n, { minutes: Math.round((prev.minutes + m) * 10) / 10, cost_usd: Math.round((prev.cost_usd + c) * 1e6) / 1e6, attempts: prev.attempts + 1 });
+      try { remote?.onUsage?.(n, r.sandbox, rec); } catch { /* the batch total still counts it */ }
+    }
+    if (sandboxUse.has(n)) row.sandbox = { ...sandboxUse.get(n) };
     const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); remoteRun.delete(n); };
     if (row.outcome === "dependency-open" && depList.length && (requeues.get(n) ?? 0) < MAX_REQUEUES) {
       // A scheduling fact, not a failure: add the edge, pull the dependency in, and run this issue again after it.
@@ -318,7 +360,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
-          r = await runOne(n, lane, { onStart: (info) => {
+          r = await runOne(n, lane, { remote: !!rec.remote, onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
             if (reg && slotted.has(n) && info?.pid) reg.setLanePid(keyOf(n), info.pid);
           } });
@@ -365,6 +407,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     let started = 0;
     const isReady = (n) => (notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome));
     budgetHeld = false;
+    budgetStop = null;
     const wanted = new Set(); // issues that stay offered in the host registry after this pass
     if (!tripped && !holdUntil && budget) {
       while (running.size < K()) {
@@ -396,6 +439,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (reg) withdrawExcept(wanted);
     if (tripped && !running.size) break; // breaker: let running lanes finish, keep the rest pending for a resume
+    if (budgetStop && !running.size) break; // execution budget (stop): the same, the rest end held
     // Wake for a delayed issue, the end of a usage-limit hold, or (with a live K) a poll.
     const waits = pending.map((n) => notBefore.get(n) ?? 0).filter((x) => x > t);
     if (holdUntil) waits.push(holdUntil);
@@ -417,12 +461,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   }
   if (reg) withdrawExcept(new Set());
   save();
-  return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: tripped?.detail ?? (budgetHeld ? "maintenance share" : "not run") });
+  return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: tripped?.detail ?? (budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run") });
 }
 
 export function formatTable(rows) {
-  const head = ["issue", "outcome", "PR", "cost", "min"];
-  const body = rows.map((r) => [`#${r.issue}`, r.outcome + (["skipped", "held"].includes(r.outcome) && r.detail ? ` (${r.detail})` : r.prefilter?.closed ? " (pre-filter)" : ""), r.pr ? `#${r.pr}` : "-", `$${(r.cost_usd ?? 0).toFixed(2)}`, String(r.minutes ?? 0)]);
+  // #4255: sandbox minutes and cost next to the token cost, only when some lane ran in a sandbox.
+  const sbx = rows.some((r) => r?.sandbox);
+  const head = ["issue", "outcome", "PR", "cost", ...(sbx ? ["sbx-min", "sbx-$"] : []), "min"];
+  const body = rows.map((r) => [`#${r.issue}`, r.outcome + (["skipped", "held"].includes(r.outcome) && r.detail ? ` (${r.detail})` : r.prefilter?.closed ? " (pre-filter)" : ""), r.pr ? `#${r.pr}` : "-", `$${(r.cost_usd ?? 0).toFixed(2)}`,
+    ...(sbx ? (r.sandbox ? [(Number(r.sandbox.minutes) || 0).toFixed(1), `$${(Number(r.sandbox.cost_usd) || 0).toFixed(2)}`] : ["-", "-"]) : []), String(r.minutes ?? 0)]);
   const w = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)));
   const line = (c) => c.map((x, i) => x.padEnd(w[i])).join("  ").trimEnd();
   return [line(head), line(w.map((n) => "-".repeat(n))), ...body.map(line)].join("\n");
@@ -440,4 +487,28 @@ export function formatWaitSummary(rows, heavyStats = null) {
   if (!hasRows && !seen && !(hasStats && heavyStats.queued > 0)) return null; // nothing waited, nothing queued: no line
   const waits = hasRows ? Object.entries(by).sort(([a], [b]) => (a < b ? -1 : 1)).map(([p, ms]) => `${p} ${(ms / 60000).toFixed(1)}m`).join(", ") : "none";
   return `waits by phase: ${waits}; heavy queue: now ${hasStats && Number.isInteger(heavyStats.queued) ? heavyStats.queued : "?"}, max ${seen}`;
+}
+
+/**
+ * #4255 batch-report line: sandbox lanes, minutes and cost next to those lanes' token cost, plus the execution budget
+ * (`budget` from parseExecution, `day` from openExecutionBudget `dayTotals`) when a cap is set. Null without sandbox usage.
+ */
+export function formatSandboxSummary(rows, { budget = null, day = null } = {}) {
+  const sb = (rows ?? []).filter((r) => r?.sandbox);
+  if (!sb.length) return null;
+  const sum = (f) => sb.reduce((a, r) => a + (Number(f(r)) || 0), 0);
+  const parts = [`sandbox: ${sb.length} lane${sb.length === 1 ? "" : "s"}, ${sum((r) => r.sandbox.minutes).toFixed(1)} min, $${sum((r) => r.sandbox.cost_usd).toFixed(2)} (token cost $${sum((r) => r.cost_usd).toFixed(2)})`];
+  const caps = [];
+  if (budget?.batchMinutes != null) caps.push(`batch ${budget.batchMinutes} min`);
+  if (budget?.batchUsd != null) caps.push(`batch $${budget.batchUsd}`);
+  if (budget?.dayMinutes != null) caps.push(`day ${budget.dayMinutes} min`);
+  if (budget?.dayUsd != null) caps.push(`day $${budget.dayUsd}`);
+  if (caps.length) {
+    let b = `budget: ${caps.join(", ")}`;
+    if (day?.ok) b += `; host today ${Number(day.minutes).toFixed(1)} min, $${Number(day.cost_usd).toFixed(2)}`;
+    const held = (rows ?? []).filter((r) => r?.outcome === "held" && String(r.detail ?? "").startsWith("execution budget")).length;
+    if (held) b += `; cap reached, ${held} held`;
+    parts.push(b);
+  }
+  return parts.join("; ");
 }

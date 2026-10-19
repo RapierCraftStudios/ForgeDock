@@ -22,14 +22,21 @@
  * credential `execution.token_env` from the env or the keychain). It is never a default, and a GitHub Actions endpoint
  * needs `allow_actions: true`. A sandbox that fails to start is a typed outcome, not an engine-error: `needs-human`
  * `sandbox.start_failed`, or `deferred` `sandbox.capacity` when the provider marks the error retryable. A provider that
- * sets `handle.minutes` (billable sandbox minutes) has them copied onto the lane result as `sandbox`.
+ * sets `handle.minutes` (billable sandbox minutes) has them used as the lane's sandbox minutes (#4255 below).
+ *
+ * Sandbox cost and budget (#4255): a provider may implement `usage(handle, {startedAt, endedAt}) -> {minutes, cost_usd}`;
+ * otherwise a lane's usage is its wall-clock minutes (from the handle's persisted `startedAt`) times
+ * `execution.cost_per_minute`. `providerLanes` attaches it to every result as `sandbox: {provider, id, minutes, cost_usd}`.
+ * `openExecutionBudget` enforces the hard caps (`budget_minutes`/`budget_usd` per batch, `day_budget_*` per host UTC day,
+ * from the host-day store `execution-budget.json` in the sched dir): pure arithmetic, no LLM.
  */
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { isLaneAlive, launchLane } from "./batch.mjs";
+import { isLaneAlive, launchLane, writeAtomic } from "./batch.mjs";
+import { schedDir } from "./sched.mjs";
 import { dockerLabels, safeSegment } from "./ledger.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { resolveCredential } from "./credentials.mjs";
@@ -45,9 +52,10 @@ const errText = (e) => String(e?.stderr || e?.message || e).split("\n")[0].slice
 
 /**
  * forge.yaml `execution:` section (block style; parseForgeYaml gives strings) → {mode, maxRemote, provider, image,
- * secrets}, plus the remote provider settings `endpoint`, `tokenEnv`, `cacheStore`, `allowActions` (#4254) when set
+ * secrets, budget}, plus the remote provider settings `endpoint`, `tokenEnv`, `cacheStore`, `allowActions` (#4254) when set
  * (absent means null/false). Invalid values fall back to the defaults; mode defaults to local (today's behaviour). The
- * provider default is never `remote`.
+ * provider default is never `remote`. `budget` is the flat-key `execution.budget` (#4255): a missing, non-numeric or
+ * negative cap is null (no cap).
  */
 export function parseExecution(sec = {}) {
   const s = sec && typeof sec === "object" ? sec : {};
@@ -64,7 +72,77 @@ export function parseExecution(sec = {}) {
   const tokenEnv = ENV_RE.test(str(s.token_env)) ? str(s.token_env) : null;
   const cacheStore = str(s.cache_store) || null;
   const allowActions = str(s.allow_actions).toLowerCase() === "true";
-  return { mode, maxRemote, provider, image, secrets, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}) };
+  const cap = (v) => { const t = str(v), x = Number(t); return t !== "" && Number.isFinite(x) && x >= 0 ? x : null; };
+  const cpm = cap(s.cost_per_minute);
+  const budget = { batchMinutes: cap(s.budget_minutes), batchUsd: cap(s.budget_usd), dayMinutes: cap(s.day_budget_minutes), dayUsd: cap(s.day_budget_usd),
+    onBudget: str(s.on_budget) === "local" ? "local" : "stop", costPerMinute: cpm ?? 0 };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}) };
+}
+
+const round1 = (x) => Math.round(x * 10) / 10;
+const round6 = (x) => Math.round(x * 1e6) / 1e6;
+const nonNeg = (x) => (Number.isFinite(x) && x >= 0 ? x : null);
+
+/** The host-day budget store: `FORGEDOCK_EXECUTION_BUDGET_FILE`, else `execution-budget.json` in the sched dir. */
+export function executionBudgetFile(env = process.env) {
+  return env.FORGEDOCK_EXECUTION_BUDGET_FILE || join(schedDir(env), "execution-budget.json");
+}
+
+const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+const KEEP_DAYS = 7;
+
+/**
+ * The execution budget (#4255). `record(key, {minutes, cost_usd})` adds one lane attempt to today's host total; the key
+ * (`<batch>#<sandbox id>#<startedAt>`) makes a repeated record a no-op. `admit({minutes, cost_usd, running})` gets the
+ * batch's settled + running usage (`running` the running part alone) and refuses once a batch cap, or a day cap with
+ * today's host total plus this batch's running usage, is reached. A corrupt or unreadable day file refuses while a day
+ * cap is set (a hard cap fails closed) and is ignored otherwise; it is never overwritten.
+ */
+export function openExecutionBudget({ budget = {}, file = executionBudgetFile(), now = () => Date.now() } = {}) {
+  const b = budget ?? {};
+  const dayCap = b.dayMinutes != null || b.dayUsd != null;
+  const read = () => {
+    let raw;
+    try { raw = readFileSync(file, "utf8"); } catch (e) { return e?.code === "ENOENT" ? { ok: true, days: {} } : { ok: false }; }
+    try {
+      const o = JSON.parse(raw);
+      if (!o || typeof o !== "object" || (o.days !== undefined && (typeof o.days !== "object" || o.days === null || Array.isArray(o.days)))) return { ok: false };
+      return { ok: true, days: o.days ?? {} };
+    } catch { return { ok: false }; }
+  };
+  const totals = (day) => {
+    let minutes = 0, cost_usd = 0;
+    for (const u of Object.values(day ?? {})) { minutes += nonNeg(u?.minutes) ?? 0; cost_usd += nonNeg(u?.cost_usd) ?? 0; }
+    return { minutes: round1(minutes), cost_usd: round6(cost_usd) };
+  };
+  const dayTotals = () => { const r = read(); return r.ok ? { ok: true, day: utcDay(now()), ...totals(r.days[utcDay(now())]) } : { ok: false, day: utcDay(now()), minutes: null, cost_usd: null }; };
+  return {
+    file, budget: b,
+    record: (key, u) => {
+      const r = read();
+      if (!r.ok) return false;
+      const d = utcDay(now()), today = { ...(r.days[d] ?? {}) };
+      if (today[key]) return false;
+      today[key] = { minutes: nonNeg(u?.minutes) ?? 0, cost_usd: nonNeg(u?.cost_usd) ?? 0, at: now() };
+      const days = { [d]: today };
+      for (const [k, v] of Object.entries(r.days)) if (k !== d && Date.parse(k) > now() - KEEP_DAYS * 86400000) days[k] = v;
+      writeAtomic(file, JSON.stringify({ v: 1, days }, null, 2) + "\n");
+      return true;
+    },
+    dayTotals,
+    admit: (u = {}) => {
+      const m = nonNeg(u.minutes) ?? 0, c = nonNeg(u.cost_usd) ?? 0;
+      if (b.batchMinutes != null && m >= b.batchMinutes) return { ok: false, reason: `batch sandbox minutes ${round1(m)} >= budget_minutes ${b.batchMinutes}` };
+      if (b.batchUsd != null && c >= b.batchUsd) return { ok: false, reason: `batch sandbox cost $${c.toFixed(2)} >= budget_usd ${b.batchUsd}` };
+      if (!dayCap) return { ok: true };
+      const t = dayTotals();
+      if (!t.ok) return { ok: false, reason: `host-day budget file ${file} is unreadable; fix or remove it` };
+      const dm = t.minutes + (nonNeg(u.running?.minutes) ?? 0), dc = t.cost_usd + (nonNeg(u.running?.cost_usd) ?? 0);
+      if (b.dayMinutes != null && dm >= b.dayMinutes) return { ok: false, reason: `host sandbox minutes today ${round1(dm)} >= day_budget_minutes ${b.dayMinutes}` };
+      if (b.dayUsd != null && dc >= b.dayUsd) return { ok: false, reason: `host sandbox cost today $${dc.toFixed(2)} >= day_budget_usd ${b.dayUsd}` };
+      return { ok: true };
+    },
+  };
 }
 
 /** Where a lane runs: remote only for `mode: remote` with `max_remote >= 1`; hybrid stays local until #4256 places it. */
@@ -188,7 +266,20 @@ export function providerByName(name, opts) {
  * Lane seams for `orchestrate()` over a provider, the same contract as batch.mjs `detachedLanes`. `ledgerFor(issue)`
  * returns that sandbox's ledger (ledger.mjs `makeLedger`).
  */
-export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env, secrets = [], pollMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env, secrets = [], pollMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  costPerMinute = 0, now = () => Date.now() }) {
+  const cpm = nonNeg(Number(costPerMinute)) ?? 0;
+  // #4255: the sandbox's usage: the provider's `usage()`, else the billable minutes it put on the handle (#4254), else wall
+  // clock since the handle's startedAt; cost is the provider's, else minutes x cost_per_minute.
+  const withUsage = async (r, h) => {
+    if (!r || typeof r !== "object") return r;
+    const endedAt = now(), startedAt = Number.isFinite(h?.startedAt) ? h.startedAt : endedAt;
+    let u = null;
+    try { u = typeof provider.usage === "function" ? await provider.usage(h, { startedAt, endedAt }) : null; } catch { u = null; }
+    const minutes = nonNeg(u?.minutes) ?? nonNeg(h?.minutes) ?? round1(Math.max(0, endedAt - startedAt) / 60000);
+    const cost = nonNeg(u?.cost_usd) ?? minutes * cpm;
+    return { ...r, sandbox: { provider: provider.name, id: h.id, minutes: round1(minutes), cost_usd: round6(cost) } };
+  };
   const tear = async (led, h) => {
     let ok = false;
     try { ok = (await provider.teardown(h)) === true; } catch { ok = false; }
@@ -207,8 +298,6 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       await sleep(pollMs);
     }
   };
-  // Billable minutes the provider put on the handle (#4254) travel with the lane result.
-  const withMinutes = (r, h) => (r && typeof r === "object" && Number.isFinite(h?.minutes) ? { ...r, sandbox: { provider: h.provider, id: h.id, minutes: h.minutes } } : r);
   // A start failure repeats on a relaunch: typed, never engine-error (#4254). Retryable (capacity) defers with backoff.
   const startFailed = (id, e) => (e?.retryable === true
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
@@ -216,7 +305,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
   return {
     runOne: async (n, lane, ctx = {}) => {
       const led = ledgerFor(n);
-      const base = { provider: provider.name, id: provider.idFor(n), issue: n };
+      const base = { provider: provider.name, id: provider.idFor(n), issue: n, startedAt: now() };
       // A sandbox an earlier attempt left behind (same id) goes first, or the new one could not start.
       if ((led?.entries("sandbox") ?? []).some((e) => e.value === base.id) && !(await tear(led, base))) {
         return { terminalReason: "engine-error", detail: `sandbox ${base.id} from an earlier attempt could not be torn down` };
@@ -225,6 +314,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       let h = base, r, started = false;
       try {
         h = { ...base, ...(await provider.start({ issue: n, args: laneArgs(n, lane), env, secrets })) };
+        if (!Number.isFinite(h.startedAt)) h.startedAt = base.startedAt;
         started = true;
         ctx.onStart?.({ ...(Number.isInteger(h.pid) ? { pid: h.pid } : {}), handle: h, remote: true });
         r = await wait(h);
@@ -232,13 +322,15 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         r = started ? { terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` } : startFailed(base.id, e);
       }
       await tear(led, h); // every path, after the result is in (tear never throws)
-      return withMinutes(r, h);
+      return started ? withUsage(r, h) : r; // a sandbox that never started used nothing
     },
     adopt: async (n, rec) => {
-      const h = rec?.handle;
-      if (!h?.id || h.provider !== provider.name) return null;
+      const saved = rec?.handle;
+      if (!saved?.id || saved.provider !== provider.name) return null;
+      // Usage runs from the sandbox's real start (persisted on the handle), not from this adopt.
+      const h = { ...saved, ...(Number.isFinite(saved.startedAt) ? {} : Number.isFinite(rec?.startedAt) ? { startedAt: rec.startedAt } : {}) };
       const led = ledgerFor(n);
-      led?.register("sandbox", h.id, { provider: provider.name, handle: { provider: h.provider, id: h.id, issue: h.issue } }); // now owned by this dispatcher
+      led?.register("sandbox", h.id, { provider: provider.name, handle: { provider: h.provider, id: h.id, issue: h.issue, ...(Number.isFinite(h.startedAt) ? { startedAt: h.startedAt } : {}) } }); // now owned by this dispatcher
       let r;
       try {
         r = !(await provider.fetchResult(h)) && (await provider.status(h)) !== "running" ? null : await wait(h); // null: relaunched
@@ -246,7 +338,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         r = { terminalReason: "engine-error", detail: `sandbox ${h.id}: ${errText(e)}` };
       }
       await tear(led, h);
-      return withMinutes(r, h);
+      return withUsage(r, h);
     },
   };
 }

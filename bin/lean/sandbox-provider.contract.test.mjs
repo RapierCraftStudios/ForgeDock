@@ -153,7 +153,7 @@ describe("remote adapter (#4254)", () => {
       laneArgs: () => [], ledgerFor: () => null, env: { GH_TOKEN: SECRET }, secrets: ["GH_TOKEN"], pollMs: 2 });
     const r = await lanes.runOne(3, null);
     assert.equal(r.terminalReason, "merged");
-    assert.deepEqual(r.sandbox, { provider: "remote", id: "fdrsbx-bt-3", minutes: 3.5 });
+    assert.deepEqual(r.sandbox, { provider: "remote", id: "fdrsbx-bt-3", minutes: 3.5, cost_usd: 0 }); // #4255: cost from cost_per_minute (0 here)
     const log = readFileSync(batch.logFile(3), "utf8");
     assert.match(log, /lane done/);
     assert.equal(log.includes(SECRET) || log.includes(TOKEN), false);
@@ -207,7 +207,7 @@ describe("remote adapter (#4254)", () => {
 describe("remote config and the Actions constraint (#4254)", () => {
   it("parseExecution reads the remote settings; remote is never the default provider", () => {
     assert.deepEqual(parseExecution({ mode: "remote", max_remote: "2", provider: "remote", endpoint: "https://pool.example/v1", token_env: "FD_POOL_TOKEN", cache_store: "s3://c", allow_actions: "true" }),
-      { mode: "remote", maxRemote: 2, provider: "remote", image: null, secrets: [], endpoint: "https://pool.example/v1", tokenEnv: "FD_POOL_TOKEN", cacheStore: "s3://c", allowActions: true });
+      { mode: "remote", maxRemote: 2, provider: "remote", image: null, secrets: [], budget: { batchMinutes: null, batchUsd: null, dayMinutes: null, dayUsd: null, onBudget: "stop", costPerMinute: 0 }, endpoint: "https://pool.example/v1", tokenEnv: "FD_POOL_TOKEN", cacheStore: "s3://c", allowActions: true });
     for (const sec of [{}, { mode: "remote", max_remote: "3" }, { mode: "hybrid" }, { mode: "remote", endpoint: "https://api.github.com/repos/o/r/actions/workflows/x/dispatches" }]) {
       assert.notEqual(parseExecution(sec).provider, "remote");
     }

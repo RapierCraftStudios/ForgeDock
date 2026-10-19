@@ -596,6 +596,13 @@ execution:
   # token_env: FORGEDOCK_SANDBOX_TOKEN        # credential NAME: read from the env, else the OS keychain
   # cache_store: s3://lane-cache               # shared cache store the sandbox mounts
   # allow_actions: false                       # true only to accept a GitHub Actions endpoint
+  # execution budget (forge#4255): flat keys, forge.yaml is parsed one level deep
+  budget_minutes: 600      # hard cap on sandbox-minutes per batch
+  budget_usd: 25           # hard cap on estimated sandbox USD per batch
+  day_budget_minutes: 2000 # hard cap on sandbox-minutes per host UTC day (all batches, schedd or not)
+  day_budget_usd: 80       # hard cap on estimated sandbox USD per host UTC day
+  on_budget: stop          # stop (default) | local: what the queue does once a cap is reached
+  cost_per_minute: 0.04    # USD per sandbox-minute when the provider reports no cost (default 0)
 ```
 
 | Key | Type | Required | Description |
@@ -609,6 +616,10 @@ execution:
 | `token_env` | string | No | Name of the API credential, sent as `Authorization: Bearer`. Read from the env, else the OS keychain (service `forgedock`, account = the name: `secret-tool store --label forgedock service forgedock account NAME` on Linux, `security add-generic-password -s forgedock -a NAME -w` on macOS). Never written to the ledger, the batch state, logs or GitHub. |
 | `cache_store` | string | No | Shared cache store the remote sandbox mounts (sent as `cache.store` with `cache.key` = the repo). |
 | `allow_actions` | boolean | No | `true` accepts a GitHub Actions endpoint. Default `false`. |
+| `budget_minutes`, `budget_usd` | number | No | The `execution.budget` per batch: once the batch's sandbox minutes / estimated USD (settled lanes plus the running ones' elapsed time) reach the cap, no new remote lane is admitted. Missing, non-numeric or negative means no cap. |
+| `day_budget_minutes`, `day_budget_usd` | number | No | The same cap per host UTC day, summed over every batch on the host from the host-day store (`execution-budget.json` in `~/.forge/sched/`, or `FORGEDOCK_EXECUTION_BUDGET_FILE`). A corrupt or unreadable store refuses remote lanes while a day cap is set; remove the file to reset it. |
+| `on_budget` | string | No | `stop` (default): running lanes finish and the rest end `held` (`execution budget: ...`) for a later `--resume`. `local`: the rest run as detached host lanes. |
+| `cost_per_minute` | number | No | USD per sandbox-minute, used when the provider reports no cost of its own (the `container` provider never does). Default `0`. |
 
 **Lifecycle:** each sandbox is listed in the lane ledger (`~/.forge/ledger/<batch>/sandbox-<n>.json`, kind `sandbox`) before it starts and removed from it only after teardown succeeded: on success, failure, a lane that exits without a result, and adopt after `--resume`. A sandbox left by a killed dispatcher is reaped by `forgedock gc --apply` (scope `--sandboxes`). The container provider mounts the checkout's git dir read-only at `/src` (cloned to the container's own `/work`), `~/.forge/verify-cache` read-only at `/cache`, and the batch `lanes/` dir at `/result`.
 
@@ -624,6 +635,8 @@ execution:
 | `DELETE /sandboxes/:id` | Teardown; `404` counts as torn down |
 
 **Start failures** (every provider): a sandbox that cannot start ends the lane `needs-human` with code `sandbox.start_failed`, not relaunched and not counted by the engine-error breaker; a capacity error ends it `deferred` (`sandbox.capacity`, backoff, bounded by `orchestration.max_deferrals`). See docs/OUTCOME-CODES.md. `forgedock gc --apply --sandboxes` tears a stale remote sandbox down through the same API (the checkout's forge.yaml `execution`).
+
+**Cost and budget:** every remote lane's sandbox minutes and estimated cost (the provider's own usage report, e.g. the remote provider's `/usage` minutes, else wall-clock minutes × `cost_per_minute`) land in its row (`sandbox: {minutes, cost_usd, attempts}`, summed over relaunches), in `report.json`, in the printed table (`sbx-min`, `sbx-$` next to the token `cost`, shown only when a lane used a sandbox), in a `sandbox:` summary line with the budget state, and in FORGE:TELEMETRY as one `sandbox_usage` event per lane. The caps are plain arithmetic, no model call. The batch total is kept in the batch `state.json` and the day total in the host-day store, so both survive `--resume` and a schedd restart.
 
 **Commands that use this section**: `forgedock orchestrate` (`bin/engine-cli.mjs` `readExecution`), `forgedock gc`
 

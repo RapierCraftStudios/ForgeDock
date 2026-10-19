@@ -62,6 +62,16 @@ describe("engine telemetry seam", () => {
     assert.deepEqual(p2, { reason: "merged", wall_ms: 0, milestone: "M", conformance_mode: "shadow", shadow_would: "conforms" });
     assert.equal(mapRecord({ event: "RUN_TERMINAL", reason: "merged", pr: 0 }, 1).pr, undefined, "no pr 0 in ctx");
   });
+  it("forge#4255: SANDBOX_USAGE maps to sandbox_usage with provider, minutes and cost", async () => {
+    const { calls, emit } = harness();
+    await emit({ event: "SANDBOX_USAGE", issue: 7, provider: "container", sandbox_id: "fdsbx-b-7", minutes: 12.5, cost_usd: 0.1234567891, batch: "b1" });
+    const [event, payload, ctx] = calls[0];
+    assert.equal(event, "sandbox_usage");
+    assert.deepEqual(payload, { provider: "container", sandbox_id: "fdsbx-b-7", minutes: 12.5, cost_usd: 0.123457, batch: "b1" });
+    assert.equal(ctx.issue, 7);
+    assert.equal(ctx.phase, undefined);
+  });
+
   it("null usage yields a record with no token fields", () => {
     assert.deepEqual(mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1, usage: null, duration_ms: 5 }).payload, { attempt: 1, duration_ms: 5 });
   });
