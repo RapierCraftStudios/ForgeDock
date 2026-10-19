@@ -407,6 +407,29 @@ describe("core work-on", () => {
     noNeedsHuman(w);
   });
 
+  it("#4153 a split of a milestone issue files every sub-issue with the parent's milestone; no milestone passes none", async () => {
+    const split = { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A" }, { title: "part B", body: "do B", depends_on: [0] }] } };
+    const w = depWorld({ changed: [], result: split, milestone: "Remote MCP Server", branchesOnOrigin: ["staging", "milestone/remote-mcp-server"] }, {});
+    const r = await run(w, { lane: null });
+    assert.equal(r.terminalReason, "decomposed");
+    assert.equal(w.created.length, 2);
+    for (const c of w.created) assert.equal(c[c.indexOf("--milestone") + 1], "Remote MCP Server", c.join(" "));
+    const w2 = depWorld({ changed: [], result: split }, {});
+    assert.equal((await run(w2)).terminalReason, "decomposed");
+    assert.ok(w2.created.every((c) => !c.includes("--milestone")));
+  });
+
+  it("#4153 a dependency block on an open decomposed parent resolves to its open sub-issues", async () => {
+    const decomposed = { body: "<!-- FORGE:DECOMPOSED -->\n## Split into sub-issues\n- #31 part A\n- #32 part B\n", author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
+    const parent = { state: "OPEN", labels: [{ name: "workflow:decomposed" }] };
+    const w = depWorld({ changed: [], issueComments: [decomposed], result: { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: [3] } } },
+      { 3: parent, 31: { state: "CLOSED", labels: [] }, 32: { state: "OPEN", labels: [] } });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "dependency-open");
+    assert.deepEqual(r.dependencies, [32]);
+    noNeedsHuman(w);
+  });
+
   it("#4124 a prod-data (non-human) or untyped block gets one corrective resume; a builder that then proceeds merges", async () => {
     const w = world({ result: { status: "blocked", summary: "needs live wire capture and prod baselines", block: { kind: "human", why: "prod-data" } },
       resumeResult: { status: "fixed", summary: "captured via read-only monitoring", evidence: [], tests: [] } });

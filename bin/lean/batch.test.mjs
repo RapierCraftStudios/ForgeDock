@@ -155,6 +155,25 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.deepEqual([again, row.outcome], [[9, 9], "engine-error"]);
   });
 
+  it("#4153 a resume re-derives a pending issue's lane from its current milestone", async () => {
+    const saved = { state: null };
+    const store = { load: () => saved.state, save: (s) => { saved.state = JSON.parse(JSON.stringify(s)); } };
+    const milestoneLane = { 1: "staging", 2: "staging" };
+    const resolveLane = async (n) => ({ ok: true, lane: milestoneLane[n] });
+    const runs = [];
+    let rows = await orchestrate({ issues: [1, 2], parallel: 1, breaker: { errors: 1, window_min: 30 }, store, resolveLane, readBody: async () => "",
+      runOne: async (n, lane) => { runs.push([n, lane]); throw new Error("x"); } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["held", "held"]);
+    assert.equal(saved.state.lanes["2"].lane, "staging");
+    milestoneLane[1] = milestoneLane[2] = "milestone/m1"; // the operator re-milestones both issues
+    saved.state = { ...saved.state, breaker: null, errorTimes: [] }; // what --resume does
+    rows = await orchestrate({ issues: [1, 2], parallel: 1, store, resolveLane, readBody: async () => "",
+      runOne: async (n, lane) => { runs.push([n, lane]); return { terminalReason: "merged" }; } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    assert.deepEqual(runs.slice(1).sort((a, b) => a[0] - b[0]), [[1, "milestone/m1"], [2, "milestone/m1"]]);
+    assert.equal(saved.state.lanes["2"].lane, "milestone/m1");
+  });
+
   it("concurrency follows the live K", async () => {
     let k = 1, active = 0, maxActive = 0;
     const rows = await orchestrate({ issues: [1, 2, 3, 4, 5, 6, 7], parallel: 1, pollMs: 5, getParallel: () => k, readBody: async () => "",
