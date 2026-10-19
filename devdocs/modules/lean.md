@@ -41,6 +41,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
 6. **Implement** — same session; `result.json` with typed amendments
    (`applyAmendments` → `FORGE:AMENDMENT`).
+6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
+   = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
+   `verify.workflow` (or wait on push checks), red → builder fix with log tails
+   (`max_rounds`, then `ci.red`), slow → `ci-pending`, unavailable → local fallback;
+   docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI.
 7. **Conformance** — `precheck` (deterministic: changed files vs deliverables),
    structured review (`parseReview`), `decide` computes the verdict. Mode
    `engine.conformance`: `shadow` (default; only unimplemented/regression
@@ -82,3 +87,11 @@ push/gh/merge retry patterns).
 ## Entry 2026-10-19 — Dossier created (#4185)
 
 Initial dossier written with NORTHSTAR.md and the devdocs freshness gate.
+
+## Entry 2026-10-19 — Verify-by-CI (#4167)
+
+Opt-in `verify:` section (`engine-cli.mjs` `readVerify` → `verify.mjs` `parseVerify`).
+`lean.mjs` `ciVerify` runs before each conformance gate and after a base-sync push;
+`precheck({ciVerified})` accepts `ci:true` validate ids at the verified head. Seams:
+`effects.mjs` `dispatchWorkflow`/`workflowRuns`/`commitChecks`/`failedLogs`. Rationale:
+`devdocs/decisions/4167-verify-by-ci.md`.
