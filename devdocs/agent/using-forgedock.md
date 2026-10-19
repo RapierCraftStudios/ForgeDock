@@ -142,7 +142,7 @@ Pre-commit checks: dead code, missing error handling, security anti-patterns, pe
 
 Creates a well-structured GitHub issue with all mandatory pipeline sections. **`/issue` is the enforced create-hook for every issue this pipeline creates — raw `gh issue create` is not an acceptable substitute** (see `devdocs/agent/github-cli-patterns.md` → "Issue Creation — Use `/issue`" for the rule and its one exception, the orchestrate claims board). `/issue` runs dedup and mandatory-section validation that a raw `gh issue create` call skips entirely.
 
-Also accepts a programmatic form for callers that have already composed the fields — `Skill(skill="issue", args="--title \"...\" --body-file <path> --label \"...\" [--milestone \"...\"] [--dry-run]")` — which skips free-text parsing and drafting but still runs dedup and body validation. See `commands/issue.md` → Programmatic Invocation Contract.
+Also accepts a programmatic form for callers that have already composed the fields — `Skill(skill="issue", args="--title \"...\" --body-file <path> --label \"...\" [--milestone \"...\"] [--dry-run]")` — which skips free-text parsing and drafting and makes one `scripts/issue-create.sh` call (dedup, body validation, verified create). It prints one `ISSUE_CREATE_RESULT:` line: `CREATED number=N url=U` (exit 0), `DEDUP number=N` (1), `USAGE` (2) or `ERROR` (3). See `commands/issue.md` → Programmatic Mode.
 
 **Worked example** — a command/skill that has already drafted a title and body (e.g. an audit tool, `/work-on` decomposition, or a review-finding writer) creates the issue like this:
 

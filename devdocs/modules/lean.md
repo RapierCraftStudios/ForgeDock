@@ -54,6 +54,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (`applyAmendments` → `FORGE:AMENDMENT`). An `add-deliverable` on a path the
    contract already lists appends its why to that deliverable's `change`, so it
    can declare a package edge on an already-listed package.json (#4159).
+   Builder and reviewer runs get `FORGE_DOCKER_LABELS` (`ledger.mjs`
+   `dockerLabels`: `forgedock.owner/batch/lane/issue/expires`, values limited to
+   `[A-Za-z0-9_.-]`), and the implement prompt tells the builder to put them on
+   every docker run/volume/network/build, use `--rm` and tear down via trap
+   (#4181); `scripts/ci-local/run.mjs` labels its own network and containers.
 6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
