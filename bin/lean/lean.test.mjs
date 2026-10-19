@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { writeFileSync, existsSync, readFileSync } from "node:fs";
+import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
@@ -11,10 +11,10 @@ import { makeLedger } from "./ledger.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt } from "./prompts.mjs";
-import { parseReview, unnamedEdges, structureNote } from "./conformance.mjs";
+import { parseReview, unnamedEdges, structureNote, applyAmendments } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
-import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, makeProcProbe, installRunnerExitHooks } from "./effects.mjs";
+import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, makeProcProbe, installRunnerExitHooks, procsInDir } from "./effects.mjs";
 import { watch as watchRunner } from "./runner-watchdog.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission } from "./admission.mjs";
@@ -690,6 +690,45 @@ describe("issue edited mid-run (#4188)", () => {
   });
 });
 
+describe("review row skeleton and targeted retry (#4160)", () => {
+  it("the reviewer prompt carries a pre-filled skeleton with every requirement and preserve id", async () => {
+    const w = world();
+    assert.equal((await run(w)).terminalReason, "merged");
+    const p = reviewers(w)[0][4];
+    const sk = JSON.parse(/<row_skeleton>\n([\s\S]*?)\n<\/row_skeleton>/.exec(p)[1]);
+    assert.deepEqual(sk.requirements.map((r) => r.id), CONTRACT.requirements.map((r) => r.id));
+    assert.deepEqual(sk.preserve.map((x) => x.id), (CONTRACT.preserve ?? []).map((x) => x.id));
+    assert.doesNotMatch(p, /previous_reply_problems/);
+  });
+  it("an incomplete first reply gets one retry that lists exactly what was missing, and the complete second reply decides", async () => {
+    const w = world({ reviews: [genericPass(), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 2);
+    const p2 = reviewers(w)[1][4];
+    assert.match(p2, /<previous_reply_problems>[\s\S]*requirement R1 needs exactly one row/);
+    assert.match(p2, /<previous_reply>[\s\S]*"verdict":"PASS"/);
+  });
+  it("a complete first reply needs no second reviewer run", async () => {
+    const w = world();
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1);
+  });
+});
+
+describe("procsInDir (#4162)", () => {
+  it("procsInDir reads cwd links from a /proc tree and skips this process and its ancestors", () => {
+    const root = tmpDir("proc-"), wtDir = tmpDir("wt-");
+    const mk = (pid, cwdTarget, ppid, cmd) => { mkdirSync(join(root, String(pid)), { recursive: true }); symlinkSync(cwdTarget, join(root, String(pid), "cwd")); writeFileSync(join(root, String(pid), "stat"), `${pid} (x y) S ${ppid} 0`); writeFileSync(join(root, String(pid), "cmdline"), cmd.split(" ").join("\0")); };
+    mk(100, wtDir, 1, "claude --print");
+    mk(101, join(wtDir, "src"), 1, "node test");
+    mk(102, "/elsewhere", 1, "bash");
+    mk(200, wtDir, 1, "self");
+    mkdirSync(join(root, "self")); // non-numeric entries are ignored
+    assert.deepEqual(procsInDir(wtDir, { procRoot: root, self: 200 }).map((p) => [p.pid, p.cmd]).sort(), [[100, "claude --print"], [101, "node test"]]);
+    assert.deepEqual(procsInDir(wtDir, { procRoot: join(root, "missing") }), []);
+  });
+});
+
 describe("conformance shadow mode (the default)", () => {
   const runShadow = (w, extra = {}) => run(w, { conformance: "shadow", ...extra });
   const shadowNote = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")) ?? "";
@@ -846,6 +885,15 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     // the manifest alone, without the package named, is not naming the edge
     assert.equal(unnamedEdges(withEdgeDeliverable("bump versions"), delta({ package_edges_added: [EDGE] })).length, 1);
     assert.equal(unnamedEdges(withEdgeDeliverable("add @s/core"), delta({ package_edges_added: [EDGE] })).length, 0);
+  });
+
+  it("an add-deliverable amendment on a package.json the contract already lists (for another change) declares the edge", () => {
+    const frozen = { requirements: [], deliverables: [{ id: "D1", path: "packages/db/package.json", change: "bump versions" }] };
+    const r = applyAmendments(frozen, [{ kind: "add-deliverable", path: "packages/db/package.json", why: "add @s/core: the architecture doc lets db depend on core" }]);
+    assert.equal(r.contract.deliverables.length, 1); assert.equal(r.contract.deliverables[0].id, "D1");
+    assert.match(r.contract.deliverables[0].change, /^bump versions; add @s\/core/);
+    assert.equal(unnamedEdges(r.contract, delta({ package_edges_added: [EDGE] })).length, 0);
+    assert.equal(frozen.deliverables[0].change, "bump versions", "the frozen contract is not mutated");
   });
 
   it("an add-deliverable amendment naming the package on the resume declares the edge", async () => {

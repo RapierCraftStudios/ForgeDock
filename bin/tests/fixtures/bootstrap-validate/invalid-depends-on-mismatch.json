@@ -1,0 +1,75 @@
+{
+  "milestones": [
+    {
+      "key": "core",
+      "title": "Core"
+    },
+    {
+      "key": "api",
+      "title": "API"
+    }
+  ],
+  "issues": [
+    {
+      "key": "SPIKE",
+      "title": "spike: Spike for the FastAPI service.",
+      "milestone": "core",
+      "labels": [
+        "docs"
+      ],
+      "deps": [],
+      "body": "## Problem\n\nSpike for the FastAPI service.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/spike.md` — new\n\n## Acceptance Criteria\n\n- [ ] Spike reviewed [type:manual]\n\n## Context\n\n**Parent**: none (spike)\n\n## Dependencies\n\nNone.\n"
+    },
+    {
+      "key": "PKG",
+      "title": "pkg: Create the uv-managed package and pytest",
+      "milestone": "core",
+      "labels": [
+        "infra"
+      ],
+      "deps": [
+        "SPIKE"
+      ],
+      "body": "## Problem\n\nCreate the uv-managed package and pytest setup.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `pyproject.toml` — new\n2. `src/service/__init__.py` — new\n3. `tests/conftest.py` — new\n\n## Acceptance Criteria\n\n- [ ] `pytest` runs green on an empty suite [type:unit]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SPIKE}} — needs SPIKE\n"
+    },
+    {
+      "key": "MODELS",
+      "title": "models: SQLAlchemy models and Alembic migrations",
+      "milestone": "core",
+      "labels": [
+        "backend"
+      ],
+      "deps": [
+        "PKG"
+      ],
+      "body": "## Problem\n\nSQLAlchemy models and Alembic migrations.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `src/service/models.py` — new\n2. `migrations/env.py` — new\n\n## Acceptance Criteria\n\n- [ ] Migration upgrades and downgrades cleanly [type:unit]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{PKG}} — needs PKG\n"
+    },
+    {
+      "key": "ROUTES",
+      "title": "routes: CRUD routes for projects.",
+      "milestone": "api",
+      "labels": [
+        "backend",
+        "api"
+      ],
+      "deps": [
+        "MODELS",
+        "PKG"
+      ],
+      "body": "## Problem\n\nCRUD routes for projects.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `src/service/routes/projects.py` — new\n\n## Acceptance Criteria\n\n- [ ] POST /projects returns 201 [type:api]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{MODELS}} — needs MODELS\n"
+    },
+    {
+      "key": "STRIPE_KEYS",
+      "title": "stripe_keys: Create Stripe test and live keys (STRIPE",
+      "milestone": "api",
+      "labels": [
+        "needs-human"
+      ],
+      "deps": [
+        "ROUTES"
+      ],
+      "needsHuman": true,
+      "body": "## Problem\n\nCreate Stripe test and live keys (STRIPE_SECRET_KEY) once billing routes exist.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/setup/stripe.md` — new\n\n## Acceptance Criteria\n\n- [ ] Keys stored as deploy secrets [type:manual]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{ROUTES}} — needs ROUTES\n"
+    }
+  ]
+}

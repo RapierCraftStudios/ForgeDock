@@ -3,7 +3,7 @@
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -97,8 +97,32 @@ export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRun
   };
 }
 
+/** Parent pid from /proc/<pid>/stat (the field after the parenthesised command name); 0 when unreadable. */
+const ppidOf = (root, pid) => { try { const st = readFileSync(join(root, String(pid), "stat"), "utf8"); return Number(st.slice(st.lastIndexOf(")") + 2).split(" ")[1]) || 0; } catch { return 0; } };
 /**
- * Processes whose cwd is inside a worktree (#4162). Linux: readlink /proc/<pid>/cwd; elsewhere `lsof -t +D <dir>`.
+ * #4162: processes whose cwd is `dir` or inside it, from /proc (Linux). Excludes this process and its ancestors.
+ * Returns [{pid, cmd}]; [] where /proc is unavailable (the caller then skips stopping them).
+ */
+export function procsInDir(dir, { procRoot = "/proc", self = process.pid } = {}) {
+  if (!dir || !existsSync(procRoot)) return [];
+  try { dir = realpathSync(dir); } catch { /* not on disk: compare as given */ } // /proc cwd links are resolved paths
+  const skip = new Set();
+  for (let p = self, i = 0; p > 1 && i < 64 && !skip.has(p); i++) { skip.add(p); p = ppidOf(procRoot, p); }
+  const out = [];
+  for (const e of readdirSync(procRoot)) {
+    if (!/^\d+$/.test(e) || skip.has(Number(e))) continue;
+    let at; try { at = readlinkSync(join(procRoot, e, "cwd")); } catch { continue; }
+    at = at.replace(/ \(deleted\)$/, "");
+    if (at !== dir && !at.startsWith(`${dir}/`)) continue;
+    let cmd = ""; try { cmd = readFileSync(join(procRoot, e, "cmdline"), "utf8").split("\0").filter(Boolean).join(" ").slice(0, 200); } catch { /* exited */ }
+    out.push({ pid: Number(e), cmd });
+  }
+  return out;
+}
+
+/**
+ * Processes whose cwd is inside a worktree (#4162). Linux: procsInDir (/proc cwd links; the engine and its ancestors are
+ * skipped); elsewhere `lsof -t +D <dir>`.
  * `stop` sends SIGTERM, waits up to graceMs, then SIGKILLs the survivors. The current process is never listed.
  */
 export function makeProcProbe({ procRoot = "/proc", kill = process.kill.bind(process), self = process.pid, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), lsof = (dir) => pexec("lsof", ["-t", "+D", dir], { timeout: 30000 }).then((x) => x.stdout, (e) => String(e?.stdout ?? "")) } = {}) {
@@ -106,17 +130,9 @@ export function makeProcProbe({ procRoot = "/proc", kill = process.kill.bind(pro
   return {
     async inside(dir) {
       const root = resolve(dir);
-      const within = (p) => p === root || p.startsWith(root + sep);
       const out = new Set();
       if (existsSync(procRoot)) {
-        let names = [];
-        try { names = readdirSync(procRoot); } catch { names = []; }
-        for (const n of names) {
-          if (!/^\d+$/.test(n)) continue;
-          let cwd;
-          try { cwd = readlinkSync(join(procRoot, n, "cwd")); } catch { continue; }
-          if (within(cwd.replace(/ \(deleted\)$/, ""))) out.add(Number(n));
-        }
+        try { for (const p of procsInDir(root, { procRoot, self })) out.add(p.pid); } catch { /* unreadable /proc: nothing found */ }
       } else {
         for (const l of String(await lsof(root)).split("\n")) if (/^\d+$/.test(l.trim())) out.add(Number(l.trim()));
       }

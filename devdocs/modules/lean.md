@@ -33,18 +33,40 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 3. **Dependencies, then lease** — open `Depends-on` → `dependency-open`
    (orchestrate requeues behind it); then the FORGE:STATE lease.
 4. **Claim + worktree** — `workflow:investigating`, `FORGE:STARTED` comment;
-   resumes an open PR / remote branch.
+   resumes an open PR / remote branch. Before a `lean-<N>` worktree is removed
+   (recreate or teardown, #4162; a missing dir costs nothing): processes whose cwd
+   is inside it (an orphaned runner; `/proc`, else `lsof +D`) get SIGTERM, then
+   SIGKILL after 5 s (`WORKTREE_PROCS_KILLED`); uncommitted work is saved with
+   `git stash create` + `update-ref` to `refs/forge/salvage/<N>/<ms>` (`.forge-lean/`
+   to a sibling `refs/forge/salvage-notes/<N>/<ms>`), `SALVAGE_SAVED`, recorded in
+   FORGE:STATE `salvage` and the trajectory. A rerun whose frozen contract hash
+   matches the salvage's skips planning and tells the implementer to
+   `git stash apply` the ref (`SALVAGE_OFFERED`, else `SALVAGE_SKIPPED`). Runner
+   groups die with the engine: exit/signal hooks plus a detached
+   `runner-watchdog.mjs` per group; runners get `FORGE_ENGINE_PID`. Unpushed
+   `wip(forge):` commits are squashed before the first push.
 5. **Builder: plan → contract** — plan call writes `.forge-lean/`
    `investigation.md` + `contract.json`; `conformance.mjs` `validateContract`
    checks quotes against the issue and trusted comments; the engine freezes it
    (`FORGE:CONTRACT`, `contractHash`). Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
 6. **Implement** — same session; `result.json` with typed amendments
-   (`applyAmendments` → `FORGE:AMENDMENT`).
-7. **Conformance** — `precheck` (deterministic: changed files vs deliverables),
-   structured review (`parseReview`), `decide` computes the verdict. Mode
-   `engine.conformance`: `shadow` (default; only unimplemented/regression
-   block) or `enforce`. Defer/post-deploy requirements become tracked
+   (`applyAmendments` → `FORGE:AMENDMENT`). An `add-deliverable` on a path the
+   contract already lists appends its why to that deliverable's `change`, so it
+   can declare a package edge on an already-listed package.json (#4159).
+7. **Conformance** — `precheck` (deterministic: changed files vs deliverables,
+   validate results, requirement statuses; each failure has a `kind`),
+   structured review (`parseReview`), `decide` computes the verdict. The
+   reviewer prompt carries a `reviewSkeleton` (#4160): every requirement and
+   preserve id, scope rows only for files the contract does not authorize,
+   coverage seeded with the contract's verbatim quotes, all statuses empty.
+   Completeness needs scope rows only for those unauthorized files; bare
+   evidence names resolve to the one changed file they name
+   (`resolveEvidencePath`). An incomplete reply gets one retry that lists the
+   exact problems plus the previous reply. Mode `engine.conformance`: `shadow`
+   (default; unimplemented/regression from the review block, and so do a
+   precheck `validate_failed` or `requirement_unimplemented`, before any
+   reviewer run) or `enforce`. Defer/post-deploy requirements become tracked
    follow-ups (`followupItems`, `pendingTracking`).
 8. **Push + PR → merge** — merge policy `required` (default) | `all` | `none`;
    base-sync merges the lane in on conflict (never rebase/force-push); merge

@@ -171,7 +171,20 @@ function detectDefaultBranch(cwd) {
     // symbolic-ref not set — try next strategy
   }
 
-  // Strategy 2: current local branch
+  // Strategy 2: unborn branch (forge#4173) — a freshly `git init`-ed repo
+  // with no commits has no resolvable HEAD commit, so `rev-parse` below
+  // fails, but `symbolic-ref --short HEAD` still names the branch the first
+  // commit will land on. Prefer it over guessing "main".
+  const unborn = detectUnbornBranch(cwd);
+  if (unborn) {
+    return medium(
+      unborn,
+      "git symbolic-ref --short HEAD",
+      `Repository has no commits yet; HEAD points at unborn branch ${unborn}`,
+    );
+  }
+
+  // Strategy 3: current local branch
   try {
     const cur = execFileSync(
       "git",
@@ -194,8 +207,51 @@ function detectDefaultBranch(cwd) {
     // git unavailable or not a git repo
   }
 
-  // Strategy 3: fall back
+  // Strategy 4: fall back
   return low("main", "default placeholder", "Could not determine branch from git; defaulting to 'main'");
+}
+
+/**
+ * Run a read-only git command, returning trimmed stdout or null on failure.
+ * @param {string} cwd
+ * @param {string[]} args
+ * @returns {string|null}
+ */
+function gitRead(cwd, args) {
+  try {
+    return execFileSync("git", args, {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Return the unborn branch name when `cwd` is a git repo with no commits,
+ * else "" (forge#4173). Never throws.
+ * @param {string} cwd
+ * @returns {string}
+ */
+function detectUnbornBranch(cwd) {
+  if (gitRead(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"])) return "";
+  return gitRead(cwd, ["symbolic-ref", "--short", "HEAD"]) || "";
+}
+
+/**
+ * Detect repository state signals for the repo-setup step (forge#4173):
+ * whether `cwd` is inside a git work tree and whether HEAD has any commit.
+ * @param {string} cwd
+ * @returns {{ isGitRepo: boolean, hasCommits: boolean, unbornBranch: string }}
+ */
+function detectRepoState(cwd) {
+  const isGitRepo = gitRead(cwd, ["rev-parse", "--is-inside-work-tree"]) === "true";
+  if (!isGitRepo) return { isGitRepo: false, hasCommits: false, unbornBranch: "" };
+  const hasCommits = Boolean(gitRead(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"]));
+  return { isGitRepo, hasCommits, unbornBranch: hasCommits ? "" : detectUnbornBranch(cwd) };
 }
 
 /**
@@ -360,6 +416,10 @@ function deriveProjectName(repoSlug) {
  *   },
  *   meta: {
  *     remoteDetected: boolean,
+ *     isGitRepo:      boolean,  // cwd resolved to a git work tree (forge#4173)
+ *     hasCommits:     boolean,  // HEAD resolves to a commit
+ *     unbornBranch:   string,   // branch name when the repo has no commits, else ""
+ *     stagingMissing: boolean,  // no origin/staging — the setup step may create it
  *   },
  * }} ConfigDraft
  */
@@ -401,6 +461,7 @@ export async function detectConfig(cwd = process.cwd()) {
   // Branch detection
   const defaultBranchField = detectDefaultBranch(gitRoot);
   const stagingBranchField = detectStagingBranch(gitRoot, defaultBranchField.value);
+  const repoState = detectRepoState(gitRoot);
 
   return {
     project: { owner, repo, name },
@@ -409,7 +470,11 @@ export async function detectConfig(cwd = process.cwd()) {
       default: defaultBranchField,
       staging: stagingBranchField,
     },
-    meta: { remoteDetected },
+    meta: {
+      remoteDetected,
+      ...repoState,
+      stagingMissing: stagingBranchField.source !== "git branch -r",
+    },
   };
 }
 

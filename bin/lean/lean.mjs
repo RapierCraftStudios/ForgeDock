@@ -12,7 +12,7 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
-import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
+import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, closePlan, followupItems, pendingTracking, reviewSkeleton, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
@@ -880,17 +880,20 @@ export async function runCore(o) {
       const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
       const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
       const ctx = { contract: effective, changedFiles: files, issueText, pathExists: (x) => listed.has(x), ignore: IGNORE };
-      let d = null;
+      let d = null, retry = null;
+      const skeleton = reviewSkeleton({ contract: effective, changedFiles: files, ignore: IGNORE }); // #4160: every required row, pre-filled
       for (let t = 0; t < 2; t++) {
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
-          prompt: reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine }) });
+          prompt: reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, skeleton, retry }) });
         await renew();
         await attempt("review", ++reviewN, rr);
         review = parseReview(rr?.text);
         d = decide(review, ctx);
         ev({ event: "CONFORMANCE", round: reviewN, state: d.state, failures: d.failures.map((x) => x.code), mode: shadow ? "shadow" : "enforce" });
         if (!d.state.startsWith("review.")) return d;
+        // #4160: the second run is told exactly what was missing, instead of getting the same prompt again
+        retry = d.state === "review.incomplete" ? { problems: d.failures.map((x) => x.detail), previous: review ? JSON.stringify(review) : String(rr?.text ?? "") } : null;
       }
       return d;
     }

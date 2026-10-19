@@ -119,6 +119,9 @@ export function resolveEnrichBackend({
  */
 export async function enrich(draft, opts = {}) {
   const { cwd = process.cwd(), env = process.env, isCliAvailableFn, bin, spawnFn, timeoutMs } = opts;
+  // An empty repository with no remote (forge#4173) has nothing for either
+  // backend to read — skip the (slow, possibly billed) call entirely.
+  if (draft?.meta?.remoteDetected === false && draft?.meta?.hasCommits === false) return draft;
   const backend =
     opts.backend ?? resolveEnrichBackend({ cwd, env, isCliAvailableFn });
 
