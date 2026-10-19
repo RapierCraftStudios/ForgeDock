@@ -2055,9 +2055,10 @@ describe("host admission (#4105)", () => {
     }
   });
 
-  it("high load per core is deferred; disabled admission runs even on a starved host", async () => {
+  it("high load per core is deferred when max_load_per_core is configured (off by default since #4169); disabled admission runs even on a starved host", async () => {
     const wl = withHost(world(), host({ load: 40, cores: 8 }));
-    assert.match((await run(wl)).detail, /load 5\.0\/core > 4/);
+    assert.match((await run(wl, { admission: { max_load_per_core: 4 } })).detail, /load 5\.0\/core > 4/);
+    assert.equal((await run(withHost(world(), host({ load: 40, cores: 8 })))).terminalReason, "merged", "load alone no longer defers a lane");
     const wd = withHost(world(), host({ mem: 1, free: { "/tmp": 1, "/home/x/.forge/tmp": 1 }, load: 99 }));
     assert.equal((await run(wd, { admission: { enabled: false } })).terminalReason, "merged");
   });
@@ -2172,6 +2173,59 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.equal(res[2].r.code, "host.busy", "third lane refused at admission while two run");
     assert.deepEqual(res.slice(0, 2).map((x) => x.r.terminalReason), ["merged", "merged"]);
     assert.ok(st.peak <= 2 * 1.0 + 1.0, `observed load stays near the ceiling (${st.peak})`);
+  });
+
+  // ---- #4169 phase-aware admission ----
+  it("#4169 by default a loaded host neither defers the lane nor pauses the builder (LLM phases are not gated by load)", async () => {
+    const w = world(); const calls = [];
+    w.io.host = hostFor({ load: () => 40 });
+    slowBuilder(w, 150, (c) => { c.control.pause = () => { calls.push("pause"); return true; }; c.control.resume = () => { calls.push("resume"); return true; }; });
+    const r = await run(w, { governorPollMs: 20 });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(calls, []);
+  });
+
+  const heavyWorld = () => {
+    const w = world(); w.acq = []; w.rel = 0;
+    w.io.heavy = { acquire: async (e, cfg) => { w.acq.push({ ...e, cfg }); w.seq.push(`heavy:${e.phase}`); return { waitMs: 5000, queued: 2, release: () => { w.rel++; } }; } };
+    w.io.writeHeavyShims = async (binDir, { path }) => { w.shimDir = binDir; w.shimPath = path; return ["tsc", "pnpm"]; };
+    w.setups = []; w.io.runSetup = async (a) => { w.setups.push(a); return { exit: 0, stdout: "", stderr: "" }; };
+    w.io.runCommand = async () => ({ rc: 0, output: "" });
+    const g = w.io.gh; w.io.gh = async (a) => { const out = await g(a); if (a[0] === "issue" && a[1] === "view" && a[2] === "7") { const j = JSON.parse(out); return JSON.stringify({ ...j, labels: [{ name: "priority:P0" }] }); } return out; };
+    return w;
+  };
+
+  it("#4169 heavy steps: env.setup and precheck take a host slot; builder runs get the shim PATH, phase, issue and priority; the result carries waits", async () => {
+    const w = heavyWorld();
+    w.files[`${WT}/.forge-lean/heavy-waits.jsonl`] = '{"phase":"implement","name":"tsc","waitMs":30000,"queued":4}\n';
+    const r = await run(w, { envSetup: "pnpm install", precheck: { commands: ["pnpm lint"] }, heavy: { max: 2 } });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(w.acq.map((a) => [a.phase, a.issue, a.priority, a.cfg.max]), [["setup", 7, 0, 2], ["precheck", 7, 0, 2]]);
+    assert.equal(w.rel, 2, "every slot is released");
+    assert.equal(w.shimDir, `${WT}/.forge-lean/heavy/bin`);
+    const roles = w.calls.filter((c) => c[0] === "runner").map((c) => c[1]);
+    const envs = w.envs.filter((e, i) => e && roles[i] === "builder");
+    assert.ok(envs.length >= 2);
+    for (const e of envs) {
+      assert.ok(e.PATH.startsWith(`${WT}/.forge-lean/heavy/bin:`), e.PATH);
+      assert.equal(e.FORGE_LANE_ISSUE, "7"); assert.equal(e.FORGE_LANE_PRIORITY, "0"); assert.equal(e.FORGE_HEAVY_MAX, "2");
+      assert.equal(e.FORGE_HEAVY_WAITS, `${WT}/.forge-lean/heavy-waits.jsonl`);
+    }
+    assert.deepEqual(envs.map((e) => e.FORGE_LANE_PHASE).slice(0, 2), ["plan", "implement"]);
+    assert.deepEqual(r.waits, { setup: 5000, precheck: 5000, implement: 30000 });
+    assert.equal(r.heavyQueueMax, 4);
+  });
+
+  it("#4169 without io.heavy (or heavy.enabled false) nothing is gated and the runner env is unchanged", async () => {
+    const w = world();
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(r.waits, undefined);
+    for (const e of w.envs.filter(Boolean)) { assert.equal(e.FORGE_LANE_PHASE, undefined); assert.equal(e.PATH, undefined); }
+    const w2 = heavyWorld();
+    const r2 = await run(w2, { envSetup: "pnpm install", heavy: { enabled: false } });
+    assert.equal(r2.terminalReason, "merged");
+    assert.deepEqual(w2.acq, []); assert.equal(w2.shimDir, undefined);
   });
 
   // ---- #4113 ----

@@ -125,6 +125,20 @@ export function readAdmission(cwd = process.cwd()) {
   } catch { return {}; }
 }
 /**
+ * forge.yaml heavy-step semaphore (#4169), read next to `engine.admission`: `engine.heavy_enabled|heavy_max|
+ * heavy_step_mem_mb|heavy_reserve_mb` (or flat `admission_heavy_*`). Unset keys keep the heavy.mjs defaults.
+ */
+export function readHeavy(cwd = process.cwd()) {
+  try {
+    const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine ?? {};
+    const num = (v) => { const n = Number(v); return v !== undefined && v !== "" && Number.isFinite(n) && n > 0 ? n : undefined; };
+    const pick = (k) => e[`heavy_${k}`] ?? e[`admission_heavy_${k}`];
+    const en = String(pick("enabled") ?? "").trim().toLowerCase();
+    const out = { ...(en === "false" ? { enabled: false } : {}), max: num(pick("max")), step_mem_mb: num(pick("step_mem_mb")), reserve_mb: num(pick("reserve_mb")) };
+    return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined));
+  } catch { return {}; }
+}
+/**
  * forge.yaml lane caps and CLI timeouts for the core path (#4115, #4112). The parser flattens one nested level, so
  * `pipeline:`/`engine:` then `lane_limits:` with `memory_max`/`cpu_quota` arrives as `memory_max`/`cpu_quota` (or flat
  * `lane_limits_memory_max`/`lane_limits_cpu_quota`). `engine.cli_idle_minutes` (default 15) and `engine.cli_max_minutes` (default 180).
@@ -632,7 +646,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -967,7 +981,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   sink.batch?.(batch);
   sink.line(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
   const dir = deps.dir ?? runDir();
-  const { orchestrate, formatTable } = await import("./lean/orchestrate.mjs");
+  const { orchestrate, formatTable, formatWaitSummary } = await import("./lean/orchestrate.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   const { makePrefilter, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
   const prefilter = argv.includes("--no-prefilter") ? null
@@ -985,7 +999,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln) => runCore({ issue: n, repo, lane: ln, laneOverride, branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
     lanes = batchMod.detachedLanes({ batch, cwd, env, script: deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), bin: deps.laneBin, pollMs: deps.pollMs,
       laneArgs: (n, ln) => ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])] });
@@ -1039,6 +1053,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const report = ["\n" + formatTable(rows)];
   const pfLine = formatPrefilterSummary(rows);
   if (pfLine) report.push(pfLine);
+  let heavyStats = null; // #4169: live heavy-semaphore queue next to the per-phase waits the lanes reported
+  try { heavyStats = deps.heavyStats !== undefined ? deps.heavyStats : (await import("./lean/heavy.mjs")).openHeavy(schedMod.schedDir()).stats(); } catch { heavyStats = null; }
+  const waitLine = formatWaitSummary(rows, heavyStats);
+  if (waitLine) report.push(waitLine);
   if (crossLane.length) report.push(`cross-lane edges: ${crossLane.map((e) => `#${e.issue} (${e.lane}) → #${e.dependency} (${e.dependencyLane})`).join(", ")}`);
   if (rows.some((r) => r.outcome === "held")) report.push(`held issues stay pending: forgedock orchestrate --resume ${batch.id}`);
   for (const l of report) sink.line(l);

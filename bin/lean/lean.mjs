@@ -5,7 +5,7 @@
  * ForgeDock registers everything on GitHub (labels, one register comment, PR, merge). No investigation, synthesis,
  * severity taxonomy, risk tiers or local CI gates. All effects are injected through `io` so it is unit-testable.
  */
-import { join, dirname, basename } from "node:path";
+import { join, dirname, basename, delimiter } from "node:path";
 import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
@@ -23,6 +23,8 @@ import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTAT
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES } from "./verify.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
+import { writeHeavyShims, sumWaits } from "./heavy.mjs";
+import { priorityFromLabels } from "./sched.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
@@ -165,6 +167,22 @@ export async function runCore(o) {
   const runId = `${issue}-${t0}`;
   let runTmp = null;
   let toolchain = null; // #4163: {env, summary} when the repo pins its toolchain (env only with a pm shim); null leaves runner env and prompts unchanged
+  // #4169: heavy steps take a host semaphore slot (io.heavy); LLM phases are not gated. `heavyEnv` puts the heavy shims on
+  // the runner PATH; `waits` ({phase: ms}) and `heavyQueueMax` ride on the lane result for the batch report.
+  const heavyCfg = o.heavy ?? {}, heavyOn = Boolean(io.heavy) && heavyCfg.enabled !== false;
+  let heavyEnv = null, heavyWaitsFile = null, heavyQueueMax = 0, stage = "plan", iss;
+  const waits = {};
+  const addWait = (phase, ms, queued = 0) => {
+    if (Number.isFinite(ms) && ms > 0) waits[phase] = (waits[phase] ?? 0) + ms;
+    if (Number.isInteger(queued)) heavyQueueMax = Math.max(heavyQueueMax, queued);
+  };
+  const lanePriority = () => priorityFromLabels(iss?.labels);
+  /** A host heavy-step slot for an engine-side step, or null (no io.heavy, disabled, or the registry failed: ungated). */
+  async function heavyAcquire(phase) {
+    if (!heavyOn) return null;
+    try { const g = await io.heavy.acquire({ issue, phase, priority: lanePriority() }, heavyCfg); addWait(phase, g?.waitMs, g?.queued); return g; } catch { return null; }
+  }
+  async function heavyStep(phase, fn) { const g = await heavyAcquire(phase); try { return await fn(); } finally { try { g?.release?.(); } catch { /* fail-open */ } } }
   // ---- lane resource ledger (#4179): every owned resource is registered before it is created, released after its teardown ----
   let ledger = null, deleteLocalBranch = false;
   const ledgerDo = (fn) => { if (!ledger) return; try { fn(ledger); } catch (e) { ev({ event: "LEDGER_ERROR", error: String(e?.message ?? e).slice(0, 300) }); } };
@@ -246,6 +264,9 @@ export async function runCore(o) {
     return finishing;
   }
   async function finishOnce(reason, detail = "", extra = {}, codeOverride = null) {
+    if (heavyWaitsFile) { // #4169: builder-run heavy waits, read before teardown removes the run TMPDIR
+      try { heavyQueueMax = Math.max(heavyQueueMax, sumWaits(await io.fs.read(heavyWaitsFile), waits).queueMax); } catch { /* no heavy step ran */ }
+    }
     await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
@@ -264,7 +285,8 @@ export async function runCore(o) {
       try { await post(["FORGE:TRAJECTORY", REGISTER_MARKER], renderTrajectory({ ...T, usage: usageLine() })); } catch { /* best effort */ }
     }
     await releaseLease(reason);
-    done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, ...extra };
+    done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0,
+      ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...extra };
     return done;
   }
   async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR) {
@@ -351,7 +373,9 @@ export async function runCore(o) {
       // #4181: every Docker resource the builder creates carries the lane's ownership labels (same batch/lane as the ledger).
       const labels = dockerLabels({ batch: o.batchId ?? "adhoc", lane: `lean-${issue}`, issue, expires: now() + LEDGER_TTL_MS }).join(" ");
       const par = verifyParallelism(); // #4182
-      try { return await io.runner({ ...args, env: { FORGE_DOCKER_LABELS: labels, ...(runTmp ? { TMPDIR: runTmp, CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), ...(toolchain?.env ?? {}) } }); }
+      // #4169: heavy shims first on PATH; the phase/issue/priority label each heavy step's slot and wait record.
+      const heavy = heavyEnv ? { ...heavyEnv, FORGE_LANE_PHASE: args.role === "builder" ? stage : String(args.role ?? "step"), FORGE_LANE_ISSUE: String(issue), FORGE_LANE_PRIORITY: String(lanePriority()) } : {};
+      try { return await io.runner({ ...args, env: { FORGE_DOCKER_LABELS: labels, ...(runTmp ? { TMPDIR: runTmp, CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), ...(toolchain?.env ?? {}), ...heavy } }); }
       catch (e) {
         const epoch = Number.isFinite(e?.resetAtEpochMs) ? e.resetAtEpochMs : null;
         if (!(e?.usageLimit === true || epoch !== null)) throw e;
@@ -391,7 +415,10 @@ export async function runCore(o) {
   const SALVAGE_NOTE = "\n\nAn earlier run on this issue stopped with uncommitted work, saved at `REF` (not on the branch). Inspect it with `git diff HEAD REF --stat` and reuse what fits the contract (`git checkout REF -- <path>`) instead of rewriting it.";
   const RERUN_NOTE = `\n\nThis is a rerun: the branch already holds commits from an earlier run. Read \`git log\` and \`git diff origin/BASE...HEAD\`, verify that work against the contract, complete what is missing, ${vcfg.mode === "ci" ? "re-run the light checks (the engine verifies on CI)" : "re-run every validate command"} and write the result file. Do not start over.`;
 
-  /** Continuous admission (#4115): while the builder runs, pause its process group when the host is over the ceiling, resume when under. */
+  /**
+   * Continuous admission (#4115): while the builder runs, pause its process group when the host is over the ceiling, resume
+   * when under. Since #4169 the ceiling is the mem/tmp floors (load average only when configured); paused time is a wait.
+   */
   function startGovernor(control) {
     if (!io.host || o.governor === false || o.admission?.enabled === false) return { stop() {} };
     const pollMs = o.governorPollMs ?? 15000, maxPauseMs = o.maxPauseMs ?? 600000;
@@ -405,12 +432,12 @@ export async function runCore(o) {
         try { ok = (await checkAdmission({ cfg: o.admission, host: io.host })).ok; } catch { ok = true; }
         const nowMs = Date.now();
         if (!ok && !paused && !forced && control.pause) { if (control.pause()) { paused = true; pausedAt = nowMs; ev({ event: "LANE_PAUSED", reason: "host over ceiling" }); onProgress({ event: "phase_paused", phase: "builder", reason: "host-busy", detail: "host over the admission ceiling; lane paused" }); } }
-        else if (ok && paused) { control.resume?.(); paused = false; forced = false; ev({ event: "LANE_RESUMED", reason: "host recovered" }); }
+        else if (ok && paused) { control.resume?.(); paused = false; forced = false; addWait(stage, nowMs - pausedAt); ev({ event: "LANE_RESUMED", reason: "host recovered" }); }
         else if (ok) forced = false;
-        else if (paused && nowMs - pausedAt >= maxPauseMs) { control.resume?.(); paused = false; forced = true; ev({ event: "LANE_RESUMED", reason: "max pause reached" }); }
+        else if (paused && nowMs - pausedAt >= maxPauseMs) { control.resume?.(); paused = false; forced = true; addWait(stage, nowMs - pausedAt); ev({ event: "LANE_RESUMED", reason: "max pause reached" }); }
       }
     })();
-    return { async stop() { stopped = true; wake?.(); clearTimeout(t); await loop; if (paused) { control.resume?.(); paused = false; } } };
+    return { async stop() { stopped = true; wake?.(); clearTimeout(t); await loop; if (paused) { control.resume?.(); paused = false; addWait(stage, Date.now() - pausedAt); } } };
   }
 
   /** A timeout restart starts a fresh session; by default it continues the implementation against the frozen contract. */
@@ -599,7 +626,6 @@ export async function runCore(o) {
     if (runTmp && runTmp !== planned) ledgerDo((l) => l.register("tmp", runTmp));
   }
   ev({ event: "RUN_START", run: `core_${issue}_${t0}`, issue, lane, path: "core", version: ENGINE_VERSION, forge_version: ENGINE_VERSION, repo });
-  let iss;
   try {
     iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels"]));
   } catch (e) { return finish("engine-error", `cannot read issue: ${e.message}`); }
@@ -691,10 +717,24 @@ export async function runCore(o) {
       if (tc?.warning) { T.anomalies.push(tc.warning); ev({ event: "TOOLCHAIN_WARNING", warning: tc.warning }); }
       for (const n of tc?.notes ?? []) T.anomalies.push(n);
     } catch (e) { T.anomalies.push(`Toolchain detection failed (host toolchain used): ${String(e?.message ?? e).slice(0, 200)}`); }
+    // ---- 2c. heavy-step shims (#4169): after the toolchain, so a heavy shim's real binary is the pinned toolchain shim ----
+    if (heavyOn) {
+      try {
+        const root = runTmp ?? join(wt, LEAN_DIR), binDir = join(root, "heavy", "bin"), path = toolchain?.env?.PATH ?? process.env.PATH ?? "";
+        const names = await (io.writeHeavyShims ?? writeHeavyShims)(binDir, { path });
+        if (names?.length) {
+          heavyWaitsFile = join(root, "heavy-waits.jsonl");
+          const pinned = /^\d+$/.test(String(process.env.FORGE_HOST_PARALLELISM ?? "").trim()) && Number(process.env.FORGE_HOST_PARALLELISM) > 0;
+          heavyEnv = { PATH: path ? `${binDir}${delimiter}${path}` : binDir, FORGE_HEAVY_WAITS: heavyWaitsFile, ...(pinned ? { FORGE_HEAVY_PARALLELISM_PINNED: "1" } : {}),
+            ...Object.fromEntries([["FORGE_HEAVY_MAX", heavyCfg.max], ["FORGE_HEAVY_STEP_MEM_MB", heavyCfg.step_mem_mb], ["FORGE_HEAVY_RESERVE_MB", heavyCfg.reserve_mb]].filter(([, v]) => Number(v) > 0).map(([k, v]) => [k, String(v)])) };
+          ev({ event: "HEAVY_SHIMS", names });
+        }
+      } catch (e) { T.anomalies.push(`Heavy-step shims not written (builder steps ungated): ${String(e?.message ?? e).slice(0, 200)}`); }
+    }
     if (typeof envSetup === "string" && envSetup.trim()) {
       let r;
       if (!io.runSetup) r = { exit: 1, stderr: "no setup effect is configured" };
-      else { try { r = await io.runSetup({ cwd: wt, command: envSetup, env: { ...(runTmp ? { TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}) } }); } catch (e) { r = { exit: 1, stderr: String(e?.message ?? e) }; } }
+      else { try { r = await heavyStep("setup", () => io.runSetup({ cwd: wt, command: envSetup, env: { ...(runTmp ? { TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}) } })); } catch (e) { r = { exit: 1, stderr: String(e?.message ?? e) }; } }
       ev({ event: "ENV_SETUP", exit: r?.exit ?? 1 });
       if (r?.exit !== 0) {
         const tail = String(r?.stderr || r?.stdout || "").trim().slice(-800);
@@ -787,20 +827,27 @@ export async function runCore(o) {
       let r;
       if (hasCommits) {
         const target = mod.parseSplitTarget(body) ?? mod.parseSplitPlan(body)?.target, testCmd = mod.parseTestCmd(body, precheckList);
-        r = target && testCmd ? await mod.reverifySplit({ wt, base, target, testCmd, runTmp, git }) : { ok: false, code: OUTCOME_CODES.SPLIT_PLAN_INVALID, reason: "rerun of a split branch without a target or test command in the issue" };
+        r = target && testCmd ? await heavyStep("split", () => mod.reverifySplit({ wt, base, target, testCmd, runTmp, git })) : { ok: false, code: OUTCOME_CODES.SPLIT_PLAN_INVALID, reason: "rerun of a split branch without a target or test command in the issue" };
         if (r.ok) {
           r = { ...r, target, testCmd, package: null, modules: {}, rest: null, grouped: false };
           T.anomalies.push("Rerun of a split branch: the existing move was re-verified; a chained remainder is not recomputed");
         }
       } else {
-        r = await mod.runSplitStep({ wt, base, issue, issueBody: body, precheckCommands: precheckList, runTmp, git, ...(o.splitMaxLines ? { maxLines: o.splitMaxLines } : {}),
-          callGrouper: async (prompt, { cwd } = {}) => {
-            await renew();
-            const rr = await callRunner({ role: "grouper", issue, cwd: cwd ?? runTmp ?? wt, model: reviewerModel, resume: null, system: GROUPING_SYSTEM, prompt, noTools: true });
-            await renew();
-            await attempt("group", 1, rr);
-            return rr?.text ?? "";
-          } });
+        let slot = await heavyAcquire("split"); // the grouper's LLM call gives the slot back while it runs (#4169)
+        try {
+          r = await mod.runSplitStep({ wt, base, issue, issueBody: body, precheckCommands: precheckList, runTmp, git, ...(o.splitMaxLines ? { maxLines: o.splitMaxLines } : {}),
+            callGrouper: async (prompt, { cwd } = {}) => {
+              try { slot?.release?.(); } catch { /* fail-open */ }
+              slot = null;
+              try {
+                await renew();
+                const rr = await callRunner({ role: "grouper", issue, cwd: cwd ?? runTmp ?? wt, model: reviewerModel, resume: null, system: GROUPING_SYSTEM, prompt, noTools: true });
+                await renew();
+                await attempt("group", 1, rr);
+                return rr?.text ?? "";
+              } finally { slot = await heavyAcquire("split"); }
+            } });
+        } finally { try { slot?.release?.(); } catch { /* fail-open */ } }
       }
       ev({ event: "SPLIT", ok: r.ok, code: r.code ?? null, grouped: Boolean(r.grouped), modules: Object.keys(r.modules ?? {}).length, rest: Object.keys(r.rest ?? {}).length });
       if (!r.ok) {
@@ -877,7 +924,9 @@ export async function runCore(o) {
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
       const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "");
       liveKeys = ["implementation"];
+      stage = "implement";
       await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);
+      stage = "fix"; // later builder rounds fix precheck, CI, structure, docs or conformance findings
       result = await readResult();
       {
         const blocked = await endIfBlocked();
@@ -900,7 +949,7 @@ export async function runCore(o) {
         const results = [];
         for (const command of precheckCommands) {
           let r;
-          try { r = await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000 }); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
+          try { r = await heavyStep("precheck", () => io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000 })); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
           results.push({ command, rc: Number.isInteger(r?.rc) ? r.rc : 1, output: String(r?.output ?? "") });
         }
         ev({ event: "PRECHECK_COMMANDS", round, results: results.map(({ command, rc }) => ({ command, rc })) });
