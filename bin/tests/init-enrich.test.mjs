@@ -223,3 +223,35 @@ describe("enrich — forwards opts.env to the api backend (issue #2024)", () => 
     assert.deepEqual(result, DRAFT);
   });
 });
+
+describe("enrich — empty repo with no remote (forge#4173)", () => {
+  it("skips the backend entirely for an empty, remote-less draft", async () => {
+    const empty = { ...DRAFT, meta: { remoteDetected: false, hasCommits: false } };
+    let spawnFnCalled = false;
+    const result = await enrich(empty, {
+      backend: "cli",
+      cwd: "/tmp/repo",
+      spawnFn: () => {
+        spawnFnCalled = true;
+        return { status: 0, stdout: JSON.stringify(DRAFT), stderr: "", error: undefined };
+      },
+    });
+    assert.equal(spawnFnCalled, false);
+    assert.equal(result, empty);
+  });
+
+  it("still enriches when the repo has commits or a remote", async () => {
+    for (const meta of [{ remoteDetected: false, hasCommits: true }, { remoteDetected: true, hasCommits: false }]) {
+      let spawnFnCalled = false;
+      await enrich({ ...DRAFT, meta }, {
+        backend: "cli",
+        cwd: "/tmp/repo",
+        spawnFn: () => {
+          spawnFnCalled = true;
+          return { status: 0, stdout: JSON.stringify(DRAFT), stderr: "", error: undefined };
+        },
+      });
+      assert.equal(spawnFnCalled, true, JSON.stringify(meta));
+    }
+  });
+});
