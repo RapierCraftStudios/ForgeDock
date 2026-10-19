@@ -1,0 +1,99 @@
+{
+  "labels": [
+    "frontend",
+    "backend",
+    "infra",
+    "needs-human"
+  ],
+  "milestones": [
+    {
+      "key": "foundation",
+      "title": "Foundation"
+    },
+    {
+      "key": "auth",
+      "title": "Auth"
+    },
+    {
+      "key": "app",
+      "title": "App"
+    }
+  ],
+  "issues": [
+    {
+      "key": "SPIKE",
+      "title": "spike: Spike: stack, layout and milestone plan ",
+      "milestone": "foundation",
+      "labels": [
+        "infra"
+      ],
+      "deps": [],
+      "body": "## Problem\n\nSpike: stack, layout and milestone plan for the SaaS.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/engineering/technical-spike.md` — new\n\n## Acceptance Criteria\n\n- [ ] Spike doc covers stack and repo layout [type:manual]\n\n## Context\n\n**Parent**: none (spike)\n\n## Dependencies\n\nNone.\n"
+    },
+    {
+      "key": "SCAFFOLD",
+      "title": "scaffold: Scaffold the Next.js + shadcn app with p",
+      "milestone": "foundation",
+      "labels": [
+        "frontend",
+        "infra"
+      ],
+      "deps": [
+        "SPIKE"
+      ],
+      "body": "## Problem\n\nScaffold the Next.js + shadcn app with pnpm workspaces.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `apps/web/package.json` — new\n2. `apps/web/app/layout.tsx` — new\n3. `pnpm-workspace.yaml` — new\n\n## Acceptance Criteria\n\n- [ ] `pnpm build` succeeds [type:unit]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SPIKE}} — needs SPIKE\n"
+    },
+    {
+      "key": "DB",
+      "title": "db: Postgres schema with RLS for tenants via",
+      "milestone": "foundation",
+      "labels": [
+        "backend"
+      ],
+      "deps": [
+        "SCAFFOLD"
+      ],
+      "body": "## Problem\n\nPostgres schema with RLS for tenants via Prisma.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `packages/db/prisma/schema.prisma` — new\n2. `packages/db/src/rls.sql` — new\n\n## Acceptance Criteria\n\n- [ ] Tenant A cannot read tenant B rows [type:unit]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SCAFFOLD}} — needs SCAFFOLD\n"
+    },
+    {
+      "key": "GOOGLE_OAUTH",
+      "title": "google_oauth: Create the Google OAuth client and store",
+      "milestone": "auth",
+      "labels": [
+        "needs-human"
+      ],
+      "deps": [
+        "SCAFFOLD"
+      ],
+      "needsHuman": true,
+      "body": "## Problem\n\nCreate the Google OAuth client and store GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/setup/google-oauth.md` — new\n\n## Acceptance Criteria\n\n- [ ] Secrets set in the deploy environment [type:manual]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SCAFFOLD}} — needs SCAFFOLD\n"
+    },
+    {
+      "key": "AUTH",
+      "title": "auth: Google sign-in via Auth.js with a mock p",
+      "milestone": "auth",
+      "labels": [
+        "backend",
+        "frontend"
+      ],
+      "deps": [
+        "DB",
+        "GOOGLE_OAUTH"
+      ],
+      "body": "## Problem\n\nGoogle sign-in via Auth.js with a mock provider for dev and CI.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `apps/web/auth.ts` — new\n2. `apps/web/app/api/auth/[...nextauth]/route.ts` — new\n\n## Acceptance Criteria\n\n- [ ] Mock provider signs in during tests [type:e2e]\n- [ ] Session cookie is httpOnly [type:api]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\nReal credentials: see #{{GOOGLE_OAUTH}} (reference only; mocks keep CI green).\n\n## Dependencies\n\nDepends on #{{DB}}, #{{GOOGLE_OAUTH}}\n"
+    },
+    {
+      "key": "DASHBOARD",
+      "title": "dashboard: Tenant dashboard with empty, loading and",
+      "milestone": "app",
+      "labels": [
+        "frontend"
+      ],
+      "deps": [
+        "AUTH",
+        "DB"
+      ],
+      "body": "## Problem\n\nTenant dashboard with empty, loading and error states.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `apps/web/app/(app)/dashboard/page.tsx` — new\n\n## Acceptance Criteria\n\n- [ ] Empty state renders with no data [type:e2e]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{AUTH}} — needs AUTH\nDepends on #{{DB}} — needs DB\n"
+    }
+  ]
+}
