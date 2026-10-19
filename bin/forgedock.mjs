@@ -2111,6 +2111,44 @@ function resolveLabelsRepo(subArgs) {
   return null;
 }
 
+/** Fixed colors for well-known domain labels (forge#4174); anything else gets DOMAIN_LABEL_DEFAULT_COLOR. */
+const DOMAIN_LABEL_COLORS = {
+  frontend: "1D76DB",
+  backend: "0E8A16",
+  infra: "5319E7",
+  design: "D4C5F9",
+  "legal-gated": "B60205",
+};
+const DOMAIN_LABEL_DEFAULT_COLOR = "EDEDED";
+
+/**
+ * Parse a `--domain a,b,c` value into domain-label entries (forge#4174).
+ * Names are trimmed and deduped (first occurrence wins). An empty name, a name
+ * over 50 characters (GitHub's label-name limit), or a missing value is an
+ * error — the caller exits before any gh call.
+ *
+ * @param {string|undefined} raw - the value after --domain
+ * @returns {{ labels?: Array<{name: string, color: string, description: string}>, error?: string }}
+ */
+function buildDomainLabels(raw) {
+  if (raw === undefined || raw.startsWith("--")) return { error: "--domain needs a comma-separated list, e.g. --domain frontend,backend" };
+  const seen = new Set();
+  const labels = [];
+  for (const part of raw.split(",")) {
+    const name = part.trim();
+    if (!name) return { error: `--domain contains an empty label name: "${raw}"` };
+    if (name.length > 50) return { error: `--domain label name exceeds 50 characters: "${name}"` };
+    if (seen.has(name)) continue;
+    seen.add(name);
+    labels.push({
+      name,
+      color: DOMAIN_LABEL_COLORS[name] ?? DOMAIN_LABEL_DEFAULT_COLOR,
+      description: `Domain: ${name}. Managed by ForgeDock.`,
+    });
+  }
+  return { labels };
+}
+
 /**
  * Idempotently create or update all ForgeDock-managed labels on a GitHub repo.
  *
@@ -2122,10 +2160,15 @@ function resolveLabelsRepo(subArgs) {
  * --force makes the call idempotent: it creates the label if absent, or updates
  * its color and description if it already exists. Safe to re-run at any time.
  *
+ * Optional per-repo domain labels (forge#4174) are appended after the
+ * manifest — see buildDomainLabels(). They are never part of bin/labels.json,
+ * so doctor's required-label check ignores them.
+ *
  * @param {string} repo - "owner/repo" string
+ * @param {Array<{name: string, color: string, description: string}>} [domainLabels]
  * @returns {{ created: number, failed: string[] }}
  */
-async function labelsSetup(repo) {
+async function labelsSetup(repo, domainLabels = []) {
   const manifestPath = join(__dirname, "labels.json");
 
   if (!existsSync(manifestPath)) {
@@ -2141,6 +2184,8 @@ async function labelsSetup(repo) {
     console.log(`${RED}Failed to parse labels.json: ${err.message}${RESET}`);
     process.exit(1);
   }
+  const manifestNames = new Set(labels.map((l) => l.name));
+  labels = labels.concat(domainLabels.filter((l) => !manifestNames.has(l.name)));
 
   console.log("");
   console.log(`${BOLD}ForgeDock Label Bootstrap${RESET}`);
@@ -3214,7 +3259,7 @@ function help() {
     ["npx forgedock gc", "Prune stale per-run scratch dirs under ~/.forge/tmp/runs (older than 6h, owner dead)"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
-    ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
+    ["npx forgedock labels [setup] [--repo owner/repo] [--domain a,b,c]", "Bootstrap ForgeDock-managed labels on a GitHub repo, plus optional per-repo domain labels (idempotent)"],
     ["npx forgedock config migrate [dir]", "Backfill missing optional sections into an existing forge.yaml (idempotent)"],
     ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
     ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
@@ -4048,19 +4093,24 @@ switch (command) {
     const subcommand = positional[1];
     if (!subcommand || subcommand === "setup" || subcommand.startsWith("--")) {
       const repo = resolveLabelsRepo(restArgs);
-      if (!repo) {
+      const domainIdx = restArgs.indexOf("--domain");
+      const domain = domainIdx === -1 ? { labels: [] } : buildDomainLabels(restArgs[domainIdx + 1]);
+      if (domain.error) {
+        console.log(`${RED}${domain.error}${RESET}`);
+        exitCode = 1;
+      } else if (!repo) {
         console.log(
           `${RED}No repository specified.${RESET}\n` +
             `  Pass ${cyan("--repo owner/repo")} or run from a directory with ${cyan("forge.yaml")}.`,
         );
         exitCode = 1;
       } else {
-        await labelsSetup(repo);
+        await labelsSetup(repo, domain.labels);
       }
     } else {
       console.log(`${RED}Unknown labels subcommand: ${subcommand}${RESET}`);
       console.log(
-        `Usage: ${CYAN}npx forgedock labels [setup] [--repo owner/repo]${RESET}`,
+        `Usage: ${CYAN}npx forgedock labels [setup] [--repo owner/repo] [--domain a,b,c]${RESET}`,
       );
       exitCode = 1;
     }
