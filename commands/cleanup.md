@@ -12,6 +12,8 @@ install: extras
 
 Scan the entire development environment for rot and fix it. This is a maintenance command — run periodically or after large orchestration batches. It covers 6 domains: stale labels, orphaned issues and dead claims boards, worktree/branch pruning, milestone hygiene, and Project board sync.
 
+Issues this command or a `dead-code` finding produces carry the `maintenance` label, so `forgedock orchestrate` dispatches them within the maintenance budget (forge.yaml `maintenance.share`, #4197), not the feature queue.
+
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
 ---
