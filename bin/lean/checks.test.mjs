@@ -4,12 +4,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { discoverChecks, scopedChecks, cacheEntry, hydrate, publish, withCacheFlags, LOCAL_CACHE } from "./checks.mjs";
 
-const TMP = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), "checks-4218-"));
+const TMP = tmpDir("checks-4218-");
 process.env.FORGE_CI_LOCAL_HOME = path.join(TMP, "forge-home");
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 const git = (repo, ...a) => execFileSync("git", ["-C", repo, ...a], { env: GIT_ENV, encoding: "utf8" });
@@ -97,7 +97,7 @@ for (const [file, reason] of [["pnpm-lock.yaml", "lockfile"], ["apps/web/tsconfi
     assert.equal(checks.length, 3);
     for (const c of checks) {
       assert.equal(c.mode, "full", `${c.kind} ${c.command}`);
-      assert.match(c.widen_reason, new RegExp(`^${reason}: ${file.replace(/\./g, "\\.")}$`));
+      assert.match(c.widen_reason, new RegExp(`^${reason}: ${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
     }
   });
 }
