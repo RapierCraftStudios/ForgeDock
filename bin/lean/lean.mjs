@@ -18,8 +18,8 @@ import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, ciFailurePrompt, ciUnavailablePrompt, syncChecks } from "./prompts.mjs";
-import { parseVerify, runCiVerify, VERIFY_MODES } from "./verify.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks } from "./prompts.mjs";
+import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES } from "./verify.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
@@ -87,6 +87,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {number} [o.ciMaxMinutes]  remote-CI wait budget (default 360); exhaustion is NOT needs-human
  * @param {"shadow"|"enforce"} [o.conformance] conformance gate mode (default shadow)
  * @param {object} [o.verify]        forge.yaml verify (verify.mjs parseVerify): mode local (default) | ci | hybrid (#4167)
+ * @param {object} [o.precheck]      {commands}: forge.yaml learned.test_commands, run in the worktree before the PR (#4240)
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
@@ -801,6 +802,35 @@ export async function runCore(o) {
     T.implement = [`${files.length} file(s)`, branch];
     T.decisions.push(`Builder verdict: ${result?.status ?? "none"}`);
 
+    // ---- 3a. declared check commands (#4240): the repo's own cheap gates (forge.yaml learned.test_commands), run locally in
+    // the worktree before review and PR; no Actions minutes. A failure goes back to the builder in-session (#4149), up to
+    // verify.max_rounds; a round with no commit or exhausted rounds is an anomaly, not a stop: CI stays the gate.
+    const precheckCommands = (Array.isArray(o.precheck?.commands) ? o.precheck.commands : []).map((c) => String(c ?? "").trim()).filter(Boolean);
+    if (precheckCommands.length && io.runCommand) {
+      for (let round = 0; ; round++) {
+        await renew();
+        const results = [];
+        for (const command of precheckCommands) {
+          let r;
+          try { r = await io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000 }); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
+          results.push({ command, rc: Number.isInteger(r?.rc) ? r.rc : 1, output: String(r?.output ?? "") });
+        }
+        ev({ event: "PRECHECK_COMMANDS", round, results: results.map(({ command, rc }) => ({ command, rc })) });
+        const failed = results.filter((r) => r.rc !== 0);
+        if (!failed.length) { if (round) T.decisions.push(`Declared check commands pass after ${round} builder fix round(s)`); break; }
+        const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
+        if (round >= vcfg.maxRounds || !sessionId) { T.anomalies.push(`Declared check command(s) still failing before the PR: ${names}`); break; }
+        T.decisions.push(`Declared check command(s) failed: ${names}; builder resumed (round ${round + 1}/${vcfg.maxRounds})`);
+        const before = String(await git(["rev-parse", "HEAD"])).trim();
+        const capped = capLogs(failed.map((f) => ({ ...f, log: f.output }))).map((f) => ({ command: f.command, rc: f.rc, output: f.log }));
+        await builder(++attemptN, precheckFailurePrompt(capped, vcfg.mode), sessionId);
+        await upsertStage("implementation");
+        result = (await readResult()) ?? result;
+        if (String(await git(["rev-parse", "HEAD"])).trim() === before) { T.anomalies.push(`Declared check command(s) failing and the builder made no new commit for them: ${names}`); break; }
+        files = await changedFiles();
+      }
+    }
+
     // ---- 3b. structure delta (forge#4159): deterministic, before the conformance review; no reviewer run of its own ----
     // A package.json edge between workspace packages the contract does not name blocks (one builder resume) in either
     // conformance mode; import-pair growth and boundary-config loosening only add one line to the reviewer prompt.
@@ -878,6 +908,7 @@ export async function runCore(o) {
         }
         ciRounds++; fixes++;
         T.decisions.push(`CI verification red (${jobs}); builder resumed with the failed logs (round ${ciRounds}/${vcfg.maxRounds})`);
+        ev({ event: "CI_FIX_ROUND", trigger, round: ciRounds, jobs: v.failures.map((f) => f.job) });
         await builder(++attemptN, ciFailurePrompt(v.failures, vcfg.mode), sessionId);
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
@@ -1092,6 +1123,34 @@ export async function runCore(o) {
       return null;
     }
     const NR_TESTS = "not reported";
+    /**
+     * #4240: a required check failed at merge (any verify mode). One CI fix round in the builder session with the failed
+     * logs, shared with ciVerify's verify.max_rounds budget; the fixed head is re-reviewed and pushed, then the wait restarts.
+     * Returns null to wait again, or a terminal result (rounds exhausted, no session, no new commit, review failure).
+     */
+    async function mergeFixRound(checks) {
+      const jobs = checks.map((c) => c.name);
+      if (ciRounds >= vcfg.maxRounds || !sessionId) {
+        return await needsHuman(`Required check(s) failed on PR #${pr}: ${jobs.join(", ")}${ciRounds ? ` (after ${ciRounds} CI fix round(s))` : ""}`, OUTCOME_CODES.CI_RED);
+      }
+      const failures = await collectFailedLogs(io, checks);
+      ciRounds++;
+      T.decisions.push(`Required check(s) failed on PR #${pr} (${jobs.join(", ")}); builder resumed with the failed logs (round ${ciRounds}/${vcfg.maxRounds})`);
+      ev({ event: "CI_FIX_ROUND", trigger: "merge", round: ciRounds, jobs, pr });
+      const before = await gitOut(["rev-parse", "HEAD"]);
+      await builder(++attemptN, ciFailurePrompt(failures, vcfg.mode), sessionId);
+      await upsertStage("implementation");
+      result = (await readResult()) ?? result;
+      if ((await gitOut(["rev-parse", "HEAD"])) === before) {
+        return await needsHuman(`Required check(s) failed on PR #${pr} (${jobs.join(", ")}) and the builder made no new commit for it; nothing merged.`, OUTCOME_CODES.CI_RED);
+      }
+      const rv = await doReview(); // never merge an unreviewed head
+      if (!rv) return await needsHuman("Reviewer returned no parseable verdict after a CI fix round.", OUTCOME_CODES.REVIEW_NO_VERDICT);
+      if (rv.fail) return await needsHuman(`Review FAIL after a CI fix round: ${rv.reason}`, OUTCOME_CODES.REVIEW_FAILED);
+      await gitPush(["push", "origin", branch]); // plain push of the fix commit: never force
+      localHead = await gitOut(["rev-parse", "HEAD"]);
+      return null;
+    }
     /** After the merge (#4179): delete the lane branch on origin; finish() deletes it locally after the worktree is gone. */
     async function deleteMergedBranch() {
       const skip = (why) => { ev({ event: "BRANCH_DELETE_SKIPPED", branch, why }); T.decisions.push(`Lane branch kept: ${why}`); };
@@ -1143,7 +1202,7 @@ export async function runCore(o) {
         // merge right after review
         T.merge = [policyText, "merged right after review"];
       } else {
-        const startedAt = now();
+        let startedAt = now();
         let pollIndex = 0, gateHead = null;
         for (;;) {
           await renew();
@@ -1154,9 +1213,17 @@ export async function runCore(o) {
           } else {
             let states = [];
             try { states = (await io.checkStates(pr)) ?? []; } catch { states = []; }
-            const st = (n) => states.find((x) => x.name === n)?.state ?? "pending";
+            // a rollup of another head (the PR before a fix push lands) counts as pending, never as this head's result
+            const current = (x) => !x.head || !localHead || String(x.head).startsWith(localHead) || localHead.startsWith(String(x.head));
+            const check = (n) => states.find((x) => x.name === n && current(x));
+            const st = (n) => check(n)?.state ?? "pending";
             const failed = required.filter((n) => st(n) === "failure");
-            if (failed.length) return await needsHuman(`Required check(s) failed on PR #${pr}: ${failed.join(", ")}`, OUTCOME_CODES.CI_RED);
+            if (failed.length) {
+              const r = await mergeFixRound(failed.map((n) => ({ name: n, url: check(n)?.url ?? null })));
+              if (r) return r;
+              startedAt = now(); pollIndex = 0; // the fixed head gets the full wait budget
+              continue;
+            }
             if (required.every((n) => st(n) === "success")) break;
           }
           if (now() - startedAt >= ciMaxMinutes * 60000) {

@@ -54,6 +54,12 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `[A-Za-z0-9_.-]`), and the implement prompt tells the builder to put them on
    every docker run/volume/network/build, use `--rm` and tear down via trap
    (#4181); `scripts/ci-local/run.mjs` labels its own network and containers.
+6a. **Declared check commands** (#4240) — forge.yaml `learned.test_commands`
+   (`engine-cli.mjs` `readPrecheckCommands`) run in the worktree after the build
+   commit via `io.runCommand` (`bash -c`, `verify.precheck_timeout_seconds`,
+   default 300; no Actions minutes). Failures resume the builder in-session
+   (`precheckFailurePrompt`, up to `max_rounds`); no commit / rounds exhausted is
+   an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
 6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
@@ -75,7 +81,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    follow-ups (`followupItems`, `pendingTracking`).
 8. **Push + PR → merge** — merge policy `required` (default) | `all` | `none`;
    base-sync merges the lane in on conflict (never rebase/force-push); merge
-   at the reviewed head → `merged`, or `ci-pending` after the CI wait.
+   at the reviewed head → `merged`, or `ci-pending` after the CI wait. A failed
+   required check (any verify mode, #4240) resumes the builder with the failed
+   logs (`collectFailedLogs`, `ciFailurePrompt`), re-reviews and pushes the fix,
+   and waits again; `ci.red` only after `max_rounds` (shared with `ciVerify`) or a
+   round with no new commit. Rollups of another head count as pending. `CI_FIX_ROUND`.
 
 ## Host parallelism (#4182)
 
@@ -169,3 +179,14 @@ Contracts may carry `decisions: [{id, choice, justification, source: doc|lint|pr
 which `validateContract` checks only when present. `forgedock stats --edge FROM:TO` /
 `--milestone M` (`bin/stats/query.mjs`) answer audit queries from these records.
 Rationale: `devdocs/decisions/4165-structure-delta-telemetry.md`.
+
+## Entry 2026-10-20 — Local-mode CI fix rounds + declared pre-PR checks (#4240)
+
+`verify.mode: local` (the default) ended `ci.red` on the first failed required check
+at merge. `lean.mjs` `mergeFixRound` now gives the merge wait the same fix rounds as
+`ciVerify` (shared `ciRounds` budget; fixed head re-reviewed before merge), and the
+build is followed by the repo's declared check commands (`learned.test_commands`;
+`scripts/ci-local.sh` only when the repo lists it, no hardcoded paths). Seams:
+`effects.mjs` `checkStates` (+`url`, `head`), `runCommand`. Cost: green path +0 LLM
+calls; each red round is one builder resume (+ one reviewer run at merge), replacing a
+`needs-human` and a manual `/fix-ci` + relaunch. `merge_wait: all` is unchanged.

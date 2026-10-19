@@ -159,6 +159,36 @@ export function readVerify(cwd = process.cwd()) {
     return sec && typeof sec === "object" ? parseVerify(sec) : undefined;
   } catch { return undefined; }
 }
+/**
+ * forge.yaml `learned.test_commands` (#4240): the repo's declared check commands, run by the core path in the lane
+ * worktree before the PR. A block list (`  test_commands:` then `    - "cmd"` or `    - cmd`); parseForgeYaml reads
+ * scalars only. undefined when absent, empty or unreadable.
+ */
+export function readPrecheckCommands(cwd = process.cwd()) {
+  let raw;
+  try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { return undefined; }
+  const out = [];
+  let inLearned = false, listIndent = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    if (/^\S/.test(line)) { inLearned = /^learned:\s*(#.*)?$/.test(line); listIndent = null; continue; }
+    if (!inLearned) continue;
+    const indent = line.length - line.trimStart().length;
+    if (listIndent === null) {
+      if (/^\s+test_commands:\s*(#.*)?$/.test(line)) listIndent = indent;
+      continue;
+    }
+    if (indent <= listIndent) { listIndent = /^\s+test_commands:\s*(#.*)?$/.test(line) ? indent : null; continue; }
+    const m = /^\s+-\s+(.*)$/.exec(line);
+    if (!m) continue;
+    let v = m[1].trim();
+    const q = /^"((?:[^"\\]|\\.)*)"\s*(#.*)?$/.exec(v) ?? /^'((?:[^']|'')*)'\s*(#.*)?$/.exec(v);
+    if (q) v = v.startsWith('"') ? q[1].replace(/\\(["\\])/g, "$1") : q[1].replace(/''/g, "'");
+    else v = v.replace(/\s+#.*$/, "").trim();
+    if (v) out.push(v);
+  }
+  return out.length ? out : undefined;
+}
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
 
 export function runDir() { return join(homedir(), ".forge", "runs"); }
@@ -591,7 +621,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -848,7 +878,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln) => runCore({ issue: n, repo, lane: ln, laneOverride, branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
     lanes = batchMod.detachedLanes({ batch, cwd, script: deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), bin: deps.laneBin, pollMs: deps.pollMs,
       laneArgs: (n, ln) => ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])] });
