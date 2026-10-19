@@ -47,10 +47,19 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
 6. **Implement** — same session; `result.json` with typed amendments
    (`applyAmendments` → `FORGE:AMENDMENT`).
-7. **Conformance** — `precheck` (deterministic: changed files vs deliverables),
-   structured review (`parseReview`), `decide` computes the verdict. Mode
-   `engine.conformance`: `shadow` (default; only unimplemented/regression
-   block) or `enforce`. Defer/post-deploy requirements become tracked
+7. **Conformance** — `precheck` (deterministic: changed files vs deliverables,
+   validate results, requirement statuses; each failure has a `kind`),
+   structured review (`parseReview`), `decide` computes the verdict. The
+   reviewer prompt carries a `reviewSkeleton` (#4160): every requirement and
+   preserve id, scope rows only for files the contract does not authorize,
+   coverage seeded with the contract's verbatim quotes, all statuses empty.
+   Completeness needs scope rows only for those unauthorized files; bare
+   evidence names resolve to the one changed file they name
+   (`resolveEvidencePath`). An incomplete reply gets one retry that lists the
+   exact problems plus the previous reply. Mode `engine.conformance`: `shadow`
+   (default; unimplemented/regression from the review block, and so do a
+   precheck `validate_failed` or `requirement_unimplemented`, before any
+   reviewer run) or `enforce`. Defer/post-deploy requirements become tracked
    follow-ups (`followupItems`, `pendingTracking`).
 8. **Push + PR → merge** — merge policy `required` (default) | `all` | `none`;
    base-sync merges the lane in on conflict (never rebase/force-push); merge
