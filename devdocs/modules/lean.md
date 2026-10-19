@@ -70,6 +70,17 @@ Terminal reasons: `merged`, `ci-pending`, `deferred`, `decomposed`, `invalid`,
 retry-at, `MAX_REQUEUES`, `DEFAULT_MAX_DEFERRALS`), relaunches one
 `engine-error`, and persists batches (`batch.mjs`) so a restart resumes.
 
+Maintenance budget (#4197, off unless forge.yaml `maintenance.enabled: true`,
+read by `engine-cli.mjs` `readMaintenance`): the CLI pulls open
+maintenance-labelled issues into the batch and classifies each from its labels;
+`orchestrate.mjs` `pickNext` admits P0/P1 features > maintenance while
+`maint + 1 <= floor(share * (started + 1))` > P2+ features > maintenance when
+idle (`when_idle`). The store gains `classes` and `dispatch: {started, maint}`
+only with the budget; maintenance it never admits ends `held` (`maintenance
+share`). `scripts/maintenance-scan.sh` is the deterministic producer
+(hotspots, package cycles via `structure-delta.sh`, dead-code tools, oversized
+docs), deduplicated by a `FORGE:MAINT:<kind>:<key>` marker.
+
 ## Other files
 
 `prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`),
