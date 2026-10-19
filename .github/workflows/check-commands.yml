@@ -44,6 +44,8 @@ on:
       - 'scripts/symbol-index.mjs'
       - 'scripts/symbol-index.test.sh'
       - 'scripts/fixtures/symbol-index/**'
+      - 'scripts/refactor-verify.sh'
+      - 'scripts/refactor-verify.test.sh'
       - 'scripts/maintenance-scan.sh'
       - 'scripts/maintenance-scan.test.sh'
       - 'scripts/review-finalize.sh'
@@ -122,6 +124,8 @@ on:
       - 'scripts/symbol-index.mjs'
       - 'scripts/symbol-index.test.sh'
       - 'scripts/fixtures/symbol-index/**'
+      - 'scripts/refactor-verify.sh'
+      - 'scripts/refactor-verify.test.sh'
       - 'scripts/maintenance-scan.sh'
       - 'scripts/maintenance-scan.test.sh'
       - 'scripts/review-finalize.sh'
@@ -421,6 +425,7 @@ jobs:
           bash scripts/code-index.test.sh
           bash scripts/structure-delta.test.sh
           bash scripts/symbol-index.test.sh
+          bash scripts/refactor-verify.test.sh
           bash scripts/maintenance-scan.test.sh
           bash scripts/review-finalize.test.sh
           bash scripts/close-parent-c3.test.sh

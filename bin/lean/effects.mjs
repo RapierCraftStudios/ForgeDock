@@ -259,9 +259,40 @@ export function makeLeanIo({ repo }) {
       for (const l of out.split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) map[k] = Number(n); }
       return map;
     },
+    /**
+     * forge#4163: forge.yaml env.setup, once per fresh lane worktree: `bash -c <command>` in cwd with the lane env.
+     * Resolves {exit, stdout, stderr} (output tails); a non-zero exit, timeout or spawn error never throws.
+     */
+    runSetup({ cwd, command, env = null, timeoutMs = 15 * 60000 }) {
+      return new Promise((res) => {
+        execFile("bash", ["-c", command], { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+          const tail = (x) => String(x ?? "").slice(-2000);
+          if (!err) return res({ exit: 0, stdout: tail(stdout), stderr: tail(stderr) });
+          const exit = Number.isInteger(err.code) ? err.code : 1;
+          const why = err.killed ? `timed out after ${Math.round(timeoutMs / 1000)}s` : typeof err.code === "string" ? err.code : "";
+          res({ exit: exit === 0 ? 1 : exit, stdout: tail(stdout), stderr: tail([stderr, why].filter(Boolean).join("\n")) });
+        });
+      });
+    },
     /** forge#4159: scripts/structure-delta.sh over base...HEAD in cwd; null on any failure (never fails a run). */
     async structureDelta({ cwd, base }) {
       try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
+    },
+    /**
+     * The target repo's own docs-move-with-code rule, when it has one (scripts/check-devdocs-freshness.sh, forge#4185),
+     * over base...HEAD in cwd. null when the repo has no such script or it cannot run (exit 2+, timeout): never blocks.
+     * Otherwise {ok, output} with the script's stdout+stderr (exit 0 = ok, exit 1 = stale docs).
+     */
+    async docsFreshness({ cwd, base }) {
+      const s = join(cwd, "scripts", "check-devdocs-freshness.sh");
+      if (!existsSync(s)) return null;
+      try {
+        const r = await pexec("bash", [s, base], { cwd, timeout: 60000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PR_BODY: "" } });
+        return { ok: true, output: String(r.stdout ?? "") };
+      } catch (e) {
+        if (e?.code !== 1) return null;
+        return { ok: false, output: `${e.stdout ?? ""}${e.stderr ?? ""}`.slice(0, 6000) };
+      }
     },
     /** #4162: processes left running inside a lane worktree (Linux /proc). */
     proc: { inDir: async (dir) => procsInDir(dir), alive: pidAlive, kill: (pid, sig) => { try { process.kill(pid, sig); } catch { /* already gone */ } } },

@@ -40,6 +40,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    is saved to `refs/forge/salvage/<N>/<ms>` (`WORKTREE_SALVAGED`) and the
    implement prompt names the ref. This covers runs that died hard (no
    teardown); a run that exits normally checkpoints its work in teardown (#4179).
+   **Toolchain + env.setup** (#4163, `toolchain.mjs`): the repo's pins
+   (`packageManager`, `.nvmrc`/`.node-version`/`.tool-versions`/`engines.node`,
+   forge.yaml `env.toolchain`) become a shim dir first on every runner PATH;
+   an unsatisfied node pin is a trajectory anomaly; `env.setup` runs once
+   before the builder, failure → `needs-human` / `env.setup_failed`.
 5. **Builder: plan → contract** — plan call writes `.forge-lean/`
    `investigation.md` + `contract.json`; `conformance.mjs` `validateContract`
    checks quotes against the issue and trusted comments; the engine freezes it
@@ -65,6 +70,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
    (`max_rounds`, then `ci.red`), slow → `ci-pending`, unavailable → local fallback;
    docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI.
+   **Docs freshness**: when the target repo has `scripts/check-devdocs-freshness.sh`,
+   the engine runs it on `base...HEAD` after implement (`io.docsFreshness`, empty
+   `PR_BODY`). Exit 1 resumes the builder once with the script's output (`docsPrompt`);
+   still failing is `needs-human` / `docs.stale`, before any PR or reviewer run. No
+   script, or exit 2+, never blocks.
 7. **Conformance** — `precheck` (deterministic: changed files vs deliverables,
    validate results, requirement statuses; each failure has a `kind`),
    structured review (`parseReview`), `decide` computes the verdict. The
@@ -166,6 +176,14 @@ Added `FORGE_HOST_PARALLELISM`: it is derived from the ledger lane count,
 injected into the runner env, named in the builder host rules, and used to cap
 ci-local slots and job parallelism.
 
+## Entry 2026-10-19 — Lane toolchain pins + env.setup (#4163)
+
+`toolchain.mjs` `prepareToolchain` (zero LLM) runs right after the worktree is
+added: pinned pm → `corepack <pm>@<ver>` (else `npx -y`) shims in
+`<run tmp>/toolchain/bin`, merged into `callRunner`'s env so the builder, its
+validate commands and git hooks resolve the pin. No pins → no env/prompt change.
+`env.setup` failure is an environment error (`env.setup_failed`), not a build failure.
+
 ## Entry 2026-10-20 — Structure delta and decision provenance telemetry (#4165)
 
 The implement-time `STRUCTURE_DELTA` stays in the run log and keeps gating
@@ -179,6 +197,16 @@ Contracts may carry `decisions: [{id, choice, justification, source: doc|lint|pr
 which `validateContract` checks only when present. `forgedock stats --edge FROM:TO` /
 `--milestone M` (`bin/stats/query.mjs`) answer audit queries from these records.
 Rationale: `devdocs/decisions/4165-structure-delta-telemetry.md`.
+
+## Entry 2026-10-20 — Account-scoped usage-limit holds (#4190)
+
+`limits.mjs` keeps a host-level store (`~/.forge/limits.json`, atomic writes) of
+`rate_limited` holds keyed by `backendIdentity({backend, env})`. A lane's
+`rate_limited` result carries `backendId`; `orchestrate.mjs` admission consults the
+hold for the identity the next lane would use, so batches on the same account share
+one hold and a lane on another account is admitted. Legacy per-batch `holdUntil` in
+`state.json` is ignored on `--resume`. CLI: `forgedock limits show|clear [<id>|--all]`
+(`engine-cli.mjs` `limitsFromCli`).
 
 ## Entry 2026-10-20 — Local-mode CI fix rounds + declared pre-PR checks (#4240)
 

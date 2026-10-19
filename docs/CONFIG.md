@@ -557,6 +557,28 @@ Each verification emits a `CI_VERIFY` run-log/telemetry event (`mode`, `round`, 
 
 **Commands that use this section**: core work-on (`forgedock run-issue`, `forgedock orchestrate`; `bin/engine-cli.mjs` `readVerify`)
 
+## `env` (OPTIONAL)
+
+Lane environment for the core work-on (#4163). With no keys set, lanes still pin the target repo's own toolchain:
+
+- **Package manager**: `package.json` `packageManager` (`pnpm|yarn|npm@x.y.z`, a `+sha…` suffix is ignored), else a `pnpm`/`yarn` line in `.tool-versions`. After the worktree is added the engine writes shims for it (`pnpm`+`pnpx`, `yarn`, or `npm`+`npx`) to `<run tmp>/toolchain/bin`. Each shim runs `corepack <pm>@<version>` (npm always via `npx -y`), or `npx -y` when corepack is not on PATH (yarn ≥ 2 via `@yarnpkg/cli-dist`). The shim dir goes first on the PATH of every runner call (builder and reviewer), so the builder's shell, its validate commands and git hooks (lefthook, husky) resolve the pinned version. `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` and `COREPACK_ENABLE_STRICT=0` are set. The builder prompt says the toolchain is pinned and not to install global shims.
+- **Node**: `.nvmrc`, else `.node-version`, else `.tool-versions` `nodejs`, else `package.json` `engines.node`. When the host `node` does not satisfy it, the run's trajectory shows a warning under **Anomalies**. Node is not switched.
+
+A repo with no pins and no `env` keys runs exactly as before: no shim dir, no env change, no prompt change.
+
+```yaml
+env:
+  toolchain: "pnpm@10.4.1"              # optional: overrides the detected package manager; "off" disables detection
+  setup: "bash scripts/reconcile-dev-db.sh"   # optional: run once per fresh lane worktree, before the builder
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `toolchain` | string | No | `<pnpm\|yarn\|npm>@<x.y.z>` replaces the detected package-manager pin; `off` disables all toolchain detection. An invalid value is ignored and recorded as an anomaly. |
+| `setup` | string | No | Shell command (`bash -c`) run once in each fresh lane worktree before the builder starts, with the lane's PATH and `TMPDIR`. Use it for environment drift the repo's migrations don't cover, for example a dev-database reconcile script. Timeout 15 min. A non-zero exit ends the lane `needs-human` with code `env.setup_failed`: an environment error, not a build failure. The builder never runs. |
+
+**Commands that use this section**: `forgedock run-issue`, `forgedock orchestrate` (core path; `bin/engine-cli.mjs` `readEnvConfig`)
+
 ---
 
 ## `build` (OPTIONAL)

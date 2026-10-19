@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
+import { laneBackendId } from "./limits.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
@@ -13,11 +14,12 @@ import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPromp
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
-import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir } from "./effects.mjs";
+import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo } from "./effects.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
-import { readAdmission, readConformanceMode } from "../engine-cli.mjs";
+import { readAdmission, readConformanceMode, readEnvConfig } from "../engine-cli.mjs";
+import { prepareToolchain } from "./toolchain.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS, readMaintenance } from "../engine-cli.mjs";
 
 const WT = "/wt/lean-7";
@@ -693,6 +695,54 @@ describe("issue edited mid-run (#4188)", () => {
     const w = world({ issueBodies: [ISSUE_BODY] });
     assert.equal((await run(w, { dir })).terminalReason, "merged");
     assert.equal(readLog(dir, 7).filter((e) => e.event === "ISSUE_EDITED").length, 0);
+  });
+});
+
+describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness.sh)", () => {
+  const dworld = (results, o = {}) => {
+    const w = world(o); const q = [...results]; w.docsCalls = [];
+    w.io.docsFreshness = async (x) => { w.docsCalls.push(x); return q.length > 1 ? q.shift() : q[0]; };
+    return w;
+  };
+  const STALE = { ok: false, output: "STALE: bin/lean/lean.mjs changed but no dossier matching it was touched (devdocs/modules/lean.md)" };
+
+  it("a stale dossier gets one builder resume with the script's output, then merges once it passes", async () => {
+    const w = dworld([STALE, { ok: true, output: "OK" }]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 3, "plan + implement + one docs resume");
+    assert.match(builders(w)[2][4], /docs freshness check[\s\S]*devdocs\/modules\/lean\.md/);
+    assert.equal(w.docsCalls[0].base, "origin/staging");
+    assert.match(traj(w).at(-1), /Docs freshness check failed; builder resumed once/);
+  });
+
+  it("still stale after the resume: needs-human docs.stale, before any PR or reviewer run", async () => {
+    const w = dworld([STALE]);
+    const r = await run(w);
+    assert.equal(r.code, "docs.stale"); assert.equal(w.prs.length, 0); assert.equal(reviewers(w).length, 0);
+    assert.equal(builders(w).length, 3);
+  });
+
+  it("no script in the repo, or it cannot run (null): no resume, the run is unchanged", async () => {
+    const w = dworld([null]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 2);
+  });
+
+  it("the effect: absent script -> null; exit 0 -> ok; exit 1 -> stale with output; exit 2 -> null", async () => {
+    const io = makeLeanIo({ repo: "o/r" });
+    const dir = tmpDir("docs-fresh-");
+    assert.equal(await io.docsFreshness({ cwd: dir, base: "origin/x" }), null);
+    mkdirSync(join(dir, "scripts"), { recursive: true });
+    const put = (body) => writeFileSync(join(dir, "scripts", "check-devdocs-freshness.sh"), `#!/usr/bin/env bash\n${body}\n`);
+    put('echo "OK: $1"; exit 0');
+    assert.deepEqual(await io.docsFreshness({ cwd: dir, base: "origin/x" }), { ok: true, output: "OK: origin/x\n" });
+    put('echo "STALE: lean.md"; exit 1');
+    const st = await io.docsFreshness({ cwd: dir, base: "origin/x" });
+    assert.equal(st.ok, false); assert.match(st.output, /STALE: lean\.md/);
+    put("echo usage >&2; exit 2");
+    assert.equal(await io.docsFreshness({ cwd: dir, base: "origin/x" }), null);
+    put('[ -z "$PR_BODY" ] && exit 0 || exit 1');
+    assert.equal((await io.docsFreshness({ cwd: dir, base: "origin/x" })).ok, true, "PR_BODY is empty: no exemption is read from the environment");
   });
 });
 
@@ -1825,6 +1875,7 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(r.terminalReason, "deferred");
     assert.equal(r.code, "rate_limited");
     assert.match(r.detail, /resets at 8:30pm \(Asia\/Kolkata\)/);
+    assert.equal(r.backendId, laneBackendId(process.env), "#4190: the hold names the account that hit the limit");
     assert.equal(w.edits.some((e) => e.includes("needs-human")), false);
     assert.equal(traj(w).length, 0, "no trajectory comment for a deferral");
     assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");
@@ -2885,5 +2936,105 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.equal(r.terminalReason, "merged");
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 1);
     assert.match(traj(w)[0], /builder made no new commit for them/);
+  });
+});
+
+describe("toolchain pins and env.setup at lane setup (#4163)", () => {
+  /** Real detection over the fake worktree files; shim writes are recorded, npx is the only launcher on the fake host. */
+  const pinned = (w, files, { node = "v26.7.0" } = {}) => {
+    for (const [f, t] of Object.entries(files)) w.files[`${WT}/${f}`] = typeof t === "string" ? t : JSON.stringify(t);
+    w.shims = [];
+    w.io.prepareToolchain = (a) => prepareToolchain({ ...a, basePath: "/host/bin", mkdirp: async () => {}, writeShim: async (p, c) => { w.shims.push([p, c]); },
+      find: (n) => (n === "npx" ? "/host/bin/npx" : null), hostNode: () => node });
+    return w;
+  };
+  const withSetup = (w, exit = 0) => { w.setups = []; w.io.runSetup = async (a) => { w.setups.push(a); w.seq.push("setup"); return { exit, stdout: "", stderr: exit ? "role app_user does not exist" : "" }; }; return w; };
+
+  it("R1: a pinned packageManager puts the shim dir first on PATH for every runner call and tells the builder", async () => {
+    const w = pinned(world(), { "package.json": { packageManager: "pnpm@10.4.1" } });
+    const dir = tmpDir("core-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const bin = `${WT}/.forge-lean/toolchain/bin`;
+    assert.deepEqual(w.shims.map(([p]) => p).sort(), [`${bin}/pnpm`, `${bin}/pnpx`]);
+    assert.match(w.shims.find(([p]) => p.endsWith("/pnpm"))[1], /exec '\/host\/bin\/npx' -y -p 'pnpm@10\.4\.1' pnpm "\$@"/);
+    assert.ok(w.envs.length >= 3);
+    for (const e of w.envs) { assert.equal(e?.PATH, `${bin}:/host/bin`); assert.equal(e?.COREPACK_ENABLE_DOWNLOAD_PROMPT, "0"); }
+    for (const b of builders(w)) assert.match(b[4], /pinned this repo's toolchain on PATH \(pnpm@10\.4\.1 \(package\.json packageManager\)\)\. Use it as is: do not install global shims/);
+    assert.match(traj(w)[0], /Toolchain pinned on the runner PATH: pnpm@10\.4\.1/);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "TOOLCHAIN_PINNED"));
+  });
+
+  it("R1: the shim dir lives in the per-run tmp and merges with TMPDIR", async () => {
+    const w = pinned(world(), { "package.json": { packageManager: "pnpm@10.4.1" } });
+    w.io.runTmp = { prune: async () => {}, path: (id) => `/rt/${id}`, make: async (_i, id) => `/rt/${id}`, remove: async () => true };
+    await run(w);
+    const e = w.envs[0];
+    assert.match(e.TMPDIR, /^\/rt\/7-/); assert.equal(e.CLAUDE_CODE_TMPDIR, e.TMPDIR);
+    assert.equal(e.PATH, `${e.TMPDIR}/toolchain/bin:/host/bin`);
+  });
+
+  it("R2: a node pin the host does not satisfy shows a clear warning in the trajectory", async () => {
+    const w = pinned(world(), { ".nvmrc": "18.19.0\n" });
+    const dir = tmpDir("core-");
+    await run(w, { dir });
+    assert.match(traj(w)[0], /\*\*Anomalies\*\*[\s\S]*host node v26\.7\.0 does not satisfy the \.nvmrc pin "18\.19\.0"/);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "TOOLCHAIN_WARNING"));
+    assert.ok(w.envs.every((e) => e?.PATH === undefined), "a node pin alone changes no runner PATH");
+    assert.match(traj(w)[0], /Toolchain pins detected \(no shim\): node 18\.19\.0 \(\.nvmrc\)/);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "TOOLCHAIN_PINNED"));
+    for (const b of builders(w)) assert.match(b[4], /pinned this repo's toolchain on PATH \(node 18\.19\.0 \(\.nvmrc\)\)/);
+  });
+
+  it("R3: env.setup runs exactly once, in the fresh worktree, before the builder, with the toolchain env", async () => {
+    const w = withSetup(pinned(world(), { "package.json": { packageManager: "pnpm@10.4.1" } }));
+    const r = await run(w, { envSetup: "bash scripts/reconcile-dev-db.sh" });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.setups.length, 1);
+    assert.equal(w.setups[0].cwd, WT); assert.equal(w.setups[0].command, "bash scripts/reconcile-dev-db.sh");
+    assert.equal(w.setups[0].env.PATH, `${WT}/.forge-lean/toolchain/bin:/host/bin`);
+    assert.ok(w.seq.indexOf("setup") >= 0 && w.seq.indexOf("setup") < w.seq.indexOf("builder"), w.seq.join(","));
+    assert.equal(w.seq.filter((x) => x === "setup").length, 1);
+  });
+
+  it("R3: an env.setup failure ends needs-human as an environment error (env.setup_failed), never a build failure", async () => {
+    const w = withSetup(world(), 3);
+    const dir = tmpDir("core-");
+    const r = await run(w, { dir, envSetup: "bash scripts/reconcile-dev-db.sh" });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, OUTCOME_CODES.ENV_SETUP_FAILED);
+    assert.equal(OUTCOME_CODES.ENV_SETUP_FAILED, "env.setup_failed");
+    assert.equal(builders(w).length, 0, "the builder never runs");
+    assert.equal(w.prs.length, 0);
+    const nh = w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN"));
+    assert.match(nh, /Environment error \(not a build failure\)/); assert.match(nh, /role app_user does not exist/);
+    assert.equal(readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL")?.code, "env.setup_failed");
+    assert.match(readFileSync(new URL("../../docs/OUTCOME-CODES.md", import.meta.url), "utf8"), /`env\.setup_failed`/);
+  });
+
+  it("R4: a repo without pins and without env config changes nothing: env, prompts, events, no setup call", async () => {
+    const base = world();
+    await run(base);
+    const w = withSetup(pinned(world(), {}));
+    const dir = tmpDir("core-");
+    await run(w, { dir });
+    assert.deepEqual(w.envs, base.envs);
+    assert.ok(w.envs.every((e) => e?.PATH === undefined && e?.COREPACK_ENABLE_DOWNLOAD_PROMPT === undefined));
+    assert.deepEqual(builders(w).map((b) => b[4]), builders(base).map((b) => b[4]));
+    assert.equal(builderPlanPrompt(7), builderPlanPrompt(7, { toolchain: null }));
+    assert.equal(builderImplementPrompt(), builderImplementPrompt("local", {}));
+    assert.doesNotMatch(builderPlanPrompt(7), /pinned/);
+    assert.deepEqual(w.shims, []); assert.deepEqual(w.setups, []);
+    assert.ok(!readLog(dir, 7).some((e) => /^TOOLCHAIN|^ENV_SETUP/.test(e.event)));
+    assert.doesNotMatch(traj(w)[0], /Toolchain|env\.setup/);
+  });
+
+  it("readEnvConfig reads forge.yaml env.toolchain / env.setup; absent gives {}", () => {
+    const d = tmpDir("envcfg-");
+    assert.deepEqual(readEnvConfig(d), {});
+    writeFileSync(join(d, "forge.yaml"), 'env:\n  toolchain: "pnpm@10.4.1"\n  setup: "bash scripts/db.sh"\n');
+    assert.deepEqual(readEnvConfig(d), { toolchainOverride: "pnpm@10.4.1", envSetup: "bash scripts/db.sh" });
+    writeFileSync(join(d, "forge.yaml"), "branches:\n  staging: staging\n");
+    assert.deepEqual(readEnvConfig(d), {});
   });
 });
