@@ -3,8 +3,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { writeFileSync } from "node:fs";
-import { runCore, contractHash } from "./lean.mjs";
+import { writeFileSync, existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
+import { makeLedger } from "./ledger.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt } from "./prompts.mjs";
@@ -52,7 +54,7 @@ function world(o = {}) {
     contract: o.contract ?? CONTRACT, issueComments: o.issueComments, issueStates: o.issueStates,
     changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], reviews: [...(o.reviews ?? [])], waits: [...(o.waits ?? [])], clock: 0,
     result: o.result ?? { status: "fixed", summary: "fixed foo", evidence: [], tests: ["test/foo.test.js"] },
-    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], pushes: 0, pushErrors: [...(o.pushErrors ?? [])], commentErrors: [...(o.commentErrors ?? [])], dirty: o.dirty ?? false, lastSubject: o.lastSubject ?? "", prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], mergeInProgress: false, markers: false, mergeAttempts: 0,
+    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], pushes: 0, pushErrors: [...(o.pushErrors ?? [])], commentErrors: [...(o.commentErrors ?? [])], dirty: o.dirty ?? false, lastSubject: o.lastSubject ?? "", prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], mergeInProgress: false, markers: false, mergeAttempts: 0, branchDeletes: [],
     stages: { ...STAGE_MD, ...(o.stages ?? {}) }, builderN: 0,
   };
   const put = (name, text) => { const p = `${WT}/.forge-lean/${name}`; if (w.files[p] !== text) w.mtimes[p] = Date.now(); w.files[p] = text; };
@@ -88,6 +90,7 @@ function world(o = {}) {
       if (a[0] === "rev-parse" && a[1] === "--git-path") return "/repo/.git/info/exclude";
       if (a[0] === "status" && a[1] === "--porcelain") return w.dirty ? " M src/foo.js\n" : "";
       if (a[0] === "log" && a.includes("--format=%s")) return w.lastSubject;
+      if (a[0] === "push" && a.includes("--delete")) { w.branchDeletes.push(a.at(-1)); w.seq.push("delete-remote-branch"); return ""; }
       if (a[0] === "push") { w.pushes++; if (w.pushErrors.length) { const m = w.pushErrors.shift(); throw Object.assign(new Error(m), { stderr: m }); } }
       if (a[0] === "merge" && a[1] === "--no-edit") {
         const r = w.mergeResults.shift() ?? "clean";
@@ -1162,7 +1165,7 @@ describe("base-sync (#4100)", () => {
     const g = gitCalls(w);
     assert.ok(g.some((x) => x[0] === "fetch" && x[1] === "origin" && x[2] === "staging"));
     assert.ok(g.some((x) => x[0] === "merge" && x[1] === "--no-edit" && x[2] === "origin/staging"));
-    assert.equal(g.filter((x) => x[0] === "push").length, 2, "initial push plus the sync push");
+    assert.equal(g.filter((x) => x[0] === "push" && !x.includes("--delete")).length, 2, "initial push plus the sync push");
     assert.match(syncComment(w), /## Base Sync[\s\S]*clean merge[\s\S]*not required \(conflict-free base merge\)/);
     assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
     assert.match(traj(w)[0], /\| Base Sync \| 1 sync\(s\) \|/);
@@ -1587,7 +1590,7 @@ describe("batch robustness (#4112-#4115)", () => {
     const w = world({ pushErrors: Array(10).fill("fatal: the remote end hung up unexpectedly\nerror: RPC failed; HTTP 503") });
     const r = await run(w);
     assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "push.transient");
-    assert.equal(w.pushes, 4);
+    assert.equal(w.pushes, 8, "4 for the PR push, then 4 by the exit checkpoint that never discards unpushed work (#4179)");
     assert.equal(w.prs.length, 0);
   });
 
@@ -1595,8 +1598,9 @@ describe("batch robustness (#4112-#4115)", () => {
     for (const msg of ["remote: error: GH006: Protected branch update failed for refs/heads/x", "fatal: unable to access: The requested URL returned error: 403", "! [remote rejected] x -> x (pre-receive hook declined)"]) {
       const w = world({ pushErrors: [msg, msg, msg] });
       const r = await run(w);
-      assert.equal(w.pushes, 1, msg);
+      assert.equal(w.pushes, 2, `${msg}: one rejected PR push, one rejected exit checkpoint (#4179), no retries`);
       assert.equal(r.terminalReason, "needs-human");
+      assert.equal(w.calls.filter((c) => c[1] === "worktree" && c[2] === "remove").length, 1, "the unpushed worktree is kept: only the setup remove ran");
     }
   });
 
@@ -1917,5 +1921,149 @@ describe("large diffs never reach argv (#4129)", () => {
     assert.equal(OUTCOME_CODES.CLI_SPAWN_FAILED, "cli.spawn_failed");
     const { readFileSync } = await import("node:fs");
     assert.match(readFileSync(new URL("../../docs/OUTCOME-CODES.md", import.meta.url), "utf8"), /`cli\.spawn_failed`/);
+  });
+});
+
+describe("lane resource ledger + teardown on every exit path (#4179)", () => {
+  /** A world with a real on-disk ledger, fake docker/kill, a run tmp with a known path and a builder that reports its pid + a container. */
+  const ledgered = (o = {}) => {
+    const w = world(o);
+    const root = tmpDir("ledger-");
+    w.ledgerRoot = root; w.docker = []; w.killed = []; w.snapshots = []; w.tmpRemoved = [];
+    w.io.ledger = (opts) => makeLedger({ root, ...opts });
+    w.io.docker = async (a) => { w.docker.push(a); return ""; };
+    w.io.killGroup = async (pid, marker) => { w.killed.push([pid, marker]); return true; };
+    w.io.runTmp = { prune: async () => {}, path: (id) => `/home/x/.forge/tmp/runs/${id}`, make: async (_i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async (d) => { w.tmpRemoved.push(d); return true; } };
+    w.ledgerFile = join(root, o.batch ?? "adhoc", "lean-7.json");
+    const r0 = w.io.runner;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") {
+        c.onSpawn?.({ pid: 4242, spawnfile: "/usr/bin/claude" });
+        w.snapshots.push(JSON.parse(readFileSync(w.ledgerFile, "utf8"))); // what a crash right now would leave behind
+        if (o.during) await o.during(w, c);
+      }
+      const r = await r0(c);
+      if (c.role === "builder" && !/PLANNING ONLY/.test(c.prompt) && w.files[`${WT}/.forge-lean/result.json`]) {
+        const j = JSON.parse(w.files[`${WT}/.forge-lean/result.json`]);
+        w.files[`${WT}/.forge-lean/result.json`] = JSON.stringify({ ...j, resources: { containers: ["lean7-testpg"], volumes: ["lean7-pgdata", "bad name; rm -rf /"] } });
+      }
+      return r;
+    };
+    return w;
+  };
+  const gitIdx = (w, pred) => { let i = -1; w.calls.forEach((c, k) => { if (c[0] === "git" && pred(c.slice(1))) i = k; }); return i; };
+  /** The exit teardown: the last two worktree calls are `remove --force <wt>` then `prune`; the ledger file is gone. */
+  const tornDown = (w, label) => {
+    const wtCalls = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree");
+    assert.deepEqual(wtCalls.at(-2), ["git", "worktree", "remove", "--force", WT], `${label}: worktree removed`);
+    assert.deepEqual(wtCalls.at(-1), ["git", "worktree", "prune"], `${label}: then pruned`);
+    assert.equal(existsSync(w.ledgerFile), false, `${label}: ledger cleared`);
+  };
+
+  it("while the lane runs, the ledger on disk lists worktree, branch, run tmp and builder pid with owner/batch/lane/issue/created/expires (survives a crash)", async () => {
+    const w = ledgered({ batch: "b1" });
+    await run(w, { batchId: "b1" });
+    const snap = w.snapshots.at(-1);
+    for (const k of ["owner", "batch", "lane", "issue", "created", "expires"]) assert.ok(snap[k] != null, `ledger has ${k}`);
+    assert.equal(snap.batch, "b1"); assert.equal(snap.lane, "lean-7"); assert.equal(snap.issue, 7); assert.ok(snap.expires > snap.created);
+    const kinds = snap.resources.map((r) => `${r.kind}:${r.value}`);
+    for (const k of [`worktree:${WT}`, "branch:feat/issue-7-lean", "pid:4242"]) assert.ok(kinds.includes(k), `${k} in ${kinds}`);
+    assert.ok(kinds.some((k) => k.startsWith("tmp:/home/x/.forge/tmp/runs/7-")));
+    assert.equal(snap.resources.find((r) => r.kind === "pid").marker, "claude");
+    // a crash at this point leaves exactly this file: a fresh reader still sees every resource
+    const crashed = tmpDir("ledger-crash-");
+    const l = makeLedger({ root: crashed, batch: "b1", lane: "lean-7", owner: "x", issue: 7 });
+    for (const r of snap.resources) l.register(r.kind, r.value);
+    assert.deepEqual(makeLedger({ root: crashed, batch: "b1", lane: "lean-7", issue: 7 }).entries().map((r) => r.kind).sort(), ["branch", "pid", "tmp", "worktree"]);
+  });
+
+  it("merged: remote branch deleted after the merge, worktree removed + pruned, local branch deleted, reported docker resources removed, ledger cleared", async () => {
+    const w = ledgered();
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(w.branchDeletes, ["feat/issue-7-lean"]);
+    assert.ok(w.seq.indexOf("delete-remote-branch") > w.seq.indexOf("merge"), "deleted only after the merge");
+    tornDown(w, "merged");
+    const rm = gitIdx(w, (a) => a[0] === "worktree" && a[1] === "remove"), bd = gitIdx(w, (a) => a[0] === "branch" && a[1] === "-D");
+    assert.ok(bd > rm, "local branch deleted after its worktree is gone");
+    assert.deepEqual(w.docker, [["rm", "-f", "lean7-testpg"], ["volume", "rm", "lean7-pgdata"]], "only well-formed names the builder reported");
+    assert.equal(w.tmpRemoved.length, 1);
+    assert.equal(gitIdx(w, (a) => a[0] === "commit"), -1, "a merged lane is never checkpointed");
+  });
+
+  it("an open PR using the lane branch as head or base keeps it (remote and local)", async () => {
+    for (const side of ["--head", "--base"]) {
+      const w = ledgered();
+      const g = w.io.gh; let merged = false;
+      w.io.gh = async (a) => {
+        if (a[0] === "pr" && a[1] === "merge") merged = true;
+        if (merged && a[0] === "pr" && a[1] === "list" && a[a.indexOf(side) + 1] === "feat/issue-7-lean") return JSON.stringify([{ number: 99 }]);
+        return g(a);
+      };
+      assert.equal((await run(w)).terminalReason, "merged");
+      assert.deepEqual(w.branchDeletes, [], side);
+      assert.equal(gitIdx(w, (a) => a[0] === "branch" && a[1] === "-D"), -1, side);
+    }
+  });
+
+  it("main, staging, milestone/* and anything but the issue's own lane branch are never deletion targets", () => {
+    const ctx = { issue: 7, lane: "staging", branches: { default: "main", staging: "staging" }, defaults: ["main"] };
+    for (const b of ["main", "master", "staging", "milestone/x", "milestone/adaptive", "feat/issue-8-lean", "", null]) assert.equal(isProtectedLaneBranch(b, ctx), true, String(b));
+    assert.equal(isProtectedLaneBranch("feat/issue-7-lean", ctx), false);
+    assert.equal(isProtectedLaneBranch("feat/issue-7-lean", { ...ctx, lane: "feat/issue-7-lean" }), true, "never the lane itself");
+    assert.equal(isProtectedLaneBranch("feat/issue-7-lean", { ...ctx, defaults: ["feat/issue-7-lean"] }), true, "never a default branch");
+  });
+
+  const exits = {
+    invalid: { o: { changed: [], result: { status: "invalid", summary: "not a bug", evidence: ["src/foo.js:3 already guards null"], tests: [] } }, reason: "invalid" },
+    "needs-human": { o: { waits: [{ rc: 1, text: "lint failed" }] }, extra: { mergeWait: "all" }, reason: "needs-human" },
+    "engine-error": { o: { during: (w, c) => { if (!/PLANNING ONLY/.test(c.prompt)) throw new Error("boom"); } }, reason: "engine-error" },
+    deferred: { o: { during: (w, c) => { if (!/PLANNING ONLY/.test(c.prompt)) throw Object.assign(new Error("session limit"), { usageLimit: true, resetAtEpochMs: 1e13 }); } }, reason: "deferred" },
+  };
+  for (const [name, x] of Object.entries(exits)) {
+    it(`${name}: teardown runs (worktree remove --force + prune, pid killed, docker removed, ledger cleared); no branch is deleted on origin`, async () => {
+      const w = ledgered(x.o);
+      const r = await run(w, x.extra ?? {});
+      assert.equal(r.terminalReason, x.reason);
+      tornDown(w, name);
+      assert.deepEqual(w.branchDeletes, []);
+      assert.equal(w.tmpRemoved.length, 1);
+    });
+  }
+
+  it("an unmerged lane with uncommitted work is committed and pushed to the lane branch BEFORE its worktree is removed", async () => {
+    const w = ledgered({ dirty: true, waits: [{ rc: 1, text: "lint failed" }] });
+    const r = await run(w, { mergeWait: "all" });
+    assert.equal(r.terminalReason, "needs-human");
+    const commit = gitIdx(w, (a) => a[0] === "commit" && a.some((x) => /checkpoint after exit \(needs-human\)/.test(x)));
+    const push = gitIdx(w, (a) => a[0] === "push" && a.includes("feat/issue-7-lean") && !a.includes("--delete"));
+    const rm = gitIdx(w, (a) => a[0] === "worktree" && a[1] === "remove");
+    assert.ok(commit > 0 && push > commit && rm > push, `commit ${commit} < push ${push} < remove ${rm}`);
+    tornDown(w, "dirty needs-human");
+  });
+
+  it("a checkpoint that cannot push keeps the worktree and leaves worktree + branch listed in the ledger", async () => {
+    const msg = "remote: error: GH006: Protected branch update failed for refs/heads/x";
+    const w = ledgered({ dirty: true, pushErrors: [msg, msg, msg] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(w.calls.filter((c) => c[1] === "worktree" && c[2] === "remove").length, 1, "only the setup remove ran");
+    const left = JSON.parse(readFileSync(w.ledgerFile, "utf8")).resources.map((x) => x.kind).sort();
+    assert.deepEqual(left, ["branch", "worktree"]);
+  });
+
+  it("SIGTERM/SIGINT: the registered teardown checkpoints, removes the worktree, clears the ledger, releases the lease, ends deferred run.interrupted", async () => {
+    for (const sig of ["SIGTERM", "SIGINT"]) {
+      let td = null, out = null;
+      const w = ledgered({ dirty: true, during: async (w2, c) => { if (!/PLANNING ONLY/.test(c.prompt) && !out) out = await td(sig); } });
+      w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } };
+      const r = await run(w, { onTeardown: (fn) => { td = fn; } });
+      assert.equal(out.terminalReason, "deferred", sig); assert.equal(out.code, "run.interrupted");
+      assert.equal(r, out, "the run's own later finish returns the same result (idempotent)");
+      assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");
+      assert.ok(gitIdx(w, (a) => a[0] === "commit") > 0, "uncommitted work checkpointed");
+      assert.deepEqual(w.killed, [[4242, "claude"]], "the builder's process group is signalled");
+      tornDown(w, sig);
+    }
   });
 });
