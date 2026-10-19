@@ -384,7 +384,7 @@ forge.yaml `execution:` (`execution.mjs` `parseExecution`, read by `engine-cli.m
 `readExecution`): `mode` local (default) | remote | hybrid, `max_remote` (default 0),
 `provider` (default `container` off local), `image`, `secrets` (comma-separated env
 names). `placement` is `remote` only for `mode: remote` with `max_remote >= 1`;
-`hybrid` stays local until #4256. Absent or local config builds lanes with
+`hybrid` is placed per lane by `placeLane` (#4256). Absent or local config builds lanes with
 `batch.mjs` `detachedLanes` exactly as before.
 
 A provider is `{name, idFor, start, status, fetchResult, teardown}` over a JSON
@@ -444,3 +444,24 @@ with settled + running usage. On refusal, `on_budget: stop` holds the rest
 (`ctx.remote` false, composite lanes in `runBatch`). `formatTable` adds
 `sbx-min`/`sbx-$` only when a row has `sandbox`; `formatSandboxSummary` prints the
 totals and the budget. Rationale: `devdocs/decisions/4255-sandbox-cost-budget.md`.
+
+## Entry 2026-10-20 — Hybrid placement (#4256)
+
+`execution.mode: hybrid` places each lane with the pure `placeLane({exec,
+verifyMode, labels, weight, headroom}) -> {where, reason}` (`execution.mjs`).
+Rules, in order: a non-hybrid mode keeps `placement()`; `max_remote` 0 → local;
+`verify.mode: ci` → local (validation is billed on CI already); docs-only labels →
+local; heavy validation → remote; a host without headroom → remote; otherwise local.
+`validationWeight` (declared check commands through heavy.mjs `classifyStep`,
+multi-ecosystem toolchain markers, the `detectPins` package manager) is read once
+per batch. `hostHeadroom` (admission memory floor + one heavy step, optional load
+ceiling) is a fresh synchronous snapshot per decision.
+
+`runBatch` wires hybrid like remote plus detached host lanes and passes
+`remote.place` and `remote.fallbackLocal`. In `orchestrate`, a lane placed remote
+with `max_remote` running, or refused by the budget, takes the host path instead
+of waiting or stopping. Remote mode is unchanged. The final `{where, reason}` is
+on the run record and the row, and in `ctx.placement`. The lane gets it as
+`run-issue --placement/--placement-reason`, and `runCore` `o.placement` writes it
+into FORGE:STATE (`placement: {where, reason, mode}`) and a trajectory decision.
+Cost: 0 LLM calls. Rationale: `devdocs/decisions/4256-hybrid-placement.md`.

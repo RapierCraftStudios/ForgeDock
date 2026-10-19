@@ -607,7 +607,7 @@ execution:
 
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
-| `mode` | string | No | `local` (default): lanes are detached host processes, as before. `remote`: lanes run in sandboxes of `provider`. `hybrid`: parsed; lanes stay local until hybrid placement lands (forge#4256). |
+| `mode` | string | No | `local` (default): lanes are detached host processes, as before. `remote`: lanes run in sandboxes of `provider`. `hybrid`: each lane is placed from facts (forge#4256, below). |
 | `max_remote` | integer | No | Remote lanes of the batch that may run at once. They take no slot of the host lane cap (`orchestration.global_parallel`, `forgedock sched cap`); the batch `--parallel` still applies. `0` (default) keeps lanes local. |
 | `provider` | string | No | `container` (reference: an ephemeral local container), `remote` (a runner pool or remote session over HTTP, forge#4254) or `local`. The default is `container` off `local` mode; `remote` is used only when named. Unknown names fail the batch start. |
 | `image` | string | No | Container provider image; it must provide `git` and `forgedock`. Started with `--pull never`. |
@@ -635,6 +635,21 @@ execution:
 | `DELETE /sandboxes/:id` | Teardown; `404` counts as torn down |
 
 **Start failures** (every provider): a sandbox that cannot start ends the lane `needs-human` with code `sandbox.start_failed`, not relaunched and not counted by the engine-error breaker; a capacity error ends it `deferred` (`sandbox.capacity`, backoff, bounded by `orchestration.max_deferrals`). See docs/OUTCOME-CODES.md. `forgedock gc --apply --sandboxes` tears a stale remote sandbox down through the same API (the checkout's forge.yaml `execution`).
+
+**Hybrid placement** (`mode: hybrid`, forge#4256, `bin/lean/execution.mjs` `placeLane`, no model call). Each lane is placed when it is admitted. The first matching rule wins:
+
+1. `max_remote: 0` → local.
+2. `verify.mode: ci` → local. Heavy validation already runs, and is billed, on CI, so the lane is not billed twice.
+3. A docs-only lane (issue label `docs`, `documentation` or `type:docs`) → local.
+4. Heavy expected validation → remote. This means a declared check command (`learned.test_commands`) is a type check, linter, test runner or build, or the repo has a heavy toolchain marker: `tsconfig.json`, an eslint config, a package.json `test`/`lint`/`typecheck`/`build` script, `Cargo.toml`, `go.mod`, `pyproject.toml`/`setup.cfg`/`pytest.ini`, `pom.xml` or `build.gradle`.
+5. A host without headroom → remote. "Without headroom" means MemAvailable is below `engine.min_free_mem_mb` + `engine.heavy_step_mem_mb`, or the load per core is above `engine.max_load_per_core` when that is set.
+6. Otherwise → local.
+
+A lane placed remote runs on the host instead when `max_remote` remote lanes are already running, or when the execution budget refuses it. In hybrid mode this happens whatever `on_budget` says. The decision `{where, reason}` (for example `fallback to local: max_remote 4 reached (heavy validation: tsc)`) is recorded:
+
+- in the batch row (`placement`);
+- in the trajectory (`Placement: ...`);
+- in the lane's FORGE:STATE as `placement: {where, reason, mode}`. The lane gets it as `run-issue --placement <local|remote> --placement-reason <text>`.
 
 **Cost and budget:** every remote lane's sandbox minutes and estimated cost (the provider's own usage report, e.g. the remote provider's `/usage` minutes, else wall-clock minutes × `cost_per_minute`) land in its row (`sandbox: {minutes, cost_usd, attempts}`, summed over relaunches), in `report.json`, in the printed table (`sbx-min`, `sbx-$` next to the token `cost`, shown only when a lane used a sandbox), in a `sandbox:` summary line with the budget state, and in FORGE:TELEMETRY as one `sandbox_usage` event per lane. The caps are plain arithmetic, no model call. The batch total is kept in the batch `state.json` and the day total in the host-day store, so both survive `--resume` and a schedd restart.
 

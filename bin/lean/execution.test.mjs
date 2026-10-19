@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { parseExecution, placement, scopedEnv, providerLanes, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
+import { parseExecution, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate, formatTable, formatSandboxSummary } from "./orchestrate.mjs";
@@ -50,7 +50,7 @@ describe("execution config (#4253)", () => {
     assert.equal(parseExecution({ mode: "remote", provider: "My Provider" }).provider, "container");
   });
 
-  it("placement: remote only for mode remote with max_remote >= 1; hybrid stays local until #4256", () => {
+  it("placement: remote only for mode remote with max_remote >= 1; hybrid is placed per lane by placeLane (#4256)", () => {
     assert.equal(placement(parseExecution({})), "local");
     assert.equal(placement(parseExecution({ mode: "remote", max_remote: "0" })), "local");
     assert.equal(placement(parseExecution({ mode: "hybrid", max_remote: "3" })), "local");
@@ -302,7 +302,7 @@ describe("runBatch wiring (#4253)", () => {
     const work = tmpDir("exec-cli-local-");
     const stub = join(work, "stub.mjs");
     writeFileSync(stub, `import { writeFileSync } from "node:fs"; const a = process.argv.slice(2); writeFileSync(a[a.indexOf("--result-file") + 1], JSON.stringify({ terminalReason: "merged", pr: 7 }));\n`);
-    for (const execution of [undefined, parseExecution({ mode: "local", max_remote: "4" }), parseExecution({ mode: "hybrid", max_remote: "4" })]) {
+    for (const execution of [undefined, parseExecution({ mode: "local", max_remote: "4" }), parseExecution({ mode: "hybrid", max_remote: "0" })]) {
       const prov = fakeProvider();
       const res = await quiet(() => orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], base(work, { batchId: `bl-${execution?.mode ?? "absent"}`, laneScript: stub, execution, sandboxProvider: prov })));
       assert.deepEqual(res.rows.map((r) => [r.issue, r.outcome, r.pr]), [[1, "merged", 7]]);
@@ -457,5 +457,127 @@ describe("execution budget and sandbox cost (#4255)", () => {
     assert.match(rep.report, /sbx-min/);
     assert.deepEqual(events.filter((e) => e.event === "SANDBOX_USAGE").map((e) => [e.issue, e.minutes, e.cost_usd, e.batch]), [[1, 5, 0.1, "bc1"], [2, 10, 0.2, "bc1"]]);
     assert.equal(Object.keys(JSON.parse(readFileSync(file, "utf8")).days[new Date().toISOString().slice(0, 10)]).length, 2);
+  });
+});
+
+describe("hybrid placement (#4256)", () => {
+  const hy = (max = "2") => parseExecution({ mode: "hybrid", max_remote: max });
+  const HEAVY = { heavy: true, signals: ["tsc", "eslint"] }, LIGHT = { heavy: false, signals: [] };
+  const ROOMY = { ok: true, detail: "" }, BUSY = { ok: false, detail: "mem 900 MB < 4096 MB" };
+
+  it("placeLane is pure and decides from the facts in order", () => {
+    const cases = [
+      [{ exec: parseExecution({}) }, "local", "mode local"],
+      [{ exec: parseExecution({ mode: "remote", max_remote: "3" }), weight: LIGHT }, "remote", "mode remote"],
+      [{ exec: parseExecution({ mode: "remote", max_remote: "0" }) }, "local", "mode remote"],
+      [{ exec: hy("0"), weight: HEAVY }, "local", "max_remote 0"],
+      [{ exec: hy(), verifyMode: "ci", weight: HEAVY, headroom: BUSY }, "local", "verify.mode ci: validation runs on CI, not billed twice"],
+      [{ exec: hy(), labels: ["Documentation"], weight: HEAVY, headroom: BUSY }, "local", "docs-only lane"],
+      [{ exec: hy(), labels: ["type:docs"], weight: HEAVY }, "local", "docs-only lane"],
+      [{ exec: hy(), verifyMode: "hybrid", weight: HEAVY, headroom: ROOMY }, "remote", "heavy validation: tsc, eslint"],
+      [{ exec: hy(), labels: ["bug"], weight: LIGHT, headroom: BUSY }, "remote", "host without headroom: mem 900 MB < 4096 MB"],
+      [{ exec: hy(), weight: LIGHT, headroom: ROOMY }, "local", "light lane, host has headroom"],
+      [{ exec: hy(), weight: null, headroom: null }, "local", "light lane, host has headroom"],
+      [{}, "local", "mode local"],
+      [undefined, "local", "mode local"],
+      [{ exec: hy(), labels: "docs", weight: { heavy: true, signals: null } }, "remote", "heavy validation"],
+    ];
+    for (const [facts, where, reason] of cases) assert.deepEqual(placeLane(facts), { where, reason }, JSON.stringify(facts));
+    const facts = { exec: hy(), weight: HEAVY, headroom: ROOMY, labels: ["x"] };
+    const snap = JSON.stringify(facts);
+    assert.deepEqual(placeLane(facts), placeLane(facts));
+    assert.equal(JSON.stringify(facts), snap, "inputs are not mutated");
+  });
+
+  it("validationWeight reads the repo's own toolchain facts (multi-ecosystem)", async () => {
+    const repoWith = (files) => { const d = tmpDir("vw-"); for (const [f, t] of Object.entries(files)) writeFileSync(join(d, f), t); return d; };
+    assert.deepEqual(await validationWeight({ cwd: repoWith({ "README.md": "x" }) }), { heavy: false, signals: [] });
+    assert.deepEqual(await validationWeight({ cwd: repoWith({ "Cargo.toml": "[package]" }) }), { heavy: true, signals: ["cargo"] });
+    assert.deepEqual(await validationWeight({ cwd: repoWith({ "go.mod": "module x" }) }), { heavy: true, signals: ["go"] });
+    assert.deepEqual(await validationWeight({ cwd: repoWith({ "pyproject.toml": "[project]" }) }), { heavy: true, signals: ["python"] });
+    const js = await validationWeight({ cwd: repoWith({ "tsconfig.json": "{}", "package.json": JSON.stringify({ packageManager: "pnpm@10.4.1", scripts: { test: "vitest", start: "node ." } }) }) });
+    assert.deepEqual(js, { heavy: true, signals: ["tsc", "test script", "pnpm"] });
+    assert.deepEqual(await validationWeight({ cwd: repoWith({ "package.json": JSON.stringify({ scripts: { start: "node ." } }) }), precheckCommands: ["pnpm run test", "echo ok"] }),
+      { heavy: true, signals: ["pnpm"] });
+    assert.deepEqual(await validationWeight({ cwd: repoWith({}), precheckCommands: ["echo ok", "git diff --check"] }), { heavy: false, signals: [] });
+  });
+
+  it("hostHeadroom: memory below the admission floor plus one heavy step, or a configured load ceiling", () => {
+    const host = (mem, load = 1, cores = 4) => ({ memAvailableMb: () => mem, loadAvg1: () => load, cores: () => cores });
+    assert.deepEqual(hostHeadroom({ host: host(8000) }), { ok: true, detail: "" });
+    assert.deepEqual(hostHeadroom({ host: host(3000) }), { ok: false, detail: "mem 3000 MB < 4096 MB" });
+    assert.deepEqual(hostHeadroom({ cfg: { min_free_mem_mb: 512 }, heavyCfg: { step_mem_mb: 1024 }, host: host(3000) }), { ok: true, detail: "" });
+    assert.deepEqual(hostHeadroom({ cfg: { max_load_per_core: 2 }, host: host(8000, 12, 4) }), { ok: false, detail: "load 3.0/core > 2" });
+    assert.deepEqual(hostHeadroom({ host: host(8000, 99, 1) }), { ok: true, detail: "" }, "load is ignored without max_load_per_core");
+    assert.deepEqual(hostHeadroom({ host: { memAvailableMb: () => { throw new Error("x"); } } }), { ok: true, detail: "" });
+    assert.deepEqual(hostHeadroom({ cfg: { enabled: false }, host: host(10) }), { ok: true, detail: "" });
+  });
+
+  const run = (opts) => {
+    const ctxs = [];
+    const done = orchestrate({ issues: opts.issues ?? [1, 2, 3], parallel: opts.parallel ?? 5, readBody: async () => "", now: () => 0, pollMs: 1,
+      sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms ?? 1, 5))), remote: opts.remote,
+      runOne: async (n, _l, ctx) => { ctxs.push([n, ctx.remote, ctx.placement]); if (opts.gate) await opts.gate(n); return { terminalReason: "merged", pr: n, ...(ctx.remote ? { sandbox: { provider: "fake", id: `f${n}`, minutes: 10, cost_usd: 0 } } : {}) }; } });
+    return { done, ctxs };
+  };
+
+  it("hybrid: a heavy lane goes remote, a light lane stays local; the placement reaches runOne and the row", async () => {
+    const place = (n) => (n === 1 ? { where: "remote", reason: "heavy validation: tsc" } : { where: "local", reason: "docs-only lane" });
+    const { done, ctxs } = run({ issues: [1, 2], remote: { max: 2, place, isRemote: () => true, fallbackLocal: true } });
+    const rows = await done;
+    assert.deepEqual(ctxs.sort((a, b) => a[0] - b[0]), [[1, true, { where: "remote", reason: "heavy validation: tsc" }], [2, false, { where: "local", reason: "docs-only lane" }]]);
+    assert.deepEqual(rows.map((r) => r.placement), [{ where: "remote", reason: "heavy validation: tsc" }, { where: "local", reason: "docs-only lane" }]);
+  });
+
+  it("hybrid: max_remote reached runs the next remote-placed lane locally instead of waiting", async () => {
+    const gates = new Map();
+    const gate = (n) => new Promise((r) => gates.set(n, r));
+    const { done, ctxs } = run({ issues: [1, 2, 3], gate, remote: { max: 1, place: () => ({ where: "remote", reason: "heavy validation: go" }), fallbackLocal: true } });
+    for (let i = 0; i < 200 && gates.size < 3; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(gates.size, 3, "all three run at once: one remote, two local");
+    for (const g of gates.values()) g();
+    const rows = await done;
+    assert.deepEqual(ctxs.map((c) => [c[0], c[1]]), [[1, true], [2, false], [3, false]]);
+    assert.equal(rows[1].placement.where, "local");
+    assert.equal(rows[1].placement.reason, "fallback to local: max_remote 1 reached (heavy validation: go)");
+  });
+
+  it("hybrid: an exhausted execution budget runs the rest locally even under on_budget stop", async () => {
+    const work = tmpDir("hy-budget-");
+    const b = openExecutionBudget({ budget: { batchMinutes: 10 }, file: join(work, "b.json"), now: () => 0 });
+    const { done, ctxs } = run({ issues: [1, 2, 3], parallel: 1, remote: { max: 1, place: () => ({ where: "remote", reason: "heavy validation" }), fallbackLocal: true, onBudget: "stop", admit: (u) => b.admit(u) } });
+    const rows = await done;
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "merged"]);
+    assert.deepEqual(ctxs.map((c) => [c[0], c[1]]), [[1, true], [2, false], [3, false]]);
+    assert.match(rows[1].placement.reason, /^fallback to local: execution budget: batch sandbox minutes 10 >= budget_minutes 10/);
+    assert.match(rows[2].placement.reason, /^fallback to local: execution budget: /);
+  });
+
+  it("mode remote is unchanged: a full max_remote waits and a budget refusal stops", async () => {
+    const work = tmpDir("rm-budget-");
+    const b = openExecutionBudget({ budget: { batchMinutes: 10 }, file: join(work, "b.json"), now: () => 0 });
+    const { done, ctxs } = run({ issues: [1, 2], parallel: 1, remote: { max: 1, isRemote: () => true, onBudget: "stop", admit: (u) => b.admit(u) } });
+    const rows = await done;
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "held"]);
+    assert.deepEqual(ctxs.map((c) => [c[0], c[1]]), [[1, true]]);
+  });
+
+  it("runBatch wiring: hybrid routes per lane and passes --placement to the local lane", async () => {
+    const work = tmpDir("exec-cli-hybrid-");
+    const stub = join(work, "stub.mjs");
+    writeFileSync(stub, `import { writeFileSync } from "node:fs"; const a = process.argv.slice(2); writeFileSync(a[a.indexOf("--result-file") + 1], JSON.stringify({ terminalReason: "merged", pr: 7, detail: a.slice(a.indexOf("--placement")).slice(0, 4).join("|") }));\n`);
+    const labels = { 1: [], 2: [{ name: "docs" }] };
+    const leanIo = { gh: async (a) => a.includes("milestone") ? JSON.stringify({ milestone: null }) : a[0] === "repo" ? "main\n" : JSON.stringify({ body: "", labels: labels[Number(a[2])] ?? [] }),
+      git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : a[0] === "rev-parse" ? ".git\n" : "") };
+    const prov = fakeProvider({ finish: (n) => ({ terminalReason: "merged", pr: 100 + n, cost_usd: 0 }) });
+    const res = await quiet(() => orchestrateFromCli(["1", "2", "--repo", "o/r", "--no-prefilter"], { batchRoot: join(work, "batches"), allowTmpfs: true, pollMs: 5,
+      orchestration: { breaker: null, maxDeferrals: 3 }, io: { gh: async () => "o/r\n" }, leanIo, sched: null, maintenance: null, batchId: "bh1", laneScript: stub,
+      executionBudget: openExecutionBudget({ file: join(work, "execution-budget.json") }), emitTelemetry: () => {},
+      execution: parseExecution({ mode: "hybrid", max_remote: "2" }), verify: { mode: "local" }, validationWeight: { heavy: true, signals: ["tsc"] }, hostHeadroom: () => ({ ok: true, detail: "" }),
+      sandboxProvider: prov, sandboxLedger: (n) => makeLedger({ root: join(work, "ledger"), batch: "bh1", lane: `sandbox-${n}`, owner: "t", issue: n }) }));
+    assert.deepEqual(res.rows.map((r) => [r.issue, r.outcome, r.pr]), [[1, "merged", 101], [2, "merged", 7]]);
+    assert.deepEqual(prov.calls.filter((c) => c[0] === "start").map((c) => c[1]), [1]);
+    assert.equal(res.rows[1].detail, "--placement|local|--placement-reason|docs-only lane");
+    assert.deepEqual(res.rows[0].placement, { where: "remote", reason: "heavy validation: tsc" });
   });
 });
