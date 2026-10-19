@@ -17,6 +17,29 @@ export const LEDGER_KINDS = Object.freeze(["worktree", "branch", "tmp", "pid", "
 /** A path segment that cannot escape the root: [A-Za-z0-9._-] only, never "." or "..". */
 export const safeSegment = (s) => { const v = String(s ?? "").replace(/[^A-Za-z0-9._-]/g, "_"); return !v || /^\.+$/.test(v) ? "_" : v; };
 
+const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e?.code === "EPERM"; } };
+
+/**
+ * Live lanes on this host (#4182): lane files under `<root>/<batch>/` whose host is `host`, whose pid is alive and whose
+ * expiry is in the future. Read-only: never writes or deletes; unreadable or malformed files are skipped.
+ */
+export function countLiveLanes({ root = ledgerRoot(), host = hostname(), now = () => Date.now(), alive = pidAlive, fs = nodeFs } = {}) {
+  let n = 0, batches = [];
+  try { batches = fs.readdirSync(root); } catch { return 0; }
+  for (const b of batches) {
+    let names = [];
+    try { names = fs.readdirSync(join(root, b)); } catch { continue; }
+    for (const f of names) {
+      if (!f.endsWith(".json")) continue;
+      try {
+        const j = JSON.parse(fs.readFileSync(join(root, b, f), "utf8"));
+        if (j && j.host === host && Number.isSafeInteger(j.pid) && j.pid > 0 && Number(j.expires) > now() && alive(j.pid)) n++;
+      } catch { /* not a lane file */ }
+    }
+  }
+  return n;
+}
+
 export function makeLedger({ root = ledgerRoot(), batch = "adhoc", lane, owner, issue, host = hostname(), pid = process.pid, now = () => Date.now(), ttlMs = LEDGER_TTL_MS, fs = nodeFs } = {}) {
   const dir = join(root, safeSegment(batch));
   const path = join(dir, `${safeSegment(lane ?? `lane-${issue}`)}.json`);

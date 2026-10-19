@@ -10,7 +10,7 @@ export const PLAN_FILE = `${LEAN_DIR}/plan.md`;
 export const IMPLEMENTATION_FILE = `${LEAN_DIR}/implementation.md`;
 export const CONTRACT_FILE = `${LEAN_DIR}/contract.json`;
 
-const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR.`;
+const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo).`;
 
 /** Builder call 1: investigate and write the contract. No code edits. */
 export function builderPlanPrompt(n) {

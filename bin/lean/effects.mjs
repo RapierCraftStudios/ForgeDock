@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags } from "../runner.mjs";
 import { makeIo } from "../engine-cli.mjs";
 import { makeProjector } from "../engine/projector.mjs";
-import { makeLedger } from "./ledger.mjs";
+import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -159,6 +159,8 @@ export function makeHostProbe() {
     },
     loadAvg1: () => loadavg()[0],
     cores: () => cpus().length || 1,
+    /** Live lanes on this host from the ledger (#4182), this lane included once it registered. */
+    activeLanes: () => countLiveLanes({ root: ledgerRoot(), host: hostname() }),
     tmpPaths: () => [...new Set([join(homedir(), ".forge", "tmp"), tmpdir(), "/tmp"].filter((x) => existsSync(x) || x === join(homedir(), ".forge", "tmp")))],
   };
 }

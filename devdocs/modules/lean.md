@@ -65,6 +65,27 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    base-sync merges the lane in on conflict (never rebase/force-push); merge
    at the reviewed head → `merged`, or `ci-pending` after the CI wait.
 
+## Host parallelism (#4182)
+
+Every runner call gets `FORGE_HOST_PARALLELISM` in its env, next to the
+per-run `TMPDIR`/`CLAUDE_CODE_TMPDIR`. The value is
+`max(1, floor(cores / live lanes))`, computed by `admission.mjs`
+`hostParallelism`. Live lanes come from `ledger.mjs` `countLiveLanes`, a
+read-only scan of `~/.forge/ledger/*/*.json` that counts lane files with this
+host, a live pid and an unexpired `expires`. That includes the lane itself,
+which registers its run tmp before the first runner call. The scan is exposed
+as `makeHostProbe().activeLanes()`.
+
+- A positive-integer `FORGE_HOST_PARALLELISM` already set in the environment
+  wins as an operator override.
+- When the probe fails, or there is no host probe, the variable is not set.
+- `HOST_RULES` in `prompts.mjs` tells the builder to cap verification at the
+  value: `turbo --concurrency`, `vitest`/`jest --maxWorkers`,
+  `playwright --workers` and `node --test --test-concurrency`, with eslint
+  going through turbo.
+- ci-local passes the variable through `scrubbedEnv` and caps its slot count
+  and job `maxParallel` at it (`lib.mjs` `capParallel`).
+
 ## FORGE:STATE lease
 
 Stored in the issue body by `io.projector.writeState`:
@@ -97,3 +118,9 @@ push/gh/merge retry patterns).
 ## Entry 2026-10-19 — Dossier created (#4185)
 
 Initial dossier written with NORTHSTAR.md and the devdocs freshness gate.
+
+## Entry 2026-10-20 — Host-aware verification concurrency (#4182)
+
+Added `FORGE_HOST_PARALLELISM`: it is derived from the ledger lane count,
+injected into the runner env, named in the builder host rules, and used to cap
+ci-local slots and job parallelism.

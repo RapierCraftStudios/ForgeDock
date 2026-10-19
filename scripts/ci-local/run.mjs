@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { run as runSync, commandExists, scrubbedEnv, homeForgeDir, sha256, fileHash, toolVersion, shellSplit } from './lib.mjs';
+import { run as runSync, commandExists, scrubbedEnv, capParallel, homeForgeDir, sha256, fileHash, toolVersion, shellSplit } from './lib.mjs';
 import { shellArgv } from './adapters/common.mjs';
 import { checkPortability } from './adapters/portability.mjs';
 
@@ -25,7 +25,7 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { clean
 // ---- machine-wide slot semaphore ----
 function slotCount() {
   const n = Number(process.env.FORGE_CI_LOCAL_SLOTS);
-  return n > 0 ? n : Math.max(2, Math.min(8, Math.floor(os.cpus().length / 2)));
+  return capParallel(n > 0 ? n : Math.max(2, Math.min(8, Math.floor(os.cpus().length / 2))));
 }
 function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
 
@@ -361,7 +361,7 @@ export async function runPlan(plan, o = {}) {
   // (DEGRADED) and a re-run resumes from the result cache.
   const maxInvS = Number(process.env.FORGE_CI_LOCAL_MAX_INVOCATION_SECONDS) || 540;
   const budgetS = Math.min(requestedS, maxInvS); const capped = requestedS > maxInvS;
-  const maxParallel = o.maxParallel || plan.config.max_parallel || Number(process.env.FORGE_CI_LOCAL_MAX_PARALLEL) || 4;
+  const maxParallel = capParallel(o.maxParallel || plan.config.max_parallel || Number(process.env.FORGE_CI_LOCAL_MAX_PARALLEL) || 4);
   const tmpRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'forge-ci-local.'));
   cleanups.add(() => { try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ } });
   const ctx = {

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { makeLedger, safeSegment, LEDGER_TTL_MS } from "./ledger.mjs";
+import { makeLedger, countLiveLanes, safeSegment, LEDGER_TTL_MS } from "./ledger.mjs";
 
 describe("lane resource ledger (#4179)", () => {
   it("register/release round trip carries owner, batch, lane, issue, created and expires", () => {
@@ -51,5 +51,40 @@ describe("lane resource ledger (#4179)", () => {
     const after = makeLedger({ root, batch: "b1", lane: "lean-9", issue: 9 }).read();
     assert.equal(after.owner, "core_9");
     assert.deepEqual(after.resources.map((r) => r.kind), ["tmp", "branch", "worktree", "pid"]);
+  });
+});
+
+describe("live lane count (#4182)", () => {
+  it("counts only live, same-host, unexpired lane files across batches, and deletes nothing", async () => {
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const root = tmpDir("ledger-count-");
+    const t = 10_000;
+    const lane = (batch, name, o) => { mkdirSync(join(root, batch), { recursive: true }); writeFileSync(join(root, batch, `${name}.json`), typeof o === "string" ? o : JSON.stringify({ v: 1, host: "h", pid: 11, expires: t + 1, resources: [], ...o })); };
+    lane("b1", "lean-1", {});
+    lane("b1", "lean-2", { pid: 12 });
+    lane("adhoc", "lean-3", { pid: 13 });
+    lane("b1", "dead", { pid: 99 });
+    lane("b1", "other-host", { host: "zzz" });
+    lane("b1", "expired", { expires: t });
+    lane("b1", "malformed", "{not json");
+    lane("b1", "no-pid", { pid: null });
+    writeFileSync(join(root, "b1", "lean-1.json.tmp-5"), "{}");
+    writeFileSync(join(root, "stray-file"), "x");
+    const before = readdirSync(join(root, "b1")).sort();
+    const seen = [];
+    const n = countLiveLanes({ root, host: "h", now: () => t, alive: (pid) => { seen.push(pid); return pid !== 99; } });
+    assert.equal(n, 3);
+    assert.ok(!seen.includes(null));
+    assert.deepEqual(readdirSync(join(root, "b1")).sort(), before, "read-only");
+    assert.equal(countLiveLanes({ root: join(root, "missing"), host: "h" }), 0);
+  });
+
+  it("a registered lane counts itself by default (own pid alive)", () => {
+    const root = tmpDir("ledger-self-");
+    const l = makeLedger({ root, batch: "adhoc", lane: "lean-9", owner: "core_1", issue: 9, host: "h" });
+    assert.equal(countLiveLanes({ root, host: "h" }), 0, "nothing registered yet: no file");
+    l.register("tmp", "/x/runs/9-1");
+    assert.equal(countLiveLanes({ root, host: "h" }), 1);
+    assert.equal(countLiveLanes({ root, host: "other" }), 0);
   });
 });
