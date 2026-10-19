@@ -37,3 +37,4 @@ The engine runs `bin/lean/depcache.mjs` `prepare` deterministically, right after
 - Cold lanes pay one install, as before, plus a hardlink walk. Warm lanes pay a hardlink walk plus a no-op repair.
 - Disk per extra lane drops to directory entries and copied bin scripts.
 - The cache must be on the same filesystem as the worktrees. Otherwise it is skipped (EXDEV).
+- `scripts/check-devdocs-freshness.sh` now defaults `<base-ref>` to the branch's upstream (`@{upstream}`) when it is omitted, so a lane can run the check as written in its contract. CI still passes `origin/<base>` explicitly. With no ref and no upstream it still exits 2.

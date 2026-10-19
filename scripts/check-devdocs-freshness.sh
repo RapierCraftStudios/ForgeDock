@@ -10,14 +10,18 @@
 # Exempt: a `docs-not-needed: <reason>` line (non-empty reason) in the PR body.
 # Deterministic, no LLM. bash 3.2 portable (no bash-4 builtins, no PCRE grep).
 #
-# Usage: bash scripts/check-devdocs-freshness.sh <base-ref> [--body-file <file>]
+# Usage: bash scripts/check-devdocs-freshness.sh [<base-ref>] [--body-file <file>]
+#   <base-ref> defaults to the current branch's upstream (@{upstream}); CI always passes it explicitly.
 #   PR body: --body-file, else env PR_BODY (empty when unset). Diff: <base-ref>...HEAD, run from the repo root.
 # Exit: 0 fresh / exempt / nothing to check | 1 docs missing | 2 bad usage or unknown base ref
 
 set -u
-BASE="${1:-}"
-[ -n "$BASE" ] || { echo "usage: check-devdocs-freshness.sh <base-ref> [--body-file <file>]" >&2; exit 2; }
-shift
+BASE=""
+case "${1:-}" in
+  ""|--*) BASE=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true) ;;
+  *) BASE="$1"; shift ;;
+esac
+[ -n "$BASE" ] || { echo "usage: check-devdocs-freshness.sh [<base-ref>] [--body-file <file>] (no upstream to default to)" >&2; exit 2; }
 BODY="${PR_BODY:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
