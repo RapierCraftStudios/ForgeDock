@@ -167,7 +167,8 @@ docs), deduplicated by a `FORGE:MAINT:<kind>:<key>` marker.
 ## Other files
 
 `checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),
-`execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253),
+`execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
+`sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
 `prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
@@ -405,3 +406,24 @@ leaves the entry under its dead pid: `--resume` adopts from the persisted handle
 `remote: {max, isRemote}` admits remote lanes against `max_remote` without a host
 registry slot (batch K still applies). Rationale:
 `devdocs/decisions/4253-execution-sandbox-provider.md`.
+
+## Entry 2026-10-20 — Remote sandbox provider (#4254)
+
+`sandbox-remote.mjs` `remoteProvider` implements the #4253 provider interface over a
+transport (`launch/status/logs/result/usage/destroy`, addressed by ForgeDock's own id
+`fdrsbx-<batch>-<issue>` so the pre-start ledger entry suffices for teardown).
+`httpTransport` is the one shipped transport (JSON protocol in docs/CONFIG.md
+`execution`). The launch spec carries the repo to clone, `cache_store`, the scoped
+env (secret names resolved via `credentials.mjs` `resolveCredential`: env, then
+keychain service `forgedock`) and the `run-issue` argv. Logs stream into the batch
+lane log redacted; billable minutes go on `handle.minutes` and `providerLanes`
+copies them to the lane result as `sandbox: {provider, id, minutes}` (#4255 reports
+them). `remote` is never a default provider; `remoteTransportFor` refuses a GitHub
+Actions endpoint without `allow_actions: true`. `providerLanes` maps a throwing
+`start` to `needs-human` `sandbox.start_failed` (or `deferred` `sandbox.capacity`
+for a retryable error) instead of engine-error, and tears down after the result is
+in on every path. `gc.mjs` `SANDBOX_TEARDOWN.remote` destroys stale remote
+sandboxes through the checkout's forge.yaml transport (probe `sandboxTransport`
+in tests). Contract suite: `sandbox-provider.contract.test.mjs` (container over a
+fake docker, remote over a fake transport). Rationale:
+`devdocs/decisions/4254-remote-sandbox-provider.md`.

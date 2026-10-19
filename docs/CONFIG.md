@@ -591,19 +591,41 @@ execution:
   provider: container   # default container when mode is not local
   image: my/lane-image:1  # container provider: an image with git and forgedock; never pulled
   secrets: GH_TOKEN,ANTHROPIC_API_KEY  # env var NAMES forwarded to the sandbox; nothing else is
+  # provider: remote (forge#4254), only when named explicitly:
+  # endpoint: https://runner-pool.example/v1  # sandbox HTTP API (protocol below)
+  # token_env: FORGEDOCK_SANDBOX_TOKEN        # credential NAME: read from the env, else the OS keychain
+  # cache_store: s3://lane-cache               # shared cache store the sandbox mounts
+  # allow_actions: false                       # true only to accept a GitHub Actions endpoint
 ```
 
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
 | `mode` | string | No | `local` (default): lanes are detached host processes, as before. `remote`: lanes run in sandboxes of `provider`. `hybrid`: parsed; lanes stay local until hybrid placement lands (forge#4256). |
 | `max_remote` | integer | No | Remote lanes of the batch that may run at once. They take no slot of the host lane cap (`orchestration.global_parallel`, `forgedock sched cap`); the batch `--parallel` still applies. `0` (default) keeps lanes local. |
-| `provider` | string | No | `container` (reference: an ephemeral local container) or `local`. Unknown names fail the batch start. |
+| `provider` | string | No | `container` (reference: an ephemeral local container), `remote` (a runner pool or remote session over HTTP, forge#4254) or `local`. The default is `container` off `local` mode; `remote` is used only when named. Unknown names fail the batch start. |
 | `image` | string | No | Container provider image; it must provide `git` and `forgedock`. Started with `--pull never`. |
 | `secrets` | string | No | Comma-separated env var names copied from the dispatcher's env into the sandbox. The sandbox also gets `GH_REPO` (the target repo) and `FORGEDOCK_BATCH_ID`, and nothing else from the host. |
+| `endpoint` | string | `remote` | Base URL of the sandbox API. A GitHub Actions API (`api.github.com`, or any `/actions/` path) is refused unless `allow_actions: true`, so pre-review Actions minutes are never spent implicitly. Missing: the batch start fails (`execution.provider.misconfigured`). |
+| `token_env` | string | No | Name of the API credential, sent as `Authorization: Bearer`. Read from the env, else the OS keychain (service `forgedock`, account = the name: `secret-tool store --label forgedock service forgedock account NAME` on Linux, `security add-generic-password -s forgedock -a NAME -w` on macOS). Never written to the ledger, the batch state, logs or GitHub. |
+| `cache_store` | string | No | Shared cache store the remote sandbox mounts (sent as `cache.store` with `cache.key` = the repo). |
+| `allow_actions` | boolean | No | `true` accepts a GitHub Actions endpoint. Default `false`. |
 
 **Lifecycle:** each sandbox is listed in the lane ledger (`~/.forge/ledger/<batch>/sandbox-<n>.json`, kind `sandbox`) before it starts and removed from it only after teardown succeeded: on success, failure, a lane that exits without a result, and adopt after `--resume`. A sandbox left by a killed dispatcher is reaped by `forgedock gc --apply` (scope `--sandboxes`). The container provider mounts the checkout's git dir read-only at `/src` (cloned to the container's own `/work`), `~/.forge/verify-cache` read-only at `/cache`, and the batch `lanes/` dir at `/result`.
 
-**Commands that use this section**: `forgedock orchestrate` (`bin/engine-cli.mjs` `readExecution`)
+**Remote provider** (`bin/lean/sandbox-remote.mjs`, forge#4254). The sandbox is addressed by the id ForgeDock picks (`fdrsbx-<batch>-<issue>`), JSON over HTTP:
+
+| Request | Response |
+|---------|----------|
+| `POST /sandboxes` | Launch spec `{id, issue, batch, image, repo: {slug, url, ref}, cache: {store, key} \| null, env, command, result_file}`. The sandbox clones `repo.url` at `repo.ref`, mounts the cache, runs `command` (`forgedock run-issue ...`) with exactly `env` (the `secrets` names, resolved from the env or keychain, plus `GH_REPO` and `FORGEDOCK_BATCH_ID`). `429`/`503` = no capacity (`Retry-After` honoured). |
+| `GET /sandboxes/:id` | `{state}`: `pending`/`starting`/`running`, `exited`, or `404` = gone |
+| `GET /sandboxes/:id/logs?cursor=N` | `{text, cursor}`: lane log since `cursor`; appended to the batch lane log with secret values redacted |
+| `GET /sandboxes/:id/result` | The lane's result file (`404` until written) |
+| `GET /sandboxes/:id/usage` | `{minutes}`: billable sandbox minutes, set on the handle and the lane result (`sandbox.minutes`); without it, wall-clock minutes |
+| `DELETE /sandboxes/:id` | Teardown; `404` counts as torn down |
+
+**Start failures** (every provider): a sandbox that cannot start ends the lane `needs-human` with code `sandbox.start_failed`, not relaunched and not counted by the engine-error breaker; a capacity error ends it `deferred` (`sandbox.capacity`, backoff, bounded by `orchestration.max_deferrals`). See docs/OUTCOME-CODES.md. `forgedock gc --apply --sandboxes` tears a stale remote sandbox down through the same API (the checkout's forge.yaml `execution`).
+
+**Commands that use this section**: `forgedock orchestrate` (`bin/engine-cli.mjs` `readExecution`), `forgedock gc`
 
 ## `env` (OPTIONAL)
 

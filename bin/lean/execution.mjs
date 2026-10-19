@@ -17,6 +17,12 @@
  * killed mid-lane leaves the entry under its dead pid: a `--resume` adopts the sandbox, `forgedock gc --apply` reaps it.
  * Secrets reach a sandbox only by NAME from `execution.secrets` (plus FORGEDOCK_BATCH_ID and GH_REPO, the target repo);
  * values never appear in argv, the handle, the ledger or the batch state.
+ *
+ * `remote` (#4254, sandbox-remote.mjs) reaches a runner pool or remote session through a transport (`execution.endpoint`,
+ * credential `execution.token_env` from the env or the keychain). It is never a default, and a GitHub Actions endpoint
+ * needs `allow_actions: true`. A sandbox that fails to start is a typed outcome, not an engine-error: `needs-human`
+ * `sandbox.start_failed`, or `deferred` `sandbox.capacity` when the provider marks the error retryable. A provider that
+ * sets `handle.minutes` (billable sandbox minutes) has them copied onto the lane result as `sandbox`.
  */
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -25,9 +31,12 @@ import { dirname } from "node:path";
 import { promisify } from "node:util";
 import { isLaneAlive, launchLane } from "./batch.mjs";
 import { dockerLabels, safeSegment } from "./ledger.mjs";
+import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { resolveCredential } from "./credentials.mjs";
+import { httpTransport, isActionsEndpoint, remoteProvider } from "./sandbox-remote.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
-export const SANDBOX_PROVIDERS = Object.freeze(["local", "container"]);
+export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote"]);
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
 const ENV_RE = /^[A-Z_][A-Z0-9_]*$/;
 const IMAGE_RE = /^[A-Za-z0-9][A-Za-z0-9._\/:@-]*$/;
@@ -36,7 +45,9 @@ const errText = (e) => String(e?.stderr || e?.message || e).split("\n")[0].slice
 
 /**
  * forge.yaml `execution:` section (block style; parseForgeYaml gives strings) → {mode, maxRemote, provider, image,
- * secrets}. Invalid values fall back to the defaults; mode defaults to local (today's behaviour).
+ * secrets}, plus the remote provider settings `endpoint`, `tokenEnv`, `cacheStore`, `allowActions` (#4254) when set
+ * (absent means null/false). Invalid values fall back to the defaults; mode defaults to local (today's behaviour). The
+ * provider default is never `remote`.
  */
 export function parseExecution(sec = {}) {
   const s = sec && typeof sec === "object" ? sec : {};
@@ -48,7 +59,12 @@ export function parseExecution(sec = {}) {
   const image = IMAGE_RE.test(str(s.image)) ? str(s.image) : null;
   const raw = Array.isArray(s.secrets) ? s.secrets : str(s.secrets) ? str(s.secrets).split(",") : [];
   const secrets = [...new Set(raw.map((x) => String(x).trim()).filter((x) => ENV_RE.test(x)))];
-  return { mode, maxRemote, provider, image, secrets };
+  let endpoint = null;
+  try { const u = new URL(str(s.endpoint)); if (u.protocol === "https:" || u.protocol === "http:") endpoint = str(s.endpoint); } catch { endpoint = null; }
+  const tokenEnv = ENV_RE.test(str(s.token_env)) ? str(s.token_env) : null;
+  const cacheStore = str(s.cache_store) || null;
+  const allowActions = str(s.allow_actions).toLowerCase() === "true";
+  return { mode, maxRemote, provider, image, secrets, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}) };
 }
 
 /** Where a lane runs: remote only for `mode: remote` with `max_remote >= 1`; hybrid stays local until #4256 places it. */
@@ -138,10 +154,31 @@ export function containerProvider({ batch, repo, image, gitDir, cacheDir = `${ho
   };
 }
 
-/** A provider by name; throws a typed error for an unknown one. */
+const typedError = (code, message) => Object.assign(new Error(message), { code });
+
+/**
+ * The remote transport for forge.yaml `execution` settings: `opts.transport` when injected, else `httpTransport` on
+ * `exec.endpoint` with the credential `exec.tokenEnv` (env, then keychain). Throws `execution.provider.misconfigured`
+ * without an endpoint, `execution.provider.actions_refused` for a GitHub Actions endpoint without `allow_actions`.
+ */
+export function remoteTransportFor(exec = {}, { transport = null, env = process.env, credentials = (n) => resolveCredential(n, { env }) } = {}) {
+  if (transport) return transport;
+  if (!exec?.endpoint) throw typedError("execution.provider.misconfigured", "execution.provider remote needs execution.endpoint");
+  if (isActionsEndpoint(exec.endpoint) && exec.allowActions !== true) {
+    throw typedError("execution.provider.actions_refused", "execution.endpoint is a GitHub Actions API; set execution.allow_actions: true to spend Actions minutes");
+  }
+  return httpTransport({ endpoint: exec.endpoint, token: exec.tokenEnv ? credentials(exec.tokenEnv) : null });
+}
+
+/** A provider by name; throws a typed error for an unknown one. `remote` reads `opts.exec` (parseExecution output). */
 export function providerByName(name, opts) {
   if (name === "local") return localProvider(opts);
   if (name === "container") return containerProvider(opts);
+  if (name === "remote") {
+    const exec = opts?.exec ?? {};
+    const env = opts?.env ?? process.env;
+    return remoteProvider({ batch: opts.batch, repo: opts.repo, settings: exec, env, transport: remoteTransportFor(exec, { transport: opts?.transport, env }), ...(opts?.now ? { now: opts.now } : {}) });
+  }
   const e = new Error(`unknown execution.provider ${JSON.stringify(name)} (known: ${SANDBOX_PROVIDERS.join(", ")})`);
   e.code = "execution.provider.unknown";
   throw e;
@@ -170,6 +207,12 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       await sleep(pollMs);
     }
   };
+  // Billable minutes the provider put on the handle (#4254) travel with the lane result.
+  const withMinutes = (r, h) => (r && typeof r === "object" && Number.isFinite(h?.minutes) ? { ...r, sandbox: { provider: h.provider, id: h.id, minutes: h.minutes } } : r);
+  // A start failure repeats on a relaunch: typed, never engine-error (#4254). Retryable (capacity) defers with backoff.
+  const startFailed = (id, e) => (e?.retryable === true
+    ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
+    : { terminalReason: "needs-human", code: OUTCOME_CODES.SANDBOX_START_FAILED, detail: `sandbox ${id} failed to start: ${errText(e)}` });
   return {
     runOne: async (n, lane, ctx = {}) => {
       const led = ledgerFor(n);
@@ -179,26 +222,31 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         return { terminalReason: "engine-error", detail: `sandbox ${base.id} from an earlier attempt could not be torn down` };
       }
       led?.register("sandbox", base.id, { provider: provider.name, handle: base }); // before it exists
-      let h = base;
+      let h = base, r, started = false;
       try {
         h = { ...base, ...(await provider.start({ issue: n, args: laneArgs(n, lane), env, secrets })) };
+        started = true;
         ctx.onStart?.({ ...(Number.isInteger(h.pid) ? { pid: h.pid } : {}), handle: h, remote: true });
-        return await wait(h);
+        r = await wait(h);
       } catch (e) {
-        return { terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` };
-      } finally { await tear(led, h); }
+        r = started ? { terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` } : startFailed(base.id, e);
+      }
+      await tear(led, h); // every path, after the result is in (tear never throws)
+      return withMinutes(r, h);
     },
     adopt: async (n, rec) => {
       const h = rec?.handle;
       if (!h?.id || h.provider !== provider.name) return null;
       const led = ledgerFor(n);
       led?.register("sandbox", h.id, { provider: provider.name, handle: { provider: h.provider, id: h.id, issue: h.issue } }); // now owned by this dispatcher
+      let r;
       try {
-        if (!(await provider.fetchResult(h)) && (await provider.status(h)) !== "running") return null; // relaunched
-        return await wait(h);
+        r = !(await provider.fetchResult(h)) && (await provider.status(h)) !== "running" ? null : await wait(h); // null: relaunched
       } catch (e) {
-        return { terminalReason: "engine-error", detail: `sandbox ${h.id}: ${errText(e)}` };
-      } finally { await tear(led, h); }
+        r = { terminalReason: "engine-error", detail: `sandbox ${h.id}: ${errText(e)}` };
+      }
+      await tear(led, h);
+      return withMinutes(r, h);
     },
   };
 }
