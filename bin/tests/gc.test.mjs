@@ -91,6 +91,15 @@ describe("forgedock gc args (#4180)", () => {
     assert.throws(() => parseGcArgs(["--apply", "--dry-run"])); assert.throws(() => parseGcArgs(["--everything"]));
     assert.equal(parseDockerTime("2026-10-18 10:00:00 +0200 CEST"), Date.parse("2026-10-18T08:00:00Z"));
   });
+  it("scope flags restrict the plan to the chosen types", async () => {
+    const w = world({ containers: [{ Names: "c1", Labels: "", CreatedAt: dockerTime(NOW - H), Size: "1MB" }] });
+    mkdirSync(join(w.wtRoot, "lean-1"));
+    const plan = await planGc({ probes: w.probes, scopes: new Set(["docker"]), now: NOW });
+    assert.deepEqual([...new Set(plan.items.map((i) => i.type))], ["container"]);
+    assert.equal(w.calls.git.length + w.calls.gh.length, 0);
+    const r = await run(w, ["--tmp"]);
+    assert.doesNotMatch(r.out, /^  container\s/m); assert.match(r.out, /^  tmp\s/m);
+  });
   it("bad flags exit 2 without probing anything", async () => {
     const w = world();
     const r = await run(w, ["--nope"]);
