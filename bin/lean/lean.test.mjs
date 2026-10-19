@@ -67,6 +67,7 @@ function world(o = {}) {
       if (k === "pr list") return JSON.stringify(w.prList);
       if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
       if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
+      if (k === "issue view" && o.issueBodies && a[2] === "7" && a.includes("number,title,body,state,comments")) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: "foo breaks", body: b, state: "OPEN", comments: [] }); }
       if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [] });
       if (k === "pr edit") { w.prEdits.push(a); return ""; }
       if (k === "issue comment" && w.commentErrors.length) throw new Error(w.commentErrors.shift());
@@ -654,6 +655,33 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.match(nhBody(w), /still invalid after one correction/);
     const w2 = world({ contract: bad1, fixedContract: CONTRACT });
     assert.equal((await run(w2)).terminalReason, "merged");
+  });
+});
+
+describe("issue edited mid-run (#4188)", () => {
+  const BODY_B = "foo now also needs a bar mode.\n\n- foo must accept a bar flag and return bar output.\n- Existing callers of foo keep working.";
+  const contractB = { ...CONTRACT, requirements: [{ id: "R1", quote: "foo must accept a bar flag and return bar output.", disposition: "deliver" }] };
+  const reviewB = () => conf({ issue_coverage: [{ quote: "foo must accept a bar flag and return bar output.", status: "covered" }] }, contractB);
+
+  it("body A at RUN_START, body B at validation, contract quoting B: validates against B, logs ISSUE_EDITED, merges", async () => {
+    const dir = tmpDir("issue-edited-");
+    const w = world({ contract: contractB, issueBodies: [ISSUE_BODY, BODY_B], reviews: [reviewB()] });
+    const r = await run(w, { dir });
+    assert.notEqual(r.code, "contract.invalid");
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(builders(w).length, 2, "plan + implement, no contract correction");
+    const edits = readLog(dir, 7).filter((e) => e.event === "ISSUE_EDITED");
+    assert.equal(edits.length, 1);
+    assert.match(edits[0].old, /^[0-9a-f]{12}$/); assert.match(edits[0].new, /^[0-9a-f]{12}$/);
+    assert.notEqual(edits[0].old, edits[0].new);
+    assert.match(traj(w).at(-1), /Issue edited during the run \([0-9a-f]{12} -> [0-9a-f]{12}\)/);
+  });
+
+  it("an unchanged issue emits no ISSUE_EDITED", async () => {
+    const dir = tmpDir("issue-unedited-");
+    const w = world({ issueBodies: [ISSUE_BODY] });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "ISSUE_EDITED").length, 0);
   });
 });
 
