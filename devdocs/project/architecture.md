@@ -74,30 +74,19 @@ Every pipeline stage carries an explicit `model` and `effort` in its **Agent mod
 
 **Cost rationale**: Haiku 4.5 is ~$1/$5 per MTok vs Sonnet 5 at ~$3/$15 — assigning mechanical stages to Haiku yields an estimated 40–60% cost reduction on a full `/work-on` run (18–20 agent invocations) with no quality loss on deterministic operations; explicit `xhigh` on architect/security review improves quality where it matters most.
 
-## Known Pipeline Weaknesses (Active Issues)
+## Current Runtime
 
-These are systemic problems being actively addressed:
+The canonical runtime is the lean (core) engine in `bin/lean/` — see `NORTHSTAR.md` § Runtime map and the dossier `devdocs/modules/lean.md`. The multi-phase prose pipeline (`run-issue --path full`) is legacy. Open pipeline problems are tracked as live GitHub issues, not listed here.
 
-### Agent Compliance (#639, #1383)
-Agents hallucinate branch names and routing targets despite explicit spec instructions. The LLM "reasons" its way around deterministic rules. **Root cause**: prose instructions are suggestions, not constraints. **Fix**: Scripts layer (#651) — extract deterministic operations into executable scripts.
+## Scripts Layer (#651)
 
-**Concrete incident (#1383)**: Agent invoked with `/review-pr 1378` on a staging-to-main PR completely ignored the command spec — used the `Agent` tool (not in `allowed-tools`), skipped Phase 0 routing to `review-pr-staging`, and never executed deploy gates or test gates. **Mitigations applied**: HARD RULES preambles, `FORGE:SPEC_LOADED` markers, and `NEVER use Agent tool` warnings added to all CRITICAL/HIGH command specs (#1389). Spec compliance rules added to `templates/devdocs/agent/using-forgedock.md` for distribution (#1383). **Long-term fix**: PreToolUse hooks (#1250) for deterministic enforcement.
-
-### Token Bloat (#619)
-All 27 command specs (~848KB) load into context at session start via symlinks. Most sessions use 1-2 commands but pay the token cost for all of them. **Fix**: Stub + invoke pattern — install thin stubs, load full specs on demand.
-
-### Version Blindness (#635)
-ForgeDock has zero awareness of its host runtime (Claude Code) version. No compatibility checks, no feature detection, no deprecation warnings. **Fix**: Version intelligence system — detect, track, and adapt to Claude Code releases.
-
-## Scripts Layer (Planned — #651)
-
-The next major architectural evolution. Replaces prose instructions with executable scripts for every operation that MUST be deterministic.
+Shipped: `scripts/` replaces prose instructions with executable scripts for every operation that MUST be deterministic.
 
 ```
-Current (fragile):
+Before (fragile):
   Command spec (prose) → LLM interprets → LLM executes → non-deterministic
 
-Proposed (deterministic):
+Now (deterministic):
   Command spec (routing) → LLM decides WHAT → Script executes HOW → deterministic output
 ```
 

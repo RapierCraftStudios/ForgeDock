@@ -5,6 +5,7 @@
  * seam onto FORGE:TELEMETRY events so `forgedock stats` can rebuild Cost, Time and outcome codes from GitHub alone:
  *   PHASE_ATTEMPT_USAGE -> `phase_attempt` (attempt, model, turns, duration_ms, cost_usd, *_tokens)
  *   RUN_TERMINAL        -> `run_terminal`  (reason, code, wall_ms)
+ *   STRUCTURE_DELTA     -> `structure_delta` (edges_added/removed, import_files_added/removed, boundary_changed/loosened 0|1; forge#4159)
  * Other records are ignored. The returned function NEVER throws and honours FORGE_TELEMETRY=off. Telemetry values
  * are scalars (the emitter stringifies objects), so the `usage` object is flattened here; absent values are omitted.
  */
@@ -36,6 +37,11 @@ export function mapRecord(rec, wallMs) {
   }
   if (rec.event === "RUN_TERMINAL") {
     return { event: "run_terminal", phase: null, payload: compact({ reason: rec.reason, code: rec.code, wall_ms: wallMs }) };
+  }
+  if (rec.event === "STRUCTURE_DELTA") {
+    const bit = (v) => (typeof v === "boolean" ? Number(v) : v);
+    return { event: "structure_delta", phase: rec.phase ?? "implement", payload: compact({ edges_added: rec.edges_added, edges_removed: rec.edges_removed,
+      import_files_added: rec.import_files_added, import_files_removed: rec.import_files_removed, boundary_changed: bit(rec.boundary_changed), boundary_loosened: bit(rec.boundary_loosened) }) };
   }
   if (rec.event === "CI_PENDING_WAIT") {
     return { event: "ci_pending_wait", phase: rec.phase ?? "review", payload: compact({ pr: rec.pr, minutes_waited: rec.minutes_waited, result: rec.result, polls: rec.polls, rate_limit_sleeps: rec.rate_limit_sleeps }) };
