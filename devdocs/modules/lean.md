@@ -126,6 +126,7 @@ docs), deduplicated by a `FORGE:MAINT:<kind>:<key>` marker.
 
 ## Other files
 
+`checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),
 `prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`),
 `prompts.mjs` (builder/reviewer prompts, `.forge-lean/` file names),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
@@ -150,3 +151,21 @@ Opt-in `verify:` section (`engine-cli.mjs` `readVerify` → `verify.mjs` `parseV
 Added `FORGE_HOST_PARALLELISM`: it is derived from the ledger lane count,
 injected into the runner env, named in the builder host rules, and used to cap
 ci-local slots and job parallelism.
+
+## Entry 2026-10-20 — Change-scoped checks and shared caches (#4218)
+
+`bin/lean/checks.mjs` (CLI + library) discovers the repo's typecheck/lint/test
+commands (turbo task > workspace package scripts > root script; Python `pytest` /
+`ruff check` via `uv run` / `poetry run`), scopes each with ci-local's
+`scopeCommand` against the lane's changed files, and prints them. `HOST_RULES`
+(`prompts.mjs`, `CHECKS_CLI`) tells the builder to run these instead of the full
+scripts. `scoping.mjs` gained a `tsc` selector (`scopeTsc`, `tsProjectOf`): the
+nearest owning `tsconfig.json` of the changed and referencing files →
+`tsc -p <project>`, `tsc -b` across several composite/referenced projects, full
+for the root project, several non-composite projects or any `globalWiden`
+trigger (lockfile, tsconfig, CI config). Caches: the shared entry
+`~/.forge/verify-cache/<sha256(git common dir)>/<merge-base sha>/` is copied into
+the worktree's `node_modules/.cache/forge-verify/` (hydrate); tsc gets
+`--incremental --tsBuildInfoFile` and eslint `--cache --cache-strategy content
+--cache-location` there; `--publish` creates the entry only when absent
+(tmp dir + rename, first writer wins, never modified).

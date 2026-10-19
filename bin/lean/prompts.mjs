@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /** Core work-on prompts: a plan call that writes the contract, an implement call in the same session, and the conformance reviewer. */
+import { fileURLToPath } from "node:url";
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
 export const LEAN_DIR = ".forge-lean";
@@ -10,7 +11,10 @@ export const PLAN_FILE = `${LEAN_DIR}/plan.md`;
 export const IMPLEMENTATION_FILE = `${LEAN_DIR}/implementation.md`;
 export const CONTRACT_FILE = `${LEAN_DIR}/contract.json`;
 
-const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo).`;
+/** Change-scoped checks with shared incremental caches (#4218): the builder runs the scoped commands this CLI prints. */
+export const CHECKS_CLI = fileURLToPath(new URL("./checks.mjs", import.meta.url));
+
+const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the repo's full tsc/eslint/test scripts (it widens to the full command itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, run it again with --publish to share the incremental caches.`;
 
 /** Verify-by-CI (#4167): in ci/hybrid mode the engine runs the repo's CI on GitHub runners; the host runs only light checks. */
 const LIGHT = "run only formatters and linters on the files you changed";
