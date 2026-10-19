@@ -40,6 +40,12 @@ on:
       - 'scripts/code-index.test.sh'
       - 'scripts/structure-delta.sh'
       - 'scripts/structure-delta.test.sh'
+      - 'scripts/symbol-index.py'
+      - 'scripts/symbol-index.mjs'
+      - 'scripts/symbol-index.test.sh'
+      - 'scripts/fixtures/symbol-index/**'
+      - 'scripts/maintenance-scan.sh'
+      - 'scripts/maintenance-scan.test.sh'
       - 'scripts/review-finalize.sh'
       - 'scripts/review-finalize.test.sh'
       - 'scripts/lib/pr-issue-number.sh'
@@ -112,6 +118,12 @@ on:
       - 'scripts/code-index.test.sh'
       - 'scripts/structure-delta.sh'
       - 'scripts/structure-delta.test.sh'
+      - 'scripts/symbol-index.py'
+      - 'scripts/symbol-index.mjs'
+      - 'scripts/symbol-index.test.sh'
+      - 'scripts/fixtures/symbol-index/**'
+      - 'scripts/maintenance-scan.sh'
+      - 'scripts/maintenance-scan.test.sh'
       - 'scripts/review-finalize.sh'
       - 'scripts/review-finalize.test.sh'
       - 'scripts/lib/pr-issue-number.sh'
@@ -408,6 +420,8 @@ jobs:
           bash scripts/review-prepare.test.sh
           bash scripts/code-index.test.sh
           bash scripts/structure-delta.test.sh
+          bash scripts/symbol-index.test.sh
+          bash scripts/maintenance-scan.test.sh
           bash scripts/review-finalize.test.sh
           bash scripts/close-parent-c3.test.sh
           bash scripts/review-delta.test.sh
