@@ -199,6 +199,22 @@ one hold and a lane on another account is admitted. Legacy per-batch `holdUntil`
 `state.json` is ignored on `--resume`. CLI: `forgedock limits show|clear [<id>|--all]`
 (`engine-cli.mjs` `limitsFromCli`).
 
+## Entry 2026-10-20 — Host lane registry: global cap and cross-batch priority (#4191)
+
+`sched.mjs` keeps one host registry (`~/.forge/sched/registry.json`, or
+`FORGEDOCK_SCHED_DIR`; read-modify-write under `registry.lock`, a dead owner's lock
+is taken over). `orchestrate.mjs` (seam `sched: {registry, batch, repo, cap}` +
+`priorityOf`, persisted as `priorities`) starts a lane only when the batch is under
+its K **and** `tryAcquire` grants a slot: live slots < cap and the key ranks within
+the free slots of the queue ordered by (priority, FIFO seq). Priority comes from
+`priority:P<n>` / `P<n>` labels (unlabelled P2), read in the body call. Cap: registry
+(`forgedock sched cap N|--clear`, `engine-cli.mjs` `schedFromCli`) > forge.yaml
+`orchestration.global_parallel` > none. Running lanes are never revoked. A dead
+dispatcher's queued entries are dropped; its slots too unless the detached lane
+(`lanePid`) still runs; `--resume` adopts them. Unreadable registry or lock timeout:
+admit without the cap (one `sched` row). Rationale:
+`devdocs/decisions/4191-host-lane-registry.md`.
+
 ## Entry 2026-10-20 — Change-scoped checks and shared caches (#4218)
 
 `bin/lean/checks.mjs` (CLI + library) discovers the repo's typecheck/lint/test

@@ -23,6 +23,12 @@
  * `{maintenance, priority}` (persisted as `classes`) and admission follows `pickNext`: P0/P1 features, then a maintenance
  * issue while maintenance starts stay within `share` of all lane starts (`dispatch: {started, maint}`, persisted), then
  * P2+ features, then (`whenIdle`) maintenance once no feature is pending. Maintenance the budget never admits ends `held`.
+ *
+ * Host lane registry (#4191), off unless `sched: {registry, batch, repo, cap}` is passed (`sched.mjs` `openSched`): a lane
+ * starts only when the batch is under its K and the registry grants it a host slot; `priorityOf(issue)` (persisted as
+ * `priorities`) ranks it host-wide, and the batch's ready issues are tried in priority order. Ready issues it cannot
+ * start yet stay offered in the registry (polled every `pollMs`) and are withdrawn once no longer ready; a settled lane
+ * releases its slot, an adopted one re-records it.
  */
 import { parseDependsOn } from "../engine/phases.mjs";
 
@@ -117,7 +123,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
-  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null }) {
+  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, sched = null, priorityOf = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -142,12 +148,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const classes = toMap(saved?.classes); // issue -> {maintenance, priority}; only with a maintenance budget
   const dispatch = { started: saved?.dispatch?.started ?? 0, maint: saved?.dispatch?.maint ?? 0 };
   let budgetHeld = false;
+  const reg = sched?.registry ?? null;
+  const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
 
   const save = () => {
     if (!store) return;
     store.save({ v: 1, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
-      prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}) });
+      prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
+      ...(reg ? { priorities: toObj(priorities) } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
   const classifyOne = async (n) => {
@@ -156,11 +165,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     try { c = classify ? await classify(n) : null; } catch { c = null; } // unclassifiable: an ordinary P2 feature
     classes.set(n, { maintenance: !!c?.maintenance, priority: Number.isFinite(Number(c?.priority)) ? Number(c.priority) : 2 });
   };
+  const readPriority = async (n) => {
+    if (!reg) return;
+    let p = null;
+    try { p = priorityOf ? await priorityOf(n) : null; } catch { p = null; }
+    priorities.set(n, p !== null && p !== "" && Number.isFinite(Number(p)) ? Number(p) : 2);
+  };
   const readDeps = async (n) => {
     let body = "";
     try { body = await readBody(n); } catch { /* unreadable: no ordering info, work-on's own check still applies */ }
     deps.set(n, parseDeps(body, n));
     await classifyOne(n);
+    await readPriority(n);
     if (resolveLane) { let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e) }; } lanes.set(n, l); }
   };
   const edges = (n) => (deps.get(n) ?? []).filter((d) => set.has(d));
@@ -183,8 +199,33 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   for (const n of issues) if (!set.has(n)) { set.add(n); order.push(n); pending.push(n); }
   for (const n of order) if (!deps.has(n)) await readDeps(n);
   if (budget) for (const n of order) if (!classes.has(n)) await classifyOne(n); // a resume that enabled the budget
+  if (reg) for (const n of order) if (!priorities.has(n)) await readPriority(n); // a resume of a pre-#4191 batch
   noteCrossLane();
   save();
+
+  // Host registry seams (#4191): `offered` issues are queued for a slot, `slotted` ones hold one.
+  const offered = new Set(), slotted = new Set();
+  let fellBack = false;
+  const keyOf = (n) => `${sched?.batch ?? batchId ?? "?"}#${n}`;
+  const prioOf = (n) => priorities.get(n) ?? 2;
+  const entryOf = (n) => ({ key: keyOf(n), batch: sched?.batch ?? batchId ?? null, repo: sched?.repo ?? null, issue: n, priority: prioOf(n) });
+  const releaseSlot = (n) => { if (reg && slotted.delete(n)) reg.release(keyOf(n)); };
+  const offerFresh = (ns) => { const fresh = ns.filter((n) => !offered.has(n)); if (!fresh.length) return; reg.offer(fresh.map(entryOf)); for (const n of fresh) offered.add(n); };
+  const withdrawExcept = (keep) => {
+    const gone = [...offered].filter((n) => !keep.has(n));
+    if (!gone.length) return;
+    reg.withdraw(gone.map(keyOf));
+    for (const n of gone) offered.delete(n);
+  };
+  // A host slot for `n` (a lane-refused issue runs nothing and needs none); refused: `n` stays queued in the registry.
+  const grant = (n, wanted) => {
+    if (!reg || lanes.get(n)?.ok === false) return true;
+    const r = reg.tryAcquire(keyOf(n), entryOf(n), sched.cap);
+    if (!r?.ok) { offered.add(n); wanted.add(n); return false; }
+    offered.delete(n); slotted.add(n);
+    if (r.fallback && !fellBack) { fellBack = true; update({ issue: null, outcome: "sched", detail: `host lane registry unavailable, admitting without the global cap: ${r.reason}` }); }
+    return true;
+  };
 
   const skip = (n, detail) => { results.set(n, { issue: n, outcome: "skipped", pr: null, cost_usd: 0, minutes: 0, detail }); update(results.get(n)); };
   const requeue = (n, delayMs) => { pending.push(n); if (delayMs > 0) notBefore.set(n, now() + delayMs); else notBefore.delete(n); };
@@ -203,7 +244,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + (pf?.cost_usd ?? 0), minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}) };
     const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
     const subs = (Array.isArray(r?.subissues) ? r.subissues : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
-    const done = () => { running.delete(n); runRecs.delete(n); };
+    const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); };
     if (row.outcome === "dependency-open" && depList.length && (requeues.get(n) ?? 0) < MAX_REQUEUES) {
       // A scheduling fact, not a failure: add the edge, pull the dependency in, and run this issue again after it.
       requeues.set(n, (requeues.get(n) ?? 0) + 1);
@@ -266,7 +307,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       let r;
       if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
-        try { r = await runOne(n, lane, { onStart: (info) => { Object.assign(rec, info ?? {}); save(); } }); }
+        try {
+          r = await runOne(n, lane, { onStart: (info) => {
+            Object.assign(rec, info ?? {}); save();
+            if (reg && slotted.has(n) && info?.pid) reg.setLanePid(keyOf(n), info.pid);
+          } });
+        }
         catch (e) { r = { terminalReason: "engine-error", detail: e?.message ?? String(e) }; }
       }
       await settle(n, r, rec, pf);
@@ -277,7 +323,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   for (const [n, rec] of [...runRecs]) {
     let p = null;
     if (adopt && rec?.pid) { try { p = await adopt(n, rec); } catch { p = null; } }
-    if (p) track(n, Promise.resolve(p).then((r) => settle(n, r, rec, checked.get(n) ?? null)));
+    if (p) {
+      if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); }
+      track(n, Promise.resolve(p).then((r) => settle(n, r, rec, checked.get(n) ?? null)));
+    }
     else { runRecs.delete(n); if (!pending.includes(n) && !results.has(n)) pending.unshift(n); }
   }
   // A resume re-derives each unfinished issue's lane from its current milestone (#4153): a re-milestone takes effect.
@@ -305,15 +354,27 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     let started = 0;
     const isReady = (n) => (notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome));
     budgetHeld = false;
+    const wanted = new Set(); // issues that stay offered in the host registry after this pass
     if (!tripped && !holdUntil && budget) {
       while (running.size < K()) {
         const ready = pending.filter(isReady);
         const n = pickNext(ready, { classes, share: budget.share, whenIdle: budget.whenIdle, started: dispatch.started, maint: dispatch.maint,
           featuresPending: pending.some((p) => !clsOf(classes, p).maintenance) });
         if (n === null) { budgetHeld = ready.length > 0; break; }
+        if (!grant(n, wanted)) break;
         pending.splice(pending.indexOf(n), 1);
         if (lanes.get(n)?.ok !== false) { dispatch.started++; if (clsOf(classes, n).maintenance) dispatch.maint++; }
         start(n); started++;
+      }
+    } else if (!tripped && !holdUntil && reg) {
+      // Priority first, pending order within a priority; the free per-batch K is offered so the host queue keeps FIFO.
+      const ready = pending.filter(isReady).map((n, i) => [n, i]).sort((a, b) => prioOf(a[0]) - prioOf(b[0]) || a[1] - b[1]).map(([n]) => n);
+      const want = ready.filter((n) => lanes.get(n)?.ok !== false).slice(0, Math.max(0, K() - running.size));
+      offerFresh(want);
+      for (const n of want) wanted.add(n);
+      for (const n of ready) {
+        if (running.size >= K() || !grant(n, wanted)) break;
+        pending.splice(pending.indexOf(n), 1); start(n); started++;
       }
     } else if (!tripped && !holdUntil) {
       for (let i = 0; i < pending.length && running.size < K();) {
@@ -322,17 +383,20 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         else i++;
       }
     }
+    if (reg) withdrawExcept(wanted);
     if (tripped && !running.size) break; // breaker: let running lanes finish, keep the rest pending for a resume
     // Wake for a delayed issue, the end of a usage-limit hold, or (with a live K) a poll.
     const waits = pending.map((n) => notBefore.get(n) ?? 0).filter((x) => x > t);
     if (holdUntil) waits.push(holdUntil);
     let wake = waits.length ? Math.max(0, Math.min(...waits) - t) : null;
     if (getParallel && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
+    if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
     if (tripped) wake = null;
     if (running.size) {
       if (wake === null) await Promise.race(running.values());
       else { const ac = new AbortController(); await Promise.race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
     } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
+    else if (pending.length && offered.size) await sleep(wake); // waiting for a host slot
     else if (pending.length && waits.length) await sleep(Math.max(0, Math.min(...waits) - t));
     else if (pending.length && budgetHeld) break; // maintenance the budget does not admit now: held for a later batch
     else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle
@@ -340,6 +404,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       save();
     }
   }
+  if (reg) withdrawExcept(new Set());
   save();
   return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: tripped?.detail ?? (budgetHeld ? "maintenance share" : "not run") });
 }
