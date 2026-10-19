@@ -159,6 +159,17 @@ export function readVerify(cwd = process.cwd()) {
     return sec && typeof sec === "object" ? parseVerify(sec) : undefined;
   } catch { return undefined; }
 }
+/**
+ * forge.yaml `env` for core lanes (#4163): `env.toolchain` ("<pm>@<x.y.z>" or "off") and `env.setup` (a command run once
+ * per fresh worktree before the builder). Returns runCore options; {} when absent.
+ */
+export function readEnvConfig(cwd = process.cwd()) {
+  try {
+    const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.env ?? {};
+    const s = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+    return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}) };
+  } catch { return {}; }
+}
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
 
 export function runDir() { return join(homedir(), ".forge", "runs"); }
@@ -591,7 +602,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -848,12 +859,16 @@ export async function orchestrateFromCli(argv, deps = {}) {
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln) => runCore({ issue: n, repo, lane: ln, laneOverride, branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
     lanes = batchMod.detachedLanes({ batch, cwd, script: deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), bin: deps.laneBin, pollMs: deps.pollMs,
       laneArgs: (n, ln) => ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])] });
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
+  // #4190: usage-limit holds live in the host store keyed by the account the next lane would use.
+  const limitsMod = await import("./lean/limits.mjs");
+  const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile());
+  const identity = deps.identity ?? (() => limitsMod.laneBackendId(process.env));
   const maint = deps.maintenance !== undefined ? deps.maintenance : readMaintenance(cwd);
   const labelsOf = new Map(); // issue -> label names, filled by readBody (one gh call per issue)
   let budget = {};
@@ -887,7 +902,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
   const crossLane = [];
   const rows = await orchestrate({
     issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
-    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, drift,
+    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
     onCrossLane: (e) => {
       crossLane.push(e);
       console.log(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
@@ -903,6 +918,34 @@ export async function orchestrateFromCli(argv, deps = {}) {
   if (crossLane.length) console.log(`cross-lane edges: ${crossLane.map((e) => `#${e.issue} (${e.lane}) → #${e.dependency} (${e.dependencyLane})`).join(", ")}`);
   if (rows.some((r) => r.outcome === "held")) console.log(`held issues stay pending: forgedock orchestrate --resume ${batch.id}`);
   return { rows, crossLane, batch: batch.id, ok: rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome)) };
+}
+
+/**
+ * `forgedock limits show` · `forgedock limits clear <id>|--all` (#4190)
+ * Usage-limit holds are kept per account (backend identity) in `~/.forge/limits.json` (or `FORGEDOCK_LIMITS_FILE`) and
+ * shared by every batch on the host. `show` lists the active holds (identity, reset time, source; `*` marks the account
+ * this shell's lanes would use); `clear` drops one hold or all of them, so held batches admit on their next pass.
+ */
+export async function limitsFromCli(argv, deps = {}) {
+  const limitsMod = await import("./lean/limits.mjs");
+  const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile());
+  const current = (deps.identity ?? (() => limitsMod.laneBackendId(process.env)))();
+  const usage = "usage: forgedock limits show | forgedock limits clear <id>|--all";
+  const [sub, arg] = argv;
+  if (!sub || sub === "show") {
+    const holds = limits.list();
+    if (!holds.length) console.log(`no usage-limit holds (this account: ${current})`);
+    for (const h of holds) console.log(`${h.id === current ? "*" : " "} ${h.id}  until ${new Date(h.until).toISOString()}  source ${h.source ?? "-"}`);
+    return { holds, current };
+  }
+  if (sub === "clear") {
+    if (arg === "--all") { const n = limits.clearAll(); console.log(`cleared ${n} usage-limit hold(s)`); return { cleared: n }; }
+    if (!arg || arg.startsWith("--")) throw new Error(usage);
+    if (!limits.clear(arg)) throw new Error(`no active usage-limit hold for ${arg}`);
+    console.log(`cleared usage-limit hold for ${arg}`);
+    return { cleared: 1 };
+  }
+  throw new Error(usage);
 }
 
 /**

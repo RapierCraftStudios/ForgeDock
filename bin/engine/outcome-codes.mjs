@@ -47,6 +47,7 @@ export const OUTCOME_CODES = Object.freeze({
   INFRA_CLI_SPAWN_TRANSIENT: "infra.cli_spawn_transient",
   CLI_TIMEOUT: "cli.timeout",
   CLI_SPAWN_FAILED: "cli.spawn_failed", // forge#4129: deterministic spawn failure (E2BIG, ENOENT, EACCES, ...)
+  ENV_SETUP_FAILED: "env.setup_failed", // forge#4163: forge.yaml env.setup failed before the builder; an environment error, not a build failure
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
@@ -77,6 +78,7 @@ export const OUTCOME_CODES = Object.freeze({
   CONFORMANCE_PRESERVE_VIOLATED: "conformance.preserve_violated",
   CONFORMANCE_REGRESSION: "conformance.regression",
   STRUCTURE_UNDECLARED_EDGE: "structure.undeclared_edge", // forge#4159: a workspace package.json edge the contract does not name
+  DOCS_STALE: "docs.stale", // the target repo's devdocs freshness rule still fails after one builder resume
   FOLLOWUP_UNAVAILABLE: "followup.unavailable",
   MERGE_HEAD_MISMATCH: "merge.head_mismatch",
   // Non-failure terminals, so a RUN_TERMINAL for a healthy run is not counted as a gap.

@@ -98,7 +98,9 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
   own session, so the batch survives this session: if the runner dies, run `forgedock orchestrate --resume <id>`
   (live lanes are re-adopted, nothing is launched twice). Change K of a running batch with
   `forgedock orchestrate --set-parallel <id> K`. The runner requeues `deferred` lanes by code (host busy after its
-  retry-in, a usage limit holds all admissions until the reset, transient merge/push/idle failures back off; non-host
+  retry-in, a usage limit holds admissions for that account (backend identity) until the reset, across every batch on
+  the host, while a lane on another account is admitted; `forgedock limits show` lists holds and
+  `forgedock limits clear <id>|--all` drops them; transient merge/push/idle failures back off; non-host
   deferrals stop after `orchestration.max_deferrals`), relaunches an `engine-error` once, and stops admitting after
   `orchestration.breaker` engine-errors (`errors` within `window_min`; held issues continue on `--resume`). Logical
   edges you found in step 2.4 must be written to the dependent issue as a `Depends on #X` line before launching. The
