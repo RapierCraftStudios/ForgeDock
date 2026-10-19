@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync, chmodSync, existsSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, mkdirSync, chmodSync, existsSync, readFileSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import { execFileSync } from "node:child_process";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { detectPins, parsePackageManager, nodeSatisfies, nodeWarning, shimScripts, prepareToolchain, toolchainEnv } from "./toolchain.mjs";
 
-const tmp = (p) => mkdtempSync(join(tmpdir(), p));
+const tmp = (p) => tmpDir(p);
 const repo = (files) => {
   const d = tmp("tc-repo-");
   for (const [f, t] of Object.entries(files)) writeFileSync(join(d, f), typeof t === "string" ? t : JSON.stringify(t));
