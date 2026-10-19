@@ -10,7 +10,7 @@ import { makeLedger } from "./ledger.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt } from "./prompts.mjs";
-import { parseReview, unnamedEdges, structureNote } from "./conformance.mjs";
+import { parseReview, unnamedEdges, structureNote, applyAmendments } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
 import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir } from "./effects.mjs";
@@ -940,6 +940,15 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     // the manifest alone, without the package named, is not naming the edge
     assert.equal(unnamedEdges(withEdgeDeliverable("bump versions"), delta({ package_edges_added: [EDGE] })).length, 1);
     assert.equal(unnamedEdges(withEdgeDeliverable("add @s/core"), delta({ package_edges_added: [EDGE] })).length, 0);
+  });
+
+  it("an add-deliverable amendment on a package.json the contract already lists (for another change) declares the edge", () => {
+    const frozen = { requirements: [], deliverables: [{ id: "D1", path: "packages/db/package.json", change: "bump versions" }] };
+    const r = applyAmendments(frozen, [{ kind: "add-deliverable", path: "packages/db/package.json", why: "add @s/core: the architecture doc lets db depend on core" }]);
+    assert.equal(r.contract.deliverables.length, 1); assert.equal(r.contract.deliverables[0].id, "D1");
+    assert.match(r.contract.deliverables[0].change, /^bump versions; add @s\/core/);
+    assert.equal(unnamedEdges(r.contract, delta({ package_edges_added: [EDGE] })).length, 0);
+    assert.equal(frozen.deliverables[0].change, "bump versions", "the frozen contract is not mutated");
   });
 
   it("an add-deliverable amendment naming the package on the resume declares the edge", async () => {
