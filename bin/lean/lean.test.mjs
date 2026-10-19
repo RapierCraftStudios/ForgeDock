@@ -695,6 +695,31 @@ describe("issue edited mid-run (#4188)", () => {
   });
 });
 
+describe("review row skeleton and targeted retry (#4160)", () => {
+  it("the reviewer prompt carries a pre-filled skeleton with every requirement and preserve id", async () => {
+    const w = world();
+    assert.equal((await run(w)).terminalReason, "merged");
+    const p = reviewers(w)[0][4];
+    const sk = JSON.parse(/<row_skeleton>\n([\s\S]*?)\n<\/row_skeleton>/.exec(p)[1]);
+    assert.deepEqual(sk.requirements.map((r) => r.id), CONTRACT.requirements.map((r) => r.id));
+    assert.deepEqual(sk.preserve.map((x) => x.id), (CONTRACT.preserve ?? []).map((x) => x.id));
+    assert.doesNotMatch(p, /previous_reply_problems/);
+  });
+  it("an incomplete first reply gets one retry that lists exactly what was missing, and the complete second reply decides", async () => {
+    const w = world({ reviews: [genericPass(), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 2);
+    const p2 = reviewers(w)[1][4];
+    assert.match(p2, /<previous_reply_problems>[\s\S]*requirement R1 needs exactly one row/);
+    assert.match(p2, /<previous_reply>[\s\S]*"verdict":"PASS"/);
+  });
+  it("a complete first reply needs no second reviewer run", async () => {
+    const w = world();
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1);
+  });
+});
+
 describe("worktree salvage and orphaned processes (#4162)", () => {
   const T1 = "1".repeat(40), T2 = "2".repeat(40);
   const salvageRefs = (w) => w.calls.filter((c) => c[0] === "git" && c[1] === "update-ref").map((c) => c[2]);

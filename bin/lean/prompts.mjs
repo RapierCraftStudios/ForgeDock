@@ -105,6 +105,7 @@ You receive the GitHub issue with its comments, the frozen contract (requirement
 - scope: one row per changed file: the deliverable id that authorizes it (deliverables may be directories or globs), "test", "incidental" (changelog, lockfile), or "none" with what it changes.
 - preserve: one row per preserve id: intact|violated|unverified, with path:line.
 - regressions: concrete breakages only, each with path:line.
+Start from <row_skeleton> when given: it already lists every row the engine requires. Keep every id and file, fill each status and evidence, and add issue_coverage rows for issue requirements the contract does not quote. Scope rows are needed only for the files listed there; the engine authorizes the rest.
 
 Output ONLY a JSON object in a json code fence:
 {"issue_coverage":[{"quote":"","contract_ids":["R1"],"status":"covered|narrowed|missing"}],"requirements":[{"id":"R1","status":"","evidence":"path:line","validated_by":"V1","deferral_ok":true,"note":""}],"scope":[{"file":"","authorized_by":"D1|test|none","note":""}],"preserve":[{"id":"P1","status":"","evidence":"path:line"}],"regressions":[{"at":"path:line","failure":""}],"verdict":"CONFORMS|NONCONFORMING","summary":"one line"}
@@ -140,9 +141,9 @@ export function boundDiff(diff, { stat = "", base = "", maxBytes = REVIEW_DIFF_M
     + (list.length ? `\n<omitted_files>\n${list.join("\n")}\n</omitted_files>` : "");
 }
 
-export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "" }) {
+export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", skeleton = null, retry = null }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
-  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
+  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}${skeleton ? `\n\n<row_skeleton>\n${cap(JSON.stringify(skeleton), 12000)}\n</row_skeleton>` : ""}${retry?.problems?.length ? `\n\n<previous_reply_problems>\nYour previous reply was rejected as incomplete. Fix exactly these and return the complete corrected JSON:\n${retry.problems.slice(0, 60).map((x) => `- ${x}`).join("\n")}\n</previous_reply_problems>${retry.previous ? `\n\n<previous_reply>\n${cap(retry.previous, 8000)}\n</previous_reply>` : ""}` : ""}`;
 }
 
 /** Pre-filter (#4123): one read-only, single-turn check of an issue a cheap signal flagged as possibly already fixed. */
