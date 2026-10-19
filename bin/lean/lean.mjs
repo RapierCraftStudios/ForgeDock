@@ -30,9 +30,9 @@ const SHADOW_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CO
 /**
  * Precheck failures that block in shadow mode too (#4160): every precheck or amendment failure coded
  * conformance.unimplemented (a validate command that failed or has no recorded result, a deliver requirement reported as
- * not done, an invalid amendment), the precheck's form of "a requirement not done". Scope creep stays recorded-only.
+ * not done, an invalid amendment) or conformance.regression, the same codes a review blocks on. Scope creep stays recorded-only.
  */
-const SHADOW_PRE_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED];
+const SHADOW_PRE_BLOCKS = SHADOW_BLOCKS;
 /** forge.yaml engine.review_incomplete (#4160): "needs-human" (default), or "degraded": in shadow, merge an incomplete review with a review-degraded label and a tracked follow-up. */
 export const REVIEW_INCOMPLETE_MODES = Object.freeze(["needs-human", "degraded"]);
 export const REVIEW_DEGRADED_LABEL = "review-degraded";

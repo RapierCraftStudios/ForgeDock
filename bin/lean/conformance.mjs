@@ -160,8 +160,9 @@ export function parseReview(text) {
  * A basename or path suffix in reviewer evidence, resolved to the one repo path it names (changed files first, then
  * `repoFiles`). An exact match, an ambiguous name or an unknown name is returned unchanged.
  */
-export function normalizeEvidencePath(path, { changedFiles = [], repoFiles = [] } = {}) {
+export function normalizeEvidencePath(path, { changedFiles = [], repoFiles = [], listed = null } = {}) {
   const p = cleanPath(path);
+  if (listed) repoFiles = listed;
   if (!p) return p;
   for (const pool of [changedFiles, repoFiles]) {
     const files = [...pool];
@@ -276,6 +277,12 @@ export function decide(raw, ctx) {
   return { state: "conforms", failures: [], review: rv };
 }
 
+/** The ids (or sections) a targeted re-ask must fill: requirement ids without a valid row, issue_coverage problems, ...; [] when complete. */
+export function missingIds(rv, ctx) {
+  if (!rv || typeof rv !== "object") return [];
+  return checkCompleteness(fillEngineRows(rv, ctx), ctx).missing;
+}
+
 /**
  * The reviewer's first reply with the rows of a targeted re-ask applied: a repair row replaces the row with the same id
  * (scope: file), issue_coverage is replaced when the repair sends any, verdict and summary follow the repair when valid.
@@ -301,9 +308,9 @@ export function reviewSkeleton(contract, changedFiles = [], ignore = []) {
   const reqs = contract?.requirements ?? [];
   return {
     issue_coverage: reqs.map((r) => ({ quote: r.quote, contract_ids: [r.id], status: "covered|narrowed|missing" })),
-    requirements: reqs.map((r) => ({ id: r.id, status: TRACKED.includes(r.disposition) ? `${r.disposition === "defer" ? "deferred" : r.disposition}|implemented|missing` : "implemented|partial|missing|not-applicable", evidence: "repo/relative/path:line", validated_by: "V?", ...(TRACKED.includes(r.disposition) ? { deferral_ok: "true|false" } : {}), note: "" })),
+    requirements: reqs.map((r) => ({ id: r.id, status: "", evidence: "repo/relative/path:line", validated_by: "V?", ...(TRACKED.includes(r.disposition) ? { deferral_ok: "true|false" } : {}), note: "" })),
     scope: reviewedFiles(changedFiles, ignore).map((f) => ({ file: f, authorized_by: authorizationOf(contract ?? {}, f) ?? "none", note: "" })),
-    preserve: (contract?.preserve ?? []).map((p) => ({ id: p.id, status: "intact|violated|unverified", evidence: "path:line" })),
+    preserve: (contract?.preserve ?? []).map((p) => ({ id: p.id, status: "unverified", evidence: "path:line" })),
     regressions: [],
     verdict: "CONFORMS|NONCONFORMING",
     summary: "one line",

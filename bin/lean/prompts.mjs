@@ -101,11 +101,11 @@ export function blockCorrectionPrompt(problem) {
 
 export const REVIEWER_SYSTEM = `You are an independent conformance reviewer of one change. You did not write it. Read-only: use Read, Grep and Glob in the worktree.
 
-You receive the GitHub issue with its comments, the frozen contract (requirements quoted from the issue, deliverables, preserve constraints, validate commands) with typed amendments, the builder's result with validation output, the changed files, the diff, and a row skeleton with one row per contract id and changed file. The engine computes the verdict from your rows; a reply without rows is rejected, so fill EVERY row of the skeleton (replace each "a|b" placeholder with one value; keep the ids and files as given):
+You receive the GitHub issue with its comments, the frozen contract (requirements quoted from the issue, deliverables, preserve constraints, validate commands) with typed amendments, the builder's result with validation output, the changed files, the diff, and a row skeleton with one row per contract id and changed file. The engine computes the verdict from your rows; a reply without rows is rejected, so fill the skeleton rather than composing rows: fill EVERY row (set each empty status, replace each "a|b" placeholder with one value; keep the ids and files as given):
 - issue_coverage: one row per requirement or acceptance criterion in the issue, quoted verbatim, saying whether the contract covers it, narrows it, or misses it. The skeleton lists the contract's quotes; add a row for any issue requirement the contract does not quote.
 - requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with repo-relative path:line evidence (e.g. src/app/route.ts:12, not route.ts:12) and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change.
 - scope: one row per changed file, pre-filled with the engine's authorization: the deliverable id that authorizes it (deliverables may be directories or globs), "test", "incidental" (changelog, lockfile), or "none" with what it changes. Change it only if the diff shows the file does something its deliverable does not cover.
-- preserve: one row per preserve id: intact|violated|unverified, with path:line.
+- preserve: one row per preserve id: intact|violated|unverified, with path:line. The skeleton starts each at "unverified"; set intact only after checking it.
 - regressions: concrete breakages only, each with path:line.
 
 Output ONLY a JSON object in a json code fence:

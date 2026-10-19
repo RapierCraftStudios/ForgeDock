@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -132,6 +132,14 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.deepEqual(s.preserve.map((r) => r.id), ["P1"]);
     assert.deepEqual(s.scope.map((r) => [r.file, r.authorized_by]), [["src/scrape.js", "D1"], ["src/search.js", "D2"], ["test/leak.test.js", "test"], ["src/pricing.js", "none"]]);
     assert.deepEqual(s.issue_coverage.map((r) => r.quote), [Q1, Q2]);
+    assert.ok(s.requirements.every((r) => r.status === ""), "requirement status is left for the reviewer");
+    assert.ok(s.preserve.every((r) => r.status === "unverified"), "preserve starts unverified");
+  });
+  it("#4160 missingIds lists only what a targeted re-ask must fill", () => {
+    assert.deepEqual(missingIds(good, ctx), []);
+    assert.deepEqual(missingIds({ ...good, requirements: [good.requirements[1]], preserve: [], scope: [] }, ctx), ["R1"], "engine-filled preserve/scope rows are not asked for");
+    assert.deepEqual(missingIds({ ...good, issue_coverage: [] }, ctx), ["issue_coverage"]);
+    assert.equal(normalizeEvidencePath("billing.js", { listed: new Set(["src/billing.js"]) }), "src/billing.js", "listed is the repo file list");
   });
   it("incomplete: implemented without path:line, with evidence in a nonexistent file, or without validation", () => {
     assert.equal(decide(row("R1", { evidence: "looks fine" }), ctx).state, "review.incomplete");
