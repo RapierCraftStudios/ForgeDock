@@ -171,6 +171,10 @@ export function makeLeanIo({ repo }) {
       for (const l of out.split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) map[k] = Number(n); }
       return map;
     },
+    /** forge#4159: scripts/structure-delta.sh over base...HEAD in cwd; null on any failure (never fails a run). */
+    async structureDelta({ cwd, base }) {
+      try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
+    },
     fs: {
       read: async (p) => readFileSync(p, "utf8"),
       exists: async (p) => existsSync(p),

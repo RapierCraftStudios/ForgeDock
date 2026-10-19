@@ -248,6 +248,17 @@ Build `DETECTED_ANALYTICS` list from findings:
 - `DETECTED_GA4=true` if GA4 references found
 - If none found, `DETECTED_ANALYTICS_EMPTY=true`
 
+### 2G: Boundary config check
+
+Core work-on blocks a new package.json dependency between workspace packages that its contract does not name, and only reports import growth along existing ones (`scripts/structure-delta.sh`). An allow-all boundary rule makes that report the only signal, so suggest tightening it once.
+
+```bash
+# eslint-plugin-boundaries, dependency-cruiser, Nx depConstraints (repo root only)
+ls "$REPO_ROOT"/.eslintrc* "$REPO_ROOT"/eslint.config.* "$REPO_ROOT"/.dependency-cruiser.* "$REPO_ROOT"/nx.json 2>/dev/null | head -10
+```
+
+Read each file found. Set `BOUNDARY_ALLOW_ALL=true` when a rule allows everything: an eslint-plugin-boundaries rule `{ from: [X], allow: ['*'] }` (or an `allow` list naming every element type), a dependency-cruiser config with no `forbidden` rules, or Nx `onlyDependOnLibsWithTags: ['*']`. Record the file and the rule as `BOUNDARY_ALLOW_ALL_AT`. Suggestion only: never edit the config. If no config is found, or the rules are scoped, leave it unset.
+
 ---
 
 ## Phase 3: GitHub Queries
@@ -633,6 +644,7 @@ Next steps:
        /work-on next
   3. If any WARNING appeared above, edit forge.yaml to fix the flagged values.
   4. Backup file: forge.yaml.bak (delete when satisfied)
+  {If BOUNDARY_ALLOW_ALL (2G): "5. Your boundary config allows every package to import every package ({BOUNDARY_ALLOW_ALL_AT}). Consider tightening it per package once its design settles: core work-on reports import growth but only blocks undeclared package.json edges."}
 
 ForgeDock commands now use your project's config from forge.yaml.
 ```
