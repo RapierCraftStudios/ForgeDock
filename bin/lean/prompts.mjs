@@ -142,6 +142,27 @@ export function blockCorrectionPrompt(problem) {
   return `Your ${RESULT_FILE} says "blocked", but ${String(problem).slice(0, 1000)}. That is not a block that needs a human.\n\n${BLOCK_RULES}\n\nEither do the work (fix, commit, update the stage notes and ${RESULT_FILE}) or write a valid typed "block". Do not push or touch GitHub.`;
 }
 
+/** refactor:split grouping call (#4211): no tools, no files; the only input is the compact symbol index. */
+export const GROUPING_SYSTEM = "You plan how to split one oversized source module into a package of smaller modules. You see only a symbol index (names, kinds, sizes, references); you have no tools and never see code. Reply with exactly one JSON object and nothing else.";
+
+/** The grouping prompt: fixed rules plus JSON of bin/lean/refactor.mjs compactIndex(). Its size depends on the index only, never on file length. */
+export function groupingPrompt(index) {
+  return `Group the top-level symbols of one module into cohesive new modules of a package. A codemod moves them verbatim and leaves the old module re-exporting every moved name.
+
+Index: "symbols" are top-level symbols {name, kind, lines, public}; "edges" are "from->to" references between them.
+
+Rules:
+- Module names are snake_case Python identifiers, unique, not equal to any symbol name.
+- Each symbol appears at most once. Symbols you leave out stay in the old module.
+- A moved symbol must not reference a symbol that stays: when you move a symbol, move everything it references (follow the edges).
+- Modules must not reference each other in a cycle; keep heavily cross-referenced symbols in one module.
+- Prefer a few modules of similar size grouped by what the symbols do.
+
+Reply with only {"<module>": ["<symbol>", ...], ...}.
+
+${JSON.stringify(index)}`;
+}
+
 export const REVIEWER_SYSTEM = `You are an independent conformance reviewer of one change. You did not write it. Read-only: use Read, Grep and Glob in the worktree.
 
 You receive the GitHub issue with its comments, the frozen contract (requirements quoted from the issue, deliverables, preserve constraints, validate commands) with typed amendments, the builder's result with validation output, the changed files, and the diff. The engine computes the verdict from your rows; a reply without rows is rejected, so fill EVERY row:

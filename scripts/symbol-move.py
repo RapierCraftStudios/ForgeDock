@@ -6,9 +6,11 @@
 # Python module into a sibling package and leaves a re-export shim at the old path. A CST tool (libcst) copies every
 # moved statement byte-for-byte; no LLM, no network, nothing is retyped.
 #
-# Usage: python3 scripts/symbol-move.py --src <file.py> --plan <plan.json> [--package <name>] [--dry-run]
+# Usage: python3 scripts/symbol-move.py --src <file.py> --plan <plan.json> [--package <name>] [--extend] [--dry-run]
 #   plan: {"<module>": ["<top-level symbol>", ...], ...}, names as scripts/symbol-index.py reports them.
-#   --package defaults to <stem>_parts, created next to --src.
+#   --package defaults to <stem>_parts, created next to --src. --extend (a chain step of a large split, forge#4211) adds
+#   the plan's modules to an existing package dir instead: its __init__.py is left untouched (created when absent) and a
+#   module file that already exists in it refuses. Without --extend an existing package path refuses.
 # Output (stdout, one JSON object):
 #   ok:      {"status":"ok","package":"<dotted package>","modules":{module:[symbols]},"shim":"<src path>"}
 #   refused: {"status":"refused","reason":"..."}
@@ -47,16 +49,19 @@ def emit(obj):
 
 
 def usage():
-    sys.stderr.write("usage: symbol-move.py --src <file.py> --plan <plan.json> [--package <name>] [--dry-run]\n")
+    sys.stderr.write("usage: symbol-move.py --src <file.py> --plan <plan.json> [--package <name>] [--extend] [--dry-run]\n")
     return 2
 
 
 def parse_args(argv):
-    opts, i = {"package": None, "dry_run": False}, 0
+    opts, i = {"package": None, "dry_run": False, "extend": False}, 0
     while i < len(argv):
         a = argv[i]
         if a == "--dry-run":
             opts["dry_run"] = True
+            i += 1
+        elif a == "--extend":
+            opts["extend"] = True
             i += 1
         elif a in ("--src", "--plan", "--package") and i + 1 < len(argv):
             opts[a[2:]] = argv[i + 1]
@@ -94,7 +99,7 @@ def load_plan(path):
     return plan
 
 
-def build(cst, src, plan, package):
+def build(cst, src, plan, package, extend=False):
     from libcst.metadata import GlobalScope, MetadataWrapper, ScopeProvider
 
     with open(src, "rb") as fh:
@@ -248,8 +253,12 @@ def build(cst, src, plan, package):
 
     src_dir = os.path.dirname(os.path.abspath(src))
     pkg_dir = os.path.join(src_dir, package)
-    if os.path.exists(pkg_dir) or os.path.exists(pkg_dir + ".py"):
+    if os.path.exists(pkg_dir + ".py") or (os.path.exists(pkg_dir) and not (extend and os.path.isdir(pkg_dir))):
         raise Refused("package path already exists: %s" % pkg_dir)
+    if extend:
+        taken = [m for m in plan if os.path.exists(os.path.join(pkg_dir, m + ".py"))]
+        if taken:
+            raise Refused("module already exists in package %s: %s" % (pkg_dir, ", ".join(sorted(taken))))
     base = dotted_package(src_dir)
     dotted = (base + "." if base else "") + package
 
@@ -282,7 +291,8 @@ def build(cst, src, plan, package):
             head.append(from_import("." + other, names))
         files[os.path.join(pkg_dir, mod + ".py")] = "".join(head) + "".join(code(body[i]) for i in moved)
         modules_out[mod] = [n for i in moved for n in movable[i]]
-    files[os.path.join(pkg_dir, "__init__.py")] = ""
+    if not os.path.exists(os.path.join(pkg_dir, "__init__.py")):
+        files[os.path.join(pkg_dir, "__init__.py")] = ""
 
     first = min(stmt_module)
     reexport = "".join(from_import("%s.%s" % (dotted, mod), modules_out[mod]) for mod in order)
@@ -302,10 +312,11 @@ def build(cst, src, plan, package):
 
 def write_atomic(src, plan_out):
     enc, pkg_dir = plan_out["encoding"], plan_out["pkg_dir"]
-    temps, created = [], False
+    temps, created, placed = [], False, []
     try:
-        os.mkdir(pkg_dir)
-        created = True
+        if not os.path.isdir(pkg_dir):
+            os.mkdir(pkg_dir)
+            created = True
         staged = []
         for path, text in sorted(plan_out["files"].items()) + [(src, plan_out["shim"])]:
             fd, tmp = tempfile.mkstemp(prefix=".symbol-move-", suffix=".tmp", dir=os.path.dirname(os.path.abspath(path)))
@@ -318,6 +329,8 @@ def write_atomic(src, plan_out):
         for tmp, path in staged:  # shim last: until then --src is untouched
             os.replace(tmp, path)
             temps.remove(tmp)
+            if path != src:
+                placed.append(path)
     except BaseException:
         for tmp in temps:
             try:
@@ -326,6 +339,12 @@ def write_atomic(src, plan_out):
                 pass
         if created:
             shutil.rmtree(pkg_dir, ignore_errors=True)
+        else:  # --extend: remove only the files this run added to the existing package
+            for path in placed:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
         raise
 
 
@@ -350,7 +369,7 @@ def main(argv):
         package = opts["package"] or os.path.splitext(os.path.basename(src))[0] + "_parts"
         if not package.isidentifier() or keyword.iskeyword(package):
             raise Refused("package name %r is not a valid identifier" % package)
-        out = build(cst, src, load_plan(plan_path), package)
+        out = build(cst, src, load_plan(plan_path), package, opts["extend"])
     except Refused as r:
         emit({"status": "refused", "reason": str(r)})
         return 3
