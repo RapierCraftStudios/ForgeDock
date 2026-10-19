@@ -148,6 +148,8 @@ jobs:
           bash scripts/review-pr-arguments.test.sh
           bash scripts/review-pr-domain-map.test.sh
           bash scripts/review-roster.test.sh
+          bash scripts/affected-files-check.test.sh
+          bash scripts/maintenance-scan.test.sh
           bash scripts/selfreview-plan.test.sh
           bash scripts/review-prepare.test.sh
           bash scripts/review-finalize.test.sh
