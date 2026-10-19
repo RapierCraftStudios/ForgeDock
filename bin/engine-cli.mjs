@@ -876,10 +876,18 @@ export async function orchestrateFromCli(argv, deps = {}) {
     };
     budget = { classify, maintenance: { share: maint.share ?? 0.2, whenIdle: maint.whenIdle ?? true } };
   }
+  // forge#4161: milestone drift. Always folds merged milestone lanes into the summary; thresholds and holds only with config.
+  let drift = deps.drift;
+  if (drift === undefined) {
+    const { makeDrift } = await import("./lean/drift.mjs");
+    const { affectedFiles } = await import("./orchestrate-preflight.mjs");
+    drift = makeDrift({ repo, cwd, io: leanIo, config: readDrift(cwd), stagingBranch: branches.staging ?? "staging", affectedFiles,
+      onEvent: (e) => console.log(`#${e.issue} → ${e.detail}`) });
+  }
   const crossLane = [];
   const rows = await orchestrate({
     issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
-    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget,
+    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, drift,
     onCrossLane: (e) => {
       crossLane.push(e);
       console.log(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
@@ -908,6 +916,22 @@ export function readOrchestration(cwd = process.cwd()) {
   const int = (v, d) => { const n = Number(v); return v !== undefined && v !== "" && Number.isInteger(n) && n >= 0 ? n : d; };
   const errors = int(o.breaker_errors ?? o.errors, 3), windowMin = int(o.breaker_window_min ?? o.window_min, 30);
   return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3) };
+}
+
+/**
+ * forge.yaml `orchestrate.drift` (#4161): `{pairGrowth, packageLines, fileLines, blockDispatch, generatedGlobs}` with
+ * only the positive-integer thresholds set, or null when no threshold and no `block_dispatch: true` is set (summary
+ * only: no script run, no issue, no hold). The parser flattens `orchestrate.drift.*` to `orchestrate.*`.
+ */
+export function readDrift(cwd = process.cwd()) {
+  let o = null;
+  try { o = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.orchestrate ?? null; } catch { o = null; }
+  if (!o || typeof o !== "object") return null;
+  const int = (v) => { const n = Number(v); return v !== undefined && String(v).trim() !== "" && Number.isInteger(n) && n > 0 ? n : null; };
+  const out = { pairGrowth: int(o.pair_growth), packageLines: int(o.package_lines), fileLines: int(o.file_lines),
+    blockDispatch: String(o.block_dispatch ?? "").trim() === "true",
+    generatedGlobs: String(o.generated_globs ?? "").split(",").map((x) => x.trim()).filter(Boolean) };
+  return out.pairGrowth == null && out.packageLines == null && out.fileLines == null && !out.blockDispatch ? null : out;
 }
 
 export const DEFAULT_MAINTENANCE_LABELS = ["maintenance", "refactor:split", "dead-code"];

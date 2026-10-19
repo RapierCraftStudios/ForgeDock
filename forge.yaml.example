@@ -346,6 +346,25 @@ branches:
 #   doc_kb: 64                        # oversized-doc threshold (KB)
 
 # =============================================================================
+# MILESTONE DRIFT (OPTIONAL, forge#4161)
+# `forgedock orchestrate` folds each merged milestone lane's structure delta into
+# a FORGE:DRIFT summary in the GitHub milestone description, with no LLM. Without
+# this block that is all it does. With a threshold set, scripts/milestone-drift.sh
+# runs after each merge and files ONE issue per crossing in the milestone, deduped
+# by its FORGE:DRIFT marker. A value crosses when it is greater than the threshold.
+# `/milestone drift <slug>` prints the same report. Block form only.
+# Commands: orchestrate, milestone
+# =============================================================================
+
+# orchestrate:
+#   drift:
+#     pair_growth: 5          # value-import files added for one from->to package pair since the fork point
+#     package_lines: 10000    # net lines added to one workspace package
+#     file_lines: 600         # net lines added to one file
+#     block_dispatch: false   # true: hold queued issues whose Affected Files touch a flagged package
+#     generated_globs: "*.gen.ts, data/*"   # excluded from size growth (with .gitattributes linguist-generated)
+
+# =============================================================================
 # PIPELINE (OPTIONAL)
 # Tuning knobs for the /orchestrate batch engine — stall detection and the
 # review-finding cascade-control token budget. All keys optional; sane

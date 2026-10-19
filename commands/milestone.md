@@ -93,6 +93,7 @@ Parse `$ARGUMENTS` to determine which action to take:
 | `status <slug>` | → **Show Milestone Detail** |
 | `ship <slug>` | → **Ship Milestone** |
 | `sync <slug>` | → **Sync Milestone Branch** |
+| `drift <slug>` | → **Milestone Drift** |
 | `close <slug>` | → **Close Milestone** |
 
 ---
@@ -414,6 +415,19 @@ gh issue list --milestone "{TITLE}" --state all --json number,title,state,labels
 ```
 
 Show detailed progress with per-issue status.
+
+---
+
+## Action: Milestone Drift (drift <slug>)
+
+Deterministic report (forge#4161); no LLM judgment, no issue filing:
+
+```bash
+git fetch origin "{STAGING_BRANCH}" "milestone/{slug}"
+bash scripts/milestone-drift.sh "{slug}" --format text
+```
+
+Print the output verbatim. It shows import-pair growth, new package edges and top file/package growth since the fork point, plus threshold crossings when forge.yaml `orchestrate.drift` is set. `forgedock orchestrate` files the crossing issues.
 
 ---
 

@@ -46,6 +46,8 @@ on:
       - 'scripts/fixtures/symbol-index/**'
       - 'scripts/maintenance-scan.sh'
       - 'scripts/maintenance-scan.test.sh'
+      - 'scripts/milestone-drift.sh'
+      - 'scripts/milestone-drift.test.sh'
       - 'scripts/review-finalize.sh'
       - 'scripts/review-finalize.test.sh'
       - 'scripts/lib/pr-issue-number.sh'
@@ -124,6 +126,8 @@ on:
       - 'scripts/fixtures/symbol-index/**'
       - 'scripts/maintenance-scan.sh'
       - 'scripts/maintenance-scan.test.sh'
+      - 'scripts/milestone-drift.sh'
+      - 'scripts/milestone-drift.test.sh'
       - 'scripts/review-finalize.sh'
       - 'scripts/review-finalize.test.sh'
       - 'scripts/lib/pr-issue-number.sh'
@@ -422,6 +426,7 @@ jobs:
           bash scripts/structure-delta.test.sh
           bash scripts/symbol-index.test.sh
           bash scripts/maintenance-scan.test.sh
+          bash scripts/milestone-drift.test.sh
           bash scripts/review-finalize.test.sh
           bash scripts/close-parent-c3.test.sh
           bash scripts/review-delta.test.sh
