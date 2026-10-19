@@ -139,6 +139,7 @@ export function codeForRunnerError(err) {
       return OUTCOME_CODES.CLI_SPAWN_FAILED;
     case "NO_API_KEY":
     case "NO_SDK":
+    case "CLI_BACKEND_UNAVAILABLE":
     case "CLI_BACKEND_FAILED":
     case "PHASE_ARGS_INVALID":
     case "CLI_MAX_TURNS":
