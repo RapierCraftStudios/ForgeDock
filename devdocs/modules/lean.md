@@ -38,8 +38,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    dead run, found via `/proc`) get SIGTERM, then SIGKILL after 5 s
    (`WORKTREE_PROCS_STOPPED`); uncommitted work (tracked, untracked, `.forge-lean/`)
    is saved to `refs/forge/salvage/<N>/<ms>` (`WORKTREE_SALVAGED`) and the
-   implement prompt names the ref. A run ending `needs-human` / `engine-error`
-   salvages its own worktree the same way before removal.
+   implement prompt names the ref. This covers runs that died hard (no
+   teardown); a run that exits normally checkpoints its work in teardown (#4179).
 5. **Builder: plan → contract** — plan call writes `.forge-lean/`
    `investigation.md` + `contract.json`; `conformance.mjs` `validateContract`
    checks quotes against the issue and trusted comments; the engine freezes it
