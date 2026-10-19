@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -44,16 +44,90 @@ export function wrapLaneLimits(bin, args, limits) {
   return { bin: "systemd-run", args: ["--user", "--scope", "-q", ...(mem ? ["-p", `MemoryMax=${mem}`] : []), ...(cpu ? ["-p", `CPUQuota=${cpu}`] : []), "--", bin, ...args] };
 }
 
-export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable } = {}) {
+/** Runner process groups (the runner spawns detached, so child.pid is the group id) that must not outlive the engine (#4162). */
+const liveGroups = new Set();
+const signalGroups = (sig) => { for (const g of liveGroups) { try { process.kill(-g, sig); } catch { /* gone */ } } };
+const hooked = new WeakSet();
+/** Once per process: engine exit or a fatal signal stops every runner group (SIGTERM, then SIGKILL), then the signal is re-raised. */
+export function installRunnerExitHooks(proc = process) {
+  if (hooked.has(proc)) return false;
+  hooked.add(proc);
+  proc.on("exit", () => signalGroups("SIGTERM"));
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    const h = () => {
+      proc.removeListener(sig, h);
+      const reraise = () => { if (proc.listenerCount(sig) === 0) proc.kill(proc.pid, sig); };
+      if (!liveGroups.size) return reraise();
+      signalGroups("SIGTERM");
+      setTimeout(() => { signalGroups("SIGKILL"); reraise(); }, 5000); // not unref'd: the grace period keeps the engine alive
+    };
+    proc.on(sig, h);
+  }
+  return true;
+}
+/** Detached parent-death watchdog (bin/lean/runner-watchdog.mjs) for one runner group: catches an engine SIGKILL. */
+export function spawnRunnerWatchdog(enginePid, pgid) {
+  try {
+    const c = spawn(process.execPath, [fileURLToPath(new URL("./runner-watchdog.mjs", import.meta.url)), String(enginePid), String(pgid)], { detached: true, stdio: "ignore" });
+    c.on("error", () => {});
+    c.unref();
+  } catch { /* best effort: the exit hooks and the next run's cwd scan still apply */ }
+}
+
+export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable, spawnWatchdog = spawnRunnerWatchdog, onExitInstall = installRunnerExitHooks, enginePid = process.pid } = {}) {
   return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
     const flags = [...buildLeanSessionFlags(caps), ...(readOnly ? buildReadOnlyToolFlags(caps) : [])];
+    onExitInstall();
+    const onSpawn = (child) => {
+      const g = child?.pid;
+      if (!Number.isSafeInteger(g) || g <= 1) return;
+      liveGroups.add(g);
+      child.on?.("close", () => liveGroups.delete(g));
+      spawnWatchdog(enginePid, g);
+    };
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
-      args: [String(issue)], cwd, bin, model, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
-      logger: { log() {} },
+      args: [String(issue)], cwd, bin, model, env: { ...(env ?? {}), FORGE_ENGINE_PID: String(enginePid) }, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
+      logger: { log() {} }, onSpawn,
       idleMs, maxMs, stream: idleMs > 0, control, wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default" };
+  };
+}
+
+/**
+ * Processes whose cwd is inside a worktree (#4162). Linux: readlink /proc/<pid>/cwd; elsewhere `lsof -t +D <dir>`.
+ * `stop` sends SIGTERM, waits up to graceMs, then SIGKILLs the survivors. The current process is never listed.
+ */
+export function makeProcProbe({ procRoot = "/proc", kill = process.kill.bind(process), self = process.pid, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), lsof = (dir) => pexec("lsof", ["-t", "+D", dir], { timeout: 30000 }).then((x) => x.stdout, (e) => String(e?.stdout ?? "")) } = {}) {
+  const alive = (pid) => { try { kill(pid, 0); return true; } catch (e) { return e?.code !== "ESRCH"; } };
+  return {
+    async inside(dir) {
+      const root = resolve(dir);
+      const within = (p) => p === root || p.startsWith(root + sep);
+      const out = new Set();
+      if (existsSync(procRoot)) {
+        let names = [];
+        try { names = readdirSync(procRoot); } catch { names = []; }
+        for (const n of names) {
+          if (!/^\d+$/.test(n)) continue;
+          let cwd;
+          try { cwd = readlinkSync(join(procRoot, n, "cwd")); } catch { continue; }
+          if (within(cwd.replace(/ \(deleted\)$/, ""))) out.add(Number(n));
+        }
+      } else {
+        for (const l of String(await lsof(root)).split("\n")) if (/^\d+$/.test(l.trim())) out.add(Number(l.trim()));
+      }
+      out.delete(self);
+      return [...out];
+    },
+    async stop(pids, { graceMs = 5000 } = {}) {
+      const terminated = [], killed = [];
+      for (const p of pids) { try { kill(p, "SIGTERM"); terminated.push(p); } catch { /* gone */ } }
+      for (let waited = 0; waited < graceMs && terminated.some(alive); waited += 250) await sleep(250);
+      for (const p of terminated) if (alive(p)) { try { kill(p, "SIGKILL"); killed.push(p); } catch { /* gone */ } }
+      return { terminated, killed };
+    },
   };
 }
 
@@ -126,7 +200,7 @@ export function makeLeanIo({ repo }) {
   const base = makeIo();
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000 })).stdout;
   return {
-    gh: run("gh"), git: run("git"), runTmp: makeRunTmp(), host: makeHostProbe(), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
+    gh: run("gh"), git: run("git"), runTmp: makeRunTmp(), host: makeHostProbe(), procs: makeProcProbe(), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
     /** Names of the checks the base branch requires (contexts + checks). [] on 404 / no protection. */
     async requiredChecks(lane) {
       try {

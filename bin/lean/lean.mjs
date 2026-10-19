@@ -131,14 +131,61 @@ export async function runCore(o) {
 
   // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
   const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
-  let done = null, wtCreated = false;
+  let done = null, wtCreated = false, frozenHash = null;
   const runId = `${issue}-${t0}`;
   let runTmp = null;
+  /**
+   * #4162: before any removal of this issue's worktree, stop processes still running inside it (an orphaned implementer)
+   * and save uncommitted work to refs/forge/salvage/<issue>/<ts> (stash create + update-ref; the shared stash stack is
+   * never touched), recorded in FORGE:STATE and the trajectory. A worktree dir that does not exist costs nothing.
+   */
+  async function prepareWorktreeRemoval(reason) {
+    if (io.fs.exists) { try { if (!(await io.fs.exists(wt))) return null; } catch { /* probe failed: check anyway */ } }
+    if (io.procs) {
+      try {
+        const pids = (await io.procs.inside(wt)).filter((p) => p !== process.pid);
+        if (pids.length) {
+          const r = await io.procs.stop(pids);
+          ev({ event: "WORKTREE_PROCS_KILLED", path: wt, pids, killed: r?.killed ?? [], reason });
+          T.anomalies.push(`stopped ${pids.length} process(es) still running in the worktree (${pids.join(", ")}) before removing it (${reason})`);
+        }
+      } catch (e) { ev({ event: "WORKTREE_PROCS_FAILED", path: wt, reason, error: String(e?.message ?? e).slice(0, 300) }); }
+    }
+    let listed = false;
+    try { listed = String(await io.git(["worktree", "list", "--porcelain"], { cwd })).split("\n").some((l) => l === `worktree ${wt}`); } catch { /* not a worktree */ }
+    if (!listed) return null;
+    try {
+      if (!String(await git(["status", "--porcelain"])).trim()) return null;
+      let contract = frozenHash;
+      if (!contract) { try { contract = contractHash(contractJson(JSON.parse(await io.fs.read(`${wt}/${CONTRACT_FILE}`)))); } catch { /* no contract yet */ } }
+      await git(["add", "-A"]);
+      const sha = String(await git(["stash", "create", `forge salvage #${issue} ${reason} contract=${contract ?? "none"}`])).trim();
+      if (!sha) return null;
+      const ref = `refs/forge/salvage/${issue}/${now()}`;
+      await io.git(["update-ref", ref, sha], { cwd });
+      const salvage = { ref, sha, contract: contract ?? null, at: now() };
+      ev({ event: "SALVAGE_SAVED", ...salvage, reason });
+      T.decisions.push(`Uncommitted work saved to \`${ref}\` (${sha.slice(0, 12)}) before removing the worktree (${reason})`);
+      if (leaseState) { leaseState = { ...leaseState, salvage }; if (io.projector) { try { await writeLease(leaseObj()); } catch { /* best effort */ } } }
+      return salvage;
+    } catch (e) { ev({ event: "SALVAGE_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return null; }
+  }
+  /** The newest salvage ref of this issue: {ref, sha, contract} or null (FORGE:STATE's record when the ref still resolves). */
+  async function findSalvage() {
+    let out = "";
+    try { out = String(await io.git(["for-each-ref", "--sort=-refname", "--format=%(refname) %(objectname) %(contents:subject)", `refs/forge/salvage/${issue}/`], { cwd })); } catch { /* none */ }
+    const l = out.split("\n").map((x) => x.trim()).find((x) => x.startsWith("refs/"));
+    if (l) { const [ref, sha] = l.split(" "); return { ref, sha, contract: /contract=([0-9a-f]{12})\b/.exec(l)?.[1] ?? null }; }
+    const st = leaseState?.salvage;
+    if (!st?.ref) return null;
+    try { await io.git(["rev-parse", "--verify", "--quiet", `${st.ref}^{commit}`], { cwd }); return st; } catch { return null; }
+  }
   async function finish(reason, detail = "", extra = {}, codeOverride = null) {
     if (done) return done; // idempotent: exactly one RUN_TERMINAL and one telemetry emit
     const code = codeOverride ?? codeForTerminalReason(reason);
     ev({ event: "RUN_TERMINAL", reason, code });
     await emit({ event: "RUN_TERMINAL", reason, code });
+    if (wtCreated) await prepareWorktreeRemoval(reason);
     if (["needs-human", "engine-error", "dependency-open", "dependency-blocked", "dependency-unreadable", "decomposed"].includes(reason)) {
       const wf = ["investigating", "building", "in-review"].map((x) => `workflow:${x}`).join(",");
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", wf]); } catch { /* best effort */ }
@@ -268,6 +315,28 @@ export async function runCore(o) {
   }
   const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over.";
   const PLAN_RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD` to see what exists, but plan against the issue itself. This step is still planning only: do not edit code, do not commit, and do not write the result file unless the issue is invalid, already fixed or blocked.";
+  const SALVAGE_NOTE = "\n\nUncommitted work from an interrupted run of this contract was saved to REF. Run `git stash apply REF` first, then continue from it; do not start over.";
+  /** #4162: squash unpushed commits that include `wip(forge):` ones into one before push; pushed commits are never rewritten. */
+  async function squashWip() {
+    let head = "";
+    try {
+      head = String(await git(["rev-parse", "HEAD"])).trim();
+      let start = "";
+      try { start = String(await git(["merge-base", "HEAD", `refs/remotes/origin/${branch}`])).trim(); } catch { /* no remote branch */ }
+      if (!start) { try { start = String(await git(["merge-base", "HEAD", base])).trim(); } catch { /* unknown base */ } }
+      if (!start || !head) return;
+      if (Number(String(await git(["rev-list", "--count", "--merges", `${start}..HEAD`])).trim()) > 0) return;
+      const rows = String(await git(["log", "--format=%H %s", `${start}..HEAD`])).split("\n").map((x) => x.trim()).filter(Boolean)
+        .map((l) => ({ sha: l.split(" ")[0], subject: l.slice(l.indexOf(" ") + 1) }));
+      if (rows.length < 2 || !rows.some((r) => r.subject.startsWith("wip(forge):"))) return;
+      const keep = rows.find((r) => !r.subject.startsWith("wip(forge):"));
+      const msg = (keep ? String(await git(["log", "-1", "--format=%B", keep.sha])).trim() : "") || `fix: #${issue}`;
+      await git(["reset", "--soft", start]);
+      try { await git(["commit", "--no-verify", "-m", msg]); } catch (e) { await git(["reset", "--soft", head]); throw e; }
+      ev({ event: "WIP_SQUASHED", commits: rows.length, onto: start });
+      T.decisions.push(`Squashed ${rows.length} unpushed commit(s) with WIP commits into one before push`);
+    } catch (e) { ev({ event: "WIP_SQUASH_FAILED", error: String(e?.message ?? e).slice(0, 300) }); }
+  }
   const RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD`, verify that work against the contract, complete what is missing, re-run every validate command and write the result file. Do not start over.";
 
   /** Continuous admission (#4115): while the builder runs, pause its process group when the host is over the ceiling, resume when under. */
@@ -478,6 +547,7 @@ export async function runCore(o) {
       return await needsHuman(`Open PR #${resumed.pr} targets \`${resumed.base}\`, but #${issue}'s lane is \`${lane}\`; retarget or close it before rerunning.`,
         isDefaultLane(resumed.base, defaults) ? OUTCOME_CODES.LANE_DEFAULT_BRANCH : OUTCOME_CODES.LANE_MISMATCH);
     }
+    await prepareWorktreeRemoval("recreate");
     try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* none */ }
     try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
     // Concurrent lanes in one repo race on .git/config.lock / index.lock during `worktree add`; retry with jitter.
@@ -598,10 +668,17 @@ export async function runCore(o) {
       return found;
     }
 
-    let frozen = null, hash = null, planned = false;
-    if (resumed) {
+    let frozen = null, hash = null, planned = false, salvageOffer = null;
+    const salvage = await findSalvage();
+    if (resumed || salvage) {
       const fc = await readFrozenContract();
-      if (fc) { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
+      // #4162: saved uncommitted work is offered only when it was made against the same frozen contract.
+      if (salvage && fc && salvage.contract === fc.hash) {
+        salvageOffer = salvage;
+        ev({ event: "SALVAGE_OFFERED", ref: salvage.ref, sha: salvage.sha, contract: fc.hash });
+        T.decisions.push(`Rerun: salvage \`${salvage.ref}\` offered to the implementer (contract ${fc.hash} unchanged)`);
+      } else if (salvage) ev({ event: "SALVAGE_SKIPPED", ref: salvage.ref, reason: fc ? `contract changed (${salvage.contract ?? "none"} -> ${fc.hash})` : "no frozen contract" });
+      if (fc && (resumed || salvageOffer)) { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
     }
     await label("building");
     if (!frozen) {
@@ -643,11 +720,13 @@ export async function runCore(o) {
       ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
       T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
     } else {
-      T.validate = "resumed (existing branch)";
+      T.validate = resumed ? "resumed (existing branch)" : "resumed (salvage)";
     }
+    frozenHash = hash;
     T.plan = [`contract ${hash}`, `${frozen.requirements.length} requirement(s)`];
     if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
-    const implementPrompt = builderImplementPrompt() + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane));
+    const implementPrompt = builderImplementPrompt() + (planned || !resumed ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane))
+      + (salvageOffer ? SALVAGE_NOTE.replaceAll("REF", salvageOffer.ref) : "");
     liveKeys = ["implementation"];
     await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);
     result = await readResult();
@@ -755,7 +834,11 @@ export async function runCore(o) {
 
     // ---- 5. push + PR ----
     files = await changedFiles();
+    await squashWip();
     await gitPush(["push", "-u", "origin", branch]);
+    if (salvageOffer) { // the offered work is on the remote branch now
+      try { await io.git(["update-ref", "-d", salvageOffer.ref], { cwd }); ev({ event: "SALVAGE_DROPPED", ref: salvageOffer.ref }); } catch { /* best effort */ }
+    }
     laneGuard(lane, "open a PR");
     const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghw(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
       "--title", `${iss.title} (#${issue})`, "--body", renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked })])).trim();

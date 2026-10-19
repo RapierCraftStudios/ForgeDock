@@ -50,6 +50,9 @@ export function builderImplementPrompt() {
 
 ${HOST_RULES}
 
+After each deliverable compiles (or its tests pass), make a local WIP commit \`git commit -m "wip(forge): <deliverable id>"\`; the engine squashes unpushed WIP commits before push. Make your final commit with a normal message.
+If FORGE_ENGINE_PID is set and \`kill -0 $FORGE_ENGINE_PID\` fails, the engine is gone: commit what you have as WIP and stop immediately.
+
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why, which the engine posts on the issue:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file you must change that the contract did not list.
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: an issue requirement the contract missed.

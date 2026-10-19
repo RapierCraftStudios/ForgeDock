@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { runCore, contractHash } from "./lean.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
@@ -11,7 +12,8 @@ import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPromp
 import { parseReview } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
-import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner } from "./effects.mjs";
+import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, makeProcProbe, installRunnerExitHooks } from "./effects.mjs";
+import { watch as watchRunner } from "./runner-watchdog.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
@@ -1968,5 +1970,212 @@ describe("large diffs never reach argv (#4129)", () => {
     assert.equal(OUTCOME_CODES.CLI_SPAWN_FAILED, "cli.spawn_failed");
     const { readFileSync } = await import("node:fs");
     assert.match(readFileSync(new URL("../../docs/OUTCOME-CODES.md", import.meta.url), "utf8"), /`cli\.spawn_failed`/);
+  });
+});
+
+describe("worktree salvage, orphan stop and runner lifetime (#4162)", () => {
+  const H = contractHash(contractJson(CONTRACT));
+  const leased = (w) => { w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } }; return w; };
+  const gitOf = (w) => w.calls.filter((c) => c[0] === "git").map((c) => c.slice(1));
+  const idx = (w, pred) => w.calls.findIndex(pred);
+  /** An existing, listed lean-7 worktree from an earlier run; `oldDirty` until it is removed, `dirtyAtEnd` once re-added. */
+  const salvageWorld = (o = {}) => {
+    const w = leased(world(o));
+    w.oldDirty = o.oldDirty ?? true; w.dirtyAtEnd = o.dirtyAtEnd ?? false; w.refs = o.refs ?? []; w.added = false;
+    const g = w.io.git;
+    w.io.fs.exists = async () => true;
+    w.io.git = async (a, opt) => {
+      const rec = () => w.calls.push(["git", ...a]);
+      if (a[0] === "worktree" && a[1] === "list") { rec(); return `worktree /repo\nHEAD abc\n\nworktree ${WT}\nHEAD def\n`; }
+      if (a[0] === "worktree" && a[1] === "remove") w.oldDirty = false;
+      if (a[0] === "worktree" && a[1] === "add") w.added = true;
+      if (a[0] === "status" && a[1] === "--porcelain" && (w.oldDirty || (w.added && w.dirtyAtEnd))) { rec(); return " M src/foo.js\n?? src/new.js\n"; }
+      if (a[0] === "stash" && a[1] === "create") { rec(); return "5a1e5a1e5a1e5a1e5a1e\n"; }
+      if (a[0] === "for-each-ref") { rec(); return w.refs.join("\n"); }
+      return g(a, opt);
+    };
+    return w;
+  };
+
+  it("#4162 recreating a dirty worktree first saves it to a salvage ref named in FORGE:STATE and the trajectory", async () => {
+    const w = salvageWorld();
+    w.files[`${WT}/.forge-lean/contract.json`] = contractJson(CONTRACT);
+    const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    const stash = idx(w, (c) => c[1] === "stash" && c[2] === "create");
+    const upd = idx(w, (c) => c[1] === "update-ref" && String(c[2]).startsWith("refs/forge/salvage/7/"));
+    const rm = idx(w, (c) => c[1] === "worktree" && c[2] === "remove");
+    assert.ok(stash >= 0 && upd > stash && rm > upd, "stash create + update-ref happen before the worktree is removed");
+    assert.ok(idx(w, (c) => c[1] === "add" && c[2] === "-A") < stash, "untracked files are included");
+    assert.match(w.calls[stash].at(-1), new RegExp(`contract=${H}`), "the stash message carries the contract hash");
+    assert.ok(!gitOf(w).some((c) => c[0] === "stash" && ["push", "pop", "save"].includes(c[1])), "the shared stash stack is never touched");
+    const ref = w.calls[upd][2];
+    assert.equal(w.calls[upd][3], "5a1e5a1e5a1e5a1e5a1e");
+    const saved = readLog(dir, 7).find((e) => e.event === "SALVAGE_SAVED");
+    assert.equal(saved.ref, ref); assert.equal(saved.contract, H);
+    assert.ok(w.leaseWrites.some((st) => st.salvage?.ref === ref), "FORGE:STATE records the salvage ref");
+    assert.ok(w.leaseWrites.at(-1).salvage?.ref === ref && w.leaseWrites.at(-1).lease === null, "kept through the lease release");
+    assert.ok(traj(w)[0].includes(ref), "the trajectory names the ref");
+  });
+
+  it("#4162 processes with their cwd inside the worktree are stopped and logged before it is removed; the engine itself never is", async () => {
+    const w = salvageWorld({ oldDirty: false });
+    const inside = [];
+    w.io.procs = { inside: async (d) => { inside.push(d); return [4242, process.pid]; }, stop: async (p) => { w.calls.push(["procs", "stop", p]); return { terminated: p, killed: [4242] }; } };
+    const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(inside[0], WT);
+    const stop = idx(w, (c) => c[0] === "procs");
+    assert.deepEqual(w.calls[stop][2], [4242]);
+    assert.ok(stop < idx(w, (c) => c[1] === "worktree" && c[2] === "remove"), "stopped before the removal");
+    const e = readLog(dir, 7).find((x) => x.event === "WORKTREE_PROCS_KILLED");
+    assert.deepEqual(e.pids, [4242]); assert.equal(e.path, WT); assert.equal(e.reason, "recreate");
+    assert.match(traj(w)[0], /stopped 1 process\(es\) still running in the worktree/);
+  });
+
+  it("#4162 regression guard: with no existing worktree dir the fresh path makes exactly the same git calls and never probes processes", async () => {
+    const base = world(); assert.equal((await run(base)).terminalReason, "merged");
+    const w = world();
+    w.io.fs.exists = async () => false;
+    w.io.procs = { inside: async () => { throw new Error("must not probe"); }, stop: async () => { throw new Error("must not stop"); } };
+    assert.equal((await run(w)).terminalReason, "merged");
+    const strip = (x) => gitOf(x).filter((c) => !(c[0] === "worktree" && c[1] === "list"));
+    assert.deepEqual(gitOf(w).filter((c) => ["stash", "update-ref"].includes(c[0]) || (c[0] === "worktree" && c[1] === "list")), []);
+    assert.deepEqual(gitOf(w), strip(base), "same git sequence as before #4162 (the baseline's extra list probes come from a missing fs.exists)");
+  });
+
+  const frozen = (contract = CONTRACT) => ({ body: `<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n${renderContract(contract, contractHash(contractJson(contract)))}`, author_association: "OWNER", user: { type: "User", login: "op" } });
+  it("#4162 a rerun with a salvage ref and the same frozen contract skips planning and tells the implementer to git stash apply it", async () => {
+    const ref = "refs/forge/salvage/7/1000";
+    const w = salvageWorld({ oldDirty: false, refs: [`${ref} 5a1e5a1e On feat/issue-7-lean: forge salvage #7 recreate contract=${H}`], issueComments: [frozen()] });
+    const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 1, "no re-plan");
+    assert.match(b[0][4], new RegExp(`git stash apply ${ref}`));
+    assert.doesNotMatch(b[0][4], /This is a rerun/, "no PR or remote branch: not the existing-branch rerun note");
+    assert.ok(readLog(dir, 7).some((e) => e.event === "SALVAGE_OFFERED" && e.ref === ref));
+    assert.match(traj(w)[0], /salvage `refs\/forge\/salvage\/7\/1000` offered/);
+    const push = idx(w, (c) => c[1] === "push"), drop = idx(w, (c) => c[1] === "update-ref" && c[2] === "-d" && c[3] === ref);
+    assert.ok(drop > push, "the offered ref is dropped once the work is pushed");
+  });
+
+  it("#4162 a salvage made against a different contract (or with none frozen) is not offered; the run plans", async () => {
+    for (const comments of [[frozen()], []]) {
+      const w = salvageWorld({ oldDirty: false, refs: ["refs/forge/salvage/7/1000 5a1e On x: forge salvage #7 recreate contract=000000000000"], issueComments: comments });
+      const dir = tmpDir("core-");
+      assert.equal((await run(w, { dir })).terminalReason, "merged");
+      assert.match(builders(w)[0][4], /PLANNING ONLY/);
+      assert.ok(!builders(w).some((c) => /git stash apply/.test(c[4])));
+      assert.ok(readLog(dir, 7).some((e) => e.event === "SALVAGE_SKIPPED"));
+    }
+  });
+
+  it("#4162 a run that ends engine-error with uncommitted work salvages it before its own worktree removal", async () => {
+    const w = salvageWorld({ oldDirty: false, dirtyAtEnd: true, builder: async (_w, put, kind) => { if (kind === "plan") { put("contract.json", JSON.stringify(CONTRACT)); return; } throw new Error("boom"); } });
+    const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir })).terminalReason, "engine-error");
+    const saved = readLog(dir, 7).find((e) => e.event === "SALVAGE_SAVED");
+    assert.equal(saved.reason, "engine-error"); assert.equal(saved.contract, H, "the frozen contract hash of this run");
+    const removes = w.calls.map((c, i) => [c, i]).filter(([c]) => c[1] === "worktree" && c[2] === "remove");
+    assert.ok(idx(w, (c) => c[1] === "update-ref") < removes.at(-1)[1]);
+  });
+
+  /** Squash fixture: the unpushed range holds `subjects` (newest first). */
+  const squashWorld = (subjects, merges = "0") => {
+    const w = world(); const g = w.io.git;
+    w.io.git = async (a, opt) => {
+      const rec = () => w.calls.push(["git", ...a]);
+      if (a[0] === "merge-base") { rec(); return a[2] === "refs/remotes/origin/feat/issue-7-lean" ? "" : "base0000\n"; }
+      if (a[0] === "rev-list" && a.includes("--merges")) { rec(); return `${merges}\n`; }
+      if (a[0] === "log" && a[1] === "--format=%H %s") { rec(); return subjects.map((s, i) => `c${subjects.length - i} ${s}`).join("\n"); }
+      if (a[0] === "log" && a[2] === "--format=%B") { rec(); return `${subjects.find((s) => !s.startsWith("wip(forge):"))}\n\nbody\n`; }
+      return g(a, opt);
+    };
+    return w;
+  };
+  it("#4162 unpushed WIP commits are squashed into one before push, keeping the final commit message", async () => {
+    const w = squashWorld(["fix(foo): guard null", "wip(forge): D1", "wip(forge): D0"]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    const reset = idx(w, (c) => c[1] === "reset" && c[2] === "--soft" && c[3] === "base0000");
+    const commit = idx(w, (c) => c[1] === "commit" && c.includes("fix(foo): guard null\n\nbody"));
+    assert.ok(reset >= 0 && commit > reset && idx(w, (c) => c[1] === "push") > commit);
+  });
+  it("#4162 no WIP commits, a single commit, or a merge in the range: nothing is squashed", async () => {
+    for (const w of [squashWorld(["fix(foo): a", "fix(foo): b"]), squashWorld(["wip(forge): D1"]), squashWorld(["fix", "wip(forge): D1"], "1")]) {
+      assert.equal((await run(w)).terminalReason, "merged");
+      assert.equal(idx(w, (c) => c[1] === "reset"), -1);
+    }
+  });
+
+  it("#4162 the implement prompt asks for WIP commits and a parent-liveness check", () => {
+    const p = builderImplementPrompt();
+    assert.match(p, /wip\(forge\): <deliverable id>/);
+    assert.match(p, /squashes unpushed WIP commits before push/);
+    assert.match(p, /kill -0 \$FORGE_ENGINE_PID/);
+  });
+
+  it("#4162 the lean runner passes FORGE_ENGINE_PID, records the runner group and attaches a parent-death watchdog", async () => {
+    const seen = [], dogs = [];
+    let installs = 0;
+    const runCli = async (o) => { seen.push(o.env); o.onSpawn({ pid: 999998, on() {} }); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
+    await makeLeanRunner({ runCli, probe: () => false, spawnWatchdog: (e, g) => dogs.push([e, g]), onExitInstall: () => { installs++; }, enginePid: 4321 })({ role: "builder", issue: 1, cwd: process.cwd(), prompt: "p", system: "", env: { TMPDIR: "/t" } });
+    assert.deepEqual(seen[0], { TMPDIR: "/t", FORGE_ENGINE_PID: "4321" });
+    assert.deepEqual(dogs, [[4321, 999998]]);
+    assert.equal(installs, 1);
+  });
+
+  it("#4162 watchdog: an engine gone (even after SIGKILL) gets the runner group SIGTERM then SIGKILL; a finished group just ends it", async () => {
+    const sent = [];
+    let engineChecks = 0;
+    const esrch = () => Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+    const kill = (pid, sig) => { sent.push([pid, sig]); if (pid === 10 && sig === 0 && ++engineChecks > 1) throw esrch(); return true; };
+    assert.equal(await watchRunner({ enginePid: 10, pgid: 20, kill, sleep: async () => {} }), "engine-gone");
+    assert.deepEqual(sent.filter(([, s]) => s !== 0), [[-20, "SIGTERM"], [-20, "SIGKILL"]]);
+    assert.equal(await watchRunner({ enginePid: 10, pgid: 20, kill: (pid) => { if (pid === -20) throw esrch(); return true; }, sleep: async () => {} }), "group-gone");
+  });
+
+  const linux = process.platform === "linux";
+  const waitGone = async (pid, ms) => { for (const t0 = Date.now(); Date.now() - t0 < ms; await new Promise((r) => setTimeout(r, 50))) { try { process.kill(pid, 0); } catch { return true; } } return false; };
+  it("#4162 integration: the watchdog kills a real runner group once its engine process dies", { skip: !linux }, async () => {
+    const engine = spawn("sleep", ["0.3"], { stdio: "ignore" });
+    const runner = spawn("sleep", ["30"], { stdio: "ignore", detached: true });
+    const reaped = new Promise((r) => runner.on("exit", r));
+    const dog = spawn(process.execPath, [new URL("./runner-watchdog.mjs", import.meta.url).pathname, String(engine.pid), String(runner.pid), "50"], { stdio: "ignore" });
+    try {
+      const t = await Promise.race([reaped.then(() => "killed"), new Promise((r) => setTimeout(() => r("timeout"), 8000))]);
+      assert.equal(t, "killed");
+    } finally { try { process.kill(-runner.pid, "SIGKILL"); } catch { /* gone */ } dog.kill(); }
+  });
+
+  it("#4162 integration: engine exit SIGTERMs every recorded runner group", { skip: !linux }, async () => {
+    const { EventEmitter } = await import("node:events");
+    const proc = Object.assign(new EventEmitter(), { pid: 1, kill: () => {} });
+    assert.equal(installRunnerExitHooks(proc), true);
+    assert.equal(installRunnerExitHooks(proc), false, "installed once");
+    const child = spawn("sleep", ["30"], { stdio: "ignore", detached: true });
+    const reaped = new Promise((r) => child.on("exit", (_c, sig) => r(sig)));
+    const runCli = async (o) => { o.onSpawn({ pid: child.pid, on() {} }); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
+    await makeLeanRunner({ runCli, probe: () => false, spawnWatchdog: () => {}, onExitInstall: () => {} })({ role: "builder", issue: 1, cwd: process.cwd(), prompt: "p", system: "" });
+    proc.emit("exit");
+    try { assert.equal(await Promise.race([reaped, new Promise((r) => setTimeout(() => r("timeout"), 5000))]), "SIGTERM"); }
+    finally { try { process.kill(-child.pid, "SIGKILL"); } catch { /* gone */ } }
+  });
+
+  it("#4162 integration: the proc probe finds a real process by its cwd under the worktree and stops it; other dirs are not matched", { skip: !linux }, async () => {
+    const d = tmpDir("core-wt-"), other = `${d}-other`;
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(`${d}/sub`, { recursive: true }); mkdirSync(other, { recursive: true });
+    const inner = spawn("sleep", ["30"], { cwd: `${d}/sub`, stdio: "ignore" });
+    const outer = spawn("sleep", ["30"], { cwd: other, stdio: "ignore" });
+    try {
+      await new Promise((r) => setTimeout(r, 100));
+      const probe = makeProcProbe();
+      const pids = await probe.inside(d);
+      assert.ok(pids.includes(inner.pid)); assert.ok(!pids.includes(outer.pid)); assert.ok(!pids.includes(process.pid));
+      const r = await probe.stop([inner.pid], { graceMs: 2000 });
+      assert.deepEqual(r.terminated, [inner.pid]);
+      assert.ok(await waitGone(inner.pid, 3000) || inner.exitCode !== null || inner.signalCode !== null);
+    } finally { inner.kill("SIGKILL"); outer.kill("SIGKILL"); }
   });
 });
