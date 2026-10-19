@@ -59,6 +59,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
    (`max_rounds`, then `ci.red`), slow → `ci-pending`, unavailable → local fallback;
    docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI.
+   **Docs freshness**: when the target repo has `scripts/check-devdocs-freshness.sh`,
+   the engine runs it on `base...HEAD` after implement (`io.docsFreshness`, empty
+   `PR_BODY`). Exit 1 resumes the builder once with the script's output (`docsPrompt`);
+   still failing is `needs-human` / `docs.stale`, before any PR or reviewer run. No
+   script, or exit 2+, never blocks.
 7. **Conformance** — `precheck` (deterministic: changed files vs deliverables,
    validate results, requirement statuses; each failure has a `kind`),
    structured review (`parseReview`), `decide` computes the verdict. The
@@ -156,6 +161,30 @@ Opt-in `verify:` section (`engine-cli.mjs` `readVerify` → `verify.mjs` `parseV
 Added `FORGE_HOST_PARALLELISM`: it is derived from the ledger lane count,
 injected into the runner env, named in the builder host rules, and used to cap
 ci-local slots and job parallelism.
+
+## Entry 2026-10-20 — Structure delta and decision provenance telemetry (#4165)
+
+The implement-time `STRUCTURE_DELTA` stays in the run log and keeps gating
+undeclared package edges. Its telemetry write moved to the merged path:
+`lean.mjs` `recordStructure` re-runs `structure-delta.sh` (now with
+`import_pairs[].files`), takes `top_growth` from one `git diff --numstat` and
+writes one `STRUCTURE_DELTA` (`phase: merge`, pr, milestone, deps/edges/growth,
+contract `decisions[]` sources). The trajectory shows it as a **Structure** table.
+`RUN_TERMINAL` gains pr, milestone, `conformance_mode` and `shadow_would`.
+Contracts may carry `decisions: [{id, choice, justification, source: doc|lint|precedent|spec}]`,
+which `validateContract` checks only when present. `forgedock stats --edge FROM:TO` /
+`--milestone M` (`bin/stats/query.mjs`) answer audit queries from these records.
+Rationale: `devdocs/decisions/4165-structure-delta-telemetry.md`.
+
+## Entry 2026-10-20 — Account-scoped usage-limit holds (#4190)
+
+`limits.mjs` keeps a host-level store (`~/.forge/limits.json`, atomic writes) of
+`rate_limited` holds keyed by `backendIdentity({backend, env})`. A lane's
+`rate_limited` result carries `backendId`; `orchestrate.mjs` admission consults the
+hold for the identity the next lane would use, so batches on the same account share
+one hold and a lane on another account is admitted. Legacy per-batch `holdUntil` in
+`state.json` is ignored on `--resume`. CLI: `forgedock limits show|clear [<id>|--all]`
+(`engine-cli.mjs` `limitsFromCli`).
 
 ## Entry 2026-10-20 — Change-scoped checks and shared caches (#4218)
 

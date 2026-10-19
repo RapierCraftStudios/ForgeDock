@@ -65,9 +65,10 @@ If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"alread
 {"requirements":[{"id":"R1","quote":"<verbatim sentence or checklist item from the issue>","disposition":"deliver|defer|post-deploy|not-applicable","why":"<required for defer and post-deploy>","evidence":"<file:line, required for not-applicable>"}],
  "deliverables":[{"id":"D1","path":"<file to change>","change":"<what>","requirements":["R1"]}],
  "preserve":[{"id":"P1","what":"<caller, contract or behaviour that must not change, with its path>"}],
- "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change>"}]}
+ "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change>"}],
+ "decisions":[{"id":"K1","choice":"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>","justification":"<why, with file:line>","source":"doc|lint|precedent|spec"}]}
 Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. A requirement you can do in this change is "deliver". List every file you will change as a deliverable; tests are always allowed.
-A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Then stop.
+A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when there is none. Then stop.
 
 ${BLOCK_RULES}`;
 }
@@ -85,6 +86,7 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 - {"kind":"defer|post-deploy","requirement":"R#","why":""}: a contracted requirement that becomes separate work or a post-deploy check. The engine files it as a tracked follow-up.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
 A new dependency between workspace packages in a package.json that no deliverable names (that package.json, with the package in its change) is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
+If the repository has scripts/check-devdocs-freshness.sh, its docs must move with the code: a behaviour change under the paths it checks needs the matching module dossier (devdocs/modules/*.md, per devdocs/index.yaml) updated in the same change. Run it against the base before writing the result; the engine runs it too and resumes you once if it fails.
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):
 ### Approach
@@ -111,6 +113,11 @@ export function conformanceResumePrompt(failures, mode = "local") {
 /** forge#4159: the one resume for package.json edges between workspace packages the contract does not name. */
 export function structurePrompt(edges, mode = "local") {
   return `This change adds dependencies between workspace packages that the frozen contract does not name:\n${edges.slice(0, 30).map((e) => `- ${e.from} -> ${e.to} (${e.kind}, ${e.manifest})`).join("\n")}\n\nFor each one, add it to the contract with a reason, or remove it: either record {"kind":"add-deliverable","path":"<that package.json>","why":"<names the package and why this dependency is right>"} in ${RESULT_FILE}, or drop the dependency from the package.json and the code that needs it. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** The repo's devdocs freshness rule failed on the committed change: update the named dossier(s) and commit. */
+export function docsPrompt(output, mode = "local") {
+  return `The repository's docs freshness check (scripts/check-devdocs-freshness.sh) fails on this change:\n${String(output ?? "").slice(0, 4000)}\n\nUpdate the module dossier it names (devdocs/modules/*.md; devdocs/index.yaml maps files to dossiers) to describe the behaviour you changed, in the dossier's existing style and in a few lines. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /** Human-only block reasons (#4124). Everything else agents resolve: a dependency, a split, prod data monitoring can read. */
