@@ -29,10 +29,14 @@
  * `execution.cost_per_minute`. `providerLanes` attaches it to every result as `sandbox: {provider, id, minutes, cost_usd}`.
  * `openExecutionBudget` enforces the hard caps (`budget_minutes`/`budget_usd` per batch, `day_budget_*` per host UTC day,
  * from the host-day store `execution-budget.json` in the sched dir): pure arithmetic, no LLM.
+ *
+ * Hybrid (#4256): `placeLane` places each lane from facts (lane kind, validation weight, host headroom, verify.mode);
+ * orchestrate runs a remote-placed lane locally when `max_remote` or the execution budget is exhausted.
  */
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFile } from "node:fs/promises";
+import { cpus, homedir, loadavg } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { isLaneAlive, launchLane, writeAtomic } from "./batch.mjs";
@@ -41,6 +45,9 @@ import { dockerLabels, safeSegment } from "./ledger.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { resolveCredential } from "./credentials.mjs";
 import { httpTransport, isActionsEndpoint, remoteProvider } from "./sandbox-remote.mjs";
+import { ADMISSION_DEFAULTS } from "./admission.mjs";
+import { classifyStep, heavyConfig, memAvailableMb } from "./heavy.mjs";
+import { detectPins } from "./toolchain.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
 export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote"]);
@@ -145,9 +152,89 @@ export function openExecutionBudget({ budget = {}, file = executionBudgetFile(),
   };
 }
 
-/** Where a lane runs: remote only for `mode: remote` with `max_remote >= 1`; hybrid stays local until #4256 places it. */
+/** Where a `mode: remote` lane runs: remote only with `max_remote >= 1`. Hybrid is placed per lane by `placeLane` (#4256). */
 export function placement(exec) {
   return exec?.mode === "remote" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1 ? "remote" : "local";
+}
+
+const DOCS_LABELS = new Set(["docs", "documentation", "type:docs"]);
+
+/**
+ * Hybrid placement (#4256), pure: facts in, `{where: "local"|"remote", reason}` out. `exec` is parseExecution output,
+ * `verifyMode` forge.yaml `verify.mode`, `labels` the issue's label names (the lane kind), `weight` from
+ * `validationWeight`, `headroom` from `hostHeadroom`. In order: a non-hybrid mode keeps `placement()`; `max_remote` 0 is
+ * local; `verify.mode: ci` is local (heavy validation already runs, and is billed, on CI); a docs-only lane is local; a
+ * heavy-validation lane is remote; a host without headroom sends the lane remote; anything else stays on the host.
+ * Capacity (`max_remote` reached, the execution budget) is applied at admission by orchestrate, which falls back to local.
+ */
+export function placeLane({ exec = null, verifyMode = "local", labels = [], weight = null, headroom = null } = {}) {
+  const mode = exec?.mode;
+  if (mode !== "hybrid") { const where = placement(exec); return { where, reason: `mode ${EXECUTION_MODES.includes(mode) ? mode : "local"}` }; }
+  if (!(Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1)) return { where: "local", reason: "max_remote 0" };
+  if (verifyMode === "ci") return { where: "local", reason: "verify.mode ci: validation runs on CI, not billed twice" };
+  const names = (Array.isArray(labels) ? labels : []).map((l) => String(l ?? "").trim().toLowerCase());
+  if (names.some((l) => DOCS_LABELS.has(l))) return { where: "local", reason: "docs-only lane" };
+  if (weight?.heavy === true) {
+    const sig = (Array.isArray(weight.signals) ? weight.signals : []).map(String).filter(Boolean);
+    return { where: "remote", reason: `heavy validation${sig.length ? `: ${sig.join(", ")}` : ""}` };
+  }
+  if (headroom && headroom.ok === false) return { where: "remote", reason: `host without headroom${headroom.detail ? `: ${headroom.detail}` : ""}` };
+  return { where: "local", reason: "light lane, host has headroom" };
+}
+
+/** Repo files that mean a heavy validation toolchain (type checks, linters, test suites, compiles). */
+const HEAVY_MARKERS = Object.freeze([
+  ["tsconfig.json", "tsc"], ["Cargo.toml", "cargo"], ["go.mod", "go"], ["pyproject.toml", "python"], ["setup.cfg", "python"], ["pytest.ini", "pytest"],
+  ["pom.xml", "maven"], ["build.gradle", "gradle"], ["build.gradle.kts", "gradle"],
+  ["eslint.config.js", "eslint"], ["eslint.config.mjs", "eslint"], ["eslint.config.cjs", "eslint"], [".eslintrc", "eslint"], [".eslintrc.js", "eslint"], [".eslintrc.cjs", "eslint"], [".eslintrc.json", "eslint"], [".eslintrc.yml", "eslint"],
+]);
+const HEAVY_SCRIPTS = Object.freeze(["test", "lint", "typecheck", "type-check", "build"]);
+
+/**
+ * The repo's expected validation weight (#4256): heavy when a declared check command (forge.yaml `learned.test_commands`)
+ * classifies heavy (heavy.mjs `classifyStep`), or a heavy toolchain marker or package.json test/lint/typecheck/build script
+ * exists. The toolchain pin (toolchain.mjs `detectPins`) names the package manager among the signals. Zero LLM.
+ */
+export async function validationWeight({ cwd = process.cwd(), precheckCommands = [], read = (p) => readFile(p, "utf8") } = {}) {
+  const signals = [];
+  const add = (s) => { if (!signals.includes(s)) signals.push(s); };
+  for (const cmd of Array.isArray(precheckCommands) ? precheckCommands : []) {
+    const [name, ...args] = String(cmd ?? "").trim().split(/\s+/).filter(Boolean);
+    if (name && classifyStep(name, args) === "heavy") add(name.split("/").pop());
+  }
+  const exists = async (f) => { try { await read(join(cwd, f)); return true; } catch { return false; } };
+  for (const [f, sig] of HEAVY_MARKERS) if (await exists(f)) add(sig);
+  let pkg = null;
+  try { pkg = JSON.parse(String(await read(join(cwd, "package.json")))); } catch { pkg = null; }
+  const scripts = pkg?.scripts && typeof pkg.scripts === "object" ? pkg.scripts : {};
+  for (const k of HEAVY_SCRIPTS) if (typeof scripts[k] === "string" && scripts[k].trim()) add(`${k} script`);
+  if (signals.length) {
+    let pins = null;
+    try { pins = await detectPins(cwd, { read: (p) => read(p) }); } catch { pins = null; }
+    if (pins?.pm?.name) add(pins.pm.name);
+  }
+  return { heavy: signals.length > 0, signals };
+}
+
+/**
+ * Host headroom snapshot for placement (#4256), synchronous: not ok when available memory is below the admission floor
+ * (`min_free_mem_mb`) plus one heavy step (`step_mem_mb`), or the 1-min load per core exceeds `max_load_per_core` when
+ * that is configured. Probes are injected; an unreadable probe does not count against the host.
+ */
+export function hostHeadroom({ cfg = {}, heavyCfg = {}, host = { memAvailableMb, loadAvg1: () => loadavg()[0], cores: () => cpus().length || 1 } } = {}) {
+  const c = { ...ADMISSION_DEFAULTS, ...Object.fromEntries(Object.entries(cfg ?? {}).filter(([, v]) => v !== undefined && v !== null)) };
+  const h = heavyConfig(heavyCfg ?? {});
+  const probe = (fn) => { try { const v = fn?.(); return Number.isFinite(v) ? v : null; } catch { return null; } };
+  if (c.enabled === false) return { ok: true, detail: "" };
+  const reasons = [];
+  const need = c.min_free_mem_mb + h.step_mem_mb, mem = probe(host?.memAvailableMb);
+  if (mem !== null && mem < need) reasons.push(`mem ${mem} MB < ${need} MB`);
+  const maxLoad = typeof c.max_load_per_core === "number" && Number.isFinite(c.max_load_per_core) ? c.max_load_per_core : null;
+  if (maxLoad !== null) {
+    const load = probe(host?.loadAvg1), cores = probe(host?.cores);
+    if (load !== null && cores && load / cores > maxLoad) reasons.push(`load ${(load / cores).toFixed(1)}/core > ${maxLoad}`);
+  }
+  return { ok: reasons.length === 0, detail: reasons.join(", ") };
 }
 
 /** The env a sandbox gets: FORGEDOCK_BATCH_ID, GH_REPO and the allowlisted secret names present in `env`. Nothing else. */

@@ -40,6 +40,11 @@
  * `remote.admit(usage)` gets the batch's settled usage plus the running remote lanes' elapsed minutes
  * (× `remote.costPerMinute`); when it refuses, running lanes finish and the queue either runs the rest locally
  * (`remote.onBudget: "local"`, host path) or stops: the rest end `held` ("execution budget: ...") for a resume.
+ *
+ * Hybrid placement (#4256): `remote.place(issue) -> {where, reason}` (execution.mjs `placeLane`) replaces `isRemote`.
+ * With `remote.fallbackLocal`, a lane placed remote runs on the host path instead of waiting when `max` remote lanes run,
+ * and instead of stopping when the budget refuses. The final `{where, reason}` is kept on the run record and the row as
+ * `placement` and passed to `runOne` as `ctx.placement` (the lane records it in its FORGE:STATE).
  */
 import { parseDependsOn } from "../engine/phases.mjs";
 
@@ -164,7 +169,20 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const remoteMax = remote && Number.isInteger(remote.max) && remote.max >= 0 ? remote.max : 0;
   const remoteRun = new Set(); // remote lanes running now (#4253): admitted against remoteMax, never the host cap
   let budgetLocal = false; // the execution budget refused a remote lane under on_budget local: the rest run on the host
-  const isRemote = (n) => { if (!remote || budgetLocal) return false; try { return !!remote.isRemote?.(n); } catch { return false; } };
+  // #4256: where a lane goes before capacity: `remote.place` (hybrid) or `remote.isRemote` (remote mode).
+  const placeOf = (n) => {
+    if (!remote) return null;
+    if (budgetLocal) return { where: "local", reason: `fallback to local: execution budget: ${budgetHit ?? "cap reached"}` };
+    try {
+      if (typeof remote.place === "function") {
+        const p = remote.place(n);
+        return { where: p?.where === "remote" ? "remote" : "local", reason: String(p?.reason ?? "") };
+      }
+      return remote.isRemote?.(n) ? { where: "remote", reason: "mode remote" } : { where: "local", reason: "local" };
+    } catch { return { where: "local", reason: "placement failed" }; }
+  };
+  const isRemote = (n) => placeOf(n)?.where === "remote";
+  const placed = new Map(); // issue -> {where, reason} granted this pass, picked up by start()
   const sandboxUse = toMap(saved?.sandbox); // issue -> {minutes, cost_usd, attempts} (#4255)
   const remoteCpm = Number(remote?.costPerMinute) > 0 ? Number(remote.costPerMinute) : 0;
   let budgetStop = null, budgetHit = null; // this pass's refusal under on_budget stop; the last refusal reason
@@ -250,23 +268,31 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     catch (e) { return { ok: false, reason: `budget check failed: ${e?.message ?? e}` }; }
   };
   const noteBudget = (reason) => {
-    if (budgetHit === null) update({ issue: null, outcome: "budget", detail: `execution budget reached: ${reason}; ${remote?.onBudget === "local" ? "remaining lanes run locally" : "no further remote lanes admitted"}` });
+    if (budgetHit === null) update({ issue: null, outcome: "budget", detail: `execution budget reached: ${reason}; ${remote?.onBudget === "local" || remote?.fallbackLocal ? "remaining lanes run locally" : "no further remote lanes admitted"}` });
     budgetHit = reason;
   };
   // A host slot for `n` (a lane-refused issue runs nothing and needs none); refused: `n` stays queued in the registry.
   const grant = (n, wanted) => {
     if (lanes.get(n)?.ok === false) return true;
-    if (isRemote(n)) {
+    let p = placeOf(n);
+    if (p?.where === "remote") {
       const adm = admitRemote();
-      if (adm.ok) { if (remoteRun.size >= remoteMax) return false; remoteRun.add(n); return true; }
-      noteBudget(adm.reason);
-      if (remote.onBudget !== "local") { budgetStop = adm.reason; return false; }
-      budgetLocal = true; // falls through to the host path
+      if (adm.ok) {
+        if (remoteRun.size < remoteMax) { remoteRun.add(n); placed.set(n, p); return true; }
+        if (!remote.fallbackLocal) return false;
+        p = { where: "local", reason: `fallback to local: max_remote ${remoteMax} reached (${p.reason})` }; // #4256: hybrid runs it on the host
+      } else {
+        noteBudget(adm.reason);
+        if (remote.onBudget !== "local" && !remote.fallbackLocal) { budgetStop = adm.reason; return false; }
+        budgetLocal = true; // falls through to the host path
+        p = { where: "local", reason: `fallback to local: execution budget: ${adm.reason}` };
+      }
     }
-    if (!reg) return true;
+    if (!reg) { if (p) placed.set(n, p); return true; }
     const r = reg.tryAcquire(keyOf(n), entryOf(n), sched.cap);
     if (!r?.ok) { offered.add(n); wanted.add(n); return false; }
     offered.delete(n); slotted.add(n);
+    if (p) placed.set(n, p);
     if (r.fallback && !fellBack) { fellBack = true; update({ issue: null, outcome: "sched", detail: `host lane registry unavailable, admitting without the global cap: ${r.reason}` }); }
     return true;
   };
@@ -286,7 +312,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
   const settle = async (n, r, rec, pf) => {
     const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + (pf?.cost_usd ?? 0), minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
-      ...(r?.waits && typeof r.waits === "object" ? { waits: r.waits } : {}), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}) };
+      ...(r?.waits && typeof r.waits === "object" ? { waits: r.waits } : {}), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
+      ...(rec?.placement ? { placement: rec.placement } : {}) };
     const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
     const subs = (Array.isArray(r?.subissues) ? r.subissues : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
     if (r?.sandbox && typeof r.sandbox === "object") {
@@ -350,7 +377,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       return;
     }
     const lane = ln?.lane;
-    const rec = { startedAt: now(), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}) };
+    const pl = placed.get(n);
+    placed.delete(n);
+    const rec = { startedAt: now(), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
     runRecs.set(n, rec); notBefore.delete(n); save();
     track(n, (async () => {
       // Pre-filter once per issue (a requeued issue is not re-checked); fail-open: an error means a normal lane.
@@ -360,7 +389,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
-          r = await runOne(n, lane, { remote: !!rec.remote, onStart: (info) => {
+          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
             if (reg && slotted.has(n) && info?.pid) reg.setLanePid(keyOf(n), info.pid);
           } });

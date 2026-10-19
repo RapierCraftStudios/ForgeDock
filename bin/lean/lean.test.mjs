@@ -3190,3 +3190,37 @@ describe("refactor:split lane routing (forge#4211)", () => {
     assert.ok(builders(w).length > 0);
   });
 });
+
+describe("hybrid placement in the lane's FORGE annotation (#4256)", () => {
+  const leased = (w, prior = null) => { w.leaseWrites = []; w.io.projector = { readState: async () => prior, writeState: async (_i, st) => { w.leaseWrites.push(st); } }; return w; };
+  const quiet = async (fn) => { const l = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = l; } };
+
+  it("o.placement is written into FORGE:STATE on every lease write and into the trajectory decisions", async () => {
+    const w = leased(world());
+    const placement = { where: "remote", reason: "heavy validation: tsc", mode: "hybrid" };
+    const r = await run(w, { placement });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(w.leaseWrites.length >= 2);
+    for (const st of w.leaseWrites) assert.deepEqual(st.placement, placement);
+    assert.match(traj(w).join("\n"), /Placement: remote \(heavy validation: tsc\)/);
+  });
+
+  it("without o.placement the FORGE:STATE has no placement key", async () => {
+    const w = leased(world());
+    await run(w);
+    assert.ok(w.leaseWrites.length >= 1);
+    for (const st of w.leaseWrites) assert.equal("placement" in st, false);
+  });
+
+  it("run-issue forwards --placement/--placement-reason to runCore; an invalid value is ignored", async () => {
+    const deps = () => ({ dir: tmpDir("core-cli-"), emitTelemetry: async () => {}, leanIo: {}, io: { gh: async () => "o/r\n" },
+      leanModule: { runCore: async (o) => ({ terminalReason: "merged", seen: o }) }, runIssue: async () => ({ terminalReason: "merged" }) });
+    const r = await quiet(() => runFromCli(["7", "--repo", "o/r", "--placement", "local", "--placement-reason", "docs-only lane"], deps()));
+    assert.equal(r.seen.placement.where, "local");
+    assert.equal(r.seen.placement.reason, "docs-only lane");
+    const r2 = await quiet(() => runFromCli(["7", "--repo", "o/r", "--placement", "moon"], deps()));
+    assert.equal(r2.seen.placement, undefined);
+    const r3 = await quiet(() => runFromCli(["7", "--repo", "o/r"], deps()));
+    assert.equal(r3.seen.placement, undefined);
+  });
+});

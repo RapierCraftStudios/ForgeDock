@@ -43,7 +43,10 @@ else writeFileSync(rf, JSON.stringify(n === 1 ? { terminalReason: "merged", pr: 
   it("success: the lane runs in the container, its result reaches the batch, the sandbox is gone", async () => {
     names.add(provider.idFor(1));
     const r = await lanes.runOne(1, null);
-    assert.deepEqual(r, { terminalReason: "merged", pr: 41 });
+    const { sandbox, ...rest } = r; // #4255: every sandbox result carries its usage
+    assert.deepEqual(rest, { terminalReason: "merged", pr: 41 });
+    assert.equal(sandbox.provider, "container");
+    assert.equal(sandbox.id, provider.idFor(1));
     assert.equal(exists(provider.idFor(1)), false);
     assert.equal(ledgerFor(1).read(), null);
   });

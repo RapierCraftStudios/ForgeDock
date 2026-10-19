@@ -581,7 +581,7 @@ export async function runFromCli(argv, deps = {}) {
   const backend = flag(argv, "--backend");
   const model = flag(argv, "--model");
   // Boolean flag: only counts at a flag position, never as another flag's value.
-  const retry = argv.some((a, i) => a === "--retry" && !["--lane", "--repo", "--backend", "--model", "--path", "--result-file"].includes(argv[i - 1]));
+  const retry = argv.some((a, i) => a === "--retry" && !["--lane", "--repo", "--backend", "--model", "--path", "--result-file", "--placement", "--placement-reason"].includes(argv[i - 1]));
   // forge#3574: --wait-lease blocks (bounded by the lease TTL) until a live
   // holder's lease expires or becomes reclaimable. Same flag-position guard.
   const waitLease = argv.some((a, i) => a === "--wait-lease" && !["--lane", "--repo", "--backend", "--model"].includes(argv[i - 1]));
@@ -596,6 +596,10 @@ export async function runFromCli(argv, deps = {}) {
   if (enginePath === "full" && !lane) throw new Error("--lane is required with --path full: staging or milestone/<slug>. No default to prevent accidental production targeting.");
   const io = deps.io ?? makeIo();
   const resultFile = flag(argv, "--result-file");
+  // #4256: where the dispatcher placed this lane (hybrid execution), recorded in the lane's FORGE:STATE.
+  const placementWhere = flag(argv, "--placement");
+  const placement = placementWhere === "local" || placementWhere === "remote"
+    ? { where: placementWhere, reason: String(flag(argv, "--placement-reason") ?? "").slice(0, 300), mode: readExecution()?.mode ?? "local" } : null;
   const report = (r) => { if (resultFile) (deps.writeAtomic ?? writeResultAtomic)(resultFile, JSON.stringify(r) + "\n"); return r; };
   try {
     await assertRepoMatchesCwd(io, repo, { sleep: deps.sleep });
@@ -658,7 +662,7 @@ export async function runFromCli(argv, deps = {}) {
     let lres;
     try {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
-      onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}),
+      onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
       admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
@@ -1009,18 +1013,25 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   };
   // Lanes: in-process `runCore` when a lean module is injected (tests), otherwise detached `run-issue` processes, or
   // sandboxes when forge.yaml `execution` places them remote (#4253).
-  let lanes, remote = null, execBudget = null, execConf = null;
+  const labelsOf = new Map(); // issue -> label names, filled by readBody (one gh call per issue)
+  let lanes, remote = null, execBudget = null, execConf = null, hybrid = false;
+  const execMode = () => (deps.execution !== undefined ? deps.execution : readExecution(cwd))?.mode ?? "local";
   if (deps.leanModule) {
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
-    lanes = { adopt: null, runOne: (n, ln) => runCore({ issue: n, repo, lane: ln, laneOverride, branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
+    lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
       admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
-    const laneArgs = (n, ln) => ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])];
+    // #4256: the placement orchestrate decided for a lane (ctx.placement) reaches it as --placement/--placement-reason.
+    const placementOf = new Map();
+    const laneArgs = (n, ln) => { const pl = placementOf.get(n); return ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : []),
+      ...(pl ? ["--placement", pl.where, "--placement-reason", pl.reason ?? ""] : [])]; };
+    const withPlacement = (l) => ({ runOne: (n, ln, ctx = {}) => { if (ctx.placement) placementOf.set(n, ctx.placement); else placementOf.delete(n); return l.runOne(n, ln, ctx); }, adopt: l.adopt });
     const execMod = await import("./lean/execution.mjs");
     const exec = deps.execution !== undefined ? deps.execution : readExecution(cwd);
-    if (exec && execMod.placement(exec) === "remote") {
+    hybrid = exec?.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1;
+    if (exec && (execMod.placement(exec) === "remote" || hybrid)) {
       // #4253: lanes run in sandboxes, ledger-tracked per lane, admitted against max_remote instead of the host cap.
       let gitDir = null;
       try { gitDir = resolvePath(cwd, String(await leanIo.git(["rev-parse", "--git-common-dir"], { cwd })).trim()); } catch { gitDir = null; }
@@ -1030,21 +1041,29 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const bud = exec.budget ?? {};
       const remoteLanes = execMod.providerLanes({ provider, laneArgs, ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0,
         ...(deps.now ? { now: deps.now } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}) });
-      lanes = remoteLanes;
-      if (bud.onBudget === "local") {
-        // #4255: once the budget refuses a remote lane, the rest run as detached host lanes.
+      lanes = withPlacement(remoteLanes);
+      if (bud.onBudget === "local" || hybrid) {
+        // #4255: once the budget refuses a remote lane, the rest run as detached host lanes. #4256: hybrid mixes both.
         const local = batchMod.detachedLanes({ batch, cwd, env, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs });
-        lanes = {
+        lanes = withPlacement({
           runOne: (n, ln, ctx = {}) => (ctx.remote ? remoteLanes : local).runOne(n, ln, ctx),
           adopt: (n, rec) => (rec?.remote || rec?.handle ? remoteLanes : local).adopt(n, rec),
-        };
+        });
       }
       // #4255: hard execution budget per batch and per host UTC day; every settled sandbox is recorded and reported.
       execConf = exec;
       execBudget = deps.executionBudget ?? execMod.openExecutionBudget({ budget: bud, file: execMod.executionBudgetFile(env), ...(deps.now ? { now: deps.now } : {}) });
       const emitSbx = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
+      // #4256: hybrid places each lane from facts (pure placeLane); validation weight is a repo fact, read once per batch.
+      const place = hybrid ? await (async () => {
+        const verifyMode = (deps.verify !== undefined ? deps.verify : readVerify(cwd))?.mode ?? "local";
+        let weight = deps.validationWeight ?? null;
+        if (!weight) { try { weight = await execMod.validationWeight({ cwd, precheckCommands: readPrecheckCommands(cwd) ?? [] }); } catch { weight = { heavy: false, signals: [] }; } }
+        const headroom = deps.hostHeadroom ?? (() => execMod.hostHeadroom({ cfg: readAdmission(cwd), heavyCfg: readHeavy(cwd) }));
+        return (n) => execMod.placeLane({ exec, verifyMode, labels: labelsOf.get(n) ?? [], weight, headroom: headroom() });
+      })() : null;
       remote = {
-        max: exec.maxRemote, isRemote: () => true, onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
+        max: exec.maxRemote, isRemote: () => true, ...(place ? { place, fallbackLocal: true } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
         admit: (u) => execBudget.admit(u),
         onUsage: (n, sb, rec) => {
           const startedAt = rec?.handle?.startedAt ?? rec?.startedAt ?? "?";
@@ -1052,9 +1071,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
           Promise.resolve(emitSbx({ event: "SANDBOX_USAGE", issue: n, provider: sb.provider, sandbox_id: sb.id, minutes: sb.minutes, cost_usd: sb.cost_usd, batch: batch.id })).catch(() => {});
         },
       };
-      sink.line(`execution: remote via ${provider.name}, max_remote ${exec.maxRemote}`);
+      sink.line(`execution: ${hybrid ? "hybrid" : "remote"} via ${provider.name}, max_remote ${exec.maxRemote}`);
     } else {
-      lanes = batchMod.detachedLanes({ batch, cwd, env, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs });
+      lanes = withPlacement(batchMod.detachedLanes({ batch, cwd, env, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs }));
     }
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
@@ -1065,7 +1084,6 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const maint = deps.maintenance !== undefined ? deps.maintenance : readMaintenance(cwd);
   const schedMod = await import("./lean/sched.mjs");
   const registry = deps.sched !== undefined ? deps.sched : schedMod.openSched(schedMod.schedDir());
-  const labelsOf = new Map(); // issue -> label names, filled by readBody (one gh call per issue)
   const labelNames = async (n) => {
     if (!labelsOf.has(n)) labelsOf.set(n, (JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])).labels ?? []).map((x) => x.name));
     return labelsOf.get(n);
@@ -1099,7 +1117,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       crossLane.push(e);
       sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
     },
-    readBody: maint || registry
+    readBody: maint || registry || hybrid
       ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); return v.body; }
       : async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
     onUpdate: (r) => sink.row(r),
