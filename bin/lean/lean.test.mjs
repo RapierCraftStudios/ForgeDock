@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
+import { laneBackendId } from "./limits.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
@@ -1625,6 +1626,7 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.equal(r.terminalReason, "deferred");
     assert.equal(r.code, "rate_limited");
     assert.match(r.detail, /resets at 8:30pm \(Asia\/Kolkata\)/);
+    assert.equal(r.backendId, laneBackendId(process.env), "#4190: the hold names the account that hit the limit");
     assert.equal(w.edits.some((e) => e.includes("needs-human")), false);
     assert.equal(traj(w).length, 0, "no trajectory comment for a deferral");
     assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");

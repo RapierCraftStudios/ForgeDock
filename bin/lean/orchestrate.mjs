@@ -13,7 +13,9 @@
  * Durable batch runner (#4121): with a `store` every transition is persisted, so a restarted dispatcher continues the
  * batch; lanes it launched that are still alive are re-attached through `adopt(issue, rec)` instead of relaunched.
  * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
- * limit holds all admissions until its reset, and non-host deferrals stop after `maxDeferrals`. An `engine-error` is
+ * limit holds admissions for that account until its reset, and non-host deferrals stop after `maxDeferrals`.
+ * Usage-limit holds (#4190) are keyed by backend identity in `limits` (the host store, shared by every batch on the
+ * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. An `engine-error` is
  * relaunched once; `breaker` ({errors, window_min}) stops admissions after a burst and lets running lanes finish, the
  * rest stay pending (outcome `held`) for a resume. `getParallel()` is read on every pass, so K can change live.
  */
@@ -67,6 +69,15 @@ const cancellableSleep = (ms, signal) => new Promise((res) => {
   signal?.addEventListener("abort", () => { clearTimeout(t); res(); }, { once: true });
 });
 
+// In-memory hold store with the `openLimits` interface, for callers without the host store.
+const memoryLimits = (now) => {
+  const holds = new Map();
+  return {
+    holdUntil: (id) => { const u = holds.get(id); return u > now() ? u : null; },
+    set: (id, untilMs) => { holds.set(id, Math.max(holds.get(id) ?? 0, untilMs)); return holds.get(id); },
+  };
+};
+
 const toObj = (m) => Object.fromEntries([...m].map(([k, v]) => [String(k), v]));
 const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k), v]));
 
@@ -74,7 +85,8 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  * @returns {Promise<Array<{issue:number, outcome:string, pr:?number, cost_usd:number, minutes:number, detail?:string}>>}
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
-  store = null, adopt = null, getParallel = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000 }) {
+  store = null, adopt = null, getParallel = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
+  limits = null, identity = () => "default", batchId = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -91,14 +103,16 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const engineErrors = toMap(saved?.engineErrors);
   const checked = toMap(saved?.prefilter); // issue -> pre-filter result
   let errorTimes = [...(saved?.errorTimes ?? [])];
-  let holdUntil = saved?.holdUntil ?? null;
+  // A legacy batch-local `holdUntil` (pre-#4190) names no account and is ignored: a same-account lane re-sets the hold.
+  const holds = limits ?? memoryLimits(now);
+  const heldUntil = () => { try { const id = identity(); const u = holds.holdUntil(id); return Number.isFinite(u) && u > now() ? u : null; } catch { return null; } };
   let tripped = saved?.breaker ?? null;
 
   const save = () => {
     if (!store) return;
     store.save({ v: 1, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
-      prefilter: toObj(checked), errorTimes, holdUntil, breaker: tripped });
+      prefilter: toObj(checked), errorTimes, breaker: tripped });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
   const readDeps = async (n) => {
@@ -162,8 +176,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       const pol = deferPolicy(r, { now: now(), deferrals: deferrals.get(n) ?? 0, maxDeferrals });
       if (!pol.capped) {
         if (!pol.host) deferrals.set(n, (deferrals.get(n) ?? 0) + 1);
-        if (pol.hold) holdUntil = Math.max(holdUntil ?? 0, now() + pol.delayMs);
-        requeue(n, pol.delayMs); done(); save();
+        // A usage limit is held per account; the hold, not a per-issue delay, gates the retry, so a lane on another
+        // account runs it at once. If the hold cannot be recorded, the reset delay applies to this issue instead.
+        let delayMs = pol.delayMs;
+        if (pol.hold) {
+          try { holds.set(r?.backendId ?? identity(), now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
+        }
+        requeue(n, delayMs); done(); save();
         update({ ...row, detail: `requeued in ${Math.round(pol.delayMs / 1000)}s${pol.hold ? " (admissions held)" : ""}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
         return;
       }
@@ -239,7 +258,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (bad !== undefined) { pending.splice(i, 1); skip(n, `dependency #${bad} ended ${results.get(bad).outcome}`); }
     }
     const t = now();
-    if (holdUntil && t >= holdUntil) { holdUntil = null; save(); }
+    const holdUntil = heldUntil();
     let started = 0;
     if (!tripped && !holdUntil) {
       for (let i = 0; i < pending.length && running.size < K();) {

@@ -851,10 +851,14 @@ export async function orchestrateFromCli(argv, deps = {}) {
       laneArgs: (n, ln) => ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])] });
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
+  // #4190: usage-limit holds live in the host store keyed by the account the next lane would use.
+  const limitsMod = await import("./lean/limits.mjs");
+  const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile());
+  const identity = deps.identity ?? (() => limitsMod.laneBackendId(process.env));
   const crossLane = [];
   const rows = await orchestrate({
     issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
-    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}),
+    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), limits, identity, batchId: batch.id,
     onCrossLane: (e) => {
       crossLane.push(e);
       console.log(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
@@ -868,6 +872,34 @@ export async function orchestrateFromCli(argv, deps = {}) {
   if (crossLane.length) console.log(`cross-lane edges: ${crossLane.map((e) => `#${e.issue} (${e.lane}) → #${e.dependency} (${e.dependencyLane})`).join(", ")}`);
   if (rows.some((r) => r.outcome === "held")) console.log(`held issues stay pending: forgedock orchestrate --resume ${batch.id}`);
   return { rows, crossLane, batch: batch.id, ok: rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome)) };
+}
+
+/**
+ * `forgedock limits show` · `forgedock limits clear <id>|--all` (#4190)
+ * Usage-limit holds are kept per account (backend identity) in `~/.forge/limits.json` (or `FORGEDOCK_LIMITS_FILE`) and
+ * shared by every batch on the host. `show` lists the active holds (identity, reset time, source; `*` marks the account
+ * this shell's lanes would use); `clear` drops one hold or all of them, so held batches admit on their next pass.
+ */
+export async function limitsFromCli(argv, deps = {}) {
+  const limitsMod = await import("./lean/limits.mjs");
+  const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile());
+  const current = (deps.identity ?? (() => limitsMod.laneBackendId(process.env)))();
+  const usage = "usage: forgedock limits show | forgedock limits clear <id>|--all";
+  const [sub, arg] = argv;
+  if (!sub || sub === "show") {
+    const holds = limits.list();
+    if (!holds.length) console.log(`no usage-limit holds (this account: ${current})`);
+    for (const h of holds) console.log(`${h.id === current ? "*" : " "} ${h.id}  until ${new Date(h.until).toISOString()}  source ${h.source ?? "-"}`);
+    return { holds, current };
+  }
+  if (sub === "clear") {
+    if (arg === "--all") { const n = limits.clearAll(); console.log(`cleared ${n} usage-limit hold(s)`); return { cleared: n }; }
+    if (!arg || arg.startsWith("--")) throw new Error(usage);
+    if (!limits.clear(arg)) throw new Error(`no active usage-limit hold for ${arg}`);
+    console.log(`cleared usage-limit hold for ${arg}`);
+    return { cleared: 1 };
+  }
+  throw new Error(usage);
 }
 
 /**
