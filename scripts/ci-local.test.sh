@@ -432,7 +432,7 @@ SHIM
 chmod +x "$T/bin/docker"
 export FAKE_DOCKER_LOG="$T/docker.log"
 : > "$FAKE_DOCKER_LOG"
-OUT=$(PATH="$T/bin:$PATH" bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
+OUT=$(env -u FORGE_DOCKER_LABELS PATH="$T/bin:$PATH" bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
 eq "a service job runs when docker is available" 0 "$RC"
 LOG=$(cat "$FAKE_DOCKER_LOG")
 has "container is started with the same image" "$LOG" "postgres:16"
