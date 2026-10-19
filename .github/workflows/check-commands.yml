@@ -40,6 +40,8 @@ on:
       - 'scripts/code-index.test.sh'
       - 'scripts/structure-delta.sh'
       - 'scripts/structure-delta.test.sh'
+      - 'scripts/hotspots.sh'
+      - 'scripts/hotspots.test.sh'
       - 'scripts/review-finalize.sh'
       - 'scripts/review-finalize.test.sh'
       - 'scripts/lib/pr-issue-number.sh'
@@ -112,6 +114,8 @@ on:
       - 'scripts/code-index.test.sh'
       - 'scripts/structure-delta.sh'
       - 'scripts/structure-delta.test.sh'
+      - 'scripts/hotspots.sh'
+      - 'scripts/hotspots.test.sh'
       - 'scripts/review-finalize.sh'
       - 'scripts/review-finalize.test.sh'
       - 'scripts/lib/pr-issue-number.sh'
@@ -408,6 +412,7 @@ jobs:
           bash scripts/review-prepare.test.sh
           bash scripts/code-index.test.sh
           bash scripts/structure-delta.test.sh
+          bash scripts/hotspots.test.sh
           bash scripts/review-finalize.test.sh
           bash scripts/close-parent-c3.test.sh
           bash scripts/review-delta.test.sh

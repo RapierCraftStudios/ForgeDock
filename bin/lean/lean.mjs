@@ -14,10 +14,11 @@ import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedReco
 import { createHash } from "node:crypto";
 import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
+import { namedPaths } from "./prefilter.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
@@ -29,7 +30,7 @@ const SHADOW_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CO
  * contracted requirement as not done. These are the precheck's form of "a requirement not done". Missing validate results
  * (often CI-only steps), scope creep and amendment problems stay recorded-only in shadow.
  */
-const SHADOW_PRE_BLOCKS = ["validate_failed", "requirement_unimplemented"];
+const SHADOW_PRE_BLOCKS = ["validate_failed", "requirement_unimplemented", "hotspot_growth"];
 export const REGISTER_MARKER = "FORGE:WORK-ON"; // alias marker carried by the FORGE:TRAJECTORY comment
 const num = (v) => (Number.isFinite(v) ? v : null);
 export const MAX_SUBISSUES = 8;
@@ -345,7 +346,8 @@ export async function runCore(o) {
   }
 
   /** A timeout restart starts a fresh session; by default it continues the implementation against the frozen contract. */
-  const implementRestart = () => builderImplementPrompt() + CONTINUE_NOTE.replace("BASE", lane);
+  let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
+  const implementRestart = () => builderImplementPrompt() + hotspotBuildRule(hotFacts) + CONTINUE_NOTE.replace("BASE", lane);
   async function builder(n, prompt, resume, live = false, restart = implementRestart) {
     let timeoutRetries = 0, p = prompt;
     for (;;) {
@@ -606,6 +608,12 @@ export async function runCore(o) {
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
     await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
     const changedFiles = async () => String(await git(["diff", "--name-only", `${base}...HEAD`])).split("\n").map((s) => s.trim()).filter(Boolean);
+    /** forge#4195: scripts/hotspots.sh facts in the worktree, or null (no io.hotspots, script failure): never fails a run. */
+    const hotspotsOf = async (args) => {
+      if (!io.hotspots) return null;
+      const h = await io.hotspots({ cwd: wt, ...args }).catch(() => null);
+      return h && typeof h === "object" && Array.isArray(h.files) ? h : null;
+    };
 
     // ---- 3. builder: plan call -> frozen contract -> implement call in the same session ----
     let result = null, attemptN = 0, reviewN = 0;
@@ -680,8 +688,10 @@ export async function runCore(o) {
       if (fc) { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
     }
     await label("building");
+    hotFacts = await hotspotsOf({ paths: namedPaths(iss.body ?? "") });
+    const planPrompt = () => builderPlanPrompt(issue) + hotspotPlanNote(hotFacts);
     if (!frozen) {
-      await builder(++attemptN, builderPlanPrompt(issue) + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : ""), null, true, () => builderPlanPrompt(issue));
+      await builder(++attemptN, planPrompt() + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : ""), null, true, planPrompt);
       planned = true;
       result = await readResult();
       const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
@@ -703,7 +713,7 @@ export async function runCore(o) {
       let vc = validateContract(contract, issueText);
       if (!vc.ok && sessionId) {
         T.decisions.push(`Contract rejected (${vc.problems[0]}); resumed once`);
-        await builder(++attemptN, contractCorrectionPrompt(vc.problems), sessionId, false, () => builderPlanPrompt(issue));
+        await builder(++attemptN, contractCorrectionPrompt(vc.problems), sessionId, false, planPrompt);
         contract = await readContract();
         await refreshIssue("contract validation");
         vc = validateContract(contract, issueText);
@@ -723,7 +733,7 @@ export async function runCore(o) {
     }
     T.plan = [`contract ${hash}`, `${frozen.requirements.length} requirement(s)`];
     if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
-    const implementPrompt = builderImplementPrompt() + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane));
+    const implementPrompt = builderImplementPrompt() + hotspotBuildRule(hotFacts) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane));
     liveKeys = ["implementation"];
     await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);
     result = await readResult();
@@ -813,7 +823,7 @@ export async function runCore(o) {
       result = (await readResult()) ?? result;
       files = await changedFiles();
       const amendProblems = await amend();
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE });
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, hotspots: await hotspotsOf({ base, paths: files }) });
       const pre = [...pc.failures, ...amendProblems];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };

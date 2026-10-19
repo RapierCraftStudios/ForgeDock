@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: agents, repos, project_board, orchestration, pipeline, build, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
+# Optional sections: agents, repos, project_board, maintenance, orchestration, pipeline, build, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -268,6 +268,30 @@ branches:
 #   work_on_review_model: sonnet
 #   work_on_review_max_turns: 120
 #   review_pr_staging_max_turns: 80
+
+# =============================================================================
+# MAINTENANCE (OPTIONAL)
+# Hotspot prevention for core work-on (forge#4195). scripts/hotspots.sh reports
+# lines, commits in the last 90 days and lines x commits for the files an issue
+# names and for the diff (git + wc only, no LLM). The planner is told to put new
+# logic next to a file over file_lines and give it only wiring; the builder may
+# grow such a file by at most growth_lines. More growth fails the conformance
+# precheck (maintenance.hotspot_growth; blocks in shadow and enforce, one
+# builder resume) unless the contract deliverable for that file says
+# "hotspot-exempt: <reason>". Paths marked linguist-generated or
+# linguist-vendored in .gitattributes are always excluded.
+# Read with yq; defaults apply when this block, the file or yq is missing.
+# Commands: run-issue, run
+# =============================================================================
+
+# maintenance:
+#   hotspot:
+#     enabled: true          # false turns hotspot facts, the rule and the check off
+#     file_lines: 2000       # a file over this many lines is a hotspot
+#     growth_lines: 150      # max lines a hotspot may grow in one change
+#     exclude_globs:         # shell patterns (`*` crosses `/`), never checked
+#       - "migrations/*"
+#       - "*.lock"
 
 # =============================================================================
 # ORCHESTRATION (OPTIONAL)

@@ -73,6 +73,7 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `conformance.preserve_violated` | Core work-on: a preserve constraint is violated or unverified, after one builder resume | lean | Review `preserve` row not `intact` |
 | `conformance.regression` | Core work-on: the reviewer named a concrete regression, after one builder resume | lean | Review `regressions` row |
 | `structure.undeclared_edge` | Core work-on: the change adds a package.json dependency between workspace packages that the frozen contract does not name, still present after one builder resume | lean | `unnamedEdges` over `scripts/structure-delta.sh` `package_edges_added` |
+| `maintenance.hotspot_growth` | Core work-on: the change grows a file already over `maintenance.hotspot.file_lines` by more than `growth_lines` without a `hotspot-exempt: <reason>` in the contract, still present after one builder resume; blocks in shadow and enforce | lean | `hotspotGrowth` precheck over `scripts/hotspots.sh --base` `growth` |
 | `followup.unavailable` | Core work-on: filing or verifying the tracking issue for a deferral failed; the run is deferred with nothing merged, never needs-human | lean | `file-deferred-followups.sh` exit 3/4 or an unreadable tracking issue |
 | `merge.head_mismatch` | Core work-on: CI passed for a head other than the reviewed head; merge refused | lean | Gate head differs from the reviewed head |
 | `completed` | Non-failure terminal (merged, phase-complete, investigation) | engine | Terminal reason |

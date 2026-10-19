@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -159,5 +159,36 @@ describe("close plan and follow-up items", () => {
   it("follow-up keys are single-line, tab-free and stable", () => {
     const [i] = followupItems([{ id: "R2", quote: "a\tb\n`c`", disposition: "defer", why: "x\ny" }]);
     assert.equal(i.key, "R2: a b c"); assert.equal(i.why, "defer: x y"); assert.doesNotMatch(i.key + i.why, /[\t\n`]/);
+  });
+});
+
+describe("hotspot growth precheck (forge#4195)", () => {
+  const H = (o = {}) => ({ path: "src/scrape.js", lines: 2600, commits_90d: 30, hotspot: 78000, over: true, excluded: false, base_lines: 2400, growth: 200, ...o });
+  const hs = (fs, o = {}) => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: fs, ...o });
+  const result = { validation: [{ id: "V1", exit: 0 }], requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }] };
+  const run = (hotspots, contract = C, r = result) => precheck({ contract, result: r, changedFiles: files, hotspots });
+
+  it("an over-threshold file grown past growth_lines fails with maintenance.hotspot_growth", () => {
+    const pc = run(hs([H()]));
+    assert.equal(pc.ok, false);
+    assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["maintenance.hotspot_growth", "hotspot_growth"]]);
+    assert.match(pc.failures[0].detail, /src\/scrape\.js grew by 200 lines \(now 2600; files over 2000 lines may grow by at most 150\)/);
+  });
+
+  it("within the limit, under the threshold, excluded, unchanged, disabled or no facts: no failure", () => {
+    for (const h of [hs([H({ growth: 150 })]), hs([H({ over: false, lines: 1900 })]), hs([H({ excluded: true })]), hs([H({ path: "src/other.js" })]),
+      hs([H()], { enabled: false }), hs([H({ growth: null })]), null, undefined, {}]) assert.equal(run(h).ok, true, JSON.stringify(h));
+    assert.deepEqual(precheck({ contract: C, result, changedFiles: files }), run(null), "callers without hotspots are unchanged");
+  });
+
+  it("hotspot-exempt: <reason> in a covering deliverable's change or an add-deliverable amendment's why exempts the file", () => {
+    const withChange = (change) => ({ ...C, deliverables: [{ id: "D1", path: "src/scrape.js", change }, C.deliverables[1]] });
+    assert.equal(run(hs([H()]), withChange("route fix; Hotspot-Exempt: the handler table must stay in one file")).ok, true);
+    assert.equal(run(hs([H()]), withChange("hotspot-exempt:   ")).ok, false, "an empty reason does not exempt");
+    assert.equal(run(hs([H()]), { ...C, deliverables: [{ id: "D1", path: "src/", change: "hotspot-exempt: generated routes" }, C.deliverables[1]] }).ok, true, "a covering directory deliverable");
+    const amended = { ...result, amendments: [{ kind: "add-deliverable", path: "src/scrape.js", why: "hotspot-exempt: one-off migration table" }] };
+    assert.equal(run(hs([H()]), C, amended).ok, true);
+    assert.equal(run(hs([H(), H({ path: "src/search.js" })]), withChange("hotspot-exempt: ok")).failures.length, 1, "the exemption covers only its own file");
+    assert.equal(hotspotGrowth({ contract: C, hotspots: hs([H()]), changedFiles: ["./src/scrape.js"] }).length, 1);
   });
 });

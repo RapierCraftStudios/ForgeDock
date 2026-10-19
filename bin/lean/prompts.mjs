@@ -70,6 +70,20 @@ If you started Docker containers or volumes that are still there, list their nam
 If you find you are blocked, write "status":"blocked" with a typed "block" instead.`;
 }
 
+/** forge#4195: hotspot facts for the plan prompt: one sentence plus one line per over-threshold file; "" when none. */
+export function hotspotPlanNote(facts) {
+  if (!facts || facts.enabled === false || !Array.isArray(facts.files)) return "";
+  const hot = facts.files.filter((f) => f?.over && !f.excluded);
+  if (!hot.length) return "";
+  return `\n\nHotspots (scripts/hotspots.sh): an Affected File below is over ${facts.file_lines} lines, so the contract must put new logic in a new or neighbouring module and give the hotspot only wiring (an import and a call); growing it by more than ${facts.growth_lines} lines needs "hotspot-exempt: <reason>" in that deliverable's change.\n${hot.map((f) => `- ${f.path}: ${f.lines} lines, ${f.commits_90d} commits/90d`).join("\n")}`;
+}
+
+/** forge#4195: the builder's growth rule with the effective thresholds; "" when the check is off. */
+export function hotspotBuildRule(facts) {
+  if (!facts || facts.enabled === false || !(facts.file_lines > 0) || !(facts.growth_lines > 0)) return "";
+  return `\n\nDon't grow a file over ${facts.file_lines} lines by more than ${facts.growth_lines} lines. Put new code next to it.`;
+}
+
 export function contractCorrectionPrompt(problems) {
   return `Your ${CONTRACT_FILE} is not valid:\n${problems.slice(0, 20).map((p) => `- ${p}`).join("\n")}\n\nFix the contract (planning only, no code, no commit) and stop. Do not push or touch GitHub.`;
 }

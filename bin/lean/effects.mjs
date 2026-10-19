@@ -194,6 +194,11 @@ export function makeLeanIo({ repo }) {
     async structureDelta({ cwd, base }) {
       try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
+    /** forge#4195: scripts/hotspots.sh facts for `paths` in cwd (growth since base when given); null on any failure. */
+    async hotspots({ cwd, base = null, paths = [] }) {
+      const args = [script("hotspots.sh"), ...(base ? ["--base", base] : []), "--", ...paths];
+      try { return JSON.parse((await pexec("bash", args, { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
+    },
     fs: {
       read: async (p) => readFileSync(p, "utf8"),
       exists: async (p) => existsSync(p),

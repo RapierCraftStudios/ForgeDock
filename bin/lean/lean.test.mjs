@@ -9,7 +9,7 @@ import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
@@ -889,6 +889,74 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     assert.match(builderPlanPrompt(7), /"the lint allows it" or "there is a precedent" is not a reason on its own/);
     assert.match(builderPlanPrompt(7), /must be a deliverable on that package\.json whose change names the package and gives the reason/);
     assert.match(builderImplementPrompt(), /blocked by the engine: add it through add-deliverable with a why naming the package/);
+  });
+});
+
+describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted growth blocks", () => {
+  const facts = (files, o = {}) => ({ enabled: true, file_lines: 2000, growth_lines: 150, files, ...o });
+  const HOT = { path: "src/foo.js", lines: 2400, commits_90d: 40, hotspot: 96000, over: true, excluded: false, base_lines: null, growth: null };
+  const COLD = { path: "src/bar.js", lines: 300, commits_90d: 2, hotspot: 600, over: false, excluded: false, base_lines: null, growth: null };
+  const GROWN = { ...HOT, lines: 2600, base_lines: 2400, growth: 200 };
+  const SMALL = { ...HOT, lines: 2500, base_lines: 2400, growth: 100 };
+  /** world whose io.hotspots answers the plan call (no base) with `plan` and the gate calls (base) from `gates` in order. */
+  const hworld = (plan, gates, o = {}) => {
+    const w = world(o); const q = [...gates]; w.hotCalls = [];
+    w.io.hotspots = async (x) => { w.hotCalls.push(x); if (!x.base) return plan; return q.length > 1 ? q.shift() : q[0]; };
+    return w;
+  };
+  const nh = (w) => w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
+
+  it("the plan note is empty with no over-threshold file and has exactly one line per over-threshold, non-excluded file", () => {
+    for (const f of [null, facts([]), facts([COLD]), facts([{ ...HOT, excluded: true }]), facts([HOT], { enabled: false })]) assert.equal(hotspotPlanNote(f), "");
+    const note = hotspotPlanNote(facts([HOT, COLD, { ...HOT, path: "src/big.py", lines: 9000 }, { ...HOT, path: "gen/x.py", excluded: true }]));
+    const lines = note.trim().split("\n");
+    assert.equal(lines.length, 3, "one sentence plus one line per hot file");
+    assert.match(lines[0], /over 2000 lines, so the contract must put new logic in a new or neighbouring module and give the hotspot only wiring \(an import and a call\)/);
+    assert.match(lines[0], /more than 150 lines needs "hotspot-exempt: <reason>"/);
+    assert.deepEqual(lines.slice(1), ["- src/foo.js: 2400 lines, 40 commits/90d", "- src/big.py: 9000 lines, 40 commits/90d"]);
+    assert.equal(hotspotBuildRule(facts([], { file_lines: 1000, growth_lines: 50 })).trim(), "Don't grow a file over 1000 lines by more than 50 lines. Put new code next to it.");
+    assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
+    const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
+    assert.ok(approxTokens(plan) <= 1800, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1500);
+  });
+
+  it("the plan prompt carries the facts, the implement prompt the configured rule; growth within the limit merges; no extra runner calls", async () => {
+    const w = hworld(facts([HOT, COLD], { file_lines: 2000, growth_lines: 150 }), [facts([SMALL])]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 2); assert.equal(reviewers(w).length, 1);
+    assert.match(builders(w)[0][4], /\n- src\/foo\.js: 2400 lines, 40 commits\/90d$/m);
+    assert.ok(!builders(w)[0][4].includes("src/bar.js: 300 lines"), "under-threshold files get no line");
+    assert.match(builders(w)[1][4], /Don't grow a file over 2000 lines by more than 150 lines\. Put new code next to it\./);
+    assert.equal(w.hotCalls[0].cwd, "/wt/lean-7"); assert.ok(Array.isArray(w.hotCalls[0].paths)); assert.equal(w.hotCalls[0].base, undefined);
+    assert.deepEqual(w.hotCalls[1], { cwd: "/wt/lean-7", base: "origin/staging", paths: ["src/foo.js", "test/foo.test.js"] });
+    const plain = world(); await run(plain);
+    assert.equal(plain.calls.filter((c) => c[0] === "runner").length, w.calls.filter((c) => c[0] === "runner").length, "no extra LLM calls");
+  });
+
+  it("unexempted growth of an over-threshold file blocks in enforce and in shadow: one resume, then needs-human maintenance.hotspot_growth, no reviewer run", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      const w = hworld(facts([HOT]), [facts([GROWN])]);
+      const r = await run(w, { conformance });
+      assert.equal(r.code, "maintenance.hotspot_growth", conformance); assert.equal(w.merges.length, 0);
+      assert.equal(builders(w).length, 3, `${conformance}: plan + implement + one resume`); assert.equal(reviewers(w).length, 0);
+      assert.match(builders(w)[2][4], /maintenance\.hotspot_growth: src\/foo\.js grew by 200 lines/);
+      assert.match(nh(w), /src\/foo\.js grew by 200 lines/);
+    }
+  });
+
+  it("growth moved out on the resume merges; an exemption in the contract or a failed/missing script never blocks", async () => {
+    const w = hworld(facts([HOT]), [facts([GROWN]), facts([SMALL])]);
+    assert.equal((await run(w, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(builders(w).length, 3);
+    const k = { ...CONTRACT, deliverables: [{ ...CONTRACT.deliverables[0], change: "guard null; hotspot-exempt: the guard must sit next to the parser it protects" }] };
+    const we = hworld(facts([HOT]), [facts([GROWN])], { contract: k, reviews: [conf({}, k)] });
+    assert.equal((await run(we)).terminalReason, "merged"); assert.equal(builders(we).length, 2);
+    const plain = world(); await run(plain);
+    const throwing = world(); throwing.io.hotspots = async () => { throw new Error("script failed"); };
+    for (const wn of [hworld(null, [null]), hworld(facts([HOT], { enabled: false }), [facts([GROWN], { enabled: false })]), throwing]) {
+      assert.equal((await run(wn)).terminalReason, "merged"); assert.equal(builders(wn).length, 2);
+      assert.equal(builders(wn)[0][4], builders(plain)[0][4], "no plan note"); assert.equal(builders(wn)[1][4], builders(plain)[1][4], "no build rule");
+    }
   });
 });
 
