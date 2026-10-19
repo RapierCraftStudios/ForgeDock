@@ -1,6 +1,6 @@
 ---
 description: AI-powered forge.yaml config generator — scans codebase, queries GitHub, auto-fills all optional sections from detection
-argument-hint: "[--preserve | --interactive | --section <name>]"
+argument-hint: "[--preserve | --interactive | --section <name> | --domain-labels <a,b,c>]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -23,13 +23,15 @@ You complete the `forge.yaml` configuration that `npx forgedock init` started. T
 | (none) | Fill all optional sections — overwrite existing values with newly detected ones, skip sections with nothing detected |
 | `--preserve` | Keep existing active section values unchanged — only fill sections that are not yet configured |
 | `--interactive` | Ask confirmation for every detected value and present menus for optional features |
-| `--section <name>` | Fill only one section: `repos`, `project_board`, `services`, `review`, or `verification` |
+| `--section <name>` | Fill only one section: `repos`, `project_board`, `services`, `review`, `verification`, or `labels` |
+| `--domain-labels <a,b,c>` | Domain labels to bootstrap on the repo (e.g. `frontend,backend,infra,design,legal-gated`) in addition to `bin/labels.json`. Overrides the list Phase 5E derives from the spec. |
 
 Parse `$ARGUMENTS` and set:
 ```
 PRESERVE = true if --preserve present
 INTERACTIVE = true if --interactive present (restores full questionnaire behavior for all sections)
 TARGET_SECTION = value from --section <name>, or "all"
+DOMAIN_LABELS = value from --domain-labels <a,b,c>, or "" (derived in Phase 5E)
 ```
 
 If both `--preserve` and `--interactive` are present, `--interactive` takes precedence (`PRESERVE = false`).
@@ -37,7 +39,7 @@ If both `--preserve` and `--interactive` are present, `--interactive` takes prec
 If `--section` was provided, validate the value immediately:
 
 ```bash
-ALLOWED_SECTIONS="repos project_board services review verification"
+ALLOWED_SECTIONS="repos project_board services review verification labels"
 if [ "$TARGET_SECTION" != "all" ]; then
   VALID=false
   for s in $ALLOWED_SECTIONS; do
@@ -46,7 +48,7 @@ if [ "$TARGET_SECTION" != "all" ]; then
   if [ "$VALID" = "false" ]; then
     echo "Error: '$TARGET_SECTION' is not a valid section name."
     echo ""
-    echo "Valid sections: repos, project_board, services, review, verification"
+    echo "Valid sections: repos, project_board, services, review, verification, labels"
     echo ""
     echo "Usage: /forgedock-init --section <name>"
     exit 1
@@ -273,6 +275,28 @@ gh auth status 2>&1
 
 If not authenticated, skip all GitHub queries and note which sections will need manual completion.
 
+**Projects v2 scope check.** Board discovery and creation need the `read:project` (read) or `project` (read + write) OAuth scope, which `gh auth login` does not grant by default. Without it, `gh project list` fails — and that failure must NOT be reported as "zero boards":
+
+```bash
+BOARD_SCOPE_MISSING=false
+SCOPES=$(gh auth status 2>&1 | grep -i "Token scopes:" || true)
+# Classic OAuth tokens list their scopes; a token with neither project scope cannot touch boards.
+if [ -n "$SCOPES" ] && ! echo "$SCOPES" | grep -qE "'(read:)?project'"; then
+  BOARD_SCOPE_MISSING=true
+fi
+# Fine-grained / App tokens list no scopes — probe instead and match the missing-scope error.
+if [ "$BOARD_SCOPE_MISSING" = "false" ] && gh project list --owner "$OWNER" --limit 1 2>&1 >/dev/null | grep -qiE "required scopes|read:project|INSUFFICIENT_SCOPES"; then
+  BOARD_SCOPE_MISSING=true
+fi
+if [ "$BOARD_SCOPE_MISSING" = "true" ]; then
+  echo "Your GitHub token lacks the read:project/project scope needed for Projects v2 boards."
+  echo "Grant it, then re-run /forgedock-init --section project_board:"
+  echo "  gh auth refresh -h github.com -s read:project,project"
+fi
+```
+
+When `BOARD_SCOPE_MISSING=true`, skip Phases 3B, 3C, 4B and 5F; the Phase 5D summary shows `✗ project_board — token lacks read:project/project scope (run: gh auth refresh -h github.com -s read:project,project)`. Label bootstrap (Phase 5E) does not need this scope and still runs.
+
 ### 3B: Project board discovery
 
 ```bash
@@ -323,6 +347,7 @@ Store results in `SIBLING_REPOS`. Assess satellite signals for each repo — str
 - **Auto-detected value** → use it directly. No confirmation prompt.
 - **Genuine ambiguity** (e.g., multiple project boards, multiple candidates for the same field) → ask once with the detected candidates listed.
 - **Nothing detected** → skip the section silently. Do NOT offer a menu or ask "do you want X?".
+  Exception: `project_board` — with no board found, Phase 4B offers to create one (a new project has none to detect).
 - **`--interactive` flag** → override the above and ask confirmation/selection for every section, even when detection found a clear answer.
 
 ### 4A: repos section
@@ -357,8 +382,16 @@ Store results in `SIBLING_REPOS`. Assess satellite signals for each repo — str
 
   Which board should ForgeDock use? Enter number, or press Enter to skip:
   ```
-- Zero project boards found AND `INTERACTIVE=false` → skip this section silently.
-- `INTERACTIVE=true` → present all boards and ask which one to use.
+- Zero project boards found → offer to create one (Phase 5F provisions it after `forge.yaml` is written):
+  ```
+  No Projects v2 board found under {OWNER}.
+  Create "{REPO} ForgeDock" with the ForgeDock fields (Status, Lane, Priority, Workflow, Component) and link it to {OWNER}/{REPO}? [Y/n]
+  ```
+  Set `BOARD_ACTION=create` on yes, else skip the section.
+- Board(s) found but you are linking, not auto-using one (multiple boards, or `INTERACTIVE=true`) → the menu above also offers `[n] Create a new "{REPO} ForgeDock" board`. Picking an existing board sets `BOARD_ACTION=link`; picking new sets `BOARD_ACTION=create`. The single auto-used board is `BOARD_ACTION=link`.
+- `BOARD_SCOPE_MISSING=true` (Phase 3A) → skip; the scope hint was already printed.
+
+Whichever path is taken, Phase 5F makes sure the board has every ForgeDock field before the `project_board` IDs are written.
 
 ### 4C: services section
 
@@ -464,6 +497,7 @@ project_board:
     lane:
       fast: "{FAST_OPTION_ID}"
       feature: "{FEATURE_OPTION_ID}"
+      sync: "{SYNC_OPTION_ID}"
     priority:
       p0: "{P0_OPTION_ID}"
       p1: "{P1_OPTION_ID}"
@@ -573,6 +607,69 @@ forge.yaml updated:
 
 If nothing changed for an overwritten section (detected values match existing values), show `(no change)` instead of a diff.
 
+Add one line for each provisioning step below, e.g. `✓ project_board — created "Acme ForgeDock" (#3), linked to acme/app, 4 fields added` and `✓ labels — 36 ForgeDock labels + domain labels: frontend, backend`.
+
+### 5E: Bootstrap labels (after forge.yaml is written)
+
+Runs on every invocation unless `--section` targets some other section. With `--preserve` it still runs: label creation is idempotent.
+
+**Domain labels.** If `DOMAIN_LABELS` was supplied (`--domain-labels`), use it verbatim. Otherwise derive it from the spec — the Phase 2 scan, `CLAUDE.md` and `README.md`:
+- web/UI framework (React, Next.js, Vue, Svelte, Angular, `app/`/`frontend/` dirs) → `frontend`
+- server/API code (Express, FastAPI, Django, Rails, Go/Rust services, `api/`/`backend/`/`server/` dirs) → `backend`
+- `Dockerfile`, `docker-compose*`, Terraform, Kubernetes/Helm manifests, deployment workflows → `infra`
+- a design system, Figma links, Storybook, or `design/` dir → `design`
+- legal, compliance, licensing or regulatory gating described in the spec → `legal-gated`
+
+Ask once — listing the derived names — only when the spec is ambiguous (or `INTERACTIVE=true`); otherwise use the derived list directly. An empty list is fine.
+
+```bash
+if [ -n "$DOMAIN_LABELS" ]; then
+  npx forgedock labels setup --repo "${OWNER}/${REPO}" --domain "$DOMAIN_LABELS"
+else
+  npx forgedock labels setup --repo "${OWNER}/${REPO}"
+fi
+```
+
+This creates or updates every label in `bin/labels.json` plus one `Domain: <name>` label per domain name (known domains get fixed colors). Failures are reported, not fatal.
+
+### 5F: Create or link the Projects v2 board (after forge.yaml is written)
+
+Run only when Phase 4B set `BOARD_ACTION` (and `BOARD_SCOPE_MISSING=false`).
+
+**Create** (`BOARD_ACTION=create`):
+```bash
+CREATED=$(gh project create --owner "$OWNER" --title "${REPO} ForgeDock" --format json)
+PROJECT_NUMBER=$(echo "$CREATED" | jq -r '.number')
+PROJECT_ID=$(echo "$CREATED" | jq -r '.id')
+```
+
+**Link** to the repo (both actions; idempotent — an "already linked" error is fine):
+```bash
+gh project link "$PROJECT_NUMBER" --owner "$OWNER" --repo "${OWNER}/${REPO}" 2>/dev/null || true
+```
+
+**Ensure ForgeDock fields.** `Status` is built into every Projects v2 board (Todo / In Progress / Done) — map it, never create it. Create each other field that is missing (case-insensitive name match):
+
+```bash
+EXISTING=$(gh project field-list "$PROJECT_NUMBER" --owner "$OWNER" --format json | jq -r '.fields[].name | ascii_downcase')
+COMPONENT_OPTIONS="${DOMAIN_LABELS:-core}"
+# One "field name|comma-separated options" row per ForgeDock field
+while IFS='|' read -r FIELD_NAME FIELD_OPTIONS; do
+  echo "$EXISTING" | grep -qx "$(echo "$FIELD_NAME" | tr '[:upper:]' '[:lower:]')" && continue
+  gh project field-create "$PROJECT_NUMBER" --owner "$OWNER" --name "$FIELD_NAME" \
+    --data-type SINGLE_SELECT --single-select-options "$FIELD_OPTIONS"
+done <<EOF
+Lane|Fast,Feature,Sync
+Priority|P0,P1,P2,P3
+Workflow|Investigating,Building,In Review,Merged
+Component|${COMPONENT_OPTIONS}
+EOF
+```
+
+Component options come from the Phase 5E domain-label list (fallback `core`), so board components and domain labels line up.
+
+**Write the IDs.** Re-run the Phase 3C field/option queries against `PROJECT_NUMBER`, then write the `project_board` section (Phase 5B schema) into `forge.yaml`, replacing any previous `project_board` block, and keep `forge.yaml.bak` from 5D. If any `gh project` call fails with a missing-scope error, print `gh auth refresh -h github.com -s read:project,project` and stop this step.
+
 ---
 
 ## Phase 6: Validation
@@ -636,6 +733,9 @@ forge.yaml is ready.
 
 Validation results:
   {validation output from 6A–6D}
+
+Board:  {created "{TITLE}" (#{N}) | linked "{TITLE}" (#{N}) | skipped — token lacks read:project/project scope, run: gh auth refresh -h github.com -s read:project,project}
+Labels: {N} ForgeDock labels + domain labels: {DOMAIN_LABELS or "none"}
 
 Next steps:
   1. If forge.yaml contains sensitive paths (credentials file, local paths):
