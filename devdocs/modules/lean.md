@@ -167,6 +167,7 @@ docs), deduplicated by a `FORGE:MAINT:<kind>:<key>` marker.
 ## Other files
 
 `checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),
+`execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253),
 `prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
@@ -375,3 +376,32 @@ phase: …; heavy queue: now N, max M`.
 
 Cost: 0 LLM calls; one node process (~40 MB) per heavy step while it runs.
 ADR `decisions/4169-heavy-step-semaphore.md`.
+
+## Entry 2026-10-20 — Execution modes and the sandbox-provider seam (#4253)
+
+forge.yaml `execution:` (`execution.mjs` `parseExecution`, read by `engine-cli.mjs`
+`readExecution`): `mode` local (default) | remote | hybrid, `max_remote` (default 0),
+`provider` (default `container` off local), `image`, `secrets` (comma-separated env
+names). `placement` is `remote` only for `mode: remote` with `max_remote >= 1`;
+`hybrid` stays local until #4256. Absent or local config builds lanes with
+`batch.mjs` `detachedLanes` exactly as before.
+
+A provider is `{name, idFor, start, status, fetchResult, teardown}` over a JSON
+handle `{provider, id, issue}`. `local` wraps `launchLane`; the reference
+`container` runs `docker run -d --rm --pull never` with the #4181 labels plus
+`forgedock.sandbox=1`, the checkout's git common dir read-only at `/src` (cloned to
+the container's own `/work`), `~/.forge/verify-cache` read-only at `/cache`, and the
+batch `lanes/` dir at `/result`. The sandbox env is only `FORGEDOCK_BATCH_ID`,
+`GH_REPO` (the target repo) and the allowlisted secret names, passed as `-e NAME`
+so values never reach argv, the handle, the ledger or the batch state. The lane
+inside still runs `run-issue`, so results, leases and annotations go through GitHub.
+
+`providerLanes` registers ledger kind `sandbox` (lane file `sandbox-<n>`) before
+`start` and releases it only when `teardown` returned true, on result, failure, no
+result (engine-error row), thrown error and adopt. A dispatcher killed mid-lane
+leaves the entry under its dead pid: `--resume` adopts from the persisted handle,
+`forgedock gc --apply` (scope `sandboxes`) tears it down through the provider.
+`countLiveLanes` skips sandbox-only lane files. `orchestrate.mjs` seam
+`remote: {max, isRemote}` admits remote lanes against `max_remote` without a host
+registry slot (batch K still applies). Rationale:
+`devdocs/decisions/4253-execution-sandbox-provider.md`.

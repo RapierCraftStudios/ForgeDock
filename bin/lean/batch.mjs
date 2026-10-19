@@ -8,7 +8,8 @@
  * `lanes/<issue>.{json,log}` (each lane's result and output) and `report.json` (the final rows and printed report, written
  * when the scheduler loop returns; `forgedock orchestrate --resume` on a finished batch replays it, #4192). Every write is tmp + fsync + rename, and the root must be
  * on disk, never tmpfs. A lane is its own session (`setsid` through `detached`), so killing the dispatcher leaves it
- * running; a resumed dispatcher re-attaches to it by pid, checking `/proc/<pid>/cmdline` against its result path.
+ * running; a resumed dispatcher re-attaches to it by pid, checking `/proc/<pid>/cmdline` against its result path. These
+ * detached lanes are the `local` execution (#4253); `execution.mjs` is the sandbox-provider seam for remote lanes.
  */
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { spawn } from "node:child_process";

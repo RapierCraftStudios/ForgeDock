@@ -29,6 +29,10 @@
  * `priorities`) ranks it host-wide, and the batch's ready issues are tried in priority order. Ready issues it cannot
  * start yet stay offered in the registry (polled every `pollMs`) and are withdrawn once no longer ready; a settled lane
  * releases its slot, an adopted one re-records it.
+ *
+ * Remote lanes (#4253), off unless `remote: {max, isRemote(issue)}` is passed (execution.mjs): a lane `isRemote` places
+ * in a sandbox takes no host registry slot; it starts only while fewer than `max` remote lanes of this batch run (the
+ * batch K still applies). Its run record keeps `remote: true` and the provider handle, so a resume re-counts and adopts it.
  */
 import { parseDependsOn } from "../engine/phases.mjs";
 
@@ -123,7 +127,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
-  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, sched = null, priorityOf = null }) {
+  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, sched = null, priorityOf = null, remote = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -150,6 +154,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   let budgetHeld = false;
   const reg = sched?.registry ?? null;
   const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
+  const remoteMax = remote && Number.isInteger(remote.max) && remote.max >= 0 ? remote.max : 0;
+  const remoteRun = new Set(); // remote lanes running now (#4253): admitted against remoteMax, never the host cap
+  const isRemote = (n) => { if (!remote) return false; try { return !!remote.isRemote?.(n); } catch { return false; } };
 
   const save = () => {
     if (!store) return;
@@ -219,7 +226,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
   // A host slot for `n` (a lane-refused issue runs nothing and needs none); refused: `n` stays queued in the registry.
   const grant = (n, wanted) => {
-    if (!reg || lanes.get(n)?.ok === false) return true;
+    if (lanes.get(n)?.ok === false) return true;
+    if (isRemote(n)) { if (remoteRun.size >= remoteMax) return false; remoteRun.add(n); return true; }
+    if (!reg) return true;
     const r = reg.tryAcquire(keyOf(n), entryOf(n), sched.cap);
     if (!r?.ok) { offered.add(n); wanted.add(n); return false; }
     offered.delete(n); slotted.add(n);
@@ -245,7 +254,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(r?.waits && typeof r.waits === "object" ? { waits: r.waits } : {}), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}) };
     const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
     const subs = (Array.isArray(r?.subissues) ? r.subissues : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
-    const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); };
+    const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); remoteRun.delete(n); };
     if (row.outcome === "dependency-open" && depList.length && (requeues.get(n) ?? 0) < MAX_REQUEUES) {
       // A scheduling fact, not a failure: add the edge, pull the dependency in, and run this issue again after it.
       requeues.set(n, (requeues.get(n) ?? 0) + 1);
@@ -299,7 +308,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       return;
     }
     const lane = ln?.lane;
-    const rec = { startedAt: now(), ...(lane ? { lane } : {}) };
+    const rec = { startedAt: now(), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}) };
     runRecs.set(n, rec); notBefore.delete(n); save();
     track(n, (async () => {
       // Pre-filter once per issue (a requeued issue is not re-checked); fail-open: an error means a normal lane.
@@ -323,8 +332,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // Lanes launched by an earlier dispatcher: re-attach to the live ones, queue the rest again (no result was recorded).
   for (const [n, rec] of [...runRecs]) {
     let p = null;
-    if (adopt && rec?.pid) { try { p = await adopt(n, rec); } catch { p = null; } }
-    if (p) {
+    if (adopt && (rec?.pid || rec?.handle)) { try { p = await adopt(n, rec); } catch { p = null; } }
+    if (p && rec.remote) { remoteRun.add(n); track(n, Promise.resolve(p).then((r) => settle(n, r, rec, checked.get(n) ?? null))); }
+    else if (p) {
       if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); }
       track(n, Promise.resolve(p).then((r) => settle(n, r, rec, checked.get(n) ?? null)));
     }
@@ -370,7 +380,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     } else if (!tripped && !holdUntil && reg) {
       // Priority first, pending order within a priority; the free per-batch K is offered so the host queue keeps FIFO.
       const ready = pending.filter(isReady).map((n, i) => [n, i]).sort((a, b) => prioOf(a[0]) - prioOf(b[0]) || a[1] - b[1]).map(([n]) => n);
-      const want = ready.filter((n) => lanes.get(n)?.ok !== false).slice(0, Math.max(0, K() - running.size));
+      const want = ready.filter((n) => lanes.get(n)?.ok !== false && !isRemote(n)).slice(0, Math.max(0, K() - running.size));
       offerFresh(want);
       for (const n of want) wanted.add(n);
       for (const n of ready) {
@@ -380,7 +390,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     } else if (!tripped && !holdUntil) {
       for (let i = 0; i < pending.length && running.size < K();) {
         const n = pending[i];
-        if ((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome))) { pending.splice(i, 1); start(n); started++; }
+        if ((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome)) && grant(n, new Set())) { pending.splice(i, 1); start(n); started++; }
         else i++;
       }
     }

@@ -55,6 +55,7 @@ If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pi
 | [`review`](#review-optional) | No | Context injected into review agents |
 | [`devdocs`](#devdocs-optional) | No | Devdocs knowledge tree path |
 | [`verification`](#verification-optional) | No | Health-check patterns |
+| [`execution`](#execution-optional) | No | `forgedock orchestrate`: run lanes in sandboxes instead of host processes (`mode: local\|remote\|hybrid`, `max_remote`) |
 | [`verify`](#verify-optional) | No | Core work-on: run lane verification on CI runners instead of the host (`mode: local\|ci\|hybrid`) |
 | [`billing`](#billing-optional) | No | Enable financial integrity audit phase |
 | [`adaptive_scripts`](#adaptive_scripts-optional) | No | Per-repo script override configuration |
@@ -578,6 +579,31 @@ Each verification emits a `CI_VERIFY` run-log/telemetry event (`mode`, `round`, 
 **Cost:** `ci`/`hybrid` spend GitHub Actions minutes before review, so they are opt-in per repo. On the green path they add no LLM calls; each red CI round adds one builder resume. The merge gate (`engine.merge_wait`) is unchanged.
 
 **Commands that use this section**: core work-on (`forgedock run-issue`, `forgedock orchestrate`; `bin/engine-cli.mjs` `readVerify`)
+
+## `execution` (OPTIONAL)
+
+Where `forgedock orchestrate` runs its lanes (forge#4253). Block style only.
+
+```yaml
+execution:
+  mode: remote          # local (default) | remote | hybrid
+  max_remote: 4         # remote lanes running at once (default 0 = remote off)
+  provider: container   # default container when mode is not local
+  image: my/lane-image:1  # container provider: an image with git and forgedock; never pulled
+  secrets: GH_TOKEN,ANTHROPIC_API_KEY  # env var NAMES forwarded to the sandbox; nothing else is
+```
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `mode` | string | No | `local` (default): lanes are detached host processes, as before. `remote`: lanes run in sandboxes of `provider`. `hybrid`: parsed; lanes stay local until hybrid placement lands (forge#4256). |
+| `max_remote` | integer | No | Remote lanes of the batch that may run at once. They take no slot of the host lane cap (`orchestration.global_parallel`, `forgedock sched cap`); the batch `--parallel` still applies. `0` (default) keeps lanes local. |
+| `provider` | string | No | `container` (reference: an ephemeral local container) or `local`. Unknown names fail the batch start. |
+| `image` | string | No | Container provider image; it must provide `git` and `forgedock`. Started with `--pull never`. |
+| `secrets` | string | No | Comma-separated env var names copied from the dispatcher's env into the sandbox. The sandbox also gets `GH_REPO` (the target repo) and `FORGEDOCK_BATCH_ID`, and nothing else from the host. |
+
+**Lifecycle:** each sandbox is listed in the lane ledger (`~/.forge/ledger/<batch>/sandbox-<n>.json`, kind `sandbox`) before it starts and removed from it only after teardown succeeded: on success, failure, a lane that exits without a result, and adopt after `--resume`. A sandbox left by a killed dispatcher is reaped by `forgedock gc --apply` (scope `--sandboxes`). The container provider mounts the checkout's git dir read-only at `/src` (cloned to the container's own `/work`), `~/.forge/verify-cache` read-only at `/cache`, and the batch `lanes/` dir at `/result`.
+
+**Commands that use this section**: `forgedock orchestrate` (`bin/engine-cli.mjs` `readExecution`)
 
 ## `env` (OPTIONAL)
 
