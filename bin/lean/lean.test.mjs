@@ -17,7 +17,8 @@ import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requir
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
-import { readAdmission, readConformanceMode } from "../engine-cli.mjs";
+import { readAdmission, readConformanceMode, readEnvConfig } from "../engine-cli.mjs";
+import { prepareToolchain } from "./toolchain.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS, readMaintenance } from "../engine-cli.mjs";
 
 const WT = "/wt/lean-7";
@@ -2687,5 +2688,102 @@ describe("host-aware verification concurrency (#4182)", () => {
     assert.ok(workers <= 2);
     assert.equal((await checkAdmission({ host: host({ cores, load: lanes * workers }) })).ok, true);
     assert.equal((await checkAdmission({ host: host({ cores, load: lanes * workers }) })).reasons.length, 0);
+  });
+});
+
+describe("toolchain pins and env.setup at lane setup (#4163)", () => {
+  /** Real detection over the fake worktree files; shim writes are recorded, npx is the only launcher on the fake host. */
+  const pinned = (w, files, { node = "v26.7.0" } = {}) => {
+    for (const [f, t] of Object.entries(files)) w.files[`${WT}/${f}`] = typeof t === "string" ? t : JSON.stringify(t);
+    w.shims = [];
+    w.io.prepareToolchain = (a) => prepareToolchain({ ...a, basePath: "/host/bin", mkdirp: async () => {}, writeShim: async (p, c) => { w.shims.push([p, c]); },
+      find: (n) => (n === "npx" ? "/host/bin/npx" : null), hostNode: () => node });
+    return w;
+  };
+  const withSetup = (w, exit = 0) => { w.setups = []; w.io.runSetup = async (a) => { w.setups.push(a); w.seq.push("setup"); return { exit, stdout: "", stderr: exit ? "role app_user does not exist" : "" }; }; return w; };
+
+  it("R1: a pinned packageManager puts the shim dir first on PATH for every runner call and tells the builder", async () => {
+    const w = pinned(world(), { "package.json": { packageManager: "pnpm@10.4.1" } });
+    const dir = tmpDir("core-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const bin = `${WT}/.forge-lean/toolchain/bin`;
+    assert.deepEqual(w.shims.map(([p]) => p).sort(), [`${bin}/pnpm`, `${bin}/pnpx`]);
+    assert.match(w.shims.find(([p]) => p.endsWith("/pnpm"))[1], /exec '\/host\/bin\/npx' -y -p 'pnpm@10\.4\.1' pnpm "\$@"/);
+    assert.ok(w.envs.length >= 3);
+    for (const e of w.envs) { assert.equal(e?.PATH, `${bin}:/host/bin`); assert.equal(e?.COREPACK_ENABLE_DOWNLOAD_PROMPT, "0"); }
+    for (const b of builders(w)) assert.match(b[4], /pinned this repo's toolchain on PATH \(pnpm@10\.4\.1 \(package\.json packageManager\)\).*Do not install global shims/s);
+    assert.match(traj(w)[0], /Toolchain pinned on the runner PATH: pnpm@10\.4\.1/);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "TOOLCHAIN_PINNED"));
+  });
+
+  it("R1: the shim dir lives in the per-run tmp and merges with TMPDIR", async () => {
+    const w = pinned(world(), { "package.json": { packageManager: "pnpm@10.4.1" } });
+    w.io.runTmp = { prune: async () => {}, path: (id) => `/rt/${id}`, make: async (_i, id) => `/rt/${id}`, remove: async () => true };
+    await run(w);
+    const e = w.envs[0];
+    assert.match(e.TMPDIR, /^\/rt\/7-/); assert.equal(e.CLAUDE_CODE_TMPDIR, e.TMPDIR);
+    assert.equal(e.PATH, `${e.TMPDIR}/toolchain/bin:/host/bin`);
+  });
+
+  it("R2: a node pin the host does not satisfy shows a clear warning in the trajectory", async () => {
+    const w = pinned(world(), { ".nvmrc": "18.19.0\n" });
+    const dir = tmpDir("core-");
+    await run(w, { dir });
+    assert.match(traj(w)[0], /\*\*Anomalies\*\*[\s\S]*host node v26\.7\.0 does not satisfy the \.nvmrc pin "18\.19\.0"/);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "TOOLCHAIN_WARNING"));
+    assert.ok(w.envs.every((e) => e?.PATH === undefined), "a node pin alone changes no runner PATH");
+  });
+
+  it("R3: env.setup runs exactly once, in the fresh worktree, before the builder, with the toolchain env", async () => {
+    const w = withSetup(pinned(world(), { "package.json": { packageManager: "pnpm@10.4.1" } }));
+    const r = await run(w, { envSetup: "bash scripts/reconcile-dev-db.sh" });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.setups.length, 1);
+    assert.equal(w.setups[0].cwd, WT); assert.equal(w.setups[0].command, "bash scripts/reconcile-dev-db.sh");
+    assert.equal(w.setups[0].env.PATH, `${WT}/.forge-lean/toolchain/bin:/host/bin`);
+    assert.ok(w.seq.indexOf("setup") >= 0 && w.seq.indexOf("setup") < w.seq.indexOf("builder"), w.seq.join(","));
+    assert.equal(w.seq.filter((x) => x === "setup").length, 1);
+  });
+
+  it("R3: an env.setup failure ends needs-human as an environment error (env.setup_failed), never a build failure", async () => {
+    const w = withSetup(world(), 3);
+    const dir = tmpDir("core-");
+    const r = await run(w, { dir, envSetup: "bash scripts/reconcile-dev-db.sh" });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, OUTCOME_CODES.ENV_SETUP_FAILED);
+    assert.equal(OUTCOME_CODES.ENV_SETUP_FAILED, "env.setup_failed");
+    assert.equal(builders(w).length, 0, "the builder never runs");
+    assert.equal(w.prs.length, 0);
+    const nh = w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN"));
+    assert.match(nh, /Environment error \(not a build failure\)/); assert.match(nh, /role app_user does not exist/);
+    assert.equal(readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL")?.code, "env.setup_failed");
+    assert.match(readFileSync(new URL("../../docs/OUTCOME-CODES.md", import.meta.url), "utf8"), /`env\.setup_failed`/);
+  });
+
+  it("R4: a repo without pins and without env config changes nothing: env, prompts, events, no setup call", async () => {
+    const base = world();
+    await run(base);
+    const w = withSetup(pinned(world(), {}));
+    const dir = tmpDir("core-");
+    await run(w, { dir });
+    assert.deepEqual(w.envs, base.envs);
+    assert.ok(w.envs.every((e) => e?.PATH === undefined && e?.COREPACK_ENABLE_DOWNLOAD_PROMPT === undefined));
+    assert.deepEqual(builders(w).map((b) => b[4]), builders(base).map((b) => b[4]));
+    assert.equal(builderPlanPrompt(7), builderPlanPrompt(7, { toolchain: null }));
+    assert.equal(builderImplementPrompt(), builderImplementPrompt("local", {}));
+    assert.doesNotMatch(builderPlanPrompt(7), /pinned/);
+    assert.deepEqual(w.shims, []); assert.deepEqual(w.setups, []);
+    assert.ok(!readLog(dir, 7).some((e) => /^TOOLCHAIN|^ENV_SETUP/.test(e.event)));
+    assert.doesNotMatch(traj(w)[0], /Toolchain|env\.setup/);
+  });
+
+  it("readEnvConfig reads forge.yaml env.toolchain / env.setup; absent gives {}", () => {
+    const d = tmpDir("envcfg-");
+    assert.deepEqual(readEnvConfig(d), {});
+    writeFileSync(join(d, "forge.yaml"), 'env:\n  toolchain: "pnpm@10.4.1"\n  setup: "bash scripts/db.sh"\n');
+    assert.deepEqual(readEnvConfig(d), { toolchainOverride: "pnpm@10.4.1", envSetup: "bash scripts/db.sh" });
+    writeFileSync(join(d, "forge.yaml"), "branches:\n  staging: staging\n");
+    assert.deepEqual(readEnvConfig(d), {});
   });
 });

@@ -35,11 +35,14 @@ export function ciUnavailablePrompt() {
   return `CI verification is unavailable for this branch, so verification falls back to this host. Run every validate command locally (targeted, as the host rules say), fix any failure, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE} with each command's real exit code. Do not push or touch GitHub.`;
 }
 
+/** #4163: the extra host-rules line when the engine pinned the repo's toolchain on PATH; "" otherwise (prompt unchanged). */
+const toolchainRule = (t) => (t ? ` The engine pinned this repo's toolchain on PATH (${t}), for your shell, validate commands and git hooks: use it as is. Do not install global shims or other versions, and do not edit PATH; if the pinned tool fails, report it in your result instead of working around it.` : "");
+
 /** Builder call 1: investigate and write the contract. No code edits. */
-export function builderPlanPrompt(n) {
+export function builderPlanPrompt(n, { toolchain = null } = {}) {
   return `Resolve issue #${n} (read it with gh issue view ${n} --comments). This first step is PLANNING ONLY: do not edit code, do not commit.
 
-${HOST_RULES}
+${HOST_RULES}${toolchainRule(toolchain)}
 
 1. Write ${INVESTIGATION_FILE} as markdown with exactly these headings, concise, file:line wherever you cite code (no HTML comments):
 **Verdict**: CONFIRMED|ALREADY-FIXED|INVALID|BLOCKED
@@ -69,11 +72,11 @@ ${BLOCK_RULES}`;
 }
 
 /** Builder call 2, same session: implement the frozen contract. */
-export function builderImplementPrompt(mode = "local") {
+export function builderImplementPrompt(mode = "local", { toolchain = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
   return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, and commit. Do not push or touch GitHub.
 
-${HOST_RULES}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
+${HOST_RULES}${toolchainRule(toolchain)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why, which the engine posts on the issue:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file you must change that the contract did not list.
