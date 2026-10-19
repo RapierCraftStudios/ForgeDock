@@ -282,7 +282,7 @@ echo "--- RISK_SIGNALS ---"; jq -r '.risk_signals | join(" ")' "$CTX"
 echo "--- CHURN_CONTEXT ---"; jq -r '.churn_context' "$CTX"
 ```
 
-Substitute each printed value into later fences as `{NAME}` (`{CONTEXT_FILE}`, `{REVIEW_SHA}`, `{BASE}`, `{HEAD}`, `{MERGE_HEALTH}`, `{MERGE_HEALTH_STATE}`, `{IS_MILESTONE_TO_STAGING}`, `{REQUIRES_FULL_BUILD}`, `{ROSTER_TIER}`, `{SELECTED_AGENTS}`, `{REVIEW_DEPTH}`, `{REVIEW_MODE}`, `{DELTA_FROM}`, `{PR_AUTHOR}`, ...) and record the services, domains and a one-or-two sentence PR scope for the summary.
+Substitute each printed value into later fences as `{NAME}` (`{CONTEXT_FILE}`, `{REVIEW_SHA}`, `{MERGE_HEALTH}`, `{MERGE_HEALTH_STATE}`, `{IS_MILESTONE_TO_STAGING}`, `{REQUIRES_FULL_BUILD}`, `{ROSTER_TIER}`, `{SELECTED_AGENTS}`, `{REVIEW_DEPTH}`, `{REVIEW_MODE}`, `{DELTA_FROM}`, `{PR_AUTHOR}`, ...); `BASE`/`HEAD` are display-only and are never substituted into shell text (fences re-read them from `$CTX` with jq and a ref guard); record the services, domains and a one-or-two sentence PR scope for the summary.
 
 - **BLOCKED stops the review** (any non-zero exit): print the blockers, return `REVIEW_RESULT: status: BLOCKED`, never skip. Typical blockers: no template source (`npx forgedock update`; never review inline) and an empty trusted `typescript.build` / `python.format` on a full-build lane.
 - `SELECTED_AGENTS` is the **effective** roster (canonical marker domains, Security always present, empty for `BASE_SYNC_ONLY`); `CHURN_CONTEXT` is a scrutiny prior substituted as `[CHURN_CONTEXT]`, not a selection input.
@@ -802,7 +802,10 @@ Append a `## Review Findings` table (summaries and issue links) to the PR body: 
 
 ```bash
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; MERGE_ISSUE="{MERGE_ISSUE}"
-MERGE_HEALTH="{MERGE_HEALTH}"; MERGE_HEALTH_STATE="{MERGE_HEALTH_STATE}"; BASE="{BASE}"; HEAD="{HEAD}"; REVIEW_SHA="{REVIEW_SHA}"; CTX="{CONTEXT_FILE}"
+MERGE_HEALTH="{MERGE_HEALTH}"; MERGE_HEALTH_STATE="{MERGE_HEALTH_STATE}"; REVIEW_SHA="{REVIEW_SHA}"; CTX="{CONTEXT_FILE}"
+# Ref names are attacker-chosen (git accepts `$(...)` and backticks in a ref): read them from the context file as data, never substitute into shell text.
+BASE=$(jq -r '.pr.base_ref // ""' "$CTX"); HEAD=$(jq -r '.pr.head_ref // ""' "$CTX")
+printf '%s\n%s\n' "$BASE" "$HEAD" | grep -qvE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' && { echo "REVIEW_RESULT: status: BLOCKED, blocker: PR base/head ref outside [A-Za-z0-9._/-] or unreadable (fail closed)"; exit 1; }   # STOP
 INTENSITY_TIER="{INTENSITY_TIER}"; TABLE_CELL_KEY="{TABLE_CELL_KEY}"; TRUST_SHADOW_MODE="{TRUST_SHADOW_MODE}"; TRUST_NEEDS_HUMAN="{TRUST_NEEDS_HUMAN}"
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 RF=$(forge_resolve review-finalize.sh)   # install roots only, never the PR checkout; unresolvable is a stop (fail closed), never a skipped gate
