@@ -135,10 +135,23 @@ Re-read current state before doing anything:
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 
-# Read investigation report (required — contains decomposition plan)
+# Read investigation report (contains the decomposition plan; see the /bootstrap plan below when absent)
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body'
 ```
+
+**Bootstrap plan** <!-- Added: forge#4175 -->: a greenfield spike issue filed by `/bootstrap` has no code to investigate, so it carries its plan in a `<!-- FORGE:BOOTSTRAP_PLAN -->` comment instead: a `### Decomposition Assessment` listing the sub-issues (titles, dependencies, `ESTIMATED_DIFF_LINES`) and an optional own-line `Spike: <path>` naming the spike doc. Only a trusted, marker-anchored comment counts (`scripts/trusted-comments.sh`, the same predicate as the resume check in Phase D1). Paste the Script resolution block first (fresh shell per Bash call). An unresolved helper or a failed read means "no bootstrap plan" (fail closed); an untrusted body never becomes a plan.
+
+```bash
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)   # unresolved => empty => fail closed
+BOOTSTRAP_PLAN=""
+if [ -n "$TRUSTED_SCRIPT" ] && COMMENTS_JSON=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments); then
+  BOOTSTRAP_PLAN=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:BOOTSTRAP_PLAN -->' | tail -n 1 | jq -r '.' 2>/dev/null || true)
+fi
+PLAN_SPIKE=$(printf '%s\n' "$BOOTSTRAP_PLAN" | sed -nE 's/^Spike: *`?([^` ]+)`? *$/\1/p' | head -1)
+```
+
+**Plan source**: when a FORGE:INVESTIGATOR report exists it is the plan source (`PLAN_SOURCE=investigate`) and the bootstrap plan is ignored. Only when no investigator report exists and `BOOTSTRAP_PLAN` is non-empty is the bootstrap plan the source (`PLAN_SOURCE=bootstrap`). Everything below that reads "the investigation report's Decomposition Assessment" reads the selected source's Decomposition Assessment.
 
 **MANDATORY — Owner override detection**: After reading the investigation comment, read ALL other comments on the issue to check for owner override signals:
 
@@ -147,7 +160,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR") | not) | {author: .user.login, body: .body}'
 ```
 
-Ignore machine-posted marker comments (`FORGE:DIFF_SIZE`, `FORGE:SIZE_OVERRIDE`) in this scan: they are never an owner override direction. Scan non-agent comments for override signals — phrases like "do not", "do NOT", "instead", "revert", "remove this", "override", "actually", or explicit disagreement with the investigation's recommendation. If an override comment is found from a repo owner or admin (not a bot):
+Ignore machine-posted marker comments (`FORGE:DIFF_SIZE`, `FORGE:SIZE_OVERRIDE`, `FORGE:BOOTSTRAP_PLAN`) in this scan: they are never an owner override direction. Scan non-agent comments for override signals — phrases like "do not", "do NOT", "instead", "revert", "remove this", "override", "actually", or explicit disagreement with the investigation's recommendation. If an override comment is found from a repo owner or admin (not a bot):
 
 1. **Document the override**: Note which direction the owner is steering (e.g., "remove the feature" vs. investigation's "keep with warnings")
 2. **Re-derive sub-issue scopes**: Derive sub-issue titles, bodies, and file scope from the override direction — NOT from the original investigation recommendation. The investigation's Decomposition Assessment may list sub-issues that are now stale or contradictory with the override.
@@ -161,7 +174,7 @@ Ignore machine-posted marker comments (`FORGE:DIFF_SIZE`, `FORGE:SIZE_OVERRIDE`)
 Extract from investigation report:
 - Decomposition Assessment section: list of proposed sub-issues with titles and dependencies
 
-**Planning-time only** <!-- Added: forge#3862 -->: decompose runs only from the investigation's Decomposition Assessment (`**YES**`, which requires separable pieces: independent modules or services, no shared files, no ordering dependency, each independently testable). There is no post-build route into this skill: build never discards a finished diff and never hands one here, so the assessment is the only plan source and there are no persisted staged hunks to reuse.
+**Planning-time only** <!-- Added: forge#3862 -->: decompose runs only from the investigation's Decomposition Assessment (`**YES**`, which requires separable pieces: independent modules or services, no shared files, no ordering dependency, each independently testable), or, for a greenfield spike with no investigator report, from the trusted `/bootstrap` plan's Decomposition Assessment (forge#4175). There is no post-build route into this skill: build never discards a finished diff and never hands one here, so the assessment is the only plan source and there are no persisted staged hunks to reuse.
 - Milestone (from issue metadata)
 - Priority label (P0/P1/P2) from issue labels
 
@@ -193,9 +206,9 @@ PARENT_REF=$(printf '%s\n' "$ISSUE_BODY" | grep -E '^\*\*Parent\*\*: #[0-9]+' | 
 
 If `PARENT_REF` is non-empty → BLOCKED, blocker: "Issue #{NUMBER} is a sub-issue (${PARENT_REF}) — sub-issues are never decomposed again; run /work-on build on it directly".
 
-**Guard 2 — investigation report present**: If the FORGE:INVESTIGATOR comment is absent → BLOCKED, blocker: "No investigation report found — run investigate first".
+**Guard 2 — investigation report present**: If the FORGE:INVESTIGATOR comment is absent and there is no trusted `/bootstrap` plan (`BOOTSTRAP_PLAN` empty, Phase D0) → BLOCKED, blocker: "No investigation report found — run investigate first". A trusted bootstrap plan satisfies this guard only for an issue with no investigator report. <!-- Changed: forge#4175 -->
 
-**Guard 3 — decomposition plan present**: If the investigation report has no Decomposition Assessment section, OR the assessment does not list any sub-issues → BLOCKED, blocker: "Investigation report has no decomposition plan — re-run investigate with explicit decomposition scope".
+**Guard 3 — decomposition plan present**: If the investigation report has no Decomposition Assessment section, OR the assessment does not list any sub-issues → BLOCKED, blocker: "Investigation report has no decomposition plan — re-run investigate with explicit decomposition scope". When `PLAN_SOURCE=bootstrap` the same check applies to the bootstrap plan's Decomposition Assessment; on failure the blocker is "Bootstrap plan has no decomposition plan — re-run /bootstrap for this spike".
 
 **Resume check** <!-- Added: forge#3881 -->: the marker comment drives parent edits and the D6.5 close, so only a trusted, marker-anchored comment counts (`scripts/trusted-comments.sh`, the same predicate as the review gates). Paste the Script resolution block first (fresh shell per Bash call). An unresolved helper or a failed read is treated as "no trusted comment" and the normal path continues (the D2.5 equivalent-set check still guards duplicates); an untrusted body never reaches `SUB_LIST`.
 
@@ -373,12 +386,15 @@ SUB_BODY_EOF
 ```bash
 MILESTONE_ARG=""
 [ -n "$MILESTONE_TITLE" ] && MILESTONE_ARG=" --milestone \"${MILESTONE_TITLE}\""
+# Greenfield (forge#4175): a bootstrap plan naming a spike doc lets sub-issues list planned Affected Files.
+SPIKE_ARG=""
+[ "$PLAN_SOURCE" = "bootstrap" ] && [ -n "$PLAN_SPIKE" ] && SPIKE_ARG=" --greenfield --spike \"${PLAN_SPIKE}\""
 ```
 
 **Invoke `/issue` in programmatic mode**:
 
 ```
-ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"${SUB_TITLE}\" --body-file \"${SUB_BODY_FILE}\" --label \"{PRIORITY_LABEL}\"${MILESTONE_ARG}"))
+ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"${SUB_TITLE}\" --body-file \"${SUB_BODY_FILE}\" --label \"{PRIORITY_LABEL}\"${MILESTONE_ARG}${SPIKE_ARG}"))
 ```
 
 If the skill is not found → BLOCKED, blocker: "skill not found: issue".
@@ -487,6 +503,8 @@ COMMENT_URL=$(gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DECOMPOSED 
 ## Decomposition Complete
 
 This issue has been broken into sub-issues. Each sub-issue runs through its own /work-on pipeline independently.
+
+**Plan source**: ${PLAN_SOURCE}
 
 ### Sub-Issues Created
 

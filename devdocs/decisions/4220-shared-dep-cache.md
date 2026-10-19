@@ -22,7 +22,7 @@ The engine runs `bin/lean/depcache.mjs` `prepare` deterministically, right after
 - **Hit:** the snapshot is hardlinked into the lane. Files under `.bin/` and venv `bin/` that name the build worktree are copied with the path rewritten, and absolute symlinks are rewritten. The repo's warm repair install then runs (pnpm `--offline`, `uv sync --frozen`, `poetry install --sync`), which reinstalls the editable project for this lane. npm and yarn get no repair pass: their trees hold only relative links, and npm rewrites its hidden lockfile in place, which the read-only snapshot refuses.
 - **Read-only:** shared inodes are read-only, so an in-place write from any lane fails with EACCES instead of corrupting the cache. A lane that changes its lockfile gets a new key. The builder prompt says to `rm -rf` the tree before reinstalling.
 - **Shared stores:** pnpm store, npm, uv, poetry and pip caches are exported to every runner call.
-- **Pruning:** `forgedock gc` prunes snapshots unused for 7 days (under their lock), dead publishers' tmp dirs and dead locks.
+- **Pruning:** the #4180 reaper (`bin/gc.mjs`) has a `deps` scope. Like the other scopes it is a dry-run report by default, and `--apply` reclaims snapshots unused for 7 days (under their lock), dead publishers' tmp dirs and dead locks. A snapshot locked by a live lane is reported, never removed. `depcache.mjs` `scan` is read-only and `remove` acts on one scanned entry.
 - **Failure:** a missing tool, EXDEV, a timeout or a failed install falls back to the old behaviour and never fails the run. `FORGE_DEPCACHE=0` opts out.
 
 ## Rejected options

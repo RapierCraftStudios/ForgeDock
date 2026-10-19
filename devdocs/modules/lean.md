@@ -105,7 +105,7 @@ non-PnP, uv/poetry) by sha256 of lock + manifests + runtime + platform. Hit: har
 read-only snapshot `~/.forge/depcache/<repoKey>/<eco>-<key>/` in (bin scripts copied, build
 path rewritten), then a warm repair install. Miss: frozen install under the key lock, publish
 via tmp + atomic rename. Never fails the run (`DEPS_PREPARED`); runner env gets the shared
-stores; `forgedock gc` prunes; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
+stores; `forgedock gc --deps` reaps; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
 
 ## FORGE:STATE lease
 

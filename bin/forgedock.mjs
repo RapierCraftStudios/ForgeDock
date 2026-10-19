@@ -3270,7 +3270,7 @@ function help() {
     ["npx forgedock orchestrate <issue...> [--parallel K] [--lane L]", "Run core work-on on several issues with bounded concurrency and Depends-on ordering; each issue on its own lane, cross-lane dependencies reported"],
     ["npx forgedock orchestrate --resume <id> | --set-parallel <id> K", "Continue a batch after the dispatcher died (live lanes re-adopted), or change its concurrency live"],
     ["npx forgedock triage <issue...> [--lane L] [--dry-run]", "Already-fixed pre-filter: close issues a merged PR or green CI already resolved; print the rest"],
-    ["npx forgedock gc", "Prune stale per-run scratch dirs under ~/.forge/tmp/runs (older than 6h, owner dead)"],
+    ["npx forgedock gc [--apply] [--older-than 6h] [--docker] [--worktrees] [--branches] [--tmp] [--processes]", "Report (dry-run default) and reclaim ForgeDock-owned leftovers: stale lane ledgers, forgedock-labelled containers/volumes, lean-*/agent-* worktrees, abandoned lane branches, ~/.forge/tmp scratch, orphaned lane processes; unowned resources and unpushed work are only reported"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo] [--domain a,b,c]", "Bootstrap ForgeDock-managed labels on a GitHub repo, plus optional per-repo domain labels (idempotent)"],
@@ -4046,14 +4046,9 @@ switch (command) {
     break;
   }
   case "gc": {
-    // Best-effort prune of core-run scratch dirs (older than 6h, owner pid dead). Never touches dirs we did not create.
-    const { makeRunTmp } = await import("./lean/effects.mjs");
-    const removed = await makeRunTmp().prune();
-    process.stdout.write(`gc: removed ${removed.length} stale run tmp dir(s)\n`);
-    // #4220: dependency cache snapshots unused for 7 days (unlocked), dead publishers' tmp dirs, stale locks.
-    const { makeDepCache } = await import("./lean/depcache.mjs");
-    const deps = await makeDepCache({ exec: async () => "" }).prune();
-    process.stdout.write(`gc: removed ${deps.length} stale dependency cache snapshot(s)\n`);
+    // Reaper (#4180): dry-run report by default; --apply reclaims only ForgeDock-owned resources (ledger, label, lane naming, own tmp).
+    const { runGc } = await import("./gc.mjs");
+    exitCode = await runGc(restArgs);
     break;
   }
   case "orchestrate": {

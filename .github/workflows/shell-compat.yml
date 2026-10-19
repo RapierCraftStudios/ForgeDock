@@ -112,6 +112,11 @@ jobs:
           bash scripts/checkbox-sections.test.sh
           bash scripts/file-deferred-followups.test.sh
           bash scripts/resolve-deploy-gate.test.sh
+      - name: Run affected-files-check / maintenance-scan tests
+        if: runner.os != 'macOS'
+        run: |
+          bash scripts/affected-files-check.test.sh
+          bash scripts/maintenance-scan.test.sh
       - name: Run publish-staging-sync.test.sh
         run: bash scripts/publish-staging-sync.test.sh
       - name: Run review-pr-gate2.test.sh

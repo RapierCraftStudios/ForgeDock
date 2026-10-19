@@ -254,23 +254,27 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     return out;
   }
 
-  /** Remove snapshots unused for maxAgeMs (taking their lock), tmp dirs of dead publishers and stale locks. Returns names. */
-  async function prune({ maxAgeMs = DEPCACHE_MAX_AGE_MS } = {}) {
-    const removed = [];
+  /**
+   * Read-only scan for the reaper: snapshots unused for maxAgeMs, tmp dirs of dead publishers, locks of dead holders on
+   * this host. Only names this module creates are listed. Each entry: {name, path, kind: snapshot|tmp|lock, ageMs, locked?, reason};
+   * a snapshot whose lock a live (or other-host) holder owns is listed with locked: true and is never removed.
+   */
+  function scan({ maxAgeMs = DEPCACHE_MAX_AGE_MS } = {}) {
+    const out = [];
     let repos = [];
-    try { repos = fs.readdirSync(root).filter((n) => n !== STORES); } catch { return removed; }
+    try { repos = fs.readdirSync(root).filter((n) => n !== STORES); } catch { return out; }
     for (const rk of repos) {
       const dir = join(root, rk);
       let names = [];
       try { if (!fs.lstatSync(dir).isDirectory()) continue; names = fs.readdirSync(dir); } catch { continue; }
       for (const n of names) {
-        const p = join(dir, n);
+        const p = join(dir, n), name = `${rk}/${n}`;
         try {
           const tm = TMP_RE.exec(n);
-          if (tm) { if (!alive(Number(tm[2]))) { fs.rmSync(p, { recursive: true, force: true }); removed.push(`${rk}/${n}`); } continue; }
+          if (tm) { if (!alive(Number(tm[2]))) out.push({ name, path: p, kind: "tmp", ageMs: null, reason: "publisher dead" }); continue; }
           if (LOCK_RE.test(n)) {
             const held = JSON.parse(String(fs.readFileSync(p)));
-            if (held.host === host && !alive(held.pid)) { fs.rmSync(p, { force: true }); removed.push(`${rk}/${n}`); }
+            if (held.host === host && !alive(held.pid)) out.push({ name, path: p, kind: "lock", ageMs: now() - Number(held.created), reason: "lock holder dead" });
             continue;
           }
           if (!SNAP_RE.test(n) || !fs.existsSync(join(p, "manifest.json"))) continue;
@@ -278,14 +282,31 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
           try { last = Number(String(fs.readFileSync(join(p, "last-used")))); } catch { /* fall back to created */ }
           if (!Number.isFinite(last) || last <= 0) last = Number(JSON.parse(String(fs.readFileSync(join(p, "manifest.json")))).created) || 0;
           if (now() - last < maxAgeMs) continue;
-          const r = await withLock(`${p}.lock`, async () => { fs.rmSync(p, { recursive: true, force: true }); return true; }, { wait: false });
-          if (r.locked) removed.push(`${rk}/${n}`);
+          let locked = false;
+          try { const h = JSON.parse(String(fs.readFileSync(`${p}.lock`))); locked = !(h.host === host && !alive(h.pid)); } catch { /* no lock */ }
+          out.push({ name, path: p, kind: "snapshot", ageMs: now() - last, locked, reason: locked ? "locked by a live lane" : "snapshot unused" });
         } catch { /* unreadable or not ours: leave it */ }
       }
     }
+    return out;
+  }
+
+  /** Remove one scanned entry; a snapshot only while holding its lock. Returns false when it is locked or not ours. */
+  async function remove(entry) {
+    const p = String(entry?.path ?? "");
+    if (!p.startsWith(root + "/") || p.slice(root.length + 1).split("/").length !== 2) return false;
+    if (entry.kind === "snapshot") return (await withLock(`${p}.lock`, async () => { fs.rmSync(p, { recursive: true, force: true }); return true; }, { wait: false })).locked;
+    fs.rmSync(p, { recursive: true, force: true });
+    return true;
+  }
+
+  /** scan + remove: snapshots unused for maxAgeMs (taking their lock), dead publishers' tmp dirs, stale locks. Returns names. */
+  async function prune({ maxAgeMs = DEPCACHE_MAX_AGE_MS } = {}) {
+    const removed = [];
+    for (const e of scan({ maxAgeMs })) { if (e.locked) continue; try { if (await remove(e)) removed.push(e.name); } catch { /* leave it */ } }
     return removed;
   }
 
-  return { env, prepare, prune, root };
+  return { env, prepare, prune, scan, remove, root };
 }
 
