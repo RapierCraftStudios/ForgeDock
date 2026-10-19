@@ -82,6 +82,13 @@ domains:
         authority: reference
         token_cost: 1200
 
+  lean:
+    description: "Lean (core) work-on engine bin/lean/: lane, contract, implement, conformance, merge, FORGE:STATE lease, outcome codes"
+    docs:
+      - path: modules/lean.md
+        authority: required
+        token_cost: 900
+
   decisions:
     description: "Auto-generated ADRs from TRAJECTORY decisions — prior tradeoffs with anchors. Architect injects overlapping ADRs as constraints before implementation."
     docs:
@@ -119,6 +126,12 @@ modules:
     authority: required
     token_cost: 400
 
+  - name: lean
+    glob: "bin/lean/*"
+    path: modules/lean.md
+    authority: required
+    token_cost: 900
+
 # ---------------------------------------------------------------------------
 # Always Load
 # Loaded for EVERY task regardless of domain label match.
@@ -129,3 +142,5 @@ always_load: []
 # Note: ForgeDock's own devdocs have no custom-instructions.md that overrides
 # agent behavior. The command specs in commands/ serve that role directly.
 # Add entries here only when a doc must be read for ALL tasks unconditionally.
+# NORTHSTAR.md (repo root) is always loaded through the first line of CLAUDE.md
+# and AGENTS.md, not here: always_load paths resolve under devdocs/.

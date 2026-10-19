@@ -261,14 +261,9 @@ Classify where the breakdown occurred. Use these categories:
 - **Root cause**: The single most impactful failure point. If THIS had worked, the problem wouldn't have reached production.
 - **Contributing factors**: Other pipeline links that could have caught it as a safety net but didn't.
 
-### 3D: Cross-reference with Pipeline Hardening Principles
+### 3D: Cross-reference with the hardening layers
 
-Before proposing a fix, check which layer it belongs to (from CLAUDE.md):
-
-- **Quality gate** → static analysis, grep-catchable patterns
-- **Review agents** → semantic reasoning, library API contracts, cross-service interactions
-- **Domain detection** → broad category matching, not per-bug-instance
-- **Builder rules** → prevention at write time, simple memorable rules
+Before proposing a fix, pick its layer from `NORTHSTAR.md` § Where a fix belongs: the earliest, cheapest layer that would have stopped it (issue spec/plan rule → builder rule → deterministic check → domain detection → review prompt line → new agent, last resort).
 
 **Do NOT propose a quality-gate grep check for a reasoning failure. Do NOT propose a review-agent prompt change for a pattern grep could catch.**
 
@@ -368,7 +363,7 @@ Files that need changes:
 - If tightening a review agent: describe the reasoning step to add
 - If adding context/architect guidance: describe the lookup or trace step}
 
-**Hardening layer justification** (per CLAUDE.md Pipeline Hardening Principles):
+**Hardening layer justification** (per `NORTHSTAR.md` § Where a fix belongs):
 {Explain why this fix belongs in the proposed layer and not another}
 
 ### Related Prior Work
