@@ -176,8 +176,9 @@ export function readVerify(cwd = process.cwd()) {
 }
 /**
  * forge.yaml `execution:` section (#4253, block style: `execution:` then `  mode: remote`, `  max_remote: 4`,
- * `  provider: container`, `  image`, `  secrets` comma-separated env names) for `orchestrate`; undefined when the section
- * is absent or unreadable.
+ * `  provider: container`, `  image`, `  secrets` comma-separated env names; #4255 budget: `  budget_minutes`, `  budget_usd`,
+ * `  day_budget_minutes`, `  day_budget_usd`, `  on_budget: stop|local`, `  cost_per_minute`) for `orchestrate`; undefined
+ * when the section is absent or unreadable.
  */
 export function readExecution(cwd = process.cwd()) {
   try {
@@ -993,7 +994,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   sink.batch?.(batch);
   sink.line(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
   const dir = deps.dir ?? runDir();
-  const { orchestrate, formatTable, formatWaitSummary } = await import("./lean/orchestrate.mjs");
+  const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary } = await import("./lean/orchestrate.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   const { makePrefilter, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
   const prefilter = argv.includes("--no-prefilter") ? null
@@ -1007,7 +1008,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   };
   // Lanes: in-process `runCore` when a lean module is injected (tests), otherwise detached `run-issue` processes, or
   // sandboxes when forge.yaml `execution` places them remote (#4253).
-  let lanes, remote = null;
+  let lanes, remote = null, execBudget = null, execConf = null;
   if (deps.leanModule) {
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
@@ -1025,8 +1026,31 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const provider = deps.sandboxProvider ?? execMod.providerByName(exec.provider, { batch, repo, cwd, image: exec.image, gitDir, script: laneScript, bin: deps.laneBin });
       const { makeLedger } = await import("./lean/ledger.mjs");
       const ledgerFor = deps.sandboxLedger ?? ((n) => makeLedger({ batch: batch.id, lane: `sandbox-${n}`, owner: `orch_${process.pid}`, issue: n }));
-      lanes = execMod.providerLanes({ provider, laneArgs, ledgerFor, env, secrets: exec.secrets, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}) });
-      remote = { max: exec.maxRemote, isRemote: () => true };
+      const bud = exec.budget ?? {};
+      const remoteLanes = execMod.providerLanes({ provider, laneArgs, ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0,
+        ...(deps.now ? { now: deps.now } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}) });
+      lanes = remoteLanes;
+      if (bud.onBudget === "local") {
+        // #4255: once the budget refuses a remote lane, the rest run as detached host lanes.
+        const local = batchMod.detachedLanes({ batch, cwd, env, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs });
+        lanes = {
+          runOne: (n, ln, ctx = {}) => (ctx.remote ? remoteLanes : local).runOne(n, ln, ctx),
+          adopt: (n, rec) => (rec?.remote || rec?.handle ? remoteLanes : local).adopt(n, rec),
+        };
+      }
+      // #4255: hard execution budget per batch and per host UTC day; every settled sandbox is recorded and reported.
+      execConf = exec;
+      execBudget = deps.executionBudget ?? execMod.openExecutionBudget({ budget: bud, file: execMod.executionBudgetFile(env), ...(deps.now ? { now: deps.now } : {}) });
+      const emitSbx = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
+      remote = {
+        max: exec.maxRemote, isRemote: () => true, onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
+        admit: (u) => execBudget.admit(u),
+        onUsage: (n, sb, rec) => {
+          const startedAt = rec?.handle?.startedAt ?? rec?.startedAt ?? "?";
+          try { execBudget.record(`${batch.id}#${sb.id ?? n}#${startedAt}`, sb); } catch { /* the batch total still counts it */ }
+          Promise.resolve(emitSbx({ event: "SANDBOX_USAGE", issue: n, provider: sb.provider, sandbox_id: sb.id, minutes: sb.minutes, cost_usd: sb.cost_usd, batch: batch.id })).catch(() => {});
+        },
+      };
       sink.line(`execution: remote via ${provider.name}, max_remote ${exec.maxRemote}`);
     } else {
       lanes = batchMod.detachedLanes({ batch, cwd, env, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs });
@@ -1086,6 +1110,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   try { heavyStats = deps.heavyStats !== undefined ? deps.heavyStats : (await import("./lean/heavy.mjs")).openHeavy(schedMod.schedDir()).stats(); } catch { heavyStats = null; }
   const waitLine = formatWaitSummary(rows, heavyStats);
   if (waitLine) report.push(waitLine);
+  let day = null;
+  try { day = execBudget ? execBudget.dayTotals() : null; } catch { day = null; }
+  const sbxLine = formatSandboxSummary(rows, { budget: execConf?.budget ?? null, day });
+  if (sbxLine) report.push(sbxLine);
   if (crossLane.length) report.push(`cross-lane edges: ${crossLane.map((e) => `#${e.issue} (${e.lane}) → #${e.dependency} (${e.dependencyLane})`).join(", ")}`);
   if (rows.some((r) => r.outcome === "held")) report.push(`held issues stay pending: forgedock orchestrate --resume ${batch.id}`);
   for (const l of report) sink.line(l);

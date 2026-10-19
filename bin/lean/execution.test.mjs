@@ -3,13 +3,13 @@
 // Lane execution targets (#4253): config, sandbox-provider seam, ledger-tracked teardown, gc reaping, max_remote admission.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { parseExecution, placement, scopedEnv, providerLanes, containerProvider, providerByName } from "./execution.mjs";
+import { parseExecution, placement, scopedEnv, providerLanes, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
-import { orchestrate } from "./orchestrate.mjs";
+import { orchestrate, formatTable, formatSandboxSummary } from "./orchestrate.mjs";
 import { planGc, applyGc } from "../gc.mjs";
 import { orchestrateFromCli, readExecution } from "../engine-cli.mjs";
 
@@ -33,18 +33,20 @@ function fakeProvider(opts = {}) {
     async status(h) { p.calls.push(["status", h.issue]); return p.live.has(h.issue) ? "running" : "exited"; },
     async fetchResult(h) { return p.results[h.issue] ?? null; },
     async teardown(h) { p.calls.push(["teardown", h.id]); p.live.delete(h.issue); return opts.teardownOk ?? true; },
+    ...(opts.usage ? { usage: opts.usage } : {}),
   };
   return p;
 }
 
+const NO_BUDGET = { batchMinutes: null, batchUsd: null, dayMinutes: null, dayUsd: null, onBudget: "stop", costPerMinute: 0 };
 const ledgerIn = (root, { pid = process.pid, host = HOST } = {}) => (n) => makeLedger({ root, batch: "bt", lane: `sandbox-${n}`, owner: "orch_test", issue: n, host, pid });
 
 describe("execution config (#4253)", () => {
   it("absent, empty or invalid config is local; max_remote and secrets are validated", () => {
-    assert.deepEqual(parseExecution(undefined), { mode: "local", maxRemote: 0, provider: "local", image: null, secrets: [] });
-    assert.deepEqual(parseExecution({ mode: "cloud", max_remote: "-1" }), { mode: "local", maxRemote: 0, provider: "local", image: null, secrets: [] });
+    assert.deepEqual(parseExecution(undefined), { mode: "local", maxRemote: 0, provider: "local", image: null, secrets: [], budget: NO_BUDGET });
+    assert.deepEqual(parseExecution({ mode: "cloud", max_remote: "-1" }), { mode: "local", maxRemote: 0, provider: "local", image: null, secrets: [], budget: NO_BUDGET });
     assert.deepEqual(parseExecution({ mode: "remote", max_remote: "4", image: "node:22-slim", secrets: "GH_TOKEN, bad-name,ANTHROPIC_API_KEY,GH_TOKEN" }),
-      { mode: "remote", maxRemote: 4, provider: "container", image: "node:22-slim", secrets: ["GH_TOKEN", "ANTHROPIC_API_KEY"] });
+      { mode: "remote", maxRemote: 4, provider: "container", image: "node:22-slim", secrets: ["GH_TOKEN", "ANTHROPIC_API_KEY"], budget: NO_BUDGET });
     assert.equal(parseExecution({ mode: "remote", provider: "My Provider" }).provider, "container");
   });
 
@@ -61,7 +63,7 @@ describe("execution config (#4253)", () => {
     writeFileSync(join(dir, "forge.yaml"), "project:\n  name: x\n");
     assert.equal(readExecution(dir), undefined);
     writeFileSync(join(dir, "forge.yaml"), "execution:\n  mode: remote\n  max_remote: 5\n  provider: container\n  image: node:22\n  secrets: GH_TOKEN\n");
-    assert.deepEqual(readExecution(dir), { mode: "remote", maxRemote: 5, provider: "container", image: "node:22", secrets: ["GH_TOKEN"] });
+    assert.deepEqual(readExecution(dir), { mode: "remote", maxRemote: 5, provider: "container", image: "node:22", secrets: ["GH_TOKEN"], budget: NO_BUDGET });
   });
 
   it("scopedEnv forwards only the batch id, the target repo and allowlisted secret names", () => {
@@ -80,7 +82,7 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
     const ledgerFor = ledgerIn(root);
     const prov = fakeProvider({ finish, startThrows, teardownOk, ledger: ledgerFor(7) });
     let ticks = 0;
-    const lanes = providerLanes({ provider: prov, laneArgs: () => ["--repo", "o/r"], ledgerFor, pollMs, env: { GH_TOKEN: "x" }, secrets: ["GH_TOKEN"],
+    const lanes = providerLanes({ provider: prov, laneArgs: () => ["--repo", "o/r"], ledgerFor, pollMs, env: { GH_TOKEN: "x" }, secrets: ["GH_TOKEN"], now: () => 1000,
       sleep: async () => { if (++ticks === 2 && !finish) { prov.results[7] = { terminalReason: "merged", pr: 9 }; prov.live.delete(7); } } });
     const started = [];
     const r = await lanes.runOne(7, "staging", { onStart: (i) => started.push(i) });
@@ -90,8 +92,8 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
   it("success: registered before start, result reaches the batch, torn down and released", async () => {
     const { r, prov, started, led } = await run();
     assert.deepEqual(prov.ledgerAtStart, ["fake-7"]); // registered BEFORE the sandbox was created
-    assert.deepEqual(r, { terminalReason: "merged", pr: 9 });
-    assert.deepEqual(started, [{ handle: { provider: "fake", id: "fake-7", issue: 7 }, remote: true }]);
+    assert.deepEqual(r, { terminalReason: "merged", pr: 9, sandbox: { provider: "fake", id: "fake-7", minutes: 0, cost_usd: 0 } });
+    assert.deepEqual(started, [{ handle: { provider: "fake", id: "fake-7", issue: 7, startedAt: 1000 }, remote: true }]);
     assert.ok(prov.calls.some((c) => c[0] === "teardown" && c[1] === "fake-7"));
     assert.equal(led.read(), null); // released and the empty ledger removed
   });
@@ -132,7 +134,7 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
     prov.live.add(7);
     const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor, pollMs: 1, sleep: async () => { prov.results[7] = { terminalReason: "merged", pr: 3 }; prov.live.delete(7); } });
     const r = await lanes.adopt(7, { pid: undefined, remote: true, handle: { provider: "fake", id: "fake-7", issue: 7 } });
-    assert.deepEqual(r, { terminalReason: "merged", pr: 3 });
+    assert.deepEqual(r, { terminalReason: "merged", pr: 3, sandbox: { provider: "fake", id: "fake-7", minutes: 0, cost_usd: 0 } });
     assert.ok(prov.calls.some((c) => c[0] === "teardown"));
     assert.equal(ledgerFor(7).read(), null);
     // Nothing to adopt (no handle): null, so orchestrate relaunches.
@@ -279,7 +281,8 @@ describe("max_remote admission (#4253)", () => {
 describe("runBatch wiring (#4253)", () => {
   const leanIo = { gh: async (a) => a.includes("milestone") ? JSON.stringify({ milestone: null }) : a[0] === "repo" ? "main\n" : JSON.stringify({ body: "" }),
     git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : a[0] === "rev-parse" ? ".git\n" : "") };
-  const base = (work, extra) => ({ batchRoot: join(work, "batches"), allowTmpfs: true, pollMs: 5, orchestration: { breaker: null, maxDeferrals: 3 }, io: { gh: async () => "o/r\n" }, leanIo, sched: null, maintenance: null, ...extra });
+  const base = (work, extra) => ({ batchRoot: join(work, "batches"), allowTmpfs: true, pollMs: 5, orchestration: { breaker: null, maxDeferrals: 3 }, io: { gh: async () => "o/r\n" }, leanIo, sched: null, maintenance: null,
+    executionBudget: openExecutionBudget({ file: join(work, "execution-budget.json") }), emitTelemetry: () => {}, ...extra });
 
   it("execution remote: lanes go through the provider with a sandbox ledger; result reaches the batch", async () => {
     const work = tmpDir("exec-cli-");
@@ -304,5 +307,143 @@ describe("runBatch wiring (#4253)", () => {
       assert.deepEqual(res.rows.map((r) => [r.issue, r.outcome, r.pr]), [[1, "merged", 7]]);
       assert.deepEqual(prov.calls, []);
     }
+  });
+});
+
+describe("execution budget and sandbox cost (#4255)", () => {
+  const leanIo = { gh: async (x) => x.includes("milestone") ? JSON.stringify({ milestone: null }) : x[0] === "repo" ? "main\n" : JSON.stringify({ body: "" }),
+    git: async (x) => (x[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : x[0] === "rev-parse" ? ".git\n" : "") };
+  const base = (work, extra) => ({ batchRoot: join(work, "batches"), allowTmpfs: true, pollMs: 5, orchestration: { breaker: null, maxDeferrals: 3 }, io: { gh: async () => "o/r\n" }, leanIo, sched: null, maintenance: null, ...extra });
+  const sbx = (minutes, cost_usd = 0) => ({ provider: "fake", id: "x", minutes, cost_usd });
+  // Remote lanes that each report `minutes` of sandbox time; `ctxs` records ctx.remote per launch.
+  const budgetRun = ({ issues = [1, 2, 3, 4], budget, onBudget = "stop", file, store = null, minutes = 10, ctxs = [] }) => {
+    const b = openExecutionBudget({ budget, file, now: () => 0 });
+    return orchestrate({ issues, parallel: 1, store, readBody: async () => "", now: () => 0,
+      remote: { max: 1, isRemote: () => true, admit: (u) => b.admit(u), onBudget, onUsage: (n, sb) => b.record(`bt#${n}#${ctxs.length}`, sb) },
+      runOne: async (n, _l, ctx) => { ctxs.push([n, ctx.remote]); return { terminalReason: "merged", pr: n, cost_usd: 1, ...(ctx.remote ? { sandbox: sbx(minutes, 0.5) } : {}) }; } });
+  };
+
+  it("parseExecution reads the flat budget keys; invalid caps are no cap", () => {
+    assert.deepEqual(parseExecution({ mode: "remote", max_remote: "2", budget_minutes: "30", budget_usd: "2.5", day_budget_minutes: "x", day_budget_usd: "-1", on_budget: "local", cost_per_minute: "0.05" }).budget,
+      { batchMinutes: 30, batchUsd: 2.5, dayMinutes: null, dayUsd: null, onBudget: "local", costPerMinute: 0.05 });
+    assert.equal(parseExecution({ on_budget: "fallback" }).budget.onBudget, "stop");
+  });
+
+  it("providerLanes attaches sandbox usage: from the provider, else wall clock x cost_per_minute; adopt measures from the persisted start", async () => {
+    const root = tmpDir("exec-usage-");
+    let t = 0;
+    const now = () => t;
+    const finish = () => ({ terminalReason: "merged", pr: 1 });
+    const reported = fakeProvider({ finish, usage: async () => ({ minutes: 12.34, cost_usd: 0.5 }) });
+    const r1 = await providerLanes({ provider: reported, laneArgs: () => [], ledgerFor: ledgerIn(root), pollMs: 1, now }).runOne(1, null);
+    assert.deepEqual(r1.sandbox, { provider: "fake", id: "fake-1", minutes: 12.3, cost_usd: 0.5 });
+    const wall = fakeProvider({ finish: () => { t += 10 * 60000; return finish(); } });
+    const r2 = await providerLanes({ provider: wall, laneArgs: () => [], ledgerFor: ledgerIn(root), pollMs: 1, now, costPerMinute: 0.1 }).runOne(2, null);
+    assert.deepEqual(r2.sandbox, { provider: "fake", id: "fake-2", minutes: 10, cost_usd: 1 });
+    const throws = fakeProvider({ finish, usage: async () => { throw new Error("api down"); } });
+    assert.equal((await providerLanes({ provider: throws, laneArgs: () => [], ledgerFor: ledgerIn(root), pollMs: 1, now }).runOne(3, null)).sandbox.minutes, 0);
+    const adopted = fakeProvider();
+    adopted.results[4] = { terminalReason: "merged", pr: 4 };
+    t = 30 * 60000;
+    const r4 = await providerLanes({ provider: adopted, laneArgs: () => [], ledgerFor: ledgerIn(root), pollMs: 1, now, costPerMinute: 0.1 })
+      .adopt(4, { startedAt: 0, remote: true, handle: { provider: "fake", id: "fake-4", issue: 4, startedAt: 6 * 60000 } });
+    assert.deepEqual(r4.sandbox, { provider: "fake", id: "fake-4", minutes: 24, cost_usd: 2.4 });
+  });
+
+  it("a batch that hits the budget admits no further remote lanes; on_budget stop holds the rest (fake provider)", async () => {
+    const ctxs = [];
+    const rows = await budgetRun({ budget: { batchMinutes: 20 }, file: join(tmpDir("exec-bud-"), "b.json"), ctxs });
+    assert.deepEqual(ctxs, [[1, true], [2, true]], "the third lane is never started remote");
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "held", "held"]);
+    assert.match(rows[2].detail, /^execution budget: batch sandbox minutes 20 >= budget_minutes 20/);
+    assert.deepEqual(rows[0].sandbox, { minutes: 10, cost_usd: 0.5, attempts: 1 });
+  });
+
+  it("the USD cap through providerLanes x orchestrate: no remote start past budget_usd", async () => {
+    const root = tmpDir("exec-bud-usd-");
+    const prov = fakeProvider({ finish: () => ({ terminalReason: "merged" }), usage: async () => ({ minutes: 1, cost_usd: 0.75 }) });
+    const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(root), pollMs: 1 });
+    const b = openExecutionBudget({ budget: { batchUsd: 1.5 }, file: join(root, "b.json") });
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 1, readBody: async () => "", ...lanes, remote: { max: 2, isRemote: () => true, admit: (u) => b.admit(u), onBudget: "stop" } });
+    assert.deepEqual(prov.calls.filter((c) => c[0] === "start").map((c) => c[1]), [1, 2]);
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "held"]);
+  });
+
+  it("on_budget local: once the cap is hit the rest run as local lanes (ctx.remote false)", async () => {
+    const ctxs = [];
+    const rows = await budgetRun({ budget: { batchMinutes: 20 }, onBudget: "local", file: join(tmpDir("exec-bud-l-"), "b.json"), ctxs });
+    assert.deepEqual(ctxs, [[1, true], [2, true], [3, false], [4, false]]);
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "merged", "merged"]);
+    assert.equal(rows[3].sandbox, undefined);
+  });
+
+  it("budget state survives --resume: a resumed batch at the cap starts no remote lane", async () => {
+    let state = null;
+    const store = { load: () => state, save: (s) => { state = JSON.parse(JSON.stringify(s)); }, log: () => {} };
+    const file = join(tmpDir("exec-bud-r-"), "b.json");
+    await budgetRun({ budget: { batchMinutes: 20 }, file, store });
+    assert.deepEqual(state.sandbox, { 1: { minutes: 10, cost_usd: 0.5, attempts: 1 }, 2: { minutes: 10, cost_usd: 0.5, attempts: 1 } });
+    const ctxs = [];
+    const rows = await budgetRun({ issues: [], budget: { batchMinutes: 20 }, file: join(tmpDir("exec-bud-r2-"), "fresh.json"), store, ctxs });
+    assert.deepEqual(ctxs, [], "the batch total came from the saved state, not the host file");
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "held", "held"]);
+    // A pre-#4255 state (no sandbox key) resumes as zero usage.
+    const legacy = { v: 1, order: [5], deps: { 5: [] }, lanes: {}, crossSeen: [], results: {}, running: {}, pending: [5], notBefore: {}, requeues: {}, deferrals: {}, engineErrors: {}, prefilter: {}, errorTimes: [], breaker: null };
+    const ctx2 = [];
+    const r2 = await budgetRun({ issues: [], budget: { batchMinutes: 20 }, file, store: { load: () => legacy, save: () => {}, log: () => {} }, ctxs: ctx2 });
+    assert.deepEqual(ctx2, [[5, true]]);
+    assert.equal(r2[0].outcome, "merged");
+  });
+
+  it("host-day budget survives a schedd restart: totals reload from the file, a repeated record is not double-counted", () => {
+    const file = join(tmpDir("exec-day-"), "sched", "execution-budget.json");
+    const now = () => Date.parse("2026-10-20T10:00:00Z");
+    const a = openExecutionBudget({ budget: { dayMinutes: 15 }, file, now });
+    assert.equal(a.record("b1#fdsbx-1#100", { minutes: 10, cost_usd: 1 }), true);
+    assert.equal(a.record("b1#fdsbx-1#100", { minutes: 10, cost_usd: 1 }), false);
+    const b = openExecutionBudget({ budget: { dayMinutes: 15 }, file, now }); // a fresh daemon
+    assert.deepEqual(b.dayTotals(), { ok: true, day: "2026-10-20", minutes: 10, cost_usd: 1 });
+    assert.equal(b.admit({ minutes: 0, cost_usd: 0, running: { minutes: 0, cost_usd: 0 } }).ok, true);
+    assert.match(b.admit({ minutes: 5, cost_usd: 0, running: { minutes: 5, cost_usd: 0 } }).reason, /day_budget_minutes 15/);
+    // The next UTC day starts from zero.
+    assert.equal(openExecutionBudget({ budget: { dayMinutes: 15 }, file, now: () => Date.parse("2026-10-21T00:00:01Z") }).admit({}).ok, true);
+    // A corrupt store fails closed only while a day cap is set, and is never overwritten.
+    writeFileSync(file, "{not json");
+    assert.match(openExecutionBudget({ budget: { dayUsd: 5 }, file, now }).admit({}).reason, /unreadable/);
+    assert.equal(openExecutionBudget({ budget: { batchMinutes: 50 }, file, now }).admit({}).ok, true);
+    assert.equal(openExecutionBudget({ budget: {}, file, now }).record("k", { minutes: 1 }), false);
+    assert.equal(readFileSync(file, "utf8"), "{not json");
+  });
+
+  it("report: sandbox columns next to token cost only when a lane used a sandbox; summary line", () => {
+    const local = [{ issue: 1, outcome: "merged", pr: 2, cost_usd: 1.5, minutes: 3 }];
+    assert.doesNotMatch(formatTable(local), /sbx/);
+    assert.equal(formatSandboxSummary(local), null);
+    const rows = [{ issue: 1, outcome: "merged", pr: 2, cost_usd: 1.5, minutes: 3, sandbox: { minutes: 12.5, cost_usd: 0.25, attempts: 1 } },
+      { issue: 2, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: "execution budget: batch sandbox minutes 12.5 >= budget_minutes 10" }];
+    const t = formatTable(rows);
+    assert.match(t.split("\n")[0], /cost\s+sbx-min\s+sbx-\$\s+min/);
+    assert.match(t, /#1\s+merged\s+#2\s+\$1\.50\s+12\.5\s+\$0\.25\s+3/);
+    assert.equal(formatSandboxSummary(rows, { budget: { batchMinutes: 10, batchUsd: null, dayMinutes: null, dayUsd: 20 }, day: { ok: true, minutes: 12.5, cost_usd: 0.25 } }),
+      "sandbox: 1 lane, 12.5 min, $0.25 (token cost $1.50); budget: batch 10 min, day $20; host today 12.5 min, $0.25; cap reached, 1 held");
+  });
+
+  it("runBatch: rows, report.json and FORGE:TELEMETRY carry each lane's sandbox usage; the host-day store records it", async () => {
+    const work = tmpDir("exec-cli-cost-");
+    const ledRoot = join(work, "ledger");
+    const prov = fakeProvider({ finish: (n) => ({ terminalReason: "merged", pr: 100 + n, cost_usd: 2 }), usage: async (h) => ({ minutes: 5 * h.issue, cost_usd: 0.1 * h.issue }) });
+    const events = [];
+    const file = join(work, "day.json");
+    const res = await quiet(() => orchestrateFromCli(["1", "2", "3", "--repo", "o/r", "--no-prefilter"], base(work, { batchId: "bc1",
+      execution: parseExecution({ mode: "remote", max_remote: "1", budget_minutes: "15" }), sandboxProvider: prov,
+      sandboxLedger: (n) => makeLedger({ root: ledRoot, batch: "bc1", lane: `sandbox-${n}`, owner: "t", issue: n }),
+      executionBudget: openExecutionBudget({ budget: parseExecution({ budget_minutes: "15" }).budget, file }), emitTelemetry: (rec) => { events.push(rec); } })));
+    assert.deepEqual(res.rows.map((r) => [r.issue, r.outcome, r.sandbox?.minutes ?? null]), [[1, "merged", 5], [2, "merged", 10], [3, "held", null]]);
+    const rep = openBatch(join(work, "batches"), "bc1").readReport();
+    assert.deepEqual(rep.rows[1].sandbox, { minutes: 10, cost_usd: 0.2, attempts: 1 });
+    assert.match(rep.report, /sandbox: 2 lanes, 15\.0 min, \$0\.30 \(token cost \$4\.00\); budget: batch 15 min/);
+    assert.match(rep.report, /sbx-min/);
+    assert.deepEqual(events.filter((e) => e.event === "SANDBOX_USAGE").map((e) => [e.issue, e.minutes, e.cost_usd, e.batch]), [[1, 5, 0.1, "bc1"], [2, 10, 0.2, "bc1"]]);
+    assert.equal(Object.keys(JSON.parse(readFileSync(file, "utf8")).days[new Date().toISOString().slice(0, 10)]).length, 2);
   });
 });

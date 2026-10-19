@@ -405,3 +405,20 @@ leaves the entry under its dead pid: `--resume` adopts from the persisted handle
 `remote: {max, isRemote}` admits remote lanes against `max_remote` without a host
 registry slot (batch K still applies). Rationale:
 `devdocs/decisions/4253-execution-sandbox-provider.md`.
+
+## Entry 2026-10-20 — Sandbox cost and the execution budget (#4255)
+
+Providers may implement `usage(handle, {startedAt, endedAt}) -> {minutes, cost_usd}`.
+`providerLanes` stamps `startedAt` on the handle (persisted, so adopt measures from
+the real start) and attaches `sandbox: {provider, id, minutes, cost_usd}` to every
+result. Without a usage report it uses wall clock × `execution.cost_per_minute`.
+`orchestrate` sums it per issue (state key `sandbox`, over attempts) onto the row and
+calls `remote.onUsage`. `runBatch` records each attempt in the host-day store
+(`openExecutionBudget`, `execution-budget.json` in the sched dir, keyed
+`batch#sandbox#startedAt` so a repeat is a no-op) and emits FORGE:TELEMETRY
+`sandbox_usage`. Before admitting a remote lane, `orchestrate` asks `remote.admit`
+with settled + running usage. On refusal, `on_budget: stop` holds the rest
+(`held`, "execution budget: ..."); `local` sends them through the host path
+(`ctx.remote` false, composite lanes in `runBatch`). `formatTable` adds
+`sbx-min`/`sbx-$` only when a row has `sandbox`; `formatSandboxSummary` prints the
+totals and the budget. Rationale: `devdocs/decisions/4255-sandbox-cost-budget.md`.
