@@ -36,7 +36,7 @@ export function ciUnavailablePrompt() {
 }
 
 /** #4163: the extra host-rules line when the engine pinned the repo's toolchain on PATH; "" otherwise (prompt unchanged). */
-const toolchainRule = (t) => (t ? ` The engine pinned this repo's toolchain on PATH (${t}), for your shell, validate commands and git hooks: use it as is. Do not install global shims or other versions, and do not edit PATH; if the pinned tool fails, report it in your result instead of working around it.` : "");
+const toolchainRule = (t) => (t ? `\nThe engine pinned this repo's toolchain on PATH (${t}). Use it as is: do not install global shims or other versions and do not edit PATH; if the pinned tool itself fails, report it as a toolchain/environment problem instead of working around it.` : "");
 
 /** Builder call 1: investigate and write the contract. No code edits. */
 export function builderPlanPrompt(n, { toolchain = null } = {}) {

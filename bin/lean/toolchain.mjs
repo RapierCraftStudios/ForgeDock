@@ -32,10 +32,10 @@ function parseToolVersions(text) {
 
 /**
  * The repo's pins. `override` is forge.yaml `env.toolchain`: "<pm>@<version>" replaces the package-manager pin, "off"
- * disables detection. Returns {packageManager:{name,version,source}|null, node:{spec,source}|null, notes:[]}.
+ * disables detection. Returns {pm:{name,version,source}|null, node:{spec,source}|null, notes:[]}.
  */
 export async function detectPins(dir, { override = null, read = (p) => readFile(p, "utf8") } = {}) {
-  const res = { packageManager: null, node: null, notes: [] };
+  const res = { pm: null, node: null, notes: [] };
   const ov = typeof override === "string" ? override.trim() : "";
   if (ov.toLowerCase() === "off") return res;
   const tryRead = async (f) => { try { return String(await read(join(dir, f))); } catch { return null; } };
@@ -45,17 +45,17 @@ export async function detectPins(dir, { override = null, read = (p) => readFile(
   const tv = parseToolVersions(await tryRead(".tool-versions"));
   if (ov) {
     const pm = parsePackageManager(ov);
-    if (pm) res.packageManager = { ...pm, source: "forge.yaml env.toolchain" };
+    if (pm) res.pm = { ...pm, source: "forge.yaml env.toolchain" };
     else res.notes.push(`forge.yaml env.toolchain "${ov.slice(0, 60)}" is not <pnpm|yarn|npm>@<x.y.z> or "off"; ignored`);
   }
-  if (!res.packageManager && typeof pkg?.packageManager === "string") {
+  if (!res.pm && typeof pkg?.packageManager === "string") {
     const pm = parsePackageManager(pkg.packageManager);
-    if (pm) res.packageManager = { ...pm, source: "package.json packageManager" };
+    if (pm) res.pm = { ...pm, source: "package.json packageManager" };
     else res.notes.push(`package.json packageManager "${pkg.packageManager.slice(0, 60)}" is not <pnpm|yarn|npm>@<x.y.z>; not pinned`);
   }
-  if (!res.packageManager) {
+  if (!res.pm) {
     const name = PMS.find((n) => VERSION_RE.test(tv[n] ?? ""));
-    if (name) res.packageManager = { name, version: tv[name], source: ".tool-versions" };
+    if (name) res.pm = { name, version: tv[name], source: ".tool-versions" };
   }
   for (const [f, get] of [[".nvmrc", (t) => t], [".node-version", (t) => t]]) {
     if (res.node) break;
@@ -122,13 +122,13 @@ export function nodeSatisfies(spec, v) {
 }
 
 /** One-line trajectory warning when the host node does not satisfy the pin; null when it does or nothing is pinned. */
-export function nodeWarning(pin, hostVersion) {
+export function nodeWarning(pin, hostVersion = process.version) {
   if (!pin?.spec) return null;
   if (/^(lts\/|node$|stable$|latest$|current$|system$)/i.test(pin.spec)) return null;
   const ok = nodeSatisfies(pin.spec, hostVersion);
   if (ok === true) return null;
   if (ok === null) return `Toolchain: cannot evaluate node pin "${pin.spec}" (${pin.source}) against host node ${hostVersion}; check it manually`;
-  return `Toolchain: host node ${hostVersion} does not satisfy the ${pin.source} pin "${pin.spec}"; installs, builds and tests may behave differently from the repo's CI`;
+  return `host node ${hostVersion} does not satisfy the ${pin.source} pin "${pin.spec}"; installs, builds and tests may behave differently from the repo's CI`;
 }
 
 /** First executable `name` on `pathStr`, skipping `exclude` dirs (the shim dir itself, so a shim never calls itself). */
@@ -185,9 +185,27 @@ export function hostNodeVersion(pathStr = process.env.PATH ?? "") {
 async function writeShimFile(p, content) { await writeFile(p, content); await chmod(p, 0o755); }
 
 /**
+ * Write executable (0755) shims for the pinned manager into `binDir`; launchers are resolved from `path` with `binDir`
+ * excluded. Returns the shim names written ([] when neither corepack nor npx is on `path`).
+ */
+export async function writeShims(binDir, pm, { path = process.env.PATH ?? "", find = which, writeShim = writeShimFile, mkdirp = (d) => mkdir(d, { recursive: true }) } = {}) {
+  const scripts = shimScripts(pm, { corepack: find("corepack", path, [binDir]), npx: find("npx", path, [binDir]) });
+  if (!Object.keys(scripts).length) return [];
+  await mkdirp(binDir);
+  for (const [name, content] of Object.entries(scripts)) await writeShim(join(binDir, name), content);
+  return Object.keys(scripts);
+}
+
+/** Short pin text for prompts and decisions, e.g. "pnpm@10.4.1 (package.json packageManager), node 20 (.nvmrc)"; null when nothing is pinned. */
+export function summary(pins) {
+  const parts = [...(pins?.pm ? [`${pins.pm.name}@${pins.pm.version} (${pins.pm.source})`] : []), ...(pins?.node ? [`node ${pins.node.spec} (${pins.node.source})`] : [])];
+  return parts.length ? parts.join(", ") : null;
+}
+
+/**
  * Detect pins in `dir` and, for a pinned package manager, write shims to `binDir`.
  * @returns {Promise<{pins, env:?object, shims:string[], summary:?string, warning:?string, notes:string[]}>}
- *   env/summary are null and shims empty when nothing is pinned: the caller changes nothing.
+ *   env is null and shims empty without a usable pm pin; summary is null when nothing is pinned: the caller changes nothing.
  */
 export async function prepareToolchain({ dir, binDir, override = null, read, basePath = process.env.PATH ?? "",
   writeShim = writeShimFile, mkdirp = (d) => mkdir(d, { recursive: true }), find = which, hostNode = () => hostNodeVersion(basePath) } = {}) {
@@ -198,18 +216,13 @@ export async function prepareToolchain({ dir, binDir, override = null, read, bas
     try { v = hostNode(); } catch { v = null; }
     out.warning = v ? nodeWarning(pins.node, v) : null;
   }
-  const pm = pins.packageManager;
+  const pm = pins.pm;
+  let effective = pins;
   if (pm && binDir) {
-    const scripts = shimScripts(pm, { corepack: find("corepack", basePath, [binDir]), npx: find("npx", basePath, [binDir]) });
-    if (!Object.keys(scripts).length) out.notes.push(`Toolchain: ${pm.name}@${pm.version} is pinned but neither corepack nor npx is on PATH; the host ${pm.name} is used`);
-    else {
-      await mkdirp(binDir);
-      for (const [name, content] of Object.entries(scripts)) { await writeShim(join(binDir, name), content); out.shims.push(name); }
-      out.env = toolchainEnv(binDir, basePath);
-    }
+    out.shims = await writeShims(binDir, pm, { path: basePath, find, writeShim, mkdirp });
+    if (out.shims.length) out.env = toolchainEnv(binDir, basePath);
+    else { out.notes.push(`Toolchain: ${pm.name}@${pm.version} is pinned but neither corepack nor npx is on PATH; the host ${pm.name} is used`); effective = { ...pins, pm: null }; }
   }
-  const parts = [...(out.env ? [`${pm.name}@${pm.version} (${pm.source})`] : []), ...(pins.node ? [`node ${pins.node.spec} (${pins.node.source})`] : [])];
-  if (out.env) out.summary = parts.join(", ");
-  out.pinnedLine = parts.length ? parts.join(", ") : null;
+  out.summary = summary(effective);
   return out;
 }

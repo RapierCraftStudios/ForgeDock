@@ -2712,7 +2712,7 @@ describe("toolchain pins and env.setup at lane setup (#4163)", () => {
     assert.match(w.shims.find(([p]) => p.endsWith("/pnpm"))[1], /exec '\/host\/bin\/npx' -y -p 'pnpm@10\.4\.1' pnpm "\$@"/);
     assert.ok(w.envs.length >= 3);
     for (const e of w.envs) { assert.equal(e?.PATH, `${bin}:/host/bin`); assert.equal(e?.COREPACK_ENABLE_DOWNLOAD_PROMPT, "0"); }
-    for (const b of builders(w)) assert.match(b[4], /pinned this repo's toolchain on PATH \(pnpm@10\.4\.1 \(package\.json packageManager\)\).*Do not install global shims/s);
+    for (const b of builders(w)) assert.match(b[4], /pinned this repo's toolchain on PATH \(pnpm@10\.4\.1 \(package\.json packageManager\)\)\. Use it as is: do not install global shims/);
     assert.match(traj(w)[0], /Toolchain pinned on the runner PATH: pnpm@10\.4\.1/);
     assert.ok(readLog(dir, 7).some((e) => e.event === "TOOLCHAIN_PINNED"));
   });
@@ -2733,6 +2733,9 @@ describe("toolchain pins and env.setup at lane setup (#4163)", () => {
     assert.match(traj(w)[0], /\*\*Anomalies\*\*[\s\S]*host node v26\.7\.0 does not satisfy the \.nvmrc pin "18\.19\.0"/);
     assert.ok(readLog(dir, 7).some((e) => e.event === "TOOLCHAIN_WARNING"));
     assert.ok(w.envs.every((e) => e?.PATH === undefined), "a node pin alone changes no runner PATH");
+    assert.match(traj(w)[0], /Toolchain pins detected \(no shim\): node 18\.19\.0 \(\.nvmrc\)/);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "TOOLCHAIN_PINNED"));
+    for (const b of builders(w)) assert.match(b[4], /pinned this repo's toolchain on PATH \(node 18\.19\.0 \(\.nvmrc\)\)/);
   });
 
   it("R3: env.setup runs exactly once, in the fresh worktree, before the builder, with the toolchain env", async () => {

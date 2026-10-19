@@ -158,7 +158,7 @@ export async function runCore(o) {
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
   const runId = `${issue}-${t0}`;
   let runTmp = null;
-  let toolchain = null; // #4163: {env, summary} when the repo pins a package manager; null leaves runner env and prompts unchanged
+  let toolchain = null; // #4163: {env, summary} when the repo pins its toolchain (env only with a pm shim); null leaves runner env and prompts unchanged
   // ---- lane resource ledger (#4179): every owned resource is registered before it is created, released after its teardown ----
   let ledger = null, deleteLocalBranch = false;
   const ledgerDo = (fn) => { if (!ledger) return; try { fn(ledger); } catch (e) { ev({ event: "LEDGER_ERROR", error: String(e?.message ?? e).slice(0, 300) }); } };
@@ -674,10 +674,10 @@ export async function runCore(o) {
     try {
       const tc = await (io.prepareToolchain ?? prepareToolchain)({ dir: wt, override: toolchainOverride, read: io.fs.read,
         binDir: join(runTmp ?? join(wt, LEAN_DIR), "toolchain", "bin") });
-      if (tc?.env) {
-        toolchain = { env: tc.env, summary: tc.summary };
+      if (tc?.summary) {
+        toolchain = { env: tc.env ?? null, summary: tc.summary };
         ev({ event: "TOOLCHAIN_PINNED", pins: tc.summary, shims: tc.shims });
-        T.decisions.push(`Toolchain pinned on the runner PATH: ${tc.summary}`);
+        T.decisions.push(tc.env ? `Toolchain pinned on the runner PATH: ${tc.summary}` : `Toolchain pins detected (no shim): ${tc.summary}`);
       }
       if (tc?.warning) { T.anomalies.push(tc.warning); ev({ event: "TOOLCHAIN_WARNING", warning: tc.warning }); }
       for (const n of tc?.notes ?? []) T.anomalies.push(n);

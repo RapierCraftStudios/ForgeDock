@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, chmodSync, existsSync, readFileSync } from "node:fs";
+import { writeFileSync, mkdirSync, chmodSync, existsSync, readFileSync, statSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import { execFileSync } from "node:child_process";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { detectPins, parsePackageManager, nodeSatisfies, nodeWarning, shimScripts, prepareToolchain, toolchainEnv } from "./toolchain.mjs";
+import { detectPins, parsePackageManager, nodeSatisfies, nodeWarning, shimScripts, prepareToolchain, toolchainEnv, writeShims, summary } from "./toolchain.mjs";
 
 const tmp = (p) => tmpDir(p);
 const repo = (files) => {
@@ -39,23 +39,23 @@ describe("toolchain pins (#4163)", () => {
   it("detects packageManager and node pins in priority order", async () => {
     const d = repo({ "package.json": { packageManager: "pnpm@10.4.1", engines: { node: ">=18" } }, ".nvmrc": "20.11.0\n", ".node-version": "22\n" });
     const p = await detectPins(d);
-    assert.deepEqual(p.packageManager, { name: "pnpm", version: "10.4.1", source: "package.json packageManager" });
+    assert.deepEqual(p.pm, { name: "pnpm", version: "10.4.1", source: "package.json packageManager" });
     assert.deepEqual(p.node, { spec: "20.11.0", source: ".nvmrc" });
     const e = await detectPins(repo({ "package.json": { engines: { node: "^20" } } }));
     assert.deepEqual(e.node, { spec: "^20", source: "package.json engines.node" });
-    assert.equal(e.packageManager, null);
+    assert.equal(e.pm, null);
     const tv = await detectPins(repo({ ".tool-versions": "# pins\nnodejs 20.1.0\npnpm 9.1.0\n" }));
-    assert.deepEqual(tv.packageManager, { name: "pnpm", version: "9.1.0", source: ".tool-versions" });
+    assert.deepEqual(tv.pm, { name: "pnpm", version: "9.1.0", source: ".tool-versions" });
     assert.deepEqual(tv.node, { spec: "20.1.0", source: ".tool-versions" });
   });
 
   it("forge.yaml env.toolchain overrides the pm pin; off disables detection; junk is a note", async () => {
     const d = repo({ "package.json": { packageManager: "pnpm@10.4.1" }, ".nvmrc": "20" });
-    assert.deepEqual((await detectPins(d, { override: "pnpm@9.0.0" })).packageManager, { name: "pnpm", version: "9.0.0", source: "forge.yaml env.toolchain" });
+    assert.deepEqual((await detectPins(d, { override: "pnpm@9.0.0" })).pm, { name: "pnpm", version: "9.0.0", source: "forge.yaml env.toolchain" });
     const off = await detectPins(d, { override: "off" });
-    assert.equal(off.packageManager, null); assert.equal(off.node, null);
+    assert.equal(off.pm, null); assert.equal(off.node, null);
     const junk = await detectPins(d, { override: "pnpm" });
-    assert.equal(junk.packageManager.version, "10.4.1");
+    assert.equal(junk.pm.version, "10.4.1");
     assert.match(junk.notes[0], /env\.toolchain "pnpm" is not/);
   });
 
@@ -119,7 +119,8 @@ describe("toolchain pins (#4163)", () => {
   it("R2: a node pin the host does not satisfy produces a warning (and no shim without a pm pin)", async () => {
     const binDir = join(tmp("tc-run-"), "bin");
     const tc = await prepareToolchain({ dir: repo({ ".nvmrc": "18.19.0" }), binDir, hostNode: () => "v26.7.0" });
-    assert.match(tc.warning, /does not satisfy the \.nvmrc pin "18\.19\.0"/);
+    assert.match(tc.warning, /^host node v26\.7\.0 does not satisfy the \.nvmrc pin "18\.19\.0"/);
+    assert.equal(tc.summary, "node 18.19.0 (.nvmrc)");
     assert.equal(tc.env, null); assert.equal(existsSync(binDir), false);
   });
 
@@ -135,5 +136,19 @@ describe("toolchain pins (#4163)", () => {
 
   it("toolchainEnv prepends the shim dir", () => {
     assert.deepEqual(toolchainEnv("/s", "/a:/b"), { PATH: `/s${delimiter}/a:/b`, COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", COREPACK_ENABLE_STRICT: "0" });
+  });
+
+  it("writeShims writes 0755 shims that never resolve the launcher from the shim dir; summary names the pins", async () => {
+    const host = fakeHost();
+    const binDir = join(tmp("tc-ws-"), "bin");
+    exe(binDir, "corepack", "echo self");
+    const names = await writeShims(binDir, { name: "pnpm", version: "10.4.1" }, { path: `${binDir}${delimiter}${host}` });
+    assert.deepEqual(names, ["pnpm", "pnpx"]);
+    for (const n of names) assert.equal(statSync(join(binDir, n)).mode & 0o777, 0o755);
+    assert.match(readFileSync(join(binDir, "pnpm"), "utf8"), new RegExp(`exec '${join(host, "corepack")}' 'pnpm@10\\.4\\.1'`));
+    assert.deepEqual(await writeShims(join(tmp("tc-ws-"), "bin"), { name: "yarn", version: "4.1.0" }, { path: "/nonexistent" }), []);
+    assert.equal(summary({ pm: { name: "pnpm", version: "10.4.1", source: "package.json packageManager" }, node: { spec: "20", source: ".nvmrc" } }), "pnpm@10.4.1 (package.json packageManager), node 20 (.nvmrc)");
+    assert.equal(summary({ pm: null, node: null }), null);
+    assert.equal(nodeWarning({ spec: "1", source: ".nvmrc" }) !== null, true, "defaults to process.version");
   });
 });
