@@ -12,13 +12,15 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
-import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
+import { TRACKED, validateContract, applyAmendments, precheck, parseReview, decide, closePlan, followupItems, pendingTracking, reviewSkeleton, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths } from "./prefilter.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
+import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, ciFailurePrompt, ciUnavailablePrompt, syncChecks } from "./prompts.mjs";
+import { parseVerify, runCiVerify, VERIFY_MODES } from "./verify.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
@@ -85,11 +87,15 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {string} [o.reviewerModel] default claude-sonnet-5-5
  * @param {number} [o.ciMaxMinutes]  remote-CI wait budget (default 360); exhaustion is NOT needs-human
  * @param {"shadow"|"enforce"} [o.conformance] conformance gate mode (default shadow)
+ * @param {object} [o.verify]        forge.yaml verify (verify.mjs parseVerify): mode local (default) | ci | hybrid (#4167)
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
     ciMaxMinutes = 360, conformance = "shadow", mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
+  const vcfg = { ...parseVerify({}), ...(o.verify ?? {}) };
+  if (!VERIFY_MODES.includes(vcfg.mode)) vcfg.mode = "local";
+  const remoteVerify = vcfg.mode !== "local";
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
   const branch = `feat/issue-${issue}-lean`;
@@ -147,7 +153,7 @@ export async function runCore(o) {
 
   // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
   const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
-  let done = null, finishing = null, wtCreated = false;
+  let done = null, finishing = null, wtCreated = false, salvagedRef = null;
   const runId = `${issue}-${t0}`;
   let runTmp = null;
   // ---- lane resource ledger (#4179): every owned resource is registered before it is created, released after its teardown ----
@@ -185,6 +191,45 @@ export async function runCore(o) {
       }
     }
     ledgerDo((l) => { if (l.remove()) ev({ event: "LEDGER_CLEARED", path: l.path }); else ev({ event: "LEDGER_KEPT", path: l.path, resources: l.entries().map((r) => `${r.kind}:${r.value}`) }); });
+  }
+  /**
+   * #4162: save the worktree's uncommitted work (tracked, untracked and .forge-lean/) to refs/forge/salvage/<issue>/<ms>
+   * before an earlier run's worktree is removed at the start of this run (a run that died hard never ran its
+   * teardown checkpoint, #4179). It stages into the worktree's own index, which is discarded with the worktree, and
+   * the ref lives in the shared repo, so it survives the removal. Returns the ref, or null when there is nothing to save.
+   */
+  async function salvage(why) {
+    if (!io.fs?.exists || !(await io.fs.exists(wt))) return null;
+    const g = (a) => io.git(a, { cwd: wt });
+    try {
+      await g(["add", "-A"]);
+      if (await io.fs.exists(join(wt, LEAN_DIR))) await g(["add", "-f", "--", LEAN_DIR]);
+      const tree = String(await g(["write-tree"])).trim();
+      const headTree = String(await g(["rev-parse", "HEAD^{tree}"])).trim();
+      if (!/^[0-9a-f]{40,64}$/.test(tree) || tree === headTree) return null;
+      const commit = String(await g(["-c", "user.name=forgedock", "-c", "user.email=forgedock@localhost", "commit-tree", tree, "-p", "HEAD", "-m", `forge salvage #${issue}: ${why}`])).trim();
+      if (!/^[0-9a-f]{40,64}$/.test(commit)) return null;
+      const ref = `refs/forge/salvage/${issue}/${now()}`;
+      await io.git(["update-ref", ref, commit], { cwd });
+      ev({ event: "WORKTREE_SALVAGED", ref, why });
+      T.anomalies.push(`Uncommitted work from ${why} saved to \`${ref}\` (inspect: \`git diff HEAD ${ref} --stat\`)`);
+      return ref;
+    } catch (e) {
+      ev({ event: "WORKTREE_SALVAGE_FAILED", why, error: String(e?.message ?? e).slice(0, 300) });
+      return null;
+    }
+  }
+  /** #4162: stop processes still running inside the worktree (an orphaned runner from a dead run) before it is removed. */
+  async function stopWorktreeProcs() {
+    if (!io.proc) return;
+    const procs = await Promise.resolve(io.proc.inDir(wt)).catch(() => []);
+    if (!procs.length) return;
+    for (const p of procs) io.proc.kill(p.pid, "SIGTERM");
+    for (let i = 0; i < 10 && procs.some((p) => io.proc.alive(p.pid)); i++) await sleep(500);
+    const left = procs.filter((p) => io.proc.alive(p.pid));
+    for (const p of left) io.proc.kill(p.pid, "SIGKILL");
+    ev({ event: "WORKTREE_PROCS_STOPPED", pids: procs.map((p) => p.pid), killed: left.map((p) => p.pid) });
+    T.anomalies.push(`Stopped ${procs.length} process(es) still running in the worktree from an earlier run: ${procs.map((p) => `${p.pid} ${p.cmd ?? ""}`.trim().slice(0, 80)).join("; ")}`);
   }
   function finish(...args) {
     if (done) return Promise.resolve(done);
@@ -284,7 +329,9 @@ export async function runCore(o) {
   async function callRunner(args) {
     let pauses = 0;
     for (;;) {
-      try { return await io.runner({ ...args, ...(runTmp ? { env: { TMPDIR: runTmp, CLAUDE_CODE_TMPDIR: runTmp } } : {}) }); }
+      // #4181: every Docker resource the builder creates carries the lane's ownership labels (same batch/lane as the ledger).
+      const labels = dockerLabels({ batch: o.batchId ?? "adhoc", lane: `lean-${issue}`, issue, expires: now() + LEDGER_TTL_MS }).join(" ");
+      try { return await io.runner({ ...args, env: { FORGE_DOCKER_LABELS: labels, ...(runTmp ? { TMPDIR: runTmp, CLAUDE_CODE_TMPDIR: runTmp } : {}) } }); }
       catch (e) {
         const epoch = Number.isFinite(e?.resetAtEpochMs) ? e.resetAtEpochMs : null;
         if (!(e?.usageLimit === true || epoch !== null)) throw e;
@@ -321,7 +368,8 @@ export async function runCore(o) {
   }
   const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over.";
   const PLAN_RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD` to see what exists, but plan against the issue itself. This step is still planning only: do not edit code, do not commit, and do not write the result file unless the issue is invalid, already fixed or blocked.";
-  const RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD`, verify that work against the contract, complete what is missing, re-run every validate command and write the result file. Do not start over.";
+  const SALVAGE_NOTE = "\n\nAn earlier run on this issue stopped with uncommitted work, saved at `REF` (not on the branch). Inspect it with `git diff HEAD REF --stat` and reuse what fits the contract (`git checkout REF -- <path>`) instead of rewriting it.";
+  const RERUN_NOTE = `\n\nThis is a rerun: the branch already holds commits from an earlier run. Read \`git log\` and \`git diff origin/BASE...HEAD\`, verify that work against the contract, complete what is missing, ${vcfg.mode === "ci" ? "re-run the light checks (the engine verifies on CI)" : "re-run every validate command"} and write the result file. Do not start over.`;
 
   /** Continuous admission (#4115): while the builder runs, pause its process group when the host is over the ceiling, resume when under. */
   function startGovernor(control) {
@@ -347,7 +395,7 @@ export async function runCore(o) {
 
   /** A timeout restart starts a fresh session; by default it continues the implementation against the frozen contract. */
   let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
-  const implementRestart = () => builderImplementPrompt() + hotspotBuildRule(hotFacts) + CONTINUE_NOTE.replace("BASE", lane);
+  const implementRestart = () => builderImplementPrompt(vcfg.mode) + hotspotBuildRule(hotFacts) + CONTINUE_NOTE.replace("BASE", lane);
   async function builder(n, prompt, resume, live = false, restart = implementRestart) {
     let timeoutRetries = 0, p = prompt;
     for (;;) {
@@ -555,6 +603,10 @@ export async function runCore(o) {
       return await needsHuman(`Open PR #${resumed.pr} targets \`${resumed.base}\`, but #${issue}'s lane is \`${lane}\`; retarget or close it before rerunning.`,
         isDefaultLane(resumed.base, defaults) ? OUTCOME_CODES.LANE_DEFAULT_BRANCH : OUTCOME_CODES.LANE_MISMATCH);
     }
+    // #4162: a run that died can leave its runner writing into this worktree, and uncommitted work in it. Stop the
+    // processes and save the work before the worktree is removed; the lease above makes this run the only one doing so.
+    await stopWorktreeProcs();
+    salvagedRef = await salvage("an earlier run");
     try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* none */ }
     try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
     // Concurrent lanes in one repo race on .git/config.lock / index.lock during `worktree add`; retry with jitter.
@@ -733,7 +785,7 @@ export async function runCore(o) {
     }
     T.plan = [`contract ${hash}`, `${frozen.requirements.length} requirement(s)`];
     if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
-    const implementPrompt = builderImplementPrompt() + hotspotBuildRule(hotFacts) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane));
+    const implementPrompt = builderImplementPrompt(vcfg.mode) + hotspotBuildRule(hotFacts) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "");
     liveKeys = ["implementation"];
     await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);
     result = await readResult();
@@ -766,7 +818,7 @@ export async function runCore(o) {
       let edges = undeclared();
       if (edges.length && sessionId) {
         T.decisions.push(`Undeclared package edge(s) ${edges.map((e) => `${e.from}→${e.to}`).join(", ")}; builder resumed once`);
-        await builder(++attemptN, structurePrompt(edges), sessionId);
+        await builder(++attemptN, structurePrompt(edges, vcfg.mode), sessionId);
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
         structure = (await structureOf()) ?? structure;
@@ -777,6 +829,62 @@ export async function runCore(o) {
       }
     }
     const structureLine = structureNote(structure);
+
+    // ---- 3c. verify by CI (#4167): ci|hybrid push the branch and run the repo's CI on GitHub runners, before review ----
+    // A red run resumes the builder with the failed jobs' logs (verify.max_rounds), slow CI ends ci-pending, and CI that
+    // cannot run falls back once to local validation. A head verified here lets the precheck accept validate ids left to CI.
+    let ciVerifiedHead = null, ciFellBack = false, ciRounds = 0;
+    const ciSeenRuns = [];
+    /** Verifies the current head; returns {done} with a terminal result, or {fixes} (builder CI-fix rounds that moved the head). */
+    async function ciVerify(trigger) {
+      let fixes = 0;
+      for (;;) {
+        const head = String(await git(["rev-parse", "HEAD"])).trim();
+        if (head === ciVerifiedHead || ciFellBack) return { fixes };
+        files = await changedFiles();
+        const v = await runCiVerify({ io, branch, head, changedFiles: files, verify: vcfg, ciMaxMinutes, now, sleep, random, exclude: ciSeenRuns,
+          push: () => gitPush(["push", "-u", "origin", branch]),
+          onPoll: async () => { await renew(); onProgress({ event: "phase_paused", phase: "verify", detail: `CI verification pending on ${branch}` }); } });
+        if (v.runId != null) ciSeenRuns.push(v.runId);
+        const rec = { event: "CI_VERIFY", trigger, mode: vcfg.mode, round: ciRounds, result: v.result, skipped: v.result === "skipped", run_url: v.runUrl ?? null, failures: v.failures.map((f) => f.job) };
+        ev(rec); await emit({ ...rec, phase: "verify" });
+        const row = (res) => { T.verify = [res, `mode ${vcfg.mode}, ${ciRounds} fix round(s)${v.runUrl ? `, ${v.runUrl}` : ""}`]; };
+        if (v.result === "pass" || v.result === "skipped") {
+          ciVerifiedHead = head;
+          row(v.result === "pass" ? `CI green at ${head.slice(0, 12)}` : "skipped (docs-only change)");
+          if (v.result === "skipped") T.decisions.push(`CI verification skipped: ${v.detail}`);
+          return { fixes };
+        }
+        if (v.result === "timeout") {
+          row("CI pending");
+          T.anomalies.push("CI verification still pending at the wait budget");
+          return { done: await finish("ci-pending", `CI verification of ${branch} still pending after ${ciMaxMinutes} min; rerun resumes the branch`) };
+        }
+        if (v.result === "unavailable") {
+          ciFellBack = true;
+          row("unavailable: local fallback");
+          T.decisions.push(`CI verification unavailable (${v.detail}); builder runs the validate commands locally`);
+          await builder(++attemptN, ciUnavailablePrompt(), sessionId ?? null);
+          await upsertStage("implementation");
+          result = (await readResult()) ?? result;
+          return { fixes: fixes + 1 };
+        }
+        // fail
+        const jobs = v.failures.map((f) => f.job).join(", ") || "unknown job";
+        row(`CI red (${jobs})`);
+        if (ciRounds >= vcfg.maxRounds || !sessionId) {
+          return { done: await needsHuman(`CI verification failed on \`${branch}\` at \`${head.slice(0, 12)}\` after ${ciRounds} fix round(s); nothing merged:\n${v.failures.slice(0, 10).map((f) => `- ${f.job}${f.url ? ` (${f.url})` : ""}`).join("\n")}`, OUTCOME_CODES.CI_RED) };
+        }
+        ciRounds++; fixes++;
+        T.decisions.push(`CI verification red (${jobs}); builder resumed with the failed logs (round ${ciRounds}/${vcfg.maxRounds})`);
+        await builder(++attemptN, ciFailurePrompt(v.failures, vcfg.mode), sessionId);
+        await upsertStage("implementation");
+        result = (await readResult()) ?? result;
+        if (String(await git(["rev-parse", "HEAD"])).trim() === head) {
+          return { done: await needsHuman(`CI verification failed on \`${branch}\` (${jobs}) and the builder made no new commit for it; nothing merged.`, OUTCOME_CODES.CI_RED) };
+        }
+      }
+    }
 
     // ---- 4. conformance: typed amendments, deterministic precheck, structured review; the engine computes the verdict ----
     // enforce: every failure class blocks (one builder resume, then needs-human). shadow: the verdict is computed and posted,
@@ -803,17 +911,20 @@ export async function runCore(o) {
       const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
       const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
       const ctx = { contract: effective, changedFiles: files, issueText, pathExists: (x) => listed.has(x), ignore: IGNORE };
-      let d = null;
+      let d = null, retry = null;
+      const skeleton = reviewSkeleton({ contract: effective, changedFiles: files, ignore: IGNORE }); // #4160: every required row, pre-filled
       for (let t = 0; t < 2; t++) {
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
-          prompt: reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine }) });
+          prompt: reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, skeleton, retry }) });
         await renew();
         await attempt("review", ++reviewN, rr);
         review = parseReview(rr?.text);
         d = decide(review, ctx);
         ev({ event: "CONFORMANCE", round: reviewN, state: d.state, failures: d.failures.map((x) => x.code), mode: shadow ? "shadow" : "enforce" });
         if (!d.state.startsWith("review.")) return d;
+        // #4160: the second run is told exactly what was missing, instead of getting the same prompt again
+        retry = d.state === "review.incomplete" ? { problems: d.failures.map((x) => x.detail), previous: review ? JSON.stringify(review) : String(rr?.text ?? "") } : null;
       }
       return d;
     }
@@ -823,7 +934,8 @@ export async function runCore(o) {
       result = (await readResult()) ?? result;
       files = await changedFiles();
       const amendProblems = await amend();
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, hotspots: await hotspotsOf({ base, paths: files }) });
+      const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === String(await git(["rev-parse", "HEAD"])).trim();
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots: await hotspotsOf({ base, paths: files }) });
       const pre = [...pc.failures, ...amendProblems];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
@@ -845,6 +957,7 @@ export async function runCore(o) {
       return { fail: d.state !== "conforms", verdict: d.state === "conforms" ? "CONFORMS" : "NONCONFORMING", reason: d.failures.map((f) => `${f.code}: ${f.detail}`).join("; "), failures: d.failures };
     };
     for (;;) {
+      if (remoteVerify) { const v = await ciVerify("build"); if (v.done) return v.done; }
       const outcome = await gate();
       verdict = outcome;
       if (outcome.state === "conforms") break;
@@ -855,7 +968,7 @@ export async function runCore(o) {
       if (resumes >= 1 || !sessionId) return await needsHuman(`The change does not conform to the issue and its frozen contract after ${resumes ? "one builder resume" : "the build (no session to resume)"} (${outcome.by}); nothing merged:\n${list}`, outcome.failures[0].code);
       resumes++;
       T.decisions.push(`Not conforming (${outcome.by}${outcome.inconsistent ? ", reviewer verdict contradicted its rows" : ""}): ${[...new Set(outcome.failures.map((f) => f.code))].join(", ")}; builder resumed once`);
-      await builder(++attemptN, conformanceResumePrompt(outcome.failures), sessionId);
+      await builder(++attemptN, conformanceResumePrompt(outcome.failures, vcfg.mode), sessionId);
       await upsertStage("implementation"); // the published note follows the code after every resume
     }
     // Deferrals the reviewer accepted are filed now, before any PR: the batched follow-up must exist and be linked.
@@ -942,7 +1055,7 @@ export async function runCore(o) {
         how = "clean merge of the base into the branch";
       } else {
         T.decisions.push(`Base-sync ${syncs}: merging ${base} conflicts in ${files.join(", ") || "unknown files"}; builder resolves`);
-        const prompt = `Merging ${base} into this branch conflicts in: ${files.join(", ") || "(see git status)"}. Resolve the conflicts preserving both this fix's intent and the base's changes, run the relevant tests, and commit the merge. Do not push.`;
+        const prompt = `Merging ${base} into this branch conflicts in: ${files.join(", ") || "(see git status)"}. Resolve the conflicts preserving both this fix's intent and the base's changes, ${syncChecks(vcfg.mode)}, and commit the merge. Do not push.`;
         await builder(++attemptN, prompt, sessionId ?? null);
         if (await unresolved()) {
           await gitOut(["merge", "--abort"]);
@@ -955,11 +1068,13 @@ export async function runCore(o) {
       const after = await gitOut(["rev-parse", "HEAD"]);
       if (soft && clean && after === before) { syncs--; return null; } // UNKNOWN state and nothing to merge: not a conflict
       if (after !== before) await gitPush(["push", "origin", branch]); // plain push of a merge commit: never force
-      if (!clean) {
+      let ciFixes = 0;
+      if (remoteVerify && after !== before) { const v = await ciVerify("base-sync"); if (v.done) return v.done; ciFixes = v.fixes; }
+      if (!clean || ciFixes) {
         let rv = await doReview();
         if (rv?.fail) {
           T.decisions.push(`Base-sync re-review FAIL: builder resumed with the reason`);
-          await builder(++attemptN, conformanceResumePrompt(rv.failures), sessionId ?? null);
+          await builder(++attemptN, conformanceResumePrompt(rv.failures, vcfg.mode), sessionId ?? null);
           if (await unresolved()) return await needsHuman("Base-sync re-review fix left conflict markers.", OUTCOME_CODES.BASE_CONFLICT);
           if ((await gitOut(["rev-parse", "HEAD"])) !== after) await gitPush(["push", "origin", branch]);
           rv = await doReview();

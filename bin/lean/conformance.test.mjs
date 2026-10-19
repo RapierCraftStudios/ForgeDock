@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, reviewSkeleton, resolveEvidencePath } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -95,10 +95,39 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.ok(d.failures.every((f) => f.code === "review.incomplete"));
   });
   it("no JSON is unparseable", () => { assert.equal(parseReview("LGTM"), null); assert.equal(decide(null, ctx).state, "review.unparseable"); });
-  it("incomplete: missing requirement row, missing scope row for a changed file, missing preserve row", () => {
+  it("incomplete: missing requirement row, missing scope row for an unauthorized changed file, missing preserve row", () => {
     assert.equal(decide({ ...good, requirements: good.requirements.slice(1) }, ctx).state, "review.incomplete");
-    assert.equal(decide({ ...good, scope: good.scope.slice(1) }, ctx).state, "review.incomplete");
+    const extra = { ...ctx, changedFiles: [...files, "src/billing.js"] };
+    assert.equal(checkCompleteness(good, extra).problems.includes("changed file src/billing.js has no scope row"), true);
     assert.equal(decide({ ...good, preserve: [] }, ctx).state, "review.incomplete");
+  });
+  it("#4160: a changed file the contract already authorizes (deliverable, test, incidental) needs no scope row", () => {
+    assert.equal(decide({ ...good, scope: [] }, ctx).state, "conforms");
+    assert.equal(checkCompleteness({ ...good, scope: [] }, { ...ctx, changedFiles: [...files, "CHANGELOG.md"] }).complete, true);
+  });
+  it("#4160: a scope row the reviewer gives for an authorized file is still judged (none on a deliverable is creep)", () => {
+    const s = good.scope.map((x) => (x.file === "src/scrape.js" ? { ...x, authorized_by: "none", note: "unrelated rewrite" } : x));
+    assert.equal(decide({ ...good, scope: s }, ctx).state, "nonconforming");
+  });
+  it("#4160: evidence given as a bare or partial file name resolves to the one changed file it names", () => {
+    assert.equal(resolveEvidencePath("scrape.js", files), "src/scrape.js");
+    assert.equal(resolveEvidencePath("./src/scrape.js", files), "src/scrape.js");
+    assert.equal(resolveEvidencePath("leak.test.js", files), "test/leak.test.js");
+    assert.equal(resolveEvidencePath("x.js", ["a/x.js", "b/x.js"]), null, "ambiguous");
+    assert.equal(resolveEvidencePath("nope.js", files), null);
+    assert.equal(decide(row("R1", { evidence: "scrape.js:4" }), ctx).state, "conforms");
+  });
+  it("#4160: reviewSkeleton lists every required row, pre-filled, with scope rows only for unauthorized files", () => {
+    const k = { ...C, requirements: [...C.requirements, { id: "R9", quote: "Billing pricing is unchanged.", disposition: "defer", why: "w" }] };
+    const sk = reviewSkeleton({ contract: k, changedFiles: [...files, "src/billing.js", ".forge-lean/x"], ignore: [".forge-lean/"] });
+    assert.deepEqual(sk.requirements.map((r) => r.id), k.requirements.map((r) => r.id));
+    assert.equal(sk.requirements.find((r) => r.id === "R9").deferral_ok, null);
+    assert.ok(!("deferral_ok" in sk.requirements[0]));
+    assert.deepEqual(sk.preserve.map((p) => p.id), (k.preserve ?? []).map((p) => p.id));
+    assert.deepEqual(sk.scope.map((s) => s.file), ["src/billing.js"]);
+    assert.deepEqual(sk.issue_coverage.map((c) => c.quote), k.requirements.map((r) => r.quote));
+    assert.ok(sk.issue_coverage.every((c) => inIssue(c.quote, ISSUE)), "seeded quotes pass the verbatim check");
+    assert.ok([...sk.requirements, ...sk.preserve, ...sk.issue_coverage].every((r) => r.status === ""), "no status is pre-judged");
   });
   it("incomplete: implemented without path:line, with evidence in a nonexistent file, or without validation", () => {
     assert.equal(decide(row("R1", { evidence: "looks fine" }), ctx).state, "review.incomplete");

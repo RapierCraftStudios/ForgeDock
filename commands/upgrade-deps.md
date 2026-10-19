@@ -257,7 +257,7 @@ Major upgrades detected (not auto-processed — require human review):
 
 ## Phase 3: Issue Creation
 
-For each eligible package (or batch), create a GitHub issue:
+For each eligible package (or batch), create a GitHub issue. Each carries the `maintenance` label, so `forgedock orchestrate` dispatches it within the maintenance budget (forge.yaml `maintenance.share`, #4197):
 
 ### 3A: Per-package issue (patch or minor, non-batched)
 
@@ -269,7 +269,7 @@ if [ "$DRY_RUN" = "true" ]; then
 else
 gh issue create $GH_FLAG \
   --title "feat(deps): upgrade {PACKAGE} from {CURRENT} to {LATEST} ({SEMVER_LEVEL})" \
-  --label "enhancement" \
+  --label "enhancement" --label "maintenance" \
   --body "$(cat <<'ISSUE_EOF'
 ## Problem
 
@@ -327,7 +327,7 @@ if [ "$DRY_RUN" = "true" ]; then
 else
 gh issue create $GH_FLAG \
   --title "feat(deps): batch patch upgrades — {COUNT} packages ({DATE})" \
-  --label "enhancement" \
+  --label "enhancement" --label "maintenance" \
   --body "$(cat <<'BATCH_ISSUE_EOF'
 ## Problem
 
