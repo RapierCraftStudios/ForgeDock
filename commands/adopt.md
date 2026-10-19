@@ -421,6 +421,9 @@ Where `{reason}` is a brief signal: "confirmed bug + file refs", "P1 + acceptanc
 
 4. To re-run adoption on newly added issues:
    \`/adopt\` (already-labeled issues are skipped automatically)
+
+{If the repo's boundary config contains an allow-all rule (check as in `/forgedock-init` 2G: eslint-plugin-boundaries `from: [X], allow: ['*']`, dependency-cruiser with no `forbidden` rules, Nx `onlyDependOnLibsWithTags: ['*']`), add once:}
+5. Your boundary config allows every package to import every package ({FILE}: {RULE}). Consider tightening it per package; core work-on only reports import growth along allowed edges.
 ```
 
 ---

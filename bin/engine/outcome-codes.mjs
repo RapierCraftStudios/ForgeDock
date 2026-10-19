@@ -75,6 +75,7 @@ export const OUTCOME_CODES = Object.freeze({
   CONFORMANCE_UNJUSTIFIED_DEFERRAL: "conformance.unjustified_deferral",
   CONFORMANCE_PRESERVE_VIOLATED: "conformance.preserve_violated",
   CONFORMANCE_REGRESSION: "conformance.regression",
+  STRUCTURE_UNDECLARED_EDGE: "structure.undeclared_edge", // forge#4159: a workspace package.json edge the contract does not name
   FOLLOWUP_UNAVAILABLE: "followup.unavailable",
   MERGE_HEAD_MISMATCH: "merge.head_mismatch",
   // Non-failure terminals, so a RUN_TERMINAL for a healthy run is not counted as a gap.

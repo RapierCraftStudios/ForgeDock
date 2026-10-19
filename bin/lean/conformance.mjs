@@ -236,3 +236,30 @@ export function followupItems(reqs) {
   const flat = (s) => String(s ?? "").replace(/[\t\r\n`]+/g, " ").replace(/\s+/g, " ").trim();
   return reqs.map((r) => ({ id: r.id, key: flat(`${r.id}: ${r.quote}`).slice(0, 240), why: flat(`${r.disposition}: ${r.why ?? ""}`).slice(0, 400) }));
 }
+
+/**
+ * forge#4159: package.json edges between workspace packages (scripts/structure-delta.sh `package_edges_added`) that
+ * the contract does not name. Named = a deliverable covering the edge's manifest whose `change` names the target
+ * package (an add-deliverable amendment counts: its change is the why). A null or `{}` delta names nothing to check.
+ */
+export function unnamedEdges(contract, delta) {
+  const edges = Array.isArray(delta?.package_edges_added) ? delta.package_edges_added : [];
+  const dels = contract?.deliverables ?? [];
+  return edges.filter((e) => e?.manifest && e?.to && !dels.some((d) => pathCovers(d.path, e.manifest) && String(d.change ?? "").includes(e.to)));
+}
+
+/**
+ * forge#4159: the one report-only line for the existing reviewer prompt, or "" when there is no import-pair growth
+ * and no boundary-config loosening. Never blocks; adds no reviewer run.
+ */
+export function structureNote(delta) {
+  const grow = (Array.isArray(delta?.import_pairs) ? delta.import_pairs : []).filter((p) => p?.files_added > 0);
+  const b = delta?.boundary_config_changed;
+  const loosened = Boolean(b?.loosens);
+  if (!grow.length && !loosened) return "";
+  const pairs = grow.map((p) => `${p.files_added} value import${p.files_added === 1 ? "" : "s"} ${p.from}→${p.to}`).join(", ");
+  const files = (Array.isArray(b?.files) ? b.files : []).join(", ");
+  const config = loosened ? `the repo's boundary config was loosened in this PR (${files})` : "the repo's boundary config allows it";
+  const s = grow.length ? `this PR adds ${pairs} (files); ${config}` : `this PR loosens the repo's boundary config (${files})`;
+  return `Structure (report only): ${s}; flag only if the contract or the architecture doc says otherwise.`.replace(/[\r\n]+/g, " ");
+}

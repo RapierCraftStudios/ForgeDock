@@ -8,7 +8,7 @@ import { runCore, contractHash } from "./lean.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt } from "./prompts.mjs";
-import { parseReview } from "./conformance.mjs";
+import { parseReview, unnamedEdges, structureNote } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
 import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner } from "./effects.mjs";
@@ -731,6 +731,98 @@ describe("conformance gate: base-sync and contract size", () => {
   it("forge.yaml engine.conformance selects shadow or enforce; anything else is ignored", () => {
     const d = tmpDir("conf-yaml-");
     for (const [v, want] of [["enforce", "enforce"], ["shadow", "shadow"], ["strict", undefined]]) { writeFileSync(`${d}/forge.yaml`, `engine:\n  conformance: ${v}\n`); assert.equal(readConformanceMode(d), want); }
+  });
+});
+
+describe("structure delta (forge#4159): undeclared package edges block, import growth only reports", () => {
+  const EDGE = { from: "@s/db", to: "@s/core", kind: "dependencies", manifest: "packages/db/package.json" };
+  const delta = (o = {}) => ({ package_edges_added: [], package_edges_removed: [], import_pairs: [], boundary_config_changed: { changed: false, files: [], loosens: false, tightens: false }, ...o });
+  /** world whose io.structureDelta returns the given deltas in order (the last one repeats). */
+  const sworld = (deltas, o = {}) => {
+    const w = world(o); const q = [...deltas]; w.structureCalls = [];
+    w.io.structureDelta = async (x) => { w.structureCalls.push(x); return q.length > 1 ? q.shift() : q[0]; };
+    return w;
+  };
+  const nh = (w) => w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
+  const withEdgeDeliverable = (change) => ({ ...CONTRACT, deliverables: [...CONTRACT.deliverables, { id: "D2", path: "packages/db/package.json", change }] });
+
+  it("a new package edge the contract does not name gets one builder resume; removed on the resume, it merges", async () => {
+    const dir = tmpDir("struct-");
+    const w = sworld([delta({ package_edges_added: [EDGE] }), delta()]);
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(builders(w).length, 3); assert.equal(reviewers(w).length, 1);
+    assert.match(builders(w)[2][4], /@s\/db -> @s\/core \(dependencies, packages\/db\/package\.json\)[\s\S]*add it to the contract with a reason, or remove it/);
+    assert.equal(builders(w)[2][2], "sess-1", "resumed in the builder's own session");
+    assert.deepEqual(w.structureCalls[0], { cwd: "/wt/lean-7", base: "origin/staging" });
+    const e = readLog(dir, 7).find((x) => x.event === "STRUCTURE_DELTA");
+    assert.equal(e.edges_added, 1);
+    assert.ok(readLog(dir, 7).findIndex((x) => x.event === "STRUCTURE_DELTA") < readLog(dir, 7).findIndex((x) => x.event === "CONFORMANCE"), "before the conformance review");
+  });
+
+  it("an undeclared edge that survives the resume is needs-human structure.undeclared_edge, in enforce and in shadow, with no reviewer run", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      const w = sworld([delta({ package_edges_added: [EDGE] })]);
+      const r = await run(w, { conformance });
+      assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, OUTCOME_CODES.STRUCTURE_UNDECLARED_EDGE);
+      assert.equal(builders(w).length, 3, "exactly one builder resume"); assert.equal(reviewers(w).length, 0);
+      assert.equal(w.prs.length, 0); assert.equal(w.merges.length, 0);
+      assert.match(nh(w), /@s\/db → @s\/core \(dependencies, `packages\/db\/package\.json`\)/);
+    }
+  });
+
+  it("an edge the contract names (a deliverable on the manifest whose change names the package) passes with no resume", async () => {
+    const w = sworld([delta({ package_edges_added: [EDGE] })], { contract: withEdgeDeliverable("add @s/core: db needs the tenant constants (docs/architecture.md: db depends on core)") });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 2);
+    // the manifest alone, without the package named, is not naming the edge
+    assert.equal(unnamedEdges(withEdgeDeliverable("bump versions"), delta({ package_edges_added: [EDGE] })).length, 1);
+    assert.equal(unnamedEdges(withEdgeDeliverable("add @s/core"), delta({ package_edges_added: [EDGE] })).length, 0);
+  });
+
+  it("an add-deliverable amendment naming the package on the resume declares the edge", async () => {
+    const w = sworld([delta({ package_edges_added: [EDGE] })], { resumeAmendments: [{ kind: "add-deliverable", path: "packages/db/package.json", why: "add @s/core: the architecture doc lets db depend on core" }],
+      changed: ["src/foo.js", "test/foo.test.js"] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 3);
+  });
+
+  it("import-pair growth and boundary loosening never block: one <structure> line in the one reviewer prompt, telemetry recorded", async () => {
+    const d = delta({ import_pairs: [{ from: "@s/web", to: "@s/db", files_added: 8, files_removed: 0 }], boundary_config_changed: { changed: true, files: ["eslint.config.mjs"], loosens: true, tightens: false } });
+    for (const conformance of ["enforce", "shadow"]) {
+      const w = sworld([d]);
+      const r = await run(w, { conformance });
+      assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 2); assert.equal(reviewers(w).length, 1, "no extra reviewer run");
+      const lines = reviewers(w)[0][4].split("\n").filter((l) => l.includes("<structure>"));
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], /^<structure>Structure \(report only\): this PR adds 8 value imports @s\/web→@s\/db \(files\); the repo's boundary config was loosened in this PR \(eslint\.config\.mjs\); flag only if the contract or the architecture doc says otherwise\.<\/structure>$/);
+      const t = w.telemetry.find((x) => x.event === "STRUCTURE_DELTA");
+      assert.deepEqual([t.import_files_added, t.boundary_loosened, t.phase], [8, true, "implement"]);
+      assert.deepEqual(mapRecord(t, 5).payload, { edges_added: 0, edges_removed: 0, import_files_added: 8, import_files_removed: 0, boundary_changed: 1, boundary_loosened: 1 });
+    }
+  });
+
+  it("no workspace packages ({}), a failed script or no io.structureDelta: no event, no prompt line, the same reviewer prompt", async () => {
+    const base = world(); await run(base);
+    for (const d of [{}, null]) {
+      const dir = tmpDir("struct-none-");
+      const w = sworld([d]);
+      assert.equal((await run(w, { dir })).terminalReason, "merged");
+      assert.equal(reviewers(w)[0][4], reviewers(base)[0][4]);
+      assert.ok(!readLog(dir, 7).some((x) => x.event === "STRUCTURE_DELTA")); assert.ok(!w.telemetry.some((x) => x.event === "STRUCTURE_DELTA"));
+      assert.equal(builders(w).length, 2);
+    }
+    assert.equal(structureNote({}), ""); assert.equal(structureNote(null), ""); assert.equal(structureNote(delta()), "");
+    assert.equal(structureNote(delta({ import_pairs: [{ from: "a", to: "b", files_added: 0, files_removed: 3 }] })), "", "removals are not growth");
+  });
+
+  it("the reviewer prompt is byte-identical without a structure line, and the planner and builder are told what declares an edge", () => {
+    const args = { issue: { number: 7, title: "t", body: "b" }, contract: CONTRACT, result: {}, files: ["a"], diff: "d" };
+    assert.equal(reviewerPrompt(args), reviewerPrompt({ ...args, structure: "" }));
+    assert.ok(reviewerPrompt({ ...args, structure: "x\ny" }).endsWith("</diff>\n<structure>x y</structure>"));
+    assert.match(builderPlanPrompt(7), /"the lint allows it" or "there is a precedent" is not a reason on its own/);
+    assert.match(builderPlanPrompt(7), /must be a deliverable on that package\.json whose change names the package and gives the reason/);
+    assert.match(builderImplementPrompt(), /blocked by the engine: add it through add-deliverable with a why naming the package/);
   });
 });
 
