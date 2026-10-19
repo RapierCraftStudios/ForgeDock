@@ -45,11 +45,15 @@ export function wrapLaneLimits(bin, args, limits) {
   return { bin: "systemd-run", args: ["--user", "--scope", "-q", ...(mem ? ["-p", `MemoryMax=${mem}`] : []), ...(cpu ? ["-p", `CPUQuota=${cpu}`] : []), "--", bin, ...args] };
 }
 
+/** #4211: a judgment call over data in the prompt only (the refactor:split grouping call): no tool can read a file. */
+export const noToolFlags = (caps) => (caps?.strictMcp ? ["--tools", ""]
+  : ["--disallowedTools", "Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]);
+
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null }) => {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
-    const flags = [...buildLeanSessionFlags(caps), ...(readOnly ? buildReadOnlyToolFlags(caps) : [])];
+    const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : [])];
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
       args: [String(issue)], cwd, bin, model, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
       logger: { log() {} },

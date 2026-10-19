@@ -19,9 +19,10 @@ import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM } from "./prompts.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES } from "./verify.mjs";
 import { laneBackendId } from "./limits.mjs";
+import { SPLIT_LABEL } from "./refactor.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
@@ -90,6 +91,8 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {"shadow"|"enforce"} [o.conformance] conformance gate mode (default shadow)
  * @param {object} [o.verify]        forge.yaml verify (verify.mjs parseVerify): mode local (default) | ci | hybrid (#4167)
  * @param {object} [o.precheck]      {commands}: forge.yaml learned.test_commands, run in the worktree before the PR (#4240)
+ * @param {object} [o.refactorModule] refactor:split step module (default ./refactor.mjs; injectable for tests, #4211)
+ * @param {number} [o.splitMaxLines] refactor:split moved-line budget per PR (default 4000); the rest becomes a chained issue (#4211)
  * @param {string} [o.toolchainOverride] forge.yaml env.toolchain: "<pm>@<x.y.z>" or "off" (#4163)
  * @param {string} [o.envSetup]      forge.yaml env.setup: run once per fresh worktree before the builder (#4163)
  */
@@ -598,7 +601,7 @@ export async function runCore(o) {
   ev({ event: "RUN_START", run: `core_${issue}_${t0}`, issue, lane, path: "core", version: ENGINE_VERSION, forge_version: ENGINE_VERSION, repo });
   let iss;
   try {
-    iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments"]));
+    iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels"]));
   } catch (e) { return finish("engine-error", `cannot read issue: ${e.message}`); }
   if (String(iss.state).toUpperCase() === "CLOSED") return finish("invalid", "issue already closed");
 
@@ -718,7 +721,7 @@ export async function runCore(o) {
     /** #4188: the builder reads the live issue, so quotes are checked against the current text, not the RUN_START snapshot. Best effort. */
     async function refreshIssue(stage) {
       let next;
-      try { next = JSON.parse(String(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments"]))); } catch { return; }
+      try { next = JSON.parse(String(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels"]))); } catch { return; }
       if (!next || typeof next !== "object") return;
       const tc = trustedOf(next), text = textOf(next, tc);
       const old = contractHash(issueText), now = contractHash(text);
@@ -769,68 +772,123 @@ export async function runCore(o) {
       return found;
     }
 
-    let frozen = null, hash = null, planned = false;
-    if (resumed) {
-      const fc = await readFrozenContract();
-      if (fc) { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
+    const isSplit = (iss.labels ?? []).some((l) => (l?.name ?? l) === SPLIT_LABEL);
+    /**
+     * #4211: the refactor:split step. One tool-less grouping call over the symbol index (none for a chained plan), the
+     * codemod move and its deterministic proof (bin/lean/refactor.mjs). A rerun on a branch that already holds the move
+     * re-verifies it instead. Returns {done} (needs-human, worktree left at its start commit) or the split result with a
+     * synthetic location-only contract for the renderers.
+     */
+    async function splitStep() {
+      await label("building");
+      const mod = o.refactorModule ?? (await import("./refactor.mjs"));
+      const body = String(iss.body ?? "");
+      const precheckList = Array.isArray(o.precheck?.commands) ? o.precheck.commands : [];
+      let r;
+      if (hasCommits) {
+        const target = mod.parseSplitTarget(body) ?? mod.parseSplitPlan(body)?.target, testCmd = mod.parseTestCmd(body, precheckList);
+        r = target && testCmd ? await mod.reverifySplit({ wt, base, target, testCmd, runTmp, git }) : { ok: false, code: OUTCOME_CODES.SPLIT_PLAN_INVALID, reason: "rerun of a split branch without a target or test command in the issue" };
+        if (r.ok) {
+          r = { ...r, target, testCmd, package: null, modules: {}, rest: null, grouped: false };
+          T.anomalies.push("Rerun of a split branch: the existing move was re-verified; a chained remainder is not recomputed");
+        }
+      } else {
+        r = await mod.runSplitStep({ wt, base, issue, issueBody: body, precheckCommands: precheckList, runTmp, git, ...(o.splitMaxLines ? { maxLines: o.splitMaxLines } : {}),
+          callGrouper: async (prompt, { cwd } = {}) => {
+            await renew();
+            const rr = await callRunner({ role: "grouper", issue, cwd: cwd ?? runTmp ?? wt, model: reviewerModel, resume: null, system: GROUPING_SYSTEM, prompt, noTools: true });
+            await renew();
+            await attempt("group", 1, rr);
+            return rr?.text ?? "";
+          } });
+      }
+      ev({ event: "SPLIT", ok: r.ok, code: r.code ?? null, grouped: Boolean(r.grouped), modules: Object.keys(r.modules ?? {}).length, rest: Object.keys(r.rest ?? {}).length });
+      if (!r.ok) {
+        T.validate = ["SPLIT REFUSED", r.code]; T.plan = "skipped"; T.implement = "none (worktree reset)"; T.review = "skipped"; T.pr = "none"; T.merge = "n/a";
+        return { done: await needsHuman(`refactor:split refused (${r.code}); nothing was pushed:\n${r.reason}`, r.code) };
+      }
+      const moved = await changedFiles();
+      const contract = { requirements: [], deliverables: moved.map((path, i) => ({ id: `D${i + 1}`, path, change: "location-only: moved verbatim or re-export shim", requirements: [] })), preserve: [], validate: [] };
+      const mods = Object.entries(r.modules ?? {});
+      try {
+        await post("FORGE:SPLIT", `## refactor:split\n**Target:** \`${r.target}\`\n**Package:** \`${r.package ?? "(rerun)"}\`\n**Modules:** ${mods.map(([m, l]) => `\`${m}\` (${l.length})`).join(", ") || "n/a"}\n**Plan:** ${r.grouped ? "one grouping call over the symbol index" : "no LLM call"}\n**Remaining:** ${Object.keys(r.rest ?? {}).length} module(s)\n\n\`\`\`json\n${JSON.stringify(r.verify ?? {})}\n\`\`\``);
+      } catch { /* best effort */ }
+      T.validate = ["CONFIRMED", `refactor:split \`${r.target}\``];
+      T.decisions.push(`refactor:split: ${r.grouped ? "one grouping call" : "no LLM call"}, ${mods.length} module(s) into ${r.package ?? "(rerun)"}, refactor-verify ok${r.rest ? `, ${Object.keys(r.rest).length} module(s) chained` : ""}`);
+      T.implement = [`${moved.length} file(s)`, branch];
+      sessionId = null;
+      return { ...r, contract };
     }
-    await label("building");
-    if (!frozen) {
-      await builder(++attemptN, builderPlanPrompt(issue, tcOpts()) + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : ""), null, true, () => builderPlanPrompt(issue, tcOpts()));
-      planned = true;
-      result = await readResult();
-      const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
-      const closes = ["invalid", "already-fixed"].includes(result?.status);
-      if (closes || result?.status === "blocked") await flushStages(result, ["investigation"]); // the evidence comment for invalid/already-fixed
-      T.validate = [result?.status ? String(result.status === "fixed" ? "CONFIRMED" : result.status).toUpperCase() : "CONFIRMED", `${evidence.length} evidence item(s)`];
-      if (closes && !evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_NO_EVIDENCE);
-      if (closes) {
-        T.plan = "skipped"; T.implement = "skipped"; T.review = "skipped"; T.pr = "none"; T.merge = "n/a";
-        T.decisions.push(`Builder verdict: ${result.status}`);
-        await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
-        await label("invalid");
-        return await finish("invalid", result.summary ?? result.status);
-      }
-      const blocked = await endIfBlocked();
-      if (blocked) return blocked;
-      let contract = await readContract();
-      await refreshIssue("contract validation");
-      let vc = validateContract(contract, issueText);
-      if (!vc.ok && sessionId) {
-        T.decisions.push(`Contract rejected (${vc.problems[0]}); resumed once`);
-        await builder(++attemptN, contractCorrectionPrompt(vc.problems), sessionId, false, () => builderPlanPrompt(issue, tcOpts()));
-        contract = await readContract();
-        await refreshIssue("contract validation");
-        vc = validateContract(contract, issueText);
-      }
-      await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
-      if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID);
-      frozen = contract;
-      hash = contractHash(contractJson(frozen));
-      let body = renderContract(frozen, hash);
-      if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true }); // the JSON must survive the comment cap
-      await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
-      const deferredN = frozen.requirements.filter((r) => TRACKED.includes(r.disposition)).length;
-      ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
-      T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
+    let frozen = null, hash = null, planned = false, files = [], split = null;
+    if (isSplit) {
+      // ---- 3'. refactor:split (#4211): deterministic move + proof replaces the builder; no builder session exists ----
+      split = await splitStep();
+      if (split.done) return split.done;
+      frozen = split.contract; hash = contractHash(contractJson(frozen));
+      files = await changedFiles();
     } else {
-      T.validate = "resumed (existing branch)";
+      if (resumed) {
+        const fc = await readFrozenContract();
+        if (fc) { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
+      }
+      await label("building");
+      if (!frozen) {
+        await builder(++attemptN, builderPlanPrompt(issue, tcOpts()) + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : ""), null, true, () => builderPlanPrompt(issue, tcOpts()));
+        planned = true;
+        result = await readResult();
+        const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
+        const closes = ["invalid", "already-fixed"].includes(result?.status);
+        if (closes || result?.status === "blocked") await flushStages(result, ["investigation"]); // the evidence comment for invalid/already-fixed
+        T.validate = [result?.status ? String(result.status === "fixed" ? "CONFIRMED" : result.status).toUpperCase() : "CONFIRMED", `${evidence.length} evidence item(s)`];
+        if (closes && !evidence.length) return await needsHuman(`Builder reported "${result.status}" without evidence, so the issue is not closed automatically.\n\n${result.summary ?? "(no summary)"}`, OUTCOME_CODES.BUILDER_NO_EVIDENCE);
+        if (closes) {
+          T.plan = "skipped"; T.implement = "skipped"; T.review = "skipped"; T.pr = "none"; T.merge = "n/a";
+          T.decisions.push(`Builder verdict: ${result.status}`);
+          await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
+          await label("invalid");
+          return await finish("invalid", result.summary ?? result.status);
+        }
+        const blocked = await endIfBlocked();
+        if (blocked) return blocked;
+        let contract = await readContract();
+        await refreshIssue("contract validation");
+        let vc = validateContract(contract, issueText);
+        if (!vc.ok && sessionId) {
+          T.decisions.push(`Contract rejected (${vc.problems[0]}); resumed once`);
+          await builder(++attemptN, contractCorrectionPrompt(vc.problems), sessionId, false, () => builderPlanPrompt(issue, tcOpts()));
+          contract = await readContract();
+          await refreshIssue("contract validation");
+          vc = validateContract(contract, issueText);
+        }
+        await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
+        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID);
+        frozen = contract;
+        hash = contractHash(contractJson(frozen));
+        let body = renderContract(frozen, hash);
+        if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true }); // the JSON must survive the comment cap
+        await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
+        const deferredN = frozen.requirements.filter((r) => TRACKED.includes(r.disposition)).length;
+        ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
+        T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
+      } else {
+        T.validate = "resumed (existing branch)";
+      }
+      T.plan = [`contract ${hash}`, `${frozen.requirements.length} requirement(s)`];
+      if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
+      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "");
+      liveKeys = ["implementation"];
+      await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);
+      result = await readResult();
+      {
+        const blocked = await endIfBlocked();
+        if (blocked) return blocked;
+      }
+      files = await changedFiles();
+      if (!files.length) return await needsHuman(`Builder made no commit${result ? ` (status "${result.status}")` : " and wrote no result.json"}.\n\n${result?.summary ?? ""}`, OUTCOME_CODES.BUILDER_NO_COMMIT);
+      await flushStages(result, ["implementation"]);
+      T.implement = [`${files.length} file(s)`, branch];
+      T.decisions.push(`Builder verdict: ${result?.status ?? "none"}`);
     }
-    T.plan = [`contract ${hash}`, `${frozen.requirements.length} requirement(s)`];
-    if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
-    const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "");
-    liveKeys = ["implementation"];
-    await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);
-    result = await readResult();
-    {
-      const blocked = await endIfBlocked();
-      if (blocked) return blocked;
-    }
-    let files = await changedFiles();
-    if (!files.length) return await needsHuman(`Builder made no commit${result ? ` (status "${result.status}")` : " and wrote no result.json"}.\n\n${result?.summary ?? ""}`, OUTCOME_CODES.BUILDER_NO_COMMIT);
-    await flushStages(result, ["implementation"]);
-    T.implement = [`${files.length} file(s)`, branch];
-    T.decisions.push(`Builder verdict: ${result?.status ?? "none"}`);
 
     // ---- 3a. declared check commands (#4240): the repo's own cheap gates (forge.yaml learned.test_commands), run locally in
     // the worktree before review and PR; no Actions minutes. A failure goes back to the builder in-session (#4149), up to
@@ -849,6 +907,7 @@ export async function runCore(o) {
         const failed = results.filter((r) => r.rc !== 0);
         if (!failed.length) { if (round) T.decisions.push(`Declared check commands pass after ${round} builder fix round(s)`); break; }
         const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
+        if (isSplit) return await needsHuman(`Declared check command(s) fail on the refactor:split move (no builder edits a split); nothing merged: ${names}`, OUTCOME_CODES.CI_RED);
         if (round >= vcfg.maxRounds || !sessionId) { T.anomalies.push(`Declared check command(s) still failing before the PR: ${names}`); break; }
         T.decisions.push(`Declared check command(s) failed: ${names}; builder resumed (round ${round + 1}/${vcfg.maxRounds})`);
         const before = String(await git(["rev-parse", "HEAD"])).trim();
@@ -938,6 +997,7 @@ export async function runCore(o) {
           return { done: await finish("ci-pending", `CI verification of ${branch} still pending after ${ciMaxMinutes} min; rerun resumes the branch`) };
         }
         if (v.result === "unavailable") {
+          if (isSplit) return { done: await needsHuman(`CI verification unavailable for the refactor:split move (${v.detail}); a split never falls back to builder validation; nothing merged.`) };
           ciFellBack = true;
           row("unavailable: local fallback");
           T.decisions.push(`CI verification unavailable (${v.detail}); builder runs the validate commands locally`);
@@ -1034,34 +1094,40 @@ export async function runCore(o) {
       if (d.state.startsWith("review.")) return null;
       return { fail: d.state !== "conforms", verdict: d.state === "conforms" ? "CONFORMS" : "NONCONFORMING", reason: d.failures.map((f) => `${f.code}: ${f.detail}`).join("; "), failures: d.failures };
     };
-    for (;;) {
+    if (isSplit) {
+      // #4211: location-only change proved by refactor-verify; no conformance reviewer (the optional review is not spent)
       if (remoteVerify) { const v = await ciVerify("build"); if (v.done) return v.done; }
-      const outcome = await gate();
-      verdict = outcome;
-      if (outcome.state === "conforms") break;
-      const list = outcome.failures.slice(0, 15).map((f) => `- ${f.code}: ${f.detail}`).join("\n");
-      if (outcome.state === "review.unparseable") return await needsHuman(`The conformance reviewer returned no parseable JSON twice; nothing merged.`, OUTCOME_CODES.REVIEW_NO_VERDICT);
-      if (outcome.state === "review.incomplete") return await needsHuman(`The conformance review was incomplete twice (a review without complete rows cannot pass); nothing merged:\n${list}`, OUTCOME_CODES.REVIEW_INCOMPLETE);
-      if (outcome.state === "review.inconsistent") return await needsHuman(`The conformance reviewer twice said NONCONFORMING without a failing row; nothing merged.`, OUTCOME_CODES.REVIEW_INCONSISTENT);
-      if (resumes >= 1 || !sessionId) return await needsHuman(`The change does not conform to the issue and its frozen contract after ${resumes ? "one builder resume" : "the build (no session to resume)"} (${outcome.by}); nothing merged:\n${list}`, outcome.failures[0].code);
-      resumes++;
-      T.decisions.push(`Not conforming (${outcome.by}${outcome.inconsistent ? ", reviewer verdict contradicted its rows" : ""}): ${[...new Set(outcome.failures.map((f) => f.code))].join(", ")}; builder resumed once`);
-      await builder(++attemptN, conformanceResumePrompt(outcome.failures, vcfg.mode), sessionId);
-      await upsertStage("implementation"); // the published note follows the code after every resume
-    }
-    // Deferrals the reviewer accepted are filed now, before any PR: the batched follow-up must exist and be linked.
-    const toFile = pendingTracking(effective);
-    if (!shadow && toFile.length) await track(toFile, "accepted by the conformance review");
-    if (shadow) {
-      const wf = verdict.wouldFail ?? [];
-      shadowWould = verdict.would;
-      ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
-      await emit({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
-      T.review = [`shadow: would ${verdict.would === "conforms" ? "pass" : `block (${verdict.would})`}`, `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
-      await post("FORGE:REVIEW", renderShadowReview({ would: verdict.would, failures: wf, review: verdict.reviewState === "conforms" || verdict.reviewState === "nonconforming" ? review : null, contract: effective, unfiled: toFile }));
+      T.review = "skipped (refactor-verify passed: location-only change)";
     } else {
-      T.review = ["CONFORMS", `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
-      await post("FORGE:REVIEW", renderReview(review, effective));
+      for (;;) {
+        if (remoteVerify) { const v = await ciVerify("build"); if (v.done) return v.done; }
+        const outcome = await gate();
+        verdict = outcome;
+        if (outcome.state === "conforms") break;
+        const list = outcome.failures.slice(0, 15).map((f) => `- ${f.code}: ${f.detail}`).join("\n");
+        if (outcome.state === "review.unparseable") return await needsHuman(`The conformance reviewer returned no parseable JSON twice; nothing merged.`, OUTCOME_CODES.REVIEW_NO_VERDICT);
+        if (outcome.state === "review.incomplete") return await needsHuman(`The conformance review was incomplete twice (a review without complete rows cannot pass); nothing merged:\n${list}`, OUTCOME_CODES.REVIEW_INCOMPLETE);
+        if (outcome.state === "review.inconsistent") return await needsHuman(`The conformance reviewer twice said NONCONFORMING without a failing row; nothing merged.`, OUTCOME_CODES.REVIEW_INCONSISTENT);
+        if (resumes >= 1 || !sessionId) return await needsHuman(`The change does not conform to the issue and its frozen contract after ${resumes ? "one builder resume" : "the build (no session to resume)"} (${outcome.by}); nothing merged:\n${list}`, outcome.failures[0].code);
+        resumes++;
+        T.decisions.push(`Not conforming (${outcome.by}${outcome.inconsistent ? ", reviewer verdict contradicted its rows" : ""}): ${[...new Set(outcome.failures.map((f) => f.code))].join(", ")}; builder resumed once`);
+        await builder(++attemptN, conformanceResumePrompt(outcome.failures, vcfg.mode), sessionId);
+        await upsertStage("implementation"); // the published note follows the code after every resume
+      }
+      // Deferrals the reviewer accepted are filed now, before any PR: the batched follow-up must exist and be linked.
+      const toFile = pendingTracking(effective);
+      if (!shadow && toFile.length) await track(toFile, "accepted by the conformance review");
+      if (shadow) {
+        const wf = verdict.wouldFail ?? [];
+        shadowWould = verdict.would;
+        ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
+        await emit({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
+        T.review = [`shadow: would ${verdict.would === "conforms" ? "pass" : `block (${verdict.would})`}`, `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
+        await post("FORGE:REVIEW", renderShadowReview({ would: verdict.would, failures: wf, review: verdict.reviewState === "conforms" || verdict.reviewState === "nonconforming" ? review : null, contract: effective, unfiled: toFile }));
+      } else {
+        T.review = ["CONFORMS", `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
+        await post("FORGE:REVIEW", renderReview(review, effective));
+      }
     }
     ev({ event: "PHASE_COMMIT", phase: "review" });
     const closing = closePlan(shadow ? { requirements: [] } : effective);
@@ -1071,7 +1137,8 @@ export async function runCore(o) {
     await gitPush(["push", "-u", "origin", branch]);
     laneGuard(lane, "open a PR");
     const prOut = resumed?.pr ? `/pull/${resumed.pr}` : String(await ghw(["pr", "create", "-R", repo, "--base", lane, "--head", branch,
-      "--title", `${iss.title} (#${issue})`, "--body", renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked })])).trim();
+      "--title", `${iss.title} (#${issue})`, "--body", isSplit ? (o.refactorModule ?? (await import("./refactor.mjs"))).renderSplitPrBody({ issue, ...split })
+        : renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked })])).trim();
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
     if (!Number.isInteger(pr)) return await needsHuman(`Could not parse the PR number from: ${prOut.slice(0, 200)}`);
     ev({ event: "PR_OPENED", pr });
@@ -1129,6 +1196,10 @@ export async function runCore(o) {
       const before = await gitOut(["rev-parse", "HEAD"]);
       let clean = true, files = [];
       try { await git(["merge", "--no-edit", base]); } catch { clean = false; files = await conflictFiles(); }
+      if (isSplit && !clean) { // #4211: no builder resolves a split's conflicts; a fresh run re-splits on the new base
+        await gitOut(["merge", "--abort"]);
+        return await needsHuman(`PR #${pr} (refactor:split) conflicts with ${lane} in ${files.join(", ") || "unknown files"}; a split is never resolved by an LLM. Close the PR and rerun on the new base.`, OUTCOME_CODES.BASE_CONFLICT);
+      }
       let how, tests = "not required (clean merge)", rereview = "not required (conflict-free base merge)";
       if (clean) {
         how = "clean merge of the base into the branch";
@@ -1148,8 +1219,13 @@ export async function runCore(o) {
       if (soft && clean && after === before) { syncs--; return null; } // UNKNOWN state and nothing to merge: not a conflict
       if (after !== before) await gitPush(["push", "origin", branch]); // plain push of a merge commit: never force
       let ciFixes = 0;
+      if (isSplit && after !== before) { // #4211: the merged head must still be a pure move against the new base
+        const rv = await (o.refactorModule ?? (await import("./refactor.mjs"))).reverifySplit({ wt, base, target: split.target, testCmd: split.testCmd, runTmp, git });
+        if (!rv.ok) return await needsHuman(`refactor:split no longer verifies after merging ${base}: ${rv.reason}`, rv.code);
+        rereview = "refactor-verify re-run against the new base: ok";
+      }
       if (remoteVerify && after !== before) { const v = await ciVerify("base-sync"); if (v.done) return v.done; ciFixes = v.fixes; }
-      if (!clean || ciFixes) {
+      if (!isSplit && (!clean || ciFixes)) {
         let rv = await doReview();
         if (rv?.fail) {
           T.decisions.push(`Base-sync re-review FAIL: builder resumed with the reason`);
@@ -1325,6 +1401,14 @@ export async function runCore(o) {
     await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
     if (closing.tracked.length) {
       try { await post("FORGE:TRACKED", `## Remaining work tracked\nClosed as completed by PR #${pr}. The contracted deferred and post-deploy requirements are tracked in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }
+    }
+    if (isSplit && split.rest) { // #4211: the rest of a large split is the next PR of the chain, planned already (no grouping call)
+      const mod = o.refactorModule ?? (await import("./refactor.mjs"));
+      const c = mod.renderChainIssue({ parent: issue, target: split.target, packageName: split.packageName, rest: split.rest, testCmd: mod.parseTestCmd(iss.body ?? "", []) });
+      try {
+        const out = String(await ghw(["issue", "create", "-R", repo, "--title", c.title, "--body", c.body, ...c.labels.flatMap((l) => ["--label", l]), ...(milestone ? ["--milestone", milestone] : [])]));
+        T.decisions.push(`refactor:split chain: ${Object.keys(split.rest).length} module(s) left, filed ${/\/issues\/(\d+)/.exec(out)?.[1] ? `#${/\/issues\/(\d+)/.exec(out)[1]}` : out.trim().slice(0, 120)}`);
+      } catch (e) { T.anomalies.push(`refactor:split chain issue not filed (the maintenance scan re-files the hotspot): ${String(e?.message ?? e).slice(0, 200)}`); }
     }
     await label("merged");
     return await finish("merged", `PR #${pr}`, { pr });
