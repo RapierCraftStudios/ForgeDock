@@ -176,9 +176,10 @@ export function readVerify(cwd = process.cwd()) {
 }
 /**
  * forge.yaml `execution:` section (#4253, block style: `execution:` then `  mode: remote`, `  max_remote: 4`,
- * `  provider: container`, `  image`, `  secrets` comma-separated env names; #4255 budget: `  budget_minutes`, `  budget_usd`,
- * `  day_budget_minutes`, `  day_budget_usd`, `  on_budget: stop|local`, `  cost_per_minute`) for `orchestrate`; undefined
- * when the section is absent or unreadable.
+ * `  provider: container`, `  image`, `  secrets` comma-separated env names; remote provider #4254: `  endpoint`,
+ * `  token_env`, `  cache_store`, `  allow_actions`; #4255 budget: `  budget_minutes`, `  budget_usd`, `  day_budget_minutes`,
+ * `  day_budget_usd`, `  on_budget: stop|local`, `  cost_per_minute`) for `orchestrate`; undefined when the section is
+ * absent or unreadable.
  */
 export function readExecution(cwd = process.cwd()) {
   try {
@@ -1023,7 +1024,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       // #4253: lanes run in sandboxes, ledger-tracked per lane, admitted against max_remote instead of the host cap.
       let gitDir = null;
       try { gitDir = resolvePath(cwd, String(await leanIo.git(["rev-parse", "--git-common-dir"], { cwd })).trim()); } catch { gitDir = null; }
-      const provider = deps.sandboxProvider ?? execMod.providerByName(exec.provider, { batch, repo, cwd, image: exec.image, gitDir, script: laneScript, bin: deps.laneBin });
+      const provider = deps.sandboxProvider ?? execMod.providerByName(exec.provider, { batch, repo, cwd, image: exec.image, gitDir, script: laneScript, bin: deps.laneBin, exec, env });
       const { makeLedger } = await import("./lean/ledger.mjs");
       const ledgerFor = deps.sandboxLedger ?? ((n) => makeLedger({ batch: batch.id, lane: `sandbox-${n}`, owner: `orch_${process.pid}`, issue: n }));
       const bud = exec.budget ?? {};

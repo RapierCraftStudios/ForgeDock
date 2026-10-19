@@ -113,9 +113,10 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
     assert.equal(led.read(), null);
   });
 
-  it("start throws: engine-error row, teardown still runs", async () => {
+  it("start throws: typed needs-human sandbox.start_failed row (#4254), teardown still runs", async () => {
     const { r, prov, led } = await run({ startThrows: true });
-    assert.equal(r.terminalReason, "engine-error");
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, "sandbox.start_failed");
     assert.match(r.detail, /boom/);
     assert.ok(prov.calls.some((c) => c[0] === "teardown"));
     assert.equal(led.read(), null);
@@ -348,6 +349,17 @@ describe("execution budget and sandbox cost (#4255)", () => {
     const r4 = await providerLanes({ provider: adopted, laneArgs: () => [], ledgerFor: ledgerIn(root), pollMs: 1, now, costPerMinute: 0.1 })
       .adopt(4, { startedAt: 0, remote: true, handle: { provider: "fake", id: "fake-4", issue: 4, startedAt: 6 * 60000 } });
     assert.deepEqual(r4.sandbox, { provider: "fake", id: "fake-4", minutes: 24, cost_usd: 2.4 });
+  });
+
+  it("billable minutes a provider puts on the handle (#4254) are the lane's minutes, priced by cost_per_minute; a sandbox that never started has no usage", async () => {
+    const root = tmpDir("exec-hmin-");
+    const prov = fakeProvider({ finish: () => ({ terminalReason: "merged" }) });
+    const start = prov.start;
+    prov.start = async (o) => ({ ...(await start(o)), minutes: 7.5 });
+    const r = await providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(root), pollMs: 1, costPerMinute: 0.2 }).runOne(1, null);
+    assert.deepEqual(r.sandbox, { provider: "fake", id: "fake-1", minutes: 7.5, cost_usd: 1.5 });
+    const failed = await providerLanes({ provider: fakeProvider({ startThrows: true }), laneArgs: () => [], ledgerFor: ledgerIn(root), pollMs: 1 }).runOne(2, null);
+    assert.equal(failed.sandbox, undefined);
   });
 
   it("a batch that hits the budget admits no further remote lanes; on_budget stop holds the rest (fake provider)", async () => {

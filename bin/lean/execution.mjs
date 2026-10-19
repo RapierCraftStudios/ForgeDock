@@ -18,6 +18,12 @@
  * Secrets reach a sandbox only by NAME from `execution.secrets` (plus FORGEDOCK_BATCH_ID and GH_REPO, the target repo);
  * values never appear in argv, the handle, the ledger or the batch state.
  *
+ * `remote` (#4254, sandbox-remote.mjs) reaches a runner pool or remote session through a transport (`execution.endpoint`,
+ * credential `execution.token_env` from the env or the keychain). It is never a default, and a GitHub Actions endpoint
+ * needs `allow_actions: true`. A sandbox that fails to start is a typed outcome, not an engine-error: `needs-human`
+ * `sandbox.start_failed`, or `deferred` `sandbox.capacity` when the provider marks the error retryable. A provider that
+ * sets `handle.minutes` (billable sandbox minutes) has them used as the lane's sandbox minutes (#4255 below).
+ *
  * Sandbox cost and budget (#4255): a provider may implement `usage(handle, {startedAt, endedAt}) -> {minutes, cost_usd}`;
  * otherwise a lane's usage is its wall-clock minutes (from the handle's persisted `startedAt`) times
  * `execution.cost_per_minute`. `providerLanes` attaches it to every result as `sandbox: {provider, id, minutes, cost_usd}`.
@@ -32,9 +38,12 @@ import { promisify } from "node:util";
 import { isLaneAlive, launchLane, writeAtomic } from "./batch.mjs";
 import { schedDir } from "./sched.mjs";
 import { dockerLabels, safeSegment } from "./ledger.mjs";
+import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { resolveCredential } from "./credentials.mjs";
+import { httpTransport, isActionsEndpoint, remoteProvider } from "./sandbox-remote.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
-export const SANDBOX_PROVIDERS = Object.freeze(["local", "container"]);
+export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote"]);
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
 const ENV_RE = /^[A-Z_][A-Z0-9_]*$/;
 const IMAGE_RE = /^[A-Za-z0-9][A-Za-z0-9._\/:@-]*$/;
@@ -43,8 +52,10 @@ const errText = (e) => String(e?.stderr || e?.message || e).split("\n")[0].slice
 
 /**
  * forge.yaml `execution:` section (block style; parseForgeYaml gives strings) → {mode, maxRemote, provider, image,
- * secrets, budget}. Invalid values fall back to the defaults; mode defaults to local (today's behaviour). `budget` is the
- * flat-key `execution.budget` (#4255): a missing, non-numeric or negative cap is null (no cap).
+ * secrets, budget}, plus the remote provider settings `endpoint`, `tokenEnv`, `cacheStore`, `allowActions` (#4254) when set
+ * (absent means null/false). Invalid values fall back to the defaults; mode defaults to local (today's behaviour). The
+ * provider default is never `remote`. `budget` is the flat-key `execution.budget` (#4255): a missing, non-numeric or
+ * negative cap is null (no cap).
  */
 export function parseExecution(sec = {}) {
   const s = sec && typeof sec === "object" ? sec : {};
@@ -56,11 +67,16 @@ export function parseExecution(sec = {}) {
   const image = IMAGE_RE.test(str(s.image)) ? str(s.image) : null;
   const raw = Array.isArray(s.secrets) ? s.secrets : str(s.secrets) ? str(s.secrets).split(",") : [];
   const secrets = [...new Set(raw.map((x) => String(x).trim()).filter((x) => ENV_RE.test(x)))];
+  let endpoint = null;
+  try { const u = new URL(str(s.endpoint)); if (u.protocol === "https:" || u.protocol === "http:") endpoint = str(s.endpoint); } catch { endpoint = null; }
+  const tokenEnv = ENV_RE.test(str(s.token_env)) ? str(s.token_env) : null;
+  const cacheStore = str(s.cache_store) || null;
+  const allowActions = str(s.allow_actions).toLowerCase() === "true";
   const cap = (v) => { const t = str(v), x = Number(t); return t !== "" && Number.isFinite(x) && x >= 0 ? x : null; };
   const cpm = cap(s.cost_per_minute);
   const budget = { batchMinutes: cap(s.budget_minutes), batchUsd: cap(s.budget_usd), dayMinutes: cap(s.day_budget_minutes), dayUsd: cap(s.day_budget_usd),
     onBudget: str(s.on_budget) === "local" ? "local" : "stop", costPerMinute: cpm ?? 0 };
-  return { mode, maxRemote, provider, image, secrets, budget };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -216,10 +232,31 @@ export function containerProvider({ batch, repo, image, gitDir, cacheDir = `${ho
   };
 }
 
-/** A provider by name; throws a typed error for an unknown one. */
+const typedError = (code, message) => Object.assign(new Error(message), { code });
+
+/**
+ * The remote transport for forge.yaml `execution` settings: `opts.transport` when injected, else `httpTransport` on
+ * `exec.endpoint` with the credential `exec.tokenEnv` (env, then keychain). Throws `execution.provider.misconfigured`
+ * without an endpoint, `execution.provider.actions_refused` for a GitHub Actions endpoint without `allow_actions`.
+ */
+export function remoteTransportFor(exec = {}, { transport = null, env = process.env, credentials = (n) => resolveCredential(n, { env }) } = {}) {
+  if (transport) return transport;
+  if (!exec?.endpoint) throw typedError("execution.provider.misconfigured", "execution.provider remote needs execution.endpoint");
+  if (isActionsEndpoint(exec.endpoint) && exec.allowActions !== true) {
+    throw typedError("execution.provider.actions_refused", "execution.endpoint is a GitHub Actions API; set execution.allow_actions: true to spend Actions minutes");
+  }
+  return httpTransport({ endpoint: exec.endpoint, token: exec.tokenEnv ? credentials(exec.tokenEnv) : null });
+}
+
+/** A provider by name; throws a typed error for an unknown one. `remote` reads `opts.exec` (parseExecution output). */
 export function providerByName(name, opts) {
   if (name === "local") return localProvider(opts);
   if (name === "container") return containerProvider(opts);
+  if (name === "remote") {
+    const exec = opts?.exec ?? {};
+    const env = opts?.env ?? process.env;
+    return remoteProvider({ batch: opts.batch, repo: opts.repo, settings: exec, env, transport: remoteTransportFor(exec, { transport: opts?.transport, env }), ...(opts?.now ? { now: opts.now } : {}) });
+  }
   const e = new Error(`unknown execution.provider ${JSON.stringify(name)} (known: ${SANDBOX_PROVIDERS.join(", ")})`);
   e.code = "execution.provider.unknown";
   throw e;
@@ -232,13 +269,14 @@ export function providerByName(name, opts) {
 export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env, secrets = [], pollMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   costPerMinute = 0, now = () => Date.now() }) {
   const cpm = nonNeg(Number(costPerMinute)) ?? 0;
-  // #4255: the sandbox's usage, from the provider when it reports one, else wall clock since the handle's startedAt.
+  // #4255: the sandbox's usage: the provider's `usage()`, else the billable minutes it put on the handle (#4254), else wall
+  // clock since the handle's startedAt; cost is the provider's, else minutes x cost_per_minute.
   const withUsage = async (r, h) => {
     if (!r || typeof r !== "object") return r;
     const endedAt = now(), startedAt = Number.isFinite(h?.startedAt) ? h.startedAt : endedAt;
     let u = null;
     try { u = typeof provider.usage === "function" ? await provider.usage(h, { startedAt, endedAt }) : null; } catch { u = null; }
-    const minutes = nonNeg(u?.minutes) ?? round1(Math.max(0, endedAt - startedAt) / 60000);
+    const minutes = nonNeg(u?.minutes) ?? nonNeg(h?.minutes) ?? round1(Math.max(0, endedAt - startedAt) / 60000);
     const cost = nonNeg(u?.cost_usd) ?? minutes * cpm;
     return { ...r, sandbox: { provider: provider.name, id: h.id, minutes: round1(minutes), cost_usd: round6(cost) } };
   };
@@ -260,6 +298,10 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       await sleep(pollMs);
     }
   };
+  // A start failure repeats on a relaunch: typed, never engine-error (#4254). Retryable (capacity) defers with backoff.
+  const startFailed = (id, e) => (e?.retryable === true
+    ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
+    : { terminalReason: "needs-human", code: OUTCOME_CODES.SANDBOX_START_FAILED, detail: `sandbox ${id} failed to start: ${errText(e)}` });
   return {
     runOne: async (n, lane, ctx = {}) => {
       const led = ledgerFor(n);
@@ -269,15 +311,18 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         return { terminalReason: "engine-error", detail: `sandbox ${base.id} from an earlier attempt could not be torn down` };
       }
       led?.register("sandbox", base.id, { provider: provider.name, handle: base }); // before it exists
-      let h = base, r;
+      let h = base, r, started = false;
       try {
-        h = { ...base, ...(await provider.start({ issue: n, args: laneArgs(n, lane), env, secrets })), startedAt: base.startedAt };
+        h = { ...base, ...(await provider.start({ issue: n, args: laneArgs(n, lane), env, secrets })) };
+        if (!Number.isFinite(h.startedAt)) h.startedAt = base.startedAt;
+        started = true;
         ctx.onStart?.({ ...(Number.isInteger(h.pid) ? { pid: h.pid } : {}), handle: h, remote: true });
         r = await wait(h);
       } catch (e) {
-        r = { terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` };
-      } finally { await tear(led, h); }
-      return withUsage(r, h);
+        r = started ? { terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` } : startFailed(base.id, e);
+      }
+      await tear(led, h); // every path, after the result is in (tear never throws)
+      return started ? withUsage(r, h) : r; // a sandbox that never started used nothing
     },
     adopt: async (n, rec) => {
       const saved = rec?.handle;
@@ -288,8 +333,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       led?.register("sandbox", h.id, { provider: provider.name, handle: { provider: h.provider, id: h.id, issue: h.issue, ...(Number.isFinite(h.startedAt) ? { startedAt: h.startedAt } : {}) } }); // now owned by this dispatcher
       let r;
       try {
-        if (!(await provider.fetchResult(h)) && (await provider.status(h)) !== "running") { await tear(led, h); return null; } // relaunched
-        r = await wait(h);
+        r = !(await provider.fetchResult(h)) && (await provider.status(h)) !== "running" ? null : await wait(h); // null: relaunched
       } catch (e) {
         r = { terminalReason: "engine-error", detail: `sandbox ${h.id}: ${errText(e)}` };
       }
