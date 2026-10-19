@@ -18,6 +18,11 @@
  * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. An `engine-error` is
  * relaunched once; `breaker` ({errors, window_min}) stops admissions after a burst and lets running lanes finish, the
  * rest stay pending (outcome `held`) for a resume. `getParallel()` is read on every pass, so K can change live.
+ *
+ * Maintenance budget (#4197), off unless `maintenance: {share, whenIdle}` is passed: `classify(issue)` gives each issue
+ * `{maintenance, priority}` (persisted as `classes`) and admission follows `pickNext`: P0/P1 features, then a maintenance
+ * issue while maintenance starts stay within `share` of all lane starts (`dispatch: {started, maint}`, persisted), then
+ * P2+ features, then (`whenIdle`) maintenance once no feature is pending. Maintenance the budget never admits ends `held`.
  */
 import { parseDependsOn } from "../engine/phases.mjs";
 
@@ -78,6 +83,25 @@ const memoryLimits = (now) => {
   };
 };
 
+const clsOf = (classes, n) => (classes instanceof Map ? classes.get(n) : classes?.[n]) ?? { maintenance: false, priority: 2 };
+
+/**
+ * The next issue to start from `ready` (pending order) under the maintenance budget, or null when none may start now.
+ * Order: P0/P1 features; maintenance while `maint + 1 <= floor(share * (started + 1))`; P2+ features; maintenance
+ * regardless of share when `whenIdle` and no feature is pending at all.
+ */
+export function pickNext(ready, { classes, share, whenIdle = false, started = 0, maint = 0, featuresPending = true }) {
+  const isM = (n) => !!clsOf(classes, n).maintenance;
+  const urgent = ready.find((n) => !isM(n) && Number(clsOf(classes, n).priority) <= 1);
+  if (urgent !== undefined) return urgent;
+  const m = ready.find(isM);
+  if (m !== undefined && maint + 1 <= Math.floor(share * (started + 1) + 1e-9)) return m;
+  const f = ready.find((n) => !isM(n));
+  if (f !== undefined) return f;
+  if (m !== undefined && whenIdle && !featuresPending) return m;
+  return null;
+}
+
 const toObj = (m) => Object.fromEntries([...m].map(([k, v]) => [String(k), v]));
 const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k), v]));
 
@@ -86,7 +110,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
-  limits = null, identity = () => "default", batchId = null }) {
+  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -107,18 +131,29 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const holds = limits ?? memoryLimits(now);
   const heldUntil = () => { try { const id = identity(); const u = holds.holdUntil(id); return Number.isFinite(u) && u > now() ? u : null; } catch { return null; } };
   let tripped = saved?.breaker ?? null;
+  const budget = maintenance && Number(maintenance.share) > 0 ? { share: Number(maintenance.share), whenIdle: !!maintenance.whenIdle } : null;
+  const classes = toMap(saved?.classes); // issue -> {maintenance, priority}; only with a maintenance budget
+  const dispatch = { started: saved?.dispatch?.started ?? 0, maint: saved?.dispatch?.maint ?? 0 };
+  let budgetHeld = false;
 
   const save = () => {
     if (!store) return;
     store.save({ v: 1, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
-      prefilter: toObj(checked), errorTimes, breaker: tripped });
+      prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
+  const classifyOne = async (n) => {
+    if (!budget) return;
+    let c = null;
+    try { c = classify ? await classify(n) : null; } catch { c = null; } // unclassifiable: an ordinary P2 feature
+    classes.set(n, { maintenance: !!c?.maintenance, priority: Number.isFinite(Number(c?.priority)) ? Number(c.priority) : 2 });
+  };
   const readDeps = async (n) => {
     let body = "";
     try { body = await readBody(n); } catch { /* unreadable: no ordering info, work-on's own check still applies */ }
     deps.set(n, parseDeps(body, n));
+    await classifyOne(n);
     if (resolveLane) { let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e) }; } lanes.set(n, l); }
   };
   const edges = (n) => (deps.get(n) ?? []).filter((d) => set.has(d));
@@ -140,6 +175,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // New issues (a fresh batch, or extra issues passed to a resume) join the queue.
   for (const n of issues) if (!set.has(n)) { set.add(n); order.push(n); pending.push(n); }
   for (const n of order) if (!deps.has(n)) await readDeps(n);
+  if (budget) for (const n of order) if (!classes.has(n)) await classifyOne(n); // a resume that enabled the budget
   noteCrossLane();
   save();
 
@@ -260,7 +296,19 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const t = now();
     const holdUntil = heldUntil();
     let started = 0;
-    if (!tripped && !holdUntil) {
+    const isReady = (n) => (notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome));
+    budgetHeld = false;
+    if (!tripped && !holdUntil && budget) {
+      while (running.size < K()) {
+        const ready = pending.filter(isReady);
+        const n = pickNext(ready, { classes, share: budget.share, whenIdle: budget.whenIdle, started: dispatch.started, maint: dispatch.maint,
+          featuresPending: pending.some((p) => !clsOf(classes, p).maintenance) });
+        if (n === null) { budgetHeld = ready.length > 0; break; }
+        pending.splice(pending.indexOf(n), 1);
+        if (lanes.get(n)?.ok !== false) { dispatch.started++; if (clsOf(classes, n).maintenance) dispatch.maint++; }
+        start(n); started++;
+      }
+    } else if (!tripped && !holdUntil) {
       for (let i = 0; i < pending.length && running.size < K();) {
         const n = pending[i];
         if ((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome))) { pending.splice(i, 1); start(n); started++; }
@@ -279,13 +327,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else { const ac = new AbortController(); await Promise.race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
     } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
     else if (pending.length && waits.length) await sleep(Math.max(0, Math.min(...waits) - t));
+    else if (pending.length && budgetHeld) break; // maintenance the budget does not admit now: held for a later batch
     else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle
       for (const n of pending.splice(0)) skip(n, "dependency cycle");
       save();
     }
   }
   save();
-  return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: tripped?.detail ?? "not run" });
+  return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: tripped?.detail ?? (budgetHeld ? "maintenance share" : "not run") });
 }
 
 export function formatTable(rows) {

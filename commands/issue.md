@@ -28,6 +28,8 @@ You create GitHub issues with the exact structure the `/work-on` pipeline expect
 |------|--------|
 | (none) | Default — read code, dedup, draft, validate, then create the issue immediately. No pre-create confirmation prompt. |
 | `--dry-run` | Draft and validate as normal, but STOP before `gh issue create` — print the draft (or batch draft table) for human review instead of creating it |
+| `--greenfield` | Greenfield mode: Affected Files may be *planned* paths, validated against the spike doc's declared repo layout instead of `git show` (Phase 3E rule 2). Also enabled automatically when the spike doc exists and has a `Repo layout` heading. <!-- Added: forge#4172 --> |
+| `--spike <path>` | Spike doc for greenfield mode (implies `--greenfield`). Default `docs/engineering/technical-spike.md`, repo-relative. |
 | `--title "..."` | **Activates programmatic mode.** Supplies the final issue title directly — skips Phase 1 (parse) and Phase 3 (draft) entirely. See Programmatic Invocation Contract below. |
 | `--body "..."` | Supplies the final issue body directly (programmatic mode only). Mutually exclusive with `--body-file`. |
 | `--body-file <path>` | Supplies the final issue body by reading it from a file (programmatic mode only). Mutually exclusive with `--body`. |
@@ -37,6 +39,8 @@ You create GitHub issues with the exact structure the `/work-on` pipeline expect
 
 ```bash
 DRY_RUN=false
+GREENFIELD=false
+SPIKE_DOC="docs/engineering/technical-spike.md"
 PROGRAMMATIC_TITLE=""
 PROGRAMMATIC_BODY=""
 PROGRAMMATIC_BODY_FILE=""
@@ -111,7 +115,7 @@ rm -f "$ARGS_TMP"
 LOOKS_LIKE_FLAG_MODE=false
 for arg in "${ARGS[@]}"; do
   case "$arg" in
-    --dry-run|--title|--body|--body-file|--label|--milestone|--exclude)
+    --dry-run|--greenfield|--spike|--title|--body|--body-file|--label|--milestone|--exclude)
       LOOKS_LIKE_FLAG_MODE=true
       break
       ;;
@@ -123,7 +127,8 @@ while [ "$LOOKS_LIKE_FLAG_MODE" = "true" ] && [ $i -lt ${#ARGS[@]} ]; do
   arg="${ARGS[$i]}"
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
-    --title|--body|--body-file|--label|--milestone|--exclude)
+    --greenfield) GREENFIELD=true ;;
+    --title|--body|--body-file|--label|--milestone|--exclude|--spike)
       # Each of these flags requires a value token immediately after it. A flag
       # with no following token (e.g. --title as the last argument) is a usage
       # error, not an empty value — fail loudly instead of silently proceeding
@@ -141,6 +146,7 @@ while [ "$LOOKS_LIKE_FLAG_MODE" = "true" ] && [ $i -lt ${#ARGS[@]} ]; do
         --label) PROGRAMMATIC_LABELS+=("${ARGS[$i]}") ;;
         --milestone) PROGRAMMATIC_MILESTONE="${ARGS[$i]}" ;;
         --exclude) PROGRAMMATIC_EXCLUDE="${ARGS[$i]}" ;;
+        --spike) SPIKE_DOC="${ARGS[$i]}"; GREENFIELD=true ;;
       esac
       ;;
     --*)
@@ -583,7 +589,7 @@ Files that need changes (ordered by dependency):
 **Rules for automated issue creation**:
 - Title MUST use conventional commit prefix: `fix:`, `feat:`, `refactor:`, `investigate:`, `docs:`
 - `## Problem` is MANDATORY — every issue must state what's wrong or what's needed
-- `## Affected Files` is MANDATORY — list actual file paths the investigator should read first
+- `## Affected Files` is MANDATORY — list actual file paths the investigator should read first. In greenfield mode (`--greenfield`/`--spike`, or a spike doc declaring a `Repo layout`), files still to be created may be listed as *planned* paths, which must fall inside the spike's declared repo layout
 - `## Acceptance Criteria` is MANDATORY — at least one testable `- [ ]` criterion; each item MAY carry an optional `[type:api|unit|e2e|manual]` annotation for deterministic test-gate classification (omit to fall back to regex inference)
 - Domain-specific sections (Evidence Trail, Pattern Metadata, Validation Checklist, etc.) SHOULD be preserved — they add pipeline value. Add mandatory sections around them, not instead of them.
 - `## Prior Investigation` is OPTIONAL — include only when parent/sibling investigation Gist URLs are available. Each Gist URL must be wrapped in a `<!-- FORGE:PRIOR_GIST: {url} -->` annotation for machine-readable parsing by downstream agents. <!-- Added: forge#339 -->
@@ -595,7 +601,25 @@ Files that need changes (ordered by dependency):
 Before creating, verify:
 
 1. **Title follows convention**: `{prefix}({scope}): {description}` or `{prefix}: {description}`
-2. **Affected files are real**: Every file path in the body exists in the repo (check with `git show origin/staging:{path}` or `git show origin/main:{path}`)
+2. **Affected files are real**: Every backticked path in `## Affected Files` exists at `origin/staging` or `origin/main`. In greenfield mode a path that does not exist yet passes as `PLANNED` when it is declared in, or sits under a directory declared in, the spike doc's `Repo layout` section. Run the deterministic check from the target repo (`{GREENFIELD}`/`{SPIKE_DOC}` are the parsed values; write the draft body to an entity-scoped `mktemp` file first). Exit 1 (`MISSING <path>`) fails validation: fix the path, or in greenfield mode add it to the spike layout. Exit 2 means the spike doc is missing or declares no layout: fix it or drop `--greenfield`. If the helper does not resolve, check each path by hand with `git show origin/staging:{path}` / `git show origin/main:{path}` (brownfield rule).
+
+   ```bash
+   cd "{REPO_PATH}" || exit 1
+   type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+   AF_CHECK_SCRIPT=$(forge_resolve affected-files-check.sh)
+   GREENFIELD="{GREENFIELD}"; SPIKE_DOC="{SPIKE_DOC}"
+   # Declared spike layout auto-enables greenfield mode; without one, brownfield (existence only) applies.
+   [ -f "$SPIKE_DOC" ] && grep -qiE '^#+[[:space:]].*repo layout' "$SPIKE_DOC" && GREENFIELD=true
+   SPIKE_ARGS=()
+   [ "$GREENFIELD" = "true" ] && SPIKE_ARGS=(--spike "$SPIKE_DOC")
+   git fetch -q origin {STAGING_BRANCH} {DEFAULT_BRANCH} 2>/dev/null || true
+   if [ -n "$AF_CHECK_SCRIPT" ]; then
+     bash "$AF_CHECK_SCRIPT" "{DRAFT_BODY_FILE}" --ref "origin/{STAGING_BRANCH}" --ref "origin/{DEFAULT_BRANCH}" "${SPIKE_ARGS[@]}"
+     echo "AF_CHECK_EXIT=$?"
+   else
+     echo "affected-files-check.sh unresolved: check each path with git show (brownfield rule)"
+   fi
+   ```
 3. **No vague sections**: Every section has concrete content, not placeholders
 4. **Acceptance criteria are testable**: Each criterion can be verified with a specific action
 5. **Override files included**: If `docker-compose.yml` is listed, `docker-compose.prod.yml` is too (if it exists). If a model is listed, its migration is too.

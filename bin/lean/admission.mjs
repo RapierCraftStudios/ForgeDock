@@ -7,6 +7,12 @@
 export const ADMISSION_DEFAULTS = Object.freeze({ enabled: true, min_free_mem_mb: 2048, min_free_tmp_mb: 1024, max_load_per_core: 4 });
 export const ADMISSION_RETRY_SECONDS = 60;
 
+/** Workers one lane's verification may use (#4182): max(1, floor(cores / live lanes)); bad inputs count as 1. */
+export function hostParallelism({ cores, lanes } = {}) {
+  const c = Number.isFinite(cores) && cores > 0 ? cores : 1, l = Number.isFinite(lanes) && lanes > 0 ? lanes : 1;
+  return Math.max(1, Math.floor(c / l));
+}
+
 const gb = (mb) => { const g = mb / 1024; return `${Number.isInteger(g) ? g : g.toFixed(1)}G`; };
 
 /**

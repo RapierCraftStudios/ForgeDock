@@ -81,6 +81,11 @@ issue right away (priority label first, then the smaller size). Never hold a rea
 lanes finish. To reduce simultaneous base-syncs, don't start two lanes that name the same function within the
 same minute; start another ready issue first instead of waiting.
 
+**Maintenance budget** (off unless forge.yaml `maintenance.enabled: true`). The runner pulls open issues carrying a
+`maintenance.labels` label into the batch and admits in this order: P0/P1 features > maintenance, while maintenance
+starts stay within `maintenance.share` of all starts (0.2 = 1 lane in 5) > P2+ features. With `when_idle` it drains the
+remaining maintenance once no feature is pending; otherwise the rest ends `held (maintenance share)` for a later batch.
+
 - **Batch runner (default, when `forgedock` is on PATH).** Launch the whole set as one durable batch in a single
   `Bash` call with `run_in_background: true`. Do NOT write a scheduler, wrapper or queue script, and do not launch one
   `run-issue` per issue yourself: the runner schedules from the issues' `Depends on` / `Blocked by` lines.
