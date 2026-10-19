@@ -124,7 +124,11 @@ export function applyAmendments(frozen, amendments, issueText = null) {
     const tag = JSON.stringify(a ?? null).slice(0, 100);
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
-      if (!c.deliverables.some((d) => d.path === a.path)) c.deliverables.push({ id: a.id ?? `A${c.deliverables.length + 1}`, path: a.path, change: a.why, amended: true });
+      const have = c.deliverables.find((d) => d.path === a.path);
+      // An existing deliverable keeps its id and gains the why, so an amendment naming a package on an already-listed
+      // package.json declares the edge (forge#4159); before, it was reported as applied but changed nothing.
+      if (have) { have.change = have.change ? `${have.change}; ${a.why}` : a.why; have.amended = true; }
+      else c.deliverables.push({ id: a.id ?? `A${c.deliverables.length + 1}`, path: a.path, change: a.why, amended: true });
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {
       if (c.requirements.some((r) => r.id === a.requirement.id)) { problems.push(`add-requirement reuses id ${a.requirement.id}`); continue; }
       if (issueText != null && !inIssue(a.requirement.quote, issueText)) { problems.push(`add-requirement ${a.requirement.id}: quote is not verbatim from the issue`); continue; }

@@ -46,7 +46,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (`FORGE:CONTRACT`, `contractHash`). Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
 6. **Implement** — same session; `result.json` with typed amendments
-   (`applyAmendments` → `FORGE:AMENDMENT`).
+   (`applyAmendments` → `FORGE:AMENDMENT`). An `add-deliverable` on a path the
+   contract already lists appends its why to that deliverable's `change`, so it
+   can declare a package edge on an already-listed package.json (#4159).
 7. **Conformance** — `precheck` (deterministic: changed files vs deliverables,
    validate results, requirement statuses; each failure has a `kind`),
    structured review (`parseReview`), `decide` computes the verdict. The
