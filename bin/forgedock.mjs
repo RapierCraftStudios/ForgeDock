@@ -34,6 +34,8 @@ import {
   writeInstallReceipt,
   persistHome,
   PIPELINE_SCRIPTS,
+  resolveClaudeConfigDir,
+  setupAfterRead,
 } from "./journey.mjs";
 import {
   deriveWorkflowLabels,
@@ -176,7 +178,14 @@ const HOME = process.env.HOME || process.env.USERPROFILE || homedir();
 // existing invocations, but it is now a no-op — global is the only supported
 // install location.
 
-const GLOBAL_CLAUDE_DIR = join(HOME, ".claude");
+//
+// The directory itself honours CLAUDE_CONFIG_DIR (forge#4173): Claude Code
+// reads commands/settings from there when it is set, so install, doctor,
+// status and uninstall all resolve it through the one shared helper the
+// journey installer uses — never a hard-coded ~/.claude.
+const GLOBAL_CLAUDE_DIR = resolveClaudeConfigDir(process.env, HOME);
+/** Display form of GLOBAL_CLAUDE_DIR for user-facing messages. */
+const CLAUDE_DIR_LABEL = GLOBAL_CLAUDE_DIR === join(HOME, ".claude") ? "~/.claude" : GLOBAL_CLAUDE_DIR;
 
 /**
  * Resolve the install target directories for the current invocation.
@@ -242,7 +251,7 @@ const restArgs = cmdIdx === -1 ? [] : rawArgs.slice(cmdIdx + 1).filter((a) => a 
  * Path to the user-level Claude Code settings file.
  * This is where the SessionStart hook entry is written/removed.
  */
-const CLAUDE_SETTINGS_PATH = join(HOME, ".claude", "settings.json");
+const CLAUDE_SETTINGS_PATH = join(GLOBAL_CLAUDE_DIR, "settings.json");
 
 /**
  * Check whether a hook command string refers to the ForgeDock SessionStart hook.
@@ -1004,6 +1013,11 @@ async function statusScreen(c) {
  * otherwise falls back to the Anthropic API when ANTHROPIC_API_KEY is set,
  * otherwise skips enrichment.
  *
+ * Repository setup (forge#4173): after detection, interactive runs with no
+ * GitHub remote, no commits, or no `staging` branch are offered repo
+ * creation, an initial push of `main`, and `staging` creation — see
+ * journey.mjs setupRepo(). Non-TTY runs are unchanged.
+ *
  * Env:
  *   FORGEDOCK_INIT_BACKEND   Override ("cli"|"api"|"none"|"auto"; default
  *                            "auto") — pins the enrichment backend instead of
@@ -1042,7 +1056,7 @@ async function initFlow(c) {
     // Staging semantics preserved (#1148): detection → minimal template with
     // only the three required sections. No review screen — this is the
     // power-user escape hatch for a ~20-line forge.yaml.
-    const { draft, description } = await read(c);
+    const { draft, description } = await setupAfterRead(c, await read(c));
     // Hard-fail on unresolved identity placeholders when overwriting an
     // existing config (forge#1850 spec item 4) — never destroy a working
     // forge.yaml in favor of one that can't address a repo.
@@ -1071,7 +1085,7 @@ async function initFlow(c) {
 
   if (flags.includes("--manual")) {
     // Manual escape hatch: plain prompts, detection values as defaults.
-    const { draft, description } = await read(c);
+    const { draft, description } = await setupAfterRead(c, await read(c));
     const v = {
       owner: await input("GitHub owner", draft.project.owner.value),
       repo: await input("Repository", draft.project.repo.value),
@@ -1097,7 +1111,7 @@ async function initFlow(c) {
     await maybeOfferDemo(c);
     return 0;
   }
-  const { draft, description } = await read(c);
+  const { draft, description } = await setupAfterRead(c, await read(c));
   const reviewed = await review(c, draft, description);
   celebrate(c, reviewed);
   if (!reviewed.aborted) await maybeOfferDemo(c);
@@ -1110,7 +1124,7 @@ async function uninstall() {
   console.log("");
 
   const { targetDir, scriptsTargetDir, manifestPath } = detectInstallPaths();
-  console.log(`  Mode: global (~/.claude)`);
+  console.log(`  Mode: global (${CLAUDE_DIR_LABEL})`);
   console.log(`  ${dim(getLogoTagline("uninstall"))}`);
   console.log("");
 
@@ -1244,19 +1258,19 @@ async function uninstall() {
 
   // Remove the SessionStart hook from ~/.claude/settings.json via the
   // hardened settings-hook module (never writes through malformed JSON).
-  const settingsJsonPath = join(HOME, ".claude", "settings.json");
+  const settingsJsonPath = CLAUDE_SETTINGS_PATH;
   const { status: hookRemoveResult } = removeSessionStartHook(settingsJsonPath);
   if (hookRemoveResult === "removed") {
     console.log(
-      `  ${GREEN}✔${RESET}  Removed SessionStart hook from ${CYAN}~/.claude/settings.json${RESET}`,
+      `  ${GREEN}✔${RESET}  Removed SessionStart hook from ${CYAN}${CLAUDE_DIR_LABEL}/settings.json${RESET}`,
     );
   } else if (hookRemoveResult === "absent") {
     console.log(
-      `  ✔  SessionStart hook already absent from ~/.claude/settings.json`,
+      `  ✔  SessionStart hook already absent from ${CLAUDE_DIR_LABEL}/settings.json`,
     );
   } else {
     console.log(
-      `  ${YELLOW}⚠${RESET}  Could not update ~/.claude/settings.json — remove the hook manually.`,
+      `  ${YELLOW}⚠${RESET}  Could not update ${CLAUDE_DIR_LABEL}/settings.json — remove the hook manually.`,
     );
   }
 
@@ -1264,19 +1278,19 @@ async function uninstall() {
   // engine adapter, and SubagentStop annotation verifier.
   const { status: preToolUseRemoveResult } = removePreToolUseHook(settingsJsonPath);
   if (preToolUseRemoveResult === "removed") {
-    console.log(`  ${GREEN}✔${RESET}  Removed PreToolUse enforcement hook from ${CYAN}~/.claude/settings.json${RESET}`);
+    console.log(`  ${GREEN}✔${RESET}  Removed PreToolUse enforcement hook from ${CYAN}${CLAUDE_DIR_LABEL}/settings.json${RESET}`);
   } else if (preToolUseRemoveResult !== "absent") {
-    console.log(`  ${YELLOW}⚠${RESET}  Could not remove PreToolUse hook — check ${CYAN}~/.claude/settings.json${RESET} manually.`);
+    console.log(`  ${YELLOW}⚠${RESET}  Could not remove PreToolUse hook — check ${CYAN}${CLAUDE_DIR_LABEL}/settings.json${RESET} manually.`);
   }
   const { status: subagentStopRemoveResult } = removeSubagentStopHook(settingsJsonPath);
   if (subagentStopRemoveResult === "removed") {
-    console.log(`  ${GREEN}✔${RESET}  Removed SubagentStop hook from ${CYAN}~/.claude/settings.json${RESET}`);
+    console.log(`  ${GREEN}✔${RESET}  Removed SubagentStop hook from ${CYAN}${CLAUDE_DIR_LABEL}/settings.json${RESET}`);
   }
   const { status: subagentStopEnforceRemoveResult } = removeSubagentStopEnforceHook(settingsJsonPath);
   if (subagentStopEnforceRemoveResult === "removed") {
-    console.log(`  ${GREEN}✔${RESET}  Removed SubagentStop enforcement hook from ${CYAN}~/.claude/settings.json${RESET}`);
+    console.log(`  ${GREEN}✔${RESET}  Removed SubagentStop enforcement hook from ${CYAN}${CLAUDE_DIR_LABEL}/settings.json${RESET}`);
   } else if (subagentStopEnforceRemoveResult !== "absent") {
-    console.log(`  ${YELLOW}⚠${RESET}  Could not remove SubagentStop enforcement hook — check ${CYAN}~/.claude/settings.json${RESET} manually.`);
+    console.log(`  ${YELLOW}⚠${RESET}  Could not remove SubagentStop enforcement hook — check ${CYAN}${CLAUDE_DIR_LABEL}/settings.json${RESET} manually.`);
   }
   console.log("");
 
@@ -2210,7 +2224,7 @@ async function labelsSetup(repo) {
  *   2.  gh CLI installed and authenticated
  *   3.  git configured (user.name + user.email)
  *   4.  forge.yaml exists and has required keys
- *   5.  SessionStart hook registered in ~/.claude/settings.json
+ *   5.  SessionStart hook registered in ~/.claude/settings.json (or $CLAUDE_CONFIG_DIR)
  *   6.  CLAUDE.md legacy managed block (cwd) — informational only; the
  *       journey install never injects one, session context comes from the
  *       SessionStart hook
@@ -2247,7 +2261,7 @@ async function doctor(fix = false) {
   console.log(
     isGitCloneInstall
       ? `  Mode: git clone at ${CYAN}${FORGE_HOME}${RESET}`
-      : `  Mode: global (~/.claude)`,
+      : `  Mode: global (${CLAUDE_DIR_LABEL})`,
   );
   console.log(`  Source: ${formatSourceIdentity(sourceBranch)}`);
   console.log("");
@@ -2301,7 +2315,7 @@ async function doctor(fix = false) {
     console.log(`  ${CYAN}↻${RESET}  ${BOLD}${label}${RESET}${suffix}`);
   }
 
-  const settingsPath = join(HOME, ".claude", "settings.json");
+  const settingsPath = CLAUDE_SETTINGS_PATH;
 
   /**
    * Detect whether the registered SessionStart hook entry (if any) points at
@@ -2671,17 +2685,17 @@ async function doctor(fix = false) {
     }
 
     if (hookReg.error) {
-      fail("SessionStart hook", `Cannot read ~/.claude/settings.json: ${hookReg.error}. Run: npx forgedock install`);
+      fail("SessionStart hook", `Cannot read ${CLAUDE_DIR_LABEL}/settings.json: ${hookReg.error}. Run: npx forgedock install`);
     } else if (hookReg.ok) {
       if (fix && hookRegWasBroken) {
-        fixed("SessionStart hook", "registered in ~/.claude/settings.json (repaired)");
+        fixed("SessionStart hook", `registered in ${CLAUDE_DIR_LABEL}/settings.json (repaired)`);
       } else {
-        pass("SessionStart hook", "registered in ~/.claude/settings.json");
+        pass("SessionStart hook", `registered in ${CLAUDE_DIR_LABEL}/settings.json`);
       }
     } else {
       fail(
         "SessionStart hook",
-        "Run: npx forgedock doctor --fix  (or: npx forgedock install)  (writes hook entry to ~/.claude/settings.json)",
+        `Run: npx forgedock doctor --fix  (or: npx forgedock install)  (writes hook entry to ${CLAUDE_DIR_LABEL}/settings.json)`,
       );
     }
   }
@@ -3007,7 +3021,7 @@ async function doctor(fix = false) {
   // server presence is orthogonal to the core ForgeDock install — but missing
   // it causes /qa-sweep to silently fail mid-sweep.
   {
-    const mcpServersPath = join(HOME, ".claude", "mcp_servers.json");
+    const mcpServersPath = join(GLOBAL_CLAUDE_DIR, "mcp_servers.json");
     let playwrightFound = false;
     let fileReadable = false;
     let hasMcpServers = false;
@@ -3040,12 +3054,12 @@ async function doctor(fix = false) {
     if (!fileReadable) {
       warn(
         "Playwright MCP",
-        "No MCP servers file found (~/.claude/mcp_servers.json). Register Playwright MCP to enable /qa-sweep: claude mcp add playwright npx @playwright/mcp@latest",
+        `No MCP servers file found (${CLAUDE_DIR_LABEL}/mcp_servers.json). Register Playwright MCP to enable /qa-sweep: claude mcp add playwright npx @playwright/mcp@latest`,
       );
     } else if (!hasMcpServers) {
       warn(
         "Playwright MCP",
-        "MCP servers file found (~/.claude/mcp_servers.json) but it has no 'mcpServers' key. Register Playwright MCP to enable /qa-sweep: claude mcp add playwright npx @playwright/mcp@latest",
+        `MCP servers file found (${CLAUDE_DIR_LABEL}/mcp_servers.json) but it has no 'mcpServers' key. Register Playwright MCP to enable /qa-sweep: claude mcp add playwright npx @playwright/mcp@latest`,
       );
     } else if (playwrightFound) {
       pass("Playwright MCP", "registered in Claude Code MCP servers");
