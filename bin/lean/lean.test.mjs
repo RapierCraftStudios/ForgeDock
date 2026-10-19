@@ -1606,6 +1606,26 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     }
   });
 
+  it("#4181 the builder and reviewer get FORGE_DOCKER_LABELS with the ledger's batch and lane, with or without a run tmp", async () => {
+    for (const withTmp of [false, true]) {
+      const w = world();
+      if (withTmp) w.io.runTmp = { prune: async () => {}, make: async (i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async () => {} };
+      assert.equal((await run(w, { batchId: "b1" })).terminalReason, "merged");
+      assert.ok(w.envs.length >= 1);
+      for (const e of w.envs) {
+        const labels = String(e?.FORGE_DOCKER_LABELS ?? "").split(" ");
+        assert.deepEqual(labels.slice(0, 4), ["forgedock.owner=1", "forgedock.batch=b1", "forgedock.lane=lean-7", "forgedock.issue=7"]);
+        assert.match(labels[4], /^forgedock\.expires=\d+$/);
+        if (withTmp) assert.match(e.TMPDIR, /\/runs\/7-/); else assert.equal(e.TMPDIR, undefined);
+      }
+    }
+  });
+
+  it("#4181 the implement prompt tells the builder to use --rm, the labels and a trap teardown", () => {
+    const p = builderImplementPrompt();
+    for (const needle of ["FORGE_DOCKER_LABELS", "--rm", "--label", "trap", "volume create", "network create", "build"]) assert.ok(p.includes(needle), needle);
+  });
+
   it("#4104 makeRunTmp: removes only its own dirs; prune takes only old dirs with a dead owner and our marker", async () => {
     const { mkdirSync, writeFileSync, existsSync, utimesSync } = await import("node:fs");
     const root = tmpDir("core-runs-");
