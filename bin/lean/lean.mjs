@@ -137,11 +137,50 @@ export async function runCore(o) {
 
   // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
   const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
-  let done = null, wtCreated = false;
+  let done = null, wtCreated = false, salvagedRef = null;
   const runId = `${issue}-${t0}`;
   let runTmp = null;
+  /**
+   * #4162: save the worktree's uncommitted work (tracked, untracked and .forge-lean/) to refs/forge/salvage/<issue>/<ms>
+   * before the worktree is removed. It stages into the worktree's own index, which is discarded with the worktree, and
+   * the ref lives in the shared repo, so it survives the removal. Returns the ref, or null when there is nothing to save.
+   */
+  async function salvage(why) {
+    if (!io.fs?.exists || !(await io.fs.exists(wt))) return null;
+    const g = (a) => io.git(a, { cwd: wt });
+    try {
+      await g(["add", "-A"]);
+      if (await io.fs.exists(join(wt, LEAN_DIR))) await g(["add", "-f", "--", LEAN_DIR]);
+      const tree = String(await g(["write-tree"])).trim();
+      const headTree = String(await g(["rev-parse", "HEAD^{tree}"])).trim();
+      if (!/^[0-9a-f]{40,64}$/.test(tree) || tree === headTree) return null;
+      const commit = String(await g(["-c", "user.name=forgedock", "-c", "user.email=forgedock@localhost", "commit-tree", tree, "-p", "HEAD", "-m", `forge salvage #${issue}: ${why}`])).trim();
+      if (!/^[0-9a-f]{40,64}$/.test(commit)) return null;
+      const ref = `refs/forge/salvage/${issue}/${now()}`;
+      await io.git(["update-ref", ref, commit], { cwd });
+      ev({ event: "WORKTREE_SALVAGED", ref, why });
+      T.anomalies.push(`Uncommitted work from ${why} saved to \`${ref}\` (inspect: \`git diff HEAD ${ref} --stat\`)`);
+      return ref;
+    } catch (e) {
+      ev({ event: "WORKTREE_SALVAGE_FAILED", why, error: String(e?.message ?? e).slice(0, 300) });
+      return null;
+    }
+  }
+  /** #4162: stop processes still running inside the worktree (an orphaned runner from a dead run) before it is removed. */
+  async function stopWorktreeProcs() {
+    if (!io.proc) return;
+    const procs = await Promise.resolve(io.proc.inDir(wt)).catch(() => []);
+    if (!procs.length) return;
+    for (const p of procs) io.proc.kill(p.pid, "SIGTERM");
+    for (let i = 0; i < 10 && procs.some((p) => io.proc.alive(p.pid)); i++) await sleep(500);
+    const left = procs.filter((p) => io.proc.alive(p.pid));
+    for (const p of left) io.proc.kill(p.pid, "SIGKILL");
+    ev({ event: "WORKTREE_PROCS_STOPPED", pids: procs.map((p) => p.pid), killed: left.map((p) => p.pid) });
+    T.anomalies.push(`Stopped ${procs.length} process(es) still running in the worktree from an earlier run: ${procs.map((p) => `${p.pid} ${p.cmd ?? ""}`.trim().slice(0, 80)).join("; ")}`);
+  }
   async function finish(reason, detail = "", extra = {}, codeOverride = null) {
     if (done) return done; // idempotent: exactly one RUN_TERMINAL and one telemetry emit
+    if (wtCreated && ["needs-human", "engine-error"].includes(reason)) await salvage(`this run (${reason})`); // before the trajectory lists it
     const code = codeOverride ?? codeForTerminalReason(reason);
     ev({ event: "RUN_TERMINAL", reason, code });
     await emit({ event: "RUN_TERMINAL", reason, code });
@@ -274,6 +313,7 @@ export async function runCore(o) {
   }
   const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over.";
   const PLAN_RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD` to see what exists, but plan against the issue itself. This step is still planning only: do not edit code, do not commit, and do not write the result file unless the issue is invalid, already fixed or blocked.";
+  const SALVAGE_NOTE = "\n\nAn earlier run on this issue stopped with uncommitted work, saved at `REF` (not on the branch). Inspect it with `git diff HEAD REF --stat` and reuse what fits the contract (`git checkout REF -- <path>`) instead of rewriting it.";
   const RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD`, verify that work against the contract, complete what is missing, re-run every validate command and write the result file. Do not start over.";
 
   /** Continuous admission (#4115): while the builder runs, pause its process group when the host is over the ceiling, resume when under. */
@@ -484,6 +524,10 @@ export async function runCore(o) {
       return await needsHuman(`Open PR #${resumed.pr} targets \`${resumed.base}\`, but #${issue}'s lane is \`${lane}\`; retarget or close it before rerunning.`,
         isDefaultLane(resumed.base, defaults) ? OUTCOME_CODES.LANE_DEFAULT_BRANCH : OUTCOME_CODES.LANE_MISMATCH);
     }
+    // #4162: a run that died can leave its runner writing into this worktree, and uncommitted work in it. Stop the
+    // processes and save the work before the worktree is removed; the lease above makes this run the only one doing so.
+    await stopWorktreeProcs();
+    salvagedRef = await salvage("an earlier run");
     try { await io.git(["worktree", "remove", "--force", wt], { cwd }); } catch { /* none */ }
     try { await io.git(["worktree", "prune"], { cwd }); } catch { /* best effort */ }
     // Concurrent lanes in one repo race on .git/config.lock / index.lock during `worktree add`; retry with jitter.
@@ -653,7 +697,7 @@ export async function runCore(o) {
     }
     T.plan = [`contract ${hash}`, `${frozen.requirements.length} requirement(s)`];
     if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
-    const implementPrompt = builderImplementPrompt() + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane));
+    const implementPrompt = builderImplementPrompt() + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "");
     liveKeys = ["implementation"];
     await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);
     result = await readResult();
