@@ -945,7 +945,7 @@ export async function runIssue(opts) {
         // "needs-human" — this is the engine/tool breaking, not a genuine
         // human-judgment block (see #2244/#2261). Any other thrown error is
         // a true unexpected crash and keeps propagating unchanged.
-        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" || e.code === "CLI_MAX_TURNS" || isDiskQuotaError(e)) {
+        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" || e.code === "CLI_BACKEND_UNAVAILABLE" || e.code === "CLI_MAX_TURNS" || isDiskQuotaError(e)) {
           // forge#2241: when the runner attached a session-limit reset time
           // (bin/runner.mjs's extractSessionLimitResetTime(), only ever set
           // for a genuine session-limit CLI_BACKEND_FAILED — never
@@ -1055,6 +1055,8 @@ export async function runIssue(opts) {
       usage: outcome.usage ?? null, last_attempt_usage: outcome.last_attempt_usage ?? null,
       // forge#3589: model + turn count per phase (null when the backend does not report them).
       model: outcome.model ?? null, turns: outcome.turns ?? null,
+      // forge#4257: the execution backend that ran the phase (null when unreported).
+      backend: outcome.backend ?? null,
       ...(commitReason ? { terminalReason: commitReason, code: commitCode } : {}),
     });
     state = deriveState(readLog(dir, issue));
@@ -1282,6 +1284,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
       event: "PHASE_ATTEMPT_USAGE", phase: phase.id, attempt,
       usage: usage ?? null, duration_ms: Math.round(performance.now() - t0),
       cost_usd: extra?.cost_usd ?? null, model: extra?.model ?? null, turns: extra?.turns ?? null,
+      backend: extra?.backend ?? null,
     };
     appendEvent(dir, issue, rec);
     try { await emitTelemetry?.({ ...rec, issue }); } catch { /* telemetry never fails a phase */ }
@@ -1348,7 +1351,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
         attempt--;
         continue;
       }
-      if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") throw e;
+      if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" || e.code === "CLI_BACKEND_UNAVAILABLE") throw e;
       // forge#2377: no `usage` field here — the runner threw, so no result
       // (and therefore no usage data) was ever produced for this attempt.
       // Do not fabricate a value; omitting the field (rather than a stale
@@ -1367,10 +1370,11 @@ async function runPhaseWithRetry(phase, state, ctx) {
     // forge#3589: model/turns recorded alongside usage (additive; null when absent).
     const lastModel = result?.cliModel ?? result?.model ?? null;
     const lastTurns = result?.turns ?? null;
+    const lastBackend = typeof result?.backend === "string" ? result.backend : null; // forge#4257
     addUsage(lastUsage);
-    await recordAttempt(attempt, lastUsage, t0, { cost_usd: result?.costUsd ?? null, model: lastModel, turns: lastTurns });
+    await recordAttempt(attempt, lastUsage, t0, { cost_usd: result?.costUsd ?? null, model: lastModel, turns: lastTurns, backend: lastBackend });
     const outcome = await phase.detectOutcome(state, io, result);
-    if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: cumulativeUsage, last_attempt_usage: lastUsage, model: lastModel, turns: lastTurns };
+    if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: cumulativeUsage, last_attempt_usage: lastUsage, model: lastModel, turns: lastTurns, backend: lastBackend };
     appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, code: normalizeCode(outcome.code), maxAttempts, usage: lastUsage, model: lastModel, turns: lastTurns });
     // forge#2176: a phase's detectOutcome can mark a failure as a known,
     // state-derived fixed point — re-running the phase's runner is

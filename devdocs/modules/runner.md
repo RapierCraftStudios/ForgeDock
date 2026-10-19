@@ -122,3 +122,9 @@ Cite: #3589 / PR #3610.
 PR #3782 touched `runner`. See FORGE:BUILDER comment on issue #3778 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/runner.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3778 / PR #3782.
+
+## Entry 2026-10-20 — Feat: api agent backend only as an explicit owner-approved option (#4257)
+
+`auto` no longer falls back to the paid API backend. `isApiBackendApproved({cwd, env})` gates every `auto`→`api` path (`resolveBackend`, `checkExecutionBackend`, the readiness upgrade and the vanished-binary branch in `runCommand`): it needs forge.yaml `execution.agent_backend: api` AND `FORGEDOCK_ALLOW_API_BACKEND=1`. Unapproved, `auto` resolves to `cli` and `runCommand` throws `CLI_BACKEND_UNAVAILABLE` (engine fail-fast, `engine.error`). Explicit `--backend api` is unchanged. The engine records the runner's `backend` on `PHASE_ATTEMPT_USAGE`/`PHASE_COMMIT` and in `phase_attempt` telemetry.
+Key gotcha recorded: tests that need a deterministic `auto` result pass `isCliAvailableFn` to `resolveBackend` and `apiApproved` to `checkExecutionBackend`.
+Cite: #4257; ADR devdocs/decisions/4257-api-backend-opt-in.md.
