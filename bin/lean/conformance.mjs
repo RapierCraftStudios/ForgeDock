@@ -118,25 +118,27 @@ export function applyAmendments(frozen, amendments, issueText = null) {
 
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
- * requirements not implemented, and deferrals without a tracking issue. Returns {ok, failures[]}.
+ * requirements not implemented, and deferrals without a tracking issue. Returns {ok, failures[]}; each failure carries a
+ * `kind` (scope_creep, validate_missing, validate_failed, requirement_unimplemented, untracked_deferral) so callers can
+ * tell the builder's own failed checks apart from bookkeeping gaps.
  */
 export function precheck({ contract, result, changedFiles, ignore = [] }) {
   const failures = [];
   const creep = changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(contract, f));
-  if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
+  if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
   const runs = Array.isArray(result?.validation) ? result.validation : [];
   for (const v of contract.validate ?? []) {
     const r = runs.find((x) => x?.id === v.id);
-    if (!r) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
-    else if (r.exit !== 0) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `validate ${v.id} failed (exit ${r.exit})` });
+    if (!r) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
+    else if (r.exit !== 0) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} failed (exit ${r.exit})` });
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];
   for (const r of contract.requirements ?? []) {
     const s = st.find((x) => x?.id === r.id)?.status;
     if (TRACKED.includes(r.disposition)) continue; // typed deferrals are judged by the reviewer, then filed before the PR
     if (r.disposition === "deliver") {
-      if (s === "deferred" || s === "post-deploy") failures.push({ code: C.CONFORMANCE_UNTRACKED_DEFERRAL, detail: `${r.id} was contracted as deliver but reported "${s}" without a typed amendment` });
-      else if (s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} reported "${s ?? "no status"}"` });
+      if (s === "deferred" || s === "post-deploy") failures.push({ code: C.CONFORMANCE_UNTRACKED_DEFERRAL, kind: "untracked_deferral", detail: `${r.id} was contracted as deliver but reported "${s}" without a typed amendment` });
+      else if (s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "requirement_unimplemented", detail: `${r.id} reported "${s ?? "no status"}"` });
     }
   }
   return { ok: failures.length === 0, failures };
@@ -235,4 +237,31 @@ export function closePlan(contract) {
 export function followupItems(reqs) {
   const flat = (s) => String(s ?? "").replace(/[\t\r\n`]+/g, " ").replace(/\s+/g, " ").trim();
   return reqs.map((r) => ({ id: r.id, key: flat(`${r.id}: ${r.quote}`).slice(0, 240), why: flat(`${r.disposition}: ${r.why ?? ""}`).slice(0, 400) }));
+}
+
+/**
+ * forge#4159: package.json edges between workspace packages (scripts/structure-delta.sh `package_edges_added`) that
+ * the contract does not name. Named = a deliverable covering the edge's manifest whose `change` names the target
+ * package (an add-deliverable amendment counts: its change is the why). A null or `{}` delta names nothing to check.
+ */
+export function unnamedEdges(contract, delta) {
+  const edges = Array.isArray(delta?.package_edges_added) ? delta.package_edges_added : [];
+  const dels = contract?.deliverables ?? [];
+  return edges.filter((e) => e?.manifest && e?.to && !dels.some((d) => pathCovers(d.path, e.manifest) && String(d.change ?? "").includes(e.to)));
+}
+
+/**
+ * forge#4159: the one report-only line for the existing reviewer prompt, or "" when there is no import-pair growth
+ * and no boundary-config loosening. Never blocks; adds no reviewer run.
+ */
+export function structureNote(delta) {
+  const grow = (Array.isArray(delta?.import_pairs) ? delta.import_pairs : []).filter((p) => p?.files_added > 0);
+  const b = delta?.boundary_config_changed;
+  const loosened = Boolean(b?.loosens);
+  if (!grow.length && !loosened) return "";
+  const pairs = grow.map((p) => `${p.files_added} value import${p.files_added === 1 ? "" : "s"} ${p.from}→${p.to}`).join(", ");
+  const files = (Array.isArray(b?.files) ? b.files : []).join(", ");
+  const config = loosened ? `the repo's boundary config was loosened in this PR (${files})` : "the repo's boundary config allows it";
+  const s = grow.length ? `this PR adds ${pairs} (files); ${config}` : `this PR loosens the repo's boundary config (${files})`;
+  return `Structure (report only): ${s}; flag only if the contract or the architecture doc says otherwise.`.replace(/[\r\n]+/g, " ");
 }

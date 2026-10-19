@@ -37,6 +37,10 @@ describe("engine telemetry seam", () => {
     assert.deepEqual(calls[0][1], { reason: "needs-human", code: "review.escalated", wall_ms: 60000 });
     assert.equal(calls[0][2].phase, undefined);
   });
+  it("maps STRUCTURE_DELTA (forge#4159) to structure_delta with scalar counts and 0/1 flags", () => {
+    const m = mapRecord({ event: "STRUCTURE_DELTA", issue: 7, edges_added: 1, edges_removed: 0, import_files_added: 8, import_files_removed: 2, boundary_changed: true, boundary_loosened: false }, 10);
+    assert.deepEqual(m, { event: "structure_delta", phase: "implement", payload: { edges_added: 1, edges_removed: 0, import_files_added: 8, import_files_removed: 2, boundary_changed: 1, boundary_loosened: 0 } });
+  });
   it("null usage yields a record with no token fields", () => {
     assert.deepEqual(mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1, usage: null, duration_ms: 5 }).payload, { attempt: 1, duration_ms: 5 });
   });
