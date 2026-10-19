@@ -788,6 +788,9 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * Maintenance budget (#4197), only with forge.yaml `maintenance.enabled: true` (or `deps.maintenance`): open issues carrying
  * a `maintenance.labels` label join the batch, each issue is classified from its labels (maintenance; `priority:P<n>`,
  * unlabelled = P2) and admission reserves `maintenance.share` of lane starts for maintenance (`when_idle` drains the rest).
+ * Host lane registry (#4191): every lane takes a slot in `~/.forge/sched/` (or `FORGEDOCK_SCHED_DIR`), capped host-wide by
+ * `forgedock sched cap N` or forge.yaml `orchestration.global_parallel`; each issue's priority comes from its
+ * `priority:P<n>` / `P<n>` labels (unlabelled = P2), read in the same gh call as its body.
  */
 export async function orchestrateFromCli(argv, deps = {}) {
   const batchMod = await import("./lean/batch.mjs");
@@ -870,7 +873,13 @@ export async function orchestrateFromCli(argv, deps = {}) {
   const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile());
   const identity = deps.identity ?? (() => limitsMod.laneBackendId(process.env));
   const maint = deps.maintenance !== undefined ? deps.maintenance : readMaintenance(cwd);
+  const schedMod = await import("./lean/sched.mjs");
+  const registry = deps.sched !== undefined ? deps.sched : schedMod.openSched(schedMod.schedDir());
   const labelsOf = new Map(); // issue -> label names, filled by readBody (one gh call per issue)
+  const labelNames = async (n) => {
+    if (!labelsOf.has(n)) labelsOf.set(n, (JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])).labels ?? []).map((x) => x.name));
+    return labelsOf.get(n);
+  };
   let budget = {};
   if (maint) {
     const mLabels = maint.labels ?? DEFAULT_MAINTENANCE_LABELS;
@@ -884,8 +893,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
       }
     }
     const classify = async (n) => {
-      if (!labelsOf.has(n)) labelsOf.set(n, (JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "labels"])).labels ?? []).map((x) => x.name));
-      const names = labelsOf.get(n);
+      const names = await labelNames(n);
       const p = names.map((x) => /^priority:P(\d+)$/i.exec(x)?.[1]).find((x) => x !== undefined);
       return { maintenance: names.some((x) => mLabels.includes(x)), priority: p === undefined ? 2 : Number(p) };
     };
@@ -895,11 +903,12 @@ export async function orchestrateFromCli(argv, deps = {}) {
   const rows = await orchestrate({
     issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
     breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id,
+    ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
     onCrossLane: (e) => {
       crossLane.push(e);
       console.log(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
     },
-    readBody: maint
+    readBody: maint || registry
       ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); return v.body; }
       : async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
     onUpdate: (r) => console.log(r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`),
@@ -941,8 +950,38 @@ export async function limitsFromCli(argv, deps = {}) {
 }
 
 /**
- * forge.yaml `orchestration.breaker` ({errors, window_min}; default 3 engine-errors in 30 min; errors 0 turns it off) and
- * `orchestration.max_deferrals` (default 3). The parser flattens one nested level, so the breaker keys arrive as
+ * `forgedock sched show` · `forgedock sched cap <N>|--clear` (#4191)
+ * The host lane registry (`~/.forge/sched/`, or `FORGEDOCK_SCHED_DIR`) shared by every `forgedock orchestrate` batch.
+ * `show` prints the cap, the running slots and the queued issues in grant order; `cap N` sets the host-wide cap live
+ * (the next admission pass of every batch uses it); `cap --clear` falls back to each batch's `orchestration.global_parallel`.
+ */
+export async function schedFromCli(argv, deps = {}) {
+  const schedMod = await import("./lean/sched.mjs");
+  const reg = deps.sched ?? schedMod.openSched(schedMod.schedDir());
+  const usage = "usage: forgedock sched show | forgedock sched cap <N>|--clear";
+  const [sub, arg] = argv;
+  if (!sub || sub === "show") {
+    const st = reg.list();
+    const who = (e) => `#${e.issue} ${e.repo ?? "-"} batch ${e.batch ?? "-"} P${e.priority}`;
+    console.log(`host cap: ${st.cap ?? "none set here (each batch's orchestration.global_parallel applies)"}; running ${st.slots.length}, queued ${st.queue.length}`);
+    for (const e of st.slots) console.log(`  running ${who(e)}  dispatcher ${e.pid}${e.lanePid ? ` lane ${e.lanePid}` : ""}`);
+    for (const e of st.queue) console.log(`  queued  ${who(e)}  dispatcher ${e.pid}`);
+    return st;
+  }
+  if (sub === "cap") {
+    if (arg === "--clear") { reg.setCap(null); console.log("host cap cleared"); return { cap: null }; }
+    const k = Number(arg);
+    if (!/^\d+$/.test(String(arg ?? "")) || !Number.isInteger(k) || k < 1) throw new Error(usage);
+    reg.setCap(k);
+    console.log(`host cap set to ${k}`);
+    return { cap: k };
+  }
+  throw new Error(usage);
+}
+
+/**
+ * forge.yaml `orchestration.breaker` ({errors, window_min}; default 3 engine-errors in 30 min; errors 0 turns it off),
+ * `orchestration.max_deferrals` (default 3) and `orchestration.global_parallel` (#4191: host-wide lane cap; unset = none). The parser flattens one nested level, so the breaker keys arrive as
  * `orchestration.errors|window_min` (or flat `breaker_errors|breaker_window_min`).
  */
 export function readOrchestration(cwd = process.cwd()) {
@@ -950,7 +989,8 @@ export function readOrchestration(cwd = process.cwd()) {
   try { o = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.orchestration ?? {}; } catch { o = {}; }
   const int = (v, d) => { const n = Number(v); return v !== undefined && v !== "" && Number.isInteger(n) && n >= 0 ? n : d; };
   const errors = int(o.breaker_errors ?? o.errors, 3), windowMin = int(o.breaker_window_min ?? o.window_min, 30);
-  return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3) };
+  const gp = int(o.global_parallel, null);
+  return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), globalParallel: gp >= 1 ? gp : null };
 }
 
 export const DEFAULT_MAINTENANCE_LABELS = ["maintenance", "refactor:split", "dead-code"];

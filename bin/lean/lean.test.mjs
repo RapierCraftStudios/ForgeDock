@@ -21,6 +21,8 @@ import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { readAdmission, readConformanceMode, readEnvConfig } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS, readMaintenance } from "../engine-cli.mjs";
+// orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir.
+process.env.FORGEDOCK_SCHED_DIR = tmpDir("lean-sched-");
 
 const WT = "/wt/lean-7";
 const STAGE_MD = {
@@ -1641,7 +1643,8 @@ describe("orchestrate maintenance budget (#4197)", () => {
     try {
       await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...mk(), maintenance: null });
       assert.deepEqual(ran, [1]);
-      assert.ok(!calls.some((c) => c.startsWith("issue list") || c.includes("body,labels")), calls.join("\n"));
+      // No maintenance scan without the budget; labels (host priority, #4191) ride on the body call, never a call of their own.
+      assert.ok(!calls.some((c) => c.startsWith("issue list") || c.endsWith("--json labels")), calls.join("\n"));
       ran.length = 0; calls.length = 0;
       const res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...mk(), maintenance: { share: 0.5, whenIdle: true, labels: ["maintenance"] } });
       assert.deepEqual(ran, [1, 9]);
