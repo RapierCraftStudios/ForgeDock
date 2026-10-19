@@ -1097,20 +1097,24 @@ export async function limitsFromCli(argv, deps = {}) {
 }
 
 /**
- * `forgedock sched show` · `forgedock sched cap <N>|--clear` (#4191)
+ * `forgedock sched show` · `forgedock sched cap <N>|--clear` (#4191) · `forgedock sched weight <owner/repo> <N>|--clear` (#4193)
  * The host lane registry (`~/.forge/sched/`, or `FORGEDOCK_SCHED_DIR`) shared by every `forgedock orchestrate` batch.
- * `show` prints the cap, the running slots and the queued issues in grant order; `cap N` sets the host-wide cap live
- * (the next admission pass of every batch uses it); `cap --clear` falls back to each batch's `orchestration.global_parallel`.
+ * `show` prints the cap, the repo weights, the running slots and the queued issues in grant order; `cap N` sets the
+ * host-wide cap live (the next admission pass of every batch uses it); `cap --clear` falls back to each batch's
+ * `orchestration.global_parallel`. `weight <owner/repo> N` sets that repo's share of slots within a priority (default 1);
+ * `--clear` resets it to 1.
  */
 export async function schedFromCli(argv, deps = {}) {
   const schedMod = await import("./lean/sched.mjs");
   const reg = deps.sched ?? schedMod.openSched(schedMod.schedDir());
-  const usage = "usage: forgedock sched show | forgedock sched cap <N>|--clear";
-  const [sub, arg] = argv;
+  const usage = "usage: forgedock sched show | forgedock sched cap <N>|--clear | forgedock sched weight <owner/repo> <N>|--clear";
+  const [sub, arg, arg2] = argv;
   if (!sub || sub === "show") {
     const st = reg.list();
     const who = (e) => `#${e.issue} ${e.repo ?? "-"} batch ${e.batch ?? "-"} P${e.priority}`;
     console.log(`host cap: ${st.cap ?? "none set here (each batch's orchestration.global_parallel applies)"}; running ${st.slots.length}, queued ${st.queue.length}`);
+    const ws = Object.entries(st.weights ?? {});
+    console.log(`repo weights: ${ws.length ? ws.map(([r, n]) => `${r}=${n}`).join(", ") : "equal (none set)"}`);
     for (const e of st.slots) console.log(`  running ${who(e)}  dispatcher ${e.pid}${e.lanePid ? ` lane ${e.lanePid}` : ""}`);
     for (const e of st.queue) console.log(`  queued  ${who(e)}  dispatcher ${e.pid}`);
     return st;
@@ -1122,6 +1126,15 @@ export async function schedFromCli(argv, deps = {}) {
     reg.setCap(k);
     console.log(`host cap set to ${k}`);
     return { cap: k };
+  }
+  if (sub === "weight") {
+    if (!arg || arg.startsWith("-")) throw new Error(usage);
+    if (arg2 === "--clear") { reg.setWeight(arg, null); console.log(`weight of ${arg} reset to 1`); return { repo: arg, weight: null }; }
+    const n = Number(arg2);
+    if (!/^\d+$/.test(String(arg2 ?? "")) || !Number.isInteger(n) || n < 1) throw new Error(usage);
+    reg.setWeight(arg, n);
+    console.log(`weight of ${arg} set to ${n}`);
+    return { repo: arg, weight: n };
   }
   throw new Error(usage);
 }

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { openSched, priorityFromLabels } from "./sched.mjs";
+import { grantOrder, openSched, priorityFromLabels } from "./sched.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 import { schedFromCli } from "../engine-cli.mjs";
 
@@ -212,5 +212,99 @@ describe("host lane registry (#4191)", () => {
       priorityOf: async (n) => (n === 2 ? 0 : 2), store: { load: () => null, save: (s) => { store = s; } } });
     assert.deepEqual(order, [3, 1, 2]);
     assert.equal("priorities" in store, false);
+  });
+});
+
+describe("cross-repo fairness weights (#4193)", () => {
+  // Two repos, one dispatcher each, keep twice the cap queued at P2 (o/b offers its first batch before o/a). Each
+  // round the oldest running lane ends and every queued key retries, lowest-ranked first, so only the registry's
+  // grant order decides who starts.
+  const saturate = ({ weights = {}, cap = 6 } = {}) => {
+    const { handle } = world();
+    const disp = { "o/a": handle(501), "o/b": handle(502) };
+    for (const [r, n] of Object.entries(weights)) disp["o/a"].setWeight(r, n);
+    const next = { "o/a": 0, "o/b": 0 };
+    const offer = (repo, priority = 2) => {
+      const n = ++next[repo];
+      disp[repo].offer([{ key: `${repo}#${n}`, batch: repo, repo, issue: n, priority }]);
+      return `${repo}#${n}`;
+    };
+    for (const r of ["o/b", "o/a"]) for (let i = 0; i < cap * 2; i++) offer(r);
+    const pass = () => {
+      for (let granted = true; granted;) {
+        granted = false;
+        for (const q of disp["o/a"].list().queue.reverse()) {
+          if (disp[q.repo].tryAcquire(q.key, q, cap).ok) { granted = true; if (q.priority === 2) offer(q.repo); }
+        }
+      }
+    };
+    const slots = () => disp["o/a"].list().slots;
+    const running = () => { const c = { "o/a": 0, "o/b": 0 }; for (const s of slots()) c[s.repo]++; return c; };
+    const endOldest = () => { const s = slots().sort((x, y) => x.at - y.at)[0]; disp[s.repo].release(s.key); };
+    return { disp, offer, pass, slots, running, endOldest };
+  };
+
+  it("two repos weighted 2:1, both saturated at one priority: running lanes converge to 2:1", () => {
+    const w = saturate({ weights: { "o/a": 2 } });
+    w.pass();
+    assert.deepEqual(w.running(), { "o/a": 4, "o/b": 2 }, "the first fill already follows the weights, not who offered first");
+    for (let round = 0; round < 40; round++) {
+      w.endOldest();
+      w.pass();
+      assert.deepEqual(w.running(), { "o/a": 4, "o/b": 2 }, `round ${round}`);
+    }
+  });
+
+  it("default weights are equal: a repo that offered first does not take every slot", () => {
+    const w = saturate();
+    w.pass();
+    assert.deepEqual(w.running(), { "o/a": 3, "o/b": 3 });
+    for (let round = 0; round < 20; round++) { w.endOldest(); w.pass(); assert.deepEqual(w.running(), { "o/a": 3, "o/b": 3 }); }
+  });
+
+  it("a P0 from any repo still starts next, even from the repo already at its share", () => {
+    const w = saturate({ weights: { "o/a": 2 } });
+    w.pass();
+    const p0 = w.offer("o/b", 0);
+    assert.equal(w.disp["o/a"].list().queue[0].key, p0, "the P0 heads the queue ahead of the heavier repo's P2s");
+    assert.equal(w.disp["o/a"].tryAcquire("o/a#13", { repo: "o/a", priority: 2 }, 6).ok, false, "no slot free");
+    w.endOldest();
+    assert.equal(w.disp["o/a"].tryAcquire(w.disp["o/a"].list().queue[1].key, { repo: "o/a", priority: 2 }, 6).ok, false, "the freed slot belongs to the P0");
+    assert.equal(w.disp["o/b"].tryAcquire(p0, { repo: "o/b", priority: 0 }, 6).ok, true);
+    assert.ok(w.slots().some((s) => s.key === p0));
+  });
+
+  it("grantOrder on an injected queue: priority first, then load/weight across repos, FIFO inside a repo", () => {
+    const q = (repo, seq, priority = 2, batch = null) => ({ repo, batch, issue: seq, priority, seq });
+    const s = {
+      weights: {},
+      slots: { "x#1": { repo: "o/a", priority: 2 }, "x#2": { repo: "o/a", priority: 1 } },
+      queue: { a1: q("o/a", 1), a2: q("o/a", 2), a3: q("o/a", 3), b1: q("o/b", 4), b2: q("o/b", 5), c0: q("o/c", 9, 0) },
+    };
+    assert.deepEqual(grantOrder(s).map(([k]) => k), ["c0", "b1", "b2", "a1", "a2", "a3"]);
+    s.weights = { "o/a": 3 };
+    assert.deepEqual(grantOrder(s).map(([k]) => k), ["c0", "b1", "a1", "a2", "b2", "a3"], "ties in load/weight go to the heavier repo");
+    // One repo (or no repo, grouped by batch, else by key): plain FIFO, as before #4193.
+    const one = { weights: {}, slots: {}, queue: { k3: q(null, 3, 2, "B"), k1: q(null, 1, 2, "B"), k2: q(null, 2, 2, "B") } };
+    assert.deepEqual(grantOrder(one).map(([k]) => k), ["k1", "k2", "k3"]);
+    const none = { weights: {}, slots: {}, queue: { k3: q(null, 3), k1: q(null, 1), k2: q(null, 2) } };
+    assert.deepEqual(grantOrder(none).map(([k]) => k), ["k1", "k2", "k3"]);
+  });
+
+  it("forgedock sched weight sets and clears a repo's weight; show lists it; invalid input is rejected", async () => {
+    const { handle } = world();
+    const a = handle(601);
+    assert.deepEqual(a.weights(), {});
+    await quiet(() => schedFromCli(["weight", "o/a", "2"], { sched: a }));
+    assert.deepEqual(a.weights(), { "o/a": 2 });
+    const shown = await quiet(() => schedFromCli(["show"], { sched: a }));
+    assert.deepEqual(shown.weights, { "o/a": 2 });
+    await quiet(() => schedFromCli(["weight", "o/a", "--clear"], { sched: a }));
+    assert.deepEqual(a.weights(), {});
+    for (const bad of [["weight"], ["weight", "o/a"], ["weight", "o/a", "0"], ["weight", "o/a", "1.5"], ["weight", "--clear"]]) {
+      await assert.rejects(() => quiet(() => schedFromCli(bad, { sched: a })), /usage: forgedock sched/);
+    }
+    assert.throws(() => a.setWeight("o/a", 0), /positive integer/);
+    assert.throws(() => a.setWeight("", 2), /non-empty/);
   });
 });
