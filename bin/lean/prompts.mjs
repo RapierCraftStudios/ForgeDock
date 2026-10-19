@@ -34,6 +34,12 @@ export function ciFailurePrompt(failures, mode = "local") {
   return `CI failed on the pushed branch:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
+/** The repo's declared check commands (forge.yaml learned.test_commands) failed before the PR (#4240): fixed in-session. */
+export function precheckFailurePrompt(failures, mode = "local") {
+  const list = failures.slice(0, 10).map((f) => `#### \`${f.command}\` (exit ${f.rc})\n${f.output ? `\`\`\`\n${f.output}\n\`\`\`` : "(no output)"}`).join("\n\n");
+  return `The repo's declared check commands failed in this worktree, before the PR is opened:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). Re-run each failing command, ${mode === "ci" ? `${LIGHT} otherwise, ` : ""}commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
 /** CI could not run (no workflow run, no checks, dispatch refused): the local fallback (#4167). */
 export function ciUnavailablePrompt() {
   return `CI verification is unavailable for this branch, so verification falls back to this host. Run every validate command locally (targeted, as the host rules say), fix any failure, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE} with each command's real exit code. Do not push or touch GitHub.`;

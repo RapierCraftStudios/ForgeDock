@@ -527,6 +527,7 @@ verify:
   paths_input: changed_paths    # optional workflow_dispatch input that receives the changed paths (newline-separated)
   skip_paths: "*.md,docs/**"    # optional, comma-separated; default *.md,*.mdx,*.rst,*.txt,docs/**,devdocs/**
   max_rounds: 2                 # optional CI fix rounds before needs-human (default 2)
+  precheck_timeout_seconds: 300 # optional per-command timeout of the declared pre-PR checks (default 300)
 ```
 
 | Key | Type | Required | Description |
@@ -535,7 +536,8 @@ verify:
 | `workflow` | string | No | Workflow file name or id dispatched on the lane branch (`gh workflow run <workflow> --ref <branch>`). The engine waits for the `workflow_dispatch` run of the lane's head commit. Without it, the engine waits on the head commit's push-triggered check runs. |
 | `paths_input` | string | No | Name of a `workflow_dispatch` input that receives the changed paths, so the workflow can scope its jobs to the change. |
 | `skip_paths` | string | No | Comma-separated globs. A glob without `/` matches the basename anywhere; `**` spans directories. When every changed file matches, the lane skips CI verification (a docs-only lane runs no CI matrix). |
-| `max_rounds` | integer | No | Builder fix rounds for red CI (0–10, default 2). |
+| `max_rounds` | integer | No | Builder fix rounds for red CI (0–10, default 2). Also bounds the merge-time fix rounds and the declared-check fix rounds below, in every mode. |
+| `precheck_timeout_seconds` | integer | No | Timeout of each declared check command (1–3600, default 300); a timed-out command counts as failed (exit 124). |
 
 **Flow** (`ci`/`hybrid`, `bin/lean/verify.mjs` `runCiVerify`):
 
@@ -546,6 +548,11 @@ verify:
 5. CI unavailable (dispatch refused, or no run or check for the head within 5 minutes): one local fallback. The builder runs every validate command on the host and records real exit codes.
 
 Each verification emits a `CI_VERIFY` run-log/telemetry event (`mode`, `round`, `result`, `skipped`, `run_url`) and adds a **Verify** row to the trajectory.
+
+**Every mode, including the default `local` (forge#4240):**
+
+- **Declared check commands before the PR.** Each `learned.test_commands` entry (a block list under `learned:`) runs with `bash -c` in the lane worktree after the build commit, before review and before the PR, with the per-command timeout above. These run on the host and use no Actions minutes. If they all pass, there is no extra builder turn. A failure resumes the builder in its session with the command, its exit code and the output tail, then the commands run again, up to `max_rounds`. A round with no new commit, or exhausted rounds, is recorded as an anomaly and the lane continues, because CI stays the gate. The engine has no built-in command list: to run `scripts/ci-local.sh`, list it here. Each round emits a `PRECHECK_COMMANDS` run-log event (`round`, `results: [{command, rc}]`).
+- **Fix rounds at merge.** When a required check fails on the PR (`engine.merge_wait: required`), the failed jobs' logs (`gh run view --log-failed`, capped) go back to the builder session. The fixed head is re-reviewed and pushed, then the wait starts again. Still red after `max_rounds` (one budget shared with the `ci`/`hybrid` rounds above), or a round with no new commit, ends `needs-human` (`ci.red`). `max_rounds: 0` ends `ci.red` on the first failure. Each round emits a `CI_FIX_ROUND` run-log event (`trigger`, `round`, `jobs`). `merge_wait: all` is unchanged.
 
 **Cost:** `ci`/`hybrid` spend GitHub Actions minutes before review, so they are opt-in per repo. On the green path they add no LLM calls; each red CI round adds one builder resume. The merge gate (`engine.merge_wait`) is unchanged.
 

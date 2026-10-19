@@ -2633,8 +2633,8 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     const d = tmpDir("verify-yaml-");
     writeFileSync(`${d}/forge.yaml`, "engine:\n  conformance: shadow\n");
     assert.equal(readVerify(d), undefined);
-    writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n");
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3 });
+    writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n");
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60 });
   });
 });
 
@@ -2838,6 +2838,107 @@ describe("host-aware verification concurrency (#4182)", () => {
     assert.ok(workers <= 2);
     assert.equal((await checkAdmission({ host: host({ cores, load: lanes * workers }) })).ok, true);
     assert.equal((await checkAdmission({ host: host({ cores, load: lanes * workers }) })).reasons.length, 0);
+  });
+});
+
+describe("local-mode CI fix rounds at merge and declared pre-PR check commands (#4240)", () => {
+  const RUN_URL = "https://github.com/o/r/actions/runs/555/job/1";
+  /** checkStates fed from a list of {state: {name: state}}; each entry is reported for the PR's current head. */
+  const withChecks = (w, seq) => {
+    w.logsFor = [];
+    w.io.requiredChecks = async () => ["Unit tests"];
+    w.io.checkStates = async () => { const s = seq.length > 1 ? seq.shift() : seq[0]; return Object.entries(s).map(([name, state]) => ({ name, state, url: RUN_URL, head: w.head })); };
+    w.io.failedLogs = async (id) => { w.logsFor.push(id); return "not ok 1 - test uses mkdtempSync, not tmpDir"; };
+    return w;
+  };
+  const ciFixes = (w) => builders(w).filter((b) => /CI failed on the pushed branch/.test(b[4]));
+
+  it("local mode: a required-check failure resumes the builder with the failed log; the green re-run merges the re-reviewed head", async () => {
+    const w = withChecks(world(), [{ "Unit tests": "failure" }, { "Unit tests": "success" }]);
+    const dir = tmpDir("core-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const fix = ciFixes(w);
+    assert.equal(fix.length, 1); assert.equal(fix[0][2], "sess-1");
+    assert.match(fix[0][4], /mkdtempSync, not tmpDir/); assert.match(fix[0][4], /actions\/runs\/555/);
+    assert.deepEqual(w.logsFor, ["555"]);
+    assert.equal(reviewers(w).length, 2, "the fixed head is reviewed again before merge");
+    assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+    const round = readLog(dir, 7).find((e) => e.event === "CI_FIX_ROUND");
+    assert.deepEqual([round.trigger, round.round, round.jobs], ["merge", 1, ["Unit tests"]]);
+  });
+
+  it("local mode: still red after verify.max_rounds ends ci.red and nothing merges", async () => {
+    const w = withChecks(world(), [{ "Unit tests": "failure" }]);
+    const r = await run(w, { verify: { maxRounds: 1 } });
+    assert.equal(r.code, "ci.red"); assert.equal(w.merges.length, 0); assert.equal(ciFixes(w).length, 1);
+  });
+
+  it("verify.max_rounds 0 keeps the old behaviour: ci.red on the first failure, no builder resume", async () => {
+    const w = withChecks(world(), [{ "Unit tests": "failure" }]);
+    const r = await run(w, { verify: { maxRounds: 0 } });
+    assert.equal(r.code, "ci.red"); assert.equal(ciFixes(w).length, 0);
+  });
+
+  it("local mode: a fix round that makes no new commit ends ci.red immediately (no loop)", async () => {
+    const w = withChecks(world(), [{ "Unit tests": "failure" }]);
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { const h = w.head; const res = await inner(c); if (/CI failed on the pushed branch/.test(c.prompt)) w.head = h; return res; };
+    const r = await run(w, { verify: { maxRounds: 5 } });
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "ci.red");
+    assert.equal(ciFixes(w).length, 1); assert.equal(w.merges.length, 0);
+  });
+
+  it("a rollup still reporting the pre-fix head counts as pending, not as a second failure", async () => {
+    const w = withChecks(world(), [{ "Unit tests": "failure" }]);
+    let calls = 0;
+    w.io.checkStates = async () => {
+      calls++;
+      if (calls === 1) return [{ name: "Unit tests", state: "failure", url: RUN_URL, head: w.head }];
+      return calls === 2 ? [{ name: "Unit tests", state: "failure", url: RUN_URL, head: "0123456789abcdef" }] : [{ name: "Unit tests", state: "success", url: RUN_URL, head: w.head }];
+    };
+    const r = await run(w, { verify: { maxRounds: 1 } });
+    assert.equal(r.terminalReason, "merged"); assert.equal(ciFixes(w).length, 1);
+  });
+
+  it("pre-PR: declared commands run in the lane worktree; a failing one goes back to the builder before PR_OPENED", async () => {
+    const w = world(); const ran = [];
+    let rc = 1;
+    w.io.runCommand = async ({ command, cwd, timeoutMs }) => { ran.push([command, cwd, timeoutMs]); w.seq.push(`check:${rc}`); const r = { rc, output: "check-test-tmp-cleanup: mkdtempSync in x.test.mjs" }; return r; };
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { if (/declared check commands failed/.test(c.prompt)) rc = 0; return inner(c); };
+    const dir = tmpDir("core-");
+    const r = await run(w, { dir, precheck: { commands: ["bash scripts/check-test-tmp-cleanup.sh"] } });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(ran.map((x) => x.slice(0, 2)), [["bash scripts/check-test-tmp-cleanup.sh", WT], ["bash scripts/check-test-tmp-cleanup.sh", WT]]);
+    assert.equal(ran[0][2], 300000);
+    const fix = builders(w).filter((b) => /declared check commands failed/.test(b[4]));
+    assert.equal(fix.length, 1); assert.equal(fix[0][2], "sess-1"); assert.match(fix[0][4], /mkdtempSync in x\.test\.mjs/); assert.match(fix[0][4], /exit 1/);
+    assert.ok(w.seq.indexOf("builder-resume", w.seq.indexOf("check:1")) < w.seq.indexOf("pr"), "the fix runs before the PR is opened");
+    const log = readLog(dir, 7);
+    const pre = log.filter((e) => e.event === "PRECHECK_COMMANDS");
+    assert.deepEqual(pre.map((e) => e.results), [[{ command: "bash scripts/check-test-tmp-cleanup.sh", rc: 1 }], [{ command: "bash scripts/check-test-tmp-cleanup.sh", rc: 0 }]]);
+    assert.ok(log.findIndex((e) => e.event === "PRECHECK_COMMANDS") < log.findIndex((e) => e.event === "PR_OPENED"));
+  });
+
+  it("pre-PR: a passing set adds no builder turn; no commands configured runs nothing", async () => {
+    const w = world(); let n = 0;
+    w.io.runCommand = async () => { n++; return { rc: 0, output: "" }; };
+    assert.equal((await run(w, { precheck: { commands: ["true", "  ", "make lint"] } })).terminalReason, "merged");
+    assert.equal(n, 2); assert.equal(builders(w).length, 2, "plan and implement only");
+    const w2 = world(); let n2 = 0; w2.io.runCommand = async () => { n2++; return { rc: 0, output: "" }; };
+    assert.equal((await run(w2)).terminalReason, "merged"); assert.equal(n2, 0);
+  });
+
+  it("pre-PR: a fix round with no new commit is an anomaly and the lane continues to review (CI stays the gate)", async () => {
+    const w = world();
+    w.io.runCommand = async () => ({ rc: 2, output: "lint failed" });
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { const h = w.head; const res = await inner(c); if (/declared check commands failed/.test(c.prompt)) w.head = h; return res; };
+    const r = await run(w, { precheck: { commands: ["make lint"] }, verify: { maxRounds: 3 } });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 1);
+    assert.match(traj(w)[0], /builder made no new commit for them/);
   });
 });
 
