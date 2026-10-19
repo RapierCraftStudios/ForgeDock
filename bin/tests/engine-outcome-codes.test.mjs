@@ -64,7 +64,7 @@ const COVERAGE = {
   "build.cohesive": "reserved", "remediate.no_marker": "remediate.detectOutcome",
   "remediate.deferred_live_run": "remediate.detectOutcome", "remediate.re_escalated": "remediate.detectOutcome",
   "remediate.unfixable": "remediate.detectOutcome", "remediate.inpr_requested": "remediate.detectOutcome", "infra.cli_spawn_transient": "engine", "cli.timeout": "engine", "cli.spawn_failed": "lean", "ci.red": "reserved", "ci.timeout": "reserved",
-  "base.conflict": "reserved", "rate_limited": "engine", "host.busy": "lean", "merge.transient": "lean", "push.transient": "lean", "cli.idle": "lean", "path.switch_conflict": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
+  "base.conflict": "reserved", "rate_limited": "engine", "host.busy": "lean", "gh.unavailable": "engine", "merge.transient": "lean", "push.transient": "lean", "cli.idle": "lean", "run.interrupted": "lean", "path.switch_conflict": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
   "dependency.open": "engine", "dependency.unreadable": "engine", "dependency.blocked": "lean",
   "lane.mismatch": "lean", "lane.default_branch": "lean", "lane.branch_missing": "lean", "lane.unresolved": "lean",
   "invalid": "engine", "decomposed": "investigate.detectOutcome", "completed": "engine",
@@ -72,7 +72,7 @@ const COVERAGE = {
   "review.failed": "lean", "review.no_verdict": "lean", "merge.head_mismatch": "lean",
   "contract.invalid": "lean", "review.incomplete": "lean", "review.inconsistent": "lean", "conformance.omission": "lean",
   "conformance.unimplemented": "lean", "conformance.scope_creep": "lean", "conformance.untracked_deferral": "lean", "conformance.unjustified_deferral": "lean",
-  "conformance.preserve_violated": "lean", "conformance.regression": "lean", "followup.unavailable": "lean",
+  "conformance.preserve_violated": "lean", "conformance.regression": "lean", "structure.undeclared_edge": "lean", "followup.unavailable": "lean",
   "awaiting_merge": "codeForTerminalReason", "unclassified": "engine",
 };
 

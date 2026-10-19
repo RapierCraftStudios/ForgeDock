@@ -654,3 +654,69 @@ describe("buildMinimalForgeYaml", () => {
     assert.ok(yaml.includes('description: "has \\"quotes\\""'));
   });
 });
+
+// =============================================================================
+// Empty repo / no remote / missing staging signals (forge#4173)
+// =============================================================================
+
+describe("detectConfig — empty repo / no remote meta (forge#4173)", async () => {
+  let tmpDir;
+
+  before(() => {
+    tmpDir = makeTmpDir("forge-detect-empty-");
+  });
+
+  after(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("git-init repo with no commits: hasCommits=false, unbornBranch set, default branch is the unborn name", async () => {
+    const repo = join(tmpDir, "unborn");
+    mkdirSync(repo, { recursive: true });
+    git(["init", "-b", "trunk", repo], os.tmpdir());
+    const draft = await detectConfig(repo);
+    assert.equal(draft.meta.isGitRepo, true);
+    assert.equal(draft.meta.hasCommits, false);
+    assert.equal(draft.meta.unbornBranch, "trunk");
+    assert.equal(draft.meta.remoteDetected, false);
+    assert.equal(draft.meta.stagingMissing, true);
+    assert.equal(draft.branches.default.value, "trunk");
+    assert.equal(draft.branches.default.confidence, "medium");
+    assert.equal(draft.branches.default.source, "git symbolic-ref --short HEAD");
+  });
+
+  it("repo with commits and no remote: hasCommits=true, unbornBranch empty, remoteDetected=false", async () => {
+    const repo = makeLocalRepo(join(tmpDir, "committed"), "main");
+    const draft = await detectConfig(repo);
+    assert.equal(draft.meta.isGitRepo, true);
+    assert.equal(draft.meta.hasCommits, true);
+    assert.equal(draft.meta.unbornBranch, "");
+    assert.equal(draft.meta.remoteDetected, false);
+    assert.equal(draft.project.owner.value, "your-github-org");
+  });
+
+  it("non-git directory: isGitRepo=false, hasCommits=false", async () => {
+    const plain = join(tmpDir, "plain");
+    mkdirSync(plain, { recursive: true });
+    const draft = await detectConfig(plain);
+    assert.equal(draft.meta.isGitRepo, false);
+    assert.equal(draft.meta.hasCommits, false);
+    assert.equal(draft.meta.unbornBranch, "");
+    assert.equal(draft.meta.remoteDetected, false);
+  });
+
+  it("remote without staging: stagingMissing=true; with origin/staging: false", async () => {
+    const bare = makeBareRepo(join(tmpDir, "bare"));
+    const repo = makeLocalRepo(join(tmpDir, "with-remote"), "main");
+    addRemote(repo, "origin", bare);
+    git(["push", "-u", "origin", "main"], repo);
+    const before = await detectConfig(repo);
+    assert.equal(before.meta.stagingMissing, true);
+    assert.equal(before.branches.staging.confidence, "low", "fallback value unchanged");
+    git(["push", "origin", "main:refs/heads/staging"], repo);
+    git(["fetch", "origin"], repo);
+    const after = await detectConfig(repo);
+    assert.equal(after.meta.stagingMissing, false);
+    assert.equal(after.branches.staging.value, "staging");
+  });
+});

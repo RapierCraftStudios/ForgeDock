@@ -17,7 +17,9 @@ import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
+import { parseVerify } from "./lean/verify.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
+import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
 
 /**
  * Workflow labels that mark an issue as "in the pipeline" (not yet terminal).
@@ -147,6 +149,16 @@ export function readMergeWait(cwd = process.cwd()) {
     return ["required", "all", "none"].includes(v) ? v : undefined;
   } catch { return undefined; }
 }
+/**
+ * forge.yaml `verify:` section (#4167, block style: `verify:` then `  mode: ci`, `  workflow: verify.yml`, `  paths_input`,
+ * `  skip_paths` comma-separated, `  max_rounds`) for the core path; undefined when the section is absent or unreadable.
+ */
+export function readVerify(cwd = process.cwd()) {
+  try {
+    const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
+    return sec && typeof sec === "object" ? parseVerify(sec) : undefined;
+  } catch { return undefined; }
+}
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
 
 export function runDir() { return join(homedir(), ".forge", "runs"); }
@@ -256,21 +268,36 @@ export function formatTerminalDiagnostics(dir, issue) {
   return lines.join("\n");
 }
 
+// forge#4157: backoff between `gh repo view` attempts. Under host load one call can exceed makeIo's exec timeout.
+export const REPO_VIEW_BACKOFF_MS = [2000, 4000];
+// forge#4157: how long an orchestrate lane waits before rerunning after `gh` stayed unreachable.
+export const GH_UNAVAILABLE_RETRY_S = 60;
+const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 /**
  * Resolves the repo `gh` would target by default (i.e. resolved from the cwd
  * git remote), via `gh repo view`. Used to validate an explicit `--repo` flag
- * against the ambient context — see `assertRepoMatchesCwd`.
+ * against the ambient context — see `assertRepoMatchesCwd`. A failed call is
+ * retried with backoff (forge#4157: it is usually a transient timeout under load).
  * @param {{gh: Function}} io
- * @returns {Promise<string|null>} "owner/repo", or null if it can't be determined
+ * @param {{sleep?: (ms:number)=>Promise<void>, detail?: boolean}} [opts] - `detail: true` returns
+ *   `{repo, failed}` so a caller can tell "every attempt errored" from an answer.
+ * @returns {Promise<string|null|{repo:string|null, failed:boolean}>} "owner/repo", or null if it can't be determined
  */
-async function resolveDefaultRepo(io) {
-  try {
-    const out = await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
-    const repo = String(out).trim();
-    return repo || null;
-  } catch {
-    return null;
+async function resolveDefaultRepo(io, { sleep = realSleep, detail = false } = {}) {
+  let failed = false;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const out = await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+      const repo = String(out).trim() || null;
+      return detail ? { repo, failed: false } : repo;
+    } catch {
+      failed = true;
+      if (attempt >= REPO_VIEW_BACKOFF_MS.length) break;
+      await sleep(REPO_VIEW_BACKOFF_MS[attempt]);
+    }
   }
+  return detail ? { repo: null, failed } : null;
 }
 
 /**
@@ -298,16 +325,20 @@ export async function assertLaneNotDefault(io, lane, repo = null, cwd = process.
  * default, refuse to run at all rather than silently mixing repos.
  * @param {{gh: Function}} io
  * @param {string|null} repo
+ * @param {{sleep?: Function}} [opts] - backoff seam for the `gh repo view` retries
  * @returns {Promise<void>}
  */
-async function assertRepoMatchesCwd(io, repo) {
+async function assertRepoMatchesCwd(io, repo, { sleep } = {}) {
   if (!repo) return;
-  const defaultRepo = await resolveDefaultRepo(io);
+  const { repo: defaultRepo, failed } = await resolveDefaultRepo(io, { sleep, detail: true });
   if (defaultRepo === null) {
-    throw new Error(
+    const err = new Error(
       `--repo ${repo} was given, but the current repo could not be determined (\`gh repo view\` failed) to ` +
       `verify it matches. Refusing to run cross-repo without verification.`
     );
+    // forge#4157: `gh` kept failing after retries; transient, so run-issue defers instead of erroring.
+    if (failed) err.code = OUTCOME_CODES.GH_UNAVAILABLE;
+    throw err;
   }
   if (defaultRepo !== repo) {
     throw new Error(
@@ -495,7 +526,17 @@ export async function runFromCli(argv, deps = {}) {
   // The full path takes the lane as given (its spec runs classify-lane), so it must be explicit; no default.
   if (enginePath === "full" && !lane) throw new Error("--lane is required with --path full: staging or milestone/<slug>. No default to prevent accidental production targeting.");
   const io = deps.io ?? makeIo();
-  await assertRepoMatchesCwd(io, repo);
+  const resultFile = flag(argv, "--result-file");
+  const report = (r) => { if (resultFile) (deps.writeAtomic ?? writeResultAtomic)(resultFile, JSON.stringify(r) + "\n"); return r; };
+  try {
+    await assertRepoMatchesCwd(io, repo, { sleep: deps.sleep });
+  } catch (e) {
+    if (e?.code !== OUTCOME_CODES.GH_UNAVAILABLE) throw e;
+    // forge#4157: a scheduling fact, not an engine error; the batch requeues it and the breaker never sees it.
+    const res = report({ terminalReason: "deferred", code: OUTCOME_CODES.GH_UNAVAILABLE, detail: e.message, retryInSeconds: GH_UNAVAILABLE_RETRY_S });
+    console.log(`issue #${issue} → deferred (${res.detail})`);
+    return res;
+  }
   await assertLaneNotDefault(io, lane, repo);
   const runIssueFn = deps.runIssue ?? runIssue;
   const agentId = `cli_${sanitizeLeaseHost(hostname())}_${process.pid}`;
@@ -529,14 +570,31 @@ export async function runFromCli(argv, deps = {}) {
     const { runCore } = deps.leanModule ?? (await import("./lean/lean.mjs"));
     const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo: leanRepo });
     // #4121: a batch lane reports its result through --result-file (written atomically, also for a thrown run).
-    const resultFile = flag(argv, "--result-file");
-    const report = (r) => { if (resultFile) (deps.writeAtomic ?? writeResultAtomic)(resultFile, JSON.stringify(r) + "\n"); return r; };
+    // #4179: SIGTERM/SIGINT run the lane's teardown (ledger, checkpoint, worktree, lease), report deferred run.interrupted, exit 128+signo.
+    let teardown = null, interrupted = false;
+    const on = deps.processOn ?? ((s, f) => process.on(s, f)), off = deps.processOff ?? ((s, f) => process.removeListener(s, f));
+    const exit = deps.exit ?? ((c) => process.exit(c));
+    const SIGNO = { SIGINT: 2, SIGTERM: 15 };
+    const handlers = Object.fromEntries(Object.keys(SIGNO).map((sig) => [sig, async () => {
+      if (interrupted) return;
+      interrupted = true;
+      let r = null;
+      try { r = teardown ? await teardown(sig) : null; } catch { r = null; }
+      try { report({ ...(r ?? {}), terminalReason: "deferred", code: OUTCOME_CODES.RUN_INTERRUPTED, detail: r?.detail ?? `interrupted by ${sig}` }); } catch { /* exit anyway */ }
+      console.log(`issue #${issue} → deferred (interrupted by ${sig})`);
+      exit(128 + SIGNO[sig]);
+    }]));
+    for (const [sig, f] of Object.entries(handlers)) on(sig, f);
+    const env = deps.env ?? process.env;
     let lres;
     try {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
+      onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
-    } catch (e) { report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
+      admission: readAdmission(), ...readCoreLimits(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+    } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
+    finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
+    if (interrupted) return lres; // the signal handler reported and exits
     report(lres);
     if (lres.code === "host.busy") { console.log(`issue #${issue} → deferred (${lres.detail})`); return lres; }
     if (lres.terminalReason === "lane-refused") { console.log(`issue #${issue} → lane-refused ${lres.code} (${lres.detail})`); return lres; }
@@ -629,7 +687,7 @@ export async function resumeStalledFromCli(argv, deps = {}) {
   const repo   = flag(argv, "--repo");
 
   const io = deps.io ?? makeIo();
-  await assertRepoMatchesCwd(io, repo);
+  await assertRepoMatchesCwd(io, repo, { sleep: deps.sleep });
   await assertLaneNotDefault(io, lane, repo);
   const dispatch = deps.dispatch ?? runFromCli;
   const projector = makeProjector(io);
@@ -786,8 +844,8 @@ export async function orchestrateFromCli(argv, deps = {}) {
   if (deps.leanModule) {
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
-    lanes = { adopt: null, runOne: (n, ln) => runCore({ issue: n, repo, lane: ln, laneOverride, branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry,
-      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+    lanes = { adopt: null, runOne: (n, ln) => runCore({ issue: n, repo, lane: ln, laneOverride, branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
+      admission: readAdmission(cwd), ...readCoreLimits(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
     lanes = batchMod.detachedLanes({ batch, cwd, script: deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), bin: deps.laneBin, pollMs: deps.pollMs,
       laneArgs: (n, ln) => ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])] });

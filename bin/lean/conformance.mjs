@@ -59,6 +59,33 @@ export function authorizationOf(contract, f) {
 }
 const blank = (s) => !String(s ?? "").trim() || /^none$/i.test(String(s).trim());
 
+/**
+ * #4160: an evidence path the reviewer gave as a bare or partial name (`route.ts`, `pdf/route.ts`) resolves to the one
+ * changed file it names. Returns the repo path, or null when it is not a unique match.
+ */
+export function resolveEvidencePath(p, changedFiles = []) {
+  const s = String(p ?? "").replace(/^\.\//, "");
+  if (!s) return null;
+  const hits = changedFiles.filter((f) => f === s || f.endsWith(`/${s}`));
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/**
+ * #4160: the rows the engine requires, pre-filled with every id so the reviewer fills statuses instead of composing rows.
+ * Scope rows are listed only for changed files the contract does not already authorize (deliverable, test or
+ * incidental); issue_coverage starts from the contract's verbatim quotes, and the reviewer adds any the contract missed.
+ */
+export function reviewSkeleton({ contract, changedFiles = [], ignore = [] }) {
+  const reqs = contract?.requirements ?? [];
+  return {
+    issue_coverage: reqs.map((r) => ({ quote: r.quote, contract_ids: [r.id], status: "" })),
+    requirements: reqs.map((r) => ({ id: r.id, status: "", evidence: "", validated_by: "", ...(TRACKED.includes(r.disposition) ? { deferral_ok: null } : {}), note: "" })),
+    scope: changedFiles.filter((f) => !ignore.some((pre) => f.startsWith(pre)) && !authorizationOf(contract, f)).map((f) => ({ file: f, authorized_by: "", note: "" })),
+    preserve: (contract?.preserve ?? []).map((x) => ({ id: x.id, status: "", evidence: "" })),
+    regressions: [], verdict: "", summary: "",
+  };
+}
+
 /** Shape check of the builder's contract.json against the issue text. Returns {ok, problems[]}. */
 export function validateContract(c, issueText) {
   const problems = [];
@@ -97,7 +124,11 @@ export function applyAmendments(frozen, amendments, issueText = null) {
     const tag = JSON.stringify(a ?? null).slice(0, 100);
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
-      if (!c.deliverables.some((d) => d.path === a.path)) c.deliverables.push({ id: a.id ?? `A${c.deliverables.length + 1}`, path: a.path, change: a.why, amended: true });
+      const have = c.deliverables.find((d) => d.path === a.path);
+      // An existing deliverable keeps its id and gains the why, so an amendment naming a package on an already-listed
+      // package.json declares the edge (forge#4159); before, it was reported as applied but changed nothing.
+      if (have) { have.change = have.change ? `${have.change}; ${a.why}` : a.why; have.amended = true; }
+      else c.deliverables.push({ id: a.id ?? `A${c.deliverables.length + 1}`, path: a.path, change: a.why, amended: true });
     } else if (a.kind === "add-requirement" && a.requirement?.id && !blank(a.requirement?.quote)) {
       if (c.requirements.some((r) => r.id === a.requirement.id)) { problems.push(`add-requirement reuses id ${a.requirement.id}`); continue; }
       if (issueText != null && !inIssue(a.requirement.quote, issueText)) { problems.push(`add-requirement ${a.requirement.id}: quote is not verbatim from the issue`); continue; }
@@ -118,25 +149,31 @@ export function applyAmendments(frozen, amendments, issueText = null) {
 
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
- * requirements not implemented, and deferrals without a tracking issue. Returns {ok, failures[]}.
+ * requirements not implemented, and deferrals without a tracking issue. Returns {ok, failures[]}; each failure carries a
+ * `kind` (scope_creep, validate_missing, validate_failed, requirement_unimplemented, untracked_deferral) so callers can
+ * tell the builder's own failed checks apart from bookkeeping gaps. `ciVerified` (#4167): the current head passed the
+ * engine's CI verification, so a validate id left to CI is not missing; a recorded non-zero exit still fails.
  */
-export function precheck({ contract, result, changedFiles, ignore = [] }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false }) {
   const failures = [];
   const creep = changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(contract, f));
-  if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
+  if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
   const runs = Array.isArray(result?.validation) ? result.validation : [];
   for (const v of contract.validate ?? []) {
     const r = runs.find((x) => x?.id === v.id);
-    if (!r) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
-    else if (r.exit !== 0) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `validate ${v.id} failed (exit ${r.exit})` });
+    // #4167: a head the engine verified on CI covers validate ids the builder left to CI (no result, or ci:true without an exit)
+    const leftToCi = !r || (r.ci === true && r.exit === undefined);
+    if (ciVerified && leftToCi) continue;
+    if (leftToCi) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
+    else if (r.exit !== 0) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} failed (exit ${r.exit})` });
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];
   for (const r of contract.requirements ?? []) {
     const s = st.find((x) => x?.id === r.id)?.status;
     if (TRACKED.includes(r.disposition)) continue; // typed deferrals are judged by the reviewer, then filed before the PR
     if (r.disposition === "deliver") {
-      if (s === "deferred" || s === "post-deploy") failures.push({ code: C.CONFORMANCE_UNTRACKED_DEFERRAL, detail: `${r.id} was contracted as deliver but reported "${s}" without a typed amendment` });
-      else if (s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} reported "${s ?? "no status"}"` });
+      if (s === "deferred" || s === "post-deploy") failures.push({ code: C.CONFORMANCE_UNTRACKED_DEFERRAL, kind: "untracked_deferral", detail: `${r.id} was contracted as deliver but reported "${s}" without a typed amendment` });
+      else if (s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "requirement_unimplemented", detail: `${r.id} reported "${s ?? "no status"}"` });
     }
   }
   return { ok: failures.length === 0, failures };
@@ -175,13 +212,15 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
     if (row.status === "implemented") {
       const m = EVIDENCE_RE.exec(String(row.evidence ?? ""));
       if (!m) p.push(`${r.id}: implemented needs path:line evidence`);
-      else if (!changedFiles.includes(m[1]) && !pathExists(m[1])) p.push(`${r.id}: evidence path ${m[1]} does not exist`);
+      else if (!changedFiles.includes(m[1]) && !pathExists(m[1]) && !resolveEvidencePath(m[1], changedFiles)) p.push(`${r.id}: evidence path ${m[1]} does not exist`);
       if (blank(row.validated_by)) p.push(`${r.id}: implemented needs validated_by (a validate id or test)`);
     }
   }
   const scope = arr("scope");
   if (!scope) p.push("scope rows are missing");
-  for (const f of changedFiles.filter((x) => !ignore.some((pre) => x.startsWith(pre)))) if (!(scope ?? []).some((s) => s?.file === f)) p.push(`changed file ${f} has no scope row`);
+  // #4160: a file the contract authorizes (deliverable, test, incidental) is already settled by the deterministic precheck;
+  // a row is required only for the files it could not authorize. A row the reviewer does give is still judged in decide().
+  for (const f of changedFiles.filter((x) => !ignore.some((pre) => x.startsWith(pre)) && !authorizationOf(contract, x))) if (!(scope ?? []).some((s) => s?.file === f)) p.push(`changed file ${f} has no scope row`);
   const pres = arr("preserve") ?? [];
   for (const c of contract.preserve ?? []) {
     const row = pres.find((x) => x?.id === c.id);
@@ -235,4 +274,31 @@ export function closePlan(contract) {
 export function followupItems(reqs) {
   const flat = (s) => String(s ?? "").replace(/[\t\r\n`]+/g, " ").replace(/\s+/g, " ").trim();
   return reqs.map((r) => ({ id: r.id, key: flat(`${r.id}: ${r.quote}`).slice(0, 240), why: flat(`${r.disposition}: ${r.why ?? ""}`).slice(0, 400) }));
+}
+
+/**
+ * forge#4159: package.json edges between workspace packages (scripts/structure-delta.sh `package_edges_added`) that
+ * the contract does not name. Named = a deliverable covering the edge's manifest whose `change` names the target
+ * package (an add-deliverable amendment counts: its change is the why). A null or `{}` delta names nothing to check.
+ */
+export function unnamedEdges(contract, delta) {
+  const edges = Array.isArray(delta?.package_edges_added) ? delta.package_edges_added : [];
+  const dels = contract?.deliverables ?? [];
+  return edges.filter((e) => e?.manifest && e?.to && !dels.some((d) => pathCovers(d.path, e.manifest) && String(d.change ?? "").includes(e.to)));
+}
+
+/**
+ * forge#4159: the one report-only line for the existing reviewer prompt, or "" when there is no import-pair growth
+ * and no boundary-config loosening. Never blocks; adds no reviewer run.
+ */
+export function structureNote(delta) {
+  const grow = (Array.isArray(delta?.import_pairs) ? delta.import_pairs : []).filter((p) => p?.files_added > 0);
+  const b = delta?.boundary_config_changed;
+  const loosened = Boolean(b?.loosens);
+  if (!grow.length && !loosened) return "";
+  const pairs = grow.map((p) => `${p.files_added} value import${p.files_added === 1 ? "" : "s"} ${p.from}→${p.to}`).join(", ");
+  const files = (Array.isArray(b?.files) ? b.files : []).join(", ");
+  const config = loosened ? `the repo's boundary config was loosened in this PR (${files})` : "the repo's boundary config allows it";
+  const s = grow.length ? `this PR adds ${pairs} (files); ${config}` : `this PR loosens the repo's boundary config (${files})`;
+  return `Structure (report only): ${s}; flag only if the contract or the architecture doc says otherwise.`.replace(/[\r\n]+/g, " ");
 }

@@ -55,6 +55,7 @@ If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pi
 | [`review`](#review-optional) | No | Context injected into review agents |
 | [`devdocs`](#devdocs-optional) | No | Devdocs knowledge tree path |
 | [`verification`](#verification-optional) | No | Health-check patterns |
+| [`verify`](#verify-optional) | No | Core work-on: run lane verification on CI runners instead of the host (`mode: local\|ci\|hybrid`) |
 | [`billing`](#billing-optional) | No | Enable financial integrity audit phase |
 | [`adaptive_scripts`](#adaptive_scripts-optional) | No | Per-repo script override configuration |
 
@@ -226,6 +227,12 @@ repos:
 ## `project_board` (OPTIONAL)
 
 GitHub Projects v2 integration. When configured, ForgeDock automatically adds issues to the project board and updates Status, Lane, Component, Priority, and Workflow fields as issues progress through the pipeline.
+
+`/forgedock-init` fills this section for you: it links an existing board or creates a new one, links it to the repo, adds any missing Lane/Priority/Workflow/Component fields (Status is built in), and writes the IDs below. Projects v2 needs the `read:project`/`project` token scope, which `gh auth login` does not grant by default. If the scope is missing, `/forgedock-init` prints the fix:
+
+```bash
+gh auth refresh -h github.com -s read:project,project
+```
 
 ```yaml
 project_board:
@@ -399,7 +406,7 @@ orchestration:
 |-------|------|----------|-------------|
 | `max_concurrent` | integer | No | Max concurrent top-level `/work-on` dispatches. It does not bound cascade growth; under `policy: all` it raises drain and spawn throughput together. Default: 12. |
 | `breaker.errors` / `breaker.window_min` | integer | No | `forgedock orchestrate` circuit breaker (#4121): after `errors` engine-errors within `window_min` minutes the batch stops admitting lanes, lets running lanes finish, and keeps the rest pending for `--resume`. `errors: 0` turns it off. Default: 3 in 30 |
-| `max_deferrals` | integer | No | `forgedock orchestrate`: requeues of one issue after a non-host `deferred` (usage limit, merge/push transient, CLI idle, lease held) before its row is final. `host.busy` deferrals are not capped. Default: 3 |
+| `max_deferrals` | integer | No | `forgedock orchestrate`: requeues of one issue after a non-host `deferred` (usage limit, merge/push transient, CLI idle, lease held, gh unavailable) before its row is final. `host.busy` deferrals are not capped. Default: 3 |
 | `cascade.policy` | string | No | `all` \| `balanced` \| `conservative`. Default: `balanced` |
 | `cascade.max_generation` | integer or `"unlimited"` | No | Max cascade generation admitted at Phase 1 resolve time. Default: 1 |
 | `cascade.batch_max_generation` | integer | No | Finite maximum member generation that an automated P3 batch may aggregate. Default: 2 |
@@ -484,12 +491,12 @@ engine:
 | `<key>_max_turns` | integer | No | Positive integer passed as `--max-turns`. Invalid values are ignored. |
 
 | `path` | string | No | `core` (default), `full`, `lean` or `auto`. `core` is the lean work-on (`bin/lean/`): a planning call that writes a frozen contract, an implement call in the same session, one read-only conformance reviewer, GitHub as the register (see `conformance`). `lean` and `auto` are aliases of `core`; `full` runs the legacy multi-phase pipeline and is required for `--retry` and `--wait-lease`. The `--path` flag overrides. `lean_reviewer_model` sets the reviewer model (default `claude-sonnet-5-5`); the builder uses `--model` or the CLI default. `forgedock orchestrate <issues...> [--parallel K] [--lane L]` runs the core per issue (K default 3, lane default `staging`) and honours `**Depends on**` ordering among the given issues. |
-| `conformance` | string | No | Core work-on conformance gate. The builder first writes a contract (requirements quoted verbatim from the issue and maintainers' comments, deliverables, preserve constraints, validate commands), which the engine freezes and posts as `FORGE:CONTRACT`; changes go only through typed amendments (`FORGE:AMENDMENT`). A deterministic precheck (scope, validation, deferrals) and a row-based conformance review follow, and the engine computes the verdict. `shadow` (default): the verdict is posted in `FORGE:REVIEW` and logged (`CONFORMANCE_SHADOW` event) but only what the previous reviewer blocked on still blocks (a requirement found not implemented, a regression); deferrals are not filed. `enforce`: every failure blocks (one same-session builder resume, then `needs-human` with a `conformance.*`/`review.*` code, see docs/OUTCOME-CODES.md); deferrals the reviewer accepts are filed in one batched follow-up issue (`scripts/file-deferred-followups.sh`) and linked in the PR body and a `FORGE:TRACKED` comment before merge. |
+| `conformance` | string | No | Core work-on conformance gate. The builder first writes a contract (requirements quoted verbatim from the issue and maintainers' comments, deliverables, preserve constraints, validate commands), which the engine freezes and posts as `FORGE:CONTRACT`; changes go only through typed amendments (`FORGE:AMENDMENT`). A deterministic precheck (scope, validation, deferrals) and a row-based conformance review follow, and the engine computes the verdict. `shadow` (default): the verdict is posted in `FORGE:REVIEW` and logged (`CONFORMANCE_SHADOW` event) but only what the previous reviewer blocked on still blocks (a requirement found not implemented, a regression), plus the precheck's equivalent: a validate command that ran and failed, or a deliver requirement the builder reported as not implemented (#4160). These block before any reviewer run. A validate step with no recorded result, scope creep and amendment problems are recorded only. Deferrals are not filed. `enforce`: every failure blocks (one same-session builder resume, then `needs-human` with a `conformance.*`/`review.*` code, see docs/OUTCOME-CODES.md); deferrals the reviewer accepts are filed in one batched follow-up issue (`scripts/file-deferred-followups.sh`) and linked in the PR body and a `FORGE:TRACKED` comment before merge. |
 | `cli_idle_minutes` | number | No | Core builder idle timeout (#4112): the builder CLI runs with `--output-format stream-json` and is killed (code `cli.idle`) when it shows no stream activity for this many minutes. The run log records the last tool call and the live child processes. Default 15. |
 | `cli_max_minutes` | number | No | Absolute ceiling for a core builder session (code `cli.timeout`), replacing the fixed 60-minute kill. A session that keeps making progress is never idle-killed. Default 180. On either kill, uncommitted work is committed as `wip(forge): checkpoint after <reason>` and the lane branch is pushed (with the push retry), the builder retries once from the checkpoint, and a second kill ends `deferred`; a rerun resumes from the branch. |
 | `lane_limits` | map | No | Cap each core lane's whole process tree (#4115), under `pipeline:` or `engine:`: `memory_max` (for example `3G`) and `cpu_quota` (for example `150%`). When set and `systemd-run --user --scope` works (probed once), the builder CLI is spawned as `systemd-run --user --scope -q -p MemoryMax=... -p CPUQuota=... -- claude ...`; elsewhere the caps are ignored. Write it nested or flat (`lane_limits_memory_max`, `lane_limits_cpu_quota`). While a builder runs the engine polls host load and memory every 15 s against the `admission` thresholds: over them it SIGSTOPs the lane's process group, under them SIGCONT, and never pauses longer than 10 minutes. |
 | `admission` | map | No | Host-resource admission for the core work-on (#4105), checked before the lease, worktree or any GitHub call. When a check fails the run ends `deferred` (code `host.busy`, exit 75) with a last line such as `issue #N → deferred (host busy: mem 1.2G < 2G; retry in 60s)`; no lease is taken and nothing is posted. Keys: `enabled` (default `true`; `false` disables admission), `min_free_mem_mb` (default 2048; `MemAvailable` from `/proc/meminfo`, else `os.freemem()`), `min_free_tmp_mb` (default 1024; free space of the run TMPDIR filesystem, `~/.forge/tmp`, and of `/tmp`, via `statfs`), `max_load_per_core` (default 4; 1-minute load average divided by cores). Write it nested (`engine:` then `admission:` with the keys indented) or flat as `admission_enabled`, `admission_min_free_mem_mb`, `admission_min_free_tmp_mb`, `admission_max_load_per_core`; the parser reads one nested level into `engine`. `/orchestrate` requeues a host-busy lane and lowers K by 1 for 5 minutes. |
-| `merge_wait` | string | No | Core work-on merge gate. `required` (default): wait only for the status checks the base branch requires under branch protection (`gh api repos/{o}/{r}/branches/{base}/protection/required_status_checks`, contexts and checks); with no protection or no required checks (404 or empty) merge right after review PASS. A failing required check is `needs-human`; a pending one is polled with backoff and never `needs-human`. `all`: wait for every check (`scripts/wait-ci-green.sh`). `none`: merge right after review. Always `--match-head-commit` at the reviewed head. The policy used is recorded in the `FORGE:WORK-ON` comment. |
+| `merge_wait` | string | No | Core work-on merge gate. `required` (default): wait only for the status checks the base branch requires: the union of classic branch protection (`gh api repos/{o}/{r}/branches/{base}/protection/required_status_checks`, contexts and checks) and repository rulesets (`gh api repos/{o}/{r}/rules/branches/{base}`, `required_status_checks` rules); with neither (404 or empty) merge right after review PASS. A merge rejected by base branch policy (PR `MERGEABLE` but `BLOCKED`) is waited on and retried within the CI budget, then left `ci-pending`; it is never base-synced and never `base.conflict`. A failing required check is `needs-human`; a pending one is polled with backoff and never `needs-human`. `all`: wait for every check (`scripts/wait-ci-green.sh`). `none`: merge right after review. Always `--match-head-commit` at the reviewed head. The policy used is recorded in the `FORGE:WORK-ON` comment. |
 | `ci_pending_max_minutes` | integer | No | Minutes the engine waits for CI when the review phase ends BLOCKED with "checks still pending", or the remediate phase holds at its M7 re-gate on "CI pending" (the merge gate's wait window ended while CI was still running). Default: 90. Invalid values are ignored. This key is flat like the others but is not part of the `<key>_model` / `<key>_max_turns` pattern. |
 
 **CI still pending**: the engine polls `scripts/wait-ci-green.sh` (no model calls) one read per poll on a 60 s, 2 min, 4 min, 5 min (cap) backoff with +/-20% jitter, while the lease keeps renewing, then re-dispatches the phase that was waiting, review or remediate (idempotent at an unchanged head: review re-runs the merge gate and merges; remediate resumes at its M7 re-gate). Before each poll it reads `gh api rate_limit` (not itself rate-limited) and, below 10% of the REST budget, sleeps until the window resets instead of polling; a rate-limited or transient (5xx, network) poll is retried and never re-dispatches the phase. Red CI takes the normal ci-gate path. When the budget is exhausted the run ends `needs-human` with outcome code `review.ci_pending_timeout`; `--retry` resumes. Each wait emits a `ci_pending_wait` telemetry event (`docs/TELEMETRY.md`) with the minutes waited, polls made and rate-limit sleeps.
@@ -505,6 +512,43 @@ engine:
 **Minimal phase sessions** (forge#4065): on a supported CLI (`claude --version` >= 2.1.296, probed once and cached like the flags above) every engine phase (`work-on/*`) runs with `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`, so operator MCP servers and connectors are not loaded. Phases whose spec never calls `Skill(...)` (`work-on/investigate`, `work-on/close`) also get `--disable-slash-commands`; skill-using phases keep skills. Operator settings are intentionally not skipped (no `--setting-sources`), because ForgeDock's user-scope PreToolUse/SubagentStop hooks must keep running. Set `FORGEDOCK_FULL_SESSION=1` to restore the previous full session (no flags). Other `forgedock run` commands (qa-sweep, analytics, geo-audit, autopilot) keep the full session because they may need MCP servers. An old or unparseable CLI version also omits the flags.
 
 **Commands that use this section**: CLI backend (`runCommand` in `bin/runner.mjs`)
+
+---
+
+## `verify` (OPTIONAL)
+
+Verify-by-CI for the core work-on path (forge#4167). It moves a lane's heavy verification (type-checks, test suites, docker test containers) off the host and onto CI runners, and it catches CI-class failures (lock files, suite wiring, hangs, formatting) before the lane merges into staging. Write it as a block-style section: `parseForgeYaml` does not read inline `{ ... }` maps.
+
+```yaml
+verify:
+  mode: ci                      # local (default) | ci | hybrid
+  workflow: forgedock-verify.yml  # optional; needs an `on: workflow_dispatch` trigger
+  paths_input: changed_paths    # optional workflow_dispatch input that receives the changed paths (newline-separated)
+  skip_paths: "*.md,docs/**"    # optional, comma-separated; default *.md,*.mdx,*.rst,*.txt,docs/**,devdocs/**
+  max_rounds: 2                 # optional CI fix rounds before needs-human (default 2)
+```
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `mode` | string | No | `local` (default): today's behaviour; the builder runs every validate command on the host and no CI is started before review. `ci`: the builder runs only formatters and linters on the files it changed (no type-checks, test suites or test containers) and records validate ids it left to CI as `{"id","command","ci":true}`; the engine verifies on CI. `hybrid`: the builder runs the targeted validate commands too, and CI also verifies. |
+| `workflow` | string | No | Workflow file name or id dispatched on the lane branch (`gh workflow run <workflow> --ref <branch>`). The engine waits for the `workflow_dispatch` run of the lane's head commit. Without it, the engine waits on the head commit's push-triggered check runs. |
+| `paths_input` | string | No | Name of a `workflow_dispatch` input that receives the changed paths, so the workflow can scope its jobs to the change. |
+| `skip_paths` | string | No | Comma-separated globs. A glob without `/` matches the basename anywhere; `**` spans directories. When every changed file matches, the lane skips CI verification (a docs-only lane runs no CI matrix). |
+| `max_rounds` | integer | No | Builder fix rounds for red CI (0–10, default 2). |
+
+**Flow** (`ci`/`hybrid`, `bin/lean/verify.mjs` `runCiVerify`):
+
+1. After the build and before every conformance review, the engine pushes the lane branch (a plain push, never forced) and runs CI on the head. A base-sync that moves the head is verified again.
+2. Green (or skipped by `skip_paths`): the review runs. The precheck accepts validate ids left to CI for that head, but a recorded non-zero exit still fails.
+3. Red: the failed jobs' logs (`gh run view --log-failed`, tails capped at about 12 KB) go back to the builder session. The builder fixes and commits, and the engine pushes and verifies again. Still red after `max_rounds`, or a fix round with no new commit, ends as `needs-human` (`ci.red`) and nothing merges.
+4. Slow CI: once the core CI wait budget (360 min, the same budget the merge wait uses) is used up, the lane ends `ci-pending` and can be resumed. Slow CI is never `needs-human`.
+5. CI unavailable (dispatch refused, or no run or check for the head within 5 minutes): one local fallback. The builder runs every validate command on the host and records real exit codes.
+
+Each verification emits a `CI_VERIFY` run-log/telemetry event (`mode`, `round`, `result`, `skipped`, `run_url`) and adds a **Verify** row to the trajectory.
+
+**Cost:** `ci`/`hybrid` spend GitHub Actions minutes before review, so they are opt-in per repo. On the green path they add no LLM calls; each red CI round adds one builder resume. The merge gate (`engine.merge_wait`) is unchanged.
+
+**Commands that use this section**: core work-on (`forgedock run-issue`, `forgedock orchestrate`; `bin/engine-cli.mjs` `readVerify`)
 
 ---
 
@@ -977,7 +1021,12 @@ npx forgedock labels setup
 
 # Or target a specific repo explicitly:
 npx forgedock labels setup --repo owner/repo
+
+# Also create per-repo domain labels (comma-separated):
+npx forgedock labels setup --domain frontend,backend,infra,design,legal-gated
 ```
+
+Domain labels are optional and per-repo. They are not part of `bin/labels.json`, so `forgedock doctor` never requires them. Each one gets the description `Domain: <name>. Managed by ForgeDock.`. `frontend`, `backend`, `infra`, `design` and `legal-gated` have fixed colors; any other name is grey (`#EDEDED`). A name that is already in the manifest is not created twice. `/forgedock-init` derives the list from your spec or takes it from `--domain-labels`.
 
 Running this command is idempotent — it creates labels that don't exist and updates the color/description of labels that do. Safe to re-run at any time.
 

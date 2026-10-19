@@ -22,6 +22,7 @@ secrets/
 # Claude Code
 .claude/
 CLAUDE.md
+!/CLAUDE.md
 
 # Spec Knowledge Graph (generated; gitignored by default — opt-in to commit,
 # mirroring per-repo adaptive scripts)

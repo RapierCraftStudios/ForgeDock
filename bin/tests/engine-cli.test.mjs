@@ -1,7 +1,7 @@
 import { tmpDir } from "./_tmp.mjs";
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, rmSync, utimesSync } from "node:fs";
+import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine } from "../engine-cli.mjs";
@@ -399,6 +399,75 @@ describe("runFromCli --repo targeting guard", () => {
     assert.equal(runIssue.mock.callCount(), 1);
     assert.equal(res.terminalReason, "workflow:merged");
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// forge#4157: a failed `gh repo view` (a timeout under host load) is transient: retried with backoff, and a lane
+// that still cannot verify --repo ends `deferred` gh.unavailable (not engine-error, so the batch breaker never sees it).
+describe("runFromCli --repo verification when gh is unavailable", () => {
+  /** gh whose `repo view` throws `failures` times, then answers `currentRepo`. */
+  function makeFlakyIo(currentRepo, failures) {
+    let left = failures;
+    const gh = mock.fn(async (args) => {
+      if (args[0] === "repo" && args[1] === "view") {
+        if (left-- > 0) throw new Error("Command failed: gh repo view (timed out)");
+        return `${currentRepo}\n`;
+      }
+      throw new Error(`unexpected gh call: ${args.join(" ")}`);
+    });
+    return { gh };
+  }
+
+  it("retries `gh repo view` with increasing backoff and runs when it recovers", async () => {
+    const io = makeFlakyIo("acme/target-repo", 2);
+    const sleep = mock.fn(async () => {});
+    const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+    const dir = tmpDir("engine-cli-test-");
+    try {
+      const res = await runFromCli(["42", "--lane", "staging", "--path", "full", "--repo", "acme/target-repo"], { io, runIssue, dir, sleep });
+      assert.equal(runIssue.mock.callCount(), 1);
+      assert.equal(res.terminalReason, "workflow:merged");
+      const delays = sleep.mock.calls.map((c) => c.arguments[0]);
+      assert.equal(delays.length, 2);
+      assert.ok(delays[0] > 0 && delays[1] > delays[0], `backoff must increase: ${delays}`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("defers with gh.unavailable (and reports it through --result-file) when gh never answers", async () => {
+    const io = makeFlakyIo("acme/target-repo", Infinity);
+    const sleep = mock.fn(async () => {});
+    const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+    const runCore = mock.fn(async () => ({ terminalReason: "merged" }));
+    const dir = tmpDir("engine-cli-test-");
+    const rf = join(dir, "lanes", "42.json");
+    try {
+      for (const path of ["full", "core"]) {
+        rmSync(rf, { force: true });
+        const res = await runFromCli(["42", "--lane", "staging", "--path", path, "--repo", "acme/target-repo", "--result-file", rf],
+          { io, runIssue, dir, sleep, leanModule: { runCore }, leanIo: {}, emitTelemetry: async () => {} });
+        assert.equal(res.terminalReason, "deferred");
+        assert.equal(res.code, "gh.unavailable");
+        assert.equal(res.retryInSeconds, 60);
+        assert.match(res.detail, /could not be determined/);
+        const written = JSON.parse(readFileSync(rf, "utf8"));
+        assert.equal(written.terminalReason, "deferred");
+        assert.equal(written.code, "gh.unavailable");
+      }
+      assert.equal(runIssue.mock.callCount(), 0);
+      assert.equal(runCore.mock.callCount(), 0);
+      assert.ok(sleep.mock.callCount() >= 2);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("resume-stalled still refuses when gh never answers (no lane result to report)", async () => {
+    const io = makeFlakyIo("acme/target-repo", Infinity);
+    const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+    await assert.rejects(
+      resumeStalledFromCli(["--lane", "staging", "--repo", "acme/target-repo"], { io, dispatch, sleep: async () => {} }),
+      /could not be determined/,
+    );
+    assert.equal(dispatch.mock.callCount(), 0);
+    assert.equal(io.gh.mock.callCount(), 3);
   });
 });
 
@@ -856,5 +925,55 @@ describe("runFromCli — forge#3574 deferred output, agentId, --wait-lease", () 
     await capture(() => runFromCli(["42", "--lane", "staging", "--path", "full"], { io, runIssue, dir }));
     assert.ok(!("waitLease" in runIssue.mock.calls[1].arguments[0]));
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("run-issue core path: SIGTERM/SIGINT teardown (#4179)", () => {
+  const io = { gh: async (a) => { if (a[0] === "repo" && a[1] === "view") return "acme/target-repo\n"; throw new Error(`unexpected gh ${a.join(" ")}`); } };
+  const quiet = async (fn) => { const l = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = l; } };
+
+  for (const [sig, code] of [["SIGTERM", 143], ["SIGINT", 130]]) {
+    it(`${sig} runs the lane's registered teardown, reports deferred run.interrupted through --result-file and exits ${code}`, async () => {
+      const dir = tmpDir("engine-cli-test-");
+      const rf = join(dir, "lanes", "42.json");
+      const handlers = {}, removed = [], exits = [], torn = [];
+      let seen = null;
+      const runCore = async (o) => {
+        seen = o;
+        o.onTeardown(async (s) => { torn.push(s); return { terminalReason: "deferred", code: "run.interrupted", detail: `interrupted by ${s}`, branch: "feat/issue-42-lean" }; });
+        await handlers[sig](); // the signal arrives while the lane runs
+        return { terminalReason: "deferred", code: "run.interrupted" };
+      };
+      try {
+        await quiet(() => runFromCli(["42", "--lane", "staging", "--path", "core", "--repo", "acme/target-repo", "--result-file", rf], {
+          io, dir, sleep: async () => {}, leanModule: { runCore }, leanIo: {}, emitTelemetry: async () => {}, env: { FORGEDOCK_BATCH_ID: "b-test" },
+          processOn: (s, f) => { handlers[s] = f; }, processOff: (s) => removed.push(s), exit: (c) => exits.push(c) }));
+        assert.deepEqual(Object.keys(handlers).sort(), ["SIGINT", "SIGTERM"]);
+        assert.deepEqual(torn, [sig]);
+        assert.deepEqual(exits, [code]);
+        assert.equal(seen.batchId, "b-test", "the batch id names the ledger dir");
+        const written = JSON.parse(readFileSync(rf, "utf8"));
+        assert.equal(written.terminalReason, "deferred");
+        assert.equal(written.code, "run.interrupted");
+        assert.equal(written.branch, "feat/issue-42-lean");
+        await handlers[sig](); // a second signal does not tear down twice
+        assert.deepEqual(torn, [sig]); assert.deepEqual(exits, [code]);
+      } finally { rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+
+  it("the handlers are removed after a normal return, and no batch id means the adhoc ledger", async () => {
+    const dir = tmpDir("engine-cli-test-");
+    const handlers = {}, removed = [];
+    let seen = null;
+    try {
+      const res = await quiet(() => runFromCli(["42", "--lane", "staging", "--path", "core", "--repo", "acme/target-repo"], {
+        io, dir, sleep: async () => {}, leanModule: { runCore: async (o) => { seen = o; return { terminalReason: "merged" }; } }, leanIo: {}, emitTelemetry: async () => {}, env: {},
+        processOn: (s, f) => { handlers[s] = f; }, processOff: (s, f) => { if (handlers[s] === f) removed.push(s); }, exit: () => assert.fail("no exit on a normal return") }));
+      assert.equal(res.terminalReason, "merged");
+      assert.deepEqual(removed.sort(), ["SIGINT", "SIGTERM"]);
+      assert.equal(seen.batchId, undefined);
+      assert.equal(typeof seen.onTeardown, "function");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

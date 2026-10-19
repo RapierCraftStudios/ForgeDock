@@ -7,7 +7,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S } from "./orchestrate.mjs";
-import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic } from "./batch.mjs";
+import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane } from "./batch.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration } from "../engine-cli.mjs";
 
 const quiet = async (fn) => { const l = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = l; } };
@@ -87,6 +87,22 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.deepEqual(deferPolicy({ code: "host.busy" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
   });
 
+  it("gh.unavailable deferrals (forge#4157) are requeued, never relaunched as engine-error, and never trip the breaker", async () => {
+    const { now, sleep } = fakeClock();
+    const updates = [];
+    let calls = 0;
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3, breaker: { errors: 3, window_min: 30 },
+      onUpdate: (r) => updates.push(r),
+      runOne: async () => (++calls <= 3
+        ? { terminalReason: "deferred", code: "gh.unavailable", retryInSeconds: 60, detail: "gh repo view failed" }
+        : { terminalReason: "merged", pr: 5 }) });
+    assert.equal(calls, 4);
+    assert.equal(rows[0].outcome, "merged");
+    assert.ok(!updates.some((u) => u.outcome === "breaker" || u.outcome === "engine-error"));
+    assert.equal(updates.filter((u) => /requeued in 60s: gh.unavailable/.test(u.detail ?? "")).length, 3);
+    assert.deepEqual(deferPolicy({ code: "gh.unavailable", retryInSeconds: 60 }, { now: 0 }), { delayMs: 60000 });
+  });
+
   it("a usage limit holds every admission until its reset; a deferred issue's dependents wait instead of being skipped", async () => {
     const { now, sleep, c } = fakeClock();
     const t0 = c.t, starts = {};
@@ -139,6 +155,25 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.deepEqual([again, row.outcome], [[9, 9], "engine-error"]);
   });
 
+  it("#4153 a resume re-derives a pending issue's lane from its current milestone", async () => {
+    const saved = { state: null };
+    const store = { load: () => saved.state, save: (s) => { saved.state = JSON.parse(JSON.stringify(s)); } };
+    const milestoneLane = { 1: "staging", 2: "staging" };
+    const resolveLane = async (n) => ({ ok: true, lane: milestoneLane[n] });
+    const runs = [];
+    let rows = await orchestrate({ issues: [1, 2], parallel: 1, breaker: { errors: 1, window_min: 30 }, store, resolveLane, readBody: async () => "",
+      runOne: async (n, lane) => { runs.push([n, lane]); throw new Error("x"); } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["held", "held"]);
+    assert.equal(saved.state.lanes["2"].lane, "staging");
+    milestoneLane[1] = milestoneLane[2] = "milestone/m1"; // the operator re-milestones both issues
+    saved.state = { ...saved.state, breaker: null, errorTimes: [] }; // what --resume does
+    rows = await orchestrate({ issues: [1, 2], parallel: 1, store, resolveLane, readBody: async () => "",
+      runOne: async (n, lane) => { runs.push([n, lane]); return { terminalReason: "merged" }; } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    assert.deepEqual(runs.slice(1).sort((a, b) => a[0] - b[0]), [[1, "milestone/m1"], [2, "milestone/m1"]]);
+    assert.equal(saved.state.lanes["2"].lane, "milestone/m1");
+  });
+
   it("concurrency follows the live K", async () => {
     let k = 1, active = 0, maxActive = 0;
     const rows = await orchestrate({ issues: [1, 2, 3, 4, 5, 6, 7], parallel: 1, pollMs: 5, getParallel: () => k, readBody: async () => "",
@@ -180,5 +215,18 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     await assert.rejects(quiet(() => runFromCli(["7", "--repo", "o/r", "--result-file", rf], { ...base, leanModule: { runCore: async () => { throw new Error("kaboom"); } } })), /kaboom/);
     assert.equal(JSON.parse(readFileSync(rf, "utf8")).terminalReason, "engine-error");
     assert.ok(!existsSync(`${rf}.tmp-${process.pid}`));
+  });
+});
+
+describe("lane launch env (#4179)", () => {
+  it("launchLane passes FORGEDOCK_BATCH_ID (the ledger dir) in the lane env and keeps the rest of the env and argv", () => {
+    const batch = openBatch(tmpDir("batch-"), "b20261019-120000-1");
+    const spawned = [];
+    const { pid } = launchLane({ batch, issue: 7, args: ["--repo", "o/r"], script: "/x/forgedock.mjs", bin: "node", env: { PATH: "/bin", KEEP: "1" },
+      spawnFn: (bin, argv, opts) => { spawned.push({ bin, argv, opts }); return { pid: 99, unref() {}, on() {} }; } });
+    assert.equal(pid, 99);
+    assert.equal(spawned[0].opts.env.FORGEDOCK_BATCH_ID, batch.id);
+    assert.equal(spawned[0].opts.env.KEEP, "1");
+    assert.deepEqual(spawned[0].argv, ["/x/forgedock.mjs", "run-issue", "7", "--repo", "o/r", "--result-file", batch.resultFile(7)]);
   });
 });

@@ -12,6 +12,29 @@ export const CONTRACT_FILE = `${LEAN_DIR}/contract.json`;
 
 const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR.`;
 
+/** Verify-by-CI (#4167): in ci/hybrid mode the engine runs the repo's CI on GitHub runners; the host runs only light checks. */
+const LIGHT = "run only formatters and linters on the files you changed";
+const VERIFY_RUN = { ci: `${LIGHT} (no type-checks, test suites or test containers)`, hybrid: "run the targeted validate commands" };
+const VERIFY_RULES = {
+  ci: `Verification runs on CI (forge.yaml verify.mode: ci). Do NOT run type-checks (tsc and the like), test suites (pytest, jest, node --test and the like) or docker/test containers on this host: ${LIGHT}. The engine pushes the branch, runs CI and sends failures back to you. In ${RESULT_FILE} record each validate id you did not run as {"id":"V1","command":"","ci":true}.`,
+  hybrid: `Verification also runs on CI (forge.yaml verify.mode: hybrid). Run the targeted validate commands and ${LIGHT}; never the full suite and no docker/test containers. The engine pushes the branch, runs CI and sends failures back to you. Record each validate id you did not run as {"id":"V1","command":"","ci":true}.`,
+};
+const rerun = (mode) => (mode === "ci" ? `Re-run the light checks only (${LIGHT}); the engine re-verifies on CI` : "Re-run the validate commands");
+
+/** Base-sync conflict resolution: which checks to run after resolving (#4167: ci mode runs light checks only). */
+export const syncChecks = (mode = "local") => (mode === "ci" ? `${LIGHT} (the engine re-verifies on CI)` : "run the relevant tests");
+
+/** CI failed on the pushed branch (#4167): one fix round in the builder's own session. */
+export function ciFailurePrompt(failures, mode = "local") {
+  const list = failures.slice(0, 10).map((f) => `#### ${f.job ?? "check"}${f.url ? ` (${f.url})` : ""}\n${f.log ? `\`\`\`\n${f.log}\n\`\`\`` : "(no log available: open the url)"}`).join("\n\n");
+  return `CI failed on the pushed branch:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** CI could not run (no workflow run, no checks, dispatch refused): the local fallback (#4167). */
+export function ciUnavailablePrompt() {
+  return `CI verification is unavailable for this branch, so verification falls back to this host. Run every validate command locally (targeted, as the host rules say), fix any failure, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE} with each command's real exit code. Do not push or touch GitHub.`;
+}
+
 /** Builder call 1: investigate and write the contract. No code edits. */
 export function builderPlanPrompt(n) {
   return `Resolve issue #${n} (read it with gh issue view ${n} --comments). This first step is PLANNING ONLY: do not edit code, do not commit.
@@ -39,22 +62,25 @@ If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"alread
  "deliverables":[{"id":"D1","path":"<file to change>","change":"<what>","requirements":["R1"]}],
  "preserve":[{"id":"P1","what":"<caller, contract or behaviour that must not change, with its path>"}],
  "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change>"}]}
-Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. A requirement you can do in this change is "deliver". List every file you will change as a deliverable; tests are always allowed. Then stop.
+Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. A requirement you can do in this change is "deliver". List every file you will change as a deliverable; tests are always allowed.
+A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Then stop.
 
 ${BLOCK_RULES}`;
 }
 
 /** Builder call 2, same session: implement the frozen contract. */
-export function builderImplementPrompt() {
-  return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, run every validate command, and commit. Do not push or touch GitHub.
+export function builderImplementPrompt(mode = "local") {
+  const remote = mode === "ci" || mode === "hybrid";
+  return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, and commit. Do not push or touch GitHub.
 
-${HOST_RULES}
+${HOST_RULES}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why, which the engine posts on the issue:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file you must change that the contract did not list.
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: an issue requirement the contract missed.
 - {"kind":"defer|post-deploy","requirement":"R#","why":""}: a contracted requirement that becomes separate work or a post-deploy check. The engine files it as a tracked follow-up.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
+A new dependency between workspace packages in a package.json that no deliverable names (that package.json, with the package in its change) is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):
 ### Approach
@@ -64,6 +90,8 @@ When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comment
 ### Notes   (behavior changes, env vars)
 
 Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirements":[{"id":"R1","status":"implemented|partial|missing","evidence":"file:line"}],"validation":[{"id":"V1","command":"","exit":0}],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}],"amendments":[]}
+Docker: start containers with docker run --rm; pass --label for each entry of $FORGE_DOCKER_LABELS on every docker run, volume create, network create and build (compose: on services, volumes, networks); tear down via trap/finally.
+If you started Docker containers or volumes that are still there, list their names in ${RESULT_FILE} as "resources":{"containers":[],"volumes":[]} so the engine removes them when the lane ends.
 If you find you are blocked, write "status":"blocked" with a typed "block" instead.`;
 }
 
@@ -72,8 +100,13 @@ export function contractCorrectionPrompt(problems) {
 }
 
 /** The one bounded correction round, in the builder's own session. */
-export function conformanceResumePrompt(failures) {
-  return `The change does not conform to the frozen contract and the issue:\n${failures.slice(0, 30).map((f) => `- ${f.code}: ${String(f.detail).slice(0, 500)}`).join("\n")}\n\nFix each item in the code, or record a typed amendment with a why in ${RESULT_FILE}. Re-run the validate commands, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+export function conformanceResumePrompt(failures, mode = "local") {
+  return `The change does not conform to the frozen contract and the issue:\n${failures.slice(0, 30).map((f) => `- ${f.code}: ${String(f.detail).slice(0, 500)}`).join("\n")}\n\nFix each item in the code, or record a typed amendment with a why in ${RESULT_FILE}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** forge#4159: the one resume for package.json edges between workspace packages the contract does not name. */
+export function structurePrompt(edges, mode = "local") {
+  return `This change adds dependencies between workspace packages that the frozen contract does not name:\n${edges.slice(0, 30).map((e) => `- ${e.from} -> ${e.to} (${e.kind}, ${e.manifest})`).join("\n")}\n\nFor each one, add it to the contract with a reason, or remove it: either record {"kind":"add-deliverable","path":"<that package.json>","why":"<names the package and why this dependency is right>"} in ${RESULT_FILE}, or drop the dependency from the package.json and the code that needs it. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /** Human-only block reasons (#4124). Everything else agents resolve: a dependency, a split, prod data monitoring can read. */
@@ -97,6 +130,7 @@ You receive the GitHub issue with its comments, the frozen contract (requirement
 - scope: one row per changed file: the deliverable id that authorizes it (deliverables may be directories or globs), "test", "incidental" (changelog, lockfile), or "none" with what it changes.
 - preserve: one row per preserve id: intact|violated|unverified, with path:line.
 - regressions: concrete breakages only, each with path:line.
+Start from <row_skeleton> when given: it already lists every row the engine requires. Keep every id and file, fill each status and evidence, and add issue_coverage rows for issue requirements the contract does not quote. Scope rows are needed only for the files listed there; the engine authorizes the rest.
 
 Output ONLY a JSON object in a json code fence:
 {"issue_coverage":[{"quote":"","contract_ids":["R1"],"status":"covered|narrowed|missing"}],"requirements":[{"id":"R1","status":"","evidence":"path:line","validated_by":"V1","deferral_ok":true,"note":""}],"scope":[{"file":"","authorized_by":"D1|test|none","note":""}],"preserve":[{"id":"P1","status":"","evidence":"path:line"}],"regressions":[{"at":"path:line","failure":""}],"verdict":"CONFORMS|NONCONFORMING","summary":"one line"}
@@ -132,9 +166,9 @@ export function boundDiff(diff, { stat = "", base = "", maxBytes = REVIEW_DIFF_M
     + (list.length ? `\n<omitted_files>\n${list.join("\n")}\n</omitted_files>` : "");
 }
 
-export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "" }) {
+export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", skeleton = null, retry = null }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
-  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>`;
+  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}${skeleton ? `\n\n<row_skeleton>\n${cap(JSON.stringify(skeleton), 12000)}\n</row_skeleton>` : ""}${retry?.problems?.length ? `\n\n<previous_reply_problems>\nYour previous reply was rejected as incomplete. Fix exactly these and return the complete corrected JSON:\n${retry.problems.slice(0, 60).map((x) => `- ${x}`).join("\n")}\n</previous_reply_problems>${retry.previous ? `\n\n<previous_reply>\n${cap(retry.previous, 8000)}\n</previous_reply>` : ""}` : ""}`;
 }
 
 /** Pre-filter (#4123): one read-only, single-turn check of an issue a cheap signal flagged as possibly already fixed. */

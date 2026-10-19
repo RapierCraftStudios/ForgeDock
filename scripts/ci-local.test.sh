@@ -442,6 +442,18 @@ has "health options are passed through" "$LOG" "--health-cmd"
 hasnt "options off the safe list are dropped" "$LOG" "--privileged"
 has "container is named per run" "$LOG" "forge-ci-"
 has "container is torn down" "$LOG" "rm -f"
+# forge#4181: the network and every container carry the forgedock.* ownership labels; standalone runs get defaults
+RUNL=$(grep '^run -d' <<<"$LOG"); NETL=$(grep '^network create' <<<"$LOG")
+for k in owner=1 batch=adhoc lane=ci-local- issue=0 expires=; do has "4181: container label forgedock.$k" "$RUNL" "--label forgedock.$k"; has "4181: network label forgedock.$k" "$NETL" "--label forgedock.$k"; done
+has "4181: container keeps --rm" "$RUNL" "--rm"
+: > "$FAKE_DOCKER_LOG"
+OUT=$(FORGE_DOCKER_LABELS="forgedock.owner=1 forgedock.batch=b9 forgedock.lane=lean-42 forgedock.issue=42 forgedock.expires=1792434600394 other=x forgedock.bad=a;b" PATH="$T/bin:$PATH" bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
+eq "4181: a labelled run passes" 0 "$RC"
+RUNL=$(grep '^run -d' "$FAKE_DOCKER_LOG"); NETL=$(grep '^network create' "$FAKE_DOCKER_LOG")
+for l in batch=b9 lane=lean-42 issue=42 expires=1792434600394; do has "4181: container gets lane label $l" "$RUNL" "--label forgedock.$l"; has "4181: network gets lane label $l" "$NETL" "--label forgedock.$l"; done
+hasnt "4181: non-forgedock entries are dropped" "$RUNL" "other=x"
+hasnt "4181: malformed entries are dropped" "$RUNL" "forgedock.bad"
+hasnt "4181: env labels replace the defaults" "$RUNL" "batch=adhoc"
 : > "$FAKE_DOCKER_LOG"
 OUT=$(FAKE_DOCKER_INFO_RC=1 PATH="$T/bin:$PATH" bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
 eq "docker absent defers the service job (exit 0)" 0 "$RC"
@@ -776,7 +788,7 @@ OUT=$(PATH="$T/bin:$PATH" bash "$S" run --repo "$r" --base main --base-branch ma
 LOG=$(cat "$FAKE_DOCKER_LOG")
 eq "SEC-6: the circleci service job runs" 0 "$RC"
 hasnt "SEC-6: no --network host" "$LOG" "--network host"
-has "SEC-6: a per-job docker network is created" "$LOG" "network create forge-ci-net-"
+has "SEC-6: a per-job docker network is created" "$(grep '^network create' <<<"$LOG")" "forge-ci-net-"
 has "SEC-6: the container joins it" "$LOG" "--network forge-ci-net-"
 has "SEC-6: only the declared/default port is published, on 127.0.0.1" "$LOG" "-p 127.0.0.1:54331:5432"
 has "SEC-6: the network is removed afterwards" "$LOG" "network rm forge-ci-net-"

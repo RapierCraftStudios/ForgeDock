@@ -21,7 +21,8 @@
 #                   reported "SKIPPED — typescript.build not configured", and blocking it would stop every deploy of a repo
 #                   with plain .js files and no build command, ForgeDock itself included).
 #   --no-delta      skip the FULL/DELTA/BASE_SYNC_ONLY resolver: the review mode is always FULL (a staging bundle review always reviews the
-#                   whole bundle), without widening the roster to the full union the way --thorough does
+#                   whole bundle), without widening the roster to the full union the way --thorough does; it also enables the pinned
+#                   local-git diff fallback when `gh pr diff` fails (e.g. HTTP 406 over 20,000 lines), which a milestone->staging PR gets without it
 # Env: FORGE_CONFIG (forge.yaml path; default: the main checkout's forge.yaml, then the git top-level one),
 #      REVIEW_PREPARE_SLEEP (seconds between mergeability retries, default 5),
 #      REVIEW_PREPARE_INDEX_TIMEOUT (seconds the code-index build may take, default 120; on timeout or failure the slices say
@@ -126,15 +127,22 @@ case "$NFILES" in ''|*[!0-9]*) NFILES="" ;; esac
 LINES=$((ADDITIONS + DELETIONS))
 [ -z "$PR_INFO" ] || [ -n "$REVIEW_SHA" ] || block "could not read the PR head SHA"
 
+# Lane (the router already diverted staging->main; these gate the diff fallback, the full-build check and the roster).
+IS_STAGING_TO_MAIN="false"; [ "$HEAD" = "staging" ] && [ "$BASE" = "main" ] && IS_STAGING_TO_MAIN="true"
+IS_MILESTONE_TO_STAGING="false"; case "$HEAD" in milestone/*) [ "$BASE" = "staging" ] && IS_MILESTONE_TO_STAGING="true" ;; esac
+REQUIRES_FULL_BUILD="false"
+{ [ "$IS_STAGING_TO_MAIN" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; } && REQUIRES_FULL_BUILD="true"
+
 FILES=""; DIFF=""
 if [ -z "$BLOCKERS" ]; then
     FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only 2>/dev/null) || FILES="__FAILED__"
     [ "$FILES" = "__FAILED__" ] || DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO" 2>/dev/null) || FILES="__FAILED__"
     if [ "$FILES" = "__FAILED__" ]; then
-        # A staging bundle can exceed the API's diff size limit: read it from the long-lived branches instead (--no-delta only; a per-PR review blocks).
+        # A staging bundle or a milestone->staging PR can exceed the API's diff size limit: read it from the long-lived branches instead
+        # (--no-delta or the milestone lane only, both always FULL; any other per-PR review blocks — forge#4154).
         FILES=""; DIFF=""
         # Pinned (forge#3935): same-repo PRs only (a fork's branch name resolves to origin's own branch), and the fetched tip must equal REVIEW_SHA; the diff is taken against REVIEW_SHA, never the branch name.
-        if [ "$NO_DELTA" = "true" ] && [ -n "$BASE" ] && [ -n "$HEAD" ] && [ "$(printf '%s' "$PR_INFO" | jq -r .isCrossRepository 2>/dev/null)" = "false" ] && printf '%s' "$REVIEW_SHA" | grep -qE '^[0-9a-f]{40}$' \
+        if { [ "$NO_DELTA" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; } && [ -n "$BASE" ] && [ -n "$HEAD" ] && [ "$(printf '%s' "$PR_INFO" | jq -r .isCrossRepository 2>/dev/null)" = "false" ] && printf '%s' "$REVIEW_SHA" | grep -qE '^[0-9a-f]{40}$' \
            && git fetch -q origin "$BASE" "$HEAD" 2>/dev/null && [ "$(git rev-parse -q --verify "refs/remotes/origin/${HEAD}^{commit}" 2>/dev/null)" = "$REVIEW_SHA" ]; then
             FILES=$(git diff --name-only "origin/${BASE}...${REVIEW_SHA}" 2>/dev/null) && DIFF=$(git diff "origin/${BASE}...${REVIEW_SHA}" 2>/dev/null) || { FILES=""; DIFF=""; }
         fi
@@ -160,12 +168,6 @@ if [ -n "$PR_AUTHOR" ]; then
     case "$PRIOR_MERGED_COUNT" in ''|*[!0-9]*) PRIOR_MERGED_COUNT=1 ;; esac
     [ "$PRIOR_MERGED_COUNT" -eq 0 ] && IS_FIRST_TIME_CONTRIBUTOR="true"
 fi
-
-# Lane (the router already diverted staging->main; these still gate the full-build check and the roster).
-IS_STAGING_TO_MAIN="false"; [ "$HEAD" = "staging" ] && [ "$BASE" = "main" ] && IS_STAGING_TO_MAIN="true"
-IS_MILESTONE_TO_STAGING="false"; case "$HEAD" in milestone/*) [ "$BASE" = "staging" ] && IS_MILESTONE_TO_STAGING="true" ;; esac
-REQUIRES_FULL_BUILD="false"
-{ [ "$IS_STAGING_TO_MAIN" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; } && REQUIRES_FULL_BUILD="true"
 
 # --- optional PR checkout (throwaway review checkout only) ---
 if [ "$CHECKOUT_PR" = "true" ] && [ -z "$BLOCKERS" ]; then
