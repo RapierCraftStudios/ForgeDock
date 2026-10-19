@@ -2182,7 +2182,7 @@ describe("worktree salvage, orphan stop and runner lifetime (#4162)", () => {
       if (a[0] === "worktree" && a[1] === "remove") w.oldDirty = false;
       if (a[0] === "worktree" && a[1] === "add") w.added = true;
       if (a[0] === "status" && a[1] === "--porcelain" && (w.oldDirty || (w.added && w.dirtyAtEnd))) { rec(); return " M src/foo.js\n?? src/new.js\n"; }
-      if (a[0] === "stash" && a[1] === "create") { rec(); return "5a1e5a1e5a1e5a1e5a1e\n"; }
+      if (a[0] === "stash" && a[1] === "create") { rec(); w.stashN = (w.stashN ?? 0) + 1; return w.stashN === 1 ? "5a1e5a1e5a1e5a1e5a1e\n" : `n0te${w.stashN}`.padEnd(20, "0") + "\n"; }
       if (a[0] === "for-each-ref") { rec(); return w.refs.join("\n"); }
       return g(a, opt);
     };
@@ -2208,6 +2208,14 @@ describe("worktree salvage, orphan stop and runner lifetime (#4162)", () => {
     assert.ok(w.leaseWrites.some((st) => st.salvage?.ref === ref), "FORGE:STATE records the salvage ref");
     assert.ok(w.leaseWrites.at(-1).salvage?.ref === ref && w.leaseWrites.at(-1).lease === null, "kept through the lease release");
     assert.ok(traj(w)[0].includes(ref), "the trajectory names the ref");
+    // the gitignored .forge-lean is force-added AFTER the code snapshot, into a sibling notes ref (keeps `git stash apply` clean)
+    const force = idx(w, (c) => c[1] === "add" && c[2] === "-f" && c.at(-1) === ".forge-lean");
+    const stashes = w.calls.map((c, i) => [c, i]).filter(([c]) => c[1] === "stash" && c[2] === "create").map(([, i]) => i);
+    assert.ok(stashes.length === 2 && stashes[0] < force && force < stashes[1], "code stash, then force-add .forge-lean, then the notes stash");
+    const notes = w.calls.find((c) => c[1] === "update-ref" && String(c[2]).startsWith("refs/forge/salvage-notes/7/"));
+    assert.ok(notes, "notes ref written"); assert.equal(notes[2].split("/").at(-1), ref.split("/").at(-1), "same timestamp as the code ref");
+    assert.equal(saved.notes, notes[2]);
+    assert.ok(w.leaseWrites.some((st) => st.salvage?.notes === notes[2]), "FORGE:STATE names the notes ref too");
   });
 
   it("#4162 processes with their cwd inside the worktree are stopped and logged before it is removed; the engine itself never is", async () => {

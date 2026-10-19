@@ -180,11 +180,19 @@ export async function runCore(o) {
       await git(["add", "-A"]);
       const sha = String(await git(["stash", "create", `forge salvage #${issue} ${reason} contract=${contract ?? "none"}`])).trim();
       if (!sha) return null;
-      const ref = `refs/forge/salvage/${issue}/${now()}`;
+      const ts = now(), ref = `refs/forge/salvage/${issue}/${ts}`;
       await io.git(["update-ref", ref, sha], { cwd });
-      const salvage = { ref, sha, contract: contract ?? null, at: now() };
+      // The gitignored stage notes and contract (.forge-lean) go into a sibling snapshot: the engine rewrites them before
+      // the implementer runs, so inside the offered stash they would make `git stash apply` refuse ("already exists").
+      let notes = null;
+      try {
+        await git(["add", "-f", "-A", "--", LEAN_DIR]);
+        const nsha = String(await git(["stash", "create", `forge salvage #${issue} ${reason} with ${LEAN_DIR}`])).trim();
+        if (nsha && nsha !== sha) { notes = `refs/forge/salvage-notes/${issue}/${ts}`; await io.git(["update-ref", notes, nsha], { cwd }); }
+      } catch { notes = null; /* no stage notes: the code snapshot still stands */ }
+      const salvage = { ref, sha, contract: contract ?? null, at: ts, ...(notes ? { notes } : {}) };
       ev({ event: "SALVAGE_SAVED", ...salvage, reason });
-      T.decisions.push(`Uncommitted work saved to \`${ref}\` (${sha.slice(0, 12)}) before removing the worktree (${reason})`);
+      T.decisions.push(`Uncommitted work saved to \`${ref}\` (${sha.slice(0, 12)})${notes ? `, ${LEAN_DIR} to \`${notes}\`` : ""} before removing the worktree (${reason})`);
       if (leaseState) { leaseState = { ...leaseState, salvage }; if (io.projector) { try { await writeLease(leaseObj()); } catch { /* best effort */ } } }
       return salvage;
     } catch (e) { ev({ event: "SALVAGE_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return null; }
