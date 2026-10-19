@@ -342,6 +342,7 @@ export function scopeCommand(cmd, cwdRel, sctx, depth = 0) {
 
   let r = null;
   if (LINTERS[tool] && !(LINTERS[tool].sub && !LINTERS[tool].sub.has(rest[1]))) r = scopeLint(tool, rest, cmd, cwdRel, sctx, join);
+  else if (tool === 'tsc') r = scopeTsc(rest, cmd, cwdRel, sctx, join);
   else if (tool === 'jest') r = scopeJest(rest, cmd, cwdRel, sctx, join);
   else if (tool === 'vitest') r = scopeVitest(rest, cmd, cwdRel, sctx, join);
   else if (tool === 'pytest' || tool === 'py.test' || (/^python[0-9.]*$/.test(tool) && rest[1] === '-m' && rest[2] === 'pytest')) r = scopeRunner('pytest', tool === 'pytest' || tool === 'py.test' ? rest.slice(1) : rest.slice(3), tool === 'pytest' || tool === 'py.test' ? [rest[0]] : rest.slice(0, 3), cmd, cwdRel, sctx, join);
@@ -505,6 +506,87 @@ function scopeMaven(rest, cmd, cwdRel, sctx, join) {
   }
   if (!mods.size) return skipNo(0, null, 'maven-affected', 'no changed file in a Maven module');
   return scoped(join([...rest, '-pl', [...mods].sort().join(','), '-amd']), mods.size, null, 'maven-affected');
+}
+
+// ---- TypeScript compiler: the owning tsconfig project(s) of the changed files and of the files that reference them ----
+const TS_EXT = set('ts tsx mts cts js jsx mjs cjs');
+const TSC_VALUE = set('-p --project -t --target -m --module --outDir --outFile --rootDir --lib --jsx --tsBuildInfoFile --declarationDir --moduleResolution --baseUrl --types --typeRoots --locale --generateTrace --maxNodeModuleJsDepth --moduleDetection --verbatimModuleSyntax');
+
+// tsconfig.json is JSON with comments and trailing commas; null when unreadable.
+function readTsconfig(sctx, dir) {
+  sctx.cache.tsconfig = sctx.cache.tsconfig || new Map();
+  if (sctx.cache.tsconfig.has(dir)) return sctx.cache.tsconfig.get(dir);
+  let cfg = null;
+  try {
+    const raw = fs.readFileSync(path.join(sctx.repo, dir, 'tsconfig.json'), 'utf8');
+    const noComments = raw.replace(/("(?:[^"\\]|\\.)*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (m, q) => q || '');
+    cfg = JSON.parse(noComments.replace(/,(\s*[}\]])/g, '$1'));
+  } catch { cfg = null; }
+  sctx.cache.tsconfig.set(dir, cfg);
+  return cfg;
+}
+
+// The directory of the nearest tsconfig.json above `file` ('.' for the repo root), or '' when none owns it.
+export function tsProjectOf(sctx, file) {
+  for (let d = px.dirname(file); ; d = px.dirname(d)) {
+    if (sctx.present.has(d === '.' ? 'tsconfig.json' : `${d}/tsconfig.json`)) return d;
+    if (d === '.' || d === '/') return '';
+  }
+}
+
+// A project `tsc -b` can build: composite itself, or listed in another tsconfig's `references`.
+function tsBuildable(sctx, dir) {
+  const cfg = readTsconfig(sctx, dir);
+  if (cfg && cfg.compilerOptions && cfg.compilerOptions.composite === true) return true;
+  if (!sctx.cache.tsRefs) {
+    sctx.cache.tsRefs = new Set();
+    for (const f of sctx.tracked) {
+      if (px.basename(f) !== 'tsconfig.json' || !sctx.present.has(f)) continue;
+      const from = px.dirname(f); const c = readTsconfig(sctx, from);
+      for (const r of (c && Array.isArray(c.references) ? c.references : [])) {
+        if (!r || typeof r.path !== 'string') continue;
+        const to = px.normalize(px.join(from, r.path));
+        sctx.cache.tsRefs.add(to.endsWith('.json') ? px.dirname(to) : to);
+      }
+    }
+  }
+  return sctx.cache.tsRefs.has(dir);
+}
+
+function scopeTsc(rest, cmd, cwdRel, sctx, join) {
+  const flags = []; let project = ''; let build = false; const buildTargets = [];
+  for (let i = 1; i < rest.length; i++) {
+    const t = rest[i];
+    if (t === '-p' || t === '--project') { if (i + 1 >= rest.length) return full(cmd, '', { selector: 'unscoped:tsc-args' }); project = rest[++i]; continue; }
+    if (t.startsWith('--project=')) { project = t.slice(10); continue; }
+    if (t === '-b' || t === '--build') { build = true; continue; }
+    if (t === '-w' || t === '--watch') return full(cmd, '', { selector: 'unscoped:tsc-watch' });
+    if (t.startsWith('-')) { flags.push(t); if (TSC_VALUE.has(t) && i + 1 < rest.length) flags.push(rest[++i]); continue; }
+    if (!build) return full(cmd, '', { selector: 'unscoped:tsc-explicit-files' });
+    buildTargets.push(t);
+  }
+  if (/[$`*?]/.test(project) || buildTargets.some((t) => /[$`*?]/.test(t))) return full(cmd, '', { selector: 'unscoped:complex-target' });
+  // The project this command checks: -p X, the single -b target, else the tsconfig in its cwd.
+  const targetOf = (t) => { const r = rel(cwdRel, t); return r.endsWith('.json') ? px.dirname(r) : r; };
+  if (buildTargets.length > 1) return full(cmd, '', { selector: 'unscoped:explicit-targets' });
+  const target = project ? targetOf(project) : buildTargets.length ? targetOf(buildTargets[0]) : rel(cwdRel, '.');
+  if (sctx.widen) return full(cmd, sctx.widen, { selector: 'tsc-project' });
+  const un = unmappedFile(sctx.changed, TS_EXT);
+  if (un) return full(cmd, `unknown-language: ${un}`, { selector: 'tsc-project' });
+  const r = reach(sctx);
+  if (r.widen) return full(cmd, r.widen, { selector: 'tsc-project' });
+  const tsFiles = [...r.files].filter((f) => TS_EXT.has(extOf(f)));
+  if (!tsFiles.length) return skipNo(0, null, 'tsc-project', 'no changed TS/JS file');
+  const owners = dedupe(tsFiles.map((f) => tsProjectOf(sctx, f)).filter(Boolean))
+    .filter((d) => target === '.' || d === target || d.startsWith(target + '/')).sort();
+  if (!owners.length) return skipNo(0, null, 'tsc-project', `no changed TS/JS file in ${target}`);
+  // A command already aimed at one non-root project is that project's check: keep it as is.
+  if (target !== '.') return scoped(cmd, owners.length, null, 'tsc-project', { projects: owners });
+  if (owners.includes('.')) return full(cmd, 'root-project', { selector: 'tsc-project', projects: owners });
+  if (owners.length === 1) return scoped(join([rest[0], build ? '-b' : '-p', fromCwd(cwdRel, owners[0]), ...flags]), 1, null, 'tsc-project', { projects: owners });
+  if (!owners.every((d) => tsBuildable(sctx, d))) return full(cmd, 'multi-project', { selector: 'tsc-project', projects: owners });
+  // Build mode rejects --noEmit; composite projects emit their declarations as the repo's own build does.
+  return scoped(join([rest[0], '-b', ...owners.map((d) => fromCwd(cwdRel, d)), ...flags.filter((f) => f !== '--noEmit')]), owners.length, null, 'tsc-project', { projects: owners });
 }
 
 function scopeMono(tool, rest, cmd, sctx, join) {
