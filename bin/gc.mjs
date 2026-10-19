@@ -18,6 +18,7 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { makeLedger, ledgerRoot as defaultLedgerRoot, LEDGER_TTL_MS } from "./lean/ledger.mjs";
 import { makeRunTmp, procsInDir, killLedgerPid } from "./lean/effects.mjs";
 import { readBranches } from "./lean/lane.mjs";
+import { parseForgeYaml } from "./forge-utils.mjs";
 
 const pexec = promisify(execFile);
 export const GC_TYPES = Object.freeze(["container", "volume", "worktree", "branch", "tmp", "process"]);
@@ -36,19 +37,44 @@ export function parseDuration(s) {
 }
 
 export function parseGcArgs(argv = []) {
-  let apply = false, dry = false, olderThanMs = LEDGER_TTL_MS;
+  let apply = false, dry = false, olderThanMs = LEDGER_TTL_MS, olderThanGiven = false;
   const scopes = new Set();
   for (let i = 0; i < argv.length; i++) {
     const a = String(argv[i]);
     if (a === "--apply") apply = true;
     else if (a === "--dry-run") dry = true;
-    else if (a === "--older-than") { if (i + 1 >= argv.length) throw new Error("--older-than needs a value"); olderThanMs = parseDuration(argv[++i]); }
-    else if (a.startsWith("--older-than=")) olderThanMs = parseDuration(a.slice("--older-than=".length));
+    else if (a === "--older-than") { if (i + 1 >= argv.length) throw new Error("--older-than needs a value"); olderThanMs = parseDuration(argv[++i]); olderThanGiven = true; }
+    else if (a.startsWith("--older-than=")) { olderThanMs = parseDuration(a.slice("--older-than=".length)); olderThanGiven = true; }
     else if (GC_SCOPES.includes(a.slice(2)) && a.startsWith("--")) scopes.add(a.slice(2));
     else throw new Error(`unknown gc argument: ${a}`);
   }
   if (apply && dry) throw new Error("--apply and --dry-run are mutually exclusive");
-  return { apply, olderThanMs, scopes: scopes.size ? scopes : new Set(GC_SCOPES) };
+  return { apply, olderThanMs, olderThanGiven, scopes: scopes.size ? scopes : new Set(GC_SCOPES) };
+}
+
+/** forge.yaml `hygiene:` defaults (#4183). TTLs in hours; `max_host_load_ratio` is the near-ceiling trigger for orchestrate GC. */
+export const HYGIENE_DEFAULTS = Object.freeze({ container_ttl_hours: 6, worktree_ttl_hours: 24, tmp_ttl_hours: 6, delete_merged_branches: true, max_host_load_ratio: 0.8, auto_gc: true });
+
+/** Top-level forge.yaml `hygiene:` block (block form only); each missing or invalid value falls back to its default. */
+export function readHygiene(cwd = process.cwd(), { fs = nodeFs } = {}) {
+  let h = {};
+  try { h = parseForgeYaml(fs.readFileSync(join(cwd, "forge.yaml"), "utf8"))?.hygiene ?? {}; } catch { h = {}; }
+  if (!h || typeof h !== "object") h = {};
+  const hours = (k) => { const v = h[k], n = Number(v); return v !== undefined && v !== "" && Number.isFinite(n) && n >= 0 ? n : HYGIENE_DEFAULTS[k]; };
+  const bool = (k) => { const v = String(h[k] ?? "").trim().toLowerCase(); return v === "true" ? true : v === "false" ? false : HYGIENE_DEFAULTS[k]; };
+  const ratio = Number(h.max_host_load_ratio);
+  return {
+    container_ttl_hours: hours("container_ttl_hours"), worktree_ttl_hours: hours("worktree_ttl_hours"), tmp_ttl_hours: hours("tmp_ttl_hours"),
+    delete_merged_branches: bool("delete_merged_branches"), auto_gc: bool("auto_gc"),
+    max_host_load_ratio: h.max_host_load_ratio !== undefined && h.max_host_load_ratio !== "" && ratio > 0 && ratio <= 1 ? ratio : HYGIENE_DEFAULTS.max_host_load_ratio,
+  };
+}
+
+/** Per-type TTL in ms from hygiene settings: containers/volumes, worktrees/branches, tmp/processes. */
+export function hygieneTtls(h = HYGIENE_DEFAULTS) {
+  const ms = (x) => Math.round(Number(x) * 3600e3);
+  const c = ms(h.container_ttl_hours ?? HYGIENE_DEFAULTS.container_ttl_hours), w = ms(h.worktree_ttl_hours ?? HYGIENE_DEFAULTS.worktree_ttl_hours), t = ms(h.tmp_ttl_hours ?? HYGIENE_DEFAULTS.tmp_ttl_hours);
+  return { container: c, volume: c, worktree: w, branch: w, tmp: t, process: t };
 }
 
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e?.code !== "ESRCH"; } };
@@ -112,10 +138,11 @@ const errText = (e) => String(e?.stderr || e?.message || e).trim().split("\n")[0
  * Build the gc plan. Returns {items, summary, notes, ledgers}. `items[]`: {type, id, sizeBytes, ageMs, owned, action, reason, ...ctx}.
  * Only items with owned && action === "reclaim" are ever acted on by applyGc.
  */
-export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs = LEDGER_TTL_MS, now = Date.now() } = {}) {
+export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs = LEDGER_TTL_MS, ttlMs = null, deleteMergedBranches = true, now = Date.now() } = {}) {
   const P = probes, fs = P.fs ?? nodeFs;
   const items = [], notes = [], seen = new Set(), liveIds = new Set(), ledgers = [];
   const want = (type) => scopes.has(SCOPE_OF[type]);
+  const ttl = (type) => (Number.isFinite(ttlMs?.[type]) ? ttlMs[type] : olderThanMs); // forge.yaml hygiene TTLs, else --older-than
   const add = (it) => { const k = `${it.type}:${it.id}`; if (seen.has(k)) return; seen.add(k); items.push(it); };
   const age = (t) => (Number.isFinite(t) ? Math.max(0, now - t) : null);
   const mtime = (p) => { try { return fs.statSync(p).mtimeMs; } catch { return NaN; } };
@@ -232,12 +259,12 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
 
   // ---- 2. docker: labelled forgedock.owner=1 is owned; everything else is "not owned" ----
   if (want("container") || want("volume")) {
-    const ownedBy = (labels, createdMs) => {
+    const ownedBy = (labels, createdMs, type) => {
       if (labels["forgedock.owner"] !== "1") return { owned: false, action: "report", reason: "not owned" };
       let exp = Number(labels["forgedock.expires"]);
       if (Number.isFinite(exp) && exp > 0 && exp < 1e12) exp *= 1000;
       if (Number.isFinite(exp) && exp > 0 && exp < now) return { owned: true, action: "reclaim", reason: "forgedock label, expired" };
-      if (Number.isFinite(createdMs) && now - createdMs >= olderThanMs) return { owned: true, action: "reclaim", reason: "forgedock label, older than TTL" };
+      if (Number.isFinite(createdMs) && now - createdMs >= ttl(type)) return { owned: true, action: "reclaim", reason: "forgedock label, older than TTL" };
       return { owned: true, action: "report", reason: "forgedock label, younger than TTL" };
     };
     if (want("container")) {
@@ -247,7 +274,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
           if (!name || seen.has(`container:${name}`)) continue;
           if (liveIds.has(`container:${name}`)) continue;
           const created = parseDockerTime(c.CreatedAt);
-          add({ type: "container", id: name, sizeBytes: parseSize(c.Size), ageMs: age(created), ...ownedBy(parseLabels(c.Labels), created) });
+          add({ type: "container", id: name, sizeBytes: parseSize(c.Size), ageMs: age(created), ...ownedBy(parseLabels(c.Labels), created, "container") });
         }
       } catch (e) { notes.push(`docker containers unavailable: ${errText(e)}`); }
     }
@@ -262,7 +289,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
         }
         for (const v of vols) {
           if (!v.Name || seen.has(`volume:${v.Name}`) || liveIds.has(`volume:${v.Name}`)) continue;
-          add({ type: "volume", id: v.Name, sizeBytes: null, ageMs: age(created.get(v.Name)), ...ownedBy(parseLabels(v.Labels), created.get(v.Name)) });
+          add({ type: "volume", id: v.Name, sizeBytes: null, ageMs: age(created.get(v.Name)), ...ownedBy(parseLabels(v.Labels), created.get(v.Name), "volume") });
         }
       } catch (e) { notes.push(`docker volumes unavailable: ${errText(e)}`); }
     }
@@ -282,7 +309,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
       const procs = P.procsInDir?.(dir) ?? [];
       const w = await workIn(dir);
       if (procs.length) it.reason = "live process inside";
-      else if (reg && !(it.ageMs >= olderThanMs)) it.reason = "younger than TTL";
+      else if (reg && !(it.ageMs >= ttl("worktree"))) it.reason = "younger than TTL";
       else if (w) it.reason = w;
       else if (w === null && (reg || nonEmpty(dir))) it.reason = reg ? "cannot inspect worktree" : "unpushed work (cannot inspect)";
       else { it.action = "reclaim"; it.reason = reg ? "stale worktree, clean and pushed" : "unregistered leftover dir"; }
@@ -306,7 +333,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
         const it = { type: "branch", id, branch: name, local, sizeBytes: null, ageMs: age(Number(ts) * 1000), owned: true, action: "report", reason: "" };
         const why = await branchBlock(name, { local });
         if (why) it.reason = why;
-        else if (!(it.ageMs >= olderThanMs)) it.reason = "younger than TTL";
+        else if (!(it.ageMs >= ttl("branch"))) it.reason = "younger than TTL";
         else {
           const st = await issueState(Number(m[1]));
           if (st === "CLOSED" || st === "INVALID") { it.action = "reclaim"; it.reason = `abandoned (issue #${m[1]} ${st.toLowerCase()})`; }
@@ -338,7 +365,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
             const own = JSON.parse(fs.readFileSync(join(dir, RUN_OWNER), "utf8"));
             it.owned = true; it.ageMs = age(Number(own.created));
             // Same rule as makeRunTmp().prune (#4104): marker, older than the TTL, owner dead on this host.
-            if (!(it.ageMs >= olderThanMs)) it.reason = "younger than TTL";
+            if (!(it.ageMs >= ttl("tmp"))) it.reason = "younger than TTL";
             else if (own.host !== P.host) it.reason = "owner on another host";
             else if (Number.isSafeInteger(own.pid) && P.alive(own.pid)) it.reason = "owner alive";
             else { it.action = "reclaim"; it.reason = "stale run tmp, owner dead"; }
@@ -355,7 +382,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
         const dir = resolve(join(p, k));
         if (seen.has(`tmp:${dir}`) || liveIds.has(`tmp:${dir}`)) continue;
         const it = { type: "tmp", id: dir, sizeBytes: P.dirSize?.(dir) ?? null, ageMs: age(mtime(dir)), owned: true, action: "report", reason: "" };
-        if (!(it.ageMs >= olderThanMs)) it.reason = "younger than TTL";
+        if (!(it.ageMs >= ttl("tmp"))) it.reason = "younger than TTL";
         else if ((P.procsInDir?.(dir) ?? []).length) it.reason = "owner alive (process inside)";
         else { it.action = "reclaim"; it.reason = "stale runner scratch, no live process"; }
         add(it);
@@ -363,6 +390,9 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
     }
   }
 
+  if (!deleteMergedBranches) {
+    for (const it of items) if (it.type === "branch" && it.action === "reclaim") { it.action = "report"; it.reason = "delete_merged_branches: false"; }
+  }
   const summary = {};
   for (const t of GC_TYPES) {
     const of = items.filter((i) => i.type === t);
@@ -374,7 +404,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
       notOwned: of.filter((i) => !i.owned).length,
     };
   }
-  return { items, summary, notes, ledgers, scopes: [...scopes], olderThanMs };
+  return { items, summary, notes, ledgers, scopes: [...scopes], olderThanMs, ...(ttlMs ? { ttlMs } : {}) };
 }
 
 /** Reclaim every owned item marked "reclaim"; release ledger entries that were reclaimed. Never touches anything else. */
@@ -430,7 +460,8 @@ const fmtAge = (ms) => (ms == null ? "?" : ms >= 86400e3 ? `${Math.floor(ms / 86
 
 export function formatGcReport(plan, { applied = null } = {}) {
   const L = [];
-  L.push(`forgedock gc ${applied ? "--apply" : "(dry-run)"}: older than ${fmtAge(plan.olderThanMs)}, scopes ${plan.scopes.join(",")}`);
+  const ttlText = plan.ttlMs ? `TTL docker ${fmtAge(plan.ttlMs.container)}, worktrees ${fmtAge(plan.ttlMs.worktree)}, tmp ${fmtAge(plan.ttlMs.tmp)}` : `older than ${fmtAge(plan.olderThanMs)}`;
+  L.push(`forgedock gc ${applied ? "--apply" : "(dry-run)"}: ${ttlText}, scopes ${plan.scopes.join(",")}`);
   L.push(`  ${"type".padEnd(10)} ${"count".padStart(5)} ${"size".padStart(7)} ${"oldest".padStart(6)} ${"reclaimable".padStart(11)} ${"not owned".padStart(9)}`);
   for (const t of GC_TYPES) {
     if (!plan.scopes.includes(SCOPE_OF[t])) continue;
@@ -449,13 +480,55 @@ export function formatGcReport(plan, { applied = null } = {}) {
 }
 
 /** CLI entry: returns the exit code (0 ok, 1 apply failures, 2 bad flags). */
-export async function runGc(argv = [], { probes, now = Date.now(), out = (s) => process.stdout.write(s), err = (s) => process.stderr.write(s) } = {}) {
+export async function runGc(argv = [], { probes, hygiene = null, now = Date.now(), out = (s) => process.stdout.write(s), err = (s) => process.stderr.write(s) } = {}) {
   let opts;
   try { opts = parseGcArgs(argv); } catch (e) { err(`gc: ${e.message}\n`); return 2; }
   const P = probes ?? makeGcProbes();
-  const plan = await planGc({ probes: P, scopes: opts.scopes, olderThanMs: opts.olderThanMs, now });
+  const h = hygiene ?? readHygiene(P.cwd ?? process.cwd(), { fs: P.fs ?? nodeFs });
+  // An explicit --older-than overrides every forge.yaml hygiene TTL.
+  const plan = await planGc({ probes: P, scopes: opts.scopes, olderThanMs: opts.olderThanMs, ...(opts.olderThanGiven ? {} : { ttlMs: hygieneTtls(h) }), deleteMergedBranches: h.delete_merged_branches, now });
   if (!opts.apply) { out(formatGcReport(plan)); return 0; }
   const applied = await applyGc(plan, P);
   out(formatGcReport(plan, { applied }));
   return applied.failed.length ? 1 : 0;
+}
+
+/**
+ * Plan + apply with forge.yaml hygiene settings (orchestrate preflight/admission GC, #4183). Never throws: a failure
+ * becomes a note. Returns {plan, applied, reclaimed, bytes}.
+ */
+export async function runOwnedGc({ probes, hygiene = HYGIENE_DEFAULTS, scopes = new Set(GC_SCOPES), now = Date.now() } = {}) {
+  let plan = null, applied = { reclaimed: [], failed: [] };
+  try {
+    plan = await planGc({ probes, scopes, ttlMs: hygieneTtls(hygiene), deleteMergedBranches: hygiene.delete_merged_branches !== false, now });
+    applied = await applyGc(plan, probes);
+  } catch (e) {
+    plan = plan ?? { items: [], summary: {}, notes: [], ledgers: [], scopes: [...scopes], olderThanMs: LEDGER_TTL_MS };
+    plan.notes.push(`gc failed: ${errText(e)}`);
+  }
+  return { plan, applied, reclaimed: applied.reclaimed.length, bytes: applied.reclaimed.reduce((s, i) => s + (i.sizeBytes ?? 0), 0) };
+}
+
+/**
+ * doctor's "Resource hygiene" line (#4183): owned counts/sizes per type, reclaimable count, and unowned items older than
+ * their type TTL (reported only, never touched). warn when something is reclaimable (and not applied) or unowned-stale.
+ */
+export function hygieneCheck(plan, { applied = null, ttlMs = plan?.ttlMs ?? hygieneTtls() } = {}) {
+  const items = plan?.items ?? [];
+  const parts = [];
+  for (const t of GC_TYPES) {
+    const owned = items.filter((i) => i.type === t && i.owned);
+    if (owned.length) parts.push(`${owned.length} ${t}${owned.length === 1 ? "" : "s"} ${fmtSize(owned.reduce((s, i) => s + (i.sizeBytes ?? 0), 0))}`);
+  }
+  const reclaimable = items.filter((i) => i.owned && i.action === "reclaim").length;
+  const stale = items.filter((i) => !i.owned && i.ageMs != null && i.ageMs >= (ttlMs?.[i.type] ?? LEDGER_TTL_MS)).length;
+  const bits = [`owned: ${parts.length ? parts.join(", ") : "none"}`];
+  if (applied) bits.push(`reclaimed ${applied.reclaimed.length} of ${reclaimable}${applied.failed.length ? ` (${applied.failed.length} failed)` : ""}`);
+  else bits.push(`${reclaimable} reclaimable`);
+  if (stale) bits.push(`${stale} unowned stale (report only)`);
+  const pending = applied ? applied.failed.length : reclaimable;
+  const status = pending > 0 || stale > 0 ? "warn" : "pass";
+  let detail = bits.join("; ");
+  if (!applied && reclaimable > 0) detail += ". Run: npx forgedock doctor --fix  (or: npx forgedock gc --apply)";
+  return { status, detail, reclaimable, stale };
 }

@@ -877,7 +877,40 @@ export async function orchestrateFromCli(argv, deps = {}) {
     budget = { classify, maintenance: { share: maint.share ?? 0.2, whenIdle: maint.whenIdle ?? true } };
   }
   const crossLane = [];
+  // #4183: owned-resource GC in preflight and before an admission when the host is near the ceiling (forge.yaml hygiene).
+  const gcMod = await import("./gc.mjs");
+  const hygiene = deps.hygiene ?? gcMod.readHygiene(cwd);
+  const testDeps = deps.leanIo || deps.leanModule || deps.laneScript;
+  const gcRun = !hygiene.auto_gc ? null : deps.gc !== undefined ? deps.gc
+    : testDeps ? null : async () => gcMod.runOwnedGc({ probes: gcMod.makeGcProbes({ cwd }), hygiene });
+  const reclaimed = { enabled: !!hygiene.auto_gc, items: 0, bytes: 0, preflight: 0, admissions: 0, runs: 0 };
+  const nowMs = deps.now ?? (() => Date.now());
+  let lastGcAt = null;
+  const runGcPhase = async (phase) => {
+    if (!gcRun) return;
+    lastGcAt = nowMs();
+    try {
+      const r = (await gcRun({ phase })) ?? {};
+      const n = Number(r.reclaimed) || 0;
+      reclaimed.items += n; reclaimed.bytes += Number(r.bytes) || 0; reclaimed.runs++;
+      reclaimed[phase === "preflight" ? "preflight" : "admissions"] += n;
+      for (const note of r.plan?.notes ?? []) console.log(`gc (${phase}): ${note}`);
+    } catch (e) { console.log(`gc (${phase}) failed: ${String(e?.message ?? e).slice(0, 200)}`); }
+  };
+  await runGcPhase("preflight");
+  const GC_ADMISSION_INTERVAL_MS = 5 * 60 * 1000;
+  const beforeAdmit = !gcRun ? null : async () => {
+    if (lastGcAt !== null && nowMs() - lastGcAt < GC_ADMISSION_INTERVAL_MS) return;
+    let near = false;
+    try {
+      const { nearCeiling } = await import("./lean/admission.mjs");
+      const host = deps.host ?? (await import("./lean/effects.mjs")).makeHostProbe();
+      near = await nearCeiling({ cfg: readAdmission(cwd), host, ratio: hygiene.max_host_load_ratio });
+    } catch { near = false; }
+    if (near) await runGcPhase("admission");
+  };
   const rows = await orchestrate({
+    beforeAdmit,
     issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
     breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget,
     onCrossLane: (e) => {
@@ -890,11 +923,19 @@ export async function orchestrateFromCli(argv, deps = {}) {
     onUpdate: (r) => console.log(r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`),
   });
   console.log("\n" + formatTable(rows));
+  console.log(formatReclaimed(reclaimed));
   const pfLine = formatPrefilterSummary(rows);
   if (pfLine) console.log(pfLine);
   if (crossLane.length) console.log(`cross-lane edges: ${crossLane.map((e) => `#${e.issue} (${e.lane}) → #${e.dependency} (${e.dependencyLane})`).join(", ")}`);
   if (rows.some((r) => r.outcome === "held")) console.log(`held issues stay pending: forgedock orchestrate --resume ${batch.id}`);
-  return { rows, crossLane, batch: batch.id, ok: rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome)) };
+  return { rows, crossLane, batch: batch.id, reclaimed, ok: rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome)) };
+}
+
+/** The batch report's "reclaimed" line (#4183). */
+export function formatReclaimed(r) {
+  if (!r?.enabled) return "reclaimed: off (hygiene.auto_gc: false)";
+  const b = r.bytes, size = b >= 1073741824 ? `${(b / 1073741824).toFixed(1)}G` : b >= 1048576 ? `${(b / 1048576).toFixed(1)}M` : b >= 1024 ? `${Math.round(b / 1024)}K` : `${b}B`;
+  return `reclaimed: ${r.items} item(s), ${size} (preflight ${r.preflight}, admissions ${r.admissions})`;
 }
 
 /**
