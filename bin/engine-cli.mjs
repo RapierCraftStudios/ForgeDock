@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { readLog, deriveState } from "./engine/runlog.mjs";
@@ -18,6 +18,7 @@ import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
+import { parseExecution } from "./lean/execution.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
 
@@ -157,6 +158,17 @@ export function readVerify(cwd = process.cwd()) {
   try {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
     return sec && typeof sec === "object" ? parseVerify(sec) : undefined;
+  } catch { return undefined; }
+}
+/**
+ * forge.yaml `execution:` section (#4253, block style: `execution:` then `  mode: remote`, `  max_remote: 4`,
+ * `  provider: container`, `  image`, `  secrets` comma-separated env names) for `orchestrate`; undefined when the section
+ * is absent or unreadable.
+ */
+export function readExecution(cwd = process.cwd()) {
+  try {
+    const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.execution;
+    return sec && typeof sec === "object" ? parseExecution(sec) : undefined;
   } catch { return undefined; }
 }
 /**
@@ -979,16 +991,32 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     if (r.ok && prefilter && !fetched.has(r.lane)) { fetched.add(r.lane); try { await leanIo.git(["fetch", "origin", r.lane], { cwd }); } catch { /* offline: use the local ref */ } }
     return r;
   };
-  // Lanes: in-process `runCore` when a lean module is injected (tests), otherwise detached `run-issue` processes.
-  let lanes;
+  // Lanes: in-process `runCore` when a lean module is injected (tests), otherwise detached `run-issue` processes, or
+  // sandboxes when forge.yaml `execution` places them remote (#4253).
+  let lanes, remote = null;
   if (deps.leanModule) {
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln) => runCore({ issue: n, repo, lane: ln, laneOverride, branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
       admission: readAdmission(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
-    lanes = batchMod.detachedLanes({ batch, cwd, env, script: deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), bin: deps.laneBin, pollMs: deps.pollMs,
-      laneArgs: (n, ln) => ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])] });
+    const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
+    const laneArgs = (n, ln) => ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])];
+    const execMod = await import("./lean/execution.mjs");
+    const exec = deps.execution !== undefined ? deps.execution : readExecution(cwd);
+    if (exec && execMod.placement(exec) === "remote") {
+      // #4253: lanes run in sandboxes, ledger-tracked per lane, admitted against max_remote instead of the host cap.
+      let gitDir = null;
+      try { gitDir = resolvePath(cwd, String(await leanIo.git(["rev-parse", "--git-common-dir"], { cwd })).trim()); } catch { gitDir = null; }
+      const provider = deps.sandboxProvider ?? execMod.providerByName(exec.provider, { batch, repo, cwd, image: exec.image, gitDir, script: laneScript, bin: deps.laneBin });
+      const { makeLedger } = await import("./lean/ledger.mjs");
+      const ledgerFor = deps.sandboxLedger ?? ((n) => makeLedger({ batch: batch.id, lane: `sandbox-${n}`, owner: `orch_${process.pid}`, issue: n }));
+      lanes = execMod.providerLanes({ provider, laneArgs, ledgerFor, env, secrets: exec.secrets, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}) });
+      remote = { max: exec.maxRemote, isRemote: () => true };
+      sink.line(`execution: remote via ${provider.name}, max_remote ${exec.maxRemote}`);
+    } else {
+      lanes = batchMod.detachedLanes({ batch, cwd, env, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs });
+    }
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
   // #4190: usage-limit holds live in the host store keyed by the account the next lane would use.
@@ -1027,6 +1055,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
     breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id,
     ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
+    ...(remote ? { remote } : {}),
     onCrossLane: (e) => {
       crossLane.push(e);
       sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
