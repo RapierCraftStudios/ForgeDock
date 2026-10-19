@@ -263,7 +263,7 @@ Classify where the breakdown occurred. Use these categories:
 
 ### 3D: Cross-reference with Pipeline Hardening Principles
 
-Before proposing a fix, check which layer it belongs to (from CLAUDE.md):
+Before proposing a fix, check which layer it belongs to (`NORTHSTAR.md` § Where a fix belongs; pick the earliest, cheapest layer that would have stopped it):
 
 - **Quality gate** → static analysis, grep-catchable patterns
 - **Review agents** → semantic reasoning, library API contracts, cross-service interactions
@@ -368,7 +368,7 @@ Files that need changes:
 - If tightening a review agent: describe the reasoning step to add
 - If adding context/architect guidance: describe the lookup or trace step}
 
-**Hardening layer justification** (per CLAUDE.md Pipeline Hardening Principles):
+**Hardening layer justification** (per `NORTHSTAR.md` § Where a fix belongs):
 {Explain why this fix belongs in the proposed layer and not another}
 
 ### Related Prior Work

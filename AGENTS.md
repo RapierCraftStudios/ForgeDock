@@ -1,6 +1,8 @@
 # ForgeDock for Codex
 
-ForgeDock is a workflow-spec repository. The shared source of truth lives in `commands/`.
+Read [`NORTHSTAR.md`](./NORTHSTAR.md) first: purpose, non-negotiables, hardening layers and the runtime map.
+
+ForgeDock is a workflow-spec repository. Slash-command specs live in `commands/`; the lean engine in `bin/lean/` is the canonical runtime (see NORTHSTAR.md § Runtime map).
 
 Claude Code support remains intact:
 - `install.sh` installs slash-command symlinks into `~/.claude/commands/` for all projects (always global)
