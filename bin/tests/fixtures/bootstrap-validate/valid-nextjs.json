@@ -66,7 +66,7 @@
         "SCAFFOLD"
       ],
       "needsHuman": true,
-      "body": "## Problem\n\nCreate the Google OAuth client and store GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/setup/google-oauth.md` — new\n\n## Acceptance Criteria\n\n- [ ] Secrets set in the deploy environment [type:manual]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SCAFFOLD}} — needs SCAFFOLD\n"
+      "body": "## Problem\n\nCreate the Google OAuth client and store GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.\n\n### Setup steps\n\n1. Create the account or credential in the provider console.\n2. Store the values as deploy secrets.\n\n### Environment variables\n\n- `GOOGLE_CLIENT_ID`\n- `GOOGLE_CLIENT_SECRET`\n\n### Secret handling\n\nNever commit the values; dev and CI use the mock provider.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/setup/google-oauth.md` — new\n\n## Acceptance Criteria\n\n- [ ] Secrets set in the deploy environment [type:manual]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{SCAFFOLD}} — needs SCAFFOLD\n"
     },
     {
       "key": "AUTH",
