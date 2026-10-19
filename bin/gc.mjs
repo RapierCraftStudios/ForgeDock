@@ -3,7 +3,7 @@
 /**
  * `forgedock gc` reaper (#4180). Dry-run by default. It only reclaims what ForgeDock provably owns:
  *   - resources listed in a stale lane ledger (#4179: owner pid dead on this host, or expired on another host), sandboxes
- *     included (#4253: torn down through their provider),
+ *     included (#4253: torn down through their provider; `remote` via forge.yaml `execution`, #4254),
  *   - docker containers/volumes labelled `forgedock.owner=1`,
  *   - `lean-*` / `agent-*` dirs under the worktree root and `feat/issue-<n>-lean` branches,
  *   - ForgeDock's own scratch under `~/.forge/tmp` (run dirs with the owner marker, runner scratch `<repoKey>/<issue>`).
@@ -19,6 +19,8 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { makeLedger, ledgerRoot as defaultLedgerRoot, LEDGER_TTL_MS } from "./lean/ledger.mjs";
 import { makeRunTmp, procsInDir, killLedgerPid } from "./lean/effects.mjs";
 import { readBranches } from "./lean/lane.mjs";
+import { parseExecution, remoteTransportFor } from "./lean/execution.mjs";
+import { parseForgeYaml } from "./forge-utils.mjs";
 
 const pexec = promisify(execFile);
 export const GC_TYPES = Object.freeze(["container", "volume", "worktree", "branch", "tmp", "process", "sandbox"]);
@@ -385,10 +387,23 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
   return { items, summary, notes, ledgers, scopes: [...scopes], olderThanMs };
 }
 
-/** Sandbox teardown by provider (#4253, execution.mjs): a container is removed; a local lane is its own process. */
+/**
+ * forge.yaml `execution` of the checkout and its remote transport (#4254): `P.sandboxTransport` when injected, else the
+ * HTTP transport with the credential from the env or keychain. null when unconfigured or refused (never throws).
+ */
+const remoteTransport = (P) => {
+  if (P.sandboxTransport) return P.sandboxTransport;
+  try {
+    const sec = parseForgeYaml(nodeFs.readFileSync(join(P.cwd, "forge.yaml"), "utf8"))?.execution;
+    return remoteTransportFor(parseExecution(sec && typeof sec === "object" ? sec : {}), { env: P.env ?? process.env });
+  } catch { return null; }
+};
+
+/** Sandbox teardown by provider (#4253, execution.mjs): a container is removed; a local lane is its own process; a remote one is destroyed through its transport. */
 const SANDBOX_TEARDOWN = {
   container: async (P, h) => { try { await P.docker(["rm", "-f", h.id]); return true; } catch (e) { return /no such container/i.test(errText(e)); } },
   local: async () => true,
+  remote: async (P, h) => { const t = remoteTransport(P); if (!t) return false; try { return (await t.destroy(h.id)) !== false; } catch { return false; } },
 };
 const defaultSandboxTeardown = (P) => async (provider, handle) => (SANDBOX_TEARDOWN[provider] ? SANDBOX_TEARDOWN[provider](P, handle) : false);
 

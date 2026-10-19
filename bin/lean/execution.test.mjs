@@ -111,9 +111,10 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
     assert.equal(led.read(), null);
   });
 
-  it("start throws: engine-error row, teardown still runs", async () => {
+  it("start throws: typed needs-human sandbox.start_failed row (#4254), teardown still runs", async () => {
     const { r, prov, led } = await run({ startThrows: true });
-    assert.equal(r.terminalReason, "engine-error");
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, "sandbox.start_failed");
     assert.match(r.detail, /boom/);
     assert.ok(prov.calls.some((c) => c[0] === "teardown"));
     assert.equal(led.read(), null);
