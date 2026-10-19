@@ -13,7 +13,7 @@ import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPromp
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
-import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir } from "./effects.mjs";
+import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo } from "./effects.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
@@ -693,6 +693,54 @@ describe("issue edited mid-run (#4188)", () => {
     const w = world({ issueBodies: [ISSUE_BODY] });
     assert.equal((await run(w, { dir })).terminalReason, "merged");
     assert.equal(readLog(dir, 7).filter((e) => e.event === "ISSUE_EDITED").length, 0);
+  });
+});
+
+describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness.sh)", () => {
+  const dworld = (results, o = {}) => {
+    const w = world(o); const q = [...results]; w.docsCalls = [];
+    w.io.docsFreshness = async (x) => { w.docsCalls.push(x); return q.length > 1 ? q.shift() : q[0]; };
+    return w;
+  };
+  const STALE = { ok: false, output: "STALE: bin/lean/lean.mjs changed but no dossier matching it was touched (devdocs/modules/lean.md)" };
+
+  it("a stale dossier gets one builder resume with the script's output, then merges once it passes", async () => {
+    const w = dworld([STALE, { ok: true, output: "OK" }]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 3, "plan + implement + one docs resume");
+    assert.match(builders(w)[2][4], /docs freshness check[\s\S]*devdocs\/modules\/lean\.md/);
+    assert.equal(w.docsCalls[0].base, "origin/staging");
+    assert.match(traj(w).at(-1), /Docs freshness check failed; builder resumed once/);
+  });
+
+  it("still stale after the resume: needs-human docs.stale, before any PR or reviewer run", async () => {
+    const w = dworld([STALE]);
+    const r = await run(w);
+    assert.equal(r.code, "docs.stale"); assert.equal(w.prs.length, 0); assert.equal(reviewers(w).length, 0);
+    assert.equal(builders(w).length, 3);
+  });
+
+  it("no script in the repo, or it cannot run (null): no resume, the run is unchanged", async () => {
+    const w = dworld([null]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 2);
+  });
+
+  it("the effect: absent script -> null; exit 0 -> ok; exit 1 -> stale with output; exit 2 -> null", async () => {
+    const io = makeLeanIo({ repo: "o/r" });
+    const dir = tmpDir("docs-fresh-");
+    assert.equal(await io.docsFreshness({ cwd: dir, base: "origin/x" }), null);
+    mkdirSync(join(dir, "scripts"), { recursive: true });
+    const put = (body) => writeFileSync(join(dir, "scripts", "check-devdocs-freshness.sh"), `#!/usr/bin/env bash\n${body}\n`);
+    put('echo "OK: $1"; exit 0');
+    assert.deepEqual(await io.docsFreshness({ cwd: dir, base: "origin/x" }), { ok: true, output: "OK: origin/x\n" });
+    put('echo "STALE: lean.md"; exit 1');
+    const st = await io.docsFreshness({ cwd: dir, base: "origin/x" });
+    assert.equal(st.ok, false); assert.match(st.output, /STALE: lean\.md/);
+    put("echo usage >&2; exit 2");
+    assert.equal(await io.docsFreshness({ cwd: dir, base: "origin/x" }), null);
+    put('[ -z "$PR_BODY" ] && exit 0 || exit 1');
+    assert.equal((await io.docsFreshness({ cwd: dir, base: "origin/x" })).ok, true, "PR_BODY is empty: no exemption is read from the environment");
   });
 });
 

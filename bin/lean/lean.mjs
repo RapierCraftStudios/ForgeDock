@@ -18,7 +18,7 @@ import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, ciFailurePrompt, ciUnavailablePrompt, syncChecks } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, syncChecks } from "./prompts.mjs";
 import { parseVerify, runCiVerify, VERIFY_MODES } from "./verify.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
@@ -827,6 +827,22 @@ export async function runCore(o) {
       }
       if (edges.length) {
         return await needsHuman(`The change adds dependencies between workspace packages that the frozen contract does not name${sessionId ? ", after one builder resume" : ""}; nothing merged:\n${edges.slice(0, 15).map((e) => `- ${e.from} → ${e.to} (${e.kind}, \`${e.manifest}\`)`).join("\n")}\n\nAdd each to the contract with a reason, or remove it.`, OUTCOME_CODES.STRUCTURE_UNDECLARED_EDGE);
+      }
+    }
+    // ---- 3c. the target repo's devdocs freshness rule, when it has one: deterministic, before any PR, so a lane does not
+    // pay for a failed required check. Exit 1 resumes the builder once; still failing is needs-human docs.stale.
+    if (io.docsFreshness) {
+      let docs = await io.docsFreshness({ cwd: wt, base }).catch(() => null);
+      if (docs && !docs.ok && sessionId) {
+        ev({ event: "DOCS_STALE", round: 1 });
+        T.decisions.push("Docs freshness check failed; builder resumed once");
+        await builder(++attemptN, docsPrompt(docs.output), sessionId);
+        await upsertStage("implementation");
+        result = (await readResult()) ?? result;
+        docs = await io.docsFreshness({ cwd: wt, base }).catch(() => null);
+      }
+      if (docs && !docs.ok) {
+        return await needsHuman(`The repository's docs freshness check still fails${sessionId ? " after one builder resume" : ""}; nothing merged:\n\n${String(docs.output).slice(0, 2000)}`, OUTCOME_CODES.DOCS_STALE);
       }
     }
     const structureLine = structureNote(structure);
