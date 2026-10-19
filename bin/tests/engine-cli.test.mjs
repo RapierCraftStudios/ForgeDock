@@ -1,7 +1,7 @@
 import { tmpDir } from "./_tmp.mjs";
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, rmSync, utimesSync } from "node:fs";
+import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine } from "../engine-cli.mjs";
@@ -399,6 +399,75 @@ describe("runFromCli --repo targeting guard", () => {
     assert.equal(runIssue.mock.callCount(), 1);
     assert.equal(res.terminalReason, "workflow:merged");
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// forge#4157: a failed `gh repo view` (a timeout under host load) is transient: retried with backoff, and a lane
+// that still cannot verify --repo ends `deferred` gh.unavailable (not engine-error, so the batch breaker never sees it).
+describe("runFromCli --repo verification when gh is unavailable", () => {
+  /** gh whose `repo view` throws `failures` times, then answers `currentRepo`. */
+  function makeFlakyIo(currentRepo, failures) {
+    let left = failures;
+    const gh = mock.fn(async (args) => {
+      if (args[0] === "repo" && args[1] === "view") {
+        if (left-- > 0) throw new Error("Command failed: gh repo view (timed out)");
+        return `${currentRepo}\n`;
+      }
+      throw new Error(`unexpected gh call: ${args.join(" ")}`);
+    });
+    return { gh };
+  }
+
+  it("retries `gh repo view` with increasing backoff and runs when it recovers", async () => {
+    const io = makeFlakyIo("acme/target-repo", 2);
+    const sleep = mock.fn(async () => {});
+    const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+    const dir = tmpDir("engine-cli-test-");
+    try {
+      const res = await runFromCli(["42", "--lane", "staging", "--path", "full", "--repo", "acme/target-repo"], { io, runIssue, dir, sleep });
+      assert.equal(runIssue.mock.callCount(), 1);
+      assert.equal(res.terminalReason, "workflow:merged");
+      const delays = sleep.mock.calls.map((c) => c.arguments[0]);
+      assert.equal(delays.length, 2);
+      assert.ok(delays[0] > 0 && delays[1] > delays[0], `backoff must increase: ${delays}`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("defers with gh.unavailable (and reports it through --result-file) when gh never answers", async () => {
+    const io = makeFlakyIo("acme/target-repo", Infinity);
+    const sleep = mock.fn(async () => {});
+    const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+    const runCore = mock.fn(async () => ({ terminalReason: "merged" }));
+    const dir = tmpDir("engine-cli-test-");
+    const rf = join(dir, "lanes", "42.json");
+    try {
+      for (const path of ["full", "core"]) {
+        rmSync(rf, { force: true });
+        const res = await runFromCli(["42", "--lane", "staging", "--path", path, "--repo", "acme/target-repo", "--result-file", rf],
+          { io, runIssue, dir, sleep, leanModule: { runCore }, leanIo: {}, emitTelemetry: async () => {} });
+        assert.equal(res.terminalReason, "deferred");
+        assert.equal(res.code, "gh.unavailable");
+        assert.equal(res.retryInSeconds, 60);
+        assert.match(res.detail, /could not be determined/);
+        const written = JSON.parse(readFileSync(rf, "utf8"));
+        assert.equal(written.terminalReason, "deferred");
+        assert.equal(written.code, "gh.unavailable");
+      }
+      assert.equal(runIssue.mock.callCount(), 0);
+      assert.equal(runCore.mock.callCount(), 0);
+      assert.ok(sleep.mock.callCount() >= 2);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("resume-stalled still refuses when gh never answers (no lane result to report)", async () => {
+    const io = makeFlakyIo("acme/target-repo", Infinity);
+    const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+    await assert.rejects(
+      resumeStalledFromCli(["--lane", "staging", "--repo", "acme/target-repo"], { io, dispatch, sleep: async () => {} }),
+      /could not be determined/,
+    );
+    assert.equal(dispatch.mock.callCount(), 0);
+    assert.equal(io.gh.mock.callCount(), 3);
   });
 });
 

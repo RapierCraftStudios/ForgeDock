@@ -38,6 +38,7 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `push.transient` | `git push` kept failing with a transient error (`remote unpack failed`, `index-pack failed`, `RPC failed`, 5xx, reset, timeout) after 4 attempts; `deferred`, rerun resumes | lean | `bin/lean/lean.mjs` |
 | `cli.idle` | The builder CLI showed no stream activity for `engine.cli_idle_minutes` and was killed; uncommitted work was checkpointed to the lane branch; `deferred` after one automatic retry | lean | `bin/runner.mjs` |
 | `host.busy` | Core run deferred at admission: free memory, free tmp space or load per core outside `engine.admission` limits; no lease taken, nothing posted | lean | `bin/lean/admission.mjs` |
+| `gh.unavailable` | `run-issue --repo` could not verify the cwd repo because `gh repo view` kept failing after 3 attempts with backoff (typically a timeout under host load); the core or full run is `deferred` (exit 75, retry in 60s) before any lease, nothing posted | engine CLI | `bin/engine-cli.mjs` |
 | `rate_limited` | Session or usage limit outlasted the pause budget | engine | `err.usageLimit` / `err.resetAtEpochMs` |
 | `engine.error` | Engine or tool failure (missing key/SDK, CLI crash, max turns, unresolved args, runner threw every attempt) | engine | `err.code` |
 | `infra.disk_quota` | Disk full or quota exhausted (EDQUOT/ENOSPC, errno -28/-122); retryable infra failure, never `needs-human` | engine | Runner error text |
