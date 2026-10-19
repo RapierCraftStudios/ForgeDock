@@ -155,3 +155,13 @@ Opt-in `verify:` section (`engine-cli.mjs` `readVerify` → `verify.mjs` `parseV
 Added `FORGE_HOST_PARALLELISM`: it is derived from the ledger lane count,
 injected into the runner env, named in the builder host rules, and used to cap
 ci-local slots and job parallelism.
+
+## Entry 2026-10-20 — Account-scoped usage-limit holds (#4190)
+
+`limits.mjs` keeps a host-level store (`~/.forge/limits.json`, atomic writes) of
+`rate_limited` holds keyed by `backendIdentity({backend, env})`. A lane's
+`rate_limited` result carries `backendId`; `orchestrate.mjs` admission consults the
+hold for the identity the next lane would use, so batches on the same account share
+one hold and a lane on another account is admitted. Legacy per-batch `holdUntil` in
+`state.json` is ignored on `--resume`. CLI: `forgedock limits show|clear [<id>|--all]`
+(`engine-cli.mjs` `limitsFromCli`).

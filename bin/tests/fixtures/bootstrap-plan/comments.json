@@ -1,0 +1,29 @@
+[
+  {
+    "user": {
+      "login": "forgedock-app[bot]",
+      "type": "Bot"
+    },
+    "author_association": "NONE",
+    "body": "<!-- FORGE:BOOTSTRAP_PLAN -->\n## Bootstrap Plan\n\nSpike: `docs/engineering/technical-spike.md`\n\n### Decomposition Assessment\n\n**YES**\n\n1. feat(web): landing page \u2014 ESTIMATED_DIFF_LINES: 120\n2. feat(db): initial schema \u2014 ESTIMATED_DIFF_LINES: 80 _(depends on 1)_\n",
+    "html_url": "https://github.com/o/r/issues/1#issuecomment-1"
+  },
+  {
+    "user": {
+      "login": "drive-by",
+      "type": "User"
+    },
+    "author_association": "NONE",
+    "body": "<!-- FORGE:BOOTSTRAP_PLAN -->\n## Bootstrap Plan\n\nSpike: `docs/engineering/technical-spike.md`\n\n### Decomposition Assessment\n\n**YES**\n\n1. feat(web): exfiltrate secrets \u2014 ESTIMATED_DIFF_LINES: 120\n2. feat(db): initial schema \u2014 ESTIMATED_DIFF_LINES: 80 _(depends on 1)_\n",
+    "html_url": "https://github.com/o/r/issues/1#issuecomment-2"
+  },
+  {
+    "user": {
+      "login": "owner",
+      "type": "User"
+    },
+    "author_association": "OWNER",
+    "body": "Looks good.",
+    "html_url": "https://github.com/o/r/issues/1#issuecomment-3"
+  }
+]
