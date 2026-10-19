@@ -653,15 +653,17 @@ gh project link "$PROJECT_NUMBER" --owner "$OWNER" --repo "${OWNER}/${REPO}" 2>/
 ```bash
 EXISTING=$(gh project field-list "$PROJECT_NUMBER" --owner "$OWNER" --format json | jq -r '.fields[].name | ascii_downcase')
 COMPONENT_OPTIONS="${DOMAIN_LABELS:-core}"
-ensure_field() {  # $1 = field name, $2 = comma-separated options
-  echo "$EXISTING" | grep -qx "$(echo "$1" | tr '[:upper:]' '[:lower:]')" && return 0
-  gh project field-create "$PROJECT_NUMBER" --owner "$OWNER" --name "$1" \
-    --data-type SINGLE_SELECT --single-select-options "$2"
-}
-ensure_field "Lane"      "Fast,Feature,Sync"
-ensure_field "Priority"  "P0,P1,P2,P3"
-ensure_field "Workflow"  "Investigating,Building,In Review,Merged"
-ensure_field "Component" "$COMPONENT_OPTIONS"
+# One "field name|comma-separated options" row per ForgeDock field
+while IFS='|' read -r FIELD_NAME FIELD_OPTIONS; do
+  echo "$EXISTING" | grep -qx "$(echo "$FIELD_NAME" | tr '[:upper:]' '[:lower:]')" && continue
+  gh project field-create "$PROJECT_NUMBER" --owner "$OWNER" --name "$FIELD_NAME" \
+    --data-type SINGLE_SELECT --single-select-options "$FIELD_OPTIONS"
+done <<EOF
+Lane|Fast,Feature,Sync
+Priority|P0,P1,P2,P3
+Workflow|Investigating,Building,In Review,Merged
+Component|${COMPONENT_OPTIONS}
+EOF
 ```
 
 Component options come from the Phase 5E domain-label list (fallback `core`), so board components and domain labels line up.

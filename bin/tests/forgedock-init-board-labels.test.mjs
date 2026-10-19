@@ -74,7 +74,8 @@ describe("commands/forgedock-init.md board + labels provisioning", () => {
   });
   it("creates or links the board and ensures every ForgeDock field", () => {
     for (const s of ["gh project create", "gh project link", "gh project field-create"]) assert.ok(spec.includes(s), s);
-    for (const f of ["Lane", "Priority", "Workflow", "Component"]) assert.match(spec, new RegExp(`ensure_field "${f}"`));
+    for (const f of ["Lane", "Priority", "Workflow", "Component"]) assert.match(spec, new RegExp(`^${f}\\|`, "m"));
+    assert.doesNotMatch(spec, /ensure_field\(\)/, "no positional-arg helper in a Skill-loaded spec");
     assert.match(spec, /Status` is built into every Projects v2 board/);
     assert.doesNotMatch(spec, /Zero project boards found AND `INTERACTIVE=false` → skip this section silently/);
   });
