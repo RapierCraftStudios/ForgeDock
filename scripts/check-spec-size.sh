@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check-spec-size.sh — PR spec-size budget (forge#3762).
+# check-spec-size.sh — PR spec-size budget for every command spec (forge#3762, #4164).
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
@@ -13,7 +13,9 @@
 # Exit:  0 pass/exempt, 1 budget violation, 2 usage/base-ref error (fail closed)
 #
 # Rules (against the merge-base of HEAD and the PR base, compared in bytes):
-#   1. Budgeted specs may not grow by more than 2% or more than 4096 bytes.
+#   1. Every commands/**/*.md spec (head files plus files deleted at head) may not grow by more
+#      than 2% or more than 4096 bytes. A new spec (absent at the base) may be at most 4096 bytes.
+#      CEILINGS adds a per-file hard size cap (path:max_bytes) checked whatever the growth.
 #   2. The NET count of canonical block markers across all of commands/**/*.md
 #      may not rise (moving a block between files, or replacing one with a stub,
 #      is allowed). Count-based until the shared helper lands (#3493).
@@ -25,8 +27,9 @@ set -uo pipefail
 
 BASE="${1:-${BASE_REF:-origin/staging}}"
 PCT_NUM=2            # 2%
-ABS_MAX=4096         # bytes
-BUDGETED="commands/review-pr.md commands/review-pr-staging.md commands/work-on/remediate.md commands/work-on/review.md commands/work-on.md"
+ABS_MAX=4096         # bytes; also the size cap for a new spec
+# Per-file hard ceilings, one path:max_bytes per line (a spec converted to a script stub stays small).
+CEILINGS="commands/issue.md:15360"
 
 SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 out() { printf '%s\n' "$*" >> "$SUMMARY"; }
@@ -67,27 +70,42 @@ out "## Spec-size budget (base: \`$BASE\`)"
 out ""
 out "| File | Base | Head | Delta | Delta % | Status |"
 out "|------|-----:|-----:|------:|--------:|--------|"
-for f in $BUDGETED; do
-  [ -f "$f" ] || [ "$(base_size "$f")" != 0 ] || continue
+ceiling_of() { printf '%s\n' "$CEILINGS" | awk -F: -v f="$1" '$1 == f {print $2; exit}'; }
+HEAD_FILES=$(git ls-files 'commands/*.md' | sort -u)
+BASE_FILES=$(git ls-tree -r --name-only "$BASE" -- commands | grep -E '\.md$' | sort -u)
+ALL_FILES=$(printf '%s\n%s\n' "$HEAD_FILES" "$BASE_FILES" | sort -u)
+SPECS=0
+for f in $ALL_FILES; do
+  [ -n "$f" ] || continue
+  SPECS=$((SPECS + 1))
   b=$(base_size "$f")
   h=0; [ -f "$f" ] && h=$(wc -c < "$f" | tr -d ' ')
   g=$((h - b))
+  cap=$(ceiling_of "$f")
   status="ok"
-  if [ "$g" -gt 0 ] && { [ $((g * 100)) -gt $((b * PCT_NUM)) ] || [ "$g" -gt "$ABS_MAX" ]; }; then
-    status="OVER BUDGET"; FAILURES=$((FAILURES + 1))
+  if [ "$b" -eq 0 ]; then
+    [ "$h" -gt "$ABS_MAX" ] && status="OVER BUDGET (new spec > $ABS_MAX bytes)"
+  elif [ "$g" -gt 0 ] && { [ $((g * 100)) -gt $((b * PCT_NUM)) ] || [ "$g" -gt "$ABS_MAX" ]; }; then
+    status="OVER BUDGET"
   fi
+  if [ -n "$cap" ] && [ "$h" -gt "$cap" ]; then
+    status="OVER CEILING ($cap bytes)"
+  fi
+  # Only changed or failing specs get a row; the table would otherwise list every spec.
+  [ "$g" -ne 0 ] || [ "$status" != "ok" ] || continue
+  [ "$status" = "ok" ] || FAILURES=$((FAILURES + 1))
   if [ "$b" -gt 0 ]; then
     p=$(awk -v g="$g" -v b="$b" 'BEGIN{printf "%+.2f%%", g*100/b}')
   else p="n/a"; fi
   out "| \`$f\` | $b | $h | $g | $p | $status |"
 done
+out ""
+out "$SPECS spec(s) budgeted; unchanged specs within budget are not listed."
 
 # Net marker total across every commands/**/*.md: head (working tree, incl. new
 # files) vs base (incl. files deleted at head). Fail only when the total rises.
 HEAD_TOTAL=0; BASE_TOTAL=0; MARKER_ROWS=""
-HEAD_FILES=$(git ls-files 'commands/*.md' | sort -u)
-BASE_FILES=$(git ls-tree -r --name-only "$BASE" -- commands | grep -E '\.md$' | sort -u)
-for f in $(printf '%s\n%s\n' "$HEAD_FILES" "$BASE_FILES" | sort -u); do
+for f in $ALL_FILES; do
   [ -n "$f" ] || continue
   hc=0; [ -f "$f" ] && hc=$(grep -cE "$MARKERS" "$f" 2>/dev/null || true); hc=${hc:-0}
   bc=$(git show "$BASE:$f" 2>/dev/null | grep -cE "$MARKERS" 2>/dev/null || true); bc=${bc:-0}
