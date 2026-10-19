@@ -225,6 +225,43 @@ dispatcher's queued entries are dropped; its slots too unless the detached lane
 admit without the cap (one `sched` row). Rationale:
 `devdocs/decisions/4191-host-lane-registry.md`.
 
+## Entry 2026-10-20 — schedd: one host scheduler process for every batch (#4192)
+
+`bin/lean/schedd.mjs` is the host daemon (`forgedock schedd`). It is single
+instance through `schedd.lock` (daemon pid, O_EXCL, a dead owner's lock taken over)
+plus the unix socket `schedd.sock` in `schedDir()`. It hosts `orchestrate()` for
+every batch through the injected `engine-cli.mjs` `runBatch`, so the registry slot
+`pid` of every lane is the daemon's.
+
+`forgedock orchestrate` is now a client (`orchestrateClient`). It checks the
+arguments, resolves the repo, auto-spawns the daemon (output to
+`<sched>/schedd.log`) and talks to it in NDJSON:
+- `submit {argv, cwd, env}` streams `row`/`line` messages, then `done`.
+- `attach {id}` replays `log.jsonl` and then streams live. A finished batch
+  replays `report.json`. A batch nobody hosts, or one with `held` rows, is resumed
+  in the daemon (breaker reset, as an operator resume).
+- `set-parallel {id, k}` sets K live. With no daemon running, the client writes
+  the `parallel` file itself.
+- `status` reports the daemon pid and hosted batches.
+
+A client exit never stops a batch.
+
+On start the daemon resumes every `plan.daemon` batch without `report.json` and
+keeps a tripped breaker tripped. Live lanes are re-adopted through `adopt`. It
+exits after `FORGEDOCK_SCHEDD_IDLE_MS` (default 10 min) with no batch and no client.
+
+Lanes run with the client's env. The plan keeps the allowlist
+`PATH|HOME|USER|SHELL|LANG|LC_ALL|TMPDIR|FORGEDOCK_*|CLAUDE_*|ANTHROPIC_*|GH_*|GITHUB_*`
+(`batchEnv`). `mergeEnv` drops the daemon's own allowlisted keys, so an account
+selector never leaks between batches.
+
+`--foreground`, `FORGEDOCK_SCHEDD=0` or injected test deps run the batch
+in-process as before.
+
+systemd-user unit:
+`[Service] ExecStart=/usr/bin/env forgedock schedd` with `Restart=on-failure`.
+Rationale: `devdocs/decisions/4192-schedd.md`.
+
 ## Entry 2026-10-20 — Change-scoped checks and shared caches (#4218)
 
 `bin/lean/checks.mjs` (CLI + library) discovers the repo's typecheck/lint/test
