@@ -795,6 +795,13 @@ export async function runCore(o) {
       }
       return "unknown";
     };
+    /** #4158: MERGEABLE but BLOCKED is a base branch policy block (ruleset / required checks pending), not a conflict. */
+    const policyBlocked = async () => {
+      let j;
+      try { j = JSON.parse(String(await ghc(["pr", "view", String(pr), "-R", repo, "--json", "mergeable,mergeStateStatus"])) || "{}"); } catch { return false; }
+      return String(j.mergeable ?? "").toUpperCase() === "MERGEABLE" && String(j.mergeStateStatus ?? "").toUpperCase() === "BLOCKED";
+    };
+    let blockStartedAt = null, blockPollIndex = 0;
     const conflictFiles = async () => (await gitOut(["diff", "--name-only", "--diff-filter=U"])).split("\n").map((x) => x.trim()).filter(Boolean);
     const unresolved = async () => (await conflictFiles()).length > 0 || (await gitOut(["grep", "-n", "-e", "^<<<<<<< ", "-e", "^>>>>>>> "])) !== ""
       || (await gitOut(["diff", "--check"])) !== "" || (await gitOut(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) !== "";
@@ -899,6 +906,22 @@ export async function runCore(o) {
           if (++mergeRetries > maxMergeRetries) return await finish("deferred", `gh pr merge kept failing transiently (${mergeRetries - 1} retries): ${msg.slice(0, 300)}`, { pr, code: OUTCOME_CODES.MERGE_TRANSIENT }, OUTCOME_CODES.MERGE_TRANSIENT);
           T.anomalies.push(`gh pr merge transient failure (retry ${mergeRetries}): ${msg.split("\n")[0].slice(0, 120)}`);
           await sleepFn(Math.min(60000, 1000 * 2 ** (mergeRetries - 1)) + Math.floor(random() * 250));
+          continue;
+        }
+        if (await policyBlocked()) {
+          // Policy block: wait and retry at the reviewed head; never base-sync, never base.conflict (#4158).
+          if (blockStartedAt === null) {
+            blockStartedAt = now();
+            T.decisions.push("merge blocked by base branch policy (ruleset/required checks); waiting");
+            T.anomalies.push(`gh pr merge blocked by base branch policy: ${msg.split("\n")[0].slice(0, 120)}`);
+          }
+          if (now() - blockStartedAt >= ciMaxMinutes * 60000) {
+            T.merge = [policyText, "blocked by base branch policy"];
+            return await finish("ci-pending", `PR #${pr} blocked by base branch policy after ${ciMaxMinutes} min (checks pending or ruleset requirement unmet)`, { pr });
+          }
+          onProgress({ event: "phase_paused", phase: "merge", detail: `PR #${pr} blocked by base branch policy` });
+          await sleep(ciPollDelayMs(blockPollIndex++, random));
+          await renew();
           continue;
         }
         if (!MERGE_CONFLICT_RE.test(msg)) throw e;

@@ -11,7 +11,7 @@ import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPromp
 import { parseReview } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
-import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner } from "./effects.mjs";
+import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor } from "./effects.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
@@ -1192,6 +1192,46 @@ describe("runCliBackendAsync", () => {
   });
 });
 
+describe("requiredChecksFor: classic protection + rulesets (#4158)", () => {
+  const RULES_JQ = '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context';
+  const jqRules = (rules) => rules.filter((r) => r.type === "required_status_checks").flatMap((r) => r.parameters.required_status_checks.map((c) => c.context)).join("\n") + "\n";
+  const stub = ({ classic, rules }) => {
+    const calls = [];
+    const gh = async (a) => {
+      calls.push(a);
+      if (a[1] === "repos/o/r/branches/staging/protection/required_status_checks") { if (classic instanceof Error) throw classic; return JSON.stringify(classic); }
+      if (a.includes("repos/o/r/rules/branches/staging")) {
+        assert.ok(a.includes("--paginate")); assert.equal(a[a.indexOf("--jq") + 1], RULES_JQ);
+        if (rules instanceof Error) throw rules; return jqRules(rules);
+      }
+      throw new Error(`unexpected gh ${a.join(" ")}`);
+    };
+    return { gh, calls };
+  };
+  it("ruleset-only required checks are found when classic protection 404s", async () => {
+    const { gh } = stub({ classic: new Error("HTTP 404: Branch not protected"), rules: [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "build" }] } }, { type: "pull_request", parameters: {} }] });
+    assert.deepEqual(await requiredChecksFor({ gh, repo: "o/r", lane: "staging" }), ["build"]);
+  });
+  it("classic and ruleset checks are unioned without duplicates", async () => {
+    const { gh } = stub({ classic: { contexts: ["a"], checks: [{ context: "b" }] }, rules: [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "b" }, { context: "c" }] } }] });
+    assert.deepEqual(await requiredChecksFor({ gh, repo: "o/r", lane: "staging" }), ["a", "b", "c"]);
+  });
+  it("both sources failing yields [] and never throws", async () => {
+    const { gh } = stub({ classic: new Error("HTTP 404"), rules: new Error("HTTP 404") });
+    assert.deepEqual(await requiredChecksFor({ gh, repo: "o/r", lane: "staging" }), []);
+  });
+  it("a ruleset-derived required check is polled before the merge", async () => {
+    const w = world();
+    const { gh } = stub({ classic: new Error("HTTP 404"), rules: [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "build" }] } }] });
+    w.io.requiredChecks = (lane) => requiredChecksFor({ gh, repo: "o/r", lane });
+    const seqs = [[{ name: "build", state: "pending" }], [{ name: "build", state: "success" }]]; let polls = 0;
+    w.io.checkStates = async () => { polls++; return seqs.shift(); };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(polls, 2);
+    assert.match(traj(w)[0], /\| Merge \| required \(build\) \|/);
+  });
+});
+
 describe("base-sync (#4100)", () => {
   const CONFLICTING = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" };
   const OKSTATE = { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" };
@@ -1282,6 +1322,27 @@ describe("base-sync (#4100)", () => {
     const r = await run(w);
     assert.equal(r.terminalReason, "engine-error");
     assert.ok(!syncComment(w));
+  });
+
+  const BLOCKED = { mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" };
+  const POLICY = "GraphQL: Pull request is not mergeable: the base branch policy prohibits the merge (mergePullRequest)";
+  it("#4158 a policy block (MERGEABLE + BLOCKED) waits and retries the merge; no base-sync", async () => {
+    const w = world({ prView: [BLOCKED], mergeErrors: [POLICY] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.mergeAttempts, 2);
+    assert.equal(gitCalls(w).filter((x) => x[0] === "merge" && x[1] === "--no-edit").length, 0, "no base-sync");
+    assert.ok(!syncComment(w));
+    assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+  });
+  it("#4158 a persistent policy block ends ci-pending, never base.conflict", async () => {
+    const w = world({ prView: [BLOCKED], mergeErrors: Array(50).fill(POLICY) });
+    const r = await run(w, { ciMaxMinutes: 5 });
+    assert.equal(r.terminalReason, "ci-pending");
+    assert.notEqual(r.code, "base.conflict");
+    assert.equal(gitCalls(w).filter((x) => x[0] === "merge" && x[1] === "--no-edit").length, 0, "no base-sync");
+    assert.equal(w.merges.length, 0); assert.ok(!syncComment(w));
+    assert.ok(!w.edits.some((e) => e.includes("needs-human")));
   });
 
   it("a resumed run with a conflicting PR re-plans, verifies, then syncs in the same session", async () => {
