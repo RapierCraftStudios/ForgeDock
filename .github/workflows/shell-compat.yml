@@ -91,6 +91,7 @@ jobs:
           /bin/bash scripts/close-dossier-no-main-commit.test.sh
           /bin/bash scripts/recovery-claim-live.test.sh
           /bin/bash scripts/issue-dedup.test.sh
+          /bin/bash scripts/issue-create.test.sh
           /bin/bash scripts/checkbox-sections.test.sh
           /bin/bash scripts/file-deferred-followups.test.sh
       # macOS runs lint-dispatch-prompt/verify-phase-trail once, under /bin/bash 3.2 above.
@@ -107,9 +108,15 @@ jobs:
           bash scripts/close-dossier-no-main-commit.test.sh
           bash scripts/recovery-claim-live.test.sh
           bash scripts/issue-dedup.test.sh
+          bash scripts/issue-create.test.sh
           bash scripts/checkbox-sections.test.sh
           bash scripts/file-deferred-followups.test.sh
           bash scripts/resolve-deploy-gate.test.sh
+      - name: Run affected-files-check / maintenance-scan tests
+        if: runner.os != 'macOS'
+        run: |
+          bash scripts/affected-files-check.test.sh
+          bash scripts/maintenance-scan.test.sh
       - name: Run publish-staging-sync.test.sh
         run: bash scripts/publish-staging-sync.test.sh
       - name: Run review-pr-gate2.test.sh
@@ -148,6 +155,8 @@ jobs:
           bash scripts/review-pr-arguments.test.sh
           bash scripts/review-pr-domain-map.test.sh
           bash scripts/review-roster.test.sh
+          bash scripts/affected-files-check.test.sh
+          bash scripts/maintenance-scan.test.sh
           bash scripts/selfreview-plan.test.sh
           bash scripts/review-prepare.test.sh
           bash scripts/review-finalize.test.sh
@@ -213,6 +222,7 @@ jobs:
           bash scripts/close-dossier-no-main-commit.test.sh
           bash scripts/recovery-claim-live.test.sh
           bash scripts/issue-dedup.test.sh
+          bash scripts/issue-create.test.sh
           bash scripts/checkbox-sections.test.sh
           bash scripts/resolve-deploy-gate.test.sh
       - name: Run classify-finding.test.sh, cap-findings.test.sh and amplification-breaker.test.sh

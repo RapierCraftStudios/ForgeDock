@@ -341,7 +341,7 @@ hr_check_stub review-pr "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT derive-finding-mi
 hr_check_stub review-pr "$HR_CLASSIFY" PRIORITY_SCRIPT severity-to-priority.sh
 hr_check_stub review-prepare "$HR_PREPARE" CODE_INDEX_SCRIPT code-index.sh
 hr_check_stub review-pr "$HR_CLASSIFY" DEDUP_SCRIPT issue-dedup.sh
-hr_check_block issue "$ROOT/commands/issue.md" DEDUP_SCRIPT issue-dedup.sh
+hr_check_stub issue "$ROOT/commands/issue.md" ISSUE_CREATE_SCRIPT issue-create.sh
 stub_block "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT > "$T/hr_dm.sh"
 stub_block "$HR_CLASSIFY" PRIORITY_SCRIPT > "$T/hr_pr.sh"
 # no bare cwd-relative helper call in either review spec
