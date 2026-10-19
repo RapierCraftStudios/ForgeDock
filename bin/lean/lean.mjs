@@ -524,11 +524,25 @@ export async function runCore(o) {
     const fromCheckpoint = lastSubject.startsWith("wip(forge): checkpoint");
     const hasCommits = resumed ? (await changedFiles()).length > 0 : false;
     // Requirements may only be quoted from the issue and trusted comments: an untrusted commenter cannot add a contract requirement.
-    const trustedComments = (iss.comments ?? []).filter((c) => {
+    const trustedOf = (i) => (i.comments ?? []).filter((c) => {
       const login = String(c?.author?.login ?? c?.user?.login ?? "");
       return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
     });
-    const issueText = [iss.title, iss.body ?? "", ...trustedComments.map((c) => c?.body ?? "")].join("\n\n");
+    const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => c?.body ?? "")].join("\n\n");
+    let trustedComments = trustedOf(iss);
+    let issueText = textOf(iss, trustedComments);
+    /** #4188: the builder reads the live issue, so quotes are checked against the current text, not the RUN_START snapshot. Best effort. */
+    async function refreshIssue(stage) {
+      let next;
+      try { next = JSON.parse(String(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments"]))); } catch { return; }
+      if (!next || typeof next !== "object") return;
+      const tc = trustedOf(next), text = textOf(next, tc);
+      const old = contractHash(issueText), now = contractHash(text);
+      if (old === now) return;
+      iss = next; trustedComments = tc; issueText = text;
+      ev({ event: "ISSUE_EDITED", old, new: now, stage });
+      T.decisions.push(`Issue edited during the run (${old} -> ${now}); ${stage} uses the current text`);
+    }
     /** A typed block (with one corrective resume for an untyped one) ends the run; returns the terminal or null. */
     async function endIfBlocked() {
       let block = result?.status === "blocked" ? await resolveBlock(result) : null;
@@ -596,11 +610,13 @@ export async function runCore(o) {
       const blocked = await endIfBlocked();
       if (blocked) return blocked;
       let contract = await readContract();
+      await refreshIssue("contract validation");
       let vc = validateContract(contract, issueText);
       if (!vc.ok && sessionId) {
         T.decisions.push(`Contract rejected (${vc.problems[0]}); resumed once`);
         await builder(++attemptN, contractCorrectionPrompt(vc.problems), sessionId, false, () => builderPlanPrompt(issue));
         contract = await readContract();
+        await refreshIssue("contract validation");
         vc = validateContract(contract, issueText);
       }
       await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
@@ -672,6 +688,7 @@ export async function runCore(o) {
     }
     /** Precheck then review, on the current result and changed files (also the base-sync re-review). */
     async function gate() {
+      await refreshIssue("conformance");
       result = (await readResult()) ?? result;
       files = await changedFiles();
       const amendProblems = await amend();
