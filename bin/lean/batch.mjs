@@ -4,12 +4,13 @@
  * Durable batch state and detached lanes for `forgedock orchestrate` (#4121).
  *
  * A batch lives in `~/.forge/batches/<id>/` (or `FORGEDOCK_BATCH_DIR`): `plan.json` (the command), `state.json` (the
- * scheduler state, rewritten after every transition), `log.jsonl` (one line per lane update), `parallel` (live K) and
- * `lanes/<issue>.{json,log}` (each lane's result and output). Every write is tmp + fsync + rename, and the root must be
+ * scheduler state, rewritten after every transition), `log.jsonl` (one line per lane update), `parallel` (live K),
+ * `lanes/<issue>.{json,log}` (each lane's result and output) and `report.json` (the final rows and printed report, written
+ * when the scheduler loop returns; `forgedock orchestrate --resume` on a finished batch replays it, #4192). Every write is tmp + fsync + rename, and the root must be
  * on disk, never tmpfs. A lane is its own session (`setsid` through `detached`), so killing the dispatcher leaves it
  * running; a resumed dispatcher re-attaches to it by pid, checking `/proc/<pid>/cmdline` against its result path.
  */
-import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
@@ -63,6 +64,13 @@ export function newBatchId(now = Date.now(), pid = process.pid) {
   return `b${new Date(now).toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15)}-${pid}`;
 }
 
+/** Ids of the batches under `root` (directories with a `plan.json`). */
+export function listBatches(root) {
+  let names = [];
+  try { names = readdirSync(root); } catch { return []; }
+  return names.filter((n) => ID_RE.test(n) && existsSync(join(root, n, "plan.json"))).sort();
+}
+
 /** Handle on one batch directory. */
 export function openBatch(root, id) {
   if (!ID_RE.test(String(id ?? ""))) throw new Error(`invalid batch id ${JSON.stringify(id)}`);
@@ -84,6 +92,15 @@ export function openBatch(root, id) {
       if (!Number.isInteger(k) || k < 1) throw new Error("parallel must be a positive integer");
       writeAtomic(f("parallel"), `${k}\n`);
     },
+    /** The lane updates in `log.jsonl`, in order (unparsable lines skipped). */
+    readLog: () => {
+      let text = "";
+      try { text = readFileSync(f("log.jsonl"), "utf8"); } catch { return []; }
+      return text.split("\n").flatMap((l) => { try { return l ? [JSON.parse(l)] : []; } catch { return []; } });
+    },
+    readReport: () => readJson(f("report.json")),
+    writeReport: (report) => writeAtomic(f("report.json"), JSON.stringify(report) + "\n"),
+    clearReport: () => rmSync(f("report.json"), { force: true }),
     resultFile: (n) => f(join("lanes", `${n}.json`)),
     logFile: (n) => f(join("lanes", `${n}.log`)),
   };

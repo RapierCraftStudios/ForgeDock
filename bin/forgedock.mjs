@@ -3268,10 +3268,11 @@ function help() {
     ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
     ["npx forgedock run-issue <issue> [--lane <lane>] [--lane-override] [--path core|full] [--retry] [--wait-lease]", "Run the lean core work-on on one issue (default; --path full = legacy multi-phase pipeline; the lane comes from the issue: milestone → milestone/<slug>, else staging; --lane is an assertion, never the default branch) (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
     ["npx forgedock orchestrate <issue...> [--parallel K] [--lane L]", "Run core work-on on several issues with bounded concurrency and Depends-on ordering; each issue on its own lane, cross-lane dependencies reported"],
-    ["npx forgedock orchestrate --resume <id> | --set-parallel <id> K", "Continue a batch after the dispatcher died (live lanes re-adopted), or change its concurrency live"],
+    ["npx forgedock orchestrate --resume <id> | --set-parallel <id> K", "Reattach to a batch hosted by the schedd daemon (a finished one replays its report, an orphaned one is resumed with live lanes re-adopted), or change its concurrency live"],
     ["npx forgedock triage <issue...> [--lane L] [--dry-run]", "Already-fixed pre-filter: close issues a merged PR or green CI already resolved; print the rest"],
     ["npx forgedock limits show | clear <id>|--all", "Show or clear per-account usage-limit holds shared by orchestrate batches"],
     ["npx forgedock sched show | cap <N>|--clear", "Show the host lane registry, or set the host-wide lane cap shared by orchestrate batches"],
+    ["npx forgedock schedd [status]", "Host scheduler daemon hosting every orchestrate batch (auto-spawned by orchestrate; run in the foreground for a systemd-user unit); status shows its pid and batches"],
     ["npx forgedock gc [--apply] [--older-than 6h] [--docker] [--worktrees] [--branches] [--tmp] [--processes]", "Report (dry-run default) and reclaim ForgeDock-owned leftovers: stale lane ledgers, forgedock-labelled containers/volumes, lean-*/agent-* worktrees, abandoned lane branches, ~/.forge/tmp scratch, orphaned lane processes; unowned resources and unpushed work are only reported"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
@@ -3849,7 +3850,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "run-issue", "orchestrate", "triage", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "backend-check", "run-issue", "orchestrate", "triage", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "sched", "help", "--help", "-h",
+  "run", "backend-check", "run-issue", "orchestrate", "triage", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "sched", "schedd", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4068,6 +4069,17 @@ switch (command) {
     const { limitsFromCli } = await import("./engine-cli.mjs");
     try {
       await limitsFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "schedd": {
+    // #4192: the host scheduler daemon; runs until idle or SIGTERM. Lanes are detached and survive it.
+    const { scheddFromCli } = await import("./engine-cli.mjs");
+    try {
+      await scheddFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;

@@ -791,8 +791,100 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * Host lane registry (#4191): every lane takes a slot in `~/.forge/sched/` (or `FORGEDOCK_SCHED_DIR`), capped host-wide by
  * `forgedock sched cap N` or forge.yaml `orchestration.global_parallel`; each issue's priority comes from its
  * `priority:P<n>` / `P<n>` labels (unlabelled = P2), read in the same gh call as its body.
+ * Host scheduler (#4192): the batch runs in the `forgedock schedd` daemon (auto-spawned, `lean/schedd.mjs`), one process
+ * for every batch on the host. This command submits it and streams the rows; Ctrl-C detaches and the batch keeps
+ * running; `--resume <id>` reattaches (or replays the report of a finished batch); `--set-parallel` goes through the
+ * daemon. `--foreground` or `FORGEDOCK_SCHEDD=0` runs the batch in this process as before (also for injected test deps).
  */
 export async function orchestrateFromCli(argv, deps = {}) {
+  const inProcess = deps.inProcess || deps.leanModule || deps.laneScript || deps.batchRoot || deps.leanIo
+    || argv.includes("--foreground") || process.env.FORGEDOCK_SCHEDD === "0";
+  if (inProcess) return runBatch({ argv: argv.filter((a) => a !== "--foreground"), cwd: process.cwd(), env: process.env, sink: consoleSink(), deps });
+  return orchestrateClient(argv, deps);
+}
+
+const formatRowLine = (r) => (r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`);
+const consoleSink = () => ({ batch: () => {}, row: (r) => console.log(formatRowLine(r)), line: (t) => console.log(t) });
+
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> | --set-parallel <id> <K>";
+const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model"];
+const issuesOf = (argv) => {
+  const issues = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (ORCH_VALUED.includes(argv[i])) { i++; continue; }
+    if (/^#?\d+$/.test(argv[i])) issues.push(parseInt(argv[i].replace("#", ""), 10));
+  }
+  return issues;
+};
+const parallelOf = (argv) => {
+  const parallel = flag(argv, "--parallel") == null ? 3 : parseInt(flag(argv, "--parallel"), 10);
+  if (!Number.isInteger(parallel) || parallel < 1) throw new Error("--parallel must be a positive integer");
+  return parallel;
+};
+
+/**
+ * Daemon client (#4192): argument checks here, then submit / attach / set-parallel over the schedd socket. Prints the
+ * streamed rows and lines like the in-process run and returns the same `{rows, crossLane, batch, ok}`.
+ */
+async function orchestrateClient(argv, deps = {}) {
+  const schedd = await import("./lean/schedd.mjs");
+  const dir = deps.scheddDir ?? (await import("./lean/sched.mjs")).schedDir();
+  const connect = () => schedd.connectDaemon({ dir, ...(deps.spawnDaemon !== undefined ? { spawnDaemon: deps.spawnDaemon } : {}), ...(deps.waitMs ? { waitMs: deps.waitMs } : {}) });
+  if (argv.includes("--set-parallel")) {
+    const i = argv.indexOf("--set-parallel");
+    const id = argv[i + 1], k = Number(argv[i + 2]);
+    if (!Number.isInteger(k) || k < 1) throw new Error("parallel must be a positive integer");
+    let sock = null;
+    try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
+    if (sock) await schedd.request(sock, { op: "set-parallel", id, k });
+    else {
+      // No daemon: the batch is not running anywhere; the parallel file is all there is to change.
+      const batchMod = await import("./lean/batch.mjs");
+      const b = batchMod.openBatch(batchMod.batchRoot(), id);
+      if (!b.exists()) throw new Error(`no batch ${id} in ${batchMod.batchRoot()}`);
+      b.setParallel(k);
+    }
+    console.log(`batch ${id}: parallel set to ${k}`);
+    return { ok: true, batch: id, parallel: k };
+  }
+  const resumeId = flag(argv, "--resume");
+  let msg;
+  if (resumeId) msg = { op: "attach", id: resumeId };
+  else {
+    if (!issuesOf(argv).length) throw new Error(ORCH_USAGE);
+    parallelOf(argv);
+    let sub = [...argv];
+    if (!flag(sub, "--repo")) {
+      const repo = await resolveDefaultRepo(deps.io ?? makeIo());
+      if (!repo) throw new Error("orchestrate needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+      sub = [...sub, "--repo", repo];
+    }
+    msg = { op: "submit", argv: sub, cwd: process.cwd(), env: schedd.batchEnv(process.env) };
+  }
+  const sock = await connect();
+  let id = resumeId;
+  try {
+    const done = await schedd.request(sock, msg, (m) => {
+      if (m.type === "batch") id = m.id;
+      else if (m.type === "row") console.log(formatRowLine(m.row));
+      else if (m.type === "line") console.log(m.text);
+      else if (m.type === "done" && m.replay && m.report) console.log(m.report);
+    });
+    return done.result;
+  } catch (e) {
+    if (id && /closed the connection/.test(e?.message ?? "")) throw new Error(`${e.message}; the batch keeps its state: forgedock orchestrate --resume ${id}`);
+    throw e;
+  }
+}
+
+/**
+ * One batch from start to report, in this process: the in-process `orchestrate` path and the schedd daemon's per-batch
+ * runner (#4192). `cwd` and `env` are the submitting client's (`env` picks the lanes' account); output goes to `sink`
+ * (`batch(b)` once the batch exists, `row(r)` per update, `line(text)` otherwise). A daemon-hosted batch records
+ * `daemon: true` and the allowlisted env in its plan, so a restarted daemon resumes it on the same account; `keepBreaker`
+ * (a daemon restart, not the operator's resume) leaves a tripped breaker tripped. Writes `report.json` when done.
+ */
+export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: callerEnv = process.env, sink = consoleSink(), deps = {}, keepBreaker = false, daemon = false }) {
   const batchMod = await import("./lean/batch.mjs");
   const root = deps.batchRoot ?? batchMod.batchRoot();
   if (argv.includes("--set-parallel")) {
@@ -801,7 +893,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
     if (!b.exists()) throw new Error(`no batch ${argv[i + 1]} in ${root}`);
     const k = Number(argv[i + 2]);
     b.setParallel(k);
-    console.log(`batch ${b.id}: parallel set to ${k}`);
+    sink.line(`batch ${b.id}: parallel set to ${k}`);
     return { ok: true, batch: b.id, parallel: k };
   }
   const resumeId = flag(argv, "--resume");
@@ -812,37 +904,38 @@ export async function orchestrateFromCli(argv, deps = {}) {
     if (!plan) throw new Error(`no batch ${resumeId} in ${root}`);
     argv = plan.argv;
   }
-  const valued = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model"];
-  const issues = [];
-  for (let i = 0; i < argv.length; i++) {
-    if (valued.includes(argv[i])) { i++; continue; }
-    if (/^#?\d+$/.test(argv[i])) issues.push(parseInt(argv[i].replace("#", ""), 10));
-  }
-  if (!issues.length) throw new Error("usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> | --set-parallel <id> <K>");
-  const parallel = flag(argv, "--parallel") == null ? 3 : parseInt(flag(argv, "--parallel"), 10);
-  if (!Number.isInteger(parallel) || parallel < 1) throw new Error("--parallel must be a positive integer");
+  const issues = issuesOf(argv);
+  if (!issues.length) throw new Error(ORCH_USAGE);
+  const parallel = parallelOf(argv);
+  // The lanes' env: a resumed daemon batch uses the env its plan kept, over the daemon's own.
+  // A pre-#4192 batch resumed by the daemon kept no env: its lanes use the daemon's.
+  const kept = plan?.env ?? (resumeId ? null : daemon || callerEnv !== process.env ? callerEnv : null);
+  const env = kept ? (await import("./lean/schedd.mjs")).mergeEnv(process.env, kept) : process.env;
   const lane = flag(argv, "--lane");
   const laneOverride = argv.includes("--lane-override");
   const model = flag(argv, "--model");
   const io = deps.io ?? makeIo();
   const repo = flag(argv, "--repo") ?? plan?.repo ?? (await resolveDefaultRepo(io));
   if (!repo) throw new Error("orchestrate needs the repo: pass --repo or run inside a checkout with a GitHub remote");
-  await assertLaneNotDefault(io, lane, repo);
-  const cwd = plan?.cwd ?? process.cwd();
+  const cwd = plan?.cwd ?? callerCwd;
+  await assertLaneNotDefault(io, lane, repo, cwd);
   if (!deps.allowTmpfs && process.env.FORGEDOCK_BATCH_ALLOW_TMPFS !== "1") batchMod.assertDiskPath(root);
   if (!batch) {
     const base = deps.batchId ?? batchMod.newBatchId();
     batch = batchMod.openBatch(root, base);
     for (let i = 2; batch.exists(); i++) batch = batchMod.openBatch(root, `${base}.${i}`); // never resume by accident
-    plan = { v: 1, id: batch.id, argv: [...argv], repo, cwd, created: new Date().toISOString() };
+    plan = { v: 1, id: batch.id, argv: [...argv], repo, cwd, created: new Date().toISOString(), ...(daemon ? { daemon: true, env: kept } : {}) };
     batch.writePlan(plan);
     batch.setParallel(parallel);
   } else {
     // A resume is the operator's decision to continue: the breaker starts closed again.
     const st = batch.store.load();
-    if (st) batch.store.save({ ...st, breaker: null, errorTimes: [] });
+    if (st && !keepBreaker) batch.store.save({ ...st, breaker: null, errorTimes: [] });
+    if (daemon && !plan.daemon) batch.writePlan({ ...plan, daemon: true }); // a daemon restart resumes it from now on
+    batch.clearReport();
   }
-  console.log(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
+  sink.batch?.(batch);
+  sink.line(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
   const dir = deps.dir ?? runDir();
   const { orchestrate, formatTable } = await import("./lean/orchestrate.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
@@ -864,14 +957,14 @@ export async function orchestrateFromCli(argv, deps = {}) {
     lanes = { adopt: null, runOne: (n, ln) => runCore({ issue: n, repo, lane: ln, laneOverride, branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
       admission: readAdmission(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
-    lanes = batchMod.detachedLanes({ batch, cwd, script: deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), bin: deps.laneBin, pollMs: deps.pollMs,
+    lanes = batchMod.detachedLanes({ batch, cwd, env, script: deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url)), bin: deps.laneBin, pollMs: deps.pollMs,
       laneArgs: (n, ln) => ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : [])] });
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
   // #4190: usage-limit holds live in the host store keyed by the account the next lane would use.
   const limitsMod = await import("./lean/limits.mjs");
-  const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile());
-  const identity = deps.identity ?? (() => limitsMod.laneBackendId(process.env));
+  const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile(env));
+  const identity = deps.identity ?? (() => limitsMod.laneBackendId(env));
   const maint = deps.maintenance !== undefined ? deps.maintenance : readMaintenance(cwd);
   const schedMod = await import("./lean/sched.mjs");
   const registry = deps.sched !== undefined ? deps.sched : schedMod.openSched(schedMod.schedDir());
@@ -906,19 +999,43 @@ export async function orchestrateFromCli(argv, deps = {}) {
     ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
     onCrossLane: (e) => {
       crossLane.push(e);
-      console.log(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
+      sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
     },
     readBody: maint || registry
       ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); return v.body; }
       : async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
-    onUpdate: (r) => console.log(r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`),
+    onUpdate: (r) => sink.row(r),
   });
-  console.log("\n" + formatTable(rows));
+  const report = ["\n" + formatTable(rows)];
   const pfLine = formatPrefilterSummary(rows);
-  if (pfLine) console.log(pfLine);
-  if (crossLane.length) console.log(`cross-lane edges: ${crossLane.map((e) => `#${e.issue} (${e.lane}) → #${e.dependency} (${e.dependencyLane})`).join(", ")}`);
-  if (rows.some((r) => r.outcome === "held")) console.log(`held issues stay pending: forgedock orchestrate --resume ${batch.id}`);
-  return { rows, crossLane, batch: batch.id, ok: rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome)) };
+  if (pfLine) report.push(pfLine);
+  if (crossLane.length) report.push(`cross-lane edges: ${crossLane.map((e) => `#${e.issue} (${e.lane}) → #${e.dependency} (${e.dependencyLane})`).join(", ")}`);
+  if (rows.some((r) => r.outcome === "held")) report.push(`held issues stay pending: forgedock orchestrate --resume ${batch.id}`);
+  for (const l of report) sink.line(l);
+  const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
+  try { batch.writeReport({ rows, crossLane, ok, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
+  return { rows, crossLane, batch: batch.id, ok };
+}
+
+/**
+ * `forgedock schedd` (foreground; for a systemd-user unit: `ExecStart=forgedock schedd`) · `forgedock schedd status` (#4192)
+ */
+export async function scheddFromCli(argv, deps = {}) {
+  const schedd = await import("./lean/schedd.mjs");
+  const dir = deps.scheddDir ?? (await import("./lean/sched.mjs")).schedDir();
+  if (argv[0] === "status") {
+    let sock;
+    try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { console.log("schedd: not running"); return { running: false }; }
+    const st = await schedd.request(sock, { op: "status" });
+    console.log(`schedd: pid ${st.pid}, ${st.batches.length} batch(es)${st.batches.length ? ": " + st.batches.map((b) => b.id).join(", ") : ""}`);
+    return { running: true, ...st };
+  }
+  if (argv.length) throw new Error("usage: forgedock schedd [status]");
+  const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }) });
+  if (!d.running) return d;
+  for (const sig of ["SIGTERM", "SIGINT"]) process.once(sig, () => d.close());
+  await d.closed;
+  return { running: false };
 }
 
 /**
