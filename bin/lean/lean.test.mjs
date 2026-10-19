@@ -132,7 +132,7 @@ function world(o = {}) {
           if (/Merging origin\//.test(c.prompt) && o.syncChanged) w.changed = o.syncChanged;
           if (r?.status === "blocked" || ["invalid", "already-fixed"].includes(r?.status)) put("result.json", JSON.stringify(r));
           else if (r) put("result.json", JSON.stringify({ ...r, requirements: o.claims ?? w.contract.requirements.filter((x) => x.disposition === "deliver").map((x) => ({ id: x.id, status: "implemented", evidence: "src/foo.js:3" })),
-            validation: o.validation ?? (w.contract.validate ?? []).map((v) => ({ id: v.id, command: v.command, exit: 0 })), amendments: (c.resume && n > 2 ? o.resumeAmendments : null) ?? o.amendments ?? [] }));
+            validation: (c.resume && n > 2 ? o.resumeValidation : null) ?? o.validation ?? (w.contract.validate ?? []).map((v) => ({ id: v.id, command: v.command, exit: 0 })), amendments: (c.resume && n > 2 ? o.resumeAmendments : null) ?? o.amendments ?? [] }));
         }
         if (c.resume || /Merging origin\//.test(c.prompt)) { w.head = `bbbb${w.calls.length}`.padEnd(16, "0"); if (!o.leaveConflicts) { w.conflictFiles = []; w.mergeInProgress = false; } }
         return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: 0.1, durationMs: 1000, turns: 3, model: "default" };
@@ -688,6 +688,7 @@ describe("issue edited mid-run (#4188)", () => {
 describe("conformance shadow mode (the default)", () => {
   const runShadow = (w, extra = {}) => run(w, { conformance: "shadow", ...extra });
   const shadowNote = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")) ?? "";
+  const nhBody = (w) => w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
   const omission = () => conf({ issue_coverage: [{ quote: "foo must handle a null argument without throwing.", status: "covered" }, { quote: "Existing callers of foo keep working.", status: "missing" }] }, { ...CONTRACT, preserve: [] }, ["src/foo.js", "test/foo.test.js"]);
 
   it("runCore defaults to shadow", async () => {
@@ -724,6 +725,40 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal(r.code, "conformance.unimplemented"); assert.equal(builders(w).length, 3); assert.equal(w.merges.length, 0);
     const w2 = world({ reviews: [conf({ regressions: [{ at: "src/bar.js:4", failure: "caller passes undefined" }] }), ok()] });
     assert.equal((await runShadow(w2)).terminalReason, "merged"); assert.equal(builders(w2).length, 3, "a regression is resumed in shadow too");
+  });
+
+  it("shadow blocks a failed validate command (#4160): one resume, then needs-human, and no reviewer tokens are spent", async () => {
+    const failed = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    const w = world({ validation: failed });
+    const r = await runShadow(w);
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
+    assert.equal(builders(w).length, 3, "plan + implement + one resume"); assert.equal(reviewers(w).length, 0);
+    assert.match(builders(w)[2][4], /validate V1 failed \(exit 1\)/);
+    assert.match(nhBody(w), /validate V1 failed \(exit 1\)/);
+  });
+
+  it("shadow: a failed validate fixed by the resume merges", async () => {
+    const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
+    assert.equal((await runShadow(w)).terminalReason, "merged"); assert.equal(builders(w).length, 3);
+  });
+
+  it("shadow blocks a deliver requirement the builder reported as partial (#4160)", async () => {
+    const w = world({ claims: [{ id: "R1", status: "partial" }] });
+    const r = await runShadow(w);
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0); assert.equal(builders(w).length, 3);
+    assert.match(nhBody(w), /R1 reported "partial"/);
+  });
+
+  it("shadow still only records a validate step with no recorded result (CI-only steps) and does not block on it", async () => {
+    const w = world({ validation: [] });
+    assert.equal((await runShadow(w)).terminalReason, "merged");
+    assert.match(shadowNote(w), /validate V1 .*has no recorded result/);
+  });
+
+  it("enforce blocks a failed validate exactly as before", async () => {
+    const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }] });
+    const r = await run(w, { conformance: "enforce" });
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
   });
 
   it("shadow files nothing: accepted deferrals are listed as not filed, and the PR links nothing", async () => {

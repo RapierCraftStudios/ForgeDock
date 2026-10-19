@@ -24,6 +24,12 @@ export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 export const CONFORMANCE_MODES = Object.freeze(["shadow", "enforce"]);
 /** In shadow mode only what the previous two-question reviewer blocked on still blocks: a requirement not done, a regression. */
 const SHADOW_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CONFORMANCE_REGRESSION];
+/**
+ * Precheck failures that block in shadow mode too (#4160): the builder's own validate command failed, or it reported a
+ * contracted requirement as not done. These are the precheck's form of "a requirement not done". Missing validate results
+ * (often CI-only steps), scope creep and amendment problems stay recorded-only in shadow.
+ */
+const SHADOW_PRE_BLOCKS = ["validate_failed", "requirement_unimplemented"];
 export const REGISTER_MARKER = "FORGE:WORK-ON"; // alias marker carried by the FORGE:TRAJECTORY comment
 const num = (v) => (Number.isFinite(v) ? v : null);
 export const MAX_SUBISSUES = 8;
@@ -694,7 +700,8 @@ export async function runCore(o) {
 
     // ---- 4. conformance: typed amendments, deterministic precheck, structured review; the engine computes the verdict ----
     // enforce: every failure class blocks (one builder resume, then needs-human). shadow: the verdict is computed and posted,
-    // but only what the previous reviewer enforced blocks (a review that finds a requirement not implemented, or a regression).
+    // but only what the previous reviewer enforced blocks (a review that finds a requirement not implemented, or a regression),
+    // plus the precheck's equivalent: a failed validate command or a requirement the builder reported as not done (#4160).
     await label("in-review");
     const shadow = conformance !== "enforce";
     let effective = frozen, review = null, lastAmend = "", resumes = 0, verdict = null;
@@ -740,6 +747,9 @@ export async function runCore(o) {
       const pre = [...pc.failures, ...amendProblems];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
+      // shadow: the builder's own failed checks block before any reviewer tokens are spent (#4160)
+      const hard = shadow ? pre.filter((f) => SHADOW_PRE_BLOCKS.includes(f.kind)) : [];
+      if (hard.length) return { state: "nonconforming", by: "precheck", failures: hard };
       const d = await reviewOnce();
       if (!shadow) return { ...d, by: "review" };
       // shadow: record what enforce would have done; block only on what the previous reviewer blocked on
