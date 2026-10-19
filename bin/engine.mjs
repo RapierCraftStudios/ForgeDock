@@ -13,6 +13,7 @@ import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postC
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS, resolveRunTmpRoot, runTmpDir } from "./runner.mjs";
+import { resolveClaudeConfigDir } from "./journey.mjs";
 import { OUTCOME_CODES, UNCLASSIFIED, normalizeCode, codeForRunnerError, codeForTerminalReason, isDiskQuotaError, isDiskQuotaText, isTransientSpawnError } from "./engine/outcome-codes.mjs";
 
 // Exported (forge#2175) so bin/engine-cli.mjs can render "failed N/M attempts"
@@ -82,7 +83,10 @@ export function ciRateLimitSleepMs(rl, nowMs, rand = Math.random) {
  */
 export function backendIdentity({ backend, env = process.env } = {}) {
   const sha = (s) => createHash("sha256").update(String(s)).digest("hex");
-  const cfg = env.CLAUDE_CONFIG_DIR || `${homedir()}/.claude`;
+  // Shared resolver (forge#4173). The fallback keeps its legacy
+  // `${homedir()}/.claude` spelling so identities recorded before the shared
+  // resolver existed still match on Windows (path.join would use "\\").
+  const cfg = env.CLAUDE_CONFIG_DIR ? resolveClaudeConfigDir(env) : `${homedir()}/.claude`;
   const key = env.ANTHROPIC_API_KEY
     ? scryptSync(String(env.ANTHROPIC_API_KEY), "forgedock-backend-identity", 16).toString("hex") : "";
   return sha(JSON.stringify([backend ?? "auto", cfg, key])).slice(0, 16);

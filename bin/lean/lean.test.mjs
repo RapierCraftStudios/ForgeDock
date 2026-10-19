@@ -3,15 +3,17 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { writeFileSync } from "node:fs";
-import { runCore, contractHash } from "./lean.mjs";
+import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { join } from "node:path";
+import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
+import { makeLedger } from "./ledger.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt } from "./prompts.mjs";
-import { parseReview, unnamedEdges, structureNote } from "./conformance.mjs";
+import { parseReview, unnamedEdges, structureNote, applyAmendments } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
-import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor } from "./effects.mjs";
+import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir } from "./effects.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
@@ -52,8 +54,9 @@ function world(o = {}) {
     contract: o.contract ?? CONTRACT, issueComments: o.issueComments, issueStates: o.issueStates,
     changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], reviews: [...(o.reviews ?? [])], waits: [...(o.waits ?? [])], clock: 0,
     result: o.result ?? { status: "fixed", summary: "fixed foo", evidence: [], tests: ["test/foo.test.js"] },
-    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], pushes: 0, pushErrors: [...(o.pushErrors ?? [])], commentErrors: [...(o.commentErrors ?? [])], dirty: o.dirty ?? false, lastSubject: o.lastSubject ?? "", prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], mergeInProgress: false, markers: false, mergeAttempts: 0,
+    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], pushes: 0, pushErrors: [...(o.pushErrors ?? [])], commentErrors: [...(o.commentErrors ?? [])], dirty: o.dirty ?? false, lastSubject: o.lastSubject ?? "", prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], mergeInProgress: false, markers: false, mergeAttempts: 0, branchDeletes: [],
     stages: { ...STAGE_MD, ...(o.stages ?? {}) }, builderN: 0,
+    salvageTrees: [...(o.salvageTrees ?? [])], alive: new Set((o.procs ?? []).map((p) => p.pid)), kills: [],
   };
   const put = (name, text) => { const p = `${WT}/.forge-lean/${name}`; if (w.files[p] !== text) w.mtimes[p] = Date.now(); w.files[p] = text; };
   const writeStages = (keys) => { for (const k of keys) if (w.stages[k] != null) put(`${k}.md`, w.stages[k]); };
@@ -86,9 +89,12 @@ function world(o = {}) {
       if (a[0] === "worktree" && a[1] === "add" && (w.lockFails ?? 0) > 0) {
         w.lockFails--; const e = new Error("git failed"); e.stderr = "error: could not lock config file .git/config: File exists"; throw e;
       }
+      if (a[0] === "worktree" && a[1] === "remove") w.seq.push("worktree-remove");
+      if (a[0] === "update-ref") w.seq.push(`update-ref ${a[1]}`);
       if (a[0] === "rev-parse" && a[1] === "--git-path") return "/repo/.git/info/exclude";
       if (a[0] === "status" && a[1] === "--porcelain") return w.dirty ? " M src/foo.js\n" : "";
       if (a[0] === "log" && a.includes("--format=%s")) return w.lastSubject;
+      if (a[0] === "push" && a.includes("--delete")) { w.branchDeletes.push(a.at(-1)); w.seq.push("delete-remote-branch"); return ""; }
       if (a[0] === "push") { w.pushes++; if (w.pushErrors.length) { const m = w.pushErrors.shift(); throw Object.assign(new Error(m), { stderr: m }); } }
       if (a[0] === "merge" && a[1] === "--no-edit") {
         const r = w.mergeResults.shift() ?? "clean";
@@ -96,6 +102,9 @@ function world(o = {}) {
         w.conflictFiles = o.conflictFiles ?? ["src/foo.js"]; w.mergeInProgress = true; throw new Error("CONFLICT (content): Merge conflict in src/foo.js");
       }
       if (a[0] === "rev-parse" && a.includes("MERGE_HEAD")) return w.mergeInProgress ? "deadbeef" : "";
+      if (a[0] === "write-tree") return w.salvageTrees.length ? w.salvageTrees.shift() : "";
+      if (a[0] === "rev-parse" && a[1] === "HEAD^{tree}") return "0".repeat(40);
+      if (a.includes("commit-tree")) return "c".repeat(40);
       if (a[0] === "diff" && a.includes("--diff-filter=U")) return w.conflictFiles.join("\n");
       if (a[0] === "diff" && a[1] === "--check") return "";
       if (a[0] === "grep") return w.markers ? "src/foo.js:3:<<<<<<< HEAD" : "";
@@ -141,7 +150,8 @@ function world(o = {}) {
     },
     waitCiGreen: async () => (w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }),
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
-    fs: { stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; } },
+    ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
+    fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; } },
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw new Error(o.followupError); return Object.fromEntries(items.map((i) => [i.key, o.followupIssue ?? 900])); },
   };
   return w;
@@ -685,6 +695,95 @@ describe("issue edited mid-run (#4188)", () => {
   });
 });
 
+describe("review row skeleton and targeted retry (#4160)", () => {
+  it("the reviewer prompt carries a pre-filled skeleton with every requirement and preserve id", async () => {
+    const w = world();
+    assert.equal((await run(w)).terminalReason, "merged");
+    const p = reviewers(w)[0][4];
+    const sk = JSON.parse(/<row_skeleton>\n([\s\S]*?)\n<\/row_skeleton>/.exec(p)[1]);
+    assert.deepEqual(sk.requirements.map((r) => r.id), CONTRACT.requirements.map((r) => r.id));
+    assert.deepEqual(sk.preserve.map((x) => x.id), (CONTRACT.preserve ?? []).map((x) => x.id));
+    assert.doesNotMatch(p, /previous_reply_problems/);
+  });
+  it("an incomplete first reply gets one retry that lists exactly what was missing, and the complete second reply decides", async () => {
+    const w = world({ reviews: [genericPass(), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 2);
+    const p2 = reviewers(w)[1][4];
+    assert.match(p2, /<previous_reply_problems>[\s\S]*requirement R1 needs exactly one row/);
+    assert.match(p2, /<previous_reply>[\s\S]*"verdict":"PASS"/);
+  });
+  it("a complete first reply needs no second reviewer run", async () => {
+    const w = world();
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1);
+  });
+});
+
+describe("worktree salvage and orphaned processes (#4162)", () => {
+  const T1 = "1".repeat(40), T2 = "2".repeat(40);
+  const salvageRefs = (w) => w.calls.filter((c) => c[0] === "git" && c[1] === "update-ref").map((c) => c[2]);
+
+  it("uncommitted work in an earlier run's worktree is saved to a salvage ref before the worktree is removed, and the implementer is told", async () => {
+    const dir = tmpDir("salvage-");
+    const w = world({ wtExists: true, salvageTrees: [T1] });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    const refs = salvageRefs(w);
+    assert.equal(refs.length, 1); assert.match(refs[0], /^refs\/forge\/salvage\/7\/\d+$/);
+    assert.ok(w.seq.indexOf(`update-ref ${refs[0]}`) < w.seq.indexOf("worktree-remove"), "saved before removal");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "add" && c[2] === "-f" && c.includes(".forge-lean")), ".forge-lean is included");
+    assert.ok(builders(w).some((b) => b[4].includes(`saved at \`${refs[0]}\``)), "implement prompt names the ref");
+    assert.match(traj(w).at(-1), /Uncommitted work from an earlier run saved to `refs\/forge\/salvage\/7\//);
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "WORKTREE_SALVAGED").length, 1);
+  });
+
+  it("a clean earlier worktree (tree equals HEAD) saves nothing and the prompt is unchanged", async () => {
+    const w = world({ wtExists: true, salvageTrees: ["0".repeat(40)] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(salvageRefs(w).length, 0);
+    assert.ok(builders(w).every((b) => !b[4].includes("saved at")));
+  });
+
+  it("no worktree on disk: nothing is staged or saved", async () => {
+    const w = world({ salvageTrees: [T1] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(salvageRefs(w).length, 0);
+    assert.ok(!w.calls.some((c) => c[0] === "git" && c[1] === "write-tree"));
+  });
+
+  it("processes still running in the worktree are stopped (SIGTERM) before the worktree is removed", async () => {
+    const w = world({ procs: [{ pid: 4242, cmd: "claude --print" }] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.deepEqual(w.kills, [[4242, "SIGTERM"]]);
+    assert.ok(w.seq.indexOf("kill-SIGTERM") < w.seq.indexOf("worktree-remove"));
+    assert.match(traj(w).at(-1), /Stopped 1 process\(es\) still running in the worktree from an earlier run: 4242 claude --print/);
+  });
+
+  it("a process that ignores SIGTERM is killed with SIGKILL", async () => {
+    const w = world({ procs: [{ pid: 4243, cmd: "node x" }], stubborn: true });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.deepEqual(w.kills, [[4243, "SIGTERM"], [4243, "SIGKILL"]]);
+  });
+
+  it("salvage runs only at the start: teardown at the end is the #4179 checkpoint, not a salvage ref", async () => {
+    const w = world({ wtExists: true, salvageTrees: ["0".repeat(40), T2] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(salvageRefs(w).length, 0);
+  });
+
+  it("procsInDir reads cwd links from a /proc tree and skips this process and its ancestors", () => {
+    const root = tmpDir("proc-"), wtDir = tmpDir("wt-");
+    const mk = (pid, cwdTarget, ppid, cmd) => { mkdirSync(join(root, String(pid)), { recursive: true }); symlinkSync(cwdTarget, join(root, String(pid), "cwd")); writeFileSync(join(root, String(pid), "stat"), `${pid} (x y) S ${ppid} 0`); writeFileSync(join(root, String(pid), "cmdline"), cmd.split(" ").join("\0")); };
+    mk(100, wtDir, 1, "claude --print");
+    mk(101, join(wtDir, "src"), 1, "node test");
+    mk(102, "/elsewhere", 1, "bash");
+    mk(200, wtDir, 1, "self");
+    mkdirSync(join(root, "self")); // non-numeric entries are ignored
+    assert.deepEqual(procsInDir(wtDir, { procRoot: root, self: 200 }).map((p) => [p.pid, p.cmd]).sort(), [[100, "claude --print"], [101, "node test"]]);
+    assert.deepEqual(procsInDir(wtDir, { procRoot: join(root, "missing") }), []);
+  });
+});
+
 describe("conformance shadow mode (the default)", () => {
   const runShadow = (w, extra = {}) => run(w, { conformance: "shadow", ...extra });
   const shadowNote = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")) ?? "";
@@ -841,6 +940,15 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     // the manifest alone, without the package named, is not naming the edge
     assert.equal(unnamedEdges(withEdgeDeliverable("bump versions"), delta({ package_edges_added: [EDGE] })).length, 1);
     assert.equal(unnamedEdges(withEdgeDeliverable("add @s/core"), delta({ package_edges_added: [EDGE] })).length, 0);
+  });
+
+  it("an add-deliverable amendment on a package.json the contract already lists (for another change) declares the edge", () => {
+    const frozen = { requirements: [], deliverables: [{ id: "D1", path: "packages/db/package.json", change: "bump versions" }] };
+    const r = applyAmendments(frozen, [{ kind: "add-deliverable", path: "packages/db/package.json", why: "add @s/core: the architecture doc lets db depend on core" }]);
+    assert.equal(r.contract.deliverables.length, 1); assert.equal(r.contract.deliverables[0].id, "D1");
+    assert.match(r.contract.deliverables[0].change, /^bump versions; add @s\/core/);
+    assert.equal(unnamedEdges(r.contract, delta({ package_edges_added: [EDGE] })).length, 0);
+    assert.equal(frozen.deliverables[0].change, "bump versions", "the frozen contract is not mutated");
   });
 
   it("an add-deliverable amendment naming the package on the resume declares the edge", async () => {
@@ -1380,7 +1488,7 @@ describe("base-sync (#4100)", () => {
     const g = gitCalls(w);
     assert.ok(g.some((x) => x[0] === "fetch" && x[1] === "origin" && x[2] === "staging"));
     assert.ok(g.some((x) => x[0] === "merge" && x[1] === "--no-edit" && x[2] === "origin/staging"));
-    assert.equal(g.filter((x) => x[0] === "push").length, 2, "initial push plus the sync push");
+    assert.equal(g.filter((x) => x[0] === "push" && !x.includes("--delete")).length, 2, "initial push plus the sync push");
     assert.match(syncComment(w), /## Base Sync[\s\S]*clean merge[\s\S]*not required \(conflict-free base merge\)/);
     assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
     assert.match(traj(w)[0], /\| Base Sync \| 1 sync\(s\) \|/);
@@ -1826,7 +1934,7 @@ describe("batch robustness (#4112-#4115)", () => {
     const w = world({ pushErrors: Array(10).fill("fatal: the remote end hung up unexpectedly\nerror: RPC failed; HTTP 503") });
     const r = await run(w);
     assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "push.transient");
-    assert.equal(w.pushes, 4);
+    assert.equal(w.pushes, 8, "4 for the PR push, then 4 by the exit checkpoint that never discards unpushed work (#4179)");
     assert.equal(w.prs.length, 0);
   });
 
@@ -1834,8 +1942,9 @@ describe("batch robustness (#4112-#4115)", () => {
     for (const msg of ["remote: error: GH006: Protected branch update failed for refs/heads/x", "fatal: unable to access: The requested URL returned error: 403", "! [remote rejected] x -> x (pre-receive hook declined)"]) {
       const w = world({ pushErrors: [msg, msg, msg] });
       const r = await run(w);
-      assert.equal(w.pushes, 1, msg);
+      assert.equal(w.pushes, 2, `${msg}: one rejected PR push, one rejected exit checkpoint (#4179), no retries`);
       assert.equal(r.terminalReason, "needs-human");
+      assert.equal(w.calls.filter((c) => c[1] === "worktree" && c[2] === "remove").length, 1, "the unpushed worktree is kept: only the setup remove ran");
     }
   });
 
@@ -2252,5 +2361,149 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n");
     assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3 });
+  });
+});
+
+describe("lane resource ledger + teardown on every exit path (#4179)", () => {
+  /** A world with a real on-disk ledger, fake docker/kill, a run tmp with a known path and a builder that reports its pid + a container. */
+  const ledgered = (o = {}) => {
+    const w = world(o);
+    const root = tmpDir("ledger-");
+    w.ledgerRoot = root; w.docker = []; w.killed = []; w.snapshots = []; w.tmpRemoved = [];
+    w.io.ledger = (opts) => makeLedger({ root, ...opts });
+    w.io.docker = async (a) => { w.docker.push(a); return ""; };
+    w.io.killGroup = async (pid, marker) => { w.killed.push([pid, marker]); return true; };
+    w.io.runTmp = { prune: async () => {}, path: (id) => `/home/x/.forge/tmp/runs/${id}`, make: async (_i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async (d) => { w.tmpRemoved.push(d); return true; } };
+    w.ledgerFile = join(root, o.batch ?? "adhoc", "lean-7.json");
+    const r0 = w.io.runner;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") {
+        c.onSpawn?.({ pid: 4242, spawnfile: "/usr/bin/claude" });
+        w.snapshots.push(JSON.parse(readFileSync(w.ledgerFile, "utf8"))); // what a crash right now would leave behind
+        if (o.during) await o.during(w, c);
+      }
+      const r = await r0(c);
+      if (c.role === "builder" && !/PLANNING ONLY/.test(c.prompt) && w.files[`${WT}/.forge-lean/result.json`]) {
+        const j = JSON.parse(w.files[`${WT}/.forge-lean/result.json`]);
+        w.files[`${WT}/.forge-lean/result.json`] = JSON.stringify({ ...j, resources: { containers: ["lean7-testpg"], volumes: ["lean7-pgdata", "bad name; rm -rf /"] } });
+      }
+      return r;
+    };
+    return w;
+  };
+  const gitIdx = (w, pred) => { let i = -1; w.calls.forEach((c, k) => { if (c[0] === "git" && pred(c.slice(1))) i = k; }); return i; };
+  /** The exit teardown: the last two worktree calls are `remove --force <wt>` then `prune`; the ledger file is gone. */
+  const tornDown = (w, label) => {
+    const wtCalls = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree");
+    assert.deepEqual(wtCalls.at(-2), ["git", "worktree", "remove", "--force", WT], `${label}: worktree removed`);
+    assert.deepEqual(wtCalls.at(-1), ["git", "worktree", "prune"], `${label}: then pruned`);
+    assert.equal(existsSync(w.ledgerFile), false, `${label}: ledger cleared`);
+  };
+
+  it("while the lane runs, the ledger on disk lists worktree, branch, run tmp and builder pid with owner/batch/lane/issue/created/expires (survives a crash)", async () => {
+    const w = ledgered({ batch: "b1" });
+    await run(w, { batchId: "b1" });
+    const snap = w.snapshots.at(-1);
+    for (const k of ["owner", "batch", "lane", "issue", "created", "expires"]) assert.ok(snap[k] != null, `ledger has ${k}`);
+    assert.equal(snap.batch, "b1"); assert.equal(snap.lane, "lean-7"); assert.equal(snap.issue, 7); assert.ok(snap.expires > snap.created);
+    const kinds = snap.resources.map((r) => `${r.kind}:${r.value}`);
+    for (const k of [`worktree:${WT}`, "branch:feat/issue-7-lean", "pid:4242"]) assert.ok(kinds.includes(k), `${k} in ${kinds}`);
+    assert.ok(kinds.some((k) => k.startsWith("tmp:/home/x/.forge/tmp/runs/7-")));
+    assert.equal(snap.resources.find((r) => r.kind === "pid").marker, "claude");
+    // a crash at this point leaves exactly this file: a fresh reader still sees every resource
+    const crashed = tmpDir("ledger-crash-");
+    const l = makeLedger({ root: crashed, batch: "b1", lane: "lean-7", owner: "x", issue: 7 });
+    for (const r of snap.resources) l.register(r.kind, r.value);
+    assert.deepEqual(makeLedger({ root: crashed, batch: "b1", lane: "lean-7", issue: 7 }).entries().map((r) => r.kind).sort(), ["branch", "pid", "tmp", "worktree"]);
+  });
+
+  it("merged: remote branch deleted after the merge, worktree removed + pruned, local branch deleted, reported docker resources removed, ledger cleared", async () => {
+    const w = ledgered();
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(w.branchDeletes, ["feat/issue-7-lean"]);
+    assert.ok(w.seq.indexOf("delete-remote-branch") > w.seq.indexOf("merge"), "deleted only after the merge");
+    tornDown(w, "merged");
+    const rm = gitIdx(w, (a) => a[0] === "worktree" && a[1] === "remove"), bd = gitIdx(w, (a) => a[0] === "branch" && a[1] === "-D");
+    assert.ok(bd > rm, "local branch deleted after its worktree is gone");
+    assert.deepEqual(w.docker, [["rm", "-f", "lean7-testpg"], ["volume", "rm", "lean7-pgdata"]], "only well-formed names the builder reported");
+    assert.equal(w.tmpRemoved.length, 1);
+    assert.equal(gitIdx(w, (a) => a[0] === "commit"), -1, "a merged lane is never checkpointed");
+  });
+
+  it("an open PR using the lane branch as head or base keeps it (remote and local)", async () => {
+    for (const side of ["--head", "--base"]) {
+      const w = ledgered();
+      const g = w.io.gh; let merged = false;
+      w.io.gh = async (a) => {
+        if (a[0] === "pr" && a[1] === "merge") merged = true;
+        if (merged && a[0] === "pr" && a[1] === "list" && a[a.indexOf(side) + 1] === "feat/issue-7-lean") return JSON.stringify([{ number: 99 }]);
+        return g(a);
+      };
+      assert.equal((await run(w)).terminalReason, "merged");
+      assert.deepEqual(w.branchDeletes, [], side);
+      assert.equal(gitIdx(w, (a) => a[0] === "branch" && a[1] === "-D"), -1, side);
+    }
+  });
+
+  it("main, staging, milestone/* and anything but the issue's own lane branch are never deletion targets", () => {
+    const ctx = { issue: 7, lane: "staging", branches: { default: "main", staging: "staging" }, defaults: ["main"] };
+    for (const b of ["main", "master", "staging", "milestone/x", "milestone/adaptive", "feat/issue-8-lean", "", null]) assert.equal(isProtectedLaneBranch(b, ctx), true, String(b));
+    assert.equal(isProtectedLaneBranch("feat/issue-7-lean", ctx), false);
+    assert.equal(isProtectedLaneBranch("feat/issue-7-lean", { ...ctx, lane: "feat/issue-7-lean" }), true, "never the lane itself");
+    assert.equal(isProtectedLaneBranch("feat/issue-7-lean", { ...ctx, defaults: ["feat/issue-7-lean"] }), true, "never a default branch");
+  });
+
+  const exits = {
+    invalid: { o: { changed: [], result: { status: "invalid", summary: "not a bug", evidence: ["src/foo.js:3 already guards null"], tests: [] } }, reason: "invalid" },
+    "needs-human": { o: { waits: [{ rc: 1, text: "lint failed" }] }, extra: { mergeWait: "all" }, reason: "needs-human" },
+    "engine-error": { o: { during: (w, c) => { if (!/PLANNING ONLY/.test(c.prompt)) throw new Error("boom"); } }, reason: "engine-error" },
+    deferred: { o: { during: (w, c) => { if (!/PLANNING ONLY/.test(c.prompt)) throw Object.assign(new Error("session limit"), { usageLimit: true, resetAtEpochMs: 1e13 }); } }, reason: "deferred" },
+  };
+  for (const [name, x] of Object.entries(exits)) {
+    it(`${name}: teardown runs (worktree remove --force + prune, pid killed, docker removed, ledger cleared); no branch is deleted on origin`, async () => {
+      const w = ledgered(x.o);
+      const r = await run(w, x.extra ?? {});
+      assert.equal(r.terminalReason, x.reason);
+      tornDown(w, name);
+      assert.deepEqual(w.branchDeletes, []);
+      assert.equal(w.tmpRemoved.length, 1);
+    });
+  }
+
+  it("an unmerged lane with uncommitted work is committed and pushed to the lane branch BEFORE its worktree is removed", async () => {
+    const w = ledgered({ dirty: true, waits: [{ rc: 1, text: "lint failed" }] });
+    const r = await run(w, { mergeWait: "all" });
+    assert.equal(r.terminalReason, "needs-human");
+    const commit = gitIdx(w, (a) => a[0] === "commit" && a.some((x) => /checkpoint after exit \(needs-human\)/.test(x)));
+    const push = gitIdx(w, (a) => a[0] === "push" && a.includes("feat/issue-7-lean") && !a.includes("--delete"));
+    const rm = gitIdx(w, (a) => a[0] === "worktree" && a[1] === "remove");
+    assert.ok(commit > 0 && push > commit && rm > push, `commit ${commit} < push ${push} < remove ${rm}`);
+    tornDown(w, "dirty needs-human");
+  });
+
+  it("a checkpoint that cannot push keeps the worktree and leaves worktree + branch listed in the ledger", async () => {
+    const msg = "remote: error: GH006: Protected branch update failed for refs/heads/x";
+    const w = ledgered({ dirty: true, pushErrors: [msg, msg, msg] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(w.calls.filter((c) => c[1] === "worktree" && c[2] === "remove").length, 1, "only the setup remove ran");
+    const left = JSON.parse(readFileSync(w.ledgerFile, "utf8")).resources.map((x) => x.kind).sort();
+    assert.deepEqual(left, ["branch", "worktree"]);
+  });
+
+  it("SIGTERM/SIGINT: the registered teardown checkpoints, removes the worktree, clears the ledger, releases the lease, ends deferred run.interrupted", async () => {
+    for (const sig of ["SIGTERM", "SIGINT"]) {
+      let td = null, out = null;
+      const w = ledgered({ dirty: true, during: async (w2, c) => { if (!/PLANNING ONLY/.test(c.prompt) && !out) out = await td(sig); } });
+      w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } };
+      const r = await run(w, { onTeardown: (fn) => { td = fn; } });
+      assert.equal(out.terminalReason, "deferred", sig); assert.equal(out.code, "run.interrupted");
+      assert.equal(r, out, "the run's own later finish returns the same result (idempotent)");
+      assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");
+      assert.ok(gitIdx(w, (a) => a[0] === "commit") > 0, "uncommitted work checkpointed");
+      assert.deepEqual(w.killed, [[4242, "claude"]], "the builder's process group is signalled");
+      tornDown(w, sig);
+    }
   });
 });

@@ -3,7 +3,7 @@
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, buildLeanSessionFlags, buildReadOnlyToolFlags } from "../runner.mjs";
 import { makeIo } from "../engine-cli.mjs";
 import { makeProjector } from "../engine/projector.mjs";
+import { makeLedger } from "./ledger.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -45,16 +46,38 @@ export function wrapLaneLimits(bin, args, limits) {
 }
 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null }) => {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
     const flags = [...buildLeanSessionFlags(caps), ...(readOnly ? buildReadOnlyToolFlags(caps) : [])];
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
       args: [String(issue)], cwd, bin, model, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
       logger: { log() {} },
-      idleMs, maxMs, stream: idleMs > 0, control, wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
+      idleMs, maxMs, stream: idleMs > 0, control, onSpawn, wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default" };
   };
+}
+
+/** Parent pid from /proc/<pid>/stat (the field after the parenthesised command name); 0 when unreadable. */
+const ppidOf = (root, pid) => { try { const st = readFileSync(join(root, String(pid), "stat"), "utf8"); return Number(st.slice(st.lastIndexOf(")") + 2).split(" ")[1]) || 0; } catch { return 0; } };
+/**
+ * #4162: processes whose cwd is `dir` or inside it, from /proc (Linux). Excludes this process and its ancestors.
+ * Returns [{pid, cmd}]; [] where /proc is unavailable (the caller then skips stopping them).
+ */
+export function procsInDir(dir, { procRoot = "/proc", self = process.pid } = {}) {
+  if (!dir || !existsSync(procRoot)) return [];
+  try { dir = realpathSync(dir); } catch { /* not on disk: compare as given */ } // /proc cwd links are resolved paths
+  const skip = new Set();
+  for (let p = self, i = 0; p > 1 && i < 64 && !skip.has(p); i++) { skip.add(p); p = ppidOf(procRoot, p); }
+  const out = [];
+  for (const e of readdirSync(procRoot)) {
+    if (!/^\d+$/.test(e) || skip.has(Number(e))) continue;
+    let at; try { at = readlinkSync(join(procRoot, e, "cwd")); } catch { continue; }
+    if (at !== dir && !at.startsWith(`${dir}/`)) continue;
+    let cmd = ""; try { cmd = readFileSync(join(procRoot, e, "cmdline"), "utf8").split("\0").filter(Boolean).join(" ").slice(0, 200); } catch { /* exited */ }
+    out.push({ pid: Number(e), cmd });
+  }
+  return out;
 }
 
 export const RUN_TMP_MAX_AGE_MS = 6 * 3600 * 1000;
@@ -66,6 +89,8 @@ const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e)
 export function makeRunTmp({ root = runTmpRoot(), now = () => Date.now(), alive = pidAlive, host = hostname() } = {}) {
   const inside = (d) => { const r = resolve(d); return r.startsWith(resolve(root) + sep) && !r.slice(resolve(root).length + 1).includes(sep); };
   return {
+    /** The dir make(issue, runId) creates, so a ledger can register it first (#4179). */
+    path: (runId) => join(root, String(runId)),
     async make(issue, runId) {
       const dir = join(root, String(runId));
       mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -98,6 +123,22 @@ export function makeRunTmp({ root = runTmpRoot(), now = () => Date.now(), alive 
       return removed;
     },
   };
+}
+
+/**
+ * SIGTERM to a ledger-registered pid's process group (#4179). Only when the pid is alive and, where /proc exists, its
+ * command line still names `marker`, so a reused pid is never signalled. Returns true when the pid is gone or signalled.
+ */
+export function killLedgerPid(pid, marker, { kill = process.kill.bind(process), procDir = "/proc" } = {}) {
+  const n = Number(pid);
+  if (!Number.isSafeInteger(n) || n <= 1) return false;
+  if (!pidAlive(n)) return true;
+  if (marker && existsSync(procDir)) {
+    let cmd = "";
+    try { cmd = readFileSync(join(procDir, String(n), "cmdline"), "utf8"); } catch { return true; } // exited meanwhile
+    if (!cmd.includes(String(marker))) return true; // pid reused by something else: not ours any more
+  }
+  try { kill(-n, "SIGTERM"); return true; } catch { try { kill(n, "SIGTERM"); return true; } catch (e) { return e?.code === "ESRCH"; } }
 }
 
 /** Real host probes for admission (#4105). MemAvailable from /proc/meminfo (fallback os.freemem), statfs for tmp. */
@@ -147,7 +188,7 @@ export function makeLeanIo({ repo }) {
   const base = makeIo();
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000 })).stdout;
   return {
-    gh: run("gh"), git: run("git"), runTmp: makeRunTmp(), host: makeHostProbe(), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
+    gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
     /** Names of the checks the base branch requires: classic protection plus rulesets (#4158). [] when neither has any. */
     async requiredChecks(lane) { return requiredChecksFor({ gh: run("gh"), repo, lane }); },
     /** [{name, state: success|failure|pending}] for the PR's checks. */
@@ -197,6 +238,8 @@ export function makeLeanIo({ repo }) {
     async structureDelta({ cwd, base }) {
       try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
+    /** #4162: processes left running inside a lane worktree (Linux /proc). */
+    proc: { inDir: async (dir) => procsInDir(dir), alive: pidAlive, kill: (pid, sig) => { try { process.kill(pid, sig); } catch { /* already gone */ } } },
     fs: {
       read: async (p) => readFileSync(p, "utf8"),
       exists: async (p) => existsSync(p),
