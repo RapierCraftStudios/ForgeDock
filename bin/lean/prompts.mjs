@@ -64,9 +64,10 @@ If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"alread
 {"requirements":[{"id":"R1","quote":"<verbatim sentence or checklist item from the issue>","disposition":"deliver|defer|post-deploy|not-applicable","why":"<required for defer and post-deploy>","evidence":"<file:line, required for not-applicable>"}],
  "deliverables":[{"id":"D1","path":"<file to change>","change":"<what>","requirements":["R1"]}],
  "preserve":[{"id":"P1","what":"<caller, contract or behaviour that must not change, with its path>"}],
- "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change>"}]}
+ "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change>"}],
+ "decisions":[{"id":"K1","choice":"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>","justification":"<why, with file:line>","source":"doc|lint|precedent|spec"}]}
 Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. A requirement you can do in this change is "deliver". List every file you will change as a deliverable; tests are always allowed.
-A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Then stop.
+A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when there is none. Then stop.
 
 ${BLOCK_RULES}`;
 }

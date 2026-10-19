@@ -41,6 +41,21 @@ describe("engine telemetry seam", () => {
     const m = mapRecord({ event: "STRUCTURE_DELTA", issue: 7, edges_added: 1, edges_removed: 0, import_files_added: 8, import_files_removed: 2, boundary_changed: true, boundary_loosened: false }, 10);
     assert.deepEqual(m, { event: "structure_delta", phase: "implement", payload: { edges_added: 1, edges_removed: 0, import_files_added: 8, import_files_removed: 2, boundary_changed: 1, boundary_loosened: 0 } });
   });
+  it("forge#4165: the merge-time STRUCTURE_DELTA and RUN_TERMINAL carry scalar lists, milestone and the pr in ctx", async () => {
+    const { calls, emit } = harness();
+    await emit({ event: "STRUCTURE_DELTA", issue: 7, pr: 41, phase: "merge", milestone: "M", edges_added: 1, edges_removed: 0, import_files_added: 2, import_files_removed: 0,
+      boundary_changed: false, boundary_loosened: false, deps_added: [{ from: "@s/a", to: "@s/b" }], deps_removed: [], new_edges: [{ from: "@s/a", to: "@s/c", file: "x.ts" }, { from: "@s/d", to: "@s/c" }],
+      removed_edges: [], top_growth: [{ file: "x.ts", lines: 9 }], decisions: [{ id: "K1", source: "lint" }, { id: "K2", source: null }] });
+    await emit({ event: "RUN_TERMINAL", issue: 7, pr: 41, reason: "merged", code: null, milestone: "M", conformance_mode: "shadow", shadow_would: "conforms" });
+    assert.equal(calls.length, 2);
+    const [[e1, p1, c1], [e2, p2, c2]] = calls;
+    assert.deepEqual([e1, c1.pr, c1.phase, e2, c2.pr], ["structure_delta", 41, "merge", "run_terminal", 41]);
+    assert.deepEqual([p1.deps_added, p1.new_edges, p1.removed_edges, p1.top_growth, p1.decisions, p1.decisions_lint, p1.decisions_doc, p1.milestone],
+      ["@s/a:@s/b", "@s/a:@s/c,@s/d:@s/c", "none", "x.ts+9", "K1:lint,K2:none", 1, 0, "M"]);
+    for (const v of [...Object.values(p1), ...Object.values(p2)]) assert.notEqual(typeof v, "object");
+    assert.deepEqual(p2, { reason: "merged", wall_ms: 0, milestone: "M", conformance_mode: "shadow", shadow_would: "conforms" });
+    assert.equal(mapRecord({ event: "RUN_TERMINAL", reason: "merged", pr: 0 }, 1).pr, undefined, "no pr 0 in ctx");
+  });
   it("null usage yields a record with no token fields", () => {
     assert.deepEqual(mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1, usage: null, duration_ms: 5 }).payload, { attempt: 1, duration_ms: 5 });
   });

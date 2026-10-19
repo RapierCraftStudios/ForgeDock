@@ -9,11 +9,12 @@
 # Output (stdout, one JSON object):
 #   {} when the repo declares no workspace packages (root package.json `workspaces` / pnpm-workspace.yaml), else
 #   {"package_edges_added":[{from,to,kind,manifest}], "package_edges_removed":[...],
-#    "import_pairs":[{from,to,files_added,files_removed}],
+#    "import_pairs":[{from,to,files_added,files_removed,files[]}],
 #    "boundary_config_changed":{changed,files[],loosens,tightens}}
 # A package edge is a dependencies/devDependencies/peerDependencies key naming another workspace package. An import
 # pair counts changed non-test source files whose added (removed) lines quote an exact workspace name, optionally with
-# a subpath ('@s/x' or '@s/x/sub'); `import type` / `export type` lines are ignored. Counts only report.
+# a subpath ('@s/x' or '@s/x/sub'); `import type` / `export type` lines are ignored. Counts only report. `files` names the
+# files that added the import (sorted, at most 20; forge#4165 telemetry and trajectory).
 # Exit: 0 ok | 2 usage or bad ref. bash 3.2 portable.
 set -uo pipefail
 
@@ -122,14 +123,18 @@ IMPORTS=$(awk -F'\t' '
   END {
     for (k in hit) {
       split(k, a, SUBSEP); f = a[1]; to = a[2]; s = a[3]
-      if (s == "+" && !((f SUBSEP to SUBSEP "-") in hit)) add[fromof[f] SUBSEP to]++
+      if (s == "+" && !((f SUBSEP to SUBSEP "-") in hit)) { add[fromof[f] SUBSEP to]++; files[fromof[f] SUBSEP to, add[fromof[f] SUBSEP to]] = f }
       if (s == "-" && !((f SUBSEP to SUBSEP "+") in hit)) rem[fromof[f] SUBSEP to]++
     }
     for (k in add) pair[k] = 1
     for (k in rem) pair[k] = 1
-    for (k in pair) { split(k, a, SUBSEP); print a[1] "\t" a[2] "\t" (add[k] + 0) "\t" (rem[k] + 0) }
+    for (k in pair) {
+      split(k, a, SUBSEP); fl = ""
+      for (i = 1; i <= add[k] + 0; i++) fl = fl (i > 1 ? "\037" : "") files[k, i]
+      print a[1] "\t" a[2] "\t" (add[k] + 0) "\t" (rem[k] + 0) "\t" fl
+    }
   }
-' "$T/dirs" "$T/wsnames" "$T/diff" | sort | jq -R -s -c 'split("\n") | map(select(length > 0) | split("\t") | {from: .[0], to: .[1], files_added: (.[2] | tonumber), files_removed: (.[3] | tonumber)})')
+' "$T/dirs" "$T/wsnames" "$T/diff" | sort | jq -R -s -c 'split("\n") | map(select(length > 0) | split("\t") | {from: .[0], to: .[1], files_added: (.[2] | tonumber), files_removed: (.[3] | tonumber), files: ((.[4] // "") | split("\u001f") | map(select(length > 0)) | sort | .[:20])})')
 
 # ---- boundary config (eslint-plugin-boundaries, dependency-cruiser, Nx depConstraints) ----
 : > "$T/bfiles"; LOOSE=false; TIGHT=false

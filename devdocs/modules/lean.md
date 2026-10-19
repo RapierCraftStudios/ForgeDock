@@ -168,3 +168,17 @@ added: pinned pm → `corepack <pm>@<ver>` (else `npx -y`) shims in
 `<run tmp>/toolchain/bin`, merged into `callRunner`'s env so the builder, its
 validate commands and git hooks resolve the pin. No pins → no env/prompt change.
 `env.setup` failure is an environment error (`env.setup_failed`), not a build failure.
+
+## Entry 2026-10-20 — Structure delta and decision provenance telemetry (#4165)
+
+The implement-time `STRUCTURE_DELTA` stays in the run log and keeps gating
+undeclared package edges. Its telemetry write moved to the merged path:
+`lean.mjs` `recordStructure` re-runs `structure-delta.sh` (now with
+`import_pairs[].files`), takes `top_growth` from one `git diff --numstat` and
+writes one `STRUCTURE_DELTA` (`phase: merge`, pr, milestone, deps/edges/growth,
+contract `decisions[]` sources). The trajectory shows it as a **Structure** table.
+`RUN_TERMINAL` gains pr, milestone, `conformance_mode` and `shadow_would`.
+Contracts may carry `decisions: [{id, choice, justification, source: doc|lint|precedent|spec}]`,
+which `validateContract` checks only when present. `forgedock stats --edge FROM:TO` /
+`--milestone M` (`bin/stats/query.mjs`) answer audit queries from these records.
+Rationale: `devdocs/decisions/4165-structure-delta-telemetry.md`.

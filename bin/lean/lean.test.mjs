@@ -7,10 +7,10 @@ import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from 
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
 import { makeLedger } from "./ledger.mjs";
-import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
+import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt } from "./prompts.mjs";
-import { parseReview, unnamedEdges, structureNote, applyAmendments } from "./conformance.mjs";
+import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
 import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir } from "./effects.mjs";
@@ -112,6 +112,7 @@ function world(o = {}) {
       if (a[0] === "merge" && a[1] === "--abort") { w.mergeInProgress = false; return ""; }
       if (a[0] === "rev-parse") return w.head;
       if (a[0] === "diff" && a[1] === "--name-only") return w.changed.join("\n");
+      if (a[0] === "diff" && a[1] === "--numstat") return w.numstat ?? "";
       if (a[0] === "ls-files") return [...new Set(["src/foo.js", "src/bar.js", "test/foo.test.js", ...w.changed])].join("\n");
       if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
       if (a[0] === "ls-remote" && String(a.at(-1)).startsWith("refs/heads/")) { const b = a.at(-1).slice("refs/heads/".length); return (o.branchesOnOrigin ?? ["staging", "main"]).includes(b) ? `abc\trefs/heads/${b}\n` : ""; }
@@ -959,7 +960,7 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 3);
   });
 
-  it("import-pair growth and boundary loosening never block: one <structure> line in the one reviewer prompt, telemetry recorded", async () => {
+  it("import-pair growth and boundary loosening never block: one <structure> line in the one reviewer prompt, telemetry recorded at merge", async () => {
     const d = delta({ import_pairs: [{ from: "@s/web", to: "@s/db", files_added: 8, files_removed: 0 }], boundary_config_changed: { changed: true, files: ["eslint.config.mjs"], loosens: true, tightens: false } });
     for (const conformance of ["enforce", "shadow"]) {
       const w = sworld([d]);
@@ -968,20 +969,26 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
       const lines = reviewers(w)[0][4].split("\n").filter((l) => l.includes("<structure>"));
       assert.equal(lines.length, 1);
       assert.match(lines[0], /^<structure>Structure \(report only\): this PR adds 8 value imports @s\/web→@s\/db \(files\); the repo's boundary config was loosened in this PR \(eslint\.config\.mjs\); flag only if the contract or the architecture doc says otherwise\.<\/structure>$/);
-      const t = w.telemetry.find((x) => x.event === "STRUCTURE_DELTA");
-      assert.deepEqual([t.import_files_added, t.boundary_loosened, t.phase], [8, true, "implement"]);
-      assert.deepEqual(mapRecord(t, 5).payload, { edges_added: 0, edges_removed: 0, import_files_added: 8, import_files_removed: 0, boundary_changed: 1, boundary_loosened: 1 });
+      // forge#4165: the one telemetry record is written at merge (the implement-time event is run-log only)
+      const ts = w.telemetry.filter((x) => x.event === "STRUCTURE_DELTA");
+      assert.equal(ts.length, 1);
+      assert.deepEqual([ts[0].import_files_added, ts[0].boundary_loosened, ts[0].phase], [8, true, "merge"]);
+      assert.deepEqual(mapRecord(ts[0], 5).payload, { edges_added: 0, edges_removed: 0, import_files_added: 8, import_files_removed: 0, boundary_changed: 1, boundary_loosened: 1,
+        deps_added: "none", new_edges: "@s/web:@s/db", removed_edges: "none", top_growth: "none", decisions: "none", decisions_doc: 0, decisions_lint: 0, decisions_precedent: 0, decisions_spec: 0 });
     }
   });
 
-  it("no workspace packages ({}), a failed script or no io.structureDelta: no event, no prompt line, the same reviewer prompt", async () => {
+  it("no workspace packages ({}), a failed script or no io.structureDelta: no implement-time event, no prompt line, the same reviewer prompt", async () => {
     const base = world(); await run(base);
     for (const d of [{}, null]) {
       const dir = tmpDir("struct-none-");
       const w = sworld([d]);
       assert.equal((await run(w, { dir })).terminalReason, "merged");
       assert.equal(reviewers(w)[0][4], reviewers(base)[0][4]);
-      assert.ok(!readLog(dir, 7).some((x) => x.event === "STRUCTURE_DELTA")); assert.ok(!w.telemetry.some((x) => x.event === "STRUCTURE_DELTA"));
+      assert.ok(!readLog(dir, 7).some((x) => x.event === "STRUCTURE_DELTA" && x.phase !== "merge"));
+      // forge#4165: every merged run still writes the merge-time record, with empty lists
+      const ts = w.telemetry.filter((x) => x.event === "STRUCTURE_DELTA");
+      assert.equal(ts.length, 1); assert.equal(ts[0].phase, "merge"); assert.deepEqual([ts[0].edges_added, ts[0].new_edges], [0, []]);
       assert.equal(builders(w).length, 2);
     }
     assert.equal(structureNote({}), ""); assert.equal(structureNote(null), ""); assert.equal(structureNote(delta()), "");
@@ -995,6 +1002,96 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     assert.match(builderPlanPrompt(7), /"the lint allows it" or "there is a precedent" is not a reason on its own/);
     assert.match(builderPlanPrompt(7), /must be a deliverable on that package\.json whose change names the package and gives the reason/);
     assert.match(builderImplementPrompt(), /blocked by the engine: add it through add-deliverable with a why naming the package/);
+  });
+});
+
+describe("structure delta and decision provenance at merge (forge#4165)", () => {
+  const DEC = [{ id: "K1", choice: "web imports db", justification: "docs/architecture.md:12", source: "doc" }, { id: "K2", choice: "copy the retry helper", justification: "src/retry.js:3", source: "precedent" }];
+  const D = { package_edges_added: [{ from: "@s/db", to: "@s/core", kind: "dependencies", manifest: "packages/db/package.json" }], package_edges_removed: [],
+    import_pairs: [{ from: "@s/web", to: "@s/db", files_added: 2, files_removed: 0, files: ["apps/web/a.ts", "apps/web/b.ts"] }, { from: "@s/web", to: "@s/old", files_added: 0, files_removed: 1, files: [] }],
+    boundary_config_changed: { changed: false, files: [], loosens: false, tightens: false } };
+  const contract = { ...CONTRACT, deliverables: [...CONTRACT.deliverables, { id: "D2", path: "packages/db/package.json", change: "add @s/core: db needs the constants" }], decisions: DEC };
+  const mworld = (o = {}) => {
+    const w = world({ contract, ...o }); w.ghCalls = 0; w.structureCalls = 0;
+    const gh = w.io.gh; w.io.gh = async (a) => { w.ghCalls++; return gh(a); };
+    w.io.structureDelta = async () => { w.structureCalls++; return D; };
+    w.numstat = "120\t3\tsrc/foo.js\n4\t0\ttest/foo.test.js\n-\t-\tlogo.png\n9\t0\t.forge-lean/result.json\n300\t1\tapps/web/big.ts\n";
+    return w;
+  };
+
+  it("a merged run writes one STRUCTURE_DELTA with edges, growth, provenance and the PR; the trajectory shows it; no extra gh call", async () => {
+    const dir = tmpDir("struct-merge-");
+    const w = mworld();
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const ts = w.telemetry.filter((x) => x.event === "STRUCTURE_DELTA");
+    assert.equal(ts.length, 1, "exactly one telemetry write for the delta");
+    const t = ts[0];
+    assert.equal(t.phase, "merge"); assert.equal(t.pr, r.pr);
+    assert.deepEqual(t.deps_added, [{ from: "@s/db", to: "@s/core", kind: "dependencies", manifest: "packages/db/package.json" }]);
+    assert.deepEqual(t.new_edges, [{ from: "@s/web", to: "@s/db", file: "apps/web/a.ts", files: 2 }]);
+    assert.deepEqual(t.removed_edges, [{ from: "@s/web", to: "@s/old", files: 1 }]);
+    assert.deepEqual(t.top_growth, [{ file: "apps/web/big.ts", lines: 300 }, { file: "src/foo.js", lines: 120 }, { file: "test/foo.test.js", lines: 4 }], "binary and .forge-lean files skipped");
+    assert.deepEqual(t.decisions, [{ id: "K1", source: "doc" }, { id: "K2", source: "precedent" }]);
+    const m = mapRecord(t, 5);
+    assert.equal(m.pr, r.pr);
+    assert.deepEqual([m.payload.deps_added, m.payload.new_edges, m.payload.removed_edges, m.payload.top_growth, m.payload.decisions, m.payload.decisions_doc, m.payload.decisions_precedent, m.payload.decisions_lint],
+      ["@s/db:@s/core", "@s/web:@s/db", "@s/web:@s/old", "apps/web/big.ts+300,src/foo.js+120,test/foo.test.js+4", "K1:doc,K2:precedent", 1, 1, 0]);
+    for (const v of Object.values(m.payload)) assert.notEqual(typeof v, "object");
+    assert.ok(readLog(dir, 7).some((x) => x.event === "STRUCTURE_DELTA" && x.phase === "merge"), "run log too");
+    const traj = w.comments.find((c) => c.includes("FORGE:TRAJECTORY"));
+    assert.match(traj, /\*\*Structure\*\*\n\| Delta \| Value \|/);
+    assert.match(traj, /\| Package deps added \| @s\/db → @s\/core \(packages\/db\/package\.json\) \|/);
+    assert.match(traj, /\| Import edges added \| @s\/web → @s\/db \(apps\/web\/a\.ts\) \|/);
+    assert.match(traj, /\| Top growth \| apps\/web\/big\.ts \+300, src\/foo\.js \+120, test\/foo\.test\.js \+4 \|/);
+    assert.match(traj, /\| Decision sources \| K1 doc, K2 precedent \|/);
+    // overhead: the delta is computed by the script only (implement + one merge-time run), and adds no gh call
+    assert.equal(w.structureCalls, 2);
+    const plain = world({ contract }); plain.ghCalls = 0; const gh = plain.io.gh; plain.io.gh = async (a) => { plain.ghCalls++; return gh(a); };
+    await run(plain);
+    assert.equal(w.ghCalls, plain.ghCalls, "no new gh API call");
+    assert.equal(plain.telemetry.filter((x) => x.event === "STRUCTURE_DELTA").length, 1, "repos without a delta script still emit one record");
+  });
+
+  it("RUN_TERMINAL carries the pr, milestone, conformance mode and the shadow verdict (no telemetry write of its own)", async () => {
+    const w = mworld({ milestone: "Remote MCP Server", branchesOnOrigin: ["staging", "milestone/remote-mcp-server"] });
+    const r = await run(w, { lane: undefined, conformance: "shadow" });
+    assert.equal(r.terminalReason, "merged");
+    const term = w.telemetry.find((x) => x.event === "RUN_TERMINAL");
+    assert.deepEqual([term.pr, term.milestone, term.conformance_mode, term.shadow_would], [r.pr, "Remote MCP Server", "shadow", "conforms"]);
+    const m = mapRecord(term, 5);
+    assert.equal(m.pr, r.pr);
+    assert.deepEqual([m.payload.milestone, m.payload.conformance_mode, m.payload.shadow_would], ["Remote MCP Server", "shadow", "conforms"]);
+    assert.equal(w.telemetry.find((x) => x.event === "STRUCTURE_DELTA").milestone, "Remote MCP Server");
+    const e = w.telemetry.find((x) => x.event === "RUN_TERMINAL");
+    const en = world(); await run(en, { conformance: "enforce" });
+    const t2 = en.telemetry.find((x) => x.event === "RUN_TERMINAL");
+    assert.equal(t2.conformance_mode, "enforce"); assert.equal(t2.shadow_would, undefined); assert.ok(e);
+  });
+
+  it("a run that does not merge writes no merge-time STRUCTURE_DELTA", async () => {
+    const w = world();
+    w.io.structureDelta = async () => ({ ...D, import_pairs: [] }); // undeclared edge: needs-human after one resume
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.ok(!w.telemetry.some((x) => x.event === "STRUCTURE_DELTA"));
+  });
+
+  it("contract decisions: optional, validated when present, rendered in FORGE:CONTRACT; the planner is asked for them", () => {
+    assert.deepEqual(DECISION_SOURCES, ["doc", "lint", "precedent", "spec"]);
+    const text = "foo must handle a null argument without throwing.";
+    assert.equal(validateContract(CONTRACT, text).ok, true, "no decisions is valid");
+    assert.equal(validateContract({ ...CONTRACT, decisions: DEC }, text).ok, true);
+    assert.match(validateContract({ ...CONTRACT, decisions: [{ id: "K1", choice: "x", source: "vibes" }] }, text).problems.join("\n"), /K1: decision source must be one of doc\|lint\|precedent\|spec/);
+    assert.match(validateContract({ ...CONTRACT, decisions: [{ id: "K1", source: "doc" }] }, text).problems.join("\n"), /decision without id or choice/);
+    assert.match(validateContract({ ...CONTRACT, decisions: "doc" }, text).problems.join("\n"), /decisions must be an array/);
+    const body = renderContract({ ...CONTRACT, decisions: DEC }, "abc123abc123");
+    assert.match(body, /### Decisions\n\| Id \| Choice \| Justification \| Source \|\n\| --- \| --- \| --- \| --- \|\n\| K1 \| web imports db \| docs\/architecture\.md:12 \| doc \|/);
+    assert.ok(!renderContract(CONTRACT, "abc123abc123").includes("### Decisions"));
+    assert.deepEqual(parseContractComment(body).contract.decisions, DEC);
+    assert.match(builderPlanPrompt(7), /"decisions":\[\{"id":"K1".*"source":"doc\|lint\|precedent\|spec"\}\]/);
+    assert.equal(renderStructure(null), "");
+    assert.match(renderStructure({ deps_added: [], new_edges: [], removed_edges: [], top_growth: [], decisions: [] }), /\| Package deps added \| none \|/);
   });
 });
 

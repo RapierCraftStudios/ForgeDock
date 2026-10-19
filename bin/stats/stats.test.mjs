@@ -14,6 +14,7 @@ import { fetchGithubRecords, parseTelemetryComments, runsFromRecords, toModel } 
 import { buildReport, makeProgressPrinter, parseArgs, parseSince, runStats, sinceToTimestamp } from "./index.mjs";
 import { readLocalRuns } from "./local-source.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
+import { edgeQuery, parseEdge, verdictMix } from "./query.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fx = (f) => join(here, "fixtures", f);
@@ -469,5 +470,58 @@ describe("cli", () => {
     const real = process.stderr.write;
     process.stderr.write = () => true;
     try { assert.equal(await runStats(["--repo", "bad repo"]), 2); } finally { process.stderr.write = real; }
+  });
+});
+
+describe("audit queries (forge#4165)", () => {
+  const rec = (o) => ({ v: 1, repo: "o/r", run: null, forge_version: "1.20.0", ...o });
+  const RECS = [
+    rec({ eid: "s1", ts: "2026-10-10T10:00:00Z", issue: 11, pr: 21, phase: "merge", event: "structure_delta", deps_added: "@s/web:@s/db", new_edges: "none", removed_edges: "none", decisions: "K1:lint", milestone: "M One" }),
+    rec({ eid: "s2", ts: "2026-10-11T10:00:00Z", issue: 12, pr: 22, phase: "merge", event: "structure_delta", deps_added: "none", new_edges: "@s/web:@s/db,@s/web:@s/core", removed_edges: "@s/a:@s/b", milestone: "M One" }),
+    rec({ eid: "s3", ts: "2026-10-11T11:00:00Z", issue: 13, pr: 23, phase: "merge", event: "structure_delta", deps_added: "none", new_edges: "@s/x:@s/db" }),
+    rec({ eid: "s4", ts: "2026-10-09T10:00:00Z", issue: 14, phase: "implement", event: "structure_delta", edges_added: 1 }),
+    rec({ eid: "t1", ts: "2026-10-10T10:01:00Z", issue: 11, pr: 21, event: "run_terminal", reason: "merged", conformance_mode: "shadow", shadow_would: "conforms", milestone: "M One" }),
+    rec({ eid: "t2", ts: "2026-10-11T10:01:00Z", issue: 12, pr: 22, event: "run_terminal", reason: "merged", conformance_mode: "shadow", shadow_would: "conformance.scope" }),
+    rec({ eid: "t3", ts: "2026-10-11T11:01:00Z", issue: 13, pr: 23, event: "run_terminal", reason: "merged", conformance_mode: "enforce", milestone: "M Two" }),
+  ];
+  const ITEMS = [{ number: 11, milestone: "M One" }, { number: 12, milestone: "M One" }, { number: 13, milestone: null }];
+
+  it("parseEdge splits on the last colon and rejects malformed input", () => {
+    assert.deepEqual(parseEdge("@s/web:@s/db"), { from: "@s/web", to: "@s/db" });
+    for (const bad of ["", "nocolon", ":b", "a:"]) assert.equal(parseEdge(bad), null, bad);
+  });
+  it("lists the PRs that added an edge, package or import, oldest first; exact element match only", () => {
+    assert.deepEqual(edgeQuery(RECS, "@s/web", "@s/db"), [
+      { issue: 11, pr: 21, ts: "2026-10-10T10:00:00Z", kind: "package", milestone: "M One" },
+      { issue: 12, pr: 22, ts: "2026-10-11T10:00:00Z", kind: "import", milestone: "M One" },
+    ]);
+    assert.deepEqual(edgeQuery(RECS, "@s/web", "@s/d"), [], "a prefix is not the edge");
+    assert.deepEqual(edgeQuery(RECS, "@s/a", "@s/b"), [], "a removed edge is not an added one");
+  });
+  it("verdict mix and structure series for a milestone (issue metadata first, then the record's own field)", () => {
+    const m = verdictMix(RECS, ITEMS, "M One");
+    assert.equal(m.runs, 2);
+    assert.deepEqual(m.verdicts, { conforms: 1, "conformance.scope": 1 });
+    assert.deepEqual(m.modes, { shadow: 2 });
+    assert.deepEqual(m.series, [{ date: "2026-10-10", merged: 1, deps_added: 1, new_edges: 0, removed_edges: 0 }, { date: "2026-10-11", merged: 1, deps_added: 0, new_edges: 2, removed_edges: 1 }]);
+    assert.equal(verdictMix(RECS, [], "M Two").runs, 1, "falls back to the record's milestone");
+    assert.equal(verdictMix(RECS, ITEMS, null).runs, 3, "no milestone: the whole repo");
+  });
+  it("buildReport --edge/--milestone answers from telemetry records alone; the version report is unchanged without them", async () => {
+    const body = `<!-- FORGE:TELEMETRY v1 -->\n\`\`\`jsonl\n${RECS.filter((r) => r.issue === 11 || r.issue === 12).map((r) => JSON.stringify(r)).join("\n")}\n\`\`\``;
+    const issues = [11, 12].map((n) => ({ number: n, labels: [], created_at: "2026-10-09T00:00:00Z", closed_at: null, updated_at: "2026-10-11T12:00:00Z", user: { type: "Bot" }, milestone: { title: "M One" } }));
+    const gh = (args) => {
+      const path = args.find((a) => a.startsWith("repos/")) ?? "";
+      if (/issues\/(11|12)\/comments$/.test(path)) return JSON.stringify(path.includes("/11/") ? [{ body, user: { type: "Bot" } }] : []);
+      if (/issues\/comments\?/.test(path)) return JSON.stringify(/page=1(&|$)/.test(path) ? [{ body, user: { type: "Bot" }, issue_url: "https://api.github.com/repos/o/r/issues/11" }] : []);
+      return JSON.stringify(issues);
+    };
+    const opts = { repo: "o/r", local: false, cache: false, minN: 10, ...parseArgs(["--edge", "@s/web:@s/db", "--milestone", "M One"]) };
+    const report = await buildReport({ ...opts, repo: "o/r", local: false, cache: false }, { gh, env: ENV, releaseTimes: [] });
+    assert.deepEqual(report.query.edge.prs.map((p) => [p.pr, p.kind]), [[21, "package"], [22, "import"]]);
+    assert.deepEqual(report.query.mix.verdicts, { conforms: 1, "conformance.scope": 1 });
+    assert.ok(!("groups" in report));
+    assert.throws(() => parseArgs(["--edge", "nocolon"]), /--edge must be FROM:TO/);
+    assert.deepEqual([parseArgs([]).edge, parseArgs([]).milestone], [null, null]);
   });
 });

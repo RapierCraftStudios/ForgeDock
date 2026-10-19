@@ -68,7 +68,7 @@ eq "monorepo rc" "$rc" 0
 eq "edges added" "$(q '.package_edges_added | sort_by(.from)')" '[{"from":"@scope/db","to":"@scope/core","kind":"dependencies","manifest":"packages/db/package.json"},{"from":"@scope/x","to":"@scope/db","kind":"devDependencies","manifest":"packages/x/package.json"}]'
 eq "edges removed" "$(q '.package_edges_removed')" '[{"from":"@scope/web","to":"@scope/old","kind":"dependencies","manifest":"apps/web/package.json"}]'
 eq "non-workspace dep ignored" "$(q '[.package_edges_added[] | select(.to == "zod" or .to == "pg")] | length')" 0
-eq "import pairs" "$(q '.import_pairs | sort_by(.to)')" '[{"from":"@scope/web","to":"@scope/db","files_added":1,"files_removed":0},{"from":"@scope/web","to":"@scope/old","files_added":0,"files_removed":1},{"from":"@scope/web","to":"@scope/x","files_added":2,"files_removed":0}]'
+eq "import pairs" "$(q '.import_pairs | sort_by(.to)')" '[{"from":"@scope/web","to":"@scope/db","files_added":1,"files_removed":0,"files":["apps/web/src/value.ts"]},{"from":"@scope/web","to":"@scope/old","files_added":0,"files_removed":1,"files":[]},{"from":"@scope/web","to":"@scope/x","files_added":2,"files_removed":0,"files":["apps/web/src/dyn.ts","apps/web/src/sub.ts"]}]'
 eq "import type never counted" "$(q '[.import_pairs[] | select(.to == "@scope/core")] | length')" 0
 eq "no boundary change" "$(q '.boundary_config_changed')" '{"changed":false,"files":[],"loosens":false,"tightens":false}'
 # the two-arg form agrees
@@ -127,7 +127,8 @@ for t in gh curl wget npm npx pnpm yarn nc ssh; do printf '#!/bin/sh\necho "%s" 
 start=$(date +%s%N 2>/dev/null)
 OUT="$(PATH="$TMP/bin:$PATH" bash "$S" master...big 2>/dev/null || PATH="$TMP/bin:$PATH" bash "$S" main...big)"
 end=$(date +%s%N 2>/dev/null)
-eq "300-file count" "$(q '.import_pairs')" '[{"from":"@s/a","to":"@s/b","files_added":300,"files_removed":0}]'
+eq "300-file count" "$(q '.import_pairs | map(del(.files))')" '[{"from":"@s/a","to":"@s/b","files_added":300,"files_removed":0}]'
+eq "files capped at 20, sorted (forge#4165)" "$(q '.import_pairs[0].files | [length, .[0]]')" '[20,"packages/a/f0.ts"]'
 case "$start$end" in *N*|"") ok ;; *) ms=$(( (end - start) / 1000000 )); if [ "$ms" -lt 2000 ]; then ok; else bad "300-file diff took ${ms} ms (limit 2000)"; fi ;; esac
 if [ -e "$TMP/net.log" ]; then bad "network tool invoked: $(tr '\n' ' ' < "$TMP/net.log")"; else ok; fi
 
