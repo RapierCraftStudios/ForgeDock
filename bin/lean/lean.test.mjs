@@ -10,7 +10,7 @@ import { makeLedger } from "./ledger.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt } from "./prompts.mjs";
-import { parseReview, unnamedEdges, structureNote } from "./conformance.mjs";
+import { parseReview, unnamedEdges, structureNote, applyAmendments } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
 import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir } from "./effects.mjs";
@@ -942,6 +942,15 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     assert.equal(unnamedEdges(withEdgeDeliverable("add @s/core"), delta({ package_edges_added: [EDGE] })).length, 0);
   });
 
+  it("an add-deliverable amendment on a package.json the contract already lists (for another change) declares the edge", () => {
+    const frozen = { requirements: [], deliverables: [{ id: "D1", path: "packages/db/package.json", change: "bump versions" }] };
+    const r = applyAmendments(frozen, [{ kind: "add-deliverable", path: "packages/db/package.json", why: "add @s/core: the architecture doc lets db depend on core" }]);
+    assert.equal(r.contract.deliverables.length, 1); assert.equal(r.contract.deliverables[0].id, "D1");
+    assert.match(r.contract.deliverables[0].change, /^bump versions; add @s\/core/);
+    assert.equal(unnamedEdges(r.contract, delta({ package_edges_added: [EDGE] })).length, 0);
+    assert.equal(frozen.deliverables[0].change, "bump versions", "the frozen contract is not mutated");
+  });
+
   it("an add-deliverable amendment naming the package on the resume declares the edge", async () => {
     const w = sworld([delta({ package_edges_added: [EDGE] })], { resumeAmendments: [{ kind: "add-deliverable", path: "packages/db/package.json", why: "add @s/core: the architecture doc lets db depend on core" }],
       changed: ["src/foo.js", "test/foo.test.js"] });
@@ -1702,6 +1711,26 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     }
   });
 
+  it("#4181 the builder and reviewer get FORGE_DOCKER_LABELS with the ledger's batch and lane, with or without a run tmp", async () => {
+    for (const withTmp of [false, true]) {
+      const w = world();
+      if (withTmp) w.io.runTmp = { prune: async () => {}, make: async (i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async () => {} };
+      assert.equal((await run(w, { batchId: "b1" })).terminalReason, "merged");
+      assert.ok(w.envs.length >= 1);
+      for (const e of w.envs) {
+        const labels = String(e?.FORGE_DOCKER_LABELS ?? "").split(" ");
+        assert.deepEqual(labels.slice(0, 4), ["forgedock.owner=1", "forgedock.batch=b1", "forgedock.lane=lean-7", "forgedock.issue=7"]);
+        assert.match(labels[4], /^forgedock\.expires=\d+$/);
+        if (withTmp) assert.match(e.TMPDIR, /\/runs\/7-/); else assert.equal(e.TMPDIR, undefined);
+      }
+    }
+  });
+
+  it("#4181 the implement prompt tells the builder to use --rm, the labels and a trap teardown", () => {
+    const p = builderImplementPrompt();
+    for (const needle of ["FORGE_DOCKER_LABELS", "--rm", "--label", "trap", "volume create", "network create", "build"]) assert.ok(p.includes(needle), needle);
+  });
+
   it("#4104 makeRunTmp: removes only its own dirs; prune takes only old dirs with a dead owner and our marker", async () => {
     const { mkdirSync, writeFileSync, existsSync, utimesSync } = await import("node:fs");
     const root = tmpDir("core-runs-");
@@ -2256,6 +2285,102 @@ describe("large diffs never reach argv (#4129)", () => {
     assert.equal(OUTCOME_CODES.CLI_SPAWN_FAILED, "cli.spawn_failed");
     const { readFileSync } = await import("node:fs");
     assert.match(readFileSync(new URL("../../docs/OUTCOME-CODES.md", import.meta.url), "utf8"), /`cli\.spawn_failed`/);
+  });
+});
+
+describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds failures to the builder", () => {
+  const CI = { mode: "ci", workflow: "verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 2 };
+  /** Adds the CI seams to a world: each dispatch creates a run for the current head; `conclusions` is consumed per run. */
+  const withCi = (w, { conclusions = ["success"], dispatchError = null, log = "ERROR: poetry.lock is not up to date" } = {}) => {
+    w.ci = { dispatched: [], runs: [], logsFor: [], conclusions: [...conclusions] };
+    Object.assign(w.io, {
+      dispatchWorkflow: async (a) => { w.seq.push("dispatch"); if (dispatchError) throw new Error(dispatchError); w.ci.dispatched.push(a); const id = 100 + w.ci.runs.length;
+        const c = w.ci.conclusions.length > 1 ? w.ci.conclusions.shift() : w.ci.conclusions[0]; w.ci.runs.unshift({ databaseId: id, headSha: w.head, status: c === "pending" ? "in_progress" : "completed", conclusion: c === "pending" ? null : c, url: `https://github.com/o/r/actions/runs/${id}`, name: "verify" }); },
+      workflowRuns: async () => w.ci.runs,
+      failedLogs: async (id) => { w.ci.logsFor.push(id); return log; },
+    });
+    return w;
+  };
+  const ciValidation = [{ id: "V1", command: "node --test test/foo.test.js", ci: true }];
+  const events = (dir) => readLog(dir, 7).filter((e) => e.event === "CI_VERIFY");
+
+  it("green CI: the builder is told not to run test suites, the branch is pushed and verified before review, validate left to CI passes enforce", async () => {
+    const w = withCi(world({ validation: ciValidation }));
+    const dir = tmpDir("core-ci-");
+    const r = await run(w, { verify: CI, dir });
+    assert.equal(r.terminalReason, "merged");
+    const impl = builders(w)[1][4];
+    assert.match(impl, /Do NOT run type-checks .*test suites .*docker\/test containers/);
+    assert.doesNotMatch(impl, /run every validate command/);
+    assert.deepEqual(w.ci.dispatched, [{ workflow: "verify.yml", ref: "feat/issue-7-lean", inputs: { changed_paths: "src/foo.js\ntest/foo.test.js" } }]);
+    assert.ok(w.seq.indexOf("dispatch") < w.seq.indexOf("reviewer"), "CI runs before the conformance review");
+    assert.ok(w.pushes >= 1);
+    assert.deepEqual(events(dir).map((e) => [e.result, e.mode]), [["pass", "ci"]]);
+    assert.match(traj(w)[0], /\| Verify \| CI green at /);
+  });
+
+  it("red CI: the failed job's log goes back to the builder, the fix is re-verified, then merged", async () => {
+    const w = withCi(world({ validation: ciValidation }), { conclusions: ["failure", "success"] });
+    const r = await run(w, { verify: CI });
+    assert.equal(r.terminalReason, "merged");
+    const fix = builders(w).find((b) => /CI failed on the pushed branch/.test(b[4]));
+    assert.ok(fix, "a CI-fix resume ran"); assert.equal(fix[2], "sess-1");
+    assert.match(fix[4], /poetry\.lock is not up to date/); assert.match(fix[4], /actions\/runs\/100/);
+    assert.deepEqual(w.ci.logsFor, [100]);
+    assert.equal(w.ci.dispatched.length, 2, "the fixed head is verified again");
+    assert.notEqual(w.ci.runs[0].headSha, w.ci.runs[1].headSha);
+  });
+
+  it("CI still red after max_rounds: needs-human ci.red and nothing merges to the lane", async () => {
+    const w = withCi(world({ validation: ciValidation }), { conclusions: ["failure"] });
+    const r = await run(w, { verify: { ...CI, maxRounds: 1 } });
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "ci.red");
+    assert.equal(w.prs.length, 0); assert.equal(w.merges.length, 0); assert.equal(reviewers(w).length, 0);
+  });
+
+  it("without the fix, a validate id left to CI is missing under enforce (the regression this guards)", async () => {
+    const w = world({ validation: ciValidation });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
+  });
+
+  it("docs-only lane: no push for CI, no dispatch; the decision is recorded", async () => {
+    const w = withCi(world({ changed: ["README.md", "docs/guide.md"], validation: ciValidation }));
+    const r = await run(w, { verify: CI, conformance: "shadow" });
+    assert.equal(r.terminalReason, "merged"); assert.equal(w.ci.dispatched.length, 0);
+    assert.match(traj(w)[0], /CI verification skipped/);
+  });
+
+  it("CI unavailable: falls back once to local validation in the builder session", async () => {
+    const w = withCi(world({ validation: ciValidation, resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] }), { dispatchError: "HTTP 422: Workflow does not have 'workflow_dispatch' trigger" });
+    w.resumeResult = { ...w.result };
+    const r = await run(w, { verify: CI, conformance: "shadow" });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(builders(w).some((b) => /CI verification is unavailable/.test(b[4])));
+    assert.match(traj(w)[0], /local fallback/);
+  });
+
+  it("slow CI ends ci-pending (never needs-human) before any PR", async () => {
+    const w = withCi(world({ validation: ciValidation }), { conclusions: ["pending"] });
+    const r = await run(w, { verify: CI, ciMaxMinutes: 10 });
+    assert.equal(r.terminalReason, "ci-pending"); assert.equal(w.prs.length, 0);
+  });
+
+  it("local (default): no CI seam is touched and the implement prompt is unchanged", async () => {
+    const w = withCi(world());
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(w.ci.dispatched.length, 0);
+    assert.equal(builders(w)[1][4], builderImplementPrompt());
+    assert.doesNotMatch(traj(w)[0], /\| Verify \|/);
+  });
+
+  it("forge.yaml verify: block section is read; absent section is undefined", async () => {
+    const { readVerify } = await import("../engine-cli.mjs");
+    const d = tmpDir("verify-yaml-");
+    writeFileSync(`${d}/forge.yaml`, "engine:\n  conformance: shadow\n");
+    assert.equal(readVerify(d), undefined);
+    writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n");
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3 });
   });
 });
 

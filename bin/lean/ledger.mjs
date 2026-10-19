@@ -40,6 +40,12 @@ export function countLiveLanes({ root = ledgerRoot(), host = hostname(), now = (
   return n;
 }
 
+/** Docker ownership labels (#4181): owner, batch, lane, issue, expires (epoch ms, as the ledger), values [A-Za-z0-9_.-] only. */
+export function dockerLabels({ batch, lane, issue, expires } = {}) {
+  const v = (x) => String(x ?? "").replace(/[^A-Za-z0-9_.-]/g, "-") || "unknown";
+  return [`forgedock.owner=1`, `forgedock.batch=${v(batch)}`, `forgedock.lane=${v(lane)}`, `forgedock.issue=${v(issue)}`, `forgedock.expires=${v(expires)}`];
+}
+
 export function makeLedger({ root = ledgerRoot(), batch = "adhoc", lane, owner, issue, host = hostname(), pid = process.pid, now = () => Date.now(), ttlMs = LEDGER_TTL_MS, fs = nodeFs } = {}) {
   const dir = join(root, safeSegment(batch));
   const path = join(dir, `${safeSegment(lane ?? `lane-${issue}`)}.json`);
