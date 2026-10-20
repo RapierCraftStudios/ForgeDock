@@ -810,3 +810,14 @@ validateContract problems in the existing single `contractCorrectionPrompt` resu
 logged as `VALIDATE_PREFLIGHT` {misses, corrected}; any left are an anomaly only, never a block: the post-build #4323
 rerun still ends `env.tool_missing`. Skipped when the frozen contract is recovered from the issue. Cost: 0 LLM calls when
 the host has the tools; otherwise the one correction resume, instead of a whole implement session lost to `env.tool_missing`.
+
+## Entry 2026-10-20 — The repro harness links workspace deps on base; an unrunnable head is an environment error (#4334)
+
+`io.redGreen` gets the lane env through `laneEnv()` (#4325), so a pinned `pnpm vitest …` runs on head.
+`scripts/acceptance-red-green.sh` links every head `node_modules` next to a tracked `package.json` (workspace packages
+too) and a root `.venv` into the base worktree when the base has none, so a workspace test resolves its deps on base.
+`conformance.mjs` `reproFailures` maps `HEAD=UNRUNNABLE`, or no harness result, to `env.repro_unrunnable` (kind
+`repro_env`, recoverable in `RECOVERABLE_CODES`, with a `RECOVER_HOW` prompt). `gate()` routes it with `env.tool_missing`
+to the environment state: no builder resume, no reviewer. Other non-proofs stay `conformance.unimplemented`. A
+`BASE=SKIPPED` detail now says the base was not run because head did not pass; head's new test files were already
+overlaid (#3630). Cost: 0 LLM calls; saves the wasted resume.

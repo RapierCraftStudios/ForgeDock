@@ -70,5 +70,19 @@ fi
 out=$(bash "$RG" --repo-path "$R1" 2>/dev/null); rc=$?
 { [ "$rc" -eq 2 ] && [ -z "$out" ]; } && ok "missing args exit 2, empty stdout" || bad "usage: rc=$rc out='$out'"
 
+# 11. workspace monorepo (#4334): a new test file in a package needs that package's untracked node_modules and the root
+#     .venv; base gets head's trees linked, so it runs and fails on the defect (not 127 on a missing install)
+R5="$TMP/r5"; make_repo "$R5"
+mkdir -p "$R5/apps/web"; printf '{}\n' > "$R5/package.json"; printf '{"name":"web"}\n' > "$R5/apps/web/package.json"
+printf 'node_modules/\n.venv/\n' > "$R5/.gitignore"; git -C "$R5" add -A; git -C "$R5" commit -qm pkgs; git -C "$R5" update-ref refs/remotes/origin/main HEAD
+fix_head "$R5"
+mkdir -p "$R5/apps/web/node_modules/dep" "$R5/.venv/bin"
+printf 'echo dep\n' > "$R5/apps/web/node_modules/dep/run.sh"; printf 'echo venv\n' > "$R5/.venv/bin/tool"
+mkdir -p "$R5/apps/web/__tests__"
+printf 'bash node_modules/dep/run.sh >/dev/null 2>&1 || exit 127\nbash ../../.venv/bin/tool >/dev/null 2>&1 || exit 127\ntest "$(bash ../../app.sh)" = good && echo "1 passed"\n' > "$R5/apps/web/__tests__/t.test.sh"
+git -C "$R5" add -A; git -C "$R5" commit -qm test
+check "workspace node_modules and .venv linked into base; new nested test overlaid" "BASE=FAILED HEAD=RAN" "$R5" "cd apps/web && bash __tests__/t.test.sh"
+[ -d "$R5/apps/web/node_modules/dep" ] && [ -d "$R5/.venv/bin" ] && ok "head dependency trees survive base cleanup" || bad "head dependency trees removed by cleanup"
+
 echo "$PASS passed, $FAILN failed"
 [ "$FAILN" -eq 0 ]

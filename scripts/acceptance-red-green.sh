@@ -6,13 +6,14 @@
 # Usage: acceptance-red-green.sh --repo-path <worktree> --base-ref <ref> --test-cmd "<cmd>" [--timeout <sec>]
 # Runs <cmd> in <worktree> (head) first. Only when head RAN does it create a detached base worktree at
 # `git merge-base HEAD <base-ref>` (under mktemp -d, never inside the repo), overlay head's changed test files
-# onto it, and run <cmd> there. Each run is classified with classify-test-run.sh.
+# onto it, link head's untracked dependency trees (every node_modules next to a tracked package.json, a root .venv),
+# and run <cmd> there. Each run is classified with classify-test-run.sh.
 # Prints exactly one line on stdout:   BASE=<FAILED|RAN|RAN_NOTHING|UNRUNNABLE|SKIPPED> HEAD=<FAILED|RAN|RAN_NOTHING|UNRUNNABLE>
 #   FAILED      the run executed and failed
 #   RAN         the run executed and passed
 #   RAN_NOTHING the runner exercised nothing
 #   UNRUNNABLE  could not execute (timeout 124, not executable 126/127, worktree/overlay/classifier failure)
-#   SKIPPED     base was not run because head did not PASS
+#   SKIPPED     base was not run because head did not PASS (never a missing file: head's new test files are overlaid)
 # Never prints a verdict on success of cleanup: the base worktree is removed on every exit path (trap + explicit remove).
 # Callers map: HEAD=RAN BASE=FAILED -> proof; BASE=RAN -> passes on base (gate FAIL); anything else that is not a proof -> DEGRADED/FAIL.
 # Exit: 0 line printed | 2 usage error (stdout empty so callers fail closed)
@@ -81,8 +82,16 @@ while IFS= read -r f; do
   [ -f "$REPO/$f" ] && [ ! -L "$REPO/$f" ] || continue   # deleted at head, or a symlink: never copied
   mkdir -p "$BASE_WT/$(dirname "$f")" && cp -p "$REPO/$f" "$BASE_WT/$f" 2>/dev/null && [ -f "$BASE_WT/$f" ] || OVERLAY_OK=false
 done <<< "$CHANGED"
-# Untracked dependency tree (never in git): link it so a missing install is not mistaken for a red run.
-[ -d "$REPO/node_modules" ] && [ ! -e "$BASE_WT/node_modules" ] && ln -s "$REPO/node_modules" "$BASE_WT/node_modules" 2>/dev/null
+# Untracked dependency trees (never in git): link head's so a missing install is not mistaken for a red run (#4334):
+# every node_modules next to a tracked package.json (workspace packages too, e.g. apps/web/node_modules) and a root .venv.
+DEPS=$( { git -C "$REPO" ls-files -- package.json '*/package.json' 2>/dev/null | while IFS= read -r p; do
+  d=$(dirname "$p"); [ "$d" = "." ] && echo node_modules || echo "$d/node_modules"; done; echo .venv; } | sort -u )
+while IFS= read -r t; do
+  [ -n "$t" ] || continue
+  case "$t" in */node_modules/*) continue ;; esac   # a package.json inside an installed tree
+  [ -d "$REPO/$t" ] && [ ! -e "$BASE_WT/$t" ] && [ ! -L "$BASE_WT/$t" ] || continue
+  mkdir -p "$BASE_WT/$(dirname "$t")" 2>/dev/null && ln -s "$REPO/$t" "$BASE_WT/$t" 2>/dev/null
+done <<< "$DEPS"
 
 if [ "$OVERLAY_OK" != "true" ]; then BASE_RES=UNRUNNABLE; else BASE_RES=$(run_in "$BASE_WT"); fi
 cleanup   # explicit; the EXIT trap is the backstop

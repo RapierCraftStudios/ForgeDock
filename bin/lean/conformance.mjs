@@ -262,7 +262,7 @@ export function repoTracks(paths) {
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
  * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[]}; each failure carries a
- * `kind` (scope_creep, validate_missing, validate_failed, validate_env, requirement_unimplemented, untracked_deferral, hotspot_growth, repro_red_green) so callers can
+ * `kind` (scope_creep, validate_missing, validate_failed, validate_env, requirement_unimplemented, untracked_deferral, hotspot_growth, repro_red_green, repro_env) so callers can
  * tell the builder's own failed checks apart from bookkeeping gaps. `ciVerified` (#4167): the current head passed the
  * engine's CI verification, so a validate id left to CI is not missing; a recorded non-zero exit still fails. `repro` (#4271): the repro_test red-green words, checked when given.
  * `validateRuns` (#4323): the engine's rerun {[id]: {rc, output}} of validate commands recorded as failed. A rerun that passes
@@ -306,13 +306,20 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
 /**
  * #4271: the frozen repro_test's red-green proof ({base, head} words from scripts/acceptance-red-green.sh). Anything but
  * HEAD=RAN BASE=FAILED fails; code conformance.unimplemented, so it blocks in shadow too and goes back to the builder.
+ * #4334: HEAD=UNRUNNABLE or no words (the harness could not run the test) is env.repro_unrunnable, kind repro_env: an
+ * environment error, never a builder resume.
  */
 export function reproFailures(contract, { base, head } = {}) {
   if (head === "RAN" && base === "FAILED") return [];
   const t = contract?.repro_test ?? {};
   const name = [t.path, t.id].filter((x) => !blank(x)).join(" ") || "repro_test";
+  if (!head || head === "UNRUNNABLE") {
+    return [{ code: C.ENV_REPRO_UNRUNNABLE, kind: "repro_env",
+      detail: `repro test ${name} (\`${t.command ?? ""}\`): the harness could not run the test on head (environment, not the change); got BASE=${base ?? "UNRUNNABLE"} HEAD=${head ?? "UNRUNNABLE"}` }];
+  }
+  const skipped = base === "SKIPPED" ? " (base not run: head did not pass)" : "";
   return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "repro_red_green",
-    detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=${base ?? "UNRUNNABLE"} HEAD=${head ?? "UNRUNNABLE"}` }];
+    detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=${base ?? "UNRUNNABLE"} HEAD=${head}${skipped}` }];
 }
 
 const EXEMPT_RE = /hotspot-exempt:\s*\S/i;

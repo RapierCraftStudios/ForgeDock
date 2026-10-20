@@ -17,7 +17,7 @@ import { readLog } from "../engine/runlog.mjs";
 import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo } from "./effects.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
-import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { OUTCOME_CODES, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -1418,7 +1418,7 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
 
   it("a repro test that is not red on base and green on head fails the precheck in enforce and in shadow: one in-session resume, then needs-human", async () => {
     for (const conformance of ["enforce", "shadow"]) {
-      for (const rg of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, null]) {
+      for (const rg of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }]) {
         const w = rworld([rg]);
         const r = await run(w, { conformance });
         assert.equal(r.code, "conformance.unimplemented", `${conformance} ${JSON.stringify(rg)}`); assert.equal(w.merges.length, 0);
@@ -1430,6 +1430,27 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     }
     const fixed = rworld([{ base: "RAN", head: "RAN" }, RED_GREEN]);
     assert.equal((await run(fixed, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(fixed.rgCalls.length, 2);
+  });
+
+  it("a repro test the harness cannot run on head (or no harness result) is env.repro_unrunnable: recoverable, no resume, no reviewer (#4334)", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      for (const rg of [{ base: "SKIPPED", head: "UNRUNNABLE" }, null]) {
+        const w = rworld([rg]);
+        const r = await run(w, { conformance });
+        assert.equal(r.code, "env.repro_unrunnable", `${conformance} ${JSON.stringify(rg)}`); assert.equal(r.terminalReason, "needs-human");
+        assert.equal(classifyNeedsHuman(r), "recoverable");
+        assert.equal(w.merges.length, 0); assert.equal(builders(w).length, 2, "plan + implement, no resume"); assert.equal(reviewers(w).length, 0);
+        assert.match(nh(w), /the repro harness could not run the repro test on head; no builder resume was spent/);
+      }
+    }
+  });
+
+  it("the repro harness runs with the lane env: toolchain PATH and the per-run TMPDIR (#4334)", async () => {
+    const w = rworld([RED_GREEN]);
+    w.io.runTmp = { prune: async () => {}, path: (id) => `/rt/${id}`, make: async (_i, id) => `/rt/${id}`, remove: async () => true };
+    w.io.prepareToolchain = async () => ({ pins: [{}], env: { PATH: "/shim/bin:/host/bin" }, summary: "pnpm@10.4.1" });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(w.rgCalls[0].env.PATH, "/shim/bin:/host/bin"); assert.match(w.rgCalls[0].env.TMPDIR, /^\/rt\//);
   });
 
   it("a non-testable bug records repro_test none with a reason and is not blocked; a missing repro_test gets the one contract correction", async () => {
