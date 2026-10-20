@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, explainFailures } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -312,5 +312,31 @@ describe("repro_test on bug lanes (#4271)", () => {
     assert.deepEqual(validateContract(C, ISSUE), validateContract(C, ISSUE, { repro: false }));
     assert.deepEqual(validateContract(C, ISSUE), { ok: true, problems: [] });
     assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), precheck({ contract: C, result: res, changedFiles: files, repro: null }));
+  });
+});
+
+describe("#4265 issue scope and failure explanations", () => {
+  const iss = { title: "t", body: "Fix foo.\n\n<!-- FORGE:STATE\n{\"lease\":1}\n-->" };
+  const human = { body: "Also bar." };
+  it("scopeText ignores the engine's HTML-comment blocks and FORGE comments, keeps human text", () => {
+    const base = scopeText(iss, [human]);
+    assert.equal(scopeText({ ...iss, body: iss.body.replace("\"lease\":1", "\"lease\":2") }, [human, { body: "<!-- FORGE:CONTRACT -->\n## Builder Contract" }, { body: "  <!-- FORGE:STARTED -->\nStarted" }]), base);
+    assert.match(base, /Fix foo\.[\s\S]*Also bar\./);
+    assert.doesNotMatch(base, /FORGE:STATE|lease/);
+    assert.notEqual(scopeText(iss, [human, { body: "Scope: also baz." }]), base);
+    assert.notEqual(scopeText({ ...iss, body: "Fix foo and qux." }, [human]), base);
+  });
+  it("explainFailures appends the quote of the requirement a detail names, and leaves other details alone", () => {
+    const contract = { requirements: [{ id: "R1", quote: "foo must handle null" }, { id: "R2", quote: "x".repeat(300) }] };
+    const out = explainFailures([{ code: "c", detail: "R1 reported \"partial\"" }, { code: "c", detail: "R2 missing" }, { code: "c", detail: "validate V1 failed (exit 1)" }, { code: "c", detail: "R9 missing" }], contract);
+    assert.equal(out[0].detail, 'R1 reported "partial" ("foo must handle null")');
+    assert.ok(out[1].detail.endsWith('...")') && out[1].detail.length < 200);
+    assert.equal(out[2].detail, "validate V1 failed (exit 1)");
+    assert.equal(out[3].detail, "R9 missing");
+    assert.equal(out[0].code, "c");
+  });
+  it("a failed validate names its command", () => {
+    const r = precheck({ contract: { requirements: [], deliverables: [], validate: [{ id: "V1", command: "npm test" }] }, result: { validation: [{ id: "V1", exit: 2 }] }, changedFiles: [] });
+    assert.equal(r.failures[0].detail, "validate V1 (`npm test`) failed (exit 2)");
   });
 });

@@ -40,6 +40,26 @@ export function inIssue(quote, issueText) {
   if (q.length < 3) return false;
   return String(issueText ?? "").split("\n").some((l) => norm(l.replace(ITEM_PREFIX_RE, "")) === q);
 }
+const stripHtmlComments = (s) => String(s ?? "").replace(/<!--[\s\S]*?-->/g, "").replace(/\r\n/g, "\n").trim();
+/**
+ * #4265: the human scope of an issue: title, body and trusted comments without the engine's own annotations (HTML comment
+ * blocks such as FORGE:STATE, and comments the engine posted, which start with "<!-- FORGE:"). Its hash is the edit signal
+ * and the provenance of a frozen contract; quote validation keeps using the full text.
+ */
+export function scopeText(iss, trustedComments = []) {
+  const human = (trustedComments ?? []).map((c) => String(c?.body ?? "")).filter((b) => !b.trimStart().startsWith("<!-- FORGE:"));
+  return [iss?.title ?? "", stripHtmlComments(iss?.body), ...human.map(stripHtmlComments)].join("\n\n");
+}
+/** #4265: failures whose detail starts with a contract requirement id also quote that requirement, so a needs-human names what is unmet. */
+export function explainFailures(failures, contract) {
+  const reqs = new Map((contract?.requirements ?? []).map((r) => [String(r?.id ?? ""), String(r?.quote ?? "")]));
+  return (failures ?? []).map((f) => {
+    const id = /^([A-Za-z][\w-]*)\b/.exec(String(f?.detail ?? ""))?.[1];
+    const q = id && reqs.get(id);
+    if (!q) return f;
+    return { ...f, detail: `${f.detail} ("${q.length > 160 ? `${q.slice(0, 157)}...` : q}")` };
+  });
+}
 export const isTestPath = (p) => TEST_RE.test(String(p));
 export const isIncidentalPath = (p) => INCIDENTAL_RE.test(String(p));
 const cleanPath = (p) => String(p ?? "").trim().replace(/^\.\//, "");
@@ -179,7 +199,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     const leftToCi = !r || (r.ci === true && r.exit === undefined);
     if (ciVerified && leftToCi) continue;
     if (leftToCi) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
-    else if (r.exit !== 0) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} failed (exit ${r.exit})` });
+    else if (r.exit !== 0) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})` });
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];
   for (const r of contract.requirements ?? []) {

@@ -86,11 +86,12 @@ const esc = (v) => cell(v).replace(/</g, "&lt;");
 const escl = (v) => line(v).replace(/</g, "&lt;");
 /** Canonical contract JSON: stable, and `<` escaped so builder text can never open an HTML/FORGE comment. */
 export const contractJson = (c) => JSON.stringify(c, null, 1).replace(/</g, "\\u003c");
-const CONTRACT_BLOCK_RE = /<summary>contract\.json \(sha256 ([0-9a-f]{12})\)<\/summary>\s*```json\n([\s\S]*?)\n```/;
+// #4265: an optional ", issue S" records the hash of the issue scope (conformance.mjs scopeText) the contract was planned from.
+const CONTRACT_BLOCK_RE = /<summary>contract\.json \(sha256 ([0-9a-f]{12})(?:, issue ([0-9a-f]{12}))?\)<\/summary>\s*```json\n([\s\S]*?)\n```/;
 
 /** FORGE:CONTRACT body: readable tables plus the frozen JSON and its hash (read back on a rerun). */
-export function renderContract(c, hash, { compact = false } = {}) {
-  const json = `<details><summary>contract.json (sha256 ${hash})</summary>\n\n\`\`\`json\n${contractJson(c)}\n\`\`\`\n</details>`;
+export function renderContract(c, hash, { compact = false, scope = null } = {}) {
+  const json = `<details><summary>contract.json (sha256 ${hash}${scope ? `, issue ${scope}` : ""})</summary>\n\n\`\`\`json\n${contractJson(c)}\n\`\`\`\n</details>`;
   if (compact) return `## Builder Contract (frozen \`${hash}\`)\n\n${c.requirements.length} requirement(s), ${(c.deliverables ?? []).length} deliverable(s); the tables are omitted because the contract is large.\n\n${json}`;
   const disp = (r) => `${r.disposition}${r.tracked ? ` → ${r.tracked}` : ["defer", "post-deploy"].includes(r.disposition) ? " (filed after review accepts it)" : ""}${r.why ? ` (${escl(r.why)})` : ""}`;
   const req = c.requirements.map((r) => `| ${esc(r.id)} | ${esc(r.quote)} | ${esc(disp(r))} |`).join("\n");
@@ -99,11 +100,11 @@ export function renderContract(c, hash, { compact = false } = {}) {
     ? `\n\n### Decisions\n| Id | Choice | Justification | Source |\n| --- | --- | --- | --- |\n${c.decisions.map((k) => `| ${esc(k?.id)} | ${esc(k?.choice)} | ${esc(k?.justification)} | ${esc(k?.source)} |`).join("\n")}` : "";
   return `## Builder Contract (frozen \`${hash}\`)\n\n### Requirements\n| Id | From the issue | Disposition |\n| --- | --- | --- |\n${req}\n\n### Deliverables\n${del ? `| Id | Path | Change | Requirements |\n| --- | --- | --- | --- |\n${del}` : "None."}\n\n### Preserve\n${(c.preserve ?? []).map((p) => `- ${escl(p.id)}: ${escl(p.what)}`).join("\n") || "None."}\n\n### Validate\n${(c.validate ?? []).map((v) => `- ${escl(v.id)}: \`${escl(v.command).replace(/`/g, "'")}\``).join("\n") || NR}${dec}\n\n${json}`;
 }
-/** {contract, hash, text} from a FORGE:CONTRACT comment body, or null. */
+/** {contract, hash, scope, text} from a FORGE:CONTRACT comment body (scope null for a pre-#4265 comment), or null. */
 export function parseContractComment(body) {
   const m = CONTRACT_BLOCK_RE.exec(String(body ?? ""));
   if (!m) return null;
-  try { return { hash: m[1], text: m[2], contract: JSON.parse(m[2]) }; } catch { return null; }
+  try { return { hash: m[1], scope: m[2] ?? null, text: m[3], contract: JSON.parse(m[3]) }; } catch { return null; }
 }
 
 /** Typed amendments, posted visibly before review. */

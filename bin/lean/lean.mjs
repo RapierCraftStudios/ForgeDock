@@ -12,7 +12,7 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
-import { TRACKED, isBugIssue, validateContract, applyAmendments, precheck, parseReview, decide, mergeReviewRows, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
+import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, parseReview, decide, mergeReviewRows, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths } from "./prefilter.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
@@ -845,6 +845,7 @@ export async function runCore(o) {
     const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => c?.body ?? "")].join("\n\n");
     let trustedComments = trustedOf(iss);
     let issueText = textOf(iss, trustedComments);
+    let scopeHash = contractHash(scopeText(iss, trustedComments)); // #4265: the edit signal and the frozen contract's provenance
     ctxLane = laneType({ resumed: Boolean(resumed || salvagedRef), attempts: priorAttempts(iss.body, trustedComments), body: iss.body });
     /**
      * forge#4275: compile (or read from the cache) the context pack, log CONTEXT_PACK and post FORGE:CONTEXT. Off, no
@@ -872,9 +873,11 @@ export async function runCore(o) {
       try { next = JSON.parse(String(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels"]))); } catch { return; }
       if (!next || typeof next !== "object") return;
       const tc = trustedOf(next), text = textOf(next, tc);
-      const old = contractHash(issueText), now = contractHash(text);
+      if (contractHash(issueText) === contractHash(text)) return;
+      // #4265: the engine's own writes (FORGE:STATE, FORGE:* comments) refresh the text but are not an issue edit
+      const old = scopeHash, now = contractHash(scopeText(next, tc));
+      iss = next; trustedComments = tc; issueText = text; scopeHash = now;
       if (old === now) return;
-      iss = next; trustedComments = tc; issueText = text;
       ev({ event: "ISSUE_EDITED", old, new: now, stage });
       T.decisions.push(`Issue edited during the run (${old} -> ${now}); ${stage} uses the current text`);
     }
@@ -906,16 +909,21 @@ export async function runCore(o) {
       }
       T.decisions.push(`Tracked ${reqs.map((r) => `${r.id} (${r.disposition})`).join(", ")} in ${[...new Set(reqs.map((r) => r.tracked))].join(", ")} (${why})`);
     }
-    /** The frozen contract posted by an earlier run of this issue, verified against its hash; null when absent. */
+    /**
+     * The frozen contract posted by an earlier run of this issue, verified against its hash; null when absent. `humanAfter`
+     * (#4265): a trusted comment that the engine did not post came after it.
+     */
     async function readFrozenContract() {
       let out = "";
       try { out = String(await ghc(["api", "--paginate", `repos/${repo}/issues/${issue}/comments`, "--jq", ".[] | {body, author_association, user: {type: .user.type, login: .user.login}}"])); } catch { return null; }
       let found = null;
       for (const l of out.split("\n")) {
         let c; try { c = JSON.parse(l); } catch { continue; }
-        if (!String(c?.body ?? "").startsWith("<!-- FORGE:CONTRACT -->") || !isTrustedComment(c)) continue;
-        const fc = parseContractComment(c.body);
-        if (fc && contractHash(fc.text) === fc.hash) found = fc;
+        if (!isTrustedComment(c)) continue;
+        const b = String(c?.body ?? "");
+        if (!b.startsWith("<!-- FORGE:CONTRACT -->")) { if (found && b.trim() && !b.trimStart().startsWith("<!-- FORGE:")) found.humanAfter = true; continue; }
+        const fc = parseContractComment(b);
+        if (fc && contractHash(fc.text) === fc.hash) found = { ...fc, humanAfter: false };
       }
       return found;
     }
@@ -984,7 +992,17 @@ export async function runCore(o) {
     } else {
       if (resumed) {
         const fc = await readFrozenContract();
-        if (fc) { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
+        if (fc) {
+          // #4265: a contract planned from an older issue scope is stale: re-plan and freeze a new one instead of judging against it
+          await refreshIssue("rerun contract check");
+          const gone = (Array.isArray(fc.contract?.requirements) ? fc.contract.requirements : []).filter((r) => r?.disposition === "deliver" && !inIssue(r.quote, issueText)).map((r) => r.id);
+          const stale = fc.scope ? (fc.scope !== scopeHash ? `issue scope ${fc.scope} -> ${scopeHash}` : null)
+            : fc.humanAfter ? "a human comment was posted after it" : gone.length ? `quote(s) no longer in the issue: ${gone.join(", ")}` : null;
+          if (stale) {
+            ev({ event: "CONTRACT_STALE", hash: fc.hash, scope: fc.scope, now: scopeHash, reason: stale });
+            T.decisions.push(`Rerun: frozen contract ${fc.hash} is stale (${stale}); re-planning`);
+          } else { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
+        }
       }
       await label("building");
       hotFacts = await hotspotsOf({ paths: namedPaths(iss.body ?? "") });
@@ -1023,8 +1041,8 @@ export async function runCore(o) {
         if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID);
         frozen = contract;
         hash = contractHash(contractJson(frozen));
-        let body = renderContract(frozen, hash);
-        if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true }); // the JSON must survive the comment cap
+        let body = renderContract(frozen, hash, { scope: scopeHash });
+        if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash }); // the JSON must survive the comment cap
         await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
         const deferredN = frozen.requirements.filter((r) => TRACKED.includes(r.disposition)).length;
         ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
@@ -1296,7 +1314,8 @@ export async function runCore(o) {
         verdict = outcome;
         for (const f of [...(outcome.failures ?? []), ...(outcome.wouldFail ?? [])]) if (f?.code) failureClasses.add(f.code);
         if (outcome.state === "conforms") break;
-        const list = outcome.failures.slice(0, 15).map((f) => `- ${f.code}: ${f.detail}`).join("\n");
+        const explained = explainFailures(outcome.failures, effective); // #4265: name the unmet requirement, not only the code
+        const list = explained.slice(0, 15).map((f) => `- ${f.code}: ${f.detail}`).join("\n");
         if (outcome.state === "review.unparseable") return await needsHuman(`The conformance reviewer returned no parseable JSON twice; nothing merged.`, OUTCOME_CODES.REVIEW_NO_VERDICT);
         if (shadow && reviewIncomplete === "degraded" && (outcome.state === "review.incomplete" || outcome.state === "review.inconsistent")) {
           degraded = { state: outcome.state, missing: outcome.missing ?? [] };
@@ -1307,7 +1326,7 @@ export async function runCore(o) {
         if (outcome.state === "review.inconsistent") return await needsHuman(`The conformance reviewer twice said NONCONFORMING without a failing row; nothing merged.`, OUTCOME_CODES.REVIEW_INCONSISTENT);
         if (resumes >= 1 || !sessionId) return await needsHuman(`The change does not conform to the issue and its frozen contract after ${resumes ? "one builder resume" : "the build (no session to resume)"} (${outcome.by}); nothing merged:\n${list}`, outcome.failures[0].code);
         resumes++;
-        T.decisions.push(`Not conforming (${outcome.by}${outcome.inconsistent ? ", reviewer verdict contradicted its rows" : ""}): ${[...new Set(outcome.failures.map((f) => f.code))].join(", ")}; builder resumed once`);
+        T.decisions.push(`Not conforming (${outcome.by}${outcome.inconsistent ? ", reviewer verdict contradicted its rows" : ""}): ${[...new Set(outcome.failures.map((f) => f.code))].join(", ")} (${explained.slice(0, 5).map((f) => String(f.detail).slice(0, 160)).join("; ")}); builder resumed once`);
         // A failed validate may only mean the base moved on: fetch the lane so the resume can merge it (never rebase).
         if (outcome.failures.some((f) => f?.kind === "validate_failed")) { try { await io.git(["fetch", "origin", lane], { cwd: wt }); } catch { /* offline: the resume uses the local ref */ } }
         await builder(++attemptN, conformanceResumePrompt(outcome.failures, vcfg.mode, lane), sessionId);
