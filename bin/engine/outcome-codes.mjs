@@ -84,7 +84,7 @@ export const OUTCOME_CODES = Object.freeze({
   FOLLOWUP_UNAVAILABLE: "followup.unavailable",
   MERGE_HEAD_MISMATCH: "merge.head_mismatch",
   // refactor:split lane (forge#4211): deterministic refusals and the move proof; every one leaves no edit behind.
-  SPLIT_UNSUPPORTED: "split.unsupported", // no codemod or index tool for the target language, or libcst missing; refused before any edit
+  SPLIT_UNSUPPORTED: "split.unsupported", // no codemod or index tool for the target language, or libcst or ts-morph missing; refused before any edit
   SPLIT_PLAN_INVALID: "split.plan_invalid", // missing target/test command, unparseable grouping reply, or a plan symbol-move refuses
   SPLIT_VERIFY_FAILED: "split.verify_failed", // refactor-verify found a logic diff, missing symbol, changed counts or new cycle; branch reset
   // Non-failure terminals, so a RUN_TERMINAL for a healthy run is not counted as a gap.

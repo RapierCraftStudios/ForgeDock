@@ -17,7 +17,8 @@
 #   key-sorted JSON {test:{exit,passed,skipped},symbols,cycles,root,target,index_dir,lang,test_cmd} to --out.
 # verify: run with --root's worktree checked out at --head. Re-runs test_cmd and the cycle index, resolves every
 #   baseline symbol from its OLD module path at runtime (Python importlib + getattr chain, so re-export shims and a
-#   module turned into a package resolve; JS/TS node import()), and reads
+#   module turned into a package resolve; JS/TS node import(); JS/TS interfaces and type aliases, erased at runtime,
+#   statically: the old module still exports the name, following `export * from`), and reads
 #   `git diff --color-moved=plain --no-renames <base> <head>`. Prints key-sorted JSON {ok,failures:[...]}, kinds:
 #     logic-diff {file,line,text}   an added/removed line that is not moved, not blank and not an import line
 #                                   (Python import/from-import incl. parenthesised continuations; JS/TS import,
@@ -168,8 +169,10 @@ def module(path):
     if rel.endswith("/__init__") or rel == "__init__":
         rel = rel[: -len("__init__")].rstrip("/")
     return rel.replace("/", ".")
-out = sorted({(module(s.get("file", target)), s["name"]) for s in data["symbols"] if s.get("public")})
-print(json.dumps([{"module": m, "name": n} for m, n in out]))
+# JS/TS interfaces and type aliases are erased at runtime: flagged "type" so verify resolves them statically (#4212).
+erased = lambda s: lang != "python" and s.get("kind") in ("interface", "type")
+out = sorted({(module(s.get("file", target)), s["name"], erased(s)) for s in data["symbols"] if s.get("public")})
+print(json.dumps([dict({"module": m, "name": n}, **({"type": True} if t else {})) for m, n, t in out]))
 PY
 )" || die "cannot build symbol list"
 
@@ -207,9 +210,42 @@ PY
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { existsSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 const [want, root] = [JSON.parse(readFileSync(process.argv[2], "utf8")), process.argv[3]];
+// Type-only names (interface/type alias, erased at runtime) resolve statically: the old module still exports the
+// name by declaration, `export { ... }` list or `export ... from`, following `export * from` relative modules.
+let ts = null;
+for (const m of ["typescript", "ts-morph"]) {
+  try { const r = createRequire(path.join(root, "noop.js"))(m); ts = m === "typescript" ? r : r.ts; if (typeof ts?.createSourceFile === "function") break; ts = null; } catch { /* next */ }
+}
+const exportsOf = (file, seen = new Set()) => {
+  const names = new Set();
+  if (!ts || seen.has(file) || !existsSync(file) || !statSync(file).isFile()) return names;
+  seen.add(file);
+  const src = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+  const exported = (n) => (ts.getCombinedModifierFlags(n) & ts.ModifierFlags.Export) !== 0;
+  const resolve = (spec) => {
+    const base = path.resolve(path.dirname(file), spec), stem = base.replace(/\.(m|c)?jsx?$/, "");
+    for (const c of [base, ...[".ts", ".tsx", ".mts", ".cts", ".d.ts"].flatMap((x) => [stem + x, path.join(base, "index" + x)])]) if (existsSync(c) && statSync(c).isFile()) return c;
+    return null;
+  };
+  for (const st of src.statements) {
+    if (ts.isExportDeclaration(st)) {
+      if (st.exportClause && ts.isNamedExports(st.exportClause)) for (const el of st.exportClause.elements) names.add(el.name.text);
+      else if (!st.exportClause && st.moduleSpecifier?.text?.startsWith(".")) { const f = resolve(st.moduleSpecifier.text); if (f) for (const n of exportsOf(f, seen)) names.add(n); }
+    } else if (ts.isVariableStatement(st) && exported(st)) {
+      for (const d of st.declarationList.declarations) if (ts.isIdentifier(d.name)) names.add(d.name.text);
+    } else if (st.name && ts.isIdentifier(st.name) && exported(st)) names.add(st.name.text);
+  }
+  return names;
+};
 const missing = [];
 for (const s of want) {
+  if (s.type) {
+    if (!exportsOf(path.join(root, s.module)).has(s.name)) missing.push(s);
+    continue;
+  }
   try {
     let obj = await import(pathToFileURL(path.join(root, s.module)).href);
     for (const part of s.name.split(".")) {
