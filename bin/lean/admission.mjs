@@ -39,3 +39,24 @@ export async function checkAdmission({ cfg = {}, host }) {
   if (load !== null && cores && load / cores > maxLoad) reasons.push(`load ${(load / cores).toFixed(1)}/core > ${maxLoad}`);
   return { ok: reasons.length === 0, reasons, detail: reasons.length ? `host busy: ${reasons.join(", ")}; retry in ${ADMISSION_RETRY_SECONDS}s` : "" };
 }
+
+/**
+ * Near the admission ceiling (#4183): within `ratio` of any checkAdmission threshold (load/core >= ratio * max, or free
+ * mem/tmp <= min / ratio). Orchestrate runs owned-resource GC before an admission when this is true. A failed or
+ * non-finite probe never counts as near.
+ */
+export async function nearCeiling({ cfg = {}, host, ratio = 0.8 } = {}) {
+  const c = { ...ADMISSION_DEFAULTS, ...Object.fromEntries(Object.entries(cfg ?? {}).filter(([, v]) => v !== undefined && v !== null)) };
+  if (c.enabled === false || !host) return false;
+  const r = Number.isFinite(ratio) && ratio > 0 && ratio <= 1 ? ratio : 0.8;
+  const safe = async (fn, ...a) => { try { const v = await fn?.(...a); return Number.isFinite(v) ? v : null; } catch { return null; } };
+  const maxLoad = typeof c.max_load_per_core === "number" && Number.isFinite(c.max_load_per_core) ? c.max_load_per_core : null; // off by default (#4169)
+  const load = maxLoad === null ? null : await safe(host.loadAvg1), cores = maxLoad === null ? null : await safe(host.cores);
+  if (load !== null && cores && load / cores >= r * maxLoad) return true;
+  const mem = await safe(host.memAvailableMb);
+  if (mem !== null && mem <= c.min_free_mem_mb / r) return true;
+  let paths = [];
+  try { paths = (await host.tmpPaths?.()) ?? []; } catch { paths = []; }
+  for (const p of paths) { const free = await safe(host.freeMb, p); if (free !== null && free <= c.min_free_tmp_mb / r) return true; }
+  return false;
+}
