@@ -53,7 +53,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    ONE tool-less grouping call over the compact index (`noTools`, empty cwd; none
    for a chained `FORGE:SPLIT-PLAN`), moves ≤ `splitMaxLines` (4000) whole modules
    (`symbol-move.py`, `--extend` on chain steps), commits and proves it
-   (`refactor-verify.sh`). Refusals → `needs-human` `split.*`, worktree reset,
+   (`refactor-verify.sh`). TypeScript targets (#4212) use `symbol-index.mjs` and
+   `symbol-move.mjs` (ts-morph from the target repo or `NODE_PATH`; a `--probe`
+   before any edit refuses `no codemod tool for ts`) and leave a re-export barrel. Refusals → `needs-human` `split.*`, worktree reset,
    nothing pushed. No builder session: every fix path (precheck, CI, base-sync
    conflict) is `needs-human`; a clean base-sync re-verifies; no reviewer. After
    the merge the rest is filed as one chained `refactor:split` issue.
@@ -360,6 +362,14 @@ call (`effects.mjs` `noToolFlags`, `prompts.mjs` `groupingPrompt`), then the usu
 Chains: `slicePlan` + `symbol-move.py --extend` + a `FORGE:SPLIT-PLAN` follow-up issue. Codes
 `split.unsupported|plan_invalid|verify_failed`. Cost: one index-sized call, 0 reviewer runs per
 split, instead of a builder session plus a reviewer. ADR `decisions/4211-refactor-split-lane.md`.
+
+## Entry 2026-10-20 — TypeScript mover for refactor:split (#4212)
+
+`.ts/.tsx/.mts/.cts` targets go through `scripts/symbol-move.mjs` (ts-morph, same CLI/JSON/exit codes as
+`symbol-move.py`) and `scripts/symbol-index.mjs`; the old file becomes a re-export barrel. ts-morph is resolved
+from the target repo or `NODE_PATH` (no FD dependency); without it a `--probe` refuses `split.unsupported`
+`no codemod tool for ts` before any edit. `refactor-verify.sh` now resolves erased TS types (interfaces, type
+aliases) statically. Go/JS stay refused. ADR `decisions/4212-ts-symbol-move.md`.
 
 ## Entry 2026-10-20 — Cross-repo fairness weights in the host registry (#4193)
 
