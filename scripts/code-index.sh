@@ -415,10 +415,10 @@ done < "$FILE_LIST" >> "$DOMAIN_FILE" 2>/dev/null || true
 # Step 5: Write index manifest
 # ---------------------------------------------------------------------------
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")
-SYMBOL_COUNT=$(wc -l < "$SYMBOLS_FILE" 2>/dev/null || echo 0)
-IMPORT_COUNT=$(wc -l < "$IMPORTS_FILE" 2>/dev/null || echo 0)
-CALLER_COUNT=$(wc -l < "$CALLERS_FILE" 2>/dev/null || echo 0)
-FILE_COUNT=$(wc -l < "$DOMAIN_FILE" 2>/dev/null || echo 0)
+SYMBOL_COUNT=$( (wc -l < "$SYMBOLS_FILE" 2>/dev/null || echo 0) | tr -d " ")
+IMPORT_COUNT=$( (wc -l < "$IMPORTS_FILE" 2>/dev/null || echo 0) | tr -d " ")
+CALLER_COUNT=$( (wc -l < "$CALLERS_FILE" 2>/dev/null || echo 0) | tr -d " ")
+FILE_COUNT=$( (wc -l < "$DOMAIN_FILE" 2>/dev/null || echo 0) | tr -d " ")
 
 # Sanity check: if source files that should have produced symbols/imports were
 # found, but extraction came back empty, a loop was truncated somewhere above
