@@ -377,7 +377,7 @@ export async function runCore(o) {
       const par = verifyParallelism(); // #4182
       let deps = {}; // #4220: shared package-manager stores; the engine's own keys win
       try { deps = io.deps?.env?.() ?? {}; } catch { deps = {}; }
-            // #4169: heavy shims first on PATH; the phase/issue/priority label each heavy step's slot and wait record.
+      // #4169: heavy shims first on PATH; the phase/issue/priority label each heavy step's slot and wait record.
       const heavy = heavyEnv ? { ...heavyEnv, FORGE_LANE_PHASE: args.role === "builder" ? stage : String(args.role ?? "step"), FORGE_LANE_ISSUE: String(issue), FORGE_LANE_PRIORITY: String(lanePriority()) } : {};
       try { return await io.runner({ ...args, env: { ...deps, FORGE_DOCKER_LABELS: labels, ...(runTmp ? { TMPDIR: runTmp, CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), ...(toolchain?.env ?? {}), ...heavy } }); }
       catch (e) {
