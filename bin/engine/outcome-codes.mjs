@@ -174,3 +174,32 @@ export function codeForTerminalReason(reason) {
     default: return UNCLASSIFIED;
   }
 }
+
+/**
+ * Batch recovery classes of a lane result (forge#4267). The batch runner recovers `recoverable` rows once
+ * (`orchestration.recovery.max_attempts`) and re-queues them; only `human` rows are escalations.
+ */
+export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID]);
+/** `builder.blocked` is only reached by a typed human block: credentials, spend, promotion, customer, product-decision. */
+export const HUMAN_CODES = Object.freeze([OUTCOME_CODES.BUILDER_BLOCKED]);
+
+/**
+ * `recoverable` | `human` | `terminal` for a lane result row ({outcome|terminalReason, code, issueEdited?, conflicting?}).
+ * Recoverable: needs-human `ci.red`, `base.conflict`, `builder.block_untyped`, `contract.invalid` after a mid-run issue
+ * edit (`issueEdited`), and `ci-pending` on a conflicting PR (`conflicting`). Human: `builder.blocked`. Anything else
+ * (another code, or not a needs-human/ci-pending row) is terminal. Pure, never throws.
+ */
+export function classifyNeedsHuman(row) {
+  if (!row || typeof row !== "object") return "terminal";
+  const outcome = row.outcome ?? row.terminalReason;
+  if (outcome === "ci-pending") return row.conflicting === true ? "recoverable" : "terminal";
+  if (outcome !== "needs-human") return "terminal";
+  if (HUMAN_CODES.includes(row.code)) return "human";
+  if (row.code === OUTCOME_CODES.CONTRACT_INVALID) return row.issueEdited === true ? "recoverable" : "terminal";
+  return RECOVERABLE_CODES.includes(row.code) ? "recoverable" : "terminal";
+}
+
+/** The code a recovery lane works on: a conflicting `ci-pending` is recovered as a base conflict. */
+export function recoveryCodeOf(row) {
+  return (row?.outcome ?? row?.terminalReason) === "ci-pending" ? OUTCOME_CODES.BASE_CONFLICT : normalizeCode(row?.code);
+}

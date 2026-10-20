@@ -86,6 +86,20 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `awaiting_merge` | Clean result held for a merge decision | remediate | Terminal reason `awaiting-merge` |
 | `unclassified` | Fallback for an absent or unknown code | engine | The raw reason is kept alongside |
 
+## Needs-human classes (forge#4267)
+
+`classifyNeedsHuman(row)` in `bin/engine/outcome-codes.mjs` sorts a lane result into one of three classes, so
+`forgedock orchestrate` recovers mechanical outcomes inside the batch:
+
+- **recoverable**:
+  - needs-human with `ci.red`, `base.conflict` or `builder.block_untyped`;
+  - `contract.invalid` when the issue was edited mid-run (`issueEdited`);
+  - `ci-pending` on a conflicting PR, recovered as `base.conflict`.
+
+  The runner relaunches the issue once per `orchestration.recovery.max_attempts` (default 1) as a recovery lane (`run-issue --recover <code>`), under the normal admission rules. That lane removes the `needs-human` label, posts `FORGE:DECISION`, and resumes the open PR: base-sync, then CI fix rounds from the failed-check logs. Dependents stay queued. A merged recovery is reported as `recovered`. A failed one is final, keeps the recovery evidence on the row, and skips its dependents.
+- **human**: `builder.blocked`, which is only reached by a typed human block: credentials, spend, promotion, customer or product-decision. It is never recovered, it skips dependents, and it is the only class in the report's escalation list.
+- **terminal**: every other code. No recovery runs, dependents are skipped, and the row is reported as `unrecovered`.
+
 ## Known limits
 
 - `build.acceptance_failed` covers malformed specs too until the gate sentinel distinguishes them.

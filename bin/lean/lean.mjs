@@ -98,6 +98,8 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {string} [o.toolchainOverride] forge.yaml env.toolchain: "<pm>@<x.y.z>" or "off" (#4163)
  * @param {string} [o.envSetup]      forge.yaml env.setup: run once per fresh worktree before the builder (#4163)
  * @param {object} [o.placement]     {where: local|remote, reason, mode}: the dispatcher's lane placement (#4256), kept in FORGE:STATE
+ * @param {object} [o.recover]       {code, attempt}: a batch recovery lane (#4267) for a mechanical needs-human; removes the label,
+ *                                   posts FORGE:DECISION and resumes the open PR on the rerun path with a recovery note
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
@@ -108,6 +110,8 @@ export async function runCore(o) {
   const remoteVerify = vcfg.mode !== "local";
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
+  // #4267: a batch recovery lane for a mechanical needs-human ({code, attempt}).
+  const recover = o.recover && typeof o.recover.code === "string" ? { code: o.recover.code, attempt: Number.isInteger(o.recover.attempt) ? o.recover.attempt : 1 } : null;
   const branch = `feat/issue-${issue}-lean`;
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
@@ -290,12 +294,12 @@ export async function runCore(o) {
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...extra };
     return done;
   }
-  async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR) {
+  async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR, extra = {}) {
     try {
       await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}\n\n_${usageLine()}_`);
       await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
     } catch { /* best effort */ }
-    return finish("needs-human", why, { code }, code);
+    return finish("needs-human", why, { code, ...extra, ...(recover ? { recovery: true } : {}) }, code);
   }
 
   // ---- stage notes: investigation.md, plan.md, implementation.md become their own comments ----
@@ -412,6 +416,14 @@ export async function runCore(o) {
     } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return false; }
   }
   const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over.";
+  // #4267: what a recovery lane does per code. Codebase-agnostic: the repo's own checks and logs only.
+  const RECOVER_HOW = {
+    [OUTCOME_CODES.CI_RED]: "the PR's required checks failed. Read the failed checks' logs (`gh run view <run-id> --log-failed`, or the repo's declared check commands), fix the causes, re-run those checks locally and push new commits only (never rewrite history)",
+    [OUTCOME_CODES.BASE_CONFLICT]: "the PR conflicts with origin/BASE. Merge origin/BASE, resolve every conflict keeping both sides' intent, re-run the validate commands and push new commits only",
+    [OUTCOME_CODES.BUILDER_BLOCK_UNTYPED]: "an earlier run escalated an in-scope technical choice. Do not block on it: pick the option most consistent with the issue, the repo's conventions and prior merged decisions, and name the alternative you did not take in your summary",
+    [OUTCOME_CODES.CONTRACT_INVALID]: "the issue was edited while the earlier run planned. Plan against the current issue text",
+  };
+  const recoverNote = () => (recover ? `\n\nRecovery pass (${recover.code}): ${(RECOVER_HOW[recover.code] ?? "an earlier run ended needs-human for a mechanical reason; resolve it").replaceAll("BASE", lane)}.` : "");
   const PLAN_RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD` to see what exists, but plan against the issue itself. This step is still planning only: do not edit code, do not commit, and do not write the result file unless the issue is invalid, already fixed or blocked.";
   const SALVAGE_NOTE = "\n\nAn earlier run on this issue stopped with uncommitted work, saved at `REF` (not on the branch). Inspect it with `git diff HEAD REF --stat` and reuse what fits the contract (`git checkout REF -- <path>`) instead of rewriting it.";
   const RERUN_NOTE = `\n\nThis is a rerun: the branch already holds commits from an earlier run. Read \`git log\` and \`git diff origin/BASE...HEAD\`, verify that work against the contract, complete what is missing, ${vcfg.mode === "ci" ? "re-run the light checks (the engine verifies on CI)" : "re-run every validate command"} and write the result file. Do not start over.`;
@@ -638,6 +650,15 @@ export async function runCore(o) {
     // ---- 1. claim ----
     await label("investigating");
     await post("FORGE:STARTED", `Started work on #${issue} (base \`${lane}\`).`);
+    if (recover) {
+      // #4267: the batch decided to recover this issue itself; the label goes so the issue is live again.
+      try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", "needs-human"]); } catch { /* best effort */ }
+      try {
+        await post("FORGE:DECISION", `## Decision: recovery pass for \`${recover.code}\` (attempt ${recover.attempt})\n**What**: removed \`needs-human\` and resumed the open PR / branch on \`${lane}\` (${(RECOVER_HOW[recover.code] ?? "rerun").split(".")[0]}).\n**Why**: \`${recover.code}\` is a mechanical outcome an agent can fix without operator input.\n**Alternative**: leave the issue \`needs-human\` and skip its dependents until the operator relaunches it.`);
+      } catch { /* best effort */ }
+      T.decisions.push(`Recovery pass for ${recover.code} (attempt ${recover.attempt}): needs-human removed, PR resumed`);
+      ev({ event: "RECOVERY_START", code: recover.code, attempt: recover.attempt });
+    }
 
     // ---- 2. worktree (resume an open PR / remote branch) ----
     try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ }
@@ -759,7 +780,7 @@ export async function runCore(o) {
       return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
     });
     const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => c?.body ?? "")].join("\n\n");
-    let trustedComments = trustedOf(iss);
+    let trustedComments = trustedOf(iss), issueEdited = false;
     let issueText = textOf(iss, trustedComments);
     /** #4188: the builder reads the live issue, so quotes are checked against the current text, not the RUN_START snapshot. Best effort. */
     async function refreshIssue(stage) {
@@ -770,6 +791,7 @@ export async function runCore(o) {
       const old = contractHash(issueText), now = contractHash(text);
       if (old === now) return;
       iss = next; trustedComments = tc; issueText = text;
+      issueEdited = true;
       ev({ event: "ISSUE_EDITED", old, new: now, stage });
       T.decisions.push(`Issue edited during the run (${old} -> ${now}); ${stage} uses the current text`);
     }
@@ -883,7 +905,7 @@ export async function runCore(o) {
       }
       await label("building");
       if (!frozen) {
-        await builder(++attemptN, builderPlanPrompt(issue, tcOpts()) + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : ""), null, true, () => builderPlanPrompt(issue, tcOpts()));
+        await builder(++attemptN, builderPlanPrompt(issue, tcOpts()) + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote(), null, true, () => builderPlanPrompt(issue, tcOpts()));
         planned = true;
         result = await readResult();
         const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
@@ -911,7 +933,7 @@ export async function runCore(o) {
           vc = validateContract(contract, issueText);
         }
         await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
-        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID);
+        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, issueEdited ? { issueEdited: true } : {});
         frozen = contract;
         hash = contractHash(contractJson(frozen));
         let body = renderContract(frozen, hash);
@@ -925,7 +947,7 @@ export async function runCore(o) {
       }
       T.plan = [`contract ${hash}`, `${frozen.requirements.length} requirement(s)`];
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
-      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "");
+      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote();
       liveKeys = ["implementation"];
       stage = "implement";
       await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);

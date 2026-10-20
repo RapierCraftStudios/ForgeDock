@@ -287,3 +287,26 @@ describe("runIssue records codes on the run log and FORGE:STATE", () => {
     assert.equal(events("RUN_TERMINAL").at(-1).code, "completed");
   });
 });
+
+describe("classifyNeedsHuman (forge#4267)", async () => {
+  const { classifyNeedsHuman, recoveryCodeOf } = await import("../engine/outcome-codes.mjs");
+  it("recoverable: ci.red, base.conflict, builder.block_untyped, edited contract.invalid, conflicting ci-pending", () => {
+    for (const code of ["ci.red", "base.conflict", "builder.block_untyped"]) assert.equal(classifyNeedsHuman({ outcome: "needs-human", code }), "recoverable", code);
+    assert.equal(classifyNeedsHuman({ terminalReason: "needs-human", code: "contract.invalid", issueEdited: true }), "recoverable");
+    assert.equal(classifyNeedsHuman({ outcome: "ci-pending", conflicting: true }), "recoverable");
+    assert.equal(recoveryCodeOf({ outcome: "ci-pending", conflicting: true }), "base.conflict");
+    assert.equal(recoveryCodeOf({ outcome: "needs-human", code: "ci.red" }), "ci.red");
+  });
+  it("human: builder.blocked (product-decision, spend, credentials, promotion, customer)", () => {
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "builder.blocked" }), "human");
+  });
+  it("terminal: other codes, unedited contract.invalid, plain ci-pending, unknown and non-needs-human rows", () => {
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "contract.invalid" }), "terminal");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.omission" }), "terminal");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "nope" }), "terminal");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human" }), "terminal");
+    assert.equal(classifyNeedsHuman({ outcome: "ci-pending" }), "terminal");
+    assert.equal(classifyNeedsHuman({ outcome: "merged", code: "ci.red" }), "terminal");
+    assert.equal(classifyNeedsHuman(null), "terminal");
+  });
+});
