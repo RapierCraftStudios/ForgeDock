@@ -196,7 +196,7 @@ export function hotspotGrowth({ contract, result, hotspots, changedFiles = [] })
   return hotspots.files
     .filter((h) => h?.over && !h.excluded && Number(h.growth) > limit && changed.has(cleanPath(h.path)) && !exempt(h.path))
     .map((h) => ({ code: C.MAINTENANCE_HOTSPOT_GROWTH, kind: "hotspot_growth",
-      detail: `${h.path} grew by ${h.growth} lines (now ${h.lines}; files over ${max} lines may grow by at most ${limit}) without a hotspot-exempt: <reason> in the contract; move the new code into a new or neighbouring module` }));
+      detail: `${h.path} grew by ${h.growth} lines (now ${h.lines}, limit +${limit} over ${max}) without hotspot-exempt` }));
 }
 
 /** The reviewer's JSON object (a json fence first, then the outermost braces), or null. */

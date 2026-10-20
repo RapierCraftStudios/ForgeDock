@@ -201,7 +201,7 @@ describe("hotspot growth precheck (forge#4195)", () => {
     const pc = run(hs([H()]));
     assert.equal(pc.ok, false);
     assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["maintenance.hotspot_growth", "hotspot_growth"]]);
-    assert.match(pc.failures[0].detail, /src\/scrape\.js grew by 200 lines \(now 2600; files over 2000 lines may grow by at most 150\)/);
+    assert.match(pc.failures[0].detail, /^src\/scrape\.js grew by 200 lines \(now 2600, limit \+150 over 2000\) without hotspot-exempt$/);
   });
 
   it("within the limit, under the threshold, excluded, unchanged, disabled or no facts: no failure", () => {
