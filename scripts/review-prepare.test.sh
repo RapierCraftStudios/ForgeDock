@@ -320,19 +320,16 @@ prep "$ROOT"
 _f0=$fail; eq "real index fills the auth slice" '.index_slices.auth | startswith("Domain files (auth):")' true
 # forge#4235: on failure show review-prepare's stderr (it carries the index build's exit code and stderr tail)
 [ "$fail" -eq "$_f0" ] || sed 's/^/  stderr: /' "$WORK/stderr"
+if grep -q "review-prepare: building code index" "$WORK/stderr"; then ok; else bad "index build must print a progress line on stderr"; fi
 # a failing build reports its exit code and stderr tail, and the slices fall back to grep
 mkroot "$WORK/root-failindex" "" "" templates
-printf '#!/usr/bin/env bash
-echo "index-boom-marker" >&2
-exit 3
-' > "$WORK/root-failindex/scripts/code-index.sh"
+printf '#!/usr/bin/env bash\necho "index-boom-marker" >&2\nexit 3\n' > "$WORK/root-failindex/scripts/code-index.sh"
 prep "$WORK/root-failindex"
 rc_is "failing index build" 0
 if grep -q "code index failed (exit 3)" "$WORK/stderr"; then ok; else bad "index failure must report the build's exit code on stderr"; fi
 if grep -q "review-prepare: code-index: index-boom-marker" "$WORK/stderr"; then ok; else bad "index failure must echo the build's stderr tail: $(head -c 300 "$WORK/stderr")"; fi
 eq "failed index falls back to grep slices" .index_slices.auth "Code index not available — agent will use grep exploration"
 if ls "$WORK/out"/.code-index-err-* >/dev/null 2>&1; then bad "index stderr temp file must be removed"; else ok; fi
-if grep -q "review-prepare: building code index" "$WORK/stderr"; then ok; else bad "index build must print a progress line on stderr"; fi
 if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
     mkroot "$WORK/root-slowindex" "" "" templates
     printf '#!/usr/bin/env bash\nsleep 30\n' > "$WORK/root-slowindex/scripts/code-index.sh"
