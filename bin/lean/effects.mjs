@@ -14,6 +14,7 @@ import { makeProjector } from "../engine/projector.mjs";
 import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 import { makeDepCache } from "./depcache.mjs";
 import { makeHeavyIo } from "./heavy.mjs";
+import { gatherContextFacts } from "./context.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -296,6 +297,8 @@ export function makeLeanIo({ repo }) {
     async structureDelta({ cwd, base }) {
       try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
+    /** forge#4275: the context pack's facts for one issue (bin/lean/context.mjs), from gh and git only; sources fail independently. */
+    contextFacts: (args) => gatherContextFacts({ ...args, io: { gh: run("gh"), git: run("git"), exists: async (p) => existsSync(p) } }),
     /** forge#4195: scripts/hotspots.sh facts for `paths` in cwd (growth since base when given); null on any failure. */
     async hotspots({ cwd, base = null, paths = [] }) {
       const args = [script("hotspots.sh"), ...(base ? ["--base", base] : []), "--", ...paths];

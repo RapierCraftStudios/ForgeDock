@@ -536,6 +536,35 @@ on the run record and the row, and in `ctx.placement`. The lane gets it as
 into FORGE:STATE (`placement: {where, reason, mode}`) and a trajectory decision.
 Cost: 0 LLM calls. Rationale: `devdocs/decisions/4256-hybrid-placement.md`.
 
+## Entry 2026-10-20 — Context pack: the issue's graph as plan context (#4275)
+
+Before the plan call (not for refactor:split lanes or a recovered frozen contract)
+`lean.mjs` `contextPackStep` asks `io.contextFacts` (`context.mjs`
+`gatherContextFacts`, gh + git only) for four switchable sources: **graph**
+(`**Parent**`, `Depends on`, body links, timeline cross-references, siblings from
+the parent's `FORGE:DECOMPOSED`; full body only for parent/dependencies; outcome
+from the linked body's `FORGE:STATE`), **attempts** (`FORGE:STATE` terminal reason,
+trusted `FORGE:NEEDS_HUMAN|BASE_SYNC|FIX_CI`, `refs/forge/salvage/<N>/*`),
+**ledger** (first-parent merges on the issue's named paths within
+`context_pack_days`, kept only when a revert, reverted, or a decision / review
+finding / title names a backticked symbol from the issue) and **facts**
+(`.forge/repo-facts.json`, `.forge/test-map.json` paths when present).
+`compileContextPack` is pure: ranked graph > attempts > ledger > facts, one line
+per item with `#N`/comment id/SHA, whole items dropped past the byte cap
+(default 6144). Cached in the run dir by issue + base head SHA + config.
+Recorded as `CONTEXT_PACK` (mode, lane_type, sources, bytes, items, truncated,
+hash) and a collapsed `FORGE:CONTEXT` comment (non-empty packs, once per hash);
+`RUN_TERMINAL` gains `context_pack` and `lane_type` (rerun | child | first).
+Write-back: a terminal `FORGE:STATE` also carries `terminalCode` (the typed
+outcome code) and `failureClasses` (conformance failure codes seen in the run),
+which the next pack reads instead of re-deriving them from the reason.
+`forge.yaml engine.context_pack`: `shadow` (default) records only, `on` appends
+`contextPackNote` (hints, not proof; never quotable) to the plan prompt, `off` is
+the old path with no extra calls. The pack never enters `issueText`, so contract
+quotes stay issue-only. `forgedock stats --context-ab` reports first-pass yield,
+builder turns, cache tokens and cost per lane type and mode; the default moves to
+`on` only once that A/B shows a win.
+
 ## Entry 2026-10-20 — Resource hygiene: preflight and admission GC (#4183)
 
 `forge.yaml` `hygiene:` (`container_ttl_hours` 6, `worktree_ttl_hours` 24,
