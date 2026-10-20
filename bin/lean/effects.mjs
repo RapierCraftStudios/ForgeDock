@@ -238,6 +238,8 @@ export function makeLeanIo({ repo }) {
     },
     /** #4240: one declared check command (`bash -c`) in `cwd`; never throws. A timeout kills the process group and gives rc 124. */
     runCommand: runCheckCommand,
+    /** #4328: a read-only freeze-time probe of a validate command's tool or module (separate from runCommand). */
+    probeCommand: runCheckCommand,
     /** #4167 verify-by-CI: `gh workflow run` on the lane branch; inputs become -f key=value. */
     async dispatchWorkflow({ workflow, ref, inputs = {} }) {
       await run("gh")(["workflow", "run", String(workflow), "-R", repo, "--ref", String(ref), ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
