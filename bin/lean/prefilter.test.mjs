@@ -12,7 +12,7 @@ const fence = (o) => "```json\n" + JSON.stringify(o) + "\n```";
 /** Fake GitHub + git for one repo `o/r`, lane `staging`. */
 function world(o = {}) {
   const w = { comments: [], closed: [], labels: [], runner: [], lanes: [], gitCalls: [],
-    issues: o.issues ?? {}, prs: o.prs ?? [], commits: o.commits ?? "", paths: new Set(o.paths ?? []), runs: o.runs ?? {}, workflowRuns: o.workflowRuns ?? {},
+    issues: o.issues ?? {}, prs: o.prs ?? [], commits: o.commits ?? "", paths: new Set(o.paths ?? []), runs: o.runs ?? {}, workflowRuns: o.workflowRuns ?? {}, shaRuns: o.shaRuns ?? {},
     verdict: o.verdict ?? null };
   w.io = {
     gh: async (a) => {
@@ -25,6 +25,8 @@ function world(o = {}) {
         if (m) return JSON.stringify(w.runs[m[1]]);
         const wf = /actions\/workflows\/(\d+)\/runs\?branch=([^&]+)/.exec(a[1]);
         if (wf) return JSON.stringify({ workflow_runs: w.workflowRuns[`${wf[1]}:${decodeURIComponent(wf[2])}`] ?? [] });
+        const at = /actions\/workflows\/\d+\/runs\?head_sha=([^&]+)/.exec(a[1]);
+        if (at) { w.shaQueries = (w.shaQueries ?? 0) + 1; return JSON.stringify({ workflow_runs: w.shaRuns[at[1]] ?? [] }); }
       }
       if (k === "issue comment") { w.comments.push([Number(a[2]), a[a.indexOf("--body") + 1]]); return ""; }
       if (k === "issue close") { w.closed.push([Number(a[2]), a[a.indexOf("--reason") + 1]]); return ""; }
@@ -98,6 +100,38 @@ describe("pre-filter (#4123)", () => {
     assert.equal(w.runner.length, 0);
     assert.match(w.comments[0][1], /actions\/runs\/600/); assert.match(w.comments[0][1], /actions\/runs\/500/);
     assert.deepEqual(w.closed, [[34, "not planned"]]);
+  });
+
+  it("#4305 the CI-green shortcut is skipped for intermittent, reopened and same-SHA-flaky CI failures", async () => {
+    const link = "Run: https://github.com/o/r/actions/runs/500";
+    const green = (issue, extra = {}) => world({ issues: { 34: { title: "shell-compat failed on staging", body: `Workflow failed.\n${link}`, ...issue } },
+      runs: { 500: { id: 500, workflow_id: 7, name: "shell-compat", head_branch: "staging", head_sha: "1111111111111111", created_at: "2026-10-10T00:00:00Z", html_url: "https://github.com/o/r/actions/runs/500" } },
+      workflowRuns: { "7:staging": [{ id: 600, conclusion: "success", created_at: "2026-10-12T00:00:00Z", html_url: "https://github.com/o/r/actions/runs/600", head_sha: "8d9f6ba0aaaaaaaa" }] }, ...extra });
+    const bot = { author: { login: "rapiercraft-forgedock[bot]" }, authorAssociation: "NONE", body: "<!-- FORGE:PREFILTER -->\n<!-- FORGE:VALIDATE -->\n## Pre-filter: CI failure no longer reproduces" };
+    const stranger = { author: { login: "someone" }, authorAssociation: "NONE", body: bot.body };
+    const cases = [
+      ["intermittent wording", green({ body: `\`a.test.sh\` fails intermittently on macOS.\n${link}` }), /issue says the failure is intermittent/],
+      ["flaky label", green({ labels: [{ name: "flaky" }] }), /flaky label/],
+      ["reopened after a pre-filter close", green({ comments: [bot] }), /reopened after a pre-filter close/],
+      ["failed and passed at the same SHA", green({}, { shaRuns: { "8d9f6ba0aaaaaaaa": [{ id: 601, conclusion: "failure" }, { id: 600, conclusion: "success" }] } }), /failed and passed at 8d9f6ba0aaaa/],
+    ];
+    for (const [name, w, why] of cases) {
+      const r = await pf(w, 34);
+      assert.equal(r.closed, false, name); assert.notEqual(r.kind, "ci-green", name);
+      assert.deepEqual(w.closed, [], name); assert.deepEqual(w.comments, [], name); assert.equal(w.runner.length, 0, name);
+      assert.match(r.detail, /^skipped CI-green shortcut: flaky \(/, name); assert.match(r.detail, why, name);
+      assert.match(r.detail, /no already-fixed signal$/, name);
+    }
+    // wording and the reopen marker need no runs lookup; an untrusted marker comment is no reopen, and a green-only SHA still closes
+    const quiet = green({ body: `fails intermittently ${link}` });
+    await pf(quiet, 34); assert.equal(quiet.shaQueries ?? 0, 0);
+    const forged = green({ comments: [stranger] }, { shaRuns: { "8d9f6ba0aaaaaaaa": [{ id: 600, conclusion: "success" }] } });
+    const r = await pf(forged, 34);
+    assert.equal(r.kind, "ci-green"); assert.equal(forged.shaQueries, 1);
+    // an unreadable same-SHA lookup is no proof either: no shortcut
+    const down = green();
+    const gh0 = down.io.gh; down.io.gh = async (a) => (/head_sha=/.test(a[1] ?? "") ? (() => { throw new Error("HTTP 502"); })() : gh0(a));
+    assert.equal((await pf(down, 34)).closed, false);
   });
 
   it("a CI-failure issue whose workflow is still red (or whose latest run is the failing one) goes to a lane", async () => {
