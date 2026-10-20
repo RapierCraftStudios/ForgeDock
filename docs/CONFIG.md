@@ -713,12 +713,14 @@ A repo with no pins and no `env` keys runs exactly as before: no shim dir, no en
 env:
   toolchain: "pnpm@10.4.1"              # optional: overrides the detected package manager; "off" disables detection
   setup: "bash scripts/reconcile-dev-db.sh"   # optional: run once per fresh lane worktree, before the builder
+  sparse_max_kb: 1024                   # optional: tracked files this size or larger stay out of lane worktrees; 0 = full checkout
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `toolchain` | string | No | `<pnpm\|yarn\|npm>@<x.y.z>` replaces the detected package-manager pin; `off` disables all toolchain detection. An invalid value is ignored and recorded as an anomaly. |
 | `setup` | string | No | Shell command (`bash -c`) run once in each fresh lane worktree before the builder starts, with the lane's PATH and `TMPDIR`. Use it for environment drift the repo's migrations don't cover, for example a dev-database reconcile script. Timeout 15 min. A non-zero exit ends the lane `needs-human` with code `env.setup_failed`: an environment error, not a build failure. The builder never runs. |
+| `sparse_max_kb` | integer | No | Default `1024`. Lane worktrees are sparse checkouts: tracked files of this many KB or more (generated JSON, screenshots, PDFs, media) are not written to disk, which cuts per-lane disk in repos that track large assets (#4221). Lockfiles, manifests (`package.json`, `pyproject.toml`, `requirements*.txt`, ...), toolchain pins, `tsconfig*.json`, `forge.yaml`, `.gitattributes` and `.gitignore` are always checked out. A repo with no such file gets a plain checkout. The builder prompt names the absent files; `git sparse-checkout add /<path>` brings one back. `0` disables it. Git sets `extensions.worktreeConfig=true` in the repo's shared config; the sparse setting itself is per lane worktree, so the main checkout is unchanged. If the sparse setup fails, the lane uses a full checkout. |
 
 **Commands that use this section**: `forgedock run-issue`, `forgedock orchestrate` (core path; `bin/engine-cli.mjs` `readEnvConfig`)
 

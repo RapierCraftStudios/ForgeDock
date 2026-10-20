@@ -536,6 +536,17 @@ branches:
 #     extended_modules: 6
 #     # Changed files per slice in extended review. Default: 12.
 #     slice_files: 12
+#   # Deterministic review trigger for the core path (#4273). The conformance
+#   # reviewer is needed when the diff touches a risk path (built-in auth,
+#   # payments, security, data deletion and migration words, plus risk_paths),
+#   # adds a package edge, changes an over-threshold hotspot, or a deterministic
+#   # gate failed or was ambiguous. shadow (default): log REVIEW_TRIGGER and
+#   # always review. enforce: skip the reviewer when not triggered; switch on only
+#   # after >=30 shadow runs whose would-skip lanes had no reviewer-caught defect
+#   # (report: node bin/lean/review-trigger.mjs [--json]). off: today's behaviour.
+#   trigger: shadow
+#   # Globs added to the built-in risk words (comma list or block list).
+#   risk_paths: "src/db/**, *.sql"
 
 # =============================================================================
 # DECOMPOSITION (OPTIONAL)

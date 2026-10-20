@@ -2584,6 +2584,71 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add" && c.at(-1) === "feat/issue-7-lean"));
   });
 
+  // ---- #4221 sparse lane worktrees ----
+  const BIG = `100644 blob ${"a".repeat(40)} 3000000\tweb/openapi.json\x00100644 blob ${"b".repeat(40)}      12\tsrc/foo.js\x00`;
+  const sparseWorld = (o = {}, git1 = null) => {
+    const w = world(o);
+    const g = w.io.git;
+    w.io.git = async (a, x) => {
+      if (git1) { const r = await git1(a, x, w); if (r !== undefined) return r; }
+      if (a[0] === "ls-tree") { w.calls.push(["git", ...a]); return o.lsTree ?? BIG; }
+      if (a[0] === "rev-parse" && a[2] === "info/sparse-checkout") return "/repo/.git/worktrees/lean-7/info/sparse-checkout\n";
+      return g(a, x);
+    };
+    return w;
+  };
+  const gitCalls = (w, k) => w.calls.filter((c) => c[0] === "git" && c[1] === k);
+
+  it("#4221 fresh, resume and #4118 keepLocal paths add a sparse worktree when the ref has a large blob; WORKTREE_SPARSE is logged", async () => {
+    const keepLocal = async (a) => (a[0] === "rev-list" && a[1] === "--count" && String(a[2]).includes("refs/heads/feat/issue-7-lean") ? "1\n" : undefined);
+    for (const [name, w, ref] of [
+      ["fresh", sparseWorld(), "origin/staging"],
+      ["resume", sparseWorld({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean" }), "origin/feat/issue-7-lean"],
+      ["keepLocal", sparseWorld({}, keepLocal), "refs/heads/feat/issue-7-lean"],
+    ]) {
+      const dir = tmpDir("sparse-");
+      assert.equal((await run(w, { dir })).terminalReason, "merged", name);
+      const adds = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add");
+      assert.equal(adds.length, 1, name);
+      assert.equal(adds[0][3], "--no-checkout", name);
+      if (name === "keepLocal") assert.ok(!adds[0].includes("-B") && adds[0].at(-1) === "feat/issue-7-lean", "#4118: the local branch is never reset");
+      assert.deepEqual(gitCalls(w, "ls-tree")[0].slice(2), ["-r", "-l", "-z", ref], name);
+      assert.ok(gitCalls(w, "sparse-checkout").some((c) => c.includes("--no-cone")), name);
+      assert.ok(gitCalls(w, "read-tree").length >= 1, name);
+      assert.ok(Object.entries(w.files).some(([, t]) => t === "/*\n!/web/openapi.json\n"), `${name}: pattern file written`);
+      const ev = readLog(dir, 7).filter((e) => e.event === "WORKTREE_SPARSE");
+      assert.deepEqual(ev.map((e) => [e.excluded, e.excluded_bytes, e.max_kb]), [[1, 3000000, 1024]], name);
+      const impl = builders(w).find((c) => !/PLANNING ONLY/.test(c[4]))[4];
+      assert.match(impl, /sparse checkout: 1 tracked file\(s\) of 1024 KB or more/);
+      assert.match(builders(w).find((c) => /PLANNING ONLY/.test(c[4]))[4], /git sparse-checkout add/);
+    }
+  });
+
+  it("#4221 no large blob or sparseMaxKb 0 keeps today's plain worktree add and an unchanged prompt", async () => {
+    for (const [w, extra] of [[sparseWorld({ lsTree: "" }), {}], [sparseWorld(), { sparseMaxKb: 0 }]]) {
+      const dir = tmpDir("sparse-off-");
+      assert.equal((await run(w, { dir, ...extra })).terminalReason, "merged");
+      const adds = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add");
+      assert.deepEqual(adds.map((c) => c.slice(1)), [["worktree", "add", "-B", "feat/issue-7-lean", "/wt/lean-7", "origin/staging"]]);
+      assert.equal(gitCalls(w, "sparse-checkout").length, 0);
+      assert.equal(readLog(dir, 7).filter((e) => e.event === "WORKTREE_SPARSE").length, 0);
+      for (const c of builders(w)) assert.doesNotMatch(c[4], /sparse checkout/);
+    }
+    assert.equal(gitCalls(sparseWorld(), "ls-tree").length, 0);
+  });
+
+  it("#4221 a failing sparse step falls back to a full checkout: WORKTREE_SPARSE_FALLBACK, an anomaly, and the lane still merges", async () => {
+    const dir = tmpDir("sparse-fb-");
+    let failed = false;
+    const w = sparseWorld({}, async (a) => { if (a[0] === "read-tree" && !failed) { failed = true; throw Object.assign(new Error("boom"), { stderr: "fatal: boom" }); } return undefined; });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "WORKTREE_SPARSE_FALLBACK").map((e) => e.reason), ["fatal: boom"]);
+    assert.ok(gitCalls(w, "sparse-checkout").some((c) => c[2] === "disable"));
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "WORKTREE_SPARSE").length, 0);
+    assert.ok(traj(w).some((t) => /Sparse checkout failed, full checkout used: fatal: boom/.test(t)));
+    for (const c of builders(w)) assert.doesNotMatch(c[4], /sparse checkout:/);
+  });
+
   it("#4114 gh writes (comment) retry on 5xx and secondary rate limits; non-transient errors do not", async () => {
     const w = world({ commentErrors: ["HTTP 502: Bad Gateway", "You have exceeded a secondary rate limit. Please wait a few minutes"] });
     assert.equal((await run(w)).terminalReason, "merged");
@@ -3649,5 +3714,62 @@ describe("context pack modes (forge#4275)", () => {
     assert.equal(readContextPack(d), undefined);
     writeFileSync(join(d, "forge.yaml"), "engine:\n  conformance: shadow\n");
     assert.equal(readContextPack(d), undefined);
+  });
+});
+
+describe("review trigger (#4273): shadow logs and always reviews, enforce skips untriggered lanes, off is today", () => {
+  const cold = (o) => { const w = world(o); w.io.hotspots = async () => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: [] }); return w; };
+  const trig = (dir) => readLog(dir, 7).filter((e) => e.event === "REVIEW_TRIGGER");
+  const reviewNote = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")) ?? "";
+
+  it("shadow (the default): the reviewer runs and the run log has REVIEW_TRIGGER {would_skip, reasons}", async () => {
+    const dir = tmpDir("trig-"), w = cold({ reviews: [conf()] });
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged"); assert.equal(reviewers(w).length, 1);
+    assert.deepEqual(trig(dir).map(({ mode, would_skip, reasons, skipped }) => ({ mode, would_skip, reasons, skipped })), [{ mode: "shadow", would_skip: true, reasons: [], skipped: false }]);
+  });
+
+  it("enforce: an untriggered lane skips the reviewer, merges, and records why", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      const dir = tmpDir("trig-"), w = cold({ reviews: [conf()] });
+      const r = await run(w, { dir, conformance, reviewTrigger: { mode: "enforce", riskPaths: [] } });
+      assert.equal(r.terminalReason, "merged", conformance); assert.equal(reviewers(w).length, 0, conformance);
+      assert.deepEqual([trig(dir)[0].would_skip, trig(dir)[0].skipped], [true, true]);
+      assert.match(reviewNote(w), /Skipped by `review\.trigger: enforce`/);
+      assert.match(traj(w)[0], /\| Review \| skipped \(review\.trigger enforce: no risk trigger\) \|/);
+      assert.match(traj(w)[0], /Conformance reviewer skipped by review\.trigger enforce/);
+    }
+  });
+
+  const AUTH = { ...CONTRACT, deliverables: [{ ...CONTRACT.deliverables[0], path: "src/auth/session.js" }] };
+  it("enforce: a risk path, a configured glob, a hotspot or missing hotspot facts still run the reviewer", async () => {
+    const cases = [
+      { w: cold({ contract: AUTH, changed: ["src/auth/session.js", "test/foo.test.js"], reviews: [conf({}, AUTH, ["src/auth/session.js", "test/foo.test.js"])] }), reason: "risk_path" },
+      { w: cold({ reviews: [conf()] }), riskPaths: ["src/**"], reason: "risk_path" },
+      { w: world({ reviews: [conf()] }), reason: "gate.ambiguous" },
+    ];
+    const hot = cold({ reviews: [conf()] });
+    hot.io.hotspots = async () => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: [{ path: "src/foo.js", lines: 2400, over: true, excluded: false, growth: 0 }] });
+    cases.push({ w: hot, reason: "hotspot" });
+    for (const c of cases) {
+      const dir = tmpDir("trig-");
+      await run(c.w, { dir, reviewTrigger: { mode: "enforce", riskPaths: c.riskPaths ?? [] } });
+      assert.equal(reviewers(c.w).length, 1, c.reason);
+      assert.deepEqual([trig(dir)[0].would_skip, trig(dir)[0].skipped, trig(dir)[0].reasons.includes(c.reason)], [false, false, true], c.reason);
+    }
+  });
+
+  it("off: the reviewer runs and nothing is computed or logged", async () => {
+    const dir = tmpDir("trig-"), w = cold({ reviews: [conf()] });
+    assert.equal((await run(w, { dir, reviewTrigger: { mode: "off", riskPaths: [] } })).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1); assert.deepEqual(trig(dir), []);
+  });
+
+  it("readReviewTrigger reads review.trigger and review.risk_paths (comma or block list); invalid or absent is unset", async () => {
+    const { readReviewTrigger } = await import("../engine-cli.mjs");
+    const at = (yaml) => { const d = tmpDir("rtcfg-"); mkdirSync(d, { recursive: true }); writeFileSync(join(d, "forge.yaml"), yaml); return readReviewTrigger(d); };
+    assert.deepEqual(at('review:\n  trigger: enforce\n  risk_paths: "db/**, *.sql"\n'), { mode: "enforce", riskPaths: ["db/**", "*.sql"] });
+    assert.deepEqual(at("review:\n  tech_stack: x\n  risk_paths:\n    - \"infra/**\"\n    - lib/acct/*.ts  # c\n  trigger: bogus\n"), { mode: "shadow", riskPaths: ["infra/**", "lib/acct/*.ts"] });
+    assert.equal(at("engine:\n  path: core\n"), undefined);
   });
 });
