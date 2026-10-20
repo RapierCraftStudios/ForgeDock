@@ -2950,6 +2950,62 @@ describe("host-aware verification concurrency (#4182)", () => {
   });
 });
 
+describe("shared dependency cache wiring (#4220)", () => {
+  const depsIo = (w, o = {}) => {
+    const d = { calls: [] };
+    w.io.deps = {
+      env: () => { if (o.envThrows) throw new Error("boom"); return { UV_CACHE_DIR: "/c/stores/uv-cache", npm_config_store_dir: "/c/stores/pnpm-store", TMPDIR: "/should-not-win" }; },
+      prepare: async (a) => { d.calls.push({ ...a, runnerCallsBefore: w.calls.filter((c) => c[0] === "runner").length, worktreeAdded: w.calls.some((c) => c[1] === "worktree" && c[2] === "add") });
+        if (o.prepareThrows) throw new Error("disk on fire");
+        return o.results ?? [{ status: "hit", eco: "pnpm", key: "0123456789abcdef", ms: 1200, reason: null }]; },
+    };
+    return d;
+  };
+
+  it("#4220 prepare runs once with the lane worktree after it exists and before the first runner call; DEPS_PREPARED is logged", async () => {
+    const dir = tmpDir("deps-");
+    const w = world(); w.io.runTmp = { prune: async () => {}, make: async (i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async () => {} };
+    const d = depsIo(w);
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(d.calls.length, 1);
+    assert.equal(d.calls[0].wt, "/wt/lean-7");
+    assert.match(d.calls[0].repoKey, /^[A-Za-z0-9._-]+-[0-9a-f]{8}$/);
+    assert.equal(d.calls[0].worktreeAdded, true);
+    assert.equal(d.calls[0].runnerCallsBefore, 0);
+    const ev = readLog(dir, 7).filter((e) => e.event === "DEPS_PREPARED");
+    assert.deepEqual(ev.map((e) => [e.status, e.eco, e.key]), [["hit", "pnpm", "0123456789abcdef"]]);
+    assert.ok(w.envs.length >= 2);
+    for (const e of w.envs) {
+      assert.equal(e.UV_CACHE_DIR, "/c/stores/uv-cache");
+      assert.equal(e.npm_config_store_dir, "/c/stores/pnpm-store");
+      assert.ok(e.FORGE_DOCKER_LABELS, "existing keys stay");
+      assert.match(e.TMPDIR, /runs\/7-/, "the engine's TMPDIR wins over the cache env");
+    }
+  });
+
+  it("#4220 a prepare that throws or fails, or an env() that throws, never changes the outcome; no io.deps is the old behaviour", async () => {
+    for (const o of [{ prepareThrows: true }, { results: [{ status: "failed", eco: "uv", key: "k", ms: 5, reason: "install failed" }] }, { envThrows: true }]) {
+      const dir = tmpDir("deps-f-");
+      const w = world(); depsIo(w, o);
+      assert.equal((await run(w, { dir })).terminalReason, "merged", JSON.stringify(o));
+      assert.equal(readLog(dir, 7).filter((e) => e.event === "DEPS_PREPARED").length, 1);
+      if (o.envThrows) for (const e of w.envs) assert.equal(e.UV_CACHE_DIR, undefined);
+    }
+    const dir = tmpDir("deps-none-");
+    const w = world();
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "DEPS_PREPARED").length, 0);
+    for (const e of w.envs) assert.equal(e.UV_CACHE_DIR, undefined);
+  });
+
+  it("#4220 both builder prompts tell the builder how to treat a shared read-only node_modules/.venv (within budget)", () => {
+    for (const p of [builderPlanPrompt(7), builderImplementPrompt()]) {
+      for (const needle of ["hardlinked read-only from a shared cache", "rm -rf", "EACCES"]) assert.ok(p.includes(needle), needle);
+      assert.ok(approxTokens(p) <= 2800, `builder prompt is ${approxTokens(p)} tokens`);
+    }
+  });
+});
+
 describe("local-mode CI fix rounds at merge and declared pre-PR check commands (#4240)", () => {
   const RUN_URL = "https://github.com/o/r/actions/runs/555/job/1";
   /** checkStates fed from a list of {state: {name: state}}; each entry is reported for the PR's current head. */

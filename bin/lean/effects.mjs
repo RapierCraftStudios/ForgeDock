@@ -12,6 +12,7 @@ import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, b
 import { makeIo } from "../engine-cli.mjs";
 import { makeProjector } from "../engine/projector.mjs";
 import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
+import { makeDepCache } from "./depcache.mjs";
 import { makeHeavyIo } from "./heavy.mjs";
 
 const pexec = promisify(execFile);
@@ -217,6 +218,8 @@ export function makeLeanIo({ repo }) {
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000 })).stdout;
   return {
     gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: makeHeavyIo({ host: makeHostProbe() }), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
+    /** Shared dependency cache (#4220): the repo's own package manager, argv only, bounded by the cache's timeout. */
+    deps: makeDepCache({ exec: async (cmd, args, { cwd, env, timeoutMs } = {}) => String((await pexec(cmd, args, { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs ?? 0, maxBuffer: 100 * 1024 * 1024 })).stdout) }),
     /** Names of the checks the base branch requires: classic protection plus rulesets (#4158). [] when neither has any. */
     async requiredChecks(lane) { return requiredChecksFor({ gh: run("gh"), repo, lane }); },
     /** [{name, state: success|failure|pending, url, head}] for the PR's checks; `head` is the PR head the rollup belongs to (#4240). */

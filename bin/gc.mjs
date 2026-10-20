@@ -6,7 +6,8 @@
  *     included (#4253: torn down through their provider; `remote` via forge.yaml `execution`, #4254),
  *   - docker containers/volumes labelled `forgedock.owner=1`,
  *   - `lean-*` / `agent-*` dirs under the worktree root and `feat/issue-<n>-lean` branches,
- *   - ForgeDock's own scratch under `~/.forge/tmp` (run dirs with the owner marker, runner scratch `<repoKey>/<issue>`).
+ *   - ForgeDock's own scratch under `~/.forge/tmp` (run dirs with the owner marker, runner scratch `<repoKey>/<issue>`),
+ *   - dependency cache snapshots unused for 7 days, dead publishers' tmp dirs and dead locks (#4220, `lean/depcache.mjs`).
  * Everything else is reported, never touched. Unpushed or uncommitted work, protected branches, branches with an open
  * PR and live lanes are always reported instead of reclaimed. Any probe failure degrades to "report", never to a reclaim.
  * All effects go through injected probes (docker, git, gh, /proc, fs, kill) so the planner is testable without a host.
@@ -19,14 +20,15 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { makeLedger, ledgerRoot as defaultLedgerRoot, LEDGER_TTL_MS } from "./lean/ledger.mjs";
 import { makeRunTmp, procsInDir, killLedgerPid } from "./lean/effects.mjs";
 import { readBranches } from "./lean/lane.mjs";
+import { makeDepCache } from "./lean/depcache.mjs";
 import { parseExecution, remoteTransportFor } from "./lean/execution.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
 
 const pexec = promisify(execFile);
-export const GC_TYPES = Object.freeze(["container", "volume", "worktree", "branch", "tmp", "process", "sandbox"]);
-const SCOPE_OF = { container: "docker", volume: "docker", worktree: "worktrees", branch: "branches", tmp: "tmp", process: "processes", sandbox: "sandboxes" };
+export const GC_TYPES = Object.freeze(["container", "volume", "worktree", "branch", "tmp", "process", "sandbox", "depcache"]);
+const SCOPE_OF = { container: "docker", volume: "docker", worktree: "worktrees", branch: "branches", tmp: "tmp", process: "processes", sandbox: "sandboxes", depcache: "deps" };
 const TYPE_OF_KIND = { worktree: "worktree", branch: "branch", tmp: "tmp", pid: "process", container: "container", volume: "volume", sandbox: "sandbox" };
-export const GC_SCOPES = Object.freeze(["docker", "worktrees", "branches", "tmp", "processes", "sandboxes"]);
+export const GC_SCOPES = Object.freeze(["docker", "worktrees", "branches", "tmp", "processes", "sandboxes", "deps"]);
 const LANE_BRANCH_RE = /^feat\/issue-(\d+)-lean$/;
 const WORKTREE_DIR_RE = /^(lean|agent)-/;
 const RUN_OWNER = ".forge-run-owner";
@@ -86,6 +88,7 @@ export function makeGcProbes({ cwd = process.cwd(), home = homedir() } = {}) {
     killPid: async (pid, marker) => killLedgerPid(pid, marker),
     docker: run("docker"), git: run("git"), gh: run("gh"),
     dirSize: (p) => dirSize(p),
+    depCache: makeDepCache({ exec: async () => "" }), // scan/remove only: never installs
   };
 }
 
@@ -373,6 +376,15 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
     }
   }
 
+  // ---- 6. dependency cache (#4220): its own 7-day snapshot policy; dead publishers' tmp dirs and dead locks ----
+  if (want("depcache") && P.depCache?.scan) {
+    let entries = [];
+    try { entries = P.depCache.scan(); } catch (e) { notes.push(`depcache scan failed: ${errText(e)}`); }
+    for (const e of entries) {
+      add({ type: "depcache", id: resolve(e.path), sizeBytes: e.kind === "lock" ? null : P.dirSize?.(e.path) ?? null, ageMs: e.ageMs ?? null, owned: true, action: e.locked ? "report" : "reclaim", reason: e.reason, entry: e });
+    }
+  }
+
   const summary = {};
   for (const t of GC_TYPES) {
     const of = items.filter((i) => i.type === t);
@@ -425,6 +437,9 @@ export async function applyGc(plan, probes) {
           if (!isInside(P.forgeTmpRoot, it.id)) throw new Error("outside ForgeDock tmp");
           if (it.runDir) { if (!(await makeRunTmp({ root: dirname(it.id), host: P.host, alive: P.alive }).remove(it.id))) throw new Error("run marker missing"); }
           else fs.rmSync(it.id, { recursive: true, force: true });
+          break;
+        case "depcache":
+          if (!(await P.depCache?.remove?.(it.entry))) throw new Error("locked or outside the dependency cache");
           break;
         case "worktree":
           if (it.registered) await git(["worktree", "remove", "--force", it.id]);
