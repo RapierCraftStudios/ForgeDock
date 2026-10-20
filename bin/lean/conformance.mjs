@@ -8,6 +8,7 @@
  * "PASS") is incomplete, and incomplete never merges.
  */
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { noComments } from "./context.mjs";
 
 export const DISPOSITIONS = Object.freeze(["deliver", "defer", "not-applicable", "post-deploy"]);
 /** Dispositions the engine files as a tracked follow-up issue before anything merges. */
@@ -40,7 +41,8 @@ export function inIssue(quote, issueText) {
   if (q.length < 3) return false;
   return String(issueText ?? "").split("\n").some((l) => norm(l.replace(ITEM_PREFIX_RE, "")) === q);
 }
-const stripHtmlComments = (s) => String(s ?? "").replace(/<!--[\s\S]*?-->/g, "").replace(/\r\n/g, "\n").trim();
+// Scan-based (not a one-pass regex), so nested or unclosed markers cannot survive into the scope hash.
+const stripHtmlComments = (s) => noComments(s).replace(/\r\n/g, "\n").trim();
 /**
  * #4265: the human scope of an issue: title, body and trusted comments without the engine's own annotations (HTML comment
  * blocks such as FORGE:STATE, and comments the engine posted, which start with "<!-- FORGE:"). Its hash is the edit signal
