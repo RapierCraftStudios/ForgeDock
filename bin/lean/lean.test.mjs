@@ -1061,6 +1061,37 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal((await runShadow(p)).terminalReason, "merged"); assert.equal(builders(p).length, 2);
   });
 
+  it("#4328 freeze-time preflight: a validate needing a module the host lacks gets the one contract correction, before any build", async () => {
+    const pyC = { ...CONTRACT, validate: [{ id: "V1", command: `python3 -c "import yaml"` }] }, uvC = { ...CONTRACT, validate: [{ id: "V1", command: `uv run python -c "import yaml"` }] };
+    const probe = (w) => { const ran = []; w.io.probeCommand = async (a) => { ran.push(a); return { rc: /^'python3' .*'yaml'/.test(a.command) ? 3 : 0, output: "" }; }; return ran; };
+    const dir = tmpDir("preflight-");
+    const w = world({ contract: pyC, fixedContract: uvC, validation: [{ id: "V1", command: uvC.validate[0].command, exit: 0 }] }), ran = probe(w);
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(builders(w).length, 3, "plan + one contract correction + implement");
+    assert.match(builders(w)[1][4], /V1: needs Python module 'yaml' \(for python3\), which this host lacks[\s\S]*repo's own toolchain/);
+    assert.ok(ran.every((a) => a.cwd === WT && a.env && typeof a.env === "object"), "probes run in the worktree with the lane env");
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").map((e) => [e.corrected, e.misses.map((m) => m.tool)]), [[true, []]]);
+    // still missing after the correction: advisory only, the lane goes on (the post-build rerun is the gate)
+    const dir2 = tmpDir("preflight-");
+    const s = world({ contract: pyC, fixedContract: pyC, validation: [{ id: "V1", command: pyC.validate[0].command, exit: 0 }] }); probe(s);
+    assert.equal((await run(s, { dir: dir2 })).terminalReason, "merged"); assert.equal(builders(s).length, 3);
+    assert.deepEqual(readLog(dir2, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").map((e) => [e.corrected, e.misses.map((m) => m.tool)]), [[false, ["yaml"]]]);
+    assert.ok(traj(s).some((t) => /Validate preflight: the host lacks yaml after the contract correction/.test(t)));
+    // every tool present: no correction, no event
+    const dir3 = tmpDir("preflight-");
+    const ok = world({ contract: uvC, validation: [{ id: "V1", command: uvC.validate[0].command, exit: 0 }] }); const ran3 = probe(ok);
+    assert.equal((await run(ok, { dir: dir3 })).terminalReason, "merged"); assert.equal(builders(ok).length, 2);
+    assert.deepEqual(ran3.map((a) => a.command), ["command -v -- 'uv' >/dev/null 2>&1"]);
+    assert.equal(readLog(dir3, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").length, 0);
+  });
+  it("#4328 an invalid contract and a preflight miss share one correction; still invalid is contract.invalid as before", async () => {
+    const bad = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }], validate: [{ id: "V1", command: "jq . a.json" }] };
+    const w = world({ contract: bad, fixedContract: bad });
+    w.io.probeCommand = async () => ({ rc: 1, output: "" });
+    assert.equal((await run(w)).code, "contract.invalid"); assert.equal(builders(w).length, 2, "plan + one correction");
+    assert.match(builders(w)[1][4], /R1: quote is not verbatim[\s\S]*V1: needs command 'jq'/);
+  });
+
   it("a failed validate fetches the lane and the resume says how to catch up with a moved base (merge, never rebase)", async () => {
     const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
     assert.equal((await runShadow(w)).terminalReason, "merged");

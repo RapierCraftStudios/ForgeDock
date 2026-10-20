@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths } from "./prefilter.mjs";
+import { preflightProbes, preflightProblems } from "./preflight.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { repoKey } from "../runner.mjs";
@@ -966,6 +967,23 @@ export async function runCore(o) {
       }
       T.decisions.push(`Tracked ${reqs.map((r) => `${r.id} (${r.disposition})`).join(", ")} in ${[...new Set(reqs.map((r) => r.tracked))].join(", ")} (${why})`);
     }
+    /** #4328: probe the host for the tools and modules a contract's validate commands need; the misses, [] without io.probeCommand. */
+    async function preflightValidates(contract) {
+      if (!io.probeCommand || !contract || typeof contract !== "object") return [];
+      const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
+      const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
+      if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
+      const env = laneEnv(), missing = new Set(), misses = []; // #4325: the env the validate commands run with
+      for (const p of probes) {
+        if (p.needs && missing.has(p.needs)) continue;
+        let r;
+        try { r = await io.probeCommand({ command: p.probe, cwd: wt, timeoutMs: 15000, env }); } catch { r = { rc: 127 }; }
+        if (r?.rc === 0 || r?.rc === 124) continue; // a timed-out probe is no evidence either way
+        if (p.kind === "command") missing.add(p.tool);
+        misses.push(p);
+      }
+      return misses;
+    }
     /**
      * The frozen contract posted by an earlier run of this issue, verified against its hash; null when absent. `humanAfter`
      * (#4265): a trusted comment that the engine did not post came after it.
@@ -1088,12 +1106,23 @@ export async function runCore(o) {
         let contract = await readContract();
         await refreshIssue("contract validation");
         let vc = validateContract(contract, issueText, { repro: reproOn() });
-        if (!vc.ok && sessionId) {
-          T.decisions.push(`Contract rejected (${vc.problems[0]}); resumed once`);
-          await builder(++attemptN, contractCorrectionPrompt(vc.problems), sessionId, false, planPrompt);
+        const missed = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
+        let misses = missed;
+        if ((!vc.ok || missed.length) && sessionId) {
+          const problems = [...vc.problems, ...preflightProblems(missed)];
+          T.decisions.push(`Contract rejected (${problems[0]}); resumed once`);
+          await builder(++attemptN, contractCorrectionPrompt(problems), sessionId, false, planPrompt);
           contract = await readContract();
           await refreshIssue("contract validation");
           vc = validateContract(contract, issueText, { repro: reproOn() });
+          if (missed.length) misses = await preflightValidates(contract);
+        }
+        if (missed.length) {
+          ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind })), corrected: misses.length === 0 });
+          if (misses.length) {
+            T.anomalies.push(`Validate preflight: the host lacks ${misses.map((m) => m.tool).join(", ")} after the contract correction (advisory; a failed rerun ends env.tool_missing)`);
+            T.decisions.push(`Validate preflight left ${misses.length} miss(es) after one correction; contract frozen anyway`);
+          }
         }
         await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
         if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, issueEdited ? { issueEdited: true } : {});
