@@ -129,6 +129,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {object} [o.verify]        forge.yaml verify (verify.mjs parseVerify): mode local (default) | ci | hybrid (#4167)
  * @param {object} [o.precheck]      {commands, maxMinutes}: forge.yaml learned.test_commands, run in the worktree before the PR (#4240);
  *                                   maxMinutes: lean.precheck.max_minutes, the round budget (#4331, else verify.precheck_total_seconds)
+ * @param {boolean} [o.closeParent] forge.yaml decomposition.close_parent (#3736): close a decomposed parent at decomposition (default false)
  * @param {"off"|"prefer"} [o.reproTest] forge.yaml lean.repro_test (#4271): prefer (default) freezes a red-green repro_test on bug lanes; off is today's contract
  * @param {object} [o.refactorModule] refactor:split step module (default ./refactor.mjs; injectable for tests, #4211)
  * @param {number} [o.splitMaxLines] refactor:split moved-line budget per PR (default 4000); the rest becomes a chained issue (#4211)
@@ -143,7 +144,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
-    toolchainOverride = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", reviewIncomplete = "needs-human", reproTest = "prefer", mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const vcfg = { ...parseVerify({}), ...(o.verify ?? {}) };
   if (!VERIFY_MODES.includes(vcfg.mode)) vcfg.mode = "local";
@@ -651,8 +652,8 @@ export async function runCore(o) {
       T.decisions.push(`Builder block: split into ${refs(filed)}`);
       let marked = false;
       try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\n${s}`); marked = true; } catch { /* best effort */ }
-      // #4337: the tracker closes only once its trail and label exist: dependents then wait on the sub-issues, not on it.
-      if (await label("decomposed") && marked) {
+      // #4337: with decomposition.close_parent, the tracker closes only once its trail and label exist: dependents then wait on the sub-issues, not on it.
+      if (await label("decomposed") && marked && closeParent) {
         try {
           await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "not planned", "--comment",
             `Decomposed into ${refs(filed)}; this tracker is closed and its dependents wait on the sub-issues. A trusted \`FORGE:DECOMPOSED:REVOKED\` reopens it.`]);

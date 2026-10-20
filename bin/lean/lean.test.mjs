@@ -463,9 +463,16 @@ describe("core work-on", () => {
   });
 
   const splitBlock = { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A" }, { title: "part B", body: "do B", depends_on: [0] }] } };
-  it("#4337 a split closes the parent not planned after its FORGE:DECOMPOSED trail and label, listing every sub-issue", async () => {
+  it("#4337 without decomposition.close_parent a split keeps the parent open (opt-in, default false)", async () => {
     const w = depWorld({ changed: [], result: splitBlock }, {});
-    const r = await run(w);
+    assert.equal((await run(w)).terminalReason, "decomposed");
+    assert.equal(w.closed.length, 0);
+    assert.ok(w.labels.includes("decomposed"));
+  });
+
+  it("#4337 with decomposition.close_parent a split closes the parent not planned after its FORGE:DECOMPOSED trail and label, listing every sub-issue", async () => {
+    const w = depWorld({ changed: [], result: splitBlock }, {});
+    const r = await run(w, { closeParent: true });
     assert.equal(r.terminalReason, "decomposed");
     assert.equal(w.closed.length, 1);
     const c = w.closed[0];
@@ -483,12 +490,12 @@ describe("core work-on", () => {
     const w = depWorld({ changed: [], result: splitBlock }, {});
     const post = w.io.gh;
     w.io.gh = async (a) => (a[0] === "issue" && a[1] === "comment" && a[a.indexOf("--body") + 1].includes("FORGE:DECOMPOSED") ? Promise.reject(new Error("HTTP 422")) : post(a));
-    assert.equal((await run(w)).terminalReason, "decomposed");
+    assert.equal((await run(w, { closeParent: true })).terminalReason, "decomposed");
     assert.equal(w.closed.length, 0);
     const w2 = depWorld({ changed: [], result: splitBlock }, {});
     const tl = w2.io.transitionLabel;
     w2.io.transitionLabel = async (n, st) => { if (st === "decomposed") throw new Error("label failed"); return tl(n, st); };
-    assert.equal((await run(w2)).terminalReason, "decomposed");
+    assert.equal((await run(w2, { closeParent: true })).terminalReason, "decomposed");
     assert.equal(w2.closed.length, 0);
   });
 

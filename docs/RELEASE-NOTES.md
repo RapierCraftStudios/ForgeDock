@@ -2,6 +2,16 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## v1.30.0: environment failures are recoverable, scoped pre-PR checks, decomposed parents can close
+
+- **New recoverable codes.** A validate command the host cannot run (missing interpreter, module or executable) ends `env.tool_missing`, and a repro test the harness could not run on head ends `env.repro_unrunnable`. Both were terminal `conformance.unimplemented` before. The batch runner recovers them like `ci.red` (see docs/OUTCOME-CODES.md).
+- **Contract freeze is stricter.** Validate and repro commands that read `$TMPDIR` files they do not create are rejected at freeze, and validate commands are preflighted for their interpreters and modules (a miss asks the builder for one contract correction). Engine-run commands now get the builder's lane env (`TMPDIR`, toolchain), and the repro harness uses the workspace dependency trees and runs a new head test file against the base.
+- **Pre-PR checks.** Learned check commands run change-scoped (when a test map covers them), concurrently and timed, within a round budget: `lean.precheck.max_minutes`, else `verify.precheck_total_seconds`, whose default drops from 1800 s to **600 s**. Commands left when the budget runs out are `deferred-to-ci`, not failed. Set `FORGE_HOST_PARALLELISM=1` if your check commands share state (cache files, a test database, a fixed port).
+- **Decomposed parents.** The lean path honours `decomposition.close_parent`: with `true` a decomposed parent closes `not planned` right after decomposition (label kept, sub-issues listed); its dependents still wait on the sub-issues, and a trusted revoke reopens it. Default `false` keeps it open.
+- **Hand-off.** Enumerating tests (exhaustiveness guards) are discovered for the change, and sequence-numbered migrations that collide with the base are renumbered by the builder.
+
+Action: set `decomposition.close_parent: true` to close decomposed parents. Raise `lean.precheck.max_minutes` if your pre-PR checks legitimately need more than 10 minutes.
+
 ## v1.29.0: in-batch recovery and context pack on by default
 
 - **In-batch recovery** (`orchestration.recovery.max_attempts`, default 1): `forgedock orchestrate` now launches one recovery lane per issue for a mechanical `needs-human` (`ci.red`, `base.conflict`, `ci-pending` on a conflicting PR, `contract.invalid` after a mid-run issue edit, `builder.block_untyped`). The lane removes `needs-human`, resumes the PR and re-queues the issue. A recovery that ends anything but `merged` re-applies `needs-human` with a recovery-evidence `FORGE:NEEDS_HUMAN` comment.
