@@ -69,7 +69,7 @@
         "ROUTES"
       ],
       "needsHuman": true,
-      "body": "## Problem\n\nCreate Stripe test and live keys (STRIPE_SECRET_KEY) once billing routes exist.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/setup/stripe.md` — new\n\n## Acceptance Criteria\n\n- [ ] Keys stored as deploy secrets [type:manual]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{ROUTES}} — needs ROUTES\n"
+      "body": "## Problem\n\nCreate Stripe test and live keys (STRIPE_SECRET_KEY) once billing routes exist.\n\n### Setup steps\n\n1. Create the account or credential in the provider console.\n2. Store the values as deploy secrets.\n\n### Environment variables\n\n- `STRIPE_SECRET_KEY`\n\n### Secret handling\n\nNever commit the values; dev and CI use the mock provider.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/setup/stripe.md` — new\n\n## Acceptance Criteria\n\n- [ ] Keys stored as deploy secrets [type:manual]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nDepends on #{{ROUTES}} — needs ROUTES\n"
     }
   ]
 }
