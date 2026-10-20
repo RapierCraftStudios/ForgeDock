@@ -538,6 +538,19 @@ engine:
 
 ---
 
+## `lean` (OPTIONAL)
+
+Settings of the core work-on (`bin/lean/`) that change its contract.
+
+```yaml
+lean:
+  repro_test: prefer   # off | prefer (default)
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `repro_test` | string | No | `prefer` (default): on an issue labelled `bug` or `type:bug`, the plan step must freeze a `repro_test` in the contract (`{"path","id","command"}`) when the bug is testable. Before review, the engine runs `scripts/acceptance-red-green.sh` for that command on the host in every verify mode: one targeted test, red on the base (head's changed test files overlaid) and green on head. Any other result, including a test that could not run, fails the precheck as `conformance.unimplemented` (it blocks in shadow too) and goes back to the builder for one in-session fix round. A bug that is not testable (specs, docs, workflows, environment) records `"repro_test":"none"` with a one-line `repro_test_reason` and the lane continues as before. `off` gives exactly the previous contract and precheck. Each proof emits a `REPRO_RED_GREEN` run-log event (`base`, `head`) and adds a trajectory decision. |
+
 ## `verify` (OPTIONAL)
 
 Verify-by-CI for the core work-on path (forge#4167). It moves a lane's heavy verification (type-checks, test suites, docker test containers) off the host and onto CI runners, and it catches CI-class failures (lock files, suite wiring, hangs, formatting) before the lane merges into staging. Write it as a block-style section: `parseForgeYaml` does not read inline `{ ... }` maps.
