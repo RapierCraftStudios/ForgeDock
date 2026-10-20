@@ -4123,3 +4123,76 @@ describe("review trigger (#4273): shadow logs and always reviews, enforce skips 
     assert.equal(at("engine:\n  path: core\n"), undefined);
   });
 });
+
+describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
+  const LIST = [{ module: "src/foo.js", test: "test/registry.test.js", line: 4, why: "literal list of 3 sibling export names" }];
+  const MISS = [{ symbol: "fooNew", module: "src/foo.js", test: "test/registry.test.js", line: 4 }];
+  const COLL = [{ dir: "db", number: "0007", lane: "db/0007_usage.sql", base: ["db/0007_billing.sql"], next: "0008" }];
+  const CONFLICTING = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }, OKSTATE = { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" };
+  /** `seq`: sequenceCheck results per call; `verify`: sequenceVerify result; `missing`: enumeratingMissing results per call. */
+  const hworld = ({ list = [], missing = [[]], seq = [[]], verify = { ok: true, problems: [] }, ...o } = {}) => {
+    const w = world(o); w.enumCalls = []; w.seqCalls = 0;
+    const m = [...missing], s = [...seq];
+    w.io.enumeratingTests = async (x) => { w.enumCalls.push(x); return list; };
+    w.io.enumeratingMissing = async () => (m.length > 1 ? m.shift() : m[0]);
+    w.io.sequenceCheck = async () => { w.seqCalls++; return s.length > 1 ? s.shift() : s[0]; };
+    w.io.sequenceSnapshot = async () => [{ path: "db/0007_usage.sql", blob: "b1" }];
+    w.io.sequenceVerify = async (x) => { w.verifyArgs = x; return verify; };
+    return w;
+  };
+
+  it("no enumerating tests and no collisions: no new plan step, no extra builder call (prompts unchanged)", async () => {
+    const w = hworld();
+    assert.equal((await run(w)).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 2);
+    assert.ok(!/Enumerating tests/.test(b[0][4]) && !/Enumerating tests/.test(b[1][4]));
+    assert.equal(w.enumCalls[0].cwd, WT);
+    assert.equal(w.seqCalls, 1, "checked once at hand-off");
+  });
+
+  it("the plan lists the enumerating tests and the implement rule cites them", async () => {
+    const w = hworld({ list: LIST });
+    assert.equal((await run(w)).terminalReason, "merged");
+    const [plan, impl] = builders(w);
+    assert.match(plan[4], /Enumerating tests \(found by the engine\)[\s\S]*src\/foo\.js -> test\/registry\.test\.js:4/);
+    assert.match(impl[4], /one test-list edit per new symbol[\s\S]*not_members[\s\S]*test\/registry\.test\.js:4/);
+  });
+
+  it("a new symbol missing from an enumerating test: one builder resume; still missing is an anomaly, not needs-human", async () => {
+    let w = hworld({ missing: [MISS, []] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 3);
+    assert.match(builders(w)[2][4], /fooNew \(src\/foo\.js\) -> test\/registry\.test\.js:4/);
+    w = hworld({ missing: [MISS] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.match(traj(w).at(-1), /Enumerating test\(s\) still miss new symbol\(s\): fooNew → test\/registry\.test\.js/);
+    w = hworld({ missing: [MISS], result: { status: "fixed", summary: "s", evidence: [], tests: [], not_members: [{ symbol: "fooNew", test: "test/registry.test.js", why: "internal helper" }] } });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 2, "a justified not-member needs no resume");
+  });
+
+  it("a sequence number the lane base already uses is renumbered at hand-off, before the PR; still colliding is base.conflict", async () => {
+    let w = hworld({ seq: [COLL, []] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3);
+    assert.match(b[2][4], /origin\/staging already uses sequence numbers[\s\S]*db\/0007_usage\.sql -> number 0008 \(base has db\/0007_billing\.sql\)[\s\S]*git merge --no-edit origin\/staging/);
+    assert.ok(w.seq.indexOf("pr") > w.seq.lastIndexOf("builder-resume"));
+    assert.deepEqual(w.verifyArgs.before, [{ path: "db/0007_usage.sql", blob: "b1" }]);
+    w = hworld({ seq: [COLL], verify: { ok: false, problems: ["db/0007_usage.sql still shares number 0007 with db/0007_billing.sql"] } });
+    const r = await run(w);
+    assert.equal(r.code, OUTCOME_CODES.BASE_CONFLICT);
+    assert.equal(w.prs.length, 0);
+  });
+
+  it("base-sync: a clean text merge that brings a taken number is renumbered and re-reviewed; a conflicted journal gets the no-text-merge rule", async () => {
+    let w = hworld({ seq: [[], COLL, []], prView: [CONFLICTING, OKSTATE], mergeResults: ["clean"], reviews: [ok(), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 2, "re-review after the renumber");
+    assert.match(w.comments.find((c) => c.includes("<!-- FORGE:BASE_SYNC -->")), /clean merge[\s\S]*builder renumbered sequence-numbered files/);
+    w = hworld({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["db/meta/_journal.json"], reviews: [ok(), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.match(builders(w)[2][4], /conflicts in: db\/meta\/_journal\.json[\s\S]*do not text-merge it\. Renumber the lane's files/);
+  });
+});

@@ -140,6 +140,12 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `growth_lines` without `hotspot-exempt: <reason>` in a covering deliverable
    or add-deliverable why. A failed script or `enabled: false` turns it off;
    no runner calls are added.
+   **Enumerating tests** (#4322, `enumerating.mjs`): before the plan call
+   `io.enumeratingTests` lists tests that enumerate the exports or directory
+   siblings of the issue's named paths (`enumeratingPlanNote` /
+   `enumeratingBuildRule`, "" when none). After implement `io.enumeratingMissing`
+   (new exports/files a sibling-listing test does not name, minus result.json
+   `not_members` with a why) resumes the builder once; still missing is an anomaly.
 8. **Push + PR → merge** — merge policy `required` (default) | `all` | `none`;
    base-sync merges the lane in on conflict (never rebase/force-push); merge
    at the reviewed head → `merged`, or `ci-pending` after the CI wait. Each CI
@@ -152,6 +158,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    logs (`collectFailedLogs`, `ciFailurePrompt`), re-reviews and pushes the fix,
    and waits again; `ci.red` only after `max_rounds` (shared with `ciVerify`) or a
    round with no new commit. Rollups of another head count as pending. `CI_FIX_ROUND`.
+   **Sequence numbers** (#4322, `sequence.mjs`): before review and the first push,
+   and after every base-sync merge (clean or not), lane-added `<NNN>_*` files whose
+   number the fetched lane already uses → builder renumbers (`sequencePrompt`; a
+   conflicted migration/journal gets `sequenceSyncNote`), then `verifyRenumber`
+   (same blob, journal strictly ordered, no collision); still failing → `base.conflict`.
 
 ## Host parallelism (#4182)
 
@@ -739,3 +750,11 @@ queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 L
   20, one REST call each, `n:?` when unreadable) joins the pack cache key as `stamp.links`; no links keeps the old key.
 - `scripts/review-prepare.sh`: the code-index stderr tail shows the repo root as `<repo>`, strips control characters
   and caps lines at 200 chars. Cost: 0 LLM calls; up to 20 `gh api` reads per context-pack lane.
+
+## Entry 2026-10-20 — Enumerating tests + sequence numbers at hand-off (#4322)
+
+Two deterministic hand-off facts (git + fs, no LLM): `enumerating.mjs` finds tests that list every member of a group
+(literal/key list of >= min(3, n) sibling names, or `Object.keys(<import>)`) → plan note, build rule, post-implement
+`ENUMERATING_MISSING` resume (then anomaly). `sequence.mjs` finds lane-added numbered migrations colliding with the base
+→ `SEQUENCE_COLLISION`, builder renumbers with the repo's own generator, engine verifies. #3969 union merge unchanged.
+Cost: 0 LLM calls unless a fact fires (then one builder resume each). Implement prompt also says to run the formatter.

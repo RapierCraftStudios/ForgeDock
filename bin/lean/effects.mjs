@@ -15,6 +15,8 @@ import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 import { makeDepCache } from "./depcache.mjs";
 import { makeHeavyIo } from "./heavy.mjs";
 import { gatherContextFacts } from "./context.mjs";
+import { enumeratingTests, missingEntries } from "./enumerating.mjs";
+import { sequenceCollisions, snapshotLane, verifyRenumber } from "./sequence.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -306,6 +308,13 @@ export function makeLeanIo({ repo }) {
       const args = [script("hotspots.sh"), ...(base ? ["--base", base] : []), "--", ...paths];
       try { return JSON.parse((await pexec("bash", args, { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
+    /** #4322: tests enumerating the members of the given paths, and new members those tests miss (bin/lean/enumerating.mjs); [] on failure. */
+    enumeratingTests: ({ cwd, paths = [] }) => enumeratingTests({ git: (a) => run("git")(a, { cwd }), cwd, paths }),
+    enumeratingMissing: ({ cwd, base }) => missingEntries({ git: (a) => run("git")(a, { cwd }), cwd, base }),
+    /** #4322: sequence-numbered files the lane shares with the base (bin/lean/sequence.mjs); snapshot before, verify after a renumber. */
+    sequenceCheck: ({ cwd, base }) => sequenceCollisions({ git: (a) => run("git")(a, { cwd }), base }),
+    sequenceSnapshot: ({ cwd, base }) => snapshotLane({ git: (a) => run("git")(a, { cwd }), base }),
+    sequenceVerify: ({ cwd, base, before }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before }),
     /** #4271: scripts/acceptance-red-green.sh for the frozen repro_test in cwd; {base, head} words, or null on any failure. */
     async redGreen({ cwd, base, command, timeoutSec = 300 }) {
       const args = [script("acceptance-red-green.sh"), "--repo-path", cwd, "--base-ref", base, "--test-cmd", command, "--timeout", String(timeoutSec)];
