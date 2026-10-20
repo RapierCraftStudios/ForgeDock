@@ -23,7 +23,8 @@ import { readTestMap, readTestMapAtRef, selectCommands, mergeChecks, factsPath, 
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { computeTrigger, TRIGGER_MODES } from "./review-trigger.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote } from "./prompts.mjs";
+import { unjustified } from "./enumerating.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport } from "./verify.mjs";
 import { laneBackendId } from "./limits.mjs";
@@ -507,7 +508,8 @@ export async function runCore(o) {
   let facts = null; // #4272: path of an optional .forge/repo-facts.json (worktree, then main checkout), cited in builder prompts
   const tcOpts = () => ({ toolchain: toolchain?.summary ?? null, sparse, ...(facts ? { facts } : {}) });
   let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
-  const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + CONTINUE_NOTE.replace("BASE", lane);
+  let enumList = []; // #4322: tests enumerating the members of the paths the issue names, read once before the plan call
+  const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + CONTINUE_NOTE.replace("BASE", lane);
   async function builder(n, prompt, resume, live = false, restart = implementRestart) {
     let timeoutRetries = 0, p = prompt;
     for (;;) {
@@ -1051,9 +1053,10 @@ export async function runCore(o) {
       }
       await label("building");
       hotFacts = await hotspotsOf({ paths: namedPaths(iss.body ?? "") });
+      enumList = io.enumeratingTests ? ((await io.enumeratingTests({ cwd: wt, paths: namedPaths(iss.body ?? "") }).catch(() => null)) ?? []) : [];
       facts = await factsPath([wt, cwd], io.fs?.exists);
       const ctxPack = frozen ? null : await contextPackStep();
-      const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + reproPlanNote(reproOn()) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
+      const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + reproPlanNote(reproOn()) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       if (!frozen) {
         await builder(++attemptN, planPrompt() + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote(), null, true, planPrompt);
         planned = true;
@@ -1097,7 +1100,7 @@ export async function runCore(o) {
       }
       T.plan = [`contract ${hash}`, `${frozen.requirements.length} requirement(s)`];
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
-      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote();
+      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote();
       liveKeys = ["implementation"];
       stage = "implement";
       await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);
@@ -1209,6 +1212,38 @@ export async function runCore(o) {
         return await needsHuman(`The repository's docs freshness check still fails${sessionId ? " after one builder resume" : ""}; nothing merged:\n\n${String(docs.output).slice(0, 2000)}`, OUTCOME_CODES.DOCS_STALE);
       }
     }
+    // ---- 3d. enumerating tests (#4322): new symbols that tests listing their siblings do not name; one resume, then an
+    // anomaly (CI stays the gate). Sequence numbers the base already uses: renumbered at hand-off, still colliding = base.conflict.
+    if (io.enumeratingMissing && !isSplit) {
+      const missingNow = async () => unjustified((await io.enumeratingMissing({ cwd: wt, base }).catch(() => null)) ?? [], result?.not_members);
+      let missing = await missingNow();
+      if (missing.length && sessionId) {
+        ev({ event: "ENUMERATING_MISSING", count: missing.length });
+        T.decisions.push(`Enumerating test(s) miss new symbol(s): ${missing.slice(0, 5).map((m) => `${m.symbol} → ${m.test}`).join(", ")}; builder resumed once`);
+        await builder(++attemptN, missingEntriesPrompt(missing, vcfg.mode), sessionId);
+        await upsertStage("implementation");
+        result = (await readResult()) ?? result;
+        missing = await missingNow();
+      }
+      if (missing.length) T.anomalies.push(`Enumerating test(s) still miss new symbol(s): ${missing.slice(0, 5).map((m) => `${m.symbol} → ${m.test}`).join(", ")}`);
+    }
+    /** #4322: null (nothing to do), {done} (terminal), or {renumbered: true}. Fetches the lane, so the check sees its tip. */
+    async function sequenceHandoff(trigger) {
+      if (!io.sequenceCheck || isSplit) return null;
+      try { await git(["fetch", "origin", lane]); } catch { /* offline: use the local ref */ }
+      const collisions = (await io.sequenceCheck({ cwd: wt, base }).catch(() => null)) ?? [];
+      if (!collisions.length) return null;
+      const before = (await io.sequenceSnapshot?.({ cwd: wt, base }).catch(() => null)) ?? [];
+      ev({ event: "SEQUENCE_COLLISION", trigger, files: collisions.map((c) => c.lane) });
+      T.decisions.push(`Sequence number(s) taken on ${lane} (${trigger}): ${collisions.filter((c) => c.base.length).map((c) => `${c.lane} vs ${c.base.join(", ")}`).join("; ")}; builder renumbers`);
+      await builder(++attemptN, sequencePrompt(collisions, lane, vcfg.mode), sessionId ?? null);
+      result = (await readResult()) ?? result;
+      const v = (await io.sequenceVerify?.({ cwd: wt, base, before }).catch(() => null)) ?? { ok: false, problems: ["renumber could not be verified"] };
+      if (!v.ok) return { done: await needsHuman(`Sequence-numbered files still collide with ${lane} after the builder renumbered (${trigger}); nothing merged:\n${v.problems.slice(0, 10).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.BASE_CONFLICT) };
+      files = await changedFiles();
+      return { renumbered: true };
+    }
+    { const sq = await sequenceHandoff("hand-off"); if (sq?.done) return sq.done; }
     const structureLine = structureNote(structure);
 
     // ---- 3c. verify by CI (#4167): ci|hybrid push the branch and run the repo's CI on GitHub runners, before review ----
@@ -1557,7 +1592,7 @@ export async function runCore(o) {
         how = "clean merge of the base into the branch";
       } else {
         T.decisions.push(`Base-sync ${syncs}: merging ${base} conflicts in ${files.join(", ") || "unknown files"}; builder resolves`);
-        const prompt = `Merging ${base} into this branch conflicts in: ${files.join(", ") || "(see git status)"}. Resolve the conflicts preserving both this fix's intent and the base's changes, ${syncChecks(vcfg.mode)}, and commit the merge. Do not push.`;
+        const prompt = `Merging ${base} into this branch conflicts in: ${files.join(", ") || "(see git status)"}. Resolve the conflicts preserving both this fix's intent and the base's changes, ${syncChecks(vcfg.mode)}, and commit the merge.${sequenceSyncNote(files)} Do not push.`;
         await builder(++attemptN, prompt, sessionId ?? null);
         if (await unresolved()) {
           await gitOut(["merge", "--abort"]);
@@ -1567,6 +1602,9 @@ export async function runCore(o) {
         const r2 = await readResult();
         tests = Array.isArray(r2?.tests) && r2.tests.length ? r2.tests.map((t) => (typeof t === "string" ? t : `${t.command}: ${t.result}`)).join("; ") : NR_TESTS;
       }
+      const sq = await sequenceHandoff(`base-sync ${syncs}`); // #4322: a clean text merge can still bring a taken number
+      if (sq?.done) return sq.done;
+      if (sq?.renumbered) { how += "; builder renumbered sequence-numbered files"; }
       const after = await gitOut(["rev-parse", "HEAD"]);
       if (soft && clean && after === before) { syncs--; return null; } // UNKNOWN state and nothing to merge: not a conflict
       if (after !== before) await gitPush(["push", "origin", branch]); // plain push of a merge commit: never force
@@ -1577,7 +1615,7 @@ export async function runCore(o) {
         rereview = "refactor-verify re-run against the new base: ok";
       }
       if (remoteVerify && after !== before) { const v = await ciVerify("base-sync"); if (v.done) return v.done; ciFixes = v.fixes; }
-      if (!isSplit && (!clean || ciFixes)) {
+      if (!isSplit && (!clean || sq?.renumbered || ciFixes)) {
         let rv = await doReview();
         if (rv.env) return await envNeedsHuman(rv.env);
         if (rv?.fail) {

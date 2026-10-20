@@ -93,7 +93,7 @@ ${BLOCK_RULES}`;
 /** Builder call 2, same session: implement the frozen contract. */
 export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
-  return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, and commit. Do not push or touch GitHub.
+  return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, run the repo's formatter on the files you changed, and commit. Do not push or touch GitHub.
 
 ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
@@ -145,6 +145,39 @@ export function hotspotPlanNote(facts) {
 export function hotspotBuildRule(facts) {
   if (!facts || facts.enabled === false || !(facts.file_lines > 0) || !(facts.growth_lines > 0)) return "";
   return `\n\nDon't grow a file over ${facts.file_lines} lines by more than ${facts.growth_lines} lines. Put new code next to it.`;
+}
+
+/** #4322: tests that enumerate the siblings of a module the issue names (bin/lean/enumerating.mjs), for the plan; "" when none. */
+export function enumeratingPlanNote(list) {
+  if (!Array.isArray(list) || !list.length) return "";
+  return `\n\nEnumerating tests (found by the engine): these tests list every member of a module or directory this issue names, so a new export, table, job, action, namespace or file there must join their list or CI goes red. List each one you will touch under Affected Files in ${INVESTIGATION_FILE}, and add a validate command that runs only those tests.\n${list.slice(0, 40).map((e) => `- ${e.module} -> ${e.test}:${e.line} (${e.why})`).join("\n")}`;
+}
+
+const NOT_MEMBER = `or, when the symbol is not a member of that list, record {"symbol":"<name>","test":"<test path>","why":"<why it is not a member>"} in ${RESULT_FILE} "not_members"`;
+
+/** #4322: the builder rule citing the plan's enumerating tests; "" when none. */
+export function enumeratingBuildRule(list) {
+  if (!Array.isArray(list) || !list.length) return "";
+  return `\n\nEnumerating tests: add every new exported symbol, table, job, action, namespace or file to each test listed below whose list enumerates its siblings, one test-list edit per new symbol, ${NOT_MEMBER}.\n${list.slice(0, 40).map((e) => `- ${e.module} -> ${e.test}:${e.line}`).join("\n")}`;
+}
+
+/** #4322: after implement, new symbols that tests enumerating their siblings do not name. */
+export function missingEntriesPrompt(missing, mode = "local") {
+  return `These tests enumerate the siblings of symbols or files this change adds, but do not name them (CI will fail on the stale list):\n${missing.slice(0, 30).map((m) => `- ${m.symbol} (${m.module}) -> ${m.test}:${m.line}`).join("\n")}\n\nFor each, add the symbol to that test's list, ${NOT_MEMBER}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+const RENUMBER_RULE = "Renumber the lane's files, never the base's: rename each with git mv to its new number, keep the SQL (or other migration source) byte-identical, regenerate the snapshot and journal with the repo's own migration generator (never hand- or text-merge the journal), keep journal entries strictly ordered, and update every reference to the old name.";
+
+/** #4322: lane-added sequence-numbered files whose number the base already uses, at hand-off or after a base-sync. */
+export function sequencePrompt(collisions, lane, mode = "local") {
+  const rows = collisions.slice(0, 30).map((c) => `- ${c.lane} -> number ${c.next}${c.base.length ? ` (base has ${c.base.join(", ")})` : " (moves to keep the order)"}`).join("\n");
+  return `origin/${lane} already uses sequence numbers this change adds:\n${rows}\n\nFirst bring the branch up to date with \`git merge --no-edit origin/${lane}\` if it is not (already fetched; never rebase or force). ${RENUMBER_RULE} ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** #4322: the base-sync conflict addition when a conflicted file is a numbered migration or a journal; "" otherwise. */
+export function sequenceSyncNote(files) {
+  const hit = (files ?? []).some((f) => /(?:^|\/)\d{3,}[_-][^/]*$|(?:^|\/)_journal\.json$/.test(String(f)));
+  return hit ? ` A numbered migration or its journal conflicts: do not text-merge it. ${RENUMBER_RULE}` : "";
 }
 
 export function contractCorrectionPrompt(problems) {
