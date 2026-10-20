@@ -121,6 +121,12 @@ export function contextPackNote(pack) {
   return `\n\nContext pack (hints, not proof; compiled by the engine from GitHub and git). The issue outranks the code, which outranks this pack: verify anything you rely on. Contract requirements quote only the issue and its trusted comments, never this pack. Open a link (gh issue view N / gh pr view N) yourself when you need more.\n${pack.text}`;
 }
 
+/** #4271: the bug-lane plan addition (lean.repro_test prefer on a bug/type:bug issue); "" when off, so the prompt is unchanged. */
+export function reproPlanNote(on) {
+  if (!on) return "";
+  return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.`;
+}
+
 /** forge#4195: hotspot facts for the plan prompt: one sentence plus one line per over-threshold file; "" when none. */
 export function hotspotPlanNote(facts) {
   if (!facts || facts.enabled === false || !Array.isArray(facts.files)) return "";

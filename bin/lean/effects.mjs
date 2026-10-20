@@ -294,6 +294,14 @@ export function makeLeanIo({ repo }) {
       const args = [script("hotspots.sh"), ...(base ? ["--base", base] : []), "--", ...paths];
       try { return JSON.parse((await pexec("bash", args, { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
+    /** #4271: scripts/acceptance-red-green.sh for the frozen repro_test in cwd; {base, head} words, or null on any failure. */
+    async redGreen({ cwd, base, command, timeoutSec = 300 }) {
+      const args = [script("acceptance-red-green.sh"), "--repo-path", cwd, "--base-ref", base, "--test-cmd", command, "--timeout", String(timeoutSec)];
+      try {
+        const m = /BASE=(\w+) HEAD=(\w+)/.exec(String((await pexec("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024 })).stdout ?? ""));
+        return m ? { base: m[1], head: m[2] } : null;
+      } catch { return null; }
+    },
     /**
      * The target repo's own docs-move-with-code rule, when it has one (scripts/check-devdocs-freshness.sh, forge#4185),
      * over base...HEAD in cwd. null when the repo has no such script or it cannot run (exit 2+, timeout): never blocks.

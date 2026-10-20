@@ -270,6 +270,8 @@ Commands then appear as `/forgedock:work-on`, etc. You still run `npx forgedock 
 
 **Headless / CI:** the pipeline also runs outside Claude Code. `npx forgedock run work-on <issue> --dry-run` previews the assembled prompt and tool plan. `npx forgedock run` picks an execution backend automatically (`--backend auto`, the default): if the Claude Code CLI (`claude`) is installed and already authenticated (Pro/Max subscription or a CLI-managed key), it drives the command through that — **no separate `ANTHROPIC_API_KEY` required**. It never falls back to the paid Anthropic API implicitly: without a CLI it fails with `CLI_BACKEND_UNAVAILABLE` unless the owner opted in (forge.yaml `execution.agent_backend: api` plus `FORGEDOCK_ALLOW_API_BACKEND=1`; see [CONFIG.md](docs/CONFIG.md#execution-optional)). Force either path explicitly with `--backend cli` / `--backend api` (or `FORGEDOCK_BACKEND=cli|api`) — the API backend is what CI environments without an interactive `claude` login should use. `npx forgedock run-issue <issue>` executes the same command specs on the durable engine (event-sourced run log, leases, crash-safe resume).
 
+**Brand-new project?** `/bootstrap "<idea>"` (or `npx forgedock bootstrap "<idea>" --dry-run` to preview) turns an idea into a validated, milestone-ordered GitHub backlog that `/orchestrate` can build. See [Start a New Project with ForgeDock](docs/site/start-a-new-project.md).
+
 **Explicit install command:**
 
 ```bash
@@ -363,6 +365,7 @@ Using ForgeDock in your pipeline? Add the badge — each one is a backlink and a
 
 - [GitHub Is Already Your Agents' Memory](docs/site/github-is-the-memory.md) — the canonical argument: why GitHub is the right place for agent memory, how FORGE annotations make it machine-readable, and how to adopt the protocol without ForgeDock
 - [Getting Started in 5 Minutes](docs/site/getting-started.md)
+- [Start a New Project with ForgeDock](docs/site/start-a-new-project.md) — idea → `/bootstrap` → backlog → `/orchestrate`, with a worked example
 - [How the Knowledge Graph Works](docs/site/how-it-works.md)
 - [What Are Those FORGE Comments?](docs/site/annotations-explained.md) — 2-minute explainer for annotations you meet in the wild
 - [FORGE Annotation Protocol](docs/spec/forge-protocol-v1.md) — the open standard for AI context passing (CC-BY-4.0)
