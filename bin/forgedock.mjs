@@ -3231,6 +3231,26 @@ async function doctor(fix = false) {
     );
   }
 
+  // ── Check 13: Resource hygiene (#4183) ──────────────────────────────────────
+  // Owned leftovers (stale lane ledgers, forgedock-labelled docker, lean-*/agent-* worktrees, lane branches,
+  // ~/.forge/tmp scratch) with counts and sizes; unowned stale ones are only reported. --fix runs the reaper with the
+  // forge.yaml hygiene TTLs. Never a failure: a leftover slows the host, it does not break the install.
+  {
+    try {
+      const gc = await import("./gc.mjs");
+      const probes = gc.makeGcProbes({ cwd: process.cwd() });
+      const h = gc.readHygiene(process.cwd());
+      const plan = await gc.planGc({ probes, ttlMs: gc.hygieneTtls(h), deleteMergedBranches: h.delete_merged_branches });
+      const applied = fix ? await gc.applyGc(plan, probes) : null;
+      if (applied && applied.reclaimed.length > 0) fixesApplied++;
+      const r = gc.hygieneCheck(plan, { applied });
+      if (r.status === "pass") pass("Resource hygiene", r.detail);
+      else warn("Resource hygiene", r.detail);
+    } catch (e) {
+      warn("Resource hygiene", `could not inspect ForgeDock leftovers: ${String(e?.message ?? e).slice(0, 200)}`);
+    }
+  }
+
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log("");
   if (fix && fixesApplied > 0) {
@@ -3283,7 +3303,7 @@ function help() {
     ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
     ["npx forgedock stats [--since <ver|date>] [--repo owner/repo] [--json] [--refresh]", "Version-over-version cost/time/flow/review/gate report from GitHub telemetry (no model)"],
     ["npx forgedock doctor", "Check installation health"],
-    ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block)"],
+    ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block) and reclaim ForgeDock-owned leftovers (forge.yaml hygiene TTLs)"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock opencode install", "Install token-efficient native OpenCode commands"],

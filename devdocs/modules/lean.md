@@ -509,6 +509,31 @@ on the run record and the row, and in `ctx.placement`. The lane gets it as
 into FORGE:STATE (`placement: {where, reason, mode}`) and a trajectory decision.
 Cost: 0 LLM calls. Rationale: `devdocs/decisions/4256-hybrid-placement.md`.
 
+## Entry 2026-10-20 — Resource hygiene: preflight and admission GC (#4183)
+
+`forge.yaml` `hygiene:` (`container_ttl_hours` 6, `worktree_ttl_hours` 24,
+`tmp_ttl_hours` 6, `delete_merged_branches` true, `max_host_load_ratio` 0.8,
+`auto_gc` true) is read by `gc.readHygiene` and turned into TTLs by `hygieneTtls`.
+`runBatch` runs `runOwnedGc` once in preflight, before any lane is admitted, and
+tallies items and bytes. Only owned resources are reclaimed (ForgeDock label or
+ledger); unowned stale ones are reported, never removed.
+
+`admission.mjs` adds `nearCeiling({cfg, host, ratio})`: true when load per core,
+free memory or free tmp is within `ratio` of a `checkAdmission` threshold (load only when `max_load_per_core` is set; it is off by default, #4169). A
+failed or non-finite probe is never "near". `orchestrate` takes an optional
+`beforeAdmit` hook, awaited at the start of each admission pass when a lane is
+ready and a slot is free (not tripped, not held). Its errors are swallowed. In
+`runBatch` the hook runs GC (phase `admission`) only when `nearCeiling` is true
+and no GC ran in the last 5 minutes. `auto_gc: false` disables both phases; no hook
+is passed.
+
+The batch report ends with a `reclaimed:` line (`formatReclaimed`: items, size,
+preflight/admissions split, or "off"), and `reclaimed` is on the report file and
+the `runBatch` result. `forgedock doctor` check 13 (Resource hygiene) lists owned
+leftovers with counts and sizes and warns on unowned stale ones; `doctor --fix`
+applies the reaper. `commands/cleanup.md`, `work-on/close.md` and
+`work-on/build/validate.md` call the same reaper. Cost: 0 LLM calls.
+
 ## Entry 2026-10-20 — Complete conformance reviews, blocking shadow gate (#4160)
 
 `decide()` first runs `fillEngineRows` (`conformance.mjs`): engine-authorized scope rows, `unverified` preserve rows and `path:line` evidence normalized to repo paths (`normalizeEvidencePath`) are no longer "incomplete". `reviewerPrompt` embeds `reviewSkeleton` (a row per R/P/scope/coverage id). `checkCompleteness` returns `missing` ids; the retry in `reviewOnce` is `reviewerRepairPrompt` for those ids only (no diff), merged by `mergeReviewRows`. `changedFiles()` drops files equal to the base tip (base-sync merges).

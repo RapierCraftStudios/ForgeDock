@@ -144,7 +144,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
-  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null }) {
+  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -461,6 +461,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       return !pkg;
     };
     budgetHeld = false;
+    // #4183: a hook (owned-resource GC near the host ceiling) before lanes are admitted; its errors never stop the batch.
+    if (beforeAdmit && !tripped && !holdUntil && running.size < K() && pending.some(isReady)) { try { await beforeAdmit(); } catch { /* ignored */ } }
     budgetStop = null;
     const wanted = new Set(); // issues that stay offered in the host registry after this pass
     if (!tripped && !holdUntil && budget) {
