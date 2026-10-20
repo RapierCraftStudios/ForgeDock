@@ -48,6 +48,7 @@ export const OUTCOME_CODES = Object.freeze({
   CLI_TIMEOUT: "cli.timeout",
   CLI_SPAWN_FAILED: "cli.spawn_failed", // forge#4129: deterministic spawn failure (E2BIG, ENOENT, EACCES, ...)
   ENV_SETUP_FAILED: "env.setup_failed", // forge#4163: forge.yaml env.setup failed before the builder; an environment error, not a build failure
+  ENV_TOOL_MISSING: "env.tool_missing", // forge#4323: a validate command could not run because a host tool or module is missing; an environment error, not a conformance failure
   SANDBOX_START_FAILED: "sandbox.start_failed", // forge#4254: a lane sandbox could not start; needs-human, not relaunched
   SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff
   LEASE_HELD: "lease.held",
@@ -180,13 +181,13 @@ export function codeForTerminalReason(reason) {
  * Batch recovery classes of a lane result (forge#4267). The batch runner recovers `recoverable` rows once
  * (`orchestration.recovery.max_attempts`) and re-queues them; only `human` rows are escalations.
  */
-export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID]);
+export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID, OUTCOME_CODES.ENV_TOOL_MISSING]);
 /** `builder.blocked` is only reached by a typed human block: credentials, spend, promotion, customer, product-decision. */
 export const HUMAN_CODES = Object.freeze([OUTCOME_CODES.BUILDER_BLOCKED]);
 
 /**
  * `recoverable` | `human` | `terminal` for a lane result row ({outcome|terminalReason, code, issueEdited?, conflicting?}).
- * Recoverable: needs-human `ci.red`, `base.conflict`, `builder.block_untyped`, `contract.invalid` after a mid-run issue
+ * Recoverable: needs-human `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `contract.invalid` after a mid-run issue
  * edit (`issueEdited`), and `ci-pending` on a conflicting PR (`conflicting`). Human: `builder.blocked`. Anything else
  * (another code, or not a needs-human/ci-pending row) is terminal. Pure, never throws.
  */
