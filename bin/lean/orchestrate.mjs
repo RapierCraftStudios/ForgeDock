@@ -24,6 +24,11 @@
  * issue while maintenance starts stay within `share` of all lane starts (`dispatch: {started, maint}`, persisted), then
  * P2+ features, then (`whenIdle`) maintenance once no feature is pending. Maintenance the budget never admits ends `held`.
  *
+ * Milestone drift (#4161), off unless `drift` is passed (`bin/lean/drift.mjs` makeDrift): a `merged` milestone-lane run
+ * whose result carries `structure` awaits `drift.onMerged(issue, row, result)` before its slot frees. A drift error is
+ * reported as a `drift` row and never changes the outcome. With `drift.holds(issue, {body, lane})` (block_dispatch), a
+ * pending issue it returns a package for is not started; it ends `held` (`drift: <package> flagged`) if nothing else runs.
+ *
  * Host lane registry (#4191), off unless `sched: {registry, batch, repo, cap}` is passed (`sched.mjs` `openSched`): a lane
  * starts only when the batch is under its K and the registry grants it a host slot; `priorityOf(issue)` (persisted as
  * `priorities`) ranks it host-wide, and the batch's ready issues are tried in priority order. Ready issues it cannot
@@ -139,7 +144,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
-  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null }) {
+  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -164,6 +169,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const classes = toMap(saved?.classes); // issue -> {maintenance, priority}; only with a maintenance budget
   const dispatch = { started: saved?.dispatch?.started ?? 0, maint: saved?.dispatch?.maint ?? 0 };
   let budgetHeld = false;
+  const bodies = new Map(); // issue -> body, kept in memory for drift.holds only
+  const driftHeld = new Map(); // issue -> flagged package dir holding it this pass
   const reg = sched?.registry ?? null;
   const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
   const remoteMax = remote && Number.isInteger(remote.max) && remote.max >= 0 ? remote.max : 0;
@@ -210,6 +217,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const readDeps = async (n) => {
     let body = "";
     try { body = await readBody(n); } catch { /* unreadable: no ordering info, work-on's own check still applies */ }
+    if (drift?.holds) bodies.set(n, body);
     deps.set(n, parseDeps(body, n));
     await classifyOne(n);
     await readPriority(n);
@@ -235,6 +243,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   for (const n of issues) if (!set.has(n)) { set.add(n); order.push(n); pending.push(n); }
   for (const n of order) if (!deps.has(n)) await readDeps(n);
   if (budget) for (const n of order) if (!classes.has(n)) await classifyOne(n); // a resume that enabled the budget
+  if (drift?.holds) for (const n of pending) if (!bodies.has(n)) { try { bodies.set(n, await readBody(n)); } catch { bodies.set(n, ""); } } // a resume
   if (reg) for (const n of order) if (!priorities.has(n)) await readPriority(n); // a resume of a pre-#4191 batch
   noteCrossLane();
   save();
@@ -365,7 +374,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       for (const [m, ds] of deps) if (ds.includes(n)) deps.set(m, [...new Set(ds.flatMap((d) => (d === n ? subs : [d])))]);
       noteCrossLane();
     }
-    results.set(n, row); done(); save(); update(row);
+    results.set(n, row);
+    if (row.outcome === "merged" && drift?.onMerged && r?.structure && String(rec?.lane ?? r?.lane ?? "").startsWith("milestone/")) {
+      save(); update(row);
+      // Before the slot frees: the batch never ends with a fold pending, and block_dispatch sees the new flags.
+      try { await drift.onMerged(n, { ...row, lane: rec?.lane ?? r?.lane }, r); } catch (e) { update({ issue: n, outcome: "drift", detail: `drift check failed: ${String(e?.message ?? e).slice(0, 300)}` }); }
+      done(); save();
+      return;
+    }
+    done(); save(); update(row);
   };
 
   const track = (n, p) => { running.set(n, p.catch((e) => settle(n, { terminalReason: "engine-error", detail: e?.message ?? String(e) }, runRecs.get(n), null))); };
@@ -434,7 +451,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const t = now();
     const holdUntil = heldUntil();
     let started = 0;
-    const isReady = (n) => (notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome));
+    driftHeld.clear();
+    const isReady = (n) => {
+      if (!((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome)))) return false;
+      if (!drift?.holds) return true;
+      let pkg = null;
+      try { pkg = drift.holds(n, { body: bodies.get(n) ?? "", lane: lanes.get(n)?.lane ?? null }); } catch { pkg = null; }
+      if (pkg) driftHeld.set(n, pkg);
+      return !pkg;
+    };
     budgetHeld = false;
     // #4183: a hook (owned-resource GC near the host ceiling) before lanes are admitted; its errors never stop the batch.
     if (beforeAdmit && !tripped && !holdUntil && running.size < K() && pending.some(isReady)) { try { await beforeAdmit(); } catch { /* ignored */ } }
@@ -464,7 +489,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     } else if (!tripped && !holdUntil) {
       for (let i = 0; i < pending.length && running.size < K();) {
         const n = pending[i];
-        if ((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome)) && grant(n, new Set())) { pending.splice(i, 1); start(n); started++; }
+        if (isReady(n) && grant(n, new Set())) { pending.splice(i, 1); start(n); started++; }
         else i++;
       }
     }
@@ -485,6 +510,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     else if (pending.length && offered.size) await sleep(wake); // waiting for a host slot
     else if (pending.length && waits.length) await sleep(Math.max(0, Math.min(...waits) - t));
     else if (pending.length && budgetHeld) break; // maintenance the budget does not admit now: held for a later batch
+    else if (pending.length && driftHeld.size) break; // held by a drift flag (block_dispatch): pending for a later batch
     else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle
       for (const n of pending.splice(0)) skip(n, "dependency cycle");
       save();
@@ -492,7 +518,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   }
   if (reg) withdrawExcept(new Set());
   save();
-  return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: tripped?.detail ?? (budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run") });
+  return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: tripped?.detail ?? (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run") });
 }
 
 export function formatTable(rows) {
