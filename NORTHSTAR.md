@@ -49,6 +49,7 @@ Never put a reasoning problem in a grep, and never put a grep-able pattern in a 
 | `bin/lean/*` | lean engine: lanes, contract, conformance, merge (dossier: `devdocs/modules/lean.md`) | **canonical runtime** — `forgedock run-issue` defaults to the core path (`bin/engine-cli.mjs` `enginePath ?? "core"`) |
 | `bin/engine*.mjs`, `bin/runner.mjs` | engine CLI, runner spawning, leases, outcome codes | canonical |
 | `scripts/*` | deterministic layer (routing, dedup, checks) | canonical |
+| `scripts/test-map.sh`, `scripts/repo-facts.sh` | regenerable repo caches `.forge/test-map.json` (picks the pre-PR checks for the changed files) and `.forge/repo-facts.json` (cited to the builder by path); deleting them restores `learned.test_commands` and today's prompts | canonical, optional (#4272) |
 | `commands/*.md` | skill specs: interactive entrypoints and judgment prompts | specs; the lean engine does not load them |
 | `commands/work-on/*` full path, `run-issue --path full` | multi-phase prose pipeline | **legacy** (opt-in only) |
 | `packages/protocol/` | FORGE annotation library (MIT) | canonical |

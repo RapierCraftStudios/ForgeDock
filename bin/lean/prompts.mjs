@@ -50,11 +50,14 @@ export function ciUnavailablePrompt() {
 /** #4163: the extra host-rules line when the engine pinned the repo's toolchain on PATH; "" otherwise (prompt unchanged). */
 const toolchainRule = (t) => (t ? `\nThe engine pinned this repo's toolchain on PATH (${t}). Use it as is: do not install global shims or other versions and do not edit PATH; if the pinned tool itself fails, report it as a toolchain/environment problem instead of working around it.` : "");
 
+/** #4272: the extra line citing the repo-facts cache by path (never its content) when it exists; "" otherwise (prompt unchanged). */
+const factsRule = (f) => (f ? `\nRepo facts (toolchain pins, slow suites, layer rules, hotspots) are cached in ${f}: read it before choosing checks or placing code.` : "");
+
 /** Builder call 1: investigate and write the contract. No code edits. */
-export function builderPlanPrompt(n, { toolchain = null } = {}) {
+export function builderPlanPrompt(n, { toolchain = null, facts = null } = {}) {
   return `Resolve issue #${n} (read it with gh issue view ${n} --comments). This first step is PLANNING ONLY: do not edit code, do not commit.
 
-${HOST_RULES}${toolchainRule(toolchain)}
+${HOST_RULES}${toolchainRule(toolchain)}${factsRule(facts)}
 
 1. Write ${INVESTIGATION_FILE} as markdown with exactly these headings, concise, file:line wherever you cite code (no HTML comments):
 **Verdict**: CONFIRMED|ALREADY-FIXED|INVALID|BLOCKED
@@ -85,11 +88,11 @@ ${BLOCK_RULES}`;
 }
 
 /** Builder call 2, same session: implement the frozen contract. */
-export function builderImplementPrompt(mode = "local", { toolchain = null } = {}) {
+export function builderImplementPrompt(mode = "local", { toolchain = null, facts = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
   return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, and commit. Do not push or touch GitHub.
 
-${HOST_RULES}${toolchainRule(toolchain)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
+${HOST_RULES}${toolchainRule(toolchain)}${factsRule(facts)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why, which the engine posts on the issue:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file you must change that the contract did not list.

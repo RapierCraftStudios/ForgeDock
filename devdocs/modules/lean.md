@@ -79,6 +79,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    default 300; no Actions minutes). Failures resume the builder in-session
    (`precheckFailurePrompt`, up to `max_rounds`); no commit / rounds exhausted is
    an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
+   An optional `.forge/test-map.json` (#4272, `scripts/test-map.sh`; lane worktree,
+   then main checkout, `testmap.mjs` `readTestMap`) replaces that list with the map
+   entries whose globs match the changed files (`selectCommands`; event gains
+   `source: "test-map"`); no map, an invalid one or no match keeps `learned.test_commands`.
 6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
@@ -553,3 +557,15 @@ In shadow, `gate()` now blocks on precheck/amend failures coded `conformance.uni
 ## Entry 2026-10-20 — Bug lanes freeze a red-green repro_test (#4271)
 
 forge.yaml `lean.repro_test` (`engine-cli.mjs` `readReproTest`, `off|prefer`, default `prefer`) → `runCore` `reproTest`. On a `bug`/`type:bug` lane (`conformance.mjs` `isBugIssue`), the plan prompt gets `reproPlanNote`, and `validateContract(..., {repro: true})` requires `repro_test` `{path, id, command}` or `"none"` + `repro_test_reason` (one correction resume). `gate()` runs `io.redGreen` (`effects.mjs` → `scripts/acceptance-red-green.sh`, inside `heavyStep`) and passes `{base, head}` to `precheck({repro})`. Anything but `BASE=FAILED HEAD=RAN` is `reproFailures` kind `repro_red_green`, code `conformance.unimplemented`, so it blocks in shadow and gets the one in-session resume (#4149). `off`, non-bug lanes, resumed pre-#4271 contracts and refactor:split leave prompts, contract check and precheck unchanged. Cost: 0 LLM calls; one targeted test run on base and head per gate.
+
+## Entry 2026-10-20 — Test map + repo facts caches for the pre-PR step (#4272)
+
+`scripts/test-map.sh` writes `.forge/test-map.json` (`file glob → command` from package.json scripts, pytest/ruff
+config, go.mod, Makefile targets and CI workflow `run:` steps; fixtures `scripts/fixtures/test-map/{node,python,go}`).
+`scripts/repo-facts.sh` writes `.forge/repo-facts.json` (toolchain pins via `toolchain.mjs` `detectPins`, slow suites,
+workspace package edges + boundary configs, over-threshold hotspots via `hotspots.sh`). Both are optional, regenerable
+caches looked up in the lane worktree, then the main checkout (`bin/lean/testmap.mjs`). The pre-PR step (6a) runs the
+map's commands for the changed files when the map is valid and matches, else `learned.test_commands`; builder plan and
+implement prompts cite the facts file by path (`prompts.mjs` `factsRule`, never its content). Deleting both files
+restores today's commands, events and prompts byte-for-byte. Cost: 0 LLM calls; fewer pre-PR commands when the map
+narrows them. Rationale: `devdocs/decisions/4199-incremental-not-restructure.md`.
