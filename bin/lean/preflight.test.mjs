@@ -1,13 +1,13 @@
-// Copyright (C) 2026 RapierCraft Studios
+// SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { shellSegments, pythonImports, nodeImports, preflightProbes, preflightProblems } from "./preflight.mjs";
 import { runCheckCommand } from "./effects.mjs";
 import { repoTracks } from "./conformance.mjs";
+import { tmpDir } from "../tests/_tmp.mjs";
 
 const C = (...commands) => ({ deliverables: [], validate: commands.map((command, i) => ({ id: `V${i + 1}`, command })) });
 const needs = (c, o) => preflightProbes(c, o).probes.map((p) => [p.kind, p.tool, p.interp ?? null, p.ids.join(",")]);
@@ -44,20 +44,18 @@ describe("#4328 validate preflight: what a command needs", () => {
     assert.match(p, /repo's own toolchain .*never a global install/);
   });
   it("the probes are real read-only shell checks: present tools pass, absent ones fail", async () => {
-    const dir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "preflight-"));
-    try {
-      mkdirSync(join(dir, "node_modules", "here"), { recursive: true }); writeFileSync(join(dir, "node_modules", "here", "package.json"), "{}");
-      mkdirSync(join(dir, "sub"));
-      const probes = preflightProbes(C("bash -c true", "no-such-tool-4328 --x", `node -e "require('here'); require('fs'); require('absent-pkg-4328')"`)).probes;
-      const rc = {};
-      for (const p of probes) rc[`${p.kind}:${p.tool}`] = (await runCheckCommand({ command: p.probe, cwd: join(dir, "sub"), timeoutMs: 15000 })).rc;
-      assert.equal(rc["command:bash"], 0); assert.notEqual(rc["command:no-such-tool-4328"], 0);
-      assert.equal(rc["command:node"], 0); assert.equal(rc["node-module:here"], 0, "found in an ancestor node_modules");
-      assert.notEqual(rc["node-module:absent-pkg-4328"], 0);
-      const py = preflightProbes(C(`python3 -c "import json, no_such_mod_4328"`)).probes.filter((p) => p.kind === "python-module");
-      if ((await runCheckCommand({ command: "command -v python3", cwd: dir })).rc === 0) {
-        assert.deepEqual(await Promise.all(py.map(async (p) => (await runCheckCommand({ command: p.probe, cwd: dir })).rc !== 0)), [false, true]);
-      }
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    const dir = tmpDir("preflight-");
+    mkdirSync(join(dir, "node_modules", "here"), { recursive: true }); writeFileSync(join(dir, "node_modules", "here", "package.json"), "{}");
+    mkdirSync(join(dir, "sub"));
+    const probes = preflightProbes(C("bash -c true", "no-such-tool-4328 --x", `node -e "require('here'); require('fs'); require('absent-pkg-4328')"`)).probes;
+    const rc = {};
+    for (const p of probes) rc[`${p.kind}:${p.tool}`] = (await runCheckCommand({ command: p.probe, cwd: join(dir, "sub"), timeoutMs: 15000 })).rc;
+    assert.equal(rc["command:bash"], 0); assert.notEqual(rc["command:no-such-tool-4328"], 0);
+    assert.equal(rc["command:node"], 0); assert.equal(rc["node-module:here"], 0, "found in an ancestor node_modules");
+    assert.notEqual(rc["node-module:absent-pkg-4328"], 0);
+    const py = preflightProbes(C(`python3 -c "import json, no_such_mod_4328"`)).probes.filter((p) => p.kind === "python-module");
+    if ((await runCheckCommand({ command: "command -v python3", cwd: dir })).rc === 0) {
+      assert.deepEqual(await Promise.all(py.map(async (p) => (await runCheckCommand({ command: p.probe, cwd: dir })).rc !== 0)), [false, true]);
+    }
   });
 });

@@ -1,4 +1,4 @@
-// Copyright (C) 2026 RapierCraft Studios
+// SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
  * forge#4328: freeze-time preflight of a contract's validate commands. Pure: derives the host tools a command needs
