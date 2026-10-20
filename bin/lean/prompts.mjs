@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /** Core work-on prompts: a plan call that writes the contract, an implement call in the same session, and the conformance reviewer. */
+import { fileURLToPath } from "node:url";
 
 import { reviewSkeleton } from "./conformance.mjs";
 
@@ -12,7 +13,10 @@ export const PLAN_FILE = `${LEAN_DIR}/plan.md`;
 export const IMPLEMENTATION_FILE = `${LEAN_DIR}/implementation.md`;
 export const CONTRACT_FILE = `${LEAN_DIR}/contract.json`;
 
-const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo).`;
+/** Change-scoped checks with shared incremental caches (#4218): the builder runs the scoped commands this CLI prints. */
+export const CHECKS_CLI = fileURLToPath(new URL("./checks.mjs", import.meta.url));
+
+const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the repo's full tsc/eslint/test scripts (it widens to the full command itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, run it again with --publish to share the incremental caches.`;
 
 /** Verify-by-CI (#4167): in ci/hybrid mode the engine runs the repo's CI on GitHub runners; the host runs only light checks. */
 const LIGHT = "run only formatters and linters on the files you changed";
@@ -32,16 +36,25 @@ export function ciFailurePrompt(failures, mode = "local") {
   return `CI failed on the pushed branch:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
+/** The repo's declared check commands (forge.yaml learned.test_commands) failed before the PR (#4240): fixed in-session. */
+export function precheckFailurePrompt(failures, mode = "local") {
+  const list = failures.slice(0, 10).map((f) => `#### \`${f.command}\` (exit ${f.rc})\n${f.output ? `\`\`\`\n${f.output}\n\`\`\`` : "(no output)"}`).join("\n\n");
+  return `The repo's declared check commands failed in this worktree, before the PR is opened:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). Re-run each failing command, ${mode === "ci" ? `${LIGHT} otherwise, ` : ""}commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
 /** CI could not run (no workflow run, no checks, dispatch refused): the local fallback (#4167). */
 export function ciUnavailablePrompt() {
   return `CI verification is unavailable for this branch, so verification falls back to this host. Run every validate command locally (targeted, as the host rules say), fix any failure, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE} with each command's real exit code. Do not push or touch GitHub.`;
 }
 
+/** #4163: the extra host-rules line when the engine pinned the repo's toolchain on PATH; "" otherwise (prompt unchanged). */
+const toolchainRule = (t) => (t ? `\nThe engine pinned this repo's toolchain on PATH (${t}). Use it as is: do not install global shims or other versions and do not edit PATH; if the pinned tool itself fails, report it as a toolchain/environment problem instead of working around it.` : "");
+
 /** Builder call 1: investigate and write the contract. No code edits. */
-export function builderPlanPrompt(n) {
+export function builderPlanPrompt(n, { toolchain = null } = {}) {
   return `Resolve issue #${n} (read it with gh issue view ${n} --comments). This first step is PLANNING ONLY: do not edit code, do not commit.
 
-${HOST_RULES}
+${HOST_RULES}${toolchainRule(toolchain)}
 
 1. Write ${INVESTIGATION_FILE} as markdown with exactly these headings, concise, file:line wherever you cite code (no HTML comments):
 **Verdict**: CONFIRMED|ALREADY-FIXED|INVALID|BLOCKED
@@ -63,19 +76,20 @@ If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"alread
 {"requirements":[{"id":"R1","quote":"<verbatim sentence or checklist item from the issue>","disposition":"deliver|defer|post-deploy|not-applicable","why":"<required for defer and post-deploy>","evidence":"<file:line, required for not-applicable>"}],
  "deliverables":[{"id":"D1","path":"<file to change>","change":"<what>","requirements":["R1"]}],
  "preserve":[{"id":"P1","what":"<caller, contract or behaviour that must not change, with its path>"}],
- "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change>"}]}
+ "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change>"}],
+ "decisions":[{"id":"K1","choice":"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>","justification":"<why, with file:line>","source":"doc|lint|precedent|spec"}]}
 Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. A requirement you can do in this change is "deliver". List every file you will change as a deliverable; tests are always allowed.
-A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Then stop.
+A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when there is none. Then stop.
 
 ${BLOCK_RULES}`;
 }
 
 /** Builder call 2, same session: implement the frozen contract. */
-export function builderImplementPrompt(mode = "local") {
+export function builderImplementPrompt(mode = "local", { toolchain = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
   return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, and commit. Do not push or touch GitHub.
 
-${HOST_RULES}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
+${HOST_RULES}${toolchainRule(toolchain)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why, which the engine posts on the issue:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file you must change that the contract did not list.
@@ -83,6 +97,7 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 - {"kind":"defer|post-deploy","requirement":"R#","why":""}: a contracted requirement that becomes separate work or a post-deploy check. The engine files it as a tracked follow-up.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
 A new dependency between workspace packages in a package.json that no deliverable names (that package.json, with the package in its change) is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
+If the repository has scripts/check-devdocs-freshness.sh, its docs must move with the code: a behaviour change under the paths it checks needs the matching module dossier (devdocs/modules/*.md, per devdocs/index.yaml) updated in the same change. Run it against the base before writing the result; the engine runs it too and resumes you once if it fails.
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):
 ### Approach
@@ -111,6 +126,11 @@ export function structurePrompt(edges, mode = "local") {
   return `This change adds dependencies between workspace packages that the frozen contract does not name:\n${edges.slice(0, 30).map((e) => `- ${e.from} -> ${e.to} (${e.kind}, ${e.manifest})`).join("\n")}\n\nFor each one, add it to the contract with a reason, or remove it: either record {"kind":"add-deliverable","path":"<that package.json>","why":"<names the package and why this dependency is right>"} in ${RESULT_FILE}, or drop the dependency from the package.json and the code that needs it. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
+/** The repo's devdocs freshness rule failed on the committed change: update the named dossier(s) and commit. */
+export function docsPrompt(output, mode = "local") {
+  return `The repository's docs freshness check (scripts/check-devdocs-freshness.sh) fails on this change:\n${String(output ?? "").slice(0, 4000)}\n\nUpdate the module dossier it names (devdocs/modules/*.md; devdocs/index.yaml maps files to dossiers) to describe the behaviour you changed, in the dossier's existing style and in a few lines. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
 /** Human-only block reasons (#4124). Everything else agents resolve: a dependency, a split, prod data monitoring can read. */
 export const HUMAN_BLOCK_REASONS = Object.freeze(["credentials", "spend", "promotion", "customer", "product-decision"]);
 
@@ -122,6 +142,27 @@ const BLOCK_RULES = `"blocked" needs a typed "block" in ${RESULT_FILE}, one of:
 
 export function blockCorrectionPrompt(problem) {
   return `Your ${RESULT_FILE} says "blocked", but ${String(problem).slice(0, 1000)}. That is not a block that needs a human.\n\n${BLOCK_RULES}\n\nEither do the work (fix, commit, update the stage notes and ${RESULT_FILE}) or write a valid typed "block". Do not push or touch GitHub.`;
+}
+
+/** refactor:split grouping call (#4211): no tools, no files; the only input is the compact symbol index. */
+export const GROUPING_SYSTEM = "You plan how to split one oversized source module into a package of smaller modules. You see only a symbol index (names, kinds, sizes, references); you have no tools and never see code. Reply with exactly one JSON object and nothing else.";
+
+/** The grouping prompt: fixed rules plus JSON of bin/lean/refactor.mjs compactIndex(). Its size depends on the index only, never on file length. */
+export function groupingPrompt(index) {
+  return `Group the top-level symbols of one module into cohesive new modules of a package. A codemod moves them verbatim and leaves the old module re-exporting every moved name.
+
+Index: "symbols" are top-level symbols {name, kind, lines, public}; "edges" are "from->to" references between them.
+
+Rules:
+- Module names are snake_case Python identifiers, unique, not equal to any symbol name.
+- Each symbol appears at most once. Symbols you leave out stay in the old module.
+- A moved symbol must not reference a symbol that stays: when you move a symbol, move everything it references (follow the edges).
+- Modules must not reference each other in a cycle; keep heavily cross-referenced symbols in one module.
+- Prefer a few modules of similar size grouped by what the symbols do.
+
+Reply with only {"<module>": ["<symbol>", ...], ...}.
+
+${JSON.stringify(index)}`;
 }
 
 export const REVIEWER_SYSTEM = `You are an independent conformance reviewer of one change. You did not write it. Read-only: use Read, Grep and Glob in the worktree.

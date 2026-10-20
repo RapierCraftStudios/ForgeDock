@@ -13,6 +13,7 @@ import { aggregate, DEFAULT_MIN_N } from "./aggregate.mjs";
 import { fetchGithubRecords, isValidRepo, toModel } from "./github-source.mjs";
 import { readLocalRuns, runsDir } from "./local-source.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
+import { edgeQuery, parseEdge, verdictMix } from "./query.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -34,10 +35,14 @@ delta against the previous version and a low-n flag for samples under 10. Missin
   --min-n N             low-n threshold (default ${DEFAULT_MIN_N})
   --release-times FILE  "<version> <epoch-seconds>" lines used to estimate versions of unversioned records
                         (default: git tags v* of the ForgeDock checkout)
+
+Audit queries (forge#4165; JSON, from structure_delta / run_terminal telemetry, no comment bodies read):
+  --edge FROM:TO        merged PRs that added the dependency or import edge FROM -> TO (e.g. @s/web:@s/db)
+  --milestone M         conformance verdict mix and per-day structure series for milestone M
 `;
 
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { since: null, repo: null, edge: null, milestone: null, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -51,6 +56,8 @@ export function parseArgs(argv) {
     if (name === "--since") o.since = take();
     else if (name === "--repo") o.repo = take();
     else if (name === "--release-times") o.releaseTimes = take();
+    else if (name === "--edge") { const v = take(); if (!parseEdge(v)) throw new Error("--edge must be FROM:TO"); o.edge = v; }
+    else if (name === "--milestone") o.milestone = take();
     else if (name === "--min-n") { const v = take(); if (!/^\d+$/.test(v)) throw new Error("--min-n must be a non-negative integer"); o.minN = Number(v); }
     else if (name === "--json") o.json = true;
     else if (name === "--refresh") o.refresh = true;
@@ -153,6 +160,11 @@ export async function buildReport(opts, deps = {}) {
   if (bound.note) (deps.warn ?? ((m) => process.stderr.write(`forgedock stats: ${m}\n`)))(bound.note);
   const gh = await fetchGithubRecords({ repo, since: bound.since, refresh: opts.refresh, useCache: opts.cache, gh: deps.gh, env,
     onProgress: deps.onProgress, sleep: deps.sleep, now: deps.now });
+  if (opts.edge || opts.milestone) { // forge#4165: audit query instead of the version report
+    const e = opts.edge ? parseEdge(opts.edge) : null;
+    const query = { ...(e ? { edge: { ...e, prs: edgeQuery(gh.records, e.from, e.to) } } : {}), ...(opts.milestone ? { mix: verdictMix(gh.records, gh.items, opts.milestone) } : {}) };
+    return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query };
+  }
   const model = toModel(repo, gh);
   const ghKeys = new Set(model.runs.map((r) => `${r.repo}#${r.issue}`));
   let local = [];
@@ -178,7 +190,7 @@ export async function runStats(argv, deps = {}) {
   }
   try {
     const report = await buildReport(opts, { onProgress: makeProgressPrinter(), ...deps });
-    process.stdout.write(`${opts.json ? renderJson(report) : opts.compact ? renderCompact(report) : renderMarkdown(report)}\n`);
+    process.stdout.write(`${opts.json || report.query ? renderJson(report) : opts.compact ? renderCompact(report) : renderMarkdown(report)}\n`);
     return 0;
   } catch (err) {
     process.stderr.write(`forgedock stats: ${err.message}\n`);

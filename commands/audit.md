@@ -94,6 +94,8 @@ Read `$ARGUMENTS` carefully. The user is describing a failure — extract:
 
 ### 1B: Find related GitHub artifacts
 
+Events first: `forgedock stats --repo {GH_REPO} --edge FROM:TO` (PRs that added an edge) or `--milestone M` (verdict mix, edge series) reads `structure_delta`/`run_terminal` telemetry. Read only the matched issues; parse comments below only when the events are missing.
+
 Start from whatever the user provides (issue number, PR number, or description) and expand outward:
 
 ```bash

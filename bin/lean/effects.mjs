@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, b
 import { makeIo } from "../engine-cli.mjs";
 import { makeProjector } from "../engine/projector.mjs";
 import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
+import { makeHeavyIo } from "./heavy.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -45,11 +46,15 @@ export function wrapLaneLimits(bin, args, limits) {
   return { bin: "systemd-run", args: ["--user", "--scope", "-q", ...(mem ? ["-p", `MemoryMax=${mem}`] : []), ...(cpu ? ["-p", `CPUQuota=${cpu}`] : []), "--", bin, ...args] };
 }
 
+/** #4211: a judgment call over data in the prompt only (the refactor:split grouping call): no tool can read a file. */
+export const noToolFlags = (caps) => (caps?.strictMcp ? ["--tools", ""]
+  : ["--disallowedTools", "Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]);
+
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null }) => {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
-    const flags = [...buildLeanSessionFlags(caps), ...(readOnly ? buildReadOnlyToolFlags(caps) : [])];
+    const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : [])];
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
       args: [String(issue)], cwd, bin, model, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
       logger: { log() {} },
@@ -186,22 +191,45 @@ export async function requiredChecksFor({ gh, repo, lane }) {
   return [...new Set(all.filter((x) => typeof x === "string" && x))];
 }
 
+/** Combined stdout+stderr kept per declared check command (tail). */
+const CHECK_OUTPUT_CAP = 64000;
+/** #4240: run a forge.yaml declared check command locally (no gh, no Actions); {rc, output}, rc 124 on timeout. */
+export function runCheckCommand({ command, cwd, timeoutMs = 300000 }) {
+  return new Promise((done) => {
+    let out = "", timedOut = false, child;
+    const add = (b) => { out += String(b); if (out.length > 2 * CHECK_OUTPUT_CAP) out = out.slice(-CHECK_OUTPUT_CAP); };
+    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] }); }
+    catch (e) { done({ rc: 127, output: String(e?.message ?? e) }); return; }
+    const kill = () => { try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* gone */ } } };
+    const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);
+    child.stdout.on("data", add); child.stderr.on("data", add);
+    child.on("error", (e) => { clearTimeout(timer); done({ rc: 127, output: `${out}${String(e?.message ?? e)}`.slice(-CHECK_OUTPUT_CAP) }); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const tail = out.slice(-CHECK_OUTPUT_CAP);
+      done(timedOut ? { rc: 124, output: `${tail}\n(timed out after ${Math.round(timeoutMs / 1000)}s)` } : { rc: Number.isInteger(code) ? code : 1, output: tail });
+    });
+  });
+}
+
 export function makeLeanIo({ repo }) {
   const base = makeIo();
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000 })).stdout;
   return {
-    gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
+    gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: makeHeavyIo({ host: makeHostProbe() }), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
     /** Names of the checks the base branch requires: classic protection plus rulesets (#4158). [] when neither has any. */
     async requiredChecks(lane) { return requiredChecksFor({ gh: run("gh"), repo, lane }); },
-    /** [{name, state: success|failure|pending}] for the PR's checks. */
+    /** [{name, state: success|failure|pending, url, head}] for the PR's checks; `head` is the PR head the rollup belongs to (#4240). */
     async checkStates(pr) {
-      const j = JSON.parse(await run("gh")(["pr", "view", String(pr), "-R", repo, "--json", "statusCheckRollup"]));
+      const j = JSON.parse(await run("gh")(["pr", "view", String(pr), "-R", repo, "--json", "statusCheckRollup,headRefOid"]));
       return (j.statusCheckRollup ?? []).map((c) => {
         const v = String(c.conclusion || c.state || "").toUpperCase();
         const state = ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(v) ? "success" : ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(v) ? "failure" : "pending";
-        return { name: c.name ?? c.context, state };
+        return { name: c.name ?? c.context, state, url: c.detailsUrl || c.targetUrl || null, head: j.headRefOid ?? null };
       });
     },
+    /** #4240: one declared check command (`bash -c`) in `cwd`; never throws. A timeout kills the process group and gives rc 124. */
+    runCommand: runCheckCommand,
     /** #4167 verify-by-CI: `gh workflow run` on the lane branch; inputs become -f key=value. */
     async dispatchWorkflow({ workflow, ref, inputs = {} }) {
       await run("gh")(["workflow", "run", String(workflow), "-R", repo, "--ref", String(ref), ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
@@ -236,9 +264,40 @@ export function makeLeanIo({ repo }) {
       for (const l of out.split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) map[k] = Number(n); }
       return map;
     },
+    /**
+     * forge#4163: forge.yaml env.setup, once per fresh lane worktree: `bash -c <command>` in cwd with the lane env.
+     * Resolves {exit, stdout, stderr} (output tails); a non-zero exit, timeout or spawn error never throws.
+     */
+    runSetup({ cwd, command, env = null, timeoutMs = 15 * 60000 }) {
+      return new Promise((res) => {
+        execFile("bash", ["-c", command], { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+          const tail = (x) => String(x ?? "").slice(-2000);
+          if (!err) return res({ exit: 0, stdout: tail(stdout), stderr: tail(stderr) });
+          const exit = Number.isInteger(err.code) ? err.code : 1;
+          const why = err.killed ? `timed out after ${Math.round(timeoutMs / 1000)}s` : typeof err.code === "string" ? err.code : "";
+          res({ exit: exit === 0 ? 1 : exit, stdout: tail(stdout), stderr: tail([stderr, why].filter(Boolean).join("\n")) });
+        });
+      });
+    },
     /** forge#4159: scripts/structure-delta.sh over base...HEAD in cwd; null on any failure (never fails a run). */
     async structureDelta({ cwd, base }) {
       try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
+    },
+    /**
+     * The target repo's own docs-move-with-code rule, when it has one (scripts/check-devdocs-freshness.sh, forge#4185),
+     * over base...HEAD in cwd. null when the repo has no such script or it cannot run (exit 2+, timeout): never blocks.
+     * Otherwise {ok, output} with the script's stdout+stderr (exit 0 = ok, exit 1 = stale docs).
+     */
+    async docsFreshness({ cwd, base }) {
+      const s = join(cwd, "scripts", "check-devdocs-freshness.sh");
+      if (!existsSync(s)) return null;
+      try {
+        const r = await pexec("bash", [s, base], { cwd, timeout: 60000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PR_BODY: "" } });
+        return { ok: true, output: String(r.stdout ?? "") };
+      } catch (e) {
+        if (e?.code !== 1) return null;
+        return { ok: false, output: `${e.stdout ?? ""}${e.stderr ?? ""}`.slice(0, 6000) };
+      }
     },
     /** #4162: processes left running inside a lane worktree (Linux /proc). */
     proc: { inDir: async (dir) => procsInDir(dir), alive: pidAlive, kill: (pid, sig) => { try { process.kill(pid, sig); } catch { /* already gone */ } } },

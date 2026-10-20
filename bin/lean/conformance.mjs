@@ -12,6 +12,8 @@ import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 export const DISPOSITIONS = Object.freeze(["deliver", "defer", "not-applicable", "post-deploy"]);
 /** Dispositions the engine files as a tracked follow-up issue before anything merges. */
 export const TRACKED = Object.freeze(["defer", "post-deploy"]);
+/** forge#4165: where a plan decision's justification comes from; audits filter on lint|precedent. */
+export const DECISION_SOURCES = Object.freeze(["doc", "lint", "precedent", "spec"]);
 const REQ_STATUS = ["implemented", "partial", "missing", "deferred", "post-deploy", "not-applicable"];
 const COVER_STATUS = ["covered", "narrowed", "missing"];
 const PRESERVE_STATUS = ["intact", "violated", "unverified"];
@@ -80,6 +82,12 @@ export function validateContract(c, issueText) {
   if (reqs.some((r) => r?.disposition === "deliver") && !dels.length) problems.push("deliver requirements but no deliverables");
   for (const d of dels) if (!d?.id || !d?.path) problems.push(`deliverable without id or path: ${JSON.stringify(d).slice(0, 80)}`);
   for (const p of Array.isArray(c.preserve) ? c.preserve : []) if (!p?.id || blank(p?.what)) problems.push("preserve entry without id or what");
+  // forge#4165: decision provenance is optional (contracts frozen before it stay valid) and checked when present.
+  if (c.decisions != null && !Array.isArray(c.decisions)) problems.push("decisions must be an array");
+  for (const k of Array.isArray(c.decisions) ? c.decisions : []) {
+    if (!k?.id || blank(k?.choice)) problems.push(`decision without id or choice: ${JSON.stringify(k ?? null).slice(0, 80)}`);
+    else if (!DECISION_SOURCES.includes(k?.source)) problems.push(`${k.id}: decision source must be one of ${DECISION_SOURCES.join("|")}`);
+  }
   if (!Array.isArray(c.validate) || !c.validate.length) problems.push("the contract names no validate[] commands");
   else for (const v of c.validate) if (!v?.id || blank(v?.command)) problems.push("validate entry without id or command");
   if (JSON.stringify(c).length > MAX_CONTRACT_CHARS) problems.push(`the contract is over ${MAX_CONTRACT_CHARS} characters; keep quotes to the requirement sentence and descriptions short`);
