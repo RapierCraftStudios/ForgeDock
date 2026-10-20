@@ -19,7 +19,7 @@ import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { repoKey } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
-import { readTestMap, selectCommands, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
+import { readTestMap, readTestMapAtRef, selectCommands, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
 import { computeTrigger, TRIGGER_MODES } from "./review-trigger.mjs";
@@ -197,6 +197,7 @@ export async function runCore(o) {
   let ctxLane = null; // forge#4275: rerun | child | first, set once the issue is read
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
+  let recoverUnlabelled = false; // #4297: the recovery lane removed needs-human; any end but merged puts it back
   const runId = `${issue}-${t0}`;
   let runTmp = null;
   let sparse = null; // #4221: {excluded, maxKb} when the lane worktree is a sparse checkout; null leaves prompts unchanged
@@ -309,6 +310,12 @@ export async function runCore(o) {
       context_pack: ctxCfg.mode, ...(ctxLane ? { lane_type: ctxLane } : {}) }; // forge#4275: the on/off A/B groups runs by these
     ev(term);
     await emit(term);
+    if (recoverUnlabelled && !["merged", "needs-human"].includes(reason)) { // #4297: needsHuman() relabels on its own path
+      try {
+        await post("FORGE:NEEDS_HUMAN", `## Needs human\n${recoveryEvidence(reason, code, detail)}\n\n_${usageLine()}_`);
+        await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
+      } catch { /* best effort */ }
+    }
     if (["needs-human", "engine-error", "dependency-open", "dependency-blocked", "dependency-unreadable", "decomposed"].includes(reason)) {
       const wf = ["investigating", "building", "in-review"].map((x) => `workflow:${x}`).join(",");
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", wf]); } catch { /* best effort */ }
@@ -324,9 +331,11 @@ export async function runCore(o) {
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...extra };
     return done;
   }
+  /** #4297: what a recovery lane that did not merge tried and how it ended; the issue stays needs-human with this. */
+  const recoveryEvidence = (reason, code, detail) => `Recovery pass for \`${recover.code}\` (attempt ${recover.attempt}) did not merge: it ended \`${reason}\`${code ? ` (\`${code}\`)` : ""}${String(detail ?? "").trim() ? `: ${String(detail).trim().split("\n")[0].slice(0, 300)}` : ""}. The issue stays \`needs-human\`.`;
   async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR, extra = {}) {
     try {
-      await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}\n\n_${usageLine()}_`);
+      await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${recoverUnlabelled ? `\n\n${recoveryEvidence("needs-human", code, "")}` : ""}\n\n_${usageLine()}_`);
       await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
     } catch { /* best effort */ }
     return finish("needs-human", why, { code, ...extra, ...(recover ? { recovery: true } : {}) }, code);
@@ -687,6 +696,7 @@ export async function runCore(o) {
     if (recover) {
       // #4267: the batch decided to recover this issue itself; the label goes so the issue is live again.
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", "needs-human"]); } catch { /* best effort */ }
+      recoverUnlabelled = true;
       try {
         await post("FORGE:DECISION", `## Decision: recovery pass for \`${recover.code}\` (attempt ${recover.attempt})\n**What**: removed \`needs-human\` and resumed the open PR / branch on \`${lane}\` (${(RECOVER_HOW[recover.code] ?? "rerun").split(".")[0]}).\n**Why**: \`${recover.code}\` is a mechanical outcome an agent can fix without operator input.\n**Alternative**: leave the issue \`needs-human\` and skip its dependents until the operator relaunches it.`);
       } catch { /* best effort */ }
@@ -863,7 +873,9 @@ export async function runCore(o) {
       const login = String(c?.author?.login ?? c?.user?.login ?? "");
       return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
     });
-    const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => c?.body ?? "")].join("\n\n");
+    // #4297: engine-posted `<!-- FORGE:` comments (FORGE:CONTEXT carries linked-issue text) are never quotable, as in scopeText
+    const isEngineComment = (b) => b.trimStart().startsWith("<!-- FORGE:");
+    const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => String(c?.body ?? "")).filter((b) => !isEngineComment(b))].join("\n\n");
     let trustedComments = trustedOf(iss), issueEdited = false;
     let issueText = textOf(iss, trustedComments);
     let scopeHash = contractHash(scopeText(iss, trustedComments)); // #4265: the edit signal and the frozen contract's provenance
@@ -1097,7 +1109,8 @@ export async function runCore(o) {
     let checkCommandsFailing = false; // #4273: a failed gate triggers the reviewer
     // #4272: an optional .forge/test-map.json picks the commands for the changed files; no map or no match keeps the list.
     const learnedCommands = (Array.isArray(o.precheck?.commands) ? o.precheck.commands : []).map((c) => String(c ?? "").trim()).filter(Boolean);
-    const testMap = io.runCommand ? await readTestMap([wt, cwd], io.fs?.read) : null;
+    // #4297: its commands run, so the map comes from the base ref (else the operator's checkout), never the lane worktree
+    const testMap = io.runCommand ? (await readTestMapAtRef(git, base)) ?? (await readTestMap([cwd], io.fs?.read)) : null;
     const pickChecks = () => { const m = testMap ? selectCommands(testMap, files) : []; return m.length ? { commands: m, source: "test-map" } : { commands: learnedCommands, source: "learned" }; };
     let picked = pickChecks();
     // #4270: the last result of each deterministic gate, as computed below; only reportVerify (verify.check_run) reads it

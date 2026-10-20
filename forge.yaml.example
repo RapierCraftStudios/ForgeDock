@@ -274,6 +274,7 @@ branches:
 #   # CONTEXT_PACK. shadow (default): compiled and recorded, prompt unchanged;
 #   # on: also appended to the plan prompt as hints; off: exactly as before.
 #   # Compare with `forgedock stats --context-ab`.
+#   # Linked-issue text in the pack never becomes quotable contract text.
 #   context_pack: shadow
 #   context_pack_sources: "graph,attempts,ledger,facts"   # drop a noisy source
 #   context_pack_bytes: 6144                              # hard cap
@@ -314,6 +315,12 @@ branches:
 #   # against saturating the Anthropic API rate limit in one burst on a large
 #   # ready set. Default: 12.
 #   max_concurrent: 12
+#
+#   # In-batch recovery (#4267): recovery lanes per issue for a mechanical
+#   # needs-human (ci.red, base.conflict, ...). A recovery that does not merge
+#   # is labelled needs-human again with its evidence. Default 1; 0 disables.
+#   recovery:
+#     max_attempts: 1
 #
 #   cascade:
 #     # Named preset — "all" (pick up everything, no caps, no heuristics),

@@ -87,6 +87,50 @@ OUTS="$(bash "$S" --stdout)"
 eq "wf commands" "$(printf '%s' "$OUTS" | jq -r '[.entries[].command] | sort | join("|")')" "./custom-check|bash scripts/verify.sh --strict|ruff check --fix|shellcheck scripts/*.sh"
 eq "wf globs" "$(printf '%s' "$OUTS" | jq -c '[.entries[] | {(.command): .globs}] | add')" '{"./custom-check":["**"],"bash scripts/verify.sh --strict":["**/*.sh"],"ruff check --fix":["**/*.py"],"shellcheck scripts/*.sh":["**/*.sh"]}'
 
+# ---- 5b. forge#4297: `- run: |` then env:/shell: ends the block; deploy/publish/release/push/secret steps dropped ----
+mkdir -p "$TMP/wf2/.github/workflows"; cd "$TMP/wf2" || exit 1
+git init -q -b main
+cat > .github/workflows/ci.yml <<'EOF'
+on:
+  push:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          npm test
+        env:
+          CI: true
+        shell: bash
+      - name: Lint
+        run: |
+          npm run lint
+        working-directory: .
+      - name: Publish to npm
+        run: npm run ship
+      - run: ./scripts/release.sh
+      - run: git push origin HEAD
+      - run: curl -H "token ${{ secrets.TOKEN }}" https://x
+      - run: >-
+          tsc
+          --noEmit
+        shell: bash
+  deploy:
+    name: Ship it
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./ship.sh
+  site:
+    name: Deploy site
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./build-site.sh
+EOF
+git add -A
+OUTS="$(bash "$S" --stdout)"
+eq "wf2 commands" "$(printf '%s' "$OUTS" | jq -r '[.entries[].command] | sort | join("|")')" "npm run lint|npm test|tsc --noEmit"
+
 # ---- 6. usage ----
 bash "$S" --repo-path "$TMP/missing" >/dev/null 2>&1; eq "bad repo path" "$?" 2
 bash "$S" --nope >/dev/null 2>&1; eq "unknown option" "$?" 2

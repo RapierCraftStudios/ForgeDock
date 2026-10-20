@@ -4,8 +4,9 @@
 /**
  * Optional repo caches for the pre-PR step (#4272): `.forge/test-map.json` (scripts/test-map.sh, file glob → check
  * command) picks the checks for the lane's changed files; `.forge/repo-facts.json` (scripts/repo-facts.sh) is cited to
- * the builder by path. Both are looked up in the lane worktree, then the main checkout. A missing or invalid file is
- * absent: the lane keeps forge.yaml `learned.test_commands` and today's prompts.
+ * the builder by path. The test map's commands are run, so it is read from the base ref, then the main checkout, never
+ * the builder-writable lane worktree (#4297); repo facts are looked up in the worktree, then the main checkout. A missing
+ * or invalid file is absent: the lane keeps forge.yaml `learned.test_commands` and today's prompts.
  *
  *   node bin/lean/testmap.mjs --map FILE --select FILE...   print the selected commands, one per line
  */
@@ -36,6 +37,12 @@ export async function readTestMap(dirs, read) {
     if (map) return map;
   }
   return null;
+}
+
+/** #4297: the valid test map committed at `ref` (`git show <ref>:.forge/test-map.json`), or null; never throws. */
+export async function readTestMapAtRef(git, ref) {
+  if (typeof git !== "function" || !ref) return null;
+  try { return parseTestMap(String((await git(["show", `${ref}:${TEST_MAP_FILE}`])) ?? "")); } catch { return null; }
 }
 
 /** Commands of entries with a glob matching a changed file: map order, deduped; a non-root cwd runs as `cd <cwd> && cmd`. */
