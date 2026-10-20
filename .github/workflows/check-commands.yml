@@ -40,6 +40,15 @@ on:
       - 'scripts/code-index.test.sh'
       - 'scripts/structure-delta.sh'
       - 'scripts/structure-delta.test.sh'
+      - 'scripts/symbol-index.py'
+      - 'scripts/symbol-index.mjs'
+      - 'scripts/symbol-index.test.sh'
+      - 'scripts/fixtures/symbol-index/**'
+      - 'scripts/refactor-verify.sh'
+      - 'scripts/refactor-verify.test.sh'
+      - 'scripts/symbol-move.py'
+      - 'scripts/symbol-move.test.sh'
+      - 'scripts/fixtures/symbol-move/**'
       - 'scripts/hotspots.sh'
       - 'scripts/hotspots.test.sh'
       - 'scripts/maintenance-scan.sh'
@@ -116,6 +125,15 @@ on:
       - 'scripts/code-index.test.sh'
       - 'scripts/structure-delta.sh'
       - 'scripts/structure-delta.test.sh'
+      - 'scripts/symbol-index.py'
+      - 'scripts/symbol-index.mjs'
+      - 'scripts/symbol-index.test.sh'
+      - 'scripts/fixtures/symbol-index/**'
+      - 'scripts/refactor-verify.sh'
+      - 'scripts/refactor-verify.test.sh'
+      - 'scripts/symbol-move.py'
+      - 'scripts/symbol-move.test.sh'
+      - 'scripts/fixtures/symbol-move/**'
       - 'scripts/hotspots.sh'
       - 'scripts/hotspots.test.sh'
       - 'scripts/maintenance-scan.sh'
@@ -395,6 +413,9 @@ jobs:
           # <!-- Added: forge#1609 -->
           bash scripts/check-spec-markers.sh commands/ .
 
+      - name: Install libcst for the symbol-move codemod test
+        run: python3 -m pip install --user --break-system-packages 'libcst==1.9.0'
+
       - name: Check Skill-loaded specs for positional-arg placeholders ($0-$9) in fenced blocks
         run: |
           # Claude Code rewrites $0..$9 in a skill body with the invocation's arguments, so
@@ -416,6 +437,9 @@ jobs:
           bash scripts/review-prepare.test.sh
           bash scripts/code-index.test.sh
           bash scripts/structure-delta.test.sh
+          bash scripts/symbol-index.test.sh
+          bash scripts/refactor-verify.test.sh
+          SYMBOL_MOVE_REQUIRE_LIBCST=1 bash scripts/symbol-move.test.sh
           bash scripts/hotspots.test.sh
           bash scripts/maintenance-scan.test.sh
           bash scripts/review-finalize.test.sh
@@ -496,8 +520,9 @@ jobs:
         run: bash scripts/check-test-wiring.sh
 
   spec-size-budget:
-    name: Spec-size budget (review specs may not grow)
+    name: Spec-size budget (every command spec is budgeted)
     runs-on: ubuntu-latest
+    # Every commands/**/*.md: growth <= 2% and <= 4 KB, new specs <= 4 KB, per-file ceilings in the script (#4164).
     # Release PRs (staging -> main) carry cumulative growth already checked per PR.
     if: github.event_name == 'pull_request' && !(github.head_ref == 'staging' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)
 
@@ -525,29 +550,3 @@ jobs:
           fi
           bash "$RUNNER_TEMP/check-spec-size.sh" "origin/${BASE_NAME}"
 
-  devdocs-freshness:
-    name: Devdocs freshness (bin/lean + scripts changes update docs)
-    runs-on: ubuntu-latest
-    # Release PRs (staging -> main) carry cumulative changes already checked per PR.
-    if: github.event_name == 'pull_request' && !(github.head_ref == 'staging' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)
-
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Run freshness fixtures
-        run: bash scripts/check-devdocs-freshness.test.sh
-
-      - name: Check NORTHSTAR.md pointers and devdocs selective loading
-        run: bash scripts/northstar-docs.test.sh
-
-      - name: Check bin/lean + scripts behaviour changes touch a dossier, NORTHSTAR.md Runtime map or a decision
-        env:
-          BASE_NAME: ${{ github.base_ref }}
-          # The PR body reaches the script through env only, never interpolated into the shell.
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: |
-          # Deterministic, no LLM (forge#4185). Exempt with a 'docs-not-needed: <reason>' line in the PR body.
-          bash scripts/check-devdocs-freshness.sh "origin/${BASE_NAME}"

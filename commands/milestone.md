@@ -1,6 +1,6 @@
 ---
 description: Create, manage, and ship milestones — the top-level planning layer for feature development
-argument-hint: "[create <name> | status | ship <slug> | sync <slug>]"
+argument-hint: "[create <name> [--plan <file>] [--greenfield] [--spike <path>] | status | ship <slug> | sync <slug>]"
 install: extras
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -88,6 +88,7 @@ Parse `$ARGUMENTS` to determine which action to take:
 | Input Pattern | Action |
 |--------------|--------|
 | `create <name>` or just a descriptive phrase | → **Create Milestone** |
+| `create <name> --plan <file>` / `--greenfield` / `--spike <path>` | → **Create Milestone**, greenfield mode (Step 4G) |
 | `status` (no args, or "status") | → **Show All Milestones** |
 | `status <slug>` | → **Show Milestone Detail** |
 | `ship <slug>` | → **Ship Milestone** |
@@ -104,6 +105,25 @@ The user provides a name or description. Extract:
 - **Title**: Short, descriptive (e.g., "LLM Extraction Platform", "API Expansion v1")
 - **Slug**: Lowercase, hyphenated, max 40 chars (e.g., `llm-extraction-platform`)
 - **Description**: What this milestone delivers, extracted from user's input
+
+Optional greenfield flags (strip them from the name before deriving title and slug): <!-- Added: forge#4175 -->
+
+| Flag | Meaning |
+|------|---------|
+| `--plan <file>` | Precomputed plan from `/bootstrap`: per issue a title, type, priority, size, dependencies, planned Affected Files and acceptance criteria. Implies greenfield mode. |
+| `--greenfield` | Greenfield mode: the milestone builds code that does not exist yet, so Step 4 code-read gating is replaced by Step 4G. |
+| `--spike <path>` | Spike doc declaring the `Repo layout` (implies greenfield mode). Default `docs/engineering/technical-spike.md`, repo-relative, same semantics as `commands/issue.md` `--spike`. |
+
+```bash
+PLAN_FILE=""; GREENFIELD=false; SPIKE_DOC="docs/engineering/technical-spike.md"
+# set from the flags above: --plan => PLAN_FILE + GREENFIELD=true; --greenfield => GREENFIELD=true; --spike => SPIKE_DOC + GREENFIELD=true
+# A plan with a spike doc declaring a Repo layout is greenfield even without the flag (same predicate as /issue Phase 3E).
+[ -n "$PLAN_FILE" ] && [ -f "$SPIKE_DOC" ] && grep -qiE '^#+[[:space:]].*repo layout' "$SPIKE_DOC" && GREENFIELD=true
+# Passed to every default-repo /issue call in Step 6; empty in brownfield mode.
+GREENFIELD_ARGS=""; [ "$GREENFIELD" = "true" ] && GREENFIELD_ARGS=" --greenfield --spike \"$SPIKE_DOC\""
+```
+
+Without any of these flags `GREENFIELD=false`, `GREENFIELD_ARGS` is empty and every step below behaves as in brownfield mode.
 
 ### Step 2: Create the GitHub milestone
 
@@ -126,6 +146,8 @@ git push origin milestone/{slug}
 ```
 
 ### Step 4: Scope decomposition
+
+**Greenfield mode** (`GREENFIELD=true`): skip 4A–4C and run **Step 4G** instead. Steps 2, 3 (the `milestone/{slug}` branch), 5, 6 and 6B run unchanged in both modes. Brownfield (`GREENFIELD=false`): Step 4G does not apply and 4A–4C below are mandatory. <!-- Added: forge#4175 -->
 
 **Investigation-gated decomposition** — do NOT skip code reads. The single-pass shallow-planning approach (one agent, whole milestone, no per-issue code reads) produces under-specified issues that ship incomplete. This step mandates per-proposed-issue investigation before any issue body is written. See `work-on/decompose.md` Phase D0 for the reference pattern that enforces this gate. <!-- Added: forge#293 -->
 
@@ -155,6 +177,20 @@ For each proposed issue, after completing the per-issue investigation in Step 4B
 - **Affected files**: Full list of files enumerated during the Step 4B code read (not estimated)
 - **Acceptance criteria**: Exhaustive and falsifiable. For coverage/refactor tasks: one criterion per affected call site or pattern, written as a grep/absence assertion. No cap on criteria count — the list must be complete enough that a reviewer can verify coverage without reading the implementation.
 
+**4G: Greenfield / precomputed plan (only when `GREENFIELD=true`)** <!-- Added: forge#4175 -->
+
+There is no code to read yet, so the per-issue code reads of 4B are skipped. The spike doc's `Repo layout` replaces them as the source of truth for paths:
+
+1. **Issue list**: with `--plan`, take the issues from `PLAN_FILE` as-is (title, type, priority, size, dependencies, planned Affected Files, acceptance criteria). Without a plan, enumerate them as in 4A and write each per 4C, reading the spike doc (layout, data model, route/API map) instead of code.
+2. **Validate planned paths**: write each issue body (Step 6 template) to an entity-scoped `mktemp` file and run the same deterministic check `/issue` Phase 3E uses. Exit 1 (`MISSING <path>`) or 2 (spike doc missing or no layout) → fix the plan or the spike layout; do not create that issue.
+   ```bash
+   type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+   AF_CHECK_SCRIPT=$(forge_resolve affected-files-check.sh)
+   [ -n "$AF_CHECK_SCRIPT" ] && bash "$AF_CHECK_SCRIPT" "$PLAN_ISSUE_BODY_FILE" --spike "$SPIKE_DOC"
+   ```
+   If the helper does not resolve, leave the check to `/issue` Phase 3E, which runs it again on every Step 6 call because `GREENFIELD_ARGS` carries `--greenfield --spike`.
+3. Acceptance criteria stay exhaustive and falsifiable (4B rule 3); the plan's `Depends on` order is kept.
+
 **Project ecosystem context** (from `forge.yaml`):
 - **Primary repo** (`{GH_REPO}`): The main project codebase at `{REPO_PATH}`
 - **Tech stack**: {review.tech_stack from forge.yaml, or read CLAUDE.md for project context}
@@ -168,7 +204,7 @@ Present the proposed issues to the user. Ask:
 
 ### Step 6: Create issues and assign to milestone
 
-**Issue body standard**: Use the **Pipeline Issue Template** from `issue.md` Phase 3D as the body structure for every issue created here. Do NOT use a bespoke inline template — the Pipeline Issue Template is the single canonical standard for all automated issue creation across the pipeline. The body content (Problem, Root Cause, Affected Files, Acceptance Criteria, Context, Dependencies) comes from the per-issue investigation in Step 4B. <!-- Added: forge#293 -->
+**Issue body standard**: Use the **Pipeline Issue Template** from `issue.md` Phase 3D as the body structure for every issue created here. Do NOT use a bespoke inline template — the Pipeline Issue Template is the single canonical standard for all automated issue creation across the pipeline. The body content (Problem, Root Cause, Affected Files, Acceptance Criteria, Context, Dependencies) comes from the per-issue investigation in Step 4B. <!-- Added: forge#293 --> In greenfield mode it comes from the Step 4G plan instead, and Affected Files are planned paths inside the spike's `Repo layout`. <!-- Added: forge#4175 -->
 
 **Route creation through `/issue`'s programmatic invocation contract** (`commands/issue.md`, added #2085) instead of calling `gh issue create` directly — this gets dedup (Phase 2D) and mandatory-section body validation (Phase 3F) for free. <!-- Changed: forge#2086 — route through /issue create-hook -->
 
@@ -213,7 +249,7 @@ BODY_EOF
 ```
 
 ```
-ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"{fix|feat|refactor}: {issue_title}\" --body-file \"${MILESTONE_ISSUE_BODY_FILE}\" --label \"{type}\" --label \"{priority}\" --milestone \"{TITLE}\""))
+ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"{fix|feat|refactor}: {issue_title}\" --body-file \"${MILESTONE_ISSUE_BODY_FILE}\" --label \"{type}\" --label \"{priority}\" --milestone \"{TITLE}\"${GREENFIELD_ARGS}"))
 ```
 
 ```bash

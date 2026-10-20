@@ -45,8 +45,30 @@ run "over 4 KB fails" 1
 reset; gen 5 >> commands/review-pr.md     # small growth under both limits
 run "small growth passes" 0
 
-reset; gen 5000 >> commands/other.md      # not a budgeted spec
-run "non-budgeted growth passes" 0
+# Every spec is budgeted (#4164): top-level and nested specs outside the old review list
+reset; gen 5000 >> commands/other.md
+run "formerly unbudgeted spec growth fails" 1; has "other spec flagged" "| \`commands/other.md\`"
+reset; gen 1000 > commands/work-on/nested.md; git add -A; git commit -qm nested; git push -q origin HEAD:staging 2>/dev/null; git fetch -q origin staging
+gen 100 >> commands/work-on/nested.md
+run "nested spec over 2% fails" 1
+git reset -q --hard HEAD~1; git push -q -f origin HEAD:staging 2>/dev/null; git fetch -q origin staging; reset
+reset; gen 2 >> commands/other.md
+run "unbudgeted-before small growth passes" 0
+
+# New specs: up to 4096 bytes
+reset; gen 100 > commands/brand-new.md; git add -A    # ~2.8 KB
+run "new spec under 4 KB passes" 0
+reset; gen 200 > commands/brand-new.md; git add -A    # ~5.6 KB
+run "new spec over 4 KB fails" 1; has "new spec flagged" "new spec >"
+
+# Per-file ceiling: commands/issue.md may not exceed 15360 bytes whatever the growth
+reset; head -c 15300 /dev/zero | tr '\0' 'x' > commands/issue.md; git add -A; git commit -qm issue; git push -q origin HEAD:staging 2>/dev/null; git fetch -q origin staging
+printf '%050d' 0 >> commands/issue.md                 # 15350 bytes: +0.3%, under the cap
+run "ceiling: under the cap passes" 0
+printf '%050d' 0 >> commands/issue.md                 # 15400 bytes: +0.65% (within 2%/4 KB) but over the cap
+run "ceiling: over the cap fails" 1; has "ceiling flagged" "OVER CEILING (15360 bytes)"
+run "ceiling: exempt label waives" 0 PR_LABELS="spec-size-exempt"
+git reset -q --hard HEAD~1; git push -q -f origin HEAD:staging 2>/dev/null; git fetch -q origin staging; reset
 
 reset; gen 100 > commands/review-pr.md    # shrink
 run "shrink passes" 0
@@ -89,9 +111,10 @@ run "copy without removal still fails" 1
 # Shared-helper stubs (forge#3778): the sourced-helper stub shape carries none of the markers, so converting an inlined block to a stub
 # is a net reduction, while re-pasting the full block still fails.
 STUB_LOC='type forge_resolve >/dev/null 2>&1 || for _r in "${FORGEDOCK_HOME:-}"; do . "$_r/scripts/lib/forge-resolve.sh"; done'
-reset; printf '%s\n' "$STUB_LOC" '. "$(forge_resolve lib/fence-bootstrap.sh)" || exit 1   # FENCE_BOOTSTRAP' 'HELPER_SCRIPT=$(forge_resolve x.sh)' >> commands/other.md
+# (appended to the large work-on.md so the byte budget stays out of the marker cases)
+reset; printf '%s\n' "$STUB_LOC" '. "$(forge_resolve lib/fence-bootstrap.sh)" || exit 1   # FENCE_BOOTSTRAP' 'HELPER_SCRIPT=$(forge_resolve x.sh)' >> commands/work-on.md
 run "one-tag-per-stub design passes" 0
-reset; : > commands/donor.md; printf '%s\n' "$STUB_LOC" 'HELPER_SCRIPT=$(forge_resolve x.sh)' >> commands/other.md
+reset; : > commands/donor.md; printf '%s\n' "$STUB_LOC" 'HELPER_SCRIPT=$(forge_resolve x.sh)' >> commands/work-on.md
 run "block converted to a stub passes" 0
 reset; printf '%s\n' "$STUB_LOC" 'HELPER_SCRIPT=""' >> commands/other.md
 run "stub plus a re-pasted resolver block fails" 1

@@ -95,7 +95,9 @@ export function renderContract(c, hash, { compact = false } = {}) {
   const disp = (r) => `${r.disposition}${r.tracked ? ` → ${r.tracked}` : ["defer", "post-deploy"].includes(r.disposition) ? " (filed after review accepts it)" : ""}${r.why ? ` (${escl(r.why)})` : ""}`;
   const req = c.requirements.map((r) => `| ${esc(r.id)} | ${esc(r.quote)} | ${esc(disp(r))} |`).join("\n");
   const del = (c.deliverables ?? []).map((d) => `| ${esc(d.id)} | \`${esc(d.path)}\` | ${esc(d.change)} | ${esc((d.requirements ?? []).join(", "))} |`).join("\n");
-  return `## Builder Contract (frozen \`${hash}\`)\n\n### Requirements\n| Id | From the issue | Disposition |\n| --- | --- | --- |\n${req}\n\n### Deliverables\n${del ? `| Id | Path | Change | Requirements |\n| --- | --- | --- | --- |\n${del}` : "None."}\n\n### Preserve\n${(c.preserve ?? []).map((p) => `- ${escl(p.id)}: ${escl(p.what)}`).join("\n") || "None."}\n\n### Validate\n${(c.validate ?? []).map((v) => `- ${escl(v.id)}: \`${escl(v.command).replace(/`/g, "'")}\``).join("\n") || NR}\n\n${json}`;
+  const dec = Array.isArray(c.decisions) && c.decisions.length // forge#4165: decision provenance
+    ? `\n\n### Decisions\n| Id | Choice | Justification | Source |\n| --- | --- | --- | --- |\n${c.decisions.map((k) => `| ${esc(k?.id)} | ${esc(k?.choice)} | ${esc(k?.justification)} | ${esc(k?.source)} |`).join("\n")}` : "";
+  return `## Builder Contract (frozen \`${hash}\`)\n\n### Requirements\n| Id | From the issue | Disposition |\n| --- | --- | --- |\n${req}\n\n### Deliverables\n${del ? `| Id | Path | Change | Requirements |\n| --- | --- | --- | --- |\n${del}` : "None."}\n\n### Preserve\n${(c.preserve ?? []).map((p) => `- ${escl(p.id)}: ${escl(p.what)}`).join("\n") || "None."}\n\n### Validate\n${(c.validate ?? []).map((v) => `- ${escl(v.id)}: \`${escl(v.command).replace(/`/g, "'")}\``).join("\n") || NR}${dec}\n\n${json}`;
 }
 /** {contract, hash, text} from a FORGE:CONTRACT comment body, or null. */
 export function parseContractComment(body) {
@@ -120,12 +122,12 @@ export function renderReview(rv, contract) {
 }
 
 /** FORGE:REVIEW in shadow mode: what the enforced gate would have done, without enforcing it. */
-export function renderShadowReview({ would, failures = [], review, contract, unfiled = [] }) {
+export function renderShadowReview({ would, failures = [], review, contract, degraded = null }) {
   const head = would === "conforms" ? "would PASS" : `would BLOCK (${escl(would)})`;
   const rows = review ? `\n\n${renderReview(review, contract).split("\n").slice(2).join("\n")}` : "";
   const fl = failures.length ? `\n\n**What the enforced gate would have flagged:**\n${failures.slice(0, 30).map((f) => `- \`${escl(f.code)}\`: ${escl(f.detail)}`).join("\n")}` : "";
-  const uf = unfiled.length ? `\n\n**Deferrals not filed in shadow mode:** ${unfiled.map((r) => `${escl(r.id)} (${escl(r.disposition)})`).join(", ")}` : "";
-  return `## Conformance Review (shadow mode: not enforced)\n**Gate verdict:** ${head}. Only a requirement found not implemented, or a regression, blocks in shadow mode.${fl}${uf}${rows}`;
+  const dg = degraded ? `\n\n**Review degraded:** the review stayed incomplete after the targeted re-ask; merged with label \`review-degraded\`, follow-up ${escl(degraded)}.` : "";
+  return `## Conformance Review (shadow mode: not enforced)\n**Gate verdict:** ${head}. In shadow mode a requirement not implemented (found by the review or the precheck), a regression, or a review without complete rows blocks; accepted deferrals are filed as follow-ups.${fl}${dg}${rows}`;
 }
 
 // ---- PR body ----
@@ -140,11 +142,28 @@ export function renderPrBody({ issue, investigation, contract, implementation, r
 }
 
 // ---- trajectory ----
+/**
+ * forge#4165: the merged change's structure delta as a compact table, or "" without one. `s` is the STRUCTURE_DELTA
+ * record built at merge: deps_added [{from,to,manifest}], new_edges [{from,to,file}], removed_edges [{from,to}],
+ * top_growth [{file,lines}], decisions [{id,source}].
+ */
+export function renderStructure(s) {
+  if (!s || typeof s !== "object") return "";
+  const list = (v, fn) => (Array.isArray(v) && v.length ? v.slice(0, 10).map(fn).join(", ") + (v.length > 10 ? `, +${v.length - 10} more` : "") : "none");
+  const rows = [
+    ["Package deps added", list(s.deps_added, (e) => `${e.from} → ${e.to}${e.manifest ? ` (${e.manifest})` : ""}`)],
+    ["Import edges added", list(s.new_edges, (e) => `${e.from} → ${e.to}${e.file ? ` (${e.file})` : ""}`)],
+    ["Import edges removed", list(s.removed_edges, (e) => `${e.from} → ${e.to}`)],
+    ["Top growth", list(s.top_growth, (g) => `${g.file} +${g.lines}`)],
+    ["Decision sources", list(s.decisions, (k) => `${k.id} ${k.source}`)],
+  ];
+  return `**Structure**\n| Delta | Value |\n| --- | --- |\n${rows.map(([k, v]) => `| ${k} | ${esc(v)} |`).join("\n")}\n\n`;
+}
 export function renderTrajectory(T) {
   const rows = [["Validate", T.validate], ["Plan", T.plan], ["Implement", T.implement], ...(T.verify ? [["Verify", T.verify]] : []), ["Review", T.review], ["PR", T.pr], ["Base Sync", T.baseSync ?? "not needed"], ["Merge", T.merge], ["Close", T.close]];
   const cellPair = (v) => {
     const [res, notes] = Array.isArray(v) ? v : [v, ""];
     return `${cell(res ?? "not reached")} | ${notes ? cell(notes) : "-"}`;
   };
-  return `## Pipeline Trajectory — #${T.issue}\n\n| Phase | Result | Notes |\n| --- | --- | --- |\n${rows.map(([p, v]) => `| ${p} | ${cellPair(v)} |`).join("\n")}\n\n**Decisions**\n${(T.decisions ?? []).length ? T.decisions.map((d) => `- ${line(d)}`).join("\n") : "- none"}\n\n**Anomalies**\n${(T.anomalies ?? []).length ? T.anomalies.map((d) => `- ${line(d)}`).join("\n") : "- none"}\n\n${T.usage ? `_${T.usage}_` : ""}`;
+  return `## Pipeline Trajectory — #${T.issue}\n\n| Phase | Result | Notes |\n| --- | --- | --- |\n${rows.map(([p, v]) => `| ${p} | ${cellPair(v)} |`).join("\n")}\n\n${renderStructure(T.structure)}**Decisions**\n${(T.decisions ?? []).length ? T.decisions.map((d) => `- ${line(d)}`).join("\n") : "- none"}\n\n**Anomalies**\n${(T.anomalies ?? []).length ? T.anomalies.map((d) => `- ${line(d)}`).join("\n") : "- none"}\n\n${T.usage ? `_${T.usage}_` : ""}`;
 }

@@ -56,7 +56,8 @@ Commands are classified by role. Each role has a max line count — beyond this,
 
 `scripts/check-spec-size.sh` (job `spec-size-budget` in `check-commands.yml`, PRs only) enforces a budget that is independent of the line-count `.baselines`; the baseline is refreshed on release via `/forge-stats baseline`. It compares bytes against the PR base:
 
-- `review-pr.md`, `review-pr-staging.md`, `work-on/remediate.md`, `work-on/review.md`, `work-on.md` may not grow by more than 2% or 4 KB. Shrinking always passes.
+- Every `commands/**/*.md` spec may not grow by more than 2% or 4 KB; a new spec may be at most 4 KB. Shrinking always passes.
+- Per-file hard ceilings (`CEILINGS` in the script) cap a spec whatever its growth: `commands/issue.md` 15 KB (its procedure lives in `scripts/issue-create.sh`, #4164).
 - No `commands/**` file may gain a copy of a canonical block (FORGE_ROOT bootstrap, TRUSTED_SCRIPT/HELPER_SCRIPT resolver, FENCE_BOOTSTRAP anchor); the per-file marker count may not rise. The shared helpers (`scripts/lib/forge-resolve.sh`, `scripts/lib/fence-bootstrap.sh`) are sourced through marker-free stubs, so a conversion reads as a net reduction.
 - Exemption: the `spec-size-exempt` PR label only (needs triage rights; a PR-body marker is not honoured). The job summary lists the per-file delta and any waiver.
 

@@ -55,6 +55,7 @@ If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pi
 | [`review`](#review-optional) | No | Context injected into review agents |
 | [`devdocs`](#devdocs-optional) | No | Devdocs knowledge tree path |
 | [`verification`](#verification-optional) | No | Health-check patterns |
+| [`execution`](#execution-optional) | No | `forgedock orchestrate`: run lanes in sandboxes instead of host processes (`mode: local\|remote\|hybrid`, `max_remote`) |
 | [`verify`](#verify-optional) | No | Core work-on: run lane verification on CI runners instead of the host (`mode: local\|ci\|hybrid`) |
 | [`billing`](#billing-optional) | No | Enable financial integrity audit phase |
 | [`adaptive_scripts`](#adaptive_scripts-optional) | No | Per-repo script override configuration |
@@ -407,6 +408,7 @@ orchestration:
 | `max_concurrent` | integer | No | Max concurrent top-level `/work-on` dispatches. It does not bound cascade growth; under `policy: all` it raises drain and spawn throughput together. Default: 12. |
 | `breaker.errors` / `breaker.window_min` | integer | No | `forgedock orchestrate` circuit breaker (#4121): after `errors` engine-errors within `window_min` minutes the batch stops admitting lanes, lets running lanes finish, and keeps the rest pending for `--resume`. `errors: 0` turns it off. Default: 3 in 30 |
 | `max_deferrals` | integer | No | `forgedock orchestrate`: requeues of one issue after a non-host `deferred` (usage limit, merge/push transient, CLI idle, lease held, gh unavailable) before its row is final. `host.busy` deferrals are not capped. Default: 3 |
+| `global_parallel` | integer | No | `forgedock orchestrate` (#4191): host-wide cap on running lanes across every batch and repo on the host, enforced through the host lane registry (`~/.forge/sched/`, or `FORGEDOCK_SCHED_DIR`). A freed slot goes to the highest-priority queued issue (`priority:P<n>` / `P<n>` labels, unlabelled P2); within a priority, slots are shared across repos by weight (#4193: `forgedock sched weight <owner/repo> N`, `--clear` resets; default equal, FIFO inside a repo), and priority always dominates weights; running lanes are never preempted and `--parallel` K still bounds each batch. `forgedock sched cap N` overrides it live for the whole host (`--clear` reverts); `forgedock sched show` lists the weights, slots and the queue. Default: unset (no global cap) |
 | `cascade.policy` | string | No | `all` \| `balanced` \| `conservative`. Default: `balanced` |
 | `cascade.max_generation` | integer or `"unlimited"` | No | Max cascade generation admitted at Phase 1 resolve time. Default: 1 |
 | `cascade.batch_max_generation` | integer | No | Finite maximum member generation that an automated P3 batch may aggregate. Default: 2 |
@@ -471,6 +473,27 @@ pipeline:
 
 ---
 
+## `execution` (OPTIONAL)
+
+Owner opt-in for the paid API agent backend (#4257). The API backend is **never the default**: under `--backend auto` (the default) ForgeDock uses the `claude` CLI, and when no CLI is available it fails with `CLI_BACKEND_UNAVAILABLE` instead of billing `ANTHROPIC_API_KEY`.
+
+```yaml
+execution:
+  # Use the API backend when `auto` finds no usable claude CLI. Takes effect only
+  # together with the env var FORGEDOCK_ALLOW_API_BACKEND=1 on the host.
+  agent_backend: api
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `agent_backend` | string | No | `api` approves the API backend as the `auto` fallback, only when `FORGEDOCK_ALLOW_API_BACKEND=1` is also set. Any other value, or no value, means `auto` never selects `api`. |
+
+An explicit `--backend api` / `FORGEDOCK_BACKEND=api` still selects the API backend without this section; that flag is itself the explicit choice.
+
+**Commands that use this section**: `forgedock run`, `forgedock run-issue`, `forgedock backend-check`
+
+---
+
 ## `engine` (OPTIONAL)
 
 Per-command `--model` and `--max-turns` for the CLI backend (`forgedock run-issue` phases and `forgedock run <command>`). Opt-in: with no keys set, the `claude` invocation is unchanged and uses the CLI's own default model with no turn bound. `forge.yaml` is parsed one level deep, so settings are **flat** keys under `engine:`, named `<key>_model` and `<key>_max_turns`, where `<key>` is the command name with every non-alphanumeric character replaced by `_`.
@@ -491,7 +514,7 @@ engine:
 | `<key>_max_turns` | integer | No | Positive integer passed as `--max-turns`. Invalid values are ignored. |
 
 | `path` | string | No | `core` (default), `full`, `lean` or `auto`. `core` is the lean work-on (`bin/lean/`): a planning call that writes a frozen contract, an implement call in the same session, one read-only conformance reviewer, GitHub as the register (see `conformance`). `lean` and `auto` are aliases of `core`; `full` runs the legacy multi-phase pipeline and is required for `--retry` and `--wait-lease`. The `--path` flag overrides. `lean_reviewer_model` sets the reviewer model (default `claude-sonnet-5-5`); the builder uses `--model` or the CLI default. `forgedock orchestrate <issues...> [--parallel K] [--lane L]` runs the core per issue (K default 3, lane default `staging`) and honours `**Depends on**` ordering among the given issues. |
-| `conformance` | string | No | Core work-on conformance gate. The builder first writes a contract (requirements quoted verbatim from the issue and maintainers' comments, deliverables, preserve constraints, validate commands), which the engine freezes and posts as `FORGE:CONTRACT`; changes go only through typed amendments (`FORGE:AMENDMENT`). A deterministic precheck (scope, validation, deferrals) and a row-based conformance review follow, and the engine computes the verdict. `shadow` (default): the verdict is posted in `FORGE:REVIEW` and logged (`CONFORMANCE_SHADOW` event) but only what the previous reviewer blocked on still blocks (a requirement found not implemented, a regression), plus the precheck's equivalent: a validate command that ran and failed, or a deliver requirement the builder reported as not implemented (#4160). These block before any reviewer run. A validate step with no recorded result, scope creep and amendment problems are recorded only. Deferrals are not filed. `enforce`: every failure blocks (one same-session builder resume, then `needs-human` with a `conformance.*`/`review.*` code, see docs/OUTCOME-CODES.md); deferrals the reviewer accepts are filed in one batched follow-up issue (`scripts/file-deferred-followups.sh`) and linked in the PR body and a `FORGE:TRACKED` comment before merge. |
+| `conformance` | string | No | Core work-on conformance gate. The builder first writes a contract (requirements quoted verbatim from the issue and maintainers' comments, deliverables, preserve constraints, validate commands), which the engine freezes and posts as `FORGE:CONTRACT`; changes go only through typed amendments (`FORGE:AMENDMENT`). A deterministic precheck (scope, validation, deferrals) and a row-based conformance review follow, and the engine computes the verdict. `shadow` (default): the verdict is posted in `FORGE:REVIEW` and logged (`CONFORMANCE_SHADOW` event) but only what the previous reviewer blocked on still blocks (a requirement found not implemented, a regression), plus the precheck's equivalent: any `conformance.unimplemented` precheck or amendment failure (a validate command that failed or has no recorded result, a deliver requirement the builder reported as not implemented, an invalid amendment; #4160). These block before any reviewer run. Scope creep and omissions are recorded only. A review still incomplete or inconsistent after one targeted re-ask (only the missing ids) ends `needs-human`, or with `review_incomplete: degraded` merges with a `review-degraded` PR label and a tracked follow-up. Accepted deferrals are filed and linked, as in enforce. `scripts/calibration.mjs --shadow` reports the per-repo shadow verdict mix and when to switch to enforce. `enforce`: every failure blocks (one same-session builder resume, then `needs-human` with a `conformance.*`/`review.*` code, see docs/OUTCOME-CODES.md); deferrals the reviewer accepts are filed in one batched follow-up issue (`scripts/file-deferred-followups.sh`) and linked in the PR body and a `FORGE:TRACKED` comment before merge. |
 | `cli_idle_minutes` | number | No | Core builder idle timeout (#4112): the builder CLI runs with `--output-format stream-json` and is killed (code `cli.idle`) when it shows no stream activity for this many minutes. The run log records the last tool call and the live child processes. Default 15. |
 | `cli_max_minutes` | number | No | Absolute ceiling for a core builder session (code `cli.timeout`), replacing the fixed 60-minute kill. A session that keeps making progress is never idle-killed. Default 180. On either kill, uncommitted work is committed as `wip(forge): checkpoint after <reason>` and the lane branch is pushed (with the push retry), the builder retries once from the checkpoint, and a second kill ends `deferred`; a rerun resumes from the branch. |
 | `lane_limits` | map | No | Cap each core lane's whole process tree (#4115), under `pipeline:` or `engine:`: `memory_max` (for example `3G`) and `cpu_quota` (for example `150%`). When set and `systemd-run --user --scope` works (probed once), the builder CLI is spawned as `systemd-run --user --scope -q -p MemoryMax=... -p CPUQuota=... -- claude ...`; elsewhere the caps are ignored. Write it nested or flat (`lane_limits_memory_max`, `lane_limits_cpu_quota`). While a builder runs the engine polls host load and memory every 15 s against the `admission` thresholds: over them it SIGSTOPs the lane's process group, under them SIGCONT, and never pauses longer than 10 minutes. |
@@ -526,6 +549,7 @@ verify:
   paths_input: changed_paths    # optional workflow_dispatch input that receives the changed paths (newline-separated)
   skip_paths: "*.md,docs/**"    # optional, comma-separated; default *.md,*.mdx,*.rst,*.txt,docs/**,devdocs/**
   max_rounds: 2                 # optional CI fix rounds before needs-human (default 2)
+  precheck_timeout_seconds: 300 # optional per-command timeout of the declared pre-PR checks (default 300)
 ```
 
 | Key | Type | Required | Description |
@@ -534,7 +558,8 @@ verify:
 | `workflow` | string | No | Workflow file name or id dispatched on the lane branch (`gh workflow run <workflow> --ref <branch>`). The engine waits for the `workflow_dispatch` run of the lane's head commit. Without it, the engine waits on the head commit's push-triggered check runs. |
 | `paths_input` | string | No | Name of a `workflow_dispatch` input that receives the changed paths, so the workflow can scope its jobs to the change. |
 | `skip_paths` | string | No | Comma-separated globs. A glob without `/` matches the basename anywhere; `**` spans directories. When every changed file matches, the lane skips CI verification (a docs-only lane runs no CI matrix). |
-| `max_rounds` | integer | No | Builder fix rounds for red CI (0–10, default 2). |
+| `max_rounds` | integer | No | Builder fix rounds for red CI (0–10, default 2). Also bounds the merge-time fix rounds and the declared-check fix rounds below, in every mode. |
+| `precheck_timeout_seconds` | integer | No | Timeout of each declared check command (1–3600, default 300); a timed-out command counts as failed (exit 124). |
 
 **Flow** (`ci`/`hybrid`, `bin/lean/verify.mjs` `runCiVerify`):
 
@@ -546,9 +571,111 @@ verify:
 
 Each verification emits a `CI_VERIFY` run-log/telemetry event (`mode`, `round`, `result`, `skipped`, `run_url`) and adds a **Verify** row to the trajectory.
 
+**Every mode, including the default `local` (forge#4240):**
+
+- **Declared check commands before the PR.** Each `learned.test_commands` entry (a block list under `learned:`) runs with `bash -c` in the lane worktree after the build commit, before review and before the PR, with the per-command timeout above. These run on the host and use no Actions minutes. If they all pass, there is no extra builder turn. A failure resumes the builder in its session with the command, its exit code and the output tail, then the commands run again, up to `max_rounds`. A round with no new commit, or exhausted rounds, is recorded as an anomaly and the lane continues, because CI stays the gate. The engine has no built-in command list: to run `scripts/ci-local.sh`, list it here. Each round emits a `PRECHECK_COMMANDS` run-log event (`round`, `results: [{command, rc}]`).
+- **Fix rounds at merge.** When a required check fails on the PR (`engine.merge_wait: required`), the failed jobs' logs (`gh run view --log-failed`, capped) go back to the builder session. The fixed head is re-reviewed and pushed, then the wait starts again. Still red after `max_rounds` (one budget shared with the `ci`/`hybrid` rounds above), or a round with no new commit, ends `needs-human` (`ci.red`). `max_rounds: 0` ends `ci.red` on the first failure. Each round emits a `CI_FIX_ROUND` run-log event (`trigger`, `round`, `jobs`). `merge_wait: all` is unchanged.
+
 **Cost:** `ci`/`hybrid` spend GitHub Actions minutes before review, so they are opt-in per repo. On the green path they add no LLM calls; each red CI round adds one builder resume. The merge gate (`engine.merge_wait`) is unchanged.
 
 **Commands that use this section**: core work-on (`forgedock run-issue`, `forgedock orchestrate`; `bin/engine-cli.mjs` `readVerify`)
+
+## `execution` (OPTIONAL)
+
+Where `forgedock orchestrate` runs its lanes (forge#4253). Block style only.
+
+```yaml
+execution:
+  mode: remote          # local (default) | remote | hybrid
+  max_remote: 4         # remote lanes running at once (default 0 = remote off)
+  provider: container   # default container when mode is not local
+  image: my/lane-image:1  # container provider: an image with git and forgedock; never pulled
+  secrets: GH_TOKEN,ANTHROPIC_API_KEY  # env var NAMES forwarded to the sandbox; nothing else is
+  # provider: remote (forge#4254), only when named explicitly:
+  # endpoint: https://runner-pool.example/v1  # sandbox HTTP API (protocol below)
+  # token_env: FORGEDOCK_SANDBOX_TOKEN        # credential NAME: read from the env, else the OS keychain
+  # cache_store: s3://lane-cache               # shared cache store the sandbox mounts
+  # allow_actions: false                       # true only to accept a GitHub Actions endpoint
+  # execution budget (forge#4255): flat keys, forge.yaml is parsed one level deep
+  budget_minutes: 600      # hard cap on sandbox-minutes per batch
+  budget_usd: 25           # hard cap on estimated sandbox USD per batch
+  day_budget_minutes: 2000 # hard cap on sandbox-minutes per host UTC day (all batches, schedd or not)
+  day_budget_usd: 80       # hard cap on estimated sandbox USD per host UTC day
+  on_budget: stop          # stop (default) | local: what the queue does once a cap is reached
+  cost_per_minute: 0.04    # USD per sandbox-minute when the provider reports no cost (default 0)
+```
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `mode` | string | No | `local` (default): lanes are detached host processes, as before. `remote`: lanes run in sandboxes of `provider`. `hybrid`: each lane is placed from facts (forge#4256, below). |
+| `max_remote` | integer | No | Remote lanes of the batch that may run at once. They take no slot of the host lane cap (`orchestration.global_parallel`, `forgedock sched cap`); the batch `--parallel` still applies. `0` (default) keeps lanes local. |
+| `provider` | string | No | `container` (reference: an ephemeral local container), `remote` (a runner pool or remote session over HTTP, forge#4254) or `local`. The default is `container` off `local` mode; `remote` is used only when named. Unknown names fail the batch start. |
+| `image` | string | No | Container provider image; it must provide `git` and `forgedock`. Started with `--pull never`. |
+| `secrets` | string | No | Comma-separated env var names copied from the dispatcher's env into the sandbox. The sandbox also gets `GH_REPO` (the target repo) and `FORGEDOCK_BATCH_ID`, and nothing else from the host. |
+| `endpoint` | string | `remote` | Base URL of the sandbox API. A GitHub Actions API (`api.github.com`, or any `/actions/` path) is refused unless `allow_actions: true`, so pre-review Actions minutes are never spent implicitly. Missing: the batch start fails (`execution.provider.misconfigured`). |
+| `token_env` | string | No | Name of the API credential, sent as `Authorization: Bearer`. Read from the env, else the OS keychain (service `forgedock`, account = the name: `secret-tool store --label forgedock service forgedock account NAME` on Linux, `security add-generic-password -s forgedock -a NAME -w` on macOS). Never written to the ledger, the batch state, logs or GitHub. |
+| `cache_store` | string | No | Shared cache store the remote sandbox mounts (sent as `cache.store` with `cache.key` = the repo). |
+| `allow_actions` | boolean | No | `true` accepts a GitHub Actions endpoint. Default `false`. |
+| `budget_minutes`, `budget_usd` | number | No | The `execution.budget` per batch: once the batch's sandbox minutes / estimated USD (settled lanes plus the running ones' elapsed time) reach the cap, no new remote lane is admitted. Missing, non-numeric or negative means no cap. |
+| `day_budget_minutes`, `day_budget_usd` | number | No | The same cap per host UTC day, summed over every batch on the host from the host-day store (`execution-budget.json` in `~/.forge/sched/`, or `FORGEDOCK_EXECUTION_BUDGET_FILE`). A corrupt or unreadable store refuses remote lanes while a day cap is set; remove the file to reset it. |
+| `on_budget` | string | No | `stop` (default): running lanes finish and the rest end `held` (`execution budget: ...`) for a later `--resume`. `local`: the rest run as detached host lanes. |
+| `cost_per_minute` | number | No | USD per sandbox-minute, used when the provider reports no cost of its own (the `container` provider never does). Default `0`. |
+
+**Lifecycle:** each sandbox is listed in the lane ledger (`~/.forge/ledger/<batch>/sandbox-<n>.json`, kind `sandbox`) before it starts and removed from it only after teardown succeeded: on success, failure, a lane that exits without a result, and adopt after `--resume`. A sandbox left by a killed dispatcher is reaped by `forgedock gc --apply` (scope `--sandboxes`). The container provider mounts the checkout's git dir read-only at `/src` (cloned to the container's own `/work`), `~/.forge/verify-cache` read-only at `/cache`, and the batch `lanes/` dir at `/result`.
+
+**Remote provider** (`bin/lean/sandbox-remote.mjs`, forge#4254). The sandbox is addressed by the id ForgeDock picks (`fdrsbx-<batch>-<issue>`), JSON over HTTP:
+
+| Request | Response |
+|---------|----------|
+| `POST /sandboxes` | Launch spec `{id, issue, batch, image, repo: {slug, url, ref}, cache: {store, key} \| null, env, command, result_file}`. The sandbox clones `repo.url` at `repo.ref`, mounts the cache, runs `command` (`forgedock run-issue ...`) with exactly `env` (the `secrets` names, resolved from the env or keychain, plus `GH_REPO` and `FORGEDOCK_BATCH_ID`). `429`/`503` = no capacity (`Retry-After` honoured). |
+| `GET /sandboxes/:id` | `{state}`: `pending`/`starting`/`running`, `exited`, or `404` = gone |
+| `GET /sandboxes/:id/logs?cursor=N` | `{text, cursor}`: lane log since `cursor`; appended to the batch lane log with secret values redacted |
+| `GET /sandboxes/:id/result` | The lane's result file (`404` until written) |
+| `GET /sandboxes/:id/usage` | `{minutes}`: billable sandbox minutes, set on the handle and the lane result (`sandbox.minutes`); without it, wall-clock minutes |
+| `DELETE /sandboxes/:id` | Teardown; `404` counts as torn down |
+
+**Start failures** (every provider): a sandbox that cannot start ends the lane `needs-human` with code `sandbox.start_failed`, not relaunched and not counted by the engine-error breaker; a capacity error ends it `deferred` (`sandbox.capacity`, backoff, bounded by `orchestration.max_deferrals`). See docs/OUTCOME-CODES.md. `forgedock gc --apply --sandboxes` tears a stale remote sandbox down through the same API (the checkout's forge.yaml `execution`).
+
+**Hybrid placement** (`mode: hybrid`, forge#4256, `bin/lean/execution.mjs` `placeLane`, no model call). Each lane is placed when it is admitted. The first matching rule wins:
+
+1. `max_remote: 0` → local.
+2. `verify.mode: ci` → local. Heavy validation already runs, and is billed, on CI, so the lane is not billed twice.
+3. A docs-only lane (issue label `docs`, `documentation` or `type:docs`) → local.
+4. Heavy expected validation → remote. This means a declared check command (`learned.test_commands`) is a type check, linter, test runner or build, or the repo has a heavy toolchain marker: `tsconfig.json`, an eslint config, a package.json `test`/`lint`/`typecheck`/`build` script, `Cargo.toml`, `go.mod`, `pyproject.toml`/`setup.cfg`/`pytest.ini`, `pom.xml` or `build.gradle`.
+5. A host without headroom → remote. "Without headroom" means MemAvailable is below `engine.min_free_mem_mb` + `engine.heavy_step_mem_mb`, or the load per core is above `engine.max_load_per_core` when that is set.
+6. Otherwise → local.
+
+A lane placed remote runs on the host instead when `max_remote` remote lanes are already running, or when the execution budget refuses it. In hybrid mode this happens whatever `on_budget` says. The decision `{where, reason}` (for example `fallback to local: max_remote 4 reached (heavy validation: tsc)`) is recorded:
+
+- in the batch row (`placement`);
+- in the trajectory (`Placement: ...`);
+- in the lane's FORGE:STATE as `placement: {where, reason, mode}`. The lane gets it as `run-issue --placement <local|remote> --placement-reason <text>`.
+
+**Cost and budget:** every remote lane's sandbox minutes and estimated cost (the provider's own usage report, e.g. the remote provider's `/usage` minutes, else wall-clock minutes × `cost_per_minute`) land in its row (`sandbox: {minutes, cost_usd, attempts}`, summed over relaunches), in `report.json`, in the printed table (`sbx-min`, `sbx-$` next to the token `cost`, shown only when a lane used a sandbox), in a `sandbox:` summary line with the budget state, and in FORGE:TELEMETRY as one `sandbox_usage` event per lane. The caps are plain arithmetic, no model call. The batch total is kept in the batch `state.json` and the day total in the host-day store, so both survive `--resume` and a schedd restart.
+
+**Commands that use this section**: `forgedock orchestrate` (`bin/engine-cli.mjs` `readExecution`), `forgedock gc`
+
+## `env` (OPTIONAL)
+
+Lane environment for the core work-on (#4163). With no keys set, lanes still pin the target repo's own toolchain:
+
+- **Package manager**: `package.json` `packageManager` (`pnpm|yarn|npm@x.y.z`, a `+sha…` suffix is ignored), else a `pnpm`/`yarn` line in `.tool-versions`. After the worktree is added the engine writes shims for it (`pnpm`+`pnpx`, `yarn`, or `npm`+`npx`) to `<run tmp>/toolchain/bin`. Each shim runs `corepack <pm>@<version>` (npm always via `npx -y`), or `npx -y` when corepack is not on PATH (yarn ≥ 2 via `@yarnpkg/cli-dist`). The shim dir goes first on the PATH of every runner call (builder and reviewer), so the builder's shell, its validate commands and git hooks (lefthook, husky) resolve the pinned version. `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` and `COREPACK_ENABLE_STRICT=0` are set. The builder prompt says the toolchain is pinned and not to install global shims.
+- **Node**: `.nvmrc`, else `.node-version`, else `.tool-versions` `nodejs`, else `package.json` `engines.node`. When the host `node` does not satisfy it, the run's trajectory shows a warning under **Anomalies**. Node is not switched.
+
+A repo with no pins and no `env` keys runs exactly as before: no shim dir, no env change, no prompt change.
+
+```yaml
+env:
+  toolchain: "pnpm@10.4.1"              # optional: overrides the detected package manager; "off" disables detection
+  setup: "bash scripts/reconcile-dev-db.sh"   # optional: run once per fresh lane worktree, before the builder
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `toolchain` | string | No | `<pnpm\|yarn\|npm>@<x.y.z>` replaces the detected package-manager pin; `off` disables all toolchain detection. An invalid value is ignored and recorded as an anomaly. |
+| `setup` | string | No | Shell command (`bash -c`) run once in each fresh lane worktree before the builder starts, with the lane's PATH and `TMPDIR`. Use it for environment drift the repo's migrations don't cover, for example a dev-database reconcile script. Timeout 15 min. A non-zero exit ends the lane `needs-human` with code `env.setup_failed`: an environment error, not a build failure. The builder never runs. |
+
+**Commands that use this section**: `forgedock run-issue`, `forgedock orchestrate` (core path; `bin/engine-cli.mjs` `readEnvConfig`)
 
 ---
 
@@ -1141,6 +1268,7 @@ These variables are read from the operator's runner environment, not from `forge
 | `FORGE_TRAIL_OVERRIDE_ASSOCIATIONS` | the resolved `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` value | Comma-separated `author_association` values prefiltering break-glass override candidates (the permission API stays authoritative). Never affects which FORGE markers count toward the gate. An approver with concealed org membership can show `CONTRIBUTOR`/`NONE`, so widen this variable (not the trail list) to accept them. An explicitly empty value means no override candidates. |
 | `FORGE_TRAIL_PIPELINE_LOGINS` | empty | Comma-separated GitHub logins (case-insensitive) that are the pipeline's own identity and can never approve a phase-trail break-glass override. The authors of trusted FORGE marker comments on the issue are added automatically. |
 | `FORGE_TRAIL_QG_SINCE` | `2026-10-07T03:40:12Z` | ISO-8601 UTC cutoff for the legacy `FORGE:QUALITY_GATE` grace. An issue whose trusted `FORGE:BUILDER:COMPLETE` comment was last updated before this time has `QUALITY_GATE` waived. Set to an empty string to disable the grace. A malformed or future value (including a runner clock earlier than this default) fails closed: the verifier exits 2, an infrastructure block rather than `MISSING`. |
+| `FORGEDOCK_ALLOW_API_BACKEND` | unset | Set to `1` (host owner approval) together with forge.yaml `execution.agent_backend: api` to let `--backend auto` use the paid API backend when no `claude` CLI is available. Without both, `auto` never selects `api` (#4257). |
 | `FORGE_TELEMETRY` | `on` | Set to `off` to disable gate telemetry. Gate scripts append one structured record per decision to a trusted `FORGE:TELEMETRY v1` comment; emission is best-effort and never changes a gate's output or exit code. See [TELEMETRY.md](TELEMETRY.md). |
 
 ### Install root resolution

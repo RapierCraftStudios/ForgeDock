@@ -36,6 +36,12 @@
  *   --dry-run                      Compute table(s) but do not write any files
  *   --verbose                      Verbose logging
  *   --issue <number>               Compute outcome for a single issue only (debugging)
+ *   --shadow                       Instead: the per-repo conformance-gate shadow verdict distribution (forge#4160),
+ *                                  read from FORGE:REVIEW comments, and whether to switch engine.conformance to enforce
+ *                                  (--repo accepts a comma-separated list)
+ *   --threshold <share>            --shadow: recommend enforce while would-block-on-incomplete stays under this share (default 0.10)
+ *   --min-runs <n>                 --shadow: minimum shadow reviews before recommending enforce (default 20)
+ *   --json                         --shadow: print JSON instead of the text table
  *
  * Exit codes:
  *   0  — success
@@ -75,6 +81,11 @@ const SCHEMA_VERSION = 1;
 // larger and cells accumulate samples more slowly.
 const DEFAULT_PROVENANCE_MIN_SAMPLES = 5;
 
+// forge#4160: the conformance gate graduates from shadow to enforce once incomplete reviews are rare.
+const DEFAULT_SHADOW_THRESHOLD = 0.10;
+const DEFAULT_SHADOW_MIN_RUNS = 20;
+const SHADOW_VERDICTS = ['pass', 'nonconforming', 'review.incomplete', 'review.inconsistent', 'review.unparseable'];
+
 // Survival rate threshold above which a cell is classified as PROVEN (eligible
 // for optional-agent de-escalation).
 const PROVENANCE_PROVEN_THRESHOLD = 0.90;
@@ -105,6 +116,10 @@ export function parseArgs(argv) {
     dryRun: false,
     verbose: false,
     issue: null,
+    shadow: false,
+    threshold: DEFAULT_SHADOW_THRESHOLD,
+    minRuns: DEFAULT_SHADOW_MIN_RUNS,
+    json: false,
   };
 
   for (let i = 2; i < argv.length; i++) {
@@ -120,6 +135,10 @@ export function parseArgs(argv) {
     else if (arg === '--dry-run') { args.dryRun = true; }
     else if (arg === '--verbose') { args.verbose = true; }
     else if (arg === '--issue' && argv[i + 1]) { args.issue = parseInt(argv[++i], 10); }
+    else if (arg === '--shadow') { args.shadow = true; }
+    else if (arg === '--threshold' && argv[i + 1]) { args.threshold = parseFloat(argv[++i]); }
+    else if (arg === '--min-runs' && argv[i + 1]) { args.minRuns = parseInt(argv[++i], 10); }
+    else if (arg === '--json') { args.json = true; }
   }
 
   return args;
@@ -812,6 +831,98 @@ export function publishTable(table, repoPath, dryRun = false) {
 // Main pipeline
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Shadow verdict distribution (forge#4160)
+// ---------------------------------------------------------------------------
+
+/**
+ * The shadow gate verdict in one FORGE:REVIEW comment body: "pass", or the would-block state
+ * (nonconforming | review.incomplete | review.inconsistent | review.unparseable). Null for anything else,
+ * including an enforced review.
+ * @param {string} body
+ * @returns {string|null}
+ */
+export function parseShadowVerdict(body) {
+  const b = String(body ?? '');
+  if (!b.includes('FORGE:REVIEW')) return null;
+  const m = /\*\*Gate verdict:\*\*\s*would (PASS|BLOCK \(([^)]+)\))/.exec(b);
+  if (!m) return null;
+  return m[1] === 'PASS' ? 'pass' : m[2].trim();
+}
+
+/**
+ * Per-repo counts and shares of shadow verdicts.
+ * @param {{repo: string, verdict: string}[]} records
+ * @returns {Record<string, {runs: number, counts: Record<string, number>, shares: Record<string, number>}>}
+ */
+export function shadowDistribution(records) {
+  const out = {};
+  for (const r of records ?? []) {
+    if (!r?.repo || !r?.verdict) continue;
+    const e = out[r.repo] ??= { runs: 0, counts: Object.fromEntries(SHADOW_VERDICTS.map((v) => [v, 0])), shares: {} };
+    e.runs++;
+    e.counts[r.verdict] = (e.counts[r.verdict] ?? 0) + 1;
+  }
+  for (const e of Object.values(out)) e.shares = Object.fromEntries(Object.entries(e.counts).map(([k, n]) => [k, e.runs ? Math.round((n / e.runs) * 1000) / 1000 : 0]));
+  return out;
+}
+
+/**
+ * enforce once there are at least minRuns shadow reviews and the would-block-on-incomplete share is under threshold.
+ * @param {{runs: number, counts: Record<string, number>}} entry
+ * @param {{threshold?: number, minRuns?: number}} [o]
+ * @returns {{mode: 'enforce'|'shadow', incompleteShare: number, reason: string}}
+ */
+export function recommendEnforce(entry, { threshold = DEFAULT_SHADOW_THRESHOLD, minRuns = DEFAULT_SHADOW_MIN_RUNS } = {}) {
+  const runs = entry?.runs ?? 0;
+  const share = runs ? (entry.counts?.['review.incomplete'] ?? 0) / runs : 0;
+  const pct = (x) => `${Math.round(x * 1000) / 10}%`;
+  if (runs < minRuns) return { mode: 'shadow', incompleteShare: share, reason: `only ${runs} shadow review(s); need ${minRuns}` };
+  if (share >= threshold) return { mode: 'shadow', incompleteShare: share, reason: `would-block-on-incomplete ${pct(share)} is not under ${pct(threshold)}` };
+  return { mode: 'enforce', incompleteShare: share, reason: `would-block-on-incomplete ${pct(share)} < ${pct(threshold)} over ${runs} runs` };
+}
+
+/**
+ * Shadow FORGE:REVIEW verdicts for one repo, from its issue comments.
+ * @param {string} repo
+ * @param {(path: string, flags: string[]) => string} [gh]
+ * @returns {{repo: string, issue: number|null, verdict: string}[]}
+ */
+export function fetchShadowRecords(repo, gh = ghApi) {
+  const out = gh(`repos/${repo}/issues/comments?per_page=100`, ['--paginate', '--jq', '.[] | select(.body | contains("<!-- FORGE:REVIEW -->")) | {issue_url, body}']);
+  const records = [];
+  for (const l of String(out).split('\n')) {
+    let c; try { c = JSON.parse(l); } catch { continue; }
+    const verdict = parseShadowVerdict(c?.body);
+    if (verdict) records.push({ repo, issue: Number(/\/issues\/(\d+)$/.exec(String(c.issue_url ?? ''))?.[1]) || null, verdict });
+  }
+  return records;
+}
+
+/** Text table: one row per repo with the verdict mix and the recommendation. */
+export function formatShadowReport(report) {
+  const lines = ['| Repo | Runs | ' + SHADOW_VERDICTS.join(' | ') + ' | Recommend |', '| --- | --- | ' + SHADOW_VERDICTS.map(() => '---').join(' | ') + ' | --- |'];
+  for (const [repo, e] of Object.entries(report.repos)) {
+    lines.push(`| ${repo} | ${e.runs} | ${SHADOW_VERDICTS.map((v) => `${e.counts[v] ?? 0} (${Math.round((e.shares[v] ?? 0) * 100)}%)`).join(' | ')} | ${e.recommendation.mode}: ${e.recommendation.reason} |`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * --shadow entry: per-repo distribution plus an enforce recommendation each.
+ * @returns {{shadow: true, repos: object}}
+ */
+export function runShadow(args, repoPath, gh = ghApi) {
+  const repos = String(args.repo || readForgeYaml(repoPath) || '').split(',').map((r) => r.trim()).filter(Boolean);
+  if (!repos.length) throw new Error('Cannot determine repo: no --repo flag and forge.yaml not found or missing project.owner/repo');
+  const records = repos.flatMap((r) => fetchShadowRecords(r, gh));
+  const dist = shadowDistribution(records);
+  const zero = () => Object.fromEntries(SHADOW_VERDICTS.map((v) => [v, 0]));
+  for (const r of repos) dist[r] ??= { runs: 0, counts: zero(), shares: zero() };
+  for (const e of Object.values(dist)) e.recommendation = recommendEnforce(e, { threshold: args.threshold, minRuns: args.minRuns });
+  return { shadow: true, repos: dist };
+}
+
 /**
  * Main entry point (exported for testing).
  *
@@ -821,6 +932,7 @@ export function publishTable(table, repoPath, dryRun = false) {
  */
 export async function run(args, repoPath) {
   _verbose = args.verbose;
+  if (args.shadow) return runShadow(args, repoPath);
 
   // Resolve repo name
   const repo = args.repo || readForgeYaml(repoPath);
@@ -965,6 +1077,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
   run(args, repoPath)
     .then(result => {
+      if (result?.shadow) {
+        process.stdout.write((args.json ? JSON.stringify(result, null, 2) : formatShadowReport(result)) + '\n');
+        process.exit(0);
+      }
       const table = result.table || result;
       const provenanceTable = result.provenanceTable || null;
       const errorCount = result.errorCount || 0;
