@@ -24,7 +24,7 @@
 #   Import graph: language-specific grep patterns (Python, JS/TS, Go, Rust, shell)
 #
 # Cache key: HEAD SHA — cache is a hit on unchanged HEAD, miss on new commit.
-# Works on Windows (Git Bash / WSL) and Linux. No bash-only hot-path tooling.
+# Works on Windows (Git Bash / WSL), Linux and macOS. Bash 3.2 portable: no associative arrays, mapfile, grep -P.
 #
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
@@ -369,44 +369,44 @@ echo "INFO: Building file-domain map..."
 
 # Read forge.yaml domain hints if available
 FORGE_YAML="${REPO_PATH}/forge.yaml"
-declare -A DOMAIN_PATTERNS
-DOMAIN_PATTERNS=(
-  ["commands"]="pipeline-commands"
-  ["scripts"]="pipeline-scripts"
-  ["services/api"]="api"
-  ["services/worker"]="worker"
-  ["web/src/app/billing"]="billing"
-  ["web/src/app/auth"]="auth"
-  ["services/api/auth"]="auth"
-  ["services/api/billing"]="billing"
-  ["services/api/db"]="database"
-  ["migrations"]="database"
-  [".github/workflows"]="ci-cd"
-  ["infra"]="infrastructure"
-  ["web/src"]="frontend"
+# Ordered prefix -> domain table, most specific first; the first matching prefix wins (forge#4235).
+# Parallel indexed arrays, not an associative array: bash 3.2 (stock macOS) has no `declare -A`,
+# and hash iteration order made services/api vs services/api/auth unspecified.
+DOMAIN_PREFIXES=(
+  "web/src/app/billing" "web/src/app/auth" "services/api/auth" "services/api/billing" "services/api/db"
+  "services/api" "services/worker" "migrations" ".github/workflows" "infra" "web/src" "commands" "scripts"
+)
+DOMAIN_LABELS=(
+  "billing" "auth" "auth" "billing" "database"
+  "api" "worker" "database" "ci-cd" "infrastructure" "frontend" "pipeline-commands" "pipeline-scripts"
 )
 
-# Read key_paths from forge.yaml if present (override defaults)
+# Read key_paths from forge.yaml if present: prepended so they override the defaults
 if [[ -f "$FORGE_YAML" ]]; then
   # Simple key_paths extraction — reads "domain: [patterns]" blocks under review.key_paths
   while IFS=: read -r key val; do
     key=$(echo "$key" | tr -d ' ')
     val=$(echo "$val" | tr -d ' "')
     if [[ -n "$key" && -n "$val" ]]; then
-      DOMAIN_PATTERNS["$val"]="$key"
+      DOMAIN_PREFIXES=("$val" "${DOMAIN_PREFIXES[@]}")
+      DOMAIN_LABELS=("$key" "${DOMAIN_LABELS[@]}")
     fi
   done < <(grep -A2 'key_paths:' "$FORGE_YAML" 2>/dev/null | grep '^\s*\w\+:' | head -20 || true)
 fi
+DOMAIN_COUNT=${#DOMAIN_PREFIXES[@]}
 
 # Map each file to its domain
 while IFS= read -r rel_path; do
   case "$rel_path" in .forge/*|*/node_modules/*|node_modules/*|*/__pycache__/*) continue ;; esac
   domain="unclassified"
-  for pattern in "${!DOMAIN_PATTERNS[@]}"; do
+  i=0
+  while [[ "$i" -lt "$DOMAIN_COUNT" ]]; do
+    pattern="${DOMAIN_PREFIXES[$i]}"
     if [[ "$rel_path" == $pattern* ]]; then
-      domain="${DOMAIN_PATTERNS[$pattern]}"
+      domain="${DOMAIN_LABELS[$i]}"
       break
     fi
+    i=$((i + 1))
   done
   echo -e "${rel_path}\t${domain}"
 done < "$FILE_LIST" >> "$DOMAIN_FILE" 2>/dev/null || true

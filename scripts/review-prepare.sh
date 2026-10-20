@@ -473,11 +473,17 @@ if [ "$REVIEW_MODE" != "BASE_SYNC_ONLY" ]; then
         _ito="${REVIEW_PREPARE_INDEX_TIMEOUT:-120}"; case "$_ito" in ''|*[!0-9]*|0) _ito=120 ;; esac
         _tbin=$(command -v timeout || command -v gtimeout || true)
         echo "review-prepare: building code index (limit ${_ito}s)" >&2
-        if [ -n "$_tbin" ]; then "$_tbin" "$_ito" bash "$CODE_INDEX_SCRIPT" --repo-path "$REPO_PATH" >/dev/null 2>&1; _irc=$?
-        else bash "$CODE_INDEX_SCRIPT" --repo-path "$REPO_PATH" >/dev/null 2>&1; _irc=$?; fi
+        # forge#4235: keep the build's stderr so a failure is diagnosable (its tail is echoed below); stdout stays discarded.
+        _ierr=$(mktemp "$OUT_DIR/.code-index-err-XXXXXX" 2>/dev/null) || _ierr=/dev/null
+        if [ -n "$_tbin" ]; then "$_tbin" "$_ito" bash "$CODE_INDEX_SCRIPT" --repo-path "$REPO_PATH" >/dev/null 2>"$_ierr"; _irc=$?
+        else bash "$CODE_INDEX_SCRIPT" --repo-path "$REPO_PATH" >/dev/null 2>"$_ierr"; _irc=$?; fi
         if [ "$_irc" -eq 0 ]; then INDEX_OK=1
         elif [ "$_irc" -eq 124 ]; then echo "review-prepare: code index timed out after ${_ito}s — skipping index slices (agents grep instead)" >&2
-        else echo "review-prepare: code index failed (exit $_irc) — skipping index slices (agents grep instead)" >&2; fi
+        else
+            echo "review-prepare: code index failed (exit $_irc) — skipping index slices (agents grep instead)" >&2
+            [ -s "$_ierr" ] && tail -n 20 "$_ierr" | sed 's/^/review-prepare: code-index: /' >&2
+        fi
+        [ "$_ierr" = /dev/null ] || rm -f "$_ierr"
     fi
     build_index_slice() {
         local domain="${1}" files

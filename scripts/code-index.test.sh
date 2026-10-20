@@ -69,5 +69,24 @@ C2=$(ls -d "$WORK"/out2/*/ 2>/dev/null | head -n 1)
 if grep -q '^helper_fn	src/app.py	' "$C2/symbols.tsv" 2>/dev/null; then ok; else bad "non-git build missed helper_fn"; fi
 if grep -qE 'venv_only_fn|worktree_only_fn' "$C2/symbols.tsv" 2>/dev/null; then bad "non-git build walked .venv/.claude"; else ok; fi
 
+# --- 5. bash 3.2 portable (forge#4235): stock macOS bash has no associative arrays or mapfile ---
+if grep -vE '^[[:space:]]*#' "$SCRIPT" | grep -qE '(declare|local|typeset) -[a-zA-Z]*A|mapfile|readarray|grep -[a-zA-Z]*P'; then
+  bad "code-index.sh stays bash 3.2 portable (no associative arrays / mapfile): $(grep -nE '(declare|local|typeset) -[a-zA-Z]*A|mapfile|readarray' "$SCRIPT" | head -n 3 | tr '\n' ' ')"
+else ok; fi
+
+# --- 6. file-domain map: the most specific prefix wins, deterministically ---
+DOM="$WORK/dom"; mkdir -p "$DOM/services/api/auth" "$DOM/web/src/app/billing" "$DOM/scripts"
+printf 'x = 1\n' > "$DOM/services/api/auth/login.py"; printf 'y = 1\n' > "$DOM/services/api/routes.py"
+printf 'export const p = 1\n' > "$DOM/web/src/app/billing/page.tsx"; printf 'echo hi\n' > "$DOM/scripts/x.sh"
+git -C "$DOM" init -q -b main; git -C "$DOM" add -A; git -C "$DOM" commit -qm init
+bash "$SCRIPT" --repo-path "$DOM" --output "$WORK/out3" > "$WORK/log4" 2>&1; rc=$?
+if [ "$rc" -eq 0 ]; then ok; else bad "domain fixture build exit $rc: $(head -c 400 "$WORK/log4")"; fi
+C3=$(ls -d "$WORK"/out3/*/ 2>/dev/null | head -n 1)
+for want in "services/api/auth/login.py	auth" "services/api/routes.py	api" "web/src/app/billing/page.tsx	billing" "scripts/x.sh	pipeline-scripts"; do
+  if grep -qxF "$want" "$C3/file_domain.tsv" 2>/dev/null; then ok; else bad "file_domain.tsv missing '$want': $(tr '\n' ' ' < "$C3/file_domain.tsv" 2>/dev/null)"; fi
+done
+q=$(bash "$SCRIPT" query --domain auth --repo-path "$DOM" --output "$WORK/out3" 2>/dev/null)
+if [ "$q" = "services/api/auth/login.py	auth" ]; then ok; else bad "query --domain auth returned '$q'"; fi
+
 echo "code-index tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
