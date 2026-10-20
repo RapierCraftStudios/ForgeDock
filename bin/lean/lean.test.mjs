@@ -2396,6 +2396,71 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add" && c.at(-1) === "feat/issue-7-lean"));
   });
 
+  // ---- #4221 sparse lane worktrees ----
+  const BIG = `100644 blob ${"a".repeat(40)} 3000000\tweb/openapi.json\x00100644 blob ${"b".repeat(40)}      12\tsrc/foo.js\x00`;
+  const sparseWorld = (o = {}, git1 = null) => {
+    const w = world(o);
+    const g = w.io.git;
+    w.io.git = async (a, x) => {
+      if (git1) { const r = await git1(a, x, w); if (r !== undefined) return r; }
+      if (a[0] === "ls-tree") { w.calls.push(["git", ...a]); return o.lsTree ?? BIG; }
+      if (a[0] === "rev-parse" && a[2] === "info/sparse-checkout") return "/repo/.git/worktrees/lean-7/info/sparse-checkout\n";
+      return g(a, x);
+    };
+    return w;
+  };
+  const gitCalls = (w, k) => w.calls.filter((c) => c[0] === "git" && c[1] === k);
+
+  it("#4221 fresh, resume and #4118 keepLocal paths add a sparse worktree when the ref has a large blob; WORKTREE_SPARSE is logged", async () => {
+    const keepLocal = async (a) => (a[0] === "rev-list" && a[1] === "--count" && String(a[2]).includes("refs/heads/feat/issue-7-lean") ? "1\n" : undefined);
+    for (const [name, w, ref] of [
+      ["fresh", sparseWorld(), "origin/staging"],
+      ["resume", sparseWorld({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean" }), "origin/feat/issue-7-lean"],
+      ["keepLocal", sparseWorld({}, keepLocal), "refs/heads/feat/issue-7-lean"],
+    ]) {
+      const dir = tmpDir("sparse-");
+      assert.equal((await run(w, { dir })).terminalReason, "merged", name);
+      const adds = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add");
+      assert.equal(adds.length, 1, name);
+      assert.equal(adds[0][3], "--no-checkout", name);
+      if (name === "keepLocal") assert.ok(!adds[0].includes("-B") && adds[0].at(-1) === "feat/issue-7-lean", "#4118: the local branch is never reset");
+      assert.deepEqual(gitCalls(w, "ls-tree")[0].slice(2), ["-r", "-l", "-z", ref], name);
+      assert.ok(gitCalls(w, "sparse-checkout").some((c) => c.includes("--no-cone")), name);
+      assert.ok(gitCalls(w, "read-tree").length >= 1, name);
+      assert.ok(Object.entries(w.files).some(([, t]) => t === "/*\n!/web/openapi.json\n"), `${name}: pattern file written`);
+      const ev = readLog(dir, 7).filter((e) => e.event === "WORKTREE_SPARSE");
+      assert.deepEqual(ev.map((e) => [e.excluded, e.excluded_bytes, e.max_kb]), [[1, 3000000, 1024]], name);
+      const impl = builders(w).find((c) => !/PLANNING ONLY/.test(c[4]))[4];
+      assert.match(impl, /sparse checkout: 1 tracked file\(s\) of 1024 KB or more/);
+      assert.match(builders(w).find((c) => /PLANNING ONLY/.test(c[4]))[4], /git sparse-checkout add/);
+    }
+  });
+
+  it("#4221 no large blob or sparseMaxKb 0 keeps today's plain worktree add and an unchanged prompt", async () => {
+    for (const [w, extra] of [[sparseWorld({ lsTree: "" }), {}], [sparseWorld(), { sparseMaxKb: 0 }]]) {
+      const dir = tmpDir("sparse-off-");
+      assert.equal((await run(w, { dir, ...extra })).terminalReason, "merged");
+      const adds = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add");
+      assert.deepEqual(adds.map((c) => c.slice(1)), [["worktree", "add", "-B", "feat/issue-7-lean", "/wt/lean-7", "origin/staging"]]);
+      assert.equal(gitCalls(w, "sparse-checkout").length, 0);
+      assert.equal(readLog(dir, 7).filter((e) => e.event === "WORKTREE_SPARSE").length, 0);
+      for (const c of builders(w)) assert.doesNotMatch(c[4], /sparse checkout/);
+    }
+    assert.equal(gitCalls(sparseWorld(), "ls-tree").length, 0);
+  });
+
+  it("#4221 a failing sparse step falls back to a full checkout: WORKTREE_SPARSE_FALLBACK, an anomaly, and the lane still merges", async () => {
+    const dir = tmpDir("sparse-fb-");
+    let failed = false;
+    const w = sparseWorld({}, async (a) => { if (a[0] === "read-tree" && !failed) { failed = true; throw Object.assign(new Error("boom"), { stderr: "fatal: boom" }); } return undefined; });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "WORKTREE_SPARSE_FALLBACK").map((e) => e.reason), ["fatal: boom"]);
+    assert.ok(gitCalls(w, "sparse-checkout").some((c) => c[2] === "disable"));
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "WORKTREE_SPARSE").length, 0);
+    assert.ok(traj(w).some((t) => /Sparse checkout failed, full checkout used: fatal: boom/.test(t)));
+    for (const c of builders(w)) assert.doesNotMatch(c[4], /sparse checkout:/);
+  });
+
   it("#4114 gh writes (comment) retry on 5xx and secondary rate limits; non-transient errors do not", async () => {
     const w = world({ commentErrors: ["HTTP 502: Bad Gateway", "You have exceeded a secondary rate limit. Please wait a few minutes"] });
     assert.equal((await run(w)).terminalReason, "merged");

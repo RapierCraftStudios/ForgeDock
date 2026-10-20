@@ -21,6 +21,7 @@ import { prepareToolchain } from "./toolchain.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM } from "./prompts.mjs";
+import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES } from "./verify.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
@@ -108,6 +109,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {number} [o.splitMaxLines] refactor:split moved-line budget per PR (default 4000); the rest becomes a chained issue (#4211)
  * @param {string} [o.toolchainOverride] forge.yaml env.toolchain: "<pm>@<x.y.z>" or "off" (#4163)
  * @param {string} [o.envSetup]      forge.yaml env.setup: run once per fresh worktree before the builder (#4163)
+ * @param {number} [o.sparseMaxKb]   forge.yaml env.sparse_max_kb: tracked blobs >= this many KB stay out of the lane checkout (default 1024; 0 = off, #4221)
  * @param {object} [o.placement]     {where: local|remote, reason, mode}: the dispatcher's lane placement (#4256), kept in FORGE:STATE
  */
 export async function runCore(o) {
@@ -178,6 +180,7 @@ export async function runCore(o) {
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
   const runId = `${issue}-${t0}`;
   let runTmp = null;
+  let sparse = null; // #4221: {excluded, maxKb} when the lane worktree is a sparse checkout; null leaves prompts unchanged
   let toolchain = null; // #4163: {env, summary} when the repo pins its toolchain (env only with a pm shim); null leaves runner env and prompts unchanged
   // #4169: heavy steps take a host semaphore slot (io.heavy); LLM phases are not gated. `heavyEnv` puts the heavy shims on
   // the runner PATH; `waits` ({phase: ms}) and `heavyQueueMax` ride on the lane result for the batch report.
@@ -455,7 +458,7 @@ export async function runCore(o) {
   }
 
   /** A timeout restart starts a fresh session; by default it continues the implementation against the frozen contract. */
-  const tcOpts = () => ({ toolchain: toolchain?.summary ?? null });
+  const tcOpts = () => ({ toolchain: toolchain?.summary ?? null, sparse });
   const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + CONTINUE_NOTE.replace("BASE", lane);
   async function builder(n, prompt, resume, live = false, restart = implementRestart) {
     let timeoutRetries = 0, p = prompt;
@@ -685,10 +688,12 @@ export async function runCore(o) {
     };
     await leftoverDir();
     const LOCK_RE = /could not lock|cannot lock ref|\.lock'?: File exists|Unable to create .*\.lock|index\.lock|packed-refs\.lock/i;
-    const addWorktree = async (args) => {
+    // #4221: tracked blobs >= sparseMaxKb stay out of the checkout (lockfiles/manifests always in); falls back to a full checkout.
+    const sparseMaxKb = Number.isFinite(o.sparseMaxKb) && o.sparseMaxKb >= 0 ? o.sparseMaxKb : DEFAULT_SPARSE_MAX_KB;
+    const addWorktree = async (args, ref) => {
       let cleaned = false;
       for (let i = 0; ; i++) {
-        try { return await io.git(args, { cwd }); } catch (e) {
+        try { return await addLaneWorktree(io.git, io.fs?.write, { cwd, wt, addArgs: args, ref, maxBlobBytes: sparseMaxKb * 1024 }); } catch (e) {
           const msg = String(e?.stderr ?? e?.message ?? e);
           if (!cleaned && /already exists/i.test(msg) && (await leftoverDir())) { cleaned = true; continue; }
           if (i >= 4 || !LOCK_RE.test(msg)) throw e;
@@ -709,16 +714,25 @@ export async function runCore(o) {
       }
     } catch { /* no local branch */ }
     ledgerDo((l) => { l.register("branch", branch); l.register("worktree", wt); });
+    let wtInfo = null;
     if (keepLocal) {
-      await addWorktree(["worktree", "add", wt, branch]);
+      wtInfo = await addWorktree(["worktree", "add", wt, branch], `refs/heads/${branch}`);
       resumed = resumed ?? { pr: null, local: true };
       ev({ event: "LOCAL_BRANCH_REUSED", branch });
     } else if (resumed) {
-      await addWorktree(["worktree", "add", "-B", branch, wt, `origin/${branch}`]);
+      wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, `origin/${branch}`], `origin/${branch}`);
     } else {
-      await addWorktree(["worktree", "add", "-B", branch, wt, base]);
+      wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, base], base);
     }
     wtCreated = true;
+    if (wtInfo?.sparse) {
+      sparse = { excluded: wtInfo.excluded, maxKb: sparseMaxKb };
+      ev({ event: "WORKTREE_SPARSE", excluded: wtInfo.excluded, excluded_bytes: wtInfo.bytes, max_kb: sparseMaxKb });
+      T.decisions.push(`Sparse worktree: ${wtInfo.excluded} tracked file(s) >= ${sparseMaxKb} KB (${Math.round(wtInfo.bytes / 1048576)} MB) left out of the checkout`);
+    } else if (wtInfo?.fallback) {
+      ev({ event: "WORKTREE_SPARSE_FALLBACK", reason: wtInfo.fallback });
+      T.anomalies.push(`Sparse checkout failed, full checkout used: ${wtInfo.fallback}`);
+    }
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
     await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
     // #4220: link node_modules/.venv from the shared cache keyed by lock hash (or install once and publish). Never fails the run.

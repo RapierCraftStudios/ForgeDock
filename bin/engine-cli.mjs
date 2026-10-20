@@ -226,13 +226,15 @@ export function readPrecheckCommands(cwd = process.cwd()) {
 }
 /**
  * forge.yaml `env` for core lanes (#4163): `env.toolchain` ("<pm>@<x.y.z>" or "off") and `env.setup` (a command run once
- * per fresh worktree before the builder). Returns runCore options; {} when absent.
+ * per fresh worktree before the builder); `env.sparse_max_kb` (#4221: sparse lane checkout threshold, 0 = off). Returns runCore options; {} when absent.
  */
 export function readEnvConfig(cwd = process.cwd()) {
   try {
     const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.env ?? {};
     const s = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
-    return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}) };
+    const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
+    return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
