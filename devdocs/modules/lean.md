@@ -101,6 +101,16 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    precheck `validate_failed` or `requirement_unimplemented`, before any
    reviewer run) or `enforce`. Defer/post-deploy requirements become tracked
    follow-ups (`followupItems`, `pendingTracking`).
+   Hotspots (forge#4195): `io.hotspots` runs `scripts/hotspots.sh` once
+   before the plan call on the issue's `namedPaths` (`hotspotPlanNote`: one
+   line per file over `maintenance.hotspot.file_lines`, nothing when none;
+   the implement prompt gets `hotspotBuildRule`) and again in `gate()` with
+   `--base` on the changed files. `hotspotGrowth` fails precheck with
+   `maintenance.hotspot_growth` (kind `hotspot_growth`, in
+   `SHADOW_PRE_BLOCKS`, so it blocks in shadow too) for growth over
+   `growth_lines` without `hotspot-exempt: <reason>` in a covering deliverable
+   or add-deliverable why. A failed script or `enabled: false` turns it off;
+   no runner calls are added.
 8. **Push + PR → merge** — merge policy `required` (default) | `all` | `none`;
    base-sync merges the lane in on conflict (never rebase/force-push); merge
    at the reviewed head → `merged`, or `ci-pending` after the CI wait. Each CI

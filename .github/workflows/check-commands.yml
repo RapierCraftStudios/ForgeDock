@@ -49,6 +49,8 @@ on:
       - 'scripts/symbol-move.py'
       - 'scripts/symbol-move.test.sh'
       - 'scripts/fixtures/symbol-move/**'
+      - 'scripts/hotspots.sh'
+      - 'scripts/hotspots.test.sh'
       - 'scripts/maintenance-scan.sh'
       - 'scripts/maintenance-scan.test.sh'
       - 'scripts/review-finalize.sh'
@@ -132,6 +134,8 @@ on:
       - 'scripts/symbol-move.py'
       - 'scripts/symbol-move.test.sh'
       - 'scripts/fixtures/symbol-move/**'
+      - 'scripts/hotspots.sh'
+      - 'scripts/hotspots.test.sh'
       - 'scripts/maintenance-scan.sh'
       - 'scripts/maintenance-scan.test.sh'
       - 'scripts/review-finalize.sh'
@@ -436,6 +440,7 @@ jobs:
           bash scripts/symbol-index.test.sh
           bash scripts/refactor-verify.test.sh
           SYMBOL_MOVE_REQUIRE_LIBCST=1 bash scripts/symbol-move.test.sh
+          bash scripts/hotspots.test.sh
           bash scripts/maintenance-scan.test.sh
           bash scripts/review-finalize.test.sh
           bash scripts/close-parent-c3.test.sh

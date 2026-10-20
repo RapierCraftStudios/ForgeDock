@@ -131,12 +131,12 @@ export function applyAmendments(frozen, amendments, issueText = null) {
 
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
- * requirements not implemented, and deferrals without a tracking issue. Returns {ok, failures[]}; each failure carries a
- * `kind` (scope_creep, validate_missing, validate_failed, requirement_unimplemented, untracked_deferral) so callers can
+ * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[]}; each failure carries a
+ * `kind` (scope_creep, validate_missing, validate_failed, requirement_unimplemented, untracked_deferral, hotspot_growth) so callers can
  * tell the builder's own failed checks apart from bookkeeping gaps. `ciVerified` (#4167): the current head passed the
  * engine's CI verification, so a validate id left to CI is not missing; a recorded non-zero exit still fails.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null }) {
   const failures = [];
   const creep = changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(contract, f));
   if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
@@ -158,7 +158,27 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       else if (s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "requirement_unimplemented", detail: `${r.id} reported "${s ?? "no status"}"` });
     }
   }
+  failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
   return { ok: failures.length === 0, failures };
+}
+
+const EXEMPT_RE = /hotspot-exempt:\s*\S/i;
+/**
+ * forge#4195: a changed file already over `file_lines` (not generated, vendored or glob-excluded) that grew by more
+ * than `growth_lines` since the base, with no `hotspot-exempt: <reason>` in a covering deliverable's change or an
+ * add-deliverable amendment's why. `hotspots` is scripts/hotspots.sh --base output; null or disabled checks nothing.
+ */
+export function hotspotGrowth({ contract, result, hotspots, changedFiles = [] }) {
+  if (!hotspots || hotspots.enabled === false || !Array.isArray(hotspots.files)) return [];
+  const limit = Number(hotspots.growth_lines) || 0, max = Number(hotspots.file_lines) || 0;
+  const changed = new Set(changedFiles.map(cleanPath));
+  const amends = Array.isArray(result?.amendments) ? result.amendments : [];
+  const exempt = (f) => (contract?.deliverables ?? []).some((d) => pathCovers(d.path, f) && EXEMPT_RE.test(String(d.change ?? "")))
+    || amends.some((a) => a?.kind === "add-deliverable" && pathCovers(a.path, f) && EXEMPT_RE.test(String(a.why ?? "")));
+  return hotspots.files
+    .filter((h) => h?.over && !h.excluded && Number(h.growth) > limit && changed.has(cleanPath(h.path)) && !exempt(h.path))
+    .map((h) => ({ code: C.MAINTENANCE_HOTSPOT_GROWTH, kind: "hotspot_growth",
+      detail: `${h.path} grew by ${h.growth} lines (now ${h.lines}, limit +${limit} over ${max}) without hotspot-exempt` }));
 }
 
 /** The reviewer's JSON object (a json fence first, then the outermost braces), or null. */
