@@ -719,3 +719,17 @@ queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 L
   rspec`, `python manage.py test`, `python -m unittest`, `tox`/`nox` (no publish/release/deploy/upload env), `deno|bun
   test`, `pnpm -r`, `npm --prefix DIR`, `test:*`-style script names, `bash|sh <path>.test.sh`, each with its globs.
   Cost: 0 LLM calls; one optional `gh api user` per batch.
+
+## Entry 2026-10-20 — 1.30.0 staging review LOW follow-ups (#4316)
+
+- `scripts/test-map.sh`: `skip_cmd` is gone (the allowlist covers it). `check_cmd` also drops `$GITHUB_*`, any `<`/`>`
+  (redirects, `<(...)`, `>(...)`), a `make` with a non-check target (`make test deploy`), and fixer forms (`--fix`,
+  `--write`, `-w`; `black`/`ruff format` without `--check`, `gofmt` without `-l`/`-d`, `prettier` without a check flag).
+- `render.mjs` `recoveryEvidence` is the one recovery-evidence text (lane `lean.mjs`, settle and batch-exit relabel in
+  `orchestrate.mjs`); `full` keeps the whole persisted detail, `queued` adds the batch-stopped sentence.
+- `prefilter.mjs`: the kept detail names the skip reason (`flaky|reopened|same-sha`); bare `sometimes` is no longer
+  flaky wording (only `fails sometimes` / `sometimes fails`).
+- `context.mjs` `linkStateStamp`: hash of `n:STATE` for the issues the body references (parent, Depends on, `#N`; max
+  20, one REST call each, `n:?` when unreadable) joins the pack cache key as `stamp.links`; no links keeps the old key.
+- `scripts/review-prepare.sh`: the code-index stderr tail shows the repo root as `<repo>`, strips control characters
+  and caps lines at 200 chars. Cost: 0 LLM calls; up to 20 `gh api` reads per context-pack lane.
