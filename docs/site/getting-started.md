@@ -10,6 +10,8 @@ ForgeDock turns GitHub issues into shipped code — automatically. You open an i
 
 This tutorial gets you from zero to your first autonomous pipeline run in under 5 minutes.
 
+No repo or issues yet? [Start a New Project with ForgeDock](./start-a-new-project.md) turns an idea into a ready-to-build backlog with `/bootstrap`.
+
 ---
 
 ## Prerequisites

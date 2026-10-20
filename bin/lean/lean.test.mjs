@@ -76,7 +76,7 @@ function world(o = {}) {
       if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
       if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
       if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: "foo breaks", body: b, state: "OPEN", comments: [] }); }
-      if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [] });
+      if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [], ...(o.labels && a[2] === "7" ? { labels: o.labels } : {}) });
       if (k === "pr edit") { w.prEdits.push(a); return ""; }
       if (k === "label create") { w.labelCreates = [...(w.labelCreates ?? []), a]; return ""; }
       if (k === "issue comment" && w.commentErrors.length) throw new Error(w.commentErrors.shift());
@@ -1176,6 +1176,72 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
       assert.equal((await run(wn)).terminalReason, "merged"); assert.equal(builders(wn).length, 2);
       assert.equal(builders(wn)[0][4], builders(plain)[0][4], "no plan note"); assert.equal(builders(wn)[1][4], builders(plain)[1][4], "no build rule");
     }
+  });
+});
+
+describe("bug lanes freeze a red-green repro_test (#4271)", () => {
+  const RT = { path: "test/foo.test.js", id: "foo handles null", command: "node --test test/foo.test.js" };
+  const BUG = [{ name: "bug" }];
+  /** world labelled `labels` whose io.redGreen answers from `rg` in order (the last repeats). */
+  const rworld = (rg, o = {}) => {
+    const w = world({ labels: BUG, contract: { ...CONTRACT, repro_test: RT }, ...o }); const q = [...rg]; w.rgCalls = [];
+    w.io.redGreen = async (x) => { w.rgCalls.push(x); return q.length > 1 ? q.shift() : q[0]; };
+    return w;
+  };
+  const nh = (w) => w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
+  const RED_GREEN = { base: "FAILED", head: "RAN" };
+
+  it("a testable bug: the plan asks for repro_test, the frozen one is proved red on base and green on head, and it merges", async () => {
+    const w = rworld([RED_GREEN]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.match(builders(w)[0][4], /This issue is a bug\. When it is testable, .*"repro_test":\{"path"/);
+    assert.match(builders(w)[0][4], /"repro_test":"none","repro_test_reason"/);
+    assert.deepEqual(w.rgCalls, [{ cwd: "/wt/lean-7", base: "origin/staging", command: RT.command }]);
+    assert.match(w.comments.find((c) => c.includes("FORGE:CONTRACT")), /"repro_test"/, "repro_test is frozen in the contract JSON");
+    assert.ok(traj(w)[0].includes("repro_test test/foo.test.js foo handles null: BASE=FAILED HEAD=RAN"));
+    assert.equal(builders(w).length, 2); assert.equal(reviewers(w).length, 1);
+    const t = rworld([RED_GREEN], { labels: [{ name: "type:bug" }] });
+    assert.equal((await run(t)).terminalReason, "merged"); assert.equal(t.rgCalls.length, 1, "type:bug counts as a bug");
+  });
+
+  it("a repro test that is not red on base and green on head fails the precheck in enforce and in shadow: one in-session resume, then needs-human", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      for (const rg of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, null]) {
+        const w = rworld([rg]);
+        const r = await run(w, { conformance });
+        assert.equal(r.code, "conformance.unimplemented", `${conformance} ${JSON.stringify(rg)}`); assert.equal(w.merges.length, 0);
+        assert.equal(builders(w).length, 3, "plan + implement + one resume"); assert.equal(builders(w)[2][2], "sess-1", "the resume is in the builder's session");
+        assert.equal(reviewers(w).length, 0, "no reviewer tokens on a failed repro proof");
+        assert.match(builders(w)[2][4], /must fail on the base and pass on head; got BASE=/);
+        assert.match(nh(w), /repro test test\/foo\.test\.js foo handles null/);
+      }
+    }
+    const fixed = rworld([{ base: "RAN", head: "RAN" }, RED_GREEN]);
+    assert.equal((await run(fixed, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(fixed.rgCalls.length, 2);
+  });
+
+  it("a non-testable bug records repro_test none with a reason and is not blocked; a missing repro_test gets the one contract correction", async () => {
+    const none = { ...CONTRACT, repro_test: "none", repro_test_reason: "spec-only change, nothing executable" };
+    const w = rworld([RED_GREEN], { contract: none });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(w.rgCalls.length, 0); assert.equal(builders(w).length, 2);
+    assert.ok(traj(w)[0].includes("repro_test: none (spec-only change, nothing executable)"));
+    const m = rworld([RED_GREEN], { contract: CONTRACT, fixedContract: none });
+    assert.equal((await run(m)).terminalReason, "merged");
+    assert.match(builders(m)[1][4], /contract\.json is not valid:\n- this is a bug: repro_test must be/);
+    assert.equal(m.rgCalls.length, 0);
+  });
+
+  it("lean.repro_test off, or a lane that is not a bug, keeps today's prompts, contract check and precheck unchanged", async () => {
+    const plain = world(); await run(plain);
+    for (const [o, extra] of [[{}, { reproTest: "off" }], [{ labels: [{ name: "feature" }] }, {}]]) {
+      const w = rworld([{ base: "RAN", head: "RAN" }], { contract: CONTRACT, ...o });
+      assert.equal((await run(w, extra)).terminalReason, "merged");
+      assert.equal(builders(w)[0][4], builders(plain)[0][4], "plan prompt unchanged"); assert.equal(builders(w)[1][4], builders(plain)[1][4]);
+      assert.equal(builders(w).length, 2, "no contract correction for a missing repro_test"); assert.equal(w.rgCalls.length, 0);
+    }
+    const k = rworld([{ base: "RAN", head: "RAN" }]);
+    assert.equal((await run(k, { reproTest: "off" })).terminalReason, "merged"); assert.equal(k.rgCalls.length, 0, "off never runs a frozen repro_test");
   });
 });
 
