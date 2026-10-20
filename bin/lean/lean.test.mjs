@@ -703,6 +703,35 @@ describe("issue edited mid-run (#4188)", () => {
   });
 });
 
+describe("in-batch recovery of mechanical needs-human (#4267)", () => {
+  const BODY_B = "foo now also needs a bar mode.\n\n- foo must accept a bar flag and return bar output.\n- Existing callers of foo keep working.";
+
+  it("runCore --recover: removes needs-human, posts FORGE:DECISION, and tells the builder what to recover", async () => {
+    const w = world();
+    const r = await run(w, { recover: { code: "ci.red", attempt: 1 } });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(w.edits.some((e) => e.join(" ") === "issue edit 7 -R o/r --remove-label needs-human"));
+    const dec = w.comments.find((c) => c.startsWith("<!-- FORGE:DECISION -->"));
+    assert.match(dec, /recovery pass for `ci\.red`/); assert.match(dec, /\*\*Why\*\*/); assert.match(dec, /\*\*Alternative\*\*/);
+    assert.ok(builders(w).some((b) => /Recovery pass \(ci\.red\): .*--log-failed/.test(b[4])));
+    const w2 = world();
+    await run(w2, { recover: { code: "builder.block_untyped", attempt: 1 } });
+    assert.ok(builders(w2).some((b) => /pick the option most consistent with the issue, the repo's conventions and prior merged decisions/.test(b[4])));
+    const w3 = world();
+    await run(w3);
+    assert.ok(!w3.comments.some((c) => c.includes("FORGE:DECISION")), "no recovery: nothing changes");
+    assert.ok(!builders(w3).some((b) => /Recovery pass/.test(b[4])));
+  });
+
+  it("runCore marks a contract.invalid after a mid-run issue edit (issueEdited) and a failed recovery pass (recovery)", async () => {
+    const bad1 = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }] };
+    const r = await run(world({ contract: bad1, fixedContract: bad1, issueBodies: [ISSUE_BODY, BODY_B] }), { recover: { code: "contract.invalid", attempt: 1 } });
+    assert.equal(r.code, "contract.invalid"); assert.equal(r.issueEdited, true); assert.equal(r.recovery, true);
+    const r2 = await run(world({ contract: bad1, fixedContract: bad1 }));
+    assert.equal(r2.code, "contract.invalid"); assert.equal(r2.issueEdited, undefined); assert.equal(r2.recovery, undefined);
+  });
+});
+
 describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness.sh)", () => {
   const dworld = (results, o = {}) => {
     const w = world(o); const q = [...results]; w.docsCalls = [];

@@ -624,3 +624,23 @@ map's commands for the changed files when the map is valid and matches, else `le
 implement prompts cite the facts file by path (`prompts.mjs` `factsRule`, never its content). Deleting both files
 restores today's commands, events and prompts byte-for-byte. Cost: 0 LLM calls; fewer pre-PR commands when the map
 narrows them. Rationale: `devdocs/decisions/4199-incremental-not-restructure.md`.
+
+## Entry 2026-10-20 — In-batch recovery of mechanical needs-human (#4267)
+
+`outcome-codes.mjs` `classifyNeedsHuman(row)` sorts a lane row into `recoverable`
+(needs-human `ci.red` / `base.conflict` / `builder.block_untyped`, `contract.invalid`
+with `issueEdited`, `ci-pending` on a conflicting PR → `base.conflict`), `human`
+(`builder.blocked`: credentials, spend, promotion, customer, product-decision) or
+`terminal`. `orchestrate()` option `recovery: {maxAttempts}` (forge.yaml
+`orchestration.recovery.max_attempts`, default 1, 0 = off; absent = old behaviour)
+requeues a recoverable row as a recovery lane (`ctx.recover = {code, attempt}`, state
+keys `recoveries`/`recovering`) under the usual admission, so dependents stay queued.
+A merged recovery row carries `recovered: <code>`; any other end is final with
+`recovery` evidence. `runCore` `o.recover` (CLI `--recover <code> --recover-attempt n`)
+removes `needs-human`, posts `FORGE:DECISION`, and adds a per-code note to the rerun
+prompt (failed-check logs, base merge, untyped choice); no extra Actions trigger.
+Runner decisions (recovery, engine-error relaunch, dependency requeue, sub-issues
+added) go to `decide({issue, what, why, alternative})`, fire-and-forget; `runBatch`
+posts them as `FORGE:DECISION` comments. `formatOutcomeLists` adds `recovered:`,
+`unrecovered:` and one end-of-batch escalation list (human codes only) to the report.
+`check-spec-markers.sh` registers `DECISION`. Cost: one rerun lane per recovered issue.

@@ -96,7 +96,8 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
 
   Its first line is `batch: <id> (...)`. The batch state lives in `~/.forge/batches/<id>/` and every lane runs in its
   own session, so the batch survives this session: if the runner dies, run `forgedock orchestrate --resume <id>`
-  (live lanes are re-adopted, nothing is launched twice). Change K of a running batch with
+  (live lanes are re-adopted, nothing is launched twice). The runner is hosted by the detached `forgedock schedd` daemon,
+  which resumes every unfinished batch when it starts, so a closed session needs no manual `--resume`. Change K of a running batch with
   `forgedock orchestrate --set-parallel <id> K`. The runner requeues `deferred` lanes by code (host busy after its
   retry-in, a usage limit holds admissions for that account (backend identity) until the reset, across every batch on
   the host; `forgedock limits show|clear <id>|--all` lists or drops holds; transient merge/push/idle failures back off; non-host
@@ -137,14 +138,53 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
   `**Parent**` and `**Depends on**` lines). Add them to the DAG, launch them, and let the parent's dependents
   wait on the sub-issues.
 - `merged` or `invalid`: start the next ready issue.
-- `needs-human`: an external action agents cannot take (credentials, spend, promotion, customer) or a product
-  decision too critical for agents. Read the issue's last comment for the reason, and mark its dependents skipped. Only
+- `needs-human` with a **recoverable code**: `ci.red`, `base.conflict` (merge conflict), `ci-pending` on a conflicting
+  PR, `contract.invalid` caused by an issue edited mid-run, and `builder.block_untyped` (an in-scope technical choice).
+  These are mechanical. **Do not ask for confirmation on them.** The batch runner recovers each one itself
+  (`orchestration.recovery.max_attempts`, default 1 per issue). It launches one recovery lane under the same lease, lane
+  and admission rules as any lane, with `run-issue --recover <code>`. That lane:
+  - removes `needs-human`;
+  - resumes the open PR: merges the base, fixes the failed required checks from their logs, and pushes new commits only;
+  - re-queues the issue, keeping its dependents queued in the same batch.
+
+  Report what was recovered afterwards. A recovery that does not merge stays `needs-human` with its evidence, and there
+  is no second attempt beyond `max_attempts`.
+- `needs-human` with a **human code** (`builder.blocked`: product-decision, spend, credentials, promotion, customer): an
+  external action agents cannot take, or a product decision too critical for agents. It is never auto-recovered. Read
+  the issue's last comment for the reason, mark its dependents skipped, and add it to the escalation list (step 4). Only
   explicit or logical edges skip a dependent; an issue that merely overlaps the same file keeps running.
 - `engine-error`: relaunch it once.
-- `ci-pending` or `deferred`: leave it. A later `/orchestrate` resumes it.
+- `ci-pending` (PR not conflicting) or `deferred`: leave it. A later `/orchestrate` resumes it.
+
+**Operational decisions are yours.** Decide them without asking and keep going. Record each one as a
+`<!-- FORGE:DECISION -->` comment (what, why, alternative) on the issue, or on the batch for batch-wide choices. The
+runner posts its own decisions (recovery, relaunch, dependency requeue, sub-issues added). The decisions you take
+yourself:
+- **Recovery and retries:** relaunch, resume, fix-ci, base-sync, and stopping and relaunching a stuck lane.
+- **Scheduling:** K changes under host pressure, ordering, adding logical `Depends on` edges, and adding newly filed or
+  decomposed sub-issues to the running batch.
+- **Engine gaps:** file each engine-gap issue you discover and queue it.
+- **In-scope technical choices** a builder escalates as `untyped` or ambiguous: pick the option most consistent with the
+  issue, the repo's conventions and prior merged decisions, and note the alternative.
+
+Escalate only these:
+- product direction (`product-decision`);
+- spend;
+- credentials;
+- customer-facing actions;
+- staging→main release or deploy, unless the operator approved it for the session.
+
+Collect escalations into one question list and ask it once, at the end of the batch. Never ask per issue, and keep every
+other lane running meanwhile.
 
 ## 4. Report
 
 When all lanes have finished, print one table: issue, outcome, PR, minutes (issues the pre-filter closed
-show `invalid (pre-filter)`). Then the `pre-filter:` line from step 2.2 (count closed and spend avoided), then
-list each `needs-human` or skipped issue with its one-line reason. Nothing else.
+show `invalid (pre-filter)`). Then print:
+1. the `pre-filter:` line from step 2.2 (count closed and spend avoided);
+2. the runner's `recovered: #A (ci.red) #B (base.conflict)` line;
+3. its `unrecovered:` lines (mechanical codes whose recovery did not merge);
+4. each skipped issue with its one-line reason;
+5. one escalation list: the human-code `needs-human` issues only, asked once.
+
+Nothing else.
