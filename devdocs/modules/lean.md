@@ -666,8 +666,11 @@ Context pack: `context.mjs` `codeOf` keeps a `FORGE:STATE` `terminalCode`, `fail
 `terminalReason` only when it matches `^[a-z][a-z0-9_.-]{0,63}$`. `linkLine` re-checks this, so cached facts are covered,
 and cross-repo timeline references are skipped (the jq emits `repository_url` + number). `lean.mjs` `textOf` drops
 `<!-- FORGE:` comments, so `FORGE:CONTEXT` is never quotable. The pre-PR test map comes from the base ref
-(`readTestMapAtRef`), else the main checkout. `scripts/test-map.sh` ends a `run:` block at the `run` key's column and
-drops deploy/publish/release/push/secret steps. `verifyReport` gates carry `ran`; zero ran → `neutral`, "no gates
+(`readTestMapAtRef`), else the main checkout. `scripts/test-map.sh` ends a `run:` block at the `run` key's column.
+Since #4300 it maps a workflow `run:` step only when the whole command is an allowlisted check (`<pm> test`, `<pm> run`
+of a package.json check script, `make <check target>`, `go test|vet|build`, known test/lint/typecheck tools; one leading
+`cd|pushd DIR &&` becomes the cwd); anything else is dropped, job/step names are ignored, and workflow entries never get
+a bare `**` glob. `verifyReport` gates carry `ran`; zero ran → `neutral`, "no gates
 ran". A recovery lane (`recoverUnlabelled`) re-adds `needs-human` with a recovery-evidence `FORGE:NEEDS_HUMAN` only on a final
 `ci-pending` (`needsHuman()` has its own path); never on merged/invalid/decomposed/dependency-*/deferred/engine-error. The
 batch runner (`orchestrate.mjs` settle, injected `relabelNeedsHuman`, wired in `engine-cli.mjs`) relabels once for a final

@@ -18,10 +18,12 @@
 #   go.mod (dir D) → `go test ./...`, `go vet ./...` in D, `D/**/*.go`, `D/go.mod`, `D/go.sum`
 #   Makefile / GNUmakefile targets test/lint/check/typecheck/vet → `make <target>`, `**`
 #   .github/workflows/*.yml|*.yaml `run:` steps (one command per line of a `|` block, a `>` block is one command;
-#     install/setup lines skipped): globs
-#     from the tool (python/go/shell/js), else the workflow's `paths:` filter, else `**`. A step whose job id, job
-#     name, step name or command matches deploy/publish/release/push/secret is never mapped (forge#4297): the engine
-#     runs these commands before a PR, so only check steps belong here.
+#     install/setup lines skipped). The engine runs these commands before a PR, so a step is mapped only when its whole
+#     command is an allowlisted check (forge#4300): `<pm> test`, `<pm> run <package.json check script>`, `make <check
+#     target>`, `go test|vet|build` or a known test/lint/typecheck tool; everything else is dropped, and job and step
+#     names are never consulted. One leading `cd DIR &&` / `pushd DIR &&` becomes the entry cwd; any other chaining,
+#     substitution or `${{ }}` drops the step. Globs from the tool (python/go/shell/js, under the cwd), else the
+#     workflow's `paths:` filter, else `DIR/**` for a cwd; a workflow entry never gets a bare `**`.
 # Exit: 0 ok | 2 usage or bad repo path. bash 3.2 portable.
 set -uo pipefail
 
@@ -53,6 +55,11 @@ fi
 US="$(printf '\037')"
 row() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$T/rows"; }
 JS_EXT="js jsx ts tsx mjs cjs"
+# check recognisers shared by package.json scripts / Makefile targets and the workflow allowlist (forge#4300)
+PKG_SCRIPTS="test|lint|typecheck|type-check|check"
+MAKE_TARGETS="test|lint|check|typecheck|vet"
+pkg_check_script() { case "|$PKG_SCRIPTS|" in *"|$1|"*) [ -n "$1" ] ;; *) return 1 ;; esac; }
+make_check_target() { case "|$MAKE_TARGETS|" in *"|$1|"*) [ -n "$1" ] ;; *) return 1 ;; esac; }
 # globs for the extensions in $2 under dir $1 ("." = repo root)
 ext_globs() {
   g=""; pre=""; [ "$1" = "." ] || pre="$1/"
@@ -73,7 +80,7 @@ grep -E '(^|/)package\.json$' "$T/files" | grep -v -E '(^|/)node_modules/' | sor
   jq -r '(.scripts // {}) | to_entries[] | select(.value | type == "string") | .key' "$pj" 2>/dev/null | while IFS= read -r s; do
     case "$s" in
       test) row "$pj#scripts.$s$tag" "$d" "$PM run $s" "$globs" ;;
-      lint|typecheck|type-check|check) row "$pj#scripts.$s" "$d" "$PM run $s" "$globs" ;;
+      *) pkg_check_script "$s" && row "$pj#scripts.$s" "$d" "$PM run $s" "$globs" ;;
     esac
   done
 done
@@ -105,20 +112,20 @@ done
 # ---- Makefile ----
 for mf in Makefile GNUmakefile; do
   [ -f "$mf" ] || continue
-  grep -oE '^(test|lint|check|typecheck|vet)[[:space:]]*:' "$mf" | sed -E 's/[[:space:]]*:$//' | sort -u | while IFS= read -r t; do
+  grep -oE "^($MAKE_TARGETS)[[:space:]]*:" "$mf" | sed -E 's/[[:space:]]*:$//' | sort -u | while IFS= read -r t; do
     row "$mf#$t" "." "make $t" "**"
   done
 done
 
 # ---- CI workflow run: steps ----
-# Emits: job US jobname US stepname US command (US = \037, so empty names survive `read`), one per command line; and P TAB path for each `paths:` filter item
+# Emits: job US command (US = \037), one per command line; and P TAB path for each `paths:` filter item
 # before `jobs:`. A block ends at the first non-blank line not indented past the `run` key (sibling keys such as env:).
 wf_extract() {
   awk '
     function indent(s) { match(s, /^ */); return RLENGTH }
     function unq(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); if (s ~ /^".*"$/ || s ~ /^\x27.*\x27$/) s = substr(s, 2, length(s) - 2); return s }
-    function emit(c) { c = unq(c); if (c != "") print job "\037" jname "\037" sname "\037" c }
-    BEGIN { injobs = 0; jind = -1; block = 0; inpaths = 0; job = ""; jname = ""; sname = "" }
+    function emit(c) { c = unq(c); if (c != "") print job "\037" c }
+    BEGIN { injobs = 0; jind = -1; block = 0; inpaths = 0; job = "" }
     {
       line = $0; sub(/\r$/, "", line)
       if (block) {
@@ -143,13 +150,7 @@ wf_extract() {
         next
       }
       if (line ~ /^[^ \t#]/) { injobs = 0; next }
-      if (line ~ /^ +[A-Za-z0-9_-]+:[ \t]*$/ && (jind < 0 || indent(line) == jind)) { jind = indent(line); job = line; sub(/^ +/, "", job); sub(/:.*$/, "", job); jname = ""; sname = ""; next }
-      if (line ~ /^[ \t]*-[ \t]/) sname = ""
-      if (line ~ /^[ \t]*(-[ \t]+)?name:/) {
-        nm = line; sub(/^[ \t]*(-[ \t]+)?name:[ \t]*/, "", nm); sub(/[ \t]+#.*$/, "", nm)
-        if (line !~ /^[ \t]*-[ \t]/ && indent(line) == jind + 2) jname = unq(nm); else sname = unq(nm)
-        next
-      }
+      if (line ~ /^ +[A-Za-z0-9_-]+:[ \t]*$/ && (jind < 0 || indent(line) == jind)) { jind = indent(line); job = line; sub(/^ +/, "", job); sub(/:.*$/, "", job); next }
       if (line ~ /^[ \t]*(-[ \t]+)?run:/) {
         rest = line; sub(/^[ \t]*(-[ \t]+)?run:[ \t]*/, "", rest); sub(/[ \t]+#.*$/, "", rest)
         # bind = the column of the `run` key: step keys after it (env:, shell:) sit there and end the block
@@ -161,15 +162,50 @@ wf_extract() {
   ' "$1"
 }
 skip_cmd() {
+  # shellcheck disable=SC2016 # literal $GITHUB_ patterns
   case "$1" in
     \#*|echo\ *|echo|cd\ *|export\ *|set\ *|if\ *|then|fi|else|for\ *|do|done|\}*|\{*|*'$GITHUB_'*|*'>> $GITHUB'*) return 0 ;;
     npm\ ci*|npm\ install*|npm\ i|npm\ i\ *|pnpm\ install*|pnpm\ i|yarn|yarn\ install*|pip\ install*|pip3\ install*|python*\ -m\ pip\ install*|uv\ sync*|uv\ pip\ install*|poetry\ install*|go\ mod\ download*|apt-get*|sudo\ *|corepack\ *|brew\ *) return 0 ;;
   esac
   return 1
 }
-# forge#4297: deploy, publish, release, push and secret-using steps are never check commands
-deploy_step() {
-  grep -qiE 'deploy|publish|release|push|secret' <<<"$*"
+# forge#4300: allowlist. 0 when the whole command $1 is a recognised check; sets CK_CWD (one leading `cd|pushd DIR &&`,
+# else ".") and CK_CMD (the command without that prefix). Names never matter: a mutating command is dropped whatever its
+# step is called, and a check is mapped whatever it is called.
+check_cmd() {
+  c=$1; CK_CWD=.; CK_CMD=
+  # shellcheck disable=SC2016 # literal ${{ and $( patterns
+  case "$c" in *'${{'*|*'`'*|*'$('*) return 1 ;; esac
+  case "$c" in
+    "cd "*" && "*|"pushd "*" && "*)
+      d=${c#* }; d=${d%%" && "*}; c=${c#*" && "}
+      case "$d" in ""|/*|*[!A-Za-z0-9._/-]*|..|../*|*/..|*/../*) return 1 ;; esac
+      d=${d%/}; [ -n "$d" ] && [ "$d" != . ] && CK_CWD=$d ;;
+  esac
+  c=${c%" && popd"}
+  case "$c" in *';'*|*'|'*|*'&'*) return 1 ;; esac
+  CK_CMD=$c
+  set -f
+  # shellcheck disable=SC2086 # split into words on purpose; set -f stops glob expansion
+  set -- $c
+  set +f
+  while [ $# -gt 0 ]; do case "$1" in [A-Za-z_]*=*) shift ;; *) break ;; esac; done
+  case "${1:-} ${2:-}" in
+    "uv run"|"poetry run"|"pnpm exec"|"yarn exec"|"python -m"|"python3 -m") shift 2 ;;
+    "npx "*|"bunx "*) shift ;;
+  esac
+  case "${1:-}" in
+    npm|pnpm|yarn|bun)
+      [ "${2:-}" = test ] && return 0
+      [ "${2:-}" = run ] && pkg_check_script "${3:-}" && return 0
+      case "$1" in yarn|pnpm) pkg_check_script "${2:-}" && return 0 ;; esac
+      return 1 ;;
+    make) make_check_target "${2:-}"; return ;;
+    go) case "${2:-}" in test|vet|build) return 0 ;; esac; return 1 ;;
+    node) [ "${2:-}" = --test ]; return ;;
+    eslint|tsc|prettier|vitest|jest|pytest|ruff|flake8|pylint|mypy|black|golangci-lint|gofmt|staticcheck|shellcheck) return 0 ;;
+  esac
+  return 1
 }
 tool_globs() {
   c=" $1 "
@@ -185,13 +221,15 @@ grep -E '^\.github/workflows/[^/]+\.(yml|yaml)$' "$T/files" | sort | while IFS= 
   [ -f "$wf" ] || continue
   wf_extract "$wf" > "$T/wf"
   paths=$(awk -F'\t' '$1 == "P" { printf "%s\037", $2 }' "$T/wf"); paths=${paths%"$US"}
-  awk -F'\t' '$1 != "P"' "$T/wf" | while IFS="$(printf '\037')" read -r job jname sname cmd; do
-    skip_cmd "$cmd" && continue
-    deploy_step "$job" "$jname" "$sname" "$cmd" && continue
-    g=$(tool_globs "$cmd")
+  awk -F'\t' '$1 != "P"' "$T/wf" | while IFS="$US" read -r job cmd; do
+    check_cmd "$cmd" || continue
+    skip_cmd "$CK_CMD" && continue
+    g=$(tool_globs "$CK_CMD")
+    [ -n "$g" ] && [ "$CK_CWD" != . ] && g="$CK_CWD/${g//$US/$US$CK_CWD/}"
     [ -n "$g" ] || g="$paths"
-    [ -n "$g" ] || g="**"
-    row "$wf#jobs.$job" "." "$cmd" "$g"
+    [ -n "$g" ] || { [ "$CK_CWD" != . ] && g="$CK_CWD/**"; }
+    [ -n "$g" ] || continue
+    row "$wf#jobs.$job" "$CK_CWD" "$CK_CMD" "$g"
   done
 done
 
@@ -207,5 +245,6 @@ MAP=$(jq -R -s -c '
 if [ "$STDOUT" = 1 ]; then printf '%s\n' "$MAP"; exit 0; fi
 [ -n "$OUT" ] || OUT=".forge/test-map.json"
 mkdir -p "$(dirname "$OUT")" || die "cannot create $(dirname "$OUT")"
-printf '%s\n' "$MAP" > "$OUT.tmp.$$" && mv "$OUT.tmp.$$" "$OUT" || die "cannot write $OUT"
+printf '%s\n' "$MAP" > "$OUT.tmp.$$" || die "cannot write $OUT"
+mv "$OUT.tmp.$$" "$OUT" || die "cannot write $OUT"
 echo "$OUT"
