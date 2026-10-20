@@ -57,7 +57,9 @@
  * edit, `ci-pending` whose PR `conflicting(issue, pr)` says conflicts) is not final while its persisted `recoveries` stay
  * under `maxAttempts`: it is requeued as a recovery lane (`ctx.recover = {code, attempt, final}`, `final` when attempt ==
  * `maxAttempts`) under the same admission as any lane, so its dependents stay queued. Only a final lane relabels needs-human
- * itself; a non-final attempt that ends needs-human/ci-pending without a successor is relabelled here, once (#4302).
+ * itself; a non-final attempt that ends needs-human/ci-pending without a successor is relabelled here, once (#4302). A recovery
+ * still queued when the batch exits (breaker, budget, hold, or a resume that does not relaunch it) is relabelled once with the
+ * full persisted lane reason (#4315).
  * A merged recovery row carries `recovered: <code>`; any other end is final with `recovery` evidence. Human codes (`builder.blocked`) are never recovered. Every operational decision the runner takes
  * (recovery, engine-error relaunch, dependency requeue, sub-issues added) goes to `decide({issue, what, why, alternative})`,
  * fire-and-forget: the runner never waits on it.
@@ -208,7 +210,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   let budgetStop = null, budgetHit = null; // this pass's refusal under on_budget stop; the last refusal reason
   const recoveryMax = Number.isInteger(recovery?.maxAttempts) && recovery.maxAttempts > 0 ? recovery.maxAttempts : 0;
   const recoveries = toMap(saved?.recoveries); // issue -> recovery lanes launched (#4267)
-  const recovering = toMap(saved?.recovering); // issue -> {code, attempt} of the recovery lane queued or running
+  const recovering = toMap(saved?.recovering); // issue -> {code, attempt, detail, outcome, ...} of the recovery lane queued or running
+  const relabelled = new Set(saved?.relabelled ?? []); // #4315: queued recoveries relabelled needs-human when a batch stopped
   // #4267: decisions are recorded, never awaited: a failing or slow recorder cannot block the batch.
   const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
   const firstLine = (x) => String(x ?? "").split("\n")[0].slice(0, 300);
@@ -219,7 +222,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
-      ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering) } : {}) });
+      ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering) } : {}),
+      ...(relabelled.size ? { relabelled: [...relabelled] } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
   const classifyOne = async (n) => {
@@ -426,7 +430,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       const used = recoveries.get(n) ?? 0;
       if (classifyNeedsHuman(facts) === "recoverable" && used < recoveryMax) {
         const code = recoveryCodeOf(facts), attempt = used + 1;
-        recoveries.set(n, attempt); recovering.set(n, { code, attempt, cost_usd: Number(row.cost_usd) || 0, minutes: Number(row.minutes) || 0 });
+        // #4315: the full lane detail is kept (never firstLine) for the relabel when the batch stops before this attempt
+        recoveries.set(n, attempt); recovering.set(n, { code, attempt, cost_usd: Number(row.cost_usd) || 0, minutes: Number(row.minutes) || 0,
+          detail: String(row.detail ?? ""), outcome: row.outcome, ...(row.code ? { result_code: row.code } : {}), prev_attempt: prior?.attempt ?? 0 });
         requeue(n, 0); done(); save();
         decided({ issue: n, what: `recovery lane for ${code} (attempt ${attempt}/${recoveryMax}); dependents stay queued`, why: firstLine(row.detail) || code,
           alternative: "leave needs-human for the operator and skip the dependents" });
@@ -458,6 +464,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       return;
     }
     const lane = ln?.lane;
+    if (relabelled.delete(n)) save(); // #4315: the recovery lane launches after all; it removes needs-human itself
     const pl = placed.get(n);
     placed.delete(n);
     const rec = { startedAt: now(), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
@@ -581,8 +588,22 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
   }
   if (reg) withdrawExcept(new Set());
+  const heldDetail = (n) => tripped?.detail ?? (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run");
+  // #4315: a recovery queued but never launched (the batch stopped: breaker, budget, hold; or a resume that did not relaunch a
+  // lost run) left the issue without needs-human, since a non-final attempt does not relabel. Relabel it once, with the full reason.
+  for (const [n, q] of recovering) {
+    if (running.has(n) || results.has(n) || relabelled.has(n) || typeof relabelNeedsHuman !== "function") continue;
+    const cause = heldDetail(n) === "not run" ? "batch stopped" : heldDetail(n);
+    const how = q.prev_attempt ? `Recovery pass for \`${q.code}\` (attempt ${q.prev_attempt}) did not merge` : "The lane did not merge";
+    const evidence = `${how}: it ended \`${q.outcome ?? "needs-human"}\`${q.result_code ? ` (\`${q.result_code}\`)` : ""}${String(q.detail ?? "").trim() ? `: ${String(q.detail).trim()}` : ""}\n\n`
+      + `Recovery attempt ${q.attempt}/${recoveryMax || q.attempt} for \`${q.code}\` was queued, but the batch stopped (${cause}) before it launched. The issue stays \`needs-human\`.`;
+    try { await relabelNeedsHuman({ issue: n, evidence }); } catch { /* best effort */ }
+    relabelled.add(n);
+  }
   save();
-  return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: tripped?.detail ?? (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run") });
+  return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: heldDetail(n),
+    ...(recovering.has(n) ? { recovery: { code: recovering.get(n).code, attempts: recoveries.get(n) ?? recovering.get(n).attempt, outcome: recovering.get(n).outcome ?? "needs-human",
+      ...(recovering.get(n).result_code ? { result_code: recovering.get(n).result_code } : {}), detail: firstLine(recovering.get(n).detail ?? recovering.get(n).code) } } : {}) });
 }
 
 /** Max chars of one row's detail in the batch-report outcome lists (#4298). */

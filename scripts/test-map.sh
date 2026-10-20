@@ -19,9 +19,11 @@
 #   Makefile / GNUmakefile targets test/lint/check/typecheck/vet → `make <target>`, `**`
 #   .github/workflows/*.yml|*.yaml `run:` steps (one command per line of a `|` block, a `>` block is one command;
 #     install/setup lines skipped). The engine runs these commands before a PR, so a step is mapped only when its whole
-#     command is an allowlisted check (forge#4300): `<pm> test`, `<pm> run <package.json check script>`, `make <check
-#     target>`, `go test|vet|build` or a known test/lint/typecheck tool; everything else is dropped, and job and step
-#     names are never consulted. One leading `cd DIR &&` / `pushd DIR &&` becomes the entry cwd; any other chaining,
+#     command is an allowlisted check (forge#4300): `<pm> test`, `<pm> run <package.json check script>` (also `test:*`
+#     style names, `pnpm -r`, `npm --prefix DIR`), `make <check target>`, `go test|vet|build`, `cargo test|clippy|check`,
+#     gradle/maven with check tasks/goals only, `[bundle exec] rspec`, `python manage.py test`, `python -m unittest`,
+#     `tox`/`nox` (not a publish/release/deploy/upload env), `deno|bun test`, `bash|sh <path>.test.sh` or a known
+#     test/lint/typecheck tool (forge#4315); everything else is dropped, and job and step names are never consulted. One leading `cd DIR &&` / `pushd DIR &&` becomes the entry cwd; any other chaining,
 #     substitution or `${{ }}` drops the step. Globs from the tool (python/go/shell/js, under the cwd), else the
 #     workflow's `paths:` filter, else `DIR/**` for a cwd; a workflow entry never gets a bare `**`.
 # Exit: 0 ok | 2 usage or bad repo path. bash 3.2 portable.
@@ -58,8 +60,14 @@ JS_EXT="js jsx ts tsx mjs cjs"
 # check recognisers shared by package.json scripts / Makefile targets and the workflow allowlist (forge#4300)
 PKG_SCRIPTS="test|lint|typecheck|type-check|check"
 MAKE_TARGETS="test|lint|check|typecheck|vet"
-pkg_check_script() { case "|$PKG_SCRIPTS|" in *"|$1|"*) [ -n "$1" ] ;; *) return 1 ;; esac; }
+# forge#4315: `test:unit`, `lint:css` ... are the same check under a sub-name
+pkg_check_script() {
+  b=${1%%:*}
+  case "$1" in *:*) case "${1#*:}" in ""|*[!A-Za-z0-9:_.-]*) return 1 ;; esac ;; esac
+  case "|$PKG_SCRIPTS|" in *"|$b|"*) [ -n "$b" ] ;; *) return 1 ;; esac
+}
 make_check_target() { case "|$MAKE_TARGETS|" in *"|$1|"*) [ -n "$1" ] ;; *) return 1 ;; esac; }
+safe_dir() { case "$1" in ""|/*|*[!A-Za-z0-9._/-]*|..|../*|*/..|*/../*) return 1 ;; esac; return 0; }
 # globs for the extensions in $2 under dir $1 ("." = repo root)
 ext_globs() {
   g=""; pre=""; [ "$1" = "." ] || pre="$1/"
@@ -191,15 +199,43 @@ check_cmd() {
   set +f
   while [ $# -gt 0 ]; do case "$1" in [A-Za-z_]*=*) shift ;; *) break ;; esac; done
   case "${1:-} ${2:-}" in
-    "uv run"|"poetry run"|"pnpm exec"|"yarn exec"|"python -m"|"python3 -m") shift 2 ;;
+    "uv run"|"poetry run"|"pnpm exec"|"yarn exec"|"python -m"|"python3 -m"|"bundle exec") shift 2 ;;
     "npx "*|"bunx "*) shift ;;
   esac
   case "${1:-}" in
     npm|pnpm|yarn|bun)
-      [ "${2:-}" = test ] && return 0
-      [ "${2:-}" = run ] && pkg_check_script "${3:-}" && return 0
-      case "$1" in yarn|pnpm) pkg_check_script "${2:-}" && return 0 ;; esac
+      pm=$1; shift
+      case "$pm ${1:-}" in # forge#4315: pnpm -r test, npm --prefix DIR test
+        "pnpm -r"|"pnpm --recursive") shift ;;
+        "npm --prefix") [ $# -ge 2 ] && safe_dir "$2" || return 1; shift 2 ;;
+      esac
+      [ "${1:-}" = test ] && return 0
+      [ "${1:-}" = run ] && pkg_check_script "${2:-}" && return 0
+      case "$pm" in yarn|pnpm) pkg_check_script "${1:-}" && return 0 ;; esac
       return 1 ;;
+    cargo) case "${2:-}" in test|clippy|check) return 0 ;; esac; return 1 ;;
+    ./gradlew|gradlew|gradle|./mvnw|mvnw|mvn)
+      # every non-flag word is a check task/goal (`:mod:test` qualified for gradle); publish/deploy/install never pass
+      case "$1" in *mvn*) goals="test|verify|validate" ;; *) goals="test|check|lint" ;; esac
+      shift; nt=0
+      for w in "$@"; do
+        case "$w" in -*) continue ;; esac
+        t=${w##*:}
+        case "|$goals|" in *"|$t|"*) [ -n "$t" ] && nt=$((nt+1)) ;; *) return 1 ;; esac
+      done
+      [ "$nt" -gt 0 ]; return ;;
+    rspec|unittest) return 0 ;;
+    python|python3) [ "${2:-}" = manage.py ] && [ "${3:-}" = test ]; return ;;
+    tox|nox)
+      shift; prev=""
+      for w in "$@"; do
+        case "$prev" in -e|-s|--env|--session|--sessions) case ",$w," in *publish*|*release*|*deploy*|*upload*) return 1 ;; esac ;; esac
+        case "$w" in -e*|-s*) case "${w#-?}" in *publish*|*release*|*deploy*|*upload*) return 1 ;; esac ;; esac
+        prev=$w
+      done
+      return 0 ;;
+    deno) [ "${2:-}" = test ]; return ;;
+    bash|sh) case "${2:-}" in *.test.sh) safe_dir "$2"; return ;; esac; return 1 ;;
     make) make_check_target "${2:-}"; return ;;
     go) case "${2:-}" in test|vet|build) return 0 ;; esac; return 1 ;;
     node) [ "${2:-}" = --test ]; return ;;
@@ -210,6 +246,12 @@ check_cmd() {
 tool_globs() {
   c=" $1 "
   case "$c" in
+    *\ cargo\ *) printf '%s' "**/*.rs$US**/Cargo.toml${US}Cargo.lock"; return ;;
+    *gradlew\ *|*\ gradle\ *|*mvnw\ *|*\ mvn\ *) printf '%s' "$(ext_globs . "java kt kts gradle groovy scala")$US**/pom.xml"; return ;;
+    *[\ /]rspec\ *) printf '**/*.rb'; return ;;
+    *\ manage.py\ test\ *|*\ unittest\ *|*\ tox\ *|*\ nox\ *) printf '**/*.py'; return ;;
+    *\ npm\ --prefix\ *) d=${1#*--prefix }; d=${d%% *}; ext_globs "$d" "$JS_EXT"; return ;;
+    *\ deno\ *|*\ bun\ *|*\ bunx\ *) ext_globs . "$JS_EXT"; return ;;
     *[\ /]ruff\ *|*[\ /]flake8\ *|*[\ /]pylint\ *|*[\ /]mypy\ *|*[\ /]black\ *|*[\ /]pytest\ *) printf '**/*.py'; return ;;
     *[\ /]golangci-lint\ *|*[\ /]gofmt\ *|*[\ /]staticcheck\ *|*\ go\ *) printf '**/*.go'; return ;;
     *[\ /]shellcheck\ *|*\ bash\ *.sh\ *|*\ sh\ *.sh\ *) printf '**/*.sh'; return ;;

@@ -216,6 +216,83 @@ eq "unrecognised docs script dropped" "$(printf '%s' "$OUTS" | jq '[.entries[] |
 printf '%s' "$OUTS" > "$TMP/sp-map.json"
 eq "spaced changed file selects its package test" "$(node "$SEL" --map "$TMP/sp-map.json" --select "web app/src/x.js")" "cd 'web app' && npm run test"
 
+# ---- 5e. forge#4315: real runners per ecosystem are mapped with their globs; mutating siblings stay dropped ----
+# wf_case NAME: the step commands on stdin become .github/workflows/ci.yml of a fresh repo; OUTS = its map
+wf_case() {
+  mkdir -p "$TMP/$1/.github/workflows"; cd "$TMP/$1" || exit 1
+  git init -q -b main
+  { printf 'on: pull_request\njobs:\n  ci:\n    runs-on: ubuntu-latest\n    steps:\n'; sed 's/^/      - run: /'; } > .github/workflows/ci.yml
+  git add -A
+  OUTS="$(bash "$S" --stdout)"
+  nostar "$1" "$OUTS"
+}
+cmds() { printf '%s' "$OUTS" | jq -r '[.entries[].command] | sort | join("|")'; }
+globs_of() { printf '%s' "$OUTS" | jq -r --arg c "$1" '[.entries[] | select(.command == $c) | .globs[]] | join(",")'; }
+
+wf_case rust <<'WF'
+cargo test --workspace
+cargo clippy -- -D warnings
+cargo publish
+cargo build --release
+WF
+eq "rust commands" "$(cmds)" "cargo clippy -- -D warnings|cargo test --workspace"
+eq "rust globs" "$(globs_of "cargo test --workspace")" "**/*.rs,**/Cargo.toml,Cargo.lock"
+
+wf_case jvm <<'WF'
+./gradlew test
+./gradlew :app:check --no-daemon
+mvn -B test
+./gradlew publish
+./gradlew test publish
+mvn deploy
+mvn install
+WF
+eq "jvm commands" "$(cmds)" "./gradlew :app:check --no-daemon|./gradlew test|mvn -B test"
+eq "jvm globs" "$(globs_of "mvn -B test")" "**/*.java,**/*.kt,**/*.kts,**/*.gradle,**/*.groovy,**/*.scala,**/pom.xml"
+
+wf_case ruby <<'WF'
+bundle exec rspec
+rspec spec/models
+bundle exec rake release
+WF
+eq "ruby commands" "$(cmds)" "bundle exec rspec|rspec spec/models"
+eq "ruby globs" "$(globs_of "bundle exec rspec")" "**/*.rb"
+
+wf_case pyrun <<'WF'
+python manage.py test
+python -m unittest discover
+tox
+nox -s lint
+tox -e publish
+nox -s release
+python manage.py migrate
+WF
+eq "python runner commands" "$(cmds)" "nox -s lint|python -m unittest discover|python manage.py test|tox"
+eq "python runner globs" "$(globs_of "tox")" "**/*.py"
+
+wf_case js <<'WF'
+deno test
+bun test
+pnpm -r test
+npm --prefix web test
+npm run test:unit
+deno deploy
+npm run deploy:prod
+npm --prefix ../x test
+WF
+eq "js runner commands" "$(cmds)" "bun test|deno test|npm --prefix web test|npm run test:unit|pnpm -r test"
+eq "bun globs" "$(globs_of "bun test")" "**/*.js,**/*.jsx,**/*.ts,**/*.tsx,**/*.mjs,**/*.cjs"
+eq "npm --prefix globs" "$(globs_of "npm --prefix web test")" "web/**/*.js,web/**/*.jsx,web/**/*.ts,web/**/*.tsx,web/**/*.mjs,web/**/*.cjs"
+
+wf_case shell <<'WF'
+bash scripts/a.test.sh
+sh tests/b.test.sh
+bash scripts/deploy.sh
+bash scripts/verify.sh
+WF
+eq "shell commands" "$(cmds)" "bash scripts/a.test.sh|sh tests/b.test.sh"
+eq "shell globs" "$(globs_of "bash scripts/a.test.sh")" "**/*.sh"
+
 # ---- 6. usage ----
 bash "$S" --repo-path "$TMP/missing" >/dev/null 2>&1; eq "bad repo path" "$?" 2
 bash "$S" --nope >/dev/null 2>&1; eq "unknown option" "$?" 2

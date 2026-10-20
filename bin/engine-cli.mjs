@@ -1244,7 +1244,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
     relabelNeedsHuman: deps.relabelNeedsHuman ?? (async ({ issue, evidence }) => {
       try {
-        await leanIo.gh(["issue", "comment", String(issue), "-R", repo, "--body", `<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\n${evidence}`]);
+        // #4315: the evidence carries the full lane reason; capped so it never exceeds GitHub's comment limit
+        const { capComment } = await import("./lean/render.mjs");
+        await leanIo.gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\n${evidence}`)]);
         await leanIo.gh(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
       } catch { /* best effort: the batch row keeps the evidence */ }
     }),
