@@ -10,7 +10,7 @@ import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
-import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord } from "../engine/phases.mjs";
+import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
 import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
@@ -178,7 +178,8 @@ export async function runCore(o) {
     const out = String(await ghw(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`${marks}\n${body}`)])).trim();
     return /https?:\/\/\S+/.exec(out)?.[0] ?? null;
   };
-  const label = async (state) => { try { await retrying(() => io.transitionLabel(issue, state), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random }); } catch { /* labels are best effort */ } };
+  /** Best effort; `true` when the transition succeeded (#4337: the decomposed close needs to know). */
+  const label = async (state) => { try { await retrying(() => io.transitionLabel(issue, state), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random }); return true; } catch { /* labels are best effort */ return false; } };
   const usageLine = () => `cost $${usage.cost_usd.toFixed(4)}, tokens ${usage.input} in / ${usage.output} out / ${usage.cache} cache, wall ${Math.round((now() - t0) / 60000 * 10) / 10} min`;
 
   // ---- lease (same FORGE:STATE lease the full path uses) ----
@@ -593,11 +594,13 @@ export async function runCore(o) {
       try { v = JSON.parse(String(await ghc(["issue", "view", String(d), "-R", repo, "--json", "state,labels"]))); } catch (e) {
         return { kind: "unreadable", detail: `dependency #${d} named by the builder could not be read: ${String(e?.message ?? e).slice(0, 200)}` };
       }
-      if (String(v?.state).toUpperCase() !== "OPEN") continue;
-      // #4153: an open decomposed parent resolves to its open sub-issues; it is satisfied once they all close.
-      const subs = isDecomposedRecord(v) ? await decomposedSubissues(d, io) : null;
+      // #4153 / #4337: a decomposed parent, open or closed, resolves to its open sub-issues; it is satisfied once they all
+      // close. Without a usable trail the parent itself is the dependency, even when closed (fail closed).
+      const decomposed = isDecomposedRecord(v) && ["OPEN", "CLOSED"].includes(String(v?.state).toUpperCase());
+      if (!decomposed && String(v?.state).toUpperCase() !== "OPEN") continue;
+      const subs = decomposed ? await decomposedSubissues(d, io) : null;
       const recs = [];
-      if (!subs) recs.push([d, v]);
+      if (!subs) recs.push([d, { ...v, state: "OPEN" }]);
       else for (const n of subs) {
         try { recs.push([n, JSON.parse(String(await ghc(["issue", "view", String(n), "-R", repo, "--json", "state,labels"])))]); } catch (e) {
           return { kind: "unreadable", detail: `sub-issue #${n} of decomposed dependency #${d} could not be read: ${String(e?.message ?? e).slice(0, 200)}` };
@@ -642,8 +645,16 @@ export async function runCore(o) {
         }
       } catch (e) { return await finish("engine-error", `filing sub-issues failed after ${refs(filed) || "none"}: ${e?.message ?? e}`, { subissues: filed }); }
       T.decisions.push(`Builder block: split into ${refs(filed)}`);
-      try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\n${s}`); } catch { /* best effort */ }
-      await label("decomposed");
+      let marked = false;
+      try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\n${s}`); marked = true; } catch { /* best effort */ }
+      // #4337: the tracker closes only once its trail and label exist: dependents then wait on the sub-issues, not on it.
+      if (await label("decomposed") && marked) {
+        try {
+          await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "not planned", "--comment",
+            `Decomposed into ${refs(filed)}; this tracker is closed and its dependents wait on the sub-issues. A trusted \`FORGE:DECOMPOSED:REVOKED\` reopens it.`]);
+          T.decisions.push(`Closed the decomposed parent (not planned); tracked by ${refs(filed)}`);
+        } catch { /* best effort: the parent stays open, as before #4337 */ }
+      }
       return await finish("decomposed", `split into ${refs(filed)}`, { code: OUTCOME_CODES.DECOMPOSED, subissues: filed });
     }
     return await needsHuman(`Builder is blocked without a valid typed reason after one correction (${b.problem}): ${s}`, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED);
@@ -708,7 +719,13 @@ export async function runCore(o) {
   try {
     iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels,updatedAt"]));
   } catch (e) { return finish("engine-error", `cannot read issue: ${e.message}`); }
-  if (String(iss.state).toUpperCase() === "CLOSED") return finish("invalid", "issue already closed");
+  if (String(iss.state).toUpperCase() === "CLOSED") {
+    // #4337: a closed decomposed tracker is not "already done": its dependents wait on its sub-issues (the batch re-points
+    // them). A trusted revocation reopens it and the run continues. An unreadable trail lists none (fail closed).
+    if (!isDecomposedRecord(iss)) return finish("invalid", "issue already closed");
+    if (await reopenRevokedDecomposition(issue, io)) iss.state = "OPEN";
+    else return finish("decomposed", "closed decomposed tracker; dependents wait on its sub-issues", { code: OUTCOME_CODES.DECOMPOSED, subissues: (await decomposedSubissues(issue, io)) ?? [] });
+  }
 
   try {
     // ---- 1. claim ----

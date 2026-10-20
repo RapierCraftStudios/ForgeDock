@@ -1381,6 +1381,28 @@ describe("runIssue", () => {
       assert.ok(readLog(dir, 42).some((e) => e.event === "RUN_REOPEN" && Array.isArray(e.uncommit)));
     });
 
+    it("#4337 a parent closed at decomposition is reopened on GitHub by a trusted revoke, so the retry is not ended invalid", async () => {
+      const { w, io } = fakeWorld();
+      staleDecomposedRun(w);
+      w.markers += REVOKED;
+      w.issueState = "CLOSED"; w.labels = ["workflow:decomposed"];
+      const patches = [];
+      const gh = io.gh;
+      io.gh = async (args) => {
+        const a = args.join(" ");
+        if (a.startsWith("api -X PATCH") && a.includes("issues/42")) { patches.push(a); w.issueState = "OPEN"; w.labels = []; return "{}"; }
+        if (/^api repos\/\{owner\}\/\{repo\}\/issues\/42$/.test(a)) return JSON.stringify({ state: w.issueState.toLowerCase(), labels: w.labels.map((name) => ({ name })) });
+        return gh(args);
+      };
+      const ran = []; const sc = script(w);
+      const runner = async ({ commandName }) => { ran.push(commandName); sc[commandName]?.(); return { status: "complete" }; };
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner, now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(patches.length, 1, "the closed parent is reopened (state=open)");
+      assert.match(patches[0], /-f state=open/);
+      assert.equal(ran[0], "work-on/build");
+      assert.equal(res.terminalReason, "merged");
+    });
+
     it("an override without a revocation, or neither -> not-retryable, nothing runs", async () => {
       for (const extra of [OVERRIDE, ""]) {
         rmSync(join(dir, "42.jsonl"), { force: true });

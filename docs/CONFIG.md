@@ -821,6 +821,8 @@ decomposition:
 
 **With `close_parent: false`** (default): unchanged. The parent stays open and is closed by C3 when the last child closes.
 
+`close_parent` governs the legacy `work-on:decompose` path only. The lean (core) path always closes a decomposed parent at decomposition (`not planned`, label kept); dependents still wait on its sub-issues (#4337).
+
 **Limitation**: `--retry` and engine resume refuse closed issues, so a closed decomposed parent cannot be re-run. It has nothing left to run; work on its open children instead.
 
 **Commands that use this section**: `work-on` (`decompose` D6.5, `close` C3), `orchestrate`

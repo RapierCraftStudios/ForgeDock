@@ -462,6 +462,76 @@ describe("core work-on", () => {
     noNeedsHuman(w);
   });
 
+  const splitBlock = { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A" }, { title: "part B", body: "do B", depends_on: [0] }] } };
+  it("#4337 a split closes the parent not planned after its FORGE:DECOMPOSED trail and label, listing every sub-issue", async () => {
+    const w = depWorld({ changed: [], result: splitBlock }, {});
+    const r = await run(w);
+    assert.equal(r.terminalReason, "decomposed");
+    assert.equal(w.closed.length, 1);
+    const c = w.closed[0];
+    assert.equal(c[c.indexOf("--reason") + 1], "not planned");
+    const note = c[c.indexOf("--comment") + 1];
+    assert.match(note, /#201/); assert.match(note, /#202/);
+    assert.ok(w.labels.includes("decomposed"));
+    assert.ok(!w.edits.some((e) => e.includes("--remove-label") && e.join(" ").includes("workflow:decomposed")), "the decomposed label is kept");
+    const seq = w.seq.filter((x) => x === "label:decomposed" || x === "close");
+    assert.deepEqual(seq, ["label:decomposed", "close"]);
+    assert.ok(w.comments.findIndex((x) => x.includes("FORGE:DECOMPOSED")) >= 0);
+  });
+
+  it("#4337 no close when the FORGE:DECOMPOSED comment or the decomposed label could not be written (fail closed)", async () => {
+    const w = depWorld({ changed: [], result: splitBlock }, {});
+    const post = w.io.gh;
+    w.io.gh = async (a) => (a[0] === "issue" && a[1] === "comment" && a[a.indexOf("--body") + 1].includes("FORGE:DECOMPOSED") ? Promise.reject(new Error("HTTP 422")) : post(a));
+    assert.equal((await run(w)).terminalReason, "decomposed");
+    assert.equal(w.closed.length, 0);
+    const w2 = depWorld({ changed: [], result: splitBlock }, {});
+    const tl = w2.io.transitionLabel;
+    w2.io.transitionLabel = async (n, st) => { if (st === "decomposed") throw new Error("label failed"); return tl(n, st); };
+    assert.equal((await run(w2)).terminalReason, "decomposed");
+    assert.equal(w2.closed.length, 0);
+  });
+
+  const trail = { body: "<!-- FORGE:DECOMPOSED -->\n## Split into sub-issues\n- #31 part A\n- #32 part B\n", author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
+  const revoke = { body: "<!-- FORGE:DECOMPOSED:REVOKED -->\nre-plan", author_association: "OWNER", user: { type: "User", login: "op" } };
+  it("#4337 a dependency block on a CLOSED decomposed parent resolves to its open sub-issues; no usable trail keeps the parent", async () => {
+    const parent = { state: "CLOSED", labels: [{ name: "workflow:decomposed" }] };
+    const block = { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: [3] } };
+    const w = depWorld({ changed: [], issueComments: [trail], result: block }, { 3: parent, 31: { state: "CLOSED", labels: [] }, 32: { state: "OPEN", labels: [] } });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "dependency-open");
+    assert.deepEqual(r.dependencies, [32]);
+    for (const comments of [[], [trail, revoke]]) {
+      const w2 = depWorld({ changed: [], issueComments: comments, result: block }, { 3: parent });
+      const r2 = await run(w2);
+      assert.equal(r2.terminalReason, "dependency-open", JSON.stringify(comments));
+      assert.deepEqual(r2.dependencies, [3]);
+    }
+    const w3 = depWorld({ changed: [], issueComments: [trail], result: block }, { 3: parent, 31: { state: "CLOSED", labels: [] }, 32: { state: "CLOSED", labels: [] } });
+    assert.notEqual((await run(w3)).terminalReason, "dependency-open", "satisfied once every sub-issue is closed");
+  });
+
+  it("#4337 a run on a CLOSED decomposed tracker ends decomposed with its sub-issues; a trusted revoke reopens it and the run proceeds", async () => {
+    const w = world({ issueStates: { 7: "CLOSED" }, labels: [{ name: "workflow:decomposed" }], issueComments: [trail] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "decomposed");
+    assert.deepEqual(r.subissues, [31, 32]);
+    assert.equal(builders(w).length, 0);
+    assert.equal(w.patches.length, 0);
+    const w2 = world({ issueStates: { 7: "CLOSED" }, labels: [{ name: "workflow:decomposed" }], issueComments: [] });
+    assert.deepEqual((await run(w2)).subissues, [], "no trail: no sub-issues, so the batch skips its dependents (fail closed)");
+    const w3 = world({ issueStates: { 7: "CLOSED" } });
+    assert.equal((await run(w3)).terminalReason, "invalid", "a plain closed issue is still already closed");
+    const w4 = world({ issueStates: { 7: "CLOSED" }, labels: [{ name: "workflow:decomposed" }], issueComments: [trail, revoke] });
+    const gh = w4.io.gh;
+    w4.io.gh = async (a) => (a[0] === "api" && a.length === 2 && /issues\/7$/.test(a[1]) ? JSON.stringify({ state: "closed", labels: [{ name: "workflow:decomposed" }] }) : gh(a));
+    const r4 = await run(w4);
+    assert.equal(w4.patches.length, 1);
+    assert.ok(w4.patches[0].includes("state=open"));
+    assert.ok(builders(w4).length > 0, "the reopened issue is worked on");
+    assert.notEqual(r4.terminalReason, "decomposed");
+  });
+
   it("#4124 a prod-data (non-human) or untyped block gets one corrective resume; a builder that then proceeds merges", async () => {
     const w = world({ result: { status: "blocked", summary: "needs live wire capture and prod baselines", block: { kind: "human", why: "prod-data" } },
       resumeResult: { status: "fixed", summary: "captured via read-only monitoring", evidence: [], tests: [] } });
@@ -1852,6 +1922,21 @@ describe("orchestrate", () => {
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "decomposed"], [2, "merged"], [11, "merged"], [12, "merged"]]);
     assert.ok(log.indexOf("end 11") < log.indexOf("start 12"));
     assert.ok(log.indexOf("end 12") < log.indexOf("start 2"));
+  });
+
+  it("#4337 a CLOSED decomposed tracker in the batch gates its dependents on its sub-issues like resolveBlock; no trail skips them", async () => {
+    const trail = { body: "<!-- FORGE:DECOMPOSED -->\n- #31 part A\n- #32 part B\n", author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
+    const tracker = async (comments) => run(world({ issueStates: { 7: "CLOSED" }, labels: [{ name: "workflow:decomposed" }], issueComments: comments }));
+    const lane = await tracker([trail]);
+    const log = [];
+    const rows = await orchestrate({ issues: [7, 2], parallel: 3, readBody: async (n) => (n === 2 ? "**Depends on**: #7" : ""),
+      runOne: async (n) => { log.push(`start ${n}`); await new Promise((r) => setImmediate(r)); log.push(`end ${n}`); return n === 7 ? lane : { terminalReason: "merged" }; } });
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[7, "decomposed"], [2, "merged"], [31, "merged"], [32, "merged"]]);
+    assert.ok(log.indexOf("end 31") < log.indexOf("start 2") && log.indexOf("end 32") < log.indexOf("start 2"), log.join(","));
+    const failClosed = await tracker([]);
+    const rows2 = await orchestrate({ issues: [7, 2], parallel: 3, readBody: async (n) => (n === 2 ? "**Depends on**: #7" : ""),
+      runOne: async (n) => (n === 7 ? failClosed : { terminalReason: "merged" }) });
+    assert.equal(rows2.find((r) => r.issue === 2).outcome, "skipped");
   });
 
   it("a dependency that closed as invalid does not block", async () => {

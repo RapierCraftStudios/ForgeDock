@@ -81,6 +81,15 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    quote of the requirement a failure names (`explainFailures`), and a failed
    validate names its command. Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
+   A `split` closes the parent `not planned` once its `FORGE:DECOMPOSED` trail
+   and `workflow:decomposed` label are written (label kept; the closing comment
+   lists the sub-issues; either write failing leaves it open) (#4337). A
+   decomposed dependency, open or closed, gates through its sub-issues in
+   `openDependency` and `resolveBlock`; no usable trail keeps the parent as the
+   dependency. A run on a closed decomposed tracker ends `decomposed` with its
+   `subissues` (the batch re-points dependents; none listed skips them), and a
+   trusted `FORGE:DECOMPOSED:REVOKED` reopens it (`reopenRevokedDecomposition`,
+   also used by the engine's `--retry`).
 6. **Implement** — same session; `result.json` with typed amendments
    (`applyAmendments` → `FORGE:AMENDMENT`). An `add-deliverable` on a path the
    contract already lists appends its why to that deliverable's `change`, so it
