@@ -360,6 +360,37 @@ export function resolveConfiguredDefaultModel(cwd) {
 }
 
 /**
+ * Whether the owner approved the paid API backend as the `auto` fallback (#4257).
+ * Needs both forge.yaml `execution.agent_backend: api` in `cwd` (repo owner) and
+ * env `FORGEDOCK_ALLOW_API_BACKEND=1` (host owner), so a committed config edit
+ * alone cannot start billing an API key. Never throws.
+ *
+ * @param {{cwd?: string, env?: object}} [opts]
+ * @returns {boolean}
+ */
+export function isApiBackendApproved({ cwd = process.cwd(), env = process.env } = {}) {
+  if (String(env?.FORGEDOCK_ALLOW_API_BACKEND ?? "").trim() !== "1") return false;
+  try {
+    const forgeYamlPath = join(cwd, "forge.yaml");
+    if (!existsSync(forgeYamlPath)) return false;
+    return parseForgeYaml(readFileSync(forgeYamlPath, "utf-8"))?.execution?.agent_backend === "api";
+  } catch {
+    return false;
+  }
+}
+
+/** #4257: typed error when `auto` finds no usable CLI and the API backend is not approved. */
+function cliUnavailableError(detail = "The claude CLI is not available") {
+  const err = new Error(
+    `${detail}, and the API backend is never used implicitly. Install and authenticate the \`claude\` CLI, ` +
+      "or opt in to the API backend (forge.yaml `execution.agent_backend: api` plus FORGEDOCK_ALLOW_API_BACKEND=1), " +
+      "or pass --backend api.",
+  );
+  err.code = "CLI_BACKEND_UNAVAILABLE";
+  return err;
+}
+
+/**
  * Resolve the CLI backend timeout from forge.yaml's
  * `pipeline.cli_timeout_minutes` field, if it is a positive integer.
  *
@@ -854,6 +885,7 @@ export function checkExecutionBackend({
   apiKey = env.ANTHROPIC_API_KEY,
   resolveCliFn = resolveClaudeCliBinary,
   spawnImpl = spawnSync,
+  apiApproved = isApiBackendApproved({ cwd, env }),
   sdkAvailableFn = () => {
     try {
       createRequire(import.meta.url).resolve("@anthropic-ai/sdk");
@@ -884,7 +916,8 @@ export function checkExecutionBackend({
         return { ready: true, backend: "cli", reason: "resolved-cli" };
       }
     }
-    if (requested === "cli") {
+    // #4257: auto never crosses to the paid API backend without the owner's opt-in.
+    if (requested === "cli" || !apiApproved) {
       return { ready: false, backend: "cli", reason: "cli-unavailable" };
     }
   }
@@ -905,7 +938,8 @@ export function checkExecutionBackend({
  * CLI and prefer it when present — but diverge on (a) which override
  * values are valid and whether an invalid one throws or is silently
  * ignored, and (b) what to return when the CLI probe fails (`resolveBackend`
- * always falls back to `"api"`; `resolveEnrichBackend` falls back to `"api"`
+ * falls back to `"api"` only with the owner's opt-in, else `"cli"` (#4257);
+ * `resolveEnrichBackend` falls back to `"api"`
  * only if `ANTHROPIC_API_KEY` is set, else `"none"`). Rather than force
  * those into one shape, this shared helper implements exactly the common
  * two steps and defers to a `cliFallback` callback for the diverging tail,
@@ -954,24 +988,27 @@ export function resolveBackendLadder({
  *   2. `"auto"` (the default) probes `isClaudeCliAvailable()`: prefers the
  *      CLI backend when a working `claude` install is detected (reuses
  *      whatever credentials the CLI already has — Pro/Max OAuth or a
- *      CLI-managed key — with no ANTHROPIC_API_KEY required), otherwise
- *      falls back to the API backend unchanged (existing behavior for every
- *      caller that never opts in to this feature).
+ *      CLI-managed key — with no ANTHROPIC_API_KEY required). Without a CLI it
+ *      falls back to the API backend ONLY when the owner opted in
+ *      (`isApiBackendApproved()`, #4257); otherwise it returns `"cli"` and
+ *      `runCommand()` fails with a typed `CLI_BACKEND_UNAVAILABLE`. The API
+ *      backend is never the implicit default.
  *
  * Delegates its shared "override-or-probe-CLI" shape to
  * `resolveBackendLadder()` (issue #2026) — this function retains its own
  * `VALID_BACKENDS` throw-on-invalid check (NOT shared; see that helper's
- * doc comment) and its own no-API-key-check fallback (always `"api"`,
- * unconditionally — the API key itself is validated lazily downstream, only
+ * doc comment) and its own opt-in-gated fallback (`"api"` only when
+ * approved — the API key itself is validated lazily downstream, only
  * if/when the api backend is actually selected).
  *
  * @param {object} [opts]
  * @param {string} [opts.requested] - "cli" | "api" | "auto" (default "auto").
  * @param {string} [opts.cwd]       - Working directory for the CLI probe.
  * @param {object} [opts.env]       - Runtime environment used for capability checks.
+ * @param {Function} [opts.isCliAvailableFn] - Injectable CLI-presence probe (test seam).
  * @returns {"cli"|"api"}
  */
-export function resolveBackend({ requested = "auto", cwd = process.cwd(), env = process.env } = {}) {
+export function resolveBackend({ requested = "auto", cwd = process.cwd(), env = process.env, isCliAvailableFn = isClaudeCliAvailable } = {}) {
   if (!VALID_BACKENDS.has(requested)) {
     throw new Error(
       `Invalid backend "${requested}". Must be one of: ${[...VALID_BACKENDS].join(", ")}.`,
@@ -982,7 +1019,8 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd(), env = 
     override: requested === "auto" ? undefined : requested,
     validOverrides: new Set(["cli", "api"]),
     cwd,
-    cliFallback: () => "api",
+    isCliAvailableFn,
+    cliFallback: () => (isApiBackendApproved({ cwd, env }) ? "api" : "cli"),
   });
 }
 
@@ -2789,7 +2827,9 @@ export function renderSummaryCard(ctx) {
  * @param {string} [opts.backend]            - "cli" | "api" | "auto" (default
  *   "auto"). Resolution order when omitted: $FORGEDOCK_BACKEND env > "auto".
  *   "auto" prefers the local Claude Code CLI when detected (no
- *   ANTHROPIC_API_KEY needed), else falls back to the API backend. This
+ *   ANTHROPIC_API_KEY needed); without a CLI it uses the API backend only
+ *   with the owner's opt-in (`isApiBackendApproved()`, #4257), else it fails
+ *   with a typed CLI_BACKEND_UNAVAILABLE — api is never the default. This
  *   precedence is intentional/shipped (issue #2003's accepted acceptance
  *   criteria) and is NOT changed by issue #2020 — that issue only adds a
  *   discoverability notice (below) for the case where the ladder silently
@@ -2840,6 +2880,7 @@ export async function runCommand(opts = {}) {
 
   if (resolvedBackend === "cli" && backend === "auto") {
     const readiness = checkExecutionBackend({ requested: "auto", cwd, apiKey, env: runtimeEnv });
+    // #4257: readiness only reports api when the owner approved it.
     if (readiness.backend === "api") resolvedBackend = "api";
   }
 
@@ -2938,6 +2979,8 @@ export async function runCommand(opts = {}) {
       sessionFlags = buildMinimalSessionFlags(commandName, caps);
     }
     if (!resolvedBin && backend === "auto") {
+      // #4257: never cross to the paid API backend without the owner's opt-in.
+      if (!isApiBackendApproved({ cwd, env: runtimeEnv })) throw cliUnavailableError();
       resolvedBackend = "api";
     } else if (!resolvedBin) {
       const err = new Error("The configured claude CLI path disappeared before invocation.");

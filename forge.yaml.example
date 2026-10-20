@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: agents, repos, project_board, orchestration, pipeline, build, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
+# Optional sections: agents, repos, project_board, orchestration, maintenance, hygiene, pipeline, build, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -270,6 +270,26 @@ branches:
 #   review_pr_staging_max_turns: 80
 
 # =============================================================================
+# ENV (OPTIONAL)
+# Lane environment for the core work-on (#4163). Without these keys lanes still
+# pin the repo's own toolchain: package.json `packageManager` (else .tool-versions)
+# becomes a corepack/npx shim first on the builder's PATH, so validate commands
+# and git hooks run the pinned pnpm/yarn/npm; a node pin (.nvmrc, .node-version,
+# .tool-versions, engines.node) the host doesn't satisfy is a trajectory warning.
+# See docs/CONFIG.md -> `env`.
+#   toolchain: override the package-manager pin ("pnpm@10.4.1"), or "off"
+#   setup:     command run once per fresh lane worktree, before the builder
+#              (e.g. a dev-DB reconcile script). A failure ends the lane
+#              needs-human with code env.setup_failed (an environment error,
+#              not a build failure).
+# Commands: run-issue, orchestrate
+# =============================================================================
+
+# env:
+#   toolchain: "pnpm@10.4.1"
+#   setup: "bash scripts/reconcile-dev-db.sh"
+
+# =============================================================================
 # ORCHESTRATION (OPTIONAL)
 # Concurrency limits and cascade admission policy for the /orchestrate batch
 # engine. `max_concurrent` already existed at runtime but was undocumented
@@ -325,6 +345,82 @@ branches:
 # batched or auto-admitted by ANY cascade.policy, including "all" — that
 # exclusion is a hard invariant enforced upstream of this section, not a
 # configurable key.
+
+# =============================================================================
+# MAINTENANCE (OPTIONAL, off by default)
+# Reserves a share of `forgedock orchestrate` lane starts for maintenance-labelled
+# issues: P0/P1 features > maintenance share > P2+ features. Issues come from
+# scripts/maintenance-scan.sh (deterministic: hotspots, package cycles, dead code,
+# oversized docs), /upgrade-deps and /cleanup. Block form only: the parser does
+# not read `maintenance: { share: 0.2, when_idle: true, scan: weekly }`.
+#
+# maintenance.hotspot (forge#4195, on by default): hotspot prevention for core
+# work-on. scripts/hotspots.sh (git + wc, no LLM) reports lines, commits in the
+# last 90 days and lines x commits for the files an issue names and for the
+# diff. The planner is told to put new logic next to a file over file_lines and
+# give it only wiring; the builder may grow such a file by at most
+# growth_lines. More growth fails the conformance precheck
+# (maintenance.hotspot_growth; blocks in shadow and enforce, one builder
+# resume) unless the contract deliverable for that file says
+# "hotspot-exempt: <reason>". linguist-generated / linguist-vendored paths are
+# always excluded. Read with yq; defaults apply when absent. Its keys are its
+# own: `hotspot.enabled` does not turn the budget on.
+# Commands: orchestrate, autopilot, upgrade-deps, cleanup, run-issue, run
+# =============================================================================
+
+# maintenance:
+#   enabled: false                    # nothing changes until this is true
+#   share: 0.2                        # 0.2 = 1 lane start in 5 goes to maintenance when any is queued
+#   when_idle: true                   # also drain maintenance once no feature is pending
+#   scan: weekly                      # /autopilot runs maintenance-scan.sh this often (weekly | off)
+#   labels: maintenance,refactor:split,dead-code   # labels that mark an issue as maintenance
+#   file_lines: 2000                  # hotspot threshold (lines in a recently changed file)
+#   doc_kb: 64                        # oversized-doc threshold (KB)
+#   hotspot:
+#     enabled: true                   # false turns hotspot facts, the rule and the check off
+#     file_lines: 2000                # a file over this many lines is a hotspot
+#     growth_lines: 150               # max lines a hotspot may grow in one change
+#     exclude_globs:                  # shell patterns (`*` crosses `/`), never checked
+#       - "migrations/*"
+#       - "*.lock"
+
+# =============================================================================
+# MILESTONE DRIFT (OPTIONAL, forge#4161)
+# `forgedock orchestrate` folds each merged milestone lane's structure delta into
+# a FORGE:DRIFT summary in the GitHub milestone description, with no LLM. Without
+# this block that is all it does. With a threshold set, scripts/milestone-drift.sh
+# runs after each merge and files ONE issue per crossing in the milestone, deduped
+# by its FORGE:DRIFT marker. A value crosses when it is greater than the threshold.
+# `/milestone drift <slug>` prints the same report. Block form only.
+# Commands: orchestrate, milestone
+# =============================================================================
+
+# orchestrate:
+#   drift:
+#     pair_growth: 5          # value-import files added for one from->to package pair since the fork point
+#     package_lines: 10000    # net lines added to one workspace package
+#     file_lines: 600         # net lines added to one file
+#     block_dispatch: false   # true: hold queued issues whose Affected Files touch a flagged package
+#     generated_globs: "*.gen.ts, data/*"   # excluded from size growth (with .gitattributes linguist-generated)
+
+# =============================================================================
+# HYGIENE (OPTIONAL, safe defaults)
+# Automatic reclaim of ForgeDock's own leftovers (#4183) with the `forgedock gc`
+# reaper. Only resources ForgeDock provably owns (a lane ledger, a
+# `forgedock.owner=1` docker label, lean-*/agent-* worktrees, feat/issue-<n>-lean
+# branches, ~/.forge/tmp scratch) are reclaimed; everything else is reported.
+# Unpushed or uncommitted work, live lanes, protected and open-PR branches are
+# never touched. Block form only.
+# Commands: orchestrate (preflight + near-ceiling GC), doctor (--fix), gc, cleanup
+# =============================================================================
+
+# hygiene:
+#   container_ttl_hours: 6            # owned docker containers and volumes older than this are reclaimed
+#   worktree_ttl_hours: 24            # owned worktrees and abandoned lane branches
+#   tmp_ttl_hours: 6                  # ~/.forge/tmp run dirs and runner scratch
+#   delete_merged_branches: true      # false: lane branches of closed issues are only reported
+#   max_host_load_ratio: 0.8          # GC before an admission once the host is within 80% of engine admission limits
+#   auto_gc: true                     # false: orchestrate never runs GC (gc and doctor --fix still work)
 
 # =============================================================================
 # PIPELINE (OPTIONAL)
@@ -430,6 +526,17 @@ branches:
 #     extended_modules: 6
 #     # Changed files per slice in extended review. Default: 12.
 #     slice_files: 12
+#   # Deterministic review trigger for the core path (#4273). The conformance
+#   # reviewer is needed when the diff touches a risk path (built-in auth,
+#   # payments, security, data deletion and migration words, plus risk_paths),
+#   # adds a package edge, changes an over-threshold hotspot, or a deterministic
+#   # gate failed or was ambiguous. shadow (default): log REVIEW_TRIGGER and
+#   # always review. enforce: skip the reviewer when not triggered; switch on only
+#   # after >=30 shadow runs whose would-skip lanes had no reviewer-caught defect
+#   # (report: node bin/lean/review-trigger.mjs [--json]). off: today's behaviour.
+#   trigger: shadow
+#   # Globs added to the built-in risk words (comma list or block list).
+#   risk_paths: "src/db/**, *.sql"
 
 # =============================================================================
 # DECOMPOSITION (OPTIONAL)

@@ -12,6 +12,8 @@ install: extras
 
 Scan the entire development environment for rot and fix it. This is a maintenance command — run periodically or after large orchestration batches. It covers 6 domains: stale labels, orphaned issues and dead claims boards, worktree/branch pruning, milestone hygiene, and Project board sync.
 
+Issues this command or a `dead-code` finding produces carry the `maintenance` label, so `forgedock orchestrate` dispatches them within the maintenance budget (forge.yaml `maintenance.share`, #4197), not the feature queue.
+
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
 ---
@@ -47,7 +49,7 @@ All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD
 |-------|--------|
 | `labels` or empty | Fix stale/missing workflow labels on closed issues; detect OPEN issues stuck in intermediate states (Phase 1D) |
 | `orphans` | Close open issues whose PRs are already merged (Phase 2A/2B), and close dead orchestrate claims boards (Phase 2C) |
-| `branches` | Prune worktrees and remote branches for merged PRs |
+| `branches` | Reclaim ForgeDock-owned worktrees, tmp, docker and orphans via `forgedock gc` (3A/3B); prune remote branches for merged PRs (3C) |
 | `milestones` | Report milestones with 0 open issues (advisory — never closes) |
 | `board` | Sync closed issues to Project board with correct terminal state |
 | `batch-p3` | Sweep: fold stale unbatched P3 review findings into surface-area-grouped batch issues (same file, then leaf directory) |
@@ -321,32 +323,15 @@ echo "Claims boards closed: $BOARDS_CLOSED"
 
 ## Phase 3: Worktree & Branch Pruning
 
-### 3A: Identify worktrees with merged PRs
+### 3A/3B: Reclaim owned worktrees, tmp, docker and orphans (the `forgedock gc` reaper, #4183)
 
 ```bash
 cd {REPO_PATH}
-
-# For each worktree (excluding the main one), check if its branch has a merged PR
-REPO_NAME=$(basename "{REPO_PATH}")
-git worktree list --porcelain | grep "^worktree " | grep -v "/$REPO_NAME$" | sed 's/^worktree //' | while read wt; do
-  branch=$(git -C "$wt" branch --show-current 2>/dev/null)
-  if [ -n "$branch" ]; then
-    merged_pr=$(gh pr list --head "$branch" --state merged --json number --jq '.[0].number' 2>/dev/null)
-    if [ -n "$merged_pr" ]; then
-      echo "STALE_WT|$wt|$branch|PR#$merged_pr"
-    fi
-  fi
-done
+npx forgedock gc --worktrees --tmp --docker --processes          # dry-run report
+npx forgedock gc --worktrees --tmp --docker --processes --apply  # reclaim
 ```
 
-### 3B: Remove stale worktrees and local branches
-
-For each worktree with a merged PR:
-```bash
-git worktree remove "$WORKTREE_PATH" --force
-git branch -D "$BRANCH_NAME" 2>/dev/null || true
-echo "Removed: $WORKTREE_PATH ($BRANCH_NAME)"
-```
+It honours `forge.yaml` `hygiene:` TTLs and reclaims only what ForgeDock owns (stale lane ledgers, `lean-*`/`agent-*` worktrees that are clean and pushed, including unregistered dirs, `forgedock.owner=1` containers/volumes, `~/.forge/tmp` scratch, orphaned lane processes). Everything else is reported, never removed. Include its summary table in the report.
 
 ### 3C: Prune merged remote branches
 

@@ -81,6 +81,11 @@ issue right away (priority label first, then the smaller size). Never hold a rea
 lanes finish. To reduce simultaneous base-syncs, don't start two lanes that name the same function within the
 same minute; start another ready issue first instead of waiting.
 
+**Maintenance budget** (off unless forge.yaml `maintenance.enabled: true`). The runner pulls open issues carrying a
+`maintenance.labels` label into the batch and admits in this order: P0/P1 features > maintenance, while maintenance
+starts stay within `maintenance.share` of all starts (0.2 = 1 lane in 5) > P2+ features. With `when_idle` it drains the
+remaining maintenance once no feature is pending; otherwise the rest ends `held (maintenance share)` for a later batch.
+
 - **Batch runner (default, when `forgedock` is on PATH).** Launch the whole set as one durable batch in a single
   `Bash` call with `run_in_background: true`. Do NOT write a scheduler, wrapper or queue script, and do not launch one
   `run-issue` per issue yourself: the runner schedules from the issues' `Depends on` / `Blocked by` lines.
@@ -93,9 +98,12 @@ same minute; start another ready issue first instead of waiting.
   own session, so the batch survives this session: if the runner dies, run `forgedock orchestrate --resume <id>`
   (live lanes are re-adopted, nothing is launched twice). Change K of a running batch with
   `forgedock orchestrate --set-parallel <id> K`. The runner requeues `deferred` lanes by code (host busy after its
-  retry-in, a usage limit holds all admissions until the reset, transient merge/push/idle failures back off; non-host
+  retry-in, a usage limit holds admissions for that account (backend identity) until the reset, across every batch on
+  the host; `forgedock limits show|clear <id>|--all` lists or drops holds; transient merge/push/idle failures back off; non-host
   deferrals stop after `orchestration.max_deferrals`), relaunches an `engine-error` once, and stops admitting after
-  `orchestration.breaker` engine-errors (`errors` within `window_min`; held issues continue on `--resume`). Logical
+  `orchestration.breaker` engine-errors (`errors` within `window_min`; held issues continue on `--resume`). Lanes are
+  capped host-wide (`orchestration.global_parallel`, `forgedock sched cap N|show`), highest priority first; within a
+  priority, slots are shared across repos by weight (`forgedock sched weight <owner/repo> N`, default equal). Logical
   edges you found in step 2.4 must be written to the dependent issue as a `Depends on #X` line before launching. The
   last lines are the report table.
 - **Agent lane (only when the `forgedock` CLI is unavailable).** Spawn one background agent per issue.

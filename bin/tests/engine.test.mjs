@@ -2094,6 +2094,39 @@ describe("runIssue — forge#3696: per-attempt usage, cumulative commit usage, R
     assert.equal(term[0].code, "completed");
     assert.equal(term[0].issue, 42);
   });
+
+  it("forge#4257: the runner's backend is recorded on PHASE_ATTEMPT_USAGE, PHASE_COMMIT and telemetry", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete", backend: commandName === "work-on/build" ? "api" : undefined }; };
+    const seen = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3,
+      emitTelemetry: (rec) => { seen.push(rec); } });
+    assert.equal(res.terminalReason, "merged");
+    const events = readLog(dir, 42);
+    assert.equal(events.find((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "build").backend, "api");
+    assert.equal(events.find((e) => e.event === "PHASE_COMMIT" && e.phase === "build").backend, "api");
+    assert.equal(events.find((e) => e.event === "PHASE_COMMIT" && e.phase === "investigate").backend, null, "unreported backend is null");
+    assert.equal(seen.find((r) => r.event === "PHASE_ATTEMPT_USAGE" && r.phase === "build").backend, "api");
+  });
+
+  it("forge#4257: CLI_BACKEND_UNAVAILABLE fails fast on attempt 1 and ends engine-error", async () => {
+    const { w, io } = fakeWorld();
+    let buildCalls = 0;
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") { w.markers += investigationComment("COMPLETE"); return { status: "complete" }; }
+      buildCalls++;
+      throw Object.assign(new Error("The claude CLI is not available"), { code: "CLI_BACKEND_UNAVAILABLE" });
+    };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+    assert.equal(res.terminalReason, "engine-error");
+    assert.equal(buildCalls, 1, "never retried");
+  });
 });
 
 describe("runIssue — forge#2313: lease config validation", () => {
