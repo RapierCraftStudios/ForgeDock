@@ -1,0 +1,4 @@
+{
+  "name": "@fixture/ui",
+  "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" }
+}

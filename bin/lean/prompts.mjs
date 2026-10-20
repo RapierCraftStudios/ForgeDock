@@ -50,14 +50,17 @@ export function ciUnavailablePrompt() {
 /** #4163: the extra host-rules line when the engine pinned the repo's toolchain on PATH; "" otherwise (prompt unchanged). */
 const toolchainRule = (t) => (t ? `\nThe engine pinned this repo's toolchain on PATH (${t}). Use it as is: do not install global shims or other versions and do not edit PATH; if the pinned tool itself fails, report it as a toolchain/environment problem instead of working around it.` : "");
 
+/** #4272: the extra line citing the repo-facts cache by path (never its content) when it exists; "" otherwise (prompt unchanged). */
+const factsRule = (f) => (f ? `\nRepo facts (toolchain pins, slow suites, layer rules, hotspots) are cached in ${f}: read it before choosing checks or placing code.` : "");
+
 /** #4221: the extra host-rules line when the lane worktree is sparse; "" otherwise (prompt unchanged). */
 const sparseRule = (s) => (s?.excluded ? `\nThis worktree is a sparse checkout: ${s.excluded} tracked file(s) of ${s.maxKb} KB or more are not on disk (\`git ls-files -t | grep '^S'\` lists them). They are not deleted: never commit their removal. If you need one, run \`git sparse-checkout add /<path>\`.` : "");
 
 /** Builder call 1: investigate and write the contract. No code edits. */
-export function builderPlanPrompt(n, { toolchain = null, sparse = null } = {}) {
+export function builderPlanPrompt(n, { toolchain = null, sparse = null, facts = null } = {}) {
   return `Resolve issue #${n} (read it with gh issue view ${n} --comments). This first step is PLANNING ONLY: do not edit code, do not commit.
 
-${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}
+${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 
 1. Write ${INVESTIGATION_FILE} as markdown with exactly these headings, concise, file:line wherever you cite code (no HTML comments):
 **Verdict**: CONFIRMED|ALREADY-FIXED|INVALID|BLOCKED
@@ -79,7 +82,7 @@ If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"alread
 {"requirements":[{"id":"R1","quote":"<verbatim sentence or checklist item from the issue>","disposition":"deliver|defer|post-deploy|not-applicable","why":"<required for defer and post-deploy>","evidence":"<file:line, required for not-applicable>"}],
  "deliverables":[{"id":"D1","path":"<file to change>","change":"<what>","requirements":["R1"]}],
  "preserve":[{"id":"P1","what":"<caller, contract or behaviour that must not change, with its path>"}],
- "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change>"}],
+ "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>"}],
  "decisions":[{"id":"K1","choice":"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>","justification":"<why, with file:line>","source":"doc|lint|precedent|spec"}]}
 Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. A requirement you can do in this change is "deliver". List every file you will change as a deliverable; tests are always allowed.
 A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when there is none. Then stop.
@@ -88,11 +91,11 @@ ${BLOCK_RULES}`;
 }
 
 /** Builder call 2, same session: implement the frozen contract. */
-export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null } = {}) {
+export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
   return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, and commit. Do not push or touch GitHub.
 
-${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
+${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why, which the engine posts on the issue:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file you must change that the contract did not list.
@@ -149,8 +152,11 @@ export function contractCorrectionPrompt(problems) {
 }
 
 /** The one bounded correction round, in the builder's own session. */
-export function conformanceResumePrompt(failures, mode = "local") {
-  return `The change does not conform to the frozen contract and the issue:\n${failures.slice(0, 30).map((f) => `- ${f.code}: ${String(f.detail).slice(0, 500)}`).join("\n")}\n\nFix each item in the code, or record a typed amendment with a why in ${RESULT_FILE}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+export function conformanceResumePrompt(failures, mode = "local", lane = "") {
+  const baseMoved = lane && failures.some((f) => f?.kind === "validate_failed")
+    ? `\n\nIf a validate command fails only because origin/${lane} moved on after this branch started (the change itself is fine), bring the branch up to date with \`git merge --no-edit origin/${lane}\` (already fetched; never rebase or force), resolve any conflicts, then re-run every validate command and record the results.`
+    : "";
+  return `The change does not conform to the frozen contract and the issue:\n${failures.slice(0, 30).map((f) => `- ${f.code}: ${String(f.detail).slice(0, 500)}`).join("\n")}${baseMoved}\n\nFix each item in the code, or record a typed amendment with a why in ${RESULT_FILE}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /** forge#4159: the one resume for package.json edges between workspace packages the contract does not name. */

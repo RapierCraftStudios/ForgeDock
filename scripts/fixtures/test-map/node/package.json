@@ -1,0 +1,10 @@
+{
+  "name": "fixture-node",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "vitest run",
+    "lint": "eslint ."
+  }
+}

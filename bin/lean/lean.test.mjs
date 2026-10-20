@@ -922,6 +922,21 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(nhBody(w), /validate V1 failed \(exit 1\)/);
   });
 
+  it("a failed validate fetches the lane and the resume says how to catch up with a moved base (merge, never rebase)", async () => {
+    const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
+    assert.equal((await runShadow(w)).terminalReason, "merged");
+    const p = builders(w)[2][4];
+    assert.match(p, /origin\/staging moved on[\s\S]*git merge --no-edit origin\/staging[\s\S]*never rebase or force/);
+    const fetches = w.calls.filter((c) => c[0] === "git" && c[1] === "fetch" && c[2] === "origin" && c[3] === "staging");
+    assert.ok(fetches.length >= 2, "fetched at setup and again before the resume");
+  });
+
+  it("a resume for other failures (a partial requirement) does not mention merging the base", async () => {
+    const w = world({ claims: [{ id: "R1", status: "partial" }] });
+    await runShadow(w);
+    assert.doesNotMatch(builders(w)[2][4], /git merge --no-edit/);
+  });
+
   it("shadow: a failed validate fixed by the resume merges", async () => {
     const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
     assert.equal((await runShadow(w)).terminalReason, "merged"); assert.equal(builders(w).length, 3);
@@ -3402,6 +3417,72 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.equal(r.terminalReason, "merged");
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 1);
     assert.match(traj(w)[0], /builder made no new commit for them/);
+  });
+});
+
+describe("test map and repo facts caches (#4272)", () => {
+  const MAPF = `${WT}/.forge/test-map.json`, FACTSF = `${WT}/.forge/repo-facts.json`;
+  const map = (entries) => JSON.stringify({ version: 1, entries });
+  const recorder = (w) => { const ran = []; w.io.runCommand = async ({ command }) => { ran.push(command); return { rc: 0, output: "" }; }; return ran; };
+
+  it("a test map present picks the commands for the changed files instead of learned.test_commands", async () => {
+    const w = world(); const ran = recorder(w);
+    w.files[MAPF] = map([{ globs: ["src/**/*.js"], command: "npm run lint", cwd: ".", source: "package.json#scripts.lint" },
+      { globs: ["**/*.py"], command: "uv run pytest", cwd: ".", source: "pyproject.toml" }, { globs: ["test/**"], command: "npm test", cwd: "pkg", source: "pkg/package.json" }]);
+    const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir, precheck: { commands: ["make lint"] } })).terminalReason, "merged");
+    assert.deepEqual(ran, ["npm run lint", "cd pkg && npm test"]);
+    const pre = readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS");
+    assert.deepEqual(pre.map((e) => [e.source, e.results.map((r) => r.command)]), [["test-map", ["npm run lint", "cd pkg && npm test"]]]);
+    assert.match(traj(w)[0], /Pre-PR checks selected from \.forge\/test-map\.json: 2 of 3 entries/);
+  });
+
+  it("the main checkout's test map is used when the worktree has none; a map alone enables the step", async () => {
+    const w = world(); const ran = recorder(w);
+    w.files["/repo/.forge/test-map.json"] = map([{ globs: ["**"], command: "make check", cwd: "." }]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.deepEqual(ran, ["make check"]);
+  });
+
+  it("a map matching no changed file, or an invalid map, falls back to learned.test_commands", async () => {
+    for (const text of [map([{ globs: ["**/*.go"], command: "go test ./...", cwd: "." }]), "{not json", JSON.stringify({ version: 9, entries: [] })]) {
+      const w = world(); const ran = recorder(w); w.files[MAPF] = text;
+      const dir = tmpDir("core-");
+      assert.equal((await run(w, { dir, precheck: { commands: ["make lint"] } })).terminalReason, "merged");
+      assert.deepEqual(ran, ["make lint"], text);
+      assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS").map((e) => Object.keys(e).includes("source")), [false]);
+    }
+  });
+
+  it("neither file present: the same commands, events and prompts as without the feature", async () => {
+    const w = world(); const ran = recorder(w); w.io.fs.exists = async () => false;
+    const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir, precheck: { commands: ["true", "make lint"] } })).terminalReason, "merged");
+    assert.deepEqual(ran, ["true", "make lint"]);
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS").map(({ round, results, ...rest }) => [round, results, Object.keys(rest).filter((k) => k === "source")]),
+      [[0, [{ command: "true", rc: 0 }, { command: "make lint", rc: 0 }], []]]);
+    const [plan, impl] = builders(w);
+    assert.equal(plan[4].startsWith(builderPlanPrompt(7)), true); assert.equal(impl[4].startsWith(builderImplementPrompt("local")), true);
+    for (const b of builders(w)) assert.doesNotMatch(b[4], /Repo facts/);
+    assert.doesNotMatch(traj(w)[0], /test-map/);
+  });
+
+  it("repo-facts.json present: the builder prompts cite its path, never its content", async () => {
+    const w = world(); recorder(w);
+    w.files[FACTSF] = JSON.stringify({ version: 1, toolchain: { pm: { name: "pnpm", version: "9.9.9-SECRET" } } });
+    w.io.fs.exists = async (p) => p in w.files;
+    assert.equal((await run(w)).terminalReason, "merged");
+    const [plan, impl] = builders(w);
+    for (const b of [plan, impl]) { assert.ok(b[4].includes(`are cached in ${FACTSF}`)); assert.doesNotMatch(b[4], /9\.9\.9-SECRET/); }
+    const w2 = world(); recorder(w2); w2.files["/repo/.forge/repo-facts.json"] = "{}"; w2.io.fs.exists = async (p) => p in w2.files;
+    assert.equal((await run(w2)).terminalReason, "merged");
+    assert.ok(builders(w2)[0][4].includes("are cached in /repo/.forge/repo-facts.json"));
+  });
+
+  it("prompts are byte-identical without a facts path", () => {
+    assert.equal(builderPlanPrompt(7, { toolchain: null, facts: null }), builderPlanPrompt(7));
+    assert.equal(builderImplementPrompt("ci", { facts: null }), builderImplementPrompt("ci"));
+    assert.match(builderImplementPrompt("local", { facts: "/x/.forge/repo-facts.json" }), /Repo facts \(toolchain pins, slow suites, layer rules, hotspots\) are cached in \/x\/\.forge\/repo-facts\.json/);
   });
 });
 
