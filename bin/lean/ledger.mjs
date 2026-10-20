@@ -4,7 +4,8 @@
  * Lane resource ledger (#4179): `~/.forge/ledger/<batch>/<lane>.json` lists every resource a lane owns (worktree, branch,
  * run tmp, spawned pids, containers/volumes the builder reported) with owner, batch, lane, issue, created and expires.
  * Each resource is registered BEFORE it is created and released only after its teardown succeeded, so a lane that dies
- * leaves an exact record behind. Teardown acts only on what the ledger lists; this module itself only reads and writes
+ * leaves an exact record behind. A `sandbox` entry (#4253, execution.mjs) carries `{provider, handle}` (never a secret);
+ * a file listing only sandboxes is a remote lane, not a lane on this host. Teardown acts only on what the ledger lists; this module itself only reads and writes
  * the ledger file (no git, gh, docker or kill calls).
  */
 import * as nodeFs from "node:fs";
@@ -13,7 +14,7 @@ import { join } from "node:path";
 
 export const ledgerRoot = () => join(homedir(), ".forge", "ledger");
 export const LEDGER_TTL_MS = 6 * 3600 * 1000;
-export const LEDGER_KINDS = Object.freeze(["worktree", "branch", "tmp", "pid", "container", "volume"]);
+export const LEDGER_KINDS = Object.freeze(["worktree", "branch", "tmp", "pid", "container", "volume", "sandbox"]);
 /** A path segment that cannot escape the root: [A-Za-z0-9._-] only, never "." or "..". */
 export const safeSegment = (s) => { const v = String(s ?? "").replace(/[^A-Za-z0-9._-]/g, "_"); return !v || /^\.+$/.test(v) ? "_" : v; };
 
@@ -21,7 +22,7 @@ const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e)
 
 /**
  * Live lanes on this host (#4182): lane files under `<root>/<batch>/` whose host is `host`, whose pid is alive and whose
- * expiry is in the future. Read-only: never writes or deletes; unreadable or malformed files are skipped.
+ * expiry is in the future. A file listing only `sandbox` resources (#4253) runs off this host and is not counted. Read-only: never writes or deletes; unreadable or malformed files are skipped.
  */
 export function countLiveLanes({ root = ledgerRoot(), host = hostname(), now = () => Date.now(), alive = pidAlive, fs = nodeFs } = {}) {
   let n = 0, batches = [];
@@ -33,7 +34,8 @@ export function countLiveLanes({ root = ledgerRoot(), host = hostname(), now = (
       if (!f.endsWith(".json")) continue;
       try {
         const j = JSON.parse(fs.readFileSync(join(root, b, f), "utf8"));
-        if (j && j.host === host && Number.isSafeInteger(j.pid) && j.pid > 0 && Number(j.expires) > now() && alive(j.pid)) n++;
+        const remote = Array.isArray(j?.resources) && j.resources.length > 0 && j.resources.every((r) => r?.kind === "sandbox");
+        if (j && !remote && j.host === host && Number.isSafeInteger(j.pid) && j.pid > 0 && Number(j.expires) > now() && alive(j.pid)) n++;
       } catch { /* not a lane file */ }
     }
   }

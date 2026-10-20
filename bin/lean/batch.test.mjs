@@ -10,6 +10,8 @@ import { orchestrate, deferPolicy, DEFER_BACKOFF_S } from "./orchestrate.mjs";
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane } from "./batch.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration } from "../engine-cli.mjs";
 
+// orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir, also for spawned dispatchers.
+process.env.FORGEDOCK_SCHED_DIR = tmpDir("batch-sched-");
 const quiet = async (fn) => { const l = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = l; } };
 const until = async (cond, ms = 15000) => {
   const end = Date.now() + ms;
@@ -201,9 +203,9 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.doesNotThrow(() => assertDiskPath("/home/u/.forge/batches", mounts));
     assert.equal(isLaneAlive(process.pid, "--definitely-not-in-my-cmdline"), false);
     assert.equal(isLaneAlive(2 ** 22 + 12345, null), false);
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3 });
-    writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n");
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2 });
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, globalParallel: null });
+    writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n");
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, globalParallel: 4 });
   });
 
   it("run-issue --result-file writes the lane result, also when the run throws", async () => {
