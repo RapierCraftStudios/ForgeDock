@@ -79,7 +79,7 @@ If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"alread
 {"requirements":[{"id":"R1","quote":"<verbatim sentence or checklist item from the issue>","disposition":"deliver|defer|post-deploy|not-applicable","why":"<required for defer and post-deploy>","evidence":"<file:line, required for not-applicable>"}],
  "deliverables":[{"id":"D1","path":"<file to change>","change":"<what>","requirements":["R1"]}],
  "preserve":[{"id":"P1","what":"<caller, contract or behaviour that must not change, with its path>"}],
- "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change>"}],
+ "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>"}],
  "decisions":[{"id":"K1","choice":"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>","justification":"<why, with file:line>","source":"doc|lint|precedent|spec"}]}
 Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. A requirement you can do in this change is "deliver". List every file you will change as a deliverable; tests are always allowed.
 A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when there is none. Then stop.
@@ -140,8 +140,11 @@ export function contractCorrectionPrompt(problems) {
 }
 
 /** The one bounded correction round, in the builder's own session. */
-export function conformanceResumePrompt(failures, mode = "local") {
-  return `The change does not conform to the frozen contract and the issue:\n${failures.slice(0, 30).map((f) => `- ${f.code}: ${String(f.detail).slice(0, 500)}`).join("\n")}\n\nFix each item in the code, or record a typed amendment with a why in ${RESULT_FILE}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+export function conformanceResumePrompt(failures, mode = "local", lane = "") {
+  const baseMoved = lane && failures.some((f) => f?.kind === "validate_failed")
+    ? `\n\nIf a validate command fails only because origin/${lane} moved on after this branch started (the change itself is fine), bring the branch up to date with \`git merge --no-edit origin/${lane}\` (already fetched; never rebase or force), resolve any conflicts, then re-run every validate command and record the results.`
+    : "";
+  return `The change does not conform to the frozen contract and the issue:\n${failures.slice(0, 30).map((f) => `- ${f.code}: ${String(f.detail).slice(0, 500)}`).join("\n")}${baseMoved}\n\nFix each item in the code, or record a typed amendment with a why in ${RESULT_FILE}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /** forge#4159: the one resume for package.json edges between workspace packages the contract does not name. */

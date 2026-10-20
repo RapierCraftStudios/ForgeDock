@@ -1267,7 +1267,9 @@ export async function runCore(o) {
         if (resumes >= 1 || !sessionId) return await needsHuman(`The change does not conform to the issue and its frozen contract after ${resumes ? "one builder resume" : "the build (no session to resume)"} (${outcome.by}); nothing merged:\n${list}`, outcome.failures[0].code);
         resumes++;
         T.decisions.push(`Not conforming (${outcome.by}${outcome.inconsistent ? ", reviewer verdict contradicted its rows" : ""}): ${[...new Set(outcome.failures.map((f) => f.code))].join(", ")}; builder resumed once`);
-        await builder(++attemptN, conformanceResumePrompt(outcome.failures, vcfg.mode), sessionId);
+        // A failed validate may only mean the base moved on: fetch the lane so the resume can merge it (never rebase).
+        if (outcome.failures.some((f) => f?.kind === "validate_failed")) { try { await io.git(["fetch", "origin", lane], { cwd: wt }); } catch { /* offline: the resume uses the local ref */ } }
+        await builder(++attemptN, conformanceResumePrompt(outcome.failures, vcfg.mode, lane), sessionId);
         await upsertStage("implementation"); // the published note follows the code after every resume
       }
       // Deferrals the reviewer accepted are filed now, before any PR: the batched follow-up must exist and be linked.

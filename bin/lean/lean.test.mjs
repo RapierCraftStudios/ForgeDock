@@ -922,6 +922,21 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(nhBody(w), /validate V1 failed \(exit 1\)/);
   });
 
+  it("a failed validate fetches the lane and the resume says how to catch up with a moved base (merge, never rebase)", async () => {
+    const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
+    assert.equal((await runShadow(w)).terminalReason, "merged");
+    const p = builders(w)[2][4];
+    assert.match(p, /origin\/staging moved on[\s\S]*git merge --no-edit origin\/staging[\s\S]*never rebase or force/);
+    const fetches = w.calls.filter((c) => c[0] === "git" && c[1] === "fetch" && c[2] === "origin" && c[3] === "staging");
+    assert.ok(fetches.length >= 2, "fetched at setup and again before the resume");
+  });
+
+  it("a resume for other failures (a partial requirement) does not mention merging the base", async () => {
+    const w = world({ claims: [{ id: "R1", status: "partial" }] });
+    await runShadow(w);
+    assert.doesNotMatch(builders(w)[2][4], /git merge --no-edit/);
+  });
+
   it("shadow: a failed validate fixed by the resume merges", async () => {
     const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
     assert.equal((await runShadow(w)).terminalReason, "merged"); assert.equal(builders(w).length, 3);
