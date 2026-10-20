@@ -87,15 +87,23 @@ case "$MERGE_ISSUE" in *[!0-9]*) MERGE_ISSUE="" ;; esac
 [ "$THOROUGH" = "true" ] || THOROUGH="false"
 
 # --- trusted helper resolution (install roots only; never cwd) ---
+# shellcheck source=/dev/null  # the resolver lib is found at runtime in the trusted install root
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; _SELF_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)"; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" "${CLAUDE_PLUGIN_ROOT:-}" "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/* "$_SELF_ROOT"; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 
 ROSTER_SCRIPT=$(forge_resolve review-roster.sh)
 TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+# shellcheck disable=SC2034  # read by lib/review-delta-mode.sh (sourced below)
 REVIEW_DELTA_SCRIPT=$(forge_resolve review-delta.sh)
 CODE_INDEX_SCRIPT=$(forge_resolve code-index.sh)
-_l=$(forge_resolve lib/pr-issue-number.sh); if [ -n "$_l" ]; then . "$_l"; else pr_issue_number() { return 0; }; fi
-_l=$(forge_resolve lib/review-template-resolve.sh); if [ -n "$_l" ]; then . "$_l"; else review_template_resolve() { TEMPLATE_BASE=""; TEMPLATE_SOURCE="none"; MONOLITHIC_CATALOG=""; }; fi
-_l=$(forge_resolve lib/review-delta-mode.sh); if [ -n "$_l" ]; then . "$_l"; else review_delta_mode() { echo "FULL - 0"; }; carry_verified_from() { :; }; fi
+_l=$(forge_resolve lib/pr-issue-number.sh)
+# shellcheck source=/dev/null  # resolved at runtime from the trusted install root
+if [ -n "$_l" ]; then . "$_l"; else pr_issue_number() { return 0; }; fi
+_l=$(forge_resolve lib/review-template-resolve.sh)
+# shellcheck source=/dev/null  # resolved at runtime from the trusted install root
+if [ -n "$_l" ]; then . "$_l"; else review_template_resolve() { TEMPLATE_BASE=""; TEMPLATE_SOURCE="none"; MONOLITHIC_CATALOG=""; }; fi
+_l=$(forge_resolve lib/review-delta-mode.sh)
+# shellcheck source=/dev/null disable=SC2329  # resolved at runtime; the fallback stubs mirror the lib's API
+if [ -n "$_l" ]; then . "$_l"; else review_delta_mode() { echo "FULL - 0"; }; carry_verified_from() { :; }; fi
 
 # --- state, scratch and the ref-restore guard ---
 BLOCKERS=""
@@ -105,12 +113,14 @@ mkdir -p "$OUT_DIR" 2>/dev/null || { echo "review-prepare: cannot create $OUT_DI
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/review-prepare.XXXXXX") || exit 2
 ORIG_REF=""; CHECKED_OUT=""
 # restore_ref: put the checkout back exactly where it was. -f so a dirty review checkout can never wedge the restore.
+# shellcheck disable=SC2329  # called from cleanup (EXIT trap) and the checkout paths
 restore_ref() {
     if [ -n "$CHECKED_OUT" ] && [ -n "$ORIG_REF" ]; then
         git checkout -f "$ORIG_REF" >/dev/null 2>&1 || echo "review-prepare: WARNING could not restore $ORIG_REF" >&2
     fi
     CHECKED_OUT=""
 }
+# shellcheck disable=SC2329  # invoked by the EXIT trap
 cleanup() { restore_ref; rm -rf "$TMP_DIR"; }
 trap cleanup EXIT
 
@@ -144,6 +154,7 @@ if [ -z "$BLOCKERS" ]; then
         # Pinned (forge#3935): same-repo PRs only (a fork's branch name resolves to origin's own branch), and the fetched tip must equal REVIEW_SHA; the diff is taken against REVIEW_SHA, never the branch name.
         if { [ "$NO_DELTA" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; } && [ -n "$BASE" ] && [ -n "$HEAD" ] && [ "$(printf '%s' "$PR_INFO" | jq -r .isCrossRepository 2>/dev/null)" = "false" ] && printf '%s' "$REVIEW_SHA" | grep -qE '^[0-9a-f]{40}$' \
            && git fetch -q origin "$BASE" "$HEAD" 2>/dev/null && [ "$(git rev-parse -q --verify "refs/remotes/origin/${HEAD}^{commit}" 2>/dev/null)" = "$REVIEW_SHA" ]; then
+            # shellcheck disable=SC2015  # either assignment failing resets both, by design
             FILES=$(git diff --name-only "origin/${BASE}...${REVIEW_SHA}" 2>/dev/null) && DIFF=$(git diff "origin/${BASE}...${REVIEW_SHA}" 2>/dev/null) || { FILES=""; DIFF=""; }
         fi
         [ -n "$FILES" ] || block "gh pr diff failed"
@@ -420,7 +431,9 @@ canonical_roster() { local out="" a d; for a in $1; do d=$(agent_domain "$a"); c
 SELECTED_AGENTS=$(canonical_roster "$SELECTED_AGENTS")
 
 # --- Phase 3C: review mode (FULL | DELTA | BASE_SYNC_ONLY) ---
+# shellcheck disable=SC2034  # both read by lib/review-delta-mode.sh
 BASE_BRANCH="$BASE"
+# shellcheck disable=SC2034
 COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
 delta_roster() {
     local rounds="${1}" full="${2}" files="${3}" out="security" root

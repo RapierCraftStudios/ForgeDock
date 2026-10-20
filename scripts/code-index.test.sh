@@ -38,7 +38,7 @@ mkdir -p "$REPO/.venv/lib"; printf 'def venv_only_fn():\n    helper_fn()\n' > "$
 OUT="$WORK/out"
 bash "$SCRIPT" --repo-path "$REPO" --output "$OUT" > "$WORK/log" 2>&1; rc=$?
 if [ "$rc" -eq 0 ]; then ok; else bad "build exit $rc: $(head -c 400 "$WORK/log")"; fi
-C=$(ls -d "$OUT"/*/ 2>/dev/null | head -n 1)
+C=$(find "$OUT" -mindepth 1 -maxdepth 1 -type d | head -n 1)
 for f in symbols imports callers file_domain; do
   if [ -s "$C/$f.tsv" ]; then ok; else bad "$f.tsv is empty"; fi
   if grep -qE '\.claude/|\.forge/|\.venv/|worktree_only_fn|forge_wt_only_fn|venv_only_fn' "$C/$f.tsv" 2>/dev/null; then
@@ -65,7 +65,7 @@ printf 'def venv_only_fn():\n    pass\n' > "$PLAIN/.venv/lib/site.py"
 printf 'def worktree_only_fn():\n    pass\n' > "$PLAIN/.claude/worktrees/x/src/w.py"
 bash "$SCRIPT" --repo-path "$PLAIN" --output "$WORK/out2" > "$WORK/log3" 2>&1; rc=$?
 if [ "$rc" -eq 0 ]; then ok; else bad "non-git build exit $rc"; fi
-C2=$(ls -d "$WORK"/out2/*/ 2>/dev/null | head -n 1)
+C2=$(find "$WORK/out2" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1)
 if grep -q '^helper_fn	src/app.py	' "$C2/symbols.tsv" 2>/dev/null; then ok; else bad "non-git build missed helper_fn"; fi
 if grep -qE 'venv_only_fn|worktree_only_fn' "$C2/symbols.tsv" 2>/dev/null; then bad "non-git build walked .venv/.claude"; else ok; fi
 
@@ -81,7 +81,7 @@ printf 'export const p = 1\n' > "$DOM/web/src/app/billing/page.tsx"; printf 'ech
 git -C "$DOM" init -q -b main; git -C "$DOM" add -A; git -C "$DOM" commit -qm init
 bash "$SCRIPT" --repo-path "$DOM" --output "$WORK/out3" > "$WORK/log4" 2>&1; rc=$?
 if [ "$rc" -eq 0 ]; then ok; else bad "domain fixture build exit $rc: $(head -c 400 "$WORK/log4")"; fi
-C3=$(ls -d "$WORK"/out3/*/ 2>/dev/null | head -n 1)
+C3=$(find "$WORK/out3" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1)
 for want in "services/api/auth/login.py	auth" "services/api/routes.py	api" "web/src/app/billing/page.tsx	billing" "scripts/x.sh	pipeline-scripts"; do
   if grep -qxF "$want" "$C3/file_domain.tsv" 2>/dev/null; then ok; else bad "file_domain.tsv missing '$want': $(tr '\n' ' ' < "$C3/file_domain.tsv" 2>/dev/null)"; fi
 done

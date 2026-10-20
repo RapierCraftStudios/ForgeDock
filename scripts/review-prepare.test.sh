@@ -109,7 +109,9 @@ setup feat/x staging "README.md" "$DIFF_PLAIN"; printf 'CONFLICTING|DIRTY\n' > "
 prep "$ROOT"; eq "conflicting" .merge_health.mergeable CONFLICTING; eq "conflicting state" .merge_health.state DIRTY; eq "no retry on CONFLICTING" .merge_health.retries 0
 setup feat/x staging "README.md" "$DIFF_PLAIN"; printf 'UNKNOWN|UNKNOWN\n' > "$FIX/merge.seq"
 prep "$ROOT"; eq "unknown stays unknown after 3 retries" .merge_health.retries 3; eq "still UNKNOWN" .merge_health.mergeable UNKNOWN
-setup feat/x staging "README.md" "$DIFF_PLAIN"; printf 'garbage|$(rm -rf)\n' > "$FIX/merge.seq"
+setup feat/x staging "README.md" "$DIFF_PLAIN"
+# shellcheck disable=SC2016  # the literal $(rm -rf) is the hostile payload under test
+printf 'garbage|$(rm -rf)\n' > "$FIX/merge.seq"
 prep "$ROOT"; eq "garbage state normalized" .merge_health.state UNKNOWN
 setup feat/x staging "README.md" "$DIFF_PLAIN"; echo 0 > "$FIX/prior"
 prep "$ROOT"; eq "first-time contributor" .pr.first_time_contributor true
@@ -234,6 +236,7 @@ CFG_OVERRIDE="$WORK/emptyroot.yaml" prep "$WORK/root-notpl"
 rc_is "no template source" 3; eq "templates none" .templates.source none
 
 # --- 8. issue number extraction and trusted contract ---
+# shellcheck source=/dev/null
 . "$ROOT/scripts/lib/pr-issue-number.sh"
 chk() { local got; got=$(pr_issue_number_of "$2"); if [ "$got" = "$3" ]; then ok; else bad "$1: got '$got', want '$3'"; fi; }
 chk "Closes" "Closes #12" 12
@@ -271,6 +274,7 @@ setup feat/x staging "README.md" "$DIFF_PLAIN" "00000000000000000000000000000000
 prep "$ROOT" --checkout-pr
 rc_is "unknown sha cannot be checked out" 3
 if [ "$(git -C "$REPO_DIR" symbolic-ref --short HEAD 2>/dev/null)" = "main" ]; then ok; else bad "failed checkout moved HEAD"; fi
+# shellcheck disable=SC2016  # matches the literal $ORIG_REF in the script source
 if grep -q 'checkout -f "\$ORIG_REF"' "$ROOT/scripts/review-prepare.sh"; then ok; else bad "restore_ref must use git checkout -f"; fi
 
 # --- 10. fail closed on gh and bad arguments ---

@@ -181,7 +181,7 @@ src_files() {
 # Step 1: Symbol extraction
 # ---------------------------------------------------------------------------
 SYMBOLS_FILE="${CACHE_DIR}/symbols.tsv"
-> "$SYMBOLS_FILE"
+: > "$SYMBOLS_FILE"
 
 echo "INFO: Extracting symbols..."
 
@@ -239,7 +239,7 @@ if [[ ! -s "$SYMBOLS_FILE" ]] || ! command -v ctags >/dev/null 2>&1; then
         name=""
       fi
       kind=$(echo "$content" | grep -q "^def \|    def " && echo "function" || echo "class")
-      rel_path="${f#$REPO_PATH/}"
+      rel_path="${f#"$REPO_PATH"/}"
       [[ -n "$name" ]] && echo -e "${name}\t${rel_path}\t${lnum}\t${kind}"
     done || true
   done >> "$SYMBOLS_FILE" 2>/dev/null || true
@@ -257,7 +257,7 @@ if [[ ! -s "$SYMBOLS_FILE" ]] || ! command -v ctags >/dev/null 2>&1; then
       else
         name=""
       fi
-      rel_path="${f#$REPO_PATH/}"
+      rel_path="${f#"$REPO_PATH"/}"
       [[ -n "$name" ]] && echo -e "${name}\t${rel_path}\t${lnum}\tfunction"
     done || true
   done >> "$SYMBOLS_FILE" 2>/dev/null || true
@@ -267,13 +267,13 @@ fi
 # Step 2: Import graph extraction
 # ---------------------------------------------------------------------------
 IMPORTS_FILE="${CACHE_DIR}/imports.tsv"
-> "$IMPORTS_FILE"
+: > "$IMPORTS_FILE"
 
 echo "INFO: Building import graph..."
 
 # Python imports
 src_files py | while read -r f; do
-  rel_path="${f#$REPO_PATH/}"
+  rel_path="${f#"$REPO_PATH"/}"
   grep -n "^import \|^from " "$f" 2>/dev/null | while IFS=: read -r lnum content; do
     # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
     # grep build on Windows, so use a bash regex instead of lookbehind.
@@ -293,7 +293,7 @@ done >> "$IMPORTS_FILE" 2>/dev/null || true
 
 # JavaScript/TypeScript imports
 src_files js ts tsx jsx | while read -r f; do
-  rel_path="${f#$REPO_PATH/}"
+  rel_path="${f#"$REPO_PATH"/}"
   grep -n "^import \|^} from \|require(" "$f" 2>/dev/null | while IFS=: read -r lnum content; do
     # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
     # grep build on Windows, so use a bash regex instead of lookbehind/lookahead.
@@ -310,7 +310,7 @@ done >> "$IMPORTS_FILE" 2>/dev/null || true
 
 # Go imports
 src_files go | while read -r f; do
-  rel_path="${f#$REPO_PATH/}"
+  rel_path="${f#"$REPO_PATH"/}"
   grep -n '"[^"]*"' "$f" 2>/dev/null | grep -v "//\|fmt.Print\|errors.New" | while IFS=: read -r lnum content; do
     # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
     # grep build on Windows, so use a bash regex instead of lookbehind/lookahead.
@@ -327,7 +327,7 @@ done >> "$IMPORTS_FILE" 2>/dev/null || true
 # Step 3: Caller graph (callee → callers mapping)
 # ---------------------------------------------------------------------------
 CALLERS_FILE="${CACHE_DIR}/callers.tsv"
-> "$CALLERS_FILE"
+: > "$CALLERS_FILE"
 
 echo "INFO: Building caller graph..."
 
@@ -363,7 +363,7 @@ fi
 # Step 4: File-to-domain mapping
 # ---------------------------------------------------------------------------
 DOMAIN_FILE="${CACHE_DIR}/file_domain.tsv"
-> "$DOMAIN_FILE"
+: > "$DOMAIN_FILE"
 
 echo "INFO: Building file-domain map..."
 
