@@ -5,16 +5,17 @@
 // creates no duplicates.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpDir } from "./_tmp.mjs";
 import {
   checkSpikeDoc, injectGuardrails, subIssueOrder, planPreview, bootstrapPlanComment, decomposedComment,
-  handoffText, createBacklog, preflight, priorityLabel, main, SPIKE_SECTIONS,
+  handoffText, createBacklog, preflight, priorityLabel, main, SPIKE_SECTIONS, DEFAULT_ISSUE_COST_USD,
 } from "../../scripts/bootstrap-create.mjs";
-import { validatePlan } from "../../scripts/bootstrap-validate.mjs";
+import { runBootstrap } from "../bootstrap.mjs";
+import { validatePlan, isNeedsHuman } from "../../scripts/bootstrap-validate.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const read = (p) => readFileSync(join(root, p), "utf8");
@@ -362,5 +363,103 @@ describe("/bootstrap spec and templates", () => {
     plan.issues[3].body = plan.issues[3].body.replace(/^### Secret handling$/m, "Notes");
     const codes = validatePlan(plan).errors.map((e) => `${e.issue}:${e.code}`).sort();
     assert.deepEqual(codes, ["CREDS:missing-needs-human-section", "PAGE:hero-not-routed"]);
+  });
+});
+
+// forge#4177: `forgedock bootstrap` — the headless entry. Plan mode delegates to bootstrap-create (dry-run preview with
+// estimated agent cost, resume by re-running against GitHub); idea mode runs the spec with --dry-run as a spec argument.
+describe("forgedock bootstrap (headless CLI)", () => {
+  const sinkOf = () => { const o = { out: "", err: "" }; return { o, out: { write: (x) => { o.out += x; } }, err: { write: (x) => { o.err += x; } } }; };
+  const fixtureRepo = () => {
+    const dir = tmpDir("bootstrap-cli-");
+    mkdirSync(join(dir, "docs/engineering"), { recursive: true });
+    writeFileSync(join(dir, "docs/engineering/technical-spike.md"), spikeText());
+    writeFileSync(join(dir, "plan.json"), JSON.stringify(samplePlan()));
+    return dir;
+  };
+  const inDir = async (dir, fn) => { const cwd = process.cwd(); process.chdir(dir); try { return await fn(); } finally { process.chdir(cwd); } };
+
+  test("planPreview estimates agent cost from the build sub-issues; plan.costPerIssueUsd overrides the default", () => {
+    const plan = samplePlan();
+    const build = subIssueOrder(plan).filter((it) => !isNeedsHuman(it)).length;
+    assert.match(planPreview(plan), new RegExp(`Estimated agent cost: ~\\$${(build * DEFAULT_ISSUE_COST_USD).toFixed(2)} \\(${build} build issues`));
+    assert.match(planPreview(plan, { costPerIssueUsd: 2 }), new RegExp(`~\\$${(build * 2).toFixed(2)} `));
+    plan.costPerIssueUsd = 5;
+    assert.match(planPreview(plan, { costPerIssueUsd: 2 }), new RegExp(`~\\$${(build * 5).toFixed(2)} `));
+  });
+
+  test("--plan --dry-run prints milestones, titles, DAG and estimated cost with zero gh calls", async () => {
+    const dir = fixtureRepo();
+    const { s, io } = fakeGitHub();
+    const { o, out, err } = sinkOf();
+    const code = await inDir(dir, () => runBootstrap(["--plan", "plan.json", "--dry-run", "--cost-per-issue", "4"],
+      { createMain: (a, sink) => main(a, { ...sink, io }), out, err }));
+    assert.equal(code, 0, o.err);
+    assert.match(o.out, /dry run: nothing written to GitHub/);
+    assert.match(o.out, /milestone\/foundation/);
+    for (const it of subIssueOrder(samplePlan())) assert.ok(o.out.includes(it.title), it.title);
+    assert.match(o.out, /^DAG: /m);
+    assert.match(o.out, /Estimated agent cost: ~\$[\d.]+ \(\d+ build issues × \$4\/issue/);
+    assert.equal(s.calls.length, 0);
+    assert.equal(await runBootstrap(["--plan", "plan.json", "--dry-run", "--cost-per-issue", "-1"], { createMain: (a, sink) => main(a, { ...sink, io }), out, err }), 2);
+    assert.equal(await runBootstrap(["--plan"], { out, err }), 2);
+  });
+
+  test("--plan resumes from GitHub state: an interrupted run exits 3, the same command re-run creates no duplicates", async () => {
+    const dir = fixtureRepo();
+    const { s, io } = fakeGitHub({ failCreateAt: 4 });
+    const { o, out, err } = sinkOf();
+    const run = () => runBootstrap(["--plan", "plan.json", "--repo", REPO, "--config", "none.yaml"], { createMain: (a, sink) => main(a, { ...sink, io }), out, err });
+    assert.equal(await inDir(dir, run), 3);
+    assert.match(o.err, /Re-run the same command to resume/);
+    assert.equal(s.issues.length, 3);
+    s.creates = 100;
+    assert.equal(await inDir(dir, run), 0, o.err);
+    const n = samplePlan().issues.length;
+    assert.equal(s.issues.length, n);
+    assert.equal(new Set(s.issues.map((i) => i.title)).size, n);
+    const before = mutating(s.calls).length;
+    assert.equal(await inDir(dir, run), 0);
+    assert.equal(s.issues.length, n);
+    assert.equal(mutating(s.calls).length, before, "a third run writes nothing");
+  });
+
+  test("idea mode runs the bootstrap spec with --dry-run and --spike as spec arguments, never the runner's dryRun", async () => {
+    const calls = [];
+    const runCommand = async (opts) => { calls.push(opts); return { status: "complete" }; };
+    const { out, err } = sinkOf();
+    const code = await runBootstrap(["a habit tracker for teams", "--dry-run", "--spike", "docs/spike.md", "--model", "m1"],
+      { runCommand, commandsDir: "/cmds", cwd: "/repo", out, err });
+    assert.equal(code, 0);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].commandName, "bootstrap");
+    assert.equal(calls[0].commandsDir, "/cmds");
+    assert.equal(calls[0].dryRun, false);
+    assert.equal(calls[0].model, "m1");
+    assert.deepEqual(calls[0].args, ["a habit tracker for teams", "--dry-run", "--spike", "docs/spike.md"]);
+    assert.equal(await runBootstrap(["x"], { runCommand: async () => ({ status: "max-iterations" }), out, err }), 1);
+    assert.equal(await runBootstrap([], { runCommand, out, err }), 2);
+    assert.equal(await runBootstrap(["--dry-run", "--spike", "a.md"], { runCommand, out, err }), 2, "no idea or docs path");
+    assert.equal(await runBootstrap(["x", "--bogus"], { runCommand, out, err }), 2);
+    assert.equal(calls.length, 1);
+  });
+
+  test("the spec tells a headless run to take the recommended option", () => {
+    assert.match(read("commands/bootstrap.md"), /Headless \(no AskUserQuestion, e\.g\. `npx forgedock bootstrap`\): take each recommended option/);
+  });
+
+  test("e2e: `forgedock bootstrap --plan --dry-run` in a throwaway repo never invokes gh", () => {
+    const dir = fixtureRepo();
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    const binDir = tmpDir("bootstrap-fakegh-");
+    const log = join(binDir, "gh.log");
+    writeFileSync(join(binDir, "gh"), `#!/bin/sh\necho "$@" >> "${log}"\nexit 1\n`);
+    chmodSync(join(binDir, "gh"), 0o755);
+    const stdout = execFileSync(process.execPath, [join(root, "bin/forgedock.mjs"), "bootstrap", "--plan", "plan.json", "--dry-run"], {
+      cwd: dir, encoding: "utf8", env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, FORGEDOCK_HOME: root, NO_COLOR: "1" },
+    });
+    assert.match(stdout, /dry run: nothing written to GitHub/);
+    assert.match(stdout, /Estimated agent cost/);
+    assert.ok(!existsSync(log) || readFileSync(log, "utf8") === "", `gh was invoked: ${existsSync(log) ? readFileSync(log, "utf8") : ""}`);
   });
 });

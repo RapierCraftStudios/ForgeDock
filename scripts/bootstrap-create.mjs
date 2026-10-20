@@ -19,9 +19,11 @@
  *   "guardrails": ["no auto-send"], "domainRules": ["India-only data residency"]
  *   issues[].priority: "p0".."p3" (label priority:P<n> + board Priority), issues[].component: board Component label,
  *   issues[].estimatedDiffLines: number (FORGE:BOOTSTRAP_PLAN estimate)
+ *   "costPerIssueUsd": 3                              dry-run cost estimate per build issue (#4177)
  *
  * Usage: node scripts/bootstrap-create.mjs <plan.json> [--dry-run] [--json] [--repo OWNER/NAME] [--config forge.yaml]
- *                                                     [--base <branch>]
+ *                                                     [--base <branch>] [--cost-per-issue <usd>]
+ * Cost: plan.costPerIssueUsd, else --cost-per-issue, else DEFAULT_ISSUE_COST_USD, times the build sub-issues.
  * Repo: --repo, else forge.yaml project.owner/project.repo. Base: --base, else branches.staging, else "staging".
  * Exit: 0 created (or dry-run preview); 1 plan or spike doc invalid (nothing written); 2 usage; 3 GitHub error.
  */
@@ -35,6 +37,8 @@ import { milestoneSlug } from "../bin/lean/lane.mjs";
 const SELF_DIR = fileURLToPath(new URL(".", import.meta.url));
 const DEFAULT_SPIKE_DOC = "docs/engineering/technical-spike.md";
 const PLACEHOLDER_RE = /#\{\{[^{}]*\}\}/;
+/** Planning estimate of agent spend per build issue (one lean lane) for the dry-run preview; not a measured figure. */
+export const DEFAULT_ISSUE_COST_USD = 3;
 
 /** Spike-doc sections (templates/bootstrap/technical-spike.md), matched as a prefix of a `## ` heading. */
 export const SPIKE_SECTIONS = [
@@ -121,8 +125,8 @@ export function priorityLabel(issue) {
   return m ? `priority:P${m[1]}` : null;
 }
 
-/** Plan preview for --dry-run: milestones, titles, DAG summary. No GitHub access. */
-export function planPreview(plan) {
+/** Plan preview for --dry-run: milestones, titles, DAG summary, estimated agent cost. No GitHub access. */
+export function planPreview(plan, { costPerIssueUsd } = {}) {
   const spikeKey = plan.spike ?? "SPIKE";
   const spike = plan.issues.find((it) => it.key === spikeKey);
   const subs = subIssueOrder(plan);
@@ -140,6 +144,9 @@ export function planPreview(plan) {
     lines.push("");
   });
   lines.push(`DAG: ${subs.length} sub-issues (${subs.length - human.length} build, ${human.length} needs-human), ${edges} dependency edges, ${plan.milestones.length} milestones.`);
+  const rate = [plan.costPerIssueUsd, costPerIssueUsd].find((r) => Number.isFinite(r) && r > 0) ?? DEFAULT_ISSUE_COST_USD;
+  const build = subs.length - human.length;
+  lines.push(`Estimated agent cost: ~$${(build * rate).toFixed(2)} (${build} build issues × $${rate}/issue; needs-human and spike excluded).`);
   return lines.join("\n");
 }
 
@@ -341,7 +348,7 @@ function readConfig(path) {
 }
 
 export function main(argv, { io = defaultIo, out = process.stdout, err = process.stderr } = {}) {
-  let planPath = null, dryRun = false, asJson = false, repo = "", configPath = process.env.FORGE_CONFIG || "forge.yaml", base = "";
+  let planPath = null, dryRun = false, asJson = false, repo = "", configPath = process.env.FORGE_CONFIG || "forge.yaml", base = "", costPerIssueUsd;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const val = () => { if (i + 1 >= argv.length) throw new Error(`${a} requires a value`); return argv[++i]; };
@@ -351,18 +358,22 @@ export function main(argv, { io = defaultIo, out = process.stdout, err = process
       else if (a === "--repo") repo = val();
       else if (a === "--config") configPath = val();
       else if (a === "--base") base = val();
+      else if (a === "--cost-per-issue") {
+        costPerIssueUsd = Number(val());
+        if (!Number.isFinite(costPerIssueUsd) || costPerIssueUsd <= 0) throw new Error("--cost-per-issue must be a positive number");
+      }
       else if (!planPath && !a.startsWith("--")) planPath = a;
       else throw new Error(`unknown argument ${a}`);
     } catch (e) { err.write(`bootstrap-create: ${e.message}\n`); return 2; }
   }
-  if (!planPath) { err.write("usage: node scripts/bootstrap-create.mjs <plan.json> [--dry-run] [--json] [--repo OWNER/NAME] [--config forge.yaml] [--base <branch>]\n"); return 2; }
+  if (!planPath) { err.write("usage: node scripts/bootstrap-create.mjs <plan.json> [--dry-run] [--json] [--repo OWNER/NAME] [--config forge.yaml] [--base <branch>] [--cost-per-issue <usd>]\n"); return 2; }
   let plan;
   try { plan = JSON.parse(readFileSync(planPath, "utf8")); } catch (e) { err.write(`bootstrap-create: cannot read plan: ${e.message}\n`); return 2; }
   const spikePath = plan?.spikeDoc ?? DEFAULT_SPIKE_DOC;
   const spikeText = existsSync(spikePath) ? readFileSync(spikePath, "utf8") : null;
   const errors = preflight(plan, spikeText);
   if (errors.length) { err.write(errors.join("\n") + "\nbootstrap-create: not creating anything; fix the plan or spike doc\n"); return 1; }
-  if (dryRun) { out.write(planPreview(plan) + "\n"); return 0; }
+  if (dryRun) { out.write(planPreview(plan, { costPerIssueUsd }) + "\n"); return 0; }
 
   const config = readConfig(configPath);
   repo ||= config.project?.owner && config.project?.repo ? `${config.project.owner}/${config.project.repo}` : "";
