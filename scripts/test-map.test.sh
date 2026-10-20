@@ -15,11 +15,13 @@ eq() { if [ "$2" = "$3" ]; then ok; else bad "$1 (got: $2 want: $3)"; fi }
 
 # copy a fixture into a fresh git repo and build its map
 setup() {
-  rm -rf "$TMP/$1"; cp -R "$FIX/$1" "$TMP/$1"; cd "$TMP/$1" || exit 1
+  rm -rf "${TMP:?}/$1"; cp -R "$FIX/$1" "$TMP/$1"; cd "$TMP/$1" || exit 1
   git init -q -b main; git config user.email t@example.com; git config user.name t; git config commit.gpgsign false
   git add -A; git commit -qm init
   OUTP="$(bash "$S")"; RC=$?
 }
+# forge#4300: workflow-derived entries of the map JSON in $2 carry no bare `**` glob
+nostar() { eq "$1 no bare ** on workflow entries" "$(printf '%s' "$2" | jq '[.entries[] | select(.source | startswith(".github/workflows/")) | .globs[] | select(. == "**")] | length')" 0; }
 # selected commands for changed files, sorted, joined by |
 sel() { node "$SEL" --map .forge/test-map.json --select "$@" | LC_ALL=C sort | paste -sd'|' -; }
 
@@ -44,13 +46,15 @@ eq "python non-py" "$(sel uv.lock)" ""
 # ---- 3. go: go.mod, Makefile and CI workflow steps; CI-only lint step; install lines skipped ----
 setup go
 eq "go rc" "$RC" 0
-eq "go file" "$(sel main.go)" "./scripts/check-docs|go test ./...|go vet ./...|golangci-lint run ./...|make test"
-eq "nested go file" "$(sel internal/util/util.go)" "./scripts/check-docs|go test ./...|go vet ./...|golangci-lint run ./...|make test"
+eq "go file" "$(sel main.go)" "go test ./...|go vet ./...|golangci-lint run ./...|make test|make vet"
+eq "nested go file" "$(sel internal/util/util.go)" "go test ./...|go vet ./...|golangci-lint run ./...|make test|make vet"
+eq "unrecognised ci script dropped" "$(jq '[.entries[] | select(.command | test("check-docs"))] | length' .forge/test-map.json)" 0
 eq "ci-only lint source" "$(jq -r '.entries[] | select(.command == "golangci-lint run ./...") | .source' .forge/test-map.json)" ".github/workflows/ci.yml#jobs.lint"
 eq "install line skipped" "$(jq '[.entries[] | select(.command | test("mod download"))] | length' .forge/test-map.json)" 0
-eq "paths filter fallback" "$(jq -c '.entries[] | select(.command == "./scripts/check-docs") | .globs' .forge/test-map.json)" '["**.go","go.mod"]'
+eq "paths filter fallback" "$(jq -c '.entries[] | select(.command == "make vet") | .globs' .forge/test-map.json)" '["**.go","go.mod"]'
 eq "docs file" "$(sel README.md)" "make test"
 eq "go.sum" "$(sel go.sum)" "go test ./...|go vet ./...|make test"
+nostar go "$(cat .forge/test-map.json)"
 
 # ---- 4. regenerable: a rerun is byte-identical; --stdout writes nothing; --output ----
 cp .forge/test-map.json "$TMP/first.json"
@@ -84,8 +88,10 @@ jobs:
 EOF
 git add -A
 OUTS="$(bash "$S" --stdout)"
-eq "wf commands" "$(printf '%s' "$OUTS" | jq -r '[.entries[].command] | sort | join("|")')" "./custom-check|bash scripts/verify.sh --strict|ruff check --fix|shellcheck scripts/*.sh"
-eq "wf globs" "$(printf '%s' "$OUTS" | jq -c '[.entries[] | {(.command): .globs}] | add')" '{"./custom-check":["**"],"bash scripts/verify.sh --strict":["**/*.sh"],"ruff check --fix":["**/*.py"],"shellcheck scripts/*.sh":["**/*.sh"]}'
+# forge#4300: ./custom-check and `bash scripts/verify.sh` are not allowlisted checks, so they are dropped
+eq "wf commands" "$(printf '%s' "$OUTS" | jq -r '[.entries[].command] | sort | join("|")')" "ruff check --fix|shellcheck scripts/*.sh"
+eq "wf globs" "$(printf '%s' "$OUTS" | jq -c '[.entries[] | {(.command): .globs}] | add')" '{"ruff check --fix":["**/*.py"],"shellcheck scripts/*.sh":["**/*.sh"]}'
+nostar wf "$OUTS"
 
 # ---- 5b. forge#4297: `- run: |` then env:/shell: ends the block; deploy/publish/release/push/secret steps dropped ----
 mkdir -p "$TMP/wf2/.github/workflows"; cd "$TMP/wf2" || exit 1
@@ -130,6 +136,56 @@ EOF
 git add -A
 OUTS="$(bash "$S" --stdout)"
 eq "wf2 commands" "$(printf '%s' "$OUTS" | jq -r '[.entries[].command] | sort | join("|")')" "npm run lint|npm test|tsc --noEmit"
+nostar wf2 "$OUTS"
+
+# ---- 5d. forge#4300: allowlist, not a name/substring denylist; names never decide; cd/pushd prefix becomes the cwd ----
+mkdir -p "$TMP/wf3/.github/workflows"; cd "$TMP/wf3" || exit 1
+git init -q -b main
+cat > .github/workflows/ci.yml <<'EOF'
+on: pull_request
+jobs:
+  release-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+      - run: pytest tests/test_release.py
+      - run: pushd sub && make test
+      - run: npm run lint
+        name: Deploy
+      - name: Run tests
+        uses: some/action@v1
+        with:
+          name: release
+      - name: Typecheck
+        with:
+          name: release
+        run: npm run typecheck
+  ship:
+    runs-on: ubuntu-latest
+    steps:
+      - run: twine upload dist/*
+      - run: terraform apply -auto-approve
+      - run: kubectl apply -f k8s/
+      - run: ./deploy.sh
+        name: test
+      - name: Tests
+        with:
+          name: test
+        run: ./publish.sh
+      - run: pytest && twine upload dist/*
+      - run: cd ../other && make test
+      - run: npm run build
+      - run: npm test -- --token=${{ secrets.NPM_TOKEN }}
+EOF
+git add -A
+OUTS="$(bash "$S" --stdout)"
+eq "wf3 commands" "$(printf '%s' "$OUTS" | jq -r '[.entries[].command] | sort | join("|")')" "make test|npm run lint|npm run typecheck|npm test|pytest tests/test_release.py"
+eq "wf3 release-tests job kept" "$(printf '%s' "$OUTS" | jq -r '[.entries[].source] | unique | join("|")')" ".github/workflows/ci.yml#jobs.release-tests"
+eq "wf3 pushd cwd + globs" "$(printf '%s' "$OUTS" | jq -c '[.entries[] | select(.command == "make test") | {cwd, globs}]')" '[{"cwd":"sub","globs":["sub/**"]}]'
+eq "wf3 no mutating command" "$(printf '%s' "$OUTS" | jq '[.entries[] | select(.command | test("twine|terraform|kubectl|deploy|publish|build|secrets"))] | length')" 0
+nostar wf3 "$OUTS"
+printf '%s' "$OUTS" > "$TMP/wf3-map.json"
+eq "wf3 pushd entry runs in its dir" "$(node "$SEL" --map "$TMP/wf3-map.json" --select sub/Makefile)" "cd sub && make test"
 
 # ---- 5c. forge#4298: a package dir with a space and a non-ASCII name keeps whole globs; workflow paths with spaces ----
 mkdir -p "$TMP/sp/web app" "$TMP/sp/pkg/ü/src" "$TMP/sp/.github/workflows"; cd "$TMP/sp" || exit 1
@@ -148,12 +204,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: ./build-docs.sh
+      - run: make check
 EOF
 git add -A
 OUTS="$(bash "$S" --stdout)"
 eq "spaced package globs" "$(printf '%s' "$OUTS" | jq -c '[.entries[] | select(.cwd == "web app") | .globs[]] | map(select(endswith("package.json") or endswith(".js")))')" '["web app/**/*.js","web app/package.json"]'
 eq "non-ASCII package dir" "$(printf '%s' "$OUTS" | jq -r '[.entries[] | select(.command == "npm run lint") | .cwd] | join("|")')" "pkg/ü"
-eq "spaced workflow path filter" "$(printf '%s' "$OUTS" | jq -c '[.entries[] | select(.command == "./build-docs.sh") | .globs]')" '[["docs site/**"]]'
+eq "spaced workflow path filter" "$(printf '%s' "$OUTS" | jq -c '[.entries[] | select(.command == "make check") | .globs]')" '[["docs site/**"]]'
+nostar sp "$OUTS"
+eq "unrecognised docs script dropped" "$(printf '%s' "$OUTS" | jq '[.entries[] | select(.command == "./build-docs.sh")] | length')" 0
 printf '%s' "$OUTS" > "$TMP/sp-map.json"
 eq "spaced changed file selects its package test" "$(node "$SEL" --map "$TMP/sp-map.json" --select "web app/src/x.js")" "cd 'web app' && npm run test"
 

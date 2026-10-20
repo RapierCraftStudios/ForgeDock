@@ -21,3 +21,5 @@ jobs:
           go test ./...
       - name: docs
         run: ./scripts/check-docs
+      - name: vet
+        run: make vet
