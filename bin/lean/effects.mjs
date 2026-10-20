@@ -251,6 +251,16 @@ export function makeLeanIo({ repo }) {
         return { name: c.name, state, url: c.url ?? null };
       });
     },
+    /**
+     * #4270 verify.check_run: one completed check run on `sha` (`gh api -X POST repos/<repo>/check-runs`, JSON on stdin).
+     * Needs a token allowed to create check runs (GitHub App, checks:write). Resolves {id, html_url}; throws on failure.
+     */
+    async createCheckRun({ sha, name, conclusion, title, summary, text }) {
+      const body = JSON.stringify({ name, head_sha: sha, status: "completed", conclusion, output: { title, summary, text } });
+      const out = await runWithInput("gh", ["api", "-X", "POST", `repos/${repo}/check-runs`, "--input", "-"], body, 60000);
+      const j = JSON.parse(out || "{}");
+      return { id: j.id ?? null, html_url: j.html_url ?? null };
+    },
     /** Failed-job logs of an Actions run (`gh run view --log-failed`), tail-capped; "" when unreadable. */
     async failedLogs(runId) {
       try { const out = String(await run("gh")(["run", "view", String(runId), "-R", repo, "--log-failed"])); return out.length > 64000 ? out.slice(-64000) : out; } catch { return ""; }

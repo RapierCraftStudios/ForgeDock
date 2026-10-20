@@ -514,3 +514,12 @@ Cost: 0 LLM calls. Rationale: `devdocs/decisions/4256-hybrid-placement.md`.
 `decide()` first runs `fillEngineRows` (`conformance.mjs`): engine-authorized scope rows, `unverified` preserve rows and `path:line` evidence normalized to repo paths (`normalizeEvidencePath`) are no longer "incomplete". `reviewerPrompt` embeds `reviewSkeleton` (a row per R/P/scope/coverage id). `checkCompleteness` returns `missing` ids; the retry in `reviewOnce` is `reviewerRepairPrompt` for those ids only (no diff), merged by `mergeReviewRows`. `changedFiles()` drops files equal to the base tip (base-sync merges).
 
 In shadow, `gate()` now blocks on precheck/amend failures coded `conformance.unimplemented`/`regression` (`SHADOW_PRE_BLOCKS`), ends `review.incomplete`/`inconsistent` as needs-human, and files accepted deferrals with `track()`. `engine.review_incomplete: degraded` (`readReviewIncomplete`) merges instead with the `review-degraded` label and a tracked follow-up. Enforce unchanged. `scripts/calibration.mjs --shadow` prints the per-repo shadow mix and recommends `enforce` under the threshold. Rationale: `devdocs/decisions/4160-shadow-gate-complete-reviews.md`.
+
+## Entry 2026-10-20 — forgedock/verify check run (#4270)
+
+Opt-in `verify.check_run` (`verify.mjs` `parseVerify` → `checkRun`, default false).
+`lean.mjs` keeps `verifyFacts` (last result of the declared checks, structure, docs and
+`gate()` precheck) and `reportVerify()` posts one `forgedock/verify` check run per pushed
+head (PR push, base-sync, merge fix round) via `effects.mjs` `createCheckRun`, payload from
+pure `verify.mjs` `verifyReport`; `VERIFY` run-log event, Checks API failure → anomaly.
+Own check excluded from `runCiVerify` commit checks and `wait-ci-green.sh --ignore-check`.
