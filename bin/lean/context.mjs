@@ -27,11 +27,21 @@ const ATTEMPT_MARKERS = ["NEEDS_HUMAN", "BASE_SYNC", "FIX_CI"];
 const LINE_MAX = 200;
 
 const hash12 = (s) => createHash("sha256").update(String(s)).digest("hex").slice(0, 12);
+/**
+ * Untrusted issue/comment text with every HTML comment removed: strip to a fixed point (so `<!-<!-- x -->- FORGE:…`
+ * cannot reassemble a marker), then drop any leftover opener or closer. Pack text is posted back in a trusted bot
+ * comment, so it must never carry a FORGE marker.
+ */
+export function noComments(s, repl = "") {
+  let t = String(s ?? ""), prev;
+  do { prev = t; t = t.replace(/<!--[\s\S]*?-->/g, repl).replace(/<!--|-->/g, repl); } while (t !== prev);
+  return t;
+}
 const oneLine = (s, max = LINE_MAX) => {
-  const t = String(s ?? "").replace(/<!--[\s\S]*?-->/g, " ").replace(/\s+/g, " ").trim();
+  const t = noComments(s, " ").replace(/\s+/g, " ").trim();
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 };
-const stripComments = (s) => String(s ?? "").replace(/<!--[\s\S]*?-->/g, "").replace(/\r\n/g, "\n").trim();
+const stripComments = (s) => noComments(s).replace(/\r\n/g, "\n").trim();
 const byNum = (a, b) => a - b;
 
 /** forge.yaml engine.context_pack (+ _sources, _bytes, _days) normalised; invalid values fall back to the defaults. */
@@ -82,7 +92,8 @@ export function issueSymbols(body) {
   return [...out].sort();
 }
 
-const namesSymbol = (text, symbols) => symbols.some((s) => new RegExp(`(?:^|[^\\w$])${s.replace(/\$/g, "\\$")}(?:$|[^\\w$])`).test(String(text)));
+const reEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const namesSymbol = (text, symbols) => symbols.some((s) => new RegExp(`(?:^|[^\\w$])${reEscape(s)}(?:$|[^\\w$])`).test(String(text)));
 
 /** Rerun (an earlier run left a record or salvage), decomposed child (`**Parent**`), or first attempt. */
 export function laneType({ resumed = false, attempts = 0, body = "" } = {}) {
@@ -119,7 +130,7 @@ const trusted = (c) => {
   return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
 };
 /** First line of a FORGE record that is not a marker or a heading. */
-const recordLine = (body) => oneLine(String(body ?? "").replace(/<!--[\s\S]*?-->/g, "").split("\n").map((l) => l.trim()).find((l) => l && !/^#+\s/.test(l)) ?? "");
+const recordLine = (body) => oneLine(noComments(body).split("\n").map((l) => l.trim()).find((l) => l && !/^#+\s/.test(l)) ?? "");
 const markerOf = (body) => /^\s*<!--\s*FORGE:([A-Z_]+)\s*-->/.exec(String(body ?? ""))?.[1] ?? null;
 
 async function readIssue(gh, repo, n) {
@@ -275,7 +286,7 @@ export function compileContextPack(facts, { budgetBytes = DEFAULT_CONTEXT_BYTES,
 /** The collapsed FORGE:CONTEXT issue record body (without the marker). */
 export function renderContextRecord(pack, { mode, laneType: lt }) {
   const src = CONTEXT_SOURCES.map((s) => `${s} ${pack.sources[s]}/${pack.found[s]}`).join(", ");
-  return `<details><summary>Context pack: ${pack.items} item(s), ${pack.bytes} bytes, ${pack.truncated} dropped (mode ${mode}, lane ${lt}, hash ${pack.hash})</summary>\n\nSources (included/found): ${src}\n\n~~~~text\n${pack.text.replace(/~~~~/g, "~~~")}\n~~~~\n</details>`;
+  return `<details><summary>Context pack: ${pack.items} item(s), ${pack.bytes} bytes, ${pack.truncated} dropped (mode ${mode}, lane ${lt}, hash ${pack.hash})</summary>\n\nSources (included/found): ${src}\n\n~~~~text\n${noComments(pack.text).replace(/~~~~/g, "~~~")}\n~~~~\n</details>`;
 }
 
 /**

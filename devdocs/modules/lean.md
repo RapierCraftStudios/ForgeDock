@@ -553,7 +553,10 @@ finding / title names a backticked symbol from the issue) and **facts**
 per item with `#N`/comment id/SHA, whole items dropped past the byte cap
 (default 6144). Cached in the run dir by issue + base head SHA + config.
 Recorded as `CONTEXT_PACK` (mode, lane_type, sources, bytes, items, truncated,
-hash) and a collapsed `FORGE:CONTEXT` comment (non-empty packs, once per hash);
+hash) and a collapsed `FORGE:CONTEXT` comment (non-empty packs, once per hash).
+All issue/comment text goes through `noComments` (HTML comments stripped to a fixed
+point, leftover `<!--`/`-->` removed) and the rendered record is stripped again, so
+untrusted text can never place a FORGE marker in the bot's comment;
 `RUN_TERMINAL` gains `context_pack` and `lane_type` (rerun | child | first).
 Write-back: a terminal `FORGE:STATE` also carries `terminalCode` (the typed
 outcome code) and `failureClasses` (conformance failure codes seen in the run),
