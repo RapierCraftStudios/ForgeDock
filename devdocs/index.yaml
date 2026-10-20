@@ -132,6 +132,12 @@ modules:
     authority: required
     token_cost: 900
 
+  - name: lean-test-map
+    glob: "scripts/test-map*"
+    path: modules/lean.md
+    authority: required
+    token_cost: 900
+
 # ---------------------------------------------------------------------------
 # Always Load
 # Loaded for EVERY task regardless of domain label match.
