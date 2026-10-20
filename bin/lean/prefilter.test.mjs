@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { prefilterIssue, makePrefilter, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, DEFAULT_PREFILTER_MODEL } from "./prefilter.mjs";
+import { prefilterIssue, flakyReason, makePrefilter, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, DEFAULT_PREFILTER_MODEL } from "./prefilter.mjs";
 import { parsePrefilterVerdict, prefilterPrompt } from "./prompts.mjs";
 import { orchestrate, formatTable } from "./orchestrate.mjs";
 import { triageFromCli } from "../engine-cli.mjs";
@@ -166,6 +166,17 @@ describe("pre-filter (#4123)", () => {
     fails.io.gh = async (a) => (a.slice(0, 2).join(" ") === "issue close" ? (() => { throw new Error("HTTP 403"); })() : g3(a));
     const f = await pf(fails, 34);
     assert.equal(f.closed, false); assert.deepEqual(fails.comments, []); assert.match(f.detail, /pre-filter error/);
+    // #4314: a failing comment after a successful close still counts as closed (no lane), via retry, then a marker-only comment
+    const flaky = (n, big) => { const x = green(); const g = x.io.gh; let calls = 0;
+      x.io.gh = async (a) => { if (a.slice(0, 2).join(" ") === "issue comment") { calls++; if (calls <= n || (big && a[a.indexOf("--body") + 1].includes("## Pre-filter"))) throw new Error("HTTP 502"); } return g(a); };
+      return x; };
+    const once = flaky(1); const r1 = await pf(once, 34);
+    assert.equal(r1.closed, true); assert.equal(once.comments.length, 1); assert.doesNotMatch(r1.detail, /no marker/);
+    const tiny = flaky(0, true); const r2 = await pf(tiny, 34);
+    assert.equal(r2.closed, true); assert.equal(tiny.comments.length, 1); assert.match(tiny.comments[0][1], /^<!-- FORGE:PREFILTER -->/);
+    assert.match(flakyReason({ comments: [{ body: tiny.comments[0][1], author: { login: "forgedock-app[bot]" }, authorAssociation: "NONE" }] }, ["forgedock-app"])?.reason ?? "", /reopened/);
+    const dead = flaky(99); const r3 = await pf(dead, 34);
+    assert.equal(r3.closed, true); assert.equal(dead.runner.length, 0); assert.deepEqual(dead.closed, [[34, "not planned"]]); assert.match(r3.detail, /no marker comment/);
   });
 
   it("a CI-failure issue whose workflow is still red (or whose latest run is the failing one) goes to a lane", async () => {
