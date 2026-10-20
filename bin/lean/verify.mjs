@@ -13,8 +13,9 @@ export const DEFAULT_SKIP_PATHS = Object.freeze(["*.md", "*.mdx", "*.rst", "*.tx
 export const DEFAULT_MAX_ROUNDS = 2;
 /** Per-command timeout of the pre-PR declared check commands (#4240, `verify.precheck_timeout_seconds`). */
 export const DEFAULT_PRECHECK_TIMEOUT_SECONDS = 300;
-/** Total budget of one round of pre-PR check commands (#4318, `verify.precheck_total_seconds`). */
-export const DEFAULT_PRECHECK_TOTAL_SECONDS = 1800;
+/** Total budget of one round of pre-PR check commands (#4318, `verify.precheck_total_seconds`; 10 min since #4331, and
+ * forge.yaml `lean.precheck.max_minutes` overrides it). The rest of the round is deferred to CI. */
+export const DEFAULT_PRECHECK_TOTAL_SECONDS = 600;
 /** Total characters of failed-job log handed to the builder. */
 export const LOG_CAP = 12000;
 /** No run or check for the head after this long means CI is unavailable (local fallback). */

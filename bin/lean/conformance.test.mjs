@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -224,6 +224,21 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.equal(movingBaseDiff("git -C sub diff origin/milestone/foo | wc -l"), "origin/milestone/foo");
     assert.equal(movingBaseDiff("git diff HEAD~1"), null);
     assert.equal(movingBaseDiff(""), null);
+  });
+  it("#4325 a validate or repro_test command reading a $TMPDIR file it does not create is rejected at freeze", () => {
+    const bad = validateContract({ ...C, validate: [{ id: "V4", command: "uv run --with-requirements $TMPDIR/api-req.txt pytest tests/x.py" }] }, ISSUE);
+    assert.equal(bad.ok, false);
+    assert.ok(bad.problems.some((x) => x.startsWith("V4: reads $TMPDIR/api-req.txt")), bad.problems.join("; "));
+    const rt = validateContract({ ...C, repro_test: { path: "t/x.py", command: "pytest -r ${TMPDIR}/req.txt t/x.py" } }, ISSUE, { repro: true });
+    assert.ok(rt.problems.some((x) => x.startsWith("repro_test: reads $TMPDIR/req.txt")), rt.problems.join("; "));
+    for (const ok of ["uv export > $TMPDIR/r.txt && uv run --with-requirements $TMPDIR/r.txt pytest", "pytest --basetemp=$TMPDIR/pt --junitxml $TMPDIR/j.xml", "mkdir -p \"$TMPDIR/d\" && cp a $TMPDIR/d/a && cat $TMPDIR/d/a", "X=$TMPDIR/cache npm test", "echo hi | tee $TMPDIR/l; grep hi $TMPDIR/l", "node --test test/leak.test.js"]) {
+      assert.equal(validateContract({ ...C, validate: [{ id: "V4", command: ok }] }, ISSUE).ok, true, ok);
+    }
+  });
+  it("#4325 tmpdirInputs lists read-before-create $TMPDIR paths once, in first-use order", () => {
+    assert.deepEqual(tmpdirInputs("cat ${TMPDIR:-/tmp}/a.json | jq . && cp $TMPDIR/b.txt out && cat $TMPDIR/a.json"), ["$TMPDIR/a.json", "$TMPDIR/b.txt"]);
+    assert.deepEqual(tmpdirInputs("cp src.txt $TMPDIR/b.txt && cat $TMPDIR/b.txt"), []);
+    assert.deepEqual(tmpdirInputs(""), []);
   });
   it("#4160: reviewSkeleton (object form) lists every required row, scope rows pre-filled with the engine's authorization", () => {
     const k = { ...C, requirements: [...C.requirements, { id: "R9", quote: "Billing pricing is unchanged.", disposition: "defer", why: "w" }] };

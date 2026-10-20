@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseTestMap, readTestMap, selectCommands, mergeChecks, checkKey, factsPath, TEST_MAP_FILE, REPO_FACTS_FILE } from "./testmap.mjs";
+import { parseTestMap, readTestMap, selectCommands, mergeChecks, scopeChecks, checkKey, factsPath, TEST_MAP_FILE, REPO_FACTS_FILE } from "./testmap.mjs";
 
 const MAP = {
   version: 1,
@@ -82,5 +82,29 @@ describe("mergeChecks (#4318): one suite under two spellings runs once", () => {
     assert.notEqual(checkKey("npm run test:unit"), checkKey("npm test"));
     assert.notEqual(checkKey("cd a && npm test"), checkKey("npm test"));
     assert.equal(checkKey("bunx -y  jest"), "jest");
+  });
+});
+
+describe("scopeChecks (#4331): a mapped learned command runs only when its globs match", () => {
+  const map = { version: 1, entries: [
+    { globs: ["commands/**"], command: "bash scripts/check-a.sh", cwd: "." },
+    { globs: ["bin/**"], command: "bash scripts/check-b.sh", cwd: "." },
+    { globs: ["src/**"], command: "npm test", cwd: "pkg" },
+    { globs: ["**/*.py"], command: "uv run pytest", cwd: "." }] };
+  const learned = ["bash scripts/check-a.sh", "bash scripts/check-b.sh", "make lint"];
+  it("a lane changing only commands/foo.md runs the matching mapped commands plus the unmapped ones", () => {
+    assert.deepEqual(scopeChecks(map, ["commands/foo.md"], learned),
+      { commands: ["bash scripts/check-a.sh", "make lint"], added: 0, dropped: ["bash scripts/check-b.sh"], source: "test-map+learned" });
+  });
+  it("no map keeps the learned list; nothing added or dropped is source learned", () => {
+    assert.deepEqual(scopeChecks(null, ["commands/foo.md"], learned), { commands: learned, added: 0, dropped: [], source: "learned" });
+    assert.deepEqual(scopeChecks(map, ["commands/foo.md"], ["bash scripts/check-a.sh", "make lint"]).source, "learned");
+  });
+  it("matches by checkKey and by the entry's cwd prefix; map-selected commands are added", () => {
+    const r = scopeChecks(map, ["src/x.js", "a.py"], ["cd . && bash scripts/check-a.sh", "cd pkg && npm run test", "npm test"]);
+    assert.deepEqual(r.dropped, ["cd . && bash scripts/check-a.sh"]);
+    assert.deepEqual(r.commands, ["cd pkg && npm run test", "npm test", "uv run pytest"]);
+    assert.equal(r.source, "test-map+learned");
+    assert.deepEqual(scopeChecks(map, ["a.py"], []), { commands: ["uv run pytest"], added: 1, dropped: [], source: "test-map" });
   });
 });

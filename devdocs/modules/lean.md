@@ -100,6 +100,16 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) adds the map entries whose
    globs match the changed files to that list (`selectCommands` + `mergeChecks`, #4315: learned first, deduped, so the
    map never removes a check; event gains `source: "test-map"|"test-map+learned"` when the map added a command).
+   #4331 (`testmap.mjs` `scopeChecks`): a learned command the map covers (same `checkKey` as an entry's command) runs
+   only when one of its globs matches a changed file; unmapped learned commands always run; `source` also marks a
+   scoped-out command. A round runs through `precheck.mjs` `runChecks`: concurrent up to `verifyParallelism()`
+   (`FORGE_HOST_PARALLELISM`, else cores / live lanes) inside ONE `heavyStep("precheck")` slot, within a round budget of
+   forge.yaml `lean.precheck.max_minutes` (`engine-cli.mjs` `readPrecheckBudget`, 1..120; else
+   `verify.precheck_total_seconds`, default 600 s). Commands not started before the budget ends, or cut by it (rc 124
+   with the remaining budget as timeout), are `deferred-to-ci` (event entries `{command, status}`, trajectory anomaly),
+   never failures. `PRECHECK_COMMANDS` results carry `ms`; the event carries round `ms` and `parallelism`; the lane
+   result `precheckMs`/`precheckDeferred` → orchestrate row `precheck_ms`/`precheck_deferred` → batch-report line
+   `precheck: <m> total over <n> lanes[, <k> deferred to CI]` (`formatPrecheckSummary`).
 6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
@@ -773,6 +783,20 @@ targeted re-ask (at most 3 reviewer runs) only when the repaired reply is incomp
 (`evidencePathOnly`); other incomplete replies keep 2 runs. Reviewer and repair prompts ask for backtick-quoted, verbatim
 repo-relative `path:line`.
 
+## Entry 2026-10-20 — Engine-run commands get the builder's lane env; no $TMPDIR inputs at freeze (#4325)
+
+`runCore` `laneEnv()` builds one env for every command the engine runs itself: `io.deps.env()` stores, then the run
+`TMPDIR`, `FORGE_HOST_PARALLELISM` and `toolchain.env` (engine keys win over the stores). `io.redGreen` (`effects.mjs`,
+new `env` merged over `process.env`), the declared check commands (`io.runCommand`, previously no env),
+`rerunFailedValidates` and env.setup all use it. Before this, red-green ran with the daemon env (no run TMPDIR), so a
+repro command reading a builder-written `$TMPDIR` file reported `BASE=SKIPPED HEAD=FAILED`. `callRunner` builds its env
+from `laneEnv()` plus its runner-only keys (`FORGE_DOCKER_LABELS`, `CLAUDE_CODE_TMPDIR`, heavy shims) and gives the same values as before.
+`validateContract` adds one problem per `$TMPDIR/<name>` that a validate or `repro_test` command reads before creating it
+(`conformance.mjs` `tmpdirInputs`: `>`/`>>`, `tee`, `touch|mkdir|mktemp`, last argument of `cp|mv|ln|install`, output-like
+options and `X=` assignments count as creating). It goes through the existing contract-correction resume, because the run
+TMPDIR is per run and a rerun never has the file. The plan prompt says so in one line. Cost: 0 LLM calls; one correction
+resume only for a contract that would otherwise fail at precheck.
+
 ## Entry 2026-10-20 — Freeze-time preflight of validate commands (#4328)
 
 At contract freeze, `preflightValidates` (`lean.mjs`) probes the host for what each `validate[].command` needs, from
@@ -781,7 +805,7 @@ At contract freeze, `preflightValidates` (`lean.mjs`) probes the host for what e
 that interpreter) and the bare packages `node -e`/`-p` code imports (`node_modules/<pkg>` walked up from the worktree).
 Paths, `$VAR` words, names `repoTracks(git ls-files)` holds and names a deliverable's `change` text names are not probed;
 a wrapper (`uv run`, `npx`, ...) probes only the wrapper; at most 20 probes. Probes run through the separate
-`io.probeCommand` hook (`runCheckCommand`) with the lane env; no hook, no change. A miss (`preflightProblems`) joins the
+`io.probeCommand` hook (`runCheckCommand`) with `laneEnv()` (#4325); no hook, no change. A miss (`preflightProblems`) joins the
 validateContract problems in the existing single `contractCorrectionPrompt` resume. After it the misses are re-probed and
 logged as `VALIDATE_PREFLIGHT` {misses, corrected}; any left are an anomaly only, never a block: the post-build #4323
 rerun still ends `env.tool_missing`. Skipped when the frozen contract is recovered from the issue. Cost: 0 LLM calls when
