@@ -19,7 +19,8 @@ import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { repoKey } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
-import { readTestMap, readTestMapAtRef, selectCommands, mergeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
+import { readTestMap, readTestMapAtRef, selectCommands, scopeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
+import { runChecks } from "./precheck.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { computeTrigger, TRIGGER_MODES } from "./review-trigger.mjs";
@@ -122,7 +123,8 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {"needs-human"|"degraded"} [o.reviewIncomplete] shadow only: what an incomplete review after the re-ask does (default needs-human)
  * @param {object} [o.reviewTrigger] forge.yaml review.trigger/risk_paths (#4273): {mode: shadow (default)|enforce|off, riskPaths: globs}
  * @param {object} [o.verify]        forge.yaml verify (verify.mjs parseVerify): mode local (default) | ci | hybrid (#4167)
- * @param {object} [o.precheck]      {commands}: forge.yaml learned.test_commands, run in the worktree before the PR (#4240)
+ * @param {object} [o.precheck]      {commands, maxMinutes}: forge.yaml learned.test_commands, run in the worktree before the PR (#4240);
+ *                                   maxMinutes: lean.precheck.max_minutes, the round budget (#4331, else verify.precheck_total_seconds)
  * @param {"off"|"prefer"} [o.reproTest] forge.yaml lean.repro_test (#4271): prefer (default) freezes a red-green repro_test on bug lanes; off is today's contract
  * @param {object} [o.refactorModule] refactor:split step module (default ./refactor.mjs; injectable for tests, #4211)
  * @param {number} [o.splitMaxLines] refactor:split moved-line budget per PR (default 4000); the rest becomes a chained issue (#4211)
@@ -220,6 +222,7 @@ export async function runCore(o) {
   const heavyCfg = o.heavy ?? {}, heavyOn = Boolean(io.heavy) && heavyCfg.enabled !== false;
   let heavyEnv = null, heavyWaitsFile = null, heavyQueueMax = 0, stage = "plan", iss;
   const waits = {};
+  let precheckMs = 0, precheckDeferred = 0, precheckRan = false; // #4331: pre-PR check wall time and deferrals, for the batch report
   const addWait = (phase, ms, queued = 0) => {
     if (Number.isFinite(ms) && ms > 0) waits[phase] = (waits[phase] ?? 0) + ms;
     if (Number.isInteger(queued)) heavyQueueMax = Math.max(heavyQueueMax, queued);
@@ -345,7 +348,7 @@ export async function runCore(o) {
     }
     await releaseLease(reason, code);
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0,
-      ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...extra };
+      ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}), ...extra };
     return done;
   }
   /** #4297/#4316: a recovery lane that ended unmerged keeps needs-human with this evidence (shared text in render.mjs). */
@@ -1132,29 +1135,29 @@ export async function runCore(o) {
     const learnedCommands = (Array.isArray(o.precheck?.commands) ? o.precheck.commands : []).map((c) => String(c ?? "").trim()).filter(Boolean);
     // #4297: its commands run, so the map comes from the base ref (else the operator's checkout), never the lane worktree
     const testMap = io.runCommand ? (await readTestMapAtRef(git, base)) ?? (await readTestMap([cwd], io.fs?.read)) : null;
-    // #4315: the map's selection is merged into the learned commands (deduped): a partial map never skips a learned suite
-    const pickChecks = () => { const m = testMap ? selectCommands(testMap, files) : []; return { ...mergeChecks(m, learnedCommands), selected: m.length }; };
+    // #4331: a learned command the map covers runs only when its globs match a changed file; unmapped ones always run (#4315)
+    const pickChecks = () => { const m = scopeChecks(testMap, files, learnedCommands); return { ...m, selected: testMap ? selectCommands(testMap, files).length : 0 }; };
     let picked = pickChecks();
     // #4270: the last result of each deterministic gate, as computed below; only reportVerify (verify.check_run) reads it
     const verifyFacts = { commands: null, structure: null, undeclaredEdges: [], docs: null, precheck: null, amendments: [], hotspots: false };
-    if (picked.source !== "learned") T.decisions.push(`Pre-PR checks selected from ${TEST_MAP_FILE}: ${picked.selected} of ${testMap.entries.length} entries${learnedCommands.length ? `, plus ${learnedCommands.length} learned` : ""}`);
+    if (picked.source !== "learned") T.decisions.push(`Pre-PR checks selected from ${TEST_MAP_FILE}: ${picked.selected} of ${testMap.entries.length} entries${learnedCommands.length ? `, plus ${learnedCommands.length - picked.dropped.length} learned` : ""}${picked.dropped.length ? `; ${picked.dropped.length} mapped learned command(s) not matching the changed files left to CI` : ""}`);
     if (picked.commands.length && io.runCommand) {
+      precheckRan = true;
       for (let round = 0; ; round++) {
         await renew();
         if (round) picked = pickChecks();
         const precheckCommands = picked.commands;
-        const results = [], skipped = [];
-        // #4318: one round has a total budget; a command gets what is left of it, and the rest are skipped (CI stays the gate)
-        const totalMs = (Number(vcfg.precheckTotalSeconds) || 1800) * 1000, deadline = now() + totalMs;
-        for (const command of precheckCommands) {
-          const left = deadline - now();
-          if (left <= 0) { skipped.push(command); continue; }
-          let r;
-          try { r = await heavyStep("precheck", () => io.runCommand({ command, cwd: wt, timeoutMs: Math.min(vcfg.precheckTimeoutSeconds * 1000, left), env: laneEnv() })); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
-          results.push({ command, rc: Number.isInteger(r?.rc) ? r.rc : 1, output: String(r?.output ?? "") });
-        }
-        if (skipped.length) T.anomalies.push(`skipped: pre-PR check total budget ${totalMs / 1000} s reached; not run: ${skipped.map((c) => `\`${c}\``).join(", ")}`);
-        ev({ event: "PRECHECK_COMMANDS", round, results: results.map(({ command, rc }) => ({ command, rc })), ...(picked.source !== "learned" ? { source: picked.source } : {}) });
+        // #4318/#4331: one round has a total budget (lean.precheck.max_minutes, else verify.precheck_total_seconds); the
+        // commands run concurrently up to the host worker cap under ONE heavy slot; the rest are deferred to CI, not failed
+        const maxMin = Number(o.precheck?.maxMinutes), totalMs = (maxMin > 0 ? maxMin * 60 : Number(vcfg.precheckTotalSeconds) || 600) * 1000;
+        const parallelism = Number(verifyParallelism()) || 1;
+        const round$ = await heavyStep("precheck", () => runChecks({ commands: precheckCommands, parallelism, budgetMs: totalMs, perCommandMs: vcfg.precheckTimeoutSeconds * 1000, now,
+          run: ({ command, timeoutMs }) => io.runCommand({ command, cwd: wt, timeoutMs, env: laneEnv() }) }));
+        const { results, deferred } = round$;
+        precheckMs += round$.ms; precheckDeferred += deferred.length;
+        if (deferred.length) T.anomalies.push(`deferred-to-ci: pre-PR check budget ${totalMs / 1000} s reached; left to CI: ${deferred.map((c) => `\`${c}\``).join(", ")}`);
+        ev({ event: "PRECHECK_COMMANDS", round, results: [...results.map(({ command, rc, ms }) => ({ command, rc, ms })), ...deferred.map((command) => ({ command, status: "deferred-to-ci" }))],
+          ms: round$.ms, parallelism, ...(picked.source !== "learned" ? { source: picked.source } : {}) });
         verifyFacts.commands = results.map(({ command, rc }) => ({ command, rc }));
         const failed = results.filter((r) => r.rc !== 0);
         if (!failed.length) { checkCommandsFailing = false; if (round) T.decisions.push(`Declared check commands pass after ${round} builder fix round(s)`); break; }

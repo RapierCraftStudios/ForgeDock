@@ -100,6 +100,16 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) adds the map entries whose
    globs match the changed files to that list (`selectCommands` + `mergeChecks`, #4315: learned first, deduped, so the
    map never removes a check; event gains `source: "test-map"|"test-map+learned"` when the map added a command).
+   #4331 (`testmap.mjs` `scopeChecks`): a learned command the map covers (same `checkKey` as an entry's command) runs
+   only when one of its globs matches a changed file; unmapped learned commands always run; `source` also marks a
+   scoped-out command. A round runs through `precheck.mjs` `runChecks`: concurrent up to `verifyParallelism()`
+   (`FORGE_HOST_PARALLELISM`, else cores / live lanes) inside ONE `heavyStep("precheck")` slot, within a round budget of
+   forge.yaml `lean.precheck.max_minutes` (`engine-cli.mjs` `readPrecheckBudget`, 1..120; else
+   `verify.precheck_total_seconds`, default 600 s). Commands not started before the budget ends, or cut by it (rc 124
+   with the remaining budget as timeout), are `deferred-to-ci` (event entries `{command, status}`, trajectory anomaly),
+   never failures. `PRECHECK_COMMANDS` results carry `ms`; the event carries round `ms` and `parallelism`; the lane
+   result `precheckMs`/`precheckDeferred` → orchestrate row `precheck_ms`/`precheck_deferred` → batch-report line
+   `precheck: <m> total over <n> lanes[, <k> deferred to CI]` (`formatPrecheckSummary`).
 6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails

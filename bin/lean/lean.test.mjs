@@ -2684,6 +2684,25 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.equal(r.heavyQueueMax, 4);
   });
 
+  it("#4331 pre-PR checks: scoped by the test map, concurrent up to FORGE_HOST_PARALLELISM under one heavy slot, timed", async () => {
+    const w = heavyWorld(); w.changed = ["commands/foo.md"];
+    w.baseFiles = { "origin/staging:.forge/test-map.json": JSON.stringify({ version: 1, entries: [
+      { globs: ["commands/**"], command: "bash scripts/check-a.sh", cwd: "." }, { globs: ["bin/**"], command: "bash scripts/check-b.sh", cwd: "." }] }) };
+    const ran = []; let live = 0, peak = 0;
+    w.io.runCommand = async ({ command }) => { ran.push(command); peak = Math.max(peak, ++live); await new Promise((r) => setImmediate(r)); w.clock += 1000; live--; return { rc: 0, output: "" }; };
+    const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "2";
+    const dir = tmpDir("core-");
+    let r;
+    try { r = await run(w, { dir, precheck: { commands: ["bash scripts/check-a.sh", "bash scripts/check-b.sh", "make lint", "make fmt"] } }); }
+    finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
+    assert.deepEqual(ran, ["bash scripts/check-a.sh", "make lint", "make fmt"], "mapped check-b misses commands/foo.md; unmapped ones run");
+    assert.equal(peak, 2);
+    assert.equal(w.acq.filter((a) => a.phase === "precheck").length, 1, "one heavy slot for the round");
+    const [pre] = readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS");
+    assert.equal(pre.parallelism, 2); assert.ok(pre.ms > 0); assert.ok(pre.results.every((x) => Number.isFinite(x.ms)));
+    assert.ok(r.precheckMs > 0); assert.equal(r.precheckDeferred, 0);
+  });
+
   it("#4169 without io.heavy (or heavy.enabled false) nothing is gated and the runner env is unchanged", async () => {
     const w = world();
     const r = await run(w);
@@ -3243,7 +3262,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     writeFileSync(`${d}/forge.yaml`, "engine:\n  conformance: shadow\n");
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n");
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 1800, checkRun: false });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false });
   });
 });
 
@@ -3582,7 +3601,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.ok(w.seq.indexOf("builder-resume", w.seq.indexOf("check:1")) < w.seq.indexOf("pr"), "the fix runs before the PR is opened");
     const log = readLog(dir, 7);
     const pre = log.filter((e) => e.event === "PRECHECK_COMMANDS");
-    assert.deepEqual(pre.map((e) => e.results), [[{ command: "bash scripts/check-test-tmp-cleanup.sh", rc: 1 }], [{ command: "bash scripts/check-test-tmp-cleanup.sh", rc: 0 }]]);
+    assert.deepEqual(pre.map((e) => e.results), [[{ command: "bash scripts/check-test-tmp-cleanup.sh", rc: 1, ms: 0 }], [{ command: "bash scripts/check-test-tmp-cleanup.sh", rc: 0, ms: 0 }]]);
     assert.ok(log.findIndex((e) => e.event === "PRECHECK_COMMANDS") < log.findIndex((e) => e.event === "PR_OPENED"));
   });
 
@@ -3606,14 +3625,14 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.match(traj(w)[0], /builder made no new commit for them/);
   });
 
-  it("#4318 pre-PR: a round has a total budget; a command gets what is left, the rest are skipped as an anomaly, not a failure", async () => {
+  it("#4318/#4331 pre-PR: a round has a total budget; a command gets what is left, the rest are deferred to CI, not a failure", async () => {
     const w = world(); const ran = [];
     w.io.runCommand = async ({ command, timeoutMs }) => { ran.push([command, timeoutMs]); w.clock += 60000; return { rc: 0, output: "" }; };
     const r = await run(w, { precheck: { commands: ["make a", "make b", "make c"] }, verify: { precheckTotalSeconds: 100 } });
     assert.equal(r.terminalReason, "merged");
     assert.deepEqual(ran, [["make a", 100000], ["make b", 40000]]);
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "skipped is not failing");
-    assert.match(traj(w)[0], /skipped: pre-PR check total budget 100 s reached; not run: `make c`/);
+    assert.match(traj(w)[0], /deferred-to-ci: pre-PR check budget 100 s reached; left to CI: `make c`/);
   });
 });
 
@@ -3680,7 +3699,7 @@ describe("test map and repo facts caches (#4272)", () => {
     assert.equal((await run(w, { dir, precheck: { commands: ["true", "make lint"] } })).terminalReason, "merged");
     assert.deepEqual(ran, ["true", "make lint"]);
     assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS").map(({ round, results, ...rest }) => [round, results, Object.keys(rest).filter((k) => k === "source")]),
-      [[0, [{ command: "true", rc: 0 }, { command: "make lint", rc: 0 }], []]]);
+      [[0, [{ command: "true", rc: 0, ms: 0 }, { command: "make lint", rc: 0, ms: 0 }], []]]);
     const [plan, impl] = builders(w);
     assert.equal(plan[4].startsWith(builderPlanPrompt(7)), true); assert.equal(impl[4].startsWith(builderImplementPrompt("local")), true);
     for (const b of builders(w)) assert.doesNotMatch(b[4], /Repo facts/);
