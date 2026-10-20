@@ -70,10 +70,10 @@ run() { # run <fixture> [args...] -> sets OUT, RC
   local fx="$1"; shift
   OUT=$(MOCK_GH_JSON="$fx" bash "$VERIFY" 3061 -R o/r "$@" 2>/dev/null); RC=$?
 }
-expect_pass() { run "$2" "${@:3}"; [ $RC -eq 0 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: PASS' && ok "$1" || bad "$1 (rc=$RC out=$OUT)"; }
+expect_pass() { run "$2" "${@:3}"; [ $RC -eq 0 ] && grep -q 'PHASE_TRAIL: PASS' <<< "$OUT" && ok "$1" || bad "$1 (rc=$RC out=$OUT)"; }
 expect_fail() { # name fixture needle [args]
   run "$2" "${@:4}"
-  [ $RC -eq 1 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: FAIL' && echo "$OUT" | grep -q "MISSING: $3" && ok "$1" || bad "$1 (rc=$RC out=$OUT)"
+  [ $RC -eq 1 ] && grep -q 'PHASE_TRAIL: FAIL' <<< "$OUT" && grep -q "MISSING: $3" <<< "$OUT" && ok "$1" || bad "$1 (rc=$RC out=$OUT)"
 }
 
 expect_pass "full COMPLEX trail passes" "$(mk full INV CONTRACT FP_COMPLEX CONTEXT ARCH QG_PASS)"
@@ -107,12 +107,12 @@ expect_pass "INVESTIGATION:INVALID accepted as terminal investigator sentinel" "
 
 # Missing FAST_PATH uses conservative STANDARD set, so CONTEXT/ARCHITECT also named
 run "$(mk l INV CONTRACT QG_PASS)"
-echo "$OUT" | grep -q 'MISSING: FAST_PATH' && echo "$OUT" | grep -q 'MISSING: CONTEXT' && echo "$OUT" | grep -q 'MISSING: ARCHITECT' \
+grep -q 'MISSING: FAST_PATH' <<< "$OUT" && grep -q 'MISSING: CONTEXT' <<< "$OUT" && grep -q 'MISSING: ARCHITECT' <<< "$OUT" \
   && ok "missing FAST_PATH names every missing artifact" || bad "missing FAST_PATH names every missing artifact ($OUT)"
 
 # Every missing line names the phase to route back to
 run "$(mk m INV CONTRACT FP_COMPLEX)"
-echo "$OUT" | grep -q 'MISSING: CONTEXT -> re-run Skill work-on/build/context' && ok "refusal routes to the missing phase" || bad "route text ($OUT)"
+grep -q 'MISSING: CONTEXT -> re-run Skill work-on/build/context' <<< "$OUT" && ok "refusal routes to the missing phase" || bad "route text ($OUT)"
 
 # Large thread (pipefail + early-exit grep SIGPIPE regression, #3099): a valid trail buried in filler
 python3 - "$TMP_FX/big.json" <<'PY'
@@ -168,12 +168,12 @@ mp="$TMP_FX/mp.json"
 { jq -nc '[{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL"},{"body":"<!-- FORGE:CONTRACT -->\nc"},{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","updated_at":"2026-01-04T00:00:00Z"}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})'
   jq -nc '[{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","updated_at":"2026-10-06T00:00:00Z"}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})'; } > "$mp"
 OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$mp" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: QUALITY_GATE' && ok "multi-page: latest build on page 2 is not waived" || bad "multi-page (rc=$RC out=$OUT)"
+[ $RC -eq 1 ] && grep -q 'MISSING: QUALITY_GATE' <<< "$OUT" && ok "multi-page: latest build on page 2 is not waived" || bad "multi-page (rc=$RC out=$OUT)"
 
 # Cutoff validation (#3121): malformed or future cutoff fails closed
 for bad_since in "garbage" "2999-01-01T00:00:00Z" "2020-13-45T99:99:99Z" "2026-02-30T00:00:00Z" "2026-10-01T24:00:00Z"; do
   OUT=$(FORGE_TRAIL_QG_SINCE="$bad_since" MOCK_GH_JSON="$(lg lgv 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-  [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "invalid cutoff '$bad_since' rejected" || bad "cutoff '$bad_since' (rc=$RC out=$OUT)"
+  [ $RC -eq 2 ] && grep -q 'PHASE_TRAIL: ERROR' <<< "$OUT" && ok "invalid cutoff '$bad_since' rejected" || bad "cutoff '$bad_since' (rc=$RC out=$OUT)"
 done
 
 # Runner clock behind the default cutoff: cutoff looks future-dated -> exit 2 (fails closed)
@@ -188,7 +188,7 @@ if [ "\$mode" = now ] && [ -n "\$fmt" ]; then echo 2020-01-01T00:00:00Z; else ex
 MOCKDATE
 chmod +x "$CLK/date"
 OUT=$(PATH="$CLK:$PATH" MOCK_GH_JSON="$(lg lgc 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "clock behind default cutoff fails closed (exit 2)" || bad "clock behind cutoff (rc=$RC out=$OUT)"
+[ $RC -eq 2 ] && grep -q 'PHASE_TRAIL: ERROR' <<< "$OUT" && ok "clock behind default cutoff fails closed (exit 2)" || bad "clock behind cutoff (rc=$RC out=$OUT)"
 
 # BSD/macOS date fallback (#3139): GNU `date -d` unavailable, `date -j -f` available -> valid cutoff still honoured;
 # neither parser available -> fails closed (exit 2).
@@ -207,11 +207,11 @@ chmod +x "$BSD/date"
 OUT=$(PATH="$BSD:$PATH" FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$(lg lgbsd 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 0 ] && ok "BSD date -j -f fallback validates a real cutoff" || bad "BSD fallback (rc=$RC out=$OUT)"
 OUT=$(PATH="$BSD:$PATH" BSD_NO_PARSE=1 FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$(lg lgbsd2 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "no usable date parser fails closed (exit 2)" || bad "no date parser (rc=$RC out=$OUT)"
+[ $RC -eq 2 ] && grep -q 'PHASE_TRAIL: ERROR' <<< "$OUT" && ok "no usable date parser fails closed (exit 2)" || bad "no date parser (rc=$RC out=$OUT)"
 
 # Boundary: cutoff exactly equal to BUILDER:COMPLETE time is NOT waived (strictly-before only)
 OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-01T00:00:00Z MOCK_GH_JSON="$(lg lgb 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: QUALITY_GATE' && ok "boundary: build at exactly the cutoff is not waived" || bad "boundary equal (rc=$RC out=$OUT)"
+[ $RC -eq 1 ] && grep -q 'MISSING: QUALITY_GATE' <<< "$OUT" && ok "boundary: build at exactly the cutoff is not waived" || bad "boundary equal (rc=$RC out=$OUT)"
 OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-01T00:00:01Z MOCK_GH_JSON="$(lg lgb2 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 0 ] && ok "boundary: build one second before the cutoff is waived" || bad "boundary minus 1s (rc=$RC out=$OUT)"
 
@@ -222,23 +222,23 @@ BASE='[{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"},{
 # empty pages around a populated one
 { echo '[]'; pg "$BASE"; echo '[]'; pg "[$BLD]"; echo '[]'; } > "$TMP_FX/empty.json"
 OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$TMP_FX/empty.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: QUALITY_GATE' && ok "empty pages interleaved are tolerated" || bad "empty pages (rc=$RC out=$OUT)"
+[ $RC -eq 1 ] && grep -q 'MISSING: QUALITY_GATE' <<< "$OUT" && ok "empty pages interleaved are tolerated" || bad "empty pages (rc=$RC out=$OUT)"
 OUT=$(MOCK_GH_JSON=<(echo '[]') bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: INVESTIGATOR' && ok "all-empty thread fails (not error)" || bad "all-empty (rc=$RC out=$OUT)"
+[ $RC -eq 1 ] && grep -q 'MISSING: INVESTIGATOR' <<< "$OUT" && ok "all-empty thread fails (not error)" || bad "all-empty (rc=$RC out=$OUT)"
 # 3+ pages: latest build on the LAST page wins
 { pg "$BASE"; pg '[{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","updated_at":"2026-01-01T00:00:00Z"}]'; pg "[$BLD]"; } > "$TMP_FX/p3.json"
 OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$TMP_FX/p3.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: QUALITY_GATE' && ok "3 pages: latest build on page 3 is not waived" || bad "3 pages (rc=$RC out=$OUT)"
+[ $RC -eq 1 ] && grep -q 'MISSING: QUALITY_GATE' <<< "$OUT" && ok "3 pages: latest build on page 3 is not waived" || bad "3 pages (rc=$RC out=$OUT)"
 # Malformed / mixed pages fail closed with exit 2
 { pg "$BASE"; echo '{"message":"Server Error"}'; } > "$TMP_FX/mixed.json"
 OUT=$(MOCK_GH_JSON="$TMP_FX/mixed.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "mixed array/object pages fail closed (exit 2)" || bad "mixed pages (rc=$RC out=$OUT)"
+[ $RC -eq 2 ] && grep -q 'PHASE_TRAIL: ERROR' <<< "$OUT" && ok "mixed array/object pages fail closed (exit 2)" || bad "mixed pages (rc=$RC out=$OUT)"
 { pg "$BASE"; echo '[1,"x"]'; } > "$TMP_FX/nonobj.json"
 OUT=$(MOCK_GH_JSON="$TMP_FX/nonobj.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "page with non-object elements fails closed (exit 2)" || bad "non-object elements (rc=$RC out=$OUT)"
+[ $RC -eq 2 ] && grep -q 'PHASE_TRAIL: ERROR' <<< "$OUT" && ok "page with non-object elements fails closed (exit 2)" || bad "non-object elements (rc=$RC out=$OUT)"
 { pg "$BASE"; echo '[{"body":'; } > "$TMP_FX/malformed.json"
 OUT=$(MOCK_GH_JSON="$TMP_FX/malformed.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "malformed page fails closed (exit 2)" || bad "malformed page (rc=$RC out=$OUT)"
+[ $RC -eq 2 ] && grep -q 'PHASE_TRAIL: ERROR' <<< "$OUT" && ok "malformed page fails closed (exit 2)" || bad "malformed page (rc=$RC out=$OUT)"
 
 # SEC-4 (#3149): the grace keys on updated_at -- BUILDER:COMPLETE is PATCHed in later than the comment was created
 jq -nc '[{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL"},{"body":"<!-- FORGE:CONTRACT -->\nc"},{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-08T00:00:00Z"}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})' > "$TMP_FX/patched.json"
@@ -251,7 +251,7 @@ expect_fail "INVESTIGATION band + code diff requires CONTRACT" "$(mk cd1 INV FP_
 expect_fail "INVESTIGATION band + code diff requires QUALITY_GATE" "$(mk cd2 INV CONTRACT CONTEXT ARCH FP_INVESTIGATION)" QUALITY_GATE --code-diff
 expect_pass "INVESTIGATION band + code diff passes with a full trail" "$(mk cd3 INV CONTRACT CONTEXT ARCH QG_PASS FP_INVESTIGATION)" --code-diff
 run "$(mk cd4 INV FP_INVESTIGATION)" --code-diff
-echo "$OUT" | grep -q 'NOTE: INVESTIGATION band ignored' && ok "ignored band is reported" || bad "band note ($OUT)"
+grep -q 'NOTE: INVESTIGATION band ignored' <<< "$OUT" && ok "ignored band is reported" || bad "band note ($OUT)"
 expect_pass "INVESTIGATION band + docs-only (no code diff) still passes" "$(mk cd5 INV FP_INVESTIGATION)" --docs-only
 expect_pass "TRIVIAL band is unaffected by --code-diff" "$(mk cd6 INV CONTRACT FP_TRIVIAL QG_PASS)" --code-diff
 
@@ -282,7 +282,7 @@ expect_pass "uppercase head-tree is normalised" "$(ht h6 "$QG_T1")" --head-tree 
 expect_pass "docs-only still waives the bound gate" "$(ht h7)" --docs-only --head-tree "$T1"
 for bt in "" "xyz" "${T1}0" "abc123"; do
   OUT=$(MOCK_GH_JSON="$(ht h8 "$QG_T1")" bash "$VERIFY" 3061 -R o/r --head-tree "$bt" 2>/dev/null); RC=$?
-  [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "invalid --head-tree '$bt' fails closed (exit 2)" || bad "head-tree '$bt' (rc=$RC out=$OUT)"
+  [ $RC -eq 2 ] && grep -q 'PHASE_TRAIL: ERROR' <<< "$OUT" && ok "invalid --head-tree '$bt' fails closed (exit 2)" || bad "head-tree '$bt' (rc=$RC out=$OUT)"
 done
 # A 64-hex marker tree that merely starts with the 40-hex head tree must not match
 QG_LONG=$'<!-- FORGE:QUALITY_GATE -->\n**Result**: PASS\n**Tree**: '"${T1}1111111111111111111111"
@@ -292,26 +292,26 @@ OUT=$(MOCK_GH_JSON="$(ht h9 "$QG_T1")" bash "$VERIFY" 3061 -R o/r --head-tree 2>
 
 # -h prints the full header
 HOUT=$(bash "$VERIFY" -h)
-echo "$HOUT" | grep -q 'TRUSTED ENVIRONMENT ONLY' && echo "$HOUT" | grep -q 'COLLABORATOR includes read-level' && echo "$HOUT" | grep -q '^# Usage:' && ok "-h prints the full multi-line header" || bad "-h truncated"
+grep -q 'TRUSTED ENVIRONMENT ONLY' <<< "$HOUT" && grep -q 'COLLABORATOR includes read-level' <<< "$HOUT" && grep -q '^# Usage:' <<< "$HOUT" && ok "-h prints the full multi-line header" || bad "-h truncated"
 
 # Untrusted-author FORGE markers are ignored AND diagnosed with a NOTE (#3123)
 UT="$TMP_FX/untrusted.json"
 jq -c 'map(. + {author_association:"CONTRIBUTOR", user:{login:"ext",type:"User"}})' "$(mk ut_src INV CONTRACT FP_TRIVIAL QG_PASS)" > "$UT"
 OUT=$(MOCK_GH_JSON="$UT" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: INVESTIGATOR' && echo "$OUT" | grep -q 'NOTE: .*untrusted authors were ignored' && ok "CONTRIBUTOR markers ignored with NOTE" || bad "contributor note (rc=$RC out=$OUT)"
+[ $RC -eq 1 ] && grep -q 'MISSING: INVESTIGATOR' <<< "$OUT" && grep -q 'NOTE: .*untrusted authors were ignored' <<< "$OUT" && ok "CONTRIBUTOR markers ignored with NOTE" || bad "contributor note (rc=$RC out=$OUT)"
 OUT=$(FORGE_TRAIL_TRUSTED_LOGINS=ext MOCK_GH_JSON="$UT" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 0 ] && ok "FORGE_TRAIL_TRUSTED_LOGINS accepts a CONTRIBUTOR login" || bad "trusted login override (rc=$RC out=$OUT)"
 # forge#3350: widening only the override list must not make CONTRIBUTOR trail markers count
 OUT=$(FORGE_TRAIL_OVERRIDE_ASSOCIATIONS="OWNER,MEMBER,COLLABORATOR,CONTRIBUTOR" MOCK_GH_JSON="$UT" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: INVESTIGATOR' && ok "override list widened only: CONTRIBUTOR trail markers still ignored (#3350)" || bad "override-only widen trail (rc=$RC out=$OUT)"
+[ $RC -eq 1 ] && grep -q 'MISSING: INVESTIGATOR' <<< "$OUT" && ok "override list widened only: CONTRIBUTOR trail markers still ignored (#3350)" || bad "override-only widen trail (rc=$RC out=$OUT)"
 expect_pass "marker-only CONTEXT satisfies STANDARD" "$(mk minctx INV FP_STANDARD CONTRACT CONTEXT ARCH QG_PASS)"
 
 # -h is bounded by the END-HELP sentinel, not a hardcoded line range (#3147)
-echo "$HOUT" | grep -q 'Callers route on the exit code' && ! echo "$HOUT" | grep -q 'END-HELP' && ! echo "$HOUT" | grep -q 'set -uo pipefail' && ok "-h stops at the END-HELP sentinel" || bad "-h sentinel"
+grep -q 'Callers route on the exit code' <<< "$HOUT" && ! grep -q 'END-HELP' <<< "$HOUT" && ! grep -q 'set -uo pipefail' <<< "$HOUT" && ok "-h stops at the END-HELP sentinel" || bad "-h sentinel"
 
 # Outage fails closed (exit 2, never PASS)
 OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON=/dev/null bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "gh outage fails closed" || bad "gh outage (rc=$RC out=$OUT)"
+[ $RC -eq 2 ] && grep -q 'PHASE_TRAIL: ERROR' <<< "$OUT" && ok "gh outage fails closed" || bad "gh outage (rc=$RC out=$OUT)"
 
 # -R with no value must error out, not hang
 # macOS has no `timeout`; fall back to gtimeout, then perl alarm.
@@ -353,14 +353,14 @@ ovf() { # ovf <name> <override comment json...> -> fixture = base trail + commen
 }
 GOODC() { ovc alice User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "gate misfire, verified by hand"; }
 orun() { OUT=$(MOCK_GH_JSON="$1" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" "${@:2}" 2>/dev/null); RC=$?; }
-expect_override() { orun "$2" "${@:3}"; [ $RC -eq 0 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: OVERRIDDEN' && echo "$OUT" | grep -q '^OVERRIDE: approver=' && ok "$1" || bad "$1 (rc=$RC out=$OUT)"; }
-expect_blocked() { orun "$2" "${@:3}"; [ $RC -eq 1 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: FAIL' && ! echo "$OUT" | grep -q 'OVERRIDDEN' && ok "$1" || bad "$1 (rc=$RC out=$OUT)"; }
+expect_override() { orun "$2" "${@:3}"; [ $RC -eq 0 ] && grep -q 'PHASE_TRAIL: OVERRIDDEN' <<< "$OUT" && grep -q '^OVERRIDE: approver=' <<< "$OUT" && ok "$1" || bad "$1 (rc=$RC out=$OUT)"; }
+expect_blocked() { orun "$2" "${@:3}"; [ $RC -eq 1 ] && grep -q 'PHASE_TRAIL: FAIL' <<< "$OUT" && ! grep -q 'OVERRIDDEN' <<< "$OUT" && ok "$1" || bad "$1 (rc=$RC out=$OUT)"; }
 
 expect_blocked "no override comment stays blocked" "$(ovf o0)"
 expect_override "valid human override is accepted" "$(ovf o1 "$(GOODC)")"
 orun "$(ovf o1b "$(GOODC)")"
-echo "$OUT" | grep -q "^OVERRIDE: approver=alice head=$HS missing=$CUR_MISSING reason=gate misfire, verified by hand$" && ok "OVERRIDE line carries approver, head, missing set and reason" || bad "OVERRIDE line ($OUT)"
-echo "$OUT" | grep -q '^MISSING:' && bad "accepted override must not emit MISSING lines" || ok "accepted override emits no MISSING lines"
+grep -q "^OVERRIDE: approver=alice head=$HS missing=$CUR_MISSING reason=gate misfire, verified by hand$" <<< "$OUT" && ok "OVERRIDE line carries approver, head, missing set and reason" || bad "OVERRIDE line ($OUT)"
+grep -q '^MISSING:' <<< "$OUT" && bad "accepted override must not emit MISSING lines" || ok "accepted override emits no MISSING lines"
 expect_override "admin permission is accepted" "$(ovf o2 "$(ovc carol User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "ok")")"
 expect_override "uppercase head and shuffled/spaced missing list still bind to the same set" \
   "$(ovf o3 "$(ovc alice User "$AFTER" "$AFTER" "$(echo $HS | tr a-f A-F)" "QUALITY_GATE , ARCHITECT,CONTEXT -> x" "ok")")"
@@ -376,7 +376,7 @@ expect_blocked "rejects: missing timestamps" "$(ovf r5 "$(GOODC | jq -c 'del(.up
 expect_blocked "rejects: read-only collaborator" "$(ovf r6 "$(ovc reader User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "r")")"
 expect_blocked "rejects: author with no permission record" "$(ovf r7 "$(ovc stranger User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "r")")"
 orun "$(ovf r8 "$(GOODC)")"; OUT=$(MOCK_PERM_FAIL=1 MOCK_GH_JSON="$TMP_FX/r8.json" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>/dev/null); RC=$?
-[ $RC -eq 1 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "rejects: permission API error fails closed (exit 1)" || bad "permission api error (rc=$RC out=$OUT)"
+[ $RC -eq 1 ] && ! grep -q OVERRIDDEN <<< "$OUT" && ok "rejects: permission API error fails closed (exit 1)" || bad "permission api error (rc=$RC out=$OUT)"
 expect_blocked "rejects: wrong head sha" "$(ovf r9 "$(ovc alice User "$AFTER" "$AFTER" "$HS2" "$CUR_MISSING" "r")")"
 expect_blocked "rejects: truncated head sha" "$(ovf r10 "$(ovc alice User "$AFTER" "$AFTER" "${HS:0:12}" "$CUR_MISSING" "r")")"
 expect_blocked "rejects: override for a different MISSING set" "$(ovf r11 "$(ovc alice User "$AFTER" "$AFTER" "$HS" "ARCHITECT,CONTEXT" "r")")"
@@ -396,21 +396,21 @@ PIPE_C=$(jq -nc '{body:"<!-- FORGE:QUALITY_GATE -->\n**Result**: FAIL",user:{log
 expect_blocked "rejects: author of any trusted FORGE marker (QUALITY_GATE) is pipeline" "$(ovf p5 "$PIPE_C" "$(ovc pipeuser User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "r")")"
 # Override cannot be evaluated without --head-sha
 OUT=$(MOCK_GH_JSON="$(ovf n1 "$(GOODC)")" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
-[ $RC -eq 1 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "rejects: no --head-sha means the override is never evaluated" || bad "no head-sha (rc=$RC out=$OUT)"
+[ $RC -eq 1 ] && ! grep -q OVERRIDDEN <<< "$OUT" && ok "rejects: no --head-sha means the override is never evaluated" || bad "no head-sha (rc=$RC out=$OUT)"
 for bs in "" "xyz" "${HS}0"; do
   OUT=$(MOCK_GH_JSON="$(ovf n2 "$(GOODC)")" bash "$VERIFY" 3061 -R o/r --head-sha "$bs" 2>/dev/null); RC=$?
-  [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "invalid --head-sha '$bs' fails closed (exit 2)" || bad "head-sha '$bs' (rc=$RC out=$OUT)"
+  [ $RC -eq 2 ] && grep -q 'PHASE_TRAIL: ERROR' <<< "$OUT" && ok "invalid --head-sha '$bs' fails closed (exit 2)" || bad "head-sha '$bs' (rc=$RC out=$OUT)"
 done
 OUT=$(MOCK_GH_JSON="$TMP_FX/n2.json" bash "$VERIFY" 3061 -R o/r --head-sha 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && ok "--head-sha without a value exits 2" || bad "head-sha no value (rc=$RC)"
 # Exit 2 is never overridable
 OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON="$TMP_FX/o1.json" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>/dev/null); RC=$?
-[ $RC -eq 2 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "exit 2 (unreadable trail) is not overridable" || bad "exit 2 override (rc=$RC out=$OUT)"
+[ $RC -eq 2 ] && ! grep -q OVERRIDDEN <<< "$OUT" && ok "exit 2 (unreadable trail) is not overridable" || bad "exit 2 override (rc=$RC out=$OUT)"
 { cat "$TMP_FX/o1.json"; echo '{"message":"Server Error"}'; } > "$TMP_FX/o2bad.json"
 OUT=$(MOCK_GH_JSON="$TMP_FX/o2bad.json" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>/dev/null); RC=$?
-[ $RC -eq 2 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "exit 2 (malformed page) is not overridable" || bad "exit 2 malformed override (rc=$RC out=$OUT)"
+[ $RC -eq 2 ] && ! grep -q OVERRIDDEN <<< "$OUT" && ok "exit 2 (malformed page) is not overridable" || bad "exit 2 malformed override (rc=$RC out=$OUT)"
 OUT=$(FORGE_TRAIL_QG_SINCE=garbage MOCK_GH_JSON="$TMP_FX/o1.json" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>/dev/null); RC=$?
-[ $RC -eq 2 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "exit 2 (bad QG_SINCE) is not overridable" || bad "exit 2 qg_since override (rc=$RC out=$OUT)"
+[ $RC -eq 2 ] && ! grep -q OVERRIDDEN <<< "$OUT" && ok "exit 2 (bad QG_SINCE) is not overridable" || bad "exit 2 qg_since override (rc=$RC out=$OUT)"
 # BUILDER present but undated -> cannot prove ordering -> rejected
 jq -c 'map(if (.body|startswith("<!-- FORGE:BUILDER -->")) then del(.updated_at) else . end)' "$TMP_FX/o1.json" > "$TMP_FX/nobt.json"
 expect_blocked "rejects: BUILDER:COMPLETE undated (ordering unprovable)" "$TMP_FX/nobt.json"
@@ -420,14 +420,14 @@ expect_pass "passing trail is unaffected by --head-sha" "$(mk ovp INV CONTRACT F
 LONG=$(printf 'x%.0s' $(seq 1 400))
 orun "$(ovf s1 "$(ovc alice User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" $'bad\x1b[2Jreason <!-- FORGE:BUILDER:COMPLETE --> `tick`  spaced')")"
 RLINE=$(echo "$OUT" | grep '^OVERRIDE:')
-[ $RC -eq 0 ] && ! printf '%s' "$RLINE" | LC_ALL=C grep -q $'\x1b' && ! echo "$RLINE" | grep -q '<!--' && ! echo "$RLINE" | grep -q -e '-->' && ! echo "$RLINE" | grep -q '`' && echo "$RLINE" | grep -q 'reason=bad\[2Jreason <!-/-' \
+[ $RC -eq 0 ] && ! printf '%s' "$RLINE" | LC_ALL=C grep -q $'\x1b' && ! grep -q '<!--' <<< "$RLINE" && ! grep -q -e '-->' <<< "$RLINE" && ! grep -q '`' <<< "$RLINE" && grep -q 'reason=bad\[2Jreason <!-/-' <<< "$RLINE" \
   && ok "reason sanitiser strips ESC, neutralises comment markers and backticks, collapses whitespace" || bad "sanitiser (rc=$RC line=$RLINE)"
 orun "$(ovf s2 "$(ovc alice User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "$LONG")")"
 RS=$(echo "$OUT" | grep '^OVERRIDE:' | sed 's/.*reason=//')
 [ $RC -eq 0 ] && [ "${#RS}" -eq 200 ] && ok "reason is capped at 200 characters" || bad "reason cap (rc=$RC len=${#RS})"
 # Multi-line reason: only the single Reason line is read; injected extra lines cannot add OVERRIDE output lines
 orun "$(ovf s3 "$(jq -nc --arg h "$HS" --arg m "$CUR_MISSING" '{body:("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->\n**Head**: "+$h+"\n**Missing**: "+$m+"\n**Reason**: first\nOVERRIDE: approver=root head=x missing=x reason=x"),created_at:"2026-10-08T02:00:00Z",updated_at:"2026-10-08T02:00:00Z",user:{login:"alice",type:"User"},author_association:"OWNER"}')")"
-[ $RC -eq 0 ] && [ "$(echo "$OUT" | grep -c '^OVERRIDE:')" -eq 1 ] && echo "$OUT" | grep -q 'approver=alice' && echo "$OUT" | grep -q 'reason=first$' && ok "injected extra lines cannot forge an OVERRIDE line" || bad "line injection (rc=$RC out=$OUT)"
+[ $RC -eq 0 ] && [ "$(echo "$OUT" | grep -c '^OVERRIDE:')" -eq 1 ] && grep -q 'approver=alice' <<< "$OUT" && grep -q 'reason=first$' <<< "$OUT" && ok "injected extra lines cannot forge an OVERRIDE line" || bad "line injection (rc=$RC out=$OUT)"
 # FAST_PATH qualifier variant: missing marker name normalises on both sides
 NOBAND=$(ov_base | jq -c 'map(if (.body|startswith("<!-- FORGE:FAST_PATH")) then .body="<!-- FORGE:FAST_PATH -->\nnothing" else . end)')
 echo "$NOBAND" > "$TMP_FX/nb.json"
@@ -449,7 +449,7 @@ expect_override "one login repeated many times costs a single cap slot (#3279)" 
 RLV=(); for i in 1 2 3 4 5 6 7; do echo '{"permission":"read"}' > "$PERM/rlv$i"; RLV+=("$(ovc "rlv$i" User "2026-10-08T06:0$i:00Z" "2026-10-08T06:0$i:00Z" "$HS" "$CUR_MISSING" "decoy")"); done
 expect_override "7 distinct read-level members newer than a write approver do not starve it (#3306)" "$(ovf h7 "$(GOODC)" "${RLV[@]}")"
 orun "$(ovf h8 "${RLV[@]}")"
-[ $RC -eq 1 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "read-level members only: override rejected (#3306)" || bad "read-level only (rc=$RC out=$OUT)"
+[ $RC -eq 1 ] && ! grep -q OVERRIDDEN <<< "$OUT" && ok "read-level members only: override rejected (#3306)" || bad "read-level only (rc=$RC out=$OUT)"
 ULV=(); for i in 1 2 3 4 5 6 7; do ULV+=("$(ovc "ulv$i" User "2026-10-08T07:0$i:00Z" "2026-10-08T07:0$i:00Z" "$HS" "$CUR_MISSING" "unreadable")"); done
 expect_blocked "unreadable lookups stay bounded by the error cap and fail closed (#3306)" "$(ovf h9 "$(GOODC)" "${ULV[@]}")"
 # forge#3307: association prefilter reuses the configured list; each association value is pinned
@@ -471,12 +471,12 @@ echo '{"permission":"read"}' > "$PERM/cvx"
 CVV=(); i=0; for l in Cvx cvx CVX cvX Cvx CVx; do i=$((i+1)); CVV+=("$(ovc "$l" User "2026-10-08T09:0$i:00Z" "2026-10-08T09:0$i:00Z" "$HS" "$CUR_MISSING" "dup")"); done
 PL="$TMP_FX/permlog-cv"; : > "$PL"
 OUT=$(MOCK_PERM_LOG="$PL" MOCK_GH_JSON="$(ovf a7 "$(GOODC)" "${CVV[@]}")" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>/dev/null); RC=$?
-[ $RC -eq 0 ] && echo "$OUT" | grep -q OVERRIDDEN && [ "$(grep -ic '^cvx$' "$PL")" -eq 1 ] && ok "case-variant duplicate logins cost a single lookup (#3307)" || bad "case-variant dup (rc=$RC lookups=$(grep -ic '^cvx$' "$PL"))"
+[ $RC -eq 0 ] && grep -q OVERRIDDEN <<< "$OUT" && [ "$(grep -ic '^cvx$' "$PL")" -eq 1 ] && ok "case-variant duplicate logins cost a single lookup (#3307)" || bad "case-variant dup (rc=$RC lookups=$(grep -ic '^cvx$' "$PL"))"
 # Decoys (NONE/CONTRIBUTOR) never reach the permission API; the NOTE reports the filtered count without logins
 MIXD=("${PDEC[@]}" "${CDEC[@]}")
 PL="$TMP_FX/permlog-decoy"; : > "$PL"
 ERR=$(MOCK_PERM_LOG="$PL" MOCK_GH_JSON="$(ovf a8 "${MIXD[@]}")" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>&1 >/dev/null); 
-[ ! -s "$PL" ] && echo "$ERR" | grep -q 'NOTE: 14 override candidate(s) ignored: author_association not in override-approver set' && ! echo "$ERR" | grep -q 'pdecoy\|cdecoy' \
+[ ! -s "$PL" ] && grep -q 'NOTE: 14 override candidate(s) ignored: author_association not in override-approver set' <<< "$ERR" && ! grep -q 'pdecoy\|cdecoy' <<< "$ERR" \
   && ok "decoys trigger no permission lookups; NOTE carries the count and no logins (#3307)" || bad "decoy no-call (log=$(cat "$PL") err=$ERR)"
 # forge#3351: the NOTE count shares one predicate with the candidates: only otherwise-eligible, association-excluded
 # comments are counted (edited, bot, and pre-floor ones are not)
@@ -486,20 +486,20 @@ EXP=$(ovc xold User "2000-01-01T00:00:00Z" "2000-01-01T00:00:00Z" "$HS" "$CUR_MI
 EX1=$(ovc xok1 User "2026-10-08T11:04:00Z" "2026-10-08T11:04:00Z" "$HS" "$CUR_MISSING" "dropped" | assoc NONE)
 EX2=$(ovc xok2 User "2026-10-08T11:05:00Z" "2026-10-08T11:05:00Z" "$HS" "$CUR_MISSING" "dropped" | assoc CONTRIBUTOR)
 ERR=$(MOCK_GH_JSON="$(ovf a10 "$(GOODC)" "$EXC" "$EXB" "$EXP" "$EX1" "$EX2")" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>&1 >/dev/null)
-echo "$ERR" | grep -q 'NOTE: 2 override candidate(s) ignored: author_association not in override-approver set' \
+grep -q 'NOTE: 2 override candidate(s) ignored: author_association not in override-approver set' <<< "$ERR" \
   && ok "NOTE count equals only eligible association-excluded candidates (#3351)" || bad "NOTE count shared predicate (err=$ERR)"
 # 6th distinct unreadable login is cut off: the cap stops the scan before an older real approver
 UNR=(); for i in 1 2 3 4 5 6 7 8; do UNR+=("$(ovc "unr$i" User "2026-10-08T10:0$i:00Z" "2026-10-08T10:0$i:00Z" "$HS" "$CUR_MISSING" "unreadable")"); done
 PL="$TMP_FX/permlog-unr"; : > "$PL"
 OUT=$(MOCK_PERM_LOG="$PL" MOCK_GH_JSON="$(ovf a9 "$(GOODC)" "${UNR[@]}")" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>/dev/null); RC=$?
-[ $RC -eq 1 ] && ! echo "$OUT" | grep -q OVERRIDDEN && [ "$(wc -l < "$PL" | tr -d ' ')" -eq 6 ] && ! grep -qx alice "$PL" && ok "unreadable lookups stop at the 6th login; older approver never queried (#3307)" || bad "unreadable cutoff (rc=$RC lookups=$(wc -l < "$PL"))"
+[ $RC -eq 1 ] && ! grep -q OVERRIDDEN <<< "$OUT" && [ "$(wc -l < "$PL" | tr -d ' ')" -eq 6 ] && ! grep -qx alice "$PL" && ok "unreadable lookups stop at the 6th login; older approver never queried (#3307)" || bad "unreadable cutoff (rc=$RC lookups=$(wc -l < "$PL"))"
 MOCK_SELF_LOGIN=alice orun "$(ovf h3 "$(GOODC)")"
-[ $RC -eq 1 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "verifier's own login cannot approve an override (#3269)" || bad "self-login exclusion (rc=$RC out=$OUT)"
+[ $RC -eq 1 ] && ! grep -q OVERRIDDEN <<< "$OUT" && ok "verifier's own login cannot approve an override (#3269)" || bad "self-login exclusion (rc=$RC out=$OUT)"
 MOCK_SELF_LOGIN=someoneelse orun "$(ovf h3b "$(GOODC)")"
-[ $RC -eq 0 ] && echo "$OUT" | grep -q OVERRIDDEN && ok "an unrelated self-login does not block a valid override (#3269)" || bad "self-login unrelated (rc=$RC out=$OUT)"
+[ $RC -eq 0 ] && grep -q OVERRIDDEN <<< "$OUT" && ok "an unrelated self-login does not block a valid override (#3269)" || bad "self-login unrelated (rc=$RC out=$OUT)"
 orun "$(ovf h4 "$(ovc alice User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" $'ping @octocat\u2028next\u2029line')")"
 RS=$(echo "$OUT" | grep '^OVERRIDE:' | sed 's/.*reason=//')
-[ $RC -eq 0 ] && ! printf '%s' "$RS" | grep -q '@' && ! printf '%s' "$RS" | grep -q $'\xe2\x80\xa8' && ok "reason sanitiser neutralises @mentions and U+2028/2029 (#3274)" || bad "sanitiser unicode (rc=$RC rs=$RS)"
+[ $RC -eq 0 ] && ! grep -q '@' <<< "$RS" && ! grep -q $'\xe2\x80\xa8' <<< "$RS" && ok "reason sanitiser neutralises @mentions and U+2028/2029 (#3274)" || bad "sanitiser unicode (rc=$RC rs=$RS)"
 # No BUILDER at all: floor falls back to the newest trusted FORGE marker (#3271)
 ov_base | jq -c '[.[] | select((.body|startswith("<!-- FORGE:BUILDER -->"))|not)] | map(if (.body|startswith("<!-- FORGE:CONTRACT -->")) then .created_at="2026-10-08T01:30:00Z" else . end)' > "$TMP_FX/nobuilder.json"
 orun "$TMP_FX/nobuilder.json"; NB_OUT="$OUT"
@@ -512,11 +512,11 @@ if [ -n "$NB_MISS" ]; then
 else bad "no-BUILDER fixture produced no MISSING set ($NB_OUT)"; fi
 # Rejected permission is explained on stderr (#3272)
 ERRTXT=$(MOCK_GH_JSON="$(ovf h5 "$(ovc reader User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "no perm")")" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>&1 >/dev/null)
-echo "$ERRTXT" | grep -q "rejected: permission='read'" && ok "rejected permission prints a diagnostic to stderr (#3272)" || bad "permission diagnostic ($ERRTXT)"
+grep -q "rejected: permission='read'" <<< "$ERRTXT" && ok "rejected permission prints a diagnostic to stderr (#3272)" || bad "permission diagnostic ($ERRTXT)"
 
 # -h documents the override
 HOUT2=$(bash "$VERIFY" -h)
-echo "$HOUT2" | grep -q 'FORGE_TRAIL_PIPELINE_LOGINS' && echo "$HOUT2" | grep -q -- '--head-sha' && ok "-h documents the override and --head-sha" || bad "-h override docs"
+grep -q 'FORGE_TRAIL_PIPELINE_LOGINS' <<< "$HOUT2" && grep -q -- '--head-sha' <<< "$HOUT2" && ok "-h documents the override and --head-sha" || bad "-h override docs"
 
 echo "passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]
