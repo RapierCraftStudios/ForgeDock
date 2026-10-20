@@ -1788,6 +1788,51 @@ describe("base-sync (#4100)", () => {
     assert.ok(w.edits.some((e) => e.includes("needs-human")));
   });
 
+  describe("#4266 PR turns conflicting during the CI wait", () => {
+    const syncCount = (w) => gitCalls(w).filter((x) => x[0] === "merge" && x[1] === "--no-edit").length;
+    /** required check `build` reports nothing (never started) until a base-sync merged, then `then`. */
+    const ciAfterSync = (w, then = "success") => {
+      w.io.requiredChecks = async () => ["build"];
+      w.io.checkStates = async () => { w.polls = (w.polls ?? 0) + 1; return syncCount(w) ? [{ name: "build", state: then }] : []; };
+    };
+
+    it("base-syncs within one poll, waits for CI again and merges at the synced head", async () => {
+      const w = world({ prView: [OKSTATE, CONFLICTING, OKSTATE], mergeResults: ["clean"] });
+      ciAfterSync(w);
+      const r = await run(w);
+      assert.equal(r.terminalReason, "merged");
+      assert.equal(syncCount(w), 1);
+      assert.match(syncComment(w), /\*\*Trigger:\*\* PR became conflicting while waiting for CI/);
+      assert.equal(w.polls, 2, "one poll before the sync, one green poll after it");
+      assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+      noRebaseNoForce(w);
+    });
+
+    it("an unresolvable conflict during the wait ends needs-human base.conflict, never ci-pending", async () => {
+      const w = world({ prView: [OKSTATE, CONFLICTING], mergeResults: ["clean", "clean", "clean"] });
+      ciAfterSync(w, "pending");
+      const r = await run(w, { ciMaxMinutes: 600 });
+      assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "base.conflict");
+      assert.equal(syncCount(w), 2, "the base-sync limit still applies");
+      assert.equal(w.merges.length, 0);
+      assert.ok(w.clock < 60 * 60000, "left the wait long before the CI budget");
+    });
+
+    it("required checks never started on a MERGEABLE PR log CI_NOT_STARTED once; started-but-pending checks do not", async () => {
+      const dir = tmpDir("core-");
+      const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => [];
+      assert.equal((await run(w, { dir, ciMaxMinutes: 60 })).terminalReason, "ci-pending");
+      const hits = readLog(dir, 7).filter((e) => e.event === "CI_NOT_STARTED");
+      assert.equal(hits.length, 1);
+      assert.deepEqual(hits[0].checks, ["build"]); assert.ok(hits[0].minutes >= 10);
+      assert.equal(syncCount(w), 0);
+      const dir2 = tmpDir("core-");
+      const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => [{ name: "build", state: "pending" }];
+      assert.equal((await run(w2, { dir: dir2, ciMaxMinutes: 60 })).terminalReason, "ci-pending");
+      assert.equal(readLog(dir2, 7).filter((e) => e.event === "CI_NOT_STARTED").length, 0);
+    });
+  });
+
   it("unresolved conflict markers after the builder ends needs-human with base.conflict", async () => {
     const w = world({ prView: [CONFLICTING], mergeResults: ["conflict"] });
     w.markers = true;

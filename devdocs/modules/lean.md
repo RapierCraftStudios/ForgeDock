@@ -103,7 +103,12 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    follow-ups (`followupItems`, `pendingTracking`).
 8. **Push + PR → merge** — merge policy `required` (default) | `all` | `none`;
    base-sync merges the lane in on conflict (never rebase/force-push); merge
-   at the reviewed head → `merged`, or `ci-pending` after the CI wait. A failed
+   at the reviewed head → `merged`, or `ci-pending` after the CI wait. Each CI
+   wait poll re-reads mergeability (#4266): a PR that turned conflicting (its
+   `pull_request` workflows never start) base-syncs at once and waits again,
+   within the same base-sync limit (→ `base.conflict`); required checks that
+   have not started after `CI_NOT_STARTED_GRACE_MS` on a MERGEABLE PR log one
+   `CI_NOT_STARTED` event (not terminal). A failed
    required check (any verify mode, #4240) resumes the builder with the failed
    logs (`collectFailedLogs`, `ciFailurePrompt`), re-reviews and pushes the fix,
    and waits again; `ci.red` only after `max_rounds` (shared with `ciVerify`) or a
