@@ -51,7 +51,8 @@
  * and instead of stopping when the budget refuses. The final `{where, reason}` is kept on the run record and the row as
  * `placement` and passed to `runOne` as `ctx.placement` (the lane records it in its FORGE:STATE).
  *
- * In-batch recovery (#4267), off unless `recovery: {maxAttempts}` is passed: a row `classifyNeedsHuman` calls
+ * In-batch recovery (#4267), on by default: this module recovers only when `recovery: {maxAttempts}` is passed, and the
+ * CLI always passes it (forge.yaml `orchestration.recovery.max_attempts`, default 1; 0 disables): a row `classifyNeedsHuman` calls
  * recoverable (needs-human `ci.red` / `base.conflict` / `builder.block_untyped`, `contract.invalid` after a mid-run issue
  * edit, `ci-pending` whose PR `conflicting(issue, pr)` says conflicts) is not final while its persisted `recoveries` stay
  * under `maxAttempts`: it is requeued as a recovery lane (`ctx.recover = {code, attempt}`) under the same admission as any
