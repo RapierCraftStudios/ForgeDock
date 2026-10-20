@@ -11,7 +11,7 @@ import { makeLedger } from "./ledger.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
-import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, DECISION_SOURCES } from "./conformance.mjs";
+import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
 import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo } from "./effects.mjs";
@@ -183,7 +183,7 @@ describe("core work-on", () => {
     assert.match(w.comments[1], /^<!-- FORGE:INVESTIGATION -->\n<!-- FORGE:VALIDATE -->\n## Investigation Report\n\*\*Verdict\*\*: CONFIRMED/);
     assert.match(w.comments[2], /^<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n## Builder Contract \(frozen `[0-9a-f]{12}`\)/, "PLAN stays as an alias marker");
     assert.match(w.comments[2], /\| R1 \| foo must handle a null argument without throwing\. \| deliver \|/);
-    assert.match(w.comments[2], /<summary>contract\.json \(sha256 [0-9a-f]{12}\)<\/summary>/);
+    assert.match(w.comments[2], /<summary>contract\.json \(sha256 [0-9a-f]{12}, issue [0-9a-f]{12}\)<\/summary>/);
     assert.match(w.comments[3], /## Implementation Complete\n\*\*Branch:\*\* `feat\/issue-7-lean`\n\*\*Files changed:\*\*\n- `src\/foo.js`\n- `test\/foo.test.js`/);
     assert.match(w.comments[4], /## Conformance Review\n\*\*Verdict:\*\* CONFORMS/);
     assert.match(w.comments[4], /\| R1 \| implemented \| src\/foo.js:3 \| V1 \|/);
@@ -287,7 +287,7 @@ describe("core work-on", () => {
     assert.equal(w.prs.length, 1);
     assert.equal(traj(w).length, 1);
     assert.match(traj(w)[0], /2 round\(s\)/);
-    assert.match(traj(w)[0], /Not conforming \(review\): conformance\.unimplemented; builder resumed once/);
+    assert.match(traj(w)[0], /Not conforming \(review\): conformance\.unimplemented \(R1 partial: .*\("foo must handle a null argument without throwing\."\)\); builder resumed once/);
     assert.equal(w.comments.filter((c) => c.includes("FORGE:IMPLEMENTATION")).length, 1, "one implementation note");
     assert.equal(w.patches.length, 1, "edited in place after the resume");
     assert.match(w.patches[0].join(" "), /-X PATCH repos\/o\/r\/issues\/comments\/\d+ -f body=<!-- FORGE:IMPLEMENTATION -->/);
@@ -701,6 +701,15 @@ describe("issue edited mid-run (#4188)", () => {
     assert.equal((await run(w, { dir })).terminalReason, "merged");
     assert.equal(readLog(dir, 7).filter((e) => e.event === "ISSUE_EDITED").length, 0);
   });
+
+  it("#4265 the engine's own FORGE:STATE write to the body is not an issue edit", async () => {
+    const dir = tmpDir("issue-engine-edit-");
+    const state = `${ISSUE_BODY}\n\n<!-- FORGE:STATE\n{"v":1,"issue":7,"lease":{"by":"core_1","until":1}}\n-->`;
+    const w = world({ issueBodies: [ISSUE_BODY, state, `${state.replace("until\":1", "until\":2")}`] });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "ISSUE_EDITED").length, 0);
+    assert.doesNotMatch(traj(w).at(-1), /Issue edited during the run/);
+  });
 });
 
 describe("in-batch recovery of mechanical needs-human (#4267)", () => {
@@ -947,8 +956,8 @@ describe("conformance shadow mode (the default)", () => {
     const r = await runShadow(w);
     assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
     assert.equal(builders(w).length, 3, "plan + implement + one resume"); assert.equal(reviewers(w).length, 0);
-    assert.match(builders(w)[2][4], /validate V1 failed \(exit 1\)/);
-    assert.match(nhBody(w), /validate V1 failed \(exit 1\)/);
+    assert.match(builders(w)[2][4], /validate V1 \(`node --test test\/foo\.test\.js`\) failed \(exit 1\)/);
+    assert.match(nhBody(w), /validate V1 \(`node --test test\/foo\.test\.js`\) failed \(exit 1\)/);
   });
 
   it("a failed validate fetches the lane and the resume says how to catch up with a moved base (merge, never rebase)", async () => {
@@ -976,6 +985,15 @@ describe("conformance shadow mode (the default)", () => {
     const r = await runShadow(w);
     assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0); assert.equal(builders(w).length, 3);
     assert.match(nhBody(w), /R1 reported "partial"/);
+    assert.match(nhBody(w), /R1 reported "partial" \("foo must handle a null argument without throwing\."\)/, "#4265: names the unmet requirement");
+    assert.match(traj(w)[0], /Not conforming \(precheck\): conformance\.unimplemented \(R1 reported "partial" \("foo must handle/);
+  });
+
+  it("#4265 a validate step failing after the resume names its command in the needs-human", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    const w = world({ validation: v, resumeValidation: v });
+    assert.equal((await runShadow(w)).code, "conformance.unimplemented");
+    assert.match(nhBody(w), /validate V1 \(`node --test test\/foo\.test\.js`\) failed \(exit 1\)/);
   });
 
   it("#4160 shadow blocks a validate step with no recorded result and an invalid amendment like a reviewer-found unimplemented requirement", async () => {
@@ -2789,6 +2807,27 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.equal(w.files[`${WT}/.forge-lean/contract.json`].trim(), contractJson(CONTRACT), "the engine writes the frozen contract into the worktree");
     assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT")), "not re-posted");
     assert.match(traj(w)[0], /frozen contract [0-9a-f]{12} recovered from the issue/);
+  });
+  const scoped = (body = ISSUE_BODY) => contractHash(scopeText({ title: "foo breaks", body: `${body}\n\n<!-- FORGE:STATE {"v":1} -->` }, []));
+  it("#4265 a rerun recovers a contract frozen from the current issue scope (engine annotations aside)", async () => {
+    const c = frozenComment(CONTRACT, (b) => b.replace(/\(sha256 ([0-9a-f]{12})\)/, `(sha256 $1, issue ${scoped()})`));
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [c] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 1);
+    assert.match(traj(w)[0], /frozen contract [0-9a-f]{12} recovered from the issue/);
+  });
+  it("#4265 a rerun after the issue scope changed re-plans and freezes a new contract with the current scope hash", async () => {
+    const dir = tmpDir("contract-stale-");
+    const old = frozenComment(CONTRACT, (b) => b.replace(/\(sha256 ([0-9a-f]{12})\)/, `(sha256 $1, issue ${scoped("foo crashes; old scope.")})`));
+    const human = { body: "Also: foo must log the null input.", author_association: "OWNER", user: { type: "User", login: "op" } };
+    for (const [comments, reason] of [[[old], /issue scope [0-9a-f]{12} -> [0-9a-f]{12}/], [[frozenComment(), human], /a human comment was posted after it/]]) {
+      const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: comments });
+      assert.equal((await run(w, { dir })).terminalReason, "merged");
+      assert.match(builders(w)[0][4], /PLANNING ONLY[\s\S]*This is a rerun/);
+      assert.match(traj(w)[0], reason);
+      assert.match(w.comments.find((x) => x.includes("<!-- FORGE:CONTRACT -->")), /\(sha256 [0-9a-f]{12}, issue [0-9a-f]{12}\)/);
+    }
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "CONTRACT_STALE").length, 2);
   });
   it("a tampered or untrusted contract comment is ignored: the rerun plans again", async () => {
     for (const c of [frozenComment(CONTRACT, (b) => b.replaceAll("guard null", "guard nothing")), frozenComment(CONTRACT, (b) => b, "NONE")]) {

@@ -69,7 +69,17 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 5. **Builder: plan → contract** — plan call writes `.forge-lean/`
    `investigation.md` + `contract.json`; `conformance.mjs` `validateContract`
    checks quotes against the issue and trusted comments; the engine freezes it
-   (`FORGE:CONTRACT`, `contractHash`). Typed blocks (`classifyBlock`):
+   (`FORGE:CONTRACT`, `contractHash`; the summary also records `issue S`, the
+   hash of `scopeText`: title, body and trusted comments without HTML-comment
+   blocks or `<!-- FORGE:` comments, #4265). `ISSUE_EDITED` fires only when that
+   scope hash changes, so the engine's own FORGE:STATE/annotation writes are not
+   edits. A rerun recovers the frozen contract only if its scope hash equals the
+   current one (legacy comments without it: no trusted human comment after it
+   and every `deliver` quote still in the issue); otherwise `CONTRACT_STALE`,
+   decision "frozen contract H is stale", and it re-plans and freezes a new one.
+   Conformance needs-human lines and the "Not conforming" decision append the
+   quote of the requirement a failure names (`explainFailures`), and a failed
+   validate names its command. Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
 6. **Implement** — same session; `result.json` with typed amendments
    (`applyAmendments` → `FORGE:AMENDMENT`). An `add-deliverable` on a path the
