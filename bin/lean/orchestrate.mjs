@@ -59,7 +59,9 @@
  * `maxAttempts`) under the same admission as any lane, so its dependents stay queued. Only a final lane relabels needs-human
  * itself; a non-final attempt that ends needs-human/ci-pending without a successor is relabelled here, once (#4302). A recovery
  * still queued when the batch exits (breaker, budget, hold, or a resume that does not relaunch it) is relabelled once with the
- * full persisted lane reason (#4315).
+ * full persisted lane reason (#4315); also when the loop throws, and through `onExit(fn)` (the caller's signal handler
+ * awaits `fn(cause)`), each once (#4318). `relabelNeedsHuman` may return `false`/"failed" (not recorded, a resume retries)
+ * or "skipped" (closed or leased issue: recorded); any other result counts as relabelled.
  * A merged recovery row carries `recovered: <code>`; any other end is final with `recovery` evidence. Human codes (`builder.blocked`) are never recovered. Every operational decision the runner takes
  * (recovery, engine-error relaunch, dependency requeue, sub-issues added) goes to `decide({issue, what, why, alternative})`,
  * fire-and-forget: the runner never waits on it.
@@ -160,7 +162,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null }) {
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -349,6 +351,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const pfCost = recovering.has(n) ? 0 : (pf?.cost_usd ?? 0);
     const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
       ...(r?.waits && typeof r.waits === "object" ? { waits: r.waits } : {}), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
+      ...(Number.isFinite(r?.precheckMs) ? { precheck_ms: r.precheckMs } : {}), ...(Number.isInteger(r?.precheckDeferred) && r.precheckDeferred > 0 ? { precheck_deferred: r.precheckDeferred } : {}), // #4331
       ...(rec?.placement ? { placement: rec.placement } : {}) };
     const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
     const subs = (Array.isArray(r?.subissues) ? r.subissues : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
@@ -408,7 +411,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     // #4267: a recovery pass ends here; a recoverable row under the attempt cap is requeued as a recovery lane.
     const prior = recovering.get(n) ?? null;
-    const evidence = () => recoveryEvidence({ code: prior.code, attempt: prior.attempt, outcome: row.outcome, resultCode: row.code, detail: row.detail });
+    // #4318: the full persisted lane reason (capped by the comment writer), not its first 300 chars
+    const evidence = () => recoveryEvidence({ code: prior.code, attempt: prior.attempt, outcome: row.outcome, resultCode: row.code, detail: row.detail, full: true });
     if (prior) {
       recovering.delete(n);
       // #4298: the row reports the whole issue: earlier attempts' cost and minutes are summed into the recovery's.
@@ -511,95 +515,110 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   }
   save();
 
-  const K = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
-  while (pending.length || running.size) {
-    // Resolve skips first: a dependency that finished unsatisfied (or never can) skips its dependents.
-    for (let i = pending.length - 1; i >= 0; i--) {
-      const n = pending[i];
-      if (results.has(n)) { pending.splice(i, 1); continue; }
-      const bad = edges(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome));
-      if (bad !== undefined) { pending.splice(i, 1); skip(n, `dependency #${bad} ended ${results.get(bad).outcome}`); }
-    }
-    const t = now();
-    const holdUntil = heldUntil();
-    let started = 0;
-    driftHeld.clear();
-    const isReady = (n) => {
-      if (!((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome)))) return false;
-      if (!drift?.holds) return true;
-      let pkg = null;
-      try { pkg = drift.holds(n, { body: bodies.get(n) ?? "", lane: lanes.get(n)?.lane ?? null }); } catch { pkg = null; }
-      if (pkg) driftHeld.set(n, pkg);
-      return !pkg;
-    };
-    budgetHeld = false;
-    // #4183: a hook (owned-resource GC near the host ceiling) before lanes are admitted; its errors never stop the batch.
-    if (beforeAdmit && !tripped && !holdUntil && running.size < K() && pending.some(isReady)) { try { await beforeAdmit(); } catch { /* ignored */ } }
-    budgetStop = null;
-    const wanted = new Set(); // issues that stay offered in the host registry after this pass
-    if (!tripped && !holdUntil && budget) {
-      while (running.size < K()) {
-        const ready = pending.filter(isReady);
-        const n = pickNext(ready, { classes, share: budget.share, whenIdle: budget.whenIdle, started: dispatch.started, maint: dispatch.maint,
-          featuresPending: pending.some((p) => !clsOf(classes, p).maintenance) });
-        if (n === null) { budgetHeld = ready.length > 0; break; }
-        if (!grant(n, wanted)) break;
-        pending.splice(pending.indexOf(n), 1);
-        if (lanes.get(n)?.ok !== false) { dispatch.started++; if (clsOf(classes, n).maintenance) dispatch.maint++; }
-        start(n); started++;
-      }
-    } else if (!tripped && !holdUntil && reg) {
-      // Priority first, pending order within a priority; the free per-batch K is offered so the host queue keeps FIFO.
-      const ready = pending.filter(isReady).map((n, i) => [n, i]).sort((a, b) => prioOf(a[0]) - prioOf(b[0]) || a[1] - b[1]).map(([n]) => n);
-      const want = ready.filter((n) => lanes.get(n)?.ok !== false && !isRemote(n)).slice(0, Math.max(0, K() - running.size));
-      offerFresh(want);
-      for (const n of want) wanted.add(n);
-      for (const n of ready) {
-        if (running.size >= K() || !grant(n, wanted)) break;
-        pending.splice(pending.indexOf(n), 1); start(n); started++;
-      }
-    } else if (!tripped && !holdUntil) {
-      for (let i = 0; i < pending.length && running.size < K();) {
-        const n = pending[i];
-        if (isReady(n) && grant(n, new Set())) { pending.splice(i, 1); start(n); started++; }
-        else i++;
-      }
-    }
-    if (reg) withdrawExcept(wanted);
-    if (tripped && !running.size) break; // breaker: let running lanes finish, keep the rest pending for a resume
-    if (budgetStop && !running.size) break; // execution budget (stop): the same, the rest end held
-    // Wake for a delayed issue, the end of a usage-limit hold, or (with a live K) a poll.
-    const waits = pending.map((n) => notBefore.get(n) ?? 0).filter((x) => x > t);
-    if (holdUntil) waits.push(holdUntil);
-    let wake = waits.length ? Math.max(0, Math.min(...waits) - t) : null;
-    if (getParallel && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
-    if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
-    if (tripped) wake = null;
-    if (running.size) {
-      if (wake === null) await Promise.race(running.values());
-      else { const ac = new AbortController(); await Promise.race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
-    } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
-    else if (pending.length && offered.size) await sleep(wake); // waiting for a host slot
-    else if (pending.length && waits.length) await sleep(Math.max(0, Math.min(...waits) - t));
-    else if (pending.length && budgetHeld) break; // maintenance the budget does not admit now: held for a later batch
-    else if (pending.length && driftHeld.size) break; // held by a drift flag (block_dispatch): pending for a later batch
-    else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle
-      for (const n of pending.splice(0)) skip(n, "dependency cycle");
-      save();
-    }
-  }
-  if (reg) withdrawExcept(new Set());
   const heldDetail = (n) => tripped?.detail ?? (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run");
   // #4315: a recovery queued but never launched (the batch stopped: breaker, budget, hold; or a resume that did not relaunch a
   // lost run) left the issue without needs-human, since a non-final attempt does not relabel. Relabel it once, with the full reason.
-  for (const [n, q] of recovering) {
-    if (running.has(n) || results.has(n) || relabelled.has(n) || typeof relabelNeedsHuman !== "function") continue;
-    const cause = heldDetail(n) === "not run" ? "batch stopped" : heldDetail(n);
-    const evidence = recoveryEvidence({ code: q.code, attempt: q.prev_attempt, outcome: q.outcome, resultCode: q.result_code, detail: q.detail, full: true,
-      queued: q.attempt, cause, recoveryMax });
-    try { await relabelNeedsHuman({ issue: n, evidence }); } catch { /* best effort */ }
-    relabelled.add(n);
+  // #4318: also on a throw out of the loop and on a signal (`onExit`); `cause` overrides the held reason. Runs once per process.
+  let exitRelabel = null;
+  const relabelQueued = (cause = null) => (exitRelabel ??= (async () => {
+    for (const [n, q] of recovering) {
+      if (running.has(n) || results.has(n) || relabelled.has(n) || typeof relabelNeedsHuman !== "function") continue;
+      const why = cause ?? (heldDetail(n) === "not run" ? "batch stopped" : heldDetail(n));
+      const evidence = recoveryEvidence({ code: q.code, attempt: q.prev_attempt, outcome: q.outcome, resultCode: q.result_code, detail: q.detail, full: true,
+        queued: q.attempt, cause: why, recoveryMax });
+      let res;
+      try { res = await relabelNeedsHuman({ issue: n, evidence }); } catch { res = "failed"; }
+      if (res !== false && res !== "failed") relabelled.add(n); // a failed label add is retried by a resume
+    }
+    save();
+  })());
+  if (typeof onExit === "function") { try { onExit(relabelQueued); } catch { /* best effort */ } }
+
+  const K = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
+  try {
+    while (pending.length || running.size) {
+      // Resolve skips first: a dependency that finished unsatisfied (or never can) skips its dependents.
+      for (let i = pending.length - 1; i >= 0; i--) {
+        const n = pending[i];
+        if (results.has(n)) { pending.splice(i, 1); continue; }
+        const bad = edges(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome));
+        if (bad !== undefined) { pending.splice(i, 1); skip(n, `dependency #${bad} ended ${results.get(bad).outcome}`); }
+      }
+      const t = now();
+      const holdUntil = heldUntil();
+      let started = 0;
+      driftHeld.clear();
+      const isReady = (n) => {
+        if (!((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome)))) return false;
+        if (!drift?.holds) return true;
+        let pkg = null;
+        try { pkg = drift.holds(n, { body: bodies.get(n) ?? "", lane: lanes.get(n)?.lane ?? null }); } catch { pkg = null; }
+        if (pkg) driftHeld.set(n, pkg);
+        return !pkg;
+      };
+      budgetHeld = false;
+      // #4183: a hook (owned-resource GC near the host ceiling) before lanes are admitted; its errors never stop the batch.
+      if (beforeAdmit && !tripped && !holdUntil && running.size < K() && pending.some(isReady)) { try { await beforeAdmit(); } catch { /* ignored */ } }
+      budgetStop = null;
+      const wanted = new Set(); // issues that stay offered in the host registry after this pass
+      if (!tripped && !holdUntil && budget) {
+        while (running.size < K()) {
+          const ready = pending.filter(isReady);
+          const n = pickNext(ready, { classes, share: budget.share, whenIdle: budget.whenIdle, started: dispatch.started, maint: dispatch.maint,
+            featuresPending: pending.some((p) => !clsOf(classes, p).maintenance) });
+          if (n === null) { budgetHeld = ready.length > 0; break; }
+          if (!grant(n, wanted)) break;
+          pending.splice(pending.indexOf(n), 1);
+          if (lanes.get(n)?.ok !== false) { dispatch.started++; if (clsOf(classes, n).maintenance) dispatch.maint++; }
+          start(n); started++;
+        }
+      } else if (!tripped && !holdUntil && reg) {
+        // Priority first, pending order within a priority; the free per-batch K is offered so the host queue keeps FIFO.
+        const ready = pending.filter(isReady).map((n, i) => [n, i]).sort((a, b) => prioOf(a[0]) - prioOf(b[0]) || a[1] - b[1]).map(([n]) => n);
+        const want = ready.filter((n) => lanes.get(n)?.ok !== false && !isRemote(n)).slice(0, Math.max(0, K() - running.size));
+        offerFresh(want);
+        for (const n of want) wanted.add(n);
+        for (const n of ready) {
+          if (running.size >= K() || !grant(n, wanted)) break;
+          pending.splice(pending.indexOf(n), 1); start(n); started++;
+        }
+      } else if (!tripped && !holdUntil) {
+        for (let i = 0; i < pending.length && running.size < K();) {
+          const n = pending[i];
+          if (isReady(n) && grant(n, new Set())) { pending.splice(i, 1); start(n); started++; }
+          else i++;
+        }
+      }
+      if (reg) withdrawExcept(wanted);
+      if (tripped && !running.size) break; // breaker: let running lanes finish, keep the rest pending for a resume
+      if (budgetStop && !running.size) break; // execution budget (stop): the same, the rest end held
+      // Wake for a delayed issue, the end of a usage-limit hold, or (with a live K) a poll.
+      const waits = pending.map((n) => notBefore.get(n) ?? 0).filter((x) => x > t);
+      if (holdUntil) waits.push(holdUntil);
+      let wake = waits.length ? Math.max(0, Math.min(...waits) - t) : null;
+      if (getParallel && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
+      if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
+      if (tripped) wake = null;
+      if (running.size) {
+        if (wake === null) await Promise.race(running.values());
+        else { const ac = new AbortController(); await Promise.race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
+      } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
+      else if (pending.length && offered.size) await sleep(wake); // waiting for a host slot
+      else if (pending.length && waits.length) await sleep(Math.max(0, Math.min(...waits) - t));
+      else if (pending.length && budgetHeld) break; // maintenance the budget does not admit now: held for a later batch
+      else if (pending.length && driftHeld.size) break; // held by a drift flag (block_dispatch): pending for a later batch
+      else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle
+        for (const n of pending.splice(0)) skip(n, "dependency cycle");
+        save();
+      }
+    }
+  } catch (e) {
+    // #4318: an exception out of the loop still relabels the queued recoveries before it propagates
+    try { await relabelQueued(`batch failed: ${firstLine(e?.message ?? e)}`); } catch { /* best effort */ }
+    throw e;
   }
+  if (reg) withdrawExcept(new Set());
+  await relabelQueued();
   save();
   return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: heldDetail(n),
     ...(recovering.has(n) ? { recovery: { code: recovering.get(n).code, attempts: recoveries.get(n) ?? recovering.get(n).attempt, outcome: recovering.get(n).outcome ?? "needs-human",

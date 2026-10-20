@@ -63,7 +63,7 @@ const COVERAGE = {
   "build.acceptance_malformed": "reserved", "build.size_over_gate": "reserved",
   "build.cohesive": "reserved", "remediate.no_marker": "remediate.detectOutcome",
   "remediate.deferred_live_run": "remediate.detectOutcome", "remediate.re_escalated": "remediate.detectOutcome",
-  "remediate.unfixable": "remediate.detectOutcome", "remediate.inpr_requested": "remediate.detectOutcome", "infra.cli_spawn_transient": "engine", "cli.timeout": "engine", "cli.spawn_failed": "lean", "env.setup_failed": "lean", "sandbox.start_failed": "execution", "sandbox.capacity": "execution", "ci.red": "reserved", "ci.timeout": "reserved",
+  "remediate.unfixable": "remediate.detectOutcome", "remediate.inpr_requested": "remediate.detectOutcome", "infra.cli_spawn_transient": "engine", "cli.timeout": "engine", "cli.spawn_failed": "lean", "env.setup_failed": "lean", "env.tool_missing": "lean", "env.repro_unrunnable": "lean", "sandbox.start_failed": "execution", "sandbox.capacity": "execution", "ci.red": "reserved", "ci.timeout": "reserved",
   "base.conflict": "reserved", "rate_limited": "engine", "host.busy": "lean", "gh.unavailable": "engine", "merge.transient": "lean", "push.transient": "lean", "cli.idle": "lean", "run.interrupted": "lean", "path.switch_conflict": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
   "dependency.open": "engine", "dependency.unreadable": "engine", "dependency.blocked": "lean",
   "lane.mismatch": "lean", "lane.default_branch": "lean", "lane.branch_missing": "lean", "lane.unresolved": "lean",
@@ -291,7 +291,7 @@ describe("runIssue records codes on the run log and FORGE:STATE", () => {
 describe("classifyNeedsHuman (forge#4267)", async () => {
   const { classifyNeedsHuman, recoveryCodeOf } = await import("../engine/outcome-codes.mjs");
   it("recoverable: ci.red, base.conflict, builder.block_untyped, edited contract.invalid, conflicting ci-pending", () => {
-    for (const code of ["ci.red", "base.conflict", "builder.block_untyped"]) assert.equal(classifyNeedsHuman({ outcome: "needs-human", code }), "recoverable", code);
+    for (const code of ["ci.red", "base.conflict", "builder.block_untyped", "env.tool_missing", "env.repro_unrunnable"]) assert.equal(classifyNeedsHuman({ outcome: "needs-human", code }), "recoverable", code);
     assert.equal(classifyNeedsHuman({ terminalReason: "needs-human", code: "contract.invalid", issueEdited: true }), "recoverable");
     assert.equal(classifyNeedsHuman({ outcome: "ci-pending", conflicting: true }), "recoverable");
     assert.equal(recoveryCodeOf({ outcome: "ci-pending", conflicting: true }), "base.conflict");

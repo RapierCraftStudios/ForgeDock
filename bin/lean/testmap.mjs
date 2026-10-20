@@ -6,7 +6,8 @@
  * command) picks the checks for the lane's changed files; `.forge/repo-facts.json` (scripts/repo-facts.sh) is cited to
  * the builder by path. The test map's commands are run, so it is read from the base ref, then the main checkout, never
  * the builder-writable lane worktree (#4297); repo facts are looked up in the worktree, then the main checkout. A missing
- * or invalid file is absent: the lane keeps forge.yaml `learned.test_commands` and today's prompts.
+ * or invalid file is absent: the lane keeps forge.yaml `learned.test_commands` and today's prompts. With a map, a learned
+ * command the map covers runs only when its globs match a changed file (`scopeChecks`, #4331).
  *
  *   node bin/lean/testmap.mjs --map FILE --select FILE...   print the selected commands, one per line
  */
@@ -52,21 +53,32 @@ export function selectCommands(map, files) {
   for (const e of map?.entries ?? []) {
     const res = e.globs.map((g) => globToRegex(g.replace(/^\.\//, "")));
     if (!changed.some((f) => res.some((re) => re.test(f)))) continue;
-    const cwd = typeof e.cwd === "string" && e.cwd && e.cwd !== "." ? e.cwd : "";
-    const cmd = cwd ? `cd ${shellQuote(cwd)} && ${e.command.trim()}` : e.command.trim();
+    const cmd = entryCommand(e);
     if (!out.includes(cmd)) out.push(cmd);
   }
   return out;
 }
 
 /**
+ * #4318: the dedupe key of a check command: whitespace collapsed, a leading `cd . && ` dropped, `<pm> run test` read as
+ * `<pm> test` (npm/pnpm/yarn/bun) and an `npx`/`bunx [--yes|-y]` prefix dropped, so one suite under two spellings runs once.
+ */
+export function checkKey(c) {
+  let k = String(c ?? "").trim().replace(/\s+/g, " ");
+  k = k.replace(/^cd \.\/? && /, "");
+  const cd = /^((?:cd|pushd) \S+ && )?(.*)$/.exec(k), pre = cd[1] ?? "";
+  const cmd = cd[2].replace(/^(?:npx|bunx)(?: (?:--yes|-y))? /, "").replace(/^(npm|pnpm|yarn|bun) run test(?= |$)/, "$1 test");
+  return pre + cmd;
+}
+
+/**
  * #4315: the pre-PR checks are the learned commands (in order) plus each map-selected command they lack; compared
- * whitespace-collapsed, so the map can only add checks, never remove one. `source`: "learned" when the map added
- * nothing, "test-map" when there were no learned commands, else "test-map+learned".
+ * by `checkKey` (#4318), so the map can only add checks, never remove one; the first spelling seen is kept. `source`:
+ * "learned" when the map added nothing, "test-map" when there were no learned commands, else "test-map+learned".
  * @returns {{commands:string[], source:string, added:number}}
  */
 export function mergeChecks(selected, learned) {
-  const norm = (c) => String(c ?? "").trim().replace(/\s+/g, " ");
+  const norm = checkKey;
   const commands = [], seen = new Set();
   const add = (c) => { const t = String(c ?? "").trim(), k = norm(t); if (!k || seen.has(k)) return false; seen.add(k); commands.push(t); return true; };
   for (const c of Array.isArray(learned) ? learned : []) add(c);
@@ -74,6 +86,31 @@ export function mergeChecks(selected, learned) {
   let added = 0;
   for (const c of Array.isArray(selected) ? selected : []) if (add(c)) added++;
   return { commands, added, source: !added ? "learned" : base ? "test-map+learned" : "test-map" };
+}
+
+/**
+ * #4331: change-scoped pre-PR checks. A learned command the map covers (an entry's command, with its `cd <cwd> && `
+ * prefix, has the same `checkKey`) runs only when one of those entries has a glob matching a changed file; a learned
+ * command with no map entry always runs (the safe default); map-selected commands the learned list lacks are added
+ * as in `mergeChecks`. No map: the learned list unchanged. `source` is "learned" when the map added and dropped
+ * nothing, "test-map" when there were no learned commands, else "test-map+learned".
+ * @returns {{commands:string[], source:string, added:number, dropped:string[]}}
+ */
+export function scopeChecks(map, files, learned) {
+  const list = Array.isArray(learned) ? learned : [];
+  if (!map) { const m = mergeChecks([], list); return { ...m, dropped: [] }; }
+  const selected = selectCommands(map, files), hit = new Set(selected.map(checkKey));
+  const mapped = new Set((map.entries ?? []).map((e) => checkKey(entryCommand(e))));
+  const dropped = [], kept = [];
+  for (const c of list) { const k = checkKey(c); if (!k) continue; (mapped.has(k) && !hit.has(k) ? dropped : kept).push(String(c).trim()); }
+  const m = mergeChecks(selected, kept);
+  return { commands: m.commands, added: m.added, dropped, source: !m.added && !dropped.length ? "learned" : kept.length || dropped.length ? "test-map+learned" : "test-map" };
+}
+
+/** An entry's command as `selectCommands` emits it (`cd <cwd> && cmd` for a non-root cwd). */
+function entryCommand(e) {
+  const cwd = typeof e.cwd === "string" && e.cwd && e.cwd !== "." ? e.cwd : "";
+  return cwd ? `cd ${shellQuote(cwd)} && ${e.command.trim()}` : e.command.trim();
 }
 
 /** The path of the first repo-facts file under `dirs` that exists, or null; never throws. */

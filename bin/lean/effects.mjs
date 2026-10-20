@@ -15,6 +15,8 @@ import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 import { makeDepCache } from "./depcache.mjs";
 import { makeHeavyIo } from "./heavy.mjs";
 import { gatherContextFacts } from "./context.mjs";
+import { enumeratingTests, missingEntries } from "./enumerating.mjs";
+import { sequenceCollisions, snapshotLane, verifyRenumber } from "./sequence.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -197,12 +199,12 @@ export async function requiredChecksFor({ gh, repo, lane }) {
 
 /** Combined stdout+stderr kept per declared check command (tail). */
 const CHECK_OUTPUT_CAP = 64000;
-/** #4240: run a forge.yaml declared check command locally (no gh, no Actions); {rc, output}, rc 124 on timeout. */
-export function runCheckCommand({ command, cwd, timeoutMs = 300000 }) {
+/** #4240: run a forge.yaml declared check command locally (no gh, no Actions); {rc, output}, rc 124 on timeout. `env` (#4323) is merged over process.env. */
+export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null }) {
   return new Promise((done) => {
     let out = "", timedOut = false, child;
     const add = (b) => { out += String(b); if (out.length > 2 * CHECK_OUTPUT_CAP) out = out.slice(-CHECK_OUTPUT_CAP); };
-    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] }); }
+    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env: { ...process.env, ...env } } : {}) }); }
     catch (e) { done({ rc: 127, output: String(e?.message ?? e) }); return; }
     const kill = () => { try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* gone */ } } };
     const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);
@@ -236,6 +238,8 @@ export function makeLeanIo({ repo }) {
     },
     /** #4240: one declared check command (`bash -c`) in `cwd`; never throws. A timeout kills the process group and gives rc 124. */
     runCommand: runCheckCommand,
+    /** #4328: a read-only freeze-time probe of a validate command's tool or module (separate from runCommand). */
+    probeCommand: runCheckCommand,
     /** #4167 verify-by-CI: `gh workflow run` on the lane branch; inputs become -f key=value. */
     async dispatchWorkflow({ workflow, ref, inputs = {} }) {
       await run("gh")(["workflow", "run", String(workflow), "-R", repo, "--ref", String(ref), ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
@@ -306,11 +310,21 @@ export function makeLeanIo({ repo }) {
       const args = [script("hotspots.sh"), ...(base ? ["--base", base] : []), "--", ...paths];
       try { return JSON.parse((await pexec("bash", args, { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
-    /** #4271: scripts/acceptance-red-green.sh for the frozen repro_test in cwd; {base, head} words, or null on any failure. */
-    async redGreen({ cwd, base, command, timeoutSec = 300 }) {
+    /** #4322: tests enumerating the members of the given paths, and new members those tests miss (bin/lean/enumerating.mjs); [] on failure. */
+    enumeratingTests: ({ cwd, paths = [] }) => enumeratingTests({ git: (a) => run("git")(a, { cwd }), cwd, paths }),
+    enumeratingMissing: ({ cwd, base }) => missingEntries({ git: (a) => run("git")(a, { cwd }), cwd, base }),
+    /** #4322: sequence-numbered files the lane shares with the base (bin/lean/sequence.mjs); snapshot before, verify after a renumber. */
+    sequenceCheck: ({ cwd, base }) => sequenceCollisions({ git: (a) => run("git")(a, { cwd }), base }),
+    sequenceSnapshot: ({ cwd, base }) => snapshotLane({ git: (a) => run("git")(a, { cwd }), base }),
+    sequenceVerify: ({ cwd, base, before }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before }),
+    /**
+     * #4271: scripts/acceptance-red-green.sh for the frozen repro_test in cwd; {base, head} words, or null on any failure.
+     * `env` (#4325): the lane env (run TMPDIR, toolchain), merged over process.env, so the command sees what the builder saw.
+     */
+    async redGreen({ cwd, base, command, timeoutSec = 300, env = null }) {
       const args = [script("acceptance-red-green.sh"), "--repo-path", cwd, "--base-ref", base, "--test-cmd", command, "--timeout", String(timeoutSec)];
       try {
-        const m = /BASE=(\w+) HEAD=(\w+)/.exec(String((await pexec("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024 })).stdout ?? ""));
+        const m = /BASE=(\w+) HEAD=(\w+)/.exec(String((await pexec("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024, ...(env ? { env: { ...process.env, ...env } } : {}) })).stdout ?? ""));
         return m ? { base: m[1], head: m[2] } : null;
       } catch { return null; }
     },

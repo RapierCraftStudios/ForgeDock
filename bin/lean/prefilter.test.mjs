@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { prefilterIssue, flakyReason, makePrefilter, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, DEFAULT_PREFILTER_MODEL } from "./prefilter.mjs";
+import { prefilterIssue, flakyReason, makePrefilter, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, DEFAULT_PREFILTER_MODEL } from "./prefilter.mjs";
 import { parsePrefilterVerdict, prefilterPrompt } from "./prompts.mjs";
 import { orchestrate, formatTable } from "./orchestrate.mjs";
 import { triageFromCli } from "../engine-cli.mjs";
@@ -313,5 +313,28 @@ describe("orchestrate with the pre-filter (#4123)", () => {
     assert.ok(logs.some((s) => /^#13 → lane-refused \(lane\.branch_missing: lane branch milestone\/later/.test(s)), logs.join("\n"));
     assert.deepEqual(res2.lanes, []);
     assert.ok(logs.some((s) => /^#12 → lane-refused \(lane\.default_branch/.test(s)));
+  });
+});
+
+describe("#4318: the engine's own identity under an installation token or a differently named App", () => {
+  it("ownLogins falls back to the App slug from `gh api app` when `gh api user` fails", async () => {
+    const gh = async (a) => { if (a[1] === "user") throw new Error("Resource not accessible by integration"); if (a[1] === "app") return "Other-Forge\n"; return ""; };
+    assert.deepEqual((await resolveOwnLogins(gh)), { logins: ["rapiercraft-forgedock", "other-forge"], resolved: true });
+    assert.deepEqual(await ownLogins(gh), ["rapiercraft-forgedock", "other-forge"]);
+    const both = async () => { throw new Error("401"); };
+    assert.deepEqual(await resolveOwnLogins(both), { logins: ["rapiercraft-forgedock"], resolved: false });
+  });
+  it("an unresolved lookup is retried once in the batch, then the App-slug-only set is kept", async () => {
+    const link = "Run: https://github.com/o/r/actions/runs/500";
+    const real = { author: { login: "Other-Forge" }, authorAssociation: "CONTRIBUTOR", body: "<!-- FORGE:PREFILTER -->\n## Pre-filter" };
+    const w = world({ issues: { 34: { title: "shell-compat failed on staging", body: `Workflow failed.\n${link}`, comments: [real] } },
+      runs: { 500: { id: 500, workflow_id: 7, name: "shell-compat", head_branch: "staging", head_sha: "1111111111111111", created_at: "2026-10-10T00:00:00Z", html_url: "https://github.com/o/r/actions/runs/500" } },
+      workflowRuns: { "7:staging": [{ id: 600, conclusion: "success", created_at: "2026-10-12T00:00:00Z", html_url: "https://github.com/o/r/actions/runs/600", head_sha: "8d9f6ba0aaaaaaaa" }] },
+      shaRuns: { "8d9f6ba0aaaaaaaa": [{ id: 600, conclusion: "success" }] } });
+    let lookups = 0; const g0 = w.io.gh;
+    w.io.gh = async (a) => (a[0] === "api" && (a[1] === "user" || a[1] === "app") ? (lookups++, (() => { throw new Error("401"); })()) : g0(a));
+    const run = makePrefilter({ repo: "o/r", cwd: "/repo", io: w.io });
+    await run(34, "staging"); await run(34, "staging"); await run(34, "staging");
+    assert.equal(lookups, 4, "user + app, twice: one retry, then cached");
   });
 });

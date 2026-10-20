@@ -166,6 +166,10 @@ export function readReproTest(cwd = process.cwd()) {
     return ["off", "prefer"].includes(v) ? v : undefined;
   } catch { return undefined; }
 }
+/** forge.yaml `decomposition.close_parent` (#3736, #4337): true closes a decomposed parent at decomposition; anything else keeps it open. */
+export function readCloseParent(cwd = process.cwd()) {
+  try { return String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.decomposition?.close_parent ?? "").trim() === "true"; } catch { return false; }
+}
 function readLeanSetting(key, cwd = process.cwd()) {
   try {
     const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.[`lean_${key}`] ?? "").trim();
@@ -279,6 +283,23 @@ export function readPrecheckCommands(cwd = process.cwd()) {
     if (v) out.push(v);
   }
   return out.length ? out : undefined;
+}
+/**
+ * forge.yaml `lean.precheck.max_minutes` (#4331): the pre-PR check round budget in minutes (1..120). The one-level
+ * parser flattens a nested `precheck:` block under `lean:` to `lean.max_minutes`; flat `lean.precheck_max_minutes` also
+ * works and wins. undefined when absent, invalid or unreadable (runCore then uses verify.precheck_total_seconds, default 600 s).
+ */
+export function readPrecheckBudget(cwd = process.cwd()) {
+  try {
+    const l = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.lean ?? {};
+    const raw = String(l.precheck_max_minutes ?? l.max_minutes ?? "").trim(), n = Number(raw);
+    return raw !== "" && Number.isFinite(n) && n >= 1 && n <= 120 ? n : undefined;
+  } catch { return undefined; }
+}
+/** runCore `precheck` option: {commands, maxMinutes} from learned.test_commands and lean.precheck.max_minutes; {} when neither is set. */
+function readPrecheckOptions(cwd = process.cwd()) {
+  const commands = readPrecheckCommands(cwd), maxMinutes = readPrecheckBudget(cwd);
+  return commands || maxMinutes ? { precheck: { ...(commands ? { commands } : {}), ...(maxMinutes ? { maxMinutes } : {}) } } : {};
 }
 /**
  * forge.yaml `env` for core lanes (#4163): `env.toolchain` ("<pm>@<x.y.z>" or "off") and `env.setup` (a command run once
@@ -736,7 +757,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1072,6 +1093,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   sink.line(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
   const dir = deps.dir ?? runDir();
   const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists } = await import("./lean/orchestrate.mjs");
+  const { formatPrecheckSummary } = await import("./lean/precheck.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   const { makePrefilter, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
   const prefilter = argv.includes("--no-prefilter") ? null
@@ -1092,7 +1114,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4256: the placement orchestrate decided for a lane (ctx.placement) reaches it as --placement/--placement-reason.
@@ -1228,40 +1250,50 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     } catch { near = false; }
     if (near) await runGcPhase("admission");
   };
-  const rows = await orchestrate({
-    beforeAdmit,
-    issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
-    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
-    ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
-    ...(remote ? { remote } : {}),
-    // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
-    ...(recoveryOn ? { recovery: orch.recovery } : {}),
-    decide: deps.decide ?? (async (d) => {
-      if (d?.issue == null) { sink.line(`decision: ${d?.what} (why: ${d?.why}; alternative: ${d?.alternative})`); return; }
-      const body = `<!-- FORGE:DECISION -->\n## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
-      try { await leanIo.gh(["issue", "comment", String(d.issue), "-R", repo, "--body", body]); } catch { /* best effort: the batch log keeps the row */ }
-    }),
-    // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
-    relabelNeedsHuman: deps.relabelNeedsHuman ?? (async ({ issue, evidence }) => {
-      try {
-        // #4315: the evidence carries the full lane reason; capped so it never exceeds GitHub's comment limit
-        const { capComment } = await import("./lean/render.mjs");
-        await leanIo.gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\n${evidence}`)]);
-        await leanIo.gh(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
-      } catch { /* best effort: the batch row keeps the evidence */ }
-    }),
-    conflicting: deps.conflicting ?? (async (_n, pr) => {
-      try { return JSON.parse(await leanIo.gh(["pr", "view", String(pr), "-R", repo, "--json", "mergeable"]))?.mergeable === "CONFLICTING"; } catch { return false; }
-    }),
-    onCrossLane: (e) => {
-      crossLane.push(e);
-      sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
-    },
-    readBody: maint || registry || hybrid
-      ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); return v.body; }
-      : async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
-    onUpdate: (r) => sink.row(r),
-  });
+  // #4318: SIGINT/SIGTERM of a foreground dispatcher run the batch-exit relabel, then exit 128+signo (the lane pattern above).
+  let exitRelabel = null, interrupted = false;
+  const on = deps.processOn ?? ((s, f) => process.on(s, f)), off = deps.processOff ?? ((s, f) => process.removeListener(s, f));
+  const exitProc = deps.exit ?? ((c) => process.exit(c));
+  const SIGNO = { SIGINT: 2, SIGTERM: 15 };
+  const handlers = daemon ? {} : Object.fromEntries(Object.keys(SIGNO).map((sig) => [sig, async () => {
+    if (interrupted) return;
+    interrupted = true;
+    try { if (exitRelabel) await exitRelabel(`interrupted by ${sig}`); } catch { /* exit anyway */ }
+    exitProc(128 + SIGNO[sig]);
+  }]));
+  for (const [sig, f] of Object.entries(handlers)) on(sig, f);
+  let rows;
+  try {
+    rows = await orchestrate({
+      beforeAdmit,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
+      breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
+      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
+      ...(remote ? { remote } : {}),
+      // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
+      ...(recoveryOn ? { recovery: orch.recovery } : {}),
+      decide: deps.decide ?? (async (d) => {
+        if (d?.issue == null) { sink.line(`decision: ${d?.what} (why: ${d?.why}; alternative: ${d?.alternative})`); return; }
+        const body = `<!-- FORGE:DECISION -->\n## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
+        try { await leanIo.gh(["issue", "comment", String(d.issue), "-R", repo, "--body", body]); } catch { /* best effort: the batch log keeps the row */ }
+      }),
+      // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
+      relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
+      // #4318: a dispatcher signal relabels the queued recoveries before it exits (the daemon resumes its batches instead)
+      ...(daemon ? {} : { onExit: (fn) => { exitRelabel = fn; } }),
+      conflicting: deps.conflicting ?? (async (_n, pr) => {
+        try { return JSON.parse(await leanIo.gh(["pr", "view", String(pr), "-R", repo, "--json", "mergeable"]))?.mergeable === "CONFLICTING"; } catch { return false; }
+      }),
+      onCrossLane: (e) => {
+        crossLane.push(e);
+        sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
+      },
+      readBody: maint || registry || hybrid
+        ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); return v.body; }
+        : async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
+      onUpdate: (r) => sink.row(r),
+    });
+  } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
   const report = ["\n" + formatTable(rows), ...formatOutcomeLists(rows)];
   const pfLine = formatPrefilterSummary(rows);
   if (pfLine) report.push(pfLine);
@@ -1269,6 +1301,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   try { heavyStats = deps.heavyStats !== undefined ? deps.heavyStats : (await import("./lean/heavy.mjs")).openHeavy(schedMod.schedDir()).stats(); } catch { heavyStats = null; }
   const waitLine = formatWaitSummary(rows, heavyStats);
   if (waitLine) report.push(waitLine);
+  const precheckLine = formatPrecheckSummary(rows); // #4331
+  if (precheckLine) report.push(precheckLine);
   let day = null;
   try { day = execBudget ? execBudget.dayTotals() : null; } catch { day = null; }
   const sbxLine = formatSandboxSummary(rows, { budget: execConf?.budget ?? null, day });
@@ -1280,6 +1314,30 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
   try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
+}
+
+/**
+ * #4318: the batch runner's needs-human relabel. Re-reads the issue first: closed, or a live FORGE:STATE lease (the runner
+ * never holds one, so it is another actor's) → "skipped". Label first: a failed label add → "failed" with no comment (a
+ * resume retries); then the capped FORGE:NEEDS_HUMAN comment, whose failure keeps the label → true.
+ */
+export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
+  return async ({ issue, evidence }) => {
+    const { stateOf } = await import("./lean/context.mjs");
+    try {
+      const v = JSON.parse(await gh(["issue", "view", String(issue), "-R", repo, "--json", "state,body"]));
+      if (String(v?.state ?? "").toUpperCase() === "CLOSED") return "skipped";
+      const lease = stateOf(v?.body)?.lease;
+      if (lease && Number(lease.until) > now()) return "skipped";
+    } catch { /* unreadable: relabel as before */ }
+    try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]); } catch { return "failed"; }
+    try {
+      // #4315: the evidence carries the full lane reason; capped so it never exceeds GitHub's comment limit
+      const { capComment } = await import("./lean/render.mjs");
+      await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\n${evidence}`)]);
+    } catch { /* best effort: the label is on, the batch row keeps the evidence */ }
+    return true;
+  };
 }
 
 /** The batch report's "reclaimed" line (#4183). */

@@ -349,9 +349,10 @@ export async function openDependency(issue, io) {
       return { unreadable: true, detail: `dependency #${dep} of issue ${issue} could not be read: ${e?.message || e}` };
     }
     const st = typeof d?.state === "string" ? d.state.toLowerCase() : "";
-    if (st === "open") {
-      // #4153: an open decomposed parent is a tracker; the edge resolves to its sub-issues (satisfied when all close).
-      const subs = isDecomposedRecord(d) ? await decomposedSubissues(dep, io) : null;
+    // #4153 / #4337: a decomposed parent, open or closed, is a tracker; the edge resolves to its sub-issues (satisfied
+    // when all close). No usable trail (none, untrusted, revoked, unreadable) keeps the parent itself open (fail closed).
+    if (isDecomposedRecord(d) && (st === "open" || st === "closed")) {
+      const subs = await decomposedSubissues(dep, io);
       if (!subs) { open.push(dep); continue; }
       for (const s of subs) {
         let sr;
@@ -363,6 +364,7 @@ export async function openDependency(issue, io) {
         else if (ss !== "closed") return { unreadable: true, detail: `sub-issue #${s} of decomposed dependency #${dep} has no readable state` };
       }
     }
+    else if (st === "open") open.push(dep);
     else if (st !== "closed") return { unreadable: true, detail: `dependency #${dep} of issue ${issue} has no readable state` };
   }
   return open.length ? { open: [...new Set(open)].filter((n) => n !== Number(issue)) } : null;
@@ -386,6 +388,21 @@ export async function decomposedSubissues(issue, io) {
   if (!rec) return null;
   const subs = [...new Set([...rec.matchAll(/^[ \t]*[-*][ \t]+#(\d+)\b/gm)].map((m) => Number(m[1])))].filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue));
   return subs.length ? subs : null;
+}
+
+/**
+ * #4337: reopen a CLOSED `workflow:decomposed` issue whose decomposition trusted GitHub state shows revoked
+ * (`decompositionRevoked`). `true` only when it was reopened; an open issue, no/untrusted revocation, or any read or
+ * write error is `false` (never throws), so the closed tracker keeps gating its dependents.
+ */
+export async function reopenRevokedDecomposition(issue, io) {
+  try {
+    const rec = await readIssueRecord(issue, io);
+    if (!rec || rec.empty || String(rec.state).toLowerCase() !== "closed" || !isDecomposedRecord(rec)) return false;
+    if (!(await decompositionRevoked(issue, io))) return false;
+    await io.gh(["api", "-X", "PATCH", `repos/{owner}/{repo}/issues/${issue}`, "-f", "state=open"]);
+    return true;
+  } catch { return false; }
 }
 
 /** True when a REST/`gh --json` issue record carries the `workflow:decomposed` label. */

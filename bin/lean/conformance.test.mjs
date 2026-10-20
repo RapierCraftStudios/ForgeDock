@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, explainFailures } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -72,6 +72,31 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: { ...res, validation: [{ id: "V1", exit: 1 }] }, changedFiles: files })), ["conformance.unimplemented"]);
     assert.deepEqual(codes(precheck({ contract: C, result: { ...res, validation: [] }, changedFiles: files })), ["conformance.unimplemented"]);
   });
+  it("#4323 a failed validate whose rerun could not find a host tool or module is env.tool_missing naming it, not conformance", () => {
+    const failed = { ...res, validation: [{ id: "V1", exit: 1 }] };
+    const pc = precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 1, output: "Traceback...\nModuleNotFoundError: No module named 'yaml'" } } });
+    assert.deepEqual(codes(pc), ["env.tool_missing"]);
+    assert.equal(pc.failures[0].kind, "validate_env"); assert.equal(pc.failures[0].tool, "yaml");
+    assert.match(pc.failures[0].detail, /could not run: the host is missing Python module 'yaml'/);
+    assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 127, output: "bash: line 1: pytest: command not found" } } })), ["env.tool_missing"]);
+    assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, ciVerified: true, validateRuns: { V1: { rc: 127, output: "bash: pytest: command not found" } } })), [], "CI-verified head: like a validate left to CI");
+    assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 0, output: "" } } })), [], "a passing rerun counts as passed");
+    assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 1, output: "AssertionError: 1 !== 2" } } })), ["conformance.unimplemented"]);
+    const local = precheck({ contract: C, result: failed, changedFiles: files, repoHas: repoTracks(["src/leak/__init__.py"]), validateRuns: { V1: { rc: 1, output: "ModuleNotFoundError: No module named 'leak.core'" } } });
+    assert.deepEqual(codes(local), ["conformance.unimplemented"], "a repo module the change did not create is a code defect");
+  });
+  it("#4323 missingTool: commands, python and node modules; paths, relative and repo-tracked names are not the environment", () => {
+    assert.deepEqual(missingTool({ rc: 127, output: "sh: 1: jq: not found" }), { tool: "jq", kind: "command" });
+    assert.deepEqual(missingTool({ rc: 127, output: "" }, { command: "uv run pytest -q" }), { tool: "uv", kind: "command" });
+    assert.deepEqual(missingTool({ rc: 1, output: "ImportError: No module named yaml.constructor" }), { tool: "yaml", kind: "python-module" });
+    assert.deepEqual(missingTool({ rc: 1, output: "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'zod' imported from /x/a.mjs" }), { tool: "zod", kind: "node-module" });
+    assert.deepEqual(missingTool({ rc: 1, output: "Error: Cannot find module '@scope/pkg/sub'" }), { tool: "@scope/pkg", kind: "node-module" });
+    assert.equal(missingTool({ rc: 1, output: "Error: Cannot find module './lib/new.js'" }), null);
+    assert.equal(missingTool({ rc: 1, output: "Error: Cannot find module '/repo/src/x.mjs'" }), null);
+    assert.equal(missingTool({ rc: 127, output: "bash: ./scripts/check.sh: No such file or directory" }, { command: "./scripts/check.sh" }), null);
+    assert.equal(missingTool({ rc: 1, output: "ModuleNotFoundError: No module named 'app'" }, { repoHas: repoTracks(["app.py"]) }), null);
+    assert.equal(missingTool({ rc: 1, output: "1 test failed: expected not found" }), null, "rc != 127 needs command not found");
+  });
   it("a deliver requirement reported deferred without an amendment -> untracked_deferral; partial -> unimplemented", () => {
     const r = { ...res, requirements: [{ id: "R1", status: "deferred" }, { id: "R2", status: "partial" }] };
     assert.deepEqual(codes(precheck({ contract: C, result: r, changedFiles: files })), ["conformance.untracked_deferral", "conformance.unimplemented"]);
@@ -116,6 +141,30 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.equal(normalizeEvidencePath("route.ts", { changedFiles: ["app/a/route.ts", "app/b/route.ts"] }), "route.ts", "ambiguous stays as is");
     assert.equal(normalizeEvidencePath("b/route.ts", { changedFiles: ["app/a/route.ts", "app/b/route.ts"] }), "app/b/route.ts");
     assert.equal(decide(row("R1", { evidence: "scrape.js:7" }), ctx).review.requirements[0].evidence, "src/scrape.js:7");
+  });
+  it("#4327 evidence paths with route-group, dynamic and catch-all segments are kept verbatim", () => {
+    const repo = ["apps/admin/app/(console)/layout.tsx", "apps/web/app/blog/[slug]/page.tsx", "apps/web/app/docs/[...slug]/page.tsx"];
+    const c = { ...ctx, repoFiles: repo, pathExists: (p) => repo.includes(p) };
+    for (const [ev, want] of [
+      ["`(console)/layout.tsx:12` + nav (sidebar)", "apps/admin/app/(console)/layout.tsx:12"],
+      ["`apps/admin/app/(console)/layout.tsx`:12", "apps/admin/app/(console)/layout.tsx:12"],
+      ["see apps/web/app/blog/[slug]/page.tsx:4", "apps/web/app/blog/[slug]/page.tsx:4"],
+      ["(apps/web/app/docs/[...slug]/page.tsx:9)", "apps/web/app/docs/[...slug]/page.tsx:9"],
+      ["[page](apps/web/app/docs/[...slug]/page.tsx:9)", "apps/web/app/docs/[...slug]/page.tsx:9"],
+    ]) {
+      const d = decide(row("R1", { evidence: ev }), c);
+      assert.equal(d.state, "conforms", ev); assert.equal(d.review.requirements[0].evidence, want, ev);
+    }
+    assert.deepEqual(evidencePathLine("(src/scrape.js:7), fixed"), { path: "src/scrape.js", line: "7" });
+  });
+  it("#4327 a missing route-group path is still missing; only path problems qualify for the extra re-ask", () => {
+    const c = { ...ctx, repoFiles: ["apps/admin/app/(console)/layout.tsx"], pathExists: (p) => p === "apps/admin/app/(console)/layout.tsx" };
+    const d = decide(row("R1", { evidence: "`apps/admin/app/(admin)/layout.tsx:12`" }), c);
+    assert.equal(d.state, "review.incomplete"); assert.deepEqual(d.missing, ["R1"]);
+    assert.match(d.failures[0].detail, /evidence path apps\/admin\/app\/\(admin\)\/layout\.tsx does not exist/);
+    assert.equal(evidencePathOnly(d.failures.map((f) => f.detail)), true);
+    assert.equal(evidencePathOnly(decide({ verdict: "PASS" }, ctx).failures.map((f) => f.detail)), false);
+    assert.equal(evidencePathOnly([]), false);
   });
   it("#4160 a targeted re-ask merges by id: the repair rows complete the first reply", () => {
     const first = { ...good, requirements: [good.requirements[1]], preserve: [] };
@@ -175,6 +224,21 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.equal(movingBaseDiff("git -C sub diff origin/milestone/foo | wc -l"), "origin/milestone/foo");
     assert.equal(movingBaseDiff("git diff HEAD~1"), null);
     assert.equal(movingBaseDiff(""), null);
+  });
+  it("#4325 a validate or repro_test command reading a $TMPDIR file it does not create is rejected at freeze", () => {
+    const bad = validateContract({ ...C, validate: [{ id: "V4", command: "uv run --with-requirements $TMPDIR/api-req.txt pytest tests/x.py" }] }, ISSUE);
+    assert.equal(bad.ok, false);
+    assert.ok(bad.problems.some((x) => x.startsWith("V4: reads $TMPDIR/api-req.txt")), bad.problems.join("; "));
+    const rt = validateContract({ ...C, repro_test: { path: "t/x.py", command: "pytest -r ${TMPDIR}/req.txt t/x.py" } }, ISSUE, { repro: true });
+    assert.ok(rt.problems.some((x) => x.startsWith("repro_test: reads $TMPDIR/req.txt")), rt.problems.join("; "));
+    for (const ok of ["uv export > $TMPDIR/r.txt && uv run --with-requirements $TMPDIR/r.txt pytest", "pytest --basetemp=$TMPDIR/pt --junitxml $TMPDIR/j.xml", "mkdir -p \"$TMPDIR/d\" && cp a $TMPDIR/d/a && cat $TMPDIR/d/a", "X=$TMPDIR/cache npm test", "echo hi | tee $TMPDIR/l; grep hi $TMPDIR/l", "node --test test/leak.test.js"]) {
+      assert.equal(validateContract({ ...C, validate: [{ id: "V4", command: ok }] }, ISSUE).ok, true, ok);
+    }
+  });
+  it("#4325 tmpdirInputs lists read-before-create $TMPDIR paths once, in first-use order", () => {
+    assert.deepEqual(tmpdirInputs("cat ${TMPDIR:-/tmp}/a.json | jq . && cp $TMPDIR/b.txt out && cat $TMPDIR/a.json"), ["$TMPDIR/a.json", "$TMPDIR/b.txt"]);
+    assert.deepEqual(tmpdirInputs("cp src.txt $TMPDIR/b.txt && cat $TMPDIR/b.txt"), []);
+    assert.deepEqual(tmpdirInputs(""), []);
   });
   it("#4160: reviewSkeleton (object form) lists every required row, scope rows pre-filled with the engine's authorization", () => {
     const k = { ...C, requirements: [...C.requirements, { id: "R9", quote: "Billing pricing is unchanged.", disposition: "defer", why: "w" }] };
@@ -301,12 +365,22 @@ describe("repro_test on bug lanes (#4271)", () => {
   it("red on base and green on head passes; anything else fails the precheck as conformance.unimplemented", () => {
     const k = { ...C, repro_test: RT };
     assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [] });
-    for (const repro of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "UNRUNNABLE", head: "UNRUNNABLE" }]) {
+    for (const repro of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
       const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
       assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_red_green"]], JSON.stringify(repro));
       assert.match(pc.failures[0].detail, new RegExp(`BASE=${repro.base} HEAD=${repro.head}`));
     }
-    assert.match(reproFailures(k, {})[0].detail, /test\/leak\.test\.js releases on 429.*BASE=UNRUNNABLE HEAD=UNRUNNABLE/);
+    assert.match(reproFailures(k, { base: "SKIPPED", head: "FAILED" })[0].detail, /HEAD=FAILED \(base not run: head did not pass\)$/);
+    assert.doesNotMatch(reproFailures(k, { base: "RAN", head: "RAN" })[0].detail, /base not run/);
+  });
+  it("a harness UNRUNNABLE on head is env.repro_unrunnable, not conformance.unimplemented (#4334)", () => {
+    const k = { ...C, repro_test: RT };
+    for (const repro of [{ base: "SKIPPED", head: "UNRUNNABLE" }, { base: "UNRUNNABLE", head: "UNRUNNABLE" }, {}]) {
+      const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
+      assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["env.repro_unrunnable", "repro_env"]], JSON.stringify(repro));
+      assert.match(pc.failures[0].detail, /test\/leak\.test\.js releases on 429 \(`node --test test\/leak\.test\.js`\): the harness could not run the test on head \(environment, not the change\)/);
+      assert.match(pc.failures[0].detail, new RegExp(`BASE=${repro.base ?? "UNRUNNABLE"} HEAD=UNRUNNABLE$`));
+    }
   });
   it("off (no repro option) is today's contract check and precheck exactly", () => {
     assert.deepEqual(validateContract(C, ISSUE), validateContract(C, ISSUE, { repro: false }));

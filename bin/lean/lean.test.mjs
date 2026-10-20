@@ -17,7 +17,7 @@ import { readLog } from "../engine/runlog.mjs";
 import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo } from "./effects.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
-import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { OUTCOME_CODES, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -319,6 +319,18 @@ describe("core work-on", () => {
     assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes("issue_coverage is missing")));
   });
 
+  it("#4327 a review incomplete only by unresolved evidence paths gets one more targeted re-ask, then merges", async () => {
+    const lost = () => conf({ requirements: [{ id: "R1", status: "implemented", evidence: "/layout.tsx:3", validated_by: "V1" }] });
+    const w = world({ reviews: [lost(), lost(), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    const rv = reviewers(w);
+    assert.equal(rv.length, 3); assert.equal(builders(w).length, 2, "never charged to the builder");
+    assert.match(rv[2][4], /answer ONLY for these ids or sections: R1/); assert.match(rv[2][4], /evidence path \/layout\.tsx does not exist/);
+    const w2 = world({ reviews: [lost(), lost(), lost(), ok()] });
+    const r2 = await run(w2);
+    assert.equal(r2.code, "review.incomplete"); assert.equal(reviewers(w2).length, 3, "at most three reviewer runs"); assert.equal(w2.merges.length, 0);
+  });
+
   it("a CONFORMS verdict whose rows fail is not conforming (the engine computes the verdict)", async () => {
     const w = world({ reviews: [bad("half done", "CONFORMS"), ok()] });
     assert.equal((await run(w)).terminalReason, "merged");
@@ -448,6 +460,83 @@ describe("core work-on", () => {
     assert.equal(r.terminalReason, "dependency-open");
     assert.deepEqual(r.dependencies, [32]);
     noNeedsHuman(w);
+  });
+
+  const splitBlock = { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A" }, { title: "part B", body: "do B", depends_on: [0] }] } };
+  it("#4337 without decomposition.close_parent a split keeps the parent open (opt-in, default false)", async () => {
+    const w = depWorld({ changed: [], result: splitBlock }, {});
+    assert.equal((await run(w)).terminalReason, "decomposed");
+    assert.equal(w.closed.length, 0);
+    assert.ok(w.labels.includes("decomposed"));
+  });
+
+  it("#4337 with decomposition.close_parent a split closes the parent not planned after its FORGE:DECOMPOSED trail and label, listing every sub-issue", async () => {
+    const w = depWorld({ changed: [], result: splitBlock }, {});
+    const r = await run(w, { closeParent: true });
+    assert.equal(r.terminalReason, "decomposed");
+    assert.equal(w.closed.length, 1);
+    const c = w.closed[0];
+    assert.equal(c[c.indexOf("--reason") + 1], "not planned");
+    const note = c[c.indexOf("--comment") + 1];
+    assert.match(note, /#201/); assert.match(note, /#202/);
+    assert.ok(w.labels.includes("decomposed"));
+    assert.ok(!w.edits.some((e) => e.includes("--remove-label") && e.join(" ").includes("workflow:decomposed")), "the decomposed label is kept");
+    const seq = w.seq.filter((x) => x === "label:decomposed" || x === "close");
+    assert.deepEqual(seq, ["label:decomposed", "close"]);
+    assert.ok(w.comments.findIndex((x) => x.includes("FORGE:DECOMPOSED")) >= 0);
+  });
+
+  it("#4337 no close when the FORGE:DECOMPOSED comment or the decomposed label could not be written (fail closed)", async () => {
+    const w = depWorld({ changed: [], result: splitBlock }, {});
+    const post = w.io.gh;
+    w.io.gh = async (a) => (a[0] === "issue" && a[1] === "comment" && a[a.indexOf("--body") + 1].includes("FORGE:DECOMPOSED") ? Promise.reject(new Error("HTTP 422")) : post(a));
+    assert.equal((await run(w, { closeParent: true })).terminalReason, "decomposed");
+    assert.equal(w.closed.length, 0);
+    const w2 = depWorld({ changed: [], result: splitBlock }, {});
+    const tl = w2.io.transitionLabel;
+    w2.io.transitionLabel = async (n, st) => { if (st === "decomposed") throw new Error("label failed"); return tl(n, st); };
+    assert.equal((await run(w2, { closeParent: true })).terminalReason, "decomposed");
+    assert.equal(w2.closed.length, 0);
+  });
+
+  const trail = { body: "<!-- FORGE:DECOMPOSED -->\n## Split into sub-issues\n- #31 part A\n- #32 part B\n", author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
+  const revoke = { body: "<!-- FORGE:DECOMPOSED:REVOKED -->\nre-plan", author_association: "OWNER", user: { type: "User", login: "op" } };
+  it("#4337 a dependency block on a CLOSED decomposed parent resolves to its open sub-issues; no usable trail keeps the parent", async () => {
+    const parent = { state: "CLOSED", labels: [{ name: "workflow:decomposed" }] };
+    const block = { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: [3] } };
+    const w = depWorld({ changed: [], issueComments: [trail], result: block }, { 3: parent, 31: { state: "CLOSED", labels: [] }, 32: { state: "OPEN", labels: [] } });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "dependency-open");
+    assert.deepEqual(r.dependencies, [32]);
+    for (const comments of [[], [trail, revoke]]) {
+      const w2 = depWorld({ changed: [], issueComments: comments, result: block }, { 3: parent });
+      const r2 = await run(w2);
+      assert.equal(r2.terminalReason, "dependency-open", JSON.stringify(comments));
+      assert.deepEqual(r2.dependencies, [3]);
+    }
+    const w3 = depWorld({ changed: [], issueComments: [trail], result: block }, { 3: parent, 31: { state: "CLOSED", labels: [] }, 32: { state: "CLOSED", labels: [] } });
+    assert.notEqual((await run(w3)).terminalReason, "dependency-open", "satisfied once every sub-issue is closed");
+  });
+
+  it("#4337 a run on a CLOSED decomposed tracker ends decomposed with its sub-issues; a trusted revoke reopens it and the run proceeds", async () => {
+    const w = world({ issueStates: { 7: "CLOSED" }, labels: [{ name: "workflow:decomposed" }], issueComments: [trail] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "decomposed");
+    assert.deepEqual(r.subissues, [31, 32]);
+    assert.equal(builders(w).length, 0);
+    assert.equal(w.patches.length, 0);
+    const w2 = world({ issueStates: { 7: "CLOSED" }, labels: [{ name: "workflow:decomposed" }], issueComments: [] });
+    assert.deepEqual((await run(w2)).subissues, [], "no trail: no sub-issues, so the batch skips its dependents (fail closed)");
+    const w3 = world({ issueStates: { 7: "CLOSED" } });
+    assert.equal((await run(w3)).terminalReason, "invalid", "a plain closed issue is still already closed");
+    const w4 = world({ issueStates: { 7: "CLOSED" }, labels: [{ name: "workflow:decomposed" }], issueComments: [trail, revoke] });
+    const gh = w4.io.gh;
+    w4.io.gh = async (a) => (a[0] === "api" && a.length === 2 && /issues\/7$/.test(a[1]) ? JSON.stringify({ state: "closed", labels: [{ name: "workflow:decomposed" }] }) : gh(a));
+    const r4 = await run(w4);
+    assert.equal(w4.patches.length, 1);
+    assert.ok(w4.patches[0].includes("state=open"));
+    assert.ok(builders(w4).length > 0, "the reopened issue is worked on");
+    assert.notEqual(r4.terminalReason, "decomposed");
   });
 
   it("#4124 a prod-data (non-human) or untyped block gets one corrective resume; a builder that then proceeds merges", async () => {
@@ -1026,6 +1115,60 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(nhBody(w), /validate V1 \(`node --test test\/foo\.test\.js`\) failed \(exit 1\)/);
   });
 
+  it("#4323 a validate the host cannot run (missing module) ends env.tool_missing naming it: no builder resume, no reviewer", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    for (const conformance of ["shadow", "enforce"]) {
+      const w = world({ validation: v }), ran = [];
+      w.io.runCommand = async (a) => { ran.push(a); return { rc: 1, output: "ModuleNotFoundError: No module named 'yaml'" }; };
+      const r = await run(w, { conformance });
+      assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING, conformance); assert.equal(w.merges.length, 0);
+      assert.equal(builders(w).length, 2, "plan + implement only"); assert.equal(reviewers(w).length, 0);
+      assert.match(nhBody(w), /Environment error \(not a conformance failure\): the host is missing yaml/);
+      assert.deepEqual(ran.map((a) => [a.command, a.cwd]), [["node --test test/foo.test.js", WT]], "only the failed contract validate is rerun, in the worktree");
+      assert.ok(ran[0].env && typeof ran[0].env === "object", "the rerun gets the lane env");
+    }
+  });
+  it("#4323 a rerun that fails for a repo reason stays conformance.unimplemented; one that passes merges", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    const w = world({ validation: v, resumeValidation: v });
+    w.io.runCommand = async () => ({ rc: 1, output: "Error: Cannot find module './src/foo.js'" });
+    assert.equal((await runShadow(w)).code, "conformance.unimplemented"); assert.equal(builders(w).length, 3);
+    const p = world({ validation: v });
+    p.io.runCommand = async () => ({ rc: 0, output: "" });
+    assert.equal((await runShadow(p)).terminalReason, "merged"); assert.equal(builders(p).length, 2);
+  });
+
+  it("#4328 freeze-time preflight: a validate needing a module the host lacks gets the one contract correction, before any build", async () => {
+    const pyC = { ...CONTRACT, validate: [{ id: "V1", command: `python3 -c "import yaml"` }] }, uvC = { ...CONTRACT, validate: [{ id: "V1", command: `uv run python -c "import yaml"` }] };
+    const probe = (w) => { const ran = []; w.io.probeCommand = async (a) => { ran.push(a); return { rc: /^'python3' .*'yaml'/.test(a.command) ? 3 : 0, output: "" }; }; return ran; };
+    const dir = tmpDir("preflight-");
+    const w = world({ contract: pyC, fixedContract: uvC, validation: [{ id: "V1", command: uvC.validate[0].command, exit: 0 }] }), ran = probe(w);
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(builders(w).length, 3, "plan + one contract correction + implement");
+    assert.match(builders(w)[1][4], /V1: needs Python module 'yaml' \(for python3\), which this host lacks[\s\S]*repo's own toolchain/);
+    assert.ok(ran.every((a) => a.cwd === WT && a.env && typeof a.env === "object"), "probes run in the worktree with the lane env");
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").map((e) => [e.corrected, e.misses.map((m) => m.tool)]), [[true, []]]);
+    // still missing after the correction: advisory only, the lane goes on (the post-build rerun is the gate)
+    const dir2 = tmpDir("preflight-");
+    const s = world({ contract: pyC, fixedContract: pyC, validation: [{ id: "V1", command: pyC.validate[0].command, exit: 0 }] }); probe(s);
+    assert.equal((await run(s, { dir: dir2 })).terminalReason, "merged"); assert.equal(builders(s).length, 3);
+    assert.deepEqual(readLog(dir2, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").map((e) => [e.corrected, e.misses.map((m) => m.tool)]), [[false, ["yaml"]]]);
+    assert.ok(traj(s).some((t) => /Validate preflight: the host lacks yaml after the contract correction/.test(t)));
+    // every tool present: no correction, no event
+    const dir3 = tmpDir("preflight-");
+    const ok = world({ contract: uvC, validation: [{ id: "V1", command: uvC.validate[0].command, exit: 0 }] }); const ran3 = probe(ok);
+    assert.equal((await run(ok, { dir: dir3 })).terminalReason, "merged"); assert.equal(builders(ok).length, 2);
+    assert.deepEqual(ran3.map((a) => a.command), ["command -v -- 'uv' >/dev/null 2>&1"]);
+    assert.equal(readLog(dir3, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").length, 0);
+  });
+  it("#4328 an invalid contract and a preflight miss share one correction; still invalid is contract.invalid as before", async () => {
+    const bad = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }], validate: [{ id: "V1", command: "jq . a.json" }] };
+    const w = world({ contract: bad, fixedContract: bad });
+    w.io.probeCommand = async () => ({ rc: 1, output: "" });
+    assert.equal((await run(w)).code, "contract.invalid"); assert.equal(builders(w).length, 2, "plan + one correction");
+    assert.match(builders(w)[1][4], /R1: quote is not verbatim[\s\S]*V1: needs command 'jq'/);
+  });
+
   it("a failed validate fetches the lane and the resume says how to catch up with a moved base (merge, never rebase)", async () => {
     const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
@@ -1324,17 +1467,35 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     assert.equal((await run(w)).terminalReason, "merged");
     assert.match(builders(w)[0][4], /This issue is a bug\. When it is testable, .*"repro_test":\{"path"/);
     assert.match(builders(w)[0][4], /"repro_test":"none","repro_test_reason"/);
-    assert.deepEqual(w.rgCalls, [{ cwd: "/wt/lean-7", base: "origin/staging", command: RT.command }]);
+    assert.deepEqual(w.rgCalls.map(({ env, ...x }) => x), [{ cwd: "/wt/lean-7", base: "origin/staging", command: RT.command }]);
     assert.match(w.comments.find((c) => c.includes("FORGE:CONTRACT")), /"repro_test"/, "repro_test is frozen in the contract JSON");
     assert.ok(traj(w)[0].includes("repro_test test/foo.test.js foo handles null: BASE=FAILED HEAD=RAN"));
     assert.equal(builders(w).length, 2); assert.equal(reviewers(w).length, 1);
     const t = rworld([RED_GREEN], { labels: [{ name: "type:bug" }] });
     assert.equal((await run(t)).terminalReason, "merged"); assert.equal(t.rgCalls.length, 1, "type:bug counts as a bug");
   });
+  it("#4325 the red-green check, declared checks, validate reruns and env.setup run with the builder's lane env", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    const w = rworld([RED_GREEN], { validation: v }), ran = [], setups = [];
+    w.io.runTmp = { prune: async () => {}, make: async (_i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async () => {} };
+    w.io.prepareToolchain = async () => ({ env: { PATH: "/rt/toolchain/bin:/usr/bin" }, summary: "node 22" });
+    w.io.deps = { env: () => ({ UV_CACHE_DIR: "/c/uv", TMPDIR: "/should-not-win" }), prepare: async () => [] };
+    w.io.runSetup = async (a) => { setups.push(a); return { exit: 0, stdout: "", stderr: "" }; };
+    w.io.runCommand = async (a) => { ran.push(a); return { rc: 0, output: "" }; };
+    const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "3";
+    try { assert.equal((await run(w, { envSetup: "make setup", precheck: { commands: ["npm run lint"] } })).terminalReason, "merged"); }
+    finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
+    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", PATH: "/rt/toolchain/bin:/usr/bin" };
+    assert.match(lane.TMPDIR, /\/runs\/7-/, "the builder ran with the run TMPDIR");
+    assert.deepEqual(w.rgCalls.map((x) => x.env), [lane], "red-green gets the lane env, not the daemon's");
+    assert.deepEqual(ran.map((a) => [a.command, a.env]), [["npm run lint", lane], ["node --test test/foo.test.js", lane]]);
+    assert.deepEqual(setups.map((a) => a.env), [lane]);
+    assert.equal(w.envs[0].CLAUDE_CODE_TMPDIR, lane.TMPDIR); assert.equal(w.envs[0].UV_CACHE_DIR, "/c/uv"); assert.match(w.envs[0].FORGE_DOCKER_LABELS ?? "", /lean-7/);
+  });
 
   it("a repro test that is not red on base and green on head fails the precheck in enforce and in shadow: one in-session resume, then needs-human", async () => {
     for (const conformance of ["enforce", "shadow"]) {
-      for (const rg of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, null]) {
+      for (const rg of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }]) {
         const w = rworld([rg]);
         const r = await run(w, { conformance });
         assert.equal(r.code, "conformance.unimplemented", `${conformance} ${JSON.stringify(rg)}`); assert.equal(w.merges.length, 0);
@@ -1346,6 +1507,27 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     }
     const fixed = rworld([{ base: "RAN", head: "RAN" }, RED_GREEN]);
     assert.equal((await run(fixed, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(fixed.rgCalls.length, 2);
+  });
+
+  it("a repro test the harness cannot run on head (or no harness result) is env.repro_unrunnable: recoverable, no resume, no reviewer (#4334)", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      for (const rg of [{ base: "SKIPPED", head: "UNRUNNABLE" }, null]) {
+        const w = rworld([rg]);
+        const r = await run(w, { conformance });
+        assert.equal(r.code, "env.repro_unrunnable", `${conformance} ${JSON.stringify(rg)}`); assert.equal(r.terminalReason, "needs-human");
+        assert.equal(classifyNeedsHuman(r), "recoverable");
+        assert.equal(w.merges.length, 0); assert.equal(builders(w).length, 2, "plan + implement, no resume"); assert.equal(reviewers(w).length, 0);
+        assert.match(nh(w), /the repro harness could not run the repro test on head; no builder resume was spent/);
+      }
+    }
+  });
+
+  it("the repro harness runs with the lane env: toolchain PATH and the per-run TMPDIR (#4334)", async () => {
+    const w = rworld([RED_GREEN]);
+    w.io.runTmp = { prune: async () => {}, path: (id) => `/rt/${id}`, make: async (_i, id) => `/rt/${id}`, remove: async () => true };
+    w.io.prepareToolchain = async () => ({ pins: [{}], env: { PATH: "/shim/bin:/host/bin" }, summary: "pnpm@10.4.1" });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(w.rgCalls[0].env.PATH, "/shim/bin:/host/bin"); assert.match(w.rgCalls[0].env.TMPDIR, /^\/rt\//);
   });
 
   it("a non-testable bug records repro_test none with a reason and is not blocked; a missing repro_test gets the one contract correction", async () => {
@@ -1799,6 +1981,21 @@ describe("orchestrate", () => {
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "decomposed"], [2, "merged"], [11, "merged"], [12, "merged"]]);
     assert.ok(log.indexOf("end 11") < log.indexOf("start 12"));
     assert.ok(log.indexOf("end 12") < log.indexOf("start 2"));
+  });
+
+  it("#4337 a CLOSED decomposed tracker in the batch gates its dependents on its sub-issues like resolveBlock; no trail skips them", async () => {
+    const trail = { body: "<!-- FORGE:DECOMPOSED -->\n- #31 part A\n- #32 part B\n", author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
+    const tracker = async (comments) => run(world({ issueStates: { 7: "CLOSED" }, labels: [{ name: "workflow:decomposed" }], issueComments: comments }));
+    const lane = await tracker([trail]);
+    const log = [];
+    const rows = await orchestrate({ issues: [7, 2], parallel: 3, readBody: async (n) => (n === 2 ? "**Depends on**: #7" : ""),
+      runOne: async (n) => { log.push(`start ${n}`); await new Promise((r) => setImmediate(r)); log.push(`end ${n}`); return n === 7 ? lane : { terminalReason: "merged" }; } });
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[7, "decomposed"], [2, "merged"], [31, "merged"], [32, "merged"]]);
+    assert.ok(log.indexOf("end 31") < log.indexOf("start 2") && log.indexOf("end 32") < log.indexOf("start 2"), log.join(","));
+    const failClosed = await tracker([]);
+    const rows2 = await orchestrate({ issues: [7, 2], parallel: 3, readBody: async (n) => (n === 2 ? "**Depends on**: #7" : ""),
+      runOne: async (n) => (n === 7 ? failClosed : { terminalReason: "merged" }) });
+    assert.equal(rows2.find((r) => r.issue === 2).outcome, "skipped");
   });
 
   it("a dependency that closed as invalid does not block", async () => {
@@ -2631,6 +2828,25 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.equal(r.heavyQueueMax, 4);
   });
 
+  it("#4331 pre-PR checks: scoped by the test map, concurrent up to FORGE_HOST_PARALLELISM under one heavy slot, timed", async () => {
+    const w = heavyWorld(); w.changed = ["commands/foo.md"];
+    w.baseFiles = { "origin/staging:.forge/test-map.json": JSON.stringify({ version: 1, entries: [
+      { globs: ["commands/**"], command: "bash scripts/check-a.sh", cwd: "." }, { globs: ["bin/**"], command: "bash scripts/check-b.sh", cwd: "." }] }) };
+    const ran = []; let live = 0, peak = 0;
+    w.io.runCommand = async ({ command }) => { ran.push(command); peak = Math.max(peak, ++live); await new Promise((r) => setImmediate(r)); w.clock += 1000; live--; return { rc: 0, output: "" }; };
+    const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "2";
+    const dir = tmpDir("core-");
+    let r;
+    try { r = await run(w, { dir, precheck: { commands: ["bash scripts/check-a.sh", "bash scripts/check-b.sh", "make lint", "make fmt"] } }); }
+    finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
+    assert.deepEqual(ran, ["bash scripts/check-a.sh", "make lint", "make fmt"], "mapped check-b misses commands/foo.md; unmapped ones run");
+    assert.equal(peak, 2);
+    assert.equal(w.acq.filter((a) => a.phase === "precheck").length, 1, "one heavy slot for the round");
+    const [pre] = readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS");
+    assert.equal(pre.parallelism, 2); assert.ok(pre.ms > 0); assert.ok(pre.results.every((x) => Number.isFinite(x.ms)));
+    assert.ok(r.precheckMs > 0); assert.equal(r.precheckDeferred, 0);
+  });
+
   it("#4169 without io.heavy (or heavy.enabled false) nothing is gated and the runner env is unchanged", async () => {
     const w = world();
     const r = await run(w);
@@ -3190,7 +3406,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     writeFileSync(`${d}/forge.yaml`, "engine:\n  conformance: shadow\n");
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n");
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, checkRun: false });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false });
   });
 });
 
@@ -3529,7 +3745,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.ok(w.seq.indexOf("builder-resume", w.seq.indexOf("check:1")) < w.seq.indexOf("pr"), "the fix runs before the PR is opened");
     const log = readLog(dir, 7);
     const pre = log.filter((e) => e.event === "PRECHECK_COMMANDS");
-    assert.deepEqual(pre.map((e) => e.results), [[{ command: "bash scripts/check-test-tmp-cleanup.sh", rc: 1 }], [{ command: "bash scripts/check-test-tmp-cleanup.sh", rc: 0 }]]);
+    assert.deepEqual(pre.map((e) => e.results), [[{ command: "bash scripts/check-test-tmp-cleanup.sh", rc: 1, ms: 0 }], [{ command: "bash scripts/check-test-tmp-cleanup.sh", rc: 0, ms: 0 }]]);
     assert.ok(log.findIndex((e) => e.event === "PRECHECK_COMMANDS") < log.findIndex((e) => e.event === "PR_OPENED"));
   });
 
@@ -3551,6 +3767,16 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.equal(r.terminalReason, "merged");
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 1);
     assert.match(traj(w)[0], /builder made no new commit for them/);
+  });
+
+  it("#4318/#4331 pre-PR: a round has a total budget; a command gets what is left, the rest are deferred to CI, not a failure", async () => {
+    const w = world(); const ran = [];
+    w.io.runCommand = async ({ command, timeoutMs }) => { ran.push([command, timeoutMs]); w.clock += 60000; return { rc: 0, output: "" }; };
+    const r = await run(w, { precheck: { commands: ["make a", "make b", "make c"] }, verify: { precheckTotalSeconds: 100 } });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(ran, [["make a", 100000], ["make b", 40000]]);
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "skipped is not failing");
+    assert.match(traj(w)[0], /deferred-to-ci: pre-PR check budget 100 s reached; left to CI: `make c`/);
   });
 });
 
@@ -3617,7 +3843,7 @@ describe("test map and repo facts caches (#4272)", () => {
     assert.equal((await run(w, { dir, precheck: { commands: ["true", "make lint"] } })).terminalReason, "merged");
     assert.deepEqual(ran, ["true", "make lint"]);
     assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS").map(({ round, results, ...rest }) => [round, results, Object.keys(rest).filter((k) => k === "source")]),
-      [[0, [{ command: "true", rc: 0 }, { command: "make lint", rc: 0 }], []]]);
+      [[0, [{ command: "true", rc: 0, ms: 0 }, { command: "make lint", rc: 0, ms: 0 }], []]]);
     const [plan, impl] = builders(w);
     assert.equal(plan[4].startsWith(builderPlanPrompt(7)), true); assert.equal(impl[4].startsWith(builderImplementPrompt("local")), true);
     for (const b of builders(w)) assert.doesNotMatch(b[4], /Repo facts/);
@@ -4121,5 +4347,78 @@ describe("review trigger (#4273): shadow logs and always reviews, enforce skips 
     assert.deepEqual(at('review:\n  trigger: enforce\n  risk_paths: "db/**, *.sql"\n'), { mode: "enforce", riskPaths: ["db/**", "*.sql"] });
     assert.deepEqual(at("review:\n  tech_stack: x\n  risk_paths:\n    - \"infra/**\"\n    - lib/acct/*.ts  # c\n  trigger: bogus\n"), { mode: "shadow", riskPaths: ["infra/**", "lib/acct/*.ts"] });
     assert.equal(at("engine:\n  path: core\n"), undefined);
+  });
+});
+
+describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
+  const LIST = [{ module: "src/foo.js", test: "test/registry.test.js", line: 4, why: "literal list of 3 sibling export names" }];
+  const MISS = [{ symbol: "fooNew", module: "src/foo.js", test: "test/registry.test.js", line: 4 }];
+  const COLL = [{ dir: "db", number: "0007", lane: "db/0007_usage.sql", base: ["db/0007_billing.sql"], next: "0008" }];
+  const CONFLICTING = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }, OKSTATE = { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" };
+  /** `seq`: sequenceCheck results per call; `verify`: sequenceVerify result; `missing`: enumeratingMissing results per call. */
+  const hworld = ({ list = [], missing = [[]], seq = [[]], verify = { ok: true, problems: [] }, ...o } = {}) => {
+    const w = world(o); w.enumCalls = []; w.seqCalls = 0;
+    const m = [...missing], s = [...seq];
+    w.io.enumeratingTests = async (x) => { w.enumCalls.push(x); return list; };
+    w.io.enumeratingMissing = async () => (m.length > 1 ? m.shift() : m[0]);
+    w.io.sequenceCheck = async () => { w.seqCalls++; return s.length > 1 ? s.shift() : s[0]; };
+    w.io.sequenceSnapshot = async () => [{ path: "db/0007_usage.sql", blob: "b1" }];
+    w.io.sequenceVerify = async (x) => { w.verifyArgs = x; return verify; };
+    return w;
+  };
+
+  it("no enumerating tests and no collisions: no new plan step, no extra builder call (prompts unchanged)", async () => {
+    const w = hworld();
+    assert.equal((await run(w)).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 2);
+    assert.ok(!/Enumerating tests/.test(b[0][4]) && !/Enumerating tests/.test(b[1][4]));
+    assert.equal(w.enumCalls[0].cwd, WT);
+    assert.equal(w.seqCalls, 1, "checked once at hand-off");
+  });
+
+  it("the plan lists the enumerating tests and the implement rule cites them", async () => {
+    const w = hworld({ list: LIST });
+    assert.equal((await run(w)).terminalReason, "merged");
+    const [plan, impl] = builders(w);
+    assert.match(plan[4], /Enumerating tests \(found by the engine\)[\s\S]*src\/foo\.js -> test\/registry\.test\.js:4/);
+    assert.match(impl[4], /one test-list edit per new symbol[\s\S]*not_members[\s\S]*test\/registry\.test\.js:4/);
+  });
+
+  it("a new symbol missing from an enumerating test: one builder resume; still missing is an anomaly, not needs-human", async () => {
+    let w = hworld({ missing: [MISS, []] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 3);
+    assert.match(builders(w)[2][4], /fooNew \(src\/foo\.js\) -> test\/registry\.test\.js:4/);
+    w = hworld({ missing: [MISS] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.match(traj(w).at(-1), /Enumerating test\(s\) still miss new symbol\(s\): fooNew → test\/registry\.test\.js/);
+    w = hworld({ missing: [MISS], result: { status: "fixed", summary: "s", evidence: [], tests: [], not_members: [{ symbol: "fooNew", test: "test/registry.test.js", why: "internal helper" }] } });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 2, "a justified not-member needs no resume");
+  });
+
+  it("a sequence number the lane base already uses is renumbered at hand-off, before the PR; still colliding is base.conflict", async () => {
+    let w = hworld({ seq: [COLL, []] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3);
+    assert.match(b[2][4], /origin\/staging already uses sequence numbers[\s\S]*db\/0007_usage\.sql -> number 0008 \(base has db\/0007_billing\.sql\)[\s\S]*git merge --no-edit origin\/staging/);
+    assert.ok(w.seq.indexOf("pr") > w.seq.lastIndexOf("builder-resume"));
+    assert.deepEqual(w.verifyArgs.before, [{ path: "db/0007_usage.sql", blob: "b1" }]);
+    w = hworld({ seq: [COLL], verify: { ok: false, problems: ["db/0007_usage.sql still shares number 0007 with db/0007_billing.sql"] } });
+    const r = await run(w);
+    assert.equal(r.code, OUTCOME_CODES.BASE_CONFLICT);
+    assert.equal(w.prs.length, 0);
+  });
+
+  it("base-sync: a clean text merge that brings a taken number is renumbered and re-reviewed; a conflicted journal gets the no-text-merge rule", async () => {
+    let w = hworld({ seq: [[], COLL, []], prView: [CONFLICTING, OKSTATE], mergeResults: ["clean"], reviews: [ok(), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 2, "re-review after the renumber");
+    assert.match(w.comments.find((c) => c.includes("<!-- FORGE:BASE_SYNC -->")), /clean merge[\s\S]*builder renumbered sequence-numbered files/);
+    w = hworld({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["db/meta/_journal.json"], reviews: [ok(), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.match(builders(w)[2][4], /conflicts in: db\/meta\/_journal\.json[\s\S]*do not text-merge it\. Renumber the lane's files/);
   });
 });

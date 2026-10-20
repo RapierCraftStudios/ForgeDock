@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
-import { PHASES, parseReviewResult, isCiPendingBlocker, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber, decompositionRevoked, openDependency } from "../engine/phases.mjs";
+import { PHASES, parseReviewResult, isCiPendingBlocker, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber, decompositionRevoked, openDependency, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
 import { trusted, jsonLines, invBody, builderBody, remediationBody, remediationHeldBody } from "./helpers/comments.mjs";
@@ -1387,6 +1387,56 @@ describe("pickPhase", () => {
       // without the label, the comment alone does not re-point the edge; an unreadable sub fails closed
       assert.deepEqual(await openDependency(42, withComments({ 42: body, 7: rec(), 71: rec({ state: "closed" }), 72: rec({ state: "closed" }) }, [split])), { open: [7] });
       assert.equal((await openDependency(42, withComments({ 42: body, 7: decomposedParent, 71: rec({ state: "closed" }) }, [split]))).unreadable, true);
+    });
+    it("#4337 a CLOSED workflow:decomposed dependency still resolves to its sub-issues; no usable trail keeps it blocking", async () => {
+      const closedParent = rec({ state: "closed", labels: [{ name: "workflow:decomposed" }] });
+      const split = { body: "<!-- FORGE:DECOMPOSED -->\n## Split into sub-issues\n- #71 part A\n- #72 part B\n", author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
+      const world = (records, comments) => ({ git: async () => "0", gh: async (args) => {
+        if (args.some((a) => /issues\/7\/comments$/.test(a))) { if (comments instanceof Error) throw comments; return comments.map((c) => JSON.stringify(c)).join("\n"); }
+        const r = records[/issues\/(\d+)$/.exec(args[args.length - 1])?.[1]];
+        if (r instanceof Error) throw r;
+        return r ?? "";
+      } });
+      const body = rec({ body: dep });
+      assert.deepEqual(await openDependency(42, world({ 42: body, 7: closedParent, 71: rec({ state: "closed" }), 72: rec() }, [split])), { open: [72] });
+      assert.equal(await openDependency(42, world({ 42: body, 7: closedParent, 71: rec({ state: "closed" }), 72: rec({ state: "closed" }) }, [split])), null);
+      // fail closed: no trail, an untrusted one, a revoked one or an unreadable comment list keep the closed parent as the dependency
+      assert.deepEqual(await openDependency(42, world({ 42: body, 7: closedParent }, [])), { open: [7] });
+      assert.deepEqual(await openDependency(42, world({ 42: body, 7: closedParent }, [{ ...split, user: { type: "User", login: "x" } }])), { open: [7] });
+      assert.deepEqual(await openDependency(42, world({ 42: body, 7: closedParent }, [split, { ...split, body: "<!-- FORGE:DECOMPOSED:REVOKED -->\nre-plan" }])), { open: [7] });
+      assert.deepEqual(await openDependency(42, world({ 42: body, 7: closedParent }, new Error("boom"))), { open: [7] });
+      assert.equal((await openDependency(42, world({ 42: body, 7: closedParent, 71: new Error("boom") }, [split]))).unreadable, true);
+      // a closed dependency without the label is still satisfied
+      assert.equal(await openDependency(42, world({ 42: body, 7: rec({ state: "closed" }) }, [split])), null);
+    });
+    it("#4337 reopenRevokedDecomposition reopens only a closed decomposed issue with a trusted newer revocation", async () => {
+      const split = { body: "<!-- FORGE:DECOMPOSED -->\n- #71 part A\n", author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
+      const revoke = { body: "<!-- FORGE:DECOMPOSED:REVOKED -->\nre-plan", author_association: "OWNER", user: { type: "User", login: "op" } };
+      const world = (record, comments, calls = []) => ({ git: async () => "0", gh: async (args) => {
+        calls.push(args.join(" "));
+        if (args.some((a) => /issues\/7\/comments$/.test(a))) { if (comments instanceof Error) throw comments; return comments.map((c) => JSON.stringify(c)).join("\n"); }
+        if (args.includes("PATCH")) return "{}";
+        if (record instanceof Error) throw record;
+        return record;
+      } });
+      const closedParent = rec({ state: "closed", labels: [{ name: "workflow:decomposed" }] });
+      const calls = [];
+      assert.equal(await reopenRevokedDecomposition(7, world(closedParent, [split, revoke], calls)), true);
+      assert.ok(calls.some((c) => c === "api -X PATCH repos/{owner}/{repo}/issues/7 -f state=open"), calls.join("\n"));
+      const cases = [
+        [closedParent, [split]], // no revocation
+        [closedParent, [revoke, split]], // revocation older than the decomposition
+        [closedParent, [split, { ...revoke, author_association: "NONE" }]], // untrusted revocation
+        [rec({ state: "open", labels: [{ name: "workflow:decomposed" }] }), [split, revoke]], // already open
+        [rec({ state: "closed" }), [split, revoke]], // not a decomposed tracker
+        [closedParent, new Error("boom")], // unreadable trail
+        [new Error("boom"), [split, revoke]], // unreadable issue
+      ];
+      for (const [record, comments] of cases) {
+        const c = [];
+        assert.equal(await reopenRevokedDecomposition(7, world(record, comments, c)), false);
+        assert.ok(!c.some((x) => x.includes("PATCH")), c.join("\n"));
+      }
     });
   });
 

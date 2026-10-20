@@ -111,25 +111,30 @@ export const contextPackCacheKey = (issue, headSha, cfg = {}, stamp = {}) =>
     ...(stamp?.scope != null || stamp?.attempts != null ? [String(stamp.scope ?? ""), Number(stamp.attempts) || 0] : []),
     ...(stamp?.links ? [`links:${stamp.links}`] : [])]))}.json`;
 
-/** Max referenced issues whose state is read for the cache stamp (one REST call each). */
-export const LINK_STAMP_MAX = 20;
+/** Max referenced issues whose state is read for the cache stamp (#4318: one GraphQL call for all of them). */
+export const LINK_STAMP_MAX = 100;
 /**
  * #4316: the linked-issue part of the cache stamp: a hash of `n:STATE` for each issue the body references (parent, Depends
- * on, `#N` links), so a pack never shows a linked issue as open after it closed on the same base. Timeline cross-refs are
- * left to the gather. An unreadable issue counts as `n:?`; never throws; '' when the body references nothing.
+ * on, `#N` links), so a pack never shows a linked issue as open after it closed on the same base. #4318: one GraphQL call
+ * reads every state plus the issue's own cross-reference/connected timeline count (a new relation changes the stamp too);
+ * above LINK_STAMP_MAX the highest (most recent) numbers are kept. A failed call counts every number as `n:?`; never
+ * throws; '' (and no call) when the body references nothing.
  */
 export async function linkStateStamp({ gh, repo, issue, body }) {
   const parent = parentOf(body);
   const nums = [...new Set([...(parent ? [parent] : []), ...parseDependsOn(stripComments(body), issue), ...bodyLinks(body, repo, issue)])]
-    .filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue)).sort(byNum).slice(0, LINK_STAMP_MAX);
+    .filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue)).sort(byNum).slice(-LINK_STAMP_MAX);
   if (!nums.length) return "";
-  const states = [];
-  for (const n of nums) {
-    let st = "?";
-    try { st = String(await gh(["api", `repos/${repo}/issues/${n}`, "--jq", ".state"])).trim().toUpperCase() || "?"; } catch { /* unreadable: n:? */ }
-    states.push(`${n}:${st}`);
-  }
-  return hash12(states.join(","));
+  const [owner, name] = String(repo ?? "").split("/");
+  const self = Number(issue);
+  const q = `query($o:String!,$n:String!){repository(owner:$o,name:$n){${Number.isSafeInteger(self) && self > 0
+    ? `self:issueOrPullRequest(number:${self}){... on Issue{timelineItems(itemTypes:[CROSS_REFERENCED_EVENT,CONNECTED_EVENT,DISCONNECTED_EVENT]){totalCount}}}` : ""}${
+    nums.map((n) => `i${n}:issueOrPullRequest(number:${n}){... on Issue{state} ... on PullRequest{state}}`).join(" ")}}}`;
+  let r = null;
+  try { r = JSON.parse(String(await gh(["api", "graphql", "-f", `query=${q}`, "-f", `o=${owner ?? ""}`, "-f", `n=${name ?? ""}`])))?.data?.repository ?? null; } catch { r = null; }
+  const states = nums.map((n) => `${n}:${String(r?.[`i${n}`]?.state ?? "").toUpperCase() || "?"}`);
+  const rel = r?.self?.timelineItems?.totalCount;
+  return hash12([...states, `rel:${Number.isInteger(rel) ? rel : "?"}`].join(","));
 }
 
 // ---- gather (I/O) ----

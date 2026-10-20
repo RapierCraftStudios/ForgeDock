@@ -81,6 +81,15 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    quote of the requirement a failure names (`explainFailures`), and a failed
    validate names its command. Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
+   A `split` closes the parent `not planned` once its `FORGE:DECOMPOSED` trail
+   and `workflow:decomposed` label are written (label kept; the closing comment
+   lists the sub-issues; either write failing leaves it open) (#4337). A
+   decomposed dependency, open or closed, gates through its sub-issues in
+   `openDependency` and `resolveBlock`; no usable trail keeps the parent as the
+   dependency. A run on a closed decomposed tracker ends `decomposed` with its
+   `subissues` (the batch re-points dependents; none listed skips them), and a
+   trusted `FORGE:DECOMPOSED:REVOKED` reopens it (`reopenRevokedDecomposition`,
+   also used by the engine's `--retry`).
 6. **Implement** — same session; `result.json` with typed amendments
    (`applyAmendments` → `FORGE:AMENDMENT`). An `add-deliverable` on a path the
    contract already lists appends its why to that deliverable's `change`, so it
@@ -100,6 +109,16 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) adds the map entries whose
    globs match the changed files to that list (`selectCommands` + `mergeChecks`, #4315: learned first, deduped, so the
    map never removes a check; event gains `source: "test-map"|"test-map+learned"` when the map added a command).
+   #4331 (`testmap.mjs` `scopeChecks`): a learned command the map covers (same `checkKey` as an entry's command) runs
+   only when one of its globs matches a changed file; unmapped learned commands always run; `source` also marks a
+   scoped-out command. A round runs through `precheck.mjs` `runChecks`: concurrent up to `verifyParallelism()`
+   (`FORGE_HOST_PARALLELISM`, else cores / live lanes) inside ONE `heavyStep("precheck")` slot, within a round budget of
+   forge.yaml `lean.precheck.max_minutes` (`engine-cli.mjs` `readPrecheckBudget`, 1..120; else
+   `verify.precheck_total_seconds`, default 600 s). Commands not started before the budget ends, or cut by it (rc 124
+   with the remaining budget as timeout), are `deferred-to-ci` (event entries `{command, status}`, trajectory anomaly),
+   never failures. `PRECHECK_COMMANDS` results carry `ms`; the event carries round `ms` and `parallelism`; the lane
+   result `precheckMs`/`precheckDeferred` → orchestrate row `precheck_ms`/`precheck_deferred` → batch-report line
+   `precheck: <m> total over <n> lanes[, <k> deferred to CI]` (`formatPrecheckSummary`).
 6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
@@ -140,6 +159,12 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `growth_lines` without `hotspot-exempt: <reason>` in a covering deliverable
    or add-deliverable why. A failed script or `enabled: false` turns it off;
    no runner calls are added.
+   **Enumerating tests** (#4322, `enumerating.mjs`): before the plan call
+   `io.enumeratingTests` lists tests that enumerate the exports or directory
+   siblings of the issue's named paths (`enumeratingPlanNote` /
+   `enumeratingBuildRule`, "" when none). After implement `io.enumeratingMissing`
+   (new exports/files a sibling-listing test does not name, minus result.json
+   `not_members` with a why) resumes the builder once; still missing is an anomaly.
 8. **Push + PR → merge** — merge policy `required` (default) | `all` | `none`;
    base-sync merges the lane in on conflict (never rebase/force-push); merge
    at the reviewed head → `merged`, or `ci-pending` after the CI wait. Each CI
@@ -152,6 +177,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    logs (`collectFailedLogs`, `ciFailurePrompt`), re-reviews and pushes the fix,
    and waits again; `ci.red` only after `max_rounds` (shared with `ciVerify`) or a
    round with no new commit. Rollups of another head count as pending. `CI_FIX_ROUND`.
+   **Sequence numbers** (#4322, `sequence.mjs`): before review and the first push,
+   and after every base-sync merge (clean or not), lane-added `<NNN>_*` files whose
+   number the fetched lane already uses → builder renumbers (`sequencePrompt`; a
+   conflicted migration/journal gets `sequenceSyncNote`), then `verifyRenumber`
+   (same blob, journal strictly ordered, no collision); still failing → `base.conflict`.
 
 ## Host parallelism (#4182)
 
@@ -739,3 +769,64 @@ queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 L
   20, one REST call each, `n:?` when unreadable) joins the pack cache key as `stamp.links`; no links keeps the old key.
 - `scripts/review-prepare.sh`: the code-index stderr tail shows the repo root as `<repo>`, strips control characters
   and caps lines at 200 chars. Cost: 0 LLM calls; up to 20 `gh api` reads per context-pack lane.
+
+## Entry 2026-10-20 — Missing host tools are an environment error, not conformance (#4323)
+
+`gate()` (`rerunFailedValidates`) reruns once each contract validate command the builder recorded with a non-zero exit, via `io.runCommand` (`runCheckCommand`, now with an optional `env`: the lane's `TMPDIR` + `toolchain.env`) inside `heavyStep("precheck")`, logged as `VALIDATE_RERUN`. `precheck({validateRuns, repoHas})` counts a passing rerun as passed and classifies the rest with `conformance.mjs` `missingTool`: `command not found` / rc 127, Python `No module named x`, Node `Cannot find module|package 'x'` (bare names only). A path, relative specifier or a name `repoTracks(git ls-files)` holds stays `validate_failed` (a module the change forgot is a code defect). A miss is kind `validate_env`, code `env.tool_missing`: kept out of `pre`/`SHADOW_PRE_BLOCKS`, never sent to a builder resume, skipped on a CI-verified head; with no other blocking failure the lane ends `needs-human` `env.tool_missing` naming the tool before any reviewer call (also on the base-sync and CI-fix re-reviews, `envNeedsHuman`). The code is in `RECOVERABLE_CODES`; `RECOVER_HOW` has the recovery lane run the check through the repo's own toolchain. Freeze-time preflight of validate commands: see the #4328 entry. Cost: 0 LLM calls; one rerun per failed validate command.
+
+## Entry 2026-10-20 — Enumerating tests + sequence numbers at hand-off (#4322)
+
+Two deterministic hand-off facts (git + fs, no LLM): `enumerating.mjs` finds tests that list every member of a group
+(literal/key list of >= min(3, n) sibling names, or `Object.keys(<import>)`) → plan note, build rule, post-implement
+`ENUMERATING_MISSING` resume (then anomaly). `sequence.mjs` finds lane-added numbered migrations colliding with the base
+→ `SEQUENCE_COLLISION`, builder renumbers with the repo's own generator, engine verifies. #3969 union merge unchanged.
+Cost: 0 LLM calls unless a fact fires (then one builder resume each). Implement prompt also says to run the formatter.
+
+## Entry 2026-10-20 — Evidence paths keep route-group and bracket segments (#4327)
+
+`conformance.mjs` `evidencePathLine` reads reviewer evidence token by token. It keeps `(group)`, `[slug]` and
+`[...slug]` path segments verbatim and drops only brackets with no partner (prose `(src/a.js:3)`), backticks, quotes and a
+markdown link label. The old regex treated `()[]` as delimiters, so `(console)/layout.tsx:12` became `/layout.tsx`. The
+existence check is unchanged: a missing path is still `review.incomplete`. `reviewOnce` (`lean.mjs`) gives one extra
+targeted re-ask (at most 3 reviewer runs) only when the repaired reply is incomplete solely by unresolved evidence paths
+(`evidencePathOnly`); other incomplete replies keep 2 runs. Reviewer and repair prompts ask for backtick-quoted, verbatim
+repo-relative `path:line`.
+
+## Entry 2026-10-20 — Engine-run commands get the builder's lane env; no $TMPDIR inputs at freeze (#4325)
+
+`runCore` `laneEnv()` builds one env for every command the engine runs itself: `io.deps.env()` stores, then the run
+`TMPDIR`, `FORGE_HOST_PARALLELISM` and `toolchain.env` (engine keys win over the stores). `io.redGreen` (`effects.mjs`,
+new `env` merged over `process.env`), the declared check commands (`io.runCommand`, previously no env),
+`rerunFailedValidates` and env.setup all use it. Before this, red-green ran with the daemon env (no run TMPDIR), so a
+repro command reading a builder-written `$TMPDIR` file reported `BASE=SKIPPED HEAD=FAILED`. `callRunner` builds its env
+from `laneEnv()` plus its runner-only keys (`FORGE_DOCKER_LABELS`, `CLAUDE_CODE_TMPDIR`, heavy shims) and gives the same values as before.
+`validateContract` adds one problem per `$TMPDIR/<name>` that a validate or `repro_test` command reads before creating it
+(`conformance.mjs` `tmpdirInputs`: `>`/`>>`, `tee`, `touch|mkdir|mktemp`, last argument of `cp|mv|ln|install`, output-like
+options and `X=` assignments count as creating). It goes through the existing contract-correction resume, because the run
+TMPDIR is per run and a rerun never has the file. The plan prompt says so in one line. Cost: 0 LLM calls; one correction
+resume only for a contract that would otherwise fail at precheck.
+
+## Entry 2026-10-20 — Freeze-time preflight of validate commands (#4328)
+
+At contract freeze, `preflightValidates` (`lean.mjs`) probes the host for what each `validate[].command` needs, from
+`preflight.mjs` `preflightProbes` (pure): a quote-aware split on `&&`/`||`/`|`/`;`, each segment's bare executable
+(`command -v`), the modules a bare `python`/`python3`/`pythonX.Y` imports via `-c`/`-m` (`importlib.util.find_spec` with
+that interpreter) and the bare packages `node -e`/`-p` code imports (`node_modules/<pkg>` walked up from the worktree).
+Paths, `$VAR` words, names `repoTracks(git ls-files)` holds and names a deliverable's `change` text names are not probed;
+a wrapper (`uv run`, `npx`, ...) probes only the wrapper; at most 20 probes. Probes run through the separate
+`io.probeCommand` hook (`runCheckCommand`) with `laneEnv()` (#4325); no hook, no change. A miss (`preflightProblems`) joins the
+validateContract problems in the existing single `contractCorrectionPrompt` resume. After it the misses are re-probed and
+logged as `VALIDATE_PREFLIGHT` {misses, corrected}; any left are an anomaly only, never a block: the post-build #4323
+rerun still ends `env.tool_missing`. Skipped when the frozen contract is recovered from the issue. Cost: 0 LLM calls when
+the host has the tools; otherwise the one correction resume, instead of a whole implement session lost to `env.tool_missing`.
+
+## Entry 2026-10-20 — The repro harness links workspace deps on base; an unrunnable head is an environment error (#4334)
+
+`io.redGreen` gets the lane env through `laneEnv()` (#4325), so a pinned `pnpm vitest …` runs on head.
+`scripts/acceptance-red-green.sh` links every head `node_modules` next to a tracked `package.json` (workspace packages
+too) and a root `.venv` into the base worktree when the base has none, so a workspace test resolves its deps on base.
+`conformance.mjs` `reproFailures` maps `HEAD=UNRUNNABLE`, or no harness result, to `env.repro_unrunnable` (kind
+`repro_env`, recoverable in `RECOVERABLE_CODES`, with a `RECOVER_HOW` prompt). `gate()` routes it with `env.tool_missing`
+to the environment state: no builder resume, no reviewer. Other non-proofs stay `conformance.unimplemented`. A
+`BASE=SKIPPED` detail now says the base was not run because head did not pass; head's new test files were already
+overlaid (#3630). Cost: 0 LLM calls; saves the wasted resume.

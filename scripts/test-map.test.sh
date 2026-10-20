@@ -345,6 +345,61 @@ eslint .
 WF
 eq "unsafe forms dropped, check forms kept" "$(cmds)" "black --check .|eslint .|gofmt -l .|make test V=1|make test lint|prettier --check .|ruff format --check ."
 
+# ---- 5g. forge#4318: flag-family fixers, snapshot updaters, write targets, quotes and tox publish envs are dropped ----
+wf_case bypass <<'WF'
+cargo clippy --fix
+tox --env=publish
+tox --session=release
+tox -ePUBLISH
+tox -e dist,pypi
+nox -s Release
+eslint "--fix" .
+gofmt -l --w .
+gofmt -w=true .
+prettier --write=true .
+prettier -cw .
+ruff --fix-only .
+ruff check --add-noqa .
+jest -u
+jest --updateSnapshot
+vitest -u
+vitest --update
+pytest --snapshot-update
+npm test -- -u
+go build -o /tmp/x ./...
+go test -o out.test ./...
+go test -exec foo ./...
+tsc --outDir /tmp/out
+tsc --outFile out.js
+pytest --junitxml=/abs/x.xml
+pytest --basetemp=../t
+mvn clean test
+./gradlew clean test
+tox -e py311,lint
+pytest -q
+WF
+eq "bypass forms dropped" "$(cmds)" "pytest -q|tox -e py311,lint"
+
+# ---- 5h. forge#4318: workspace flags, versioned/wrapped runners, -C, toolchains and test scripts are mapped ----
+wf_case forms <<'WF'
+npm -w pkg test
+pnpm -w test
+uv run python -m pytest
+python3.12 -m pytest
+npx --yes vitest
+pnpm --filter web test
+make -C sub test
+mvn -pl mod test
+./gradlew test --tests Foo
+cargo +nightly test
+cargo fmt --check
+./x.test.sh
+bash -x x.test.sh
+WF
+eq "real forms mapped" "$(cmds)" "./gradlew test --tests Foo|./x.test.sh|bash -x x.test.sh|cargo +nightly test|cargo fmt --check|make test|mvn -pl mod test|npm -w pkg test|npx --yes vitest|pnpm --filter web test|pnpm -w test|python3.12 -m pytest|uv run python -m pytest"
+eq "make -C dir is the cwd" "$(printf '%s' "$OUTS" | jq -r '.entries[] | select(.command == "make test") | "\(.cwd) \(.globs | join(","))"')" "sub sub/**"
+eq "test script globs" "$(globs_of "./x.test.sh")" "**/*.sh"
+
 # ---- 6. usage ----
 bash "$S" --repo-path "$TMP/missing" >/dev/null 2>&1; eq "bad repo path" "$?" 2
 bash "$S" --nope >/dev/null 2>&1; eq "unknown option" "$?" 2

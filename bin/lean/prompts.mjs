@@ -85,6 +85,7 @@ If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"alread
  "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>"}],
  "decisions":[{"id":"K1","choice":"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>","justification":"<why, with file:line>","source":"doc|lint|precedent|spec"}]}
 Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. A requirement you can do in this change is "deliver". List every file you will change as a deliverable; tests are always allowed.
+A validate or repro command must not read a $TMPDIR file it does not create itself: each run gets a fresh TMPDIR.
 A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when there is none. Then stop.
 
 ${BLOCK_RULES}`;
@@ -93,7 +94,7 @@ ${BLOCK_RULES}`;
 /** Builder call 2, same session: implement the frozen contract. */
 export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
-  return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, and commit. Do not push or touch GitHub.
+  return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, run the repo's formatter on the files you changed, and commit. Do not push or touch GitHub.
 
 ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
@@ -145,6 +146,39 @@ export function hotspotPlanNote(facts) {
 export function hotspotBuildRule(facts) {
   if (!facts || facts.enabled === false || !(facts.file_lines > 0) || !(facts.growth_lines > 0)) return "";
   return `\n\nDon't grow a file over ${facts.file_lines} lines by more than ${facts.growth_lines} lines. Put new code next to it.`;
+}
+
+/** #4322: tests that enumerate the siblings of a module the issue names (bin/lean/enumerating.mjs), for the plan; "" when none. */
+export function enumeratingPlanNote(list) {
+  if (!Array.isArray(list) || !list.length) return "";
+  return `\n\nEnumerating tests (found by the engine): these tests list every member of a module or directory this issue names, so a new export, table, job, action, namespace or file there must join their list or CI goes red. List each one you will touch under Affected Files in ${INVESTIGATION_FILE}, and add a validate command that runs only those tests.\n${list.slice(0, 40).map((e) => `- ${e.module} -> ${e.test}:${e.line} (${e.why})`).join("\n")}`;
+}
+
+const NOT_MEMBER = `or, when the symbol is not a member of that list, record {"symbol":"<name>","test":"<test path>","why":"<why it is not a member>"} in ${RESULT_FILE} "not_members"`;
+
+/** #4322: the builder rule citing the plan's enumerating tests; "" when none. */
+export function enumeratingBuildRule(list) {
+  if (!Array.isArray(list) || !list.length) return "";
+  return `\n\nEnumerating tests: add every new exported symbol, table, job, action, namespace or file to each test listed below whose list enumerates its siblings, one test-list edit per new symbol, ${NOT_MEMBER}.\n${list.slice(0, 40).map((e) => `- ${e.module} -> ${e.test}:${e.line}`).join("\n")}`;
+}
+
+/** #4322: after implement, new symbols that tests enumerating their siblings do not name. */
+export function missingEntriesPrompt(missing, mode = "local") {
+  return `These tests enumerate the siblings of symbols or files this change adds, but do not name them (CI will fail on the stale list):\n${missing.slice(0, 30).map((m) => `- ${m.symbol} (${m.module}) -> ${m.test}:${m.line}`).join("\n")}\n\nFor each, add the symbol to that test's list, ${NOT_MEMBER}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+const RENUMBER_RULE = "Renumber the lane's files, never the base's: rename each with git mv to its new number, keep the SQL (or other migration source) byte-identical, regenerate the snapshot and journal with the repo's own migration generator (never hand- or text-merge the journal), keep journal entries strictly ordered, and update every reference to the old name.";
+
+/** #4322: lane-added sequence-numbered files whose number the base already uses, at hand-off or after a base-sync. */
+export function sequencePrompt(collisions, lane, mode = "local") {
+  const rows = collisions.slice(0, 30).map((c) => `- ${c.lane} -> number ${c.next}${c.base.length ? ` (base has ${c.base.join(", ")})` : " (moves to keep the order)"}`).join("\n");
+  return `origin/${lane} already uses sequence numbers this change adds:\n${rows}\n\nFirst bring the branch up to date with \`git merge --no-edit origin/${lane}\` if it is not (already fetched; never rebase or force). ${RENUMBER_RULE} ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** #4322: the base-sync conflict addition when a conflicted file is a numbered migration or a journal; "" otherwise. */
+export function sequenceSyncNote(files) {
+  const hit = (files ?? []).some((f) => /(?:^|\/)\d{3,}[_-][^/]*$|(?:^|\/)_journal\.json$/.test(String(f)));
+  return hit ? ` A numbered migration or its journal conflicts: do not text-merge it. ${RENUMBER_RULE}` : "";
 }
 
 export function contractCorrectionPrompt(problems) {
@@ -207,7 +241,7 @@ export const REVIEWER_SYSTEM = `You are an independent conformance reviewer of o
 
 You receive the GitHub issue with its comments, the frozen contract (requirements quoted from the issue, deliverables, preserve constraints, validate commands) with typed amendments, the builder's result with validation output, the changed files, the diff, and a row skeleton with one row per contract id and changed file. The engine computes the verdict from your rows; a reply without rows is rejected, so fill the skeleton rather than composing rows: fill EVERY row (set each empty status, evidence and validated_by, and each null deferral_ok; keep the ids and files as given):
 - issue_coverage: one row per requirement or acceptance criterion in the issue, quoted verbatim, saying whether the contract covers it, narrows it, or misses it. The skeleton lists the contract's quotes; add a row for any issue requirement the contract does not quote.
-- requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with repo-relative path:line evidence (e.g. src/app/route.ts:12, not route.ts:12) and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change.
+- requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with evidence as a backtick-quoted repo-relative path:line copied verbatim from the changed files, including (group), [slug] and [...slug] folders (e.g. \`apps/web/app/(console)/layout.tsx:12\`, not route.ts:12) and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change.
 - scope: one row per changed file, pre-filled with the engine's authorization: the deliverable id that authorizes it (deliverables may be directories or globs), "test", "incidental" (changelog, lockfile), or "none" with what it changes. Change it only if the diff shows the file does something its deliverable does not cover.
 - preserve: one row per preserve id: intact|violated|unverified, with path:line. The skeleton starts each at "unverified"; set intact only after checking it.
 - regressions: concrete breakages only, each with path:line.
@@ -257,7 +291,7 @@ export function reviewerPrompt({ issue, comments = [], contract, result, files =
  * for, with the exact problems and the reviewer's previous reply; no diff is re-sent (the worktree still holds the change).
  */
 export function reviewerRepairPrompt({ missing = [], problems = [], rows = null }) {
-  return `Your conformance review is incomplete. The engine keeps your other rows; answer ONLY for these ids or sections: ${missing.join(", ") || "(see the problems)"}.\n\n<previous_reply_problems>\nYour previous reply was rejected as incomplete. Fix exactly these:\n${problems.slice(0, 60).map((p) => `- ${String(p).slice(0, 300)}`).join("\n")}\n</previous_reply_problems>\n\n<previous_reply>\n${cap(JSON.stringify(rows ?? {}), 20000)}\n</previous_reply>\n\nRead the changed files in your worktree as needed. Output ONLY a JSON object in a json code fence with just the rows for those ids (requirements rows by id, preserve rows by id, scope rows by file, issue_coverage in full if it is listed) plus "verdict":"CONFORMS|NONCONFORMING" consistent with all rows. Evidence is repo-relative path:line.`;
+  return `Your conformance review is incomplete. The engine keeps your other rows; answer ONLY for these ids or sections: ${missing.join(", ") || "(see the problems)"}.\n\n<previous_reply_problems>\nYour previous reply was rejected as incomplete. Fix exactly these:\n${problems.slice(0, 60).map((p) => `- ${String(p).slice(0, 300)}`).join("\n")}\n</previous_reply_problems>\n\n<previous_reply>\n${cap(JSON.stringify(rows ?? {}), 20000)}\n</previous_reply>\n\nRead the changed files in your worktree as needed. Output ONLY a JSON object in a json code fence with just the rows for those ids (requirements rows by id, preserve rows by id, scope rows by file, issue_coverage in full if it is listed) plus "verdict":"CONFORMS|NONCONFORMING" consistent with all rows. Evidence is a backtick-quoted repo-relative path:line copied verbatim (e.g. \`apps/web/app/(console)/layout.tsx:12\`); for an evidence path reported as not existing, give the full repo-relative path of that file from the changed files or the repository.`;
 }
 
 /** Pre-filter (#4123): one read-only, single-turn check of an issue a cheap signal flagged as possibly already fixed. */

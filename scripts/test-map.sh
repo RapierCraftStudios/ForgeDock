@@ -27,6 +27,12 @@
 #     substitution, `${{ }}`, `$GITHUB_*`, redirect or `<(...)`/`>(...)`, a non-check make target, or a fixer form
 #     (`--fix`, `--write`, `-w`, `black`/`ruff format`/`gofmt`/`prettier` without their check flag) drops the step (forge#4316). Globs from the tool (python/go/shell/js, under the cwd), else the
 #     workflow's `paths:` filter, else `DIR/**` for a cwd; a workflow entry never gets a bare `**`.
+#     forge#4318: also dropped: any quote, fixer/snapshot flag families (`--fix-only`, `--add-noqa`, `--write=*`, `--w`,
+#     `--update*`, `--updateSnapshot`, `--snapshot-update`, `-u` on jest/vitest/package managers), write targets (`go -o`,
+#     `-exec`, `-toolexec`, `tsc --outDir/--outFile`, `pytest --junitxml/--basetemp/--html`, any absolute or `..` path) and
+#     tox/nox `dist`/`pypi`/`twine` envs in any spelling; `-w` is a workspace on npm/pnpm. Also mapped: `uv run python -m X`,
+#     `python3.N -m X`, `npx --yes X`, `pnpm --filter X`, `npm -w PKG`, `make -C DIR` (DIR becomes the cwd), `cargo +TC <sub>`,
+#     `cargo fmt --check`, gradle `--tests X` / maven `-pl X`, `./x.test.sh`, `bash -x x.test.sh`. `clean` goals stay unmapped.
 # Exit: 0 ok | 2 usage or bad repo path. bash 3.2 portable.
 set -uo pipefail
 
@@ -207,6 +213,8 @@ check_cmd() {
   esac
   c=${c%" && popd"}
   case "$c" in *';'*|*'|'*|*'&'*) return 1 ;; esac
+  # forge#4318: a quoted word hides a flag from the word checks below ("--fix"); a real check never needs quotes
+  case "$c" in *\"*|*\'*) return 1 ;; esac
   CK_CMD=$c
   set -f
   # shellcheck disable=SC2086 # split into words on purpose; set -f stops glob expansion
@@ -214,11 +222,24 @@ check_cmd() {
   set +f
   while [ $# -gt 0 ]; do case "$1" in [A-Za-z_]*=*) shift ;; *) break ;; esac; done
   case "${1:-} ${2:-}" in
-    "uv run"|"poetry run"|"pnpm exec"|"yarn exec"|"python -m"|"python3 -m"|"bundle exec") shift 2 ;;
-    "npx "*|"bunx "*) shift ;;
+    "uv run"|"poetry run") shift 2; case "${1:-} ${2:-}" in "python -m"|"python3 -m") shift 2 ;; esac ;; # forge#4318: uv run python -m X
+    "pnpm exec"|"yarn exec"|"python -m"|"python3 -m"|"bundle exec") shift 2 ;;
+    "python3."[0-9]" -m"|"python3."[0-9][0-9]" -m") shift 2 ;; # forge#4318: a versioned interpreter
+    "npx "*|"bunx "*) shift; case "${1:-}" in --yes|-y) shift ;; esac ;;
   esac
-  # forge#4316: a fixer rewrites the tree; only its read-only check form is a check
-  for w in "$@"; do case "$w" in --fix|--fix=*|--write|-w) return 1 ;; esac; done
+  tool=${1:-}
+  # forge#4316/#4318: a fixer, snapshot updater or write-target flag rewrites the tree or writes outside it; matched as a
+  # flag family (`--fix-only`, `--write=true`, `--w`), and `-w` only off a package manager (there it names a workspace)
+  for w in "$@"; do
+    case "$w" in
+      --fix|--fix[=-]*|--add-noqa*|--unsafe-fixes*|--write|--write[=-]*|--update|--update[=-]*|--updateSnapshot*|--snapshot-update*) return 1 ;;
+      --outDir*|--outdir*|--out-dir*|--outFile*|--declarationDir*|--tsBuildInfoFile*|--junitxml*|--junit-xml*|--basetemp*|--html*|-exec|-exec=*|-toolexec*) return 1 ;;
+      /*|*=/*|..|../*|*/..|*/../*|*=..|*=../*) return 1 ;; # an absolute or parent path is outside the checkout
+      -w|-w=*|--w|--w=*) case "$tool" in npm|pnpm|yarn|bun) ;; *) return 1 ;; esac ;;
+      -u) case "$tool" in jest|vitest|npm|pnpm|yarn|bun) return 1 ;; esac ;;
+      -o|-o=*) [ "$tool" = go ] && return 1 ;;
+    esac
+  done
   case "${1:-} ${2:-}" in
     "black "*|"ruff format") has_word --check "$@" || return 1 ;;
     "gofmt "*) has_word -l "$@" || has_word -d "$@" || return 1 ;;
@@ -227,21 +248,26 @@ check_cmd() {
   case "${1:-}" in
     npm|pnpm|yarn|bun)
       pm=$1; shift
-      case "$pm ${1:-}" in # forge#4315: pnpm -r test, npm --prefix DIR test
-        "pnpm -r"|"pnpm --recursive") shift ;;
-        "npm --prefix") [ $# -ge 2 ] && safe_dir "$2" || return 1; shift 2 ;;
+      case "$pm ${1:-}" in # forge#4315: pnpm -r test, npm --prefix DIR test; forge#4318: npm -w PKG, pnpm -w, pnpm --filter X
+        "pnpm -r"|"pnpm --recursive"|"pnpm -w"|"pnpm --workspace-root") shift ;;
+        "npm --prefix"|"npm -w"|"npm --workspace") [ $# -ge 2 ] && safe_dir "$2" || return 1; shift 2 ;;
+        "pnpm --filter"|"pnpm -F") [ $# -ge 2 ] || return 1; case "$2" in *[!A-Za-z0-9@._/-]*) return 1 ;; esac; shift 2 ;;
       esac
       [ "${1:-}" = test ] && return 0
       [ "${1:-}" = run ] && pkg_check_script "${2:-}" && return 0
       case "$pm" in yarn|pnpm) pkg_check_script "${1:-}" && return 0 ;; esac
       return 1 ;;
-    cargo) case "${2:-}" in test|clippy|check) return 0 ;; esac; return 1 ;;
+    cargo)
+      a=${2:-}; [ "${a#+}" != "$a" ] && a=${3:-} # forge#4318: cargo +TOOLCHAIN <sub>
+      case "$a" in test|clippy|check) return 0 ;; fmt) has_word --check "$@"; return ;; esac; return 1 ;;
     ./gradlew|gradlew|gradle|./mvnw|mvnw|mvn)
-      # every non-flag word is a check task/goal (`:mod:test` qualified for gradle); publish/deploy/install never pass
+      # every non-flag word is a check task/goal (`:mod:test` qualified for gradle); publish/deploy/install/clean never pass;
+      # forge#4318: the value of --tests / -pl / --projects / -P / -D is not a goal
       case "$1" in *mvn*) goals="test|verify|validate" ;; *) goals="test|check|lint" ;; esac
-      shift; nt=0
+      shift; nt=0; skipv=""
       for w in "$@"; do
-        case "$w" in -*) continue ;; esac
+        if [ -n "$skipv" ]; then skipv=""; continue; fi
+        case "$w" in --tests|-pl|--projects|-P|-D) skipv=1; continue ;; -*) continue ;; esac
         t=${w##*:}
         case "|$goals|" in *"|$t|"*) [ -n "$t" ] && nt=$((nt+1)) ;; *) return 1 ;; esac
       done
@@ -249,19 +275,39 @@ check_cmd() {
     rspec|unittest) return 0 ;;
     python|python3) [ "${2:-}" = manage.py ] && [ "${3:-}" = test ]; return ;;
     tox|nox)
+      # forge#4318: `--env=X`, `-eX` and comma lists are split, case-folded, and packaging envs (dist, pypi) are publish too
       shift; prev=""
       for w in "$@"; do
-        case "$prev" in -e|-s|--env|--session|--sessions) case ",$w," in *publish*|*release*|*deploy*|*upload*) return 1 ;; esac ;; esac
-        case "$w" in -e*|-s*) case "${w#-?}" in *publish*|*release*|*deploy*|*upload*) return 1 ;; esac ;; esac
+        v=""
+        case "$prev" in -e|-s|--env|--session|--sessions) v=$w ;; esac
+        case "$w" in --env=*|--session=*|--sessions=*) v=${w#*=} ;; --*) ;; -e?*|-s?*) v=${w#-?} ;; esac
+        if [ -n "$v" ]; then
+          v=$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')
+          case ",$v," in *publish*|*release*|*deploy*|*upload*|*pypi*|*twine*|*,dist,*) return 1 ;; esac
+        fi
         prev=$w
       done
       return 0 ;;
     deno) [ "${2:-}" = test ]; return ;;
-    bash|sh) case "${2:-}" in *.test.sh) safe_dir "$2"; return ;; esac; return 1 ;;
+    bash|sh)
+      # forge#4318: shell option words (-x, -eu) before the script are allowed
+      shift; while [ $# -gt 0 ]; do case "$1" in -[a-z]*) shift ;; *) break ;; esac; done
+      case "${1:-}" in *.test.sh) safe_dir "$1"; return ;; esac; return 1 ;;
+    ./*.test.sh) safe_dir "${1#./}"; return ;;
     make)
       # forge#4316: every target must be a check (`make test deploy` is dropped); VAR=value and flags are not targets
-      shift; nt=0
-      for w in "$@"; do case "$w" in -*|*=*) continue ;; esac; make_check_target "$w" || return 1; nt=$((nt+1)); done
+      # forge#4318: `make -C DIR` runs in DIR: it becomes the entry cwd, not a target
+      shift; nt=0; prev=""; mdir=""
+      for w in "$@"; do
+        if [ "$prev" = -C ]; then mdir=$w; prev=$w; continue; fi
+        prev=$w
+        case "$w" in -*|*=*) continue ;; esac; make_check_target "$w" || return 1; nt=$((nt+1))
+      done
+      if [ -n "$mdir" ]; then
+        safe_dir "$mdir" || return 1
+        CK_CMD=${CK_CMD/ -C $mdir/}; mdir=${mdir%/}
+        if [ "$mdir" != . ]; then if [ "$CK_CWD" = . ]; then CK_CWD=$mdir; else CK_CWD="$CK_CWD/$mdir"; fi; fi
+      fi
       [ "$nt" -gt 0 ]; return ;;
     go) case "${2:-}" in test|vet|build) return 0 ;; esac; return 1 ;;
     node) [ "${2:-}" = --test ]; return ;;
@@ -280,7 +326,7 @@ tool_globs() {
     *\ deno\ *|*\ bun\ *|*\ bunx\ *) ext_globs . "$JS_EXT"; return ;;
     *[\ /]ruff\ *|*[\ /]flake8\ *|*[\ /]pylint\ *|*[\ /]mypy\ *|*[\ /]black\ *|*[\ /]pytest\ *) printf '**/*.py'; return ;;
     *[\ /]golangci-lint\ *|*[\ /]gofmt\ *|*[\ /]staticcheck\ *|*\ go\ *) printf '**/*.go'; return ;;
-    *[\ /]shellcheck\ *|*\ bash\ *.sh\ *|*\ sh\ *.sh\ *) printf '**/*.sh'; return ;;
+    *[\ /]shellcheck\ *|*\ bash\ *.sh\ *|*\ sh\ *.sh\ *|*.test.sh\ *) printf '**/*.sh'; return ;;
     *[\ /]eslint\ *|*[\ /]tsc\ *|*[\ /]prettier\ *|*[\ /]vitest\ *|*[\ /]jest\ *|*\ node\ --test*|*\ npm\ *|*\ pnpm\ *|*\ yarn\ *|*\ npx\ *) ext_globs . "$JS_EXT"; return ;;
   esac
   printf ''
