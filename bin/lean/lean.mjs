@@ -430,18 +430,25 @@ export async function runCore(o) {
     if (!io.host?.cores) return null;
     try { return String(hostParallelism({ cores: io.host.cores(), lanes: io.host.activeLanes?.() })); } catch { return null; }
   }
+  /**
+   * #4325: the lane env every engine-run command shares with the builder: shared package-manager stores (#4220), the run
+   * TMPDIR (#4104), FORGE_HOST_PARALLELISM (#4182) and the pinned toolchain (#4163); the engine's own keys win over the stores.
+   */
+  function laneEnv() {
+    let deps = {};
+    try { deps = io.deps?.env?.() ?? {}; } catch { deps = {}; }
+    const par = verifyParallelism();
+    return { ...deps, ...(runTmp ? { TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), ...(toolchain?.env ?? {}) };
+  }
   /** Runner call with the per-run TMPDIR and FORGE_HOST_PARALLELISM; a usage limit pauses and resumes the same step, or defers past the cap (#4101). */
   async function callRunner(args) {
     let pauses = 0;
     for (;;) {
       // #4181: every Docker resource the builder creates carries the lane's ownership labels (same batch/lane as the ledger).
       const labels = dockerLabels({ batch: o.batchId ?? "adhoc", lane: `lean-${issue}`, issue, expires: now() + LEDGER_TTL_MS }).join(" ");
-      const par = verifyParallelism(); // #4182
-      let deps = {}; // #4220: shared package-manager stores; the engine's own keys win
-      try { deps = io.deps?.env?.() ?? {}; } catch { deps = {}; }
       // #4169: heavy shims first on PATH; the phase/issue/priority label each heavy step's slot and wait record.
       const heavy = heavyEnv ? { ...heavyEnv, FORGE_LANE_PHASE: args.role === "builder" ? stage : String(args.role ?? "step"), FORGE_LANE_ISSUE: String(issue), FORGE_LANE_PRIORITY: String(lanePriority()) } : {};
-      try { return await io.runner({ ...args, env: { ...deps, FORGE_DOCKER_LABELS: labels, ...(runTmp ? { TMPDIR: runTmp, CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(par ? { FORGE_HOST_PARALLELISM: par } : {}), ...(toolchain?.env ?? {}), ...heavy } }); }
+      try { return await io.runner({ ...args, env: { ...laneEnv(), FORGE_DOCKER_LABELS: labels, ...(runTmp ? { CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}), ...heavy } }); }
       catch (e) {
         const epoch = Number.isFinite(e?.resetAtEpochMs) ? e.resetAtEpochMs : null;
         if (!(e?.usageLimit === true || epoch !== null)) throw e;
@@ -836,7 +843,7 @@ export async function runCore(o) {
     if (typeof envSetup === "string" && envSetup.trim()) {
       let r;
       if (!io.runSetup) r = { exit: 1, stderr: "no setup effect is configured" };
-      else { try { r = await heavyStep("setup", () => io.runSetup({ cwd: wt, command: envSetup, env: { ...(runTmp ? { TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}) } })); } catch (e) { r = { exit: 1, stderr: String(e?.message ?? e) }; } }
+      else { try { r = await heavyStep("setup", () => io.runSetup({ cwd: wt, command: envSetup, env: laneEnv() })); } catch (e) { r = { exit: 1, stderr: String(e?.message ?? e) }; } }
       ev({ event: "ENV_SETUP", exit: r?.exit ?? 1 });
       if (r?.exit !== 0) {
         const tail = String(r?.stderr || r?.stdout || "").trim().slice(-800);
@@ -870,7 +877,7 @@ export async function runCore(o) {
         if (reproOn() && t === "none" && !reproNoted) { reproNoted = true; T.decisions.push(`repro_test: none (${String(c.repro_test_reason ?? "").slice(0, 200)})`); }
         return null;
       }
-      const rg = await heavyStep("precheck", () => io.redGreen({ cwd: wt, base, command: String(t.command) })).catch(() => null);
+      const rg = await heavyStep("precheck", () => io.redGreen({ cwd: wt, base, command: String(t.command), env: laneEnv() })).catch(() => null);
       const words = rg?.base && rg?.head ? rg : { base: "UNRUNNABLE", head: "UNRUNNABLE" };
       ev({ event: "REPRO_RED_GREEN", ...words });
       T.decisions.push(`repro_test ${t.path ?? ""}${t.id ? ` ${t.id}` : ""}: BASE=${words.base} HEAD=${words.head}`);
@@ -1145,7 +1152,7 @@ export async function runCore(o) {
         const maxMin = Number(o.precheck?.maxMinutes), totalMs = (maxMin > 0 ? maxMin * 60 : Number(vcfg.precheckTotalSeconds) || 600) * 1000;
         const parallelism = Number(verifyParallelism()) || 1;
         const round$ = await heavyStep("precheck", () => runChecks({ commands: precheckCommands, parallelism, budgetMs: totalMs, perCommandMs: vcfg.precheckTimeoutSeconds * 1000, now,
-          run: ({ command, timeoutMs }) => io.runCommand({ command, cwd: wt, timeoutMs }) }));
+          run: ({ command, timeoutMs }) => io.runCommand({ command, cwd: wt, timeoutMs, env: laneEnv() }) }));
         const { results, deferred } = round$;
         precheckMs += round$.ms; precheckDeferred += deferred.length;
         if (deferred.length) T.anomalies.push(`deferred-to-ci: pre-PR check budget ${totalMs / 1000} s reached; left to CI: ${deferred.map((c) => `\`${c}\``).join(", ")}`);
@@ -1364,7 +1371,7 @@ export async function runCore(o) {
     async function rerunFailedValidates(contract) {
       if (!io.runCommand) return null;
       const runs = Array.isArray(result?.validation) ? result.validation : [], out = {};
-      const env = { ...(runTmp ? { TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}) };
+      const env = laneEnv();
       for (const v of contract.validate ?? []) {
         const r = runs.find((x) => x?.id === v.id);
         if (!r || r.exit === undefined || r.exit === 0) continue;

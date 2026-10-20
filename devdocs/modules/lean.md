@@ -782,3 +782,17 @@ existence check is unchanged: a missing path is still `review.incomplete`. `revi
 targeted re-ask (at most 3 reviewer runs) only when the repaired reply is incomplete solely by unresolved evidence paths
 (`evidencePathOnly`); other incomplete replies keep 2 runs. Reviewer and repair prompts ask for backtick-quoted, verbatim
 repo-relative `path:line`.
+
+## Entry 2026-10-20 — Engine-run commands get the builder's lane env; no $TMPDIR inputs at freeze (#4325)
+
+`runCore` `laneEnv()` builds one env for every command the engine runs itself: `io.deps.env()` stores, then the run
+`TMPDIR`, `FORGE_HOST_PARALLELISM` and `toolchain.env` (engine keys win over the stores). `io.redGreen` (`effects.mjs`,
+new `env` merged over `process.env`), the declared check commands (`io.runCommand`, previously no env),
+`rerunFailedValidates` and env.setup all use it. Before this, red-green ran with the daemon env (no run TMPDIR), so a
+repro command reading a builder-written `$TMPDIR` file reported `BASE=SKIPPED HEAD=FAILED`. `callRunner` builds its env
+from `laneEnv()` plus its runner-only keys (`FORGE_DOCKER_LABELS`, `CLAUDE_CODE_TMPDIR`, heavy shims) and gives the same values as before.
+`validateContract` adds one problem per `$TMPDIR/<name>` that a validate or `repro_test` command reads before creating it
+(`conformance.mjs` `tmpdirInputs`: `>`/`>>`, `tee`, `touch|mkdir|mktemp`, last argument of `cp|mv|ln|install`, output-like
+options and `X=` assignments count as creating). It goes through the existing contract-correction resume, because the run
+TMPDIR is per run and a rerun never has the file. The plan prompt says so in one line. Cost: 0 LLM calls; one correction
+resume only for a contract that would otherwise fail at precheck.
