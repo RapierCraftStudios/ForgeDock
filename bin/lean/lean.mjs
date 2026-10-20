@@ -48,6 +48,8 @@ const UNUSABLE_REVIEW_CODES = { "review.unparseable": OUTCOME_CODES.REVIEW_NO_VE
 export const REGISTER_MARKER = "FORGE:WORK-ON"; // alias marker carried by the FORGE:TRAJECTORY comment
 const num = (v) => (Number.isFinite(v) ? v : null);
 export const MAX_SUBISSUES = 8;
+/** #4266: required checks with no rollup entry this long into a CI wait on a MERGEABLE PR log CI_NOT_STARTED (once per wait). */
+export const CI_NOT_STARTED_GRACE_MS = 10 * 60 * 1000;
 /** 12-hex sha256 of the canonical contract JSON text (renderContract embeds the same text). */
 export const contractHash = (text) => createHash("sha256").update(String(text)).digest("hex").slice(0, 12);
 
@@ -1280,6 +1282,13 @@ export async function runCore(o) {
       try { j = JSON.parse(String(await ghc(["pr", "view", String(pr), "-R", repo, "--json", "mergeable,mergeStateStatus"])) || "{}"); } catch { return false; }
       return String(j.mergeable ?? "").toUpperCase() === "MERGEABLE" && String(j.mergeStateStatus ?? "").toUpperCase() === "BLOCKED";
     };
+    /** #4266: one mergeability read inside the CI wait: "conflict", "mergeable", or null (unknown / unreadable / other). */
+    const waitMergeState = async () => {
+      let j;
+      try { j = JSON.parse(String(await ghc(["pr", "view", String(pr), "-R", repo, "--json", "mergeable,mergeStateStatus"])) || "{}"); } catch { return null; }
+      const m = String(j.mergeable ?? "").toUpperCase(), st = String(j.mergeStateStatus ?? "").toUpperCase();
+      return m === "CONFLICTING" || st === "DIRTY" ? "conflict" : m === "MERGEABLE" ? "mergeable" : null;
+    };
     let blockStartedAt = null, blockPollIndex = 0;
     const conflictFiles = async () => (await gitOut(["diff", "--name-only", "--diff-filter=U"])).split("\n").map((x) => x.trim()).filter(Boolean);
     const unresolved = async () => (await conflictFiles()).length > 0 || (await gitOut(["grep", "-n", "-e", "^<<<<<<< ", "-e", "^>>>>>>> "])) !== ""
@@ -1424,18 +1433,18 @@ export async function runCore(o) {
         T.merge = [policyText, "merged right after review"];
       } else {
         let startedAt = now();
-        let pollIndex = 0, gateHead = null;
+        let pollIndex = 0, gateHead = null, conflicted = false, notStartedLogged = false;
         for (;;) {
           await renew();
+          let states = [];
+          // a rollup of another head (the PR before a fix push lands) counts as pending, never as this head's result
+          const current = (x) => !x.head || !localHead || String(x.head).startsWith(localHead) || localHead.startsWith(String(x.head));
           if (policy === "all") {
             const w = await io.waitCiGreen(pr, repo, 0).catch(() => ({ rc: 2, text: "" }));
             if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; break; }
             if (w.rc === 1) return await needsHuman(`Remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`, OUTCOME_CODES.CI_RED);
           } else {
-            let states = [];
             try { states = (await io.checkStates(pr)) ?? []; } catch { states = []; }
-            // a rollup of another head (the PR before a fix push lands) counts as pending, never as this head's result
-            const current = (x) => !x.head || !localHead || String(x.head).startsWith(localHead) || localHead.startsWith(String(x.head));
             const check = (n) => states.find((x) => x.name === n && current(x));
             const st = (n) => check(n)?.state ?? "pending";
             const failed = required.filter((n) => st(n) === "failure");
@@ -1447,6 +1456,16 @@ export async function runCore(o) {
             }
             if (required.every((n) => st(n) === "success")) break;
           }
+          // #4266: a PR that turns conflicting gets no merge ref, so its pull_request workflows never start: base-sync now.
+          const ms = await waitMergeState();
+          if (ms === "conflict") { conflicted = true; break; }
+          if (policy !== "all" && ms === "mergeable" && !notStartedLogged && now() - startedAt >= CI_NOT_STARTED_GRACE_MS
+            && required.every((n) => !states.some((x) => x.name === n && current(x)))) {
+            notStartedLogged = true;
+            const minutes = Math.round((now() - startedAt) / 60000);
+            ev({ event: "CI_NOT_STARTED", pr, checks: required, minutes });
+            T.anomalies.push(`Required check(s) ${required.join(", ")} not started on PR #${pr} after ${minutes} min (missing workflow trigger?)`);
+          }
           if (now() - startedAt >= ciMaxMinutes * 60000) {
             // Slow CI is never a needs-human: leave the PR open and resumable.
             ev({ event: "CI_PENDING_WAIT", state: "end", pr, result: "timeout" });
@@ -1455,6 +1474,10 @@ export async function runCore(o) {
           }
           onProgress({ event: "phase_paused", phase: "merge", detail: `CI pending on PR #${pr}` });
           await sleep(ciPollDelayMs(pollIndex++, random));
+        }
+        if (conflicted) {
+          const r = await baseSync("PR became conflicting while waiting for CI"); if (r) return r;
+          continue; // wait again on the synced head with a fresh budget
         }
         if (gateHead && !(localHead.startsWith(gateHead) || gateHead.startsWith(localHead))) {
           return await needsHuman(`CI passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`, OUTCOME_CODES.MERGE_HEAD_MISMATCH);
