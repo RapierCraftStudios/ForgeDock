@@ -147,7 +147,7 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
   - resumes the open PR: merges the base, fixes the failed required checks from their logs, and pushes new commits only;
   - re-queues the issue, keeping its dependents queued in the same batch.
 
-  Report what was recovered afterwards. A recovery that does not merge stays `needs-human` with its evidence, and there
+  Report what was recovered afterwards. A failed recovery stays `needs-human` with its evidence, exactly once (failed = `needs-human`, `ci-pending`, or a final `engine-error`/`deferred`; `invalid`, `decomposed` and `dependency-*` are not failures and never re-label), and there
   is no second attempt beyond `max_attempts`.
 - `needs-human` with a **human code** (`builder.blocked`: product-decision, spend, credentials, promotion, customer): an
   external action agents cannot take, or a product decision too critical for agents. It is never auto-recovered. Read

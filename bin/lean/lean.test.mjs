@@ -741,12 +741,11 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.equal(r2.code, "contract.invalid"); assert.equal(r2.issueEdited, undefined); assert.equal(r2.recovery, undefined);
   });
 
-  it("a recovery lane that ends anything but merged leaves the issue labelled needs-human with a recovery-evidence comment (#4297)", async () => {
+  it("a recovery lane puts needs-human back once, with evidence, only on a final failure (ci-pending / needs-human); never on invalid, decomposed, merged, deferred, engine-error (#4297, SPEC-7/8)", async () => {
     const add = (w) => w.edits.filter((e) => e.join(" ") === "issue edit 7 -R o/r --add-label needs-human").length;
     const nh = (w) => w.comments.filter((c) => c.startsWith("<!-- FORGE:NEEDS_HUMAN -->"));
     const ends = {
       "ci-pending": [{ waits: Array(500).fill({ rc: 2, text: "" }) }, { ciMaxMinutes: 10, mergeWait: "all" }],
-      invalid: [{ changed: [], result: { status: "invalid", summary: "not a bug", evidence: ["src/foo.js:3 already guards null"], tests: [] } }, {}],
       "needs-human": [{ waits: [{ rc: 1, text: "lint failed" }] }, { mergeWait: "all" }],
     };
     for (const [reason, [wo, ro]] of Object.entries(ends)) {
@@ -755,6 +754,31 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
       assert.equal(add(w), 1, `${reason}: needs-human re-applied once`);
       assert.equal(nh(w).length, 1, reason);
       assert.match(nh(w)[0], new RegExp(`Recovery pass for \`ci\\.red\` \\(attempt 1\\) did not merge: it ended \`${reason}\``), reason);
+    }
+    // SPEC-7/8: invalid and decomposed are legitimate endings; deferred/engine-error/dependency-open may be requeued by the runner.
+    // The lane itself never relabels them.
+    const limitErr = Object.assign(new Error("claude CLI exited with status 1. You've hit your session limit"), { code: "CLI_BACKEND_FAILED", usageLimit: true, resetAtEpochMs: 3 * 3600 * 1000 });
+    const failBuilder = (w, err) => { const orig = w.io.runner; let n = 0; w.io.runner = async (c) => { if (c.role === "builder" && n++ < 1) throw err; return orig(c); }; return w; };
+    const withDeps = (w, deps) => {
+      const gh = w.io.gh;
+      w.io.gh = async (x) => {
+        if (x[0] === "issue" && x[1] === "view" && deps[x[2]]) return JSON.stringify(deps[x[2]]);
+        if (x[0] === "issue" && x[1] === "create") return "https://github.com/o/r/issues/201\n";
+        return gh(x);
+      };
+      return w;
+    };
+    const quiet = {
+      invalid: () => world({ changed: [], result: { status: "invalid", summary: "not a bug", evidence: ["src/foo.js:3 already guards null"], tests: [] } }),
+      decomposed: () => withDeps(world({ changed: [], result: { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A" }] } } }), {}),
+      "dependency-open": () => withDeps(world({ changed: [], result: { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: ["#3"] } } }), { 3: { state: "OPEN", labels: [] } }),
+      "engine-error": () => failBuilder(world(), new Error("boom")),
+      deferred: () => failBuilder(world(), limitErr),
+    };
+    for (const [reason, mk] of Object.entries(quiet)) {
+      const w = mk();
+      assert.equal((await run(w, { recover: { code: "ci.red", attempt: 1 } })).terminalReason, reason);
+      assert.equal(add(w), 0, `${reason}: no needs-human relabel`); assert.equal(nh(w).length, 0, `${reason}: no FORGE:NEEDS_HUMAN`);
     }
     const m = world();
     assert.equal((await run(m, { recover: { code: "ci.red", attempt: 1 } })).terminalReason, "merged");
