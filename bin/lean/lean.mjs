@@ -129,8 +129,9 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {number} [o.sparseMaxKb]   forge.yaml env.sparse_max_kb: tracked blobs >= this many KB stay out of the lane checkout (default 1024; 0 = off, #4221)
  * @param {object} [o.placement]     {where: local|remote, reason, mode}: the dispatcher's lane placement (#4256), kept in FORGE:STATE
  * @param {object} [o.contextPack]   {mode: shadow|on|off, sources, bytes, days}: forge.yaml engine.context_pack* (#4275, default shadow)
- * @param {object} [o.recover]       {code, attempt}: a batch recovery lane (#4267) for a mechanical needs-human; removes the label,
- *                                   posts FORGE:DECISION and resumes the open PR on the rerun path with a recovery note
+ * @param {object} [o.recover]       {code, attempt, final}: a batch recovery lane (#4267) for a mechanical needs-human; removes the label,
+ *                                   posts FORGE:DECISION and resumes the open PR on the rerun path with a recovery note. `final`
+ *                                   (default true) is false when the runner may launch another attempt: the lane then never relabels (#4302)
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
@@ -143,8 +144,8 @@ export async function runCore(o) {
   const riskPaths = Array.isArray(o.reviewTrigger?.riskPaths) ? o.reviewTrigger.riskPaths : [];
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
-  // #4267: a batch recovery lane for a mechanical needs-human ({code, attempt}).
-  const recover = o.recover && typeof o.recover.code === "string" ? { code: o.recover.code, attempt: Number.isInteger(o.recover.attempt) ? o.recover.attempt : 1 } : null;
+  // #4267: a batch recovery lane for a mechanical needs-human ({code, attempt, final}); #4302: only a final attempt relabels.
+  const recover = o.recover && typeof o.recover.code === "string" ? { code: o.recover.code, attempt: Number.isInteger(o.recover.attempt) ? o.recover.attempt : 1, final: o.recover.final !== false } : null;
   const branch = `feat/issue-${issue}-lean`;
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
@@ -322,8 +323,9 @@ export async function runCore(o) {
     await emit(term);
     // #4297: only a final failure the runner never requeues puts needs-human back (needsHuman() relabels on its own path). invalid,
     // decomposed and dependency-* are legitimate non-failure endings; deferred/engine-error may be requeued, so the batch runner
-    // (orchestrate settle, relabelNeedsHuman) relabels those once they are final.
-    if (recoverUnlabelled && reason === "ci-pending") {
+    // (orchestrate settle, relabelNeedsHuman) relabels those once they are final. #4302: a non-final attempt never relabels; the runner
+    // either launches the next attempt or relabels in settle.
+    if (recoverUnlabelled && recover.final && reason === "ci-pending") {
       try {
         await post("FORGE:NEEDS_HUMAN", `## Needs human\n${recoveryEvidence(reason, code, detail)}\n\n_${usageLine()}_`);
         await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
@@ -347,7 +349,7 @@ export async function runCore(o) {
   /** #4297: what a recovery lane that did not merge tried and how it ended; the issue stays needs-human with this. */
   const recoveryEvidence = (reason, code, detail) => `Recovery pass for \`${recover.code}\` (attempt ${recover.attempt}) did not merge: it ended \`${reason}\`${code ? ` (\`${code}\`)` : ""}${String(detail ?? "").trim() ? `: ${String(detail).trim().split("\n")[0].slice(0, 300)}` : ""}. The issue stays \`needs-human\`.`;
   async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR, extra = {}) {
-    try {
+    if (!recover || recover.final) try {
       await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${recoverUnlabelled ? `\n\n${recoveryEvidence("needs-human", code, "")}` : ""}\n\n_${usageLine()}_`);
       await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
     } catch { /* best effort */ }

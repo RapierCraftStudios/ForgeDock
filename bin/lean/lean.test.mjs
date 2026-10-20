@@ -787,6 +787,24 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.equal((await run(plain, ends["ci-pending"][1])).terminalReason, "ci-pending");
     assert.equal(add(plain), 0, "no recovery: a ci-pending run is not labelled");
   });
+
+  it("#4302: a non-final recovery attempt (recover.final false) never relabels needs-human; final true or absent relabels once", async () => {
+    const add = (w) => w.edits.filter((e) => e.join(" ") === "issue edit 7 -R o/r --add-label needs-human").length;
+    const nh = (w) => w.comments.filter((c) => c.startsWith("<!-- FORGE:NEEDS_HUMAN -->")).length;
+    const ends = {
+      "ci-pending": [{ waits: Array(500).fill({ rc: 2, text: "" }) }, { ciMaxMinutes: 10, mergeWait: "all" }],
+      "needs-human": [{ waits: [{ rc: 1, text: "lint failed" }] }, { mergeWait: "all" }],
+    };
+    for (const [reason, [wo, ro]] of Object.entries(ends)) {
+      for (const [final, want] of [[false, 0], [true, 1], [undefined, 1]]) {
+        const w = world(wo);
+        const r = await run(w, { recover: { code: "ci.red", attempt: 1, ...(final === undefined ? {} : { final }) }, ...ro });
+        assert.equal(r.terminalReason, reason);
+        assert.equal(add(w), want, `${reason} final=${final}: label`); assert.equal(nh(w), want, `${reason} final=${final}: comment`);
+        if (reason === "needs-human") assert.equal(r.recovery, true);
+      }
+    }
+  });
 });
 
 describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness.sh)", () => {
