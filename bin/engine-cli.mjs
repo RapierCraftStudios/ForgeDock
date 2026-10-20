@@ -637,7 +637,7 @@ export function lastLocalRun(dir) {
  */
 export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--path core|full] [--recover <code> [--recover-attempt n]] [--retry] [--wait-lease]");
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--path core|full] [--recover <code> [--recover-attempt n] [--recover-nonfinal]] [--retry] [--wait-lease]");
   assertOpenCodeNativeRuntime({ operation: "forgedock run-issue" });
   const lane = flag(argv, "--lane");
   if (argv.includes("--lane") && (!lane || lane.startsWith("--"))) throw new Error("--lane requires a value: staging or milestone/<slug>");
@@ -667,10 +667,11 @@ export async function runFromCli(argv, deps = {}) {
   const placementWhere = flag(argv, "--placement");
   const placement = placementWhere === "local" || placementWhere === "remote"
     ? { where: placementWhere, reason: String(flag(argv, "--placement-reason") ?? "").slice(0, 300), mode: readExecution()?.mode ?? "local" } : null;
-  // #4267: a batch recovery lane for a mechanical needs-human (`--recover <code> [--recover-attempt n]`).
+  // #4267: a batch recovery lane for a mechanical needs-human (`--recover <code> [--recover-attempt n]`); #4302: `--recover-nonfinal`
+  // marks an attempt the runner may follow with another, so the lane leaves the needs-human relabel to the runner.
   const recoverCode = flag(argv, "--recover");
   const recoverAttempt = Number(flag(argv, "--recover-attempt"));
-  const recover = recoverCode && !recoverCode.startsWith("--") ? { code: recoverCode, attempt: Number.isInteger(recoverAttempt) && recoverAttempt > 0 ? recoverAttempt : 1 } : null;
+  const recover = recoverCode && !recoverCode.startsWith("--") ? { code: recoverCode, attempt: Number.isInteger(recoverAttempt) && recoverAttempt > 0 ? recoverAttempt : 1, final: !argv.includes("--recover-nonfinal") } : null;
   const report = (r) => { if (resultFile) (deps.writeAtomic ?? writeResultAtomic)(resultFile, JSON.stringify(r) + "\n"); return r; };
   try {
     await assertRepoMatchesCwd(io, repo, { sleep: deps.sleep });
@@ -1098,7 +1099,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // #4267: a recovery lane (ctx.recover) reaches it as --recover/--recover-attempt.
     const placementOf = new Map(), recoverOf = new Map();
     const laneArgs = (n, ln) => { const pl = placementOf.get(n), rc = recoverOf.get(n); return ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : []),
-      ...(pl ? ["--placement", pl.where, "--placement-reason", pl.reason ?? ""] : []), ...(rc ? ["--recover", rc.code, "--recover-attempt", String(rc.attempt ?? 1)] : [])]; };
+      ...(pl ? ["--placement", pl.where, "--placement-reason", pl.reason ?? ""] : []), ...(rc ? ["--recover", rc.code, "--recover-attempt", String(rc.attempt ?? 1), ...(rc.final === false ? ["--recover-nonfinal"] : [])] : [])]; };
     const withPlacement = (l) => ({ runOne: (n, ln, ctx = {}) => {
       if (ctx.placement) placementOf.set(n, ctx.placement); else placementOf.delete(n);
       if (ctx.recover) recoverOf.set(n, ctx.recover); else recoverOf.delete(n);
@@ -1153,6 +1154,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     }
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
+  // #4304: recovery lanes run on the core path only (run-issue throws on --recover with full), so a full-path repo gets none.
+  const recoveryOn = Boolean(orch.recovery?.maxAttempts) && (deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd)) !== "full";
+  if (orch.recovery?.maxAttempts && !recoveryOn) sink.line("recovery: off (engine.path is full; recovery lanes run on the core path only)");
   // #4190: usage-limit holds live in the host store keyed by the account the next lane would use.
   const limitsMod = await import("./lean/limits.mjs");
   const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile(env));
@@ -1231,7 +1235,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
     ...(remote ? { remote } : {}),
     // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
-    ...(orch.recovery?.maxAttempts ? { recovery: orch.recovery } : {}),
+    ...(recoveryOn ? { recovery: orch.recovery } : {}),
     decide: deps.decide ?? (async (d) => {
       if (d?.issue == null) { sink.line(`decision: ${d?.what} (why: ${d?.why}; alternative: ${d?.alternative})`); return; }
       const body = `<!-- FORGE:DECISION -->\n## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;

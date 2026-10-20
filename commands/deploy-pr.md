@@ -357,8 +357,9 @@ else
   # Check current CI status
   # Fail closed: valid fields only (`status`/`conclusion` do not exist on gh pr checks --json; the
   # old query errored and defaulted to 0 = "no failures"). An unreadable result counts as failing.
+  # forgedock/verify (the lean engine's report-only gate summary) is not a code failure: ignored, as wait-ci-green.sh does.
   CURRENT_CI_STATUS=$(gh pr checks "$PR_NUMBER" $GH_FLAG --json name,bucket \
-    --jq '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null || echo "1")
+    --jq '[.[] | select(.name != "forgedock/verify") | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null || echo "1")
 
   if [ "$CURRENT_CI_STATUS" -eq 0 ]; then
     echo "CI gate: PASSED (no failing checks)"
@@ -378,9 +379,9 @@ else
 
       CI_FIXES=$((CI_FIXES + 1))
 
-      # Re-check CI status after fix attempt
-      FAILING_AFTER=$(gh pr checks "$PR_NUMBER" $GH_FLAG --json name,status,conclusion \
-        --jq '[.[] | select(.conclusion == "failure")] | length' 2>/dev/null || echo "0")
+      # Re-check CI status after fix attempt (same fail-closed query as above)
+      FAILING_AFTER=$(gh pr checks "$PR_NUMBER" $GH_FLAG --json name,bucket \
+        --jq '[.[] | select(.name != "forgedock/verify") | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null || echo "1")
 
       if [ "$FAILING_AFTER" -eq 0 ]; then
         echo "CI gate: PASSED after $CI_ITER iteration(s)"

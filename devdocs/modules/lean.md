@@ -646,7 +646,8 @@ narrows them. Rationale: `devdocs/decisions/4199-incremental-not-restructure.md`
 with `issueEdited`, `ci-pending` on a conflicting PR → `base.conflict`), `human`
 (`builder.blocked`: credentials, spend, promotion, customer, product-decision) or
 `terminal`. `orchestrate()` option `recovery: {maxAttempts}` (forge.yaml
-`orchestration.recovery.max_attempts`, default 1, 0 = off; absent = old behaviour)
+`orchestration.recovery.max_attempts`, default 1, 0 = off; absent = old behaviour;
+`orchestrateFromCli` leaves it off when `engine.path` is `full`, #4304, since recovery lanes run on the core path only)
 requeues a recoverable row as a recovery lane (`ctx.recover = {code, attempt}`, state
 keys `recoveries`/`recovering`) under the usual admission, so dependents stay queued.
 A merged recovery row carries `recovered: <code>`; any other end is final with
@@ -679,8 +680,9 @@ batch runner (`orchestrate.mjs` settle, injected `relabelNeedsHuman`, wired in `
 
 One comment-strip helper: `noComments` lives in `render.mjs` (re-exported by `context.mjs`) and `prefilter.mjs`
 `namedPaths` uses it too, so no one-pass `<!--…-->` regex is left on hash or path input. `context.mjs` `REPO_FACT_FILES`
-reuses `testmap.mjs` `REPO_FACTS_FILE`/`TEST_MAP_FILE`. Context-pack cache: the key also hashes the issue's `updatedAt`
-and prior-attempt count (`contextPackFor` `stamp`); a gather with source `errors` is not cached; the write goes through
+reuses `testmap.mjs` `REPO_FACTS_FILE`/`TEST_MAP_FILE`. Context-pack cache: the key also hashes the issue's scope-text hash
+(`stamp.scope` = `contractHash(scopeText(...))`, not `updatedAt`, which the lane's own posts bump, #4304) and
+prior-attempt count (`contextPackFor` `stamp`); the recovery row counts the pre-filter cost once (#4304); a gather with source `errors` is not cached; the write goes through
 `<file>.<pid>.tmp` + `io.fs.rename`; the issue's other `context-<N>-*.json` files are pruned (`io.fs.list`/`rm`).
 `lean.mjs` `RECOVER_HOW` is a module export; `recovery.test.mjs` keeps its keys equal to `RECOVERABLE_CODES`.
 `orchestrate.mjs`: a settled recovery row sums the earlier attempts' `cost_usd` and `minutes` (persisted in the
@@ -692,3 +694,13 @@ rejects `--recover` with `--path full`. `conformance.mjs` `movingBaseDiff` reads
 `test-map.sh` separates globs with `\037`; it and `repo-facts.sh` list files with `-z` and `core.quotepath=off`, and
 `grep -q` reads here-strings (no SIGPIPE false negative under pipefail). Cost: 0 LLM calls.
 Rationale: `devdocs/decisions/4298-staging-low-followups.md`.
+
+## Entry 2026-10-20 — Recovery relabel only on the final attempt (#4302)
+
+`orchestrate.mjs` passes `ctx.recover = {code, attempt, final}` with `final = attempt >= recovery.maxAttempts`;
+`engine-cli.mjs` carries it to a subprocess lane as `--recover-nonfinal` (absent = final, so a manual
+`run-issue --recover` and `max_attempts: 1` are unchanged). `runCore` normalises `recover.final` (default true); a
+non-final recovery lane posts no `FORGE:NEEDS_HUMAN` and adds no `needs-human`, on `ci-pending` and in `needsHuman()`
+alike, so the label does not flap between attempts and a concurrent dependent does not read a transient label. Settle
+relabels once via `relabelNeedsHuman` when a non-final attempt ends `needs-human`/`ci-pending` and no next attempt is
+queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 LLM calls.
