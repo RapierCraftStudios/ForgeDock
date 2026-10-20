@@ -20,7 +20,7 @@ BOOT_TPL="$(forge_root)/templates/bootstrap"; VALIDATE=$(forge_resolve bootstrap
 1. **Read the input.** Use the free text, or read each doc at the given path(s).
 2. **Interview** from `interview.md`. Cover every aspect it lists, briefly and conversationally. Skip what the input already answers.
 3. **Fill the blanks.** Give every unanswered aspect a sensible default with a one-line rationale tied to what the user said, using the closest `stack-profiles.md` preset. Show them all in ONE editable "Here's what I assumed" list and apply the user's edits.
-4. **Ask only genuine doubts** (they change architecture or cost: native vs PWA, data residency, self-host vs managed DB, product name, repo owner). Ask with AskUserQuestion, at most 4 multiple-choice questions per batch, each with a recommended option. Everything else stays a default.
+4. **Ask only genuine doubts** (they change architecture or cost: native vs PWA, data residency, self-host vs managed DB, product name, repo owner). Ask with AskUserQuestion, at most 4 multiple-choice questions per batch, each with a recommended option. Everything else stays a default. Headless (no AskUserQuestion, e.g. `npx forgedock bootstrap`): take each recommended option and list it under "Here's what I assumed".
 5. **Spike doc.** Write `technical-spike.md` to `--spike` (default `docs/engineering/technical-spike.md`); set the plan's `spikeDoc` to that path. Fill every section and give each decision an ADR-style `**Rationale**:` line.
 6. **Plan JSON** in `$TMPDIR` (shape: header of `bootstrap-validate.mjs` and `bootstrap-create.mjs`):
    - Milestones in build order, foundation first.

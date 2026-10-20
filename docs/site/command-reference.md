@@ -565,6 +565,14 @@ Guided setup for a brand-new project — interviews you about the idea, proposes
 /bootstrap "<idea>" --dry-run            # Preview the backlog without GitHub writes
 ```
 
+Headless, from a terminal or CI:
+
+```bash
+npx forgedock bootstrap "<idea>" [--dry-run]       # Run /bootstrap without an interactive session
+npx forgedock bootstrap --plan plan.json --dry-run # Preview milestones, titles, DAG and estimated agent cost; no GitHub access
+npx forgedock bootstrap --plan plan.json           # Validate and create; re-run the same command to resume from GitHub
+```
+
 ---
 
 #### `/sync-ecosystem`
