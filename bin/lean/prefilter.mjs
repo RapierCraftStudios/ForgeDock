@@ -4,7 +4,9 @@
  * Already-fixed pre-filter (#4123): cheap checks before any lane starts, so an issue that a merged PR or a later green
  * CI run already resolved does not cost a worktree, a lease and a builder session.
  *   1. merged PRs (and lane commits) that claim to fix #N  -> candidate
- *   2. auto-filed CI-failure issue whose workflow is green again on the failing branch -> closed with the run link
+ *   2. auto-filed CI-failure issue whose workflow is green again on the failing branch -> closed with the run link,
+ *      unless it is flaky (#4305): flaky wording or label, a reopen after an earlier pre-filter close, or a failed run
+ *      of the workflow at the green run's SHA. Then the shortcut is skipped and the issue goes on as normal.
  *   3. every repo path the issue names is gone from origin/<lane> -> candidate
  * A candidate gets ONE read-only, single-turn validation on a small model in the main checkout (no worktree). Only an
  * ALREADY-FIXED/INVALID verdict with evidence closes the issue; everything else, and every error, goes to the normal lane.
@@ -12,6 +14,7 @@
  */
 import { capComment, sanitizeMd, noComments } from "./render.mjs";
 import { PREFILTER_SYSTEM, prefilterPrompt, parsePrefilterVerdict } from "./prompts.mjs";
+import { isTrustedComment } from "../engine/phases.mjs";
 
 export const DEFAULT_PREFILTER_MODEL = "claude-haiku-5-5";
 export const PREFILTER_MARKER = "FORGE:PREFILTER";
@@ -35,6 +38,22 @@ export function ciFailureRun(iss) {
   return m && CI_FAIL_RE.test(text) ? { repo: m[1], id: Number(m[2]) } : null;
 }
 
+const FLAKY_RE = /\b(?:intermittent\w*|flaky|flak(?:e|es|iness)|sometimes|non-?deterministic\w*)\b/i;
+const trusted = (c) => {
+  const login = String(c?.author?.login ?? c?.user?.login ?? "");
+  return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
+};
+/**
+ * #4305: why one green run is no proof for this issue, without an API call: flaky wording or a `flaky` label, or an
+ * earlier trusted pre-filter close (the issue is open again, so an operator reopened it). {reason, why} or null.
+ */
+export function flakyReason(iss) {
+  if (FLAKY_RE.test(`${iss.title ?? ""}\n${noComments(String(iss.body ?? ""), " ")}`)) return { reason: "flaky", why: "issue says the failure is intermittent" };
+  if ((iss.labels ?? []).some((l) => String(l?.name ?? l).toLowerCase() === "flaky")) return { reason: "flaky", why: "flaky label" };
+  if ((iss.comments ?? []).some((c) => trusted(c) && String(c?.body ?? "").trimStart().startsWith(`<!-- ${PREFILTER_MARKER} -->`))) return { reason: "reopened", why: "reopened after a pre-filter close" };
+  return null;
+}
+
 const PATH_RE = /(?:^|[\s`'"(\[])((?:\.{0,2}\/)?(?:[\w@.-]+\/)+[\w@.-]+\.[A-Za-z0-9]{1,8})(?::\d+(?:-\d+)?)?(?=$|[\s`'"),.:;\]])/gm;
 /** Repo-relative file paths the issue names (`dir/file.ext`, optionally `:line`); URLs and HTML comments are ignored. */
 export function namedPaths(text) {
@@ -43,7 +62,7 @@ export function namedPaths(text) {
 }
 
 /**
- * @returns {Promise<{prs:object[], commits:object[], ci:?object, missingPaths:string[], namedPaths:string[]}>}
+ * @returns {Promise<{prs:object[], commits:object[], ci:?object, ciSkip?:{reason:string, why:string}, missingPaths:string[], namedPaths:string[]}>}
  */
 export async function collectSignals({ iss, repo, lane, io, cwd }) {
   const n = iss.number;
@@ -63,7 +82,18 @@ export async function collectSignals({ iss, repo, lane, io, cwd }) {
       const branch = failed.head_branch || lane;
       const latest = JSON.parse(String(await io.gh(["api", `repos/${repo}/actions/workflows/${failed.workflow_id}/runs?branch=${encodeURIComponent(branch)}&status=completed&per_page=1`])))?.workflow_runs?.[0];
       if (latest && latest.id !== failed.id && latest.conclusion === "success" && Date.parse(latest.created_at) > Date.parse(failed.created_at)) {
-        sig.ci = { workflow: failed.name ?? latest.name ?? String(failed.workflow_id), branch, failedUrl: failed.html_url, greenUrl: latest.html_url, greenSha: latest.head_sha ?? "" };
+        const sha = latest.head_sha ?? "";
+        // #4305: a workflow that failed and passed at the same SHA is flaky; the lookup is any branch (PR run vs push)
+        // and only made when the issue itself gave no reason. An unreadable lookup throws: no CI signal.
+        let skip = flakyReason(iss);
+        const same = { reason: "same-sha", why: `failed and passed at ${sha.slice(0, 12)}` };
+        if (!skip && sha && failed.head_sha === sha) skip = same;
+        if (!skip && sha) {
+          const atSha = JSON.parse(String(await io.gh(["api", `repos/${repo}/actions/workflows/${failed.workflow_id}/runs?head_sha=${sha}&status=completed&per_page=100`])))?.workflow_runs ?? [];
+          if (atSha.some((r) => r?.conclusion === "failure")) skip = same;
+        }
+        if (skip) sig.ciSkip = skip;
+        else sig.ci = { workflow: failed.name ?? latest.name ?? String(failed.workflow_id), branch, failedUrl: failed.html_url, greenUrl: latest.html_url, greenSha: sha };
       }
     } catch { /* run unreadable: no CI signal */ }
   }
@@ -85,7 +115,7 @@ export async function collectSignals({ iss, repo, lane, io, cwd }) {
 export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAULT_PREFILTER_MODEL, dryRun = false, agentId = null, maxMinutes = 5 }) {
   const out = { issue, closed: false, kind: null, candidate: false, verdict: null, cost_usd: 0, detail: "" };
   try {
-    const iss = JSON.parse(String(await io.gh(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,labels"])));
+    const iss = JSON.parse(String(await io.gh(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,labels,comments"])));
     if (String(iss.state).toUpperCase() !== "OPEN") return { ...out, detail: "not open" };
     if ((iss.labels ?? []).some((l) => ["needs-human", "workflow:merged"].includes(l?.name ?? l))) return { ...out, detail: "labelled, left to the lane" };
     if (io.projector) {
@@ -103,25 +133,27 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
       return { ...out, closed: !dryRun, kind, detail };
     };
 
+    // #4305: a skipped CI-green shortcut is named in every non-closing detail line that follows.
+    const keep = (detail) => ({ ...out, detail: sig.ciSkip ? `skipped CI-green shortcut: flaky (${sig.ciSkip.why}); ${detail}` : detail });
     if (sig.ci) {
       out.candidate = true;
       const c = sig.ci;
       return await close("ci-green", `## Pre-filter: CI failure no longer reproduces\n**Workflow:** ${c.workflow} on \`${c.branch}\`\n**Failing run:** ${c.failedUrl}\n**Latest run (green):** ${c.greenUrl}${c.greenSha ? ` at \`${c.greenSha.slice(0, 12)}\`` : ""}\n\nClosed without a lane. Reopen if the failure comes back.`,
         `CI green again: ${c.greenUrl}`);
     }
-    if (!sig.prs.length && !sig.commits.length && !sig.missingPaths.length) return { ...out, detail: "no already-fixed signal" };
+    if (!sig.prs.length && !sig.commits.length && !sig.missingPaths.length) return keep("no already-fixed signal");
     out.candidate = true;
     const why = [...sig.prs.map((p) => `PR #${p.number}`), ...sig.commits.map((c) => c.sha.slice(0, 12)), ...(sig.missingPaths.length ? ["named paths missing"] : [])].join(", ");
-    if (dryRun) return { ...out, detail: `candidate: ${why}` };
+    if (dryRun) return keep(`candidate: ${why}`);
     let r;
     try {
       r = await io.runner({ role: "prefilter", issue, cwd, model, resume: null, system: PREFILTER_SYSTEM, readOnly: true,
         prompt: prefilterPrompt({ issue: iss, lane, signals: sig }), maxMs: Math.round(maxMinutes * 60000) });
-    } catch (e) { return { ...out, detail: `validation failed (${String(e?.message ?? e).slice(0, 120)}): lane` }; }
+    } catch (e) { return keep(`validation failed (${String(e?.message ?? e).slice(0, 120)}): lane`); }
     out.cost_usd = Number.isFinite(r?.costUsd) ? r.costUsd : 0;
     const v = parsePrefilterVerdict(r?.text);
     out.verdict = v?.verdict ?? null;
-    if (!v || v.verdict === "CONFIRMED" || !v.evidence.length) return { ...out, detail: `candidate (${why}) ${v ? (v.verdict === "CONFIRMED" ? "confirmed" : "without evidence") : "unparseable verdict"}: lane` };
+    if (!v || v.verdict === "CONFIRMED" || !v.evidence.length) return keep(`candidate (${why}) ${v ? (v.verdict === "CONFIRMED" ? "confirmed" : "without evidence") : "unparseable verdict"}: lane`);
     const ev = v.evidence.map((x) => `- ${sanitizeMd(x).replace(/\s+/g, " ").slice(0, 400)}`).join("\n");
     return await close("validated", `## Pre-filter: ${v.verdict}\n**Signal:** ${why}\n**Summary:** ${sanitizeMd(v.summary).replace(/\s+/g, " ").slice(0, 600) || "not reported"}\n\n**Evidence:**\n${ev}\n\nValidated by a single read-only check (${model}), without a lane. Reopen if this is wrong.`,
       `${v.verdict.toLowerCase()} (${why})`);
