@@ -327,11 +327,16 @@ _f0=$fail; eq "real index fills the auth slice" '.index_slices.auth | startswith
 if grep -q "review-prepare: building code index" "$WORK/stderr"; then ok; else bad "index build must print a progress line on stderr"; fi
 # a failing build reports its exit code and stderr tail, and the slices fall back to grep
 mkroot "$WORK/root-failindex" "" "" templates
-printf '#!/usr/bin/env bash\necho "index-boom-marker" >&2\nexit 3\n' > "$WORK/root-failindex/scripts/code-index.sh"
+# forge#4316: a line naming a repo file, carrying an ESC and over 200 chars is echoed sanitised and capped
+# shellcheck disable=SC2016 # $2 is the fake index script's own argument
+printf '#!/usr/bin/env bash\necho "index-boom-marker" >&2\nprintf "parse error in %%s/secret/file.py \\033[31m%%0300d\\n" "$2" 0 >&2\nexit 3\n' > "$WORK/root-failindex/scripts/code-index.sh"
 prep "$WORK/root-failindex"
 rc_is "failing index build" 0
 if grep -q "code index failed (exit 3)" "$WORK/stderr"; then ok; else bad "index failure must report the build's exit code on stderr"; fi
 if grep -q "review-prepare: code-index: index-boom-marker" "$WORK/stderr"; then ok; else bad "index failure must echo the build's stderr tail: $(head -c 300 "$WORK/stderr")"; fi
+_ix=$(grep "review-prepare: code-index: parse error" "$WORK/stderr")
+case "$_ix" in "review-prepare: code-index: parse error in <repo>/secret/file.py [31m0"*) ok ;; *) bad "index stderr must show the repo root as <repo> without control chars: $(printf '%s' "$_ix" | head -c 120 | od -c | head -3)" ;; esac
+if [ "${#_ix}" -le $((28 + 200)) ]; then ok; else bad "index stderr line must be capped at 200 chars, got ${#_ix}"; fi
 eq "failed index falls back to grep slices" .index_slices.auth "Code index not available — agent will use grep exploration"
 if ls "$WORK/out"/.code-index-err-* >/dev/null 2>&1; then bad "index stderr temp file must be removed"; else ok; fi
 if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then

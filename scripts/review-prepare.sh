@@ -494,7 +494,10 @@ if [ "$REVIEW_MODE" != "BASE_SYNC_ONLY" ]; then
         elif [ "$_irc" -eq 124 ]; then echo "review-prepare: code index timed out after ${_ito}s — skipping index slices (agents grep instead)" >&2
         else
             echo "review-prepare: code index failed (exit $_irc) — skipping index slices (agents grep instead)" >&2
-            [ -s "$_ierr" ] && tail -n 20 "$_ierr" | sed 's/^/review-prepare: code-index: /' >&2
+            # forge#4316: the tail can name repo files; show the repo root as <repo>, strip control chars, cap each line
+            [ -s "$_ierr" ] && tail -n 20 "$_ierr" | tr -d '\000-\010\013-\037\177' \
+                | awk -v r="$REPO_PATH" '{ l = $0; if (r != "") { o = ""; while ((i = index(l, r)) > 0) { o = o substr(l, 1, i - 1) "<repo>"; l = substr(l, i + length(r)) } l = o l } print substr(l, 1, 200) }' \
+                | sed 's/^/review-prepare: code-index: /' >&2
         fi
         [ "$_ierr" = /dev/null ] || rm -f "$_ierr"
     fi

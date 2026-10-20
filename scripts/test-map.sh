@@ -17,14 +17,15 @@
 #     `ruff check .` (through `uv run` / `poetry run` when that lockfile exists), `**/*.py`
 #   go.mod (dir D) → `go test ./...`, `go vet ./...` in D, `D/**/*.go`, `D/go.mod`, `D/go.sum`
 #   Makefile / GNUmakefile targets test/lint/check/typecheck/vet → `make <target>`, `**`
-#   .github/workflows/*.yml|*.yaml `run:` steps (one command per line of a `|` block, a `>` block is one command;
-#     install/setup lines skipped). The engine runs these commands before a PR, so a step is mapped only when its whole
+#   .github/workflows/*.yml|*.yaml `run:` steps (one command per line of a `|` block, a `>` block is one command).
+#     The engine runs these commands before a PR, so a step is mapped only when its whole
 #     command is an allowlisted check (forge#4300): `<pm> test`, `<pm> run <package.json check script>` (also `test:*`
 #     style names, `pnpm -r`, `npm --prefix DIR`), `make <check target>`, `go test|vet|build`, `cargo test|clippy|check`,
 #     gradle/maven with check tasks/goals only, `[bundle exec] rspec`, `python manage.py test`, `python -m unittest`,
 #     `tox`/`nox` (not a publish/release/deploy/upload env), `deno|bun test`, `bash|sh <path>.test.sh` or a known
 #     test/lint/typecheck tool (forge#4315); everything else is dropped, and job and step names are never consulted. One leading `cd DIR &&` / `pushd DIR &&` becomes the entry cwd; any other chaining,
-#     substitution or `${{ }}` drops the step. Globs from the tool (python/go/shell/js, under the cwd), else the
+#     substitution, `${{ }}`, `$GITHUB_*`, redirect or `<(...)`/`>(...)`, a non-check make target, or a fixer form
+#     (`--fix`, `--write`, `-w`, `black`/`ruff format`/`gofmt`/`prettier` without their check flag) drops the step (forge#4316). Globs from the tool (python/go/shell/js, under the cwd), else the
 #     workflow's `paths:` filter, else `DIR/**` for a cwd; a workflow entry never gets a bare `**`.
 # Exit: 0 ok | 2 usage or bad repo path. bash 3.2 portable.
 set -uo pipefail
@@ -67,6 +68,7 @@ pkg_check_script() {
   case "|$PKG_SCRIPTS|" in *"|$b|"*) [ -n "$b" ] ;; *) return 1 ;; esac
 }
 make_check_target() { case "|$MAKE_TARGETS|" in *"|$1|"*) [ -n "$1" ] ;; *) return 1 ;; esac; }
+has_word() { k=$1; shift; for w in "$@"; do [ "$w" = "$k" ] && return 0; done; return 1; }
 safe_dir() { case "$1" in ""|/*|*[!A-Za-z0-9._/-]*|..|../*|*/..|*/../*) return 1 ;; esac; return 0; }
 # globs for the extensions in $2 under dir $1 ("." = repo root)
 ext_globs() {
@@ -169,21 +171,14 @@ wf_extract() {
     END { if (block && pend != "") emit(pend) }
   ' "$1"
 }
-skip_cmd() {
-  # shellcheck disable=SC2016 # literal $GITHUB_ patterns
-  case "$1" in
-    \#*|echo\ *|echo|cd\ *|export\ *|set\ *|if\ *|then|fi|else|for\ *|do|done|\}*|\{*|*'$GITHUB_'*|*'>> $GITHUB'*) return 0 ;;
-    npm\ ci*|npm\ install*|npm\ i|npm\ i\ *|pnpm\ install*|pnpm\ i|yarn|yarn\ install*|pip\ install*|pip3\ install*|python*\ -m\ pip\ install*|uv\ sync*|uv\ pip\ install*|poetry\ install*|go\ mod\ download*|apt-get*|sudo\ *|corepack\ *|brew\ *) return 0 ;;
-  esac
-  return 1
-}
 # forge#4300: allowlist. 0 when the whole command $1 is a recognised check; sets CK_CWD (one leading `cd|pushd DIR &&`,
 # else ".") and CK_CMD (the command without that prefix). Names never matter: a mutating command is dropped whatever its
 # step is called, and a check is mapped whatever it is called.
 check_cmd() {
   c=$1; CK_CWD=.; CK_CMD=
   # shellcheck disable=SC2016 # literal ${{ and $( patterns
-  case "$c" in *'${{'*|*'`'*|*'$('*) return 1 ;; esac
+  # forge#4316: runner-file writes, redirects and process substitution are CI plumbing, never a local check
+  case "$c" in *'${{'*|*'`'*|*'$('*|*'$GITHUB_'*|*'<'*|*'>'*) return 1 ;; esac
   case "$c" in
     "cd "*" && "*|"pushd "*" && "*)
       d=${c#* }; d=${d%%" && "*}; c=${c#*" && "}
@@ -201,6 +196,13 @@ check_cmd() {
   case "${1:-} ${2:-}" in
     "uv run"|"poetry run"|"pnpm exec"|"yarn exec"|"python -m"|"python3 -m"|"bundle exec") shift 2 ;;
     "npx "*|"bunx "*) shift ;;
+  esac
+  # forge#4316: a fixer rewrites the tree; only its read-only check form is a check
+  for w in "$@"; do case "$w" in --fix|--fix=*|--write|-w) return 1 ;; esac; done
+  case "${1:-} ${2:-}" in
+    "black "*|"ruff format") has_word --check "$@" || return 1 ;;
+    "gofmt "*) has_word -l "$@" || has_word -d "$@" || return 1 ;;
+    "prettier "*) has_word --check "$@" || has_word -c "$@" || has_word --list-different "$@" || has_word -l "$@" || return 1 ;;
   esac
   case "${1:-}" in
     npm|pnpm|yarn|bun)
@@ -236,7 +238,11 @@ check_cmd() {
       return 0 ;;
     deno) [ "${2:-}" = test ]; return ;;
     bash|sh) case "${2:-}" in *.test.sh) safe_dir "$2"; return ;; esac; return 1 ;;
-    make) make_check_target "${2:-}"; return ;;
+    make)
+      # forge#4316: every target must be a check (`make test deploy` is dropped); VAR=value and flags are not targets
+      shift; nt=0
+      for w in "$@"; do case "$w" in -*|*=*) continue ;; esac; make_check_target "$w" || return 1; nt=$((nt+1)); done
+      [ "$nt" -gt 0 ]; return ;;
     go) case "${2:-}" in test|vet|build) return 0 ;; esac; return 1 ;;
     node) [ "${2:-}" = --test ]; return ;;
     eslint|tsc|prettier|vitest|jest|pytest|ruff|flake8|pylint|mypy|black|golangci-lint|gofmt|staticcheck|shellcheck) return 0 ;;
@@ -265,7 +271,6 @@ grep -E '^\.github/workflows/[^/]+\.(yml|yaml)$' "$T/files" | sort | while IFS= 
   paths=$(awk -F'\t' '$1 == "P" { printf "%s\037", $2 }' "$T/wf"); paths=${paths%"$US"}
   awk -F'\t' '$1 != "P"' "$T/wf" | while IFS="$US" read -r job cmd; do
     check_cmd "$cmd" || continue
-    skip_cmd "$CK_CMD" && continue
     g=$(tool_globs "$CK_CMD")
     [ -n "$g" ] && [ "$CK_CWD" != . ] && g="$CK_CWD/${g//$US/$US$CK_CWD/}"
     [ -n "$g" ] || g="$paths"

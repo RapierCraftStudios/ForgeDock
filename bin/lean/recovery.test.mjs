@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { orchestrate, formatOutcomeLists, OUTCOME_LINE_MAX } from "./orchestrate.mjs";
 import { RECOVER_HOW } from "./lean.mjs";
+import { recoveryEvidence } from "./render.mjs";
 import { RECOVERABLE_CODES } from "../engine/outcome-codes.mjs";
 import { runFromCli, orchestrateFromCli } from "../engine-cli.mjs";
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir.
@@ -388,5 +389,31 @@ describe("#4304 staging-review follow-ups: recovery", () => {
     assert.ok(full.logs.some((x) => /recovery: off \(engine\.path is full/.test(x)), full.logs.join("\n"));
     const core = await runBatchWith("core");
     assert.deepEqual(core.runs, [null, { code: "ci.red", attempt: 1, final: true }]);
+  });
+});
+
+describe("#4316 one shared recovery evidence text", () => {
+  it("lane, settle and batch-exit relabels render the same evidence shape", () => {
+    const long = `${"x".repeat(320)}\nsecond line`;
+    assert.equal(recoveryEvidence({ code: "ci.red", attempt: 1, outcome: "needs-human", resultCode: "ci.red", detail: "  red check\nmore  " }),
+      "Recovery pass for `ci.red` (attempt 1) did not merge: it ended `needs-human` (`ci.red`): red check. The issue stays `needs-human`.");
+    assert.equal(recoveryEvidence({ code: "ci.red", attempt: 2, outcome: "ci-pending", detail: "" }),
+      "Recovery pass for `ci.red` (attempt 2) did not merge: it ended `ci-pending`. The issue stays `needs-human`.");
+    assert.equal(recoveryEvidence({ code: "c", attempt: 1, outcome: "o", detail: long }).includes(`: ${"x".repeat(300)}. The issue`), true, "first line, 300 chars");
+    const queued = recoveryEvidence({ code: "base.conflict", attempt: 0, outcome: undefined, resultCode: "base.conflict", detail: long, full: true, queued: 1, cause: "breaker", recoveryMax: 2 });
+    assert.equal(queued, `The lane did not merge: it ended \`needs-human\` (\`base.conflict\`): ${long}\n\n`
+      + "Recovery attempt 1/2 for `base.conflict` was queued, but the batch stopped (breaker) before it launched. The issue stays `needs-human`.");
+    assert.match(recoveryEvidence({ code: "c", attempt: 1, outcome: "o", queued: 2, cause: "batch stopped" }), /^Recovery pass for `c` \(attempt 1\) did not merge: it ended `o`\n\nRecovery attempt 2\/2 /);
+  });
+  it("/orchestrate spec names the pre-filter's flaky exceptions and recovery being off on engine.path full", () => {
+    const spec = readFileSync(new URL("../../commands/orchestrate.md", import.meta.url), "utf8");
+    assert.match(spec, /unless it is flaky \(wording or `flaky` label\), was reopened after a pre-filter close, or\s+the workflow failed and passed at the same SHA/);
+    assert.match(spec, /recovery is off when `engine\.path: full`/);
+  });
+  it("orchestrate.mjs and lean.mjs build no copy of their own", () => {
+    for (const f of ["orchestrate.mjs", "lean.mjs"]) {
+      const src = readFileSync(new URL(`./${f}`, import.meta.url), "utf8");
+      assert.equal((src.match(/did not merge/g) ?? []).length, 0, f);
+    }
   });
 });

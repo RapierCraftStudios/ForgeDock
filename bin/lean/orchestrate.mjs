@@ -66,6 +66,7 @@
  */
 import { parseDependsOn } from "../engine/phases.mjs";
 import { classifyNeedsHuman, recoveryCodeOf } from "../engine/outcome-codes.mjs";
+import { recoveryEvidence } from "./render.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -407,7 +408,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     // #4267: a recovery pass ends here; a recoverable row under the attempt cap is requeued as a recovery lane.
     const prior = recovering.get(n) ?? null;
-    const recoveryEvidence = () => `Recovery pass for \`${prior.code}\` (attempt ${prior.attempt}) did not merge: it ended \`${row.outcome}\`${row.code ? ` (\`${row.code}\`)` : ""}${firstLine(row.detail) ? `: ${firstLine(row.detail)}` : ""}. The issue stays \`needs-human\`.`;
+    const evidence = () => recoveryEvidence({ code: prior.code, attempt: prior.attempt, outcome: row.outcome, resultCode: row.code, detail: row.detail });
     if (prior) {
       recovering.delete(n);
       // #4298: the row reports the whole issue: earlier attempts' cost and minutes are summed into the recovery's.
@@ -418,7 +419,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // A recovery that failed for good keeps needs-human. The lane relabels needs-human/ci-pending itself; engine-error (after its
       // relaunch) and deferred (no longer requeued) end here, so the runner does it, once. invalid/decomposed/dependency-*/merged never.
       if (["engine-error", "deferred"].includes(row.outcome) && typeof relabelNeedsHuman === "function") {
-        try { await relabelNeedsHuman({ issue: n, evidence: recoveryEvidence() }); } catch { /* best effort */ }
+        try { await relabelNeedsHuman({ issue: n, evidence: evidence() }); } catch { /* best effort */ }
       }
     }
     if (recoveryMax && (row.outcome === "needs-human" || row.outcome === "ci-pending")) {
@@ -442,7 +443,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     // #4302: a non-final recovery attempt left needs-human/ci-pending unlabelled for its successor; none is launched, so relabel once.
     if (prior && prior.attempt < recoveryMax && ["needs-human", "ci-pending"].includes(row.outcome) && typeof relabelNeedsHuman === "function") {
-      try { await relabelNeedsHuman({ issue: n, evidence: recoveryEvidence() }); } catch { /* best effort */ }
+      try { await relabelNeedsHuman({ issue: n, evidence: evidence() }); } catch { /* best effort */ }
     }
     results.set(n, row);
     if (row.outcome === "merged" && drift?.onMerged && r?.structure && String(rec?.lane ?? r?.lane ?? "").startsWith("milestone/")) {
@@ -594,9 +595,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   for (const [n, q] of recovering) {
     if (running.has(n) || results.has(n) || relabelled.has(n) || typeof relabelNeedsHuman !== "function") continue;
     const cause = heldDetail(n) === "not run" ? "batch stopped" : heldDetail(n);
-    const how = q.prev_attempt ? `Recovery pass for \`${q.code}\` (attempt ${q.prev_attempt}) did not merge` : "The lane did not merge";
-    const evidence = `${how}: it ended \`${q.outcome ?? "needs-human"}\`${q.result_code ? ` (\`${q.result_code}\`)` : ""}${String(q.detail ?? "").trim() ? `: ${String(q.detail).trim()}` : ""}\n\n`
-      + `Recovery attempt ${q.attempt}/${recoveryMax || q.attempt} for \`${q.code}\` was queued, but the batch stopped (${cause}) before it launched. The issue stays \`needs-human\`.`;
+    const evidence = recoveryEvidence({ code: q.code, attempt: q.prev_attempt, outcome: q.outcome, resultCode: q.result_code, detail: q.detail, full: true,
+      queued: q.attempt, cause, recoveryMax });
     try { await relabelNeedsHuman({ issue: n, evidence }); } catch { /* best effort */ }
     relabelled.add(n);
   }
