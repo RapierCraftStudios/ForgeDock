@@ -57,7 +57,10 @@ expect "pending past timeout" "3|CI_GATE: TIMEOUT" "$(run "$(mk slow '[{"name":"
 expect "fail wins over pending" "1|CI_GATE: FAIL" "$(run "$(mk mixed '[{"name":"a","bucket":"pending"},{"name":"b","bucket":"fail"}]')")"
 # forge#4270: --ignore-check drops the named check (the lane's own report-only forgedock/verify) before deciding.
 OWN='[{"name":"a","bucket":"pass"},{"name":"forgedock/verify","bucket":"fail"}]'
-expect "own verify check failing fails without --ignore-check" "1|CI_GATE: FAIL" "$(run "$(mk ownfail "$OWN")")"
+# forge#4298: forgedock/verify is ignored by default, so every caller (legacy engine, review-finalize, spec gates) agrees.
+expect "own verify check failing is ignored by default" "0|CI_GATE: PASS" "$(run "$(mk ownfail "$OWN")")"
+expect "default ignore keeps other failures" "1|CI_GATE: FAIL" "$(run "$(mk owndef '[{"name":"b","bucket":"fail"},{"name":"forgedock/verify","bucket":"fail"}]')")"
+expect "usage text lists --ignore-check" "1" "$(bash "$GATE" 2>&1 >/dev/null | grep -c -- '--ignore-check NAME')"
 expect "--ignore-check drops the named failing check" "0|CI_GATE: PASS" "$(run "$(mk ownign "$OWN")" --ignore-check forgedock/verify)"
 expect "--ignore-check keeps other failures" "1|CI_GATE: FAIL" "$(run "$(mk ownother '[{"name":"b","bucket":"fail"},{"name":"forgedock/verify","bucket":"pass"}]')" --ignore-check forgedock/verify)"
 expect "--ignore-check without a name is a usage error" "2|CI_GATE: ERROR" "$(run "$(mk ownusage "$P")" --ignore-check)"

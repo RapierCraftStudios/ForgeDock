@@ -112,16 +112,22 @@ export function readReviewIncomplete(cwd = process.cwd()) {
     return ["needs-human", "degraded"].includes(v) ? v : undefined;
   } catch { return undefined; }
 }
+const warnedContextPack = new Set();
+const stderrWarn = (m) => { if (!warnedContextPack.has(m)) { warnedContextPack.add(m); process.stderr.write(`${m}\n`); } };
 /**
  * forge.yaml context pack (#4275), flat keys under `engine` (the parser flattens one level): `context_pack`
  * (shadow|on|off), `context_pack_sources` (comma list of graph,attempts,ledger,facts), `context_pack_bytes`,
- * `context_pack_days`. undefined when none is set or the mode is invalid (the core defaults to shadow).
+ * `context_pack_days`. undefined when none is set (the core defaults to shadow). An invalid mode warns through `warn`
+ * (stderr, once per message per process) and is dropped; the other keys are kept (#4298).
  */
-export function readContextPack(cwd = process.cwd()) {
+export function readContextPack(cwd = process.cwd(), warn = stderrWarn) {
   try {
     const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine ?? {};
-    const mode = String(e.context_pack ?? "").trim().toLowerCase();
-    if (mode && !["shadow", "on", "off"].includes(mode)) return undefined;
+    let mode = String(e.context_pack ?? "").trim().toLowerCase();
+    if (mode && !["shadow", "on", "off"].includes(mode)) {
+      warn(`forge.yaml engine.context_pack: invalid mode "${mode}" (expected shadow|on|off); using the default, other context_pack_* keys kept`);
+      mode = "";
+    }
     const out = { ...(mode ? { mode } : {}), ...(e.context_pack_sources != null ? { sources: String(e.context_pack_sources) } : {}),
       ...(e.context_pack_bytes != null ? { bytes: Number(e.context_pack_bytes) } : {}), ...(e.context_pack_days != null ? { days: Number(e.context_pack_days) } : {}) };
     return Object.keys(out).length ? out : undefined;
@@ -631,7 +637,7 @@ export function lastLocalRun(dir) {
  */
 export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--retry] [--wait-lease]");
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--path core|full] [--recover <code> [--recover-attempt n]] [--retry] [--wait-lease]");
   assertOpenCodeNativeRuntime({ operation: "forgedock run-issue" });
   const lane = flag(argv, "--lane");
   if (argv.includes("--lane") && (!lane || lane.startsWith("--"))) throw new Error("--lane requires a value: staging or milestone/<slug>");
@@ -653,6 +659,8 @@ export async function runFromCli(argv, deps = {}) {
   }
   // The full path takes the lane as given (its spec runs classify-lane), so it must be explicit; no default.
   if (enginePath === "full" && !lane) throw new Error("--lane is required with --path full: staging or milestone/<slug>. No default to prevent accidental production targeting.");
+  // #4298: recovery lanes (#4267) exist only on the core path; the legacy full path would silently ignore --recover.
+  if (enginePath === "full" && argv.includes("--recover")) throw new Error("--recover is not supported with --path full (recovery lanes run on the core path only)");
   const io = deps.io ?? makeIo();
   const resultFile = flag(argv, "--result-file");
   // #4256: where the dispatcher placed this lane (hybrid execution), recorded in the lane's FORGE:STATE.

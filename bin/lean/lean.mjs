@@ -32,6 +32,16 @@ import { writeHeavyShims, sumWaits } from "./heavy.mjs";
 import { priorityFromLabels } from "./sched.mjs";
 import { parseContextPackConfig, contextPackFor, renderContextRecord, laneType, priorAttempts } from "./context.mjs";
 
+/**
+ * #4267: what a recovery lane does per code. Codebase-agnostic: the repo's own checks and logs only. Keys stay in step
+ * with RECOVERABLE_CODES (bin/engine/outcome-codes.mjs); recovery.test.mjs checks it (#4298).
+ */
+export const RECOVER_HOW = Object.freeze({
+  [OUTCOME_CODES.CI_RED]: "the PR's required checks failed. Read the failed checks' logs (`gh run view <run-id> --log-failed`, or the repo's declared check commands), fix the causes, re-run those checks locally and push new commits only (never rewrite history)",
+  [OUTCOME_CODES.BASE_CONFLICT]: "the PR conflicts with origin/BASE. Merge origin/BASE, resolve every conflict keeping both sides' intent, re-run the validate commands and push new commits only",
+  [OUTCOME_CODES.BUILDER_BLOCK_UNTYPED]: "an earlier run escalated an in-scope technical choice. Do not block on it: pick the option most consistent with the issue, the repo's conventions and prior merged decisions, and name the alternative you did not take in your summary",
+  [OUTCOME_CODES.CONTRACT_INVALID]: "the issue was edited while the earlier run planned. Plan against the current issue text",
+});
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
 export const CONFORMANCE_MODES = Object.freeze(["shadow", "enforce"]);
@@ -460,13 +470,6 @@ export async function runCore(o) {
     } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return false; }
   }
   const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over.";
-  // #4267: what a recovery lane does per code. Codebase-agnostic: the repo's own checks and logs only.
-  const RECOVER_HOW = {
-    [OUTCOME_CODES.CI_RED]: "the PR's required checks failed. Read the failed checks' logs (`gh run view <run-id> --log-failed`, or the repo's declared check commands), fix the causes, re-run those checks locally and push new commits only (never rewrite history)",
-    [OUTCOME_CODES.BASE_CONFLICT]: "the PR conflicts with origin/BASE. Merge origin/BASE, resolve every conflict keeping both sides' intent, re-run the validate commands and push new commits only",
-    [OUTCOME_CODES.BUILDER_BLOCK_UNTYPED]: "an earlier run escalated an in-scope technical choice. Do not block on it: pick the option most consistent with the issue, the repo's conventions and prior merged decisions, and name the alternative you did not take in your summary",
-    [OUTCOME_CODES.CONTRACT_INVALID]: "the issue was edited while the earlier run planned. Plan against the current issue text",
-  };
   const recoverNote = () => (recover ? `\n\nRecovery pass (${recover.code}): ${(RECOVER_HOW[recover.code] ?? "an earlier run ended needs-human for a mechanical reason; resolve it").replaceAll("BASE", lane)}.` : "");
   const PLAN_RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD` to see what exists, but plan against the issue itself. This step is still planning only: do not edit code, do not commit, and do not write the result file unless the issue is invalid, already fixed or blocked.";
   const SALVAGE_NOTE = "\n\nAn earlier run on this issue stopped with uncommitted work, saved at `REF` (not on the branch). Inspect it with `git diff HEAD REF --stat` and reuse what fits the contract (`git checkout REF -- <path>`) instead of rewriting it.";
@@ -688,7 +691,7 @@ export async function runCore(o) {
   }
   ev({ event: "RUN_START", run: `core_${issue}_${t0}`, issue, lane, path: "core", version: ENGINE_VERSION, forge_version: ENGINE_VERSION, repo });
   try {
-    iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels"]));
+    iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels,updatedAt"]));
   } catch (e) { return finish("engine-error", `cannot read issue: ${e.message}`); }
   if (String(iss.state).toUpperCase() === "CLOSED") return finish("invalid", "issue already closed");
 
@@ -891,7 +894,7 @@ export async function runCore(o) {
       if (ctxCfg.mode === "off" || !io.contextFacts) return null;
       try {
         const headSha = String(await git(["rev-parse", base])).trim();
-        const r = await contextPackFor({ cfg: ctxCfg, issue, headSha, cacheDir: dir, fs: io.fs,
+        const r = await contextPackFor({ cfg: ctxCfg, issue, headSha, cacheDir: dir, fs: io.fs, stamp: { updatedAt: iss.updatedAt ?? null, attempts: priorAttempts(iss.body, trustedComments) },
           gather: () => io.contextFacts({ repo, issue, iss, comments: trustedComments, cwd: wt, base, sources: ctxCfg.sources, days: ctxCfg.days, now: now() }) });
         const p = r.pack;
         const rec = { event: "CONTEXT_PACK", mode: ctxCfg.mode, lane_type: ctxLane, sources: p.sources, found: p.found, bytes: p.bytes, items: p.items, truncated: p.truncated,
@@ -906,7 +909,7 @@ export async function runCore(o) {
     /** #4188: the builder reads the live issue, so quotes are checked against the current text, not the RUN_START snapshot. Best effort. */
     async function refreshIssue(stage) {
       let next;
-      try { next = JSON.parse(String(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels"]))); } catch { return; }
+      try { next = JSON.parse(String(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels,updatedAt"]))); } catch { return; }
       if (!next || typeof next !== "object") return;
       const tc = trustedOf(next), text = textOf(next, tc);
       if (contractHash(issueText) === contractHash(text)) return;

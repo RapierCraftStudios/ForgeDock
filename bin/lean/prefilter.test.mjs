@@ -112,6 +112,9 @@ describe("pre-filter (#4123)", () => {
 
   it("every named path missing on the lane is a candidate; any surviving path is not", async () => {
     assert.deepEqual(namedPaths("see `src/old/foo.js:12` and lib/bar.py, not https://x.io/a/b.js <!-- FORGE:STATE {\"a\":\"c/d.js\"} -->"), ["src/old/foo.js", "lib/bar.py"]);
+    // #4298: the scan-based noComments: a `--!>` closer ends a comment and an unclosed one runs to the end (the old
+    // one-pass regex kept both hidden paths).
+    assert.deepEqual(namedPaths("fix lib/a.js <!-- x/hidden.js --!> visible/e.js and <!-- unclosed c/d.js"), ["lib/a.js", "visible/e.js"]);
     const gone = world({ issues: { 5: { body: "crash in src/old/foo.js:12" } }, verdict: { verdict: "INVALID", evidence: ["src/old/foo.js removed in abc123"] } });
     assert.equal((await pf(gone, 5)).closed, true);
     assert.match(gone.runner[0].prompt, /do not exist on origin\/staging: src\/old\/foo\.js/);

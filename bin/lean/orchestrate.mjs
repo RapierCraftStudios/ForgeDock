@@ -401,6 +401,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const prior = recovering.get(n) ?? null;
     if (prior) {
       recovering.delete(n);
+      // #4298: the row reports the whole issue: earlier attempts' cost and minutes are summed into the recovery's.
+      row.cost_usd = Math.round(((Number(row.cost_usd) || 0) + (Number(prior.cost_usd) || 0)) * 1e6) / 1e6;
+      row.minutes = Math.round(((Number(row.minutes) || 0) + (Number(prior.minutes) || 0)) * 10) / 10;
       if (row.outcome === "merged") row.recovered = prior.code;
       else row.recovery = { code: prior.code, attempts: recoveries.get(n) ?? prior.attempt, outcome: row.outcome, ...(row.code ? { result_code: row.code } : {}), detail: firstLine(row.detail) };
       // A recovery that failed for good keeps needs-human. The lane relabels needs-human/ci-pending itself; engine-error (after its
@@ -418,7 +421,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       const used = recoveries.get(n) ?? 0;
       if (classifyNeedsHuman(facts) === "recoverable" && used < recoveryMax) {
         const code = recoveryCodeOf(facts), attempt = used + 1;
-        recoveries.set(n, attempt); recovering.set(n, { code, attempt });
+        recoveries.set(n, attempt); recovering.set(n, { code, attempt, cost_usd: Number(row.cost_usd) || 0, minutes: Number(row.minutes) || 0 });
         requeue(n, 0); done(); save();
         decided({ issue: n, what: `recovery lane for ${code} (attempt ${attempt}/${recoveryMax}); dependents stay queued`, why: firstLine(row.detail) || code,
           alternative: "leave needs-human for the operator and skip the dependents" });
@@ -458,7 +461,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
-          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { ...recovering.get(n) } } : {}), onStart: (info) => {
+          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt } } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
             if (reg && slotted.has(n) && info?.pid) reg.setLanePid(keyOf(n), info.pid);
           } });
@@ -573,6 +576,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: tripped?.detail ?? (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run") });
 }
 
+/** Max chars of one row's detail in the batch-report outcome lists (#4298). */
+export const OUTCOME_LINE_MAX = 200;
 /**
  * #4267 batch-report lines after the table: `recovered: #A (ci.red) #B (base.conflict)`, one `unrecovered:` line per
  * mechanical needs-human row (failed recovery or a terminal code), then one escalation list holding only human codes,
@@ -580,7 +585,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
  */
 export function formatOutcomeLists(rows) {
   const out = [];
-  const one = (x) => String(x ?? "").split("\n")[0].slice(0, 200);
+  const one = (x) => String(x ?? "").split("\n")[0].slice(0, OUTCOME_LINE_MAX);
   const rec = (rows ?? []).filter((r) => r?.recovered);
   if (rec.length) out.push(`recovered: ${rec.map((r) => `#${r.issue} (${r.recovered})`).join(" ")}`);
   for (const r of rows ?? []) {

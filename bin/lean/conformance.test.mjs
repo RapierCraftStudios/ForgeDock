@@ -326,6 +326,17 @@ describe("#4265 issue scope and failure explanations", () => {
     assert.notEqual(scopeText(iss, [human, { body: "Scope: also baz." }]), base);
     assert.notEqual(scopeText({ ...iss, body: "Fix foo and qux." }, [human]), base);
   });
+  it("#4298 SEC-5: an edit that only touches a human HTML comment is not a scope edit", () => {
+    const withNote = { ...iss, body: `${iss.body}\n<!-- note: maybe also qux -->` };
+    assert.equal(scopeText(withNote, [human]), scopeText({ ...withNote, body: withNote.body.replace("maybe also qux", "definitely qux") }, [human]));
+    assert.equal(scopeText(withNote, [human]), scopeText(iss, [human]));
+  });
+  it("#4298: movingBaseDiff reads only the revisions before `--`", () => {
+    assert.equal(movingBaseDiff("git diff HEAD -- origin/x.txt"), null);
+    assert.equal(movingBaseDiff("git diff --stat -- origin/foo/bar && echo ok"), null);
+    assert.equal(movingBaseDiff("git diff origin/main -- src"), "origin/main");
+    assert.equal(movingBaseDiff("git diff --name-only origin/main --"), "origin/main");
+  });
   it("explainFailures appends the quote of the requirement a detail names, and leaves other details alone", () => {
     const contract = { requirements: [{ id: "R1", quote: "foo must handle null" }, { id: "R2", quote: "x".repeat(300) }] };
     const out = explainFailures([{ code: "c", detail: "R1 reported \"partial\"" }, { code: "c", detail: "R2 missing" }, { code: "c", detail: "validate V1 failed (exit 1)" }, { code: "c", detail: "R9 missing" }], contract);

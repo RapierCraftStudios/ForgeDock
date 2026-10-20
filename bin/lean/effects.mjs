@@ -3,7 +3,7 @@
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, renameSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -88,6 +88,8 @@ export function procsInDir(dir, { procRoot = "/proc", self = process.pid } = {})
 }
 
 export const RUN_TMP_MAX_AGE_MS = 6 * 3600 * 1000;
+/** Timeout of the Checks API POST that reports the forgedock/verify check run (#4270). */
+export const CHECK_RUN_TIMEOUT_MS = 60000;
 export const runTmpRoot = () => join(homedir(), ".forge", "tmp", "runs");
 const OWNER = ".forge-run-owner";
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e?.code !== "ESRCH"; } };
@@ -258,7 +260,7 @@ export function makeLeanIo({ repo }) {
      */
     async createCheckRun({ sha, name, conclusion, title, summary, text }) {
       const body = JSON.stringify({ name, head_sha: sha, status: "completed", conclusion, output: { title, summary, text } });
-      const out = await runWithInput("gh", ["api", "-X", "POST", `repos/${repo}/check-runs`, "--input", "-"], body, 60000);
+      const out = await runWithInput("gh", ["api", "-X", "POST", `repos/${repo}/check-runs`, "--input", "-"], body, CHECK_RUN_TIMEOUT_MS);
       const j = JSON.parse(out || "{}");
       return { id: j.id ?? null, html_url: j.html_url ?? null };
     },
@@ -337,6 +339,9 @@ export function makeLeanIo({ repo }) {
       stat: async (p) => { try { return { mtimeMs: statSync(p).mtimeMs }; } catch { return null; } },
       append: async (p, t) => { mkdirSync(dirname(p), { recursive: true }); appendFileSync(p, t); },
       write: async (p, t) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, t); },
+      rename: async (from, to) => renameSync(from, to),
+      list: async (d) => { try { return readdirSync(d); } catch { return []; } },
+      rm: async (p) => rmSync(p, { force: true }),
     },
   };
 }

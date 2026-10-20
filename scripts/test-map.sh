@@ -43,19 +43,21 @@ cd "$REPO" || die "cannot enter $REPO"
 T=$(mktemp -d "${TMPDIR:-/tmp}/test-map.XXXXXX") || die "mktemp failed"
 trap 'rm -rf "$T"' EXIT
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git ls-files --cached --others --exclude-standard > "$T/files"
+  # -z and quotepath=off (#4298): non-ASCII and spaced paths come out verbatim, never C-quoted
+  git -c core.quotepath=off ls-files -z --cached --others --exclude-standard | tr '\0' '\n' > "$T/files"
 else
   find . -type f -not -path './.git/*' | sed 's|^\./||' | sort > "$T/files"
 fi
 : > "$T/rows"
-# row: source TAB cwd TAB command TAB space-separated globs
+# row: source TAB cwd TAB command TAB globs separated by US (\037, #4298: a glob may contain spaces)
+US="$(printf '\037')"
 row() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$T/rows"; }
 JS_EXT="js jsx ts tsx mjs cjs"
 # globs for the extensions in $2 under dir $1 ("." = repo root)
 ext_globs() {
   g=""; pre=""; [ "$1" = "." ] || pre="$1/"
-  for e in $2; do g="$g ${pre}**/*.$e"; done
-  printf '%s' "${g# }"
+  for e in $2; do g="$g$US${pre}**/*.$e"; done
+  printf '%s' "${g#"$US"}"
 }
 
 # ---- package.json scripts ----
@@ -65,7 +67,7 @@ PM=npm
 grep -E '(^|/)package\.json$' "$T/files" | grep -v -E '(^|/)node_modules/' | sort | while IFS= read -r pj; do
   [ -f "$pj" ] || continue
   d=$(dirname "$pj")
-  globs="$(ext_globs "$d" "$JS_EXT") $pj"
+  globs="$(ext_globs "$d" "$JS_EXT")$US$pj"
   tag=""
   if [ -n "$(ls "$d"/vitest.config.* "$d"/jest.config.* 2>/dev/null)" ] || jq -e 'has("jest")' "$pj" >/dev/null 2>&1; then tag=" (vitest/jest config)"; fi
   jq -r '(.scripts // {}) | to_entries[] | select(.value | type == "string") | .key' "$pj" 2>/dev/null | while IFS= read -r s; do
@@ -85,7 +87,7 @@ if [ -f pyproject.toml ] && grep -qE '^\[tool\.pytest' pyproject.toml; then PY_S
 elif [ -f pytest.ini ]; then PY_SRC="pytest.ini"
 elif [ -f setup.cfg ] && grep -qE '^\[tool:pytest\]' setup.cfg; then PY_SRC="setup.cfg#tool:pytest"
 elif grep -qE '(^|/)conftest\.py$' "$T/files"; then PY_SRC="conftest.py"; fi
-[ -n "$PY_SRC" ] && row "$PY_SRC" "." "${RUN}pytest" "**/*.py **/conftest.py"
+[ -n "$PY_SRC" ] && row "$PY_SRC" "." "${RUN}pytest" "**/*.py$US**/conftest.py"
 RUFF_SRC=""
 if [ -f pyproject.toml ] && grep -qE '^\[tool\.ruff' pyproject.toml; then RUFF_SRC="pyproject.toml#tool.ruff"
 elif [ -f ruff.toml ]; then RUFF_SRC="ruff.toml"
@@ -95,7 +97,7 @@ elif [ -f .ruff.toml ]; then RUFF_SRC=".ruff.toml"; fi
 # ---- go ----
 grep -E '(^|/)go\.mod$' "$T/files" | grep -v -E '(^|/)vendor/' | sort | while IFS= read -r gm; do
   d=$(dirname "$gm"); pre=""; [ "$d" = "." ] || pre="$d/"
-  globs="${pre}**/*.go ${pre}go.mod ${pre}go.sum"
+  globs="${pre}**/*.go$US${pre}go.mod$US${pre}go.sum"
   row "$gm" "$d" "go test ./..." "$globs"
   row "$gm" "$d" "go vet ./..." "$globs"
 done
@@ -167,7 +169,7 @@ skip_cmd() {
 }
 # forge#4297: deploy, publish, release, push and secret-using steps are never check commands
 deploy_step() {
-  printf '%s\n' "$@" | grep -qiE 'deploy|publish|release|push|secret'
+  grep -qiE 'deploy|publish|release|push|secret' <<<"$*"
 }
 tool_globs() {
   c=" $1 "
@@ -182,7 +184,7 @@ tool_globs() {
 grep -E '^\.github/workflows/[^/]+\.(yml|yaml)$' "$T/files" | sort | while IFS= read -r wf; do
   [ -f "$wf" ] || continue
   wf_extract "$wf" > "$T/wf"
-  paths=$(awk -F'\t' '$1 == "P" { printf "%s ", $2 }' "$T/wf"); paths=${paths% }
+  paths=$(awk -F'\t' '$1 == "P" { printf "%s\037", $2 }' "$T/wf"); paths=${paths%"$US"}
   awk -F'\t' '$1 != "P"' "$T/wf" | while IFS="$(printf '\037')" read -r job jname sname cmd; do
     skip_cmd "$cmd" && continue
     deploy_step "$job" "$jname" "$sname" "$cmd" && continue
@@ -194,7 +196,7 @@ grep -E '^\.github/workflows/[^/]+\.(yml|yaml)$' "$T/files" | sort | while IFS= 
 done
 
 MAP=$(jq -R -s -c '
-  [split("\n")[] | select(length > 0) | split("\t") | {source: .[0], cwd: .[1], command: .[2], globs: (.[3] | split(" ") | map(select(length > 0)))}]
+  [split("\n")[] | select(length > 0) | split("\t") | {source: .[0], cwd: .[1], command: .[2], globs: (.[3] | split("\u001f") | map(select(length > 0)))}]
   | sort_by(.source, .command)
   | reduce .[] as $e ({order: [], by: {}};
       ([$e.command, $e.cwd] | tojson) as $k

@@ -6,7 +6,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { orchestrate, formatOutcomeLists } from "./orchestrate.mjs";
+import { orchestrate, formatOutcomeLists, OUTCOME_LINE_MAX } from "./orchestrate.mjs";
+import { RECOVER_HOW } from "./lean.mjs";
+import { RECOVERABLE_CODES } from "../engine/outcome-codes.mjs";
 import { runFromCli, orchestrateFromCli } from "../engine-cli.mjs";
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("recovery-sched-");
@@ -186,5 +188,43 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.match(step3, /FORGE:DECISION/);
     assert.match(step3, /one question list[\s\S]*once, at the end of the batch/);
     assert.match(spec, /recovered: #A \(ci\.red\) #B \(base\.conflict\)/);
+  });
+});
+
+describe("#4298 staging-review follow-ups: recovery", () => {
+  it("RECOVER_HOW has a prompt for exactly the RECOVERABLE_CODES", () => {
+    assert.deepEqual(Object.keys(RECOVER_HOW).sort(), [...RECOVERABLE_CODES].sort());
+    for (const c of RECOVERABLE_CODES) assert.ok(String(RECOVER_HOW[c]).length > 20, c);
+  });
+
+  it("a recovered row reports the first attempt's cost and minutes summed with the recovery's; the lane sees only {code, attempt}", async () => {
+    let t = 0; const seen = [];
+    const script = { 1: [{ terminalReason: "needs-human", code: "ci.red", detail: "red", cost_usd: 0.5 }, { terminalReason: "merged", pr: 9, cost_usd: 0.25 }],
+      2: [{ terminalReason: "needs-human", code: "ci.red", detail: "red", cost_usd: 1 }, { terminalReason: "needs-human", code: "ci.red", detail: "red again", cost_usd: 2 }] };
+    const k = { 1: 0, 2: 0 };
+    const rows = await orchestrate({ issues: [1, 2], parallel: 1, recovery: { maxAttempts: 1 }, readBody: async () => "", now: () => t,
+      runOne: async (n, _l, ctx = {}) => { seen.push(ctx.recover ?? null); t += 60000 * (n === 1 ? 3 : 1); return script[n][k[n]++]; } });
+    const r = Object.fromEntries(rows.map((x) => [x.issue, x]));
+    assert.equal(r[1].outcome, "merged"); assert.equal(r[1].cost_usd, 0.75); assert.equal(r[1].minutes, 6);
+    assert.equal(r[2].outcome, "needs-human"); assert.equal(r[2].cost_usd, 3); assert.equal(r[2].minutes, 2);
+    assert.deepEqual(seen.filter(Boolean), [{ code: "ci.red", attempt: 1 }, { code: "ci.red", attempt: 1 }]);
+  });
+
+  it("formatOutcomeLists caps a detail at OUTCOME_LINE_MAX", () => {
+    const [l] = formatOutcomeLists([{ issue: 3, outcome: "needs-human", code: "conformance.omission", detail: "x".repeat(500) }]);
+    assert.ok(l.includes("x".repeat(OUTCOME_LINE_MAX)) && !l.includes("x".repeat(OUTCOME_LINE_MAX + 1)));
+  });
+
+  it("run-issue rejects --recover on the legacy --path full", async () => {
+    await assert.rejects(runFromCli(["7", "--lane", "staging", "--path", "full", "--recover", "ci.red"], { dir: tmpDir("core-rec-"), emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" } }),
+      /--recover is not supported with --path full/);
+  });
+
+  it("/orchestrate spec describes terminal non-human needs-human rows, --recover scope and the schedd resume scope", () => {
+    const spec = readFileSync(new URL("../../commands/orchestrate.md", import.meta.url), "utf8");
+    assert.match(spec, /\*\*terminal code\*\* that is neither recoverable nor human/);
+    assert.match(spec, /`unrecovered: #N/);
+    assert.match(spec, /core path only:\s+`--path full` rejects `--recover`/);
+    assert.match(spec, /resumes every daemon-hosted batch that has no report yet/);
   });
 });
