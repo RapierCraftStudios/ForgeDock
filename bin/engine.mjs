@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, scryptSync } from "node:crypto";
 import { hostname as osHostname, homedir } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog, scopeEvents } from "./engine/runlog.mjs";
-import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber, newestCycle, cycleResetProvable, remediationHeadStale, decompositionRevoked, openDependency } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber, newestCycle, cycleResetProvable, remediationHeadStale, decompositionRevoked, openDependency, reopenRevokedDecomposition } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS, resolveRunTmpRoot, runTmpDir } from "./runner.mjs";
@@ -570,6 +570,8 @@ export async function runIssue(opts) {
     // revocation alone suffices now that the size gate is gone. Anything else keeps the terminal; an
     // unreadable comment trail fails closed.
     if (state.terminalReason === "decomposed" && await decompositionRevoked(issue, io)) {
+      // #4337: a parent closed at decomposition is reopened on GitHub too, or the pre-phase divergence check ends it invalid.
+      await reopenRevokedDecomposition(issue, io);
       reopenUncommit = ["build", "decompose"];
     } else if (state.terminalReason !== "engine-error" && state.terminalReason !== "phase-complete" &&
         state.terminalReason !== "needs-human") {
