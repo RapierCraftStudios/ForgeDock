@@ -70,3 +70,30 @@ export function verdictMix(records, items = [], milestone = null) {
     series: [...series.values()].sort((a, b) => a.date.localeCompare(b.date)),
   };
 }
+
+/**
+ * forge#4275: the context-pack A/B over local run summaries (local-source.mjs summariseLog), per lane type (rerun,
+ * child, first) and mode (on, off, shadow), never one blended average. First-pass yield: merged with one plan + one
+ * implement builder call and at most one review. Runs without a recorded lane type (older logs) are left out.
+ */
+export const CONTEXT_LANE_TYPES = Object.freeze(["rerun", "child", "first"]);
+export function contextPackAb(runs) {
+  const out = {};
+  const mean = (xs) => (xs.length ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 1e4) / 1e4 : null);
+  for (const lt of CONTEXT_LANE_TYPES) {
+    out[lt] = {};
+    for (const mode of ["on", "off", "shadow"]) {
+      const rs = runs.filter((r) => r?.finished && r.contextPack?.laneType === lt && r.contextPack?.mode === mode);
+      out[lt][mode] = { n: rs.length, first_pass_yield: mean(rs.map((r) => (r.firstPass ? 1 : 0))), builder_turns: mean(rs.map((r) => r.builderTurns ?? 0)),
+        cache_tokens: mean(rs.map((r) => r.cacheTokens ?? 0)), cost_usd: mean(rs.map((r) => r.costUsd ?? 0)) };
+    }
+  }
+  return out;
+}
+
+/** Markdown table for contextPackAb. */
+export function renderContextAb(ab) {
+  const f = (v) => (v == null ? "n/a" : String(v));
+  const rows = CONTEXT_LANE_TYPES.flatMap((lt) => ["on", "off", "shadow"].map((m) => { const g = ab[lt][m]; return `| ${lt} | ${m} | ${g.n} | ${f(g.first_pass_yield)} | ${f(g.builder_turns)} | ${f(g.cache_tokens)} | ${f(g.cost_usd)} |`; }));
+  return `| Lane type | Mode | n | First-pass yield | Builder turns | Cache tokens | Cost USD |\n| --- | --- | --- | --- | --- | --- | --- |\n${rows.join("\n")}`;
+}
