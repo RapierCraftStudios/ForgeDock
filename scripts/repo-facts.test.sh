@@ -12,7 +12,7 @@ eq() { if [ "$2" = "$3" ]; then ok; else bad "$1 (got: $2 want: $3)"; fi }
 q() { printf '%s' "$OUT" | jq -c "$1"; }
 
 new_repo() {
-  rm -rf "$TMP/$1"; mkdir -p "$TMP/$1"; cd "$TMP/$1" || exit 1
+  rm -rf "${TMP:?}/$1"; mkdir -p "$TMP/$1"; cd "$TMP/$1" || exit 1
   git init -q -b main; git config user.email t@example.com; git config user.name t; git config commit.gpgsign false
 }
 commit() { git add -A; git commit -qm "$1"; }
@@ -44,12 +44,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - run: make lint-all
+      - run: pytest tests/slow
   quick:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: make fmt
+      - run: ruff check .
 EOF
 lines src/big.ts 2100; commit c1
 echo x >> src/big.ts; lines src/small.ts 10; commit c2
@@ -62,8 +62,8 @@ eq "packages" "$(q '.layer_rules.packages')" '[{"name":"@x/a","dir":"packages/a"
 eq "edge" "$(q '.layer_rules.edges')" '[{"from":"@x/a","to":"@x/b","kind":"dependencies","manifest":"packages/a/package.json"}]'
 eq "boundary configs" "$(q '.layer_rules.boundary_configs')" '[".eslintrc.js"]'
 eq "services job" "$(q '[.slow_suites[] | select(.command == "pnpm run test") | .why]')" '["CI job .github/workflows/ci.yml#jobs.db uses services"]'
-eq "timeout job" "$(q '[.slow_suites[] | select(.command == "make lint-all") | .why]')" '["CI job .github/workflows/ci.yml#jobs.long sets timeout-minutes 45"]'
-eq "quick job not slow" "$(q '[.slow_suites[] | select(.command == "make fmt")] | length')" 0
+eq "timeout job" "$(q '[.slow_suites[] | select(.command == "pytest tests/slow") | .why]')" '["CI job .github/workflows/ci.yml#jobs.long sets timeout-minutes 45"]'
+eq "quick job not slow" "$(q '[.slow_suites[] | select(.command == "ruff check .")] | length')" 0
 eq "hotspot" "$(q '.hotspots')" '[{"path":"src/big.ts","lines":2101,"commits_90d":2,"hotspot":4202}]'
 
 # ---- 2. a cached test map is read: its e2e command is a slow suite ----
