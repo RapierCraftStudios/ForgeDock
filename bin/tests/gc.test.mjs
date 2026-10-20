@@ -3,7 +3,7 @@
 // forgedock gc reaper (#4180): injected docker/git/gh/ps/fs probes; real temp dirs, never real docker/git/gh/kill.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, existsSync, readFileSync, utimesSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, utimesSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpDir } from "./_tmp.mjs";
 import { parseGcArgs, parseDuration, planGc, applyGc, runGc, parseDockerTime, GC_SCOPES } from "../gc.mjs";
@@ -414,5 +414,61 @@ describe("forgedock gc deps (#4220 dependency cache)", () => {
     for (const p of [oldSnap, deadTmp, deadLock]) assert.equal(existsSync(p), false, p);
     for (const p of [freshSnap, lockedSnap, join(root, "stores", "pnpm-store")]) assert.ok(existsSync(p), p);
     assert.match(r.out, /gc: reclaimed 3 of 3 item\(s\)/);
+  });
+});
+
+describe("3-issue batch leaves zero owned leftovers (#4184)", () => {
+  // Fake probes whose destructive calls mutate the world, so a second dry-run sees what --apply actually left behind.
+  const mutating = (w) => {
+    const { docker, git } = w.probes;
+    w.probes.docker = async (args) => {
+      if (args[0] === "rm") w.containers = w.containers.filter((c) => !args.includes(c.Names));
+      if (args[0] === "volume" && args[1] === "rm") w.volumes = w.volumes.filter((v) => !args.includes(v.Name));
+      return docker(args);
+    };
+    w.probes.git = async (args, o) => {
+      if (args[0] === "branch" && args[1] === "-D") w.branches.local = w.branches.local.filter(([n]) => n !== args[2]);
+      if (args[0] === "worktree" && args[1] === "remove") { const d = resolve(args.at(-1)); w.registered = w.registered.filter((r) => resolve(r) !== d); rmSync(d, { recursive: true, force: true }); }
+      return git(args, o);
+    };
+    return w;
+  };
+  it("after three crashed lanes, owned GC leaves a dry-run with no owned reclaimable container, volume, worktree, tmp or lane branch; unowned stays", async () => {
+    const w = mutating(world());
+    w.containers.push({ Names: "sqv-postgres", Labels: "", CreatedAt: dockerTime(NOW - 900 * H), Size: "50MB" });
+    for (const n of [101, 102, 103]) {
+      const wt = join(w.wtRoot, `lean-${n}`); mkdirSync(wt); writeFileSync(join(wt, "f.txt"), "x");
+      w.registered.push(wt); w.toplevel[resolve(wt)] = true;
+      const runTmp = join(w.tmpRoot, "runs", `${n}-1`); mkdirSync(runTmp, { recursive: true });
+      w.branches.local.push([`feat/issue-${n}-lean`, old()]); w.issues[n] = "CLOSED";
+      w.containers.push({ Names: `lean${n}-pg`, Labels: `forgedock.owner=1,forgedock.lane=${n}`, CreatedAt: dockerTime(NOW - 30 * H), Size: "5MB" });
+      w.volumes.push({ Name: `lean${n}-vol`, Labels: "forgedock.owner=1", CreatedAt: new Date(NOW - 30 * H).toISOString() });
+      writeLedger(w, { lane: `lean-${n}`, resources: [
+        { kind: "worktree", value: wt, registered: NOW - 2 * H }, { kind: "branch", value: `feat/issue-${n}-lean`, registered: NOW - 2 * H },
+        { kind: "tmp", value: runTmp, registered: NOW - 2 * H }, { kind: "container", value: `lean${n}-pg`, registered: NOW - H },
+        { kind: "volume", value: `lean${n}-vol`, registered: NOW - H },
+      ] });
+    }
+    const before = await planGc({ probes: w.probes, now: NOW });
+    const OWNED = new Set(["container", "volume", "worktree", "tmp", "branch"]);
+    const reclaimable = (p) => p.items.filter((i) => OWNED.has(i.type) && i.owned && i.action === "reclaim");
+    assert.equal(reclaimable(before).length, 15, "5 owned resources per lane before GC");
+
+    const r = await runOwnedGc({ probes: w.probes, now: NOW });
+    assert.equal(r.applied.failed.length, 0, JSON.stringify(r.applied.failed));
+
+    const dry = await run(w, ["--dry-run"]);
+    assert.equal(dry.code, 0, dry.out);
+    const after = await planGc({ probes: w.probes, now: NOW });
+    assert.deepEqual(reclaimable(after).map((i) => `${i.type}:${i.id}`), []);
+    assert.deepEqual(after.items.filter((i) => OWNED.has(i.type) && i.owned).map((i) => `${i.type}:${i.id}`), [], "no owned resource of a finished lane remains");
+    assert.ok(w.containers.some((c) => c.Names === "sqv-postgres"), "unowned container is never touched");
+  });
+  it("a CPU-bound lint/test phase alone does not trip the default admission ceiling (load gating off, #4169)", async () => {
+    const { checkAdmission, ADMISSION_DEFAULTS } = await import("../lean/admission.mjs");
+    assert.equal(ADMISSION_DEFAULTS.max_load_per_core, null);
+    const busy = { loadAvg1: () => 64, cores: () => 4, memAvailableMb: () => 8 * 1024, tmpPaths: () => ["/t"], freeMb: () => 20 * 1024 }; // 16/core on a 4c/16G host
+    assert.deepEqual(await checkAdmission({ host: busy }), { ok: true, reasons: [], detail: "" });
+    assert.equal(await nearCeiling({ host: busy }), false);
   });
 });
