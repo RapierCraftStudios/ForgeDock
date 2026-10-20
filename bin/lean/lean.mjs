@@ -188,6 +188,8 @@ export async function runCore(o) {
   // Pipeline trajectory (posted once at the end): phase rows, decisions, anomalies.
   const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
   const failureClasses = new Set(); // forge#4275: conformance failure codes seen this run (gate failures, shadow would-fail)
+  const ctxCfg = parseContextPackConfig(o.contextPack ?? {});
+  let ctxLane = null; // forge#4275: rerun | child | first, set once the issue is read
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
   const runId = `${issue}-${t0}`;
@@ -472,8 +474,6 @@ export async function runCore(o) {
 
   /** A timeout restart starts a fresh session; by default it continues the implementation against the frozen contract. */
   const tcOpts = () => ({ toolchain: toolchain?.summary ?? null, sparse });
-  const ctxCfg = parseContextPackConfig(o.contextPack ?? {});
-  let ctxLane = null; // forge#4275: rerun | child | first, set once the issue is read
   let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
   const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + CONTINUE_NOTE.replace("BASE", lane);
   async function builder(n, prompt, resume, live = false, restart = implementRestart) {

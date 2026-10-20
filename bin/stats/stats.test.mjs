@@ -542,6 +542,9 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
     assert.deepEqual([s.builderTurns, s.cacheTokens, s.costUsd, s.firstPass], [10, 2130, 1.1, true]);
     assert.equal(summariseLog(log("on", "child", { builds: 4 })).firstPass, false);
     assert.equal(summariseLog(log("on", "child", { reason: "needs-human" })).firstPass, false);
+    const fixed = log("on", "child"); fixed.splice(-1, 0, { event: "CI_FIX_ROUND", trigger: "build", round: 1 });
+    assert.equal(summariseLog(fixed).firstPass, false);
+    assert.equal(summariseLog([{ event: "RUN_START", issue: 3 }, { event: "RUN_TERMINAL", reason: "merged" }]).contextPack.mode, "off");
   });
 
   it("reports per lane type and mode, never one blended average", () => {
