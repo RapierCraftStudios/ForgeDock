@@ -54,9 +54,20 @@ const isMarked = (c) => String(c?.body ?? "").trimStart().startsWith(`<!-- ${PRE
  * CONTRIBUTOR, never `[bot]`) plus the token's own user (`gh api user`; an App installation token cannot read it).
  */
 export async function ownLogins(gh) {
+  return (await resolveOwnLogins(gh)).logins;
+}
+/**
+ * #4318: {logins, resolved}. When `gh api user` fails (an App installation token), the App's own slug from `gh api app`
+ * (a differently named App); `resolved` is false when neither lookup answered, so the batch memo may ask once more.
+ */
+export async function resolveOwnLogins(gh) {
   const out = new Set([bareLogin(APP_SLUG)]);
-  try { const me = bareLogin(await gh(["api", "user", "--jq", ".login"])); if (me) out.add(me); } catch { /* installation token: the App slug only */ }
-  return [...out];
+  let resolved = false;
+  try { const me = bareLogin(await gh(["api", "user", "--jq", ".login"])); if (me) { out.add(me); resolved = true; } } catch { /* installation token */ }
+  if (!resolved) {
+    try { const slug = bareLogin(await gh(["api", "app", "--jq", ".slug"])); if (slug) { out.add(slug); resolved = true; } } catch { /* the App slug only */ }
+  }
+  return { logins: [...out], resolved };
 }
 /**
  * #4305: why one green run is no proof for this issue, without an API call: flaky wording or a `flaky` label, or an
@@ -195,8 +206,14 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
 
 /** Per-issue hook for `orchestrate({ prefilter })`; `lane` is the issue's own resolved lane (#4125). */
 export function makePrefilter(opts) {
-  let own = null; // #4315: one `gh api user` per batch, and only when a marker comment needs it
-  const selfLogins = opts.selfLogins ?? (() => (own ??= ownLogins(opts.io.gh)));
+  // #4315: one identity lookup per batch, and only when a marker comment needs it; #4318: an unresolved one is retried once
+  let own = null, tries = 0;
+  const selfLogins = opts.selfLogins ?? (() => (own ??= (async () => {
+    tries++;
+    const r = await resolveOwnLogins(opts.io.gh);
+    if (!r.resolved && tries < 2) own = null;
+    return r.logins;
+  })()));
   return (issue, lane) => prefilterIssue({ ...opts, selfLogins, issue, ...(lane ? { lane } : {}) });
 }
 

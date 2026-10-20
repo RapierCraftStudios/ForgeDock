@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseTestMap, readTestMap, selectCommands, mergeChecks, factsPath, TEST_MAP_FILE, REPO_FACTS_FILE } from "./testmap.mjs";
+import { parseTestMap, readTestMap, selectCommands, mergeChecks, checkKey, factsPath, TEST_MAP_FILE, REPO_FACTS_FILE } from "./testmap.mjs";
 
 const MAP = {
   version: 1,
@@ -69,5 +69,18 @@ describe("mergeChecks (#4315): the map can only add checks", () => {
     assert.deepEqual(mergeChecks([], ["make lint"]), { commands: ["make lint"], added: 0, source: "learned" });
     assert.deepEqual(mergeChecks(["npm test"], []), { commands: ["npm test"], added: 1, source: "test-map" });
     assert.deepEqual(mergeChecks(undefined, undefined), { commands: [], added: 0, source: "learned" });
+  });
+});
+
+describe("mergeChecks (#4318): one suite under two spellings runs once", () => {
+  it("collapses <pm> run test / <pm> test, npx [--yes] X / X and cd . && X / X, keeping the first spelling", () => {
+    assert.deepEqual(mergeChecks(["pnpm test", "vitest", "make lint"], ["pnpm run test", "npx --yes vitest", "cd . && make lint"]),
+      { commands: ["pnpm run test", "npx --yes vitest", "cd . && make lint"], added: 0, source: "learned" });
+    assert.deepEqual(mergeChecks(["cd pkg && npx vitest run", "cd other && vitest run"], ["cd pkg && vitest run"]).commands, ["cd pkg && vitest run", "cd other && vitest run"]);
+  });
+  it("checkKey keeps different suites apart", () => {
+    assert.notEqual(checkKey("npm run test:unit"), checkKey("npm test"));
+    assert.notEqual(checkKey("cd a && npm test"), checkKey("npm test"));
+    assert.equal(checkKey("bunx -y  jest"), "jest");
   });
 });

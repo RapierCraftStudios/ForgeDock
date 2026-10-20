@@ -3190,7 +3190,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     writeFileSync(`${d}/forge.yaml`, "engine:\n  conformance: shadow\n");
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n");
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, checkRun: false });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 1800, checkRun: false });
   });
 });
 
@@ -3551,6 +3551,16 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.equal(r.terminalReason, "merged");
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 1);
     assert.match(traj(w)[0], /builder made no new commit for them/);
+  });
+
+  it("#4318 pre-PR: a round has a total budget; a command gets what is left, the rest are skipped as an anomaly, not a failure", async () => {
+    const w = world(); const ran = [];
+    w.io.runCommand = async ({ command, timeoutMs }) => { ran.push([command, timeoutMs]); w.clock += 60000; return { rc: 0, output: "" }; };
+    const r = await run(w, { precheck: { commands: ["make a", "make b", "make c"] }, verify: { precheckTotalSeconds: 100 } });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(ran, [["make a", 100000], ["make b", 40000]]);
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "skipped is not failing");
+    assert.match(traj(w)[0], /skipped: pre-PR check total budget 100 s reached; not run: `make c`/);
   });
 });
 

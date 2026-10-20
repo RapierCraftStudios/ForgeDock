@@ -1132,12 +1132,17 @@ export async function runCore(o) {
         await renew();
         if (round) picked = pickChecks();
         const precheckCommands = picked.commands;
-        const results = [];
+        const results = [], skipped = [];
+        // #4318: one round has a total budget; a command gets what is left of it, and the rest are skipped (CI stays the gate)
+        const totalMs = (Number(vcfg.precheckTotalSeconds) || 1800) * 1000, deadline = now() + totalMs;
         for (const command of precheckCommands) {
+          const left = deadline - now();
+          if (left <= 0) { skipped.push(command); continue; }
           let r;
-          try { r = await heavyStep("precheck", () => io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000 })); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
+          try { r = await heavyStep("precheck", () => io.runCommand({ command, cwd: wt, timeoutMs: Math.min(vcfg.precheckTimeoutSeconds * 1000, left) })); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
           results.push({ command, rc: Number.isInteger(r?.rc) ? r.rc : 1, output: String(r?.output ?? "") });
         }
+        if (skipped.length) T.anomalies.push(`skipped: pre-PR check total budget ${totalMs / 1000} s reached; not run: ${skipped.map((c) => `\`${c}\``).join(", ")}`);
         ev({ event: "PRECHECK_COMMANDS", round, results: results.map(({ command, rc }) => ({ command, rc })), ...(picked.source !== "learned" ? { source: picked.source } : {}) });
         verifyFacts.commands = results.map(({ command, rc }) => ({ command, rc }));
         const failed = results.filter((r) => r.rc !== 0);

@@ -13,6 +13,8 @@ export const DEFAULT_SKIP_PATHS = Object.freeze(["*.md", "*.mdx", "*.rst", "*.tx
 export const DEFAULT_MAX_ROUNDS = 2;
 /** Per-command timeout of the pre-PR declared check commands (#4240, `verify.precheck_timeout_seconds`). */
 export const DEFAULT_PRECHECK_TIMEOUT_SECONDS = 300;
+/** Total budget of one round of pre-PR check commands (#4318, `verify.precheck_total_seconds`). */
+export const DEFAULT_PRECHECK_TOTAL_SECONDS = 1800;
 /** Total characters of failed-job log handed to the builder. */
 export const LOG_CAP = 12000;
 /** No run or check for the head after this long means CI is unavailable (local fallback). */
@@ -26,7 +28,7 @@ const OK = ["success", "neutral", "skipped"];
 
 /**
  * forge.yaml `verify:` section (block style; parseForgeYaml gives strings) → {mode, workflow, pathsInput, skipPaths,
- * maxRounds, precheckTimeoutSeconds, checkRun}. Invalid values fall back to the defaults; mode defaults to local (today's
+ * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun}. Invalid values fall back to the defaults; mode defaults to local (today's
  * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`.
  */
 export function parseVerify(sec = {}) {
@@ -41,8 +43,10 @@ export function parseVerify(sec = {}) {
   const maxRounds = str(s.max_rounds) !== "" && Number.isInteger(n) && n >= 0 && n <= 10 ? n : DEFAULT_MAX_ROUNDS;
   const t = Number(str(s.precheck_timeout_seconds));
   const precheckTimeoutSeconds = str(s.precheck_timeout_seconds) !== "" && Number.isInteger(t) && t >= 1 && t <= 3600 ? t : DEFAULT_PRECHECK_TIMEOUT_SECONDS;
+  const tt = Number(str(s.precheck_total_seconds));
+  const precheckTotalSeconds = str(s.precheck_total_seconds) !== "" && Number.isInteger(tt) && tt >= 1 && tt <= 7200 ? tt : DEFAULT_PRECHECK_TOTAL_SECONDS;
   const checkRun = str(s.check_run).toLowerCase() === "true";
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, checkRun };
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);
