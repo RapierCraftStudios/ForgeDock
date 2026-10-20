@@ -1030,13 +1030,15 @@ describe("verify.check_run plumbing (#4270)", () => {
   });
   it("waitCiGreen passes ignore names as --ignore-check; without them the argv and verdict are unchanged", async () => {
     const d = tmpDir("cli-wait-");
-    writeFileSync(join(d, "gh"), `#!/usr/bin/env bash\nif [ "$1 $2" = "pr view" ]; then echo abc1234; exit 0; fi\nif [ "$1 $2" = "pr checks" ]; then echo '[{"name":"ci","bucket":"pass"},{"name":"forgedock/verify","bucket":"fail"}]'; exit 0; fi\nexit 1\n`, { mode: 0o755 });
+    // #4298: forgedock/verify is ignored by wait-ci-green.sh itself, so "lint" stands in for an ignorable check here.
+    writeFileSync(join(d, "gh"), `#!/usr/bin/env bash\nif [ "$1 $2" = "pr view" ]; then echo abc1234; exit 0; fi\nif [ "$1 $2" = "pr checks" ]; then echo '[{"name":"ci","bucket":"pass"},{"name":"forgedock/verify","bucket":"fail"},{"name":"lint","bucket":"fail"}]'; exit 0; fi\nexit 1\n`, { mode: 0o755 });
     const PATH = process.env.PATH;
     process.env.PATH = `${d}:${PATH}`;
     try {
       const io = makeIo();
-      assert.equal((await io.waitCiGreen(7, "o/r", 0)).rc, 1);
-      const w = await io.waitCiGreen(7, "o/r", 0, { ignore: ["forgedock/verify"] });
+      const r = await io.waitCiGreen(7, "o/r", 0);
+      assert.equal(r.rc, 1); assert.doesNotMatch(r.text, /forgedock\/verify/, "the report-only check is ignored by default (#4298)");
+      const w = await io.waitCiGreen(7, "o/r", 0, { ignore: ["lint"] });
       assert.equal(w.rc, 0); assert.match(w.text, /CI_GATE: PASS/);
     } finally { process.env.PATH = PATH; }
   });

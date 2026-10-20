@@ -13,7 +13,11 @@ import { join } from "node:path";
 import { isTrustedComment, parseDependsOn } from "../engine/phases.mjs";
 import { codeForTerminalReason } from "../engine/outcome-codes.mjs";
 import { namedPaths } from "./prefilter.mjs";
-import { parseContractComment } from "./render.mjs";
+import { parseContractComment, noComments } from "./render.mjs";
+import { REPO_FACTS_FILE, TEST_MAP_FILE } from "./testmap.mjs";
+
+// noComments lives in render.mjs (#4298: one comment-strip helper for context, conformance and prefilter).
+export { noComments };
 
 export const CONTEXT_MODES = Object.freeze(["shadow", "on", "off"]);
 export const CONTEXT_SOURCES = Object.freeze(["graph", "attempts", "ledger", "facts"]);
@@ -22,30 +26,11 @@ export const DEFAULT_LEDGER_DAYS = 30;
 /** Bounds on GitHub reads per pack: linked issues read, ledger PRs inspected. */
 export const MAX_LINKS = 20;
 export const MAX_LEDGER_PRS = 8;
-export const REPO_FACT_FILES = Object.freeze([".forge/repo-facts.json", ".forge/test-map.json"]);
+export const REPO_FACT_FILES = Object.freeze([REPO_FACTS_FILE, TEST_MAP_FILE]);
 const ATTEMPT_MARKERS = ["NEEDS_HUMAN", "BASE_SYNC", "FIX_CI"];
 const LINE_MAX = 200;
 
 const hash12 = (s) => createHash("sha256").update(String(s)).digest("hex").slice(0, 12);
-/**
- * Untrusted issue/comment text with HTML comments removed and no comment opener left: comments are cut out by plain
- * scanning (closer `-->` or `--!>`; an unclosed one runs to the end), then every `<` that starts `<!` becomes `‹`.
- * With no `<!` in the output, no HTML comment and no FORGE marker can open, whatever the input nesting. Pack text is
- * posted back in a trusted bot comment, so this is the guarantee that matters.
- */
-export function noComments(s, repl = "") {
-  const t = String(s ?? "");
-  let out = "", i = 0;
-  for (;;) {
-    const a = t.indexOf("<!--", i);
-    if (a < 0) { out += t.slice(i); break; }
-    out += t.slice(i, a) + repl;
-    const ends = [[t.indexOf("-->", a + 4), 3], [t.indexOf("--!>", a + 4), 4]].filter(([k]) => k >= 0).sort((x, y) => x[0] - y[0]);
-    if (!ends.length) break;
-    i = ends[0][0] + ends[0][1];
-  }
-  return out.replace(/<(?=!)/g, "\u2039");
-}
 const oneLine = (s, max = LINE_MAX) => {
   const t = noComments(s, " ").replace(/\s+/g, " ").trim();
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
@@ -116,9 +101,13 @@ export function priorAttempts(body, comments = []) {
   return (stateOf(body)?.terminalReason ? 1 : 0) + comments.filter((c) => ATTEMPT_MARKERS.includes(markerOf(c?.body)) && trusted(c)).length;
 }
 
-/** Cache key for a compiled pack: issue + base head SHA, plus the config that shapes it. */
-export const contextPackCacheKey = (issue, headSha, cfg = {}) =>
-  `context-${issue}-${String(headSha ?? "").trim().slice(0, 40) || "nohead"}-${hash12(JSON.stringify([cfg.sources ?? [], cfg.budgetBytes ?? null, cfg.days ?? null]))}.json`;
+/**
+ * Cache key for a compiled pack: issue + base head SHA, plus the config that shapes it and (#4298) the issue's
+ * `updatedAt` and prior-attempt count, so an edit or a new attempt on the same base compiles a fresh pack.
+ */
+export const contextPackCacheKey = (issue, headSha, cfg = {}, stamp = {}) =>
+  `context-${issue}-${String(headSha ?? "").trim().slice(0, 40) || "nohead"}-${hash12(JSON.stringify([cfg.sources ?? [], cfg.budgetBytes ?? null, cfg.days ?? null,
+    ...(stamp?.updatedAt != null || stamp?.attempts != null ? [String(stamp.updatedAt ?? ""), Number(stamp.attempts) || 0] : [])]))}.json`;
 
 // ---- gather (I/O) ----
 
@@ -309,16 +298,36 @@ export function renderContextRecord(pack, { mode, laneType: lt }) {
 }
 
 /**
- * The pack for one run: read from the cache (`cacheDir`, keyed by issue + base head SHA + config) or gathered and
- * compiled, then cached. `gather` returns the facts; `fs` is {read, write}. A cache miss or write failure is not an error.
+ * The pack for one run: read from the cache (`cacheDir`, keyed by issue + base head SHA + config + `stamp`) or gathered
+ * and compiled, then cached. `gather` returns the facts; `fs` is {read, write, rename?, list?, rm?}. A gather that
+ * reported source errors is not cached (#4298), the write goes through a temp file and a rename, and the issue's other
+ * cached packs are pruned. A cache miss or any write/rename/prune failure is not an error.
  */
-export async function contextPackFor({ cfg, issue, headSha, cacheDir, fs, gather }) {
-  const file = cacheDir && headSha ? join(cacheDir, contextPackCacheKey(issue, headSha, cfg)) : null;
+export async function contextPackFor({ cfg, issue, headSha, cacheDir, fs, gather, stamp = {} }) {
+  const name = cacheDir && headSha ? contextPackCacheKey(issue, headSha, cfg, stamp) : null;
+  const file = name ? join(cacheDir, name) : null;
   if (file && fs?.read) {
     try { const c = JSON.parse(await fs.read(file)); if (c?.pack && typeof c.pack.text === "string") return { ...c, cached: true }; } catch { /* miss */ }
   }
   const facts = await gather();
   const out = { pack: compileContextPack(facts, cfg), errors: facts?.errors ?? [] };
-  if (file && fs?.write) { try { await fs.write(file, JSON.stringify(out)); } catch { /* cache is optional */ } }
+  if (file && fs?.write && !out.errors.length) await cachePack(fs, cacheDir, file, name, issue, JSON.stringify(out));
   return { ...out, cached: false };
+}
+
+async function cachePack(fs, cacheDir, file, name, issue, text) {
+  try {
+    if (typeof fs.rename === "function") {
+      const tmp = `${file}.${process.pid}.tmp`;
+      await fs.write(tmp, text);
+      await fs.rename(tmp, file);
+    } else await fs.write(file, text);
+  } catch { return; /* cache is optional */ }
+  if (typeof fs.list !== "function" || typeof fs.rm !== "function") return;
+  try {
+    const prefix = `context-${issue}-`;
+    for (const f of await fs.list(cacheDir)) {
+      if (f !== name && f.startsWith(prefix) && f.endsWith(".json")) { try { await fs.rm(join(cacheDir, f)); } catch { /* best effort */ } }
+    }
+  } catch { /* best effort */ }
 }

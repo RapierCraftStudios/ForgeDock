@@ -6,8 +6,9 @@
 #
 # Usage: wait-ci-green.sh <pr-number> -R <owner/repo> [--timeout SECONDS] [--interval SECONDS] [--ignore-check NAME]...
 #
-# --ignore-check NAME (repeatable): drop checks with exactly that name before deciding (forge#4270: the lane's own
-# report-only `forgedock/verify` check run never gates its own merge).
+# --ignore-check NAME (repeatable): drop checks with exactly that name before deciding. `forgedock/verify` (forge#4270,
+# the lean engine's report-only gate summary) is always ignored, so every caller of this gate treats it the same
+# (forge#4298); requiring it is the repository's branch-protection choice.
 #
 # Waits until every check on the PR has finished, then decides. Fails closed: a merge may
 # proceed ONLY on exit 0. Field test: pipeline agents merged PRs to staging while checks were
@@ -43,10 +44,10 @@ set -uo pipefail
 _TEL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/telemetry.sh"; [ -f "$_TEL" ] && . "$_TEL" 2>/dev/null
 type forge_emit >/dev/null 2>&1 || forge_emit() { :; }
 
-PR=""; REPO=""; IGNORE='[]'
+PR=""; REPO=""; IGNORE='["forgedock/verify"]'
 TIMEOUT="${FORGE_CI_TIMEOUT:-540}"; INTERVAL="${FORGE_CI_INTERVAL:-20}"; SETTLE="${FORGE_CI_SETTLE:-45}"
 GRACE="${FORGE_CI_NO_CHECKS_GRACE:-120}"; REQUIRE="${FORGE_CI_REQUIRE_CHECKS:-0}"
-usage() { echo "CI_GATE: ERROR"; echo "CI_GATE_HEAD: unknown"; echo "usage: wait-ci-green.sh <pr> -R <owner/repo> [--timeout S] [--interval S]" >&2; exit 2; }
+usage() { echo "CI_GATE: ERROR"; echo "CI_GATE_HEAD: unknown"; echo "usage: wait-ci-green.sh <pr> -R <owner/repo> [--timeout S] [--interval S] [--ignore-check NAME]..." >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     -R) [ $# -ge 2 ] || usage; REPO="$2"; shift 2 ;;
@@ -54,7 +55,7 @@ while [ $# -gt 0 ]; do
     --timeout) [ $# -ge 2 ] || usage; TIMEOUT="$2"; shift 2 ;;
     --interval) [ $# -ge 2 ] || usage; INTERVAL="$2"; shift 2 ;;
     --ignore-check) [ $# -ge 2 ] || usage; IGNORE="$(jq -c --arg n "$2" '. + [$n]' <<<"$IGNORE")"; shift 2 ;;
-    -h|--help) sed -n '5,35p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,37p' "$0"; exit 0 ;;
     *) [ -z "$PR" ] || usage; PR="$1"; shift ;;
   esac
 done

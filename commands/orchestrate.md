@@ -97,7 +97,8 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
   Its first line is `batch: <id> (...)`. The batch state lives in `~/.forge/batches/<id>/` and every lane runs in its
   own session, so the batch survives this session: if the runner dies, run `forgedock orchestrate --resume <id>`
   (live lanes are re-adopted, nothing is launched twice). The runner is hosted by the detached `forgedock schedd` daemon,
-  which resumes every unfinished batch when it starts, so a closed session needs no manual `--resume`. Change K of a running batch with
+  which resumes every daemon-hosted batch that has no report yet when it starts, so a closed session needs no manual
+  `--resume`; a batch started without the daemon still needs `forgedock orchestrate --resume <id>`. Change K of a running batch with
   `forgedock orchestrate --set-parallel <id> K`. The runner requeues `deferred` lanes by code (host busy after its
   retry-in, a usage limit holds admissions for that account (backend identity) until the reset, across every batch on
   the host; `forgedock limits show|clear <id>|--all` lists or drops holds; transient merge/push/idle failures back off; non-host
@@ -142,7 +143,8 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
   PR, `contract.invalid` caused by an issue edited mid-run, and `builder.block_untyped` (an in-scope technical choice).
   These are mechanical. **Do not ask for confirmation on them.** The batch runner recovers each one itself
   (`orchestration.recovery.max_attempts`, default 1 per issue). It launches one recovery lane under the same lease, lane
-  and admission rules as any lane, with `run-issue --recover <code>`. That lane:
+  and admission rules as any lane, with `run-issue --recover <code> [--recover-attempt n]` (core path only:
+  `--path full` rejects `--recover`). That lane:
   - removes `needs-human`;
   - resumes the open PR: merges the base, fixes the failed required checks from their logs, and pushes new commits only;
   - re-queues the issue, keeping its dependents queued in the same batch.
@@ -153,6 +155,10 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
   external action agents cannot take, or a product decision too critical for agents. It is never auto-recovered. Read
   the issue's last comment for the reason, mark its dependents skipped, and add it to the escalation list (step 4). Only
   explicit or logical edges skip a dependent; an issue that merely overlaps the same file keeps running.
+- `needs-human` with a **terminal code** that is neither recoverable nor human (for example a `conformance.*` code, or
+  `contract.invalid` without a mid-run issue edit): the runner does not recover it and it is not an escalation. The
+  batch report lists it as `unrecovered: #N (<code>: <detail>)`, like a recovery that did not merge. Mark its dependents
+  skipped and leave the issue for a later run once its cause is fixed.
 - `engine-error`: relaunch it once.
 - `ci-pending` (PR not conflicting) or `deferred`: leave it. A later `/orchestrate` resumes it.
 

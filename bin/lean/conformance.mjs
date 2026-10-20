@@ -47,6 +47,8 @@ const stripHtmlComments = (s) => noComments(s).replace(/\r\n/g, "\n").trim();
  * #4265: the human scope of an issue: title, body and trusted comments without the engine's own annotations (HTML comment
  * blocks such as FORGE:STATE, and comments the engine posted, which start with "<!-- FORGE:"). Its hash is the edit signal
  * and the provenance of a frozen contract; quote validation keeps using the full text.
+ * #4298 (SEC-5): EVERY HTML comment is cut, human ones too. GitHub does not render them, so they are not the scope a
+ * human reads, and an edit that only touches a hidden comment is not a scope edit.
  */
 export function scopeText(iss, trustedComments = []) {
   const human = (trustedComments ?? []).map((c) => String(c?.body ?? "")).filter((b) => !b.trimStart().startsWith("<!-- FORGE:"));
@@ -97,9 +99,11 @@ export const isBugIssue = (labels) => (Array.isArray(labels) ? labels : []).some
  * A validate command that diffs against a remote branch tip (`git diff origin/x`, `git diff origin/x HEAD`) breaks as
  * soon as the base moves on, even when the change is fine. Returns the remote ref it diffs against, or null when every
  * `git diff` segment compares against the merge base (`origin/x...HEAD`, `$(git merge-base …)`) or no remote ref.
+ * Only revisions count: anything after a standalone `--` is a pathspec (`git diff HEAD -- origin/x.txt`, #4298).
  */
 export function movingBaseDiff(command) {
-  for (const seg of String(command ?? "").split(/&&|\|\||;|\|/)) {
+  for (const whole of String(command ?? "").split(/&&|\|\||;|\|/)) {
+    const seg = whole.split(/(?:^|\s)--(?=\s|$)/)[0];
     if (!/\bgit\b(?:\s+-C\s+\S+)?(?:\s+-c\s+\S+)*\s+diff\b/.test(seg)) continue;
     const ref = /(?:^|[\s=])(origin\/[A-Za-z0-9._\/-]+)/.exec(seg)?.[1];
     if (!ref || seg.includes("...") || /merge-base/.test(seg)) continue;

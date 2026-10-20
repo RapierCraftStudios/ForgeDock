@@ -131,6 +131,32 @@ git add -A
 OUTS="$(bash "$S" --stdout)"
 eq "wf2 commands" "$(printf '%s' "$OUTS" | jq -r '[.entries[].command] | sort | join("|")')" "npm run lint|npm test|tsc --noEmit"
 
+# ---- 5c. forge#4298: a package dir with a space and a non-ASCII name keeps whole globs; workflow paths with spaces ----
+mkdir -p "$TMP/sp/web app" "$TMP/sp/pkg/ü/src" "$TMP/sp/.github/workflows"; cd "$TMP/sp" || exit 1
+git init -q -b main
+echo '{"name":"root","private":true}' > package.json
+echo '{"name":"web","scripts":{"test":"vitest run"}}' > "web app/package.json"
+echo '{"name":"u","scripts":{"lint":"eslint ."}}' > "pkg/ü/package.json"
+echo 'x' > "pkg/ü/src/a.ts"
+cat > .github/workflows/ci.yml <<'EOF'
+on:
+  push:
+    paths:
+      - "docs site/**"
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./build-docs.sh
+EOF
+git add -A
+OUTS="$(bash "$S" --stdout)"
+eq "spaced package globs" "$(printf '%s' "$OUTS" | jq -c '[.entries[] | select(.cwd == "web app") | .globs[]] | map(select(endswith("package.json") or endswith(".js")))')" '["web app/**/*.js","web app/package.json"]'
+eq "non-ASCII package dir" "$(printf '%s' "$OUTS" | jq -r '[.entries[] | select(.command == "npm run lint") | .cwd] | join("|")')" "pkg/ü"
+eq "spaced workflow path filter" "$(printf '%s' "$OUTS" | jq -c '[.entries[] | select(.command == "./build-docs.sh") | .globs]')" '[["docs site/**"]]'
+printf '%s' "$OUTS" > "$TMP/sp-map.json"
+eq "spaced changed file selects its package test" "$(node "$SEL" --map "$TMP/sp-map.json" --select "web app/src/x.js")" "cd 'web app' && npm run test"
+
 # ---- 6. usage ----
 bash "$S" --repo-path "$TMP/missing" >/dev/null 2>&1; eq "bad repo path" "$?" 2
 bash "$S" --nope >/dev/null 2>&1; eq "unknown option" "$?" 2

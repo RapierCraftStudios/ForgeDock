@@ -39,7 +39,8 @@ cd "$REPO" || die "cannot enter $REPO"
 T=$(mktemp -d "${TMPDIR:-/tmp}/repo-facts.XXXXXX") || die "mktemp failed"
 trap 'rm -rf "$T"' EXIT
 HAS_HEAD=0; git rev-parse --verify -q "HEAD^{commit}" >/dev/null 2>&1 && HAS_HEAD=1
-if [ "$HAS_HEAD" = 1 ]; then git ls-tree -r --name-only HEAD > "$T/files"; else : > "$T/files"; fi
+# -z and quotepath=off (#4298): non-ASCII and spaced paths come out verbatim, never C-quoted
+if [ "$HAS_HEAD" = 1 ]; then git -c core.quotepath=off ls-tree -r -z --name-only HEAD | tr '\0' '\n' > "$T/files"; else : > "$T/files"; fi
 # file content at HEAD
 at_head() { git show "HEAD:$1" 2>/dev/null; }
 
@@ -97,8 +98,8 @@ done < "$T/globs"
 if [ -s "$T/inc" ]; then
   grep -E '/package\.json$' "$T/files" | grep -v -E '(^|/)node_modules/' | while IFS= read -r m; do
     d=${m%/package.json}
-    printf '%s\n' "$d" | grep -qE -f "$T/inc" || continue
-    if [ -s "$T/exc" ] && printf '%s\n' "$d" | grep -qE -f "$T/exc"; then continue; fi
+    grep -qE -f "$T/inc" <<<"$d" || continue
+    if [ -s "$T/exc" ] && grep -qE -f "$T/exc" <<<"$d"; then continue; fi
     at_head "$m" > "$T/pj" || continue
     n=$(jq -r '.name // empty | strings' "$T/pj" 2>/dev/null)
     [ -n "$n" ] || continue
@@ -115,7 +116,8 @@ EDGES=$(awk -F'\t' '
 while IFS= read -r f; do
   case "${f##*/}" in
     .eslintrc|.eslintrc.*|eslint.config.*|.dependency-cruiser.*|nx.json|project.json)
-      at_head "$f" | grep -qE 'boundaries|forbidden|depConstraints|DependOnLibsWithTags|no-restricted-paths' && printf '%s\n' "$f" >> "$T/bfiles" ;;
+      # here-string, not `at_head | grep -q`: under pipefail an early grep exit SIGPIPEs at_head and reads as no match (#4298)
+      c=$(at_head "$f"); grep -qE 'boundaries|forbidden|depConstraints|DependOnLibsWithTags|no-restricted-paths' <<<"$c" && printf '%s\n' "$f" >> "$T/bfiles" ;;
   esac
 done < "$T/files"
 BOUNDARY=$(jq -R -s -c 'split("\n") | map(select(length > 0))' < "$T/bfiles")

@@ -87,6 +87,17 @@ new_repo empty
 OUT="$(bash "$S" --stdout)"; eq "no commits rc" "$?" 0
 eq "no commits" "$(q '.hotspots')" '[]'
 
+# ---- 4b. #4298: a big boundary config matching early (pipefail + grep -q SIGPIPE) and non-ASCII / spaced paths ----
+new_repo paths
+mkdir -p "packages/é b" "apps/ü"
+echo '{"name":"root","private":true,"workspaces":["packages/*"]}' > package.json
+echo '{"name":"@x/c"}' > "packages/é b/package.json"
+{ echo "export default [{ rules: { 'boundaries/element-types': ['error'] } }];"; i=0; while [ $i -lt 20000 ]; do echo "// padding line $i to overflow the pipe buffer ......................................"; i=$((i+1)); done; } > "apps/ü/eslint.config.js"
+commit init
+OUT="$(bash "$S" --stdout)"; eq "paths rc" "$?" 0
+eq "big boundary config in a non-ASCII dir" "$(q '.layer_rules.boundary_configs')" '["apps/ü/eslint.config.js"]'
+eq "spaced non-ASCII package dir" "$(q '.layer_rules.packages')" '[{"name":"@x/c","dir":"packages/é b"}]'
+
 # ---- 5. usage ----
 bash "$S" --repo-path "$TMP/missing" >/dev/null 2>&1; eq "bad repo path" "$?" 2
 bash "$S" --bogus >/dev/null 2>&1; eq "unknown option" "$?" 2

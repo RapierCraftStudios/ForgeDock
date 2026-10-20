@@ -669,3 +669,21 @@ and cross-repo timeline references are skipped (the jq emits `repository_url` + 
 drops deploy/publish/release/push/secret steps. `verifyReport` gates carry `ran`; zero ran → `neutral`, "no gates
 ran". A recovery lane (`recoverUnlabelled`) that ends anything but `merged` re-adds `needs-human` with a recovery-evidence
 `FORGE:NEEDS_HUMAN`. Rationale: `devdocs/decisions/4297-pre-release-trust-boundaries.md`.
+
+## Entry 2026-10-20 — 1.29.0 staging-review LOW follow-ups (#4298)
+
+One comment-strip helper: `noComments` lives in `render.mjs` (re-exported by `context.mjs`) and `prefilter.mjs`
+`namedPaths` uses it too, so no one-pass `<!--…-->` regex is left on hash or path input. `context.mjs` `REPO_FACT_FILES`
+reuses `testmap.mjs` `REPO_FACTS_FILE`/`TEST_MAP_FILE`. Context-pack cache: the key also hashes the issue's `updatedAt`
+and prior-attempt count (`contextPackFor` `stamp`); a gather with source `errors` is not cached; the write goes through
+`<file>.<pid>.tmp` + `io.fs.rename`; the issue's other `context-<N>-*.json` files are pruned (`io.fs.list`/`rm`).
+`lean.mjs` `RECOVER_HOW` is a module export; `recovery.test.mjs` keeps its keys equal to `RECOVERABLE_CODES`.
+`orchestrate.mjs`: a settled recovery row sums the earlier attempts' `cost_usd` and `minutes` (persisted in the
+`recovering` entry; older state without them sums 0); `OUTCOME_LINE_MAX`; `effects.mjs` `CHECK_RUN_TIMEOUT_MS`.
+`engine-cli.mjs` `readContextPack` warns once on an invalid `context_pack` mode and keeps the other keys; `run-issue`
+rejects `--recover` with `--path full`. `conformance.mjs` `movingBaseDiff` reads only the revisions before `--`;
+`scopeText` cuts every HTML comment, human ones too (SEC-5, not scope). `scripts/wait-ci-green.sh` always ignores
+`forgedock/verify`, so the legacy engine, `review-finalize.sh` and spec CI gates agree with the lean path.
+`test-map.sh` separates globs with `\037`; it and `repo-facts.sh` list files with `-z` and `core.quotepath=off`, and
+`grep -q` reads here-strings (no SIGPIPE false negative under pipefail). Cost: 0 LLM calls.
+Rationale: `devdocs/decisions/4298-staging-low-followups.md`.
