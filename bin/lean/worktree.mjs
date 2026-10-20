@@ -31,7 +31,7 @@ export function sparsePlan(lsTree, { maxBlobBytes = DEFAULT_SPARSE_MAX_KB * 1024
 }
 
 /** gitignore-syntax escape for a literal path: \ * ? [ anywhere, trailing spaces. */
-const esc = (p) => p.replace(/[\\*?[]/g, (c) => `\\${c}`).replace(/ +$/, (s) => s.replace(/ /g, "\\ "));
+const esc = (p) => p.replace(/[\\*?[]| (?= *$)/g, (c) => `\\${c}`);
 
 /** Non-cone sparse patterns that include everything except `excludes`. */
 export function sparsePatterns(excludes) {
