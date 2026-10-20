@@ -353,7 +353,19 @@ branches:
 # scripts/maintenance-scan.sh (deterministic: hotspots, package cycles, dead code,
 # oversized docs), /upgrade-deps and /cleanup. Block form only: the parser does
 # not read `maintenance: { share: 0.2, when_idle: true, scan: weekly }`.
-# Commands: orchestrate, autopilot, upgrade-deps, cleanup
+#
+# maintenance.hotspot (forge#4195, on by default): hotspot prevention for core
+# work-on. scripts/hotspots.sh (git + wc, no LLM) reports lines, commits in the
+# last 90 days and lines x commits for the files an issue names and for the
+# diff. The planner is told to put new logic next to a file over file_lines and
+# give it only wiring; the builder may grow such a file by at most
+# growth_lines. More growth fails the conformance precheck
+# (maintenance.hotspot_growth; blocks in shadow and enforce, one builder
+# resume) unless the contract deliverable for that file says
+# "hotspot-exempt: <reason>". linguist-generated / linguist-vendored paths are
+# always excluded. Read with yq; defaults apply when absent. Its keys are its
+# own: `hotspot.enabled` does not turn the budget on.
+# Commands: orchestrate, autopilot, upgrade-deps, cleanup, run-issue, run
 # =============================================================================
 
 # maintenance:
@@ -364,6 +376,32 @@ branches:
 #   labels: maintenance,refactor:split,dead-code   # labels that mark an issue as maintenance
 #   file_lines: 2000                  # hotspot threshold (lines in a recently changed file)
 #   doc_kb: 64                        # oversized-doc threshold (KB)
+#   hotspot:
+#     enabled: true                   # false turns hotspot facts, the rule and the check off
+#     file_lines: 2000                # a file over this many lines is a hotspot
+#     growth_lines: 150               # max lines a hotspot may grow in one change
+#     exclude_globs:                  # shell patterns (`*` crosses `/`), never checked
+#       - "migrations/*"
+#       - "*.lock"
+
+# =============================================================================
+# MILESTONE DRIFT (OPTIONAL, forge#4161)
+# `forgedock orchestrate` folds each merged milestone lane's structure delta into
+# a FORGE:DRIFT summary in the GitHub milestone description, with no LLM. Without
+# this block that is all it does. With a threshold set, scripts/milestone-drift.sh
+# runs after each merge and files ONE issue per crossing in the milestone, deduped
+# by its FORGE:DRIFT marker. A value crosses when it is greater than the threshold.
+# `/milestone drift <slug>` prints the same report. Block form only.
+# Commands: orchestrate, milestone
+# =============================================================================
+
+# orchestrate:
+#   drift:
+#     pair_growth: 5          # value-import files added for one from->to package pair since the fork point
+#     package_lines: 10000    # net lines added to one workspace package
+#     file_lines: 600         # net lines added to one file
+#     block_dispatch: false   # true: hold queued issues whose Affected Files touch a flagged package
+#     generated_globs: "*.gen.ts, data/*"   # excluded from size growth (with .gitattributes linguist-generated)
 
 # =============================================================================
 # PIPELINE (OPTIONAL)

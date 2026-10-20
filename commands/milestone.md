@@ -17,7 +17,7 @@ Milestones are the top-level planning unit. They group related issues into a shi
 **Hierarchy**: Milestone → Issues → Sub-issues (optional decomposition)
 
 **NEVER use plan mode (EnterPlanMode).**
-**NEVER use the Agent tool for issue work** — milestone dispatches issue work via `Skill(skill="{FORGE_SKILL_PREFIX}work-on", ...)` only. The Agent tool bypasses the Skill pipeline's label state machine, FORGE annotations, and structured review. The Agent tool may be used only for coordination tasks within milestone planning itself (e.g., parallel issue list queries) — never for /work-on sub-dispatch.
+**NEVER use the Agent tool for issue work** — milestone dispatches issue work via `Skill(skill="{FORGE_SKILL_PREFIX}work-on", ...)` only. Agent bypasses the Skill pipeline's label state machine, FORGE annotations and structured review; use it only to coordinate milestone planning (e.g. parallel issue-list queries), never for /work-on sub-dispatch.
 
 <!-- FORGE:SPEC_LOADED — milestone.md loaded and active. Agent is bound by this spec. -->
 
@@ -93,6 +93,7 @@ Parse `$ARGUMENTS` to determine which action to take:
 | `status <slug>` | → **Show Milestone Detail** |
 | `ship <slug>` | → **Ship Milestone** |
 | `sync <slug>` | → **Sync Milestone Branch** |
+| `drift <slug>` | → **Milestone Drift** |
 | `close <slug>` | → **Close Milestone** |
 
 ---
@@ -149,7 +150,7 @@ git push origin milestone/{slug}
 
 **Greenfield mode** (`GREENFIELD=true`): skip 4A–4C and run **Step 4G** instead. Steps 2, 3 (the `milestone/{slug}` branch), 5, 6 and 6B run unchanged in both modes. Brownfield (`GREENFIELD=false`): Step 4G does not apply and 4A–4C below are mandatory. <!-- Added: forge#4175 -->
 
-**Investigation-gated decomposition** — do NOT skip code reads. The single-pass shallow-planning approach (one agent, whole milestone, no per-issue code reads) produces under-specified issues that ship incomplete. This step mandates per-proposed-issue investigation before any issue body is written. See `work-on/decompose.md` Phase D0 for the reference pattern that enforces this gate. <!-- Added: forge#293 -->
+**Investigation-gated decomposition** — do NOT skip code reads: one shallow pass with no per-issue code reads yields under-specified issues that ship incomplete, so investigate each proposed issue before writing its body. See `work-on/decompose.md` Phase D0 for the reference pattern that enforces this gate. <!-- Added: forge#293 -->
 
 **4A: First pass — enumerate proposed issues (no code reads yet)**
 
@@ -175,7 +176,7 @@ For each proposed issue, after completing the per-issue investigation in Step 4B
 - **Size**: S (1-2 files), M (3-5 files), L (6+ files)
 - **Dependencies**: Which other issues must be done first (by number)
 - **Affected files**: Full list of files enumerated during the Step 4B code read (not estimated)
-- **Acceptance criteria**: Exhaustive and falsifiable. For coverage/refactor tasks: one criterion per affected call site or pattern, written as a grep/absence assertion. No cap on criteria count — the list must be complete enough that a reviewer can verify coverage without reading the implementation.
+- **Acceptance criteria**: Exhaustive and falsifiable. For coverage/refactor tasks: one criterion per affected call site or pattern, written as a grep/absence assertion. No cap: a reviewer must be able to verify coverage without reading the implementation.
 
 **4G: Greenfield / precomputed plan (only when `GREENFIELD=true`)** <!-- Added: forge#4175 -->
 
@@ -204,7 +205,7 @@ Present the proposed issues to the user. Ask:
 
 ### Step 6: Create issues and assign to milestone
 
-**Issue body standard**: Use the **Pipeline Issue Template** from `issue.md` Phase 3D as the body structure for every issue created here. Do NOT use a bespoke inline template — the Pipeline Issue Template is the single canonical standard for all automated issue creation across the pipeline. The body content (Problem, Root Cause, Affected Files, Acceptance Criteria, Context, Dependencies) comes from the per-issue investigation in Step 4B. <!-- Added: forge#293 --> In greenfield mode it comes from the Step 4G plan instead, and Affected Files are planned paths inside the spike's `Repo layout`. <!-- Added: forge#4175 -->
+**Issue body standard**: Use the **Pipeline Issue Template** from `issue.md` Phase 3D as the body structure for every issue created here (it is the single canonical standard; no bespoke inline template). The body content (Problem, Root Cause, Affected Files, Acceptance Criteria, Context, Dependencies) comes from the per-issue investigation in Step 4B. <!-- Added: forge#293 --> In greenfield mode it comes from the Step 4G plan instead, and Affected Files are planned paths inside the spike's `Repo layout`. <!-- Added: forge#4175 -->
 
 **Route creation through `/issue`'s programmatic invocation contract** (`commands/issue.md`, added #2085) instead of calling `gh issue create` directly — this gets dedup (Phase 2D) and mandatory-section body validation (Phase 3F) for free. <!-- Changed: forge#2086 — route through /issue create-hook -->
 
@@ -414,6 +415,18 @@ gh issue list --milestone "{TITLE}" --state all --json number,title,state,labels
 ```
 
 Show detailed progress with per-issue status.
+
+---
+
+## Action: Milestone Drift (drift <slug>)
+
+Print verbatim (forge#4161); no LLM, no issue filing.
+
+```bash
+git fetch origin "{STAGING_BRANCH}" "milestone/{slug}"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+bash "$(forge_resolve milestone-drift.sh)" "{slug}" --format text
+```
 
 ---
 

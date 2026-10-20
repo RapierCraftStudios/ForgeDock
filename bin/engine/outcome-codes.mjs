@@ -81,6 +81,7 @@ export const OUTCOME_CODES = Object.freeze({
   CONFORMANCE_REGRESSION: "conformance.regression",
   STRUCTURE_UNDECLARED_EDGE: "structure.undeclared_edge", // forge#4159: a workspace package.json edge the contract does not name
   DOCS_STALE: "docs.stale", // the target repo's devdocs freshness rule still fails after one builder resume
+  MAINTENANCE_HOTSPOT_GROWTH: "maintenance.hotspot_growth", // forge#4195: an over-threshold file grew past growth_lines without hotspot-exempt
   FOLLOWUP_UNAVAILABLE: "followup.unavailable",
   MERGE_HEAD_MISMATCH: "merge.head_mismatch",
   // refactor:split lane (forge#4211): deterministic refusals and the move proof; every one leaves no edit behind.

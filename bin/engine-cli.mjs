@@ -104,6 +104,13 @@ export function readConformanceMode(cwd = process.cwd()) {
     return ["shadow", "enforce"].includes(v) ? v : undefined;
   } catch { return undefined; }
 }
+/** forge.yaml `engine.review_incomplete` (needs-human|degraded, #4160); undefined when absent or invalid (the core defaults to needs-human). */
+export function readReviewIncomplete(cwd = process.cwd()) {
+  try {
+    const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.review_incomplete ?? "").trim();
+    return ["needs-human", "degraded"].includes(v) ? v : undefined;
+  } catch { return undefined; }
+}
 function readLeanSetting(key, cwd = process.cwd()) {
   try {
     const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.[`lean_${key}`] ?? "").trim();
@@ -664,7 +671,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1020,7 +1027,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4256: the placement orchestrate decided for a lane (ctx.placement) reaches it as --placement/--placement-reason.
@@ -1107,10 +1114,18 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     };
     budget = { classify, maintenance: { share: maint.share ?? 0.2, whenIdle: maint.whenIdle ?? true } };
   }
+  // forge#4161: milestone drift. Always folds merged milestone lanes into the summary; thresholds and holds only with config.
+  let drift = deps.drift;
+  if (drift === undefined) {
+    const { makeDrift } = await import("./lean/drift.mjs");
+    const { affectedFiles } = await import("./orchestrate-preflight.mjs");
+    drift = makeDrift({ repo, cwd, io: leanIo, config: readDrift(cwd), stagingBranch: branches.staging ?? "staging", affectedFiles,
+      onEvent: (e) => console.log(`#${e.issue} → ${e.detail}`) });
+  }
   const crossLane = [];
   const rows = await orchestrate({
     issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
-    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id,
+    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
     ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
     ...(remote ? { remote } : {}),
     onCrossLane: (e) => {
@@ -1247,6 +1262,37 @@ export function readOrchestration(cwd = process.cwd()) {
   return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), globalParallel: gp >= 1 ? gp : null };
 }
 
+/**
+ * forge.yaml `orchestrate.drift` (#4161): `{pairGrowth, packageLines, fileLines, blockDispatch, generatedGlobs}` with
+ * only the positive-integer thresholds set, or null when no threshold and no `block_dispatch: true` is set (summary
+ * only: no script run, no issue, no hold). The parser flattens `orchestrate.drift.*` to `orchestrate.*`.
+ */
+export function readDrift(cwd = process.cwd()) {
+  let o = null;
+  try { o = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.orchestrate ?? null; } catch { o = null; }
+  if (!o || typeof o !== "object") return null;
+  const int = (v) => { const n = Number(v); return v !== undefined && String(v).trim() !== "" && Number.isInteger(n) && n > 0 ? n : null; };
+  const out = { pairGrowth: int(o.pair_growth), packageLines: int(o.package_lines), fileLines: int(o.file_lines),
+    blockDispatch: String(o.block_dispatch ?? "").trim() === "true",
+    generatedGlobs: String(o.generated_globs ?? "").split(",").map((x) => x.trim()).filter(Boolean) };
+  return out.pairGrowth == null && out.packageLines == null && out.fileLines == null && !out.blockDispatch ? null : out;
+}
+
+/**
+ * forge.yaml text without the `maintenance.hotspot:` sub-map (forge#4195, read by scripts/hotspots.sh via yq). The
+ * parser flattens one nested level, so its `enabled`/`file_lines` would otherwise overwrite the budget's own keys.
+ */
+function withoutHotspotMap(raw) {
+  let inMaint = false, sub = -1;
+  return String(raw).split(/\r?\n/).filter((l) => {
+    if (/^[A-Za-z_][A-Za-z0-9_]*:/.test(l)) { inMaint = /^maintenance:\s*(?:#.*)?$/.test(l); sub = -1; return true; }
+    const indent = /^\s*/.exec(l)[0].length;
+    if (sub >= 0) { if (/^\s*(?:#.*)?$/.test(l) || indent > sub) return false; sub = -1; }
+    if (inMaint && /^\s+hotspot:\s*(?:#.*)?$/.test(l)) { sub = indent; return false; }
+    return true;
+  }).join("\n");
+}
+
 export const DEFAULT_MAINTENANCE_LABELS = ["maintenance", "refactor:split", "dead-code"];
 
 /**
@@ -1256,7 +1302,7 @@ export const DEFAULT_MAINTENANCE_LABELS = ["maintenance", "refactor:split", "dea
  */
 export function readMaintenance(cwd = process.cwd()) {
   let m = null;
-  try { m = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.maintenance ?? null; } catch { m = null; }
+  try { m = parseForgeYaml(withoutHotspotMap(readFileSync(join(cwd, "forge.yaml"), "utf8")))?.maintenance ?? null; } catch { m = null; }
   if (!m || typeof m !== "object" || String(m.enabled ?? "").trim() !== "true") return null;
   const num = (v, d, ok) => { const n = Number(v); return v !== undefined && v !== "" && ok(n) ? n : d; };
   const labels = String(m.labels ?? "").split(",").map((x) => x.trim()).filter(Boolean);

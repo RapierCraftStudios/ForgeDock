@@ -52,8 +52,12 @@ on:
       - 'scripts/symbol-move.mjs'
       - 'scripts/symbol-move-ts.test.sh'
       - 'scripts/fixtures/symbol-move-ts/**'
+      - 'scripts/hotspots.sh'
+      - 'scripts/hotspots.test.sh'
       - 'scripts/maintenance-scan.sh'
       - 'scripts/maintenance-scan.test.sh'
+      - 'scripts/milestone-drift.sh'
+      - 'scripts/milestone-drift.test.sh'
       - 'scripts/review-finalize.sh'
       - 'scripts/review-finalize.test.sh'
       - 'scripts/lib/pr-issue-number.sh'
@@ -138,8 +142,12 @@ on:
       - 'scripts/symbol-move.mjs'
       - 'scripts/symbol-move-ts.test.sh'
       - 'scripts/fixtures/symbol-move-ts/**'
+      - 'scripts/hotspots.sh'
+      - 'scripts/hotspots.test.sh'
       - 'scripts/maintenance-scan.sh'
       - 'scripts/maintenance-scan.test.sh'
+      - 'scripts/milestone-drift.sh'
+      - 'scripts/milestone-drift.test.sh'
       - 'scripts/review-finalize.sh'
       - 'scripts/review-finalize.test.sh'
       - 'scripts/lib/pr-issue-number.sh'
@@ -446,7 +454,9 @@ jobs:
           bash scripts/refactor-verify.test.sh
           SYMBOL_MOVE_REQUIRE_LIBCST=1 bash scripts/symbol-move.test.sh
           SYMBOL_MOVE_TS_NODE_MODULES="$RUNNER_TEMP/tsm/node_modules" SYMBOL_MOVE_REQUIRE_TS_MORPH=1 bash scripts/symbol-move-ts.test.sh
+          bash scripts/hotspots.test.sh
           bash scripts/maintenance-scan.test.sh
+          bash scripts/milestone-drift.test.sh
           bash scripts/review-finalize.test.sh
           bash scripts/close-parent-c3.test.sh
           bash scripts/review-delta.test.sh

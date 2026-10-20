@@ -45,12 +45,15 @@ done
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "not inside a git repository"
 cd "$ROOT" || die "cannot cd to $ROOT"
 
-# forge.yaml `maintenance:` block (block form only, like bin/forge-utils.mjs parseForgeYaml)
+# forge.yaml `maintenance:` block (block form only, like bin/forge-utils.mjs parseForgeYaml): direct children only, so
+# a sub-map's keys (`  hotspot:` → `    file_lines:`, forge#4195) never stand in for the section's own
 yaml_maint() {
   [ -f forge.yaml ] || return 0
   awk -v k="$1" '
-    /^[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*(#.*)?$/ { on = ($0 ~ /^maintenance:/); next }
+    /^[A-Za-z_][A-Za-z0-9_]*:[[:space:]]*(#.*)?$/ { on = ($0 ~ /^maintenance:/); ci = -1; next }
     /^[^[:space:]#]/ { on = 0 }
+    on && /^[[:space:]]*(#|$)/ { next }
+    on { match($0, /^[[:space:]]*/); if (ci >= 0 && RLENGTH > ci) next; ci = RLENGTH }
     on && $0 ~ "^[[:space:]]+" k ":" { sub("^[[:space:]]+" k ":[[:space:]]*", ""); sub("[[:space:]]*#.*$", ""); gsub(/"/, ""); print; exit }
   ' forge.yaml
 }
