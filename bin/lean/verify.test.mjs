@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseVerify, matchesGlob, skipsCi, capLogs, runCiVerify, collectFailedLogs, DEFAULT_SKIP_PATHS, LOG_CAP } from "./verify.mjs";
+import { parseVerify, matchesGlob, skipsCi, capLogs, runCiVerify, collectFailedLogs, verifyReport, DEFAULT_SKIP_PATHS, LOG_CAP, VERIFY_CHECK_NAME, VERIFY_TEXT_CAP } from "./verify.mjs";
 import { precheck } from "./conformance.mjs";
 
 const HEAD = "abc123abc123abc123";
@@ -22,9 +22,9 @@ function fake(o = {}) {
 
 describe("verify-by-CI config (#4167)", () => {
   it("parseVerify defaults to local and rejects invalid values", () => {
-    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300 });
+    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300, checkRun: false });
     const v = parseVerify({ mode: "ci", workflow: ".github/workflows/verify.yml", paths_input: "changed_paths", skip_paths: "*.md, docs/** ,", max_rounds: "3" });
-    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300 });
+    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300, checkRun: false });
     assert.equal(parseVerify({ mode: "remote" }).mode, "local");
     assert.equal(parseVerify({ workflow: "x; rm -rf /" }).workflow, null);
     assert.equal(parseVerify({ max_rounds: "-1" }).maxRounds, 2);
@@ -114,5 +114,68 @@ describe("merge-time fix rounds and declared check commands (#4240)", () => {
     assert.equal(parseVerify({}).precheckTimeoutSeconds, 300);
     assert.equal(parseVerify({ precheck_timeout_seconds: "60" }).precheckTimeoutSeconds, 60);
     for (const bad of ["0", "-5", "1.5", "abc", "3601"]) assert.equal(parseVerify({ precheck_timeout_seconds: bad }).precheckTimeoutSeconds, 300, bad);
+  });
+});
+
+describe("forgedock/verify check run (#4270)", () => {
+  const contract = { requirements: [{ id: "R1", disposition: "deliver" }], deliverables: [{ id: "D1", path: "src/a.ts", change: "x", requirements: ["R1"] }], validate: [{ id: "V1", command: "node --test t.mjs" }, { id: "V2", command: "tsc" }] };
+  const result = { validation: [{ id: "V1", exit: 0 }, { id: "V2", ci: true }], requirements: [{ id: "R1", status: "implemented" }] };
+  const out = (r) => JSON.parse(/```json\n([\s\S]*)\n```/.exec(r.text)[1]);
+
+  it("parseVerify: check_run is true only for the literal true; default false", () => {
+    assert.equal(parseVerify({}).checkRun, false);
+    assert.equal(parseVerify({ check_run: "true" }).checkRun, true);
+    assert.equal(parseVerify({ check_run: true }).checkRun, true);
+    for (const v of ["false", "yes", "1", ""]) assert.equal(parseVerify({ check_run: v }).checkRun, false, v);
+    assert.equal(VERIFY_CHECK_NAME, "forgedock/verify");
+  });
+
+  it("success iff every gate passed; per-gate typed evidence from the computed results", () => {
+    const r = verifyReport({ head: "abc", commands: [{ command: "npm run lint", rc: 0 }], structure: { package_edges_added: [{ from: "@s/a", to: "@s/b", manifest: "packages/a/package.json" }] },
+      docs: { ok: true }, precheck: [], amendments: [], hotspots: true, contract, result });
+    assert.equal(r.conclusion, "success");
+    const g = Object.fromEntries(out(r).gates.map((x) => [x.id, x]));
+    assert.deepEqual(g["precheck.commands"].evidence, [{ command: "npm run lint", rc: 0 }]);
+    assert.deepEqual(g["structure.edges"].evidence, { added: ["@s/a→@s/b (packages/a/package.json)"] });
+    assert.deepEqual(g["conformance.validate"].evidence, [{ id: "V1", command: "node --test t.mjs", exit: 0 }, { id: "V2", command: "tsc", ci: true }]);
+    assert.deepEqual(g["conformance.requirements"].evidence, [{ id: "R1", status: "implemented" }]);
+    assert.ok(Object.values(g).every((x) => x.ok));
+  });
+
+  it("each failing gate is failure with its evidence; gates without input are ok and marked not run", () => {
+    const pre = [
+      { kind: "scope_creep", detail: "changed outside the contract's deliverables: src/x.ts" },
+      { kind: "validate_failed", detail: "validate V1 failed (exit 1)" },
+      { kind: "requirement_unimplemented", detail: "R1 reported \"partial\"" },
+      { kind: "hotspot_growth", detail: "src/big.ts grew by 300 lines" },
+    ];
+    const r = verifyReport({ head: "abc", commands: [{ command: "lint", rc: 2 }], structure: { package_edges_added: [] }, undeclaredEdges: [{ from: "@s/a", to: "@s/b" }],
+      docs: { ok: false, output: "stale devdocs/x.md" }, precheck: pre, amendments: [{ detail: "add-deliverable without why" }], hotspots: true, contract, result });
+    assert.equal(r.conclusion, "failure");
+    const g = Object.fromEntries(r.gates.map((x) => [x.id, x]));
+    assert.ok(r.gates.every((x) => !x.ok), "every gate failed");
+    assert.deepEqual(g["precheck.commands"].evidence, ["lint (exit 2)"]);
+    assert.deepEqual(g["structure.edges"].evidence, ["undeclared @s/a→@s/b"]);
+    assert.match(g["conformance.scope"].evidence[0], /src\/x\.ts/);
+    assert.match(g["maintenance.hotspot_growth"].evidence[0], /src\/big\.ts/);
+    assert.match(r.title, /8 of 8/);
+
+    const none = verifyReport({});
+    assert.equal(none.conclusion, "success");
+    assert.ok(none.gates.every((x) => x.ok && x.evidence === "not run"));
+  });
+
+  it("the output text stays under the Checks API limit", () => {
+    const r = verifyReport({ precheck: Array.from({ length: 2000 }, (_, i) => ({ kind: "scope_creep", detail: `changed outside: src/${"x".repeat(80)}${i}.ts` })), contract, result });
+    assert.ok(r.text.length < 65535); assert.ok(r.text.length <= VERIFY_TEXT_CAP + 100);
+    assert.equal(r.conclusion, "failure"); assert.equal(out(r).truncated, true);
+  });
+
+  it("runCiVerify never waits on the lane's own forgedock/verify check run", async () => {
+    const f = fake({ checks: [[{ name: "ci", state: "success" }, { name: VERIFY_CHECK_NAME, state: "failure" }]] });
+    const r = await runCiVerify(f.args({ verify: parseVerify({ mode: "ci" }) }));
+    assert.equal(r.result, "pass");
+    const g = fake({ checks: [[{ name: VERIFY_CHECK_NAME, state: "success" }], [{ name: "ci", state: "success" }]] });
+    assert.equal((await runCiVerify(g.args({ verify: parseVerify({ mode: "ci" }) }))).detail, "1 check(s) green", "its own check alone is not CI");
   });
 });

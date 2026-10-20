@@ -606,6 +606,15 @@ applies the reaper. `commands/cleanup.md`, `work-on/close.md` and
 
 In shadow, `gate()` now blocks on precheck/amend failures coded `conformance.unimplemented`/`regression` (`SHADOW_PRE_BLOCKS`), ends `review.incomplete`/`inconsistent` as needs-human, and files accepted deferrals with `track()`. `engine.review_incomplete: degraded` (`readReviewIncomplete`) merges instead with the `review-degraded` label and a tracked follow-up. Enforce unchanged. `scripts/calibration.mjs --shadow` prints the per-repo shadow mix and recommends `enforce` under the threshold. Rationale: `devdocs/decisions/4160-shadow-gate-complete-reviews.md`.
 
+## Entry 2026-10-20 — forgedock/verify check run (#4270)
+
+Opt-in `verify.check_run` (`verify.mjs` `parseVerify` → `checkRun`, default false).
+`lean.mjs` keeps `verifyFacts` (last result of the declared checks, structure, docs and
+`gate()` precheck) and `reportVerify()` posts one `forgedock/verify` check run per pushed
+head (PR push, base-sync, merge fix round) via `effects.mjs` `createCheckRun`, payload from
+pure `verify.mjs` `verifyReport`; `VERIFY` run-log event, Checks API failure → anomaly.
+Own check excluded from `runCiVerify` commit checks and `wait-ci-green.sh --ignore-check`.
+
 ## Entry 2026-10-20 — Bug lanes freeze a red-green repro_test (#4271)
 
 forge.yaml `lean.repro_test` (`engine-cli.mjs` `readReproTest`, `off|prefer`, default `prefer`) → `runCore` `reproTest`. On a `bug`/`type:bug` lane (`conformance.mjs` `isBugIssue`), the plan prompt gets `reproPlanNote`, and `validateContract(..., {repro: true})` requires `repro_test` `{path, id, command}` or `"none"` + `repro_test_reason` (one correction resume). `gate()` runs `io.redGreen` (`effects.mjs` → `scripts/acceptance-red-green.sh`, inside `heavyStep`) and passes `{base, head}` to `precheck({repro})`. Anything but `BASE=FAILED HEAD=RAN` is `reproFailures` kind `repro_red_green`, code `conformance.unimplemented`, so it blocks in shadow and gets the one in-session resume (#4149). `off`, non-bug lanes, resumed pre-#4271 contracts and refactor:split leave prompts, contract check and precheck unchanged. Cost: 0 LLM calls; one targeted test run on base and head per gate.
@@ -625,3 +634,23 @@ map's commands for the changed files when the map is valid and matches, else `le
 implement prompts cite the facts file by path (`prompts.mjs` `factsRule`, never its content). Deleting both files
 restores today's commands, events and prompts byte-for-byte. Cost: 0 LLM calls; fewer pre-PR commands when the map
 narrows them. Rationale: `devdocs/decisions/4199-incremental-not-restructure.md`.
+
+## Entry 2026-10-20 — In-batch recovery of mechanical needs-human (#4267)
+
+`outcome-codes.mjs` `classifyNeedsHuman(row)` sorts a lane row into `recoverable`
+(needs-human `ci.red` / `base.conflict` / `builder.block_untyped`, `contract.invalid`
+with `issueEdited`, `ci-pending` on a conflicting PR → `base.conflict`), `human`
+(`builder.blocked`: credentials, spend, promotion, customer, product-decision) or
+`terminal`. `orchestrate()` option `recovery: {maxAttempts}` (forge.yaml
+`orchestration.recovery.max_attempts`, default 1, 0 = off; absent = old behaviour)
+requeues a recoverable row as a recovery lane (`ctx.recover = {code, attempt}`, state
+keys `recoveries`/`recovering`) under the usual admission, so dependents stay queued.
+A merged recovery row carries `recovered: <code>`; any other end is final with
+`recovery` evidence. `runCore` `o.recover` (CLI `--recover <code> --recover-attempt n`)
+removes `needs-human`, posts `FORGE:DECISION`, and adds a per-code note to the rerun
+prompt (failed-check logs, base merge, untyped choice); no extra Actions trigger.
+Runner decisions (recovery, engine-error relaunch, dependency requeue, sub-issues
+added) go to `decide({issue, what, why, alternative})`, fire-and-forget; `runBatch`
+posts them as `FORGE:DECISION` comments. `formatOutcomeLists` adds `recovered:`,
+`unrecovered:` and one end-of-batch escalation list (human codes only) to the report.
+`check-spec-markers.sh` registers `DECISION`. Cost: one rerun lane per recovered issue.

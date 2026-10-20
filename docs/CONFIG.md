@@ -595,6 +595,7 @@ verify:
   skip_paths: "*.md,docs/**"    # optional, comma-separated; default *.md,*.mdx,*.rst,*.txt,docs/**,devdocs/**
   max_rounds: 2                 # optional CI fix rounds before needs-human (default 2)
   precheck_timeout_seconds: 300 # optional per-command timeout of the declared pre-PR checks (default 300)
+  check_run: true               # optional; post the forgedock/verify check run (default false)
 ```
 
 | Key | Type | Required | Description |
@@ -605,6 +606,7 @@ verify:
 | `skip_paths` | string | No | Comma-separated globs. A glob without `/` matches the basename anywhere; `**` spans directories. When every changed file matches, the lane skips CI verification (a docs-only lane runs no CI matrix). |
 | `max_rounds` | integer | No | Builder fix rounds for red CI (0–10, default 2). Also bounds the merge-time fix rounds and the declared-check fix rounds below, in every mode. |
 | `precheck_timeout_seconds` | integer | No | Timeout of each declared check command (1–3600, default 300); a timed-out command counts as failed (exit 124). |
+| `check_run` | boolean | No | Default `false` (no Checks API call, behaviour unchanged). `true`: after each push of a reviewed head (PR open, base-sync, merge-time fix round) the engine posts one completed `forgedock/verify` check run on that head (forge#4270), `success` iff every deterministic gate the lane already ran passed: declared check commands, undeclared package edges, docs freshness, contract scope, validate ids, requirement status, hotspot growth, amendments. The output carries each gate's id, pass/fail and evidence as JSON; the run log records a `VERIFY` event. Report only: ForgeDock never makes it required and never waits on it (it is ignored by its own CI waits); requiring it is the repository's branch-protection choice. Creating check runs needs a token that may (a GitHub App with `checks: write`); a Checks API failure is logged as an anomaly and never fails the lane. |
 
 **Flow** (`ci`/`hybrid`, `bin/lean/verify.mjs` `runCiVerify`):
 

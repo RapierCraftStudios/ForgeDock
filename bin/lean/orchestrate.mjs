@@ -50,8 +50,18 @@
  * With `remote.fallbackLocal`, a lane placed remote runs on the host path instead of waiting when `max` remote lanes run,
  * and instead of stopping when the budget refuses. The final `{where, reason}` is kept on the run record and the row as
  * `placement` and passed to `runOne` as `ctx.placement` (the lane records it in its FORGE:STATE).
+ *
+ * In-batch recovery (#4267), off unless `recovery: {maxAttempts}` is passed: a row `classifyNeedsHuman` calls
+ * recoverable (needs-human `ci.red` / `base.conflict` / `builder.block_untyped`, `contract.invalid` after a mid-run issue
+ * edit, `ci-pending` whose PR `conflicting(issue, pr)` says conflicts) is not final while its persisted `recoveries` stay
+ * under `maxAttempts`: it is requeued as a recovery lane (`ctx.recover = {code, attempt}`) under the same admission as any
+ * lane, so its dependents stay queued. A merged recovery row carries `recovered: <code>`; any other end is final with
+ * `recovery` evidence. Human codes (`builder.blocked`) are never recovered. Every operational decision the runner takes
+ * (recovery, engine-error relaunch, dependency requeue, sub-issues added) goes to `decide({issue, what, why, alternative})`,
+ * fire-and-forget: the runner never waits on it.
  */
 import { parseDependsOn } from "../engine/phases.mjs";
+import { classifyNeedsHuman, recoveryCodeOf } from "../engine/outcome-codes.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -144,7 +154,8 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
-  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null }) {
+  classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
+  recovery = null, decide = () => {}, conflicting = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -193,13 +204,20 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const sandboxUse = toMap(saved?.sandbox); // issue -> {minutes, cost_usd, attempts} (#4255)
   const remoteCpm = Number(remote?.costPerMinute) > 0 ? Number(remote.costPerMinute) : 0;
   let budgetStop = null, budgetHit = null; // this pass's refusal under on_budget stop; the last refusal reason
+  const recoveryMax = Number.isInteger(recovery?.maxAttempts) && recovery.maxAttempts > 0 ? recovery.maxAttempts : 0;
+  const recoveries = toMap(saved?.recoveries); // issue -> recovery lanes launched (#4267)
+  const recovering = toMap(saved?.recovering); // issue -> {code, attempt} of the recovery lane queued or running
+  // #4267: decisions are recorded, never awaited: a failing or slow recorder cannot block the batch.
+  const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
+  const firstLine = (x) => String(x ?? "").split("\n")[0].slice(0, 300);
 
   const save = () => {
     if (!store) return;
     store.save({ v: 1, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
-      ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}) });
+      ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
+      ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering) } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
   const classifyOne = async (n) => {
@@ -341,6 +359,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // Dependencies already done but still open on GitHub: a delay instead of a hot relaunch loop.
       const allDone = depList.every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome));
       requeue(n, allDone ? DEP_REQUEUE_DELAY_S * 1000 : 0); done(); save();
+      decided({ issue: n, what: `requeued behind ${depList.map((d) => `#${d}`).join(", ")} (Depends on edge added)`, why: firstLine(row.detail) || "the lane reported an open dependency",
+        alternative: "skip the issue and its dependents" });
       update({ ...row, detail: `requeued behind ${depList.map((d) => `#${d}`).join(", ")}` });
       return;
     }
@@ -365,14 +385,41 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if ((engineErrors.get(n) ?? 0) < ENGINE_ERROR_RELAUNCHES) {
         engineErrors.set(n, (engineErrors.get(n) ?? 0) + 1);
         requeue(n, 0); done(); save();
+        decided({ issue: n, what: "relaunch once after engine-error", why: firstLine(row.detail) || "engine-error", alternative: "end the issue engine-error and skip its dependents" });
         update({ ...row, detail: `relaunching once: ${row.detail ?? ""}` });
         return;
       }
     }
     if (row.outcome === "decomposed" && subs.length) {
       await addIssues(subs);
+      decided({ issue: n, what: `added sub-issues ${subs.map((d) => `#${d}`).join(", ")} to the batch; dependents wait on them`, why: "the builder decomposed the issue",
+        alternative: "end the batch row decomposed and let dependents wait for a later batch" });
       for (const [m, ds] of deps) if (ds.includes(n)) deps.set(m, [...new Set(ds.flatMap((d) => (d === n ? subs : [d])))]);
       noteCrossLane();
+    }
+    // #4267: a recovery pass ends here; a recoverable row under the attempt cap is requeued as a recovery lane.
+    const prior = recovering.get(n) ?? null;
+    if (prior) {
+      recovering.delete(n);
+      if (row.outcome === "merged") row.recovered = prior.code;
+      else row.recovery = { code: prior.code, attempts: recoveries.get(n) ?? prior.attempt, outcome: row.outcome, ...(row.code ? { result_code: row.code } : {}), detail: firstLine(row.detail) };
+    }
+    if (recoveryMax && (row.outcome === "needs-human" || row.outcome === "ci-pending")) {
+      let isConflicting = false;
+      if (row.outcome === "ci-pending" && typeof conflicting === "function" && Number.isInteger(row.pr)) {
+        try { isConflicting = (await conflicting(n, row.pr)) === true; } catch { isConflicting = false; }
+      }
+      const facts = { ...row, issueEdited: r?.issueEdited === true, conflicting: isConflicting };
+      const used = recoveries.get(n) ?? 0;
+      if (classifyNeedsHuman(facts) === "recoverable" && used < recoveryMax) {
+        const code = recoveryCodeOf(facts), attempt = used + 1;
+        recoveries.set(n, attempt); recovering.set(n, { code, attempt });
+        requeue(n, 0); done(); save();
+        decided({ issue: n, what: `recovery lane for ${code} (attempt ${attempt}/${recoveryMax}); dependents stay queued`, why: firstLine(row.detail) || code,
+          alternative: "leave needs-human for the operator and skip the dependents" });
+        update({ ...row, outcome: "recovering", detail: `recovering (${code}), attempt ${attempt}/${recoveryMax}: ${firstLine(row.detail)}` });
+        return;
+      }
     }
     results.set(n, row);
     if (row.outcome === "merged" && drift?.onMerged && r?.structure && String(rec?.lane ?? r?.lane ?? "").startsWith("milestone/")) {
@@ -406,7 +453,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
-          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), onStart: (info) => {
+          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { ...recovering.get(n) } } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
             if (reg && slotted.has(n) && info?.pid) reg.setLanePid(keyOf(n), info.pid);
           } });
@@ -519,6 +566,26 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   if (reg) withdrawExcept(new Set());
   save();
   return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: tripped?.detail ?? (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run") });
+}
+
+/**
+ * #4267 batch-report lines after the table: `recovered: #A (ci.red) #B (base.conflict)`, one `unrecovered:` line per
+ * mechanical needs-human row (failed recovery or a terminal code), then one escalation list holding only human codes,
+ * asked once at the end of the batch. Empty when there is nothing to list.
+ */
+export function formatOutcomeLists(rows) {
+  const out = [];
+  const one = (x) => String(x ?? "").split("\n")[0].slice(0, 200);
+  const rec = (rows ?? []).filter((r) => r?.recovered);
+  if (rec.length) out.push(`recovered: ${rec.map((r) => `#${r.issue} (${r.recovered})`).join(" ")}`);
+  for (const r of rows ?? []) {
+    if (!r || r.recovered) continue;
+    const human = r.outcome === "needs-human" && classifyNeedsHuman(r) === "human";
+    if (!human && (r.outcome === "needs-human" || r.recovery)) out.push(`unrecovered: #${r.issue} (${r.code ?? r.recovery?.code ?? "unclassified"}: ${one(r.recovery ? `recovery ${r.recovery.code} ended ${r.recovery.outcome}: ${r.recovery.detail}` : r.detail)})`);
+  }
+  const esc = (rows ?? []).filter((r) => r?.outcome === "needs-human" && classifyNeedsHuman(r) === "human");
+  if (esc.length) out.push(["escalations (human decisions, asked once):", ...esc.map((r) => `- #${r.issue} (${r.code}): ${one(r.detail)}`)].join("\n"));
+  return out;
 }
 
 export function formatTable(rows) {

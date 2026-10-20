@@ -712,6 +712,35 @@ describe("issue edited mid-run (#4188)", () => {
   });
 });
 
+describe("in-batch recovery of mechanical needs-human (#4267)", () => {
+  const BODY_B = "foo now also needs a bar mode.\n\n- foo must accept a bar flag and return bar output.\n- Existing callers of foo keep working.";
+
+  it("runCore --recover: removes needs-human, posts FORGE:DECISION, and tells the builder what to recover", async () => {
+    const w = world();
+    const r = await run(w, { recover: { code: "ci.red", attempt: 1 } });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(w.edits.some((e) => e.join(" ") === "issue edit 7 -R o/r --remove-label needs-human"));
+    const dec = w.comments.find((c) => c.startsWith("<!-- FORGE:DECISION -->"));
+    assert.match(dec, /recovery pass for `ci\.red`/); assert.match(dec, /\*\*Why\*\*/); assert.match(dec, /\*\*Alternative\*\*/);
+    assert.ok(builders(w).some((b) => /Recovery pass \(ci\.red\): .*--log-failed/.test(b[4])));
+    const w2 = world();
+    await run(w2, { recover: { code: "builder.block_untyped", attempt: 1 } });
+    assert.ok(builders(w2).some((b) => /pick the option most consistent with the issue, the repo's conventions and prior merged decisions/.test(b[4])));
+    const w3 = world();
+    await run(w3);
+    assert.ok(!w3.comments.some((c) => c.includes("FORGE:DECISION")), "no recovery: nothing changes");
+    assert.ok(!builders(w3).some((b) => /Recovery pass/.test(b[4])));
+  });
+
+  it("runCore marks a contract.invalid after a mid-run issue edit (issueEdited) and a failed recovery pass (recovery)", async () => {
+    const bad1 = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }] };
+    const r = await run(world({ contract: bad1, fixedContract: bad1, issueBodies: [ISSUE_BODY, BODY_B] }), { recover: { code: "contract.invalid", attempt: 1 } });
+    assert.equal(r.code, "contract.invalid"); assert.equal(r.issueEdited, true); assert.equal(r.recovery, true);
+    const r2 = await run(world({ contract: bad1, fixedContract: bad1 }));
+    assert.equal(r2.code, "contract.invalid"); assert.equal(r2.issueEdited, undefined); assert.equal(r2.recovery, undefined);
+  });
+});
+
 describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness.sh)", () => {
   const dworld = (results, o = {}) => {
     const w = world(o); const q = [...results]; w.docsCalls = [];
@@ -3095,7 +3124,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     writeFileSync(`${d}/forge.yaml`, "engine:\n  conformance: shadow\n");
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n");
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60 });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, checkRun: false });
   });
 });
 
@@ -3750,6 +3779,103 @@ describe("hybrid placement in the lane's FORGE annotation (#4256)", () => {
     assert.equal(r2.seen.placement, undefined);
     const r3 = await quiet(() => runFromCli(["7", "--repo", "o/r"], deps()));
     assert.equal(r3.seen.placement, undefined);
+  });
+});
+
+describe("verify.check_run: forgedock/verify check run (#4270)", () => {
+  const withChecks = (o = {}, fail = null) => {
+    const w = world(o);
+    w.checkRuns = [];
+    w.io.createCheckRun = async (c) => { w.checkRuns.push(c); if (fail) throw new Error(fail); return { id: w.checkRuns.length, html_url: `https://github.com/o/r/runs/${w.checkRuns.length}` }; };
+    return w;
+  };
+  const on = { verify: { mode: "local", checkRun: true } };
+  const strip = (evs) => evs.map(({ ts, ...e }) => e);
+
+  it("posts one success check run on the pushed PR head with per-gate typed output and a VERIFY event", async () => {
+    const dir = tmpDir("vcr-");
+    const w = withChecks();
+    const r = await run(w, { dir, ...on });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.checkRuns.length, 1);
+    const c = w.checkRuns[0];
+    assert.equal(c.name, "forgedock/verify");
+    assert.equal(c.sha, w.head);
+    assert.equal(c.conclusion, "success");
+    const out = JSON.parse(/```json\n([\s\S]*)\n```/.exec(c.text)[1]);
+    assert.deepEqual(out.gates.map((g) => g.id), ["precheck.commands", "structure.edges", "docs.freshness", "conformance.scope", "conformance.validate", "conformance.requirements", "maintenance.hotspot_growth", "conformance.amendments"]);
+    assert.ok(out.gates.every((g) => g.ok === true));
+    assert.deepEqual(out.gates.find((g) => g.id === "conformance.validate").evidence, [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }]);
+    const v = readLog(dir, 7).filter((e) => e.event === "VERIFY");
+    assert.equal(v.length, 1);
+    assert.equal(v[0].head, w.head); assert.equal(v[0].conclusion, "success"); assert.equal(v[0].posted, true);
+    assert.ok(readLog(dir, 7).findIndex((e) => e.event === "PR_OPENED") < readLog(dir, 7).findIndex((e) => e.event === "VERIFY"), "after the PR head is pushed");
+  });
+
+  it("reports failure iff an existing gate failed (shadow scope creep), without changing the lane outcome", async () => {
+    const w = withChecks({ changed: ["src/foo.js", "test/foo.test.js", "src/extra.js"] });
+    const base = world({ changed: ["src/foo.js", "test/foo.test.js", "src/extra.js"] });
+    const r = await run(w, { conformance: "shadow", ...on });
+    assert.equal(r.terminalReason, (await run(base, { conformance: "shadow" })).terminalReason);
+    assert.equal(w.checkRuns.length, 1);
+    assert.equal(w.checkRuns[0].conclusion, "failure");
+    const out = JSON.parse(/```json\n([\s\S]*)\n```/.exec(w.checkRuns[0].text)[1]);
+    const scope = out.gates.find((g) => g.id === "conformance.scope");
+    assert.equal(scope.ok, false); assert.match(scope.evidence[0], /src\/extra\.js/);
+    assert.ok(out.gates.filter((g) => g.id !== "conformance.scope").every((g) => g.ok));
+  });
+
+  it("posts once per pushed head: a base-sync that moves the head gets its own check run", async () => {
+    const w = withChecks({ prView: [{ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }, { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" }], mergeResults: ["clean"] });
+    assert.equal((await run(w, on)).terminalReason, "merged");
+    assert.equal(w.checkRuns.length, 2);
+    assert.match(w.checkRuns[0].sha, /^bbbb/, "the reviewed PR head");
+    assert.match(w.checkRuns[1].sha, /^cccc/, "the base-synced head");
+    assert.equal(w.checkRuns[1].sha, w.head);
+  });
+
+  it("with the flag unset no Checks API call is made and the run log is identical (golden comparison)", async () => {
+    const runs = [];
+    for (const extra of [{}, { verify: { mode: "local" } }, { verify: { mode: "local", checkRun: false } }]) {
+      const dir = tmpDir("vcr-off-");
+      const w = withChecks();
+      const r = await run(w, { dir, ...extra });
+      assert.equal(w.checkRuns.length, 0);
+      runs.push({ reason: r.terminalReason, log: strip(readLog(dir, 7)), waits: w.calls.length });
+    }
+    assert.ok(!runs[0].log.some((e) => e.event === "VERIFY"));
+    assert.deepEqual(runs[1], runs[0]); assert.deepEqual(runs[2], runs[0]);
+    // the same lane without the seam at all: the golden reference
+    const dir = tmpDir("vcr-ref-");
+    const ref = world();
+    const rr = await run(ref, { dir });
+    assert.deepEqual({ reason: rr.terminalReason, log: strip(readLog(dir, 7)) }, { reason: runs[0].reason, log: runs[0].log });
+  });
+
+  it("merge policy all: the lane's own check is ignored by the CI wait only when the flag is on", async () => {
+    const seen = [];
+    for (const extra of [{}, on]) {
+      const w = withChecks();
+      w.io.waitCiGreen = async (...a) => { seen.push(a); return { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }; };
+      assert.equal((await run(w, { mergeWait: "all", ...extra })).terminalReason, "merged");
+    }
+    assert.equal(seen[0].length, 3, "flag off: the 3-argument call is unchanged");
+    assert.deepEqual(seen.at(-1)[3], { ignore: ["forgedock/verify"] });
+  });
+
+  it("a Checks API failure never fails the lane: recorded as an anomaly and a VERIFY event with posted false", async () => {
+    const dir = tmpDir("vcr-fail-");
+    const w = withChecks({}, "HTTP 403: Resource not accessible by integration");
+    const r = await run(w, { dir, ...on });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.checkRuns.length, 1);
+    const v = readLog(dir, 7).find((e) => e.event === "VERIFY");
+    assert.equal(v.posted, false); assert.match(v.error, /403/);
+    assert.match(traj(w).at(-1), /forgedock\/verify check run not posted[\s\S]*403/);
+    // a lane without the seam at all is the same anomaly, never a crash
+    const w2 = world();
+    assert.equal((await run(w2, on)).terminalReason, "merged");
+    assert.match(traj(w2).at(-1), /forgedock\/verify check run not posted.*no Checks API seam/);
   });
 });
 

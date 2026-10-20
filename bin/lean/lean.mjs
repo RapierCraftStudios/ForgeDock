@@ -25,7 +25,7 @@ import { renderInvestigation, renderImplementation, renderReview, renderPrBody, 
 import { computeTrigger, TRIGGER_MODES } from "./review-trigger.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM } from "./prompts.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
-import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES } from "./verify.mjs";
+import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport } from "./verify.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
 import { writeHeavyShims, sumWaits } from "./heavy.mjs";
@@ -119,6 +119,8 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {number} [o.sparseMaxKb]   forge.yaml env.sparse_max_kb: tracked blobs >= this many KB stay out of the lane checkout (default 1024; 0 = off, #4221)
  * @param {object} [o.placement]     {where: local|remote, reason, mode}: the dispatcher's lane placement (#4256), kept in FORGE:STATE
  * @param {object} [o.contextPack]   {mode: shadow|on|off, sources, bytes, days}: forge.yaml engine.context_pack* (#4275, default shadow)
+ * @param {object} [o.recover]       {code, attempt}: a batch recovery lane (#4267) for a mechanical needs-human; removes the label,
+ *                                   posts FORGE:DECISION and resumes the open PR on the rerun path with a recovery note
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
@@ -131,6 +133,8 @@ export async function runCore(o) {
   const riskPaths = Array.isArray(o.reviewTrigger?.riskPaths) ? o.reviewTrigger.riskPaths : [];
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
+  // #4267: a batch recovery lane for a mechanical needs-human ({code, attempt}).
+  const recover = o.recover && typeof o.recover.code === "string" ? { code: o.recover.code, attempt: Number.isInteger(o.recover.attempt) ? o.recover.attempt : 1 } : null;
   const branch = `feat/issue-${issue}-lean`;
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
@@ -320,12 +324,12 @@ export async function runCore(o) {
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...extra };
     return done;
   }
-  async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR) {
+  async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR, extra = {}) {
     try {
       await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}\n\n_${usageLine()}_`);
       await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
     } catch { /* best effort */ }
-    return finish("needs-human", why, { code }, code);
+    return finish("needs-human", why, { code, ...extra, ...(recover ? { recovery: true } : {}) }, code);
   }
 
   // ---- stage notes: investigation.md, plan.md, implementation.md become their own comments ----
@@ -444,6 +448,14 @@ export async function runCore(o) {
     } catch (e) { ev({ event: "CHECKPOINT_FAILED", reason, error: String(e?.message ?? e).slice(0, 300) }); return false; }
   }
   const CONTINUE_NOTE = "\n\nThe branch already holds work from an earlier session that was interrupted (see the latest `wip(forge): checkpoint` commit). Continue from it: read `git log` and `git diff origin/BASE...HEAD`, do not start over.";
+  // #4267: what a recovery lane does per code. Codebase-agnostic: the repo's own checks and logs only.
+  const RECOVER_HOW = {
+    [OUTCOME_CODES.CI_RED]: "the PR's required checks failed. Read the failed checks' logs (`gh run view <run-id> --log-failed`, or the repo's declared check commands), fix the causes, re-run those checks locally and push new commits only (never rewrite history)",
+    [OUTCOME_CODES.BASE_CONFLICT]: "the PR conflicts with origin/BASE. Merge origin/BASE, resolve every conflict keeping both sides' intent, re-run the validate commands and push new commits only",
+    [OUTCOME_CODES.BUILDER_BLOCK_UNTYPED]: "an earlier run escalated an in-scope technical choice. Do not block on it: pick the option most consistent with the issue, the repo's conventions and prior merged decisions, and name the alternative you did not take in your summary",
+    [OUTCOME_CODES.CONTRACT_INVALID]: "the issue was edited while the earlier run planned. Plan against the current issue text",
+  };
+  const recoverNote = () => (recover ? `\n\nRecovery pass (${recover.code}): ${(RECOVER_HOW[recover.code] ?? "an earlier run ended needs-human for a mechanical reason; resolve it").replaceAll("BASE", lane)}.` : "");
   const PLAN_RERUN_NOTE = "\n\nThis is a rerun: the branch already holds commits from an earlier run. Read `git log` and `git diff origin/BASE...HEAD` to see what exists, but plan against the issue itself. This step is still planning only: do not edit code, do not commit, and do not write the result file unless the issue is invalid, already fixed or blocked.";
   const SALVAGE_NOTE = "\n\nAn earlier run on this issue stopped with uncommitted work, saved at `REF` (not on the branch). Inspect it with `git diff HEAD REF --stat` and reuse what fits the contract (`git checkout REF -- <path>`) instead of rewriting it.";
   const RERUN_NOTE = `\n\nThis is a rerun: the branch already holds commits from an earlier run. Read \`git log\` and \`git diff origin/BASE...HEAD\`, verify that work against the contract, complete what is missing, ${vcfg.mode === "ci" ? "re-run the light checks (the engine verifies on CI)" : "re-run every validate command"} and write the result file. Do not start over.`;
@@ -672,6 +684,15 @@ export async function runCore(o) {
     // ---- 1. claim ----
     await label("investigating");
     await post("FORGE:STARTED", `Started work on #${issue} (base \`${lane}\`).`);
+    if (recover) {
+      // #4267: the batch decided to recover this issue itself; the label goes so the issue is live again.
+      try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", "needs-human"]); } catch { /* best effort */ }
+      try {
+        await post("FORGE:DECISION", `## Decision: recovery pass for \`${recover.code}\` (attempt ${recover.attempt})\n**What**: removed \`needs-human\` and resumed the open PR / branch on \`${lane}\` (${(RECOVER_HOW[recover.code] ?? "rerun").split(".")[0]}).\n**Why**: \`${recover.code}\` is a mechanical outcome an agent can fix without operator input.\n**Alternative**: leave the issue \`needs-human\` and skip its dependents until the operator relaunches it.`);
+      } catch { /* best effort */ }
+      T.decisions.push(`Recovery pass for ${recover.code} (attempt ${recover.attempt}): needs-human removed, PR resumed`);
+      ev({ event: "RECOVERY_START", code: recover.code, attempt: recover.attempt });
+    }
 
     // ---- 2. worktree (resume an open PR / remote branch) ----
     try { await io.git(["fetch", "origin", lane], { cwd }); } catch { /* offline: use the local ref */ }
@@ -843,7 +864,7 @@ export async function runCore(o) {
       return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
     });
     const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => c?.body ?? "")].join("\n\n");
-    let trustedComments = trustedOf(iss);
+    let trustedComments = trustedOf(iss), issueEdited = false;
     let issueText = textOf(iss, trustedComments);
     let scopeHash = contractHash(scopeText(iss, trustedComments)); // #4265: the edit signal and the frozen contract's provenance
     ctxLane = laneType({ resumed: Boolean(resumed || salvagedRef), attempts: priorAttempts(iss.body, trustedComments), body: iss.body });
@@ -878,6 +899,7 @@ export async function runCore(o) {
       const old = scopeHash, now = contractHash(scopeText(next, tc));
       iss = next; trustedComments = tc; issueText = text; scopeHash = now;
       if (old === now) return;
+      issueEdited = true;
       ev({ event: "ISSUE_EDITED", old, new: now, stage });
       T.decisions.push(`Issue edited during the run (${old} -> ${now}); ${stage} uses the current text`);
     }
@@ -1010,7 +1032,7 @@ export async function runCore(o) {
       const ctxPack = frozen ? null : await contextPackStep();
       const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + reproPlanNote(reproOn()) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       if (!frozen) {
-        await builder(++attemptN, planPrompt() + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : ""), null, true, planPrompt);
+        await builder(++attemptN, planPrompt() + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote(), null, true, planPrompt);
         planned = true;
         result = await readResult();
         const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
@@ -1038,7 +1060,7 @@ export async function runCore(o) {
           vc = validateContract(contract, issueText, { repro: reproOn() });
         }
         await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
-        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID);
+        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, issueEdited ? { issueEdited: true } : {});
         frozen = contract;
         hash = contractHash(contractJson(frozen));
         let body = renderContract(frozen, hash, { scope: scopeHash });
@@ -1052,7 +1074,7 @@ export async function runCore(o) {
       }
       T.plan = [`contract ${hash}`, `${frozen.requirements.length} requirement(s)`];
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
-      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "");
+      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote();
       liveKeys = ["implementation"];
       stage = "implement";
       await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);
@@ -1078,6 +1100,8 @@ export async function runCore(o) {
     const testMap = io.runCommand ? await readTestMap([wt, cwd], io.fs?.read) : null;
     const pickChecks = () => { const m = testMap ? selectCommands(testMap, files) : []; return m.length ? { commands: m, source: "test-map" } : { commands: learnedCommands, source: "learned" }; };
     let picked = pickChecks();
+    // #4270: the last result of each deterministic gate, as computed below; only reportVerify (verify.check_run) reads it
+    const verifyFacts = { commands: null, structure: null, undeclaredEdges: [], docs: null, precheck: null, amendments: [], hotspots: false };
     if (picked.source === "test-map") T.decisions.push(`Pre-PR checks selected from ${TEST_MAP_FILE}: ${picked.commands.length} of ${testMap.entries.length} entries`);
     if (picked.commands.length && io.runCommand) {
       for (let round = 0; ; round++) {
@@ -1091,6 +1115,7 @@ export async function runCore(o) {
           results.push({ command, rc: Number.isInteger(r?.rc) ? r.rc : 1, output: String(r?.output ?? "") });
         }
         ev({ event: "PRECHECK_COMMANDS", round, results: results.map(({ command, rc }) => ({ command, rc })), ...(picked.source === "test-map" ? { source: "test-map" } : {}) });
+        verifyFacts.commands = results.map(({ command, rc }) => ({ command, rc }));
         const failed = results.filter((r) => r.rc !== 0);
         if (!failed.length) { checkCommandsFailing = false; if (round) T.decisions.push(`Declared check commands pass after ${round} builder fix round(s)`); break; }
         const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
@@ -1132,6 +1157,7 @@ export async function runCore(o) {
         structure = (await structureOf()) ?? structure;
         edges = undeclared();
       }
+      verifyFacts.structure = structure; verifyFacts.undeclaredEdges = edges;
       if (edges.length) {
         return await needsHuman(`The change adds dependencies between workspace packages that the frozen contract does not name${sessionId ? ", after one builder resume" : ""}; nothing merged:\n${edges.slice(0, 15).map((e) => `- ${e.from} → ${e.to} (${e.kind}, \`${e.manifest}\`)`).join("\n")}\n\nAdd each to the contract with a reason, or remove it.`, OUTCOME_CODES.STRUCTURE_UNDECLARED_EDGE);
       }
@@ -1148,6 +1174,7 @@ export async function runCore(o) {
         result = (await readResult()) ?? result;
         docs = await io.docsFreshness({ cwd: wt, base }).catch(() => null);
       }
+      verifyFacts.docs = docs;
       if (docs && !docs.ok) {
         return await needsHuman(`The repository's docs freshness check still fails${sessionId ? " after one builder resume" : ""}; nothing merged:\n\n${String(docs.output).slice(0, 2000)}`, OUTCOME_CODES.DOCS_STALE);
       }
@@ -1269,6 +1296,7 @@ export async function runCore(o) {
       const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === String(await git(["rev-parse", "HEAD"])).trim();
       const hotspots = await hotspotsOf({ base, paths: files });
       const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective) });
+      Object.assign(verifyFacts, { precheck: pc.failures, amendments: amendProblems, hotspots: Boolean(hotspots && hotspots.enabled !== false && Array.isArray(hotspots.files)) });
       const pre = [...pc.failures, ...amendProblems];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
@@ -1295,6 +1323,29 @@ export async function runCore(o) {
       if (d.state.startsWith("review.")) return { ...d, by: "review", would, wouldFail, reviewState: d.state };
       const blocking = d.state === "nonconforming" ? d.failures.filter((f) => SHADOW_BLOCKS.includes(f.code)) : [];
       return { state: blocking.length ? "nonconforming" : "conforms", by: "review", failures: blocking, would, wouldFail, reviewState: d.state };
+    }
+    const verifyReported = new Set();
+    /**
+     * #4270 verify.check_run: one `forgedock/verify` check run per pushed head, reporting the gates' last results (no gate
+     * logic, never blocks). Off: no call, no event. A missing seam or a Checks API failure is an anomaly, never a lane failure.
+     */
+    async function reportVerify() {
+      if (vcfg.checkRun !== true) return;
+      let head = "";
+      try { head = String(await git(["rev-parse", "HEAD"])).trim(); } catch { return; }
+      if (!head || verifyReported.has(head)) return;
+      verifyReported.add(head);
+      const r = verifyReport({ head, ...verifyFacts, contract: effective, result });
+      let posted = false, url = null, error = null;
+      try {
+        if (!io.createCheckRun) throw new Error("no Checks API seam");
+        const c = await io.createCheckRun({ sha: head, name: VERIFY_CHECK_NAME, conclusion: r.conclusion, title: r.title, summary: r.summary, text: r.text });
+        posted = true; url = c?.html_url ?? null;
+      } catch (e) {
+        error = String(e?.stderr || e?.message || e).split("\n")[0].slice(0, 200);
+        T.anomalies.push(`${VERIFY_CHECK_NAME} check run not posted for ${head.slice(0, 12)}: ${error}`);
+      }
+      ev({ event: "VERIFY", head, conclusion: r.conclusion, gates: r.gates.map((g) => ({ id: g.id, ok: g.ok })), posted, url, ...(error ? { error } : {}) });
     }
     /** Shape the base-sync path expects: {unusable: state} when no usable review, else {fail, verdict, reason, failures}. */
     const doReview = async () => {
@@ -1384,6 +1435,7 @@ export async function runCore(o) {
     T.pr = [`#${pr}`, resumed?.pr ? "existing" : "opened"];
     const prUrl = /https?:\/\/\S+/.exec(prOut)?.[0] ?? `https://github.com/${repo}/pull/${pr}`;
     let localHead = String(await git(["rev-parse", "HEAD"])).trim();
+    await reportVerify();
 
     // ---- 6. merge policy: required (default) | all | none ----
     let policy = mergeWait, required = [];
@@ -1481,6 +1533,7 @@ export async function runCore(o) {
         rereview = `${rv.verdict}: ${rv.reason || "no concrete failure"}`;
       }
       localHead = await gitOut(["rev-parse", "HEAD"]);
+      await reportVerify();
       syncRow.push(`${trigger}: ${clean ? "clean" : "conflicts"} (${baseSha})`);
       T.baseSync = [`${syncs} sync(s)`, syncRow.join("; ")];
       await post("FORGE:BASE_SYNC", `## Base Sync\n**Trigger:** ${trigger}\n**Base merged:** \`${base}\` at \`${baseSha}\`\n**Result:** ${clean ? "clean merge" : `conflicts in ${files.map((f) => `\`${f}\``).join(", ") || "unknown files"}`}\n**Resolution:** ${how}\n**Tests run:** ${tests}\n**Re-review:** ${rereview}\n**New head:** \`${localHead.slice(0, 12)}\``);
@@ -1513,6 +1566,7 @@ export async function runCore(o) {
       if (rv.fail) return await needsHuman(`Review FAIL after a CI fix round: ${rv.reason}`, OUTCOME_CODES.REVIEW_FAILED);
       await gitPush(["push", "origin", branch]); // plain push of the fix commit: never force
       localHead = await gitOut(["rev-parse", "HEAD"]);
+      await reportVerify();
       return null;
     }
     /** After the merge (#4179): delete the lane branch on origin; finish() deletes it locally after the worktree is gone. */
@@ -1574,7 +1628,8 @@ export async function runCore(o) {
           // a rollup of another head (the PR before a fix push lands) counts as pending, never as this head's result
           const current = (x) => !x.head || !localHead || String(x.head).startsWith(localHead) || localHead.startsWith(String(x.head));
           if (policy === "all") {
-            const w = await io.waitCiGreen(pr, repo, 0).catch(() => ({ rc: 2, text: "" }));
+            // #4270: the lane's own report-only check never gates its own merge
+            const w = await io.waitCiGreen(pr, repo, 0, ...(vcfg.checkRun === true ? [{ ignore: [VERIFY_CHECK_NAME] }] : [])).catch(() => ({ rc: 2, text: "" }));
             if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; break; }
             if (w.rc === 1) return await needsHuman(`Remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`, OUTCOME_CODES.CI_RED);
           } else {
