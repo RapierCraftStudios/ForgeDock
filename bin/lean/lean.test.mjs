@@ -19,7 +19,7 @@ import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
-import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig } from "../engine-cli.mjs";
+import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS, readMaintenance } from "../engine-cli.mjs";
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir.
@@ -3465,5 +3465,77 @@ describe("hybrid placement in the lane's FORGE annotation (#4256)", () => {
     assert.equal(r2.seen.placement, undefined);
     const r3 = await quiet(() => runFromCli(["7", "--repo", "o/r"], deps()));
     assert.equal(r3.seen.placement, undefined);
+  });
+});
+
+describe("context pack modes (forge#4275)", () => {
+  const FACTS = { issue: 7, links: [{ number: 3, rel: "parent", kind: "issue", title: "Epic", state: "OPEN", code: null, result: null, body: "Parent says: the zebra protocol must be kept." }], attempts: [], ledger: [], facts: [".forge/test-map.json"], errors: [] };
+  const withPack = (o = {}) => { const w = world(o); w.packCalls = []; w.io.contextFacts = async (a) => { w.packCalls.push(a); return FACTS; }; return w; };
+  const ctx = (w) => w.comments.filter((c) => c.startsWith("<!-- FORGE:CONTEXT -->"));
+
+  it("on: the pack goes into the plan prompt as hints, FORGE:CONTEXT and CONTEXT_PACK are recorded", async () => {
+    const w = withPack(), dir = tmpDir("core-");
+    const r = await run(w, { dir, contextPack: { mode: "on" } });
+    assert.equal(r.terminalReason, "merged");
+    const plan = builders(w)[0][4];
+    assert.ok(plan.startsWith(builderPlanPrompt(7)));
+    assert.match(plan, /Context pack \(hints, not proof[\s\S]*- #3 \[parent\] OPEN "Epic"[\s\S]*zebra protocol/);
+    assert.equal(w.packCalls.length, 1);
+    assert.equal(w.packCalls[0].base, "origin/staging");
+    assert.equal(ctx(w).length, 1);
+    assert.match(ctx(w)[0], /<details><summary>Context pack: 2 item\(s\), \d+ bytes, 0 dropped \(mode on, lane first/);
+    const ev = readLog(dir, 7).find((e) => e.event === "CONTEXT_PACK");
+    assert.deepEqual([ev.mode, ev.lane_type, ev.items, ev.sources.graph, ev.sources.facts, ev.cached], ["on", "first", 2, 1, 1, false]);
+    assert.ok(ev.bytes > 0 && Number.isInteger(ev.truncated));
+    assert.ok(w.telemetry.some((x) => x.event === "CONTEXT_PACK"));
+    const term = readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.deepEqual([term.context_pack, term.lane_type], ["on", "first"]);
+  });
+
+  it("shadow (default): compiled and recorded, the plan prompt is unchanged", async () => {
+    const w = withPack(), off = world(), dir = tmpDir("core-");
+    await run(w, { dir });
+    await run(off, { contextPack: { mode: "off" } });
+    assert.equal(builders(w)[0][4], builders(off)[0][4]);
+    assert.ok(!builders(w)[0][4].includes("Context pack"));
+    assert.equal(ctx(w).length, 1);
+    assert.equal(readLog(dir, 7).find((e) => e.event === "CONTEXT_PACK").mode, "shadow");
+  });
+
+  it("off: no gathering, no record, no event; the run is today's", async () => {
+    const w = withPack(), dir = tmpDir("core-");
+    const r = await run(w, { dir, contextPack: { mode: "off" } });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.packCalls.length, 0);
+    assert.equal(ctx(w).length, 0);
+    assert.ok(!readLog(dir, 7).some((e) => e.event === "CONTEXT_PACK"));
+    assert.ok(!w.telemetry.some((x) => x.event === "CONTEXT_PACK"));
+    assert.equal(readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL").context_pack, "off");
+  });
+
+  it("a contract cannot quote the pack: requirements are checked against the issue only", async () => {
+    const bad = { ...CONTRACT, requirements: [{ id: "R1", quote: "Parent says: the zebra protocol must be kept.", disposition: "deliver" }] };
+    const w = withPack({ contract: bad });
+    const r = await run(w, { contextPack: { mode: "on" } });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, OUTCOME_CODES.CONTRACT_INVALID);
+  });
+
+  it("a gather failure never fails the run: anomaly, prompt unchanged", async () => {
+    const w = world(); w.io.contextFacts = async () => { throw new Error("gh down"); };
+    const r = await run(w, { contextPack: { mode: "on" } });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(!builders(w)[0][4].includes("Context pack"));
+    assert.ok(traj(w)[0].includes("Context pack not compiled"));
+  });
+
+  it("forge.yaml engine.context_pack* is read flat; invalid mode is ignored", () => {
+    const d = tmpDir("ctxcfg-");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_pack: on\n  context_pack_sources: graph,attempts\n  context_pack_bytes: 4096\n");
+    assert.deepEqual(readContextPack(d), { mode: "on", sources: "graph,attempts", bytes: 4096 });
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_pack: maybe\n");
+    assert.equal(readContextPack(d), undefined);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  conformance: shadow\n");
+    assert.equal(readContextPack(d), undefined);
   });
 });

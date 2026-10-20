@@ -112,6 +112,15 @@ If you started Docker containers or volumes that are still there, list their nam
 If you find you are blocked, write "status":"blocked" with a typed "block" instead.`;
 }
 
+/**
+ * forge#4275: the compiled context pack for the plan prompt (context_pack: on); "" for an empty pack. Labelled as hints:
+ * the issue outranks the code, which outranks the pack, and contract quotes never come from it.
+ */
+export function contextPackNote(pack) {
+  if (!pack?.text) return "";
+  return `\n\nContext pack (hints, not proof; compiled by the engine from GitHub and git). The issue outranks the code, which outranks this pack: verify anything you rely on. Contract requirements quote only the issue and its trusted comments, never this pack. Open a link (gh issue view N / gh pr view N) yourself when you need more.\n${pack.text}`;
+}
+
 /** forge#4195: hotspot facts for the plan prompt: one sentence plus one line per over-threshold file; "" when none. */
 export function hotspotPlanNote(facts) {
   if (!facts || facts.enabled === false || !Array.isArray(facts.files)) return "";

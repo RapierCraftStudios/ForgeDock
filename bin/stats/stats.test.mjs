@@ -12,9 +12,9 @@ import { aggregate, compareVersions, percentile } from "./aggregate.mjs";
 import { cacheDir } from "./cache.mjs";
 import { fetchGithubRecords, parseTelemetryComments, runsFromRecords, toModel } from "./github-source.mjs";
 import { buildReport, makeProgressPrinter, parseArgs, parseSince, runStats, sinceToTimestamp } from "./index.mjs";
-import { readLocalRuns } from "./local-source.mjs";
+import { readLocalRuns, summariseLog } from "./local-source.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
-import { edgeQuery, parseEdge, verdictMix } from "./query.mjs";
+import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb } from "./query.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fx = (f) => join(here, "fixtures", f);
@@ -523,5 +523,41 @@ describe("audit queries (forge#4165)", () => {
     assert.ok(!("groups" in report));
     assert.throws(() => parseArgs(["--edge", "nocolon"]), /--edge must be FROM:TO/);
     assert.deepEqual([parseArgs([]).edge, parseArgs([]).milestone], [null, null]);
+  });
+});
+
+describe("context-pack A/B over run logs (forge#4275)", () => {
+  const use = (phase, turns, cr, usd) => ({ event: "PHASE_ATTEMPT_USAGE", phase, turns, cost_usd: usd, usage: { cache_read_input_tokens: cr, cache_creation_input_tokens: 10, output_tokens: 1 } });
+  const log = (mode, lt, { reason = "merged", builds = 2, reviews = 1 } = {}) => [
+    { event: "RUN_START", issue: 1, repo: "o/r", run: "r" },
+    ...(mode !== "off" ? [{ event: "CONTEXT_PACK", mode, lane_type: lt, bytes: 100 }] : []),
+    ...Array.from({ length: builds }, () => use("implement", 5, 1000, 0.5)),
+    ...Array.from({ length: reviews }, () => use("review", 2, 100, 0.1)),
+    { event: "RUN_TERMINAL", reason, code: "x", context_pack: mode, lane_type: lt },
+  ];
+
+  it("summariseLog carries mode, lane type, builder turns, cache tokens, cost and first-pass", () => {
+    const s = summariseLog(log("on", "child"));
+    assert.deepEqual(s.contextPack, { mode: "on", laneType: "child" });
+    assert.deepEqual([s.builderTurns, s.cacheTokens, s.costUsd, s.firstPass], [10, 2130, 1.1, true]);
+    assert.equal(summariseLog(log("on", "child", { builds: 4 })).firstPass, false);
+    assert.equal(summariseLog(log("on", "child", { reason: "needs-human" })).firstPass, false);
+  });
+
+  it("reports per lane type and mode, never one blended average", () => {
+    const runs = [log("on", "first"), log("on", "first", { builds: 4, reviews: 2 }), log("off", "first"), log("shadow", "rerun"),
+      [{ event: "RUN_START", issue: 2 }, { event: "RUN_TERMINAL", reason: "merged" }]].map((l) => summariseLog(l));
+    const ab = contextPackAb(runs);
+    assert.deepEqual(Object.keys(ab), ["rerun", "child", "first"]);
+    assert.deepEqual(ab.first.on, { n: 2, first_pass_yield: 0.5, builder_turns: 15, cache_tokens: 3195, cost_usd: 1.65 });
+    assert.equal(ab.first.off.n, 1); assert.equal(ab.first.off.first_pass_yield, 1);
+    assert.equal(ab.rerun.shadow.n, 1); assert.equal(ab.child.on.n, 0); assert.equal(ab.child.on.cost_usd, null);
+    assert.match(renderContextAb(ab), /\| first \| on \| 2 \| 0\.5 \| 15 \| 3195 \| 1\.65 \|/);
+  });
+
+  it("--context-ab reads run logs only (no GitHub crawl)", async () => {
+    assert.equal(parseArgs(["--context-ab"]).contextAb, true);
+    const rep = await buildReport({ repo: "o/r", contextAb: true }, { localRuns: [summariseLog(log("on", "first"))], releaseTimes: [], gh: async () => { throw new Error("no network"); } });
+    assert.equal(rep.query.context_ab.first.on.n, 1);
   });
 });

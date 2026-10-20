@@ -21,12 +21,13 @@ import { repoKey } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM } from "./prompts.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES } from "./verify.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
 import { writeHeavyShims, sumWaits } from "./heavy.mjs";
 import { priorityFromLabels } from "./sched.mjs";
+import { parseContextPackConfig, contextPackFor, renderContextRecord, laneType, priorAttempts } from "./context.mjs";
 
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
@@ -111,6 +112,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {string} [o.toolchainOverride] forge.yaml env.toolchain: "<pm>@<x.y.z>" or "off" (#4163)
  * @param {string} [o.envSetup]      forge.yaml env.setup: run once per fresh worktree before the builder (#4163)
  * @param {object} [o.placement]     {where: local|remote, reason, mode}: the dispatcher's lane placement (#4256), kept in FORGE:STATE
+ * @param {object} [o.contextPack]   {mode: shadow|on|off, sources, bytes, days}: forge.yaml engine.context_pack* (#4275, default shadow)
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL,
@@ -285,7 +287,8 @@ export async function runCore(o) {
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}),
-      conformance_mode: conformance === "enforce" ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}) };
+      conformance_mode: conformance === "enforce" ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}),
+      context_pack: ctxCfg.mode, ...(ctxLane ? { lane_type: ctxLane } : {}) }; // forge#4275: the on/off A/B groups runs by these
     ev(term);
     await emit(term);
     if (["needs-human", "engine-error", "dependency-open", "dependency-blocked", "dependency-unreadable", "decomposed"].includes(reason)) {
@@ -458,6 +461,8 @@ export async function runCore(o) {
 
   /** A timeout restart starts a fresh session; by default it continues the implementation against the frozen contract. */
   const tcOpts = () => ({ toolchain: toolchain?.summary ?? null });
+  const ctxCfg = parseContextPackConfig(o.contextPack ?? {});
+  let ctxLane = null; // forge#4275: rerun | child | first, set once the issue is read
   let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
   const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + CONTINUE_NOTE.replace("BASE", lane);
   async function builder(n, prompt, resume, live = false, restart = implementRestart) {
@@ -800,6 +805,27 @@ export async function runCore(o) {
     const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => c?.body ?? "")].join("\n\n");
     let trustedComments = trustedOf(iss);
     let issueText = textOf(iss, trustedComments);
+    ctxLane = laneType({ resumed: Boolean(resumed || salvagedRef), attempts: priorAttempts(iss.body, trustedComments), body: iss.body });
+    /**
+     * forge#4275: compile (or read from the cache) the context pack, log CONTEXT_PACK and post FORGE:CONTEXT. Off, no
+     * io.contextFacts or any failure gives null: never fails a run. The pack never enters issueText (contract quotes).
+     */
+    async function contextPackStep() {
+      if (ctxCfg.mode === "off" || !io.contextFacts) return null;
+      try {
+        const headSha = String(await git(["rev-parse", base])).trim();
+        const r = await contextPackFor({ cfg: ctxCfg, issue, headSha, cacheDir: dir, fs: io.fs,
+          gather: () => io.contextFacts({ repo, issue, iss, comments: trustedComments, cwd: wt, base, sources: ctxCfg.sources, days: ctxCfg.days, now: now() }) });
+        const p = r.pack;
+        const rec = { event: "CONTEXT_PACK", mode: ctxCfg.mode, lane_type: ctxLane, sources: p.sources, found: p.found, bytes: p.bytes, items: p.items, truncated: p.truncated,
+          hash: p.hash, cached: r.cached, ...(r.errors?.length ? { errors: r.errors } : {}) };
+        ev(rec); await emit(rec);
+        const seen = trustedComments.some((c) => String(c?.body ?? "").startsWith("<!-- FORGE:CONTEXT -->") && String(c.body).includes(`hash ${p.hash})`));
+        if (p.items && !seen) { try { await post("FORGE:CONTEXT", renderContextRecord(p, { mode: ctxCfg.mode, laneType: ctxLane })); } catch { /* best effort */ } }
+        T.decisions.push(`Context pack (${ctxCfg.mode}): ${p.items} item(s), ${p.bytes} bytes${p.truncated ? `, ${p.truncated} dropped` : ""}, ${ctxCfg.mode === "on" ? "given to the builder" : "recorded only"}`);
+        return p;
+      } catch (e) { T.anomalies.push(`Context pack not compiled (builder prompt unchanged): ${String(e?.message ?? e).slice(0, 200)}`); return null; }
+    }
     /** #4188: the builder reads the live issue, so quotes are checked against the current text, not the RUN_START snapshot. Best effort. */
     async function refreshIssue(stage) {
       let next;
@@ -922,7 +948,8 @@ export async function runCore(o) {
       }
       await label("building");
       hotFacts = await hotspotsOf({ paths: namedPaths(iss.body ?? "") });
-      const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts);
+      const ctxPack = frozen ? null : await contextPackStep();
+      const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       if (!frozen) {
         await builder(++attemptN, planPrompt() + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : ""), null, true, planPrompt);
         planned = true;
