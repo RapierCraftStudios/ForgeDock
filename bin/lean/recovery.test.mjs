@@ -271,3 +271,41 @@ describe("#4298 staging-review follow-ups: recovery", () => {
     assert.match(spec, /resumes every daemon-hosted batch that has no report yet/);
   });
 });
+
+describe("#4304 staging-review follow-ups: recovery", () => {
+  it("a recovery row counts the pre-filter cost once; a single pass still includes it", async () => {
+    const script = { 1: [{ terminalReason: "needs-human", code: "ci.red", detail: "red", cost_usd: 1 }, { terminalReason: "needs-human", code: "ci.red", detail: "red again", cost_usd: 1 }],
+      2: [{ terminalReason: "merged", pr: 4, cost_usd: 1 }] };
+    const k = { 1: 0, 2: 0 };
+    const rows = await orchestrate({ issues: [1, 2], parallel: 1, recovery: { maxAttempts: 1 }, readBody: async () => "", now: () => 0,
+      prefilter: async () => ({ closed: false, cost_usd: 0.1 }), runOne: async (n) => script[n][k[n]++] });
+    const r = Object.fromEntries(rows.map((x) => [x.issue, x]));
+    assert.equal(k[1], 2, "issue 1 ran a recovery lane");
+    assert.equal(r[1].cost_usd, 2.1);
+    assert.equal(r[2].cost_usd, 1.1);
+  });
+
+  const runBatchWith = async (enginePath) => {
+    const leanIo = {
+      gh: async (a) => (a.includes("milestone") ? JSON.stringify({ milestone: null }) : JSON.stringify({ body: "" })),
+      git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : ""),
+    };
+    const runs = [], logs = [], l = console.log;
+    console.log = (x) => logs.push(String(x));
+    try {
+      await orchestrateFromCli(["5", "--repo", "o/r", "--no-prefilter"], { dir: tmpDir("core-rec-"), batchRoot: tmpDir("core-rec-batch-"), allowTmpfs: true, emitTelemetry: async () => {},
+        io: { gh: async () => "o/r\n" }, leanIo, sched: null, enginePath, orchestration: { breaker: null, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 1 } }, decide: () => {},
+        relabelNeedsHuman: async () => {},
+        leanModule: { runCore: async (o) => { runs.push(o.recover ?? null); return { terminalReason: "needs-human", code: "ci.red", detail: "Required check(s) failed on PR #55: test" }; } } });
+    } finally { console.log = l; }
+    return { runs, logs };
+  };
+
+  it("engine.path full turns batch recovery off (run-issue rejects --recover there); core keeps it", async () => {
+    const full = await runBatchWith("full");
+    assert.deepEqual(full.runs, [null]);
+    assert.ok(full.logs.some((x) => /recovery: off \(engine\.path is full/.test(x)), full.logs.join("\n"));
+    const core = await runBatchWith("core");
+    assert.deepEqual(core.runs, [null, { code: "ci.red", attempt: 1 }]);
+  });
+});
