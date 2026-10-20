@@ -1676,6 +1676,40 @@ describe("orchestrate", () => {
     await assert.rejects(orchestrateFromCli([], {}), /usage/);
   });
 
+  it("#4183 orchestrateFromCli runs owned-resource GC in preflight and near the ceiling, prints a reclaimed line, honours auto_gc", async () => {
+    const leanIo = { gh: async (a) => (a[0] === "repo" ? "main\n" : a.includes("milestone") ? JSON.stringify({ milestone: null }) : JSON.stringify({ body: "" })),
+      git: async (a) => (a[0] === "ls-remote" && a.at(-1) === "refs/heads/staging" ? "abc\tref\n" : "") };
+    const gcCalls = [];
+    let t = 0;
+    const mk = (over) => ({ dir: tmpDir("core-gc-"), batchRoot: tmpDir("core-gc-batch-"), allowTmpfs: true, emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo,
+      leanModule: { runCore: async (o) => { t += 6 * 60 * 1000; return { terminalReason: "merged", pr: o.issue, cost_usd: 0, wall_ms: 1 }; } },
+      gc: async ({ phase }) => { gcCalls.push(phase); return { reclaimed: phase === "preflight" ? 2 : 1, bytes: 2 * 1048576 }; },
+      host: { loadAvg1: () => 0, cores: () => 1, memAvailableMb: () => 100 }, now: () => t, hygiene: { auto_gc: true, max_host_load_ratio: 0.8 }, ...over });
+    const logs = [];
+    const l = console.log; console.log = (s) => logs.push(String(s));
+    let res;
+    try { res = await orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], mk({})); } finally { console.log = l; }
+    // preflight once, then near-ceiling GC before the second admission (the first is within 5 min of the preflight run)
+    assert.deepEqual(gcCalls, ["preflight", "admission"]);
+    assert.equal(res.reclaimed.items, 3);
+    assert.ok(logs.includes("reclaimed: 3 item(s), 4.0M (preflight 2, admissions 1)"), logs.join("\n"));
+    // not near the ceiling: preflight only
+    gcCalls.length = 0;
+    console.log = () => {};
+    try { await orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], mk({ host: { loadAvg1: () => 0, cores: () => 4, memAvailableMb: () => 64000 } })); } finally { console.log = l; }
+    assert.deepEqual(gcCalls, ["preflight"]);
+    // auto_gc: false disables GC and says so
+    gcCalls.length = 0; logs.length = 0;
+    console.log = (s) => logs.push(String(s));
+    try { res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], mk({ hygiene: { auto_gc: false, max_host_load_ratio: 0.8 } })); } finally { console.log = l; }
+    assert.deepEqual(gcCalls, []);
+    assert.ok(logs.includes("reclaimed: off (hygiene.auto_gc: false)"), logs.join("\n"));
+    // a failing gc never fails the batch
+    console.log = () => {};
+    try { res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], mk({ gc: async () => { throw new Error("docker down"); } })); } finally { console.log = l; }
+    assert.equal(res.ok, true);
+  });
+
   it("#4125 a lane-refused issue starts no run and its dependents are skipped, not reported as a cycle", async () => {
     const runs = [];
     const rows = await orchestrate({ issues: [1, 2, 3], parallel: 2, readBody: async (n) => (n === 2 ? "**Depends on**: #1" : ""),
