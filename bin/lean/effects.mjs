@@ -315,11 +315,14 @@ export function makeLeanIo({ repo }) {
     sequenceCheck: ({ cwd, base }) => sequenceCollisions({ git: (a) => run("git")(a, { cwd }), base }),
     sequenceSnapshot: ({ cwd, base }) => snapshotLane({ git: (a) => run("git")(a, { cwd }), base }),
     sequenceVerify: ({ cwd, base, before }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before }),
-    /** #4271: scripts/acceptance-red-green.sh for the frozen repro_test in cwd; {base, head} words, or null on any failure. */
-    async redGreen({ cwd, base, command, timeoutSec = 300 }) {
+    /**
+     * #4271: scripts/acceptance-red-green.sh for the frozen repro_test in cwd; {base, head} words, or null on any failure.
+     * `env` (#4325): the lane env (run TMPDIR, toolchain), merged over process.env, so the command sees what the builder saw.
+     */
+    async redGreen({ cwd, base, command, timeoutSec = 300, env = null }) {
       const args = [script("acceptance-red-green.sh"), "--repo-path", cwd, "--base-ref", base, "--test-cmd", command, "--timeout", String(timeoutSec)];
       try {
-        const m = /BASE=(\w+) HEAD=(\w+)/.exec(String((await pexec("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024 })).stdout ?? ""));
+        const m = /BASE=(\w+) HEAD=(\w+)/.exec(String((await pexec("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024, ...(env ? { env: { ...process.env, ...env } } : {}) })).stdout ?? ""));
         return m ? { base: m[1], head: m[2] } : null;
       } catch { return null; }
     },

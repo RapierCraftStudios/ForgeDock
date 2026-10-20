@@ -112,6 +112,42 @@ export function movingBaseDiff(command) {
   return null;
 }
 
+/** Option names whose value a tool writes (output, report, cache or temp dirs), not reads (#4325). */
+const WRITE_OPT = /^-(?:o|O|-?[\w-]*(?:out|dir|temp|tmp|cache|report|junit|xml|log)[\w-]*)$/i;
+const TMP_PATH = /\$(?:\{TMPDIR(?::-[^}]*)?\}|TMPDIR)\/([^\s"'`;|&<>()=]+)/g;
+/**
+ * #4325: the `$TMPDIR/<name>` paths a frozen command reads without creating them itself. The run TMPDIR is per run, so such
+ * a file (written by the builder before) is gone for the engine's red-green check and for any rerun. A path counts as
+ * created when it, or a directory above it, was earlier the target of `>`/`>>`, `tee`, `touch|mkdir|mktemp`, the last
+ * argument of `cp|mv|ln|install`, an output-like option (`-o`, `--output`, `--basetemp`, `--junitxml`, `--cache-dir`…) or an
+ * env assignment (`X=$TMPDIR/y`). Returns the read paths in first-use order (deduped), e.g. ["$TMPDIR/req.txt"].
+ */
+export function tmpdirInputs(command) {
+  const made = [], reads = [];
+  const createdAbove = (p) => made.some((m) => p === m || p.startsWith(`${m}/`));
+  for (const seg of String(command ?? "").split(/&&|\|\||;|\||\n/)) {
+    const toks = seg.trim().split(/\s+/).filter(Boolean).map((t) => t.replace(/^["']+|["']+$/g, ""));
+    const words = toks.filter((t) => !/^[A-Za-z_]\w*=/.test(t));
+    const cmd = (words[0] ?? "").replace(/^.*\//, "");
+    toks.forEach((tok, i) => {
+      for (const m of tok.matchAll(TMP_PATH)) {
+        const path = m[1].replace(/\/+$/, "");
+        const before = tok.slice(0, m.index), prev = toks[i - 1] ?? "";
+        const opt = /^(-[\w-]+)=["']?$/.exec(before)?.[1] ?? (before === "" && /^-/.test(prev) ? prev : null);
+        const write = /\d*>>?$|&>$/.test(before) || (before === "" && /^(?:\d*>>?|&>)$/.test(prev))
+          || /^[A-Za-z_]\w*=["']?$/.test(before) || (opt !== null && WRITE_OPT.test(opt))
+          || cmd === "tee" || ["touch", "mkdir", "mktemp"].includes(cmd)
+          || (["cp", "mv", "ln", "install"].includes(cmd) && i === toks.length - 1);
+        if (write) made.push(path);
+        else if (!createdAbove(path) && !reads.includes(`$TMPDIR/${path}`)) reads.push(`$TMPDIR/${path}`);
+      }
+    });
+  }
+  return reads;
+}
+
+const tmpInputProblem = (id, p) => `${id}: reads ${p}, which the command does not create; the run TMPDIR is per run, so the engine's rerun and red-green check will not find it. Create the file inside the command (\`… > ${p} && …\`) or use a path the repo tracks`;
+
 export function validateContract(c, issueText, { repro = false } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
@@ -142,11 +178,13 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     if (!v?.id || blank(v?.command)) { problems.push("validate entry without id or command"); continue; }
     const ref = movingBaseDiff(v.command);
     if (ref) problems.push(`${v.id}: \`git diff\` against the moving ${ref} tip fails as soon as the base moves on, even when the change is fine; compare against the merge base instead (\`${ref}...HEAD\` or \`$(git merge-base HEAD ${ref})\`)`);
+    for (const p of tmpdirInputs(v.command)) problems.push(tmpInputProblem(v.id, p));
   }
   if (repro) {
     const t = c.repro_test;
     if (t === "none") { if (blank(c.repro_test_reason)) problems.push(`repro_test "none" needs a one-line repro_test_reason`); }
     else if (!t || typeof t !== "object" || Array.isArray(t) || blank(t.path) || blank(t.command)) problems.push(`this is a bug: repro_test must be {"path","id","command"} (a test that fails on the base and passes after the fix) or "none" with a repro_test_reason`);
+    else for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem("repro_test", p));
   }
   if (JSON.stringify(c).length > MAX_CONTRACT_CHARS) problems.push(`the contract is over ${MAX_CONTRACT_CHARS} characters; keep quotes to the requirement sentence and descriptions short`);
   return { ok: problems.length === 0, problems };

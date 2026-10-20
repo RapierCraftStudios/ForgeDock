@@ -1347,12 +1347,30 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     assert.equal((await run(w)).terminalReason, "merged");
     assert.match(builders(w)[0][4], /This issue is a bug\. When it is testable, .*"repro_test":\{"path"/);
     assert.match(builders(w)[0][4], /"repro_test":"none","repro_test_reason"/);
-    assert.deepEqual(w.rgCalls, [{ cwd: "/wt/lean-7", base: "origin/staging", command: RT.command }]);
+    assert.deepEqual(w.rgCalls.map(({ env, ...x }) => x), [{ cwd: "/wt/lean-7", base: "origin/staging", command: RT.command }]);
     assert.match(w.comments.find((c) => c.includes("FORGE:CONTRACT")), /"repro_test"/, "repro_test is frozen in the contract JSON");
     assert.ok(traj(w)[0].includes("repro_test test/foo.test.js foo handles null: BASE=FAILED HEAD=RAN"));
     assert.equal(builders(w).length, 2); assert.equal(reviewers(w).length, 1);
     const t = rworld([RED_GREEN], { labels: [{ name: "type:bug" }] });
     assert.equal((await run(t)).terminalReason, "merged"); assert.equal(t.rgCalls.length, 1, "type:bug counts as a bug");
+  });
+  it("#4325 the red-green check, declared checks, validate reruns and env.setup run with the builder's lane env", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    const w = rworld([RED_GREEN], { validation: v }), ran = [], setups = [];
+    w.io.runTmp = { prune: async () => {}, make: async (_i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async () => {} };
+    w.io.prepareToolchain = async () => ({ env: { PATH: "/rt/toolchain/bin:/usr/bin" }, summary: "node 22" });
+    w.io.deps = { env: () => ({ UV_CACHE_DIR: "/c/uv", TMPDIR: "/should-not-win" }), prepare: async () => [] };
+    w.io.runSetup = async (a) => { setups.push(a); return { exit: 0, stdout: "", stderr: "" }; };
+    w.io.runCommand = async (a) => { ran.push(a); return { rc: 0, output: "" }; };
+    const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "3";
+    try { assert.equal((await run(w, { envSetup: "make setup", precheck: { commands: ["npm run lint"] } })).terminalReason, "merged"); }
+    finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
+    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", PATH: "/rt/toolchain/bin:/usr/bin" };
+    assert.match(lane.TMPDIR, /\/runs\/7-/, "the builder ran with the run TMPDIR");
+    assert.deepEqual(w.rgCalls.map((x) => x.env), [lane], "red-green gets the lane env, not the daemon's");
+    assert.deepEqual(ran.map((a) => [a.command, a.env]), [["npm run lint", lane], ["node --test test/foo.test.js", lane]]);
+    assert.deepEqual(setups.map((a) => a.env), [lane]);
+    assert.equal(w.envs[0].CLAUDE_CODE_TMPDIR, lane.TMPDIR); assert.equal(w.envs[0].UV_CACHE_DIR, "/c/uv"); assert.match(w.envs[0].FORGE_DOCKER_LABELS ?? "", /lean-7/);
   });
 
   it("a repro test that is not red on base and green on head fails the precheck in enforce and in shadow: one in-session resume, then needs-human", async () => {
