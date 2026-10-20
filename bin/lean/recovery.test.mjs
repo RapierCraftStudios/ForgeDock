@@ -306,6 +306,6 @@ describe("#4304 staging-review follow-ups: recovery", () => {
     assert.deepEqual(full.runs, [null]);
     assert.ok(full.logs.some((x) => /recovery: off \(engine\.path is full/.test(x)), full.logs.join("\n"));
     const core = await runBatchWith("core");
-    assert.deepEqual(core.runs, [null, { code: "ci.red", attempt: 1 }]);
+    assert.deepEqual(core.runs, [null, { code: "ci.red", attempt: 1, final: true }]);
   });
 });
