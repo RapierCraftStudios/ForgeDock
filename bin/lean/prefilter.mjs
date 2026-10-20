@@ -39,7 +39,8 @@ export function ciFailureRun(iss) {
   return m && CI_FAIL_RE.test(text) ? { repo: m[1], id: Number(m[2]) } : null;
 }
 
-const FLAKY_RE = /\b(?:intermittent\w*|flaky|flak(?:e|es|iness)|sometimes|non-?deterministic\w*)\b/i;
+// #4316: a bare "sometimes" is ordinary prose; only "fails sometimes" / "sometimes fails" says the failure is intermittent
+const FLAKY_RE = /\b(?:intermittent\w*|flaky|flak(?:e|es|iness)|fail(?:s|ed|ing)?\s+sometimes|sometimes\s+fail(?:s|ed|ing)?|non-?deterministic\w*)\b/i;
 const loginOf = (c) => String(c?.author?.login ?? c?.user?.login ?? "");
 const trusted = (c) => {
   const login = loginOf(c);
@@ -163,8 +164,8 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
       return { ...out, closed: !dryRun, kind, detail: `${detail}${note}` };
     };
 
-    // #4305: a skipped CI-green shortcut is named in every non-closing detail line that follows.
-    const keep = (detail) => ({ ...out, detail: sig.ciSkip ? `skipped CI-green shortcut: flaky (${sig.ciSkip.why}); ${detail}` : detail });
+    // #4305: a skipped CI-green shortcut is named in every non-closing detail line that follows (#4316: with its reason).
+    const keep = (detail) => ({ ...out, detail: sig.ciSkip ? `skipped CI-green shortcut: ${sig.ciSkip.reason} (${sig.ciSkip.why}); ${detail}` : detail });
     if (sig.ci) {
       out.candidate = true;
       const c = sig.ci;

@@ -110,16 +110,16 @@ describe("pre-filter (#4123)", () => {
     const bot = { author: { login: "rapiercraft-forgedock[bot]" }, authorAssociation: "NONE", body: "<!-- FORGE:PREFILTER -->\n<!-- FORGE:VALIDATE -->\n## Pre-filter: CI failure no longer reproduces" };
     const stranger = { author: { login: "someone" }, authorAssociation: "NONE", body: bot.body };
     const cases = [
-      ["intermittent wording", green({ body: `\`a.test.sh\` fails intermittently on macOS.\n${link}` }), /issue says the failure is intermittent/],
-      ["flaky label", green({ labels: [{ name: "flaky" }] }), /flaky label/],
-      ["reopened after a pre-filter close", green({ comments: [bot] }), /reopened after a pre-filter close/],
-      ["failed and passed at the same SHA", green({}, { shaRuns: { "8d9f6ba0aaaaaaaa": [{ id: 601, conclusion: "failure" }, { id: 600, conclusion: "success" }] } }), /failed and passed at 8d9f6ba0aaaa/],
+      ["intermittent wording", green({ body: `\`a.test.sh\` fails intermittently on macOS.\n${link}` }), /issue says the failure is intermittent/, "flaky"],
+      ["flaky label", green({ labels: [{ name: "flaky" }] }), /flaky label/, "flaky"],
+      ["reopened after a pre-filter close", green({ comments: [bot] }), /reopened after a pre-filter close/, "reopened"],
+      ["failed and passed at the same SHA", green({}, { shaRuns: { "8d9f6ba0aaaaaaaa": [{ id: 601, conclusion: "failure" }, { id: 600, conclusion: "success" }] } }), /failed and passed at 8d9f6ba0aaaa/, "same-sha"],
     ];
-    for (const [name, w, why] of cases) {
+    for (const [name, w, why, reason] of cases) {
       const r = await pf(w, 34);
       assert.equal(r.closed, false, name); assert.notEqual(r.kind, "ci-green", name);
       assert.deepEqual(w.closed, [], name); assert.deepEqual(w.comments, [], name); assert.equal(w.runner.length, 0, name);
-      assert.match(r.detail, /^skipped CI-green shortcut: flaky \(/, name); assert.match(r.detail, why, name);
+      assert.ok(r.detail.startsWith(`skipped CI-green shortcut: ${reason} (`), `${name}: ${r.detail}`); assert.match(r.detail, why, name);
       assert.match(r.detail, /no already-fixed signal$/, name);
     }
     // wording and the reopen marker need no runs lookup; an untrusted marker comment is no reopen, and a green-only SHA still closes
@@ -134,6 +134,13 @@ describe("pre-filter (#4123)", () => {
     assert.equal((await pf(down, 34)).closed, false);
   });
 
+  it("#4316 a bare \"sometimes\" is prose, not flaky wording; \"fails sometimes\" and \"sometimes fails\" are", () => {
+    assert.equal(flakyReason({ title: "deploy check failed", body: "This sometimes happens after a deploy." }), null);
+    assert.equal(flakyReason({ title: "x", body: "Sometimes we rerun it by hand." }), null);
+    for (const body of ["the job fails sometimes on macOS", "it sometimes fails on macOS", "shell-compat failed sometimes", "intermittent timeout", "a flaky test"]) {
+      assert.equal(flakyReason({ title: "ci failed", body })?.reason, "flaky", body);
+    }
+  });
   it("#4315 a comment shaped like #4235's real pre-filter comment is the pipeline's own: a reopened CI-failure issue is kept for a lane", async () => {
     const link = "Run: https://github.com/o/r/actions/runs/500";
     const green = (issue, extra = {}) => world({ issues: { 34: { title: "shell-compat failed on staging", body: `Workflow failed.\n${link}`, ...issue } },

@@ -89,8 +89,9 @@ EOF
 git add -A
 OUTS="$(bash "$S" --stdout)"
 # forge#4300: ./custom-check and `bash scripts/verify.sh` are not allowlisted checks, so they are dropped
-eq "wf commands" "$(printf '%s' "$OUTS" | jq -r '[.entries[].command] | sort | join("|")')" "ruff check --fix|shellcheck scripts/*.sh"
-eq "wf globs" "$(printf '%s' "$OUTS" | jq -c '[.entries[] | {(.command): .globs}] | add')" '{"ruff check --fix":["**/*.py"],"shellcheck scripts/*.sh":["**/*.sh"]}'
+# forge#4316: `ruff check --fix` rewrites the tree, so it is dropped too
+eq "wf commands" "$(printf '%s' "$OUTS" | jq -r '[.entries[].command] | sort | join("|")')" "shellcheck scripts/*.sh"
+eq "wf globs" "$(printf '%s' "$OUTS" | jq -c '[.entries[] | {(.command): .globs}] | add')" '{"shellcheck scripts/*.sh":["**/*.sh"]}'
 nostar wf "$OUTS"
 
 # ---- 5b. forge#4297: `- run: |` then env:/shell: ends the block; deploy/publish/release/push/secret steps dropped ----
@@ -318,6 +319,31 @@ bash scripts/verify.sh
 WF
 eq "shell commands" "$(cmds)" "bash scripts/a.test.sh|sh tests/b.test.sh"
 eq "shell globs" "$(globs_of "bash scripts/a.test.sh")" "**/*.sh"
+
+# ---- 5f. forge#4316: redirects, process substitution, $GITHUB_*, extra make targets and fixer forms are dropped ----
+# (make needs a cwd for its globs: a workflow entry never gets a bare **)
+wf_case unsafe <<'WF'
+pytest > out.txt
+pytest 2>&1
+diff <(a) <(b)
+tee >(x)
+cd sub && make test deploy
+eslint --fix .
+prettier --write .
+gofmt -w .
+black .
+ruff format .
+cargo clippy --fix
+pytest --junitxml=$GITHUB_WORKSPACE/r.xml
+cd sub && make test lint
+cd sub && make test V=1
+black --check .
+ruff format --check .
+prettier --check .
+gofmt -l .
+eslint .
+WF
+eq "unsafe forms dropped, check forms kept" "$(cmds)" "black --check .|eslint .|gofmt -l .|make test V=1|make test lint|prettier --check .|ruff format --check ."
 
 # ---- 6. usage ----
 bash "$S" --repo-path "$TMP/missing" >/dev/null 2>&1; eq "bad repo path" "$?" 2
