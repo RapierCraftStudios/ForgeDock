@@ -3632,3 +3632,60 @@ describe("hybrid placement in the lane's FORGE annotation (#4256)", () => {
     assert.equal(r3.seen.placement, undefined);
   });
 });
+
+describe("review trigger (#4273): shadow logs and always reviews, enforce skips untriggered lanes, off is today", () => {
+  const cold = (o) => { const w = world(o); w.io.hotspots = async () => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: [] }); return w; };
+  const trig = (dir) => readLog(dir, 7).filter((e) => e.event === "REVIEW_TRIGGER");
+  const reviewNote = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")) ?? "";
+
+  it("shadow (the default): the reviewer runs and the run log has REVIEW_TRIGGER {would_skip, reasons}", async () => {
+    const dir = tmpDir("trig-"), w = cold({ reviews: [conf()] });
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged"); assert.equal(reviewers(w).length, 1);
+    assert.deepEqual(trig(dir).map(({ mode, would_skip, reasons, skipped }) => ({ mode, would_skip, reasons, skipped })), [{ mode: "shadow", would_skip: true, reasons: [], skipped: false }]);
+  });
+
+  it("enforce: an untriggered lane skips the reviewer, merges, and records why", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      const dir = tmpDir("trig-"), w = cold({ reviews: [conf()] });
+      const r = await run(w, { dir, conformance, reviewTrigger: { mode: "enforce", riskPaths: [] } });
+      assert.equal(r.terminalReason, "merged", conformance); assert.equal(reviewers(w).length, 0, conformance);
+      assert.deepEqual([trig(dir)[0].would_skip, trig(dir)[0].skipped], [true, true]);
+      assert.match(reviewNote(w), /Skipped by `review\.trigger: enforce`/);
+      assert.match(traj(w)[0], /\| Review \| skipped \(review\.trigger enforce: no risk trigger\) \|/);
+      assert.match(traj(w)[0], /Conformance reviewer skipped by review\.trigger enforce/);
+    }
+  });
+
+  const AUTH = { ...CONTRACT, deliverables: [{ ...CONTRACT.deliverables[0], path: "src/auth/session.js" }] };
+  it("enforce: a risk path, a configured glob, a hotspot or missing hotspot facts still run the reviewer", async () => {
+    const cases = [
+      { w: cold({ contract: AUTH, changed: ["src/auth/session.js", "test/foo.test.js"], reviews: [conf({}, AUTH, ["src/auth/session.js", "test/foo.test.js"])] }), reason: "risk_path" },
+      { w: cold({ reviews: [conf()] }), riskPaths: ["src/**"], reason: "risk_path" },
+      { w: world({ reviews: [conf()] }), reason: "gate.ambiguous" },
+    ];
+    const hot = cold({ reviews: [conf()] });
+    hot.io.hotspots = async () => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: [{ path: "src/foo.js", lines: 2400, over: true, excluded: false, growth: 0 }] });
+    cases.push({ w: hot, reason: "hotspot" });
+    for (const c of cases) {
+      const dir = tmpDir("trig-");
+      await run(c.w, { dir, reviewTrigger: { mode: "enforce", riskPaths: c.riskPaths ?? [] } });
+      assert.equal(reviewers(c.w).length, 1, c.reason);
+      assert.deepEqual([trig(dir)[0].would_skip, trig(dir)[0].skipped, trig(dir)[0].reasons.includes(c.reason)], [false, false, true], c.reason);
+    }
+  });
+
+  it("off: the reviewer runs and nothing is computed or logged", async () => {
+    const dir = tmpDir("trig-"), w = cold({ reviews: [conf()] });
+    assert.equal((await run(w, { dir, reviewTrigger: { mode: "off", riskPaths: [] } })).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1); assert.deepEqual(trig(dir), []);
+  });
+
+  it("readReviewTrigger reads review.trigger and review.risk_paths (comma or block list); invalid or absent is unset", async () => {
+    const { readReviewTrigger } = await import("../engine-cli.mjs");
+    const at = (yaml) => { const d = tmpDir("rtcfg-"); mkdirSync(d, { recursive: true }); writeFileSync(join(d, "forge.yaml"), yaml); return readReviewTrigger(d); };
+    assert.deepEqual(at('review:\n  trigger: enforce\n  risk_paths: "db/**, *.sql"\n'), { mode: "enforce", riskPaths: ["db/**", "*.sql"] });
+    assert.deepEqual(at("review:\n  tech_stack: x\n  risk_paths:\n    - \"infra/**\"\n    - lib/acct/*.ts  # c\n  trigger: bogus\n"), { mode: "shadow", riskPaths: ["infra/**", "lib/acct/*.ts"] });
+    assert.equal(at("engine:\n  path: core\n"), undefined);
+  });
+});
