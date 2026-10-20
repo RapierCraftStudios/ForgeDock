@@ -567,7 +567,9 @@ hash) and a collapsed `FORGE:CONTEXT` comment (non-empty packs, once per hash).
 All issue/comment text goes through `noComments` (HTML comments cut out by scanning,
 `-->` or `--!>`, then every `<` starting `<!` becomes `‹`) and the rendered record is
 passed through it again: no `<!` survives, so untrusted text can never open a comment
-or place a FORGE marker in the bot's comment;
+or place a FORGE marker in the bot's comment (`sanitize.mjs`: `cutComments` scans
+comments out, `noComments` also neutralises `<!`; conformance's issue-scope hash uses
+`cutComments`);
 `RUN_TERMINAL` gains `context_pack` and `lane_type` (rerun | child | first).
 Write-back: a terminal `FORGE:STATE` also carries `terminalCode` (the typed
 outcome code) and `failureClasses` (conformance failure codes seen in the run),

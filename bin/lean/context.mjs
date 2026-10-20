@@ -14,6 +14,8 @@ import { isTrustedComment, parseDependsOn } from "../engine/phases.mjs";
 import { codeForTerminalReason } from "../engine/outcome-codes.mjs";
 import { namedPaths } from "./prefilter.mjs";
 import { parseContractComment } from "./render.mjs";
+import { noComments } from "./sanitize.mjs";
+export { noComments };
 
 export const CONTEXT_MODES = Object.freeze(["shadow", "on", "off"]);
 export const CONTEXT_SOURCES = Object.freeze(["graph", "attempts", "ledger", "facts"]);
@@ -27,25 +29,6 @@ const ATTEMPT_MARKERS = ["NEEDS_HUMAN", "BASE_SYNC", "FIX_CI"];
 const LINE_MAX = 200;
 
 const hash12 = (s) => createHash("sha256").update(String(s)).digest("hex").slice(0, 12);
-/**
- * Untrusted issue/comment text with HTML comments removed and no comment opener left: comments are cut out by plain
- * scanning (closer `-->` or `--!>`; an unclosed one runs to the end), then every `<` that starts `<!` becomes `‹`.
- * With no `<!` in the output, no HTML comment and no FORGE marker can open, whatever the input nesting. Pack text is
- * posted back in a trusted bot comment, so this is the guarantee that matters.
- */
-export function noComments(s, repl = "") {
-  const t = String(s ?? "");
-  let out = "", i = 0;
-  for (;;) {
-    const a = t.indexOf("<!--", i);
-    if (a < 0) { out += t.slice(i); break; }
-    out += t.slice(i, a) + repl;
-    const ends = [[t.indexOf("-->", a + 4), 3], [t.indexOf("--!>", a + 4), 4]].filter(([k]) => k >= 0).sort((x, y) => x[0] - y[0]);
-    if (!ends.length) break;
-    i = ends[0][0] + ends[0][1];
-  }
-  return out.replace(/<(?=!)/g, "\u2039");
-}
 const oneLine = (s, max = LINE_MAX) => {
   const t = noComments(s, " ").replace(/\s+/g, " ").trim();
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;

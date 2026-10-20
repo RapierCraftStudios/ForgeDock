@@ -177,3 +177,11 @@ describe("context pack never carries an HTML comment or FORGE marker from untrus
     assert.ok(!out.includes("<!"), out);
   });
 });
+
+describe("sanitize.mjs", () => {
+  it("cutComments removes closed, --!>-closed and unclosed comments without touching other text", async () => {
+    const { cutComments } = await import("./sanitize.mjs");
+    assert.equal(cutComments("a <!-- x --> b <!-- y --!> c <!-- z"), "a  b  c ");
+    assert.equal(cutComments("Array<string> and a<b"), "Array<string> and a<b");
+  });
+});
