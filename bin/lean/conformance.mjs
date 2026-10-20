@@ -187,14 +187,51 @@ export function applyAmendments(frozen, amendments, issueText = null) {
   return { contract: c, applied, toTrack, problems };
 }
 
+const PY_MISSING_RE = /ModuleNotFoundError: No module named '([^']+)'|ImportError: No module named '?([\w.]+)'?/;
+const NODE_MISSING_RE = /Cannot find (?:module|package) '([^']+)'/;
+const CMD_NOT_FOUND_RE = /([^\s:'"`]+): command not found/, SH_NOT_FOUND_RE = /([^\s:'"`]+): not found\b/;
+const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package" };
+/**
+ * forge#4323: the host tool or module a failed command could not find, from its {rc, output}: bash/sh "X: command not found"
+ * (or rc 127), python "No module named x" (top-level package), node "Cannot find module|package 'x'" (bare specifiers only).
+ * Returns {tool, kind: command|python-module|node-module} or null. A path, a relative specifier or a name the repo tracks
+ * (`repoHas(name)`) is null: a module the change forgot to create is a code defect, not the environment.
+ */
+export function missingTool({ rc, output } = {}, { repoHas = () => false, command = "" } = {}) {
+  const out = String(output ?? "");
+  const local = (name) => !name || name.startsWith(".") || name.startsWith("/") || name.startsWith("file:") || repoHas(name);
+  const py = PY_MISSING_RE.exec(out);
+  if (py) { const tool = String(py[1] ?? py[2]).split(".")[0]; return local(tool) ? null : { tool, kind: "python-module" }; }
+  const js = NODE_MISSING_RE.exec(out);
+  if (js) {
+    const spec = js[1], scoped = spec.startsWith("@");
+    if (!scoped && spec.includes("/")) return null;
+    const tool = scoped ? spec.split("/").slice(0, 2).join("/") : spec;
+    return local(tool) || (scoped && !tool.includes("/")) ? null : { tool, kind: "node-module" };
+  }
+  const cmd = CMD_NOT_FOUND_RE.exec(out)?.[1] ?? (rc === 127 ? SH_NOT_FOUND_RE.exec(out)?.[1] ?? String(command).trim().split(/\s+/)[0] : null);
+  if (!cmd || cmd.includes("/") || local(cmd)) return null;
+  return { tool: cmd, kind: "command" };
+}
+
+/** `repoHas` for missingTool: true when any tracked path has a segment equal to `name` or `name.py`. */
+export function repoTracks(paths) {
+  const segs = new Set();
+  for (const p of paths ?? []) for (const x of String(p).split("/")) segs.add(x);
+  return (name) => segs.has(name) || segs.has(`${name}.py`);
+}
+
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
  * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[]}; each failure carries a
- * `kind` (scope_creep, validate_missing, validate_failed, requirement_unimplemented, untracked_deferral, hotspot_growth, repro_red_green) so callers can
+ * `kind` (scope_creep, validate_missing, validate_failed, validate_env, requirement_unimplemented, untracked_deferral, hotspot_growth, repro_red_green) so callers can
  * tell the builder's own failed checks apart from bookkeeping gaps. `ciVerified` (#4167): the current head passed the
  * engine's CI verification, so a validate id left to CI is not missing; a recorded non-zero exit still fails. `repro` (#4271): the repro_test red-green words, checked when given.
+ * `validateRuns` (#4323): the engine's rerun {[id]: {rc, output}} of validate commands recorded as failed. A rerun that passes
+ * counts as passed; one that could not find a host tool or module (missingTool, with `repoHas`) is kind validate_env, code
+ * env.tool_missing (skipped on a CI-verified head), not a conformance failure.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false }) {
   const failures = [];
   const creep = changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(contract, f));
   if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
@@ -205,7 +242,14 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     const leftToCi = !r || (r.ci === true && r.exit === undefined);
     if (ciVerified && leftToCi) continue;
     if (leftToCi) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
-    else if (r.exit !== 0) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})` });
+    else if (r.exit !== 0) {
+      const rerun = validateRuns?.[v.id];
+      if (rerun?.rc === 0) continue;
+      const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
+      if (miss && ciVerified) continue;
+      if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)` });
+      else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})` });
+    }
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];
   for (const r of contract.requirements ?? []) {

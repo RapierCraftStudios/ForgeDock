@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, explainFailures } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, explainFailures, missingTool, repoTracks } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -71,6 +71,31 @@ describe("precheck (deterministic, no reviewer)", () => {
   it("failed or missing validation -> unimplemented", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: { ...res, validation: [{ id: "V1", exit: 1 }] }, changedFiles: files })), ["conformance.unimplemented"]);
     assert.deepEqual(codes(precheck({ contract: C, result: { ...res, validation: [] }, changedFiles: files })), ["conformance.unimplemented"]);
+  });
+  it("#4323 a failed validate whose rerun could not find a host tool or module is env.tool_missing naming it, not conformance", () => {
+    const failed = { ...res, validation: [{ id: "V1", exit: 1 }] };
+    const pc = precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 1, output: "Traceback...\nModuleNotFoundError: No module named 'yaml'" } } });
+    assert.deepEqual(codes(pc), ["env.tool_missing"]);
+    assert.equal(pc.failures[0].kind, "validate_env"); assert.equal(pc.failures[0].tool, "yaml");
+    assert.match(pc.failures[0].detail, /could not run: the host is missing Python module 'yaml'/);
+    assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 127, output: "bash: line 1: pytest: command not found" } } })), ["env.tool_missing"]);
+    assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, ciVerified: true, validateRuns: { V1: { rc: 127, output: "bash: pytest: command not found" } } })), [], "CI-verified head: like a validate left to CI");
+    assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 0, output: "" } } })), [], "a passing rerun counts as passed");
+    assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 1, output: "AssertionError: 1 !== 2" } } })), ["conformance.unimplemented"]);
+    const local = precheck({ contract: C, result: failed, changedFiles: files, repoHas: repoTracks(["src/leak/__init__.py"]), validateRuns: { V1: { rc: 1, output: "ModuleNotFoundError: No module named 'leak.core'" } } });
+    assert.deepEqual(codes(local), ["conformance.unimplemented"], "a repo module the change did not create is a code defect");
+  });
+  it("#4323 missingTool: commands, python and node modules; paths, relative and repo-tracked names are not the environment", () => {
+    assert.deepEqual(missingTool({ rc: 127, output: "sh: 1: jq: not found" }), { tool: "jq", kind: "command" });
+    assert.deepEqual(missingTool({ rc: 127, output: "" }, { command: "uv run pytest -q" }), { tool: "uv", kind: "command" });
+    assert.deepEqual(missingTool({ rc: 1, output: "ImportError: No module named yaml.constructor" }), { tool: "yaml", kind: "python-module" });
+    assert.deepEqual(missingTool({ rc: 1, output: "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'zod' imported from /x/a.mjs" }), { tool: "zod", kind: "node-module" });
+    assert.deepEqual(missingTool({ rc: 1, output: "Error: Cannot find module '@scope/pkg/sub'" }), { tool: "@scope/pkg", kind: "node-module" });
+    assert.equal(missingTool({ rc: 1, output: "Error: Cannot find module './lib/new.js'" }), null);
+    assert.equal(missingTool({ rc: 1, output: "Error: Cannot find module '/repo/src/x.mjs'" }), null);
+    assert.equal(missingTool({ rc: 127, output: "bash: ./scripts/check.sh: No such file or directory" }, { command: "./scripts/check.sh" }), null);
+    assert.equal(missingTool({ rc: 1, output: "ModuleNotFoundError: No module named 'app'" }, { repoHas: repoTracks(["app.py"]) }), null);
+    assert.equal(missingTool({ rc: 1, output: "1 test failed: expected not found" }), null, "rc != 127 needs command not found");
   });
   it("a deliver requirement reported deferred without an amendment -> untracked_deferral; partial -> unimplemented", () => {
     const r = { ...res, requirements: [{ id: "R1", status: "deferred" }, { id: "R2", status: "partial" }] };

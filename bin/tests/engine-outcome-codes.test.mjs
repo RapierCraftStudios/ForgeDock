@@ -291,7 +291,7 @@ describe("runIssue records codes on the run log and FORGE:STATE", () => {
 describe("classifyNeedsHuman (forge#4267)", async () => {
   const { classifyNeedsHuman, recoveryCodeOf } = await import("../engine/outcome-codes.mjs");
   it("recoverable: ci.red, base.conflict, builder.block_untyped, edited contract.invalid, conflicting ci-pending", () => {
-    for (const code of ["ci.red", "base.conflict", "builder.block_untyped"]) assert.equal(classifyNeedsHuman({ outcome: "needs-human", code }), "recoverable", code);
+    for (const code of ["ci.red", "base.conflict", "builder.block_untyped", "env.tool_missing"]) assert.equal(classifyNeedsHuman({ outcome: "needs-human", code }), "recoverable", code);
     assert.equal(classifyNeedsHuman({ terminalReason: "needs-human", code: "contract.invalid", issueEdited: true }), "recoverable");
     assert.equal(classifyNeedsHuman({ outcome: "ci-pending", conflicting: true }), "recoverable");
     assert.equal(recoveryCodeOf({ outcome: "ci-pending", conflicting: true }), "base.conflict");
