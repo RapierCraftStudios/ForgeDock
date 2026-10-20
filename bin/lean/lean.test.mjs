@@ -3629,6 +3629,18 @@ describe("context pack modes (forge#4275)", () => {
     assert.ok(traj(w)[0].includes("Context pack not compiled"));
   });
 
+  it("write-back: the terminal FORGE:STATE carries the typed outcome code and failure classes the compiler reads", async () => {
+    const w = world({ reviews: [bad(), bad()] });
+    w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    const last = w.leaseWrites.at(-1);
+    assert.deepEqual([last.terminal, last.terminalReason, last.terminalCode, last.failureClasses], [true, "needs-human", OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED]]);
+    const m = world(); m.leaseWrites = []; m.io.projector = { readState: async () => null, writeState: async (_i, st) => { m.leaseWrites.push(st); } };
+    await run(m);
+    assert.deepEqual([m.leaseWrites.at(-1).terminalCode, m.leaseWrites.at(-1).failureClasses], [OUTCOME_CODES.COMPLETED, []]);
+  });
+
   it("forge.yaml engine.context_pack* is read flat; invalid mode is ignored", () => {
     const d = tmpDir("ctxcfg-");
     writeFileSync(join(d, "forge.yaml"), "engine:\n  context_pack: on\n  context_pack_sources: graph,attempts\n  context_pack_bytes: 4096\n");

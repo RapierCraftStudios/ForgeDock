@@ -134,6 +134,13 @@ describe("context pack (forge#4275)", () => {
     assert.deepEqual([p.text, p.bytes, p.items, p.hash], ["", 0, 0, null]);
   });
 
+  it("reads the typed outcome code and failure classes from FORGE:STATE (write-back loop)", async () => {
+    const f = fakes();
+    const typedBody = `x\n**Parent**: #40\n${STATE({ terminalReason: "needs-human", terminalCode: "conformance.unimplemented", failureClasses: ["conformance.unimplemented", "review.incomplete"] })}`;
+    const facts = await gatherContextFacts({ io: f.io, repo: REPO, issue: 50, iss: { number: 50, body: typedBody }, comments: [], cwd: "/wt", base: "origin/staging", sources: ["attempts"] });
+    assert.match(compileContextPack(facts).text, /last run ended needs-human \(conformance\.unimplemented\); failures conformance\.unimplemented, review\.incomplete/);
+  });
+
   it("config, lane type and parsers", () => {
     assert.deepEqual(parseContextPackConfig({}), { mode: "shadow", sources: ["graph", "attempts", "ledger", "facts"], budgetBytes: 6144, days: 30 });
     assert.equal(parseContextPackConfig({ mode: "ON" }).mode, "on");

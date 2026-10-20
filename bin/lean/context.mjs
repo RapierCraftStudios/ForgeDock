@@ -104,8 +104,16 @@ export const contextPackCacheKey = (issue, headSha, cfg = {}) =>
 
 const parseLines = (out) => String(out ?? "").split("\n").map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((x) => x && typeof x === "object");
 const commentId = (c) => /#issuecomment-(\d+)/.exec(String(c?.url ?? ""))?.[1] ?? c?.id ?? null;
-/** The typed outcome code for a terminal reason; null when it only maps to the catch-all. */
-const outcomeOf = (reason) => { const c = reason ? codeForTerminalReason(reason) : null; return c && c !== "unclassified" ? c : null; };
+/**
+ * The typed outcome of a FORGE:STATE record: the `terminalCode` and `failureClasses` the engine writes at the end of a run
+ * (forge#4275); older records fall back to the code their terminal reason maps to (null for the catch-all).
+ */
+const outcomeOf = (st) => {
+  const reason = st?.terminalReason ?? null;
+  const c = typeof st?.terminalCode === "string" && st.terminalCode ? st.terminalCode : reason ? codeForTerminalReason(reason) : null;
+  return c && c !== "unclassified" ? c : null;
+};
+const failuresOf = (st) => (Array.isArray(st?.failureClasses) ? [...new Set(st.failureClasses.filter((x) => typeof x === "string" && x))].sort().slice(0, 5) : []);
 const trusted = (c) => {
   const login = String(c?.author?.login ?? c?.user?.login ?? "");
   return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
@@ -159,15 +167,15 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
       let rec;
       try { rec = await readIssue(io.gh, repo, n); } catch { facts.links.push({ number: n, rel: r, title: null, state: null, code: null, result: "unreadable" }); continue; }
       const st = stateOf(rec.body);
-      const reason = st?.terminalReason ?? null;
-      facts.links.push({ number: n, rel: r, kind: rec.pr ? "pr" : "issue", title: rec.title, state: rec.state, code: outcomeOf(reason),
-        result: reason ?? (rec.state === "CLOSED" ? rec.stateReason ?? "closed" : null), ...(r === "parent" || r === "depends-on" ? { body: stripComments(rec.body) } : {}) });
+      const reason = st?.terminalReason ?? null, fails = failuresOf(st);
+      facts.links.push({ number: n, rel: r, kind: rec.pr ? "pr" : "issue", title: rec.title, state: rec.state, code: outcomeOf(st),
+        result: reason ?? (rec.state === "CLOSED" ? rec.stateReason ?? "closed" : null), ...(fails.length ? { failures: fails } : {}), ...(r === "parent" || r === "depends-on" ? { body: stripComments(rec.body) } : {}) });
     }
   });
 
   await step("attempts", async () => {
     const st = stateOf(body);
-    if (st?.terminalReason) facts.attempts.push({ kind: "state", ref: `#${issue} FORGE:STATE`, line: `last run ended ${st.terminalReason}${outcomeOf(st.terminalReason) ? ` (${outcomeOf(st.terminalReason)})` : ""}${st.pr ? `, PR #${st.pr}` : ""}` });
+    if (st?.terminalReason) facts.attempts.push({ kind: "state", ref: `#${issue} FORGE:STATE`, line: `last run ended ${st.terminalReason}${outcomeOf(st) ? ` (${outcomeOf(st)})` : ""}${failuresOf(st).length ? `; failures ${failuresOf(st).join(", ")}` : ""}${st.pr ? `, PR #${st.pr}` : ""}` });
     for (const c of comments) {
       const m = markerOf(c?.body);
       if (!m || !ATTEMPT_MARKERS.includes(m) || !trusted(c)) continue;
@@ -223,7 +231,7 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
 
 // ---- compile (pure) ----
 
-const linkLine = (l) => `- #${l.number} [${l.rel}${l.kind === "pr" ? ", PR" : ""}] ${l.state ?? "?"}${l.title ? ` "${l.title}"` : ""}${l.code ? `; outcome ${l.code}` : ""}${l.result ? `; ${oneLine(l.result, 80)}` : ""}`;
+const linkLine = (l) => `- #${l.number} [${l.rel}${l.kind === "pr" ? ", PR" : ""}] ${l.state ?? "?"}${l.title ? ` "${l.title}"` : ""}${l.code ? `; outcome ${l.code}` : ""}${l.result ? `; ${oneLine(l.result, 80)}` : ""}${l.failures?.length ? `; failures ${l.failures.join(", ")}` : ""}`;
 const ledgerLine = (p) => `- ${p.pr ? `PR #${p.pr}` : "commit"} ${p.sha}${p.revert ? " [revert]" : ""}${p.reverted ? ` [reverted by ${p.reverted}]` : ""} "${p.title}"${p.files?.length ? ` (${p.files.join(", ")})` : ""}${p.notes?.length ? ` — ${p.notes.join("; ")}` : ""}`;
 
 /**

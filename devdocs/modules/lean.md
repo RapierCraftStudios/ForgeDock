@@ -538,6 +538,9 @@ per item with `#N`/comment id/SHA, whole items dropped past the byte cap
 Recorded as `CONTEXT_PACK` (mode, lane_type, sources, bytes, items, truncated,
 hash) and a collapsed `FORGE:CONTEXT` comment (non-empty packs, once per hash);
 `RUN_TERMINAL` gains `context_pack` and `lane_type` (rerun | child | first).
+Write-back: a terminal `FORGE:STATE` also carries `terminalCode` (the typed
+outcome code) and `failureClasses` (conformance failure codes seen in the run),
+which the next pack reads instead of re-deriving them from the reason.
 `forge.yaml engine.context_pack`: `shadow` (default) records only, `on` appends
 `contextPackNote` (hints, not proof; never quotable) to the plan prompt, `off` is
 the old path with no extra calls. The pack never enters `issueText`, so contract
