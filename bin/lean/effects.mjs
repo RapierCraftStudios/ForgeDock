@@ -3,7 +3,7 @@
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, renameSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -14,6 +14,7 @@ import { makeProjector } from "../engine/projector.mjs";
 import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 import { makeDepCache } from "./depcache.mjs";
 import { makeHeavyIo } from "./heavy.mjs";
+import { gatherContextFacts } from "./context.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -87,6 +88,8 @@ export function procsInDir(dir, { procRoot = "/proc", self = process.pid } = {})
 }
 
 export const RUN_TMP_MAX_AGE_MS = 6 * 3600 * 1000;
+/** Timeout of the Checks API POST that reports the forgedock/verify check run (#4270). */
+export const CHECK_RUN_TIMEOUT_MS = 60000;
 export const runTmpRoot = () => join(homedir(), ".forge", "tmp", "runs");
 const OWNER = ".forge-run-owner";
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e?.code !== "ESRCH"; } };
@@ -251,6 +254,16 @@ export function makeLeanIo({ repo }) {
         return { name: c.name, state, url: c.url ?? null };
       });
     },
+    /**
+     * #4270 verify.check_run: one completed check run on `sha` (`gh api -X POST repos/<repo>/check-runs`, JSON on stdin).
+     * Needs a token allowed to create check runs (GitHub App, checks:write). Resolves {id, html_url}; throws on failure.
+     */
+    async createCheckRun({ sha, name, conclusion, title, summary, text }) {
+      const body = JSON.stringify({ name, head_sha: sha, status: "completed", conclusion, output: { title, summary, text } });
+      const out = await runWithInput("gh", ["api", "-X", "POST", `repos/${repo}/check-runs`, "--input", "-"], body, CHECK_RUN_TIMEOUT_MS);
+      const j = JSON.parse(out || "{}");
+      return { id: j.id ?? null, html_url: j.html_url ?? null };
+    },
     /** Failed-job logs of an Actions run (`gh run view --log-failed`), tail-capped; "" when unreadable. */
     async failedLogs(runId) {
       try { const out = String(await run("gh")(["run", "view", String(runId), "-R", repo, "--log-failed"])); return out.length > 64000 ? out.slice(-64000) : out; } catch { return ""; }
@@ -286,6 +299,8 @@ export function makeLeanIo({ repo }) {
     async structureDelta({ cwd, base }) {
       try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
+    /** forge#4275: the context pack's facts for one issue (bin/lean/context.mjs), from gh and git only; sources fail independently. */
+    contextFacts: (args) => gatherContextFacts({ ...args, io: { gh: run("gh"), git: run("git"), exists: async (p) => existsSync(p) } }),
     /** forge#4195: scripts/hotspots.sh facts for `paths` in cwd (growth since base when given); null on any failure. */
     async hotspots({ cwd, base = null, paths = [] }) {
       const args = [script("hotspots.sh"), ...(base ? ["--base", base] : []), "--", ...paths];
@@ -324,6 +339,9 @@ export function makeLeanIo({ repo }) {
       stat: async (p) => { try { return { mtimeMs: statSync(p).mtimeMs }; } catch { return null; } },
       append: async (p, t) => { mkdirSync(dirname(p), { recursive: true }); appendFileSync(p, t); },
       write: async (p, t) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, t); },
+      rename: async (from, to) => renameSync(from, to),
+      list: async (d) => { try { return readdirSync(d); } catch { return []; } },
+      rm: async (p) => rmSync(p, { force: true }),
     },
   };
 }

@@ -4,7 +4,11 @@
 #
 # wait-ci-green.sh — CI gate every autonomous merge must pass first.
 #
-# Usage: wait-ci-green.sh <pr-number> -R <owner/repo> [--timeout SECONDS] [--interval SECONDS]
+# Usage: wait-ci-green.sh <pr-number> -R <owner/repo> [--timeout SECONDS] [--interval SECONDS] [--ignore-check NAME]...
+#
+# --ignore-check NAME (repeatable): drop checks with exactly that name before deciding. `forgedock/verify` (forge#4270,
+# the lean engine's report-only gate summary) is always ignored, so every caller of this gate treats it the same
+# (forge#4298); requiring it is the repository's branch-protection choice.
 #
 # Waits until every check on the PR has finished, then decides. Fails closed: a merge may
 # proceed ONLY on exit 0. Field test: pipeline agents merged PRs to staging while checks were
@@ -40,17 +44,18 @@ set -uo pipefail
 _TEL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/telemetry.sh"; [ -f "$_TEL" ] && . "$_TEL" 2>/dev/null
 type forge_emit >/dev/null 2>&1 || forge_emit() { :; }
 
-PR=""; REPO=""
+PR=""; REPO=""; IGNORE='["forgedock/verify"]'
 TIMEOUT="${FORGE_CI_TIMEOUT:-540}"; INTERVAL="${FORGE_CI_INTERVAL:-20}"; SETTLE="${FORGE_CI_SETTLE:-45}"
 GRACE="${FORGE_CI_NO_CHECKS_GRACE:-120}"; REQUIRE="${FORGE_CI_REQUIRE_CHECKS:-0}"
-usage() { echo "CI_GATE: ERROR"; echo "CI_GATE_HEAD: unknown"; echo "usage: wait-ci-green.sh <pr> -R <owner/repo> [--timeout S] [--interval S]" >&2; exit 2; }
+usage() { echo "CI_GATE: ERROR"; echo "CI_GATE_HEAD: unknown"; echo "usage: wait-ci-green.sh <pr> -R <owner/repo> [--timeout S] [--interval S] [--ignore-check NAME]..." >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     -R) [ $# -ge 2 ] || usage; REPO="$2"; shift 2 ;;
     -R*) REPO="${1#-R}"; REPO="${REPO# }"; shift ;;
     --timeout) [ $# -ge 2 ] || usage; TIMEOUT="$2"; shift 2 ;;
     --interval) [ $# -ge 2 ] || usage; INTERVAL="$2"; shift 2 ;;
-    -h|--help) sed -n '5,32p' "$0"; exit 0 ;;
+    --ignore-check) [ $# -ge 2 ] || usage; IGNORE="$(jq -c --arg n "$2" '. + [$n]' <<<"$IGNORE")"; shift 2 ;;
+    -h|--help) sed -n '5,37p' "$0"; exit 0 ;;
     *) [ -z "$PR" ] || usage; PR="$1"; shift ;;
   esac
 done
@@ -132,6 +137,7 @@ while :; do
     fi
   fi
   errors=0; limited=0; transient=0
+  [ "$IGNORE" = '[]' ] || JSON="$(printf '%s' "$JSON" | jq -c --argjson ig "$IGNORE" '[.[] | select(.name as $n | $ig | index($n) | not)]')"
   cur="$(head_sha)"
   if [ -n "$cur" ] && [ "$cur" != "$START_SHA" ]; then emit ERROR; echo "PR head moved during the wait ($START_SHA -> $cur); re-review the new head"; exit 2; fi
   total=$(printf '%s' "$JSON" | jq 'length')

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readVerify, makeIo } from "../engine-cli.mjs";
 import { serializeState } from "../engine/state.mjs";
 import { appendEvent } from "../engine/runlog.mjs";
 
@@ -1017,5 +1017,29 @@ describe("readReproTest (#4271)", () => {
     assert.equal(readReproTest(d), "off");
     writeFileSync(join(d, "forge.yaml"), "lean:\n  repro_test: prefer\n");
     assert.equal(readReproTest(d), "prefer");
+  });
+});
+
+describe("verify.check_run plumbing (#4270)", () => {
+  it("readVerify carries check_run; absent stays default false", () => {
+    const d = tmpDir("cli-verify-");
+    writeFileSync(join(d, "forge.yaml"), "verify:\n  mode: local\n  check_run: true\n");
+    assert.equal(readVerify(d).checkRun, true);
+    writeFileSync(join(d, "forge.yaml"), "verify:\n  mode: local\n");
+    assert.equal(readVerify(d).checkRun, false);
+  });
+  it("waitCiGreen passes ignore names as --ignore-check; without them the argv and verdict are unchanged", async () => {
+    const d = tmpDir("cli-wait-");
+    // #4298: forgedock/verify is ignored by wait-ci-green.sh itself, so "lint" stands in for an ignorable check here.
+    writeFileSync(join(d, "gh"), `#!/usr/bin/env bash\nif [ "$1 $2" = "pr view" ]; then echo abc1234; exit 0; fi\nif [ "$1 $2" = "pr checks" ]; then echo '[{"name":"ci","bucket":"pass"},{"name":"forgedock/verify","bucket":"fail"},{"name":"lint","bucket":"fail"}]'; exit 0; fi\nexit 1\n`, { mode: 0o755 });
+    const PATH = process.env.PATH;
+    process.env.PATH = `${d}:${PATH}`;
+    try {
+      const io = makeIo();
+      const r = await io.waitCiGreen(7, "o/r", 0);
+      assert.equal(r.rc, 1); assert.doesNotMatch(r.text, /forgedock\/verify/, "the report-only check is ignored by default (#4298)");
+      const w = await io.waitCiGreen(7, "o/r", 0, { ignore: ["lint"] });
+      assert.equal(w.rc, 0); assert.match(w.text, /CI_GATE: PASS/);
+    } finally { process.env.PATH = PATH; }
   });
 });

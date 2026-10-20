@@ -69,7 +69,17 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 5. **Builder: plan → contract** — plan call writes `.forge-lean/`
    `investigation.md` + `contract.json`; `conformance.mjs` `validateContract`
    checks quotes against the issue and trusted comments; the engine freezes it
-   (`FORGE:CONTRACT`, `contractHash`). Typed blocks (`classifyBlock`):
+   (`FORGE:CONTRACT`, `contractHash`; the summary also records `issue S`, the
+   hash of `scopeText`: title, body and trusted comments without HTML-comment
+   blocks or `<!-- FORGE:` comments, #4265). `ISSUE_EDITED` fires only when that
+   scope hash changes, so the engine's own FORGE:STATE/annotation writes are not
+   edits. A rerun recovers the frozen contract only if its scope hash equals the
+   current one (legacy comments without it: no trusted human comment after it
+   and every `deliver` quote still in the issue); otherwise `CONTRACT_STALE`,
+   decision "frozen contract H is stale", and it re-plans and freezes a new one.
+   Conformance needs-human lines and the "Not conforming" decision append the
+   quote of the requirement a failure names (`explainFailures`), and a failed
+   validate names its command. Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
 6. **Implement** — same session; `result.json` with typed amendments
    (`applyAmendments` → `FORGE:AMENDMENT`). An `add-deliverable` on a path the
@@ -86,11 +96,21 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    default 300; no Actions minutes). Failures resume the builder in-session
    (`precheckFailurePrompt`, up to `max_rounds`); no commit / rounds exhausted is
    an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
+   An optional `.forge/test-map.json` (#4272, `scripts/test-map.sh`; base ref via
+   `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) replaces that list with the map
+   entries whose globs match the changed files (`selectCommands`; event gains
+   `source: "test-map"`); no map, an invalid one or no match keeps `learned.test_commands`.
 6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
    (`max_rounds`, then `ci.red`), slow → `ci-pending`, unavailable → local fallback;
    docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI.
+   **Validate commands vs a moving base**: `validateContract` rejects a validate
+   command whose `git diff` compares against a remote `origin/<x>` tip rather than the
+   merge base (`movingBaseDiff`), so the planner fixes it in the one contract
+   correction. When a precheck `validate_failed` resumes the builder, the engine first
+   fetches the lane and the resume prompt says to `git merge --no-edit origin/<lane>`
+   (never rebase) if the failure is only the base moving on.
    **Docs freshness**: when the target repo has `scripts/check-devdocs-freshness.sh`,
    the engine runs it on `base...HEAD` after implement (`io.docsFreshness`, empty
    `PR_BODY`). Exit 1 resumes the builder once with the script's output (`docsPrompt`);
@@ -526,6 +546,39 @@ on the run record and the row, and in `ctx.placement`. The lane gets it as
 into FORGE:STATE (`placement: {where, reason, mode}`) and a trajectory decision.
 Cost: 0 LLM calls. Rationale: `devdocs/decisions/4256-hybrid-placement.md`.
 
+## Entry 2026-10-20 — Context pack: the issue's graph as plan context (#4275)
+
+Before the plan call (not for refactor:split lanes or a recovered frozen contract)
+`lean.mjs` `contextPackStep` asks `io.contextFacts` (`context.mjs`
+`gatherContextFacts`, gh + git only) for four switchable sources: **graph**
+(`**Parent**`, `Depends on`, body links, timeline cross-references, siblings from
+the parent's `FORGE:DECOMPOSED`; full body only for parent/dependencies; outcome
+from the linked body's `FORGE:STATE`), **attempts** (`FORGE:STATE` terminal reason,
+trusted `FORGE:NEEDS_HUMAN|BASE_SYNC|FIX_CI`, `refs/forge/salvage/<N>/*`),
+**ledger** (first-parent merges on the issue's named paths within
+`context_pack_days`, kept only when a revert, reverted, or a decision / review
+finding / title names a backticked symbol from the issue) and **facts**
+(`.forge/repo-facts.json`, `.forge/test-map.json` paths when present).
+`compileContextPack` is pure: ranked graph > attempts > ledger > facts, one line
+per item with `#N`/comment id/SHA, whole items dropped past the byte cap
+(default 6144). Cached in the run dir by issue + base head SHA + config.
+Recorded as `CONTEXT_PACK` (mode, lane_type, sources, bytes, items, truncated,
+hash) and a collapsed `FORGE:CONTEXT` comment (non-empty packs, once per hash).
+All issue/comment text goes through `noComments` (HTML comments cut out by scanning,
+`-->` or `--!>`, then every `<` starting `<!` becomes `‹`) and the rendered record is
+passed through it again: no `<!` survives, so untrusted text can never open a comment
+or place a FORGE marker in the bot's comment;
+`RUN_TERMINAL` gains `context_pack` and `lane_type` (rerun | child | first).
+Write-back: a terminal `FORGE:STATE` also carries `terminalCode` (the typed
+outcome code) and `failureClasses` (conformance failure codes seen in the run),
+which the next pack reads instead of re-deriving them from the reason.
+`forge.yaml engine.context_pack`: `shadow` (default) records only, `on` appends
+`contextPackNote` (hints, not proof; never quotable) to the plan prompt, `off` is
+the old path with no extra calls. The pack never enters `issueText`, and neither does
+the bot's `FORGE:CONTEXT` comment (#4297), so contract quotes stay issue-only. `forgedock stats --context-ab` reports first-pass yield,
+builder turns, cache tokens and cost per lane type and mode; the default moves to
+`on` only once that A/B shows a win.
+
 ## Entry 2026-10-20 — Resource hygiene: preflight and admission GC (#4183)
 
 `forge.yaml` `hygiene:` (`container_ttl_hours` 6, `worktree_ttl_hours` 24,
@@ -557,6 +610,15 @@ applies the reaper. `commands/cleanup.md`, `work-on/close.md` and
 
 In shadow, `gate()` now blocks on precheck/amend failures coded `conformance.unimplemented`/`regression` (`SHADOW_PRE_BLOCKS`), ends `review.incomplete`/`inconsistent` as needs-human, and files accepted deferrals with `track()`. `engine.review_incomplete: degraded` (`readReviewIncomplete`) merges instead with the `review-degraded` label and a tracked follow-up. Enforce unchanged. `scripts/calibration.mjs --shadow` prints the per-repo shadow mix and recommends `enforce` under the threshold. Rationale: `devdocs/decisions/4160-shadow-gate-complete-reviews.md`.
 
+## Entry 2026-10-20 — forgedock/verify check run (#4270)
+
+Opt-in `verify.check_run` (`verify.mjs` `parseVerify` → `checkRun`, default false).
+`lean.mjs` keeps `verifyFacts` (last result of the declared checks, structure, docs and
+`gate()` precheck) and `reportVerify()` posts one `forgedock/verify` check run per pushed
+head (PR push, base-sync, merge fix round) via `effects.mjs` `createCheckRun`, payload from
+pure `verify.mjs` `verifyReport`; `VERIFY` run-log event, Checks API failure → anomaly.
+Own check excluded from `runCiVerify` commit checks and `wait-ci-green.sh --ignore-check`.
+
 ## Entry 2026-10-20 — Bug lanes freeze a red-green repro_test (#4271)
 
 forge.yaml `lean.repro_test` (`engine-cli.mjs` `readReproTest`, `off|prefer`, default `prefer`) → `runCore` `reproTest`. On a `bug`/`type:bug` lane (`conformance.mjs` `isBugIssue`), the plan prompt gets `reproPlanNote`, and `validateContract(..., {repro: true})` requires `repro_test` `{path, id, command}` or `"none"` + `repro_test_reason` (one correction resume). `gate()` runs `io.redGreen` (`effects.mjs` → `scripts/acceptance-red-green.sh`, inside `heavyStep`) and passes `{base, head}` to `precheck({repro})`. Anything but `BASE=FAILED HEAD=RAN` is `reproFailures` kind `repro_red_green`, code `conformance.unimplemented`, so it blocks in shadow and gets the one in-session resume (#4149). `off`, non-bug lanes, resumed pre-#4271 contracts and refactor:split leave prompts, contract check and precheck unchanged. Cost: 0 LLM calls; one targeted test run on base and head per gate.
@@ -564,3 +626,66 @@ forge.yaml `lean.repro_test` (`engine-cli.mjs` `readReproTest`, `off|prefer`, de
 ## Entry 2026-10-20 — Deterministic review trigger, shadow-first (#4273)
 
 `review-trigger.mjs` `computeTrigger` returns `{would_skip, reasons}` from facts only: `risk_path` (built-in auth/payments/security/deletion/migration words, plus forge.yaml `review.risk_paths` globs), `package_edge`, `hotspot` (changed file `over`, not excluded), `gate.failed` (precheck failures, declared check commands still failing, CI fallback) and `gate.ambiguous` (hotspot facts unavailable, or the contract defers a requirement). `gate()` logs `REVIEW_TRIGGER {mode, would_skip, reasons, skipped}` after the precheck. Modes (`review.trigger`, `readReviewTrigger`): `shadow` (default) always reviews; `enforce` skips `reviewOnce` when untriggered and records why (trajectory, decision, FORGE:REVIEW); `off` computes and logs nothing. An error in the trigger runs the reviewer. Exit criterion for enforce: ≥30 shadow runs with `would_skip_flagged` 0 in `node bin/lean/review-trigger.mjs [--json]` (per repo, from the local run logs). Cost: 0 LLM calls; enforce saves one or two reviewer runs per untriggered lane.
+
+## Entry 2026-10-20 — Test map + repo facts caches for the pre-PR step (#4272)
+
+`scripts/test-map.sh` writes `.forge/test-map.json` (`file glob → command` from package.json scripts, pytest/ruff
+config, go.mod, Makefile targets and CI workflow `run:` steps; fixtures `scripts/fixtures/test-map/{node,python,go}`).
+`scripts/repo-facts.sh` writes `.forge/repo-facts.json` (toolchain pins via `toolchain.mjs` `detectPins`, slow suites,
+workspace package edges + boundary configs, over-threshold hotspots via `hotspots.sh`). Both are optional, regenerable
+caches looked up in the lane worktree, then the main checkout (`bin/lean/testmap.mjs`). The pre-PR step (6a) runs the
+map's commands for the changed files when the map is valid and matches, else `learned.test_commands`; builder plan and
+implement prompts cite the facts file by path (`prompts.mjs` `factsRule`, never its content). Deleting both files
+restores today's commands, events and prompts byte-for-byte. Cost: 0 LLM calls; fewer pre-PR commands when the map
+narrows them. Rationale: `devdocs/decisions/4199-incremental-not-restructure.md`.
+
+## Entry 2026-10-20 — In-batch recovery of mechanical needs-human (#4267)
+
+`outcome-codes.mjs` `classifyNeedsHuman(row)` sorts a lane row into `recoverable`
+(needs-human `ci.red` / `base.conflict` / `builder.block_untyped`, `contract.invalid`
+with `issueEdited`, `ci-pending` on a conflicting PR → `base.conflict`), `human`
+(`builder.blocked`: credentials, spend, promotion, customer, product-decision) or
+`terminal`. `orchestrate()` option `recovery: {maxAttempts}` (forge.yaml
+`orchestration.recovery.max_attempts`, default 1, 0 = off; absent = old behaviour)
+requeues a recoverable row as a recovery lane (`ctx.recover = {code, attempt}`, state
+keys `recoveries`/`recovering`) under the usual admission, so dependents stay queued.
+A merged recovery row carries `recovered: <code>`; any other end is final with
+`recovery` evidence. `runCore` `o.recover` (CLI `--recover <code> --recover-attempt n`)
+removes `needs-human`, posts `FORGE:DECISION`, and adds a per-code note to the rerun
+prompt (failed-check logs, base merge, untyped choice); no extra Actions trigger.
+Runner decisions (recovery, engine-error relaunch, dependency requeue, sub-issues
+added) go to `decide({issue, what, why, alternative})`, fire-and-forget; `runBatch`
+posts them as `FORGE:DECISION` comments. `formatOutcomeLists` adds `recovered:`,
+`unrecovered:` and one end-of-batch escalation list (human codes only) to the report.
+`check-spec-markers.sh` registers `DECISION`. Cost: one rerun lane per recovered issue.
+
+## Entry 2026-10-20 — 1.29.0 trust-boundary fixes (#4297)
+
+Context pack: `context.mjs` `codeOf` keeps a `FORGE:STATE` `terminalCode`, `failureClasses` item or
+`terminalReason` only when it matches `^[a-z][a-z0-9_.-]{0,63}$`. `linkLine` re-checks this, so cached facts are covered,
+and cross-repo timeline references are skipped (the jq emits `repository_url` + number). `lean.mjs` `textOf` drops
+`<!-- FORGE:` comments, so `FORGE:CONTEXT` is never quotable. The pre-PR test map comes from the base ref
+(`readTestMapAtRef`), else the main checkout. `scripts/test-map.sh` ends a `run:` block at the `run` key's column and
+drops deploy/publish/release/push/secret steps. `verifyReport` gates carry `ran`; zero ran → `neutral`, "no gates
+ran". A recovery lane (`recoverUnlabelled`) re-adds `needs-human` with a recovery-evidence `FORGE:NEEDS_HUMAN` only on a final
+`ci-pending` (`needsHuman()` has its own path); never on merged/invalid/decomposed/dependency-*/deferred/engine-error. The
+batch runner (`orchestrate.mjs` settle, injected `relabelNeedsHuman`, wired in `engine-cli.mjs`) relabels once for a final
+`engine-error`/`deferred` after a recovery pass (2026-10-20, SPEC-7/8, BUG-6 from #4291). Rationale: `devdocs/decisions/4297-pre-release-trust-boundaries.md`.
+
+## Entry 2026-10-20 — 1.29.0 staging-review LOW follow-ups (#4298)
+
+One comment-strip helper: `noComments` lives in `render.mjs` (re-exported by `context.mjs`) and `prefilter.mjs`
+`namedPaths` uses it too, so no one-pass `<!--…-->` regex is left on hash or path input. `context.mjs` `REPO_FACT_FILES`
+reuses `testmap.mjs` `REPO_FACTS_FILE`/`TEST_MAP_FILE`. Context-pack cache: the key also hashes the issue's `updatedAt`
+and prior-attempt count (`contextPackFor` `stamp`); a gather with source `errors` is not cached; the write goes through
+`<file>.<pid>.tmp` + `io.fs.rename`; the issue's other `context-<N>-*.json` files are pruned (`io.fs.list`/`rm`).
+`lean.mjs` `RECOVER_HOW` is a module export; `recovery.test.mjs` keeps its keys equal to `RECOVERABLE_CODES`.
+`orchestrate.mjs`: a settled recovery row sums the earlier attempts' `cost_usd` and `minutes` (persisted in the
+`recovering` entry; older state without them sums 0); `OUTCOME_LINE_MAX`; `effects.mjs` `CHECK_RUN_TIMEOUT_MS`.
+`engine-cli.mjs` `readContextPack` warns once on an invalid `context_pack` mode and keeps the other keys; `run-issue`
+rejects `--recover` with `--path full`. `conformance.mjs` `movingBaseDiff` reads only the revisions before `--`;
+`scopeText` cuts every HTML comment, human ones too (SEC-5, not scope). `scripts/wait-ci-green.sh` always ignores
+`forgedock/verify`, so the legacy engine, `review-finalize.sh` and spec CI gates agree with the lean path.
+`test-map.sh` separates globs with `\037`; it and `repo-facts.sh` list files with `-z` and `core.quotepath=off`, and
+`grep -q` reads here-strings (no SIGPIPE false negative under pipefail). Cost: 0 LLM calls.
+Rationale: `devdocs/decisions/4298-staging-low-followups.md`.

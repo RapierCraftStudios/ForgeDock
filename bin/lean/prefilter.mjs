@@ -10,7 +10,7 @@
  * ALREADY-FIXED/INVALID verdict with evidence closes the issue; everything else, and every error, goes to the normal lane.
  * All effects are injected (gh, git, runner, transitionLabel, projector?) so it is unit-testable.
  */
-import { capComment, sanitizeMd } from "./render.mjs";
+import { capComment, sanitizeMd, noComments } from "./render.mjs";
 import { PREFILTER_SYSTEM, prefilterPrompt, parsePrefilterVerdict } from "./prompts.mjs";
 
 export const DEFAULT_PREFILTER_MODEL = "claude-haiku-5-5";
@@ -38,7 +38,7 @@ export function ciFailureRun(iss) {
 const PATH_RE = /(?:^|[\s`'"(\[])((?:\.{0,2}\/)?(?:[\w@.-]+\/)+[\w@.-]+\.[A-Za-z0-9]{1,8})(?::\d+(?:-\d+)?)?(?=$|[\s`'"),.:;\]])/gm;
 /** Repo-relative file paths the issue names (`dir/file.ext`, optionally `:line`); URLs and HTML comments are ignored. */
 export function namedPaths(text) {
-  const s = sanitizeMd(text).replace(/<!--[\s\S]*?-->/g, " ").replace(/\b[a-z]+:\/\/\S+/gi, " ");
+  const s = noComments(sanitizeMd(text), " ").replace(/\b[a-z]+:\/\/\S+/gi, " ");
   return [...new Set([...s.matchAll(PATH_RE)].map((m) => m[1].replace(/^\.\//, "")).filter((p) => !p.startsWith("/") && !p.startsWith("../")))];
 }
 

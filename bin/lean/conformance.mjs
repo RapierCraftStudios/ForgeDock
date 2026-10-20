@@ -8,6 +8,7 @@
  * "PASS") is incomplete, and incomplete never merges.
  */
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { noComments } from "./context.mjs";
 
 export const DISPOSITIONS = Object.freeze(["deliver", "defer", "not-applicable", "post-deploy"]);
 /** Dispositions the engine files as a tracked follow-up issue before anything merges. */
@@ -40,6 +41,29 @@ export function inIssue(quote, issueText) {
   if (q.length < 3) return false;
   return String(issueText ?? "").split("\n").some((l) => norm(l.replace(ITEM_PREFIX_RE, "")) === q);
 }
+// Scan-based (not a one-pass regex), so nested or unclosed markers cannot survive into the scope hash.
+const stripHtmlComments = (s) => noComments(s).replace(/\r\n/g, "\n").trim();
+/**
+ * #4265: the human scope of an issue: title, body and trusted comments without the engine's own annotations (HTML comment
+ * blocks such as FORGE:STATE, and comments the engine posted, which start with "<!-- FORGE:"). Its hash is the edit signal
+ * and the provenance of a frozen contract; quote validation keeps using the full text.
+ * #4298 (SEC-5): EVERY HTML comment is cut, human ones too. GitHub does not render them, so they are not the scope a
+ * human reads, and an edit that only touches a hidden comment is not a scope edit.
+ */
+export function scopeText(iss, trustedComments = []) {
+  const human = (trustedComments ?? []).map((c) => String(c?.body ?? "")).filter((b) => !b.trimStart().startsWith("<!-- FORGE:"));
+  return [iss?.title ?? "", stripHtmlComments(iss?.body), ...human.map(stripHtmlComments)].join("\n\n");
+}
+/** #4265: failures whose detail starts with a contract requirement id also quote that requirement, so a needs-human names what is unmet. */
+export function explainFailures(failures, contract) {
+  const reqs = new Map((contract?.requirements ?? []).map((r) => [String(r?.id ?? ""), String(r?.quote ?? "")]));
+  return (failures ?? []).map((f) => {
+    const id = /^([A-Za-z][\w-]*)\b/.exec(String(f?.detail ?? ""))?.[1];
+    const q = id && reqs.get(id);
+    if (!q) return f;
+    return { ...f, detail: `${f.detail} ("${q.length > 160 ? `${q.slice(0, 157)}...` : q}")` };
+  });
+}
 export const isTestPath = (p) => TEST_RE.test(String(p));
 export const isIncidentalPath = (p) => INCIDENTAL_RE.test(String(p));
 const cleanPath = (p) => String(p ?? "").trim().replace(/^\.\//, "");
@@ -71,6 +95,23 @@ export const isBugIssue = (labels) => (Array.isArray(labels) ? labels : []).some
  * Shape check of the builder's contract.json against the issue text. Returns {ok, problems[]}. `repro` (#4271): a bug
  * lane with lean.repro_test on also needs repro_test: {path, id?, command}, or "none" with a repro_test_reason.
  */
+/**
+ * A validate command that diffs against a remote branch tip (`git diff origin/x`, `git diff origin/x HEAD`) breaks as
+ * soon as the base moves on, even when the change is fine. Returns the remote ref it diffs against, or null when every
+ * `git diff` segment compares against the merge base (`origin/x...HEAD`, `$(git merge-base …)`) or no remote ref.
+ * Only revisions count: anything after a standalone `--` is a pathspec (`git diff HEAD -- origin/x.txt`, #4298).
+ */
+export function movingBaseDiff(command) {
+  for (const whole of String(command ?? "").split(/&&|\|\||;|\|/)) {
+    const seg = whole.split(/(?:^|\s)--(?=\s|$)/)[0];
+    if (!/\bgit\b(?:\s+-C\s+\S+)?(?:\s+-c\s+\S+)*\s+diff\b/.test(seg)) continue;
+    const ref = /(?:^|[\s=])(origin\/[A-Za-z0-9._\/-]+)/.exec(seg)?.[1];
+    if (!ref || seg.includes("...") || /merge-base/.test(seg)) continue;
+    return ref.replace(/\.\.?$/, "");
+  }
+  return null;
+}
+
 export function validateContract(c, issueText, { repro = false } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
@@ -97,7 +138,11 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     else if (!DECISION_SOURCES.includes(k?.source)) problems.push(`${k.id}: decision source must be one of ${DECISION_SOURCES.join("|")}`);
   }
   if (!Array.isArray(c.validate) || !c.validate.length) problems.push("the contract names no validate[] commands");
-  else for (const v of c.validate) if (!v?.id || blank(v?.command)) problems.push("validate entry without id or command");
+  else for (const v of c.validate) {
+    if (!v?.id || blank(v?.command)) { problems.push("validate entry without id or command"); continue; }
+    const ref = movingBaseDiff(v.command);
+    if (ref) problems.push(`${v.id}: \`git diff\` against the moving ${ref} tip fails as soon as the base moves on, even when the change is fine; compare against the merge base instead (\`${ref}...HEAD\` or \`$(git merge-base HEAD ${ref})\`)`);
+  }
   if (repro) {
     const t = c.repro_test;
     if (t === "none") { if (blank(c.repro_test_reason)) problems.push(`repro_test "none" needs a one-line repro_test_reason`); }
@@ -160,7 +205,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     const leftToCi = !r || (r.ci === true && r.exit === undefined);
     if (ciVerified && leftToCi) continue;
     if (leftToCi) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
-    else if (r.exit !== 0) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} failed (exit ${r.exit})` });
+    else if (r.exit !== 0) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})` });
   }
   const st = Array.isArray(result?.requirements) ? result.requirements : [];
   for (const r of contract.requirements ?? []) {

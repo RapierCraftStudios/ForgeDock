@@ -18,11 +18,16 @@ export const LOG_CAP = 12000;
 /** No run or check for the head after this long means CI is unavailable (local fallback). */
 export const DEFAULT_GRACE_MS = 5 * 60000;
 const LEAN_PREFIX = ".forge-lean/";
+/** The lane's own report-only check run (#4270, `verify.check_run`): never part of ForgeDock's own CI waits. */
+export const VERIFY_CHECK_NAME = "forgedock/verify";
+/** Checks API output.text limit is 65535 characters; stay well under it. */
+export const VERIFY_TEXT_CAP = 60000;
 const OK = ["success", "neutral", "skipped"];
 
 /**
  * forge.yaml `verify:` section (block style; parseForgeYaml gives strings) → {mode, workflow, pathsInput, skipPaths,
- * maxRounds, precheckTimeoutSeconds}. Invalid values fall back to the defaults; mode defaults to local (today's behaviour).
+ * maxRounds, precheckTimeoutSeconds, checkRun}. Invalid values fall back to the defaults; mode defaults to local (today's
+ * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`.
  */
 export function parseVerify(sec = {}) {
   const s = sec && typeof sec === "object" ? sec : {};
@@ -36,7 +41,8 @@ export function parseVerify(sec = {}) {
   const maxRounds = str(s.max_rounds) !== "" && Number.isInteger(n) && n >= 0 && n <= 10 ? n : DEFAULT_MAX_ROUNDS;
   const t = Number(str(s.precheck_timeout_seconds));
   const precheckTimeoutSeconds = str(s.precheck_timeout_seconds) !== "" && Number.isInteger(t) && t >= 1 && t <= 3600 ? t : DEFAULT_PRECHECK_TIMEOUT_SECONDS;
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds };
+  const checkRun = str(s.check_run).toLowerCase() === "true";
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, checkRun };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);
@@ -109,7 +115,7 @@ export async function runCiVerify({ io, branch, head, changedFiles, verify, ciMa
       if (!run && now() - startedAt >= graceMs) return unavailable(`no ${v.workflow} run for ${String(head).slice(0, 12)} appeared within ${Math.round(graceMs / 60000)} min`);
     } else {
       let checks = [];
-      try { checks = (await io.commitChecks(head)) ?? []; } catch { checks = []; }
+      try { checks = ((await io.commitChecks(head)) ?? []).filter((c) => c?.name !== VERIFY_CHECK_NAME); } catch { checks = []; }
       if (!checks.length && now() - startedAt >= graceMs) return unavailable(`no checks reported for ${String(head).slice(0, 12)} within ${Math.round(graceMs / 60000)} min`);
       if (checks.length && checks.every((c) => c.state !== "pending")) {
         const failed = checks.filter((c) => c.state === "failure");
@@ -121,4 +127,43 @@ export async function runCiVerify({ io, branch, head, changedFiles, verify, ciMa
     await onPoll();
     await sleep(ciPollDelayMs(i, random));
   }
+}
+
+const VALIDATE_KINDS = ["validate_missing", "validate_failed"], REQUIREMENT_KINDS = ["requirement_unimplemented", "untracked_deferral"];
+/**
+ * #4270: the `forgedock/verify` check-run payload from the results the lane already computed (no gate logic of its own).
+ * commands: [{command, rc}] of the last declared-check round, or null (none configured); structure: the structure delta or
+ * null; undeclaredEdges: package edges the contract does not name; docs: io.docsFreshness result or null; precheck: the
+ * conformance precheck failures of the last gate() run (null = never ran); amendments: its amendment problems; hotspots:
+ * whether hotspot facts were available. Returns {conclusion, gates: [{id, ok, ran, evidence}], title, summary, text}. A gate
+ * counts only when it ran (#4297): failure if a gate that ran failed, neutral ("no gates ran") when none ran, else success.
+ */
+export function verifyReport({ head = null, commands = null, structure = null, undeclaredEdges = [], docs = null, precheck = null, amendments = [], hotspots = false, contract = null, result = null } = {}) {
+  const NOT_RUN = "not run";
+  const pre = Array.isArray(precheck) ? precheck : [];
+  const details = (kinds) => pre.filter((f) => kinds.includes(f?.kind)).map((f) => String(f.detail ?? f.code ?? ""));
+  const runs = Array.isArray(result?.validation) ? result.validation : [];
+  const reqs = Array.isArray(result?.requirements) ? result.requirements : [];
+  const edges = (xs) => (xs ?? []).map((e) => `${e?.from}→${e?.to}${e?.manifest ? ` (${e.manifest})` : ""}`);
+  const gate = (id, ran, failures, okEvidence) => ({ id, ok: !failures.length, ran: Boolean(ran), evidence: !ran ? NOT_RUN : failures.length ? failures : okEvidence });
+  const gates = [
+    gate("precheck.commands", Array.isArray(commands), (commands ?? []).filter((c) => c.rc !== 0).map((c) => `${c.command} (exit ${c.rc})`),
+      (commands ?? []).map((c) => ({ command: c.command, rc: c.rc }))),
+    gate("structure.edges", Boolean(structure), edges(undeclaredEdges).map((e) => `undeclared ${e}`), { added: edges(structure?.package_edges_added) }),
+    gate("docs.freshness", Boolean(docs), docs && !docs.ok ? [String(docs.output ?? "stale docs").slice(0, 2000)] : [], "ok"),
+    gate("conformance.scope", precheck !== null, details(["scope_creep"]), "every changed file is inside the contract's deliverables"),
+    gate("conformance.validate", precheck !== null, details(VALIDATE_KINDS),
+      (contract?.validate ?? []).map((v) => { const r = runs.find((x) => x?.id === v.id); return { id: v.id, command: v.command, ...(r?.exit !== undefined ? { exit: r.exit } : r?.ci ? { ci: true } : {}) }; })),
+    gate("conformance.requirements", precheck !== null, details(REQUIREMENT_KINDS), reqs.map((r) => ({ id: r?.id, status: r?.status }))),
+    gate("maintenance.hotspot_growth", precheck !== null && Boolean(hotspots), details(["hotspot_growth"]), "no over-threshold file grew past the limit"),
+    gate("conformance.amendments", precheck !== null, (amendments ?? []).map((a) => String(a?.detail ?? a)), "ok"),
+  ];
+  const ran = gates.filter((g) => g.ran), failed = ran.filter((g) => !g.ok);
+  const conclusion = failed.length ? "failure" : ran.length ? "success" : "neutral";
+  const title = failed.length ? `${failed.length} of ${ran.length} deterministic gate(s) failed` : ran.length ? `${ran.length} deterministic gate(s) passed` : "no gates ran";
+  const summary = [`ForgeDock deterministic gates${head ? ` at \`${String(head).slice(0, 12)}\`` : ""}: report only (requiring it is the repository's branch-protection choice).`, "",
+    ...(ran.length ? gates.map((g) => `- ${!g.ran ? "⏭️" : g.ok ? "✅" : "❌"} \`${g.id}\`${g.ran ? "" : " (not run)"}`) : ["no gates ran"])].join("\n");
+  let json = JSON.stringify({ head, conclusion, gates }, null, 2);
+  if (json.length > VERIFY_TEXT_CAP) json = JSON.stringify({ head, conclusion, truncated: true, gates: gates.map((g) => ({ id: g.id, ok: g.ok, ran: g.ran, evidence: JSON.stringify(g.evidence).slice(0, Math.floor(VERIFY_TEXT_CAP / (gates.length + 1))) })) }, null, 2);
+  return { conclusion, gates, title, summary, text: "```json\n" + json + "\n```" };
 }

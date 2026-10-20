@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, explainFailures } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -161,6 +161,21 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.equal(resolveEvidencePath("nope.js", files), null);
     assert.equal(decide(row("R1", { evidence: "scrape.js:4" }), ctx).state, "conforms");
   });
+  it("a validate command that diffs against the moving origin/<lane> tip invalidates the contract; a merge-base diff does not", () => {
+    const withV = (command) => ({ ...C, validate: [{ id: "V4", command }] });
+    const bad = validateContract(withV("./scripts/sync.sh --check-only && git diff --quiet origin/staging -- infra/a infra/b"), ISSUE);
+    assert.equal(bad.ok, false);
+    assert.ok(bad.problems.some((x) => /^V4: `git diff` against the moving origin\/staging tip/.test(x) && x.includes("origin/staging...HEAD")), bad.problems.join("; "));
+    for (const ok of ["git diff --quiet origin/staging...HEAD -- infra/a", "git diff --quiet $(git merge-base HEAD origin/staging) -- infra/a", "node --test test/leak.test.js", "git log origin/staging..HEAD --oneline"]) {
+      assert.equal(validateContract(withV(ok), ISSUE).ok, true, ok);
+    }
+  });
+  it("movingBaseDiff finds the remote ref in any git diff segment, and ignores merge-base forms and other commands", () => {
+    assert.equal(movingBaseDiff("git diff --name-only origin/main HEAD"), "origin/main");
+    assert.equal(movingBaseDiff("git -C sub diff origin/milestone/foo | wc -l"), "origin/milestone/foo");
+    assert.equal(movingBaseDiff("git diff HEAD~1"), null);
+    assert.equal(movingBaseDiff(""), null);
+  });
   it("#4160: reviewSkeleton (object form) lists every required row, scope rows pre-filled with the engine's authorization", () => {
     const k = { ...C, requirements: [...C.requirements, { id: "R9", quote: "Billing pricing is unchanged.", disposition: "defer", why: "w" }] };
     const sk = reviewSkeleton({ contract: k, changedFiles: [...files, "src/billing.js", ".forge-lean/x"], ignore: [".forge-lean/"] });
@@ -297,5 +312,42 @@ describe("repro_test on bug lanes (#4271)", () => {
     assert.deepEqual(validateContract(C, ISSUE), validateContract(C, ISSUE, { repro: false }));
     assert.deepEqual(validateContract(C, ISSUE), { ok: true, problems: [] });
     assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), precheck({ contract: C, result: res, changedFiles: files, repro: null }));
+  });
+});
+
+describe("#4265 issue scope and failure explanations", () => {
+  const iss = { title: "t", body: "Fix foo.\n\n<!-- FORGE:STATE\n{\"lease\":1}\n-->" };
+  const human = { body: "Also bar." };
+  it("scopeText ignores the engine's HTML-comment blocks and FORGE comments, keeps human text", () => {
+    const base = scopeText(iss, [human]);
+    assert.equal(scopeText({ ...iss, body: iss.body.replace("\"lease\":1", "\"lease\":2") }, [human, { body: "<!-- FORGE:CONTRACT -->\n## Builder Contract" }, { body: "  <!-- FORGE:STARTED -->\nStarted" }]), base);
+    assert.match(base, /Fix foo\.[\s\S]*Also bar\./);
+    assert.doesNotMatch(base, /FORGE:STATE|lease/);
+    assert.notEqual(scopeText(iss, [human, { body: "Scope: also baz." }]), base);
+    assert.notEqual(scopeText({ ...iss, body: "Fix foo and qux." }, [human]), base);
+  });
+  it("#4298 SEC-5: an edit that only touches a human HTML comment is not a scope edit", () => {
+    const withNote = { ...iss, body: `${iss.body}\n<!-- note: maybe also qux -->` };
+    assert.equal(scopeText(withNote, [human]), scopeText({ ...withNote, body: withNote.body.replace("maybe also qux", "definitely qux") }, [human]));
+    assert.equal(scopeText(withNote, [human]), scopeText(iss, [human]));
+  });
+  it("#4298: movingBaseDiff reads only the revisions before `--`", () => {
+    assert.equal(movingBaseDiff("git diff HEAD -- origin/x.txt"), null);
+    assert.equal(movingBaseDiff("git diff --stat -- origin/foo/bar && echo ok"), null);
+    assert.equal(movingBaseDiff("git diff origin/main -- src"), "origin/main");
+    assert.equal(movingBaseDiff("git diff --name-only origin/main --"), "origin/main");
+  });
+  it("explainFailures appends the quote of the requirement a detail names, and leaves other details alone", () => {
+    const contract = { requirements: [{ id: "R1", quote: "foo must handle null" }, { id: "R2", quote: "x".repeat(300) }] };
+    const out = explainFailures([{ code: "c", detail: "R1 reported \"partial\"" }, { code: "c", detail: "R2 missing" }, { code: "c", detail: "validate V1 failed (exit 1)" }, { code: "c", detail: "R9 missing" }], contract);
+    assert.equal(out[0].detail, 'R1 reported "partial" ("foo must handle null")');
+    assert.ok(out[1].detail.endsWith('...")') && out[1].detail.length < 200);
+    assert.equal(out[2].detail, "validate V1 failed (exit 1)");
+    assert.equal(out[3].detail, "R9 missing");
+    assert.equal(out[0].code, "c");
+  });
+  it("a failed validate names its command", () => {
+    const r = precheck({ contract: { requirements: [], deliverables: [], validate: [{ id: "V1", command: "npm test" }] }, result: { validation: [{ id: "V1", exit: 2 }] }, changedFiles: [] });
+    assert.equal(r.failures[0].detail, "validate V1 (`npm test`) failed (exit 2)");
   });
 });

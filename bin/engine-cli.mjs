@@ -61,12 +61,13 @@ export function makeIo() {
     return stdout;
   };
   // CI wait seam (scripts/wait-ci-green.sh, argv only, no shell). Resolves { rc, text } for any exit code.
-  const waitCiGreen = async (pr, repo, timeoutSec) => {
+  // `ignore` (forge#4270): check names dropped before deciding (`--ignore-check`); omitted, the argv is unchanged.
+  const waitCiGreen = async (pr, repo, timeoutSec, { ignore = [] } = {}) => {
     const script = fileURLToPath(new URL("../scripts/wait-ci-green.sh", import.meta.url));
     try {
       // The engine owns the backoff and the budget: each call is ONE read (no in-script polling, no settle hold;
       // the re-dispatched phase re-runs the full gate before any merge).
-      const { stdout } = await pexec("bash", [script, String(pr), "-R", String(repo), "--timeout", String(timeoutSec)],
+      const { stdout } = await pexec("bash", [script, String(pr), "-R", String(repo), "--timeout", String(timeoutSec), ...ignore.flatMap((n) => ["--ignore-check", String(n)])],
         { maxBuffer: 10 * 1024 * 1024, timeout: (timeoutSec + 120) * 1000, env: { ...process.env, FORGE_CI_SETTLE: "0" } });
       return { rc: 0, text: stdout };
     } catch (e) { return { rc: Number.isInteger(e?.code) ? e.code : 2, text: String(e?.stdout ?? "") }; }
@@ -109,6 +110,27 @@ export function readReviewIncomplete(cwd = process.cwd()) {
   try {
     const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.review_incomplete ?? "").trim();
     return ["needs-human", "degraded"].includes(v) ? v : undefined;
+  } catch { return undefined; }
+}
+const warnedContextPack = new Set();
+const stderrWarn = (m) => { if (!warnedContextPack.has(m)) { warnedContextPack.add(m); process.stderr.write(`${m}\n`); } };
+/**
+ * forge.yaml context pack (#4275), flat keys under `engine` (the parser flattens one level): `context_pack`
+ * (shadow|on|off), `context_pack_sources` (comma list of graph,attempts,ledger,facts), `context_pack_bytes`,
+ * `context_pack_days`. undefined when none is set (the core defaults to shadow). An invalid mode warns through `warn`
+ * (stderr, once per message per process) and is dropped; the other keys are kept (#4298).
+ */
+export function readContextPack(cwd = process.cwd(), warn = stderrWarn) {
+  try {
+    const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine ?? {};
+    let mode = String(e.context_pack ?? "").trim().toLowerCase();
+    if (mode && !["shadow", "on", "off"].includes(mode)) {
+      warn(`forge.yaml engine.context_pack: invalid mode "${mode}" (expected shadow|on|off); using the default, other context_pack_* keys kept`);
+      mode = "";
+    }
+    const out = { ...(mode ? { mode } : {}), ...(e.context_pack_sources != null ? { sources: String(e.context_pack_sources) } : {}),
+      ...(e.context_pack_bytes != null ? { bytes: Number(e.context_pack_bytes) } : {}), ...(e.context_pack_days != null ? { days: Number(e.context_pack_days) } : {}) };
+    return Object.keys(out).length ? out : undefined;
   } catch { return undefined; }
 }
 /**
@@ -206,7 +228,8 @@ export function readMergeWait(cwd = process.cwd()) {
 }
 /**
  * forge.yaml `verify:` section (#4167, block style: `verify:` then `  mode: ci`, `  workflow: verify.yml`, `  paths_input`,
- * `  skip_paths` comma-separated, `  max_rounds`) for the core path; undefined when the section is absent or unreadable.
+ * `  skip_paths` comma-separated, `  max_rounds`, `  check_run: true` (#4270)) for the core path; undefined when the
+ * section is absent or unreadable.
  */
 export function readVerify(cwd = process.cwd()) {
   try {
@@ -614,7 +637,7 @@ export function lastLocalRun(dir) {
  */
 export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--retry] [--wait-lease]");
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> [--lane <lane>] [--lane-override] [--path core|full] [--recover <code> [--recover-attempt n]] [--retry] [--wait-lease]");
   assertOpenCodeNativeRuntime({ operation: "forgedock run-issue" });
   const lane = flag(argv, "--lane");
   if (argv.includes("--lane") && (!lane || lane.startsWith("--"))) throw new Error("--lane requires a value: staging or milestone/<slug>");
@@ -623,7 +646,7 @@ export async function runFromCli(argv, deps = {}) {
   const backend = flag(argv, "--backend");
   const model = flag(argv, "--model");
   // Boolean flag: only counts at a flag position, never as another flag's value.
-  const retry = argv.some((a, i) => a === "--retry" && !["--lane", "--repo", "--backend", "--model", "--path", "--result-file", "--placement", "--placement-reason"].includes(argv[i - 1]));
+  const retry = argv.some((a, i) => a === "--retry" && !["--lane", "--repo", "--backend", "--model", "--path", "--result-file", "--placement", "--placement-reason", "--recover", "--recover-attempt"].includes(argv[i - 1]));
   // forge#3574: --wait-lease blocks (bounded by the lease TTL) until a live
   // holder's lease expires or becomes reclaimable. Same flag-position guard.
   const waitLease = argv.some((a, i) => a === "--wait-lease" && !["--lane", "--repo", "--backend", "--model"].includes(argv[i - 1]));
@@ -636,12 +659,18 @@ export async function runFromCli(argv, deps = {}) {
   }
   // The full path takes the lane as given (its spec runs classify-lane), so it must be explicit; no default.
   if (enginePath === "full" && !lane) throw new Error("--lane is required with --path full: staging or milestone/<slug>. No default to prevent accidental production targeting.");
+  // #4298: recovery lanes (#4267) exist only on the core path; the legacy full path would silently ignore --recover.
+  if (enginePath === "full" && argv.includes("--recover")) throw new Error("--recover is not supported with --path full (recovery lanes run on the core path only)");
   const io = deps.io ?? makeIo();
   const resultFile = flag(argv, "--result-file");
   // #4256: where the dispatcher placed this lane (hybrid execution), recorded in the lane's FORGE:STATE.
   const placementWhere = flag(argv, "--placement");
   const placement = placementWhere === "local" || placementWhere === "remote"
     ? { where: placementWhere, reason: String(flag(argv, "--placement-reason") ?? "").slice(0, 300), mode: readExecution()?.mode ?? "local" } : null;
+  // #4267: a batch recovery lane for a mechanical needs-human (`--recover <code> [--recover-attempt n]`).
+  const recoverCode = flag(argv, "--recover");
+  const recoverAttempt = Number(flag(argv, "--recover-attempt"));
+  const recover = recoverCode && !recoverCode.startsWith("--") ? { code: recoverCode, attempt: Number.isInteger(recoverAttempt) && recoverAttempt > 0 ? recoverAttempt : 1 } : null;
   const report = (r) => { if (resultFile) (deps.writeAtomic ?? writeResultAtomic)(resultFile, JSON.stringify(r) + "\n"); return r; };
   try {
     await assertRepoMatchesCwd(io, repo, { sleep: deps.sleep });
@@ -704,9 +733,9 @@ export async function runFromCli(argv, deps = {}) {
     let lres;
     try {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
-      onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}),
+      onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1041,7 +1070,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   sink.batch?.(batch);
   sink.line(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
   const dir = deps.dir ?? runDir();
-  const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary } = await import("./lean/orchestrate.mjs");
+  const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists } = await import("./lean/orchestrate.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   const { makePrefilter, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
   const prefilter = argv.includes("--no-prefilter") ? null
@@ -1061,15 +1090,20 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (deps.leanModule) {
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
-    lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+    lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4256: the placement orchestrate decided for a lane (ctx.placement) reaches it as --placement/--placement-reason.
-    const placementOf = new Map();
-    const laneArgs = (n, ln) => { const pl = placementOf.get(n); return ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : []),
-      ...(pl ? ["--placement", pl.where, "--placement-reason", pl.reason ?? ""] : [])]; };
-    const withPlacement = (l) => ({ runOne: (n, ln, ctx = {}) => { if (ctx.placement) placementOf.set(n, ctx.placement); else placementOf.delete(n); return l.runOne(n, ln, ctx); }, adopt: l.adopt });
+    // #4267: a recovery lane (ctx.recover) reaches it as --recover/--recover-attempt.
+    const placementOf = new Map(), recoverOf = new Map();
+    const laneArgs = (n, ln) => { const pl = placementOf.get(n), rc = recoverOf.get(n); return ["--repo", repo, ...(ln ? ["--lane", ln] : []), ...(laneOverride ? ["--lane-override"] : []), ...(model ? ["--model", model] : []),
+      ...(pl ? ["--placement", pl.where, "--placement-reason", pl.reason ?? ""] : []), ...(rc ? ["--recover", rc.code, "--recover-attempt", String(rc.attempt ?? 1)] : [])]; };
+    const withPlacement = (l) => ({ runOne: (n, ln, ctx = {}) => {
+      if (ctx.placement) placementOf.set(n, ctx.placement); else placementOf.delete(n);
+      if (ctx.recover) recoverOf.set(n, ctx.recover); else recoverOf.delete(n);
+      return l.runOne(n, ln, ctx);
+    }, adopt: l.adopt });
     const execMod = await import("./lean/execution.mjs");
     const exec = deps.execution !== undefined ? deps.execution : readExecution(cwd);
     hybrid = exec?.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1;
@@ -1196,6 +1230,23 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
     ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
     ...(remote ? { remote } : {}),
+    // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
+    ...(orch.recovery?.maxAttempts ? { recovery: orch.recovery } : {}),
+    decide: deps.decide ?? (async (d) => {
+      if (d?.issue == null) { sink.line(`decision: ${d?.what} (why: ${d?.why}; alternative: ${d?.alternative})`); return; }
+      const body = `<!-- FORGE:DECISION -->\n## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
+      try { await leanIo.gh(["issue", "comment", String(d.issue), "-R", repo, "--body", body]); } catch { /* best effort: the batch log keeps the row */ }
+    }),
+    // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
+    relabelNeedsHuman: deps.relabelNeedsHuman ?? (async ({ issue, evidence }) => {
+      try {
+        await leanIo.gh(["issue", "comment", String(issue), "-R", repo, "--body", `<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\n${evidence}`]);
+        await leanIo.gh(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
+      } catch { /* best effort: the batch row keeps the evidence */ }
+    }),
+    conflicting: deps.conflicting ?? (async (_n, pr) => {
+      try { return JSON.parse(await leanIo.gh(["pr", "view", String(pr), "-R", repo, "--json", "mergeable"]))?.mergeable === "CONFLICTING"; } catch { return false; }
+    }),
     onCrossLane: (e) => {
       crossLane.push(e);
       sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
@@ -1205,7 +1256,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       : async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
     onUpdate: (r) => sink.row(r),
   });
-  const report = ["\n" + formatTable(rows)];
+  const report = ["\n" + formatTable(rows), ...formatOutcomeLists(rows)];
   const pfLine = formatPrefilterSummary(rows);
   if (pfLine) report.push(pfLine);
   let heavyStats = null; // #4169: live heavy-semaphore queue next to the per-phase waits the lanes reported
@@ -1328,6 +1379,8 @@ export async function schedFromCli(argv, deps = {}) {
  * forge.yaml `orchestration.breaker` ({errors, window_min}; default 3 engine-errors in 30 min; errors 0 turns it off),
  * `orchestration.max_deferrals` (default 3) and `orchestration.global_parallel` (#4191: host-wide lane cap; unset = none). The parser flattens one nested level, so the breaker keys arrive as
  * `orchestration.errors|window_min` (or flat `breaker_errors|breaker_window_min`).
+ * `orchestration.recovery.max_attempts` (#4267; arrives as `max_attempts`, or flat `recovery_max_attempts`): recovery lanes per
+ * issue for a mechanical needs-human, default 1, 0 turns recovery off.
  */
 export function readOrchestration(cwd = process.cwd()) {
   let o = {};
@@ -1335,7 +1388,9 @@ export function readOrchestration(cwd = process.cwd()) {
   const int = (v, d) => { const n = Number(v); return v !== undefined && v !== "" && Number.isInteger(n) && n >= 0 ? n : d; };
   const errors = int(o.breaker_errors ?? o.errors, 3), windowMin = int(o.breaker_window_min ?? o.window_min, 30);
   const gp = int(o.global_parallel, null);
-  return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), globalParallel: gp >= 1 ? gp : null };
+  const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
+  return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), globalParallel: gp >= 1 ? gp : null,
+    recovery: { maxAttempts: recoveryMax } };
 }
 
 /**

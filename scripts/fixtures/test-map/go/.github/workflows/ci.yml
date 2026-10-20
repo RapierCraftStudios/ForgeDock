@@ -1,0 +1,23 @@
+name: ci
+on:
+  pull_request:
+    paths:
+      - '**.go'
+      - 'go.mod'
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: golangci-lint run ./...
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: test
+        run: |
+          go mod download
+          go test ./...
+      - name: docs
+        run: ./scripts/check-docs
