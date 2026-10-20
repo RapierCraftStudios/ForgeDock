@@ -28,14 +28,23 @@ const LINE_MAX = 200;
 
 const hash12 = (s) => createHash("sha256").update(String(s)).digest("hex").slice(0, 12);
 /**
- * Untrusted issue/comment text with every HTML comment removed: strip to a fixed point (so `<!-<!-- x -->- FORGE:…`
- * cannot reassemble a marker), then drop any leftover opener or closer. Pack text is posted back in a trusted bot
- * comment, so it must never carry a FORGE marker.
+ * Untrusted issue/comment text with HTML comments removed and no comment opener left: comments are cut out by plain
+ * scanning (closer `-->` or `--!>`; an unclosed one runs to the end), then every `<` that starts `<!` becomes `‹`.
+ * With no `<!` in the output, no HTML comment and no FORGE marker can open, whatever the input nesting. Pack text is
+ * posted back in a trusted bot comment, so this is the guarantee that matters.
  */
 export function noComments(s, repl = "") {
-  let t = String(s ?? ""), prev;
-  do { prev = t; t = t.replace(/<!--[\s\S]*?-->/g, repl).replace(/<!--|-->/g, repl); } while (t !== prev);
-  return t;
+  const t = String(s ?? "");
+  let out = "", i = 0;
+  for (;;) {
+    const a = t.indexOf("<!--", i);
+    if (a < 0) { out += t.slice(i); break; }
+    out += t.slice(i, a) + repl;
+    const ends = [[t.indexOf("-->", a + 4), 3], [t.indexOf("--!>", a + 4), 4]].filter(([k]) => k >= 0).sort((x, y) => x[0] - y[0]);
+    if (!ends.length) break;
+    i = ends[0][0] + ends[0][1];
+  }
+  return out.replace(/<(?=!)/g, "\u2039");
 }
 const oneLine = (s, max = LINE_MAX) => {
   const t = noComments(s, " ").replace(/\s+/g, " ").trim();
