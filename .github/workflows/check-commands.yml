@@ -54,6 +54,11 @@ on:
       - 'scripts/fixtures/symbol-move-ts/**'
       - 'scripts/hotspots.sh'
       - 'scripts/hotspots.test.sh'
+      - 'scripts/test-map.sh'
+      - 'scripts/test-map.test.sh'
+      - 'scripts/fixtures/test-map/**'
+      - 'scripts/repo-facts.sh'
+      - 'scripts/repo-facts.test.sh'
       - 'scripts/maintenance-scan.sh'
       - 'scripts/maintenance-scan.test.sh'
       - 'scripts/milestone-drift.sh'
@@ -144,6 +149,11 @@ on:
       - 'scripts/fixtures/symbol-move-ts/**'
       - 'scripts/hotspots.sh'
       - 'scripts/hotspots.test.sh'
+      - 'scripts/test-map.sh'
+      - 'scripts/test-map.test.sh'
+      - 'scripts/fixtures/test-map/**'
+      - 'scripts/repo-facts.sh'
+      - 'scripts/repo-facts.test.sh'
       - 'scripts/maintenance-scan.sh'
       - 'scripts/maintenance-scan.test.sh'
       - 'scripts/milestone-drift.sh'
@@ -455,6 +465,8 @@ jobs:
           SYMBOL_MOVE_REQUIRE_LIBCST=1 bash scripts/symbol-move.test.sh
           SYMBOL_MOVE_TS_NODE_MODULES="$RUNNER_TEMP/tsm/node_modules" SYMBOL_MOVE_REQUIRE_TS_MORPH=1 bash scripts/symbol-move-ts.test.sh
           bash scripts/hotspots.test.sh
+          bash scripts/test-map.test.sh
+          bash scripts/repo-facts.test.sh
           bash scripts/maintenance-scan.test.sh
           bash scripts/milestone-drift.test.sh
           bash scripts/review-finalize.test.sh
