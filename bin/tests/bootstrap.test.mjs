@@ -322,6 +322,12 @@ describe("/bootstrap spec and templates", () => {
     assert.doesNotMatch(spec, /Skill\(/);
   });
 
+  test("--spike picks the spike doc path and reaches the plan's spikeDoc", () => {
+    assert.match(spec, /^argument-hint: "<free text \| path to docs> \[--dry-run\] \[--spike <path>\]"$/m);
+    assert.match(spec, /`--spike` \(default `docs\/engineering\/technical-spike\.md`\)/);
+    assert.match(spec, /plan's `spikeDoc`/);
+  });
+
   test("the interview bank covers every aspect of the product", () => {
     for (const aspect of ["Users and segments", "Core jobs and features", "Scope", "Platforms", "Stack", "Auth",
       "Data and tenancy", "Integrations", "Payments", "i18n", "Compliance and residency", "Design ambition and UI libraries",
