@@ -367,12 +367,14 @@ async function planGcFor(w) {
 describe("near the admission ceiling (#4183)", () => {
   const host = (o) => ({ loadAvg1: () => o.load ?? 0, cores: () => o.cores ?? 4, memAvailableMb: () => o.mem ?? 64000, tmpPaths: () => ["/t"], freeMb: () => o.tmp ?? 64000 });
   it("true within the ratio of any threshold, false otherwise, on disabled admission or failed probes", async () => {
-    assert.equal(await nearCeiling({ host: host({ load: 13 }) }), true); // 3.25/core >= 0.8*4
-    assert.equal(await nearCeiling({ host: host({ load: 12 }) }), false);
+    const L = { max_load_per_core: 4 }; // load gating is off by default (#4169), so these opt in
+    assert.equal(await nearCeiling({ cfg: L, host: host({ load: 13 }) }), true); // 3.25/core >= 0.8*4
+    assert.equal(await nearCeiling({ cfg: L, host: host({ load: 12 }) }), false);
+    assert.equal(await nearCeiling({ host: host({ load: 400 }) }), false); // no max_load_per_core: load is ignored
     assert.equal(await nearCeiling({ host: host({ mem: 2500 }) }), true); // <= 2048/0.8
     assert.equal(await nearCeiling({ host: host({ tmp: 1200 }) }), true);
-    assert.equal(await nearCeiling({ host: host({ load: 13 }), ratio: 1 }), false);
-    assert.equal(await nearCeiling({ host: host({ load: 13 }), cfg: { enabled: false } }), false);
+    assert.equal(await nearCeiling({ cfg: L, host: host({ load: 13 }), ratio: 1 }), false);
+    assert.equal(await nearCeiling({ host: host({ load: 13 }), cfg: { ...L, enabled: false } }), false);
     assert.equal(await nearCeiling({ host: { loadAvg1: () => { throw new Error("x"); }, memAvailableMb: () => NaN } }), false);
     assert.equal(await nearCeiling({}), false);
   });

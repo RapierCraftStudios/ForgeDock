@@ -476,7 +476,7 @@ tallies items and bytes. Only owned resources are reclaimed (ForgeDock label or
 ledger); unowned stale ones are reported, never removed.
 
 `admission.mjs` adds `nearCeiling({cfg, host, ratio})`: true when load per core,
-free memory or free tmp is within `ratio` of a `checkAdmission` threshold. A
+free memory or free tmp is within `ratio` of a `checkAdmission` threshold (load only when `max_load_per_core` is set; it is off by default, #4169). A
 failed or non-finite probe is never "near". `orchestrate` takes an optional
 `beforeAdmit` hook, awaited at the start of each admission pass when a lane is
 ready and a slot is free (not tripped, not held). Its errors are swallowed. In

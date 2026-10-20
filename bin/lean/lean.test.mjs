@@ -1547,7 +1547,7 @@ describe("orchestrate", () => {
     const mk = (over) => ({ dir: tmpDir("core-gc-"), batchRoot: tmpDir("core-gc-batch-"), allowTmpfs: true, emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo,
       leanModule: { runCore: async (o) => { t += 6 * 60 * 1000; return { terminalReason: "merged", pr: o.issue, cost_usd: 0, wall_ms: 1 }; } },
       gc: async ({ phase }) => { gcCalls.push(phase); return { reclaimed: phase === "preflight" ? 2 : 1, bytes: 2 * 1048576 }; },
-      host: { loadAvg1: () => 100, cores: () => 1 }, now: () => t, hygiene: { auto_gc: true, max_host_load_ratio: 0.8 }, ...over });
+      host: { loadAvg1: () => 0, cores: () => 1, memAvailableMb: () => 100 }, now: () => t, hygiene: { auto_gc: true, max_host_load_ratio: 0.8 }, ...over });
     const logs = [];
     const l = console.log; console.log = (s) => logs.push(String(s));
     let res;

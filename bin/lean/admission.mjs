@@ -50,8 +50,9 @@ export async function nearCeiling({ cfg = {}, host, ratio = 0.8 } = {}) {
   if (c.enabled === false || !host) return false;
   const r = Number.isFinite(ratio) && ratio > 0 && ratio <= 1 ? ratio : 0.8;
   const safe = async (fn, ...a) => { try { const v = await fn?.(...a); return Number.isFinite(v) ? v : null; } catch { return null; } };
-  const load = await safe(host.loadAvg1), cores = await safe(host.cores);
-  if (load !== null && cores && load / cores >= r * c.max_load_per_core) return true;
+  const maxLoad = typeof c.max_load_per_core === "number" && Number.isFinite(c.max_load_per_core) ? c.max_load_per_core : null; // off by default (#4169)
+  const load = maxLoad === null ? null : await safe(host.loadAvg1), cores = maxLoad === null ? null : await safe(host.cores);
+  if (load !== null && cores && load / cores >= r * maxLoad) return true;
   const mem = await safe(host.memAvailableMb);
   if (mem !== null && mem <= c.min_free_mem_mb / r) return true;
   let paths = [];
