@@ -42,6 +42,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    is saved to `refs/forge/salvage/<N>/<ms>` (`WORKTREE_SALVAGED`) and the
    implement prompt names the ref. This covers runs that died hard (no
    teardown); a run that exits normally checkpoints its work in teardown (#4179).
+   **Sparse worktree** (#4221, `worktree.mjs` `addLaneWorktree`): tracked blobs
+   >= forge.yaml `env.sparse_max_kb` (default 1024; 0 = off) stay out of the
+   checkout (non-cone patterns in the worktree's own `info/sparse-checkout`;
+   lockfiles, manifests, toolchain pins, forge/git config always in). The
+   #4162/#4118 steps above run first, unchanged; no such blob → today's plain
+   `worktree add`; a failed sparse step → full checkout (`WORKTREE_SPARSE_FALLBACK`).
+   `WORKTREE_SPARSE` logs the count/bytes; the builder prompt names the absent files.
    **Toolchain + env.setup** (#4163, `toolchain.mjs`): the repo's pins
    (`packageManager`, `.nvmrc`/`.node-version`/`.tool-versions`/`engines.node`,
    forge.yaml `env.toolchain`) become a shim dir first on every runner PATH;
