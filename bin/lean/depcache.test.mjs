@@ -4,12 +4,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, lstatSync, readlinkSync, readdirSync, symlinkSync, rmSync, renameSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync, lstatSync, readlinkSync, readdirSync, symlinkSync, rmSync, renameSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join, dirname, relative } from "node:path";
 import { makeDepCache } from "./depcache.mjs";
 
-const scratch = () => mkdtempSync(join(tmpdir(), "fd-depcache-"));
+const scratch = () => tmpDir("fd-depcache-");
 const put = (p, text, mode) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, text, mode ? { mode } : undefined); };
 /** Replace a file the way package managers do (tmp + rename), never writing into the existing inode. */
 const replace = (p, text) => { put(`${p}.new`, text); renameSync(`${p}.new`, p); };

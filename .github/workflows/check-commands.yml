@@ -44,6 +44,11 @@ on:
       - 'scripts/symbol-index.mjs'
       - 'scripts/symbol-index.test.sh'
       - 'scripts/fixtures/symbol-index/**'
+      - 'scripts/refactor-verify.sh'
+      - 'scripts/refactor-verify.test.sh'
+      - 'scripts/symbol-move.py'
+      - 'scripts/symbol-move.test.sh'
+      - 'scripts/fixtures/symbol-move/**'
       - 'scripts/maintenance-scan.sh'
       - 'scripts/maintenance-scan.test.sh'
       - 'scripts/review-finalize.sh'
@@ -122,6 +127,11 @@ on:
       - 'scripts/symbol-index.mjs'
       - 'scripts/symbol-index.test.sh'
       - 'scripts/fixtures/symbol-index/**'
+      - 'scripts/refactor-verify.sh'
+      - 'scripts/refactor-verify.test.sh'
+      - 'scripts/symbol-move.py'
+      - 'scripts/symbol-move.test.sh'
+      - 'scripts/fixtures/symbol-move/**'
       - 'scripts/maintenance-scan.sh'
       - 'scripts/maintenance-scan.test.sh'
       - 'scripts/review-finalize.sh'
@@ -399,6 +409,9 @@ jobs:
           # <!-- Added: forge#1609 -->
           bash scripts/check-spec-markers.sh commands/ .
 
+      - name: Install libcst for the symbol-move codemod test
+        run: python3 -m pip install --user --break-system-packages 'libcst==1.9.0'
+
       - name: Check Skill-loaded specs for positional-arg placeholders ($0-$9) in fenced blocks
         run: |
           # Claude Code rewrites $0..$9 in a skill body with the invocation's arguments, so
@@ -421,6 +434,8 @@ jobs:
           bash scripts/code-index.test.sh
           bash scripts/structure-delta.test.sh
           bash scripts/symbol-index.test.sh
+          bash scripts/refactor-verify.test.sh
+          SYMBOL_MOVE_REQUIRE_LIBCST=1 bash scripts/symbol-move.test.sh
           bash scripts/maintenance-scan.test.sh
           bash scripts/review-finalize.test.sh
           bash scripts/close-parent-c3.test.sh

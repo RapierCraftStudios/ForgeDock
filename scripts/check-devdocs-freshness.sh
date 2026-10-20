@@ -11,17 +11,18 @@
 # Deterministic, no LLM. bash 3.2 portable (no bash-4 builtins, no PCRE grep).
 #
 # Usage: bash scripts/check-devdocs-freshness.sh [<base-ref>] [--body-file <file>]
-#   <base-ref> defaults to the current branch's upstream (@{upstream}); CI always passes it explicitly.
+#   No base-ref: the current branch's upstream (@{upstream}), else origin/HEAD (the remote default branch).
 #   PR body: --body-file, else env PR_BODY (empty when unset). Diff: <base-ref>...HEAD, run from the repo root.
 # Exit: 0 fresh / exempt / nothing to check | 1 docs missing | 2 bad usage or unknown base ref
 
 set -u
 BASE=""
 case "${1:-}" in
-  ""|--*) BASE=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true) ;;
+  ""|--*) BASE=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) \
+            || BASE=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null) || BASE="" ;;
   *) BASE="$1"; shift ;;
 esac
-[ -n "$BASE" ] || { echo "usage: check-devdocs-freshness.sh [<base-ref>] [--body-file <file>] (no upstream to default to)" >&2; exit 2; }
+[ -n "$BASE" ] || { echo "usage: check-devdocs-freshness.sh [<base-ref>] [--body-file <file>] (no upstream or origin/HEAD to default to)" >&2; exit 2; }
 BODY="${PR_BODY:-}"
 while [ $# -gt 0 ]; do
   case "$1" in

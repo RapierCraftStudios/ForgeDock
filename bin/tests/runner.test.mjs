@@ -56,6 +56,7 @@ import {
   resolveClaudeCliBinary,
   runCliWithStalePathRecovery,
   checkExecutionBackend,
+  isApiBackendApproved,
   assertOpenCodeNativeRuntime,
   isOpenCodeRuntime,
   resolveBackend,
@@ -3384,10 +3385,24 @@ describe("checkExecutionBackend", () => {
     });
   });
 
-  it("falls back to a configured API backend in auto mode", () => {
+  it("#4257: auto with no CLI and an API key does NOT report api without the owner's opt-in", () => {
     assert.deepEqual(checkExecutionBackend({
       resolveCliFn: () => null,
       apiKey: "key",
+      apiApproved: false,
+      sdkAvailableFn: () => true,
+    }), {
+      ready: false,
+      backend: "cli",
+      reason: "cli-unavailable",
+    });
+  });
+
+  it("falls back to a configured API backend in auto mode only when the owner approved it", () => {
+    assert.deepEqual(checkExecutionBackend({
+      resolveCliFn: () => null,
+      apiKey: "key",
+      apiApproved: true,
       sdkAvailableFn: () => true,
     }), {
       ready: true,
@@ -3402,7 +3417,7 @@ describe("checkExecutionBackend", () => {
   });
 
   it("reports no usable backend when auto has neither CLI nor API key", () => {
-    assert.deepEqual(checkExecutionBackend({ resolveCliFn: () => null, apiKey: "" }), {
+    assert.deepEqual(checkExecutionBackend({ resolveCliFn: () => null, apiKey: "", apiApproved: true }), {
       ready: false,
       backend: "api",
       reason: "api-key-missing",
@@ -3453,6 +3468,48 @@ describe("resolveBackend", () => {
       () => resolveBackend({ requested: "not-a-real-backend", cwd: TMP }),
       /Invalid backend "not-a-real-backend"/,
     );
+  });
+});
+
+describe("#4257: api backend only as an explicit owner-approved option", () => {
+  const withRepo = (yaml) => {
+    const dir = tmpDir("forgedock-4257-");
+    if (yaml !== null) writeFileSync(join(dir, "forge.yaml"), yaml);
+    return dir;
+  };
+  const OPT_IN_YAML = "execution:\n  agent_backend: api\n";
+  const noCli = () => false;
+
+  it("isApiBackendApproved needs both forge.yaml execution.agent_backend: api and FORGEDOCK_ALLOW_API_BACKEND=1", () => {
+    const yes = withRepo(OPT_IN_YAML);
+    assert.equal(isApiBackendApproved({ cwd: yes, env: { FORGEDOCK_ALLOW_API_BACKEND: "1" } }), true);
+    assert.equal(isApiBackendApproved({ cwd: yes, env: {} }), false, "forge.yaml alone is not approval");
+    assert.equal(isApiBackendApproved({ cwd: yes, env: { FORGEDOCK_ALLOW_API_BACKEND: "true" } }), false);
+    assert.equal(isApiBackendApproved({ cwd: withRepo(null), env: { FORGEDOCK_ALLOW_API_BACKEND: "1" } }), false, "env alone is not approval");
+    assert.equal(isApiBackendApproved({ cwd: withRepo("execution:\n  agent_backend: cli\n"), env: { FORGEDOCK_ALLOW_API_BACKEND: "1" } }), false);
+  });
+
+  it("with no opt-in, a missing CLI plus a present API key does NOT select api", () => {
+    const env = { ANTHROPIC_API_KEY: "sk-test" };
+    assert.equal(resolveBackend({ requested: "auto", cwd: withRepo(null), env, isCliAvailableFn: noCli }), "cli");
+    assert.equal(resolveBackend({ requested: "auto", cwd: withRepo(OPT_IN_YAML), env, isCliAvailableFn: noCli }), "cli");
+    assert.equal(resolveBackend({ requested: "auto", cwd: withRepo(null), env: { ...env, FORGEDOCK_ALLOW_API_BACKEND: "1" }, isCliAvailableFn: noCli }), "cli");
+  });
+
+  it("with the explicit opt-in, a missing CLI selects api", () => {
+    const env = { ANTHROPIC_API_KEY: "sk-test", FORGEDOCK_ALLOW_API_BACKEND: "1" };
+    assert.equal(resolveBackend({ requested: "auto", cwd: withRepo(OPT_IN_YAML), env, isCliAvailableFn: noCli }), "api");
+    assert.equal(resolveBackend({ requested: "auto", cwd: withRepo(OPT_IN_YAML), env, isCliAvailableFn: () => true }), "cli", "a working CLI still wins");
+  });
+
+  it("explicit --backend api keeps working without the opt-in", () => {
+    assert.equal(resolveBackend({ requested: "api", cwd: withRepo(null), env: {}, isCliAvailableFn: noCli }), "api");
+  });
+
+  it("checkExecutionBackend default approval reads the same opt-in", () => {
+    const base = { resolveCliFn: () => null, apiKey: "key", sdkAvailableFn: () => true };
+    assert.equal(checkExecutionBackend({ ...base, cwd: withRepo(OPT_IN_YAML), env: {} }).backend, "cli");
+    assert.equal(checkExecutionBackend({ ...base, cwd: withRepo(OPT_IN_YAML), env: { FORGEDOCK_ALLOW_API_BACKEND: "1" } }).backend, "api");
   });
 });
 
