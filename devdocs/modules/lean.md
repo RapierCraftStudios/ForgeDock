@@ -762,3 +762,13 @@ Two deterministic hand-off facts (git + fs, no LLM): `enumerating.mjs` finds tes
 `ENUMERATING_MISSING` resume (then anomaly). `sequence.mjs` finds lane-added numbered migrations colliding with the base
 → `SEQUENCE_COLLISION`, builder renumbers with the repo's own generator, engine verifies. #3969 union merge unchanged.
 Cost: 0 LLM calls unless a fact fires (then one builder resume each). Implement prompt also says to run the formatter.
+
+## Entry 2026-10-20 — Evidence paths keep route-group and bracket segments (#4327)
+
+`conformance.mjs` `evidencePathLine` reads reviewer evidence token by token. It keeps `(group)`, `[slug]` and
+`[...slug]` path segments verbatim and drops only brackets with no partner (prose `(src/a.js:3)`), backticks, quotes and a
+markdown link label. The old regex treated `()[]` as delimiters, so `(console)/layout.tsx:12` became `/layout.tsx`. The
+existence check is unchanged: a missing path is still `review.incomplete`. `reviewOnce` (`lean.mjs`) gives one extra
+targeted re-ask (at most 3 reviewer runs) only when the repaired reply is incomplete solely by unresolved evidence paths
+(`evidencePathOnly`); other incomplete replies keep 2 runs. Reviewer and repair prompts ask for backtick-quoted, verbatim
+repo-relative `path:line`.
