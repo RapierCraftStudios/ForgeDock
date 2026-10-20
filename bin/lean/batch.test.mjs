@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S } from "./orchestrate.mjs";
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane } from "./batch.mjs";
-import { orchestrateFromCli, runFromCli, readOrchestration } from "../engine-cli.mjs";
+import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman } from "../engine-cli.mjs";
 
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir, also for spawned dispatchers.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("batch-sched-");
@@ -230,5 +230,66 @@ describe("lane launch env (#4179)", () => {
     assert.equal(spawned[0].opts.env.FORGEDOCK_BATCH_ID, batch.id);
     assert.equal(spawned[0].opts.env.KEEP, "1");
     assert.deepEqual(spawned[0].argv, ["/x/forgedock.mjs", "run-issue", "7", "--repo", "o/r", "--result-file", batch.resultFile(7)]);
+  });
+});
+
+describe("#4318: the batch dispatcher's signal relabel and the needs-human relabel hook", () => {
+  it("SIGINT of a foreground dispatcher relabels a queued recovery with the signal as cause, then exits 130; handlers are removed", async () => {
+    const leanIo = {
+      gh: async (a) => (a.includes("milestone") ? JSON.stringify({ milestone: null }) : JSON.stringify({ body: "" })),
+      git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : ""),
+    };
+    const handlers = new Map(), removed = [], exits = [], relabels = [];
+    const l = console.log;
+    console.log = () => {};
+    try {
+      await orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], { dir: tmpDir("sig-"), batchRoot: tmpDir("sig-batch-"), allowTmpfs: true,
+        emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo, sched: null, decide: () => {},
+        orchestration: { breaker: null, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 2 } },
+        processOn: (s, f) => handlers.set(s, f), processOff: (s, f) => { if (handlers.get(s) === f) removed.push(s); }, exit: (c) => exits.push(c),
+        relabelNeedsHuman: async (x) => { relabels.push(x); return true; },
+        leanModule: { runCore: async (o) => {
+          if (o.issue === 1 && !o.recover) return { terminalReason: "needs-human", code: "ci.red", detail: "Required check(s) failed on PR #55: test" };
+          if (o.issue === 2) await handlers.get("SIGINT")(); // issue 1's attempt is queued behind issue 2 (K=1)
+          return { terminalReason: "merged", pr: 50 + o.issue };
+        } } });
+    } finally { console.log = l; }
+    assert.deepEqual(exits, [130]);
+    assert.equal(relabels.length, 1); assert.equal(relabels[0].issue, 1);
+    assert.match(relabels[0].evidence, /the batch stopped \(interrupted by SIGINT\)/);
+    assert.deepEqual(removed.sort(), ["SIGINT", "SIGTERM"]);
+  });
+
+  describe("makeRelabelNeedsHuman", () => {
+    const LIVE = (until) => `body\n<!-- FORGE:STATE\n${JSON.stringify({ v: 1, issue: 7, lease: { by: "core_1", until, host: "h", pid: 1 } })}\n-->`;
+    const hook = (view, fail = {}) => {
+      const calls = [];
+      const gh = async (a) => {
+        calls.push(a[1]);
+        if (a[1] === "view") return JSON.stringify(view);
+        if (fail[a[1]]) throw new Error(`${a[1]} failed`);
+        return "";
+      };
+      return { calls, run: () => makeRelabelNeedsHuman({ gh, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "why" }) };
+    };
+    it("a closed issue or a live lease is skipped without a write", async () => {
+      for (const view of [{ state: "CLOSED", body: "" }, { state: "OPEN", body: LIVE(5000) }]) {
+        const h = hook(view);
+        assert.equal(await h.run(), "skipped");
+        assert.deepEqual(h.calls, ["view"]);
+      }
+    });
+    it("an expired lease relabels: the label first, then the comment", async () => {
+      const h = hook({ state: "OPEN", body: LIVE(500) });
+      assert.equal(await h.run(), true);
+      assert.deepEqual(h.calls, ["view", "edit", "comment"]);
+    });
+    it("a failed label add posts no comment and reports failed; a failed comment keeps the label", async () => {
+      const a = hook({ state: "OPEN", body: "" }, { edit: true });
+      assert.equal(await a.run(), "failed");
+      assert.deepEqual(a.calls, ["view", "edit"]);
+      const b = hook({ state: "OPEN", body: "" }, { comment: true });
+      assert.equal(await b.run(), true);
+    });
   });
 });
