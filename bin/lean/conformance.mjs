@@ -18,8 +18,8 @@ export const DECISION_SOURCES = Object.freeze(["doc", "lint", "precedent", "spec
 const REQ_STATUS = ["implemented", "partial", "missing", "deferred", "post-deploy", "not-applicable"];
 const COVER_STATUS = ["covered", "narrowed", "missing"];
 const PRESERVE_STATUS = ["intact", "violated", "unverified"];
-/** The first path:line anywhere in the evidence text (backticks, quotes and brackets around it are ignored). */
-const EVIDENCE_RE = /([^\s:`'"()[\]<>,;]+):(\d+)/;
+/** A path:line inside one evidence token; the path may hold ( ) [ ] segments (route groups, [slug], [...slug]) (#4327). */
+const EVIDENCE_RE = /([^:]+):(\d+)/;
 /** Test files in any common ecosystem: test dirs, *.test.* / *.spec.*, test_*.*, *_test.*, *Test(s).java|kt|cs|php|scala, *_spec.rb, tests.rs, conftest.py, snapshots. */
 const TEST_RE = /(^|\/)(test|tests|__tests__|spec|specs|testdata|__snapshots__)\/|\.(test|spec)\.[a-z0-9]+$|(^|\/)test_[^/]+\.[a-z0-9]+$|_test\.[a-z0-9]+$|Tests?\.(java|kt|kts|cs|php|scala|swift)$|_spec\.rb$|(^|\/)tests\.rs$|(^|\/)conftest\.py$|\.bats$|\.snap$/;
 /** Files any change may touch without being a deliverable: changelogs and dependency lockfiles. */
@@ -370,10 +370,42 @@ export function resolveEvidencePath(p, changedFiles = []) {
   const n = normalizeEvidencePath(p, { changedFiles });
   return n && changedFiles.includes(n) ? n : null;
 }
+const count = (s, ch) => s.split(ch).length - 1;
+/** Drops a leading or trailing bracket that has no partner inside the path: `(src/a.js` -> `src/a.js`, `(g)/a.tsx` stays. */
+function trimUnbalanced(p) {
+  for (let again = true; again && p;) {
+    again = false;
+    for (const [o, c] of [["(", ")"], ["[", "]"]]) {
+      if (p.startsWith(o) && count(p, o) > count(p, c)) { p = p.slice(1); again = true; }
+      if (p.endsWith(c) && count(p, c) > count(p, o)) { p = p.slice(0, -1); again = true; }
+    }
+  }
+  return p;
+}
+/**
+ * The first path:line anywhere in the evidence text, verbatim (#4327: `(group)`, `[slug]`, `[...slug]` segments kept).
+ * Backticks and quotes are ignored, a markdown link `[label](path:line)` yields its target, and only brackets with no
+ * partner inside the path (prose like `(src/a.js:3)`) are dropped.
+ */
+export function evidencePathLine(text) {
+  for (let tok of String(text ?? "").replace(/[`'"]/g, "").split(/[\s,;<>]+/)) {
+    const link = tok.lastIndexOf("](");
+    if (link >= 0) tok = tok.slice(link + 2);
+    const m = EVIDENCE_RE.exec(tok);
+    const path = m && trimUnbalanced(m[1]);
+    if (path) return { path, line: m[2] };
+  }
+  return null;
+}
 /** The path:line in an evidence string, with the path normalized; null when there is none. */
 function evidenceOf(text, ctx) {
-  const m = EVIDENCE_RE.exec(String(text ?? ""));
-  return m ? { path: normalizeEvidencePath(m[1], ctx), line: m[2] } : null;
+  const m = evidencePathLine(text);
+  return m ? { path: normalizeEvidencePath(m.path, ctx), line: m.line } : null;
+}
+const MISSING_PATH_RE = /^[^:]+: evidence path .+ does not exist$/;
+/** #4327: true when every problem of an incomplete review is an evidence path that did not resolve (a re-ask can fix it). */
+export function evidencePathOnly(problems = []) {
+  return problems.length > 0 && problems.every((p) => MISSING_PATH_RE.test(String(p)));
 }
 const reviewedFiles = (changedFiles, ignore) => changedFiles.filter((x) => !ignore.some((pre) => x.startsWith(pre)));
 

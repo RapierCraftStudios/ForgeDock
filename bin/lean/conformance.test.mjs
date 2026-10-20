@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, explainFailures, missingTool, repoTracks, tmpdirInputs } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -141,6 +141,30 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.equal(normalizeEvidencePath("route.ts", { changedFiles: ["app/a/route.ts", "app/b/route.ts"] }), "route.ts", "ambiguous stays as is");
     assert.equal(normalizeEvidencePath("b/route.ts", { changedFiles: ["app/a/route.ts", "app/b/route.ts"] }), "app/b/route.ts");
     assert.equal(decide(row("R1", { evidence: "scrape.js:7" }), ctx).review.requirements[0].evidence, "src/scrape.js:7");
+  });
+  it("#4327 evidence paths with route-group, dynamic and catch-all segments are kept verbatim", () => {
+    const repo = ["apps/admin/app/(console)/layout.tsx", "apps/web/app/blog/[slug]/page.tsx", "apps/web/app/docs/[...slug]/page.tsx"];
+    const c = { ...ctx, repoFiles: repo, pathExists: (p) => repo.includes(p) };
+    for (const [ev, want] of [
+      ["`(console)/layout.tsx:12` + nav (sidebar)", "apps/admin/app/(console)/layout.tsx:12"],
+      ["`apps/admin/app/(console)/layout.tsx`:12", "apps/admin/app/(console)/layout.tsx:12"],
+      ["see apps/web/app/blog/[slug]/page.tsx:4", "apps/web/app/blog/[slug]/page.tsx:4"],
+      ["(apps/web/app/docs/[...slug]/page.tsx:9)", "apps/web/app/docs/[...slug]/page.tsx:9"],
+      ["[page](apps/web/app/docs/[...slug]/page.tsx:9)", "apps/web/app/docs/[...slug]/page.tsx:9"],
+    ]) {
+      const d = decide(row("R1", { evidence: ev }), c);
+      assert.equal(d.state, "conforms", ev); assert.equal(d.review.requirements[0].evidence, want, ev);
+    }
+    assert.deepEqual(evidencePathLine("(src/scrape.js:7), fixed"), { path: "src/scrape.js", line: "7" });
+  });
+  it("#4327 a missing route-group path is still missing; only path problems qualify for the extra re-ask", () => {
+    const c = { ...ctx, repoFiles: ["apps/admin/app/(console)/layout.tsx"], pathExists: (p) => p === "apps/admin/app/(console)/layout.tsx" };
+    const d = decide(row("R1", { evidence: "`apps/admin/app/(admin)/layout.tsx:12`" }), c);
+    assert.equal(d.state, "review.incomplete"); assert.deepEqual(d.missing, ["R1"]);
+    assert.match(d.failures[0].detail, /evidence path apps\/admin\/app\/\(admin\)\/layout\.tsx does not exist/);
+    assert.equal(evidencePathOnly(d.failures.map((f) => f.detail)), true);
+    assert.equal(evidencePathOnly(decide({ verdict: "PASS" }, ctx).failures.map((f) => f.detail)), false);
+    assert.equal(evidencePathOnly([]), false);
   });
   it("#4160 a targeted re-ask merges by id: the repair rows complete the first reply", () => {
     const first = { ...good, requirements: [good.requirements[1]], preserve: [] };

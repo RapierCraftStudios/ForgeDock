@@ -319,6 +319,18 @@ describe("core work-on", () => {
     assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes("issue_coverage is missing")));
   });
 
+  it("#4327 a review incomplete only by unresolved evidence paths gets one more targeted re-ask, then merges", async () => {
+    const lost = () => conf({ requirements: [{ id: "R1", status: "implemented", evidence: "/layout.tsx:3", validated_by: "V1" }] });
+    const w = world({ reviews: [lost(), lost(), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    const rv = reviewers(w);
+    assert.equal(rv.length, 3); assert.equal(builders(w).length, 2, "never charged to the builder");
+    assert.match(rv[2][4], /answer ONLY for these ids or sections: R1/); assert.match(rv[2][4], /evidence path \/layout\.tsx does not exist/);
+    const w2 = world({ reviews: [lost(), lost(), lost(), ok()] });
+    const r2 = await run(w2);
+    assert.equal(r2.code, "review.incomplete"); assert.equal(reviewers(w2).length, 3, "at most three reviewer runs"); assert.equal(w2.merges.length, 0);
+  });
+
   it("a CONFORMS verdict whose rows fail is not conforming (the engine computes the verdict)", async () => {
     const w = world({ reviews: [bad("half done", "CONFORMS"), ok()] });
     assert.equal((await run(w)).terminalReason, "merged");
