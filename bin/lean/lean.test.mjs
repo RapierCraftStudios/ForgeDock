@@ -1243,6 +1243,21 @@ describe("structure delta and decision provenance at merge (forge#4165)", () => 
     assert.equal(t2.conformance_mode, "enforce"); assert.equal(t2.shadow_would, undefined); assert.ok(e);
   });
 
+  it("forge#4161: the merged lane result carries the structure record, milestone and lane for the drift fold (no extra call)", async () => {
+    const w = mworld({ milestone: "Remote MCP Server", branchesOnOrigin: ["staging", "milestone/remote-mcp-server"] });
+    const r = await run(w, { lane: undefined });
+    assert.equal(r.terminalReason, "merged");
+    const t = w.telemetry.find((x) => x.event === "STRUCTURE_DELTA");
+    assert.deepEqual(r.structure, { deps_added: t.deps_added, deps_removed: t.deps_removed, new_edges: t.new_edges, removed_edges: t.removed_edges, top_growth: t.top_growth, decisions: t.decisions });
+    assert.deepEqual([r.milestone, r.lane], ["Remote MCP Server", "milestone/remote-mcp-server"]);
+    assert.equal(w.structureCalls, 2, "no extra script run");
+    const nm = mworld({ contract: CONTRACT });
+    nm.io.structureDelta = async () => ({ ...D, import_pairs: [] }); // undeclared edge: needs-human, never merged
+    const r2 = await run(nm);
+    assert.notEqual(r2.terminalReason, "merged");
+    assert.equal(r2.structure, undefined, "only a merged result carries it");
+  });
+
   it("a run that does not merge writes no merge-time STRUCTURE_DELTA", async () => {
     const w = world();
     w.io.structureDelta = async () => ({ ...D, import_pairs: [] }); // undeclared edge: needs-human after one resume

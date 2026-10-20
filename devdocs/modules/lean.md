@@ -188,6 +188,25 @@ share`). `scripts/maintenance-scan.sh` is the deterministic producer
 (hotspots, package cycles via `structure-delta.sh`, dead-code tools, oversized
 docs), deduplicated by a `FORGE:MAINT:<kind>:<key>` marker.
 
+Milestone drift (#4161, no LLM): a merged lane's result carries `structure`
+(the merge-time STRUCTURE_DELTA record), `milestone` and `lane`.
+`orchestrate.mjs` awaits `drift.onMerged` for merged `milestone/*` lanes
+before their slot frees. A drift error is a `drift` row and never changes the
+outcome. `drift.mjs` `makeDrift` (wired by `engine-cli.mjs`) folds the record,
+keyed by PR, into a `<!-- FORGE:DRIFT {json} -->` block in the GitHub milestone
+description (GET + PATCH; the text around it is kept). With forge.yaml
+`orchestrate.drift` thresholds (`readDrift`: `pair_growth`, `package_lines`,
+`file_lines`), it fetches the milestone and staging branches and runs
+`scripts/milestone-drift.sh`. That script recomputes pair growth and new
+edges (`structure-delta.sh`) and size growth (one `git diff --numstat`,
+generated paths excluded) from the fork point. It then files one templated
+issue per crossing in the milestone, deduplicated by a
+`FORGE:DRIFT:<slug>:<kind>:<key>` marker. `block_dispatch: true` holds queued
+issues on that lane whose Affected Files sit under a flagged package dir;
+they end `held` (`drift: <dir> flagged`). The flags are in memory, so a
+resumed batch holds nothing until the next merge. With no config, only the
+summary is written. `/milestone drift <slug>` prints the script's text report.
+
 ## Other files
 
 `checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),

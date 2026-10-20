@@ -1544,7 +1544,8 @@ export async function runCore(o) {
       } catch (e) { T.anomalies.push(`refactor:split chain issue not filed (the maintenance scan re-files the hotspot): ${String(e?.message ?? e).slice(0, 200)}`); }
     }
     await label("merged");
-    return await finish("merged", `PR #${pr}`, { pr });
+    // forge#4161: the merge-time structure record and the milestone ride on the lane result for orchestrate's drift fold.
+    return await finish("merged", `PR #${pr}`, { pr, structure: T.structure ?? null, ...(milestone ? { milestone } : {}), ...(lane ? { lane } : {}) });
   } catch (e) {
     if (e?.deferUsageLimit) {
       const when = e.resetAt || (Number.isFinite(e.resetAtEpochMs) ? new Date(e.resetAtEpochMs).toISOString() : "unknown");
