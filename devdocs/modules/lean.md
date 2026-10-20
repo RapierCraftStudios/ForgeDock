@@ -719,6 +719,12 @@ queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 L
   rspec`, `python manage.py test`, `python -m unittest`, `tox`/`nox` (no publish/release/deploy/upload env), `deno|bun
   test`, `pnpm -r`, `npm --prefix DIR`, `test:*`-style script names, `bash|sh <path>.test.sh`, each with its globs.
   Cost: 0 LLM calls; one optional `gh api user` per batch.
+- 2026-10-20 (#4314 review): `test-map.sh` accepts `test|lint|check|typecheck|type-check|tsc` bare, and sub-named scripts
+  only with suffixes `unit|ci|node|types|type|ts|js|static|check` (`format` only when the command is a check form);
+  anything containing `fix|watch|write|update|dev|serve|start|e2e|integration|deploy|release|publish|snapshot|-u` is
+  rejected, for package.json scripts and `npm run|pnpm|yarn|bun run` workflow steps. `prefilter.mjs`: once the close
+  succeeds the result is `closed:true` whatever the marker comment does; the comment is retried once, then a short
+  marker-only comment is posted so the #4305 reopen guard still sees the close.
 
 ## Entry 2026-10-20 — 1.30.0 staging review LOW follow-ups (#4316)
 

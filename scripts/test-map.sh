@@ -59,13 +59,33 @@ US="$(printf '\037')"
 row() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$T/rows"; }
 JS_EXT="js jsx ts tsx mjs cjs"
 # check recognisers shared by package.json scripts / Makefile targets and the workflow allowlist (forge#4300)
-PKG_SCRIPTS="test|lint|typecheck|type-check|check"
+PKG_SCRIPTS="test|lint|typecheck|type-check|check|tsc"
 MAKE_TARGETS="test|lint|check|typecheck|vet"
 # forge#4315: `test:unit`, `lint:css` ... are the same check under a sub-name
+# (#4314: only a closed set of suffixes; fixers `lint:fix`, watchers, e2e/integration (need services), deploy-ish and
+# snapshot-updating scripts never run pre-PR.) $2 (optional) is the script's command: `format` is a check only when
+# that command is a check form.
+PKG_DENY='fix|watch|write|update|dev|serve|start|e2e|integration|deploy|release|publish|snapshot|-u'
+PKG_SUFFIXES="unit ci node types type ts js static check"
 pkg_check_script() {
+  [ -n "${1:-}" ] || return 1
+  case "$1" in *[!A-Za-z0-9:_.-]*) return 1 ;; esac
   b=${1%%:*}
-  case "$1" in *:*) case "${1#*:}" in ""|*[!A-Za-z0-9:_.-]*) return 1 ;; esac ;; esac
-  case "|$PKG_SCRIPTS|" in *"|$b|"*) [ -n "$b" ] ;; *) return 1 ;; esac
+  case "|$PKG_SCRIPTS|" in *"|$b|"*) ;; *) return 1 ;; esac
+  [ "$b" = "$1" ] && return 0
+  printf '%s' "$1" | grep -qiE "$PKG_DENY" && return 1
+  rest=${1#*:}; [ -n "$rest" ] || return 1
+  oldifs=$IFS; IFS=:; set -f
+  for seg in $rest; do
+    ok=0
+    case " $PKG_SUFFIXES " in *" $seg "*) [ -n "$seg" ] && ok=1 ;; esac
+    if [ "$ok" = 0 ] && [ "$seg" = format ]; then
+      case " ${2:-} " in *" --check "*|*" -c "*|*" --list-different "*|*" -l "*) ok=1 ;; esac
+    fi
+    [ "$ok" = 1 ] || { IFS=$oldifs; set +f; return 1; }
+  done
+  IFS=$oldifs; set +f
+  return 0
 }
 make_check_target() { case "|$MAKE_TARGETS|" in *"|$1|"*) [ -n "$1" ] ;; *) return 1 ;; esac; }
 has_word() { k=$1; shift; for w in "$@"; do [ "$w" = "$k" ] && return 0; done; return 1; }
@@ -87,10 +107,10 @@ grep -E '(^|/)package\.json$' "$T/files" | grep -v -E '(^|/)node_modules/' | sor
   globs="$(ext_globs "$d" "$JS_EXT")$US$pj"
   tag=""
   if [ -n "$(ls "$d"/vitest.config.* "$d"/jest.config.* 2>/dev/null)" ] || jq -e 'has("jest")' "$pj" >/dev/null 2>&1; then tag=" (vitest/jest config)"; fi
-  jq -r '(.scripts // {}) | to_entries[] | select(.value | type == "string") | .key' "$pj" 2>/dev/null | while IFS= read -r s; do
+  jq -r '(.scripts // {}) | to_entries[] | select(.value | type == "string") | .key + "\t" + .value' "$pj" 2>/dev/null | while IFS="$(printf '\t')" read -r s sv; do
     case "$s" in
       test) row "$pj#scripts.$s$tag" "$d" "$PM run $s" "$globs" ;;
-      *) pkg_check_script "$s" && row "$pj#scripts.$s" "$d" "$PM run $s" "$globs" ;;
+      *) pkg_check_script "$s" "$sv" && row "$pj#scripts.$s" "$d" "$PM run $s" "$globs" ;;
     esac
   done
 done

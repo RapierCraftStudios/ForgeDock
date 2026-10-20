@@ -145,13 +145,23 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
     }
     const sig = await collectSignals({ iss, repo, lane, io, cwd, selfLogins });
     const close = async (kind, body, detail) => {
+      let note = "";
       if (!dryRun) {
         // #4315: close first: the marker is posted only on an issue that was closed, so it always means "reopened" later
         await io.gh(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
-        await io.gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- ${PREFILTER_MARKER} -->\n<!-- FORGE:VALIDATE -->\n${body}`)]);
+        // #4314: the issue IS closed from here on: the result is closed:true whatever the comment does, so no lane starts on it.
+        // The comment is retried once, then a marker-only comment (a second, tiny payload) keeps the #4305 reopen guard working.
+        const comment = (text) => io.gh(["issue", "comment", String(issue), "-R", repo, "--body", text]);
+        const full = capComment(`<!-- ${PREFILTER_MARKER} -->\n<!-- FORGE:VALIDATE -->\n${body}`);
+        const minimal = `<!-- ${PREFILTER_MARKER} -->\nClosed by the pre-filter (${kind}); the explanation comment could not be posted. Reopen if this is wrong.`;
+        let posted = false;
+        for (const text of [full, full, minimal]) {
+          try { await comment(text); posted = true; break; } catch { /* next attempt */ }
+        }
+        if (!posted) note = " (closed, but no marker comment could be posted: a reopen is not recognised)";
         try { await io.transitionLabel?.(issue, "invalid"); } catch { /* labels are best effort */ }
       }
-      return { ...out, closed: !dryRun, kind, detail };
+      return { ...out, closed: !dryRun, kind, detail: `${detail}${note}` };
     };
 
     // #4305: a skipped CI-green shortcut is named in every non-closing detail line that follows (#4316: with its reason).
