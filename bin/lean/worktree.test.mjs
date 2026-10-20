@@ -3,8 +3,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, statSync, existsSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, readdirSync, statSync, existsSync, rmSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join, dirname } from "node:path";
 import { sparsePlan, sparsePatterns, addLaneWorktree } from "./worktree.mjs";
 
@@ -16,7 +16,7 @@ const blob = (n, ch = "x") => ch.repeat(n);
 
 /** A fixture repo: {path: content}. Returns its dir. */
 function repo(files) {
-  const dir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "wt4221-"));
+  const dir = tmpDir("wt4221-");
   const r = join(dir, "r");
   mkdirSync(r);
   gitSync(["init", "-q", "-b", "main"], r);

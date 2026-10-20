@@ -15,7 +15,7 @@ import { groupingPrompt, GROUPING_SYSTEM } from "./prompts.mjs";
 import { noToolFlags } from "./effects.mjs";
 import {
   runSplitStep, defaultRun, compactIndex, slicePlan, parseSplitTarget, parseTestCmd, parseSplitPlan, parseGroupingReply,
-  renderChainIssue, renderSplitPrBody, SYMBOL_INDEX, SYMBOL_MOVE, REFACTOR_VERIFY, SPLIT_LABEL,
+  renderChainIssue, renderSplitPrBody, SYMBOL_INDEX, SYMBOL_MOVE, REFACTOR_VERIFY, SPLIT_LABEL, SYMBOL_INDEX_MJS, SYMBOL_MOVE_TS,
 } from "./refactor.mjs";
 
 const GEN = fileURLToPath(new URL("../../scripts/fixtures/symbol-move/gen_big.py", import.meta.url));
@@ -187,14 +187,14 @@ describe("refactor:split step on a fixture repo (forge#4211)", () => {
     });
   }
 
-  it("R6: a non-Python target is refused as needs-human material before anything runs", async () => {
+  it("R6: a target with no mover (Go) is refused as needs-human material before anything runs", async () => {
     const d = fixtureRepo();
-    mkdirSync(join(d, "src")); writeFileSync(join(d, "src/big.ts"), "export const a = 1;\n");
-    git(d, "add", "-A"); git(d, "commit", "-qm", "ts");
+    mkdirSync(join(d, "src")); writeFileSync(join(d, "src/big.go"), "package big\n");
+    git(d, "add", "-A"); git(d, "commit", "-qm", "go");
     const calls = [];
-    const r = await runSplitStep({ wt: d, base: "base", issueBody: "<!-- FORGE:MAINT:refactor:split:src/big.ts -->", precheckCommands: [TEST_CMD], git: gitFx(d),
+    const r = await runSplitStep({ wt: d, base: "base", issueBody: "<!-- FORGE:MAINT:refactor:split:src/big.go -->", precheckCommands: [TEST_CMD], git: gitFx(d),
       run: async (...a) => { calls.push(a); return defaultRun(...a); }, callGrouper: grouper(FULL).fn });
-    assert.deepEqual(r, { ok: false, code: OUTCOME_CODES.SPLIT_UNSUPPORTED, reason: "no codemod tool for ts: `src/big.ts` (the refactor:split mover supports Python only)" });
+    assert.deepEqual(r, { ok: false, code: OUTCOME_CODES.SPLIT_UNSUPPORTED, reason: "no codemod tool for go: `src/big.go` (the refactor:split movers support Python and TypeScript)" });
     assert.equal(calls.length, 0);
     assert.equal(clean(d), "");
   });
@@ -244,6 +244,116 @@ describe("refactor:split step on a fixture repo (forge#4211)", () => {
   });
 
   it("the scripts the step calls exist", () => {
-    for (const p of [SYMBOL_INDEX, SYMBOL_MOVE, REFACTOR_VERIFY]) assert.ok(existsSync(p), p);
+    for (const p of [SYMBOL_INDEX, SYMBOL_MOVE, REFACTOR_VERIFY, SYMBOL_INDEX_MJS, SYMBOL_MOVE_TS]) assert.ok(existsSync(p), p);
+  });
+});
+
+// ---- forge#4212: TypeScript targets go through scripts/symbol-move.mjs (ts-morph) ----
+// The end-to-end case needs SYMBOL_MOVE_TS_NODE_MODULES=<node_modules holding ts-morph> and skips without it.
+const TS_GEN = fileURLToPath(new URL("../../scripts/fixtures/symbol-move-ts/gen_big.mjs", import.meta.url));
+const TS_TEST_CMD = "env -u NODE_TEST_CONTEXT node --test test/big.test.ts"; // not a child of this node:test run
+const TS_BODY = "`src/big.ts` is a hotspot.\n\n<!-- FORGE:MAINT:refactor:split:src/big.ts -->\n";
+const TSM = process.env.SYMBOL_MOVE_TS_NODE_MODULES && existsSync(join(process.env.SYMBOL_MOVE_TS_NODE_MODULES, "ts-morph")) ? process.env.SYMBOL_MOVE_TS_NODE_MODULES : null;
+const TS_PLAN = {
+  consts: seq(20, (i) => `LIMIT_${i}`),
+  helpers: seq(20, (i) => [`_scale_${i}`, `compute_${i}`]).flat(),
+  models: [...seq(20, (i) => `Item_${i}`), ...seq(20, (i) => `Store_${i}`)],
+  aio: seq(20, (i) => `fetch_${i}`),
+};
+/** A git repo holding the TS fixture src/big.ts and its node:test suite, committed and tagged `base`. */
+function tsFixtureRepo() {
+  const d = join(tmpDir("split-ts-"), "repo");
+  mkdirSync(d, { recursive: true });
+  git(d, "init", "-q");
+  writeFileSync(join(d, ".gitignore"), "node_modules/\n.forge-lean/\n");
+  execFileSync(process.execPath, [TS_GEN, d], { env: ENV });
+  git(d, "add", "-A"); git(d, "commit", "-qm", "base"); git(d, "tag", "base");
+  return d;
+}
+
+describe("refactor:split TypeScript targets (forge#4212)", () => {
+  it("R3: ts-morph unavailable is split.unsupported `no codemod tool for ts`, before the grouping call, with no partial edit", async () => {
+    const d = tsFixtureRepo();
+    const g = grouper(TS_PLAN);
+    const home = tmpDir("split-ts-home-");
+    const r = await runSplitStep({ wt: d, base: "base", issueBody: TS_BODY, precheckCommands: [TS_TEST_CMD], runTmp: tmpDir("split-run-"), git: gitFx(d),
+      env: { NODE_PATH: "", HOME: home }, callGrouper: g.fn });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, OUTCOME_CODES.SPLIT_UNSUPPORTED);
+    assert.match(r.reason, /^no codemod tool for ts: ts-morph is not resolvable/);
+    assert.equal(g.calls.length, 0, "refused before the grouping call");
+    assert.equal(clean(d), "");
+    assert.equal(git(d, "rev-parse", "HEAD"), git(d, "rev-parse", "base"));
+    assert.equal(existsSync(join(d, "src/big_parts")), false);
+  });
+
+  it("R1: a .ts target dispatches to node symbol-index.mjs and symbol-move.mjs; a ts-morph refusal from the mover resets the worktree", async () => {
+    const d = tsFixtureRepo();
+    const calls = [];
+    const index = { symbols: [{ name: "LIMIT_00", kind: "const", lines: 1, public: true }, { name: "compute_00", kind: "function", lines: 4, public: true }], edges: [], imports: [], cycles: [] };
+    const run = async (cmd, args, o) => {
+      calls.push({ cmd, args });
+      if (args.includes(SYMBOL_MOVE_TS) && args.includes("--probe")) return { code: 0, stdout: JSON.stringify({ status: "ok", tool: "ts-morph" }), stderr: "" };
+      if (args.includes(SYMBOL_INDEX_MJS)) return { code: 0, stdout: JSON.stringify(index), stderr: "" };
+      if (args.includes(REFACTOR_VERIFY)) return { code: 0, stdout: "{}", stderr: "" };
+      if (args.includes(SYMBOL_MOVE_TS)) {
+        writeFileSync(join(o.cwd, "src/partial.ts"), "export {};\n"); // whatever a mover leaves behind is reset
+        return { code: 3, stdout: JSON.stringify({ status: "refused", reason: "no codemod tool for ts: ts-morph is not resolvable from src" }), stderr: "" };
+      }
+      return defaultRun(cmd, args, o);
+    };
+    const r = await runSplitStep({ wt: d, base: "base", issueBody: TS_BODY, precheckCommands: [TS_TEST_CMD], runTmp: tmpDir("split-run-"), git: gitFx(d), run,
+      callGrouper: grouper({ consts: ["LIMIT_00"], helpers: ["compute_00"] }).fn });
+    assert.equal(r.code, OUTCOME_CODES.SPLIT_UNSUPPORTED);
+    assert.match(r.reason, /symbol-move refused: no codemod tool for ts/);
+    const idx = calls.find((c) => c.args.includes(SYMBOL_INDEX_MJS)), mv = calls.find((c) => c.args.includes(SYMBOL_MOVE_TS) && !c.args.includes("--probe"));
+    assert.equal(idx.cmd, process.execPath);
+    assert.deepEqual(idx.args, [SYMBOL_INDEX_MJS, "src/big.ts"]);
+    assert.equal(mv.cmd, process.execPath);
+    assert.deepEqual(mv.args.slice(0, 4), [SYMBOL_MOVE_TS, "--src", "src/big.ts", "--plan"]);
+    assert.ok(!calls.some((c) => c.args.includes(SYMBOL_INDEX) || c.args.includes(SYMBOL_MOVE) || c.args.includes("import libcst")), "no Python tool for a .ts target");
+    assert.equal(clean(d), "");
+    assert.equal(git(d, "rev-parse", "HEAD"), git(d, "rev-parse", "base"));
+  });
+
+  it("a plan the TS mover refuses is split.plan_invalid", async () => {
+    const d = tsFixtureRepo();
+    const run = async (cmd, args, o) => {
+      if (args.includes(SYMBOL_MOVE_TS)) return args.includes("--probe") ? { code: 0, stdout: "{}", stderr: "" } : { code: 3, stdout: JSON.stringify({ status: "refused", reason: "plan creates an import cycle: a -> b -> a" }), stderr: "" };
+      if (args.includes(SYMBOL_INDEX_MJS)) return { code: 0, stdout: JSON.stringify({ symbols: [{ name: "ping", kind: "function", lines: 3, public: true }, { name: "pong", kind: "function", lines: 3, public: true }], edges: [] }), stderr: "" };
+      if (args.includes(REFACTOR_VERIFY)) return { code: 0, stdout: "{}", stderr: "" };
+      return defaultRun(cmd, args, o);
+    };
+    const r = await runSplitStep({ wt: d, base: "base", issueBody: TS_BODY, precheckCommands: [TS_TEST_CMD], runTmp: tmpDir("split-run-"), git: gitFx(d), run, callGrouper: grouper({ a: ["ping"], b: ["pong"] }).fn });
+    assert.equal(r.code, OUTCOME_CODES.SPLIT_PLAN_INVALID);
+    assert.match(r.reason, /import cycle/);
+    assert.equal(clean(d), "");
+  });
+
+  it("R2: the TS module becomes modules plus a re-export barrel, refactor-verify ok, one grouping call", { skip: TSM ? false : "set SYMBOL_MOVE_TS_NODE_MODULES to a node_modules holding ts-morph" }, async () => {
+    const d = tsFixtureRepo();
+    const g = grouper(TS_PLAN);
+    const r = await runSplitStep({ wt: d, base: "base", issue: 7, issueBody: TS_BODY, precheckCommands: [TS_TEST_CMD], runTmp: tmpDir("split-run-"), git: gitFx(d),
+      env: { NODE_PATH: TSM }, callGrouper: g.fn });
+    assert.equal(r.ok, true, r.reason);
+    assert.equal(r.package, "src/big_parts");
+    assert.equal(r.packageName, "big_parts");
+    assert.equal(r.tool, "ts-morph");
+    assert.deepEqual(Object.keys(r.modules).sort(), ["aio", "consts", "helpers", "models"]);
+    assert.deepEqual(r.verify, { failures: [], ok: true });
+    assert.equal(g.calls.length, 1);
+    for (const m of ["consts", "helpers", "models", "aio"]) assert.ok(existsSync(join(d, `src/big_parts/${m}.ts`)), m);
+    assert.match(readFileSync(join(d, "src/big.ts"), "utf8"), /^export \{ .*\} from "\.\/big_parts\/helpers\.ts";$/m);
+    assert.equal(clean(d), "", "the move is committed");
+    assert.match(git(d, "log", "-1", "--format=%s"), /^refactor\(split\): move 4 module\(s\) of src\/big.ts into src\/big_parts \(#7\)$/);
+    const body = renderSplitPrBody({ issue: 7, ...r });
+    assert.match(body, /scripts\/symbol-move\.mjs` \(ts-morph\)/);
+    // a chained remainder carries the bare package name, which the TS mover takes as --package
+    assert.equal(parseSplitPlan(renderChainIssue({ parent: 7, target: r.target, packageName: r.packageName, rest: { more: ["x"] } }).body).package, "big_parts");
+  });
+
+  it("renderSplitPrBody names the mover by the target's language when the result carries no tool (a rerun)", () => {
+    assert.match(renderSplitPrBody({ issue: 1, target: "src/big.ts", package: null, modules: {}, verify: { ok: true }, rest: null, grouped: false }), /symbol-move\.mjs` \(ts-morph\)/);
+    assert.match(renderSplitPrBody({ issue: 1, target: "pkg/big.py", package: null, modules: {}, verify: { ok: true }, rest: null, grouped: false }), /symbol-move\.py` \(libcst\)/);
   });
 });

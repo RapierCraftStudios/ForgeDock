@@ -3,7 +3,7 @@
 // forgedock gc reaper (#4180): injected docker/git/gh/ps/fs probes; real temp dirs, never real docker/git/gh/kill.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, existsSync, readFileSync, utimesSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, utimesSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpDir } from "./_tmp.mjs";
 import { parseGcArgs, parseDuration, planGc, applyGc, runGc, parseDockerTime, GC_SCOPES } from "../gc.mjs";
@@ -293,6 +293,103 @@ describe("forgedock gc tmp (#4180, #4104 parity)", () => {
   });
 });
 
+// ---- #4183: forge.yaml hygiene settings, doctor check, near-ceiling predicate, orchestrate hook ----
+import { readHygiene, hygieneTtls, hygieneCheck, runOwnedGc, HYGIENE_DEFAULTS } from "../gc.mjs";
+import { nearCeiling } from "../lean/admission.mjs";
+import { orchestrate } from "../lean/orchestrate.mjs";
+
+describe("forge.yaml hygiene (#4183)", () => {
+  it("defaults when absent; block values honoured; invalid values fall back; auto_gc can be disabled", () => {
+    const d = tmpDir("hyg-");
+    assert.deepEqual(readHygiene(d), { ...HYGIENE_DEFAULTS });
+    writeFileSync(join(d, "forge.yaml"), "project:\n  repo: r\nhygiene:\n  container_ttl_hours: 2\n  worktree_ttl_hours: nope\n  tmp_ttl_hours: 1.5\n  delete_merged_branches: false\n  max_host_load_ratio: 3\n  auto_gc: false\n");
+    const h = readHygiene(d);
+    assert.equal(h.container_ttl_hours, 2); assert.equal(h.worktree_ttl_hours, 24); assert.equal(h.tmp_ttl_hours, 1.5);
+    assert.equal(h.delete_merged_branches, false); assert.equal(h.max_host_load_ratio, 0.8); assert.equal(h.auto_gc, false);
+    assert.deepEqual(hygieneTtls(h), { container: 2 * H, volume: 2 * H, worktree: 24 * H, branch: 24 * H, tmp: 1.5 * H, process: 1.5 * H });
+  });
+
+  it("per-type TTLs: a 10h-old clean worktree is kept under the 24h worktree TTL, reclaimed with --older-than 6h", async () => {
+    const w = world();
+    const wt = join(w.wtRoot, "lean-9"); mkdirSync(wt); writeFileSync(join(wt, "f"), "x");
+    w.registered.push(resolve(wt)); w.toplevel[resolve(wt)] = true;
+    utimesSync(wt, new Date(NOW - 10 * H), new Date(NOW - 10 * H));
+    let r = await run(w, ["--worktrees"]);
+    assert.match(r.out, /TTL docker 6h, worktrees 1d, tmp 6h/);
+    assert.match(r.out, /lean-9  \(younger than TTL\)/);
+    r = await run(w, ["--worktrees", "--older-than", "6h"]);
+    assert.match(r.out, /older than 6h/); assert.match(r.out, /reclaim .*lean-9/);
+  });
+
+  it("forge.yaml hygiene is read from the repo: container TTL and delete_merged_branches: false", async () => {
+    const w = world({
+      containers: [{ Names: "lean1-pg", CreatedAt: dockerTime(NOW - 3 * H), Labels: "forgedock.owner=1", Size: "1kB" }],
+      branches: { local: [], remote: [["feat/issue-1-lean", old()]] }, issues: { 1: "CLOSED" },
+    });
+    writeFileSync(join(w.repo, "forge.yaml"), "hygiene:\n  container_ttl_hours: 2\n  delete_merged_branches: false\n");
+    const r = await run(w, ["--apply", "--docker", "--branches"]);
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(destructive(w), ["rm -f lean1-pg"]);
+    assert.match(r.out, /feat\/issue-1-lean  \(delete_merged_branches: false\)/);
+  });
+
+  it("doctor Resource hygiene check: counts/sizes of owned leftovers, warns on reclaimable and unowned stale; --fix applies", async () => {
+    const w = world({
+      containers: [
+        { Names: "lean1-pg", CreatedAt: dockerTime(NOW - 10 * H), Labels: "forgedock.owner=1", Size: "1kB" },
+        { Names: "users-db", CreatedAt: dockerTime(NOW - 30 * H), Labels: "", Size: "1kB" },
+      ],
+    });
+    const plan = await planGcFor(w);
+    const c = hygieneCheck(plan);
+    assert.equal(c.status, "warn"); assert.equal(c.reclaimable, 1); assert.equal(c.stale, 1);
+    assert.match(c.detail, /owned: 1 container/); assert.match(c.detail, /1 reclaimable/); assert.match(c.detail, /1 unowned stale \(report only\)/); assert.match(c.detail, /doctor --fix/);
+    const res = await runOwnedGc({ probes: w.probes, hygiene: HYGIENE_DEFAULTS, now: NOW });
+    assert.equal(res.reclaimed, 1); assert.deepEqual(destructive(w), ["rm -f lean1-pg"]);
+    const after = hygieneCheck(res.plan, { applied: res.applied });
+    assert.match(after.detail, /reclaimed 1 of 1/);
+    const clean = hygieneCheck(await planGcFor(world()));
+    assert.equal(clean.status, "pass"); assert.match(clean.detail, /owned: none; 0 reclaimable/);
+  });
+
+  it("runOwnedGc never throws", async () => {
+    const w = world(); w.probes.git = async () => { throw new Error("boom"); }; w.probes.fs = { readdirSync() { throw new Error("x"); } };
+    const r = await runOwnedGc({ probes: w.probes, now: NOW });
+    assert.equal(r.reclaimed, 0);
+  });
+});
+
+async function planGcFor(w) {
+  const { planGc: plan } = await import("../gc.mjs");
+  return plan({ probes: w.probes, ttlMs: hygieneTtls(), now: NOW });
+}
+
+describe("near the admission ceiling (#4183)", () => {
+  const host = (o) => ({ loadAvg1: () => o.load ?? 0, cores: () => o.cores ?? 4, memAvailableMb: () => o.mem ?? 64000, tmpPaths: () => ["/t"], freeMb: () => o.tmp ?? 64000 });
+  it("true within the ratio of any threshold, false otherwise, on disabled admission or failed probes", async () => {
+    const L = { max_load_per_core: 4 }; // load gating is off by default (#4169), so these opt in
+    assert.equal(await nearCeiling({ cfg: L, host: host({ load: 13 }) }), true); // 3.25/core >= 0.8*4
+    assert.equal(await nearCeiling({ cfg: L, host: host({ load: 12 }) }), false);
+    assert.equal(await nearCeiling({ host: host({ load: 400 }) }), false); // no max_load_per_core: load is ignored
+    assert.equal(await nearCeiling({ host: host({ mem: 2500 }) }), true); // <= 2048/0.8
+    assert.equal(await nearCeiling({ host: host({ tmp: 1200 }) }), true);
+    assert.equal(await nearCeiling({ cfg: L, host: host({ load: 13 }), ratio: 1 }), false);
+    assert.equal(await nearCeiling({ host: host({ load: 13 }), cfg: { ...L, enabled: false } }), false);
+    assert.equal(await nearCeiling({ host: { loadAvg1: () => { throw new Error("x"); }, memAvailableMb: () => NaN } }), false);
+    assert.equal(await nearCeiling({}), false);
+  });
+});
+
+describe("orchestrate beforeAdmit hook (#4183)", () => {
+  it("runs before admissions while issues are ready; its errors never stop the batch", async () => {
+    let calls = 0;
+    const rows = await orchestrate({ issues: [1, 2], parallel: 1, readBody: async () => "", runOne: async () => ({ terminalReason: "merged", pr: 1 }),
+      beforeAdmit: async () => { calls++; throw new Error("gc down"); } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    assert.equal(calls, 2);
+  });
+});
+
 describe("forgedock gc deps (#4220 dependency cache)", () => {
   it("dry-run reports, --apply reclaims old unlocked snapshots, dead publishers' tmp dirs and dead locks; fresh and locked snapshots stay", async () => {
     const { makeDepCache } = await import("../lean/depcache.mjs");
@@ -317,5 +414,61 @@ describe("forgedock gc deps (#4220 dependency cache)", () => {
     for (const p of [oldSnap, deadTmp, deadLock]) assert.equal(existsSync(p), false, p);
     for (const p of [freshSnap, lockedSnap, join(root, "stores", "pnpm-store")]) assert.ok(existsSync(p), p);
     assert.match(r.out, /gc: reclaimed 3 of 3 item\(s\)/);
+  });
+});
+
+describe("3-issue batch leaves zero owned leftovers (#4184)", () => {
+  // Fake probes whose destructive calls mutate the world, so a second dry-run sees what --apply actually left behind.
+  const mutating = (w) => {
+    const { docker, git } = w.probes;
+    w.probes.docker = async (args) => {
+      if (args[0] === "rm") w.containers = w.containers.filter((c) => !args.includes(c.Names));
+      if (args[0] === "volume" && args[1] === "rm") w.volumes = w.volumes.filter((v) => !args.includes(v.Name));
+      return docker(args);
+    };
+    w.probes.git = async (args, o) => {
+      if (args[0] === "branch" && args[1] === "-D") w.branches.local = w.branches.local.filter(([n]) => n !== args[2]);
+      if (args[0] === "worktree" && args[1] === "remove") { const d = resolve(args.at(-1)); w.registered = w.registered.filter((r) => resolve(r) !== d); rmSync(d, { recursive: true, force: true }); }
+      return git(args, o);
+    };
+    return w;
+  };
+  it("after three crashed lanes, owned GC leaves a dry-run with no owned reclaimable container, volume, worktree, tmp or lane branch; unowned stays", async () => {
+    const w = mutating(world());
+    w.containers.push({ Names: "sqv-postgres", Labels: "", CreatedAt: dockerTime(NOW - 900 * H), Size: "50MB" });
+    for (const n of [101, 102, 103]) {
+      const wt = join(w.wtRoot, `lean-${n}`); mkdirSync(wt); writeFileSync(join(wt, "f.txt"), "x");
+      w.registered.push(wt); w.toplevel[resolve(wt)] = true;
+      const runTmp = join(w.tmpRoot, "runs", `${n}-1`); mkdirSync(runTmp, { recursive: true });
+      w.branches.local.push([`feat/issue-${n}-lean`, old()]); w.issues[n] = "CLOSED";
+      w.containers.push({ Names: `lean${n}-pg`, Labels: `forgedock.owner=1,forgedock.lane=${n}`, CreatedAt: dockerTime(NOW - 30 * H), Size: "5MB" });
+      w.volumes.push({ Name: `lean${n}-vol`, Labels: "forgedock.owner=1", CreatedAt: new Date(NOW - 30 * H).toISOString() });
+      writeLedger(w, { lane: `lean-${n}`, resources: [
+        { kind: "worktree", value: wt, registered: NOW - 2 * H }, { kind: "branch", value: `feat/issue-${n}-lean`, registered: NOW - 2 * H },
+        { kind: "tmp", value: runTmp, registered: NOW - 2 * H }, { kind: "container", value: `lean${n}-pg`, registered: NOW - H },
+        { kind: "volume", value: `lean${n}-vol`, registered: NOW - H },
+      ] });
+    }
+    const before = await planGc({ probes: w.probes, now: NOW });
+    const OWNED = new Set(["container", "volume", "worktree", "tmp", "branch"]);
+    const reclaimable = (p) => p.items.filter((i) => OWNED.has(i.type) && i.owned && i.action === "reclaim");
+    assert.equal(reclaimable(before).length, 15, "5 owned resources per lane before GC");
+
+    const r = await runOwnedGc({ probes: w.probes, now: NOW });
+    assert.equal(r.applied.failed.length, 0, JSON.stringify(r.applied.failed));
+
+    const dry = await run(w, ["--dry-run"]);
+    assert.equal(dry.code, 0, dry.out);
+    const after = await planGc({ probes: w.probes, now: NOW });
+    assert.deepEqual(reclaimable(after).map((i) => `${i.type}:${i.id}`), []);
+    assert.deepEqual(after.items.filter((i) => OWNED.has(i.type) && i.owned).map((i) => `${i.type}:${i.id}`), [], "no owned resource of a finished lane remains");
+    assert.ok(w.containers.some((c) => c.Names === "sqv-postgres"), "unowned container is never touched");
+  });
+  it("a CPU-bound lint/test phase alone does not trip the default admission ceiling (load gating off, #4169)", async () => {
+    const { checkAdmission, ADMISSION_DEFAULTS } = await import("../lean/admission.mjs");
+    assert.equal(ADMISSION_DEFAULTS.max_load_per_core, null);
+    const busy = { loadAvg1: () => 64, cores: () => 4, memAvailableMb: () => 8 * 1024, tmpPaths: () => ["/t"], freeMb: () => 20 * 1024 }; // 16/core on a 4c/16G host
+    assert.deepEqual(await checkAdmission({ host: busy }), { ok: true, reasons: [], detail: "" });
+    assert.equal(await nearCeiling({ host: busy }), false);
   });
 });

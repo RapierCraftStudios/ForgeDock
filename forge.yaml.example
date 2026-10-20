@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: agents, repos, project_board, orchestration, maintenance, pipeline, build, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
+# Optional sections: agents, repos, project_board, orchestration, maintenance, hygiene, pipeline, build, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -402,6 +402,25 @@ branches:
 #     file_lines: 600         # net lines added to one file
 #     block_dispatch: false   # true: hold queued issues whose Affected Files touch a flagged package
 #     generated_globs: "*.gen.ts, data/*"   # excluded from size growth (with .gitattributes linguist-generated)
+
+# =============================================================================
+# HYGIENE (OPTIONAL, safe defaults)
+# Automatic reclaim of ForgeDock's own leftovers (#4183) with the `forgedock gc`
+# reaper. Only resources ForgeDock provably owns (a lane ledger, a
+# `forgedock.owner=1` docker label, lean-*/agent-* worktrees, feat/issue-<n>-lean
+# branches, ~/.forge/tmp scratch) are reclaimed; everything else is reported.
+# Unpushed or uncommitted work, live lanes, protected and open-PR branches are
+# never touched. Block form only.
+# Commands: orchestrate (preflight + near-ceiling GC), doctor (--fix), gc, cleanup
+# =============================================================================
+
+# hygiene:
+#   container_ttl_hours: 6            # owned docker containers and volumes older than this are reclaimed
+#   worktree_ttl_hours: 24            # owned worktrees and abandoned lane branches
+#   tmp_ttl_hours: 6                  # ~/.forge/tmp run dirs and runner scratch
+#   delete_merged_branches: true      # false: lane branches of closed issues are only reported
+#   max_host_load_ratio: 0.8          # GC before an admission once the host is within 80% of engine admission limits
+#   auto_gc: true                     # false: orchestrate never runs GC (gc and doctor --fix still work)
 
 # =============================================================================
 # PIPELINE (OPTIONAL)

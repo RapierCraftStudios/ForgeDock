@@ -60,7 +60,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    ONE tool-less grouping call over the compact index (`noTools`, empty cwd; none
    for a chained `FORGE:SPLIT-PLAN`), moves ≤ `splitMaxLines` (4000) whole modules
    (`symbol-move.py`, `--extend` on chain steps), commits and proves it
-   (`refactor-verify.sh`). Refusals → `needs-human` `split.*`, worktree reset,
+   (`refactor-verify.sh`). TypeScript targets (#4212) use `symbol-index.mjs` and
+   `symbol-move.mjs` (ts-morph from the target repo or `NODE_PATH`; a `--probe`
+   before any edit refuses `no codemod tool for ts`) and leave a re-export barrel. Refusals → `needs-human` `split.*`, worktree reset,
    nothing pushed. No builder session: every fix path (precheck, CI, base-sync
    conflict) is `needs-human`; a clean base-sync re-verifies; no reviewer. After
    the merge the rest is filed as one chained `refactor:split` issue.
@@ -368,6 +370,14 @@ Chains: `slicePlan` + `symbol-move.py --extend` + a `FORGE:SPLIT-PLAN` follow-up
 `split.unsupported|plan_invalid|verify_failed`. Cost: one index-sized call, 0 reviewer runs per
 split, instead of a builder session plus a reviewer. ADR `decisions/4211-refactor-split-lane.md`.
 
+## Entry 2026-10-20 — TypeScript mover for refactor:split (#4212)
+
+`.ts/.tsx/.mts/.cts` targets go through `scripts/symbol-move.mjs` (ts-morph, same CLI/JSON/exit codes as
+`symbol-move.py`) and `scripts/symbol-index.mjs`; the old file becomes a re-export barrel. ts-morph is resolved
+from the target repo or `NODE_PATH` (no FD dependency); without it a `--probe` refuses `split.unsupported`
+`no codemod tool for ts` before any edit. `refactor-verify.sh` now resolves erased TS types (interfaces, type
+aliases) statically. Go/JS stay refused. ADR `decisions/4212-ts-symbol-move.md`.
+
 ## Entry 2026-10-20 — Cross-repo fairness weights in the host registry (#4193)
 
 `sched.mjs` `grantOrder(s)` replaces the static (priority, seq) sort for both
@@ -516,8 +526,37 @@ on the run record and the row, and in `ctx.placement`. The lane gets it as
 into FORGE:STATE (`placement: {where, reason, mode}`) and a trajectory decision.
 Cost: 0 LLM calls. Rationale: `devdocs/decisions/4256-hybrid-placement.md`.
 
+## Entry 2026-10-20 — Resource hygiene: preflight and admission GC (#4183)
+
+`forge.yaml` `hygiene:` (`container_ttl_hours` 6, `worktree_ttl_hours` 24,
+`tmp_ttl_hours` 6, `delete_merged_branches` true, `max_host_load_ratio` 0.8,
+`auto_gc` true) is read by `gc.readHygiene` and turned into TTLs by `hygieneTtls`.
+`runBatch` runs `runOwnedGc` once in preflight, before any lane is admitted, and
+tallies items and bytes. Only owned resources are reclaimed (ForgeDock label or
+ledger); unowned stale ones are reported, never removed.
+
+`admission.mjs` adds `nearCeiling({cfg, host, ratio})`: true when load per core,
+free memory or free tmp is within `ratio` of a `checkAdmission` threshold (load only when `max_load_per_core` is set; it is off by default, #4169). A
+failed or non-finite probe is never "near". `orchestrate` takes an optional
+`beforeAdmit` hook, awaited at the start of each admission pass when a lane is
+ready and a slot is free (not tripped, not held). Its errors are swallowed. In
+`runBatch` the hook runs GC (phase `admission`) only when `nearCeiling` is true
+and no GC ran in the last 5 minutes. `auto_gc: false` disables both phases; no hook
+is passed.
+
+The batch report ends with a `reclaimed:` line (`formatReclaimed`: items, size,
+preflight/admissions split, or "off"), and `reclaimed` is on the report file and
+the `runBatch` result. `forgedock doctor` check 13 (Resource hygiene) lists owned
+leftovers with counts and sizes and warns on unowned stale ones; `doctor --fix`
+applies the reaper. `commands/cleanup.md`, `work-on/close.md` and
+`work-on/build/validate.md` call the same reaper. Cost: 0 LLM calls.
+
 ## Entry 2026-10-20 — Complete conformance reviews, blocking shadow gate (#4160)
 
 `decide()` first runs `fillEngineRows` (`conformance.mjs`): engine-authorized scope rows, `unverified` preserve rows and `path:line` evidence normalized to repo paths (`normalizeEvidencePath`) are no longer "incomplete". `reviewerPrompt` embeds `reviewSkeleton` (a row per R/P/scope/coverage id). `checkCompleteness` returns `missing` ids; the retry in `reviewOnce` is `reviewerRepairPrompt` for those ids only (no diff), merged by `mergeReviewRows`. `changedFiles()` drops files equal to the base tip (base-sync merges).
 
 In shadow, `gate()` now blocks on precheck/amend failures coded `conformance.unimplemented`/`regression` (`SHADOW_PRE_BLOCKS`), ends `review.incomplete`/`inconsistent` as needs-human, and files accepted deferrals with `track()`. `engine.review_incomplete: degraded` (`readReviewIncomplete`) merges instead with the `review-degraded` label and a tracked follow-up. Enforce unchanged. `scripts/calibration.mjs --shadow` prints the per-repo shadow mix and recommends `enforce` under the threshold. Rationale: `devdocs/decisions/4160-shadow-gate-complete-reviews.md`.
+
+## Entry 2026-10-20 — Bug lanes freeze a red-green repro_test (#4271)
+
+forge.yaml `lean.repro_test` (`engine-cli.mjs` `readReproTest`, `off|prefer`, default `prefer`) → `runCore` `reproTest`. On a `bug`/`type:bug` lane (`conformance.mjs` `isBugIssue`), the plan prompt gets `reproPlanNote`, and `validateContract(..., {repro: true})` requires `repro_test` `{path, id, command}` or `"none"` + `repro_test_reason` (one correction resume). `gate()` runs `io.redGreen` (`effects.mjs` → `scripts/acceptance-red-green.sh`, inside `heavyStep`) and passes `{base, head}` to `precheck({repro})`. Anything but `BASE=FAILED HEAD=RAN` is `reproFailures` kind `repro_red_green`, code `conformance.unimplemented`, so it blocks in shadow and gets the one in-session resume (#4149). `off`, non-bug lanes, resumed pre-#4271 contracts and refactor:split leave prompts, contract check and precheck unchanged. Cost: 0 LLM calls; one targeted test run on base and head per gate.

@@ -1830,6 +1830,8 @@ if [ -n "{WORKTREE_PATH}" ] && [ -d "{WORKTREE_PATH}" ]; then
 else
   echo "Worktree cleanup skipped: path not provided or does not exist"
 fi
+# #4183: reap ForgeDock-owned, stale leftovers (labelled docker, tmp scratch, orphans); core lanes tear down from the ledger.
+npx forgedock gc --apply --docker --tmp --processes >/dev/null 2>&1 || true
 ```
 
 Set `{CLEANUP_STATUS}` based on outcome:

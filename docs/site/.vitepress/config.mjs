@@ -132,6 +132,7 @@ export default defineConfig({
       {
         text: 'Guides',
         items: [
+          { text: 'Start a New Project', link: '/start-a-new-project' },
           { text: 'ForgeDock vs. Manual Workflows', link: '/vs-manual-workflows' },
         ],
       },

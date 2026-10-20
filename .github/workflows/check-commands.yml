@@ -49,6 +49,9 @@ on:
       - 'scripts/symbol-move.py'
       - 'scripts/symbol-move.test.sh'
       - 'scripts/fixtures/symbol-move/**'
+      - 'scripts/symbol-move.mjs'
+      - 'scripts/symbol-move-ts.test.sh'
+      - 'scripts/fixtures/symbol-move-ts/**'
       - 'scripts/hotspots.sh'
       - 'scripts/hotspots.test.sh'
       - 'scripts/maintenance-scan.sh'
@@ -136,6 +139,9 @@ on:
       - 'scripts/symbol-move.py'
       - 'scripts/symbol-move.test.sh'
       - 'scripts/fixtures/symbol-move/**'
+      - 'scripts/symbol-move.mjs'
+      - 'scripts/symbol-move-ts.test.sh'
+      - 'scripts/fixtures/symbol-move-ts/**'
       - 'scripts/hotspots.sh'
       - 'scripts/hotspots.test.sh'
       - 'scripts/maintenance-scan.sh'
@@ -420,6 +426,9 @@ jobs:
       - name: Install libcst for the symbol-move codemod test
         run: python3 -m pip install --user --break-system-packages 'libcst==1.9.0'
 
+      - name: Install ts-morph for the TypeScript symbol-move codemod test (forge#4212)
+        run: npm install --prefix "$RUNNER_TEMP/tsm" --no-save --no-package-lock 'ts-morph@28.0.0'
+
       - name: Check Skill-loaded specs for positional-arg placeholders ($0-$9) in fenced blocks
         run: |
           # Claude Code rewrites $0..$9 in a skill body with the invocation's arguments, so
@@ -444,6 +453,7 @@ jobs:
           bash scripts/symbol-index.test.sh
           bash scripts/refactor-verify.test.sh
           SYMBOL_MOVE_REQUIRE_LIBCST=1 bash scripts/symbol-move.test.sh
+          SYMBOL_MOVE_TS_NODE_MODULES="$RUNNER_TEMP/tsm/node_modules" SYMBOL_MOVE_REQUIRE_TS_MORPH=1 bash scripts/symbol-move-ts.test.sh
           bash scripts/hotspots.test.sh
           bash scripts/maintenance-scan.test.sh
           bash scripts/milestone-drift.test.sh

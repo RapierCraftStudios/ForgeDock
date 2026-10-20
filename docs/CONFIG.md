@@ -49,6 +49,7 @@ If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pi
 | [`repos`](#repos-optional) | No | Multi-repository routing |
 | [`project_board`](#project_board-optional) | No | GitHub Projects v2 integration |
 | [`orchestration`](#orchestration-optional) | No | `/orchestrate` concurrency and cascade admission policy |
+| [`hygiene`](#hygiene-optional) | No | Automatic reclaim of ForgeDock-owned leftovers: TTLs, branch deletion, near-ceiling GC, `auto_gc` |
 | [`pipeline`](#pipeline-optional) | No | `/orchestrate` batch-engine tuning (stall detection, token budget, narration) |
 | [`build`](#build-optional) | No | `/work-on` build-phase scope check (`build.scope.*`) and review depth (`review.depth.*`) |
 | [`services`](#services-optional) | No | External service URLs and IDs |
@@ -431,6 +432,37 @@ orchestration:
 
 ---
 
+## `hygiene` (OPTIONAL)
+
+Automatic reclaim of what ForgeDock leaves behind (#4183), using the `forgedock gc` reaper. Only resources ForgeDock provably owns are reclaimed: entries of a stale lane ledger, Docker containers and volumes labelled `forgedock.owner=1`, `lean-*`/`agent-*` dirs under `.claude/worktrees`, `feat/issue-<n>-lean` branches of closed issues, and ForgeDock scratch under `~/.forge/tmp`. Everything else is reported, never touched, and so are unpushed or uncommitted work, live lanes, protected branches and branches with an open PR. Block form only.
+
+```yaml
+hygiene:
+  container_ttl_hours: 6
+  worktree_ttl_hours: 24
+  tmp_ttl_hours: 6
+  delete_merged_branches: true
+  max_host_load_ratio: 0.8
+  auto_gc: true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `container_ttl_hours` | number | `6` | Age after which owned Docker containers and volumes are reclaimed (an expired `forgedock.expires` label reclaims earlier). |
+| `worktree_ttl_hours` | number | `24` | Age after which owned worktrees (clean and pushed) and abandoned lane branches are reclaimed. |
+| `tmp_ttl_hours` | number | `6` | Age after which `~/.forge/tmp` run dirs (owner dead) and runner scratch (no live process) are reclaimed. |
+| `delete_merged_branches` | boolean | `true` | `false`: lane branches of closed issues are reported, never deleted. |
+| `max_host_load_ratio` | number in (0,1] | `0.8` | Near-ceiling trigger relative to the `engine` admission thresholds: load/core at or above ratio × `max_load_per_core`, or free memory/tmp at or below the minimum ÷ ratio. |
+| `auto_gc` | boolean | `true` | `false` disables GC in `forgedock orchestrate`; `forgedock gc` and `forgedock doctor --fix` still work. |
+
+Invalid values fall back to the default. `forgedock gc --older-than <d>` overrides every TTL for that run. Resources of a live lane (its ledger owner is alive) are always skipped.
+
+**Where it runs**: `forgedock orchestrate` applies GC once before admitting lanes, and again before an admission when the host is near the ceiling (at most every 5 minutes). The batch report ends with `reclaimed: N item(s), SIZE (preflight A, admissions B)`, or `reclaimed: off (hygiene.auto_gc: false)`. `forgedock doctor` shows a **Resource hygiene** check (owned counts and sizes, reclaimable count, unowned stale items as warnings), and `doctor --fix` runs the reaper. `/cleanup branches` calls `forgedock gc`.
+
+**Commands that use this section**: `orchestrate`, `doctor`, `gc`, `cleanup`
+
+---
+
 ## `pipeline` (OPTIONAL)
 
 Tuning knobs for the CLI backend and `/orchestrate`'s batch engine — invocation and stall timeouts, narration verbosity, and (deprecated alias only, see `orchestration.cascade` above) the review-finding cascade token budget. All keys optional; sane defaults apply when omitted.
@@ -537,6 +569,19 @@ engine:
 **Commands that use this section**: CLI backend (`runCommand` in `bin/runner.mjs`)
 
 ---
+
+## `lean` (OPTIONAL)
+
+Settings of the core work-on (`bin/lean/`) that change its contract.
+
+```yaml
+lean:
+  repro_test: prefer   # off | prefer (default)
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `repro_test` | string | No | `prefer` (default): on an issue labelled `bug` or `type:bug`, the plan step must freeze a `repro_test` in the contract (`{"path","id","command"}`) when the bug is testable. Before review, the engine runs `scripts/acceptance-red-green.sh` for that command on the host in every verify mode: one targeted test, red on the base (head's changed test files overlaid) and green on head. Any other result, including a test that could not run, fails the precheck as `conformance.unimplemented` (it blocks in shadow too) and goes back to the builder for one in-session fix round. A bug that is not testable (specs, docs, workflows, environment) records `"repro_test":"none"` with a one-line `repro_test_reason` and the lane continues as before. `off` gives exactly the previous contract and precheck. Each proof emits a `REPRO_RED_GREEN` run-log event (`base`, `head`) and adds a trajectory decision. |
 
 ## `verify` (OPTIONAL)
 

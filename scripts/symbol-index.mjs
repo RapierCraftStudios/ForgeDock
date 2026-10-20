@@ -4,7 +4,8 @@
 //
 // symbol-index.mjs: JS/TS twin of scripts/symbol-index.py (forge#4208), same output schema.
 // No new dependencies: the `typescript` package is loaded from the target repo (resolved from the target path, then
-// cwd). When it is not installed the run prints only {"unsupported":"ts"|"js","reason":"no-parser"} and exits 0.
+// cwd; NODE_PATH is honoured), else the TypeScript bundled with ts-morph (forge#4212). When neither is installed the
+// run prints only {"unsupported":"ts"|"js","reason":"no-parser"} and exits 0.
 // .py targets are handed to symbol-index.py. Never emits source text or literal values.
 //
 // Usage: node scripts/symbol-index.mjs <file | dir>...
@@ -41,6 +42,10 @@ function loadTs(targets) {
   for (const b of bases) {
     // typescript >= 7 (native port) ships no in-process compiler API at the package root: skip it.
     try { const ts = createRequire(path.join(b, "noop.js"))("typescript"); if (typeof ts?.createSourceFile === "function") return ts; } catch { /* try next */ }
+  }
+  // forge#4212: a repo with only ts-morph (the refactor:split TS mover) has TypeScript bundled in @ts-morph/common.
+  for (const b of bases) {
+    try { const ts = createRequire(path.join(b, "noop.js"))("ts-morph").ts; if (typeof ts?.createSourceFile === "function") return ts; } catch { /* try next */ }
   }
   return null;
 }

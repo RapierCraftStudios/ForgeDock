@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest } from "../engine-cli.mjs";
 import { serializeState } from "../engine/state.mjs";
 import { appendEvent } from "../engine/runlog.mjs";
 
@@ -1002,5 +1002,20 @@ describe("readPrecheckCommands (#4240)", () => {
     }
     writeFileSync(join(d, "forge.yaml"), "env:\n  setup: x\n");
     assert.equal("sparseMaxKb" in readEnvConfig(d), false);
+  });
+});
+
+describe("readReproTest (#4271)", () => {
+  it("reads lean.repro_test off|prefer; absent, invalid or another section's key is undefined", () => {
+    const d = tmpDir("repro-yaml-");
+    assert.equal(readReproTest(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  repro_test: off\n");
+    assert.equal(readReproTest(d), undefined);
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  repro_test: maybe\n");
+    assert.equal(readReproTest(d), undefined);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  conformance: shadow\nlean:\n  repro_test: off  # today's contract\n");
+    assert.equal(readReproTest(d), "off");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  repro_test: prefer\n");
+    assert.equal(readReproTest(d), "prefer");
   });
 });
