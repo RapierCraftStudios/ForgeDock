@@ -42,6 +42,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    is saved to `refs/forge/salvage/<N>/<ms>` (`WORKTREE_SALVAGED`) and the
    implement prompt names the ref. This covers runs that died hard (no
    teardown); a run that exits normally checkpoints its work in teardown (#4179).
+   **Sparse worktree** (#4221, `worktree.mjs` `addLaneWorktree`): tracked blobs
+   >= forge.yaml `env.sparse_max_kb` (default 1024; 0 = off) stay out of the
+   checkout (non-cone patterns in the worktree's own `info/sparse-checkout`;
+   lockfiles, manifests, toolchain pins, forge/git config always in). The
+   #4162/#4118 steps above run first, unchanged; no such blob → today's plain
+   `worktree add`; a failed sparse step → full checkout (`WORKTREE_SPARSE_FALLBACK`).
+   `WORKTREE_SPARSE` logs the count/bytes; the builder prompt names the absent files.
    **Toolchain + env.setup** (#4163, `toolchain.mjs`): the repo's pins
    (`packageManager`, `.nvmrc`/`.node-version`/`.tool-versions`/`engines.node`,
    forge.yaml `env.toolchain`) become a shim dir first on every runner PATH;
@@ -557,6 +564,10 @@ In shadow, `gate()` now blocks on precheck/amend failures coded `conformance.uni
 ## Entry 2026-10-20 — Bug lanes freeze a red-green repro_test (#4271)
 
 forge.yaml `lean.repro_test` (`engine-cli.mjs` `readReproTest`, `off|prefer`, default `prefer`) → `runCore` `reproTest`. On a `bug`/`type:bug` lane (`conformance.mjs` `isBugIssue`), the plan prompt gets `reproPlanNote`, and `validateContract(..., {repro: true})` requires `repro_test` `{path, id, command}` or `"none"` + `repro_test_reason` (one correction resume). `gate()` runs `io.redGreen` (`effects.mjs` → `scripts/acceptance-red-green.sh`, inside `heavyStep`) and passes `{base, head}` to `precheck({repro})`. Anything but `BASE=FAILED HEAD=RAN` is `reproFailures` kind `repro_red_green`, code `conformance.unimplemented`, so it blocks in shadow and gets the one in-session resume (#4149). `off`, non-bug lanes, resumed pre-#4271 contracts and refactor:split leave prompts, contract check and precheck unchanged. Cost: 0 LLM calls; one targeted test run on base and head per gate.
+
+## Entry 2026-10-20 — Deterministic review trigger, shadow-first (#4273)
+
+`review-trigger.mjs` `computeTrigger` returns `{would_skip, reasons}` from facts only: `risk_path` (built-in auth/payments/security/deletion/migration words, plus forge.yaml `review.risk_paths` globs), `package_edge`, `hotspot` (changed file `over`, not excluded), `gate.failed` (precheck failures, declared check commands still failing, CI fallback) and `gate.ambiguous` (hotspot facts unavailable, or the contract defers a requirement). `gate()` logs `REVIEW_TRIGGER {mode, would_skip, reasons, skipped}` after the precheck. Modes (`review.trigger`, `readReviewTrigger`): `shadow` (default) always reviews; `enforce` skips `reviewOnce` when untriggered and records why (trajectory, decision, FORGE:REVIEW); `off` computes and logs nothing. An error in the trigger runs the reviewer. Exit criterion for enforce: ≥30 shadow runs with `would_skip_flagged` 0 in `node bin/lean/review-trigger.mjs [--json]` (per repo, from the local run logs). Cost: 0 LLM calls; enforce saves one or two reviewer runs per untriggered lane.
 
 ## Entry 2026-10-20 — Test map + repo facts caches for the pre-PR step (#4272)
 

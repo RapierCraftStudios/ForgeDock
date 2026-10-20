@@ -22,7 +22,9 @@ import { prepareToolchain } from "./toolchain.mjs";
 import { readTestMap, selectCommands, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS } from "./render.mjs";
+import { computeTrigger, TRIGGER_MODES } from "./review-trigger.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM } from "./prompts.mjs";
+import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES } from "./verify.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
@@ -105,6 +107,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {number} [o.ciMaxMinutes]  remote-CI wait budget (default 360); exhaustion is NOT needs-human
  * @param {"shadow"|"enforce"} [o.conformance] conformance gate mode (default shadow)
  * @param {"needs-human"|"degraded"} [o.reviewIncomplete] shadow only: what an incomplete review after the re-ask does (default needs-human)
+ * @param {object} [o.reviewTrigger] forge.yaml review.trigger/risk_paths (#4273): {mode: shadow (default)|enforce|off, riskPaths: globs}
  * @param {object} [o.verify]        forge.yaml verify (verify.mjs parseVerify): mode local (default) | ci | hybrid (#4167)
  * @param {object} [o.precheck]      {commands}: forge.yaml learned.test_commands, run in the worktree before the PR (#4240)
  * @param {"off"|"prefer"} [o.reproTest] forge.yaml lean.repro_test (#4271): prefer (default) freezes a red-green repro_test on bug lanes; off is today's contract
@@ -112,6 +115,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {number} [o.splitMaxLines] refactor:split moved-line budget per PR (default 4000); the rest becomes a chained issue (#4211)
  * @param {string} [o.toolchainOverride] forge.yaml env.toolchain: "<pm>@<x.y.z>" or "off" (#4163)
  * @param {string} [o.envSetup]      forge.yaml env.setup: run once per fresh worktree before the builder (#4163)
+ * @param {number} [o.sparseMaxKb]   forge.yaml env.sparse_max_kb: tracked blobs >= this many KB stay out of the lane checkout (default 1024; 0 = off, #4221)
  * @param {object} [o.placement]     {where: local|remote, reason, mode}: the dispatcher's lane placement (#4256), kept in FORGE:STATE
  */
 export async function runCore(o) {
@@ -121,6 +125,8 @@ export async function runCore(o) {
   const vcfg = { ...parseVerify({}), ...(o.verify ?? {}) };
   if (!VERIFY_MODES.includes(vcfg.mode)) vcfg.mode = "local";
   const remoteVerify = vcfg.mode !== "local";
+  const triggerMode = TRIGGER_MODES.includes(o.reviewTrigger?.mode) ? o.reviewTrigger.mode : "shadow";
+  const riskPaths = Array.isArray(o.reviewTrigger?.riskPaths) ? o.reviewTrigger.riskPaths : [];
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
   const branch = `feat/issue-${issue}-lean`;
@@ -182,6 +188,7 @@ export async function runCore(o) {
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
   const runId = `${issue}-${t0}`;
   let runTmp = null;
+  let sparse = null; // #4221: {excluded, maxKb} when the lane worktree is a sparse checkout; null leaves prompts unchanged
   let toolchain = null; // #4163: {env, summary} when the repo pins its toolchain (env only with a pm shim); null leaves runner env and prompts unchanged
   // #4169: heavy steps take a host semaphore slot (io.heavy); LLM phases are not gated. `heavyEnv` puts the heavy shims on
   // the runner PATH; `waits` ({phase: ms}) and `heavyQueueMax` ride on the lane result for the batch report.
@@ -460,7 +467,7 @@ export async function runCore(o) {
 
   /** A timeout restart starts a fresh session; by default it continues the implementation against the frozen contract. */
   let facts = null; // #4272: path of an optional .forge/repo-facts.json (worktree, then main checkout), cited in builder prompts
-  const tcOpts = () => ({ toolchain: toolchain?.summary ?? null, ...(facts ? { facts } : {}) });
+  const tcOpts = () => ({ toolchain: toolchain?.summary ?? null, sparse, ...(facts ? { facts } : {}) });
   let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
   const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + CONTINUE_NOTE.replace("BASE", lane);
   async function builder(n, prompt, resume, live = false, restart = implementRestart) {
@@ -691,10 +698,12 @@ export async function runCore(o) {
     };
     await leftoverDir();
     const LOCK_RE = /could not lock|cannot lock ref|\.lock'?: File exists|Unable to create .*\.lock|index\.lock|packed-refs\.lock/i;
-    const addWorktree = async (args) => {
+    // #4221: tracked blobs >= sparseMaxKb stay out of the checkout (lockfiles/manifests always in); falls back to a full checkout.
+    const sparseMaxKb = Number.isFinite(o.sparseMaxKb) && o.sparseMaxKb >= 0 ? o.sparseMaxKb : DEFAULT_SPARSE_MAX_KB;
+    const addWorktree = async (args, ref) => {
       let cleaned = false;
       for (let i = 0; ; i++) {
-        try { return await io.git(args, { cwd }); } catch (e) {
+        try { return await addLaneWorktree(io.git, io.fs?.write, { cwd, wt, addArgs: args, ref, maxBlobBytes: sparseMaxKb * 1024 }); } catch (e) {
           const msg = String(e?.stderr ?? e?.message ?? e);
           if (!cleaned && /already exists/i.test(msg) && (await leftoverDir())) { cleaned = true; continue; }
           if (i >= 4 || !LOCK_RE.test(msg)) throw e;
@@ -715,16 +724,25 @@ export async function runCore(o) {
       }
     } catch { /* no local branch */ }
     ledgerDo((l) => { l.register("branch", branch); l.register("worktree", wt); });
+    let wtInfo = null;
     if (keepLocal) {
-      await addWorktree(["worktree", "add", wt, branch]);
+      wtInfo = await addWorktree(["worktree", "add", wt, branch], `refs/heads/${branch}`);
       resumed = resumed ?? { pr: null, local: true };
       ev({ event: "LOCAL_BRANCH_REUSED", branch });
     } else if (resumed) {
-      await addWorktree(["worktree", "add", "-B", branch, wt, `origin/${branch}`]);
+      wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, `origin/${branch}`], `origin/${branch}`);
     } else {
-      await addWorktree(["worktree", "add", "-B", branch, wt, base]);
+      wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, base], base);
     }
     wtCreated = true;
+    if (wtInfo?.sparse) {
+      sparse = { excluded: wtInfo.excluded, maxKb: sparseMaxKb };
+      ev({ event: "WORKTREE_SPARSE", excluded: wtInfo.excluded, excluded_bytes: wtInfo.bytes, max_kb: sparseMaxKb });
+      T.decisions.push(`Sparse worktree: ${wtInfo.excluded} tracked file(s) >= ${sparseMaxKb} KB (${Math.round(wtInfo.bytes / 1048576)} MB) left out of the checkout`);
+    } else if (wtInfo?.fallback) {
+      ev({ event: "WORKTREE_SPARSE_FALLBACK", reason: wtInfo.fallback });
+      T.anomalies.push(`Sparse checkout failed, full checkout used: ${wtInfo.fallback}`);
+    }
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
     await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
     // #4220: link node_modules/.venv from the shared cache keyed by lock hash (or install once and publish). Never fails the run.
@@ -1006,6 +1024,7 @@ export async function runCore(o) {
     // ---- 3a. declared check commands (#4240): the repo's own cheap gates (forge.yaml learned.test_commands), run locally in
     // the worktree before review and PR; no Actions minutes. A failure goes back to the builder in-session (#4149), up to
     // verify.max_rounds; a round with no commit or exhausted rounds is an anomaly, not a stop: CI stays the gate.
+    let checkCommandsFailing = false; // #4273: a failed gate triggers the reviewer
     // #4272: an optional .forge/test-map.json picks the commands for the changed files; no map or no match keeps the list.
     const learnedCommands = (Array.isArray(o.precheck?.commands) ? o.precheck.commands : []).map((c) => String(c ?? "").trim()).filter(Boolean);
     const testMap = io.runCommand ? await readTestMap([wt, cwd], io.fs?.read) : null;
@@ -1025,9 +1044,10 @@ export async function runCore(o) {
         }
         ev({ event: "PRECHECK_COMMANDS", round, results: results.map(({ command, rc }) => ({ command, rc })), ...(picked.source === "test-map" ? { source: "test-map" } : {}) });
         const failed = results.filter((r) => r.rc !== 0);
-        if (!failed.length) { if (round) T.decisions.push(`Declared check commands pass after ${round} builder fix round(s)`); break; }
+        if (!failed.length) { checkCommandsFailing = false; if (round) T.decisions.push(`Declared check commands pass after ${round} builder fix round(s)`); break; }
         const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
         if (isSplit) return await needsHuman(`Declared check command(s) fail on the refactor:split move (no builder edits a split); nothing merged: ${names}`, OUTCOME_CODES.CI_RED);
+        checkCommandsFailing = true;
         if (round >= vcfg.maxRounds || !sessionId) { T.anomalies.push(`Declared check command(s) still failing before the PR: ${names}`); break; }
         T.decisions.push(`Declared check command(s) failed: ${names}; builder resumed (round ${round + 1}/${vcfg.maxRounds})`);
         const before = String(await git(["rev-parse", "HEAD"])).trim();
@@ -1151,7 +1171,9 @@ export async function runCore(o) {
     // A review without usable rows ends needs-human (or, with engine.review_incomplete: degraded, merges flagged).
     await label("in-review");
     const shadow = conformance !== "enforce";
-    let effective = frozen, review = null, lastAmend = "", resumes = 0, verdict = null, degraded = null;
+    let effective = frozen, review = null, lastAmend = "", resumes = 0, verdict = null, degraded = null, triggerSkipped = false;
+    const TRIGGER_SKIP = "skipped (review.trigger enforce: no risk trigger)";
+    const triggerSkipNote = "## Conformance Review\n**Skipped by `review.trigger: enforce`:** no risk path, package edge or hotspot in the diff, and every deterministic gate passed; no reviewer ran (#4273).";
     async function amend() {
       const a = applyAmendments(frozen, result?.amendments, issueText);
       const sig = JSON.stringify(a.applied);
@@ -1197,13 +1219,26 @@ export async function runCore(o) {
       files = await changedFiles();
       const amendProblems = await amend();
       const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === String(await git(["rev-parse", "HEAD"])).trim();
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots: await hotspotsOf({ base, paths: files }), repro: await reproOf(effective) });
+      const hotspots = await hotspotsOf({ base, paths: files });
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective) });
       const pre = [...pc.failures, ...amendProblems];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
       // shadow: the builder's own failed checks block before any reviewer tokens are spent (#4160)
       const hard = shadow ? pre.filter((f) => SHADOW_PRE_BLOCKS.includes(f.code)) : [];
       if (hard.length) return { state: "nonconforming", by: "precheck", failures: hard, would: "nonconforming", wouldFail: pre, reviewState: null };
+      // #4273: deterministic review trigger; off computes nothing, shadow logs and always reviews, enforce skips when untriggered
+      if (triggerMode !== "off") {
+        let t = null;
+        try { t = computeTrigger({ files, riskPaths, structure, hotspots, gates: { precheckFailures: pre, checkCommandsFailing, ciFellBack }, contract: effective }); } catch { /* fall back to reviewing */ }
+        const skip = triggerMode === "enforce" && t?.would_skip === true;
+        ev({ event: "REVIEW_TRIGGER", mode: triggerMode, would_skip: t ? t.would_skip : false, reasons: t ? t.reasons.map((r) => r.code) : ["trigger.error"], skipped: skip });
+        if (skip) {
+          triggerSkipped = true;
+          return { state: "conforms", by: "trigger", failures: [], ...(shadow ? { would: "conforms", wouldFail: [], reviewState: null } : {}) };
+        }
+        triggerSkipped = false;
+      }
       const d = await reviewOnce();
       if (!shadow) return { ...d, by: "review" };
       // shadow: record what enforce would have done; block only on what the previous reviewer blocked on
@@ -1250,7 +1285,16 @@ export async function runCore(o) {
       if (toFile.length) await track(toFile, "accepted by the conformance review");
       degradedReq = degraded ? { id: "REVIEW", quote: `conformance review ${degraded.state}: re-run the review`, disposition: "defer", why: `${REVIEW_DEGRADED_LABEL}: rows still missing for ${degraded.missing.join(", ") || "the verdict"}` } : null;
       if (degradedReq) await track([degradedReq], "the conformance review stayed incomplete");
-      if (shadow) {
+      if (triggerSkipped) {
+        T.decisions.push("Conformance reviewer skipped by review.trigger enforce: no trigger reason (risk path, package edge, hotspot, failed or ambiguous gate)");
+        if (shadow) {
+          shadowWould = verdict.would;
+          ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: [] });
+          await emit({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: [] });
+        }
+        T.review = [TRIGGER_SKIP, `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
+        await post("FORGE:REVIEW", triggerSkipNote);
+      } else if (shadow) {
         const wf = verdict.wouldFail ?? [];
         shadowWould = verdict.would;
         ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });

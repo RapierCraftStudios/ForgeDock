@@ -53,11 +53,14 @@ const toolchainRule = (t) => (t ? `\nThe engine pinned this repo's toolchain on 
 /** #4272: the extra line citing the repo-facts cache by path (never its content) when it exists; "" otherwise (prompt unchanged). */
 const factsRule = (f) => (f ? `\nRepo facts (toolchain pins, slow suites, layer rules, hotspots) are cached in ${f}: read it before choosing checks or placing code.` : "");
 
+/** #4221: the extra host-rules line when the lane worktree is sparse; "" otherwise (prompt unchanged). */
+const sparseRule = (s) => (s?.excluded ? `\nThis worktree is a sparse checkout: ${s.excluded} tracked file(s) of ${s.maxKb} KB or more are not on disk (\`git ls-files -t | grep '^S'\` lists them). They are not deleted: never commit their removal. If you need one, run \`git sparse-checkout add /<path>\`.` : "");
+
 /** Builder call 1: investigate and write the contract. No code edits. */
-export function builderPlanPrompt(n, { toolchain = null, facts = null } = {}) {
+export function builderPlanPrompt(n, { toolchain = null, sparse = null, facts = null } = {}) {
   return `Resolve issue #${n} (read it with gh issue view ${n} --comments). This first step is PLANNING ONLY: do not edit code, do not commit.
 
-${HOST_RULES}${toolchainRule(toolchain)}${factsRule(facts)}
+${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 
 1. Write ${INVESTIGATION_FILE} as markdown with exactly these headings, concise, file:line wherever you cite code (no HTML comments):
 **Verdict**: CONFIRMED|ALREADY-FIXED|INVALID|BLOCKED
@@ -88,11 +91,11 @@ ${BLOCK_RULES}`;
 }
 
 /** Builder call 2, same session: implement the frozen contract. */
-export function builderImplementPrompt(mode = "local", { toolchain = null, facts = null } = {}) {
+export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
   return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, and commit. Do not push or touch GitHub.
 
-${HOST_RULES}${toolchainRule(toolchain)}${factsRule(facts)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
+${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why, which the engine posts on the issue:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file you must change that the contract did not list.
