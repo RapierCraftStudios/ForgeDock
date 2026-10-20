@@ -34,6 +34,12 @@ export function ciFailurePrompt(failures, mode = "local") {
   return `CI failed on the pushed branch:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
+/** The repo's declared check commands (forge.yaml learned.test_commands) failed before the PR (#4240): fixed in-session. */
+export function precheckFailurePrompt(failures, mode = "local") {
+  const list = failures.slice(0, 10).map((f) => `#### \`${f.command}\` (exit ${f.rc})\n${f.output ? `\`\`\`\n${f.output}\n\`\`\`` : "(no output)"}`).join("\n\n");
+  return `The repo's declared check commands failed in this worktree, before the PR is opened:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). Re-run each failing command, ${mode === "ci" ? `${LIGHT} otherwise, ` : ""}commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
 /** CI could not run (no workflow run, no checks, dispatch refused): the local fallback (#4167). */
 export function ciUnavailablePrompt() {
   return `CI verification is unavailable for this branch, so verification falls back to this host. Run every validate command locally (targeted, as the host rules say), fix any failure, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE} with each command's real exit code. Do not push or touch GitHub.`;
@@ -134,6 +140,27 @@ const BLOCK_RULES = `"blocked" needs a typed "block" in ${RESULT_FILE}, one of:
 
 export function blockCorrectionPrompt(problem) {
   return `Your ${RESULT_FILE} says "blocked", but ${String(problem).slice(0, 1000)}. That is not a block that needs a human.\n\n${BLOCK_RULES}\n\nEither do the work (fix, commit, update the stage notes and ${RESULT_FILE}) or write a valid typed "block". Do not push or touch GitHub.`;
+}
+
+/** refactor:split grouping call (#4211): no tools, no files; the only input is the compact symbol index. */
+export const GROUPING_SYSTEM = "You plan how to split one oversized source module into a package of smaller modules. You see only a symbol index (names, kinds, sizes, references); you have no tools and never see code. Reply with exactly one JSON object and nothing else.";
+
+/** The grouping prompt: fixed rules plus JSON of bin/lean/refactor.mjs compactIndex(). Its size depends on the index only, never on file length. */
+export function groupingPrompt(index) {
+  return `Group the top-level symbols of one module into cohesive new modules of a package. A codemod moves them verbatim and leaves the old module re-exporting every moved name.
+
+Index: "symbols" are top-level symbols {name, kind, lines, public}; "edges" are "from->to" references between them.
+
+Rules:
+- Module names are snake_case Python identifiers, unique, not equal to any symbol name.
+- Each symbol appears at most once. Symbols you leave out stay in the old module.
+- A moved symbol must not reference a symbol that stays: when you move a symbol, move everything it references (follow the edges).
+- Modules must not reference each other in a cycle; keep heavily cross-referenced symbols in one module.
+- Prefer a few modules of similar size grouped by what the symbols do.
+
+Reply with only {"<module>": ["<symbol>", ...], ...}.
+
+${JSON.stringify(index)}`;
 }
 
 export const REVIEWER_SYSTEM = `You are an independent conformance reviewer of one change. You did not write it. Read-only: use Read, Grep and Glob in the worktree.

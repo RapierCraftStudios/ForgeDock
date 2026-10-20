@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /**
  * `forgedock gc` reaper (#4180). Dry-run by default. It only reclaims what ForgeDock provably owns:
- *   - resources listed in a stale lane ledger (#4179: owner pid dead on this host, or expired on another host),
+ *   - resources listed in a stale lane ledger (#4179: owner pid dead on this host, or expired on another host), sandboxes
+ *     included (#4253: torn down through their provider; `remote` via forge.yaml `execution`, #4254),
  *   - docker containers/volumes labelled `forgedock.owner=1`,
  *   - `lean-*` / `agent-*` dirs under the worktree root and `feat/issue-<n>-lean` branches,
  *   - ForgeDock's own scratch under `~/.forge/tmp` (run dirs with the owner marker, runner scratch `<repoKey>/<issue>`).
@@ -18,12 +19,14 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { makeLedger, ledgerRoot as defaultLedgerRoot, LEDGER_TTL_MS } from "./lean/ledger.mjs";
 import { makeRunTmp, procsInDir, killLedgerPid } from "./lean/effects.mjs";
 import { readBranches } from "./lean/lane.mjs";
+import { parseExecution, remoteTransportFor } from "./lean/execution.mjs";
+import { parseForgeYaml } from "./forge-utils.mjs";
 
 const pexec = promisify(execFile);
-export const GC_TYPES = Object.freeze(["container", "volume", "worktree", "branch", "tmp", "process"]);
-const SCOPE_OF = { container: "docker", volume: "docker", worktree: "worktrees", branch: "branches", tmp: "tmp", process: "processes" };
-const TYPE_OF_KIND = { worktree: "worktree", branch: "branch", tmp: "tmp", pid: "process", container: "container", volume: "volume" };
-export const GC_SCOPES = Object.freeze(["docker", "worktrees", "branches", "tmp", "processes"]);
+export const GC_TYPES = Object.freeze(["container", "volume", "worktree", "branch", "tmp", "process", "sandbox"]);
+const SCOPE_OF = { container: "docker", volume: "docker", worktree: "worktrees", branch: "branches", tmp: "tmp", process: "processes", sandbox: "sandboxes" };
+const TYPE_OF_KIND = { worktree: "worktree", branch: "branch", tmp: "tmp", pid: "process", container: "container", volume: "volume", sandbox: "sandbox" };
+export const GC_SCOPES = Object.freeze(["docker", "worktrees", "branches", "tmp", "processes", "sandboxes"]);
 const LANE_BRANCH_RE = /^feat\/issue-(\d+)-lean$/;
 const WORKTREE_DIR_RE = /^(lean|agent)-/;
 const RUN_OWNER = ".forge-run-owner";
@@ -196,6 +199,9 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
         const type = TYPE_OF_KIND[r.kind];
         if (!type) continue;
         const id = String(r.value);
+        const provider = r.provider ?? r.handle?.provider ?? null;
+        // A container sandbox (#4253) is reaped through its ledger entry, never again by the labelled-container pass.
+        if (type === "sandbox" && provider === "container") { liveIds.add(`container:${id}`); seen.add(`container:${id}`); }
         if (!stale) { liveIds.add(`${type}:${type === "worktree" || type === "tmp" ? resolve(id) : id}`); if (want(type)) add({ type, id, sizeBytes: null, ageMs: age(r.registered), owned: true, action: "report", reason: `live lane ${j.lane}`, ledger: path }); continue; }
         if (!want(type)) continue;
         const it = { type, id, sizeBytes: null, ageMs: age(r.registered), owned: true, action: "reclaim", reason: `stale ledger ${j.lane} (owner ${j.pid}@${j.host} gone)`, ledger: path, kind: r.kind, value: r.value, marker: r.marker ?? null };
@@ -219,6 +225,10 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
           it.id = resolve(id);
           if (!isInside(P.forgeTmpRoot, id)) { it.action = "report"; it.reason = "outside ForgeDock tmp"; }
           else it.sizeBytes = P.dirSize?.(id) ?? null;
+        } else if (type === "sandbox") {
+          it.provider = provider;
+          it.handle = { provider, id, issue: r.handle?.issue ?? j.issue ?? null };
+          if (!SANDBOX_TEARDOWN[provider]) { it.action = "report"; it.reason = `unknown sandbox provider ${provider ?? "?"}`; }
         } else if (type === "process") {
           const pid = Number(id);
           if (!sameHost) { it.action = "report"; it.reason = "process on another host"; }
@@ -377,6 +387,26 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
   return { items, summary, notes, ledgers, scopes: [...scopes], olderThanMs };
 }
 
+/**
+ * forge.yaml `execution` of the checkout and its remote transport (#4254): `P.sandboxTransport` when injected, else the
+ * HTTP transport with the credential from the env or keychain. null when unconfigured or refused (never throws).
+ */
+const remoteTransport = (P) => {
+  if (P.sandboxTransport) return P.sandboxTransport;
+  try {
+    const sec = parseForgeYaml(nodeFs.readFileSync(join(P.cwd, "forge.yaml"), "utf8"))?.execution;
+    return remoteTransportFor(parseExecution(sec && typeof sec === "object" ? sec : {}), { env: P.env ?? process.env });
+  } catch { return null; }
+};
+
+/** Sandbox teardown by provider (#4253, execution.mjs): a container is removed; a local lane is its own process; a remote one is destroyed through its transport. */
+const SANDBOX_TEARDOWN = {
+  container: async (P, h) => { try { await P.docker(["rm", "-f", h.id]); return true; } catch (e) { return /no such container/i.test(errText(e)); } },
+  local: async () => true,
+  remote: async (P, h) => { const t = remoteTransport(P); if (!t) return false; try { return (await t.destroy(h.id)) !== false; } catch { return false; } },
+};
+const defaultSandboxTeardown = (P) => async (provider, handle) => (SANDBOX_TEARDOWN[provider] ? SANDBOX_TEARDOWN[provider](P, handle) : false);
+
 /** Reclaim every owned item marked "reclaim"; release ledger entries that were reclaimed. Never touches anything else. */
 export async function applyGc(plan, probes) {
   const P = probes, fs = P.fs ?? nodeFs;
@@ -389,6 +419,7 @@ export async function applyGc(plan, probes) {
       switch (it.type) {
         case "container": await P.docker(["rm", "-f", it.id]); break;
         case "volume": await P.docker(["volume", "rm", it.id]); break;
+        case "sandbox": if (!(await (P.sandboxTeardown ?? defaultSandboxTeardown(P))(it.provider, it.handle))) throw new Error("sandbox teardown failed"); break;
         case "process": if (P.alive(Number(it.id)) && !(await P.killPid(Number(it.id), it.marker))) throw new Error("kill refused"); break;
         case "tmp":
           if (!isInside(P.forgeTmpRoot, it.id)) throw new Error("outside ForgeDock tmp");

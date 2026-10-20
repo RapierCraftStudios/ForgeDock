@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { foldSummary, emptySummary, parseSummary, renderSummary, crossingIssues, fileCrossings, flaggedPackages, heldBy, makeDrift } from "./drift.mjs";
 import { orchestrate } from "./orchestrate.mjs";
@@ -62,7 +62,7 @@ describe("drift summary fold (forge#4161)", () => {
     const s1 = foldSummary(emptySummary("M One"), { issue: 1, pr: 21, structure: { ...S1, top_growth: [{ file: "a-->b.ts", lines: 3 }] } });
     const d1 = renderSummary(desc, s1);
     assert.ok(d1.startsWith(`${desc}\n\n<!-- FORGE:DRIFT {`));
-    assert.equal((d1.match(/-->/g) ?? []).length, 2, "a `-->` in a path never ends the comment");
+    assert.equal((d1.split("-->").length - 1), 2, "a `-->` in a path never ends the comment");
     assert.deepEqual(parseSummary(d1), s1);
     const s2 = foldSummary(s1, { issue: 2, pr: 22, structure: S2 });
     const d2 = renderSummary(d1, s2);
@@ -206,8 +206,9 @@ describe("orchestrate drift seam (forge#4161)", () => {
 
 describe("readDrift (forge#4161)", () => {
   const withYaml = (yaml, f) => {
-    const dir = mkdtempSync(join(tmpdir(), "drift-yaml-"));
-    try { if (yaml != null) writeFileSync(join(dir, "forge.yaml"), yaml); return f(dir); } finally { rmSync(dir, { recursive: true, force: true }); }
+    const dir = tmpDir("drift-yaml-");
+    if (yaml != null) writeFileSync(join(dir, "forge.yaml"), yaml);
+    return f(dir);
   };
   it("null without forge.yaml, without the block, or with nothing set", () => {
     assert.equal(withYaml(null, readDrift), null);

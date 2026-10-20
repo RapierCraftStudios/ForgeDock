@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands } from "../engine-cli.mjs";
 import { serializeState } from "../engine/state.mjs";
 import { appendEvent } from "../engine/runlog.mjs";
 
@@ -975,5 +975,20 @@ describe("run-issue core path: SIGTERM/SIGINT teardown (#4179)", () => {
       assert.equal(seen.batchId, undefined);
       assert.equal(typeof seen.onTeardown, "function");
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe("readPrecheckCommands (#4240)", () => {
+  it("reads learned.test_commands as a block list; absent or empty is undefined", () => {
+    const d = tmpDir("precheck-yaml-");
+    assert.equal(readPrecheckCommands(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  conformance: shadow\nlearned:\n  other: x\n");
+    assert.equal(readPrecheckCommands(d), undefined);
+    writeFileSync(join(d, "forge.yaml"), [
+      "learned:", "  conventions:", "    - not a command", "  test_commands: # declared checks",
+      '    - "bash scripts/check-spec-markers.sh commands/ ."', "    - npm run lint  # comment", "    - 'make \"x\"'", '    - ""', "",
+      "  other_list:", "    - nope", "verify:", "  mode: local", "test_commands:", "  - nope",
+    ].join("\n"));
+    assert.deepEqual(readPrecheckCommands(d), ["bash scripts/check-spec-markers.sh commands/ .", "npm run lint", 'make "x"']);
   });
 });

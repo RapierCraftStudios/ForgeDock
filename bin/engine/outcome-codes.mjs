@@ -48,6 +48,8 @@ export const OUTCOME_CODES = Object.freeze({
   CLI_TIMEOUT: "cli.timeout",
   CLI_SPAWN_FAILED: "cli.spawn_failed", // forge#4129: deterministic spawn failure (E2BIG, ENOENT, EACCES, ...)
   ENV_SETUP_FAILED: "env.setup_failed", // forge#4163: forge.yaml env.setup failed before the builder; an environment error, not a build failure
+  SANDBOX_START_FAILED: "sandbox.start_failed", // forge#4254: a lane sandbox could not start; needs-human, not relaunched
+  SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
@@ -81,6 +83,10 @@ export const OUTCOME_CODES = Object.freeze({
   DOCS_STALE: "docs.stale", // the target repo's devdocs freshness rule still fails after one builder resume
   FOLLOWUP_UNAVAILABLE: "followup.unavailable",
   MERGE_HEAD_MISMATCH: "merge.head_mismatch",
+  // refactor:split lane (forge#4211): deterministic refusals and the move proof; every one leaves no edit behind.
+  SPLIT_UNSUPPORTED: "split.unsupported", // no codemod or index tool for the target language, or libcst missing; refused before any edit
+  SPLIT_PLAN_INVALID: "split.plan_invalid", // missing target/test command, unparseable grouping reply, or a plan symbol-move refuses
+  SPLIT_VERIFY_FAILED: "split.verify_failed", // refactor-verify found a logic diff, missing symbol, changed counts or new cycle; branch reset
   // Non-failure terminals, so a RUN_TERMINAL for a healthy run is not counted as a gap.
   COMPLETED: "completed",
   AWAITING_MERGE: "awaiting_merge",
@@ -135,6 +141,7 @@ export function codeForRunnerError(err) {
       return OUTCOME_CODES.CLI_SPAWN_FAILED;
     case "NO_API_KEY":
     case "NO_SDK":
+    case "CLI_BACKEND_UNAVAILABLE":
     case "CLI_BACKEND_FAILED":
     case "PHASE_ARGS_INVALID":
     case "CLI_MAX_TURNS":

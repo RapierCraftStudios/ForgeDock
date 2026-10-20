@@ -99,10 +99,11 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
   (live lanes are re-adopted, nothing is launched twice). Change K of a running batch with
   `forgedock orchestrate --set-parallel <id> K`. The runner requeues `deferred` lanes by code (host busy after its
   retry-in, a usage limit holds admissions for that account (backend identity) until the reset, across every batch on
-  the host, while a lane on another account is admitted; `forgedock limits show` lists holds and
-  `forgedock limits clear <id>|--all` drops them; transient merge/push/idle failures back off; non-host
+  the host; `forgedock limits show|clear <id>|--all` lists or drops holds; transient merge/push/idle failures back off; non-host
   deferrals stop after `orchestration.max_deferrals`), relaunches an `engine-error` once, and stops admitting after
-  `orchestration.breaker` engine-errors (`errors` within `window_min`; held issues continue on `--resume`). Logical
+  `orchestration.breaker` engine-errors (`errors` within `window_min`; held issues continue on `--resume`). Lanes are
+  capped host-wide (`orchestration.global_parallel`, `forgedock sched cap N|show`), highest priority first; within a
+  priority, slots are shared across repos by weight (`forgedock sched weight <owner/repo> N`, default equal). Logical
   edges you found in step 2.4 must be written to the dependent issue as a `Depends on #X` line before launching. The
   last lines are the report table.
 - **Agent lane (only when the `forgedock` CLI is unavailable).** Spawn one background agent per issue.

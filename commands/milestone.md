@@ -424,7 +424,10 @@ Deterministic report (forge#4161); no LLM judgment, no issue filing:
 
 ```bash
 git fetch origin "{STAGING_BRANCH}" "milestone/{slug}"
-bash scripts/milestone-drift.sh "{slug}" --format text
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+DRIFT_SCRIPT=$(forge_resolve milestone-drift.sh)
+[ -n "$DRIFT_SCRIPT" ] || { echo "ERROR: milestone-drift.sh not found in a trusted ForgeDock install" >&2; exit 3; }
+bash "$DRIFT_SCRIPT" "{slug}" --format text
 ```
 
 Print the output verbatim. It shows import-pair growth, new package edges and top file/package growth since the fork point, plus threshold crossings when forge.yaml `orchestrate.drift` is set. `forgedock orchestrate` files the crossing issues.
