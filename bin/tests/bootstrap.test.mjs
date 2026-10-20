@@ -5,11 +5,11 @@
 // creates no duplicates.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { tmpDir } from "./_tmp.mjs";
 import {
   checkSpikeDoc, injectGuardrails, subIssueOrder, planPreview, bootstrapPlanComment, decomposedComment,
   handoffText, createBacklog, preflight, priorityLabel, main, SPIKE_SECTIONS,
@@ -149,7 +149,7 @@ describe("bootstrap-create preflight: nothing is written for an invalid plan or 
   });
 
   test("CLI: an invalid plan exits 1 without a single gh call; --dry-run previews without GitHub", () => {
-    const dir = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "bootstrap-create-"));
+    const dir = tmpDir("bootstrap-create-");
     mkdirSync(join(dir, "docs/engineering"), { recursive: true });
     writeFileSync(join(dir, "docs/engineering/technical-spike.md"), spikeText());
     const bad = samplePlan();
