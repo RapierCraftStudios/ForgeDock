@@ -1237,6 +1237,13 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const body = `<!-- FORGE:DECISION -->\n## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
       try { await leanIo.gh(["issue", "comment", String(d.issue), "-R", repo, "--body", body]); } catch { /* best effort: the batch log keeps the row */ }
     }),
+    // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
+    relabelNeedsHuman: deps.relabelNeedsHuman ?? (async ({ issue, evidence }) => {
+      try {
+        await leanIo.gh(["issue", "comment", String(issue), "-R", repo, "--body", `<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\n${evidence}`]);
+        await leanIo.gh(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
+      } catch { /* best effort: the batch row keeps the evidence */ }
+    }),
     conflicting: deps.conflicting ?? (async (_n, pr) => {
       try { return JSON.parse(await leanIo.gh(["pr", "view", String(pr), "-R", repo, "--json", "mergeable"]))?.mergeable === "CONFLICTING"; } catch { return false; }
     }),

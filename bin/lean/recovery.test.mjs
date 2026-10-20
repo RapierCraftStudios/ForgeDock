@@ -99,6 +99,32 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.equal(byIssue(rows)[2].outcome, "needs-human"); assert.equal(calls.filter((c) => c.n === 2).length, 1);
   });
 
+  it("relabelNeedsHuman (SPEC-7/8): only a recovery that ends final engine-error/deferred relabels; invalid/merged never; a requeued deferred waits", async () => {
+    const relabels = [];
+    const rl = { relabelNeedsHuman: async (x) => { relabels.push(x); }, pollMs: 5 };
+    // engine-error after the recovery lane's own relaunch: final -> exactly one relabel with the recovery evidence
+    const a = await batch({ 1: [NH("ci.red"), { terminalReason: "engine-error", detail: "boom" }] }, {}, rl);
+    assert.equal(a.rows[0].outcome, "engine-error"); assert.equal(relabels.length, 1);
+    assert.equal(relabels[0].issue, 1); assert.match(relabels[0].evidence, /Recovery pass for `ci\.red` \(attempt 1\) did not merge: it ended `engine-error`/);
+    // invalid / merged / decomposed: never
+    relabels.length = 0;
+    await batch({ 1: [NH("ci.red"), { terminalReason: "invalid", detail: "not a bug" }], 2: [NH("ci.red"), { terminalReason: "merged" }],
+      3: [NH("ci.red"), { terminalReason: "decomposed", subissues: [] }] }, {}, rl);
+    assert.deepEqual(relabels, []);
+    // a deferred recovery that is requeued is not relabelled until it is final (capped)
+    const defer = { terminalReason: "deferred", code: "gh.unavailable", retryInSeconds: 0.01, detail: "gh down" };
+    const seen = [];
+    const d = await batch({ 1: [NH("ci.red"), defer] }, {}, { ...rl, maxDeferrals: 2, onUpdate: (r) => seen.push([r.outcome, relabels.length, String(r.detail)]) });
+    assert.equal(d.rows[0].outcome, "deferred");
+    const rq = seen.filter(([o, , det]) => o === "deferred" && /^requeued in/.test(det));
+    assert.ok(rq.length >= 1 && rq.every(([, n]) => n === 0), "a requeued deferral is not relabelled");
+    assert.equal(relabels.filter((x) => x.issue === 1).length, 1, "once, only when final");
+    // without a recovery pass nothing is relabelled
+    relabels.length = 0;
+    await batch({ 1: [{ terminalReason: "engine-error" }] }, {}, rl);
+    assert.deepEqual(relabels, []);
+  });
+
   it("without the recovery option the runner behaves as before: needs-human is final and dependents skip", async () => {
     const calls = [];
     const rows = await orchestrate({ issues: [1, 2], readBody: async (n) => (n === 2 ? "**Depends on**: #1" : ""),

@@ -207,7 +207,7 @@ export async function runCore(o) {
   let ctxLane = null; // forge#4275: rerun | child | first, set once the issue is read
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
-  let recoverUnlabelled = false; // #4297: the recovery lane removed needs-human; any end but merged puts it back
+  let recoverUnlabelled = false; // #4297: the recovery lane removed needs-human; a final ci-pending (or needsHuman()) puts it back
   const runId = `${issue}-${t0}`;
   let runTmp = null;
   let sparse = null; // #4221: {excluded, maxKb} when the lane worktree is a sparse checkout; null leaves prompts unchanged
@@ -320,7 +320,10 @@ export async function runCore(o) {
       context_pack: ctxCfg.mode, ...(ctxLane ? { lane_type: ctxLane } : {}) }; // forge#4275: the on/off A/B groups runs by these
     ev(term);
     await emit(term);
-    if (recoverUnlabelled && !["merged", "needs-human"].includes(reason)) { // #4297: needsHuman() relabels on its own path
+    // #4297: only a final failure the runner never requeues puts needs-human back (needsHuman() relabels on its own path). invalid,
+    // decomposed and dependency-* are legitimate non-failure endings; deferred/engine-error may be requeued, so the batch runner
+    // (orchestrate settle, relabelNeedsHuman) relabels those once they are final.
+    if (recoverUnlabelled && reason === "ci-pending") {
       try {
         await post("FORGE:NEEDS_HUMAN", `## Needs human\n${recoveryEvidence(reason, code, detail)}\n\n_${usageLine()}_`);
         await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
