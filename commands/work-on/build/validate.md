@@ -357,7 +357,11 @@ else
 fi
 [ "$TEST_FAILED" -eq 1 ] && LEARNED_FAILED=1
 echo "TEST_FAILED=${TEST_FAILED}"
+# #4183: reclaim owned, expired test containers/volumes and scratch (never unowned ones); non-fatal.
+npx forgedock gc --apply --docker --tmp >/dev/null 2>&1 || true
 ```
+
+Test services you start yourself (`docker run`, compose) carry the `forgedock.*` labels (#4181), use `--rm`, and are removed in a `trap` on exit.
 
 The configured `verification.commands.<lang>.test` always runs here, whether or not V4.8's `ci-local.sh` resolves (forge#4040): the local CI gate never runs that command, so a failing configured suite must fail V2 on its own. Only a wall-clock timeout (rc 124) is DEGRADED. Test command failures (`TEST_FAILED=1`, also reported as `LEARNED_FAILED=1`) are BLOCKING (same as `verification.commands` failures): fix and re-run. A command matched and skipped by the known-slow gate is never executed and never counted as a failure, but it is DEGRADED, not verified. Each `DEGRADED_CHECKS+=` line printed here is a carry-forward line: record it in your notes, V5 Step 1 and Step 4 rebuild `DEGRADED_CHECKS` from them (a fresh shell does not keep the variable).
 

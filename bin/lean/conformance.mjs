@@ -62,8 +62,31 @@ export function authorizationOf(contract, f) {
 }
 const blank = (s) => !String(s ?? "").trim() || /^none$/i.test(String(s).trim());
 
-/** Shape check of the builder's contract.json against the issue text. Returns {ok, problems[]}. */
-export function validateContract(c, issueText) {
+/** forge.yaml lean.repro_test (#4271): "prefer" (default) asks a bug lane for a red-green repro test; "off" is today's contract. */
+export const REPRO_MODES = Object.freeze(["off", "prefer"]);
+/** True when the issue carries a `bug` or `type:bug` label (names or {name} objects). */
+export const isBugIssue = (labels) => (Array.isArray(labels) ? labels : []).some((l) => ["bug", "type:bug"].includes(String(l?.name ?? l).trim().toLowerCase()));
+
+/**
+ * Shape check of the builder's contract.json against the issue text. Returns {ok, problems[]}. `repro` (#4271): a bug
+ * lane with lean.repro_test on also needs repro_test: {path, id?, command}, or "none" with a repro_test_reason.
+ */
+/**
+ * A validate command that diffs against a remote branch tip (`git diff origin/x`, `git diff origin/x HEAD`) breaks as
+ * soon as the base moves on, even when the change is fine. Returns the remote ref it diffs against, or null when every
+ * `git diff` segment compares against the merge base (`origin/x...HEAD`, `$(git merge-base …)`) or no remote ref.
+ */
+export function movingBaseDiff(command) {
+  for (const seg of String(command ?? "").split(/&&|\|\||;|\|/)) {
+    if (!/\bgit\b(?:\s+-C\s+\S+)?(?:\s+-c\s+\S+)*\s+diff\b/.test(seg)) continue;
+    const ref = /(?:^|[\s=])(origin\/[A-Za-z0-9._\/-]+)/.exec(seg)?.[1];
+    if (!ref || seg.includes("...") || /merge-base/.test(seg)) continue;
+    return ref.replace(/\.\.?$/, "");
+  }
+  return null;
+}
+
+export function validateContract(c, issueText, { repro = false } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
   const reqs = Array.isArray(c.requirements) ? c.requirements : [];
@@ -89,7 +112,16 @@ export function validateContract(c, issueText) {
     else if (!DECISION_SOURCES.includes(k?.source)) problems.push(`${k.id}: decision source must be one of ${DECISION_SOURCES.join("|")}`);
   }
   if (!Array.isArray(c.validate) || !c.validate.length) problems.push("the contract names no validate[] commands");
-  else for (const v of c.validate) if (!v?.id || blank(v?.command)) problems.push("validate entry without id or command");
+  else for (const v of c.validate) {
+    if (!v?.id || blank(v?.command)) { problems.push("validate entry without id or command"); continue; }
+    const ref = movingBaseDiff(v.command);
+    if (ref) problems.push(`${v.id}: \`git diff\` against the moving ${ref} tip fails as soon as the base moves on, even when the change is fine; compare against the merge base instead (\`${ref}...HEAD\` or \`$(git merge-base HEAD ${ref})\`)`);
+  }
+  if (repro) {
+    const t = c.repro_test;
+    if (t === "none") { if (blank(c.repro_test_reason)) problems.push(`repro_test "none" needs a one-line repro_test_reason`); }
+    else if (!t || typeof t !== "object" || Array.isArray(t) || blank(t.path) || blank(t.command)) problems.push(`this is a bug: repro_test must be {"path","id","command"} (a test that fails on the base and passes after the fix) or "none" with a repro_test_reason`);
+  }
   if (JSON.stringify(c).length > MAX_CONTRACT_CHARS) problems.push(`the contract is over ${MAX_CONTRACT_CHARS} characters; keep quotes to the requirement sentence and descriptions short`);
   return { ok: problems.length === 0, problems };
 }
@@ -132,11 +164,11 @@ export function applyAmendments(frozen, amendments, issueText = null) {
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
  * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[]}; each failure carries a
- * `kind` (scope_creep, validate_missing, validate_failed, requirement_unimplemented, untracked_deferral, hotspot_growth) so callers can
+ * `kind` (scope_creep, validate_missing, validate_failed, requirement_unimplemented, untracked_deferral, hotspot_growth, repro_red_green) so callers can
  * tell the builder's own failed checks apart from bookkeeping gaps. `ciVerified` (#4167): the current head passed the
- * engine's CI verification, so a validate id left to CI is not missing; a recorded non-zero exit still fails.
+ * engine's CI verification, so a validate id left to CI is not missing; a recorded non-zero exit still fails. `repro` (#4271): the repro_test red-green words, checked when given.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null }) {
   const failures = [];
   const creep = changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(contract, f));
   if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
@@ -159,7 +191,20 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     }
   }
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
+  if (repro) failures.push(...reproFailures(contract, repro));
   return { ok: failures.length === 0, failures };
+}
+
+/**
+ * #4271: the frozen repro_test's red-green proof ({base, head} words from scripts/acceptance-red-green.sh). Anything but
+ * HEAD=RAN BASE=FAILED fails; code conformance.unimplemented, so it blocks in shadow too and goes back to the builder.
+ */
+export function reproFailures(contract, { base, head } = {}) {
+  if (head === "RAN" && base === "FAILED") return [];
+  const t = contract?.repro_test ?? {};
+  const name = [t.path, t.id].filter((x) => !blank(x)).join(" ") || "repro_test";
+  return [{ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "repro_red_green",
+    detail: `repro test ${name} (\`${t.command ?? ""}\`) must fail on the base and pass on head; got BASE=${base ?? "UNRUNNABLE"} HEAD=${head ?? "UNRUNNABLE"}` }];
 }
 
 const EXEMPT_RE = /hotspot-exempt:\s*\S/i;

@@ -111,6 +111,39 @@ export function readReviewIncomplete(cwd = process.cwd()) {
     return ["needs-human", "degraded"].includes(v) ? v : undefined;
   } catch { return undefined; }
 }
+/**
+ * forge.yaml `review.trigger` (shadow|enforce|off) and `review.risk_paths` (#4273): a comma-separated scalar or a block
+ * list (`  risk_paths:` then `    - glob`). Returns {mode, riskPaths}; undefined when neither is set (the core defaults to
+ * shadow with the built-in risk patterns). An invalid mode reads as unset.
+ */
+export function readReviewTrigger(cwd = process.cwd()) {
+  let raw;
+  try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { return undefined; }
+  let sec = {};
+  try { sec = parseForgeYaml(raw)?.review ?? {}; } catch { /* unreadable: no trigger config */ }
+  const m = String(sec?.trigger ?? "").trim();
+  const mode = ["shadow", "enforce", "off"].includes(m) ? m : undefined;
+  const riskPaths = typeof sec?.risk_paths === "string" ? sec.risk_paths.split(",").map((x) => x.trim()).filter(Boolean) : [];
+  let inReview = false, listIndent = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    if (/^\S/.test(line)) { inReview = /^review:\s*(#.*)?$/.test(line); listIndent = null; continue; }
+    if (!inReview) continue;
+    const indent = line.length - line.trimStart().length;
+    if (listIndent === null) { if (/^\s+risk_paths:\s*(#.*)?$/.test(line)) listIndent = indent; continue; }
+    if (indent <= listIndent) { listIndent = /^\s+risk_paths:\s*(#.*)?$/.test(line) ? indent : null; continue; }
+    const li = /^\s+-\s+["']?([^"'#]+?)["']?\s*(#.*)?$/.exec(line);
+    if (li) riskPaths.push(li[1].trim());
+  }
+  return mode || riskPaths.length ? { mode: mode ?? "shadow", riskPaths } : undefined;
+}
+/** forge.yaml `lean.repro_test` (off|prefer, #4271); undefined when absent or invalid (the core defaults to prefer). */
+export function readReproTest(cwd = process.cwd()) {
+  try {
+    const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.lean?.repro_test ?? "").trim();
+    return ["off", "prefer"].includes(v) ? v : undefined;
+  } catch { return undefined; }
+}
 function readLeanSetting(key, cwd = process.cwd()) {
   try {
     const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.[`lean_${key}`] ?? "").trim();
@@ -226,13 +259,15 @@ export function readPrecheckCommands(cwd = process.cwd()) {
 }
 /**
  * forge.yaml `env` for core lanes (#4163): `env.toolchain` ("<pm>@<x.y.z>" or "off") and `env.setup` (a command run once
- * per fresh worktree before the builder). Returns runCore options; {} when absent.
+ * per fresh worktree before the builder); `env.sparse_max_kb` (#4221: sparse lane checkout threshold, 0 = off). Returns runCore options; {} when absent.
  */
 export function readEnvConfig(cwd = process.cwd()) {
   try {
     const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.env ?? {};
     const s = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
-    return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}) };
+    const kb = typeof e.sparse_max_kb === "string" && /^\d+$/.test(e.sparse_max_kb.trim()) ? Number(e.sparse_max_kb) : e.sparse_max_kb;
+    return { ...(s(e.toolchain) ? { toolchainOverride: s(e.toolchain) } : {}), ...(s(e.setup) ? { envSetup: s(e.setup) } : {}),
+      ...(Number.isInteger(kb) && kb >= 0 ? { sparseMaxKb: kb } : {}) };
   } catch { return {}; }
 }
 export const ENGINE_PATHS = ["core", "full", "lean", "auto"];
@@ -675,7 +710,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1031,7 +1066,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4256: the placement orchestrate decided for a lane (ctx.placement) reaches it as --placement/--placement-reason.
@@ -1123,10 +1158,51 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     };
     budget = { classify, maintenance: { share: maint.share ?? 0.2, whenIdle: maint.whenIdle ?? true } };
   }
+  // forge#4161: milestone drift. Always folds merged milestone lanes into the summary; thresholds and holds only with config.
+  let drift = deps.drift;
+  if (drift === undefined) {
+    const { makeDrift } = await import("./lean/drift.mjs");
+    const { affectedFiles } = await import("./orchestrate-preflight.mjs");
+    drift = makeDrift({ repo, cwd, io: leanIo, config: readDrift(cwd), stagingBranch: branches.staging ?? "staging", affectedFiles,
+      onEvent: (e) => console.log(`#${e.issue} → ${e.detail}`) });
+  }
   const crossLane = [];
+  // #4183: owned-resource GC in preflight and before an admission when the host is near the ceiling (forge.yaml hygiene).
+  const gcMod = await import("./gc.mjs");
+  const hygiene = deps.hygiene ?? gcMod.readHygiene(cwd);
+  const testDeps = deps.leanIo || deps.leanModule || deps.laneScript;
+  const gcRun = !hygiene.auto_gc ? null : deps.gc !== undefined ? deps.gc
+    : testDeps ? null : async () => gcMod.runOwnedGc({ probes: gcMod.makeGcProbes({ cwd }), hygiene });
+  const reclaimed = { enabled: !!hygiene.auto_gc, items: 0, bytes: 0, preflight: 0, admissions: 0, runs: 0 };
+  const nowMs = deps.now ?? (() => Date.now());
+  let lastGcAt = null;
+  const runGcPhase = async (phase) => {
+    if (!gcRun) return;
+    lastGcAt = nowMs();
+    try {
+      const r = (await gcRun({ phase })) ?? {};
+      const n = Number(r.reclaimed) || 0;
+      reclaimed.items += n; reclaimed.bytes += Number(r.bytes) || 0; reclaimed.runs++;
+      reclaimed[phase === "preflight" ? "preflight" : "admissions"] += n;
+      for (const note of r.plan?.notes ?? []) console.log(`gc (${phase}): ${note}`);
+    } catch (e) { console.log(`gc (${phase}) failed: ${String(e?.message ?? e).slice(0, 200)}`); }
+  };
+  await runGcPhase("preflight");
+  const GC_ADMISSION_INTERVAL_MS = 5 * 60 * 1000;
+  const beforeAdmit = !gcRun ? null : async () => {
+    if (lastGcAt !== null && nowMs() - lastGcAt < GC_ADMISSION_INTERVAL_MS) return;
+    let near = false;
+    try {
+      const { nearCeiling } = await import("./lean/admission.mjs");
+      const host = deps.host ?? (await import("./lean/effects.mjs")).makeHostProbe();
+      near = await nearCeiling({ cfg: readAdmission(cwd), host, ratio: hygiene.max_host_load_ratio });
+    } catch { near = false; }
+    if (near) await runGcPhase("admission");
+  };
   const rows = await orchestrate({
+    beforeAdmit,
     issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
-    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id,
+    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
     ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
     ...(remote ? { remote } : {}),
     // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
@@ -1161,10 +1237,18 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (sbxLine) report.push(sbxLine);
   if (crossLane.length) report.push(`cross-lane edges: ${crossLane.map((e) => `#${e.issue} (${e.lane}) → #${e.dependency} (${e.dependencyLane})`).join(", ")}`);
   if (rows.some((r) => r.outcome === "held")) report.push(`held issues stay pending: forgedock orchestrate --resume ${batch.id}`);
+  report.push(formatReclaimed(reclaimed));
   for (const l of report) sink.line(l);
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
-  try { batch.writeReport({ rows, crossLane, ok, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
-  return { rows, crossLane, batch: batch.id, ok };
+  try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
+  return { rows, crossLane, batch: batch.id, reclaimed, ok };
+}
+
+/** The batch report's "reclaimed" line (#4183). */
+export function formatReclaimed(r) {
+  if (!r?.enabled) return "reclaimed: off (hygiene.auto_gc: false)";
+  const b = r.bytes, size = b >= 1073741824 ? `${(b / 1073741824).toFixed(1)}G` : b >= 1048576 ? `${(b / 1048576).toFixed(1)}M` : b >= 1024 ? `${Math.round(b / 1024)}K` : `${b}B`;
+  return `reclaimed: ${r.items} item(s), ${size} (preflight ${r.preflight}, admissions ${r.admissions})`;
 }
 
 /**
@@ -1275,6 +1359,22 @@ export function readOrchestration(cwd = process.cwd()) {
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
   return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), globalParallel: gp >= 1 ? gp : null,
     recovery: { maxAttempts: recoveryMax } };
+}
+
+/**
+ * forge.yaml `orchestrate.drift` (#4161): `{pairGrowth, packageLines, fileLines, blockDispatch, generatedGlobs}` with
+ * only the positive-integer thresholds set, or null when no threshold and no `block_dispatch: true` is set (summary
+ * only: no script run, no issue, no hold). The parser flattens `orchestrate.drift.*` to `orchestrate.*`.
+ */
+export function readDrift(cwd = process.cwd()) {
+  let o = null;
+  try { o = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.orchestrate ?? null; } catch { o = null; }
+  if (!o || typeof o !== "object") return null;
+  const int = (v) => { const n = Number(v); return v !== undefined && String(v).trim() !== "" && Number.isInteger(n) && n > 0 ? n : null; };
+  const out = { pairGrowth: int(o.pair_growth), packageLines: int(o.package_lines), fileLines: int(o.file_lines),
+    blockDispatch: String(o.block_dispatch ?? "").trim() === "true",
+    generatedGlobs: String(o.generated_globs ?? "").split(",").map((x) => x.trim()).filter(Boolean) };
+  return out.pairGrowth == null && out.packageLines == null && out.fileLines == null && !out.blockDispatch ? null : out;
 }
 
 /**

@@ -3231,6 +3231,26 @@ async function doctor(fix = false) {
     );
   }
 
+  // ── Check 13: Resource hygiene (#4183) ──────────────────────────────────────
+  // Owned leftovers (stale lane ledgers, forgedock-labelled docker, lean-*/agent-* worktrees, lane branches,
+  // ~/.forge/tmp scratch) with counts and sizes; unowned stale ones are only reported. --fix runs the reaper with the
+  // forge.yaml hygiene TTLs. Never a failure: a leftover slows the host, it does not break the install.
+  {
+    try {
+      const gc = await import("./gc.mjs");
+      const probes = gc.makeGcProbes({ cwd: process.cwd() });
+      const h = gc.readHygiene(process.cwd());
+      const plan = await gc.planGc({ probes, ttlMs: gc.hygieneTtls(h), deleteMergedBranches: h.delete_merged_branches });
+      const applied = fix ? await gc.applyGc(plan, probes) : null;
+      if (applied && applied.reclaimed.length > 0) fixesApplied++;
+      const r = gc.hygieneCheck(plan, { applied });
+      if (r.status === "pass") pass("Resource hygiene", r.detail);
+      else warn("Resource hygiene", r.detail);
+    } catch (e) {
+      warn("Resource hygiene", `could not inspect ForgeDock leftovers: ${String(e?.message ?? e).slice(0, 200)}`);
+    }
+  }
+
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log("");
   if (fix && fixesApplied > 0) {
@@ -3266,6 +3286,7 @@ function help() {
     ["npx forgedock disable [dir]", "Opt a directory out of ForgeDock"],
     ["npx forgedock status [dir]", "Show ForgeDock state for a directory"],
     ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
+    ["npx forgedock bootstrap <idea|docs> [--dry-run] [--spike <path>] | --plan <plan.json> [--dry-run]", "Headless /bootstrap: idea to orchestrate-ready backlog (--dry-run previews milestones, titles, DAG and estimated agent cost without GitHub writes); --plan validates and creates (or previews) a plan, and re-running resumes from GitHub"],
     ["npx forgedock run-issue <issue> [--lane <lane>] [--lane-override] [--path core|full] [--retry] [--wait-lease]", "Run the lean core work-on on one issue (default; --path full = legacy multi-phase pipeline; the lane comes from the issue: milestone → milestone/<slug>, else staging; --lane is an assertion, never the default branch) (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
     ["npx forgedock orchestrate <issue...> [--parallel K] [--lane L]", "Run core work-on on several issues with bounded concurrency and Depends-on ordering; each issue on its own lane, cross-lane dependencies reported"],
     ["npx forgedock orchestrate --resume <id> | --set-parallel <id> K", "Reattach to a batch hosted by the schedd daemon (a finished one replays its report, an orphaned one is resumed with live lanes re-adopted), or change its concurrency live"],
@@ -3282,7 +3303,7 @@ function help() {
     ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
     ["npx forgedock stats [--since <ver|date>] [--repo owner/repo] [--json] [--refresh]", "Version-over-version cost/time/flow/review/gate report from GitHub telemetry (no model)"],
     ["npx forgedock doctor", "Check installation health"],
-    ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block)"],
+    ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block) and reclaim ForgeDock-owned leftovers (forge.yaml hygiene TTLs)"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock opencode install", "Install token-efficient native OpenCode commands"],
@@ -3847,10 +3868,10 @@ async function watch() {
 // The journey-routed commands render their own branded marks (hero/compact);
 // splash() would double-brand them. Engine-surface commands, help, and
 // unknown-command output keep the logo.
-const SPLASH_COMMANDS = new Set(["run", "run-issue", "orchestrate", "triage", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
+const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "backend-check", "run-issue", "orchestrate", "triage", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "sched", "schedd", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "triage", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "sched", "schedd", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4007,6 +4028,18 @@ switch (command) {
   case "run":
     await run();
     break;
+  case "bootstrap": {
+    // #4177: headless /bootstrap; --plan runs scripts/bootstrap-create.mjs directly (no LLM), a re-run resumes.
+    const { runBootstrap } = await import("./bootstrap.mjs");
+    try {
+      const { runCommand } = await import("./runner.mjs");
+      exitCode = await runBootstrap(restArgs, { runCommand, commandsDir: COMMANDS_DIR });
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
   case "backend-check": {
     // Exit codes: 0 = ready, 1 = no usable backend, 2 = bad usage (unknown option).
     // Only --quiet is accepted; anything else is a usage error so callers can tell a

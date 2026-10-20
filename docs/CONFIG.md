@@ -49,6 +49,7 @@ If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pi
 | [`repos`](#repos-optional) | No | Multi-repository routing |
 | [`project_board`](#project_board-optional) | No | GitHub Projects v2 integration |
 | [`orchestration`](#orchestration-optional) | No | `/orchestrate` concurrency and cascade admission policy |
+| [`hygiene`](#hygiene-optional) | No | Automatic reclaim of ForgeDock-owned leftovers: TTLs, branch deletion, near-ceiling GC, `auto_gc` |
 | [`pipeline`](#pipeline-optional) | No | `/orchestrate` batch-engine tuning (stall detection, token budget, narration) |
 | [`build`](#build-optional) | No | `/work-on` build-phase scope check (`build.scope.*`) and review depth (`review.depth.*`) |
 | [`services`](#services-optional) | No | External service URLs and IDs |
@@ -431,6 +432,37 @@ orchestration:
 
 ---
 
+## `hygiene` (OPTIONAL)
+
+Automatic reclaim of what ForgeDock leaves behind (#4183), using the `forgedock gc` reaper. Only resources ForgeDock provably owns are reclaimed: entries of a stale lane ledger, Docker containers and volumes labelled `forgedock.owner=1`, `lean-*`/`agent-*` dirs under `.claude/worktrees`, `feat/issue-<n>-lean` branches of closed issues, and ForgeDock scratch under `~/.forge/tmp`. Everything else is reported, never touched, and so are unpushed or uncommitted work, live lanes, protected branches and branches with an open PR. Block form only.
+
+```yaml
+hygiene:
+  container_ttl_hours: 6
+  worktree_ttl_hours: 24
+  tmp_ttl_hours: 6
+  delete_merged_branches: true
+  max_host_load_ratio: 0.8
+  auto_gc: true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `container_ttl_hours` | number | `6` | Age after which owned Docker containers and volumes are reclaimed (an expired `forgedock.expires` label reclaims earlier). |
+| `worktree_ttl_hours` | number | `24` | Age after which owned worktrees (clean and pushed) and abandoned lane branches are reclaimed. |
+| `tmp_ttl_hours` | number | `6` | Age after which `~/.forge/tmp` run dirs (owner dead) and runner scratch (no live process) are reclaimed. |
+| `delete_merged_branches` | boolean | `true` | `false`: lane branches of closed issues are reported, never deleted. |
+| `max_host_load_ratio` | number in (0,1] | `0.8` | Near-ceiling trigger relative to the `engine` admission thresholds: load/core at or above ratio × `max_load_per_core`, or free memory/tmp at or below the minimum ÷ ratio. |
+| `auto_gc` | boolean | `true` | `false` disables GC in `forgedock orchestrate`; `forgedock gc` and `forgedock doctor --fix` still work. |
+
+Invalid values fall back to the default. `forgedock gc --older-than <d>` overrides every TTL for that run. Resources of a live lane (its ledger owner is alive) are always skipped.
+
+**Where it runs**: `forgedock orchestrate` applies GC once before admitting lanes, and again before an admission when the host is near the ceiling (at most every 5 minutes). The batch report ends with `reclaimed: N item(s), SIZE (preflight A, admissions B)`, or `reclaimed: off (hygiene.auto_gc: false)`. `forgedock doctor` shows a **Resource hygiene** check (owned counts and sizes, reclaimable count, unowned stale items as warnings), and `doctor --fix` runs the reaper. `/cleanup branches` calls `forgedock gc`.
+
+**Commands that use this section**: `orchestrate`, `doctor`, `gc`, `cleanup`
+
+---
+
 ## `pipeline` (OPTIONAL)
 
 Tuning knobs for the CLI backend and `/orchestrate`'s batch engine — invocation and stall timeouts, narration verbosity, and (deprecated alias only, see `orchestration.cascade` above) the review-finding cascade token budget. All keys optional; sane defaults apply when omitted.
@@ -537,6 +569,19 @@ engine:
 **Commands that use this section**: CLI backend (`runCommand` in `bin/runner.mjs`)
 
 ---
+
+## `lean` (OPTIONAL)
+
+Settings of the core work-on (`bin/lean/`) that change its contract.
+
+```yaml
+lean:
+  repro_test: prefer   # off | prefer (default)
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `repro_test` | string | No | `prefer` (default): on an issue labelled `bug` or `type:bug`, the plan step must freeze a `repro_test` in the contract (`{"path","id","command"}`) when the bug is testable. Before review, the engine runs `scripts/acceptance-red-green.sh` for that command on the host in every verify mode: one targeted test, red on the base (head's changed test files overlaid) and green on head. Any other result, including a test that could not run, fails the precheck as `conformance.unimplemented` (it blocks in shadow too) and goes back to the builder for one in-session fix round. A bug that is not testable (specs, docs, workflows, environment) records `"repro_test":"none"` with a one-line `repro_test_reason` and the lane continues as before. `off` gives exactly the previous contract and precheck. Each proof emits a `REPRO_RED_GREEN` run-log event (`base`, `head`) and adds a trajectory decision. |
 
 ## `verify` (OPTIONAL)
 
@@ -668,12 +713,14 @@ A repo with no pins and no `env` keys runs exactly as before: no shim dir, no en
 env:
   toolchain: "pnpm@10.4.1"              # optional: overrides the detected package manager; "off" disables detection
   setup: "bash scripts/reconcile-dev-db.sh"   # optional: run once per fresh lane worktree, before the builder
+  sparse_max_kb: 1024                   # optional: tracked files this size or larger stay out of lane worktrees; 0 = full checkout
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `toolchain` | string | No | `<pnpm\|yarn\|npm>@<x.y.z>` replaces the detected package-manager pin; `off` disables all toolchain detection. An invalid value is ignored and recorded as an anomaly. |
 | `setup` | string | No | Shell command (`bash -c`) run once in each fresh lane worktree before the builder starts, with the lane's PATH and `TMPDIR`. Use it for environment drift the repo's migrations don't cover, for example a dev-database reconcile script. Timeout 15 min. A non-zero exit ends the lane `needs-human` with code `env.setup_failed`: an environment error, not a build failure. The builder never runs. |
+| `sparse_max_kb` | integer | No | Default `1024`. Lane worktrees are sparse checkouts: tracked files of this many KB or more (generated JSON, screenshots, PDFs, media) are not written to disk, which cuts per-lane disk in repos that track large assets (#4221). Lockfiles, manifests (`package.json`, `pyproject.toml`, `requirements*.txt`, ...), toolchain pins, `tsconfig*.json`, `forge.yaml`, `.gitattributes` and `.gitignore` are always checked out. A repo with no such file gets a plain checkout. The builder prompt names the absent files; `git sparse-checkout add /<path>` brings one back. `0` disables it. Git sets `extensions.worktreeConfig=true` in the repo's shared config; the sparse setting itself is per lane worktree, so the main checkout is unchanged. If the sparse setup fails, the lane uses a full checkout. |
 
 **Commands that use this section**: `forgedock run-issue`, `forgedock orchestrate` (core path; `bin/engine-cli.mjs` `readEnvConfig`)
 

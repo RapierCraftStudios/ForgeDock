@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -161,6 +161,21 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.equal(resolveEvidencePath("nope.js", files), null);
     assert.equal(decide(row("R1", { evidence: "scrape.js:4" }), ctx).state, "conforms");
   });
+  it("a validate command that diffs against the moving origin/<lane> tip invalidates the contract; a merge-base diff does not", () => {
+    const withV = (command) => ({ ...C, validate: [{ id: "V4", command }] });
+    const bad = validateContract(withV("./scripts/sync.sh --check-only && git diff --quiet origin/staging -- infra/a infra/b"), ISSUE);
+    assert.equal(bad.ok, false);
+    assert.ok(bad.problems.some((x) => /^V4: `git diff` against the moving origin\/staging tip/.test(x) && x.includes("origin/staging...HEAD")), bad.problems.join("; "));
+    for (const ok of ["git diff --quiet origin/staging...HEAD -- infra/a", "git diff --quiet $(git merge-base HEAD origin/staging) -- infra/a", "node --test test/leak.test.js", "git log origin/staging..HEAD --oneline"]) {
+      assert.equal(validateContract(withV(ok), ISSUE).ok, true, ok);
+    }
+  });
+  it("movingBaseDiff finds the remote ref in any git diff segment, and ignores merge-base forms and other commands", () => {
+    assert.equal(movingBaseDiff("git diff --name-only origin/main HEAD"), "origin/main");
+    assert.equal(movingBaseDiff("git -C sub diff origin/milestone/foo | wc -l"), "origin/milestone/foo");
+    assert.equal(movingBaseDiff("git diff HEAD~1"), null);
+    assert.equal(movingBaseDiff(""), null);
+  });
   it("#4160: reviewSkeleton (object form) lists every required row, scope rows pre-filled with the engine's authorization", () => {
     const k = { ...C, requirements: [...C.requirements, { id: "R9", quote: "Billing pricing is unchanged.", disposition: "defer", why: "w" }] };
     const sk = reviewSkeleton({ contract: k, changedFiles: [...files, "src/billing.js", ".forge-lean/x"], ignore: [".forge-lean/"] });
@@ -264,5 +279,38 @@ describe("hotspot growth precheck (forge#4195)", () => {
     assert.equal(run(hs([H()]), C, amended).ok, true);
     assert.equal(run(hs([H(), H({ path: "src/search.js" })]), withChange("hotspot-exempt: ok")).failures.length, 1, "the exemption covers only its own file");
     assert.equal(hotspotGrowth({ contract: C, hotspots: hs([H()]), changedFiles: ["./src/scrape.js"] }).length, 1);
+  });
+});
+
+describe("repro_test on bug lanes (#4271)", () => {
+  const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+  const RT = { path: "test/leak.test.js", id: "releases on 429", command: "node --test test/leak.test.js" };
+  it("isBugIssue reads bug and type:bug labels, as names or {name}", () => {
+    assert.equal(isBugIssue([{ name: "bug" }]), true);
+    assert.equal(isBugIssue(["P2", "type:bug"]), true);
+    assert.equal(isBugIssue([{ name: "feature" }, "debug"]), false);
+    assert.equal(isBugIssue(null), false);
+  });
+  it("a testable bug needs repro_test {path, command}; a non-testable one records none with a reason", () => {
+    assert.deepEqual(validateContract({ ...C, repro_test: RT }, ISSUE, { repro: true }), { ok: true, problems: [] });
+    assert.deepEqual(validateContract({ ...C, repro_test: "none", repro_test_reason: "spec-only change" }, ISSUE, { repro: true }), { ok: true, problems: [] });
+    assert.match(validateContract(C, ISSUE, { repro: true }).problems.join(), /repro_test must be/);
+    assert.match(validateContract({ ...C, repro_test: { path: "test/x.js" } }, ISSUE, { repro: true }).problems.join(), /repro_test must be/);
+    assert.match(validateContract({ ...C, repro_test: "none" }, ISSUE, { repro: true }).problems.join(), /repro_test_reason/);
+  });
+  it("red on base and green on head passes; anything else fails the precheck as conformance.unimplemented", () => {
+    const k = { ...C, repro_test: RT };
+    assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [] });
+    for (const repro of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "UNRUNNABLE", head: "UNRUNNABLE" }]) {
+      const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
+      assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_red_green"]], JSON.stringify(repro));
+      assert.match(pc.failures[0].detail, new RegExp(`BASE=${repro.base} HEAD=${repro.head}`));
+    }
+    assert.match(reproFailures(k, {})[0].detail, /test\/leak\.test\.js releases on 429.*BASE=UNRUNNABLE HEAD=UNRUNNABLE/);
+  });
+  it("off (no repro option) is today's contract check and precheck exactly", () => {
+    assert.deepEqual(validateContract(C, ISSUE), validateContract(C, ISSUE, { repro: false }));
+    assert.deepEqual(validateContract(C, ISSUE), { ok: true, problems: [] });
+    assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), precheck({ contract: C, result: res, changedFiles: files, repro: null }));
   });
 });

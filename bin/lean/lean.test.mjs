@@ -76,7 +76,7 @@ function world(o = {}) {
       if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
       if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
       if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: "foo breaks", body: b, state: "OPEN", comments: [] }); }
-      if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [] });
+      if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [], ...(o.labels && a[2] === "7" ? { labels: o.labels } : {}) });
       if (k === "pr edit") { w.prEdits.push(a); return ""; }
       if (k === "label create") { w.labelCreates = [...(w.labelCreates ?? []), a]; return ""; }
       if (k === "issue comment" && w.commentErrors.length) throw new Error(w.commentErrors.shift());
@@ -951,6 +951,21 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(nhBody(w), /validate V1 failed \(exit 1\)/);
   });
 
+  it("a failed validate fetches the lane and the resume says how to catch up with a moved base (merge, never rebase)", async () => {
+    const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
+    assert.equal((await runShadow(w)).terminalReason, "merged");
+    const p = builders(w)[2][4];
+    assert.match(p, /origin\/staging moved on[\s\S]*git merge --no-edit origin\/staging[\s\S]*never rebase or force/);
+    const fetches = w.calls.filter((c) => c[0] === "git" && c[1] === "fetch" && c[2] === "origin" && c[3] === "staging");
+    assert.ok(fetches.length >= 2, "fetched at setup and again before the resume");
+  });
+
+  it("a resume for other failures (a partial requirement) does not mention merging the base", async () => {
+    const w = world({ claims: [{ id: "R1", status: "partial" }] });
+    await runShadow(w);
+    assert.doesNotMatch(builders(w)[2][4], /git merge --no-edit/);
+  });
+
   it("shadow: a failed validate fixed by the resume merges", async () => {
     const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
     assert.equal((await runShadow(w)).terminalReason, "merged"); assert.equal(builders(w).length, 3);
@@ -1208,6 +1223,72 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
   });
 });
 
+describe("bug lanes freeze a red-green repro_test (#4271)", () => {
+  const RT = { path: "test/foo.test.js", id: "foo handles null", command: "node --test test/foo.test.js" };
+  const BUG = [{ name: "bug" }];
+  /** world labelled `labels` whose io.redGreen answers from `rg` in order (the last repeats). */
+  const rworld = (rg, o = {}) => {
+    const w = world({ labels: BUG, contract: { ...CONTRACT, repro_test: RT }, ...o }); const q = [...rg]; w.rgCalls = [];
+    w.io.redGreen = async (x) => { w.rgCalls.push(x); return q.length > 1 ? q.shift() : q[0]; };
+    return w;
+  };
+  const nh = (w) => w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
+  const RED_GREEN = { base: "FAILED", head: "RAN" };
+
+  it("a testable bug: the plan asks for repro_test, the frozen one is proved red on base and green on head, and it merges", async () => {
+    const w = rworld([RED_GREEN]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.match(builders(w)[0][4], /This issue is a bug\. When it is testable, .*"repro_test":\{"path"/);
+    assert.match(builders(w)[0][4], /"repro_test":"none","repro_test_reason"/);
+    assert.deepEqual(w.rgCalls, [{ cwd: "/wt/lean-7", base: "origin/staging", command: RT.command }]);
+    assert.match(w.comments.find((c) => c.includes("FORGE:CONTRACT")), /"repro_test"/, "repro_test is frozen in the contract JSON");
+    assert.ok(traj(w)[0].includes("repro_test test/foo.test.js foo handles null: BASE=FAILED HEAD=RAN"));
+    assert.equal(builders(w).length, 2); assert.equal(reviewers(w).length, 1);
+    const t = rworld([RED_GREEN], { labels: [{ name: "type:bug" }] });
+    assert.equal((await run(t)).terminalReason, "merged"); assert.equal(t.rgCalls.length, 1, "type:bug counts as a bug");
+  });
+
+  it("a repro test that is not red on base and green on head fails the precheck in enforce and in shadow: one in-session resume, then needs-human", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      for (const rg of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, null]) {
+        const w = rworld([rg]);
+        const r = await run(w, { conformance });
+        assert.equal(r.code, "conformance.unimplemented", `${conformance} ${JSON.stringify(rg)}`); assert.equal(w.merges.length, 0);
+        assert.equal(builders(w).length, 3, "plan + implement + one resume"); assert.equal(builders(w)[2][2], "sess-1", "the resume is in the builder's session");
+        assert.equal(reviewers(w).length, 0, "no reviewer tokens on a failed repro proof");
+        assert.match(builders(w)[2][4], /must fail on the base and pass on head; got BASE=/);
+        assert.match(nh(w), /repro test test\/foo\.test\.js foo handles null/);
+      }
+    }
+    const fixed = rworld([{ base: "RAN", head: "RAN" }, RED_GREEN]);
+    assert.equal((await run(fixed, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(fixed.rgCalls.length, 2);
+  });
+
+  it("a non-testable bug records repro_test none with a reason and is not blocked; a missing repro_test gets the one contract correction", async () => {
+    const none = { ...CONTRACT, repro_test: "none", repro_test_reason: "spec-only change, nothing executable" };
+    const w = rworld([RED_GREEN], { contract: none });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(w.rgCalls.length, 0); assert.equal(builders(w).length, 2);
+    assert.ok(traj(w)[0].includes("repro_test: none (spec-only change, nothing executable)"));
+    const m = rworld([RED_GREEN], { contract: CONTRACT, fixedContract: none });
+    assert.equal((await run(m)).terminalReason, "merged");
+    assert.match(builders(m)[1][4], /contract\.json is not valid:\n- this is a bug: repro_test must be/);
+    assert.equal(m.rgCalls.length, 0);
+  });
+
+  it("lean.repro_test off, or a lane that is not a bug, keeps today's prompts, contract check and precheck unchanged", async () => {
+    const plain = world(); await run(plain);
+    for (const [o, extra] of [[{}, { reproTest: "off" }], [{ labels: [{ name: "feature" }] }, {}]]) {
+      const w = rworld([{ base: "RAN", head: "RAN" }], { contract: CONTRACT, ...o });
+      assert.equal((await run(w, extra)).terminalReason, "merged");
+      assert.equal(builders(w)[0][4], builders(plain)[0][4], "plan prompt unchanged"); assert.equal(builders(w)[1][4], builders(plain)[1][4]);
+      assert.equal(builders(w).length, 2, "no contract correction for a missing repro_test"); assert.equal(w.rgCalls.length, 0);
+    }
+    const k = rworld([{ base: "RAN", head: "RAN" }]);
+    assert.equal((await run(k, { reproTest: "off" })).terminalReason, "merged"); assert.equal(k.rgCalls.length, 0, "off never runs a frozen repro_test");
+  });
+});
+
 describe("structure delta and decision provenance at merge (forge#4165)", () => {
   const DEC = [{ id: "K1", choice: "web imports db", justification: "docs/architecture.md:12", source: "doc" }, { id: "K2", choice: "copy the retry helper", justification: "src/retry.js:3", source: "precedent" }];
   const D = { package_edges_added: [{ from: "@s/db", to: "@s/core", kind: "dependencies", manifest: "packages/db/package.json" }], package_edges_removed: [],
@@ -1270,6 +1351,21 @@ describe("structure delta and decision provenance at merge (forge#4165)", () => 
     const en = world(); await run(en, { conformance: "enforce" });
     const t2 = en.telemetry.find((x) => x.event === "RUN_TERMINAL");
     assert.equal(t2.conformance_mode, "enforce"); assert.equal(t2.shadow_would, undefined); assert.ok(e);
+  });
+
+  it("forge#4161: the merged lane result carries the structure record, milestone and lane for the drift fold (no extra call)", async () => {
+    const w = mworld({ milestone: "Remote MCP Server", branchesOnOrigin: ["staging", "milestone/remote-mcp-server"] });
+    const r = await run(w, { lane: undefined });
+    assert.equal(r.terminalReason, "merged");
+    const t = w.telemetry.find((x) => x.event === "STRUCTURE_DELTA");
+    assert.deepEqual(r.structure, { deps_added: t.deps_added, deps_removed: t.deps_removed, new_edges: t.new_edges, removed_edges: t.removed_edges, top_growth: t.top_growth, decisions: t.decisions });
+    assert.deepEqual([r.milestone, r.lane], ["Remote MCP Server", "milestone/remote-mcp-server"]);
+    assert.equal(w.structureCalls, 2, "no extra script run");
+    const nm = mworld({ contract: CONTRACT });
+    nm.io.structureDelta = async () => ({ ...D, import_pairs: [] }); // undeclared edge: needs-human, never merged
+    const r2 = await run(nm);
+    assert.notEqual(r2.terminalReason, "merged");
+    assert.equal(r2.structure, undefined, "only a merged result carries it");
   });
 
   it("a run that does not merge writes no merge-time STRUCTURE_DELTA", async () => {
@@ -1688,6 +1784,40 @@ describe("orchestrate", () => {
     assert.deepEqual(seen, [[2, "staging", "o/r"]]);
     await assert.rejects(orchestrateFromCli(["1", "--lane", "main", "--repo", "o/r"], { ...deps, io: { gh: async () => "main\n" } }), /lane\.default_branch/);
     await assert.rejects(orchestrateFromCli([], {}), /usage/);
+  });
+
+  it("#4183 orchestrateFromCli runs owned-resource GC in preflight and near the ceiling, prints a reclaimed line, honours auto_gc", async () => {
+    const leanIo = { gh: async (a) => (a[0] === "repo" ? "main\n" : a.includes("milestone") ? JSON.stringify({ milestone: null }) : JSON.stringify({ body: "" })),
+      git: async (a) => (a[0] === "ls-remote" && a.at(-1) === "refs/heads/staging" ? "abc\tref\n" : "") };
+    const gcCalls = [];
+    let t = 0;
+    const mk = (over) => ({ dir: tmpDir("core-gc-"), batchRoot: tmpDir("core-gc-batch-"), allowTmpfs: true, emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo,
+      leanModule: { runCore: async (o) => { t += 6 * 60 * 1000; return { terminalReason: "merged", pr: o.issue, cost_usd: 0, wall_ms: 1 }; } },
+      gc: async ({ phase }) => { gcCalls.push(phase); return { reclaimed: phase === "preflight" ? 2 : 1, bytes: 2 * 1048576 }; },
+      host: { loadAvg1: () => 0, cores: () => 1, memAvailableMb: () => 100 }, now: () => t, hygiene: { auto_gc: true, max_host_load_ratio: 0.8 }, ...over });
+    const logs = [];
+    const l = console.log; console.log = (s) => logs.push(String(s));
+    let res;
+    try { res = await orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], mk({})); } finally { console.log = l; }
+    // preflight once, then near-ceiling GC before the second admission (the first is within 5 min of the preflight run)
+    assert.deepEqual(gcCalls, ["preflight", "admission"]);
+    assert.equal(res.reclaimed.items, 3);
+    assert.ok(logs.includes("reclaimed: 3 item(s), 4.0M (preflight 2, admissions 1)"), logs.join("\n"));
+    // not near the ceiling: preflight only
+    gcCalls.length = 0;
+    console.log = () => {};
+    try { await orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], mk({ host: { loadAvg1: () => 0, cores: () => 4, memAvailableMb: () => 64000 } })); } finally { console.log = l; }
+    assert.deepEqual(gcCalls, ["preflight"]);
+    // auto_gc: false disables GC and says so
+    gcCalls.length = 0; logs.length = 0;
+    console.log = (s) => logs.push(String(s));
+    try { res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], mk({ hygiene: { auto_gc: false, max_host_load_ratio: 0.8 } })); } finally { console.log = l; }
+    assert.deepEqual(gcCalls, []);
+    assert.ok(logs.includes("reclaimed: off (hygiene.auto_gc: false)"), logs.join("\n"));
+    // a failing gc never fails the batch
+    console.log = () => {};
+    try { res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], mk({ gc: async () => { throw new Error("docker down"); } })); } finally { console.log = l; }
+    assert.equal(res.ok, true);
   });
 
   it("#4125 a lane-refused issue starts no run and its dependents are skipped, not reported as a cycle", async () => {
@@ -2498,6 +2628,71 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add" && c.at(-1) === "feat/issue-7-lean"));
   });
 
+  // ---- #4221 sparse lane worktrees ----
+  const BIG = `100644 blob ${"a".repeat(40)} 3000000\tweb/openapi.json\x00100644 blob ${"b".repeat(40)}      12\tsrc/foo.js\x00`;
+  const sparseWorld = (o = {}, git1 = null) => {
+    const w = world(o);
+    const g = w.io.git;
+    w.io.git = async (a, x) => {
+      if (git1) { const r = await git1(a, x, w); if (r !== undefined) return r; }
+      if (a[0] === "ls-tree") { w.calls.push(["git", ...a]); return o.lsTree ?? BIG; }
+      if (a[0] === "rev-parse" && a[2] === "info/sparse-checkout") return "/repo/.git/worktrees/lean-7/info/sparse-checkout\n";
+      return g(a, x);
+    };
+    return w;
+  };
+  const gitCalls = (w, k) => w.calls.filter((c) => c[0] === "git" && c[1] === k);
+
+  it("#4221 fresh, resume and #4118 keepLocal paths add a sparse worktree when the ref has a large blob; WORKTREE_SPARSE is logged", async () => {
+    const keepLocal = async (a) => (a[0] === "rev-list" && a[1] === "--count" && String(a[2]).includes("refs/heads/feat/issue-7-lean") ? "1\n" : undefined);
+    for (const [name, w, ref] of [
+      ["fresh", sparseWorld(), "origin/staging"],
+      ["resume", sparseWorld({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean" }), "origin/feat/issue-7-lean"],
+      ["keepLocal", sparseWorld({}, keepLocal), "refs/heads/feat/issue-7-lean"],
+    ]) {
+      const dir = tmpDir("sparse-");
+      assert.equal((await run(w, { dir })).terminalReason, "merged", name);
+      const adds = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add");
+      assert.equal(adds.length, 1, name);
+      assert.equal(adds[0][3], "--no-checkout", name);
+      if (name === "keepLocal") assert.ok(!adds[0].includes("-B") && adds[0].at(-1) === "feat/issue-7-lean", "#4118: the local branch is never reset");
+      assert.deepEqual(gitCalls(w, "ls-tree")[0].slice(2), ["-r", "-l", "-z", ref], name);
+      assert.ok(gitCalls(w, "sparse-checkout").some((c) => c.includes("--no-cone")), name);
+      assert.ok(gitCalls(w, "read-tree").length >= 1, name);
+      assert.ok(Object.entries(w.files).some(([, t]) => t === "/*\n!/web/openapi.json\n"), `${name}: pattern file written`);
+      const ev = readLog(dir, 7).filter((e) => e.event === "WORKTREE_SPARSE");
+      assert.deepEqual(ev.map((e) => [e.excluded, e.excluded_bytes, e.max_kb]), [[1, 3000000, 1024]], name);
+      const impl = builders(w).find((c) => !/PLANNING ONLY/.test(c[4]))[4];
+      assert.match(impl, /sparse checkout: 1 tracked file\(s\) of 1024 KB or more/);
+      assert.match(builders(w).find((c) => /PLANNING ONLY/.test(c[4]))[4], /git sparse-checkout add/);
+    }
+  });
+
+  it("#4221 no large blob or sparseMaxKb 0 keeps today's plain worktree add and an unchanged prompt", async () => {
+    for (const [w, extra] of [[sparseWorld({ lsTree: "" }), {}], [sparseWorld(), { sparseMaxKb: 0 }]]) {
+      const dir = tmpDir("sparse-off-");
+      assert.equal((await run(w, { dir, ...extra })).terminalReason, "merged");
+      const adds = w.calls.filter((c) => c[0] === "git" && c[1] === "worktree" && c[2] === "add");
+      assert.deepEqual(adds.map((c) => c.slice(1)), [["worktree", "add", "-B", "feat/issue-7-lean", "/wt/lean-7", "origin/staging"]]);
+      assert.equal(gitCalls(w, "sparse-checkout").length, 0);
+      assert.equal(readLog(dir, 7).filter((e) => e.event === "WORKTREE_SPARSE").length, 0);
+      for (const c of builders(w)) assert.doesNotMatch(c[4], /sparse checkout/);
+    }
+    assert.equal(gitCalls(sparseWorld(), "ls-tree").length, 0);
+  });
+
+  it("#4221 a failing sparse step falls back to a full checkout: WORKTREE_SPARSE_FALLBACK, an anomaly, and the lane still merges", async () => {
+    const dir = tmpDir("sparse-fb-");
+    let failed = false;
+    const w = sparseWorld({}, async (a) => { if (a[0] === "read-tree" && !failed) { failed = true; throw Object.assign(new Error("boom"), { stderr: "fatal: boom" }); } return undefined; });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "WORKTREE_SPARSE_FALLBACK").map((e) => e.reason), ["fatal: boom"]);
+    assert.ok(gitCalls(w, "sparse-checkout").some((c) => c[2] === "disable"));
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "WORKTREE_SPARSE").length, 0);
+    assert.ok(traj(w).some((t) => /Sparse checkout failed, full checkout used: fatal: boom/.test(t)));
+    for (const c of builders(w)) assert.doesNotMatch(c[4], /sparse checkout:/);
+  });
+
   it("#4114 gh writes (comment) retry on 5xx and secondary rate limits; non-transient errors do not", async () => {
     const w = world({ commentErrors: ["HTTP 502: Bad Gateway", "You have exceeded a secondary rate limit. Please wait a few minutes"] });
     assert.equal((await run(w)).terminalReason, "merged");
@@ -3254,6 +3449,72 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
   });
 });
 
+describe("test map and repo facts caches (#4272)", () => {
+  const MAPF = `${WT}/.forge/test-map.json`, FACTSF = `${WT}/.forge/repo-facts.json`;
+  const map = (entries) => JSON.stringify({ version: 1, entries });
+  const recorder = (w) => { const ran = []; w.io.runCommand = async ({ command }) => { ran.push(command); return { rc: 0, output: "" }; }; return ran; };
+
+  it("a test map present picks the commands for the changed files instead of learned.test_commands", async () => {
+    const w = world(); const ran = recorder(w);
+    w.files[MAPF] = map([{ globs: ["src/**/*.js"], command: "npm run lint", cwd: ".", source: "package.json#scripts.lint" },
+      { globs: ["**/*.py"], command: "uv run pytest", cwd: ".", source: "pyproject.toml" }, { globs: ["test/**"], command: "npm test", cwd: "pkg", source: "pkg/package.json" }]);
+    const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir, precheck: { commands: ["make lint"] } })).terminalReason, "merged");
+    assert.deepEqual(ran, ["npm run lint", "cd pkg && npm test"]);
+    const pre = readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS");
+    assert.deepEqual(pre.map((e) => [e.source, e.results.map((r) => r.command)]), [["test-map", ["npm run lint", "cd pkg && npm test"]]]);
+    assert.match(traj(w)[0], /Pre-PR checks selected from \.forge\/test-map\.json: 2 of 3 entries/);
+  });
+
+  it("the main checkout's test map is used when the worktree has none; a map alone enables the step", async () => {
+    const w = world(); const ran = recorder(w);
+    w.files["/repo/.forge/test-map.json"] = map([{ globs: ["**"], command: "make check", cwd: "." }]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.deepEqual(ran, ["make check"]);
+  });
+
+  it("a map matching no changed file, or an invalid map, falls back to learned.test_commands", async () => {
+    for (const text of [map([{ globs: ["**/*.go"], command: "go test ./...", cwd: "." }]), "{not json", JSON.stringify({ version: 9, entries: [] })]) {
+      const w = world(); const ran = recorder(w); w.files[MAPF] = text;
+      const dir = tmpDir("core-");
+      assert.equal((await run(w, { dir, precheck: { commands: ["make lint"] } })).terminalReason, "merged");
+      assert.deepEqual(ran, ["make lint"], text);
+      assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS").map((e) => Object.keys(e).includes("source")), [false]);
+    }
+  });
+
+  it("neither file present: the same commands, events and prompts as without the feature", async () => {
+    const w = world(); const ran = recorder(w); w.io.fs.exists = async () => false;
+    const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir, precheck: { commands: ["true", "make lint"] } })).terminalReason, "merged");
+    assert.deepEqual(ran, ["true", "make lint"]);
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS").map(({ round, results, ...rest }) => [round, results, Object.keys(rest).filter((k) => k === "source")]),
+      [[0, [{ command: "true", rc: 0 }, { command: "make lint", rc: 0 }], []]]);
+    const [plan, impl] = builders(w);
+    assert.equal(plan[4].startsWith(builderPlanPrompt(7)), true); assert.equal(impl[4].startsWith(builderImplementPrompt("local")), true);
+    for (const b of builders(w)) assert.doesNotMatch(b[4], /Repo facts/);
+    assert.doesNotMatch(traj(w)[0], /test-map/);
+  });
+
+  it("repo-facts.json present: the builder prompts cite its path, never its content", async () => {
+    const w = world(); recorder(w);
+    w.files[FACTSF] = JSON.stringify({ version: 1, toolchain: { pm: { name: "pnpm", version: "9.9.9-SECRET" } } });
+    w.io.fs.exists = async (p) => p in w.files;
+    assert.equal((await run(w)).terminalReason, "merged");
+    const [plan, impl] = builders(w);
+    for (const b of [plan, impl]) { assert.ok(b[4].includes(`are cached in ${FACTSF}`)); assert.doesNotMatch(b[4], /9\.9\.9-SECRET/); }
+    const w2 = world(); recorder(w2); w2.files["/repo/.forge/repo-facts.json"] = "{}"; w2.io.fs.exists = async (p) => p in w2.files;
+    assert.equal((await run(w2)).terminalReason, "merged");
+    assert.ok(builders(w2)[0][4].includes("are cached in /repo/.forge/repo-facts.json"));
+  });
+
+  it("prompts are byte-identical without a facts path", () => {
+    assert.equal(builderPlanPrompt(7, { toolchain: null, facts: null }), builderPlanPrompt(7));
+    assert.equal(builderImplementPrompt("ci", { facts: null }), builderImplementPrompt("ci"));
+    assert.match(builderImplementPrompt("local", { facts: "/x/.forge/repo-facts.json" }), /Repo facts \(toolchain pins, slow suites, layer rules, hotspots\) are cached in \/x\/\.forge\/repo-facts\.json/);
+  });
+});
+
 describe("toolchain pins and env.setup at lane setup (#4163)", () => {
   /** Real detection over the fake worktree files; shim writes are recorded, npx is the only launcher on the fake host. */
   const pinned = (w, files, { node = "v26.7.0" } = {}) => {
@@ -3479,5 +3740,62 @@ describe("hybrid placement in the lane's FORGE annotation (#4256)", () => {
     assert.equal(r2.seen.placement, undefined);
     const r3 = await quiet(() => runFromCli(["7", "--repo", "o/r"], deps()));
     assert.equal(r3.seen.placement, undefined);
+  });
+});
+
+describe("review trigger (#4273): shadow logs and always reviews, enforce skips untriggered lanes, off is today", () => {
+  const cold = (o) => { const w = world(o); w.io.hotspots = async () => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: [] }); return w; };
+  const trig = (dir) => readLog(dir, 7).filter((e) => e.event === "REVIEW_TRIGGER");
+  const reviewNote = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")) ?? "";
+
+  it("shadow (the default): the reviewer runs and the run log has REVIEW_TRIGGER {would_skip, reasons}", async () => {
+    const dir = tmpDir("trig-"), w = cold({ reviews: [conf()] });
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged"); assert.equal(reviewers(w).length, 1);
+    assert.deepEqual(trig(dir).map(({ mode, would_skip, reasons, skipped }) => ({ mode, would_skip, reasons, skipped })), [{ mode: "shadow", would_skip: true, reasons: [], skipped: false }]);
+  });
+
+  it("enforce: an untriggered lane skips the reviewer, merges, and records why", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      const dir = tmpDir("trig-"), w = cold({ reviews: [conf()] });
+      const r = await run(w, { dir, conformance, reviewTrigger: { mode: "enforce", riskPaths: [] } });
+      assert.equal(r.terminalReason, "merged", conformance); assert.equal(reviewers(w).length, 0, conformance);
+      assert.deepEqual([trig(dir)[0].would_skip, trig(dir)[0].skipped], [true, true]);
+      assert.match(reviewNote(w), /Skipped by `review\.trigger: enforce`/);
+      assert.match(traj(w)[0], /\| Review \| skipped \(review\.trigger enforce: no risk trigger\) \|/);
+      assert.match(traj(w)[0], /Conformance reviewer skipped by review\.trigger enforce/);
+    }
+  });
+
+  const AUTH = { ...CONTRACT, deliverables: [{ ...CONTRACT.deliverables[0], path: "src/auth/session.js" }] };
+  it("enforce: a risk path, a configured glob, a hotspot or missing hotspot facts still run the reviewer", async () => {
+    const cases = [
+      { w: cold({ contract: AUTH, changed: ["src/auth/session.js", "test/foo.test.js"], reviews: [conf({}, AUTH, ["src/auth/session.js", "test/foo.test.js"])] }), reason: "risk_path" },
+      { w: cold({ reviews: [conf()] }), riskPaths: ["src/**"], reason: "risk_path" },
+      { w: world({ reviews: [conf()] }), reason: "gate.ambiguous" },
+    ];
+    const hot = cold({ reviews: [conf()] });
+    hot.io.hotspots = async () => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: [{ path: "src/foo.js", lines: 2400, over: true, excluded: false, growth: 0 }] });
+    cases.push({ w: hot, reason: "hotspot" });
+    for (const c of cases) {
+      const dir = tmpDir("trig-");
+      await run(c.w, { dir, reviewTrigger: { mode: "enforce", riskPaths: c.riskPaths ?? [] } });
+      assert.equal(reviewers(c.w).length, 1, c.reason);
+      assert.deepEqual([trig(dir)[0].would_skip, trig(dir)[0].skipped, trig(dir)[0].reasons.includes(c.reason)], [false, false, true], c.reason);
+    }
+  });
+
+  it("off: the reviewer runs and nothing is computed or logged", async () => {
+    const dir = tmpDir("trig-"), w = cold({ reviews: [conf()] });
+    assert.equal((await run(w, { dir, reviewTrigger: { mode: "off", riskPaths: [] } })).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1); assert.deepEqual(trig(dir), []);
+  });
+
+  it("readReviewTrigger reads review.trigger and review.risk_paths (comma or block list); invalid or absent is unset", async () => {
+    const { readReviewTrigger } = await import("../engine-cli.mjs");
+    const at = (yaml) => { const d = tmpDir("rtcfg-"); mkdirSync(d, { recursive: true }); writeFileSync(join(d, "forge.yaml"), yaml); return readReviewTrigger(d); };
+    assert.deepEqual(at('review:\n  trigger: enforce\n  risk_paths: "db/**, *.sql"\n'), { mode: "enforce", riskPaths: ["db/**", "*.sql"] });
+    assert.deepEqual(at("review:\n  tech_stack: x\n  risk_paths:\n    - \"infra/**\"\n    - lib/acct/*.ts  # c\n  trigger: bogus\n"), { mode: "shadow", riskPaths: ["infra/**", "lib/acct/*.ts"] });
+    assert.equal(at("engine:\n  path: core\n"), undefined);
   });
 });
