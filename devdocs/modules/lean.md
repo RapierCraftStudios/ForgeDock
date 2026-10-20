@@ -91,6 +91,12 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
    (`max_rounds`, then `ci.red`), slow → `ci-pending`, unavailable → local fallback;
    docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI.
+   **Validate commands vs a moving base**: `validateContract` rejects a validate
+   command whose `git diff` compares against a remote `origin/<x>` tip rather than the
+   merge base (`movingBaseDiff`), so the planner fixes it in the one contract
+   correction. When a precheck `validate_failed` resumes the builder, the engine first
+   fetches the lane and the resume prompt says to `git merge --no-edit origin/<lane>`
+   (never rebase) if the failure is only the base moving on.
    **Docs freshness**: when the target repo has `scripts/check-devdocs-freshness.sh`,
    the engine runs it on `base...HEAD` after implement (`io.docsFreshness`, empty
    `PR_BODY`). Exit 1 resumes the builder once with the script's output (`docsPrompt`);

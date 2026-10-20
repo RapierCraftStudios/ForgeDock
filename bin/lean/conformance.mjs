@@ -71,6 +71,21 @@ export const isBugIssue = (labels) => (Array.isArray(labels) ? labels : []).some
  * Shape check of the builder's contract.json against the issue text. Returns {ok, problems[]}. `repro` (#4271): a bug
  * lane with lean.repro_test on also needs repro_test: {path, id?, command}, or "none" with a repro_test_reason.
  */
+/**
+ * A validate command that diffs against a remote branch tip (`git diff origin/x`, `git diff origin/x HEAD`) breaks as
+ * soon as the base moves on, even when the change is fine. Returns the remote ref it diffs against, or null when every
+ * `git diff` segment compares against the merge base (`origin/x...HEAD`, `$(git merge-base …)`) or no remote ref.
+ */
+export function movingBaseDiff(command) {
+  for (const seg of String(command ?? "").split(/&&|\|\||;|\|/)) {
+    if (!/\bgit\b(?:\s+-C\s+\S+)?(?:\s+-c\s+\S+)*\s+diff\b/.test(seg)) continue;
+    const ref = /(?:^|[\s=])(origin\/[A-Za-z0-9._\/-]+)/.exec(seg)?.[1];
+    if (!ref || seg.includes("...") || /merge-base/.test(seg)) continue;
+    return ref.replace(/\.\.?$/, "");
+  }
+  return null;
+}
+
 export function validateContract(c, issueText, { repro = false } = {}) {
   const problems = [];
   if (!c || typeof c !== "object" || Array.isArray(c)) return { ok: false, problems: ["contract.json is missing or not a JSON object"] };
@@ -97,7 +112,11 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     else if (!DECISION_SOURCES.includes(k?.source)) problems.push(`${k.id}: decision source must be one of ${DECISION_SOURCES.join("|")}`);
   }
   if (!Array.isArray(c.validate) || !c.validate.length) problems.push("the contract names no validate[] commands");
-  else for (const v of c.validate) if (!v?.id || blank(v?.command)) problems.push("validate entry without id or command");
+  else for (const v of c.validate) {
+    if (!v?.id || blank(v?.command)) { problems.push("validate entry without id or command"); continue; }
+    const ref = movingBaseDiff(v.command);
+    if (ref) problems.push(`${v.id}: \`git diff\` against the moving ${ref} tip fails as soon as the base moves on, even when the change is fine; compare against the merge base instead (\`${ref}...HEAD\` or \`$(git merge-base HEAD ${ref})\`)`);
+  }
   if (repro) {
     const t = c.repro_test;
     if (t === "none") { if (blank(c.repro_test_reason)) problems.push(`repro_test "none" needs a one-line repro_test_reason`); }

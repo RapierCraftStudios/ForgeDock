@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -160,6 +160,21 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.equal(resolveEvidencePath("x.js", ["a/x.js", "b/x.js"]), null, "ambiguous");
     assert.equal(resolveEvidencePath("nope.js", files), null);
     assert.equal(decide(row("R1", { evidence: "scrape.js:4" }), ctx).state, "conforms");
+  });
+  it("a validate command that diffs against the moving origin/<lane> tip invalidates the contract; a merge-base diff does not", () => {
+    const withV = (command) => ({ ...C, validate: [{ id: "V4", command }] });
+    const bad = validateContract(withV("./scripts/sync.sh --check-only && git diff --quiet origin/staging -- infra/a infra/b"), ISSUE);
+    assert.equal(bad.ok, false);
+    assert.ok(bad.problems.some((x) => /^V4: `git diff` against the moving origin\/staging tip/.test(x) && x.includes("origin/staging...HEAD")), bad.problems.join("; "));
+    for (const ok of ["git diff --quiet origin/staging...HEAD -- infra/a", "git diff --quiet $(git merge-base HEAD origin/staging) -- infra/a", "node --test test/leak.test.js", "git log origin/staging..HEAD --oneline"]) {
+      assert.equal(validateContract(withV(ok), ISSUE).ok, true, ok);
+    }
+  });
+  it("movingBaseDiff finds the remote ref in any git diff segment, and ignores merge-base forms and other commands", () => {
+    assert.equal(movingBaseDiff("git diff --name-only origin/main HEAD"), "origin/main");
+    assert.equal(movingBaseDiff("git -C sub diff origin/milestone/foo | wc -l"), "origin/milestone/foo");
+    assert.equal(movingBaseDiff("git diff HEAD~1"), null);
+    assert.equal(movingBaseDiff(""), null);
   });
   it("#4160: reviewSkeleton (object form) lists every required row, scope rows pre-filled with the engine's authorization", () => {
     const k = { ...C, requirements: [...C.requirements, { id: "R9", quote: "Billing pricing is unchanged.", disposition: "defer", why: "w" }] };
