@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { runChecks, formatPrecheckSummary } from "./precheck.mjs";
 import { readPrecheckBudget } from "../engine-cli.mjs";
 import { orchestrate } from "./orchestrate.mjs";
@@ -82,12 +82,12 @@ describe("formatPrecheckSummary (#4331)", () => {
 });
 
 describe("readPrecheckBudget: forge.yaml lean.precheck.max_minutes (#4331)", () => {
-  const withYaml = (text, fn) => { const d = mkdtempSync(join(tmpdir(), "precheck-")); try { writeFileSync(join(d, "forge.yaml"), text); return fn(d); } finally { rmSync(d, { recursive: true, force: true }); } };
+  const withYaml = (text, fn) => { const d = tmpDir("precheck-"); writeFileSync(join(d, "forge.yaml"), text); return fn(d); };
   it("reads the nested block and the flat key; invalid or absent is undefined", () => {
     assert.equal(withYaml("lean:\n  precheck:\n    max_minutes: 7\n", readPrecheckBudget), 7);
     assert.equal(withYaml("lean:\n  precheck_max_minutes: 15\n  repro_test: off\n", readPrecheckBudget), 15);
     for (const bad of ["0", "-1", "abc", "121"]) assert.equal(withYaml(`lean:\n  precheck_max_minutes: ${bad}\n`, readPrecheckBudget), undefined, bad);
     assert.equal(withYaml("verify:\n  mode: local\n", readPrecheckBudget), undefined);
-    const d = mkdtempSync(join(tmpdir(), "precheck-")); try { assert.equal(readPrecheckBudget(d), undefined); } finally { rmSync(d, { recursive: true, force: true }); }
+    assert.equal(readPrecheckBudget(tmpDir("precheck-")), undefined);
   });
 });
