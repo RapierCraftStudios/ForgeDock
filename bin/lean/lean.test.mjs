@@ -1061,6 +1061,37 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal((await runShadow(p)).terminalReason, "merged"); assert.equal(builders(p).length, 2);
   });
 
+  it("#4328 freeze-time preflight: a validate needing a module the host lacks gets the one contract correction, before any build", async () => {
+    const pyC = { ...CONTRACT, validate: [{ id: "V1", command: `python3 -c "import yaml"` }] }, uvC = { ...CONTRACT, validate: [{ id: "V1", command: `uv run python -c "import yaml"` }] };
+    const probe = (w) => { const ran = []; w.io.probeCommand = async (a) => { ran.push(a); return { rc: /^'python3' .*'yaml'/.test(a.command) ? 3 : 0, output: "" }; }; return ran; };
+    const dir = tmpDir("preflight-");
+    const w = world({ contract: pyC, fixedContract: uvC, validation: [{ id: "V1", command: uvC.validate[0].command, exit: 0 }] }), ran = probe(w);
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(builders(w).length, 3, "plan + one contract correction + implement");
+    assert.match(builders(w)[1][4], /V1: needs Python module 'yaml' \(for python3\), which this host lacks[\s\S]*repo's own toolchain/);
+    assert.ok(ran.every((a) => a.cwd === WT && a.env && typeof a.env === "object"), "probes run in the worktree with the lane env");
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").map((e) => [e.corrected, e.misses.map((m) => m.tool)]), [[true, []]]);
+    // still missing after the correction: advisory only, the lane goes on (the post-build rerun is the gate)
+    const dir2 = tmpDir("preflight-");
+    const s = world({ contract: pyC, fixedContract: pyC, validation: [{ id: "V1", command: pyC.validate[0].command, exit: 0 }] }); probe(s);
+    assert.equal((await run(s, { dir: dir2 })).terminalReason, "merged"); assert.equal(builders(s).length, 3);
+    assert.deepEqual(readLog(dir2, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").map((e) => [e.corrected, e.misses.map((m) => m.tool)]), [[false, ["yaml"]]]);
+    assert.ok(traj(s).some((t) => /Validate preflight: the host lacks yaml after the contract correction/.test(t)));
+    // every tool present: no correction, no event
+    const dir3 = tmpDir("preflight-");
+    const ok = world({ contract: uvC, validation: [{ id: "V1", command: uvC.validate[0].command, exit: 0 }] }); const ran3 = probe(ok);
+    assert.equal((await run(ok, { dir: dir3 })).terminalReason, "merged"); assert.equal(builders(ok).length, 2);
+    assert.deepEqual(ran3.map((a) => a.command), ["command -v -- 'uv' >/dev/null 2>&1"]);
+    assert.equal(readLog(dir3, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT").length, 0);
+  });
+  it("#4328 an invalid contract and a preflight miss share one correction; still invalid is contract.invalid as before", async () => {
+    const bad = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }], validate: [{ id: "V1", command: "jq . a.json" }] };
+    const w = world({ contract: bad, fixedContract: bad });
+    w.io.probeCommand = async () => ({ rc: 1, output: "" });
+    assert.equal((await run(w)).code, "contract.invalid"); assert.equal(builders(w).length, 2, "plan + one correction");
+    assert.match(builders(w)[1][4], /R1: quote is not verbatim[\s\S]*V1: needs command 'jq'/);
+  });
+
   it("a failed validate fetches the lane and the resume says how to catch up with a moved base (merge, never rebase)", async () => {
     const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
@@ -1359,12 +1390,30 @@ describe("bug lanes freeze a red-green repro_test (#4271)", () => {
     assert.equal((await run(w)).terminalReason, "merged");
     assert.match(builders(w)[0][4], /This issue is a bug\. When it is testable, .*"repro_test":\{"path"/);
     assert.match(builders(w)[0][4], /"repro_test":"none","repro_test_reason"/);
-    assert.deepEqual(w.rgCalls, [{ cwd: "/wt/lean-7", base: "origin/staging", command: RT.command, env: {} }]);
+    assert.deepEqual(w.rgCalls.map(({ env, ...x }) => x), [{ cwd: "/wt/lean-7", base: "origin/staging", command: RT.command }]);
     assert.match(w.comments.find((c) => c.includes("FORGE:CONTRACT")), /"repro_test"/, "repro_test is frozen in the contract JSON");
     assert.ok(traj(w)[0].includes("repro_test test/foo.test.js foo handles null: BASE=FAILED HEAD=RAN"));
     assert.equal(builders(w).length, 2); assert.equal(reviewers(w).length, 1);
     const t = rworld([RED_GREEN], { labels: [{ name: "type:bug" }] });
     assert.equal((await run(t)).terminalReason, "merged"); assert.equal(t.rgCalls.length, 1, "type:bug counts as a bug");
+  });
+  it("#4325 the red-green check, declared checks, validate reruns and env.setup run with the builder's lane env", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    const w = rworld([RED_GREEN], { validation: v }), ran = [], setups = [];
+    w.io.runTmp = { prune: async () => {}, make: async (_i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async () => {} };
+    w.io.prepareToolchain = async () => ({ env: { PATH: "/rt/toolchain/bin:/usr/bin" }, summary: "node 22" });
+    w.io.deps = { env: () => ({ UV_CACHE_DIR: "/c/uv", TMPDIR: "/should-not-win" }), prepare: async () => [] };
+    w.io.runSetup = async (a) => { setups.push(a); return { exit: 0, stdout: "", stderr: "" }; };
+    w.io.runCommand = async (a) => { ran.push(a); return { rc: 0, output: "" }; };
+    const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "3";
+    try { assert.equal((await run(w, { envSetup: "make setup", precheck: { commands: ["npm run lint"] } })).terminalReason, "merged"); }
+    finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
+    const lane = { UV_CACHE_DIR: "/c/uv", TMPDIR: w.envs[0].TMPDIR, FORGE_HOST_PARALLELISM: "3", PATH: "/rt/toolchain/bin:/usr/bin" };
+    assert.match(lane.TMPDIR, /\/runs\/7-/, "the builder ran with the run TMPDIR");
+    assert.deepEqual(w.rgCalls.map((x) => x.env), [lane], "red-green gets the lane env, not the daemon's");
+    assert.deepEqual(ran.map((a) => [a.command, a.env]), [["npm run lint", lane], ["node --test test/foo.test.js", lane]]);
+    assert.deepEqual(setups.map((a) => a.env), [lane]);
+    assert.equal(w.envs[0].CLAUDE_CODE_TMPDIR, lane.TMPDIR); assert.equal(w.envs[0].UV_CACHE_DIR, "/c/uv"); assert.match(w.envs[0].FORGE_DOCKER_LABELS ?? "", /lean-7/);
   });
 
   it("a repro test that is not red on base and green on head fails the precheck in enforce and in shadow: one in-session resume, then needs-human", async () => {

@@ -238,6 +238,8 @@ export function makeLeanIo({ repo }) {
     },
     /** #4240: one declared check command (`bash -c`) in `cwd`; never throws. A timeout kills the process group and gives rc 124. */
     runCommand: runCheckCommand,
+    /** #4328: a read-only freeze-time probe of a validate command's tool or module (separate from runCommand). */
+    probeCommand: runCheckCommand,
     /** #4167 verify-by-CI: `gh workflow run` on the lane branch; inputs become -f key=value. */
     async dispatchWorkflow({ workflow, ref, inputs = {} }) {
       await run("gh")(["workflow", "run", String(workflow), "-R", repo, "--ref", String(ref), ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
@@ -317,12 +319,12 @@ export function makeLeanIo({ repo }) {
     sequenceVerify: ({ cwd, base, before }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before }),
     /**
      * #4271: scripts/acceptance-red-green.sh for the frozen repro_test in cwd; {base, head} words, or null on any failure.
-     * #4334: `env` (the lane's toolchain PATH, TMPDIR) is merged over process.env.
+     * `env` (#4325): the lane env (run TMPDIR, toolchain), merged over process.env, so the command sees what the builder saw.
      */
-    async redGreen({ cwd, base, command, timeoutSec = 300, env = {} }) {
+    async redGreen({ cwd, base, command, timeoutSec = 300, env = null }) {
       const args = [script("acceptance-red-green.sh"), "--repo-path", cwd, "--base-ref", base, "--test-cmd", command, "--timeout", String(timeoutSec)];
       try {
-        const m = /BASE=(\w+) HEAD=(\w+)/.exec(String((await pexec("bash", args, { cwd, env: { ...process.env, ...env }, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024 })).stdout ?? ""));
+        const m = /BASE=(\w+) HEAD=(\w+)/.exec(String((await pexec("bash", args, { cwd, timeout: (timeoutSec * 2 + 60) * 1000, maxBuffer: 4 * 1024 * 1024, ...(env ? { env: { ...process.env, ...env } } : {}) })).stdout ?? ""));
         return m ? { base: m[1], head: m[2] } : null;
       } catch { return null; }
     },

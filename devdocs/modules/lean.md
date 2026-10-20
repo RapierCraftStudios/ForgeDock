@@ -763,7 +763,7 @@ queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 L
 
 ## Entry 2026-10-20 — Missing host tools are an environment error, not conformance (#4323)
 
-`gate()` (`rerunFailedValidates`) reruns once each contract validate command the builder recorded with a non-zero exit, via `io.runCommand` (`runCheckCommand`, now with an optional `env`: the lane's `TMPDIR` + `toolchain.env`) inside `heavyStep("precheck")`, logged as `VALIDATE_RERUN`. `precheck({validateRuns, repoHas})` counts a passing rerun as passed and classifies the rest with `conformance.mjs` `missingTool`: `command not found` / rc 127, Python `No module named x`, Node `Cannot find module|package 'x'` (bare names only). A path, relative specifier or a name `repoTracks(git ls-files)` holds stays `validate_failed` (a module the change forgot is a code defect). A miss is kind `validate_env`, code `env.tool_missing`: kept out of `pre`/`SHADOW_PRE_BLOCKS`, never sent to a builder resume, skipped on a CI-verified head; with no other blocking failure the lane ends `needs-human` `env.tool_missing` naming the tool before any reviewer call (also on the base-sync and CI-fix re-reviews, `envNeedsHuman`). The code is in `RECOVERABLE_CODES`; `RECOVER_HOW` has the recovery lane run the check through the repo's own toolchain. Freeze-time preflight of validate commands is deferred. Cost: 0 LLM calls; one rerun per failed validate command.
+`gate()` (`rerunFailedValidates`) reruns once each contract validate command the builder recorded with a non-zero exit, via `io.runCommand` (`runCheckCommand`, now with an optional `env`: the lane's `TMPDIR` + `toolchain.env`) inside `heavyStep("precheck")`, logged as `VALIDATE_RERUN`. `precheck({validateRuns, repoHas})` counts a passing rerun as passed and classifies the rest with `conformance.mjs` `missingTool`: `command not found` / rc 127, Python `No module named x`, Node `Cannot find module|package 'x'` (bare names only). A path, relative specifier or a name `repoTracks(git ls-files)` holds stays `validate_failed` (a module the change forgot is a code defect). A miss is kind `validate_env`, code `env.tool_missing`: kept out of `pre`/`SHADOW_PRE_BLOCKS`, never sent to a builder resume, skipped on a CI-verified head; with no other blocking failure the lane ends `needs-human` `env.tool_missing` naming the tool before any reviewer call (also on the base-sync and CI-fix re-reviews, `envNeedsHuman`). The code is in `RECOVERABLE_CODES`; `RECOVER_HOW` has the recovery lane run the check through the repo's own toolchain. Freeze-time preflight of validate commands: see the #4328 entry. Cost: 0 LLM calls; one rerun per failed validate command.
 
 ## Entry 2026-10-20 — Enumerating tests + sequence numbers at hand-off (#4322)
 
@@ -783,14 +783,41 @@ targeted re-ask (at most 3 reviewer runs) only when the repaired reply is incomp
 (`evidencePathOnly`); other incomplete replies keep 2 runs. Reviewer and repair prompts ask for backtick-quoted, verbatim
 repo-relative `path:line`.
 
-## Entry 2026-10-20 — The repro harness gets the lane env; an unrunnable head is an environment error (#4334)
+## Entry 2026-10-20 — Engine-run commands get the builder's lane env; no $TMPDIR inputs at freeze (#4325)
 
-`gate()`'s `reproOf` (`lean.mjs`) now passes the lane env (`TMPDIR` = per-run tmp, the toolchain pin's `PATH`), the
-same env as the validate reruns, to `io.redGreen` (`effects.mjs` merges it over `process.env`). Before, a pinned
-`pnpm vitest …` exited 127 on head. `scripts/acceptance-red-green.sh` links every head `node_modules` next to a
-tracked `package.json` (workspace packages too) and a root `.venv` into the base worktree when the base has none, so a
-workspace test resolves its deps on base. `conformance.mjs` `reproFailures` maps `HEAD=UNRUNNABLE`, or no harness
-result, to `env.repro_unrunnable` (kind `repro_env`, recoverable in `RECOVERABLE_CODES`, with a `RECOVER_HOW`
-prompt). `gate()` routes it with `env.tool_missing` to the environment state: no builder resume, no reviewer.
-Other non-proofs stay `conformance.unimplemented`. A `BASE=SKIPPED` detail now says the base was not run because head
-did not pass; head's new test files were already overlaid (#3630). Cost: 0 LLM calls; saves the wasted resume.
+`runCore` `laneEnv()` builds one env for every command the engine runs itself: `io.deps.env()` stores, then the run
+`TMPDIR`, `FORGE_HOST_PARALLELISM` and `toolchain.env` (engine keys win over the stores). `io.redGreen` (`effects.mjs`,
+new `env` merged over `process.env`), the declared check commands (`io.runCommand`, previously no env),
+`rerunFailedValidates` and env.setup all use it. Before this, red-green ran with the daemon env (no run TMPDIR), so a
+repro command reading a builder-written `$TMPDIR` file reported `BASE=SKIPPED HEAD=FAILED`. `callRunner` builds its env
+from `laneEnv()` plus its runner-only keys (`FORGE_DOCKER_LABELS`, `CLAUDE_CODE_TMPDIR`, heavy shims) and gives the same values as before.
+`validateContract` adds one problem per `$TMPDIR/<name>` that a validate or `repro_test` command reads before creating it
+(`conformance.mjs` `tmpdirInputs`: `>`/`>>`, `tee`, `touch|mkdir|mktemp`, last argument of `cp|mv|ln|install`, output-like
+options and `X=` assignments count as creating). It goes through the existing contract-correction resume, because the run
+TMPDIR is per run and a rerun never has the file. The plan prompt says so in one line. Cost: 0 LLM calls; one correction
+resume only for a contract that would otherwise fail at precheck.
+
+## Entry 2026-10-20 — Freeze-time preflight of validate commands (#4328)
+
+At contract freeze, `preflightValidates` (`lean.mjs`) probes the host for what each `validate[].command` needs, from
+`preflight.mjs` `preflightProbes` (pure): a quote-aware split on `&&`/`||`/`|`/`;`, each segment's bare executable
+(`command -v`), the modules a bare `python`/`python3`/`pythonX.Y` imports via `-c`/`-m` (`importlib.util.find_spec` with
+that interpreter) and the bare packages `node -e`/`-p` code imports (`node_modules/<pkg>` walked up from the worktree).
+Paths, `$VAR` words, names `repoTracks(git ls-files)` holds and names a deliverable's `change` text names are not probed;
+a wrapper (`uv run`, `npx`, ...) probes only the wrapper; at most 20 probes. Probes run through the separate
+`io.probeCommand` hook (`runCheckCommand`) with `laneEnv()` (#4325); no hook, no change. A miss (`preflightProblems`) joins the
+validateContract problems in the existing single `contractCorrectionPrompt` resume. After it the misses are re-probed and
+logged as `VALIDATE_PREFLIGHT` {misses, corrected}; any left are an anomaly only, never a block: the post-build #4323
+rerun still ends `env.tool_missing`. Skipped when the frozen contract is recovered from the issue. Cost: 0 LLM calls when
+the host has the tools; otherwise the one correction resume, instead of a whole implement session lost to `env.tool_missing`.
+
+## Entry 2026-10-20 — The repro harness links workspace deps on base; an unrunnable head is an environment error (#4334)
+
+`io.redGreen` gets the lane env through `laneEnv()` (#4325), so a pinned `pnpm vitest …` runs on head.
+`scripts/acceptance-red-green.sh` links every head `node_modules` next to a tracked `package.json` (workspace packages
+too) and a root `.venv` into the base worktree when the base has none, so a workspace test resolves its deps on base.
+`conformance.mjs` `reproFailures` maps `HEAD=UNRUNNABLE`, or no harness result, to `env.repro_unrunnable` (kind
+`repro_env`, recoverable in `RECOVERABLE_CODES`, with a `RECOVER_HOW` prompt). `gate()` routes it with `env.tool_missing`
+to the environment state: no builder resume, no reviewer. Other non-proofs stay `conformance.unimplemented`. A
+`BASE=SKIPPED` detail now says the base was not run because head did not pass; head's new test files were already
+overlaid (#3630). Cost: 0 LLM calls; saves the wasted resume.
