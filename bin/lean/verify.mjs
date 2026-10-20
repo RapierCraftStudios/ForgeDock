@@ -135,8 +135,8 @@ const VALIDATE_KINDS = ["validate_missing", "validate_failed"], REQUIREMENT_KIND
  * commands: [{command, rc}] of the last declared-check round, or null (none configured); structure: the structure delta or
  * null; undeclaredEdges: package edges the contract does not name; docs: io.docsFreshness result or null; precheck: the
  * conformance precheck failures of the last gate() run (null = never ran); amendments: its amendment problems; hotspots:
- * whether hotspot facts were available. Returns {conclusion: success iff every gate ok, gates: [{id, ok, evidence}],
- * title, summary, text}.
+ * whether hotspot facts were available. Returns {conclusion, gates: [{id, ok, ran, evidence}], title, summary, text}. A gate
+ * counts only when it ran (#4297): failure if a gate that ran failed, neutral ("no gates ran") when none ran, else success.
  */
 export function verifyReport({ head = null, commands = null, structure = null, undeclaredEdges = [], docs = null, precheck = null, amendments = [], hotspots = false, contract = null, result = null } = {}) {
   const NOT_RUN = "not run";
@@ -145,7 +145,7 @@ export function verifyReport({ head = null, commands = null, structure = null, u
   const runs = Array.isArray(result?.validation) ? result.validation : [];
   const reqs = Array.isArray(result?.requirements) ? result.requirements : [];
   const edges = (xs) => (xs ?? []).map((e) => `${e?.from}→${e?.to}${e?.manifest ? ` (${e.manifest})` : ""}`);
-  const gate = (id, ran, failures, okEvidence) => ({ id, ok: !failures.length, evidence: !ran ? NOT_RUN : failures.length ? failures : okEvidence });
+  const gate = (id, ran, failures, okEvidence) => ({ id, ok: !failures.length, ran: Boolean(ran), evidence: !ran ? NOT_RUN : failures.length ? failures : okEvidence });
   const gates = [
     gate("precheck.commands", Array.isArray(commands), (commands ?? []).filter((c) => c.rc !== 0).map((c) => `${c.command} (exit ${c.rc})`),
       (commands ?? []).map((c) => ({ command: c.command, rc: c.rc }))),
@@ -158,12 +158,12 @@ export function verifyReport({ head = null, commands = null, structure = null, u
     gate("maintenance.hotspot_growth", precheck !== null && Boolean(hotspots), details(["hotspot_growth"]), "no over-threshold file grew past the limit"),
     gate("conformance.amendments", precheck !== null, (amendments ?? []).map((a) => String(a?.detail ?? a)), "ok"),
   ];
-  const failed = gates.filter((g) => !g.ok);
-  const conclusion = failed.length ? "failure" : "success";
-  const title = failed.length ? `${failed.length} of ${gates.length} deterministic gate(s) failed` : `${gates.length} deterministic gate(s) passed`;
+  const ran = gates.filter((g) => g.ran), failed = ran.filter((g) => !g.ok);
+  const conclusion = failed.length ? "failure" : ran.length ? "success" : "neutral";
+  const title = failed.length ? `${failed.length} of ${ran.length} deterministic gate(s) failed` : ran.length ? `${ran.length} deterministic gate(s) passed` : "no gates ran";
   const summary = [`ForgeDock deterministic gates${head ? ` at \`${String(head).slice(0, 12)}\`` : ""}: report only (requiring it is the repository's branch-protection choice).`, "",
-    ...gates.map((g) => `- ${g.ok ? "✅" : "❌"} \`${g.id}\`${g.evidence === NOT_RUN ? " (not run)" : ""}`)].join("\n");
+    ...(ran.length ? gates.map((g) => `- ${!g.ran ? "⏭️" : g.ok ? "✅" : "❌"} \`${g.id}\`${g.ran ? "" : " (not run)"}`) : ["no gates ran"])].join("\n");
   let json = JSON.stringify({ head, conclusion, gates }, null, 2);
-  if (json.length > VERIFY_TEXT_CAP) json = JSON.stringify({ head, conclusion, truncated: true, gates: gates.map((g) => ({ id: g.id, ok: g.ok, evidence: JSON.stringify(g.evidence).slice(0, Math.floor(VERIFY_TEXT_CAP / (gates.length + 1))) })) }, null, 2);
+  if (json.length > VERIFY_TEXT_CAP) json = JSON.stringify({ head, conclusion, truncated: true, gates: gates.map((g) => ({ id: g.id, ok: g.ok, ran: g.ran, evidence: JSON.stringify(g.evidence).slice(0, Math.floor(VERIFY_TEXT_CAP / (gates.length + 1))) })) }, null, 2);
   return { conclusion, gates, title, summary, text: "```json\n" + json + "\n```" };
 }

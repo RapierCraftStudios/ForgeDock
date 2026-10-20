@@ -96,8 +96,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    default 300; no Actions minutes). Failures resume the builder in-session
    (`precheckFailurePrompt`, up to `max_rounds`); no commit / rounds exhausted is
    an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
-   An optional `.forge/test-map.json` (#4272, `scripts/test-map.sh`; lane worktree,
-   then main checkout, `testmap.mjs` `readTestMap`) replaces that list with the map
+   An optional `.forge/test-map.json` (#4272, `scripts/test-map.sh`; base ref via
+   `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) replaces that list with the map
    entries whose globs match the changed files (`selectCommands`; event gains
    `source: "test-map"`); no map, an invalid one or no match keeps `learned.test_commands`.
 6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
@@ -574,8 +574,8 @@ outcome code) and `failureClasses` (conformance failure codes seen in the run),
 which the next pack reads instead of re-deriving them from the reason.
 `forge.yaml engine.context_pack`: `shadow` (default) records only, `on` appends
 `contextPackNote` (hints, not proof; never quotable) to the plan prompt, `off` is
-the old path with no extra calls. The pack never enters `issueText`, so contract
-quotes stay issue-only. `forgedock stats --context-ab` reports first-pass yield,
+the old path with no extra calls. The pack never enters `issueText`, and neither does
+the bot's `FORGE:CONTEXT` comment (#4297), so contract quotes stay issue-only. `forgedock stats --context-ab` reports first-pass yield,
 builder turns, cache tokens and cost per lane type and mode; the default moves to
 `on` only once that A/B shows a win.
 
@@ -658,3 +658,14 @@ added) go to `decide({issue, what, why, alternative})`, fire-and-forget; `runBat
 posts them as `FORGE:DECISION` comments. `formatOutcomeLists` adds `recovered:`,
 `unrecovered:` and one end-of-batch escalation list (human codes only) to the report.
 `check-spec-markers.sh` registers `DECISION`. Cost: one rerun lane per recovered issue.
+
+## Entry 2026-10-20 — 1.29.0 trust-boundary fixes (#4297)
+
+Context pack: `context.mjs` `codeOf` keeps a `FORGE:STATE` `terminalCode`, `failureClasses` item or
+`terminalReason` only when it matches `^[a-z][a-z0-9_.-]{0,63}$`. `linkLine` re-checks this, so cached facts are covered,
+and cross-repo timeline references are skipped (the jq emits `repository_url` + number). `lean.mjs` `textOf` drops
+`<!-- FORGE:` comments, so `FORGE:CONTEXT` is never quotable. The pre-PR test map comes from the base ref
+(`readTestMapAtRef`), else the main checkout. `scripts/test-map.sh` ends a `run:` block at the `run` key's column and
+drops deploy/publish/release/push/secret steps. `verifyReport` gates carry `ran`; zero ran → `neutral`, "no gates
+ran". A recovery lane (`recoverUnlabelled`) that ends anything but `merged` re-adds `needs-human` with a recovery-evidence
+`FORGE:NEEDS_HUMAN`. Rationale: `devdocs/decisions/4297-pre-release-trust-boundaries.md`.

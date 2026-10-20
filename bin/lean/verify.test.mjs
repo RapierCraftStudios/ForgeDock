@@ -161,8 +161,23 @@ describe("forgedock/verify check run (#4270)", () => {
     assert.match(r.title, /8 of 8/);
 
     const none = verifyReport({});
-    assert.equal(none.conclusion, "success");
-    assert.ok(none.gates.every((x) => x.ok && x.evidence === "not run"));
+    assert.ok(none.gates.every((x) => x.ok && !x.ran && x.evidence === "not run"));
+  });
+
+  it("verifyReport with no gate results is neutral with \"no gates ran\" (#4297)", () => {
+    for (const r of [verifyReport({}), verifyReport({ head: "abc" })]) {
+      assert.equal(r.conclusion, "neutral");
+      assert.equal(r.title, "no gates ran");
+      assert.match(r.summary, /no gates ran/);
+      assert.doesNotMatch(`${r.title}\n${r.summary}`, /passed|✅/);
+    }
+    // Only gates that ran are counted: one command round, nothing else.
+    const one = verifyReport({ head: "abc", commands: [{ command: "lint", rc: 0 }] });
+    assert.equal(one.conclusion, "success");
+    assert.equal(one.title, "1 deterministic gate(s) passed");
+    assert.match(one.summary, /`structure\.edges` \(not run\)/);
+    const bad = verifyReport({ head: "abc", commands: [{ command: "lint", rc: 1 }] });
+    assert.equal(bad.conclusion, "failure"); assert.equal(bad.title, "1 of 1 deterministic gate(s) failed");
   });
 
   it("the output text stays under the Checks API limit", () => {

@@ -19,7 +19,9 @@
 #   Makefile / GNUmakefile targets test/lint/check/typecheck/vet → `make <target>`, `**`
 #   .github/workflows/*.yml|*.yaml `run:` steps (one command per line of a `|` block, a `>` block is one command;
 #     install/setup lines skipped): globs
-#     from the tool (python/go/shell/js), else the workflow's `paths:` filter, else `**`
+#     from the tool (python/go/shell/js), else the workflow's `paths:` filter, else `**`. A step whose job id, job
+#     name, step name or command matches deploy/publish/release/push/secret is never mapped (forge#4297): the engine
+#     runs these commands before a PR, so only check steps belong here.
 # Exit: 0 ok | 2 usage or bad repo path. bash 3.2 portable.
 set -uo pipefail
 
@@ -107,13 +109,14 @@ for mf in Makefile GNUmakefile; do
 done
 
 # ---- CI workflow run: steps ----
-# Emits: job TAB command, one per command line; and P TAB path for each `paths:` filter item before `jobs:`.
+# Emits: job US jobname US stepname US command (US = \037, so empty names survive `read`), one per command line; and P TAB path for each `paths:` filter item
+# before `jobs:`. A block ends at the first non-blank line not indented past the `run` key (sibling keys such as env:).
 wf_extract() {
   awk '
     function indent(s) { match(s, /^ */); return RLENGTH }
     function unq(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); if (s ~ /^".*"$/ || s ~ /^\x27.*\x27$/) s = substr(s, 2, length(s) - 2); return s }
-    function emit(c) { c = unq(c); if (c != "") print job "\t" c }
-    BEGIN { injobs = 0; jind = -1; block = 0; inpaths = 0; job = "" }
+    function emit(c) { c = unq(c); if (c != "") print job "\037" jname "\037" sname "\037" c }
+    BEGIN { injobs = 0; jind = -1; block = 0; inpaths = 0; job = ""; jname = ""; sname = "" }
     {
       line = $0; sub(/\r$/, "", line)
       if (block) {
@@ -138,10 +141,17 @@ wf_extract() {
         next
       }
       if (line ~ /^[^ \t#]/) { injobs = 0; next }
-      if (line ~ /^ +[A-Za-z0-9_-]+:[ \t]*$/ && (jind < 0 || indent(line) == jind)) { jind = indent(line); job = line; sub(/^ +/, "", job); sub(/:.*$/, "", job); next }
+      if (line ~ /^ +[A-Za-z0-9_-]+:[ \t]*$/ && (jind < 0 || indent(line) == jind)) { jind = indent(line); job = line; sub(/^ +/, "", job); sub(/:.*$/, "", job); jname = ""; sname = ""; next }
+      if (line ~ /^[ \t]*-[ \t]/) sname = ""
+      if (line ~ /^[ \t]*(-[ \t]+)?name:/) {
+        nm = line; sub(/^[ \t]*(-[ \t]+)?name:[ \t]*/, "", nm); sub(/[ \t]+#.*$/, "", nm)
+        if (line !~ /^[ \t]*-[ \t]/ && indent(line) == jind + 2) jname = unq(nm); else sname = unq(nm)
+        next
+      }
       if (line ~ /^[ \t]*(-[ \t]+)?run:/) {
         rest = line; sub(/^[ \t]*(-[ \t]+)?run:[ \t]*/, "", rest); sub(/[ \t]+#.*$/, "", rest)
-        if (rest ~ /^[|>][-+0-9]*$/) { block = 1; pend = ""; fold = (rest ~ /^>/); bind = indent(line); if (line ~ /^[ \t]*-[ \t]/) bind = bind + 1; next }
+        # bind = the column of the `run` key: step keys after it (env:, shell:) sit there and end the block
+        if (rest ~ /^[|>][-+0-9]*$/) { block = 1; pend = ""; fold = (rest ~ /^>/); bind = match(line, /run:/) - 1; next }
         emit(rest)
       }
     }
@@ -154,6 +164,10 @@ skip_cmd() {
     npm\ ci*|npm\ install*|npm\ i|npm\ i\ *|pnpm\ install*|pnpm\ i|yarn|yarn\ install*|pip\ install*|pip3\ install*|python*\ -m\ pip\ install*|uv\ sync*|uv\ pip\ install*|poetry\ install*|go\ mod\ download*|apt-get*|sudo\ *|corepack\ *|brew\ *) return 0 ;;
   esac
   return 1
+}
+# forge#4297: deploy, publish, release, push and secret-using steps are never check commands
+deploy_step() {
+  printf '%s\n' "$@" | grep -qiE 'deploy|publish|release|push|secret'
 }
 tool_globs() {
   c=" $1 "
@@ -169,8 +183,9 @@ grep -E '^\.github/workflows/[^/]+\.(yml|yaml)$' "$T/files" | sort | while IFS= 
   [ -f "$wf" ] || continue
   wf_extract "$wf" > "$T/wf"
   paths=$(awk -F'\t' '$1 == "P" { printf "%s ", $2 }' "$T/wf"); paths=${paths% }
-  awk -F'\t' '$1 != "P"' "$T/wf" | while IFS="$(printf '\t')" read -r job cmd; do
+  awk -F'\t' '$1 != "P"' "$T/wf" | while IFS="$(printf '\037')" read -r job jname sname cmd; do
     skip_cmd "$cmd" && continue
+    deploy_step "$job" "$jname" "$sname" "$cmd" && continue
     g=$(tool_globs "$cmd")
     [ -n "$g" ] || g="$paths"
     [ -n "$g" ] || g="**"

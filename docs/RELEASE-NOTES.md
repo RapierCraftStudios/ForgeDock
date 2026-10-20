@@ -2,6 +2,15 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## v1.29.0: in-batch recovery and context pack on by default
+
+- **In-batch recovery** (`orchestration.recovery.max_attempts`, default 1): `forgedock orchestrate` now launches one recovery lane per issue for a mechanical `needs-human` (`ci.red`, `base.conflict`, `ci-pending` on a conflicting PR, `contract.invalid` after a mid-run issue edit, `builder.block_untyped`). The lane removes `needs-human`, resumes the PR and re-queues the issue. A recovery that ends anything but `merged` re-applies `needs-human` with a recovery-evidence `FORGE:NEEDS_HUMAN` comment.
+- **Context pack** (`engine.context_pack`, default `shadow`): each core run compiles a budgeted pack of the issue's links, prior attempts and related merged PRs, posts it as a collapsed `FORGE:CONTEXT` comment and logs `CONTEXT_PACK`; the builder prompt is unchanged in shadow. `FORGE:CONTEXT` and other engine-posted `<!-- FORGE:` comments are never quotable by contract requirements, and only outcome codes are read from linked issues' `FORGE:STATE`.
+- **Pre-PR test map**: `.forge/test-map.json` is read from the base ref (else the main checkout), never the lane worktree. `scripts/test-map.sh` no longer maps deploy/publish/release/push/secret steps, and a `- run: |` block ends at sibling step keys (`env:`, `shell:`). Regenerate the map.
+- **`forgedock/verify` check**: only gates that ran count; with none, the check is `neutral` ("no gates ran") instead of `success`.
+
+Action: set `orchestration.recovery.max_attempts: 0` to keep every `needs-human` final, and `engine.context_pack: off` to stop the `FORGE:CONTEXT` comment. Rerun `scripts/test-map.sh` if you keep a test map. See docs/CONFIG.md.
+
 ## Core work-on: per-phase comments (GitHub as the knowledge graph)
 
 The core builder now writes three markdown stage notes with fixed heading templates (`.forge-lean/investigation.md`, `plan.md`, `implementation.md`) next to the machine-readable `result.json`. The engine posts each as its own comment, live while the builder session runs (the CLI call is now asynchronous; a file is posted once its mtime is stable for 2 s) and the rest in order right after the session, before review: `FORGE:INVESTIGATION` (`## Investigation Report`, also carries the `FORGE:VALIDATE` alias marker), `FORGE:PLAN` (`## Implementation Plan`), `FORGE:IMPLEMENTATION` (`## Implementation Complete`, with branch and files changed computed by the engine), then `FORGE:REVIEW` (`## Review`: fixes the issue yes/no with evidence, regression check with what was checked, notes). A missing or blank file is rendered from the `result.json` fields ("not reported" for gaps); builder-written `<!-- FORGE:` markers are stripped and each comment is capped at 60k characters. At the end (merged, invalid or needs-human) one `FORGE:TRAJECTORY` comment (`## Pipeline Trajectory`, also carrying the `FORGE:WORK-ON` alias marker) replaces the old register comment: phase table, decisions, anomalies, cost, tokens, wall time. The PR body shows the root cause, the deliverables table and the verification. No extra model sessions.

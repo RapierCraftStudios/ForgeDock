@@ -125,15 +125,20 @@ export const contextPackCacheKey = (issue, headSha, cfg = {}) =>
 const parseLines = (out) => String(out ?? "").split("\n").map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((x) => x && typeof x === "object");
 const commentId = (c) => /#issuecomment-(\d+)/.exec(String(c?.url ?? ""))?.[1] ?? c?.id ?? null;
 /**
+ * forge#4297: a FORGE:STATE value as an outcome code (`ci.red`, `needs-human`, `conformance.unimplemented`), or null. A
+ * linked issue's body is anyone's text, so a multi-line, marked-up or over-long value never reaches the pack.
+ */
+export const codeOf = (v) => (typeof v === "string" && /^[a-z][a-z0-9_.-]{0,63}$/.test(v) ? v : null);
+/**
  * The typed outcome of a FORGE:STATE record: the `terminalCode` and `failureClasses` the engine writes at the end of a run
  * (forge#4275); older records fall back to the code their terminal reason maps to (null for the catch-all).
  */
 const outcomeOf = (st) => {
-  const reason = st?.terminalReason ?? null;
-  const c = typeof st?.terminalCode === "string" && st.terminalCode ? st.terminalCode : reason ? codeForTerminalReason(reason) : null;
-  return c && c !== "unclassified" ? c : null;
+  const reason = codeOf(st?.terminalReason);
+  const c = codeOf(st?.terminalCode) ?? (reason ? codeForTerminalReason(reason) : null);
+  return codeOf(c) && c !== "unclassified" ? c : null;
 };
-const failuresOf = (st) => (Array.isArray(st?.failureClasses) ? [...new Set(st.failureClasses.filter((x) => typeof x === "string" && x))].sort().slice(0, 5) : []);
+const failuresOf = (st) => (Array.isArray(st?.failureClasses) ? [...new Set(st.failureClasses.map(codeOf).filter(Boolean))].sort().slice(0, 5) : []);
 const trusted = (c) => {
   const login = String(c?.author?.login ?? c?.user?.login ?? "");
   return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
@@ -169,8 +174,11 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
     for (const n of bodyLinks(body, repo, issue)) if (!rel.has(n)) rel.set(n, "link");
     let xrefs = [];
     try {
-      xrefs = String(await io.gh(["api", "--paginate", `repos/${repo}/issues/${issue}/timeline`, "--jq", '.[] | select(.event == "cross-referenced") | .source.issue.number']))
-        .split("\n").map((x) => Number(x.trim())).filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue));
+      // forge#4297: a reference from another repo carries that repo's number; only same-repo references are read here
+      const own = `/repos/${String(repo).toLowerCase()}`;
+      xrefs = String(await io.gh(["api", "--paginate", `repos/${repo}/issues/${issue}/timeline`, "--jq", '.[] | select(.event == "cross-referenced") | "\(.source.issue.repository_url) \(.source.issue.number)"']))
+        .split("\n").map((l) => l.trim().split(" ")).filter(([url]) => String(url ?? "").toLowerCase().endsWith(own))
+        .map(([, n]) => Number(n)).filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue));
     } catch (e) { facts.errors.push(`graph: timeline ${oneLine(e?.message ?? e, 80)}`); }
     for (const n of [...new Set(xrefs)].sort(byNum)) if (!rel.has(n)) rel.set(n, "cross-ref");
     if (parent) {
@@ -187,15 +195,15 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
       let rec;
       try { rec = await readIssue(io.gh, repo, n); } catch { facts.links.push({ number: n, rel: r, title: null, state: null, code: null, result: "unreadable" }); continue; }
       const st = stateOf(rec.body);
-      const reason = st?.terminalReason ?? null, fails = failuresOf(st);
+      const reason = codeOf(st?.terminalReason), fails = failuresOf(st);
       facts.links.push({ number: n, rel: r, kind: rec.pr ? "pr" : "issue", title: rec.title, state: rec.state, code: outcomeOf(st),
         result: reason ?? (rec.state === "CLOSED" ? rec.stateReason ?? "closed" : null), ...(fails.length ? { failures: fails } : {}), ...(r === "parent" || r === "depends-on" ? { body: stripComments(rec.body) } : {}) });
     }
   });
 
   await step("attempts", async () => {
-    const st = stateOf(body);
-    if (st?.terminalReason) facts.attempts.push({ kind: "state", ref: `#${issue} FORGE:STATE`, line: `last run ended ${st.terminalReason}${outcomeOf(st) ? ` (${outcomeOf(st)})` : ""}${failuresOf(st).length ? `; failures ${failuresOf(st).join(", ")}` : ""}${st.pr ? `, PR #${st.pr}` : ""}` });
+    const st = stateOf(body), reason = codeOf(st?.terminalReason), pr = Number(st?.pr);
+    if (reason) facts.attempts.push({ kind: "state", ref: `#${issue} FORGE:STATE`, line: `last run ended ${reason}${outcomeOf(st) ? ` (${outcomeOf(st)})` : ""}${failuresOf(st).length ? `; failures ${failuresOf(st).join(", ")}` : ""}${Number.isSafeInteger(pr) && pr > 0 ? `, PR #${pr}` : ""}` });
     for (const c of comments) {
       const m = markerOf(c?.body);
       if (!m || !ATTEMPT_MARKERS.includes(m) || !trusted(c)) continue;
@@ -251,7 +259,9 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
 
 // ---- compile (pure) ----
 
-const linkLine = (l) => `- #${l.number} [${l.rel}${l.kind === "pr" ? ", PR" : ""}] ${l.state ?? "?"}${l.title ? ` "${l.title}"` : ""}${l.code ? `; outcome ${l.code}` : ""}${l.result ? `; ${oneLine(l.result, 80)}` : ""}${l.failures?.length ? `; failures ${l.failures.join(", ")}` : ""}`;
+// forge#4297: codes are re-checked here too, so facts read back from the cache get the same whitelist
+const linkLine = (l) => { const fails = (Array.isArray(l.failures) ? l.failures : []).map(codeOf).filter(Boolean), res = codeOf(l.result);
+  return `- #${l.number} [${l.rel}${l.kind === "pr" ? ", PR" : ""}] ${l.state ?? "?"}${l.title ? ` "${l.title}"` : ""}${codeOf(l.code) ? `; outcome ${l.code}` : ""}${res ? `; ${res}` : ""}${fails.length ? `; failures ${fails.join(", ")}` : ""}`; };
 const ledgerLine = (p) => `- ${p.pr ? `PR #${p.pr}` : "commit"} ${p.sha}${p.revert ? " [revert]" : ""}${p.reverted ? ` [reverted by ${p.reverted}]` : ""} "${p.title}"${p.files?.length ? ` (${p.files.join(", ")})` : ""}${p.notes?.length ? ` — ${p.notes.join("; ")}` : ""}`;
 
 /**
