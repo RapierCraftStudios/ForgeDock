@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { gatherContextFacts, compileContextPack, contextPackFor, contextPackCacheKey, linkStateStamp, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments } from "./context.mjs";
+import { gatherContextFacts, compileContextPack, contextPackFor, contextPackCacheKey, linkStateStamp, LINK_STAMP_MAX, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments } from "./context.mjs";
 
 const REPO = "o/r";
 const BOT = { author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
@@ -221,20 +221,51 @@ describe("#4298 context-pack cache and shared names", () => {
     assert.notEqual(k({ scope: "aaa111", attempts: 1 }), k({ scope: "aaa111", attempts: 2 }));
   });
 
+  it("#4318: above LINK_STAMP_MAX the highest numbers are kept, still in one call", async () => {
+    const calls = [];
+    const gh = async (args) => { calls.push(args); return JSON.stringify({ data: { repository: {} } }); };
+    const body = Array.from({ length: LINK_STAMP_MAX + 5 }, (_, i) => `#${i + 1}`).join(" ");
+    await linkStateStamp({ gh, repo: "o/r", issue: 9999, body });
+    assert.equal(calls.length, 1);
+    const nums = [...(calls[0].find((x) => x.startsWith("query=")) ?? "").matchAll(/i(\d+):/g)].map((m) => Number(m[1]));
+    assert.equal(nums.length, LINK_STAMP_MAX);
+    assert.equal(nums[0], 6, "the lowest numbers are dropped");
+    assert.equal(nums.at(-1), LINK_STAMP_MAX + 5);
+  });
+
   it("#4316: linked-issue states are in the key; a state change recompiles; no links keeps the old key", async () => {
     const states = { 7: "open", 8: "open", 9: "closed" };
+    let rel = 2;
     const calls = [];
-    const gh = async (args) => { calls.push(args); const n = Number(/issues\/(\d+)$/.exec(args[1])?.[1]); if (n === 9 && states.fail9) throw new Error("HTTP 502"); return `${states[n]}\n`; };
+    // #4318: one GraphQL call; an alias per referenced number, plus the issue's own timeline relation count
+    const gh = async (args) => {
+      calls.push(args);
+      if (states.fail) throw new Error("HTTP 502");
+      const q = args.find((a) => a.startsWith("query=")) ?? "";
+      const repository = { self: { timelineItems: { totalCount: rel } } };
+      for (const m of q.matchAll(/i(\d+):issueOrPullRequest/g)) repository[`i${m[1]}`] = states[m[1]] ? { state: states[m[1]].toUpperCase() } : null;
+      return JSON.stringify({ data: { repository } });
+    };
+    const aliases = (a) => [...(a.find((x) => x.startsWith("query=")) ?? "").matchAll(/i(\d+):/g)].map((m) => Number(m[1]));
     const body = "**Parent**: #7\nDepends on #8\nSee #9 and #50 (self).";
     const s1 = await linkStateStamp({ gh, repo: "o/r", issue: 50, body });
     assert.match(s1, /^[0-9a-f]{12}$/);
-    assert.deepEqual(calls.map((a) => a[1]), ["repos/o/r/issues/7", "repos/o/r/issues/8", "repos/o/r/issues/9"], "parent, depends-on and links once each, never self");
+    assert.equal(calls.length, 1, "one call for every reference");
+    assert.deepEqual(calls[0].slice(0, 2), ["api", "graphql"]);
+    assert.deepEqual(aliases(calls[0]), [7, 8, 9], "parent, depends-on and links once each, never self");
+    assert.ok(calls[0].includes("o=o") && calls[0].includes("n=r"));
     assert.equal(await linkStateStamp({ gh, repo: "o/r", issue: 50, body }), s1, "stable");
     states[8] = "closed";
     const s2 = await linkStateStamp({ gh, repo: "o/r", issue: 50, body });
     assert.notEqual(s2, s1, "a linked issue closing changes the stamp");
-    states.fail9 = true;
-    assert.match(await linkStateStamp({ gh, repo: "o/r", issue: 50, body }), /^[0-9a-f]{12}$/, "an unreadable link never throws");
+    rel = 3;
+    assert.notEqual(await linkStateStamp({ gh, repo: "o/r", issue: 50, body }), s2, "a new timeline relation changes the stamp");
+    rel = 2;
+    states.fail = true;
+    const sf = await linkStateStamp({ gh, repo: "o/r", issue: 50, body });
+    assert.match(sf, /^[0-9a-f]{12}$/, "a failed call never throws");
+    assert.notEqual(sf, s2, "a failed call is n:? for every number");
+    delete states.fail;
     assert.equal(await linkStateStamp({ gh: async () => { throw new Error("x"); }, repo: "o/r", issue: 50, body: "no links here" }), "");
     const k = (s) => contextPackCacheKey(50, "abc", cfg, s);
     assert.equal(k({ scope: "s", attempts: 0, links: "" }), k({ scope: "s", attempts: 0 }), "no links: the pre-#4316 key");

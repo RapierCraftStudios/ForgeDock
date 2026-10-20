@@ -12,7 +12,7 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
-import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, parseReview, decide, mergeReviewRows, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
+import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, parseReview, decide, mergeReviewRows, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths } from "./prefilter.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
@@ -42,6 +42,7 @@ export const RECOVER_HOW = Object.freeze({
   [OUTCOME_CODES.BASE_CONFLICT]: "the PR conflicts with origin/BASE. Merge origin/BASE, resolve every conflict keeping both sides' intent, re-run the validate commands and push new commits only",
   [OUTCOME_CODES.BUILDER_BLOCK_UNTYPED]: "an earlier run escalated an in-scope technical choice. Do not block on it: pick the option most consistent with the issue, the repo's conventions and prior merged decisions, and name the alternative you did not take in your summary",
   [OUTCOME_CODES.CONTRACT_INVALID]: "the issue was edited while the earlier run planned. Plan against the current issue text",
+  [OUTCOME_CODES.ENV_TOOL_MISSING]: "a validate command could not run because the host lacks the tool or module named in the earlier run's detail; the change may already be correct. Do not edit the deliverables for it and never install anything globally: run the same check through the repo's own toolchain (its virtualenv, lockfile-pinned runner or package scripts), record that exit under the same validate id and name the command you used in your summary",
 });
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
@@ -1135,12 +1136,17 @@ export async function runCore(o) {
         await renew();
         if (round) picked = pickChecks();
         const precheckCommands = picked.commands;
-        const results = [];
+        const results = [], skipped = [];
+        // #4318: one round has a total budget; a command gets what is left of it, and the rest are skipped (CI stays the gate)
+        const totalMs = (Number(vcfg.precheckTotalSeconds) || 1800) * 1000, deadline = now() + totalMs;
         for (const command of precheckCommands) {
+          const left = deadline - now();
+          if (left <= 0) { skipped.push(command); continue; }
           let r;
-          try { r = await heavyStep("precheck", () => io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000 })); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
+          try { r = await heavyStep("precheck", () => io.runCommand({ command, cwd: wt, timeoutMs: Math.min(vcfg.precheckTimeoutSeconds * 1000, left) })); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
           results.push({ command, rc: Number.isInteger(r?.rc) ? r.rc : 1, output: String(r?.output ?? "") });
         }
+        if (skipped.length) T.anomalies.push(`skipped: pre-PR check total budget ${totalMs / 1000} s reached; not run: ${skipped.map((c) => `\`${c}\``).join(", ")}`);
         ev({ event: "PRECHECK_COMMANDS", round, results: results.map(({ command, rc }) => ({ command, rc })), ...(picked.source !== "learned" ? { source: picked.source } : {}) });
         verifyFacts.commands = results.map(({ command, rc }) => ({ command, rc }));
         const failed = results.filter((r) => r.rc !== 0);
@@ -1346,6 +1352,21 @@ export async function runCore(o) {
       }
       return d;
     }
+    /** #4323: rerun once each validate command the builder recorded as failed, with the lane env; {[id]: {rc, output}} or null. */
+    async function rerunFailedValidates(contract) {
+      if (!io.runCommand) return null;
+      const runs = Array.isArray(result?.validation) ? result.validation : [], out = {};
+      const env = { ...(runTmp ? { TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}) };
+      for (const v of contract.validate ?? []) {
+        const r = runs.find((x) => x?.id === v.id);
+        if (!r || r.exit === undefined || r.exit === 0) continue;
+        let x;
+        try { x = await heavyStep("precheck", () => io.runCommand({ command: String(v.command), cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env })); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+        out[v.id] = { rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") };
+      }
+      if (Object.keys(out).length) ev({ event: "VALIDATE_RERUN", runs: Object.entries(out).map(([id, x]) => ({ id, rc: x.rc })) });
+      return out;
+    }
     /** Precheck then review, on the current result and changed files (also the base-sync re-review). */
     async function gate() {
       await refreshIssue("conformance");
@@ -1354,14 +1375,19 @@ export async function runCore(o) {
       const amendProblems = await amend();
       const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === String(await git(["rev-parse", "HEAD"])).trim();
       const hotspots = await hotspotsOf({ base, paths: files });
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective) });
+      const validateRuns = await rerunFailedValidates(effective);
+      const repoHas = validateRuns && Object.keys(validateRuns).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas });
       Object.assign(verifyFacts, { precheck: pc.failures, amendments: amendProblems, hotspots: Boolean(hotspots && hotspots.enabled !== false && Array.isArray(hotspots.files)) });
-      const pre = [...pc.failures, ...amendProblems];
+      // #4323: a missing host tool or module is an environment error: never a conformance failure, never a builder resume
+      const envFails = pc.failures.filter((f) => f.code === OUTCOME_CODES.ENV_TOOL_MISSING);
+      const pre = [...pc.failures.filter((f) => f.code !== OUTCOME_CODES.ENV_TOOL_MISSING), ...amendProblems];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
       // shadow: the builder's own failed checks block before any reviewer tokens are spent (#4160)
       const hard = shadow ? pre.filter((f) => SHADOW_PRE_BLOCKS.includes(f.code)) : [];
       if (hard.length) return { state: "nonconforming", by: "precheck", failures: hard, would: "nonconforming", wouldFail: pre, reviewState: null };
+      if (envFails.length) return { state: "environment", by: "precheck", failures: envFails };
       // #4273: deterministic review trigger; off computes nothing, shadow logs and always reviews, enforce skips when untriggered
       if (triggerMode !== "off") {
         let t = null;
@@ -1406,9 +1432,16 @@ export async function runCore(o) {
       }
       ev({ event: "VERIFY", head, conclusion: r.conclusion, gates: r.gates.map((g) => ({ id: g.id, ok: g.ok })), posted, url, ...(error ? { error } : {}) });
     }
-    /** Shape the base-sync path expects: {unusable: state} when no usable review, else {fail, verdict, reason, failures}. */
+    /** #4323: a validate command the host could not run ends needs-human env.tool_missing (recoverable), never a builder resume. */
+    async function envNeedsHuman(failures) {
+      const tools = [...new Set(failures.map((f) => f.tool))].join(", ");
+      T.anomalies.push(`Environment error: validate command(s) could not run, the host is missing ${tools}`);
+      return await needsHuman(`Environment error (not a conformance failure): the host is missing ${tools}, so validate command(s) could not run; no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nInstall it on the host or run the check through the repo's own toolchain, then rerun.`, OUTCOME_CODES.ENV_TOOL_MISSING);
+    }
+    /** Shape the base-sync path expects: {unusable: state} when no usable review, {env: failures} for a missing host tool, else {fail, verdict, reason, failures}. */
     const doReview = async () => {
       const d = await gate();
+      if (d.state === "environment") return { env: d.failures };
       if (d.state.startsWith("review.")) return { unusable: d.state, failures: d.failures };
       return { fail: d.state !== "conforms", verdict: d.state === "conforms" ? "CONFORMS" : "NONCONFORMING", reason: d.failures.map((f) => `${f.code}: ${f.detail}`).join("; "), failures: d.failures };
     };
@@ -1426,6 +1459,7 @@ export async function runCore(o) {
         if (outcome.state === "conforms") break;
         const explained = explainFailures(outcome.failures, effective); // #4265: name the unmet requirement, not only the code
         const list = explained.slice(0, 15).map((f) => `- ${f.code}: ${f.detail}`).join("\n");
+        if (outcome.state === "environment") return await envNeedsHuman(outcome.failures);
         if (outcome.state === "review.unparseable") return await needsHuman(`The conformance reviewer returned no parseable JSON twice; nothing merged.`, OUTCOME_CODES.REVIEW_NO_VERDICT);
         if (shadow && reviewIncomplete === "degraded" && (outcome.state === "review.incomplete" || outcome.state === "review.inconsistent")) {
           degraded = { state: outcome.state, missing: outcome.missing ?? [] };
@@ -1583,12 +1617,14 @@ export async function runCore(o) {
       if (remoteVerify && after !== before) { const v = await ciVerify("base-sync"); if (v.done) return v.done; ciFixes = v.fixes; }
       if (!isSplit && (!clean || sq?.renumbered || ciFixes)) {
         let rv = await doReview();
+        if (rv.env) return await envNeedsHuman(rv.env);
         if (rv?.fail) {
           T.decisions.push(`Base-sync re-review FAIL: builder resumed with the reason`);
           await builder(++attemptN, conformanceResumePrompt(rv.failures, vcfg.mode), sessionId ?? null);
           if (await unresolved()) return await needsHuman("Base-sync re-review fix left conflict markers.", OUTCOME_CODES.BASE_CONFLICT);
           if ((await gitOut(["rev-parse", "HEAD"])) !== after) await gitPush(["push", "origin", branch]);
           rv = await doReview();
+          if (rv.env) return await envNeedsHuman(rv.env);
         }
         if (rv.unusable) return await needsHuman(`Reviewer returned no usable review after base-sync (${rv.unusable}).`, UNUSABLE_REVIEW_CODES[rv.unusable]);
         if (rv.fail) return await needsHuman(`Review FAIL after base-sync: ${rv.reason}`, OUTCOME_CODES.REVIEW_FAILED);
@@ -1625,6 +1661,7 @@ export async function runCore(o) {
       }
       const rv = await doReview(); // never merge an unreviewed head
       if (!rv) return await needsHuman("Reviewer returned no parseable verdict after a CI fix round.", OUTCOME_CODES.REVIEW_NO_VERDICT);
+      if (rv.env) return await envNeedsHuman(rv.env);
       if (rv.fail) return await needsHuman(`Review FAIL after a CI fix round: ${rv.reason}`, OUTCOME_CODES.REVIEW_FAILED);
       await gitPush(["push", "origin", branch]); // plain push of the fix commit: never force
       localHead = await gitOut(["rev-parse", "HEAD"]);

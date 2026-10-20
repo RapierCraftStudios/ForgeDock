@@ -60,13 +60,25 @@ export function selectCommands(map, files) {
 }
 
 /**
+ * #4318: the dedupe key of a check command: whitespace collapsed, a leading `cd . && ` dropped, `<pm> run test` read as
+ * `<pm> test` (npm/pnpm/yarn/bun) and an `npx`/`bunx [--yes|-y]` prefix dropped, so one suite under two spellings runs once.
+ */
+export function checkKey(c) {
+  let k = String(c ?? "").trim().replace(/\s+/g, " ");
+  k = k.replace(/^cd \.\/? && /, "");
+  const cd = /^((?:cd|pushd) \S+ && )?(.*)$/.exec(k), pre = cd[1] ?? "";
+  const cmd = cd[2].replace(/^(?:npx|bunx)(?: (?:--yes|-y))? /, "").replace(/^(npm|pnpm|yarn|bun) run test(?= |$)/, "$1 test");
+  return pre + cmd;
+}
+
+/**
  * #4315: the pre-PR checks are the learned commands (in order) plus each map-selected command they lack; compared
- * whitespace-collapsed, so the map can only add checks, never remove one. `source`: "learned" when the map added
- * nothing, "test-map" when there were no learned commands, else "test-map+learned".
+ * by `checkKey` (#4318), so the map can only add checks, never remove one; the first spelling seen is kept. `source`:
+ * "learned" when the map added nothing, "test-map" when there were no learned commands, else "test-map+learned".
  * @returns {{commands:string[], source:string, added:number}}
  */
 export function mergeChecks(selected, learned) {
-  const norm = (c) => String(c ?? "").trim().replace(/\s+/g, " ");
+  const norm = checkKey;
   const commands = [], seen = new Set();
   const add = (c) => { const t = String(c ?? "").trim(), k = norm(t); if (!k || seen.has(k)) return false; seen.add(k); commands.push(t); return true; };
   for (const c of Array.isArray(learned) ? learned : []) add(c);

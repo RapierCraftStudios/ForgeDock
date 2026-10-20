@@ -417,3 +417,78 @@ describe("#4316 one shared recovery evidence text", () => {
     }
   });
 });
+
+describe("#4318: the batch-exit relabel survives a throw and a signal; relabel results; full non-final reason", () => {
+  const LONG = `ci.red: line one ${"x".repeat(400)}\nsecond line END-OF-REASON`;
+  const NH = (code, detail) => ({ terminalReason: "needs-human", code, detail });
+  // issue 1 ends ci.red; attempt 1/2 is queued, and `onRecovering` runs when the runner reports it
+  const queued = (opts) => {
+    const relabels = [], ran = [];
+    const p = orchestrate({ issues: [1], parallel: 1, recovery: { maxAttempts: 2 }, readBody: async () => "",
+      relabelNeedsHuman: opts.relabel ?? (async (x) => { relabels.push(x); }),
+      runOne: async (n, _l, ctx = {}) => { ran.push(ctx.recover ?? null); await new Promise((r) => setImmediate(r)); return NH("ci.red", LONG); },
+      ...opts.extra(relabels) });
+    return { p, relabels, ran };
+  };
+
+  it("an exception out of the loop relabels the queued recovery once, then propagates", async () => {
+    let boom = false;
+    const { p, relabels, ran } = queued({ extra: () => ({
+      now: () => { if (boom) throw new Error("clock broke"); return 1000; },
+      onUpdate: (r) => { if (r.outcome === "recovering") boom = true; } }) });
+    await assert.rejects(p, /clock broke/);
+    assert.deepEqual(ran, [null], "attempt 1 never launched");
+    assert.equal(relabels.length, 1); assert.equal(relabels[0].issue, 1);
+    assert.ok(relabels[0].evidence.includes(LONG), "full persisted reason");
+    assert.match(relabels[0].evidence, /the batch stopped \(batch failed: clock broke\)/);
+  });
+
+  it("onExit hands the caller the relabel: a signal relabels with its cause, once; the normal exit does not repeat it", async () => {
+    let exitFn = null;
+    const { p, relabels } = queued({ extra: () => ({
+      onExit: (fn) => { exitFn = fn; },
+      onUpdate: async (r) => { if (r.outcome === "recovering" && exitFn) { const f = exitFn; exitFn = null; await f("interrupted by SIGINT"); await f("again"); } } }) });
+    await p;
+    assert.equal(relabels.length, 1, "idempotent");
+    assert.match(relabels[0].evidence, /the batch stopped \(interrupted by SIGINT\)/);
+  });
+
+  it("a non-final attempt's relabel carries the full multi-line reason, not 300 chars", async () => {
+    const relabels = [];
+    await orchestrate({ issues: [1], parallel: 1, recovery: { maxAttempts: 2 }, readBody: async () => "", relabelNeedsHuman: async (x) => { relabels.push(x); },
+      runOne: async (_n, _l, ctx = {}) => (ctx.recover ? NH("builder.blocked", LONG) : NH("ci.red", "red")) });
+    assert.equal(relabels.length, 1);
+    assert.ok(relabels[0].evidence.includes(LONG));
+    assert.ok(relabels[0].evidence.includes("END-OF-REASON"));
+  });
+
+  describe("relabel results on the batch-exit path", () => {
+    const lost = (relabel) => {
+      let state = { v: 1, order: [1], deps: { 1: [] }, pending: [], results: {}, running: { 1: { startedAt: 1, pid: 999 } }, recoveries: { 1: 2 },
+        recovering: { 1: { code: "ci.red", attempt: 2, detail: LONG, outcome: "needs-human", result_code: "ci.red", prev_attempt: 1 } },
+        breaker: { at: 1, detail: "circuit breaker: tripped" } };
+      const store = { load: () => state, save: (s) => { state = s; }, log: () => {} };
+      const calls = [];
+      const go = () => orchestrate({ issues: [1], store, recovery: { maxAttempts: 2 }, readBody: async () => "", adopt: async () => null,
+        relabelNeedsHuman: async (x) => { calls.push(x); return relabel(); }, runOne: async () => ({ terminalReason: "merged" }) });
+      return { go, calls, state: () => state };
+    };
+    it("a failed label add (false / \"failed\" / a throw) is not recorded: the next resume retries it", async () => {
+      for (const relabel of [() => false, () => "failed", () => { throw new Error("gh down"); }]) {
+        const b = lost(relabel);
+        await b.go();
+        assert.equal(b.state().relabelled, undefined);
+        await b.go();
+        assert.equal(b.calls.length, 2, "retried on resume");
+      }
+    });
+    it("\"skipped\" (closed or leased issue) and true are recorded: no retry", async () => {
+      for (const relabel of [() => "skipped", () => true]) {
+        const b = lost(relabel);
+        await b.go(); await b.go();
+        assert.deepEqual(b.state().relabelled, [1]);
+        assert.equal(b.calls.length, 1);
+      }
+    });
+  });
+});

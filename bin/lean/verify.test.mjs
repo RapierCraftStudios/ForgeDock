@@ -22,9 +22,9 @@ function fake(o = {}) {
 
 describe("verify-by-CI config (#4167)", () => {
   it("parseVerify defaults to local and rejects invalid values", () => {
-    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300, checkRun: false });
+    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300, precheckTotalSeconds: 1800, checkRun: false });
     const v = parseVerify({ mode: "ci", workflow: ".github/workflows/verify.yml", paths_input: "changed_paths", skip_paths: "*.md, docs/** ,", max_rounds: "3" });
-    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300, checkRun: false });
+    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300, precheckTotalSeconds: 1800, checkRun: false });
     assert.equal(parseVerify({ mode: "remote" }).mode, "local");
     assert.equal(parseVerify({ workflow: "x; rm -rf /" }).workflow, null);
     assert.equal(parseVerify({ max_rounds: "-1" }).maxRounds, 2);
@@ -122,6 +122,12 @@ describe("forgedock/verify check run (#4270)", () => {
   const result = { validation: [{ id: "V1", exit: 0 }, { id: "V2", ci: true }], requirements: [{ id: "R1", status: "implemented" }] };
   const out = (r) => JSON.parse(/```json\n([\s\S]*)\n```/.exec(r.text)[1]);
 
+  it("#4318 parseVerify precheck_total_seconds: default 1800, integer 1-7200 accepted, others fall back", () => {
+    assert.equal(parseVerify({}).precheckTotalSeconds, 1800);
+    assert.equal(parseVerify({ precheck_total_seconds: "600" }).precheckTotalSeconds, 600);
+    assert.equal(parseVerify({ precheck_total_seconds: "7200" }).precheckTotalSeconds, 7200);
+    for (const bad of ["0", "-5", "1.5", "abc", "7201"]) assert.equal(parseVerify({ precheck_total_seconds: bad }).precheckTotalSeconds, 1800, bad);
+  });
   it("parseVerify: check_run is true only for the literal true; default false", () => {
     assert.equal(parseVerify({}).checkRun, false);
     assert.equal(parseVerify({ check_run: "true" }).checkRun, true);

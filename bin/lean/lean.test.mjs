@@ -1026,6 +1026,29 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(nhBody(w), /validate V1 \(`node --test test\/foo\.test\.js`\) failed \(exit 1\)/);
   });
 
+  it("#4323 a validate the host cannot run (missing module) ends env.tool_missing naming it: no builder resume, no reviewer", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    for (const conformance of ["shadow", "enforce"]) {
+      const w = world({ validation: v }), ran = [];
+      w.io.runCommand = async (a) => { ran.push(a); return { rc: 1, output: "ModuleNotFoundError: No module named 'yaml'" }; };
+      const r = await run(w, { conformance });
+      assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING, conformance); assert.equal(w.merges.length, 0);
+      assert.equal(builders(w).length, 2, "plan + implement only"); assert.equal(reviewers(w).length, 0);
+      assert.match(nhBody(w), /Environment error \(not a conformance failure\): the host is missing yaml/);
+      assert.deepEqual(ran.map((a) => [a.command, a.cwd]), [["node --test test/foo.test.js", WT]], "only the failed contract validate is rerun, in the worktree");
+      assert.ok(ran[0].env && typeof ran[0].env === "object", "the rerun gets the lane env");
+    }
+  });
+  it("#4323 a rerun that fails for a repo reason stays conformance.unimplemented; one that passes merges", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
+    const w = world({ validation: v, resumeValidation: v });
+    w.io.runCommand = async () => ({ rc: 1, output: "Error: Cannot find module './src/foo.js'" });
+    assert.equal((await runShadow(w)).code, "conformance.unimplemented"); assert.equal(builders(w).length, 3);
+    const p = world({ validation: v });
+    p.io.runCommand = async () => ({ rc: 0, output: "" });
+    assert.equal((await runShadow(p)).terminalReason, "merged"); assert.equal(builders(p).length, 2);
+  });
+
   it("a failed validate fetches the lane and the resume says how to catch up with a moved base (merge, never rebase)", async () => {
     const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
@@ -3190,7 +3213,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     writeFileSync(`${d}/forge.yaml`, "engine:\n  conformance: shadow\n");
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n");
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, checkRun: false });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 1800, checkRun: false });
   });
 });
 
@@ -3551,6 +3574,16 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.equal(r.terminalReason, "merged");
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 1);
     assert.match(traj(w)[0], /builder made no new commit for them/);
+  });
+
+  it("#4318 pre-PR: a round has a total budget; a command gets what is left, the rest are skipped as an anomaly, not a failure", async () => {
+    const w = world(); const ran = [];
+    w.io.runCommand = async ({ command, timeoutMs }) => { ran.push([command, timeoutMs]); w.clock += 60000; return { rc: 0, output: "" }; };
+    const r = await run(w, { precheck: { commands: ["make a", "make b", "make c"] }, verify: { precheckTotalSeconds: 100 } });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(ran, [["make a", 100000], ["make b", 40000]]);
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "skipped is not failing");
+    assert.match(traj(w)[0], /skipped: pre-PR check total budget 100 s reached; not run: `make c`/);
   });
 });
 

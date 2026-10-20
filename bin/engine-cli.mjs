@@ -1228,40 +1228,50 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     } catch { near = false; }
     if (near) await runGcPhase("admission");
   };
-  const rows = await orchestrate({
-    beforeAdmit,
-    issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
-    breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
-    ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
-    ...(remote ? { remote } : {}),
-    // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
-    ...(recoveryOn ? { recovery: orch.recovery } : {}),
-    decide: deps.decide ?? (async (d) => {
-      if (d?.issue == null) { sink.line(`decision: ${d?.what} (why: ${d?.why}; alternative: ${d?.alternative})`); return; }
-      const body = `<!-- FORGE:DECISION -->\n## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
-      try { await leanIo.gh(["issue", "comment", String(d.issue), "-R", repo, "--body", body]); } catch { /* best effort: the batch log keeps the row */ }
-    }),
-    // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
-    relabelNeedsHuman: deps.relabelNeedsHuman ?? (async ({ issue, evidence }) => {
-      try {
-        // #4315: the evidence carries the full lane reason; capped so it never exceeds GitHub's comment limit
-        const { capComment } = await import("./lean/render.mjs");
-        await leanIo.gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\n${evidence}`)]);
-        await leanIo.gh(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
-      } catch { /* best effort: the batch row keeps the evidence */ }
-    }),
-    conflicting: deps.conflicting ?? (async (_n, pr) => {
-      try { return JSON.parse(await leanIo.gh(["pr", "view", String(pr), "-R", repo, "--json", "mergeable"]))?.mergeable === "CONFLICTING"; } catch { return false; }
-    }),
-    onCrossLane: (e) => {
-      crossLane.push(e);
-      sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
-    },
-    readBody: maint || registry || hybrid
-      ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); return v.body; }
-      : async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
-    onUpdate: (r) => sink.row(r),
-  });
+  // #4318: SIGINT/SIGTERM of a foreground dispatcher run the batch-exit relabel, then exit 128+signo (the lane pattern above).
+  let exitRelabel = null, interrupted = false;
+  const on = deps.processOn ?? ((s, f) => process.on(s, f)), off = deps.processOff ?? ((s, f) => process.removeListener(s, f));
+  const exitProc = deps.exit ?? ((c) => process.exit(c));
+  const SIGNO = { SIGINT: 2, SIGTERM: 15 };
+  const handlers = daemon ? {} : Object.fromEntries(Object.keys(SIGNO).map((sig) => [sig, async () => {
+    if (interrupted) return;
+    interrupted = true;
+    try { if (exitRelabel) await exitRelabel(`interrupted by ${sig}`); } catch { /* exit anyway */ }
+    exitProc(128 + SIGNO[sig]);
+  }]));
+  for (const [sig, f] of Object.entries(handlers)) on(sig, f);
+  let rows;
+  try {
+    rows = await orchestrate({
+      beforeAdmit,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
+      breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
+      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
+      ...(remote ? { remote } : {}),
+      // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
+      ...(recoveryOn ? { recovery: orch.recovery } : {}),
+      decide: deps.decide ?? (async (d) => {
+        if (d?.issue == null) { sink.line(`decision: ${d?.what} (why: ${d?.why}; alternative: ${d?.alternative})`); return; }
+        const body = `<!-- FORGE:DECISION -->\n## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;
+        try { await leanIo.gh(["issue", "comment", String(d.issue), "-R", repo, "--body", body]); } catch { /* best effort: the batch log keeps the row */ }
+      }),
+      // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
+      relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
+      // #4318: a dispatcher signal relabels the queued recoveries before it exits (the daemon resumes its batches instead)
+      ...(daemon ? {} : { onExit: (fn) => { exitRelabel = fn; } }),
+      conflicting: deps.conflicting ?? (async (_n, pr) => {
+        try { return JSON.parse(await leanIo.gh(["pr", "view", String(pr), "-R", repo, "--json", "mergeable"]))?.mergeable === "CONFLICTING"; } catch { return false; }
+      }),
+      onCrossLane: (e) => {
+        crossLane.push(e);
+        sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
+      },
+      readBody: maint || registry || hybrid
+        ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); return v.body; }
+        : async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
+      onUpdate: (r) => sink.row(r),
+    });
+  } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
   const report = ["\n" + formatTable(rows), ...formatOutcomeLists(rows)];
   const pfLine = formatPrefilterSummary(rows);
   if (pfLine) report.push(pfLine);
@@ -1280,6 +1290,30 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
   try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
+}
+
+/**
+ * #4318: the batch runner's needs-human relabel. Re-reads the issue first: closed, or a live FORGE:STATE lease (the runner
+ * never holds one, so it is another actor's) → "skipped". Label first: a failed label add → "failed" with no comment (a
+ * resume retries); then the capped FORGE:NEEDS_HUMAN comment, whose failure keeps the label → true.
+ */
+export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
+  return async ({ issue, evidence }) => {
+    const { stateOf } = await import("./lean/context.mjs");
+    try {
+      const v = JSON.parse(await gh(["issue", "view", String(issue), "-R", repo, "--json", "state,body"]));
+      if (String(v?.state ?? "").toUpperCase() === "CLOSED") return "skipped";
+      const lease = stateOf(v?.body)?.lease;
+      if (lease && Number(lease.until) > now()) return "skipped";
+    } catch { /* unreadable: relabel as before */ }
+    try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]); } catch { return "failed"; }
+    try {
+      // #4315: the evidence carries the full lane reason; capped so it never exceeds GitHub's comment limit
+      const { capComment } = await import("./lean/render.mjs");
+      await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\n${evidence}`)]);
+    } catch { /* best effort: the label is on, the batch row keeps the evidence */ }
+    return true;
+  };
 }
 
 /** The batch report's "reclaimed" line (#4183). */
