@@ -292,3 +292,30 @@ describe("forgedock gc tmp (#4180, #4104 parity)", () => {
     assert.match(r.out, /not owned\s+tmp .*build0\.log/);
   });
 });
+
+describe("forgedock gc deps (#4220 dependency cache)", () => {
+  it("dry-run reports, --apply reclaims old unlocked snapshots, dead publishers' tmp dirs and dead locks; fresh and locked snapshots stay", async () => {
+    const { makeDepCache } = await import("../lean/depcache.mjs");
+    const w = world();
+    const root = join(w.home, ".forge", "depcache"), rk = join(root, "repo-0e11c8a4");
+    const snap = (key, lastUsed) => { const d = join(rk, `npm-${key}`); mkdirSync(join(d, "node_modules", "x"), { recursive: true }); writeFileSync(join(d, "node_modules", "x", "i.js"), "1", { mode: 0o444 }); writeFileSync(join(d, "manifest.json"), JSON.stringify({ created: lastUsed })); writeFileSync(join(d, "last-used"), String(lastUsed)); return d; };
+    const oldSnap = snap("a".repeat(16), NOW - 8 * 24 * H), freshSnap = snap("b".repeat(16), NOW - H), lockedSnap = snap("c".repeat(16), NOW - 9 * 24 * H);
+    writeFileSync(`${lockedSnap}.lock`, JSON.stringify({ host: HOST, pid: 4242, created: NOW })); w.alive.add(4242);
+    const deadTmp = join(rk, `npm-${"d".repeat(16)}.tmp-31337`); mkdirSync(deadTmp, { recursive: true });
+    const deadLock = join(rk, `npm-${"e".repeat(16)}.lock`); writeFileSync(deadLock, JSON.stringify({ host: HOST, pid: 31338, created: NOW - H }));
+    mkdirSync(join(root, "stores", "pnpm-store"), { recursive: true });
+    w.probes.depCache = makeDepCache({ root, exec: async () => "", env: {}, now: () => NOW, host: HOST, alive: (pid) => w.alive.has(Number(pid)) });
+
+    const dry = await run(w, ["--deps"]);
+    assert.equal(dry.code, 0, dry.out);
+    assert.match(dry.out, /reclaim\s+depcache .*npm-a{16}\s+\(snapshot unused\)/);
+    assert.match(dry.out, /report\s+depcache .*npm-c{16}\s+\(locked by a live lane\)/);
+    for (const p of [oldSnap, deadTmp, deadLock]) assert.ok(existsSync(p), `dry-run never deletes ${p}`);
+
+    const r = await run(w, ["--apply", "--deps"]);
+    assert.equal(r.code, 0, r.out);
+    for (const p of [oldSnap, deadTmp, deadLock]) assert.equal(existsSync(p), false, p);
+    for (const p of [freshSnap, lockedSnap, join(root, "stores", "pnpm-store")]) assert.ok(existsSync(p), p);
+    assert.match(r.out, /gc: reclaimed 3 of 3 item\(s\)/);
+  });
+});

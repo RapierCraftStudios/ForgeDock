@@ -11,12 +11,14 @@
  *     "labels":     ["backend", ...],                      // optional: when given, every issue label must be in it
  *     "milestones": [{ "key": "M1", "title": "..." }, ...],  // build order: foundation first
  *     "issues": [{ "key": "API", "title": "...", "milestone": "M1", "labels": ["backend"],
- *                  "deps": ["DB"], "needsHuman": false, "body": "## Problem\n..." }],
+ *                  "deps": ["DB"], "needsHuman": false, "ui": false, "hero": false, "body": "## Problem\n..." }],
  *     "numbers":    { "DB": 12 }                             // optional: real issue numbers once created
  *   }
  *
  * Rejects: invalid-plan, unknown-dep, cycle, forward-milestone-dep, depends-on-mismatch, unresolved-placeholder,
- * missing-section, missing-type-tag, missing-parent, missing-labels, unknown-label, code-depends-on-needs-human.
+ * missing-section, missing-type-tag, missing-parent, missing-labels, unknown-label, code-depends-on-needs-human,
+ * missing-design-spec (a `ui` issue lacks a design-spec item), hero-not-routed (a `hero` issue never names `/design`),
+ * missing-needs-human-section (a needs-human issue lacks setup steps, env var names or secret handling) (#4176).
  * `Depends on` lines are read with the engine's own parser (bin/engine/phases.mjs parseDependsOn) after placeholder
  * resolution, so the plan and engine admission agree on what blocks what.
  *
@@ -44,6 +46,25 @@ const SYNTHETIC_BASE = 1_000_000_000;
 // Mandatory Pipeline Issue Template sections (commands/issue.md Phase 3D). Matched case-insensitively on `## ` headings,
 // ignoring a trailing parenthetical such as "Root Cause (if known)".
 const SECTIONS = ["Problem", "Root Cause", "Affected Files", "Acceptance Criteria", "Context", "Dependencies"];
+
+// UI issues carry a full design spec (#4176): each item must be named somewhere in the body.
+const DESIGN_SPEC = [
+  ["breakpoints", /breakpoint/i],
+  ["empty state", /\bempty\b/i],
+  ["loading state", /\bloading\b/i],
+  ["error state", /\berror\b/i],
+  ["offline state", /\boffline\b/i],
+  ["motion", /\bmotion\b/i],
+  ["accessibility", /\b(?:accessibility|a11y)\b/i],
+  ["dark mode", /\bdark[ -]mode\b/i],
+];
+// Needs-human issues (#4176): headings for setup steps, env vars and secret handling, plus at least one env var name.
+const NEEDS_HUMAN_PARTS = [
+  ["setup steps heading", /^#{2,6}[ \t]+.*\bsetup steps\b/im],
+  ["environment variables heading", /^#{2,6}[ \t]+.*\b(?:environment variables|env vars)\b/im],
+  ["secret handling heading", /^#{2,6}[ \t]+.*\bsecrets?\b/im],
+  ["env var name (e.g. `API_KEY`)", /`[A-Z][A-Z0-9]*_[A-Z0-9_]+`/],
+];
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isNonEmptyString = (v) => typeof v === "string" && v.trim() !== "";
@@ -125,6 +146,7 @@ function checkStructure(plan) {
       at("`labels` must be an array of strings");
     }
     if (typeof it.body !== "string") at("needs a string `body`");
+    for (const f of ["ui", "hero"]) if (it[f] !== undefined && typeof it[f] !== "boolean") at(`\`${f}\` must be a boolean`);
   });
   return errors;
 }
@@ -242,6 +264,18 @@ export function validatePlan(plan) {
     }
     const ctx = secs.get("context");
     if (ctx && !ctx.some((l) => l.includes("**Parent**"))) err(it.key, "missing-parent", "`## Context` has no `**Parent**` line");
+
+    if (it.ui === true) {
+      const lacking = DESIGN_SPEC.filter(([, re]) => !re.test(it.body)).map(([name]) => name);
+      if (lacking.length) err(it.key, "missing-design-spec", `UI issue design spec lacks: ${lacking.join(", ")}`);
+    }
+    if (it.hero === true && !/(^|[^\w/])\/design\b/.test(it.body)) {
+      err(it.key, "hero-not-routed", "hero surface issue does not route to `/design`");
+    }
+    if (isNeedsHuman(it)) {
+      const lacking = NEEDS_HUMAN_PARTS.filter(([, re]) => !re.test(it.body)).map(([name]) => name);
+      if (lacking.length) err(it.key, "missing-needs-human-section", `needs-human issue lacks: ${lacking.join(", ")}`);
+    }
   }
   return { ok: errors.length === 0, errors };
 }

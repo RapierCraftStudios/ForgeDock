@@ -7,6 +7,11 @@ import {
   isWithinWindow,
   buildTable,
   lookupCell,
+  parseShadowVerdict,
+  shadowDistribution,
+  recommendEnforce,
+  runShadow,
+  formatShadowReport,
 } from '../../scripts/calibration.mjs';
 
 // ---------------------------------------------------------------------------
@@ -315,4 +320,56 @@ test('sanity anchor: #1370/#1371 HIGH-confidence failure scenario', () => {
   assert.equal(row.trusted, true, 'should be trusted (11 samples)');
   // 7 survived / 11 total ≈ 0.636 < 0.8 → overconfidence flag
   assert.equal(row.flag, 'overconfidence', `should flag overconfidence (survival rate ${row.survivalRate})`);
+});
+
+// ---------------------------------------------------------------------------
+// --shadow: conformance-gate shadow verdict distribution (forge#4160)
+// ---------------------------------------------------------------------------
+
+test('#4160 parseArgs: --shadow flags and defaults', () => {
+  const d = parseArgs(['node', 'calibration.mjs']);
+  assert.deepEqual([d.shadow, d.threshold, d.minRuns, d.json], [false, 0.10, 20, false]);
+  const a = parseArgs(['node', 'calibration.mjs', '--shadow', '--threshold', '0.2', '--min-runs', '5', '--json']);
+  assert.deepEqual([a.shadow, a.threshold, a.minRuns, a.json], [true, 0.2, 5, true]);
+});
+
+test('#4160 parseShadowVerdict reads the FORGE:REVIEW gate verdict line; enforced reviews are ignored', () => {
+  const body = (v) => `<!-- FORGE:REVIEW -->\n## Conformance Review (shadow mode: not enforced)\n**Gate verdict:** ${v}. In shadow mode ...`;
+  assert.equal(parseShadowVerdict(body('would PASS')), 'pass');
+  assert.equal(parseShadowVerdict(body('would BLOCK (review.incomplete)')), 'review.incomplete');
+  assert.equal(parseShadowVerdict(body('would BLOCK (nonconforming)')), 'nonconforming');
+  assert.equal(parseShadowVerdict('<!-- FORGE:REVIEW -->\n## Conformance Review\n**Verdict:** CONFORMS'), null);
+  assert.equal(parseShadowVerdict('**Gate verdict:** would PASS'), null, 'not a FORGE:REVIEW comment');
+});
+
+test('#4160 shadowDistribution and recommendEnforce: per-repo mix, enforce only under the threshold over N runs', () => {
+  const recs = [
+    ...Array.from({ length: 46 }, () => ({ repo: 'a/mono', verdict: 'review.incomplete' })),
+    ...Array.from({ length: 12 }, () => ({ repo: 'a/mono', verdict: 'nonconforming' })),
+    ...Array.from({ length: 9 }, () => ({ repo: 'a/mono', verdict: 'pass' })),
+    ...Array.from({ length: 19 }, () => ({ repo: 'a/lib', verdict: 'pass' })),
+    { repo: 'a/lib', verdict: 'review.incomplete' },
+  ];
+  const d = shadowDistribution(recs);
+  assert.equal(d['a/mono'].runs, 67);
+  assert.equal(d['a/mono'].counts['review.incomplete'], 46);
+  assert.equal(d['a/mono'].shares['review.incomplete'], 0.687);
+  assert.equal(recommendEnforce(d['a/mono']).mode, 'shadow');
+  assert.equal(recommendEnforce(d['a/lib']).mode, 'enforce', '1/20 = 5% < 10% over 20 runs');
+  assert.equal(recommendEnforce(d['a/lib'], { minRuns: 30 }).mode, 'shadow');
+  assert.equal(recommendEnforce(d['a/lib'], { threshold: 0.05 }).mode, 'shadow', 'the threshold is strict');
+});
+
+test('#4160 runShadow reads FORGE:REVIEW comments per repo and prints the table', () => {
+  const lines = (vs) => vs.map((v, i) => JSON.stringify({ issue_url: `https://api.github.com/repos/o/r/issues/${i + 1}`, body: `<!-- FORGE:REVIEW -->\n**Gate verdict:** ${v}.` })).join('\n');
+  const calls = [];
+  const gh = (path, flags) => { calls.push([path, flags]); return path.startsWith('repos/o/r/') ? lines(['would PASS', 'would BLOCK (review.incomplete)']) : ''; };
+  const r = runShadow({ repo: 'o/r,o/empty', threshold: 0.1, minRuns: 1 }, '/nonexistent', gh);
+  assert.equal(r.repos['o/r'].runs, 2);
+  assert.equal(r.repos['o/r'].recommendation.mode, 'shadow');
+  assert.equal(r.repos['o/empty'].runs, 0);
+  assert.ok(calls.every(([, f]) => f.includes('--paginate')));
+  const t = formatShadowReport(r);
+  assert.match(t, /\| o\/r \| 2 \| 1 \(50%\) \| 0 \(0%\) \| 1 \(50%\)/);
+  assert.match(t, /\| o\/empty \| 0 \|.*shadow: only 0 shadow review/);
 });

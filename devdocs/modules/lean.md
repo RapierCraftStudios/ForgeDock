@@ -3,7 +3,7 @@ module: lean
 glob: "bin/lean/*"
 authority: required
 token_cost: 900
-last_compacted: "2026-10-19"
+last_compacted: "2026-10-20"
 ---
 
 # Module Dossier: bin/lean/ (core work-on engine)
@@ -101,9 +101,24 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    precheck `validate_failed` or `requirement_unimplemented`, before any
    reviewer run) or `enforce`. Defer/post-deploy requirements become tracked
    follow-ups (`followupItems`, `pendingTracking`).
+   Hotspots (forge#4195): `io.hotspots` runs `scripts/hotspots.sh` once
+   before the plan call on the issue's `namedPaths` (`hotspotPlanNote`: one
+   line per file over `maintenance.hotspot.file_lines`, nothing when none;
+   the implement prompt gets `hotspotBuildRule`) and again in `gate()` with
+   `--base` on the changed files. `hotspotGrowth` fails precheck with
+   `maintenance.hotspot_growth` (kind `hotspot_growth`, in
+   `SHADOW_PRE_BLOCKS`, so it blocks in shadow too) for growth over
+   `growth_lines` without `hotspot-exempt: <reason>` in a covering deliverable
+   or add-deliverable why. A failed script or `enabled: false` turns it off;
+   no runner calls are added.
 8. **Push + PR → merge** — merge policy `required` (default) | `all` | `none`;
    base-sync merges the lane in on conflict (never rebase/force-push); merge
-   at the reviewed head → `merged`, or `ci-pending` after the CI wait. A failed
+   at the reviewed head → `merged`, or `ci-pending` after the CI wait. Each CI
+   wait poll re-reads mergeability (#4266): a PR that turned conflicting (its
+   `pull_request` workflows never start) base-syncs at once and waits again,
+   within the same base-sync limit (→ `base.conflict`); required checks that
+   have not started after `CI_NOT_STARTED_GRACE_MS` on a MERGEABLE PR log one
+   `CI_NOT_STARTED` event (not terminal). A failed
    required check (any verify mode, #4240) resumes the builder with the failed
    logs (`collectFailedLogs`, `ciFailurePrompt`), re-reviews and pushes the fix,
    and waits again; `ci.red` only after `max_rounds` (shared with `ciVerify`) or a
@@ -132,6 +147,15 @@ as `makeHostProbe().activeLanes()`.
   going through turbo.
 - ci-local passes the variable through `scrubbedEnv` and caps its slot count
   and job `maxParallel` at it (`lib.mjs` `capParallel`).
+
+## Dependency cache (#4220)
+
+`depcache.mjs` `prepare` (after the worktree exists) keys each lockfile (pnpm/npm/yarn
+non-PnP, uv/poetry) by sha256 of lock + manifests + runtime + platform. Hit: hardlink the
+read-only snapshot `~/.forge/depcache/<repoKey>/<eco>-<key>/` in (bin scripts copied, build
+path rewritten), then a warm repair install. Miss: frozen install under the key lock, publish
+via tmp + atomic rename. Never fails the run (`DEPS_PREPARED`); runner env gets the shared
+stores; `forgedock gc --deps` reaps; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
 
 ## FORGE:STATE lease
 
@@ -484,3 +508,9 @@ on the run record and the row, and in `ctx.placement`. The lane gets it as
 `run-issue --placement/--placement-reason`, and `runCore` `o.placement` writes it
 into FORGE:STATE (`placement: {where, reason, mode}`) and a trajectory decision.
 Cost: 0 LLM calls. Rationale: `devdocs/decisions/4256-hybrid-placement.md`.
+
+## Entry 2026-10-20 — Complete conformance reviews, blocking shadow gate (#4160)
+
+`decide()` first runs `fillEngineRows` (`conformance.mjs`): engine-authorized scope rows, `unverified` preserve rows and `path:line` evidence normalized to repo paths (`normalizeEvidencePath`) are no longer "incomplete". `reviewerPrompt` embeds `reviewSkeleton` (a row per R/P/scope/coverage id). `checkCompleteness` returns `missing` ids; the retry in `reviewOnce` is `reviewerRepairPrompt` for those ids only (no diff), merged by `mergeReviewRows`. `changedFiles()` drops files equal to the base tip (base-sync merges).
+
+In shadow, `gate()` now blocks on precheck/amend failures coded `conformance.unimplemented`/`regression` (`SHADOW_PRE_BLOCKS`), ends `review.incomplete`/`inconsistent` as needs-human, and files accepted deferrals with `track()`. `engine.review_incomplete: degraded` (`readReviewIncomplete`) merges instead with the `review-degraded` label and a tracked follow-up. Enforce unchanged. `scripts/calibration.mjs --shadow` prints the per-repo shadow mix and recommends `enforce` under the threshold. Rationale: `devdocs/decisions/4160-shadow-gate-complete-reviews.md`.
