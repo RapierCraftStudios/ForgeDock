@@ -10,7 +10,7 @@ import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext, formatOutcomeLists } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
@@ -19,7 +19,7 @@ import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
-import { readAdmission, readConformanceMode, readEnvConfig } from "../engine-cli.mjs";
+import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS, readMaintenance } from "../engine-cli.mjs";
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir.
@@ -78,6 +78,7 @@ function world(o = {}) {
       if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: "foo breaks", body: b, state: "OPEN", comments: [] }); }
       if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [] });
       if (k === "pr edit") { w.prEdits.push(a); return ""; }
+      if (k === "label create") { w.labelCreates = [...(w.labelCreates ?? []), a]; return ""; }
       if (k === "issue comment" && w.commentErrors.length) throw new Error(w.commentErrors.shift());
       if (k === "issue comment") { w.comments.push(a[a.indexOf("--body") + 1]); w.seq.push("comment"); return `https://github.com/o/r/issues/7#issuecomment-${w.comments.length}\n`; }
       if (k === "issue close") { w.closed.push(a); w.seq.push("close"); return ""; }
@@ -115,6 +116,7 @@ function world(o = {}) {
       if (a[0] === "grep") return w.markers ? "src/foo.js:3:<<<<<<< HEAD" : "";
       if (a[0] === "merge" && a[1] === "--abort") { w.mergeInProgress = false; return ""; }
       if (a[0] === "rev-parse") return w.head;
+      if (a[0] === "diff" && a[1] === "--name-only" && !a.some((x) => String(x).includes("..."))) return w.changed.filter((f) => !(o.equalToBase ?? []).includes(f)).join("\n");
       if (a[0] === "diff" && a[1] === "--name-only") return w.changed.join("\n");
       if (a[0] === "diff" && a[1] === "--numstat") return w.numstat ?? "";
       if (a[0] === "ls-files") return [...new Set(["src/foo.js", "src/bar.js", "test/foo.test.js", ...w.changed])].join("\n");
@@ -1040,13 +1042,43 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(traj(w)[0], /\| Review \| shadow: would block \(nonconforming\) \|/);
   });
 
-  it("scope creep and a generic PASS do not block in shadow (as today) but are recorded", async () => {
+  it("scope creep does not block in shadow (as today) but is recorded", async () => {
     const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"], reviews: [conf({}, CONTRACT, ["src/foo.js", "src/billing.js", "test/foo.test.js"])] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
     assert.match(shadowNote(w), /would BLOCK[\s\S]*conformance\.scope_creep[\s\S]*src\/billing\.js/);
-    const w2 = world({ reviews: [genericPass(), genericPass()] });
-    assert.equal((await runShadow(w2)).terminalReason, "merged");
-    assert.match(shadowNote(w2), /would BLOCK \(review\.incomplete\)/);
+  });
+
+  it("#4160 an incomplete review gets one targeted re-ask with only the missing ids, then needs-human; never merges in shadow", async () => {
+    const w = world({ reviews: [genericPass(), genericPass()] });
+    const r = await runShadow(w);
+    assert.equal(r.code, "review.incomplete"); assert.equal(w.merges.length, 0); assert.equal(w.prs.length, 0);
+    const rv = reviewers(w);
+    assert.equal(rv.length, 2); assert.equal(builders(w).length, 2);
+    assert.match(rv[0][4], /<row_skeleton>/); assert.match(rv[0][4], /<diff>/);
+    assert.match(rv[1][4], /answer ONLY for these ids or sections: verdict, issue_coverage, R1/);
+    assert.doesNotMatch(rv[1][4], /<diff>/, "the re-ask is not a full re-review");
+    const w2 = world({ reviews: [conf({ verdict: "NONCONFORMING" }), conf({ verdict: "NONCONFORMING" })] });
+    assert.equal((await runShadow(w2)).code, "review.inconsistent"); assert.equal(w2.merges.length, 0);
+  });
+
+  it("#4160 the targeted re-ask completes the first reply: its rows are merged by id and the change merges", async () => {
+    const partial = fence({ ...JSON.parse(ok().slice(8, -4)), requirements: [] });
+    const w = world({ reviews: [partial, fence({ requirements: [{ id: "R1", status: "implemented", evidence: "foo.js:3", validated_by: "V1" }], verdict: "CONFORMS" })] });
+    assert.equal((await runShadow(w)).terminalReason, "merged");
+    assert.match(reviewers(w)[1][4], /answer ONLY for these ids or sections: R1\./);
+    assert.match(shadowNote(w), /would PASS/);
+  });
+
+  it("#4160 engine.review_incomplete degraded: an incomplete review merges with the review-degraded label and a tracked follow-up", async () => {
+    const w = world({ reviews: [genericPass(), genericPass()] });
+    const r = await runShadow(w, { reviewIncomplete: "degraded" });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^REVIEW: conformance review review\.incomplete/);
+    assert.ok(w.prEdits.some((a) => a.includes("--add-label") && a.includes("review-degraded")));
+    assert.match(shadowNote(w), /Review degraded:[\s\S]*#900/);
+    assert.match(w.prs[0].join(" "), /Remaining work tracked\n- #900/);
+    const e = world({ reviews: [genericPass(), genericPass()] });
+    assert.equal((await run(e, { reviewIncomplete: "degraded" })).code, "review.incomplete", "enforce ignores the degraded setting");
   });
 
   it("shadow still blocks what the previous reviewer blocked on: a requirement not implemented gets one resume, then needs-human", async () => {
@@ -1079,10 +1111,21 @@ describe("conformance shadow mode (the default)", () => {
     assert.match(nhBody(w), /R1 reported "partial"/);
   });
 
-  it("shadow still only records a validate step with no recorded result (CI-only steps) and does not block on it", async () => {
+  it("#4160 shadow blocks a validate step with no recorded result and an invalid amendment like a reviewer-found unimplemented requirement", async () => {
     const w = world({ validation: [] });
+    const r = await runShadow(w);
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
+    assert.equal(builders(w).length, 3, "one builder resume"); assert.equal(reviewers(w).length, 0, "no reviewer tokens on a precheck block");
+    assert.match(builders(w)[2][4], /validate V1 .*has no recorded result/);
+    const fixed = world({ validation: [], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
+    assert.equal((await runShadow(fixed)).terminalReason, "merged", "recorded by the resume, then merges");
+    const a = world({ amendments: [{ kind: "add-deliverable", path: "src/x.js" }] });
+    const ra = await runShadow(a);
+    assert.equal(ra.code, "conformance.unimplemented"); assert.match(nhBody(a), /amendment without why/);
+  });
+  it("#4160 scope creep found by the precheck stays recorded-only in shadow", async () => {
+    const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"], reviews: [conf({}, CONTRACT, ["src/foo.js", "src/billing.js", "test/foo.test.js"])] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
-    assert.match(shadowNote(w), /validate V1 .*has no recorded result/);
   });
 
   it("enforce blocks a failed validate exactly as before", async () => {
@@ -1091,13 +1134,20 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
   });
 
-  it("shadow files nothing: accepted deferrals are listed as not filed, and the PR links nothing", async () => {
+  it("#4160 shadow files accepted deferrals with track(), the same as enforce, and the PR links them", async () => {
     const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w" }] };
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
-    assert.equal(w.followups.length, 0);
-    assert.match(shadowNote(w), /Deferrals not filed in shadow mode:\*\* R2 \(defer\)/);
-    assert.doesNotMatch(w.prs[0].join(" "), /Remaining work tracked/);
+    assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^R2: /);
+    assert.doesNotMatch(shadowNote(w), /not filed/);
+    assert.match(w.prs[0].join(" "), /Remaining work tracked\n- #900/);
+    assert.ok(w.seq.indexOf("pr") > -1 && traj(w)[0].includes("Tracked R2 (defer) in #900"));
+  });
+
+  it("#4160 base-sync merge files (equal to the base) drop out of the scope check", async () => {
+    const w = world({ changed: ["src/foo.js", "src/merged-from-base.js", "test/foo.test.js"], equalToBase: ["src/merged-from-base.js"] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.doesNotMatch(reviewers(w)[0][4], /merged-from-base/);
   });
 
   it("an unparseable reviewer still ends needs-human in shadow (as today)", async () => {
@@ -1124,6 +1174,10 @@ describe("conformance gate: base-sync and contract size", () => {
   it("forge.yaml engine.conformance selects shadow or enforce; anything else is ignored", () => {
     const d = tmpDir("conf-yaml-");
     for (const [v, want] of [["enforce", "enforce"], ["shadow", "shadow"], ["strict", undefined]]) { writeFileSync(`${d}/forge.yaml`, `engine:\n  conformance: ${v}\n`); assert.equal(readConformanceMode(d), want); }
+  });
+  it("#4160 forge.yaml engine.review_incomplete selects needs-human or degraded; anything else is ignored", () => {
+    const d = tmpDir("rev-inc-yaml-");
+    for (const [v, want] of [["degraded", "degraded"], ["needs-human", "needs-human"], ["merge", undefined]]) { writeFileSync(`${d}/forge.yaml`, `engine:\n  review_incomplete: ${v}\n`); assert.equal(readReviewIncomplete(d), want); }
   });
 });
 
@@ -1231,6 +1285,74 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     assert.match(builderPlanPrompt(7), /"the lint allows it" or "there is a precedent" is not a reason on its own/);
     assert.match(builderPlanPrompt(7), /must be a deliverable on that package\.json whose change names the package and gives the reason/);
     assert.match(builderImplementPrompt(), /blocked by the engine: add it through add-deliverable with a why naming the package/);
+  });
+});
+
+describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted growth blocks", () => {
+  const facts = (files, o = {}) => ({ enabled: true, file_lines: 2000, growth_lines: 150, files, ...o });
+  const HOT = { path: "src/foo.js", lines: 2400, commits_90d: 40, hotspot: 96000, over: true, excluded: false, base_lines: null, growth: null };
+  const COLD = { path: "src/bar.js", lines: 300, commits_90d: 2, hotspot: 600, over: false, excluded: false, base_lines: null, growth: null };
+  const GROWN = { ...HOT, lines: 2600, base_lines: 2400, growth: 200 };
+  const SMALL = { ...HOT, lines: 2500, base_lines: 2400, growth: 100 };
+  /** world whose io.hotspots answers the plan call (no base) with `plan` and the gate calls (base) from `gates` in order. */
+  const hworld = (plan, gates, o = {}) => {
+    const w = world(o); const q = [...gates]; w.hotCalls = [];
+    w.io.hotspots = async (x) => { w.hotCalls.push(x); if (!x.base) return plan; return q.length > 1 ? q.shift() : q[0]; };
+    return w;
+  };
+  const nh = (w) => w.comments.find((c) => c.includes("FORGE:NEEDS_HUMAN")) ?? "";
+
+  it("the plan note is empty with no over-threshold file and has exactly one line per over-threshold, non-excluded file", () => {
+    for (const f of [null, facts([]), facts([COLD]), facts([{ ...HOT, excluded: true }]), facts([HOT], { enabled: false })]) assert.equal(hotspotPlanNote(f), "");
+    const note = hotspotPlanNote(facts([HOT, COLD, { ...HOT, path: "src/big.py", lines: 9000 }, { ...HOT, path: "gen/x.py", excluded: true }]));
+    const lines = note.trim().split("\n");
+    assert.equal(lines.length, 3, "one sentence plus one line per hot file");
+    assert.match(lines[0], /over 2000 lines, so the contract must put new logic in a new or neighbouring module and give the hotspot only wiring \(an import and a call\)/);
+    assert.match(lines[0], /more than 150 lines needs "hotspot-exempt: <reason>"/);
+    assert.deepEqual(lines.slice(1), ["- src/foo.js: 2400 lines, 40 commits/90d", "- src/big.py: 9000 lines, 40 commits/90d"]);
+    assert.equal(hotspotBuildRule(facts([], { file_lines: 1000, growth_lines: 50 })).trim(), "Don't grow a file over 1000 lines by more than 50 lines. Put new code next to it.");
+    assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
+    const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
+    assert.ok(approxTokens(plan) <= 1800, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1500);
+  });
+
+  it("the plan prompt carries the facts, the implement prompt the configured rule; growth within the limit merges; no extra runner calls", async () => {
+    const w = hworld(facts([HOT, COLD], { file_lines: 2000, growth_lines: 150 }), [facts([SMALL])]);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(builders(w).length, 2); assert.equal(reviewers(w).length, 1);
+    assert.match(builders(w)[0][4], /\n- src\/foo\.js: 2400 lines, 40 commits\/90d$/m);
+    assert.ok(!builders(w)[0][4].includes("src/bar.js: 300 lines"), "under-threshold files get no line");
+    assert.match(builders(w)[1][4], /Don't grow a file over 2000 lines by more than 150 lines\. Put new code next to it\./);
+    assert.equal(w.hotCalls[0].cwd, "/wt/lean-7"); assert.ok(Array.isArray(w.hotCalls[0].paths)); assert.equal(w.hotCalls[0].base, undefined);
+    assert.deepEqual(w.hotCalls[1], { cwd: "/wt/lean-7", base: "origin/staging", paths: ["src/foo.js", "test/foo.test.js"] });
+    const plain = world(); await run(plain);
+    assert.equal(plain.calls.filter((c) => c[0] === "runner").length, w.calls.filter((c) => c[0] === "runner").length, "no extra LLM calls");
+  });
+
+  it("unexempted growth of an over-threshold file blocks in enforce and in shadow: one resume, then needs-human maintenance.hotspot_growth, no reviewer run", async () => {
+    for (const conformance of ["enforce", "shadow"]) {
+      const w = hworld(facts([HOT]), [facts([GROWN])]);
+      const r = await run(w, { conformance });
+      assert.equal(r.code, "maintenance.hotspot_growth", conformance); assert.equal(w.merges.length, 0);
+      assert.equal(builders(w).length, 3, `${conformance}: plan + implement + one resume`); assert.equal(reviewers(w).length, 0);
+      assert.match(builders(w)[2][4], /maintenance\.hotspot_growth: src\/foo\.js grew by 200 lines/);
+      assert.match(nh(w), /src\/foo\.js grew by 200 lines/);
+    }
+  });
+
+  it("growth moved out on the resume merges; an exemption in the contract or a failed/missing script never blocks", async () => {
+    const w = hworld(facts([HOT]), [facts([GROWN]), facts([SMALL])]);
+    assert.equal((await run(w, { conformance: "shadow" })).terminalReason, "merged"); assert.equal(builders(w).length, 3);
+    const k = { ...CONTRACT, deliverables: [{ ...CONTRACT.deliverables[0], change: "guard null; hotspot-exempt: the guard must sit next to the parser it protects" }] };
+    const we = hworld(facts([HOT]), [facts([GROWN])], { contract: k, reviews: [conf({}, k)] });
+    assert.equal((await run(we)).terminalReason, "merged"); assert.equal(builders(we).length, 2);
+    const plain = world(); await run(plain);
+    const throwing = world(); throwing.io.hotspots = async () => { throw new Error("script failed"); };
+    for (const wn of [hworld(null, [null]), hworld(facts([HOT], { enabled: false }), [facts([GROWN], { enabled: false })]), throwing]) {
+      assert.equal((await run(wn)).terminalReason, "merged"); assert.equal(builders(wn).length, 2);
+      assert.equal(builders(wn)[0][4], builders(plain)[0][4], "no plan note"); assert.equal(builders(wn)[1][4], builders(plain)[1][4], "no build rule");
+    }
   });
 });
 
@@ -1800,6 +1922,11 @@ describe("orchestrate maintenance budget (#4197)", () => {
     assert.equal(readMaintenance(d).share, 0.2);
     writeFileSync(join(d, "forge.yaml"), "maintenance: { enabled: true, share: 0.2 }\n");
     assert.equal(readMaintenance(d), null);
+    // forge#4195: the maintenance.hotspot sub-map's enabled/file_lines are not the budget's own keys
+    writeFileSync(join(d, "forge.yaml"), "maintenance:\n  enabled: false\n  file_lines: 3000\n  hotspot:\n    enabled: true\n    file_lines: 1500\n    exclude_globs:\n      - \"a/*\"\n");
+    assert.equal(readMaintenance(d), null, "hotspot.enabled does not turn the budget on");
+    writeFileSync(join(d, "forge.yaml"), "maintenance:\n  enabled: true\n  hotspot:\n    file_lines: 1500\n  file_lines: 3000\n");
+    assert.equal(readMaintenance(d).fileLines, 3000);
   });
 
   it("orchestrateFromCli pulls open maintenance-labelled issues only when the budget is configured", async () => {
@@ -1963,6 +2090,51 @@ describe("base-sync (#4100)", () => {
     assert.equal(gitCalls(w).filter((x) => x[0] === "merge" && x[1] === "--no-edit").length, 2, "at most 2 base-syncs");
     assert.equal(w.merges.length, 0);
     assert.ok(w.edits.some((e) => e.includes("needs-human")));
+  });
+
+  describe("#4266 PR turns conflicting during the CI wait", () => {
+    const syncCount = (w) => gitCalls(w).filter((x) => x[0] === "merge" && x[1] === "--no-edit").length;
+    /** required check `build` reports nothing (never started) until a base-sync merged, then `then`. */
+    const ciAfterSync = (w, then = "success") => {
+      w.io.requiredChecks = async () => ["build"];
+      w.io.checkStates = async () => { w.polls = (w.polls ?? 0) + 1; return syncCount(w) ? [{ name: "build", state: then }] : []; };
+    };
+
+    it("base-syncs within one poll, waits for CI again and merges at the synced head", async () => {
+      const w = world({ prView: [OKSTATE, CONFLICTING, OKSTATE], mergeResults: ["clean"] });
+      ciAfterSync(w);
+      const r = await run(w);
+      assert.equal(r.terminalReason, "merged");
+      assert.equal(syncCount(w), 1);
+      assert.match(syncComment(w), /\*\*Trigger:\*\* PR became conflicting while waiting for CI/);
+      assert.equal(w.polls, 2, "one poll before the sync, one green poll after it");
+      assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+      noRebaseNoForce(w);
+    });
+
+    it("an unresolvable conflict during the wait ends needs-human base.conflict, never ci-pending", async () => {
+      const w = world({ prView: [OKSTATE, CONFLICTING], mergeResults: ["clean", "clean", "clean"] });
+      ciAfterSync(w, "pending");
+      const r = await run(w, { ciMaxMinutes: 600 });
+      assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "base.conflict");
+      assert.equal(syncCount(w), 2, "the base-sync limit still applies");
+      assert.equal(w.merges.length, 0);
+      assert.ok(w.clock < 60 * 60000, "left the wait long before the CI budget");
+    });
+
+    it("required checks never started on a MERGEABLE PR log CI_NOT_STARTED once; started-but-pending checks do not", async () => {
+      const dir = tmpDir("core-");
+      const w = world(); w.io.requiredChecks = async () => ["build"]; w.io.checkStates = async () => [];
+      assert.equal((await run(w, { dir, ciMaxMinutes: 60 })).terminalReason, "ci-pending");
+      const hits = readLog(dir, 7).filter((e) => e.event === "CI_NOT_STARTED");
+      assert.equal(hits.length, 1);
+      assert.deepEqual(hits[0].checks, ["build"]); assert.ok(hits[0].minutes >= 10);
+      assert.equal(syncCount(w), 0);
+      const dir2 = tmpDir("core-");
+      const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => [{ name: "build", state: "pending" }];
+      assert.equal((await run(w2, { dir: dir2, ciMaxMinutes: 60 })).terminalReason, "ci-pending");
+      assert.equal(readLog(dir2, 7).filter((e) => e.event === "CI_NOT_STARTED").length, 0);
+    });
   });
 
   it("unresolved conflict markers after the builder ends needs-human with base.conflict", async () => {
@@ -3070,6 +3242,62 @@ describe("host-aware verification concurrency (#4182)", () => {
     assert.ok(workers <= 2);
     assert.equal((await checkAdmission({ host: host({ cores, load: lanes * workers }) })).ok, true);
     assert.equal((await checkAdmission({ host: host({ cores, load: lanes * workers }) })).reasons.length, 0);
+  });
+});
+
+describe("shared dependency cache wiring (#4220)", () => {
+  const depsIo = (w, o = {}) => {
+    const d = { calls: [] };
+    w.io.deps = {
+      env: () => { if (o.envThrows) throw new Error("boom"); return { UV_CACHE_DIR: "/c/stores/uv-cache", npm_config_store_dir: "/c/stores/pnpm-store", TMPDIR: "/should-not-win" }; },
+      prepare: async (a) => { d.calls.push({ ...a, runnerCallsBefore: w.calls.filter((c) => c[0] === "runner").length, worktreeAdded: w.calls.some((c) => c[1] === "worktree" && c[2] === "add") });
+        if (o.prepareThrows) throw new Error("disk on fire");
+        return o.results ?? [{ status: "hit", eco: "pnpm", key: "0123456789abcdef", ms: 1200, reason: null }]; },
+    };
+    return d;
+  };
+
+  it("#4220 prepare runs once with the lane worktree after it exists and before the first runner call; DEPS_PREPARED is logged", async () => {
+    const dir = tmpDir("deps-");
+    const w = world(); w.io.runTmp = { prune: async () => {}, make: async (i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async () => {} };
+    const d = depsIo(w);
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(d.calls.length, 1);
+    assert.equal(d.calls[0].wt, "/wt/lean-7");
+    assert.match(d.calls[0].repoKey, /^[A-Za-z0-9._-]+-[0-9a-f]{8}$/);
+    assert.equal(d.calls[0].worktreeAdded, true);
+    assert.equal(d.calls[0].runnerCallsBefore, 0);
+    const ev = readLog(dir, 7).filter((e) => e.event === "DEPS_PREPARED");
+    assert.deepEqual(ev.map((e) => [e.status, e.eco, e.key]), [["hit", "pnpm", "0123456789abcdef"]]);
+    assert.ok(w.envs.length >= 2);
+    for (const e of w.envs) {
+      assert.equal(e.UV_CACHE_DIR, "/c/stores/uv-cache");
+      assert.equal(e.npm_config_store_dir, "/c/stores/pnpm-store");
+      assert.ok(e.FORGE_DOCKER_LABELS, "existing keys stay");
+      assert.match(e.TMPDIR, /runs\/7-/, "the engine's TMPDIR wins over the cache env");
+    }
+  });
+
+  it("#4220 a prepare that throws or fails, or an env() that throws, never changes the outcome; no io.deps is the old behaviour", async () => {
+    for (const o of [{ prepareThrows: true }, { results: [{ status: "failed", eco: "uv", key: "k", ms: 5, reason: "install failed" }] }, { envThrows: true }]) {
+      const dir = tmpDir("deps-f-");
+      const w = world(); depsIo(w, o);
+      assert.equal((await run(w, { dir })).terminalReason, "merged", JSON.stringify(o));
+      assert.equal(readLog(dir, 7).filter((e) => e.event === "DEPS_PREPARED").length, 1);
+      if (o.envThrows) for (const e of w.envs) assert.equal(e.UV_CACHE_DIR, undefined);
+    }
+    const dir = tmpDir("deps-none-");
+    const w = world();
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "DEPS_PREPARED").length, 0);
+    for (const e of w.envs) assert.equal(e.UV_CACHE_DIR, undefined);
+  });
+
+  it("#4220 both builder prompts tell the builder how to treat a shared read-only node_modules/.venv (within budget)", () => {
+    for (const p of [builderPlanPrompt(7), builderImplementPrompt()]) {
+      for (const needle of ["hardlinked read-only from a shared cache", "rm -rf", "EACCES"]) assert.ok(p.includes(needle), needle);
+      assert.ok(approxTokens(p) <= 2800, `builder prompt is ${approxTokens(p)} tokens`);
+    }
   });
 });
 

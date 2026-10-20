@@ -114,7 +114,17 @@ run "no relevant changes pass" 0
 
 reset
 env PR_BODY="" bash "$S" no/such-ref >"$TMP/out" 2>&1; [ $? = 2 ] && PASS=$((PASS+1)) || bad "unknown base ref exits 2"
-env bash "$S" >"$TMP/out" 2>&1; [ $? = 2 ] && PASS=$((PASS+1)) || bad "missing base ref exits 2"
+env bash "$S" >"$TMP/out" 2>&1; [ $? = 2 ] && PASS=$((PASS+1)) || bad "missing base ref and no upstream exits 2"
+
+# #4220: without a base ref the branch's upstream is the base (CI always passes it explicitly).
+git branch -q --set-upstream-to=origin/staging
+printf '#!/bin/sh\necho bar\n' > scripts/foo.sh; commit
+env PR_BODY="" bash "$S" >"$TMP/out" 2>&1; [ $? = 1 ] && PASS=$((PASS+1)) || bad "no base ref: upstream diff, docs missing fails"
+printf 'docs-not-needed: fixture\n' > "$TMP/body"
+env PR_BODY="" bash "$S" --body-file "$TMP/body" >"$TMP/out" 2>&1; [ $? = 0 ] && PASS=$((PASS+1)) || bad "no base ref + --body-file uses the upstream"
+printf '# ADR\n' > devdocs/decisions/4220-x.md; commit
+env PR_BODY="" bash "$S" >"$TMP/out" 2>&1; [ $? = 0 ] && PASS=$((PASS+1)) || bad "no base ref: upstream diff with a new decision passes"
+git branch -q --unset-upstream
 
 echo "check-devdocs-freshness.test.sh: $PASS passed, $FAILN failed"
 [ "$FAILN" = 0 ]

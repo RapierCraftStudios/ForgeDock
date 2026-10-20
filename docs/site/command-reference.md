@@ -553,6 +553,20 @@ Onboards an existing repo into the ForgeDock pipeline — scans open issues, cla
 
 ---
 
+### `/bootstrap`
+
+**Idea-to-backlog setup for a new project.**
+
+Guided setup for a brand-new project — interviews you about the idea, proposes defaults, surfaces doubts, writes a technical spike doc, and files a validated, orchestrate-ready issue backlog. The plan is validated before any GitHub write.
+
+```bash
+/bootstrap "a habit tracker for teams"   # Start from a free-text idea
+/bootstrap docs/idea.md                  # Start from existing docs
+/bootstrap "<idea>" --dry-run            # Preview the backlog without GitHub writes
+```
+
+---
+
 #### `/sync-ecosystem`
 
 **Cross-repo sync.**

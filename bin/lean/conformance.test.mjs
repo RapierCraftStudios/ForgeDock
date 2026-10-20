@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, reviewSkeleton, resolveEvidencePath } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -95,11 +95,55 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.ok(d.failures.every((f) => f.code === "review.incomplete"));
   });
   it("no JSON is unparseable", () => { assert.equal(parseReview("LGTM"), null); assert.equal(decide(null, ctx).state, "review.unparseable"); });
-  it("incomplete: missing requirement row, missing scope row for an unauthorized changed file, missing preserve row", () => {
-    assert.equal(decide({ ...good, requirements: good.requirements.slice(1) }, ctx).state, "review.incomplete");
+  it("incomplete: a missing requirement row (only the reviewer can judge it), and missing lists that id for the re-ask", () => {
+    const d = decide({ ...good, requirements: good.requirements.slice(1) }, ctx);
+    assert.equal(d.state, "review.incomplete"); assert.deepEqual(d.missing, ["R1"]);
+  });
+  it("#4160 missing scope and preserve rows are filled by the engine: complete, with the honest verdict", () => {
+    assert.equal(decide({ ...good, scope: good.scope.slice(1) }, ctx).state, "conforms", "an authorized file needs no reviewer row");
+    const creep = decide({ ...good }, { ...ctx, changedFiles: [...files, "src/pricing.js"] });
+    assert.deepEqual(codes(creep), ["conformance.scope_creep"], "an unauthorized file without a row is still creep");
+    const noPres = decide({ ...good, preserve: [] }, ctx);
+    assert.deepEqual(codes(noPres), ["conformance.preserve_violated"], "a missing preserve row is unverified, not incomplete");
+    assert.match(noPres.failures[0].detail, /P1 unverified/);
+    assert.equal(decide({ ...good, scope: undefined, preserve: undefined }, ctx).state, "nonconforming");
+  });
+  it("#4160 basename and wrapped evidence are normalized to the repo path; an ambiguous or unknown name is still incomplete", () => {
+    assert.equal(decide(row("R1", { evidence: "scrape.js:7" }), ctx).state, "conforms");
+    assert.equal(decide(row("R1", { evidence: "see `src/scrape.js:7` (guard)" }), ctx).state, "conforms");
+    assert.equal(decide(row("R1", { evidence: "billing.js:1" }), { ...ctx, repoFiles: ["src/billing.js"], pathExists: (p) => p === "src/billing.js" }).state, "conforms");
+    assert.equal(decide(row("R1", { evidence: "nope.js:3" }), ctx).state, "review.incomplete");
+    assert.equal(normalizeEvidencePath("route.ts", { changedFiles: ["app/a/route.ts", "app/b/route.ts"] }), "route.ts", "ambiguous stays as is");
+    assert.equal(normalizeEvidencePath("b/route.ts", { changedFiles: ["app/a/route.ts", "app/b/route.ts"] }), "app/b/route.ts");
+    assert.equal(decide(row("R1", { evidence: "scrape.js:7" }), ctx).review.requirements[0].evidence, "src/scrape.js:7");
+  });
+  it("#4160 a targeted re-ask merges by id: the repair rows complete the first reply", () => {
+    const first = { ...good, requirements: [good.requirements[1]], preserve: [] };
+    const d1 = decide(first, ctx);
+    assert.equal(d1.state, "review.incomplete"); assert.deepEqual(d1.missing, ["R1"]);
+    const merged = mergeReviewRows(first, { requirements: [good.requirements[0]], preserve: good.preserve });
+    assert.equal(decide(merged, ctx).state, "conforms");
+    assert.equal(mergeReviewRows(first, null), first, "an unparseable repair keeps the first reply");
+    assert.equal(decide(mergeReviewRows({ ...good, verdict: "NONCONFORMING" }, { verdict: "CONFORMS" }), ctx).state, "conforms");
+  });
+  it("#4160 the skeleton has one row per requirement, preserve id and changed file, scope pre-filled by the engine", () => {
+    const s = reviewSkeleton(C, [...files, ".forge-lean/x", "src/pricing.js"], [".forge-lean/"]);
+    assert.deepEqual(s.requirements.map((r) => r.id), ["R1", "R2"]);
+    assert.deepEqual(s.preserve.map((r) => r.id), ["P1"]);
+    assert.deepEqual(s.scope.map((r) => [r.file, r.authorized_by]), [["src/scrape.js", "D1"], ["src/search.js", "D2"], ["test/leak.test.js", "test"], ["src/pricing.js", "none"]]);
+    assert.deepEqual(s.issue_coverage.map((r) => r.quote), [Q1, Q2]);
+    assert.ok(s.requirements.every((r) => r.status === ""), "requirement status is left for the reviewer");
+    assert.ok(s.preserve.every((r) => r.status === "unverified"), "preserve starts unverified");
+  });
+  it("#4160 missingIds lists only what a targeted re-ask must fill", () => {
+    assert.deepEqual(missingIds(good, ctx), []);
+    assert.deepEqual(missingIds({ ...good, requirements: [good.requirements[1]], preserve: [], scope: [] }, ctx), ["R1"], "engine-filled preserve/scope rows are not asked for");
+    assert.deepEqual(missingIds({ ...good, issue_coverage: [] }, ctx), ["issue_coverage"]);
+    assert.equal(normalizeEvidencePath("billing.js", { listed: new Set(["src/billing.js"]) }), "src/billing.js", "listed is the repo file list");
+  });
+  it("#4160 checkCompleteness on the raw reply still lists a missing scope row for an unauthorized changed file (decide fills it as creep)", () => {
     const extra = { ...ctx, changedFiles: [...files, "src/billing.js"] };
     assert.equal(checkCompleteness(good, extra).problems.includes("changed file src/billing.js has no scope row"), true);
-    assert.equal(decide({ ...good, preserve: [] }, ctx).state, "review.incomplete");
   });
   it("#4160: a changed file the contract already authorizes (deliverable, test, incidental) needs no scope row", () => {
     assert.equal(decide({ ...good, scope: [] }, ctx).state, "conforms");
@@ -117,17 +161,18 @@ describe("conformance review: the engine computes the verdict from complete rows
     assert.equal(resolveEvidencePath("nope.js", files), null);
     assert.equal(decide(row("R1", { evidence: "scrape.js:4" }), ctx).state, "conforms");
   });
-  it("#4160: reviewSkeleton lists every required row, pre-filled, with scope rows only for unauthorized files", () => {
+  it("#4160: reviewSkeleton (object form) lists every required row, scope rows pre-filled with the engine's authorization", () => {
     const k = { ...C, requirements: [...C.requirements, { id: "R9", quote: "Billing pricing is unchanged.", disposition: "defer", why: "w" }] };
     const sk = reviewSkeleton({ contract: k, changedFiles: [...files, "src/billing.js", ".forge-lean/x"], ignore: [".forge-lean/"] });
     assert.deepEqual(sk.requirements.map((r) => r.id), k.requirements.map((r) => r.id));
     assert.equal(sk.requirements.find((r) => r.id === "R9").deferral_ok, null);
     assert.ok(!("deferral_ok" in sk.requirements[0]));
     assert.deepEqual(sk.preserve.map((p) => p.id), (k.preserve ?? []).map((p) => p.id));
-    assert.deepEqual(sk.scope.map((s) => s.file), ["src/billing.js"]);
+    assert.deepEqual(sk.scope.map((s) => [s.file, s.authorized_by]), [...files.map((f) => [f, f.startsWith("test/") ? "test" : f === "src/scrape.js" ? "D1" : "D2"]), ["src/billing.js", "none"]]);
     assert.deepEqual(sk.issue_coverage.map((c) => c.quote), k.requirements.map((r) => r.quote));
     assert.ok(sk.issue_coverage.every((c) => inIssue(c.quote, ISSUE)), "seeded quotes pass the verbatim check");
-    assert.ok([...sk.requirements, ...sk.preserve, ...sk.issue_coverage].every((r) => r.status === ""), "no status is pre-judged");
+    assert.ok([...sk.requirements, ...sk.issue_coverage].every((r) => r.status === ""), "no requirement or coverage status is pre-judged");
+    assert.ok(sk.preserve.every((p) => p.status === "unverified"), "preserve starts unverified");
   });
   it("incomplete: implemented without path:line, with evidence in a nonexistent file, or without validation", () => {
     assert.equal(decide(row("R1", { evidence: "looks fine" }), ctx).state, "review.incomplete");
@@ -188,5 +233,36 @@ describe("close plan and follow-up items", () => {
   it("follow-up keys are single-line, tab-free and stable", () => {
     const [i] = followupItems([{ id: "R2", quote: "a\tb\n`c`", disposition: "defer", why: "x\ny" }]);
     assert.equal(i.key, "R2: a b c"); assert.equal(i.why, "defer: x y"); assert.doesNotMatch(i.key + i.why, /[\t\n`]/);
+  });
+});
+
+describe("hotspot growth precheck (forge#4195)", () => {
+  const H = (o = {}) => ({ path: "src/scrape.js", lines: 2600, commits_90d: 30, hotspot: 78000, over: true, excluded: false, base_lines: 2400, growth: 200, ...o });
+  const hs = (fs, o = {}) => ({ enabled: true, file_lines: 2000, growth_lines: 150, files: fs, ...o });
+  const result = { validation: [{ id: "V1", exit: 0 }], requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }] };
+  const run = (hotspots, contract = C, r = result) => precheck({ contract, result: r, changedFiles: files, hotspots });
+
+  it("an over-threshold file grown past growth_lines fails with maintenance.hotspot_growth", () => {
+    const pc = run(hs([H()]));
+    assert.equal(pc.ok, false);
+    assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["maintenance.hotspot_growth", "hotspot_growth"]]);
+    assert.match(pc.failures[0].detail, /^src\/scrape\.js grew by 200 lines \(now 2600, limit \+150 over 2000\) without hotspot-exempt$/);
+  });
+
+  it("within the limit, under the threshold, excluded, unchanged, disabled or no facts: no failure", () => {
+    for (const h of [hs([H({ growth: 150 })]), hs([H({ over: false, lines: 1900 })]), hs([H({ excluded: true })]), hs([H({ path: "src/other.js" })]),
+      hs([H()], { enabled: false }), hs([H({ growth: null })]), null, undefined, {}]) assert.equal(run(h).ok, true, JSON.stringify(h));
+    assert.deepEqual(precheck({ contract: C, result, changedFiles: files }), run(null), "callers without hotspots are unchanged");
+  });
+
+  it("hotspot-exempt: <reason> in a covering deliverable's change or an add-deliverable amendment's why exempts the file", () => {
+    const withChange = (change) => ({ ...C, deliverables: [{ id: "D1", path: "src/scrape.js", change }, C.deliverables[1]] });
+    assert.equal(run(hs([H()]), withChange("route fix; Hotspot-Exempt: the handler table must stay in one file")).ok, true);
+    assert.equal(run(hs([H()]), withChange("hotspot-exempt:   ")).ok, false, "an empty reason does not exempt");
+    assert.equal(run(hs([H()]), { ...C, deliverables: [{ id: "D1", path: "src/", change: "hotspot-exempt: generated routes" }, C.deliverables[1]] }).ok, true, "a covering directory deliverable");
+    const amended = { ...result, amendments: [{ kind: "add-deliverable", path: "src/scrape.js", why: "hotspot-exempt: one-off migration table" }] };
+    assert.equal(run(hs([H()]), C, amended).ok, true);
+    assert.equal(run(hs([H(), H({ path: "src/search.js" })]), withChange("hotspot-exempt: ok")).failures.length, 1, "the exemption covers only its own file");
+    assert.equal(hotspotGrowth({ contract: C, hotspots: hs([H()]), changedFiles: ["./src/scrape.js"] }).length, 1);
   });
 });

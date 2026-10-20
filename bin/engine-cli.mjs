@@ -104,6 +104,13 @@ export function readConformanceMode(cwd = process.cwd()) {
     return ["shadow", "enforce"].includes(v) ? v : undefined;
   } catch { return undefined; }
 }
+/** forge.yaml `engine.review_incomplete` (needs-human|degraded, #4160); undefined when absent or invalid (the core defaults to needs-human). */
+export function readReviewIncomplete(cwd = process.cwd()) {
+  try {
+    const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.review_incomplete ?? "").trim();
+    return ["needs-human", "degraded"].includes(v) ? v : undefined;
+  } catch { return undefined; }
+}
 function readLeanSetting(key, cwd = process.cwd()) {
   try {
     const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.[`lean_${key}`] ?? "").trim();
@@ -668,7 +675,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...(readPrecheckCommands() ? { precheck: { commands: readPrecheckCommands() } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1024,7 +1031,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...(readPrecheckCommands(cwd) ? { precheck: { commands: readPrecheckCommands(cwd) } } : {}), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4256: the placement orchestrate decided for a lane (ctx.placement) reaches it as --placement/--placement-reason.
@@ -1270,6 +1277,21 @@ export function readOrchestration(cwd = process.cwd()) {
     recovery: { maxAttempts: recoveryMax } };
 }
 
+/**
+ * forge.yaml text without the `maintenance.hotspot:` sub-map (forge#4195, read by scripts/hotspots.sh via yq). The
+ * parser flattens one nested level, so its `enabled`/`file_lines` would otherwise overwrite the budget's own keys.
+ */
+function withoutHotspotMap(raw) {
+  let inMaint = false, sub = -1;
+  return String(raw).split(/\r?\n/).filter((l) => {
+    if (/^[A-Za-z_][A-Za-z0-9_]*:/.test(l)) { inMaint = /^maintenance:\s*(?:#.*)?$/.test(l); sub = -1; return true; }
+    const indent = /^\s*/.exec(l)[0].length;
+    if (sub >= 0) { if (/^\s*(?:#.*)?$/.test(l) || indent > sub) return false; sub = -1; }
+    if (inMaint && /^\s+hotspot:\s*(?:#.*)?$/.test(l)) { sub = indent; return false; }
+    return true;
+  }).join("\n");
+}
+
 export const DEFAULT_MAINTENANCE_LABELS = ["maintenance", "refactor:split", "dead-code"];
 
 /**
@@ -1279,7 +1301,7 @@ export const DEFAULT_MAINTENANCE_LABELS = ["maintenance", "refactor:split", "dea
  */
 export function readMaintenance(cwd = process.cwd()) {
   let m = null;
-  try { m = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.maintenance ?? null; } catch { m = null; }
+  try { m = parseForgeYaml(withoutHotspotMap(readFileSync(join(cwd, "forge.yaml"), "utf8")))?.maintenance ?? null; } catch { m = null; }
   if (!m || typeof m !== "object" || String(m.enabled ?? "").trim() !== "true") return null;
   const num = (v, d, ok) => { const n = Number(v); return v !== undefined && v !== "" && ok(n) ? n : d; };
   const labels = String(m.labels ?? "").split(",").map((x) => x.trim()).filter(Boolean);

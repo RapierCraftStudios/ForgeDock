@@ -161,3 +161,48 @@ test("CLI: stdin '-' works; bad JSON, a missing file and no argument exit 2", ()
   assert.equal(cli([`${FIXTURES}does-not-exist.json`]).status, 2);
   assert.equal(cli([]).status, 2);
 });
+
+// #4176: UI issues carry the full design spec, hero surfaces route to /design, needs-human issues explain the setup.
+const DESIGN_SPEC = "\n- Breakpoints: 360/768/1280\n- States: empty, loading, error, offline\n- Motion: fades\n- Accessibility: AA\n- Dark mode: tokens\n";
+
+test("ui issues need every design-spec item; hero issues must route to /design", () => {
+  const p = load("valid-nextjs");
+  const dash = issue(p, "DASHBOARD");
+  dash.ui = true;
+  const r = validatePlan(p);
+  assert.deepEqual(codes(r), ["missing-design-spec"]);
+  assert.match(formatErrors(r.errors), /DASHBOARD: \[missing-design-spec\] .*breakpoints.*dark mode/);
+  dash.body = dash.body.replace("## Context", `${DESIGN_SPEC}\n## Context`);
+  assert.equal(validatePlan(p).ok, true);
+  dash.body = dash.body.replace(", offline", "");
+  assert.match(formatErrors(validatePlan(p).errors), /lacks: offline state$/m);
+  dash.body = dash.body.replace("error", "error, offline");
+  dash.hero = true;
+  assert.deepEqual(codes(validatePlan(p)), ["hero-not-routed"]);
+  dash.body += "\nHero surface: route to `/design` first.\n";
+  assert.equal(validatePlan(p).ok, true);
+  // A path that merely contains /design is not a routing line.
+  dash.body = dash.body.replace("`/design`", "docs/design");
+  assert.deepEqual(codes(validatePlan(p)), ["hero-not-routed"]);
+});
+
+test("needs-human issues need setup steps, env var names and secret handling", () => {
+  const p = load("valid-python");
+  const keys = issue(p, "STRIPE_KEYS");
+  assert.equal(validatePlan(p).ok, true);
+  for (const [heading, part] of [["### Setup steps", "setup steps"], ["### Environment variables", "environment variables"], ["### Secret handling", "secret handling"]]) {
+    const q = load("valid-python");
+    issue(q, "STRIPE_KEYS").body = issue(q, "STRIPE_KEYS").body.replace(heading, "Notes:");
+    const r = validatePlan(q);
+    assert.deepEqual(codes(r), ["missing-needs-human-section"], part);
+    assert.match(formatErrors(r.errors), new RegExp(`STRIPE_KEYS: .*${part}`));
+  }
+  keys.body = keys.body.replace(/`[A-Z_]+`/g, "the key");
+  assert.match(formatErrors(validatePlan(p).errors), /STRIPE_KEYS: \[missing-needs-human-section\] .*env var name/);
+});
+
+test("non-boolean ui / hero flags are invalid-plan", () => {
+  const p = load("valid-go");
+  issue(p, "SYNC").ui = "yes";
+  assert.deepEqual(codes(validatePlan(p)), ["invalid-plan"]);
+});

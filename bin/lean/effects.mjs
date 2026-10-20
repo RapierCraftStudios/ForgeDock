@@ -12,6 +12,7 @@ import { runCliBackendAsync, resolveClaudeCliBinary, getClaudeCliCapabilities, b
 import { makeIo } from "../engine-cli.mjs";
 import { makeProjector } from "../engine/projector.mjs";
 import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
+import { makeDepCache } from "./depcache.mjs";
 import { makeHeavyIo } from "./heavy.mjs";
 
 const pexec = promisify(execFile);
@@ -217,6 +218,8 @@ export function makeLeanIo({ repo }) {
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000 })).stdout;
   return {
     gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: makeHeavyIo({ host: makeHostProbe() }), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
+    /** Shared dependency cache (#4220): the repo's own package manager, argv only, bounded by the cache's timeout. */
+    deps: makeDepCache({ exec: async (cmd, args, { cwd, env, timeoutMs } = {}) => String((await pexec(cmd, args, { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs ?? 0, maxBuffer: 100 * 1024 * 1024 })).stdout) }),
     /** Names of the checks the base branch requires: classic protection plus rulesets (#4158). [] when neither has any. */
     async requiredChecks(lane) { return requiredChecksFor({ gh: run("gh"), repo, lane }); },
     /** [{name, state: success|failure|pending, url, head}] for the PR's checks; `head` is the PR head the rollup belongs to (#4240). */
@@ -282,6 +285,11 @@ export function makeLeanIo({ repo }) {
     /** forge#4159: scripts/structure-delta.sh over base...HEAD in cwd; null on any failure (never fails a run). */
     async structureDelta({ cwd, base }) {
       try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
+    },
+    /** forge#4195: scripts/hotspots.sh facts for `paths` in cwd (growth since base when given); null on any failure. */
+    async hotspots({ cwd, base = null, paths = [] }) {
+      const args = [script("hotspots.sh"), ...(base ? ["--base", base] : []), "--", ...paths];
+      try { return JSON.parse((await pexec("bash", args, { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
     /**
      * The target repo's own docs-move-with-code rule, when it has one (scripts/check-devdocs-freshness.sh, forge#4185),
