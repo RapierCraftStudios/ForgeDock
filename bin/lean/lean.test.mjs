@@ -3565,10 +3565,20 @@ describe("test map and repo facts caches (#4272)", () => {
       { globs: ["**/*.py"], command: "uv run pytest", cwd: ".", source: "pyproject.toml" }, { globs: ["test/**"], command: "npm test", cwd: "pkg", source: "pkg/package.json" }]);
     const dir = tmpDir("core-");
     assert.equal((await run(w, { dir, precheck: { commands: ["make lint"] } })).terminalReason, "merged");
-    assert.deepEqual(ran, ["npm run lint", "cd pkg && npm test"]);
+    // #4315: the map adds to learned.test_commands, never replaces them
+    assert.deepEqual(ran, ["make lint", "npm run lint", "cd pkg && npm test"]);
     const pre = readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS");
-    assert.deepEqual(pre.map((e) => [e.source, e.results.map((r) => r.command)]), [["test-map", ["npm run lint", "cd pkg && npm test"]]]);
-    assert.match(traj(w)[0], /Pre-PR checks selected from \.forge\/test-map\.json: 2 of 3 entries/);
+    assert.deepEqual(pre.map((e) => [e.source, e.results.map((r) => r.command)]), [["test-map+learned", ["make lint", "npm run lint", "cd pkg && npm test"]]]);
+    assert.match(traj(w)[0], /Pre-PR checks selected from \.forge\/test-map\.json: 2 of 3 entries, plus 1 learned/);
+  });
+
+  it("#4315 a partial test map still runs the learned commands it does not cover, each once", async () => {
+    const w = world(); const ran = recorder(w);
+    w.baseFiles = { [MAPF]: map([{ globs: ["src/**"], command: "npm test", cwd: "." }, { globs: ["**/*.go"], command: "go test ./...", cwd: "." }]) };
+    const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir, precheck: { commands: ["npm test", "make lint"] } })).terminalReason, "merged");
+    assert.deepEqual(ran, ["npm test", "make lint"]);
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS").map((e) => Object.keys(e).includes("source")), [false]);
   });
 
   it("the main checkout's test map is used when the base ref has none; a map alone enables the step", async () => {

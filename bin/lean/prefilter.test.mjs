@@ -134,6 +134,40 @@ describe("pre-filter (#4123)", () => {
     assert.equal((await pf(down, 34)).closed, false);
   });
 
+  it("#4315 a comment shaped like #4235's real pre-filter comment is the pipeline's own: a reopened CI-failure issue is kept for a lane", async () => {
+    const link = "Run: https://github.com/o/r/actions/runs/500";
+    const green = (issue, extra = {}) => world({ issues: { 34: { title: "shell-compat failed on staging", body: `Workflow failed.\n${link}`, ...issue } },
+      runs: { 500: { id: 500, workflow_id: 7, name: "shell-compat", head_branch: "staging", head_sha: "1111111111111111", created_at: "2026-10-10T00:00:00Z", html_url: "https://github.com/o/r/actions/runs/500" } },
+      workflowRuns: { "7:staging": [{ id: 600, conclusion: "success", created_at: "2026-10-12T00:00:00Z", html_url: "https://github.com/o/r/actions/runs/600", head_sha: "8d9f6ba0aaaaaaaa" }] },
+      shaRuns: { "8d9f6ba0aaaaaaaa": [{ id: 600, conclusion: "success" }] }, ...extra });
+    // the shape `gh issue view --json comments` returns for the ForgeDock App on #4235: no `[bot]`, CONTRIBUTOR, marker first
+    const body = "<!-- FORGE:PREFILTER -->\n<!-- FORGE:VALIDATE -->\n## Pre-filter: CI failure no longer reproduces\n**Workflow:** shell-compat on `staging`";
+    const real = { author: { login: "rapiercraft-forgedock" }, authorAssociation: "CONTRIBUTOR", body };
+    const w = green({ comments: [real] });
+    const r = await pf(w, 34);
+    assert.equal(r.closed, false); assert.notEqual(r.kind, "ci-green");
+    assert.match(r.detail, /reopened after a pre-filter close/);
+    assert.deepEqual(w.closed, []); assert.deepEqual(w.comments, []);
+    // the token's own user (`gh api user`) counts too, cached once per makePrefilter batch; a CONTRIBUTOR stranger does not
+    const mine = green({ comments: [{ ...real, author: { login: "Op-User" } }] });
+    let userCalls = 0; const gh0 = mine.io.gh;
+    mine.io.gh = async (a) => (a[0] === "api" && a[1] === "user" ? (userCalls++, "op-user\n") : gh0(a));
+    const run = makePrefilter({ repo: "o/r", cwd: "/repo", io: mine.io });
+    assert.match((await run(34, "staging")).detail, /reopened after a pre-filter close/);
+    await run(34, "staging"); assert.equal(userCalls, 1);
+    const stranger = green({ comments: [{ ...real, author: { login: "someone" } }] });
+    assert.equal((await pf(stranger, 34)).kind, "ci-green");
+    // BUG-4: the marker is posted only after a successful close; a failed close posts no marker
+    const order = [];
+    const ok = green(); const g2 = ok.io.gh;
+    ok.io.gh = async (a) => { if (["issue close", "issue comment"].includes(a.slice(0, 2).join(" "))) order.push(a[1]); return g2(a); };
+    assert.equal((await pf(ok, 34)).closed, true); assert.deepEqual(order, ["close", "comment"]);
+    const fails = green(); const g3 = fails.io.gh;
+    fails.io.gh = async (a) => (a.slice(0, 2).join(" ") === "issue close" ? (() => { throw new Error("HTTP 403"); })() : g3(a));
+    const f = await pf(fails, 34);
+    assert.equal(f.closed, false); assert.deepEqual(fails.comments, []); assert.match(f.detail, /pre-filter error/);
+  });
+
   it("a CI-failure issue whose workflow is still red (or whose latest run is the failing one) goes to a lane", async () => {
     const base = { issues: { 34: { title: "ci failed", body: "https://github.com/o/r/actions/runs/500" } },
       runs: { 500: { id: 500, workflow_id: 7, head_branch: "staging", created_at: "2026-10-10T00:00:00Z" } } };

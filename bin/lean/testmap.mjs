@@ -59,6 +59,23 @@ export function selectCommands(map, files) {
   return out;
 }
 
+/**
+ * #4315: the pre-PR checks are the learned commands (in order) plus each map-selected command they lack; compared
+ * whitespace-collapsed, so the map can only add checks, never remove one. `source`: "learned" when the map added
+ * nothing, "test-map" when there were no learned commands, else "test-map+learned".
+ * @returns {{commands:string[], source:string, added:number}}
+ */
+export function mergeChecks(selected, learned) {
+  const norm = (c) => String(c ?? "").trim().replace(/\s+/g, " ");
+  const commands = [], seen = new Set();
+  const add = (c) => { const t = String(c ?? "").trim(), k = norm(t); if (!k || seen.has(k)) return false; seen.add(k); commands.push(t); return true; };
+  for (const c of Array.isArray(learned) ? learned : []) add(c);
+  const base = commands.length;
+  let added = 0;
+  for (const c of Array.isArray(selected) ? selected : []) if (add(c)) added++;
+  return { commands, added, source: !added ? "learned" : base ? "test-map+learned" : "test-map" };
+}
+
 /** The path of the first repo-facts file under `dirs` that exists, or null; never throws. */
 export async function factsPath(dirs, exists) {
   if (typeof exists !== "function") return null;

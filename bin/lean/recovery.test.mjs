@@ -221,6 +221,87 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.deepEqual(relabels, []);
   });
 
+  describe("#4315: a recovery queued when the batch stops is relabelled needs-human with the full reason", () => {
+    const LONG = `ci.red: ${"x".repeat(400)} END-OF-REASON`;
+    // issue 1 ends ci.red twice (original lane + non-final attempt 1/2); `stop` ends the batch before attempt 2 launches
+    const stopped = async (stop) => {
+      const relabels = [], calls = [];
+      let tick; const secondRun = new Promise((r) => { tick = r; });
+      const rows = await orchestrate({ issues: stop.issues ?? [1], parallel: 2, recovery: { maxAttempts: 2 }, readBody: async () => "",
+        relabelNeedsHuman: async (x) => { relabels.push(x); },
+        runOne: async (n, _l, ctx = {}) => {
+          calls.push({ n, recover: ctx.recover ?? null });
+          if (n === 2) { await secondRun; return { terminalReason: "engine-error", detail: "boom" }; }
+          if (calls.filter((c) => c.n === 1).length === 2) tick();
+          await new Promise((r) => setImmediate(r));
+          return NH("ci.red", LONG);
+        }, ...stop.opts(calls) });
+      return { rows, relabels, calls: calls.filter((c) => c.n === 1) };
+    };
+    const check = ({ rows, relabels, calls }, cause) => {
+      assert.deepEqual(calls.map((c) => c.recover), [null, { code: "ci.red", attempt: 1, final: false }], "attempt 2 never launched");
+      assert.equal(relabels.length, 1); assert.equal(relabels[0].issue, 1);
+      assert.match(relabels[0].evidence, /Recovery pass for `ci\.red` \(attempt 1\) did not merge: it ended `needs-human` \(`ci\.red`\)/);
+      assert.ok(relabels[0].evidence.includes(LONG), "full reason, not 300 chars");
+      assert.match(relabels[0].evidence, /Recovery attempt 2\/2 for `ci\.red` was queued, but the batch stopped \(/);
+      assert.match(relabels[0].evidence, cause);
+      const r1 = byIssue(rows)[1];
+      assert.equal(r1.outcome, "held"); assert.equal(r1.recovery.code, "ci.red"); assert.equal(r1.recovery.attempts, 2);
+      assert.match(formatOutcomeLists(rows).join("\n"), /unrecovered: #1/);
+    };
+
+    it("breaker", async () => {
+      check(await stopped({ issues: [1, 2], opts: () => ({ breaker: { errors: 1, window_min: 30 } }) }), /circuit breaker/);
+    });
+    it("execution budget (on_budget stop)", async () => {
+      check(await stopped({ opts: (calls) => ({ remote: { max: 3, isRemote: () => true, admit: () => (calls.length >= 2 ? { ok: false, reason: "cap $5 reached" } : { ok: true }) } }) }),
+        /execution budget: cap \$5 reached/);
+    });
+    it("drift hold", async () => {
+      check(await stopped({ opts: (calls) => ({ drift: { holds: () => (calls.length >= 2 ? "packages/ui" : null) } }) }), /drift: packages\/ui flagged/);
+    });
+
+    it("a resume of a lost run that does not relaunch it relabels once; a second resume does not repeat it", async () => {
+      let state = { v: 1, order: [1], deps: { 1: [] }, pending: [], results: {}, running: { 1: { startedAt: 1, pid: 999 } }, recoveries: { 1: 2 },
+        recovering: { 1: { code: "ci.red", attempt: 2, detail: LONG, outcome: "needs-human", result_code: "ci.red", prev_attempt: 1 } },
+        breaker: { at: 1, detail: "circuit breaker: 3 engine-errors within 30 min; admissions stopped" } };
+      const store = { load: () => state, save: (s) => { state = s; }, log: () => {} };
+      const relabels = [], ran = [];
+      const go = () => orchestrate({ issues: [1], store, recovery: { maxAttempts: 2 }, readBody: async () => "", adopt: async () => null,
+        relabelNeedsHuman: async (x) => { relabels.push(x); }, runOne: async (n) => { ran.push(n); return { terminalReason: "merged" }; } });
+      const rows = await go();
+      assert.deepEqual(ran, []); assert.equal(rows[0].outcome, "held");
+      assert.equal(relabels.length, 1); assert.ok(relabels[0].evidence.includes(LONG));
+      assert.match(relabels[0].evidence, /attempt 1\) did not merge.*[\s\S]*circuit breaker/);
+      assert.deepEqual(state.relabelled, [1]);
+      await go();
+      assert.equal(relabels.length, 1, "relabelled once across resumes");
+    });
+
+    it("a resume that relaunches the lost recovery lane does not relabel; the lane gets ctx.recover", async () => {
+      let state = { v: 1, order: [1], deps: { 1: [] }, pending: [], results: {}, running: { 1: { startedAt: 1, pid: 999 } }, recoveries: { 1: 2 },
+        recovering: { 1: { code: "ci.red", attempt: 2, detail: LONG, outcome: "needs-human", prev_attempt: 1 } }, relabelled: [1] };
+      const store = { load: () => state, save: (s) => { state = s; }, log: () => {} };
+      const relabels = [], ctxs = [];
+      const rows = await orchestrate({ issues: [1], store, recovery: { maxAttempts: 2 }, readBody: async () => "", adopt: async () => null,
+        relabelNeedsHuman: async (x) => { relabels.push(x); }, runOne: async (n, l, ctx) => { ctxs.push(ctx.recover); return { terminalReason: "merged" }; } });
+      assert.deepEqual(ctxs, [{ code: "ci.red", attempt: 2, final: true }]);
+      assert.equal(rows[0].outcome, "merged"); assert.deepEqual(relabels, []);
+      assert.equal(state.relabelled, undefined);
+    });
+
+    it("a store from before #4315 (no detail, no relabelled) still resumes and relabels with the code", async () => {
+      let state = { v: 1, order: [1], deps: { 1: [] }, pending: [1], results: {}, running: {}, recoveries: { 1: 1 }, recovering: { 1: { code: "ci.red", attempt: 1 } },
+        breaker: { at: 1, detail: "circuit breaker: tripped" } };
+      const store = { load: () => state, save: (s) => { state = s; }, log: () => {} };
+      const relabels = [];
+      const rows = await orchestrate({ issues: [1], store, recovery: { maxAttempts: 2 }, readBody: async () => "",
+        relabelNeedsHuman: async (x) => { relabels.push(x); }, runOne: async () => ({ terminalReason: "merged" }) });
+      assert.equal(rows[0].outcome, "held"); assert.equal(rows[0].recovery.detail, "ci.red");
+      assert.equal(relabels.length, 1); assert.match(relabels[0].evidence, /The lane did not merge: it ended `needs-human`/);
+    });
+  });
+
   it("#4302: --recover-nonfinal reaches runCore as final: false; without it a recovery lane is final", async () => {
     const got = [];
     const l = console.log; console.log = () => {};

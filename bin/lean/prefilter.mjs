@@ -15,6 +15,7 @@
 import { capComment, sanitizeMd, noComments } from "./render.mjs";
 import { PREFILTER_SYSTEM, prefilterPrompt, parsePrefilterVerdict } from "./prompts.mjs";
 import { isTrustedComment } from "../engine/phases.mjs";
+import { APP_SLUG } from "../init-repo.mjs";
 
 export const DEFAULT_PREFILTER_MODEL = "claude-haiku-5-5";
 export const PREFILTER_MARKER = "FORGE:PREFILTER";
@@ -39,20 +40,37 @@ export function ciFailureRun(iss) {
 }
 
 const FLAKY_RE = /\b(?:intermittent\w*|flaky|flak(?:e|es|iness)|sometimes|non-?deterministic\w*)\b/i;
+const loginOf = (c) => String(c?.author?.login ?? c?.user?.login ?? "");
 const trusted = (c) => {
-  const login = String(c?.author?.login ?? c?.user?.login ?? "");
+  const login = loginOf(c);
   return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
 };
+/** #4315: a login compared as the engine posts it: lowercased, without `app/` or a `[bot]` suffix (`gh issue view` drops both). */
+const bareLogin = (l) => String(l ?? "").trim().toLowerCase().replace(/^app\//, "").replace(/\[bot\]$/, "");
+const isMarked = (c) => String(c?.body ?? "").trimStart().startsWith(`<!-- ${PREFILTER_MARKER} -->`);
+/**
+ * #4315: the logins the engine posts as: the ForgeDock App (`gh issue view` reports it as `rapiercraft-forgedock` with
+ * CONTRIBUTOR, never `[bot]`) plus the token's own user (`gh api user`; an App installation token cannot read it).
+ */
+export async function ownLogins(gh) {
+  const out = new Set([bareLogin(APP_SLUG)]);
+  try { const me = bareLogin(await gh(["api", "user", "--jq", ".login"])); if (me) out.add(me); } catch { /* installation token: the App slug only */ }
+  return [...out];
+}
 /**
  * #4305: why one green run is no proof for this issue, without an API call: flaky wording or a `flaky` label, or an
- * earlier trusted pre-filter close (the issue is open again, so an operator reopened it). {reason, why} or null.
+ * earlier pre-filter close by the pipeline (the issue is open again, so an operator reopened it). {reason, why} or null.
+ * #4315: a marker comment is the pipeline's own when it is trusted or written by one of `own` (bare logins).
  */
-export function flakyReason(iss) {
+export function flakyReason(iss, own = [bareLogin(APP_SLUG)]) {
   if (FLAKY_RE.test(`${iss.title ?? ""}\n${noComments(String(iss.body ?? ""), " ")}`)) return { reason: "flaky", why: "issue says the failure is intermittent" };
   if ((iss.labels ?? []).some((l) => String(l?.name ?? l).toLowerCase() === "flaky")) return { reason: "flaky", why: "flaky label" };
-  if ((iss.comments ?? []).some((c) => trusted(c) && String(c?.body ?? "").trimStart().startsWith(`<!-- ${PREFILTER_MARKER} -->`))) return { reason: "reopened", why: "reopened after a pre-filter close" };
+  const mine = new Set((own ?? []).map(bareLogin));
+  if ((iss.comments ?? []).some((c) => isMarked(c) && (trusted(c) || mine.has(bareLogin(loginOf(c)))))) return { reason: "reopened", why: "reopened after a pre-filter close" };
   return null;
 }
+/** The own logins, looked up only when an otherwise-untrusted marker comment needs them (no call for most issues). */
+const ownFor = async (iss, resolve) => ((iss.comments ?? []).some((c) => isMarked(c) && !trusted(c)) ? resolve() : undefined);
 
 const PATH_RE = /(?:^|[\s`'"(\[])((?:\.{0,2}\/)?(?:[\w@.-]+\/)+[\w@.-]+\.[A-Za-z0-9]{1,8})(?::\d+(?:-\d+)?)?(?=$|[\s`'"),.:;\]])/gm;
 /** Repo-relative file paths the issue names (`dir/file.ext`, optionally `:line`); URLs and HTML comments are ignored. */
@@ -64,7 +82,7 @@ export function namedPaths(text) {
 /**
  * @returns {Promise<{prs:object[], commits:object[], ci:?object, ciSkip?:{reason:string, why:string}, missingPaths:string[], namedPaths:string[]}>}
  */
-export async function collectSignals({ iss, repo, lane, io, cwd }) {
+export async function collectSignals({ iss, repo, lane, io, cwd, selfLogins = null }) {
   const n = iss.number;
   const sig = { prs: [], commits: [], ci: null, missingPaths: [], namedPaths: [] };
   try {
@@ -85,7 +103,8 @@ export async function collectSignals({ iss, repo, lane, io, cwd }) {
         const sha = latest.head_sha ?? "";
         // #4305: a workflow that failed and passed at the same SHA is flaky; the lookup is any branch (PR run vs push)
         // and only made when the issue itself gave no reason. An unreadable lookup throws: no CI signal.
-        let skip = flakyReason(iss);
+        const own = await ownFor(iss, typeof selfLogins === "function" ? selfLogins : selfLogins ? async () => selfLogins : () => ownLogins(io.gh));
+        let skip = flakyReason(iss, own);
         const same = { reason: "same-sha", why: `failed and passed at ${sha.slice(0, 12)}` };
         if (!skip && sha && failed.head_sha === sha) skip = same;
         if (!skip && sha) {
@@ -112,7 +131,7 @@ export async function collectSignals({ iss, repo, lane, io, cwd }) {
  * Pre-filter one issue. Never throws.
  * @returns {Promise<{issue:number, closed:boolean, kind:?string, candidate:boolean, verdict:?string, cost_usd:number, detail:string}>}
  */
-export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAULT_PREFILTER_MODEL, dryRun = false, agentId = null, maxMinutes = 5 }) {
+export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAULT_PREFILTER_MODEL, dryRun = false, agentId = null, maxMinutes = 5, selfLogins = null }) {
   const out = { issue, closed: false, kind: null, candidate: false, verdict: null, cost_usd: 0, detail: "" };
   try {
     const iss = JSON.parse(String(await io.gh(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,labels,comments"])));
@@ -123,11 +142,12 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
       try { st = await io.projector.readState(issue); } catch { /* unreadable: proceed */ }
       if (st?.lease && st.lease.until > Date.now() && st.lease.by !== agentId) return { ...out, detail: `leased by ${st.lease.by}` };
     }
-    const sig = await collectSignals({ iss, repo, lane, io, cwd });
+    const sig = await collectSignals({ iss, repo, lane, io, cwd, selfLogins });
     const close = async (kind, body, detail) => {
       if (!dryRun) {
-        await io.gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- ${PREFILTER_MARKER} -->\n<!-- FORGE:VALIDATE -->\n${body}`)]);
+        // #4315: close first: the marker is posted only on an issue that was closed, so it always means "reopened" later
         await io.gh(["issue", "close", String(issue), "-R", repo, "--reason", "not planned"]);
+        await io.gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- ${PREFILTER_MARKER} -->\n<!-- FORGE:VALIDATE -->\n${body}`)]);
         try { await io.transitionLabel?.(issue, "invalid"); } catch { /* labels are best effort */ }
       }
       return { ...out, closed: !dryRun, kind, detail };
@@ -164,7 +184,9 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
 
 /** Per-issue hook for `orchestrate({ prefilter })`; `lane` is the issue's own resolved lane (#4125). */
 export function makePrefilter(opts) {
-  return (issue, lane) => prefilterIssue({ ...opts, issue, ...(lane ? { lane } : {}) });
+  let own = null; // #4315: one `gh api user` per batch, and only when a marker comment needs it
+  const selfLogins = opts.selfLogins ?? (() => (own ??= ownLogins(opts.io.gh)));
+  return (issue, lane) => prefilterIssue({ ...opts, selfLogins, issue, ...(lane ? { lane } : {}) });
 }
 
 /** One report line: how many the pre-filter checked, flagged and closed, what validation cost, and the spend avoided. */

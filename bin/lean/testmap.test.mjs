@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseTestMap, readTestMap, selectCommands, factsPath, TEST_MAP_FILE, REPO_FACTS_FILE } from "./testmap.mjs";
+import { parseTestMap, readTestMap, selectCommands, mergeChecks, factsPath, TEST_MAP_FILE, REPO_FACTS_FILE } from "./testmap.mjs";
 
 const MAP = {
   version: 1,
@@ -54,5 +54,20 @@ describe("test map (#4272)", () => {
     assert.equal(await factsPath(["/wt", "/main"], exists([])), null);
     assert.equal(await factsPath(["/wt"], undefined), null);
     assert.equal(await factsPath(["/wt"], async () => { throw new Error("EACCES"); }), null);
+  });
+});
+
+describe("mergeChecks (#4315): the map can only add checks", () => {
+  it("a partial map keeps every learned command and adds the ones it selects that learned lacks", () => {
+    assert.deepEqual(mergeChecks(["npm test", "cd pkg && npm test"], ["make lint", "npm test"]),
+      { commands: ["make lint", "npm test", "cd pkg && npm test"], added: 1, source: "test-map+learned" });
+  });
+  it("duplicates, whitespace variants included, appear once", () => {
+    assert.deepEqual(mergeChecks(["npm  run   lint", " npm run lint", "npm test"], ["npm run lint ", "npm run lint"]).commands, ["npm run lint", "npm test"]);
+  });
+  it("an empty selection keeps the learned commands; no learned commands keep the map's selection", () => {
+    assert.deepEqual(mergeChecks([], ["make lint"]), { commands: ["make lint"], added: 0, source: "learned" });
+    assert.deepEqual(mergeChecks(["npm test"], []), { commands: ["npm test"], added: 1, source: "test-map" });
+    assert.deepEqual(mergeChecks(undefined, undefined), { commands: [], added: 0, source: "learned" });
   });
 });

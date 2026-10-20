@@ -97,9 +97,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (`precheckFailurePrompt`, up to `max_rounds`); no commit / rounds exhausted is
    an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
    An optional `.forge/test-map.json` (#4272, `scripts/test-map.sh`; base ref via
-   `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) replaces that list with the map
-   entries whose globs match the changed files (`selectCommands`; event gains
-   `source: "test-map"`); no map, an invalid one or no match keeps `learned.test_commands`.
+   `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) adds the map entries whose
+   globs match the changed files to that list (`selectCommands` + `mergeChecks`, #4315: learned first, deduped, so the
+   map never removes a check; event gains `source: "test-map"|"test-map+learned"` when the map added a command).
 6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
@@ -704,3 +704,18 @@ non-final recovery lane posts no `FORGE:NEEDS_HUMAN` and adds no `needs-human`, 
 alike, so the label does not flap between attempts and a concurrent dependent does not read a transient label. Settle
 relabels once via `relabelNeedsHuman` when a non-final attempt ends `needs-human`/`ci-pending` and no next attempt is
 queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 LLM calls.
+
+## Entry 2026-10-20 — 1.30.0 pre-release fixes (#4315)
+
+- `prefilter.mjs`: a `FORGE:PREFILTER` marker comment is the pipeline's own when it is trusted or written by the
+  engine's identity (`ownLogins`: the App slug plus the token's `gh api user` login, looked up only when an untrusted
+  marker comment exists, once per `makePrefilter` batch). `gh issue view` reports the App as `rapiercraft-forgedock`
+  with `CONTRIBUTOR`, so the `[bot]` heuristic never matched. The close now runs before the marker comment.
+- `orchestrate.mjs`: a recovery still queued when the batch exits (breaker, execution budget, drift/maintenance hold, or a
+  resume that does not relaunch a lost run) is relabelled once via `relabelNeedsHuman` with the full persisted lane
+  reason (`recovering[n].detail`, never `firstLine`); the persisted `relabelled` list stops a repeat across resumes and is
+  cleared when the lane launches. Its `held` row carries `recovery`. `engine-cli.mjs` caps that comment (`capComment`).
+- `scripts/test-map.sh` allowlist: `cargo test|clippy|check`, gradle/maven with check tasks/goals only, `[bundle exec]
+  rspec`, `python manage.py test`, `python -m unittest`, `tox`/`nox` (no publish/release/deploy/upload env), `deno|bun
+  test`, `pnpm -r`, `npm --prefix DIR`, `test:*`-style script names, `bash|sh <path>.test.sh`, each with its globs.
+  Cost: 0 LLM calls; one optional `gh api user` per batch.
