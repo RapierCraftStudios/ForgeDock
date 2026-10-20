@@ -596,6 +596,15 @@ applies the reaper. `commands/cleanup.md`, `work-on/close.md` and
 
 In shadow, `gate()` now blocks on precheck/amend failures coded `conformance.unimplemented`/`regression` (`SHADOW_PRE_BLOCKS`), ends `review.incomplete`/`inconsistent` as needs-human, and files accepted deferrals with `track()`. `engine.review_incomplete: degraded` (`readReviewIncomplete`) merges instead with the `review-degraded` label and a tracked follow-up. Enforce unchanged. `scripts/calibration.mjs --shadow` prints the per-repo shadow mix and recommends `enforce` under the threshold. Rationale: `devdocs/decisions/4160-shadow-gate-complete-reviews.md`.
 
+## Entry 2026-10-20 — forgedock/verify check run (#4270)
+
+Opt-in `verify.check_run` (`verify.mjs` `parseVerify` → `checkRun`, default false).
+`lean.mjs` keeps `verifyFacts` (last result of the declared checks, structure, docs and
+`gate()` precheck) and `reportVerify()` posts one `forgedock/verify` check run per pushed
+head (PR push, base-sync, merge fix round) via `effects.mjs` `createCheckRun`, payload from
+pure `verify.mjs` `verifyReport`; `VERIFY` run-log event, Checks API failure → anomaly.
+Own check excluded from `runCiVerify` commit checks and `wait-ci-green.sh --ignore-check`.
+
 ## Entry 2026-10-20 — Bug lanes freeze a red-green repro_test (#4271)
 
 forge.yaml `lean.repro_test` (`engine-cli.mjs` `readReproTest`, `off|prefer`, default `prefer`) → `runCore` `reproTest`. On a `bug`/`type:bug` lane (`conformance.mjs` `isBugIssue`), the plan prompt gets `reproPlanNote`, and `validateContract(..., {repro: true})` requires `repro_test` `{path, id, command}` or `"none"` + `repro_test_reason` (one correction resume). `gate()` runs `io.redGreen` (`effects.mjs` → `scripts/acceptance-red-green.sh`, inside `heavyStep`) and passes `{base, head}` to `precheck({repro})`. Anything but `BASE=FAILED HEAD=RAN` is `reproFailures` kind `repro_red_green`, code `conformance.unimplemented`, so it blocks in shadow and gets the one in-session resume (#4149). `off`, non-bug lanes, resumed pre-#4271 contracts and refactor:split leave prompts, contract check and precheck unchanged. Cost: 0 LLM calls; one targeted test run on base and head per gate.

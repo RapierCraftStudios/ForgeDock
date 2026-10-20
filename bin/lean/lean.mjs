@@ -25,7 +25,7 @@ import { renderInvestigation, renderImplementation, renderReview, renderPrBody, 
 import { computeTrigger, TRIGGER_MODES } from "./review-trigger.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM } from "./prompts.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
-import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES } from "./verify.mjs";
+import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport } from "./verify.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
 import { writeHeavyShims, sumWaits } from "./heavy.mjs";
@@ -1060,6 +1060,8 @@ export async function runCore(o) {
     const testMap = io.runCommand ? await readTestMap([wt, cwd], io.fs?.read) : null;
     const pickChecks = () => { const m = testMap ? selectCommands(testMap, files) : []; return m.length ? { commands: m, source: "test-map" } : { commands: learnedCommands, source: "learned" }; };
     let picked = pickChecks();
+    // #4270: the last result of each deterministic gate, as computed below; only reportVerify (verify.check_run) reads it
+    const verifyFacts = { commands: null, structure: null, undeclaredEdges: [], docs: null, precheck: null, amendments: [], hotspots: false };
     if (picked.source === "test-map") T.decisions.push(`Pre-PR checks selected from ${TEST_MAP_FILE}: ${picked.commands.length} of ${testMap.entries.length} entries`);
     if (picked.commands.length && io.runCommand) {
       for (let round = 0; ; round++) {
@@ -1073,6 +1075,7 @@ export async function runCore(o) {
           results.push({ command, rc: Number.isInteger(r?.rc) ? r.rc : 1, output: String(r?.output ?? "") });
         }
         ev({ event: "PRECHECK_COMMANDS", round, results: results.map(({ command, rc }) => ({ command, rc })), ...(picked.source === "test-map" ? { source: "test-map" } : {}) });
+        verifyFacts.commands = results.map(({ command, rc }) => ({ command, rc }));
         const failed = results.filter((r) => r.rc !== 0);
         if (!failed.length) { checkCommandsFailing = false; if (round) T.decisions.push(`Declared check commands pass after ${round} builder fix round(s)`); break; }
         const names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
@@ -1114,6 +1117,7 @@ export async function runCore(o) {
         structure = (await structureOf()) ?? structure;
         edges = undeclared();
       }
+      verifyFacts.structure = structure; verifyFacts.undeclaredEdges = edges;
       if (edges.length) {
         return await needsHuman(`The change adds dependencies between workspace packages that the frozen contract does not name${sessionId ? ", after one builder resume" : ""}; nothing merged:\n${edges.slice(0, 15).map((e) => `- ${e.from} → ${e.to} (${e.kind}, \`${e.manifest}\`)`).join("\n")}\n\nAdd each to the contract with a reason, or remove it.`, OUTCOME_CODES.STRUCTURE_UNDECLARED_EDGE);
       }
@@ -1130,6 +1134,7 @@ export async function runCore(o) {
         result = (await readResult()) ?? result;
         docs = await io.docsFreshness({ cwd: wt, base }).catch(() => null);
       }
+      verifyFacts.docs = docs;
       if (docs && !docs.ok) {
         return await needsHuman(`The repository's docs freshness check still fails${sessionId ? " after one builder resume" : ""}; nothing merged:\n\n${String(docs.output).slice(0, 2000)}`, OUTCOME_CODES.DOCS_STALE);
       }
@@ -1251,6 +1256,7 @@ export async function runCore(o) {
       const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === String(await git(["rev-parse", "HEAD"])).trim();
       const hotspots = await hotspotsOf({ base, paths: files });
       const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective) });
+      Object.assign(verifyFacts, { precheck: pc.failures, amendments: amendProblems, hotspots: Boolean(hotspots && hotspots.enabled !== false && Array.isArray(hotspots.files)) });
       const pre = [...pc.failures, ...amendProblems];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
@@ -1277,6 +1283,29 @@ export async function runCore(o) {
       if (d.state.startsWith("review.")) return { ...d, by: "review", would, wouldFail, reviewState: d.state };
       const blocking = d.state === "nonconforming" ? d.failures.filter((f) => SHADOW_BLOCKS.includes(f.code)) : [];
       return { state: blocking.length ? "nonconforming" : "conforms", by: "review", failures: blocking, would, wouldFail, reviewState: d.state };
+    }
+    const verifyReported = new Set();
+    /**
+     * #4270 verify.check_run: one `forgedock/verify` check run per pushed head, reporting the gates' last results (no gate
+     * logic, never blocks). Off: no call, no event. A missing seam or a Checks API failure is an anomaly, never a lane failure.
+     */
+    async function reportVerify() {
+      if (vcfg.checkRun !== true) return;
+      let head = "";
+      try { head = String(await git(["rev-parse", "HEAD"])).trim(); } catch { return; }
+      if (!head || verifyReported.has(head)) return;
+      verifyReported.add(head);
+      const r = verifyReport({ head, ...verifyFacts, contract: effective, result });
+      let posted = false, url = null, error = null;
+      try {
+        if (!io.createCheckRun) throw new Error("no Checks API seam");
+        const c = await io.createCheckRun({ sha: head, name: VERIFY_CHECK_NAME, conclusion: r.conclusion, title: r.title, summary: r.summary, text: r.text });
+        posted = true; url = c?.html_url ?? null;
+      } catch (e) {
+        error = String(e?.stderr || e?.message || e).split("\n")[0].slice(0, 200);
+        T.anomalies.push(`${VERIFY_CHECK_NAME} check run not posted for ${head.slice(0, 12)}: ${error}`);
+      }
+      ev({ event: "VERIFY", head, conclusion: r.conclusion, gates: r.gates.map((g) => ({ id: g.id, ok: g.ok })), posted, url, ...(error ? { error } : {}) });
     }
     /** Shape the base-sync path expects: {unusable: state} when no usable review, else {fail, verdict, reason, failures}. */
     const doReview = async () => {
@@ -1365,6 +1394,7 @@ export async function runCore(o) {
     T.pr = [`#${pr}`, resumed?.pr ? "existing" : "opened"];
     const prUrl = /https?:\/\/\S+/.exec(prOut)?.[0] ?? `https://github.com/${repo}/pull/${pr}`;
     let localHead = String(await git(["rev-parse", "HEAD"])).trim();
+    await reportVerify();
 
     // ---- 6. merge policy: required (default) | all | none ----
     let policy = mergeWait, required = [];
@@ -1462,6 +1492,7 @@ export async function runCore(o) {
         rereview = `${rv.verdict}: ${rv.reason || "no concrete failure"}`;
       }
       localHead = await gitOut(["rev-parse", "HEAD"]);
+      await reportVerify();
       syncRow.push(`${trigger}: ${clean ? "clean" : "conflicts"} (${baseSha})`);
       T.baseSync = [`${syncs} sync(s)`, syncRow.join("; ")];
       await post("FORGE:BASE_SYNC", `## Base Sync\n**Trigger:** ${trigger}\n**Base merged:** \`${base}\` at \`${baseSha}\`\n**Result:** ${clean ? "clean merge" : `conflicts in ${files.map((f) => `\`${f}\``).join(", ") || "unknown files"}`}\n**Resolution:** ${how}\n**Tests run:** ${tests}\n**Re-review:** ${rereview}\n**New head:** \`${localHead.slice(0, 12)}\``);
@@ -1494,6 +1525,7 @@ export async function runCore(o) {
       if (rv.fail) return await needsHuman(`Review FAIL after a CI fix round: ${rv.reason}`, OUTCOME_CODES.REVIEW_FAILED);
       await gitPush(["push", "origin", branch]); // plain push of the fix commit: never force
       localHead = await gitOut(["rev-parse", "HEAD"]);
+      await reportVerify();
       return null;
     }
     /** After the merge (#4179): delete the lane branch on origin; finish() deletes it locally after the worktree is gone. */
@@ -1555,7 +1587,8 @@ export async function runCore(o) {
           // a rollup of another head (the PR before a fix push lands) counts as pending, never as this head's result
           const current = (x) => !x.head || !localHead || String(x.head).startsWith(localHead) || localHead.startsWith(String(x.head));
           if (policy === "all") {
-            const w = await io.waitCiGreen(pr, repo, 0).catch(() => ({ rc: 2, text: "" }));
+            // #4270: the lane's own report-only check never gates its own merge
+            const w = await io.waitCiGreen(pr, repo, 0, ...(vcfg.checkRun === true ? [{ ignore: [VERIFY_CHECK_NAME] }] : [])).catch(() => ({ rc: 2, text: "" }));
             if (w.rc === 0) { gateHead = /CI_GATE_HEAD:\s*([0-9a-f]{7,40})/.exec(w.text ?? "")?.[1] ?? null; break; }
             if (w.rc === 1) return await needsHuman(`Remote CI failed on PR #${pr}:\n${String(w.text).slice(-2000)}`, OUTCOME_CODES.CI_RED);
           } else {

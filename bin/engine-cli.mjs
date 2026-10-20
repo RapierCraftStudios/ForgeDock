@@ -61,12 +61,13 @@ export function makeIo() {
     return stdout;
   };
   // CI wait seam (scripts/wait-ci-green.sh, argv only, no shell). Resolves { rc, text } for any exit code.
-  const waitCiGreen = async (pr, repo, timeoutSec) => {
+  // `ignore` (forge#4270): check names dropped before deciding (`--ignore-check`); omitted, the argv is unchanged.
+  const waitCiGreen = async (pr, repo, timeoutSec, { ignore = [] } = {}) => {
     const script = fileURLToPath(new URL("../scripts/wait-ci-green.sh", import.meta.url));
     try {
       // The engine owns the backoff and the budget: each call is ONE read (no in-script polling, no settle hold;
       // the re-dispatched phase re-runs the full gate before any merge).
-      const { stdout } = await pexec("bash", [script, String(pr), "-R", String(repo), "--timeout", String(timeoutSec)],
+      const { stdout } = await pexec("bash", [script, String(pr), "-R", String(repo), "--timeout", String(timeoutSec), ...ignore.flatMap((n) => ["--ignore-check", String(n)])],
         { maxBuffer: 10 * 1024 * 1024, timeout: (timeoutSec + 120) * 1000, env: { ...process.env, FORGE_CI_SETTLE: "0" } });
       return { rc: 0, text: stdout };
     } catch (e) { return { rc: Number.isInteger(e?.code) ? e.code : 2, text: String(e?.stdout ?? "") }; }
@@ -221,7 +222,8 @@ export function readMergeWait(cwd = process.cwd()) {
 }
 /**
  * forge.yaml `verify:` section (#4167, block style: `verify:` then `  mode: ci`, `  workflow: verify.yml`, `  paths_input`,
- * `  skip_paths` comma-separated, `  max_rounds`) for the core path; undefined when the section is absent or unreadable.
+ * `  skip_paths` comma-separated, `  max_rounds`, `  check_run: true` (#4270)) for the core path; undefined when the
+ * section is absent or unreadable.
  */
 export function readVerify(cwd = process.cwd()) {
   try {
