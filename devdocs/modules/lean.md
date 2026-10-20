@@ -689,3 +689,13 @@ rejects `--recover` with `--path full`. `conformance.mjs` `movingBaseDiff` reads
 `test-map.sh` separates globs with `\037`; it and `repo-facts.sh` list files with `-z` and `core.quotepath=off`, and
 `grep -q` reads here-strings (no SIGPIPE false negative under pipefail). Cost: 0 LLM calls.
 Rationale: `devdocs/decisions/4298-staging-low-followups.md`.
+
+## Entry 2026-10-20 — Recovery relabel only on the final attempt (#4302)
+
+`orchestrate.mjs` passes `ctx.recover = {code, attempt, final}` with `final = attempt >= recovery.maxAttempts`;
+`engine-cli.mjs` carries it to a subprocess lane as `--recover-nonfinal` (absent = final, so a manual
+`run-issue --recover` and `max_attempts: 1` are unchanged). `runCore` normalises `recover.final` (default true); a
+non-final recovery lane posts no `FORGE:NEEDS_HUMAN` and adds no `needs-human`, on `ci-pending` and in `needsHuman()`
+alike, so the label does not flap between attempts and a concurrent dependent does not read a transient label. Settle
+relabels once via `relabelNeedsHuman` when a non-final attempt ends `needs-human`/`ci-pending` and no next attempt is
+queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 LLM calls.
