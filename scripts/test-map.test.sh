@@ -284,6 +284,32 @@ eq "js runner commands" "$(cmds)" "bun test|deno test|npm --prefix web test|npm 
 eq "bun globs" "$(globs_of "bun test")" "**/*.js,**/*.jsx,**/*.ts,**/*.tsx,**/*.mjs,**/*.cjs"
 eq "npm --prefix globs" "$(globs_of "npm --prefix web test")" "web/**/*.js,web/**/*.jsx,web/**/*.ts,web/**/*.tsx,web/**/*.mjs,web/**/*.cjs"
 
+# ---- 5f. forge#4314: package.json script suffix allowlist (fixers/watchers/e2e/deploy never run pre-PR) ----
+mkdir -p "$TMP/sfx"; cd "$TMP/sfx" || exit 1
+git init -q -b main
+cat > package.json <<'JSON'
+{"name":"s","scripts":{"test":"x","test:unit":"x","test:ci":"x","test:node":"x","test:types":"x","lint:ts":"x","lint:js":"x","check:static":"x","check:types":"x","tsc":"tsc --noEmit","typecheck":"tsc","lint:check":"x","test:unit:ci":"x","lint:format":"prettier --check .","check:format":"prettier --write .",
+"lint:fix":"eslint --fix .","check:fix":"x","test:watch":"x","test:e2e":"x","test:integration":"x","test:deploy":"x","test:update":"x","test:snapshot":"x","lint:css":"x","test:unit:watch":"x","test:-u":"x","lint:write":"x","test:dev":"x","check:release":"x"}}
+JSON
+git add -A
+SFX="$(bash "$S" --stdout | jq -r '[.entries[].source | sub("^package.json#scripts\\.";"")] | sort | join("|")')"
+eq "script suffix allowlist" "$SFX" "check:static|check:types|lint:check|lint:format|lint:js|lint:ts|test|test:ci|test:node|test:types|test:unit|test:unit:ci|tsc|typecheck"
+
+wf_case sfxwf <<'WF'
+npm run lint:fix
+npm run check:fix
+pnpm test:watch
+yarn test:e2e
+bun run test:integration
+npm run test:deploy
+pnpm run lint:fix
+npm run test:unit
+pnpm lint:ts
+yarn check:types
+bun run test:ci
+WF
+eq "workflow suffix commands" "$(cmds)" "bun run test:ci|npm run test:unit|pnpm lint:ts|yarn check:types"
+
 wf_case shell <<'WF'
 bash scripts/a.test.sh
 sh tests/b.test.sh
