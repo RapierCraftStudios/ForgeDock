@@ -1,0 +1,77 @@
+#!/usr/bin/env node
+// SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+// SPDX-License-Identifier: AGPL-3.0-or-later
+/**
+ * Optional repo caches for the pre-PR step (#4272): `.forge/test-map.json` (scripts/test-map.sh, file glob → check
+ * command) picks the checks for the lane's changed files; `.forge/repo-facts.json` (scripts/repo-facts.sh) is cited to
+ * the builder by path. Both are looked up in the lane worktree, then the main checkout. A missing or invalid file is
+ * absent: the lane keeps forge.yaml `learned.test_commands` and today's prompts.
+ *
+ *   node bin/lean/testmap.mjs --map FILE --select FILE...   print the selected commands, one per line
+ */
+import fs from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { globToRegex, shellQuote } from "../../scripts/ci-local/lib.mjs";
+
+export const TEST_MAP_FILE = ".forge/test-map.json";
+export const REPO_FACTS_FILE = ".forge/repo-facts.json";
+
+/** A parsed test map when valid ({version:1, entries:[{command, globs:string[]}]}), else null. */
+export function parseTestMap(text) {
+  let j;
+  try { j = JSON.parse(text); } catch { return null; }
+  if (!j || j.version !== 1 || !Array.isArray(j.entries)) return null;
+  const ok = j.entries.every((e) => e && typeof e.command === "string" && e.command.trim() && Array.isArray(e.globs) && e.globs.length && e.globs.every((g) => typeof g === "string" && g));
+  return ok ? j : null;
+}
+
+/** The first valid test map under `dirs` (in order), or null; never throws. */
+export async function readTestMap(dirs, read) {
+  if (typeof read !== "function") return null;
+  for (const d of dirs.filter(Boolean)) {
+    let text;
+    try { text = await read(join(d, TEST_MAP_FILE)); } catch { continue; }
+    const map = parseTestMap(String(text ?? ""));
+    if (map) return map;
+  }
+  return null;
+}
+
+/** Commands of entries with a glob matching a changed file: map order, deduped; a non-root cwd runs as `cd <cwd> && cmd`. */
+export function selectCommands(map, files) {
+  const out = [];
+  const changed = (Array.isArray(files) ? files : []).map((f) => String(f).replace(/^\.\//, ""));
+  for (const e of map?.entries ?? []) {
+    const res = e.globs.map((g) => globToRegex(g.replace(/^\.\//, "")));
+    if (!changed.some((f) => res.some((re) => re.test(f)))) continue;
+    const cwd = typeof e.cwd === "string" && e.cwd && e.cwd !== "." ? e.cwd : "";
+    const cmd = cwd ? `cd ${shellQuote(cwd)} && ${e.command.trim()}` : e.command.trim();
+    if (!out.includes(cmd)) out.push(cmd);
+  }
+  return out;
+}
+
+/** The path of the first repo-facts file under `dirs` that exists, or null; never throws. */
+export async function factsPath(dirs, exists) {
+  if (typeof exists !== "function") return null;
+  for (const d of dirs.filter(Boolean)) {
+    const p = join(d, REPO_FACTS_FILE);
+    try { if (await exists(p)) return p; } catch { /* absent */ }
+  }
+  return null;
+}
+
+function main(argv) {
+  const i = argv.indexOf("--map"), j = argv.indexOf("--select");
+  if (i < 0 || !argv[i + 1] || j !== i + 2) { console.error("usage: testmap.mjs --map FILE --select FILE..."); return 2; }
+  let text;
+  try { text = fs.readFileSync(argv[i + 1], "utf8"); } catch { console.error(`testmap: cannot read ${argv[i + 1]}`); return 2; }
+  const map = parseTestMap(text);
+  if (!map) { console.error("testmap: invalid test map"); return 2; }
+  const files = argv.slice(j + 1);
+  for (const c of selectCommands(map, files)) console.log(c);
+  return 0;
+}
+
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) process.exitCode = main(process.argv.slice(2));

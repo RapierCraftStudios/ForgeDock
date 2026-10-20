@@ -86,11 +86,21 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    default 300; no Actions minutes). Failures resume the builder in-session
    (`precheckFailurePrompt`, up to `max_rounds`); no commit / rounds exhausted is
    an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
+   An optional `.forge/test-map.json` (#4272, `scripts/test-map.sh`; lane worktree,
+   then main checkout, `testmap.mjs` `readTestMap`) replaces that list with the map
+   entries whose globs match the changed files (`selectCommands`; event gains
+   `source: "test-map"`); no map, an invalid one or no match keeps `learned.test_commands`.
 6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
    (`max_rounds`, then `ci.red`), slow → `ci-pending`, unavailable → local fallback;
    docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI.
+   **Validate commands vs a moving base**: `validateContract` rejects a validate
+   command whose `git diff` compares against a remote `origin/<x>` tip rather than the
+   merge base (`movingBaseDiff`), so the planner fixes it in the one contract
+   correction. When a precheck `validate_failed` resumes the builder, the engine first
+   fetches the lane and the resume prompt says to `git merge --no-edit origin/<lane>`
+   (never rebase) if the failure is only the base moving on.
    **Docs freshness**: when the target repo has `scripts/check-devdocs-freshness.sh`,
    the engine runs it on `base...HEAD` after implement (`io.docsFreshness`, empty
    `PR_BODY`). Exit 1 resumes the builder once with the script's output (`docsPrompt`);
@@ -573,3 +583,15 @@ forge.yaml `lean.repro_test` (`engine-cli.mjs` `readReproTest`, `off|prefer`, de
 ## Entry 2026-10-20 — Deterministic review trigger, shadow-first (#4273)
 
 `review-trigger.mjs` `computeTrigger` returns `{would_skip, reasons}` from facts only: `risk_path` (built-in auth/payments/security/deletion/migration words, plus forge.yaml `review.risk_paths` globs), `package_edge`, `hotspot` (changed file `over`, not excluded), `gate.failed` (precheck failures, declared check commands still failing, CI fallback) and `gate.ambiguous` (hotspot facts unavailable, or the contract defers a requirement). `gate()` logs `REVIEW_TRIGGER {mode, would_skip, reasons, skipped}` after the precheck. Modes (`review.trigger`, `readReviewTrigger`): `shadow` (default) always reviews; `enforce` skips `reviewOnce` when untriggered and records why (trajectory, decision, FORGE:REVIEW); `off` computes and logs nothing. An error in the trigger runs the reviewer. Exit criterion for enforce: ≥30 shadow runs with `would_skip_flagged` 0 in `node bin/lean/review-trigger.mjs [--json]` (per repo, from the local run logs). Cost: 0 LLM calls; enforce saves one or two reviewer runs per untriggered lane.
+
+## Entry 2026-10-20 — Test map + repo facts caches for the pre-PR step (#4272)
+
+`scripts/test-map.sh` writes `.forge/test-map.json` (`file glob → command` from package.json scripts, pytest/ruff
+config, go.mod, Makefile targets and CI workflow `run:` steps; fixtures `scripts/fixtures/test-map/{node,python,go}`).
+`scripts/repo-facts.sh` writes `.forge/repo-facts.json` (toolchain pins via `toolchain.mjs` `detectPins`, slow suites,
+workspace package edges + boundary configs, over-threshold hotspots via `hotspots.sh`). Both are optional, regenerable
+caches looked up in the lane worktree, then the main checkout (`bin/lean/testmap.mjs`). The pre-PR step (6a) runs the
+map's commands for the changed files when the map is valid and matches, else `learned.test_commands`; builder plan and
+implement prompts cite the facts file by path (`prompts.mjs` `factsRule`, never its content). Deleting both files
+restores today's commands, events and prompts byte-for-byte. Cost: 0 LLM calls; fewer pre-PR commands when the map
+narrows them. Rationale: `devdocs/decisions/4199-incremental-not-restructure.md`.
