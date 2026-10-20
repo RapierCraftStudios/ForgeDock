@@ -155,7 +155,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
-  recovery = null, decide = () => {}, conflicting = null }) {
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -403,6 +403,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       recovering.delete(n);
       if (row.outcome === "merged") row.recovered = prior.code;
       else row.recovery = { code: prior.code, attempts: recoveries.get(n) ?? prior.attempt, outcome: row.outcome, ...(row.code ? { result_code: row.code } : {}), detail: firstLine(row.detail) };
+      // A recovery that failed for good keeps needs-human. The lane relabels needs-human/ci-pending itself; engine-error (after its
+      // relaunch) and deferred (no longer requeued) end here, so the runner does it, once. invalid/decomposed/dependency-*/merged never.
+      if (["engine-error", "deferred"].includes(row.outcome) && typeof relabelNeedsHuman === "function") {
+        try { await relabelNeedsHuman({ issue: n, evidence: `Recovery pass for \`${prior.code}\` (attempt ${prior.attempt}) did not merge: it ended \`${row.outcome}\`${row.code ? ` (\`${row.code}\`)` : ""}${firstLine(row.detail) ? `: ${firstLine(row.detail)}` : ""}. The issue stays \`needs-human\`.` }); } catch { /* best effort */ }
+      }
     }
     if (recoveryMax && (row.outcome === "needs-human" || row.outcome === "ci-pending")) {
       let isConflicting = false;
