@@ -51,17 +51,22 @@
  * and instead of stopping when the budget refuses. The final `{where, reason}` is kept on the run record and the row as
  * `placement` and passed to `runOne` as `ctx.placement` (the lane records it in its FORGE:STATE).
  *
- * In-batch recovery (#4267), off unless `recovery: {maxAttempts}` is passed: a row `classifyNeedsHuman` calls
+ * In-batch recovery (#4267), on by default: this module recovers only when `recovery: {maxAttempts}` is passed, and the
+ * CLI always passes it (forge.yaml `orchestration.recovery.max_attempts`, default 1; 0 disables): a row `classifyNeedsHuman` calls
  * recoverable (needs-human `ci.red` / `base.conflict` / `builder.block_untyped`, `contract.invalid` after a mid-run issue
  * edit, `ci-pending` whose PR `conflicting(issue, pr)` says conflicts) is not final while its persisted `recoveries` stay
- * under `maxAttempts`: it is requeued as a recovery lane (`ctx.recover = {code, attempt}`) under the same admission as any
- * lane, so its dependents stay queued. A merged recovery row carries `recovered: <code>`; any other end is final with
- * `recovery` evidence. Human codes (`builder.blocked`) are never recovered. Every operational decision the runner takes
+ * under `maxAttempts`: it is requeued as a recovery lane (`ctx.recover = {code, attempt, final}`, `final` when attempt ==
+ * `maxAttempts`) under the same admission as any lane, so its dependents stay queued. Only a final lane relabels needs-human
+ * itself; a non-final attempt that ends needs-human/ci-pending without a successor is relabelled here, once (#4302). A recovery
+ * still queued when the batch exits (breaker, budget, hold, or a resume that does not relaunch it) is relabelled once with the
+ * full persisted lane reason (#4315).
+ * A merged recovery row carries `recovered: <code>`; any other end is final with `recovery` evidence. Human codes (`builder.blocked`) are never recovered. Every operational decision the runner takes
  * (recovery, engine-error relaunch, dependency requeue, sub-issues added) goes to `decide({issue, what, why, alternative})`,
  * fire-and-forget: the runner never waits on it.
  */
 import { parseDependsOn } from "../engine/phases.mjs";
 import { classifyNeedsHuman, recoveryCodeOf } from "../engine/outcome-codes.mjs";
+import { recoveryEvidence } from "./render.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -206,7 +211,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   let budgetStop = null, budgetHit = null; // this pass's refusal under on_budget stop; the last refusal reason
   const recoveryMax = Number.isInteger(recovery?.maxAttempts) && recovery.maxAttempts > 0 ? recovery.maxAttempts : 0;
   const recoveries = toMap(saved?.recoveries); // issue -> recovery lanes launched (#4267)
-  const recovering = toMap(saved?.recovering); // issue -> {code, attempt} of the recovery lane queued or running
+  const recovering = toMap(saved?.recovering); // issue -> {code, attempt, detail, outcome, ...} of the recovery lane queued or running
+  const relabelled = new Set(saved?.relabelled ?? []); // #4315: queued recoveries relabelled needs-human when a batch stopped
   // #4267: decisions are recorded, never awaited: a failing or slow recorder cannot block the batch.
   const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
   const firstLine = (x) => String(x ?? "").split("\n")[0].slice(0, 300);
@@ -217,7 +223,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
-      ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering) } : {}) });
+      ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering) } : {}),
+      ...(relabelled.size ? { relabelled: [...relabelled] } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
   const classifyOne = async (n) => {
@@ -338,7 +345,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
 
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
   const settle = async (n, r, rec, pf) => {
-    const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + (pf?.cost_usd ?? 0), minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
+    // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
+    const pfCost = recovering.has(n) ? 0 : (pf?.cost_usd ?? 0);
+    const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
       ...(r?.waits && typeof r.waits === "object" ? { waits: r.waits } : {}), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
       ...(rec?.placement ? { placement: rec.placement } : {}) };
     const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
@@ -399,6 +408,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     // #4267: a recovery pass ends here; a recoverable row under the attempt cap is requeued as a recovery lane.
     const prior = recovering.get(n) ?? null;
+    const evidence = () => recoveryEvidence({ code: prior.code, attempt: prior.attempt, outcome: row.outcome, resultCode: row.code, detail: row.detail });
     if (prior) {
       recovering.delete(n);
       // #4298: the row reports the whole issue: earlier attempts' cost and minutes are summed into the recovery's.
@@ -409,7 +419,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // A recovery that failed for good keeps needs-human. The lane relabels needs-human/ci-pending itself; engine-error (after its
       // relaunch) and deferred (no longer requeued) end here, so the runner does it, once. invalid/decomposed/dependency-*/merged never.
       if (["engine-error", "deferred"].includes(row.outcome) && typeof relabelNeedsHuman === "function") {
-        try { await relabelNeedsHuman({ issue: n, evidence: `Recovery pass for \`${prior.code}\` (attempt ${prior.attempt}) did not merge: it ended \`${row.outcome}\`${row.code ? ` (\`${row.code}\`)` : ""}${firstLine(row.detail) ? `: ${firstLine(row.detail)}` : ""}. The issue stays \`needs-human\`.` }); } catch { /* best effort */ }
+        try { await relabelNeedsHuman({ issue: n, evidence: evidence() }); } catch { /* best effort */ }
       }
     }
     if (recoveryMax && (row.outcome === "needs-human" || row.outcome === "ci-pending")) {
@@ -421,13 +431,19 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       const used = recoveries.get(n) ?? 0;
       if (classifyNeedsHuman(facts) === "recoverable" && used < recoveryMax) {
         const code = recoveryCodeOf(facts), attempt = used + 1;
-        recoveries.set(n, attempt); recovering.set(n, { code, attempt, cost_usd: Number(row.cost_usd) || 0, minutes: Number(row.minutes) || 0 });
+        // #4315: the full lane detail is kept (never firstLine) for the relabel when the batch stops before this attempt
+        recoveries.set(n, attempt); recovering.set(n, { code, attempt, cost_usd: Number(row.cost_usd) || 0, minutes: Number(row.minutes) || 0,
+          detail: String(row.detail ?? ""), outcome: row.outcome, ...(row.code ? { result_code: row.code } : {}), prev_attempt: prior?.attempt ?? 0 });
         requeue(n, 0); done(); save();
         decided({ issue: n, what: `recovery lane for ${code} (attempt ${attempt}/${recoveryMax}); dependents stay queued`, why: firstLine(row.detail) || code,
           alternative: "leave needs-human for the operator and skip the dependents" });
         update({ ...row, outcome: "recovering", detail: `recovering (${code}), attempt ${attempt}/${recoveryMax}: ${firstLine(row.detail)}` });
         return;
       }
+    }
+    // #4302: a non-final recovery attempt left needs-human/ci-pending unlabelled for its successor; none is launched, so relabel once.
+    if (prior && prior.attempt < recoveryMax && ["needs-human", "ci-pending"].includes(row.outcome) && typeof relabelNeedsHuman === "function") {
+      try { await relabelNeedsHuman({ issue: n, evidence: evidence() }); } catch { /* best effort */ }
     }
     results.set(n, row);
     if (row.outcome === "merged" && drift?.onMerged && r?.structure && String(rec?.lane ?? r?.lane ?? "").startsWith("milestone/")) {
@@ -449,6 +465,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       return;
     }
     const lane = ln?.lane;
+    if (relabelled.delete(n)) save(); // #4315: the recovery lane launches after all; it removes needs-human itself
     const pl = placed.get(n);
     placed.delete(n);
     const rec = { startedAt: now(), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
@@ -461,7 +478,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
-          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt } } : {}), onStart: (info) => {
+          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= recoveryMax } } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
             if (reg && slotted.has(n) && info?.pid) reg.setLanePid(keyOf(n), info.pid);
           } });
@@ -572,8 +589,21 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
   }
   if (reg) withdrawExcept(new Set());
+  const heldDetail = (n) => tripped?.detail ?? (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run");
+  // #4315: a recovery queued but never launched (the batch stopped: breaker, budget, hold; or a resume that did not relaunch a
+  // lost run) left the issue without needs-human, since a non-final attempt does not relabel. Relabel it once, with the full reason.
+  for (const [n, q] of recovering) {
+    if (running.has(n) || results.has(n) || relabelled.has(n) || typeof relabelNeedsHuman !== "function") continue;
+    const cause = heldDetail(n) === "not run" ? "batch stopped" : heldDetail(n);
+    const evidence = recoveryEvidence({ code: q.code, attempt: q.prev_attempt, outcome: q.outcome, resultCode: q.result_code, detail: q.detail, full: true,
+      queued: q.attempt, cause, recoveryMax });
+    try { await relabelNeedsHuman({ issue: n, evidence }); } catch { /* best effort */ }
+    relabelled.add(n);
+  }
   save();
-  return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: tripped?.detail ?? (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run") });
+  return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: heldDetail(n),
+    ...(recovering.has(n) ? { recovery: { code: recovering.get(n).code, attempts: recoveries.get(n) ?? recovering.get(n).attempt, outcome: recovering.get(n).outcome ?? "needs-human",
+      ...(recovering.get(n).result_code ? { result_code: recovering.get(n).result_code } : {}), detail: firstLine(recovering.get(n).detail ?? recovering.get(n).code) } } : {}) });
 }
 
 /** Max chars of one row's detail in the batch-report outcome lists (#4298). */

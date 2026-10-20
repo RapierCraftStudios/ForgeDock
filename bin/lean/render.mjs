@@ -50,6 +50,19 @@ export function capComment(body, max = MAX_COMMENT_CHARS) {
   const note = "\n\n_[truncated: comment exceeded the size cap]_";
   return s.slice(0, max - note.length) + note;
 }
+/**
+ * #4297/#4316: the one evidence text for a recovery that did not merge (lane, settle and batch-exit relabel). `attempt` 0 is
+ * the first lane; the detail is its first line capped at 300 chars unless `full`. `queued` (the attempt that never launched)
+ * adds why the batch stopped before it.
+ */
+export function recoveryEvidence({ code, attempt, outcome, resultCode, detail, full = false, queued = 0, cause = "", recoveryMax = 0 }) {
+  const how = attempt ? `Recovery pass for \`${code}\` (attempt ${attempt}) did not merge` : "The lane did not merge";
+  const d = String(detail ?? "").trim();
+  const shown = full ? d : d.split("\n")[0].slice(0, 300);
+  const head = `${how}: it ended \`${outcome ?? "needs-human"}\`${resultCode ? ` (\`${resultCode}\`)` : ""}${shown ? `: ${shown}` : ""}`;
+  return queued ? `${head}\n\nRecovery attempt ${queued}/${recoveryMax || queued} for \`${code}\` was queued, but the batch stopped (${cause}) before it launched. The issue stays \`needs-human\`.`
+    : `${head}. The issue stays \`needs-human\`.`;
+}
 const usable = (md) => sanitizeMd(md).replace(/\s+/g, " ").length >= 20;
 
 /** Text of the `### heading` section (up to the next heading), or "". */

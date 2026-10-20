@@ -142,5 +142,9 @@ for f in commands/work-on/review.md; do
   grep -q 'stale review' "$HERE/../$f" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: $f does not route stale review"; }
 done
 
+# forge#4304: --help prints the whole header, through the rate-limit and "No checks" lines.
+HELP=$(bash "$GATE" --help); HRC=$?
+expect "--help exits 0" "0" "$HRC"
+grep -qF 'Rate-limit and transient gh failures' <<<"$HELP" && grep -qF 'the gate keeps waiting.' <<<"$HELP" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: --help cuts off the header"; }
 echo "wait-ci-green tests: pass=$PASS fail=$FAILN"
 [ "$FAILN" -eq 0 ]

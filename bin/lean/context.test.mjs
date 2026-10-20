@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { gatherContextFacts, compileContextPack, contextPackFor, contextPackCacheKey, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments } from "./context.mjs";
+import { gatherContextFacts, compileContextPack, contextPackFor, contextPackCacheKey, linkStateStamp, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments } from "./context.mjs";
 
 const REPO = "o/r";
 const BOT = { author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
@@ -212,26 +212,54 @@ describe("#4298 context-pack cache and shared names", () => {
       list: async () => [...store.keys()].map((k) => k.slice("/runs/".length)), rm: async (p) => { ops.push(["rm", p]); store.delete(p); } } };
   };
 
-  it("the key changes with the issue's updatedAt and attempt count; no stamp keeps the old shape", () => {
+  it("#4304: the key changes with the scope hash and attempt count, not updatedAt; no stamp keeps the old shape", () => {
     const k = (s) => contextPackCacheKey(50, "abc", cfg, s);
     assert.equal(k(), contextPackCacheKey(50, "abc", cfg));
-    assert.equal(k({ updatedAt: "2026-10-20T10:00:00Z", attempts: 1 }), k({ updatedAt: "2026-10-20T10:00:00Z", attempts: 1 }));
-    assert.notEqual(k({ updatedAt: "2026-10-20T10:00:00Z", attempts: 1 }), k({ updatedAt: "2026-10-20T11:00:00Z", attempts: 1 }));
-    assert.notEqual(k({ updatedAt: "2026-10-20T10:00:00Z", attempts: 1 }), k({ updatedAt: "2026-10-20T10:00:00Z", attempts: 2 }));
+    assert.equal(k({ scope: "aaa111", attempts: 1 }), k({ scope: "aaa111", attempts: 1 }));
+    assert.equal(k({ scope: "aaa111", attempts: 1, updatedAt: "2026-10-20T10:00:00Z" }), k({ scope: "aaa111", attempts: 1, updatedAt: "2026-10-20T11:00:00Z" }), "the lane's own posts do not miss the cache");
+    assert.notEqual(k({ scope: "aaa111", attempts: 1 }), k({ scope: "bbb222", attempts: 1 }));
+    assert.notEqual(k({ scope: "aaa111", attempts: 1 }), k({ scope: "aaa111", attempts: 2 }));
+  });
+
+  it("#4316: linked-issue states are in the key; a state change recompiles; no links keeps the old key", async () => {
+    const states = { 7: "open", 8: "open", 9: "closed" };
+    const calls = [];
+    const gh = async (args) => { calls.push(args); const n = Number(/issues\/(\d+)$/.exec(args[1])?.[1]); if (n === 9 && states.fail9) throw new Error("HTTP 502"); return `${states[n]}\n`; };
+    const body = "**Parent**: #7\nDepends on #8\nSee #9 and #50 (self).";
+    const s1 = await linkStateStamp({ gh, repo: "o/r", issue: 50, body });
+    assert.match(s1, /^[0-9a-f]{12}$/);
+    assert.deepEqual(calls.map((a) => a[1]), ["repos/o/r/issues/7", "repos/o/r/issues/8", "repos/o/r/issues/9"], "parent, depends-on and links once each, never self");
+    assert.equal(await linkStateStamp({ gh, repo: "o/r", issue: 50, body }), s1, "stable");
+    states[8] = "closed";
+    const s2 = await linkStateStamp({ gh, repo: "o/r", issue: 50, body });
+    assert.notEqual(s2, s1, "a linked issue closing changes the stamp");
+    states.fail9 = true;
+    assert.match(await linkStateStamp({ gh, repo: "o/r", issue: 50, body }), /^[0-9a-f]{12}$/, "an unreadable link never throws");
+    assert.equal(await linkStateStamp({ gh: async () => { throw new Error("x"); }, repo: "o/r", issue: 50, body: "no links here" }), "");
+    const k = (s) => contextPackCacheKey(50, "abc", cfg, s);
+    assert.equal(k({ scope: "s", attempts: 0, links: "" }), k({ scope: "s", attempts: 0 }), "no links: the pre-#4316 key");
+    assert.notEqual(k({ scope: "s", attempts: 0, links: s1 }), k({ scope: "s", attempts: 0, links: s2 }));
+    const { fs } = memFs();
+    let n = 0;
+    const run = (links) => contextPackFor({ cfg, issue: 50, headSha: "abc", cacheDir: "/runs", fs, stamp: { scope: "s", attempts: 0, links }, gather: async () => { n++; return facts(); } });
+    await run(s1);
+    assert.equal((await run(s1)).cached, true);
+    assert.equal((await run(s2)).cached, false, "the pack recompiles after a linked issue closed");
+    assert.equal(n, 2);
   });
 
   it("an issue edit recompiles; a gather with source errors is not cached", async () => {
     const { fs, store } = memFs();
     let n = 0;
     const run = (stamp, errors) => contextPackFor({ cfg, issue: 50, headSha: "abc", cacheDir: "/runs", fs, stamp, gather: async () => { n++; return facts(errors); } });
-    await run({ updatedAt: "t1", attempts: 0 });
-    assert.equal((await run({ updatedAt: "t1", attempts: 0 })).cached, true);
-    await run({ updatedAt: "t2", attempts: 0 });
+    await run({ scope: "s1", attempts: 0 });
+    assert.equal((await run({ scope: "s1", attempts: 0, updatedAt: "later" })).cached, true);
+    await run({ scope: "s2", attempts: 0 });
     assert.equal(n, 2, "the edit recompiled");
     const before = store.size;
-    const r = await run({ updatedAt: "t3", attempts: 0 }, ["graph: timeline HTTP 502"]);
+    const r = await run({ scope: "s3", attempts: 0 }, ["graph: timeline HTTP 502"]);
     assert.deepEqual([r.cached, r.errors, store.size], [false, ["graph: timeline HTTP 502"], before]);
-    assert.equal((await run({ updatedAt: "t3", attempts: 0 }, ["graph: timeline HTTP 502"])).cached, false, "errors are retried, not served from cache");
+    assert.equal((await run({ scope: "s3", attempts: 0 }, ["graph: timeline HTTP 502"])).cached, false, "errors are retried, not served from cache");
   });
 
   it("writes through a temp file and a rename, then prunes the issue's other packs only", async () => {
@@ -239,8 +267,8 @@ describe("#4298 context-pack cache and shared names", () => {
     store.set("/runs/context-50-old-aaaaaaaaaaaa.json", "{}");
     store.set("/runs/context-500-x-bbbbbbbbbbbb.json", "{}");
     store.set("/runs/50-run.jsonl", "");
-    await contextPackFor({ cfg, issue: 50, headSha: "abc", cacheDir: "/runs", fs, stamp: { updatedAt: "t", attempts: 0 }, gather: async () => facts() });
-    const file = `/runs/${contextPackCacheKey(50, "abc", cfg, { updatedAt: "t", attempts: 0 })}`;
+    await contextPackFor({ cfg, issue: 50, headSha: "abc", cacheDir: "/runs", fs, stamp: { scope: "t", attempts: 0 }, gather: async () => facts() });
+    const file = `/runs/${contextPackCacheKey(50, "abc", cfg, { scope: "t", attempts: 0 })}`;
     assert.equal(ops[0][0], "write"); assert.match(ops[0][1], /\.tmp$/);
     assert.deepEqual(ops[1], ["rename", ops[0][1], file]);
     assert.deepEqual([...store.keys()].sort(), ["/runs/50-run.jsonl", "/runs/context-500-x-bbbbbbbbbbbb.json", file].sort());

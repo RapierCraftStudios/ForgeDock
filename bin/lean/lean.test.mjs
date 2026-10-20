@@ -787,6 +787,24 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.equal((await run(plain, ends["ci-pending"][1])).terminalReason, "ci-pending");
     assert.equal(add(plain), 0, "no recovery: a ci-pending run is not labelled");
   });
+
+  it("#4302: a non-final recovery attempt (recover.final false) never relabels needs-human; final true or absent relabels once", async () => {
+    const add = (w) => w.edits.filter((e) => e.join(" ") === "issue edit 7 -R o/r --add-label needs-human").length;
+    const nh = (w) => w.comments.filter((c) => c.startsWith("<!-- FORGE:NEEDS_HUMAN -->")).length;
+    const ends = {
+      "ci-pending": [{ waits: Array(500).fill({ rc: 2, text: "" }) }, { ciMaxMinutes: 10, mergeWait: "all" }],
+      "needs-human": [{ waits: [{ rc: 1, text: "lint failed" }] }, { mergeWait: "all" }],
+    };
+    for (const [reason, [wo, ro]] of Object.entries(ends)) {
+      for (const [final, want] of [[false, 0], [true, 1], [undefined, 1]]) {
+        const w = world(wo);
+        const r = await run(w, { recover: { code: "ci.red", attempt: 1, ...(final === undefined ? {} : { final }) }, ...ro });
+        assert.equal(r.terminalReason, reason);
+        assert.equal(add(w), want, `${reason} final=${final}: label`); assert.equal(nh(w), want, `${reason} final=${final}: comment`);
+        if (reason === "needs-human") assert.equal(r.recovery, true);
+      }
+    }
+  });
 });
 
 describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness.sh)", () => {
@@ -3547,10 +3565,20 @@ describe("test map and repo facts caches (#4272)", () => {
       { globs: ["**/*.py"], command: "uv run pytest", cwd: ".", source: "pyproject.toml" }, { globs: ["test/**"], command: "npm test", cwd: "pkg", source: "pkg/package.json" }]);
     const dir = tmpDir("core-");
     assert.equal((await run(w, { dir, precheck: { commands: ["make lint"] } })).terminalReason, "merged");
-    assert.deepEqual(ran, ["npm run lint", "cd pkg && npm test"]);
+    // #4315: the map adds to learned.test_commands, never replaces them
+    assert.deepEqual(ran, ["make lint", "npm run lint", "cd pkg && npm test"]);
     const pre = readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS");
-    assert.deepEqual(pre.map((e) => [e.source, e.results.map((r) => r.command)]), [["test-map", ["npm run lint", "cd pkg && npm test"]]]);
-    assert.match(traj(w)[0], /Pre-PR checks selected from \.forge\/test-map\.json: 2 of 3 entries/);
+    assert.deepEqual(pre.map((e) => [e.source, e.results.map((r) => r.command)]), [["test-map+learned", ["make lint", "npm run lint", "cd pkg && npm test"]]]);
+    assert.match(traj(w)[0], /Pre-PR checks selected from \.forge\/test-map\.json: 2 of 3 entries, plus 1 learned/);
+  });
+
+  it("#4315 a partial test map still runs the learned commands it does not cover, each once", async () => {
+    const w = world(); const ran = recorder(w);
+    w.baseFiles = { [MAPF]: map([{ globs: ["src/**"], command: "npm test", cwd: "." }, { globs: ["**/*.go"], command: "go test ./...", cwd: "." }]) };
+    const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir, precheck: { commands: ["npm test", "make lint"] } })).terminalReason, "merged");
+    assert.deepEqual(ran, ["npm test", "make lint"]);
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS").map((e) => Object.keys(e).includes("source")), [false]);
   });
 
   it("the main checkout's test map is used when the base ref has none; a map alone enables the step", async () => {

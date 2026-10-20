@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { prefilterIssue, makePrefilter, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, DEFAULT_PREFILTER_MODEL } from "./prefilter.mjs";
+import { prefilterIssue, flakyReason, makePrefilter, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, DEFAULT_PREFILTER_MODEL } from "./prefilter.mjs";
 import { parsePrefilterVerdict, prefilterPrompt } from "./prompts.mjs";
 import { orchestrate, formatTable } from "./orchestrate.mjs";
 import { triageFromCli } from "../engine-cli.mjs";
@@ -12,7 +12,7 @@ const fence = (o) => "```json\n" + JSON.stringify(o) + "\n```";
 /** Fake GitHub + git for one repo `o/r`, lane `staging`. */
 function world(o = {}) {
   const w = { comments: [], closed: [], labels: [], runner: [], lanes: [], gitCalls: [],
-    issues: o.issues ?? {}, prs: o.prs ?? [], commits: o.commits ?? "", paths: new Set(o.paths ?? []), runs: o.runs ?? {}, workflowRuns: o.workflowRuns ?? {},
+    issues: o.issues ?? {}, prs: o.prs ?? [], commits: o.commits ?? "", paths: new Set(o.paths ?? []), runs: o.runs ?? {}, workflowRuns: o.workflowRuns ?? {}, shaRuns: o.shaRuns ?? {},
     verdict: o.verdict ?? null };
   w.io = {
     gh: async (a) => {
@@ -25,6 +25,8 @@ function world(o = {}) {
         if (m) return JSON.stringify(w.runs[m[1]]);
         const wf = /actions\/workflows\/(\d+)\/runs\?branch=([^&]+)/.exec(a[1]);
         if (wf) return JSON.stringify({ workflow_runs: w.workflowRuns[`${wf[1]}:${decodeURIComponent(wf[2])}`] ?? [] });
+        const at = /actions\/workflows\/\d+\/runs\?head_sha=([^&]+)/.exec(a[1]);
+        if (at) { w.shaQueries = (w.shaQueries ?? 0) + 1; return JSON.stringify({ workflow_runs: w.shaRuns[at[1]] ?? [] }); }
       }
       if (k === "issue comment") { w.comments.push([Number(a[2]), a[a.indexOf("--body") + 1]]); return ""; }
       if (k === "issue close") { w.closed.push([Number(a[2]), a[a.indexOf("--reason") + 1]]); return ""; }
@@ -98,6 +100,90 @@ describe("pre-filter (#4123)", () => {
     assert.equal(w.runner.length, 0);
     assert.match(w.comments[0][1], /actions\/runs\/600/); assert.match(w.comments[0][1], /actions\/runs\/500/);
     assert.deepEqual(w.closed, [[34, "not planned"]]);
+  });
+
+  it("#4305 the CI-green shortcut is skipped for intermittent, reopened and same-SHA-flaky CI failures", async () => {
+    const link = "Run: https://github.com/o/r/actions/runs/500";
+    const green = (issue, extra = {}) => world({ issues: { 34: { title: "shell-compat failed on staging", body: `Workflow failed.\n${link}`, ...issue } },
+      runs: { 500: { id: 500, workflow_id: 7, name: "shell-compat", head_branch: "staging", head_sha: "1111111111111111", created_at: "2026-10-10T00:00:00Z", html_url: "https://github.com/o/r/actions/runs/500" } },
+      workflowRuns: { "7:staging": [{ id: 600, conclusion: "success", created_at: "2026-10-12T00:00:00Z", html_url: "https://github.com/o/r/actions/runs/600", head_sha: "8d9f6ba0aaaaaaaa" }] }, ...extra });
+    const bot = { author: { login: "rapiercraft-forgedock[bot]" }, authorAssociation: "NONE", body: "<!-- FORGE:PREFILTER -->\n<!-- FORGE:VALIDATE -->\n## Pre-filter: CI failure no longer reproduces" };
+    const stranger = { author: { login: "someone" }, authorAssociation: "NONE", body: bot.body };
+    const cases = [
+      ["intermittent wording", green({ body: `\`a.test.sh\` fails intermittently on macOS.\n${link}` }), /issue says the failure is intermittent/, "flaky"],
+      ["flaky label", green({ labels: [{ name: "flaky" }] }), /flaky label/, "flaky"],
+      ["reopened after a pre-filter close", green({ comments: [bot] }), /reopened after a pre-filter close/, "reopened"],
+      ["failed and passed at the same SHA", green({}, { shaRuns: { "8d9f6ba0aaaaaaaa": [{ id: 601, conclusion: "failure" }, { id: 600, conclusion: "success" }] } }), /failed and passed at 8d9f6ba0aaaa/, "same-sha"],
+    ];
+    for (const [name, w, why, reason] of cases) {
+      const r = await pf(w, 34);
+      assert.equal(r.closed, false, name); assert.notEqual(r.kind, "ci-green", name);
+      assert.deepEqual(w.closed, [], name); assert.deepEqual(w.comments, [], name); assert.equal(w.runner.length, 0, name);
+      assert.ok(r.detail.startsWith(`skipped CI-green shortcut: ${reason} (`), `${name}: ${r.detail}`); assert.match(r.detail, why, name);
+      assert.match(r.detail, /no already-fixed signal$/, name);
+    }
+    // wording and the reopen marker need no runs lookup; an untrusted marker comment is no reopen, and a green-only SHA still closes
+    const quiet = green({ body: `fails intermittently ${link}` });
+    await pf(quiet, 34); assert.equal(quiet.shaQueries ?? 0, 0);
+    const forged = green({ comments: [stranger] }, { shaRuns: { "8d9f6ba0aaaaaaaa": [{ id: 600, conclusion: "success" }] } });
+    const r = await pf(forged, 34);
+    assert.equal(r.kind, "ci-green"); assert.equal(forged.shaQueries, 1);
+    // an unreadable same-SHA lookup is no proof either: no shortcut
+    const down = green();
+    const gh0 = down.io.gh; down.io.gh = async (a) => (/head_sha=/.test(a[1] ?? "") ? (() => { throw new Error("HTTP 502"); })() : gh0(a));
+    assert.equal((await pf(down, 34)).closed, false);
+  });
+
+  it("#4316 a bare \"sometimes\" is prose, not flaky wording; \"fails sometimes\" and \"sometimes fails\" are", () => {
+    assert.equal(flakyReason({ title: "deploy check failed", body: "This sometimes happens after a deploy." }), null);
+    assert.equal(flakyReason({ title: "x", body: "Sometimes we rerun it by hand." }), null);
+    for (const body of ["the job fails sometimes on macOS", "it sometimes fails on macOS", "shell-compat failed sometimes", "intermittent timeout", "a flaky test"]) {
+      assert.equal(flakyReason({ title: "ci failed", body })?.reason, "flaky", body);
+    }
+  });
+  it("#4315 a comment shaped like #4235's real pre-filter comment is the pipeline's own: a reopened CI-failure issue is kept for a lane", async () => {
+    const link = "Run: https://github.com/o/r/actions/runs/500";
+    const green = (issue, extra = {}) => world({ issues: { 34: { title: "shell-compat failed on staging", body: `Workflow failed.\n${link}`, ...issue } },
+      runs: { 500: { id: 500, workflow_id: 7, name: "shell-compat", head_branch: "staging", head_sha: "1111111111111111", created_at: "2026-10-10T00:00:00Z", html_url: "https://github.com/o/r/actions/runs/500" } },
+      workflowRuns: { "7:staging": [{ id: 600, conclusion: "success", created_at: "2026-10-12T00:00:00Z", html_url: "https://github.com/o/r/actions/runs/600", head_sha: "8d9f6ba0aaaaaaaa" }] },
+      shaRuns: { "8d9f6ba0aaaaaaaa": [{ id: 600, conclusion: "success" }] }, ...extra });
+    // the shape `gh issue view --json comments` returns for the ForgeDock App on #4235: no `[bot]`, CONTRIBUTOR, marker first
+    const body = "<!-- FORGE:PREFILTER -->\n<!-- FORGE:VALIDATE -->\n## Pre-filter: CI failure no longer reproduces\n**Workflow:** shell-compat on `staging`";
+    const real = { author: { login: "rapiercraft-forgedock" }, authorAssociation: "CONTRIBUTOR", body };
+    const w = green({ comments: [real] });
+    const r = await pf(w, 34);
+    assert.equal(r.closed, false); assert.notEqual(r.kind, "ci-green");
+    assert.match(r.detail, /reopened after a pre-filter close/);
+    assert.deepEqual(w.closed, []); assert.deepEqual(w.comments, []);
+    // the token's own user (`gh api user`) counts too, cached once per makePrefilter batch; a CONTRIBUTOR stranger does not
+    const mine = green({ comments: [{ ...real, author: { login: "Op-User" } }] });
+    let userCalls = 0; const gh0 = mine.io.gh;
+    mine.io.gh = async (a) => (a[0] === "api" && a[1] === "user" ? (userCalls++, "op-user\n") : gh0(a));
+    const run = makePrefilter({ repo: "o/r", cwd: "/repo", io: mine.io });
+    assert.match((await run(34, "staging")).detail, /reopened after a pre-filter close/);
+    await run(34, "staging"); assert.equal(userCalls, 1);
+    const stranger = green({ comments: [{ ...real, author: { login: "someone" } }] });
+    assert.equal((await pf(stranger, 34)).kind, "ci-green");
+    // BUG-4: the marker is posted only after a successful close; a failed close posts no marker
+    const order = [];
+    const ok = green(); const g2 = ok.io.gh;
+    ok.io.gh = async (a) => { if (["issue close", "issue comment"].includes(a.slice(0, 2).join(" "))) order.push(a[1]); return g2(a); };
+    assert.equal((await pf(ok, 34)).closed, true); assert.deepEqual(order, ["close", "comment"]);
+    const fails = green(); const g3 = fails.io.gh;
+    fails.io.gh = async (a) => (a.slice(0, 2).join(" ") === "issue close" ? (() => { throw new Error("HTTP 403"); })() : g3(a));
+    const f = await pf(fails, 34);
+    assert.equal(f.closed, false); assert.deepEqual(fails.comments, []); assert.match(f.detail, /pre-filter error/);
+    // #4314: a failing comment after a successful close still counts as closed (no lane), via retry, then a marker-only comment
+    const flaky = (n, big) => { const x = green(); const g = x.io.gh; let calls = 0;
+      x.io.gh = async (a) => { if (a.slice(0, 2).join(" ") === "issue comment") { calls++; if (calls <= n || (big && a[a.indexOf("--body") + 1].includes("## Pre-filter"))) throw new Error("HTTP 502"); } return g(a); };
+      return x; };
+    const once = flaky(1); const r1 = await pf(once, 34);
+    assert.equal(r1.closed, true); assert.equal(once.comments.length, 1); assert.doesNotMatch(r1.detail, /no marker/);
+    const tiny = flaky(0, true); const r2 = await pf(tiny, 34);
+    assert.equal(r2.closed, true); assert.equal(tiny.comments.length, 1); assert.match(tiny.comments[0][1], /^<!-- FORGE:PREFILTER -->/);
+    assert.match(flakyReason({ comments: [{ body: tiny.comments[0][1], author: { login: "forgedock-app[bot]" }, authorAssociation: "NONE" }] }, ["forgedock-app"])?.reason ?? "", /reopened/);
+    const dead = flaky(99); const r3 = await pf(dead, 34);
+    assert.equal(r3.closed, true); assert.equal(dead.runner.length, 0); assert.deepEqual(dead.closed, [[34, "not planned"]]); assert.match(r3.detail, /no marker comment/);
   });
 
   it("a CI-failure issue whose workflow is still red (or whose latest run is the failing one) goes to a lane", async () => {

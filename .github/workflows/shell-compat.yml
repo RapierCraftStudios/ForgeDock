@@ -85,6 +85,7 @@ jobs:
           /bin/bash scripts/review-roster.test.sh
           /bin/bash scripts/selfreview-plan.test.sh
           /bin/bash scripts/review-prepare.test.sh
+          /bin/bash scripts/code-index.test.sh
           /bin/bash scripts/review-finalize.test.sh
           /bin/bash scripts/spawn-depth-check.test.sh
           /bin/bash scripts/diff-size.test.sh

@@ -38,7 +38,8 @@ Do this yourself from issue text and the code. Spawn no sub-agents here.
 
    It closes, with the evidence on the issue and no lane, every issue that a merged PR already fixed (one
    short read-only validation on a small model) or an auto-filed CI failure whose workflow is green again
-   (the green run link). It checks K issues at a time. Its last line is `lanes: #A #B ...`: continue with only
+   (the green run link), unless it is flaky (wording or `flaky` label), was reopened after a pre-filter close, or
+   the workflow failed and passed at the same SHA. It checks K issues at a time. Its last line is `lanes: #A #B ...`: continue with only
    those issues. This is the only pre-filter in this command: lanes run `forgedock run-issue`, which does not
    pre-filter again. Keep its
    `pre-filter:` line for the report.
@@ -144,12 +145,12 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
   These are mechanical. **Do not ask for confirmation on them.** The batch runner recovers each one itself
   (`orchestration.recovery.max_attempts`, default 1 per issue). It launches one recovery lane under the same lease, lane
   and admission rules as any lane, with `run-issue --recover <code> [--recover-attempt n]` (core path only:
-  `--path full` rejects `--recover`). That lane:
+  `--path full` rejects `--recover`; recovery is off when `engine.path: full`). That lane:
   - removes `needs-human`;
   - resumes the open PR: merges the base, fixes the failed required checks from their logs, and pushes new commits only;
   - re-queues the issue, keeping its dependents queued in the same batch.
 
-  Report what was recovered afterwards. A failed recovery stays `needs-human` with its evidence, exactly once (failed = `needs-human`, `ci-pending`, or a final `engine-error`/`deferred`; `invalid`, `decomposed` and `dependency-*` are not failures and never re-label), and there
+  Report what was recovered afterwards. A failed recovery stays `needs-human` with its evidence, re-labelled exactly once per issue, by the final attempt only (failed = `needs-human`, `ci-pending`, or a final `engine-error`/`deferred`; `invalid`, `decomposed` and `dependency-*` are not failures and never re-label). With `max_attempts > 1` a non-final attempt adds no label or comment: the runner either launches the next attempt or, when none follows, re-labels it once itself, so the label does not flap between attempts. There
   is no second attempt beyond `max_attempts`.
 - `needs-human` with a **human code** (`builder.blocked`: product-decision, spend, credentials, promotion, customer): an
   external action agents cannot take, or a product decision too critical for agents. It is never auto-recovered. Read

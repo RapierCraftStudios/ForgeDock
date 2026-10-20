@@ -660,8 +660,13 @@ git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH | grep -iE "(api[_-]?ke
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 . "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 gh pr checks "$PR_NUMBER" -R "$GH_REPO" 2>&1
+# forgedock/verify (the lean engine's report-only gate summary) is not a code failure: ignored, as wait-ci-green.sh does.
+# Fail closed: an unreadable result counts as failing.
+CI_FAILING=$(gh pr checks "$PR_NUMBER" -R "$GH_REPO" --json name,bucket \
+  --jq '[.[] | select(.name != "forgedock/verify") | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null || echo "1")
+echo "CI_FAILING: $CI_FAILING"
 ```
-Any CI failure → BLOCK DEPLOY (unless autofixed in Phase 1F).
+`CI_FAILING` > 0 → BLOCK DEPLOY (unless autofixed in Phase 1F). A red `forgedock/verify` alone does not block.
 
 ### Phase 1F: CI Autofix
 

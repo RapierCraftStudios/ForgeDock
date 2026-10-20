@@ -102,12 +102,35 @@ export function priorAttempts(body, comments = []) {
 }
 
 /**
- * Cache key for a compiled pack: issue + base head SHA, plus the config that shapes it and (#4298) the issue's
- * `updatedAt` and prior-attempt count, so an edit or a new attempt on the same base compiles a fresh pack.
+ * Cache key for a compiled pack: issue + base head SHA, plus the config that shapes it and (#4298, #4304) the hash of the
+ * issue's human scope text (`scope`) and prior-attempt count, so an edit or a new attempt on the same base compiles a
+ * fresh pack. Not `updatedAt`: the lane's own FORGE:STATE/CONTEXT posts and label edits bump it, so the cache never hit.
  */
 export const contextPackCacheKey = (issue, headSha, cfg = {}, stamp = {}) =>
   `context-${issue}-${String(headSha ?? "").trim().slice(0, 40) || "nohead"}-${hash12(JSON.stringify([cfg.sources ?? [], cfg.budgetBytes ?? null, cfg.days ?? null,
-    ...(stamp?.updatedAt != null || stamp?.attempts != null ? [String(stamp.updatedAt ?? ""), Number(stamp.attempts) || 0] : [])]))}.json`;
+    ...(stamp?.scope != null || stamp?.attempts != null ? [String(stamp.scope ?? ""), Number(stamp.attempts) || 0] : []),
+    ...(stamp?.links ? [`links:${stamp.links}`] : [])]))}.json`;
+
+/** Max referenced issues whose state is read for the cache stamp (one REST call each). */
+export const LINK_STAMP_MAX = 20;
+/**
+ * #4316: the linked-issue part of the cache stamp: a hash of `n:STATE` for each issue the body references (parent, Depends
+ * on, `#N` links), so a pack never shows a linked issue as open after it closed on the same base. Timeline cross-refs are
+ * left to the gather. An unreadable issue counts as `n:?`; never throws; '' when the body references nothing.
+ */
+export async function linkStateStamp({ gh, repo, issue, body }) {
+  const parent = parentOf(body);
+  const nums = [...new Set([...(parent ? [parent] : []), ...parseDependsOn(stripComments(body), issue), ...bodyLinks(body, repo, issue)])]
+    .filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue)).sort(byNum).slice(0, LINK_STAMP_MAX);
+  if (!nums.length) return "";
+  const states = [];
+  for (const n of nums) {
+    let st = "?";
+    try { st = String(await gh(["api", `repos/${repo}/issues/${n}`, "--jq", ".state"])).trim().toUpperCase() || "?"; } catch { /* unreadable: n:? */ }
+    states.push(`${n}:${st}`);
+  }
+  return hash12(states.join(","));
+}
 
 // ---- gather (I/O) ----
 
@@ -298,7 +321,7 @@ export function renderContextRecord(pack, { mode, laneType: lt }) {
 }
 
 /**
- * The pack for one run: read from the cache (`cacheDir`, keyed by issue + base head SHA + config + `stamp`) or gathered
+ * The pack for one run: read from the cache (`cacheDir`, keyed by issue + base head SHA + config + `stamp` {scope, attempts}) or gathered
  * and compiled, then cached. `gather` returns the facts; `fs` is {read, write, rename?, list?, rm?}. A gather that
  * reported source errors is not cached (#4298), the write goes through a temp file and a rename, and the issue's other
  * cached packs are pruned. A cache miss or any write/rename/prune failure is not an error.

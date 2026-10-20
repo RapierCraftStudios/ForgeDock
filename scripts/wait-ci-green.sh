@@ -55,7 +55,7 @@ while [ $# -gt 0 ]; do
     --timeout) [ $# -ge 2 ] || usage; TIMEOUT="$2"; shift 2 ;;
     --interval) [ $# -ge 2 ] || usage; INTERVAL="$2"; shift 2 ;;
     --ignore-check) [ $# -ge 2 ] || usage; IGNORE="$(jq -c --arg n "$2" '. + [$n]' <<<"$IGNORE")"; shift 2 ;;
-    -h|--help) sed -n '5,37p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,41p' "$0"; exit 0 ;;
     *) [ -z "$PR" ] || usage; PR="$1"; shift ;;
   esac
 done

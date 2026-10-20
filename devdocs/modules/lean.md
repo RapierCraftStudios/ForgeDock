@@ -97,9 +97,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (`precheckFailurePrompt`, up to `max_rounds`); no commit / rounds exhausted is
    an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
    An optional `.forge/test-map.json` (#4272, `scripts/test-map.sh`; base ref via
-   `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) replaces that list with the map
-   entries whose globs match the changed files (`selectCommands`; event gains
-   `source: "test-map"`); no map, an invalid one or no match keeps `learned.test_commands`.
+   `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) adds the map entries whose
+   globs match the changed files to that list (`selectCommands` + `mergeChecks`, #4315: learned first, deduped, so the
+   map never removes a check; event gains `source: "test-map"|"test-map+learned"` when the map added a command).
 6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
@@ -241,7 +241,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
-`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`),
+`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
@@ -646,7 +646,8 @@ narrows them. Rationale: `devdocs/decisions/4199-incremental-not-restructure.md`
 with `issueEdited`, `ci-pending` on a conflicting PR → `base.conflict`), `human`
 (`builder.blocked`: credentials, spend, promotion, customer, product-decision) or
 `terminal`. `orchestrate()` option `recovery: {maxAttempts}` (forge.yaml
-`orchestration.recovery.max_attempts`, default 1, 0 = off; absent = old behaviour)
+`orchestration.recovery.max_attempts`, default 1, 0 = off; absent = old behaviour;
+`orchestrateFromCli` leaves it off when `engine.path` is `full`, #4304, since recovery lanes run on the core path only)
 requeues a recoverable row as a recovery lane (`ctx.recover = {code, attempt}`, state
 keys `recoveries`/`recovering`) under the usual admission, so dependents stay queued.
 A merged recovery row carries `recovered: <code>`; any other end is final with
@@ -665,8 +666,11 @@ Context pack: `context.mjs` `codeOf` keeps a `FORGE:STATE` `terminalCode`, `fail
 `terminalReason` only when it matches `^[a-z][a-z0-9_.-]{0,63}$`. `linkLine` re-checks this, so cached facts are covered,
 and cross-repo timeline references are skipped (the jq emits `repository_url` + number). `lean.mjs` `textOf` drops
 `<!-- FORGE:` comments, so `FORGE:CONTEXT` is never quotable. The pre-PR test map comes from the base ref
-(`readTestMapAtRef`), else the main checkout. `scripts/test-map.sh` ends a `run:` block at the `run` key's column and
-drops deploy/publish/release/push/secret steps. `verifyReport` gates carry `ran`; zero ran → `neutral`, "no gates
+(`readTestMapAtRef`), else the main checkout. `scripts/test-map.sh` ends a `run:` block at the `run` key's column.
+Since #4300 it maps a workflow `run:` step only when the whole command is an allowlisted check (`<pm> test`, `<pm> run`
+of a package.json check script, `make <check target>`, `go test|vet|build`, known test/lint/typecheck tools; one leading
+`cd|pushd DIR &&` becomes the cwd); anything else is dropped, job/step names are ignored, and workflow entries never get
+a bare `**` glob. `verifyReport` gates carry `ran`; zero ran → `neutral`, "no gates
 ran". A recovery lane (`recoverUnlabelled`) re-adds `needs-human` with a recovery-evidence `FORGE:NEEDS_HUMAN` only on a final
 `ci-pending` (`needsHuman()` has its own path); never on merged/invalid/decomposed/dependency-*/deferred/engine-error. The
 batch runner (`orchestrate.mjs` settle, injected `relabelNeedsHuman`, wired in `engine-cli.mjs`) relabels once for a final
@@ -676,8 +680,9 @@ batch runner (`orchestrate.mjs` settle, injected `relabelNeedsHuman`, wired in `
 
 One comment-strip helper: `noComments` lives in `render.mjs` (re-exported by `context.mjs`) and `prefilter.mjs`
 `namedPaths` uses it too, so no one-pass `<!--…-->` regex is left on hash or path input. `context.mjs` `REPO_FACT_FILES`
-reuses `testmap.mjs` `REPO_FACTS_FILE`/`TEST_MAP_FILE`. Context-pack cache: the key also hashes the issue's `updatedAt`
-and prior-attempt count (`contextPackFor` `stamp`); a gather with source `errors` is not cached; the write goes through
+reuses `testmap.mjs` `REPO_FACTS_FILE`/`TEST_MAP_FILE`. Context-pack cache: the key also hashes the issue's scope-text hash
+(`stamp.scope` = `contractHash(scopeText(...))`, not `updatedAt`, which the lane's own posts bump, #4304) and
+prior-attempt count (`contextPackFor` `stamp`); the recovery row counts the pre-filter cost once (#4304); a gather with source `errors` is not cached; the write goes through
 `<file>.<pid>.tmp` + `io.fs.rename`; the issue's other `context-<N>-*.json` files are pruned (`io.fs.list`/`rm`).
 `lean.mjs` `RECOVER_HOW` is a module export; `recovery.test.mjs` keeps its keys equal to `RECOVERABLE_CODES`.
 `orchestrate.mjs`: a settled recovery row sums the earlier attempts' `cost_usd` and `minutes` (persisted in the
@@ -689,3 +694,48 @@ rejects `--recover` with `--path full`. `conformance.mjs` `movingBaseDiff` reads
 `test-map.sh` separates globs with `\037`; it and `repo-facts.sh` list files with `-z` and `core.quotepath=off`, and
 `grep -q` reads here-strings (no SIGPIPE false negative under pipefail). Cost: 0 LLM calls.
 Rationale: `devdocs/decisions/4298-staging-low-followups.md`.
+
+## Entry 2026-10-20 — Recovery relabel only on the final attempt (#4302)
+
+`orchestrate.mjs` passes `ctx.recover = {code, attempt, final}` with `final = attempt >= recovery.maxAttempts`;
+`engine-cli.mjs` carries it to a subprocess lane as `--recover-nonfinal` (absent = final, so a manual
+`run-issue --recover` and `max_attempts: 1` are unchanged). `runCore` normalises `recover.final` (default true); a
+non-final recovery lane posts no `FORGE:NEEDS_HUMAN` and adds no `needs-human`, on `ci-pending` and in `needsHuman()`
+alike, so the label does not flap between attempts and a concurrent dependent does not read a transient label. Settle
+relabels once via `relabelNeedsHuman` when a non-final attempt ends `needs-human`/`ci-pending` and no next attempt is
+queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 LLM calls.
+
+## Entry 2026-10-20 — 1.30.0 pre-release fixes (#4315)
+
+- `prefilter.mjs`: a `FORGE:PREFILTER` marker comment is the pipeline's own when it is trusted or written by the
+  engine's identity (`ownLogins`: the App slug plus the token's `gh api user` login, looked up only when an untrusted
+  marker comment exists, once per `makePrefilter` batch). `gh issue view` reports the App as `rapiercraft-forgedock`
+  with `CONTRIBUTOR`, so the `[bot]` heuristic never matched. The close now runs before the marker comment.
+- `orchestrate.mjs`: a recovery still queued when the batch exits (breaker, execution budget, drift/maintenance hold, or a
+  resume that does not relaunch a lost run) is relabelled once via `relabelNeedsHuman` with the full persisted lane
+  reason (`recovering[n].detail`, never `firstLine`); the persisted `relabelled` list stops a repeat across resumes and is
+  cleared when the lane launches. Its `held` row carries `recovery`. `engine-cli.mjs` caps that comment (`capComment`).
+- `scripts/test-map.sh` allowlist: `cargo test|clippy|check`, gradle/maven with check tasks/goals only, `[bundle exec]
+  rspec`, `python manage.py test`, `python -m unittest`, `tox`/`nox` (no publish/release/deploy/upload env), `deno|bun
+  test`, `pnpm -r`, `npm --prefix DIR`, `test:*`-style script names, `bash|sh <path>.test.sh`, each with its globs.
+  Cost: 0 LLM calls; one optional `gh api user` per batch.
+- 2026-10-20 (#4314 review): `test-map.sh` accepts `test|lint|check|typecheck|type-check|tsc` bare, and sub-named scripts
+  only with suffixes `unit|ci|node|types|type|ts|js|static|check` (`format` only when the command is a check form);
+  anything containing `fix|watch|write|update|dev|serve|start|e2e|integration|deploy|release|publish|snapshot|-u` is
+  rejected, for package.json scripts and `npm run|pnpm|yarn|bun run` workflow steps. `prefilter.mjs`: once the close
+  succeeds the result is `closed:true` whatever the marker comment does; the comment is retried once, then a short
+  marker-only comment is posted so the #4305 reopen guard still sees the close.
+
+## Entry 2026-10-20 — 1.30.0 staging review LOW follow-ups (#4316)
+
+- `scripts/test-map.sh`: `skip_cmd` is gone (the allowlist covers it). `check_cmd` also drops `$GITHUB_*`, any `<`/`>`
+  (redirects, `<(...)`, `>(...)`), a `make` with a non-check target (`make test deploy`), and fixer forms (`--fix`,
+  `--write`, `-w`; `black`/`ruff format` without `--check`, `gofmt` without `-l`/`-d`, `prettier` without a check flag).
+- `render.mjs` `recoveryEvidence` is the one recovery-evidence text (lane `lean.mjs`, settle and batch-exit relabel in
+  `orchestrate.mjs`); `full` keeps the whole persisted detail, `queued` adds the batch-stopped sentence.
+- `prefilter.mjs`: the kept detail names the skip reason (`flaky|reopened|same-sha`); bare `sometimes` is no longer
+  flaky wording (only `fails sometimes` / `sometimes fails`).
+- `context.mjs` `linkStateStamp`: hash of `n:STATE` for the issues the body references (parent, Depends on, `#N`; max
+  20, one REST call each, `n:?` when unreadable) joins the pack cache key as `stamp.links`; no links keeps the old key.
+- `scripts/review-prepare.sh`: the code-index stderr tail shows the repo root as `<repo>`, strips control characters
+  and caps lines at 200 chars. Cost: 0 LLM calls; up to 20 `gh api` reads per context-pack lane.
