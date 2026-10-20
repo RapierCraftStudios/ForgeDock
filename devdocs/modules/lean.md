@@ -782,3 +782,15 @@ existence check is unchanged: a missing path is still `review.incomplete`. `revi
 targeted re-ask (at most 3 reviewer runs) only when the repaired reply is incomplete solely by unresolved evidence paths
 (`evidencePathOnly`); other incomplete replies keep 2 runs. Reviewer and repair prompts ask for backtick-quoted, verbatim
 repo-relative `path:line`.
+
+## Entry 2026-10-20 — The repro harness gets the lane env; an unrunnable head is an environment error (#4334)
+
+`gate()`'s `reproOf` (`lean.mjs`) now passes the lane env (`TMPDIR` = per-run tmp, the toolchain pin's `PATH`), the
+same env as the validate reruns, to `io.redGreen` (`effects.mjs` merges it over `process.env`). Before, a pinned
+`pnpm vitest …` exited 127 on head. `scripts/acceptance-red-green.sh` links every head `node_modules` next to a
+tracked `package.json` (workspace packages too) and a root `.venv` into the base worktree when the base has none, so a
+workspace test resolves its deps on base. `conformance.mjs` `reproFailures` maps `HEAD=UNRUNNABLE`, or no harness
+result, to `env.repro_unrunnable` (kind `repro_env`, recoverable in `RECOVERABLE_CODES`, with a `RECOVER_HOW`
+prompt). `gate()` routes it with `env.tool_missing` to the environment state: no builder resume, no reviewer.
+Other non-proofs stay `conformance.unimplemented`. A `BASE=SKIPPED` detail now says the base was not run because head
+did not pass; head's new test files were already overlaid (#3630). Cost: 0 LLM calls; saves the wasted resume.

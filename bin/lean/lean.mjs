@@ -44,7 +44,10 @@ export const RECOVER_HOW = Object.freeze({
   [OUTCOME_CODES.BUILDER_BLOCK_UNTYPED]: "an earlier run escalated an in-scope technical choice. Do not block on it: pick the option most consistent with the issue, the repo's conventions and prior merged decisions, and name the alternative you did not take in your summary",
   [OUTCOME_CODES.CONTRACT_INVALID]: "the issue was edited while the earlier run planned. Plan against the current issue text",
   [OUTCOME_CODES.ENV_TOOL_MISSING]: "a validate command could not run because the host lacks the tool or module named in the earlier run's detail; the change may already be correct. Do not edit the deliverables for it and never install anything globally: run the same check through the repo's own toolchain (its virtualenv, lockfile-pinned runner or package scripts), record that exit under the same validate id and name the command you used in your summary",
+  [OUTCOME_CODES.ENV_REPRO_UNRUNNABLE]: "the repro harness could not run the contract's repro_test on head (timeout, missing runner or dependencies); the change may already be correct. Do not edit the deliverables or stub dependencies for it and never install anything globally: run the repro command through the repo's own toolchain and installed dependencies, and when it cannot run in this checkout, fix the repro_test command (not the code) so it does",
 });
+/** #4323/#4334: precheck failure codes that are environment errors (state "environment"), never a builder resume. */
+const ENV_CODES = Object.freeze([OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE]);
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
 export const CONFORMANCE_MODES = Object.freeze(["shadow", "enforce"]);
@@ -870,7 +873,9 @@ export async function runCore(o) {
         if (reproOn() && t === "none" && !reproNoted) { reproNoted = true; T.decisions.push(`repro_test: none (${String(c.repro_test_reason ?? "").slice(0, 200)})`); }
         return null;
       }
-      const rg = await heavyStep("precheck", () => io.redGreen({ cwd: wt, base, command: String(t.command) })).catch(() => null);
+      // #4334: the lane env (toolchain pin, TMPDIR), as for the validate reruns
+      const env = { ...(runTmp ? { TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}) };
+      const rg = await heavyStep("precheck", () => io.redGreen({ cwd: wt, base, command: String(t.command), env })).catch(() => null);
       const words = rg?.base && rg?.head ? rg : { base: "UNRUNNABLE", head: "UNRUNNABLE" };
       ev({ event: "REPRO_RED_GREEN", ...words });
       T.decisions.push(`repro_test ${t.path ?? ""}${t.id ? ` ${t.id}` : ""}: BASE=${words.base} HEAD=${words.head}`);
@@ -1387,9 +1392,10 @@ export async function runCore(o) {
       const repoHas = validateRuns && Object.keys(validateRuns).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
       const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas });
       Object.assign(verifyFacts, { precheck: pc.failures, amendments: amendProblems, hotspots: Boolean(hotspots && hotspots.enabled !== false && Array.isArray(hotspots.files)) });
-      // #4323: a missing host tool or module is an environment error: never a conformance failure, never a builder resume
-      const envFails = pc.failures.filter((f) => f.code === OUTCOME_CODES.ENV_TOOL_MISSING);
-      const pre = [...pc.failures.filter((f) => f.code !== OUTCOME_CODES.ENV_TOOL_MISSING), ...amendProblems];
+      // #4323/#4334: a missing host tool or module, or a repro test the harness could not run, is an environment error:
+      // never a conformance failure, never a builder resume
+      const envFails = pc.failures.filter((f) => ENV_CODES.includes(f.code));
+      const pre = [...pc.failures.filter((f) => !ENV_CODES.includes(f.code)), ...amendProblems];
       if (pre.length) ev({ event: "PRECHECK", failures: pre.map((f) => f.code) });
       if (pre.length && !shadow) return { state: "nonconforming", by: "precheck", failures: pre };
       // shadow: the builder's own failed checks block before any reviewer tokens are spent (#4160)
@@ -1441,8 +1447,13 @@ export async function runCore(o) {
       ev({ event: "VERIFY", head, conclusion: r.conclusion, gates: r.gates.map((g) => ({ id: g.id, ok: g.ok })), posted, url, ...(error ? { error } : {}) });
     }
     /** #4323: a validate command the host could not run ends needs-human env.tool_missing (recoverable), never a builder resume. */
+    // #4334: a repro test the harness could not run on head (and nothing else) ends env.repro_unrunnable (recoverable)
     async function envNeedsHuman(failures) {
-      const tools = [...new Set(failures.map((f) => f.tool))].join(", ");
+      if (failures.every((f) => f.code === OUTCOME_CODES.ENV_REPRO_UNRUNNABLE)) {
+        T.anomalies.push("Environment error: the repro harness could not run the repro test on head");
+        return await needsHuman(`Environment error (not a conformance failure): the repro harness could not run the repro test on head; no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRun the repro command through the repo's own toolchain and installed dependencies, then rerun.`, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE);
+      }
+      const tools = [...new Set(failures.filter((f) => f.tool).map((f) => f.tool))].join(", ");
       T.anomalies.push(`Environment error: validate command(s) could not run, the host is missing ${tools}`);
       return await needsHuman(`Environment error (not a conformance failure): the host is missing ${tools}, so validate command(s) could not run; no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nInstall it on the host or run the check through the repo's own toolchain, then rerun.`, OUTCOME_CODES.ENV_TOOL_MISSING);
     }

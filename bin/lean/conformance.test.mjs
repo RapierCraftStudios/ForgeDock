@@ -350,12 +350,22 @@ describe("repro_test on bug lanes (#4271)", () => {
   it("red on base and green on head passes; anything else fails the precheck as conformance.unimplemented", () => {
     const k = { ...C, repro_test: RT };
     assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [] });
-    for (const repro of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "UNRUNNABLE", head: "UNRUNNABLE" }]) {
+    for (const repro of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
       const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
       assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_red_green"]], JSON.stringify(repro));
       assert.match(pc.failures[0].detail, new RegExp(`BASE=${repro.base} HEAD=${repro.head}`));
     }
-    assert.match(reproFailures(k, {})[0].detail, /test\/leak\.test\.js releases on 429.*BASE=UNRUNNABLE HEAD=UNRUNNABLE/);
+    assert.match(reproFailures(k, { base: "SKIPPED", head: "FAILED" })[0].detail, /HEAD=FAILED \(base not run: head did not pass\)$/);
+    assert.doesNotMatch(reproFailures(k, { base: "RAN", head: "RAN" })[0].detail, /base not run/);
+  });
+  it("a harness UNRUNNABLE on head is env.repro_unrunnable, not conformance.unimplemented (#4334)", () => {
+    const k = { ...C, repro_test: RT };
+    for (const repro of [{ base: "SKIPPED", head: "UNRUNNABLE" }, { base: "UNRUNNABLE", head: "UNRUNNABLE" }, {}]) {
+      const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
+      assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["env.repro_unrunnable", "repro_env"]], JSON.stringify(repro));
+      assert.match(pc.failures[0].detail, /test\/leak\.test\.js releases on 429 \(`node --test test\/leak\.test\.js`\): the harness could not run the test on head \(environment, not the change\)/);
+      assert.match(pc.failures[0].detail, new RegExp(`BASE=${repro.base ?? "UNRUNNABLE"} HEAD=UNRUNNABLE$`));
+    }
   });
   it("off (no repro option) is today's contract check and precheck exactly", () => {
     assert.deepEqual(validateContract(C, ISSUE), validateContract(C, ISSUE, { repro: false }));
