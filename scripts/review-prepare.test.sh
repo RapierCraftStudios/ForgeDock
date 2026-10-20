@@ -109,7 +109,9 @@ setup feat/x staging "README.md" "$DIFF_PLAIN"; printf 'CONFLICTING|DIRTY\n' > "
 prep "$ROOT"; eq "conflicting" .merge_health.mergeable CONFLICTING; eq "conflicting state" .merge_health.state DIRTY; eq "no retry on CONFLICTING" .merge_health.retries 0
 setup feat/x staging "README.md" "$DIFF_PLAIN"; printf 'UNKNOWN|UNKNOWN\n' > "$FIX/merge.seq"
 prep "$ROOT"; eq "unknown stays unknown after 3 retries" .merge_health.retries 3; eq "still UNKNOWN" .merge_health.mergeable UNKNOWN
-setup feat/x staging "README.md" "$DIFF_PLAIN"; printf 'garbage|$(rm -rf)\n' > "$FIX/merge.seq"
+setup feat/x staging "README.md" "$DIFF_PLAIN"
+# shellcheck disable=SC2016  # the literal $(rm -rf) is the hostile payload under test
+printf 'garbage|$(rm -rf)\n' > "$FIX/merge.seq"
 prep "$ROOT"; eq "garbage state normalized" .merge_health.state UNKNOWN
 setup feat/x staging "README.md" "$DIFF_PLAIN"; echo 0 > "$FIX/prior"
 prep "$ROOT"; eq "first-time contributor" .pr.first_time_contributor true
@@ -234,6 +236,7 @@ CFG_OVERRIDE="$WORK/emptyroot.yaml" prep "$WORK/root-notpl"
 rc_is "no template source" 3; eq "templates none" .templates.source none
 
 # --- 8. issue number extraction and trusted contract ---
+# shellcheck source=/dev/null
 . "$ROOT/scripts/lib/pr-issue-number.sh"
 chk() { local got; got=$(pr_issue_number_of "$2"); if [ "$got" = "$3" ]; then ok; else bad "$1: got '$got', want '$3'"; fi; }
 chk "Closes" "Closes #12" 12
@@ -271,6 +274,7 @@ setup feat/x staging "README.md" "$DIFF_PLAIN" "00000000000000000000000000000000
 prep "$ROOT" --checkout-pr
 rc_is "unknown sha cannot be checked out" 3
 if [ "$(git -C "$REPO_DIR" symbolic-ref --short HEAD 2>/dev/null)" = "main" ]; then ok; else bad "failed checkout moved HEAD"; fi
+# shellcheck disable=SC2016  # matches the literal $ORIG_REF in the script source
 if grep -q 'checkout -f "\$ORIG_REF"' "$ROOT/scripts/review-prepare.sh"; then ok; else bad "restore_ref must use git checkout -f"; fi
 
 # --- 10. fail closed on gh and bad arguments ---
@@ -317,8 +321,19 @@ eq "a hostile cwd roster script is never used" '.roster.agents | index("evil") !
 # --- code index build is bounded and visible (forge#4126) ---
 setup feat/x staging "services/api/auth.py" "$DIFF_AUTH_BILL"
 prep "$ROOT"
-eq "real index fills the auth slice" '.index_slices.auth | startswith("Domain files (auth):")' true
+_f0=$fail; eq "real index fills the auth slice" '.index_slices.auth | startswith("Domain files (auth):")' true
+# forge#4235: on failure show review-prepare's stderr (it carries the index build's exit code and stderr tail)
+[ "$fail" -eq "$_f0" ] || sed 's/^/  stderr: /' "$WORK/stderr"
 if grep -q "review-prepare: building code index" "$WORK/stderr"; then ok; else bad "index build must print a progress line on stderr"; fi
+# a failing build reports its exit code and stderr tail, and the slices fall back to grep
+mkroot "$WORK/root-failindex" "" "" templates
+printf '#!/usr/bin/env bash\necho "index-boom-marker" >&2\nexit 3\n' > "$WORK/root-failindex/scripts/code-index.sh"
+prep "$WORK/root-failindex"
+rc_is "failing index build" 0
+if grep -q "code index failed (exit 3)" "$WORK/stderr"; then ok; else bad "index failure must report the build's exit code on stderr"; fi
+if grep -q "review-prepare: code-index: index-boom-marker" "$WORK/stderr"; then ok; else bad "index failure must echo the build's stderr tail: $(head -c 300 "$WORK/stderr")"; fi
+eq "failed index falls back to grep slices" .index_slices.auth "Code index not available — agent will use grep exploration"
+if ls "$WORK/out"/.code-index-err-* >/dev/null 2>&1; then bad "index stderr temp file must be removed"; else ok; fi
 if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
     mkroot "$WORK/root-slowindex" "" "" templates
     printf '#!/usr/bin/env bash\nsleep 30\n' > "$WORK/root-slowindex/scripts/code-index.sh"
