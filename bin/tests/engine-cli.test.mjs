@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readVerify, makeIo } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readCloseParent, readVerify, makeIo } from "../engine-cli.mjs";
 import { serializeState } from "../engine/state.mjs";
 import { appendEvent } from "../engine/runlog.mjs";
 
@@ -1017,6 +1017,21 @@ describe("readReproTest (#4271)", () => {
     assert.equal(readReproTest(d), "off");
     writeFileSync(join(d, "forge.yaml"), "lean:\n  repro_test: prefer\n");
     assert.equal(readReproTest(d), "prefer");
+  });
+});
+
+describe("readCloseParent (#3736, #4337)", () => {
+  it("is true only for decomposition.close_parent: true; absent, false, another word or another section's key is false", () => {
+    const d = tmpDir("close-parent-yaml-");
+    assert.equal(readCloseParent(d), false, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  close_parent: true\n");
+    assert.equal(readCloseParent(d), false);
+    writeFileSync(join(d, "forge.yaml"), "decomposition:\n  close_parent: false\n");
+    assert.equal(readCloseParent(d), false);
+    writeFileSync(join(d, "forge.yaml"), "decomposition:\n  close_parent: \"yes\"\n");
+    assert.equal(readCloseParent(d), false);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  conformance: shadow\ndecomposition:\n  close_parent: true  # trackers off the board\n");
+    assert.equal(readCloseParent(d), true);
   });
 });
 

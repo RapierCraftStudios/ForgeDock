@@ -141,7 +141,9 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
   wait on the sub-issues.
 - `merged` or `invalid`: start the next ready issue.
 - `needs-human` with a **recoverable code**: `ci.red`, `base.conflict` (merge conflict), `ci-pending` on a conflicting
-  PR, `contract.invalid` caused by an issue edited mid-run, and `builder.block_untyped` (an in-scope technical choice).
+  PR, `contract.invalid` caused by an issue edited mid-run, `builder.block_untyped` (an in-scope technical choice),
+  and the environment codes `env.tool_missing` (a validate command the host cannot run) and `env.repro_unrunnable`
+  (the repro harness could not run the repro test).
   These are mechanical. **Do not ask for confirmation on them.** The batch runner recovers each one itself
   (`orchestration.recovery.max_attempts`, default 1 per issue). It launches one recovery lane under the same lease, lane
   and admission rules as any lane, with `run-issue --recover <code> [--recover-attempt n]` (core path only:

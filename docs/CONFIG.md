@@ -590,11 +590,14 @@ Settings of the core work-on (`bin/lean/`) that change its contract.
 ```yaml
 lean:
   repro_test: prefer   # off | prefer (default)
+  precheck:
+    max_minutes: 10    # optional pre-PR check round budget in minutes (1-120)
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `repro_test` | string | No | `prefer` (default): on an issue labelled `bug` or `type:bug`, the plan step must freeze a `repro_test` in the contract (`{"path","id","command"}`) when the bug is testable. Before review, the engine runs `scripts/acceptance-red-green.sh` for that command on the host in every verify mode: one targeted test, red on the base (head's changed test files overlaid) and green on head. Any other result, including a test that could not run, fails the precheck as `conformance.unimplemented` (it blocks in shadow too) and goes back to the builder for one in-session fix round. A bug that is not testable (specs, docs, workflows, environment) records `"repro_test":"none"` with a one-line `repro_test_reason` and the lane continues as before. `off` gives exactly the previous contract and precheck. Each proof emits a `REPRO_RED_GREEN` run-log event (`base`, `head`) and adds a trajectory decision. |
+| `repro_test` | string | No | `prefer` (default): on an issue labelled `bug` or `type:bug`, the plan step must freeze a `repro_test` in the contract (`{"path","id","command"}`) when the bug is testable. Before review, the engine runs `scripts/acceptance-red-green.sh` for that command on the host in every verify mode: one targeted test, red on the base (head's changed test files overlaid) and green on head. A test that ran but is not red on the base and green on head fails the precheck as `conformance.unimplemented` (it blocks in shadow too) and goes back to the builder for one in-session fix round. A head the harness could not run at all (timeout, missing runner or dependencies) ends `needs-human` with the recoverable code `env.repro_unrunnable`, not a builder round: the batch runner's recovery lane reruns it through the repo's own toolchain (see docs/OUTCOME-CODES.md). The harness runs with the lane env (`TMPDIR`, toolchain) and the workspace dependency trees, and a repro test file that is new on head is run against the base sources. A bug that is not testable (specs, docs, workflows, environment) records `"repro_test":"none"` with a one-line `repro_test_reason` and the lane continues as before. `off` gives exactly the previous contract and precheck. Each proof emits a `REPRO_RED_GREEN` run-log event (`base`, `head`) and adds a trajectory decision. |
+| `precheck.max_minutes` | number | No | Total budget in minutes (1–120) of one round of pre-PR check commands (#4331). The flat form `lean.precheck_max_minutes` also works and wins. When unset, `verify.precheck_total_seconds` applies (default 600 s). Check commands run change-scoped (a learned command with a test-map entry runs only when its globs match the changed files; unmapped commands always run), concurrently up to the host worker cap under one heavy slot, each timed (`ms` in the `PRECHECK_COMMANDS` run-log event). Commands not started when the budget runs out are recorded `deferred-to-ci` (an anomaly, not a failure) and left to CI. |
 
 ## `verify` (OPTIONAL)
 
@@ -608,6 +611,7 @@ verify:
   skip_paths: "*.md,docs/**"    # optional, comma-separated; default *.md,*.mdx,*.rst,*.txt,docs/**,devdocs/**
   max_rounds: 2                 # optional CI fix rounds before needs-human (default 2)
   precheck_timeout_seconds: 300 # optional per-command timeout of the declared pre-PR checks (default 300)
+  precheck_total_seconds: 600   # optional total budget of one pre-PR check round (default 600)
   check_run: true               # optional; post the forgedock/verify check run (default false)
 ```
 
@@ -619,6 +623,7 @@ verify:
 | `skip_paths` | string | No | Comma-separated globs. A glob without `/` matches the basename anywhere; `**` spans directories. When every changed file matches, the lane skips CI verification (a docs-only lane runs no CI matrix). |
 | `max_rounds` | integer | No | Builder fix rounds for red CI (0–10, default 2). Also bounds the merge-time fix rounds and the declared-check fix rounds below, in every mode. |
 | `precheck_timeout_seconds` | integer | No | Timeout of each declared check command (1–3600, default 300); a timed-out command counts as failed (exit 124). |
+| `precheck_total_seconds` | integer | No | Total budget of one round of pre-PR check commands (1–7200, default 600; it was 1800 before 1.30.0). `lean.precheck.max_minutes` takes precedence. Commands not started within the budget are deferred to CI, not failed. |
 | `check_run` | boolean | No | Default `false` (no Checks API call, behaviour unchanged). `true`: after each push of a reviewed head (PR open, base-sync, merge-time fix round) the engine posts one completed `forgedock/verify` check run on that head (forge#4270), `success` iff every deterministic gate the lane already ran passed: declared check commands, undeclared package edges, docs freshness, contract scope, validate ids, requirement status, hotspot growth, amendments. The output carries each gate's id, pass/fail and evidence as JSON; the run log records a `VERIFY` event. Report only: ForgeDock never makes it required and never waits on it (it is ignored by its own CI waits); requiring it is the repository's branch-protection choice. Creating check runs needs a token that may (a GitHub App with `checks: write`); a Checks API failure is logged as an anomaly and never fails the lane. |
 
 **Flow** (`ci`/`hybrid`, `bin/lean/verify.mjs` `runCiVerify`):
@@ -821,7 +826,7 @@ decomposition:
 
 **With `close_parent: false`** (default): unchanged. The parent stays open and is closed by C3 when the last child closes.
 
-`close_parent` governs the legacy `work-on:decompose` path only. The lean (core) path always closes a decomposed parent at decomposition (`not planned`, label kept); dependents still wait on its sub-issues (#4337).
+The lean (core) path reads the same key (#4337): with `close_parent: true` it closes the parent at decomposition as `not planned`, keeps `workflow:decomposed` and lists the sub-issues in the closing comment; dependents still wait on the sub-issues, and a trusted `FORGE:DECOMPOSED:REVOKED` reopens it. With the default `false` the lean parent stays open.
 
 **Limitation**: `--retry` and engine resume refuse closed issues, so a closed decomposed parent cannot be re-run. It has nothing left to run; work on its open children instead.
 
