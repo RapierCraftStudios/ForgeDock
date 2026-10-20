@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseVerify, matchesGlob, skipsCi, capLogs, runCiVerify, DEFAULT_SKIP_PATHS, LOG_CAP } from "./verify.mjs";
+import { parseVerify, matchesGlob, skipsCi, capLogs, runCiVerify, collectFailedLogs, DEFAULT_SKIP_PATHS, LOG_CAP } from "./verify.mjs";
 import { precheck } from "./conformance.mjs";
 
 const HEAD = "abc123abc123abc123";
@@ -22,9 +22,9 @@ function fake(o = {}) {
 
 describe("verify-by-CI config (#4167)", () => {
   it("parseVerify defaults to local and rejects invalid values", () => {
-    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2 });
+    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300 });
     const v = parseVerify({ mode: "ci", workflow: ".github/workflows/verify.yml", paths_input: "changed_paths", skip_paths: "*.md, docs/** ,", max_rounds: "3" });
-    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3 });
+    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300 });
     assert.equal(parseVerify({ mode: "remote" }).mode, "local");
     assert.equal(parseVerify({ workflow: "x; rm -rf /" }).workflow, null);
     assert.equal(parseVerify({ max_rounds: "-1" }).maxRounds, 2);
@@ -91,5 +91,28 @@ describe("runCiVerify (#4167)", () => {
     assert.deepEqual(r.failures.map((x) => [x.job, Boolean(x.log)]), [["test", true], ["types", false]]);
     const g = fake({ checks: [[]] });
     assert.equal((await runCiVerify(g.args({ verify: parseVerify({ mode: "ci" }) }))).result, "unavailable");
+  });
+});
+
+describe("merge-time fix rounds and declared check commands (#4240)", () => {
+  it("collectFailedLogs fetches one log per Actions run and caps the total", async () => {
+    const fetched = [];
+    const io = { failedLogs: async (id) => { fetched.push(id); return "x".repeat(LOG_CAP * 2); } };
+    const out = await collectFailedLogs(io, [
+      { name: "Unit tests", url: "https://github.com/o/r/actions/runs/9/job/1" },
+      { name: "Shell tests", url: "https://github.com/o/r/actions/runs/9/job/2" },
+      { name: "status", url: null },
+    ]);
+    assert.deepEqual(fetched, ["9"]);
+    assert.deepEqual(out.map((f) => f.job), ["Unit tests", "Shell tests", "status"]);
+    assert.ok(out[0].log.length > 0 && out[1].log === "" && out[2].log === "");
+    assert.ok(out.reduce((n, f) => n + f.log.length, 0) <= LOG_CAP + 3);
+    assert.deepEqual(await collectFailedLogs({ failedLogs: async () => { throw new Error("gone"); } }, [{ name: "a", url: "https://x/actions/runs/1" }]), [{ job: "a", url: "https://x/actions/runs/1", log: "" }]);
+  });
+
+  it("parseVerify precheck_timeout_seconds: default 300, integer 1-3600 accepted, others fall back", () => {
+    assert.equal(parseVerify({}).precheckTimeoutSeconds, 300);
+    assert.equal(parseVerify({ precheck_timeout_seconds: "60" }).precheckTimeoutSeconds, 60);
+    for (const bad of ["0", "-5", "1.5", "abc", "3601"]) assert.equal(parseVerify({ precheck_timeout_seconds: bad }).precheckTimeoutSeconds, 300, bad);
   });
 });

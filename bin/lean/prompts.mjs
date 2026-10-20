@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /** Core work-on prompts: a plan call that writes the contract, an implement call in the same session, and the conformance reviewer. */
+import { fileURLToPath } from "node:url";
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
 export const LEAN_DIR = ".forge-lean";
@@ -10,7 +11,10 @@ export const PLAN_FILE = `${LEAN_DIR}/plan.md`;
 export const IMPLEMENTATION_FILE = `${LEAN_DIR}/implementation.md`;
 export const CONTRACT_FILE = `${LEAN_DIR}/contract.json`;
 
-const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo).`;
+/** Change-scoped checks with shared incremental caches (#4218): the builder runs the scoped commands this CLI prints. */
+export const CHECKS_CLI = fileURLToPath(new URL("./checks.mjs", import.meta.url));
+
+const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the repo's full tsc/eslint/test scripts (it widens to the full command itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, run it again with --publish to share the incremental caches.`;
 
 /** Verify-by-CI (#4167): in ci/hybrid mode the engine runs the repo's CI on GitHub runners; the host runs only light checks. */
 const LIGHT = "run only formatters and linters on the files you changed";
@@ -28,6 +32,12 @@ export const syncChecks = (mode = "local") => (mode === "ci" ? `${LIGHT} (the en
 export function ciFailurePrompt(failures, mode = "local") {
   const list = failures.slice(0, 10).map((f) => `#### ${f.job ?? "check"}${f.url ? ` (${f.url})` : ""}\n${f.log ? `\`\`\`\n${f.log}\n\`\`\`` : "(no log available: open the url)"}`).join("\n\n");
   return `CI failed on the pushed branch:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** The repo's declared check commands (forge.yaml learned.test_commands) failed before the PR (#4240): fixed in-session. */
+export function precheckFailurePrompt(failures, mode = "local") {
+  const list = failures.slice(0, 10).map((f) => `#### \`${f.command}\` (exit ${f.rc})\n${f.output ? `\`\`\`\n${f.output}\n\`\`\`` : "(no output)"}`).join("\n\n");
+  return `The repo's declared check commands failed in this worktree, before the PR is opened:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). Re-run each failing command, ${mode === "ci" ? `${LIGHT} otherwise, ` : ""}commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
 /** CI could not run (no workflow run, no checks, dispatch refused): the local fallback (#4167). */
@@ -130,6 +140,27 @@ const BLOCK_RULES = `"blocked" needs a typed "block" in ${RESULT_FILE}, one of:
 
 export function blockCorrectionPrompt(problem) {
   return `Your ${RESULT_FILE} says "blocked", but ${String(problem).slice(0, 1000)}. That is not a block that needs a human.\n\n${BLOCK_RULES}\n\nEither do the work (fix, commit, update the stage notes and ${RESULT_FILE}) or write a valid typed "block". Do not push or touch GitHub.`;
+}
+
+/** refactor:split grouping call (#4211): no tools, no files; the only input is the compact symbol index. */
+export const GROUPING_SYSTEM = "You plan how to split one oversized source module into a package of smaller modules. You see only a symbol index (names, kinds, sizes, references); you have no tools and never see code. Reply with exactly one JSON object and nothing else.";
+
+/** The grouping prompt: fixed rules plus JSON of bin/lean/refactor.mjs compactIndex(). Its size depends on the index only, never on file length. */
+export function groupingPrompt(index) {
+  return `Group the top-level symbols of one module into cohesive new modules of a package. A codemod moves them verbatim and leaves the old module re-exporting every moved name.
+
+Index: "symbols" are top-level symbols {name, kind, lines, public}; "edges" are "from->to" references between them.
+
+Rules:
+- Module names are snake_case Python identifiers, unique, not equal to any symbol name.
+- Each symbol appears at most once. Symbols you leave out stay in the old module.
+- A moved symbol must not reference a symbol that stays: when you move a symbol, move everything it references (follow the edges).
+- Modules must not reference each other in a cycle; keep heavily cross-referenced symbols in one module.
+- Prefer a few modules of similar size grouped by what the symbols do.
+
+Reply with only {"<module>": ["<symbol>", ...], ...}.
+
+${JSON.stringify(index)}`;
 }
 
 export const REVIEWER_SYSTEM = `You are an independent conformance reviewer of one change. You did not write it. Read-only: use Read, Grep and Glob in the worktree.
