@@ -1153,6 +1153,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     }
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
+  // #4304: recovery lanes run on the core path only (run-issue throws on --recover with full), so a full-path repo gets none.
+  const recoveryOn = Boolean(orch.recovery?.maxAttempts) && (deps.enginePath !== undefined ? deps.enginePath : readEnginePath(cwd)) !== "full";
+  if (orch.recovery?.maxAttempts && !recoveryOn) sink.line("recovery: off (engine.path is full; recovery lanes run on the core path only)");
   // #4190: usage-limit holds live in the host store keyed by the account the next lane would use.
   const limitsMod = await import("./lean/limits.mjs");
   const limits = deps.limits ?? limitsMod.openLimits(limitsMod.limitsFile(env));
@@ -1231,7 +1234,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
     ...(remote ? { remote } : {}),
     // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
-    ...(orch.recovery?.maxAttempts ? { recovery: orch.recovery } : {}),
+    ...(recoveryOn ? { recovery: orch.recovery } : {}),
     decide: deps.decide ?? (async (d) => {
       if (d?.issue == null) { sink.line(`decision: ${d?.what} (why: ${d?.why}; alternative: ${d?.alternative})`); return; }
       const body = `<!-- FORGE:DECISION -->\n## Decision (batch ${batch.id})\n**What**: ${d.what}\n**Why**: ${d.why}\n**Alternative**: ${d.alternative}`;

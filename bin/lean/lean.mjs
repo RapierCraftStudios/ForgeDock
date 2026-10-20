@@ -894,7 +894,7 @@ export async function runCore(o) {
       if (ctxCfg.mode === "off" || !io.contextFacts) return null;
       try {
         const headSha = String(await git(["rev-parse", base])).trim();
-        const r = await contextPackFor({ cfg: ctxCfg, issue, headSha, cacheDir: dir, fs: io.fs, stamp: { updatedAt: iss.updatedAt ?? null, attempts: priorAttempts(iss.body, trustedComments) },
+        const r = await contextPackFor({ cfg: ctxCfg, issue, headSha, cacheDir: dir, fs: io.fs, stamp: { scope: scopeHash, attempts: priorAttempts(iss.body, trustedComments) },
           gather: () => io.contextFacts({ repo, issue, iss, comments: trustedComments, cwd: wt, base, sources: ctxCfg.sources, days: ctxCfg.days, now: now() }) });
         const p = r.pack;
         const rec = { event: "CONTEXT_PACK", mode: ctxCfg.mode, lane_type: ctxLane, sources: p.sources, found: p.found, bytes: p.bytes, items: p.items, truncated: p.truncated,

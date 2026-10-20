@@ -646,7 +646,8 @@ narrows them. Rationale: `devdocs/decisions/4199-incremental-not-restructure.md`
 with `issueEdited`, `ci-pending` on a conflicting PR → `base.conflict`), `human`
 (`builder.blocked`: credentials, spend, promotion, customer, product-decision) or
 `terminal`. `orchestrate()` option `recovery: {maxAttempts}` (forge.yaml
-`orchestration.recovery.max_attempts`, default 1, 0 = off; absent = old behaviour)
+`orchestration.recovery.max_attempts`, default 1, 0 = off; absent = old behaviour;
+`orchestrateFromCli` leaves it off when `engine.path` is `full`, #4304, since recovery lanes run on the core path only)
 requeues a recoverable row as a recovery lane (`ctx.recover = {code, attempt}`, state
 keys `recoveries`/`recovering`) under the usual admission, so dependents stay queued.
 A merged recovery row carries `recovered: <code>`; any other end is final with
@@ -676,8 +677,9 @@ batch runner (`orchestrate.mjs` settle, injected `relabelNeedsHuman`, wired in `
 
 One comment-strip helper: `noComments` lives in `render.mjs` (re-exported by `context.mjs`) and `prefilter.mjs`
 `namedPaths` uses it too, so no one-pass `<!--…-->` regex is left on hash or path input. `context.mjs` `REPO_FACT_FILES`
-reuses `testmap.mjs` `REPO_FACTS_FILE`/`TEST_MAP_FILE`. Context-pack cache: the key also hashes the issue's `updatedAt`
-and prior-attempt count (`contextPackFor` `stamp`); a gather with source `errors` is not cached; the write goes through
+reuses `testmap.mjs` `REPO_FACTS_FILE`/`TEST_MAP_FILE`. Context-pack cache: the key also hashes the issue's scope-text hash
+(`stamp.scope` = `contractHash(scopeText(...))`, not `updatedAt`, which the lane's own posts bump, #4304) and
+prior-attempt count (`contextPackFor` `stamp`); the recovery row counts the pre-filter cost once (#4304); a gather with source `errors` is not cached; the write goes through
 `<file>.<pid>.tmp` + `io.fs.rename`; the issue's other `context-<N>-*.json` files are pruned (`io.fs.list`/`rm`).
 `lean.mjs` `RECOVER_HOW` is a module export; `recovery.test.mjs` keeps its keys equal to `RECOVERABLE_CODES`.
 `orchestrate.mjs`: a settled recovery row sums the earlier attempts' `cost_usd` and `minutes` (persisted in the

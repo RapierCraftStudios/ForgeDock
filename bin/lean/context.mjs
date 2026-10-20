@@ -102,12 +102,13 @@ export function priorAttempts(body, comments = []) {
 }
 
 /**
- * Cache key for a compiled pack: issue + base head SHA, plus the config that shapes it and (#4298) the issue's
- * `updatedAt` and prior-attempt count, so an edit or a new attempt on the same base compiles a fresh pack.
+ * Cache key for a compiled pack: issue + base head SHA, plus the config that shapes it and (#4298, #4304) the hash of the
+ * issue's human scope text (`scope`) and prior-attempt count, so an edit or a new attempt on the same base compiles a
+ * fresh pack. Not `updatedAt`: the lane's own FORGE:STATE/CONTEXT posts and label edits bump it, so the cache never hit.
  */
 export const contextPackCacheKey = (issue, headSha, cfg = {}, stamp = {}) =>
   `context-${issue}-${String(headSha ?? "").trim().slice(0, 40) || "nohead"}-${hash12(JSON.stringify([cfg.sources ?? [], cfg.budgetBytes ?? null, cfg.days ?? null,
-    ...(stamp?.updatedAt != null || stamp?.attempts != null ? [String(stamp.updatedAt ?? ""), Number(stamp.attempts) || 0] : [])]))}.json`;
+    ...(stamp?.scope != null || stamp?.attempts != null ? [String(stamp.scope ?? ""), Number(stamp.attempts) || 0] : [])]))}.json`;
 
 // ---- gather (I/O) ----
 
@@ -298,7 +299,7 @@ export function renderContextRecord(pack, { mode, laneType: lt }) {
 }
 
 /**
- * The pack for one run: read from the cache (`cacheDir`, keyed by issue + base head SHA + config + `stamp`) or gathered
+ * The pack for one run: read from the cache (`cacheDir`, keyed by issue + base head SHA + config + `stamp` {scope, attempts}) or gathered
  * and compiled, then cached. `gather` returns the facts; `fs` is {read, write, rename?, list?, rm?}. A gather that
  * reported source errors is not cached (#4298), the write goes through a temp file and a rename, and the issue's other
  * cached packs are pruned. A cache miss or any write/rename/prune failure is not an error.
