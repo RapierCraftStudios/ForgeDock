@@ -4632,7 +4632,9 @@ describe("#4362 attempt triggers", () => {
       if (n > fixLines && n < fixLines + 10 && /trigger \}\)/.test(l)) continue; // fixRound forwards its own trigger, checked below
       known(/trigger: "([a-z_]+)"/.exec(l)?.[1], l, n);
     }
-    for (const [l, n] of [...fixSites, ...attemptSites]) known(/, "([a-z_]+)"\);/.exec(l)?.[1], l, n);
+    // #4375: a fixRound call may pass the failure text after its trigger
+    for (const [l, n] of fixSites) known(/\), (?:[\w.]+|\[\]), "([a-z_]+)"(?:, .*)?\);$/.exec(l)?.[1], l, n);
+    for (const [l, n] of attemptSites) known(/, "([a-z_]+)"\);/.exec(l)?.[1], l, n);
     assert.match(src, /opts\.trigger = "timeout_restart"/, "a timeout restart is tagged");
   });
 
@@ -4662,5 +4664,65 @@ describe("#4362 attempt triggers", () => {
     assert.equal(r.terminalReason, "merged");
     assert.deepEqual(usage(dir).filter((e) => e.phase === "implement").map((e) => [e.attempt, e.trigger, e.restart_of ?? null]), [[1, "plan", null], [2, "timeout_restart", "build"]]);
     assert.equal(r.firstPass, true);
+  });
+});
+
+describe("learned pitfalls (#4375)", () => {
+  const memStore = () => { const recs = []; return { recs, read: async () => recs.map((r) => JSON.parse(JSON.stringify(r))), append: async (_repo, r) => { recs.push(r); } }; };
+  const packFacts = async (a) => (await import("./context.mjs")).gatherContextFacts({ ...a, io: {}, sources: ["pitfalls"] });
+  const failingPrecheck = (w, passAfterFix = true) => {
+    let rc = 1;
+    w.io.runCommand = async () => ({ rc, output: rc ? "> eslint .\nsrc/foo.js:3:7  error  'tmp' is assigned a value but never used  no-unused-vars" : "" });
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { const res = await inner(c); if (passAfterFix && /declared check commands failed/.test(c.prompt)) rc = 0; return res; };
+  };
+
+  it("a precheck rework round that fixes the failure records one pitfall; the next lane's pack carries it, never posted", async () => {
+    const store = memStore();
+    const w = world(); w.io.pitfalls = store; failingPrecheck(w);
+    const dir = tmpDir("core-pit-");
+    assert.equal((await run(w, { dir, precheck: { commands: ["npm run lint"] } })).terminalReason, "merged");
+    const pits = store.recs.filter((r) => r.t === "pitfall");
+    assert.equal(pits.length, 1);
+    assert.equal(pits[0].trigger, "precheck");
+    assert.match(pits[0].sig, /^precheck:[0-9a-f]{12}$/);
+    assert.deepEqual(pits[0].globs, ["src/*.js", "test/*.js"]);
+    assert.match(pits[0].lesson, /^precheck: src\/foo\.js:3:7 error 'tmp' is assigned a value but never used no-unused-vars$/);
+    assert.equal(store.recs.filter((r) => r.t === "lane").length, 1, "one lane row per lane");
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "PITFALL_RECORDED").map((e) => [e.trigger, e.sig]), [["precheck", pits[0].sig]]);
+
+    // the next lane naming the same file gets it in its pack (mode on), logs it, and posts only the count
+    const w2 = world({ issueBodies: [`${ISSUE_BODY}\n\nFix it in src/foo.js.`] }); w2.io.pitfalls = store; w2.io.contextFacts = packFacts;
+    const dir2 = tmpDir("core-pit2-");
+    assert.equal((await run(w2, { dir: dir2, contextPack: { mode: "on" } })).terminalReason, "merged");
+    assert.match(builders(w2)[0][4], /Recurring pitfalls in this repo[\s\S]*no-unused-vars/);
+    const cp = readLog(dir2, 7).find((e) => e.event === "CONTEXT_PACK");
+    assert.deepEqual(cp.pitfalls, [{ sig: pits[0].sig, match: "files" }]);
+    assert.equal(readLog(dir2, 7).find((e) => e.event === "RUN_TERMINAL").pitfalls_matched, 1);
+    for (const c of [...w.comments, ...w2.comments]) assert.ok(!c.includes("no-unused-vars") || !c.startsWith("<!-- FORGE:CONTEXT"), "pitfall text never in FORGE:CONTEXT");
+    assert.ok(!w2.comments.some((c) => c.includes("'tmp' is assigned a value")), "no posted comment carries the lesson");
+    const mapped = [...w.telemetry, ...w2.telemetry].map((x) => JSON.stringify(mapRecord(x) ?? null));
+    assert.ok(!mapped.some((x) => /never used|pitfall|precheck:[0-9a-f]{12}/.test(x)), "nothing pitfall-shaped reaches the FORGE:TELEMETRY record");
+  });
+
+  it("a rework round whose gate never passes records nothing; no io.pitfalls is today's run", async () => {
+    const store = memStore();
+    const w = world(); w.io.pitfalls = store; failingPrecheck(w, false);
+    const dir = tmpDir("core-pit3-");
+    assert.equal((await run(w, { dir, precheck: { commands: ["npm run lint"] } })).terminalReason, "merged");
+    assert.equal(store.recs.filter((r) => r.t === "pitfall").length, 0);
+    assert.ok(!readLog(dir, 7).some((e) => e.event === "PITFALL_RECORDED"));
+    const plain = world(); failingPrecheck(plain);
+    const d2 = tmpDir("core-pit4-");
+    assert.equal((await run(plain, { dir: d2, precheck: { commands: ["npm run lint"] } })).terminalReason, "merged");
+    assert.ok(!readLog(d2, 7).some((e) => e.event === "PITFALL_RECORDED"));
+    assert.equal(readLog(d2, 7).find((e) => e.event === "RUN_TERMINAL").pitfalls_matched, undefined);
+  });
+
+  it("a ledger that throws never fails the lane", async () => {
+    const w = world({ issueBodies: [`${ISSUE_BODY}\n\nsrc/foo.js`] });
+    w.io.pitfalls = { read: async () => { throw new Error("EACCES"); }, append: async () => { throw new Error("EROFS"); } };
+    w.io.contextFacts = packFacts; failingPrecheck(w);
+    assert.equal((await run(w, { contextPack: { mode: "on" }, precheck: { commands: ["npm run lint"] } })).terminalReason, "merged");
   });
 });

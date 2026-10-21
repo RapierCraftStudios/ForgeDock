@@ -42,6 +42,9 @@ function sections(g) {
     ["merged", pct(f.mergedPct)], ["needs-human", pct(f.needsHumanPct)], ["remediation rate", pct(f.remediationPct)],
     ["top outcome codes (n=" + f.codesN + ")", f.codes.slice(0, 5).map((x) => `${x.code} ${x.count} (${pct(x.pct)})`).join(", ") || NA],
     ...(g.firstPass ? [["first-pass rate", `${pct(g.firstPass.rate)} (${g.firstPass.firstPass}/${g.firstPass.n} lanes that reached the build, ${g.firstPass.unknown} unknown)`]] : []),
+    // #4375: the same rate split by whether the context pack carried pitfalls matching the issue's files
+    ...(g.firstPassByPitfalls && (g.firstPassByPitfalls.with.n || g.firstPassByPitfalls.without.n)
+      ? [["with", "without"].map((k) => [`first-pass ${k} matching pitfalls`, `${pct(g.firstPassByPitfalls[k].rate)} (${g.firstPassByPitfalls[k].firstPass}/${g.firstPassByPitfalls[k].n})`])].flat() : []),
   ]), "");
   if (g.rework) { // #4362: builder rework rounds by trigger; untagged (older) attempts are "unknown"
     const w = g.rework, rows = Object.entries(w.byTrigger).sort((a, b) => b[1].usd - a[1].usd || a[0].localeCompare(b[0]));

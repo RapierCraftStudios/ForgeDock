@@ -129,7 +129,8 @@ export function readContextPack(cwd = process.cwd(), warn = stderrWarn) {
       mode = "";
     }
     const out = { ...(mode ? { mode } : {}), ...(e.context_pack_sources != null ? { sources: String(e.context_pack_sources) } : {}),
-      ...(e.context_pack_bytes != null ? { bytes: Number(e.context_pack_bytes) } : {}), ...(e.context_pack_days != null ? { days: Number(e.context_pack_days) } : {}) };
+      ...(e.context_pack_bytes != null ? { bytes: Number(e.context_pack_bytes) } : {}), ...(e.context_pack_days != null ? { days: Number(e.context_pack_days) } : {}),
+      ...(e.context_pack_pitfall_lanes != null ? { pitfallLanes: Number(e.context_pack_pitfall_lanes) } : {}) }; // #4375
     return Object.keys(out).length ? out : undefined;
   } catch { return undefined; }
 }

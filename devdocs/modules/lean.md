@@ -918,3 +918,22 @@ so they cannot drift. The builder self-reviews its diff against it inside the bu
 `SELF_REVIEW_AGREED`/`SELF_REVIEW_DISAGREED` against the first reviewer judgement, so first-pass self-checks can be
 compared with the reviewer. Cost: 0 extra LLM calls (~230 prompt tokens on the implement prompt, ~120 on the reviewer).
 
+
+## Entry 2026-10-21 — Learned per-repo pitfalls in the context pack (#4375)
+
+`pitfalls.mjs` keeps an append-only JSONL per repo at `~/.forge/pitfalls/<owner>__<repo>.jsonl` (`FORGE_PITFALLS_DIR`),
+real I/O through `io.pitfalls` {read, append} (`effects.mjs`). Rows: `{t:"lane", run}`, appended once per lane by
+`contextPackStep` even when the pack is off (the aging clock), and `{t:"pitfall", run, sig, trigger, globs, lesson}`.
+`fixRound` takes the gate's failure text. For a `REWORK_TRIGGERS` round it keeps a pending pitfall: `sig` = trigger + a
+sha256/12 of the first error-like line with paths, quoted literals, hex and numbers normalised (rule codes kept), and
+`lesson` = that line (≤160 chars). It's recorded only when the same gate passes again (`gatePassed`: precheck, structure,
+docs, enumerating, sequence, CI pass or a merge for `ci_red`/`merge_ci`, conformance, base-sync re-review), with
+`dir/*.ext` globs of `git diff --name-only <before>..HEAD`. The run log gets `PITFALL_RECORDED` {trigger, sig}.
+`foldPitfalls` dedups by signature (count = lanes it recurred in), and an entry not seen in the last
+`engine.context_pack_pitfall_lanes` lanes (default 50) ages out. `selectPitfalls` keeps up to 5: glob matches on the issue's
+`namedPaths` first (`match: files`), then repo-wide (`match: repo`), each by count, then recency. `context.mjs` source
+`pitfalls` (after `attempts`) compiles them inside the byte budget. Their signatures join the cache stamp. The pack result's
+`pitfalls` [{sig, match}] goes on `CONTEXT_PACK` (run log only, not the telemetry emit), and `RUN_TERMINAL` carries
+`pitfalls_matched`. `renderContextRecord` drops the pitfalls section (`publicPackText`) and shows only the count, so no
+pitfall text is posted. `forgedock stats` (local logs) prints the first-pass rate with and without matching pitfalls.
+Cost: 0 LLM calls; one local read and up to a few appends per lane; ≤ ~1 KB of pack bytes when mode is `on`.

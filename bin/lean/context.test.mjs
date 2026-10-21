@@ -166,7 +166,9 @@ describe("context pack (forge#4275)", () => {
   });
 
   it("config, lane type and parsers", () => {
-    assert.deepEqual(parseContextPackConfig({}), { mode: "shadow", sources: ["graph", "attempts", "ledger", "facts"], budgetBytes: 6144, days: 30 });
+    assert.deepEqual(parseContextPackConfig({}), { mode: "shadow", sources: ["graph", "attempts", "pitfalls", "ledger", "facts"], budgetBytes: 6144, days: 30, pitfallLanes: 50 });
+    assert.equal(parseContextPackConfig({ pitfallLanes: 12 }).pitfallLanes, 12);
+    assert.equal(parseContextPackConfig({ pitfallLanes: -3 }).pitfallLanes, 50);
     assert.equal(parseContextPackConfig({ mode: "ON" }).mode, "on");
     assert.equal(parseContextPackConfig({ mode: "nope" }).mode, "shadow");
     assert.equal(laneType({ body: "x\n**Parent**: #3" }), "child");
@@ -183,7 +185,7 @@ describe("context pack (forge#4275)", () => {
     const p = compileContextPack(await gather(fakes()));
     const r = renderContextRecord(p, { mode: "shadow", laneType: "rerun" });
     assert.match(r, /^<details><summary>Context pack: \d+ item\(s\), \d+ bytes, 0 dropped \(mode shadow, lane rerun, hash [0-9a-f]{12}\)<\/summary>/);
-    assert.match(r, /Sources \(included\/found\): graph 5\/5, attempts 3\/3, ledger 3\/3, facts 1\/1/);
+    assert.match(r, /Sources \(included\/found\): graph 5\/5, attempts 3\/3, pitfalls 0\/0, ledger 3\/3, facts 1\/1/);
     assert.ok(r.includes(p.text));
   });
 });
@@ -334,5 +336,55 @@ describe("#4298 context-pack cache and shared names", () => {
     writeFileSync(`${d}/forge.yaml`, "engine:\n  context_pack: on\n");
     assert.deepEqual(readContextPack(d, (m) => warns.push(m)), { mode: "on" });
     assert.equal(warns.length, 1, "a valid mode does not warn");
+    writeFileSync(`${d}/forge.yaml`, "engine:\n  context_pack_pitfall_lanes: 20\n");
+    assert.deepEqual(readContextPack(d, (m) => warns.push(m)), { pitfallLanes: 20 }, "#4375: the pitfall aging window");
+  });
+});
+
+describe("#4375 recurring pitfalls in the context pack", () => {
+  const PITS = [
+    { sig: "precheck:aaaaaaaaaaaa", trigger: "precheck", lesson: "precheck: src/a.ts:12:5 error 'x' is defined but never used no-unused-vars", globs: ["src/*.ts"], count: 4, match: "files" },
+    { sig: "docs:bbbbbbbbbbbb", trigger: "docs", lesson: "docs: devdocs/modules/lean.md is stale for bin/lean/lean.mjs", globs: ["devdocs/modules/*.md"], count: 2, match: "repo" },
+  ];
+  const facts = (pitfalls) => gatherContextFacts({ io: { gh: async () => { throw new Error("no gh"); }, git: async () => "", exists: async () => false }, repo: REPO, issue: 50, iss: { number: 50, body: "plain" }, comments: [], cwd: "/wt", base: "origin/staging", sources: ["pitfalls"], pitfalls });
+
+  it("compiles the given pitfalls in order, inside the byte budget, and lists the kept signatures", async () => {
+    const p = compileContextPack(await facts(PITS));
+    assert.ok(p.text.includes("Recurring pitfalls in this repo (past rework):"), p.text);
+    const a = p.text.indexOf("[precheck]"), b = p.text.indexOf("[docs]");
+    assert.ok(a > 0 && b > a, p.text);
+    assert.ok(p.text.includes("(src/*.ts); seen 4×"));
+    assert.deepEqual(p.pitfalls, [{ sig: PITS[0].sig, match: "files" }, { sig: PITS[1].sig, match: "repo" }]);
+    assert.equal(p.sources.pitfalls, 2);
+    const small = compileContextPack(await facts(PITS), { budgetBytes: 200 });
+    assert.ok(small.bytes <= 200 && small.truncated >= 1, `${small.bytes} ${small.truncated}`);
+    assert.deepEqual(small.pitfalls, small.text.includes("[docs]") ? p.pitfalls : [p.pitfalls[0]]);
+    assert.equal(compileContextPack(await facts(PITS), { sources: ["graph"] }).pitfalls.length, 0, "source off: no pitfalls");
+  });
+
+  it("the posted FORGE:CONTEXT record never carries pitfall text, only the count", async () => {
+    const f = await gather(fakes());
+    const p = compileContextPack({ ...f, pitfalls: (await facts(PITS)).pitfalls });
+    assert.ok(p.text.includes("no-unused-vars"));
+    const r = renderContextRecord(p, { mode: "on", laneType: "first" });
+    for (const x of ["no-unused-vars", "Recurring pitfalls", "src/*.ts", "devdocs/modules/lean.md is stale"]) assert.ok(!r.includes(x), x);
+    assert.match(r, /pitfalls 2\/2/);
+    assert.ok(r.includes("Prior attempts at this issue:") && r.includes("Merged PRs on the same symbols"), "the other sections stay");
+  });
+
+  it("the cache key changes when the selected pitfall signatures change", () => {
+    const cfg = parseContextPackConfig({});
+    const k0 = contextPackCacheKey(50, "abc", cfg, { scope: "s", attempts: 0 });
+    assert.equal(contextPackCacheKey(50, "abc", cfg, { scope: "s", attempts: 0, pitfalls: [] }), k0, "no pitfalls: today's key");
+    const k1 = contextPackCacheKey(50, "abc", cfg, { scope: "s", attempts: 0, pitfalls: ["precheck:aaaaaaaaaaaa"] });
+    assert.notEqual(k1, k0);
+    assert.notEqual(contextPackCacheKey(50, "abc", cfg, { scope: "s", attempts: 0, pitfalls: ["precheck:aaaaaaaaaaaa", "docs:bbbbbbbbbbbb"] }), k1);
+  });
+
+  it("without pitfalls the pack text and hash are unchanged", async () => {
+    const f = await gather(fakes());
+    const a = compileContextPack(f), b = compileContextPack({ ...f, pitfalls: [] });
+    assert.equal(a.text, b.text); assert.equal(a.hash, b.hash);
+    assert.ok(!a.text.includes("Recurring pitfalls"));
   });
 });
