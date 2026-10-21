@@ -99,6 +99,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `[A-Za-z0-9_.-]`), and the implement prompt tells the builder to put them on
    every docker run/volume/network/build, use `--rm` and tear down via trap
    (#4181); `scripts/ci-local/run.mjs` labels its own network and containers.
+   #4374 builder self-review: `prompts.mjs` `REVIEW_RUBRIC` (yes/no questions: fixed, no regression, contract met,
+   scope) is embedded verbatim in both `reviewerPrompt` (`<rubric>`) and `builderImplementPrompt`, whose last step
+   before `result.json` answers each question against `git diff <base>...HEAD` with evidence and fixes any "no" in
+   the same session; `result.json` gains `self_review: [{question, answer, evidence}]`. `selfreview.mjs`
+   (`readSelfReview`, `compareSelfReview`) + `lean.mjs` wiring log `SELF_REVIEW` or `SELF_REVIEW_MISSING` after the
+   implement session (fixed results only) and, once on the first reviewer judgement (`conforms|nonconforming`),
+   `SELF_REVIEW_AGREED|SELF_REVIEW_DISAGREED`. Run log only: never a failure, no runner call, no phase.
 6a. **Declared check commands** (#4240) — forge.yaml `learned.test_commands`
    (`engine-cli.mjs` `readPrecheckCommands`) run in the worktree after the build
    commit via `io.runCommand` (`bash -c`, `verify.precheck_timeout_seconds`,
@@ -893,3 +900,12 @@ too) and a root `.venv` into the base worktree when the base has none, so a work
 to the environment state: no builder resume, no reviewer. Other non-proofs stay `conformance.unimplemented`. A
 `BASE=SKIPPED` detail now says the base was not run because head did not pass; head's new test files were already
 overlaid (#3630). Cost: 0 LLM calls; saves the wasted resume.
+
+## Entry 2026-10-21 — Builder self-review against the shared reviewer rubric (#4374)
+
+One rubric constant (`prompts.mjs` `REVIEW_RUBRIC`) is shared verbatim by `reviewerPrompt` and the implement prompt,
+so they cannot drift. The builder self-reviews its diff against it inside the build session and records
+`result.json` `self_review`; the engine logs `SELF_REVIEW_MISSING` for a fixed result without it and
+`SELF_REVIEW_AGREED`/`SELF_REVIEW_DISAGREED` against the first reviewer judgement, so first-pass self-checks can be
+compared with the reviewer. Cost: 0 extra LLM calls (~230 prompt tokens on the implement prompt, ~120 on the reviewer).
+
