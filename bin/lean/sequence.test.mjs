@@ -109,4 +109,45 @@ describe("sequence-numbered migrations at hand-off (#4322)", () => {
     assert.match(sequenceSyncNote(["db/drizzle/meta/_journal.json"]), /do not text-merge/);
     assert.match(sequenceSyncNote(["db/drizzle/0007_usage.sql"]), /Renumber the lane's files/);
   });
+
+  /** A base commit with `baseFiles`, a lane commit adding `laneFiles`, then `laterBase` on main; returns the repo on the lane. */
+  const twoCommits = (baseFiles, laneFiles, laterBase = null) => {
+    const d = tmpDir("seq-");
+    sh(d, "init", "-q", "-b", "main");
+    put(d, baseFiles); commit(d, "base");
+    sh(d, "checkout", "-qb", "lane");
+    put(d, laneFiles); commit(d, "lane");
+    if (laterBase) { sh(d, "checkout", "-q", "main"); put(d, laterBase); commit(d, "later base"); sh(d, "checkout", "-q", "lane"); }
+    return d;
+  };
+
+  it("date and issue-number filename prefixes are not sequence numbers (#4343)", async () => {
+    const d = twoCommits(
+      { "blog/2026-10-05-first.md": "a\n", "news/20261005-a.md": "a\n", "docs/4322-a.md": "a\n", "docs2/2447-a.md": "a\n", "docs2/4160-b.md": "b\n" },
+      { "blog/2026-10-20-second.md": "b\n", "news/20261020-b.md": "b\n", "docs/4322-b.md": "b\n", "docs2/4160-c.md": "c\n" },
+    );
+    assert.deepEqual(await sequenceCollisions({ git: gitIn(d), base: "main" }), []);
+    assert.deepEqual(await snapshotLane({ git: gitIn(d), base: "main" }).then((s) => s.map((f) => f.path).sort()), ["docs/4322-b.md", "docs2/4160-c.md"]);
+    assert.equal(sequenceSyncNote(["blog/2026-10-05-first.md"]), "");
+    assert.equal(sequenceSyncNote(["news/20261005-a.md"]), "");
+  });
+
+  it("real series still collide: SQL, Python, drizzle with a single base migration plus journal (#4343)", async () => {
+    const d = twoCommits(
+      {
+        "db/0006_a.sql": "a\n", "db/0007_other.sql": "o\n",
+        "app/migrations/0001_initial.py": "i\n", "app/migrations/0002_x.py": "x\n", "app/migrations/__init__.py": "",
+        "drizzle/0000_init.sql": "CREATE TABLE t (id int);\n", "drizzle/meta/_journal.json": journal("0000_init"),
+      },
+      { "db/0007_usage.sql": "u\n", "app/migrations/0002_y.py": "y\n", "drizzle/0000_x.sql": "CREATE TABLE x (id int);\n", "drizzle/meta/0000_snapshot.json": '{"id":"lane0"}\n' },
+      { "drizzle/meta/0000_snapshot.json": '{"id":"s0"}\n' },
+    );
+    const c = await sequenceCollisions({ git: gitIn(d), base: "main" });
+    assert.deepEqual(c.map((x) => [x.lane, x.base, x.next]).sort((a, b) => a[0].localeCompare(b[0])), [
+      ["app/migrations/0002_y.py", ["app/migrations/0002_x.py"], "0003"],
+      ["db/0007_usage.sql", ["db/0007_other.sql"], "0008"],
+      ["drizzle/0000_x.sql", ["drizzle/0000_init.sql"], "0001"],
+      ["drizzle/meta/0000_snapshot.json", ["drizzle/meta/0000_snapshot.json"], "0001"],
+    ]);
+  });
 });

@@ -185,6 +185,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    number the fetched lane already uses → builder renumbers (`sequencePrompt`; a
    conflicted migration/journal gets `sequenceSyncNote`), then `verifyRenumber`
    (same blob, journal strictly ordered, no collision); still failing → `base.conflict`.
+   Only real series count (#4343): a leading date (`YYYY-MM-DD`, `YYYYMMDD`) is no
+   number, and the directory must hold a series on the base — a `_journal.json` /
+   `meta/_journal.json`, or ≥2 distinct numbers of the file's width filling at least
+   half of their range (sparse issue-numbered docs are not a series).
 
 ## Host parallelism (#4182)
 
