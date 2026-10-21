@@ -1198,16 +1198,19 @@ export async function runCore(o) {
         if (round) picked = pickChecks();
         const precheckCommands = picked.commands;
         // #4318/#4331: one round has a total budget (lean.precheck.max_minutes, else verify.precheck_total_seconds); the
-        // commands run concurrently up to the host worker cap under ONE heavy slot; the rest are deferred to CI, not failed
+        // commands run concurrently up to the host worker cap; the rest are deferred to CI, not failed. #4344: one heavy
+        // slot per running command, and the worker cap is divided among them (FORGE_HOST_PARALLELISM = floor(N / k))
         const maxMin = Number(o.precheck?.maxMinutes), totalMs = (maxMin > 0 ? maxMin * 60 : Number(vcfg.precheckTotalSeconds) || 600) * 1000;
         const parallelism = Number(verifyParallelism()) || 1;
-        const round$ = await heavyStep("precheck", () => runChecks({ commands: precheckCommands, parallelism, budgetMs: totalMs, perCommandMs: vcfg.precheckTimeoutSeconds * 1000, now,
-          run: ({ command, timeoutMs }) => io.runCommand({ command, cwd: wt, timeoutMs, env: laneEnv() }) }));
+        let workers = 1;
+        const round$ = await runChecks({ commands: precheckCommands, parallelism, budgetMs: totalMs, perCommandMs: vcfg.precheckTimeoutSeconds * 1000, now,
+          acquire: () => heavyAcquire("precheck"),
+          run: ({ command, timeoutMs, workers: share }) => { workers = share; const env = laneEnv(); return io.runCommand({ command, cwd: wt, timeoutMs, env: env.FORGE_HOST_PARALLELISM ? { ...env, FORGE_HOST_PARALLELISM: String(share) } : env }); } });
         const { results, deferred } = round$;
         precheckMs += round$.ms; precheckDeferred += deferred.length;
         if (deferred.length) T.anomalies.push(`deferred-to-ci: pre-PR check budget ${totalMs / 1000} s reached; left to CI: ${deferred.map((c) => `\`${c}\``).join(", ")}`);
         ev({ event: "PRECHECK_COMMANDS", round, results: [...results.map(({ command, rc, ms }) => ({ command, rc, ms })), ...deferred.map((command) => ({ command, status: "deferred-to-ci" }))],
-          ms: round$.ms, parallelism, ...(picked.source !== "learned" ? { source: picked.source } : {}) });
+          ms: round$.ms, parallelism, workers, ...(picked.source !== "learned" ? { source: picked.source } : {}) });
         verifyFacts.commands = results.map(({ command, rc }) => ({ command, rc }));
         const failed = results.filter((r) => r.rc !== 0);
         if (!failed.length) { checkCommandsFailing = false; if (round) T.decisions.push(`Declared check commands pass after ${round} builder fix round(s)`); break; }

@@ -66,6 +66,43 @@ describe("runChecks (#4331)", () => {
   });
 });
 
+describe("runChecks (#4344)", () => {
+  /** A fake heavy semaphore: counts live slots, their peak and releases; `wait` ms of the shared clock per acquire. */
+  const sem = (h, wait = 0) => { const s = { live: 0, peak: 0, acquired: 0, released: 0 };
+    s.acquire = async () => { s.acquired++; s.peak = Math.max(s.peak, ++s.live); h.t += wait; return { release: () => { s.live--; s.released++; } }; }; return s; };
+
+  it("#4344 divides the worker budget across concurrent commands and takes one heavy slot per running command", async () => {
+    for (const [n, cmds, share, peak] of [[8, ["a", "b", "c", "d", "e", "f", "g", "h"], 1, 8], [8, ["a", "b"], 4, 2], [6, ["a", "b", "c", "d"], 1, 4], [5, ["a", "b"], 2, 2], [4, ["a"], 4, 1]]) {
+      const h = harness(), s = sem(h), seen = [];
+      await runChecks({ commands: cmds, parallelism: n, budgetMs: 600000, perCommandMs: 300000, now: h.now, acquire: s.acquire, run: (a) => { seen.push(a.workers); return h.run(a); } });
+      assert.ok(seen.every((w) => w === share), `N=${n} k=${cmds.length}: ${seen}`);
+      assert.ok(share * h.peak <= n, `round total ${share * h.peak} workers > N=${n}`);
+      assert.deepEqual([s.peak, s.acquired, s.released, s.live], [peak, cmds.length, cmds.length, 0], `N=${n} slots`);
+    }
+  });
+
+  it("#4344 FORGE_HOST_PARALLELISM=1: one command at a time, one worker, one slot", async () => {
+    const h = harness(), s = sem(h), seen = [];
+    await runChecks({ commands: ["a", "b", "c"], parallelism: 1, budgetMs: 600000, perCommandMs: 300000, now: h.now, acquire: s.acquire, run: (a) => { seen.push(a.workers); return h.run(a); } });
+    assert.deepEqual([h.peak, s.peak, seen], [1, 1, [1, 1, 1]]);
+  });
+
+  it("#4344 the slot wait counts against the budget: a command whose wait exhausts it is deferred, its slot released", async () => {
+    const h = harness(), s = sem(h, 1000);
+    const r = await runChecks({ commands: ["a", "b"], parallelism: 1, budgetMs: 2500, perCommandMs: 300000, now: h.now, acquire: s.acquire, run: h.run });
+    assert.deepEqual(h.calls, [["a", 1500]]);
+    assert.deepEqual([r.results.map((x) => x.command), r.deferred], [["a"], ["b"]]);
+    assert.deepEqual([s.acquired, s.released], [2, 2]);
+  });
+
+  it("#4344 a throwing acquire runs the command ungated; a throwing release is ignored", async () => {
+    const h = harness();
+    const r1 = await runChecks({ commands: ["a"], parallelism: 2, budgetMs: 600000, perCommandMs: 300000, now: h.now, acquire: async () => { throw new Error("registry"); }, run: h.run });
+    const r2 = await runChecks({ commands: ["b"], parallelism: 2, budgetMs: 600000, perCommandMs: 300000, now: h.now, acquire: async () => ({ release: () => { throw new Error("x"); } }), run: h.run });
+    assert.deepEqual([...r1.results, ...r2.results].map((x) => [x.command, x.rc]), [["a", 0], ["b", 0]]);
+  });
+});
+
 describe("formatPrecheckSummary (#4331)", () => {
   it("sums precheck_ms over the lanes that ran checks and counts deferrals; null when none did", () => {
     assert.equal(formatPrecheckSummary([{ precheck_ms: 90000 }, { precheck_ms: 30000, precheck_deferred: 2 }, { issue: 3 }]), "precheck: 2.0m total over 2 lanes, 2 deferred to CI");
