@@ -653,6 +653,17 @@ leftovers with counts and sizes and warns on unowned stale ones; `doctor --fix`
 applies the reaper. `commands/cleanup.md`, `work-on/close.md` and
 `work-on/build/validate.md` call the same reaper. Cost: 0 LLM calls.
 
+After `reclaimed:`, the batch report ends with the fail-soft alerts for the batch's
+repo (#4354). `formatAlertLines` prints `ALERTS` and one line per alert, or nothing
+when no alert fired. The lines come from `computeAlerts` (`bin/stats/aggregate.mjs`)
+over `readLanes` of the batch's run-log dir. Each run in a log is one lane, and the
+window is the last 50 lanes of the repo. The rules are: `DEPS_PREPARED` failed above
+20% per ecosystem, `deferred-to-ci` above 30%, one `TOOLCHAIN_WARNING` on more than
+50% of lanes, and an outcome code whose share doubled against the previous window.
+Thresholds come from `stats.alerts.*`, and there are no alerts under 10 lanes.
+`forgedock stats` prints the same alerts as `## ALERTS`. A failure while computing
+them never fails the batch. Cost: 0 LLM calls, no network.
+
 ## Entry 2026-10-20 — Complete conformance reviews, blocking shadow gate (#4160)
 
 `decide()` first runs `fillEngineRows` (`conformance.mjs`): engine-authorized scope rows, `unverified` preserve rows and `path:line` evidence normalized to repo paths (`normalizeEvidencePath`) are no longer "incomplete". `reviewerPrompt` embeds `reviewSkeleton` (a row per R/P/scope/coverage id). `checkCompleteness` returns `missing` ids; the retry in `reviewOnce` is `reviewerRepairPrompt` for those ids only (no diff), merged by `mergeReviewRows`. `changedFiles()` drops files equal to the base tip (base-sync merges).
