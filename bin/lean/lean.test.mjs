@@ -2125,6 +2125,24 @@ describe("orchestrate", () => {
     assert.equal(res.ok, true);
   });
 
+  it("#4361 a preflight GC that ran out of budget resumes at the next admission interval even off the ceiling", async () => {
+    const leanIo = { gh: async (a) => (a[0] === "repo" ? "main\n" : a.includes("milestone") ? JSON.stringify({ milestone: null }) : JSON.stringify({ body: "" })),
+      git: async (a) => (a[0] === "ls-remote" && a.at(-1) === "refs/heads/staging" ? "abc\tref\n" : "") };
+    const gcCalls = [], logs = [];
+    let t = 0;
+    const deferred = [5, 0];
+    const l = console.log; console.log = (s) => logs.push(String(s));
+    try {
+      await orchestrateFromCli(["1", "2", "3", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], { dir: tmpDir("core-gc-"), batchRoot: tmpDir("core-gc-batch-"), allowTmpfs: true, emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo,
+        leanModule: { runCore: async (o) => { t += 6 * 60 * 1000; return { terminalReason: "merged", pr: o.issue, cost_usd: 0, wall_ms: 1 }; } },
+        gc: async ({ phase }) => { gcCalls.push(phase); return { reclaimed: 1, deferred: deferred.shift() ?? 0, bytes: 0 }; },
+        host: { loadAvg1: () => 0, cores: () => 4, memAvailableMb: () => 64000 }, now: () => t, hygiene: { auto_gc: true, max_host_load_ratio: 0.8 } });
+    } finally { console.log = l; }
+    // preflight deferred 5 items: the next due admission finishes them; once nothing is pending, no more GC off the ceiling
+    assert.deepEqual(gcCalls, ["preflight", "admission"]);
+    assert.ok(logs.includes("gc (preflight): 5 item(s) deferred to the next admission"), logs.join("\n"));
+  });
+
   it("#4125 a lane-refused issue starts no run and its dependents are skipped, not reported as a cycle", async () => {
     const runs = [];
     const rows = await orchestrate({ issues: [1, 2, 3], parallel: 2, readBody: async (n) => (n === 2 ? "**Depends on**: #1" : ""),
