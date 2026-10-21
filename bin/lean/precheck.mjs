@@ -6,7 +6,16 @@
  * max(1, floor(N / k)) workers each), and `acquire` takes one heavy-step slot per running command. A command that never
  * started before the budget ran out, or that the budget cut short, is left to CI (`deferred-to-ci`), never a failure.
  * Repo-agnostic: commands are opaque `bash -c` strings run through the injected `run`.
+ * #4364: `planPrecheck` is the one selection and budget rule shared by the engine's pre-PR round and `forgedock check`,
+ * which the builder runs in-session (`selfCheck`); `worktreeFingerprint` tells whether that run saw the final tree.
  */
+import { createHash } from "node:crypto";
+import { scopeChecks, selectCommands } from "./testmap.mjs";
+import { capLogs } from "./verify.mjs";
+
+/** #4364: the engine's check plan for `forgedock check` (written beside contract.json) and the CLI's last run record. */
+export const CHECK_PLAN_FILE = ".forge-lean/check-plan.json";
+export const SELF_CHECK_FILE = ".forge-lean/self-check.json";
 
 /** rc of a command killed by its timeout (effects.mjs runCheckCommand). */
 const TIMEOUT_RC = 124;
@@ -64,4 +73,83 @@ export function formatPrecheckSummary(rows) {
   const ms = ran.reduce((a, r) => a + r.precheck_ms, 0);
   const deferred = ran.reduce((a, r) => a + (Number.isInteger(r.precheck_deferred) ? r.precheck_deferred : 0), 0);
   return `precheck: ${(ms / 60000).toFixed(1)}m total over ${ran.length} lane${ran.length === 1 ? "" : "s"}${deferred ? `, ${deferred} deferred to CI` : ""}`;
+}
+
+/**
+ * #4364: the pre-PR commands and budget for a round: `scopeChecks` over the trimmed learned commands (a mapped learned
+ * command runs only when its globs match a changed file); budget lean.precheck.max_minutes, else
+ * verify.precheck_total_seconds (default 600 s); per command verify.precheck_timeout_seconds.
+ * @returns {{commands:string[], source:string, added:number, dropped:string[], selected:number, budgetMs:number, perCommandMs:number}}
+ */
+export function planPrecheck({ testMap = null, files = [], learned = [], maxMinutes, verify = {} }) {
+  const list = (Array.isArray(learned) ? learned : []).map((c) => String(c ?? "").trim()).filter(Boolean);
+  const m = scopeChecks(testMap, files, list);
+  const max = Number(maxMinutes);
+  const budgetMs = (max > 0 ? max * 60 : Number(verify.precheckTotalSeconds) || 600) * 1000;
+  return { ...m, selected: testMap ? selectCommands(testMap, files).length : 0, budgetMs, perCommandMs: (Number(verify.precheckTimeoutSeconds) || 300) * 1000 };
+}
+
+const lines = (out) => String(out ?? "").split("\n").map((x) => x.trim()).filter(Boolean);
+
+/**
+ * #4364: content fingerprint of the worktree against merge-base(base, HEAD): sha256 over the sorted (path, blob sha or
+ * "deleted") pairs of every tracked path that differs (committed, staged or not) plus untracked non-ignored files,
+ * `.forge-lean/` excluded. Committing after a check leaves it unchanged; any edit changes it.
+ * @param {{git:(args:string[]) => Promise<string>, base:string}} p
+ */
+export async function worktreeFingerprint({ git, base }) {
+  const mb = String(await git(["merge-base", base, "HEAD"])).trim();
+  const keep = (f) => !f.startsWith(".forge-lean/");
+  const deleted = new Set(lines(await git(["diff", "--name-only", "--diff-filter=D", mb])).filter(keep));
+  const paths = [...new Set([...lines(await git(["diff", "--name-only", mb])), ...lines(await git(["ls-files", "-o", "--exclude-standard"]))])].filter(keep).sort();
+  const live = paths.filter((f) => !deleted.has(f)), blobs = new Map();
+  for (let i = 0; i < live.length; i += 200) {
+    const part = live.slice(i, i + 200), shas = lines(await git(["hash-object", "--", ...part]));
+    part.forEach((f, j) => blobs.set(f, shas[j] ?? ""));
+  }
+  return createHash("sha256").update(paths.map((f) => `${f}\0${blobs.get(f) ?? "deleted"}`).join("\n")).digest("hex");
+}
+
+/** #4364: 'skipped' (no record), 'stale' (another tree), 'red' (this tree, failing) or 'green' (this tree, passing). */
+export function selfCheckState(record, fingerprint) {
+  if (!record || typeof record !== "object" || !record.fingerprint) return "skipped";
+  if (record.fingerprint !== fingerprint) return "stale";
+  return record.ok === true ? "green" : "red";
+}
+
+/**
+ * #4364 `forgedock check`: the contract's validate commands (reported `ci`, not run, in verify.mode ci, as the engine
+ * accepts them on a CI-verified head), then the planned pre-PR commands under the plan's budget, both through
+ * `runChecks` with the same worker cap. No heavy slot is taken here: the heavy shims on the builder's PATH gate the
+ * heavy binaries. ok = every command that ran exited 0 (deferred and `ci` are not failures, as in the engine).
+ * @param {{contract:object, plan:{mode?:string, commands:string[], budgetMs:number, perCommandMs:number}, parallelism?:number, now?:() => number, run:Function}} p
+ */
+export async function selfCheck({ contract, plan, parallelism = 1, now = () => Date.now(), run }) {
+  const vals = (Array.isArray(contract?.validate) ? contract.validate : []).filter((v) => v && String(v.command ?? "").trim());
+  const ci = plan?.mode === "ci", per = Number(plan?.perCommandMs) > 0 ? Number(plan.perCommandMs) : 300000;
+  const validate = [];
+  if (ci) for (const v of vals) validate.push({ id: v.id, command: String(v.command), status: "ci" });
+  else if (vals.length) {
+    const cmds = vals.map((v) => String(v.command));
+    // as the engine's validate rerun: each command its own timeout, no round budget
+    const r = await runChecks({ commands: cmds, parallelism, budgetMs: Infinity, perCommandMs: per, now, run });
+    const byCmd = new Map(r.results.map((x) => [x.command, x]));
+    for (const v of vals) { const x = byCmd.get(String(v.command)); validate.push(x ? { id: v.id, ...x } : { id: v.id, command: String(v.command), status: "deferred-to-ci" }); }
+  }
+  const pre = await runChecks({ commands: plan?.commands ?? [], parallelism, budgetMs: plan?.budgetMs ?? 0, perCommandMs: per, now, run });
+  const commands = [...pre.results];
+  const ok = [...validate, ...commands].every((x) => x.status || x.rc === 0);
+  return { ok, validate, commands, deferred: pre.deferred };
+}
+
+/** #4364: the compact pass/fail table `forgedock check` prints, each failure's output tail capped (verify.mjs capLogs). */
+export function formatCheckTable(r, cap) {
+  const word = (x) => (x.status === "ci" ? "CI" : x.status ? "DEFERRED" : x.rc === 0 ? "PASS" : `FAIL exit ${x.rc}`);
+  const rows = [...(r.validate ?? []).map((x) => ({ ...x, label: `${x.id} ${x.command}` })), ...(r.commands ?? []).map((x) => ({ ...x, label: x.command })),
+    ...(r.deferred ?? []).map((c) => ({ command: c, label: c, status: "deferred-to-ci" }))];
+  const out = rows.map((x) => `${word(x).padEnd(12)} ${Number.isFinite(x.ms) ? `${(x.ms / 1000).toFixed(1)}s`.padStart(7) : "".padStart(7)}  ${x.label}`);
+  const failed = rows.filter((x) => !x.status && x.rc !== 0);
+  for (const f of capLogs(failed.map((x) => ({ ...x, log: x.output })), ...(cap ? [cap] : []))) out.push("", `--- ${f.label} (exit ${f.rc})`, f.log || "(no output)");
+  out.push("", r.ok ? "check: PASS" : `check: FAIL (${failed.length} failing)`);
+  return out.join("\n");
 }

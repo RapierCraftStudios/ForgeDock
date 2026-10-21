@@ -8,6 +8,7 @@ import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from 
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
 import { makeLedger } from "./ledger.mjs";
+import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
@@ -3820,6 +3821,39 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.deepEqual(ran, [["make a", 100000], ["make b", 40000]]);
     assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 0, "skipped is not failing");
     assert.match(traj(w)[0], /deferred-to-ci: pre-PR check budget 100 s reached; left to CI: `make c`/);
+  });
+});
+
+describe("#4364 in-session forgedock check: plan hand-off and self-check record", () => {
+  const SELF = `${WT}/.forge-lean/self-check.json`;
+  const fp = (w) => worktreeFingerprint({ git: (a) => w.io.git(a, { cwd: WT }), base: "origin/staging" });
+
+  it("writes check-plan.json beside the contract and the implement prompt asks for forgedock check", async () => {
+    const w = world(); w.io.runCommand = async () => ({ rc: 0, output: "" });
+    assert.equal((await run(w, { precheck: { commands: [" make lint ", ""], maxMinutes: 5 }, verify: { mode: "hybrid" } })).terminalReason, "merged");
+    assert.deepEqual(JSON.parse(w.files[`${WT}/.forge-lean/check-plan.json`]), { v: 1, base: "origin/staging", mode: "hybrid", learned: ["make lint"], maxMinutes: 5, precheckTotalSeconds: 600, precheckTimeoutSeconds: 300 });
+    assert.match(builders(w)[1][4], /forgedock\.mjs check` in the worktree[\s\S]*report the problem as blocked/);
+  });
+
+  it("fixed without a forgedock check run logs SELF_CHECK_MISSING skipped and still merges (not a failure)", async () => {
+    const w = world(); const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "SELF_CHECK_MISSING").map((e) => e.state), ["skipped"]);
+  });
+
+  it("a green run on the final tree logs nothing; a record of another tree is stale on SELF_CHECK_MISSING and a failed pre-PR round", async () => {
+    const w = world(); const dir = tmpDir("core-");
+    w.files[SELF] = JSON.stringify({ v: 1, fingerprint: await fp(w), ok: true });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(readLog(dir, 7).filter((e) => e.event === "SELF_CHECK_MISSING").length, 0);
+    const w2 = world(); const dir2 = tmpDir("core-");
+    w2.files[SELF] = JSON.stringify({ v: 1, fingerprint: "other-tree", ok: true });
+    let rc = 1; w2.io.runCommand = async () => ({ rc, output: "boom" });
+    const inner = w2.io.runner; w2.io.runner = async (c) => { if (/declared check commands failed/.test(c.prompt)) rc = 0; return inner(c); };
+    assert.equal((await run(w2, { dir: dir2, precheck: { commands: ["make lint"] } })).terminalReason, "merged");
+    const log = readLog(dir2, 7);
+    assert.deepEqual(log.filter((e) => e.event === "SELF_CHECK_MISSING").map((e) => e.state), ["stale"]);
+    assert.deepEqual(log.filter((e) => e.event === "PRECHECK_COMMANDS").map((e) => [e.results[0].rc, e.self_check]), [[1, "stale"], [0, undefined]]);
   });
 });
 

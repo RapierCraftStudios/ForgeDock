@@ -5,7 +5,8 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { runChecks, formatPrecheckSummary } from "./precheck.mjs";
+import { runChecks, formatPrecheckSummary, planPrecheck, selfCheck, selfCheckState, formatCheckTable, worktreeFingerprint } from "./precheck.mjs";
+import { execFileSync } from "node:child_process";
 import { readPrecheckBudget } from "../engine-cli.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 
@@ -126,5 +127,60 @@ describe("readPrecheckBudget: forge.yaml lean.precheck.max_minutes (#4331)", () 
     for (const bad of ["0", "-1", "abc", "121"]) assert.equal(withYaml(`lean:\n  precheck_max_minutes: ${bad}\n`, readPrecheckBudget), undefined, bad);
     assert.equal(withYaml("verify:\n  mode: local\n", readPrecheckBudget), undefined);
     assert.equal(readPrecheckBudget(tmpDir("precheck-")), undefined);
+  });
+});
+
+describe("forgedock check core (#4364)", () => {
+  const MAP = { version: 1, entries: [{ globs: ["src/**"], command: "npm test", cwd: "." }, { globs: ["docs/**"], command: "make docs", cwd: "." }] };
+
+  it("planPrecheck: the engine's selection and budget rule (max_minutes wins, else precheck_total_seconds, else 600 s)", () => {
+    const p = planPrecheck({ testMap: MAP, files: ["src/a.js"], learned: [" make lint ", "", "make docs"], verify: { precheckTotalSeconds: 120, precheckTimeoutSeconds: 30 } });
+    assert.deepEqual(p.commands, ["make lint", "npm test"]); assert.deepEqual(p.dropped, ["make docs"]);
+    assert.equal(p.selected, 1); assert.equal(p.budgetMs, 120000); assert.equal(p.perCommandMs, 30000);
+    assert.equal(planPrecheck({ learned: ["x"], maxMinutes: 2, verify: { precheckTotalSeconds: 999 } }).budgetMs, 120000);
+    assert.equal(planPrecheck({ learned: ["x"], maxMinutes: 3, verify: {} }).budgetMs, 180000);
+    assert.deepEqual(planPrecheck({ learned: ["x"], verify: {} }), { commands: ["x"], added: 0, dropped: [], source: "learned", selected: 0, budgetMs: 600000, perCommandMs: 300000 });
+  });
+
+  it("selfCheck runs validates then pre-PR commands; ok only when every run exits 0; ci mode leaves validates to CI", async () => {
+    const h = harness({ rc: { "make lint": 2 } });
+    const contract = { validate: [{ id: "V1", command: "node --test a" }, { id: "V2", command: " " }] };
+    const plan = { mode: "local", commands: ["npm test", "make lint"], budgetMs: 600000, perCommandMs: 300000 };
+    const r = await selfCheck({ contract, plan, now: h.now, run: h.run });
+    assert.deepEqual(h.calls.map((c) => c[0]), ["node --test a", "npm test", "make lint"]);
+    assert.deepEqual(r.validate.map((x) => [x.id, x.rc]), [["V1", 0]]); assert.deepEqual(r.commands.map((x) => x.rc), [0, 2]); assert.equal(r.ok, false);
+    const h2 = harness();
+    const r2 = await selfCheck({ contract, plan: { ...plan, mode: "ci" }, now: h2.now, run: h2.run });
+    assert.deepEqual(h2.calls.map((c) => c[0]), ["npm test", "make lint"]); assert.deepEqual(r2.validate, [{ id: "V1", command: "node --test a", status: "ci" }]); assert.equal(r2.ok, true);
+    const h3 = harness({ cost: { "npm test": 5000 } });
+    const r3 = await selfCheck({ contract: {}, plan: { commands: ["npm test", "make lint"], budgetMs: 4000, perCommandMs: 300000 }, now: h3.now, run: h3.run });
+    assert.deepEqual(r3.deferred, ["npm test", "make lint"]); assert.equal(r3.ok, true, "deferred to CI is not a failure, as in the engine");
+  });
+
+  it("selfCheckState and formatCheckTable", () => {
+    assert.equal(selfCheckState(null, "f"), "skipped"); assert.equal(selfCheckState({ fingerprint: "g", ok: true }, "f"), "stale");
+    assert.equal(selfCheckState({ fingerprint: "f", ok: false }, "f"), "red"); assert.equal(selfCheckState({ fingerprint: "f", ok: true }, "f"), "green");
+    const t = formatCheckTable({ ok: false, validate: [{ id: "V1", command: "v", rc: 0, ms: 1200 }], commands: [{ command: "make lint", rc: 2, ms: 10, output: `${"x".repeat(5000)}TAIL` }], deferred: ["slow"] }, 1000);
+    assert.match(t, /^PASS +1\.2s {2}V1 v$/m); assert.match(t, /^FAIL exit 2 .* make lint$/m); assert.match(t, /^DEFERRED .* slow$/m);
+    assert.match(t, /--- make lint \(exit 2\)\n…x+TAIL/); assert.ok(t.length < 1400, "failure output capped"); assert.match(t, /check: FAIL \(1 failing\)$/);
+  });
+
+  it("worktreeFingerprint: the same content committed or not is the same tree; an edit or new file changes it; .forge-lean is ignored", async () => {
+    const dir = tmpDir("selfcheck-fp-");
+    const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+    const g = (a) => execFileSync("git", a, { cwd: dir, encoding: "utf8", env });
+    g(["init", "-q", "-b", "main"]); writeFileSync(join(dir, "a.js"), "1\n"); writeFileSync(join(dir, "gone.js"), "x\n"); g(["add", "-A"]); g(["commit", "-q", "-m", "base"]);
+    g(["branch", "base"]);
+    const fp = () => worktreeFingerprint({ git: async (a) => g(a), base: "base" });
+    const clean = await fp();
+    writeFileSync(join(dir, "a.js"), "2\n"); writeFileSync(join(dir, "new.js"), "n\n"); g(["rm", "-q", "gone.js"]);
+    const dirty = await fp(); assert.notEqual(dirty, clean);
+    execFileSync("mkdir", ["-p", join(dir, ".forge-lean")]); writeFileSync(join(dir, ".forge-lean", "result.json"), "{}");
+    g(["add", "-A"]); g(["reset", "-q", "--", ".forge-lean"]);
+    writeFileSync(join(dir, ".git", "info", "exclude"), ".forge-lean/\n");
+    g(["commit", "-q", "-m", "work"]);
+    assert.equal(await fp(), dirty, "committing the checked tree does not make the check stale");
+    writeFileSync(join(dir, "a.js"), "3\n");
+    assert.notEqual(await fp(), dirty);
   });
 });

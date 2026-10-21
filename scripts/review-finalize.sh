@@ -364,12 +364,18 @@ do_extract() {
                 }
             }' "$BODY_FILE" > "$SECTION_FILE" 2>/dev/null || : > "$SECTION_FILE"
         # Failure scenario: present / absent when the section was found, unknown when the carrying comment or section is unreadable.
+        # Read from the prose (#4356): a `**Failure scenario**` anywhere on a line, or a line that starts (after list/quote/bold markup, any
+        # case) with a `failure scenario`, `scenario`, `repro`, `reproduction` or `steps to reproduce` label followed by `:` or a closing `**`.
+        # The content sits on that line or the next non-blank one; a mid-sentence use of the word is not a label.
         SCENARIO="unknown"
         if [ -s "$SECTION_FILE" ]; then
             SCENARIO=$(awk '
-                tolower($0) ~ /\*\*failure scenario\*\*/ { s = $0; sub(/^.*\*\*[Ff]ailure [Ss]cenario\*\*[*:[:space:]]*/, "", s); gsub(/[[:space:]]/, "", s)
-                    if (s != "") { print "present"; found = 1; exit } else { want = 1; next } }
-                want { t = $0; gsub(/[[:space:]]/, "", t); if (t != "") { print "present"; found = 1; exit } }
+                want { t = $0; gsub(/[[:space:]]/, "", t); if (t != "") { print "present"; found = 1; exit } next }
+                { l = tolower($0); s = "" }
+                l ~ /\*\*failure scenario\*\*/ { s = l; sub(/^.*\*\*failure scenario\*\*/, "", s) }
+                s == "" { m = l; sub(/^[[:space:]]*([-*+>_][[:space:]]*)*/, "", m)
+                    if (match(m, /^(failure scenario|steps to reproduce|reproduction|repro|scenario)((\*\*|__)?[[:space:]]*:|\*\*|__)/)) s = substr(m, RLENGTH + 1); else next }
+                { gsub(/[*_:[:space:]]/, "", s); if (s != "") { print "present"; found = 1; exit } else want = 1 }
                 END { if (!found) print "absent" }' "$SECTION_FILE")
         fi
         FIX_EFF=$(grep -iE '^[[:space:]]*(\*\*Fix efficacy\*\*:?|FIX_EFFICACY:)[[:space:]]*\**[[:space:]]*(fails|regresses)' "$SECTION_FILE" 2>/dev/null | head -n 1 \
@@ -531,10 +537,15 @@ SYMEOF
                 case "$SEV" in MEDIUM|LOW|INFO) ROUTE="pre-existing" ;; esac
             fi
         fi
-        # Gate 3 (concrete failure): MEDIUM or lower without a **Failure scenario** is speculative hardening, demoted to a NOTE.
-        # CRITICAL/HIGH are exempt; an unreadable carrying comment keeps the finding.
+        # Gate 3 (concrete failure): MEDIUM or lower without a failure scenario in its prose is speculative hardening, demoted to a NOTE.
+        # CRITICAL/HIGH (any confidence) and CONFIRMED MEDIUM are exempt (#4356): a confirmed finding is filed through the classifier with its
+        # agent and prose as evidence. An unreadable carrying comment keeps the finding.
         if [ "$ROUTE" = "file" ] && [ "$SCEN" = "absent" ]; then
-            case "$SEV" in MEDIUM|LOW|INFO) ROUTE="demoted-no-scenario" ;; esac
+            CONF=$(upper "$(printf '%s' "$F" | jq -r '.confidence // ""')")
+            case "$SEV" in
+                MEDIUM) [ "$CONF" = "CONFIRMED" ] || ROUTE="demoted-no-scenario" ;;
+                LOW|INFO) ROUTE="demoted-no-scenario" ;;
+            esac
         fi
         case "$ROUTE" in pre-existing) N_PREEXISTING=$((N_PREEXISTING + 1)) ;; demoted-no-scenario) N_NO_SCENARIO=$((N_NO_SCENARIO + 1)) ;; esac
         N_KEPT=$((N_KEPT + 1))
