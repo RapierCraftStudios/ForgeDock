@@ -1,0 +1,50 @@
+// SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { MECHANICAL_KINDS, FIX_PROMPT_MAX, citesFileLine, freshFix, issueSummary, capText } from "./fixround.mjs";
+import { fixSessionPrompt } from "./prompts.mjs";
+
+describe("#4363 fresh fix sessions: which rounds, and the prompt caps", () => {
+  it("every mechanical kind is fresh; block/contract/conflict kinds are not", () => {
+    assert.deepEqual([...MECHANICAL_KINDS], ["precheck", "ci", "docs", "structure", "enumerating", "sequence"]);
+    for (const k of MECHANICAL_KINDS) assert.equal(freshFix(k, []), true, k);
+    for (const k of ["block", "contract", "base-sync", "ci-unavailable"]) assert.equal(freshFix(k, [{ detail: "src/a.js:1" }]), false, k);
+  });
+
+  it("a conformance or review FAIL is fresh only when every failure cites a file:line", () => {
+    const cited = [{ code: "c", detail: "R1 partial: null throws (src/foo.js:9)" }, { code: "c", detail: "P1 violated (lib/bar.ts:12)" }];
+    const mixed = [...cited, { code: "c", detail: "validate V1 (`npm test`) failed (exit 1)" }];
+    for (const k of ["conformance", "review"]) {
+      assert.equal(freshFix(k, cited), true, k);
+      assert.equal(freshFix(k, mixed), false, `${k}: one failure without a file:line`);
+      assert.equal(freshFix(k, []), false, `${k}: no failures`);
+    }
+  });
+
+  it("file:line detection is codebase-agnostic", () => {
+    for (const d of ["app/models.py:42", "cmd/main.go:7", "src/lib.rs:310", "web/src/App.tsx:5", "lib/x/y.rb:1", "@scope/pkg/index.mjs:88", "Foo.java:3"]) {
+      assert.equal(citesFileLine([`fails at ${d}`]), true, d);
+    }
+    for (const d of ["the foo module", "R1 partial", "exit 1: 3 tests failed", "http://host:8080"]) assert.equal(citesFileLine([d]), false, d);
+  });
+
+  it("the issue summary drops HTML comments (FORGE:STATE) and is capped", () => {
+    const s = issueSummary(`## Problem\nfoo breaks\n\n<!-- FORGE:STATE\n{"v":1}\n-->\n${"y".repeat(5000)}`);
+    assert.doesNotMatch(s, /FORGE:STATE|"v":1/);
+    assert.match(s, /^## Problem\nfoo breaks/);
+    assert.ok(s.length < 1600);
+    assert.equal(capText("abc", 5), "abc");
+  });
+
+  it("an oversized task, diff and contract still give a prompt under 60K with the title, summary, contract and diff", () => {
+    const diff = Array.from({ length: 50 }, (_, i) => `diff --git a/src/f${i}.js b/src/f${i}.js\n${"+line\n".repeat(2000)}`).join("");
+    const contract = { requirements: [{ id: "R1", quote: "q".repeat(50000), disposition: "deliver" }] };
+    const p = fixSessionPrompt({ task: `lint failed\n${"z".repeat(200000)}`, diff, stat: " src/f0.js | 2000 +", base: "origin/staging", contract, title: "foo breaks", summary: "foo crashes on null" });
+    assert.ok(p.length < 60000, `prompt ${p.length} chars`);
+    assert.ok(p.length < FIX_PROMPT_MAX);
+    assert.match(p, /no earlier session/); assert.match(p, /## Issue: foo breaks\nfoo crashes on null/);
+    assert.match(p, /"id": "R1"/); assert.match(p, /diff --git a\/src\/f0\.js/); assert.match(p, /git diff origin\/staging\.\.\.HEAD/);
+    assert.match(p, /lint failed/); assert.match(p, /Host rules/);
+  });
+});

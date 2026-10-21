@@ -132,7 +132,8 @@ function world(o = {}) {
       w.seq.push(c.role + (c.resume ? "-resume" : ""));
       w.envs.push(c.env ?? null);
       if (c.role === "builder") {
-        const r = c.resume ? (w.resumeResult ?? w.result) : w.result;
+        const fix = Boolean(c.resume) || /no earlier session/.test(c.prompt); // #4363: a fresh fix session acts like the old resume
+        const r = fix ? (w.resumeResult ?? w.result) : w.result;
         const kind = /PLANNING ONLY/.test(c.prompt) ? "plan" : /contract.json is not valid/.test(c.prompt) ? "contract-fix" : "work";
         const n = ++w.builderN;
         if (o.builder) { await o.builder(w, put, kind, n, c); return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: 0.1, durationMs: 1000, turns: 3, model: "default" }; }
@@ -146,13 +147,13 @@ function world(o = {}) {
         } else {
           if (!(`${WT}/.forge-lean/contract.json` in w.files) && w.contract && r?.status !== "blocked") put("contract.json", JSON.stringify(w.contract));
           if (!o.noStages && !w.implWritten && !o.live) { writeStages(["implementation"]); w.implWritten = true; }
-          if (c.resume && n > 2 && /does not conform/.test(c.prompt) && o.resumeChanged) w.changed = o.resumeChanged;
+          if (fix && n > 2 && /does not conform/.test(c.prompt) && o.resumeChanged) w.changed = o.resumeChanged;
           if (/Merging origin\//.test(c.prompt) && o.syncChanged) w.changed = o.syncChanged;
           if (r?.status === "blocked" || ["invalid", "already-fixed"].includes(r?.status)) put("result.json", JSON.stringify(r));
           else if (r) put("result.json", JSON.stringify({ ...r, requirements: o.claims ?? w.contract.requirements.filter((x) => x.disposition === "deliver").map((x) => ({ id: x.id, status: "implemented", evidence: "src/foo.js:3" })),
-            validation: (c.resume && n > 2 ? o.resumeValidation : null) ?? o.validation ?? (w.contract.validate ?? []).map((v) => ({ id: v.id, command: v.command, exit: 0 })), amendments: (c.resume && n > 2 ? o.resumeAmendments : null) ?? o.amendments ?? [] }));
+            validation: (fix && n > 2 ? o.resumeValidation : null) ?? o.validation ?? (w.contract.validate ?? []).map((v) => ({ id: v.id, command: v.command, exit: 0 })), amendments: (fix && n > 2 ? o.resumeAmendments : null) ?? o.amendments ?? [] }));
         }
-        if (c.resume || /Merging origin\//.test(c.prompt)) { w.head = `bbbb${w.calls.length}`.padEnd(16, "0"); if (!o.leaveConflicts) { w.conflictFiles = []; w.mergeInProgress = false; } }
+        if ((fix && !o.freshNoCommit) || /Merging origin\//.test(c.prompt)) { w.head = `bbbb${w.calls.length}`.padEnd(16, "0"); if (!o.leaveConflicts) { w.conflictFiles = []; w.mergeInProgress = false; } }
         return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: 0.1, durationMs: 1000, turns: 3, model: "default" };
       }
       return { text: w.reviews.length ? w.reviews.shift() : ok(), sessionId: "rev", usage: { input_tokens: 4, output_tokens: 2 }, costUsd: 0.05, durationMs: 500, turns: 2, model: c.model };
@@ -282,7 +283,7 @@ describe("core work-on", () => {
     assert.equal(r.terminalReason, "merged");
     const b = builders(w);
     assert.equal(b.length, 3);
-    assert.equal(b[2][2], "sess-1");
+    assert.equal(b[2][2], null, "#4363: a FAIL citing file:line runs in a fresh session");
     assert.match(b[2][4], /conformance\.unimplemented: R1 partial: src\/foo.js:9 still wrong/);
     assert.equal(reviewers(w).length, 2);
     assert.equal(w.prs.length, 1);
@@ -1294,7 +1295,7 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     assert.equal(r.terminalReason, "merged");
     assert.equal(builders(w).length, 3); assert.equal(reviewers(w).length, 1);
     assert.match(builders(w)[2][4], /@s\/db -> @s\/core \(dependencies, packages\/db\/package\.json\)[\s\S]*add it to the contract with a reason, or remove it/);
-    assert.equal(builders(w)[2][2], "sess-1", "resumed in the builder's own session");
+    assert.equal(builders(w)[2][2], null, "#4363: a fresh fix session");
     assert.deepEqual(w.structureCalls[0], { cwd: "/wt/lean-7", base: "origin/staging" });
     const e = readLog(dir, 7).find((x) => x.event === "STRUCTURE_DELTA");
     assert.equal(e.edges_added, 1);
@@ -3352,7 +3353,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     const r = await run(w, { verify: CI });
     assert.equal(r.terminalReason, "merged");
     const fix = builders(w).find((b) => /CI failed on the pushed branch/.test(b[4]));
-    assert.ok(fix, "a CI-fix resume ran"); assert.equal(fix[2], "sess-1");
+    assert.ok(fix, "a CI-fix round ran"); assert.equal(fix[2], null);
     assert.match(fix[4], /poetry\.lock is not up to date/); assert.match(fix[4], /actions\/runs\/100/);
     assert.deepEqual(w.ci.logsFor, [100]);
     assert.equal(w.ci.dispatched.length, 2, "the fixed head is verified again");
@@ -3707,7 +3708,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     const r = await run(w, { dir });
     assert.equal(r.terminalReason, "merged");
     const fix = ciFixes(w);
-    assert.equal(fix.length, 1); assert.equal(fix[0][2], "sess-1");
+    assert.equal(fix.length, 1); assert.equal(fix[0][2], null);
     assert.match(fix[0][4], /mkdtempSync, not tmpDir/); assert.match(fix[0][4], /actions\/runs\/555/);
     assert.deepEqual(w.logsFor, ["555"]);
     assert.equal(reviewers(w).length, 2, "the fixed head is reviewed again before merge");
@@ -3734,7 +3735,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     w.io.runner = async (c) => { const h = w.head; const res = await inner(c); if (/CI failed on the pushed branch/.test(c.prompt)) w.head = h; return res; };
     const r = await run(w, { verify: { maxRounds: 5 } });
     assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "ci.red");
-    assert.equal(ciFixes(w).length, 1); assert.equal(w.merges.length, 0);
+    assert.equal(ciFixes(w).length, 2, "#4363: fresh, then the one fallback resume, in one round"); assert.equal(w.merges.length, 0);
   });
 
   it("a rollup still reporting the pre-fix head counts as pending, not as a second failure", async () => {
@@ -3761,8 +3762,8 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.deepEqual(ran.map((x) => x.slice(0, 2)), [["bash scripts/check-test-tmp-cleanup.sh", WT], ["bash scripts/check-test-tmp-cleanup.sh", WT]]);
     assert.equal(ran[0][2], 300000);
     const fix = builders(w).filter((b) => /declared check commands failed/.test(b[4]));
-    assert.equal(fix.length, 1); assert.equal(fix[0][2], "sess-1"); assert.match(fix[0][4], /mkdtempSync in x\.test\.mjs/); assert.match(fix[0][4], /exit 1/);
-    assert.ok(w.seq.indexOf("builder-resume", w.seq.indexOf("check:1")) < w.seq.indexOf("pr"), "the fix runs before the PR is opened");
+    assert.equal(fix.length, 1); assert.equal(fix[0][2], null); assert.match(fix[0][4], /mkdtempSync in x\.test\.mjs/); assert.match(fix[0][4], /exit 1/);
+    assert.ok(w.seq.indexOf("builder", w.seq.indexOf("check:1")) < w.seq.indexOf("pr"), "the fix runs before the PR is opened");
     const log = readLog(dir, 7);
     const pre = log.filter((e) => e.event === "PRECHECK_COMMANDS");
     assert.deepEqual(pre.map((e) => e.results), [[{ command: "bash scripts/check-test-tmp-cleanup.sh", rc: 1, ms: 0 }], [{ command: "bash scripts/check-test-tmp-cleanup.sh", rc: 0, ms: 0 }]]);
@@ -3785,7 +3786,7 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     w.io.runner = async (c) => { const h = w.head; const res = await inner(c); if (/declared check commands failed/.test(c.prompt)) w.head = h; return res; };
     const r = await run(w, { precheck: { commands: ["make lint"] }, verify: { maxRounds: 3 } });
     assert.equal(r.terminalReason, "merged");
-    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 1);
+    assert.equal(builders(w).filter((b) => /declared check commands failed/.test(b[4])).length, 2, "#4363: fresh, then one fallback resume");
     assert.match(traj(w)[0], /builder made no new commit for them/);
   });
 
@@ -4440,5 +4441,66 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     w = hworld({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["db/meta/_journal.json"], reviews: [ok(), ok()] });
     assert.equal((await run(w)).terminalReason, "merged");
     assert.match(builders(w)[2][4], /conflicts in: db\/meta\/_journal\.json[\s\S]*do not text-merge it\. Renumber the lane's files/);
+  });
+});
+
+describe("#4363 fresh fix sessions", () => {
+  const FRESH = /no earlier session/;
+  const prechecked = (o = {}) => {
+    const w = world(o); let rc = 1;
+    w.io.runCommand = async () => ({ rc, output: rc ? `${"x".repeat(300000)}\nlint: src/foo.js:3 unused var` : "" });
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { const res = await inner(c); if (/declared check commands failed/.test(c.prompt) && !o.freshNoCommit) rc = 0; return res; };
+    return w;
+  };
+  const usage = (dir) => readLog(dir, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "implement");
+
+  it("a precheck failure runs a fresh session: no resume id, the reviewer model by default, a prompt under 60K with no transcript; plan/build keep the builder model", async () => {
+    const w = prechecked(); const dir = tmpDir("core-");
+    const r = await run(w, { dir, builderModel: "opus-b", precheck: { commands: ["make lint"] } });
+    assert.equal(r.terminalReason, "merged");
+    const fix = builders(w).filter((b) => /declared check commands failed/.test(b[4]));
+    assert.equal(fix.length, 1);
+    assert.equal(fix[0][2], null, "no resume id"); assert.equal(fix[0][3], "claude-sonnet-5-5");
+    assert.ok(fix[0][4].length < 60000, `prompt ${fix[0][4].length} chars`);
+    for (const re of [FRESH, /## Issue: foo breaks/, /Frozen contract/, /src\/foo\.js:3 unused var/]) assert.ok(re.test(fix[0][4]), String(re));
+    assert.ok(!/PLANNING ONLY|The engine froze/.test(fix[0][4]), "no plan or build prompt text");
+    for (const b of builders(w).filter((b) => !FRESH.test(b[4]))) assert.equal(b[3], "opus-b", "plan and build keep the builder model");
+    const u = usage(dir);
+    assert.deepEqual(u.map((e) => e.mode ?? null), [null, null, "fresh"]);
+  });
+
+  it("lean.fix_model (fixModel) picks the fix-session model", async () => {
+    const w = prechecked();
+    await run(w, { builderModel: "opus-b", fixModel: "haiku-fix", precheck: { commands: ["make lint"] } });
+    assert.deepEqual(builders(w).filter((b) => FRESH.test(b[4])).map((b) => b[3]), ["haiku-fix"]);
+  });
+
+  it("a fresh session that makes no commit falls back to one resume of the build session in the same round; max_rounds is unchanged", async () => {
+    const w = prechecked({ freshNoCommit: true }); const dir = tmpDir("core-");
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { const h = w.head; const res = await inner(c); if (/declared check commands failed/.test(c.prompt)) w.head = h; return res; };
+    const r = await run(w, { dir, precheck: { commands: ["make lint"] }, verify: { maxRounds: 3 } });
+    assert.equal(r.terminalReason, "merged");
+    const fix = builders(w).filter((b) => /declared check commands failed/.test(b[4]));
+    assert.deepEqual(fix.map((b) => b[2]), [null, "sess-1"], "fresh, then exactly one resume");
+    assert.doesNotMatch(fix[1][4], FRESH, "the resume gets the plain task prompt");
+    assert.deepEqual(usage(dir).map((e) => e.mode ?? null), [null, null, "fresh", "resume"]);
+    assert.match(traj(w)[0], /Fresh precheck fix session made no commit; builder session resumed once/);
+    assert.match(traj(w)[0], /builder made no new commit for them/);
+  });
+
+  it("a conformance FAIL citing file:line is fresh; one without a file:line resumes; the one review retry is unchanged", async () => {
+    const w1 = world({ reviews: [bad("src/foo.js:9 still wrong"), ok()] }); const d1 = tmpDir("core-");
+    assert.equal((await run(w1, { dir: d1 })).terminalReason, "merged");
+    assert.deepEqual(usage(d1).map((e) => e.mode ?? null), [null, null, "fresh"]);
+    const vague = conf({ verdict: "NONCONFORMING", requirements: [{ id: "R1", status: "partial", evidence: "the foo module", validated_by: "V1", note: "null still throws" }] });
+    const w2 = world({ reviews: [vague, ok()] }); const d2 = tmpDir("core-");
+    assert.equal((await run(w2, { dir: d2 })).terminalReason, "merged");
+    assert.equal(builders(w2)[2][2], "sess-1");
+    assert.deepEqual(usage(d2).map((e) => e.mode ?? null), [null, null, "resume"]);
+    const w3 = world({ reviews: [bad(), bad(), bad()] });
+    const r3 = await run(w3);
+    assert.equal(r3.terminalReason, "needs-human"); assert.equal(reviewers(w3).length, 2, "still one review retry");
   });
 });
