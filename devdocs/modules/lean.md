@@ -161,8 +161,18 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    creep left, is returned in `superseded` (event `VALIDATE_SUPERSEDED`, a
    decision line), not `conformance.unimplemented`. Real creep still fails as
    `conformance.scope_creep`, and then the validate failure stands too. The plan
-   prompt discourages such allowlists. Option chosen over rejecting them at
+   prompt says scope is enforced by the engine. Option chosen over rejecting them at
    freeze because a frozen contract is reused on relaunch.
+   Since #4353 such a validate never reaches a new frozen contract: at freeze
+   (after each contract read, before `validateContract` and the preflight, so
+   it never costs the one correction) `dropScopeValidates` removes every
+   validate `isPureScopeCheck` matches (a scope check whose every segment is
+   git diff|log|show|status|merge-base|rev-parse or a filter such as grep,
+   sort, wc, test, awk, sed), with event `CONTRACT_SCOPE_VALIDATE_DROPPED` and a
+   decision line. A mixed command (`node --test x && git diff --stat`) is kept.
+   The hash and the posted contract cover the dropped contract; a contract
+   frozen before the change and recovered on a rerun is not rewritten, so the
+   `superseded` path stays for it.
    Delta re-review (#4365, `review-delta.mjs`): every usable review leaves a
    checkpoint `{head, rows, failures, state}`. The next `reviewOnce` (after a
    FAIL + resume, a base-sync or a CI-fix round) runs `classifyDelta`: `same`
@@ -666,6 +676,17 @@ the `runBatch` result. `forgedock doctor` check 13 (Resource hygiene) lists owne
 leftovers with counts and sizes and warns on unowned stale ones; `doctor --fix`
 applies the reaper. `commands/cleanup.md`, `work-on/close.md` and
 `work-on/build/validate.md` call the same reaper. Cost: 0 LLM calls.
+
+After `reclaimed:`, the batch report ends with the fail-soft alerts for the batch's
+repo (#4354). `formatAlertLines` prints `ALERTS` and one line per alert, or nothing
+when no alert fired. The lines come from `computeAlerts` (`bin/stats/aggregate.mjs`)
+over `readLanes` of the batch's run-log dir. Each run in a log is one lane, and the
+window is the last 50 lanes of the repo. The rules are: `DEPS_PREPARED` failed above
+20% per ecosystem, `deferred-to-ci` above 30%, one `TOOLCHAIN_WARNING` on more than
+50% of lanes, and an outcome code whose share doubled against the previous window.
+Thresholds come from `stats.alerts.*`, and there are no alerts under 10 lanes.
+`forgedock stats` prints the same alerts as `## ALERTS`. A failure while computing
+them never fails the batch. Cost: 0 LLM calls, no network.
 
 ## Entry 2026-10-20 — Complete conformance reviews, blocking shadow gate (#4160)
 

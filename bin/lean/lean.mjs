@@ -12,7 +12,7 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
-import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, parseReview, decide, mergeReviewRows, reviewSkeleton, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
+import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, dropScopeValidates, parseReview, decide, mergeReviewRows, reviewSkeleton, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths } from "./prefilter.mjs";
 import { preflightProbes, preflightProblems } from "./preflight.mjs";
@@ -1137,7 +1137,17 @@ export async function runCore(o) {
         }
         const blocked = await endIfBlocked();
         if (blocked) return blocked;
-        let contract = await readContract();
+        // #4353: the engine's scope gate is the only scope authority; a pure file-scope validate is dropped before it is checked or frozen
+        const dropScope = (c) => {
+          const d = dropScopeValidates(c);
+          if (d.dropped.length) {
+            ev({ event: "CONTRACT_SCOPE_VALIDATE_DROPPED", runs: d.dropped });
+            const note = `Scope-check validate ${d.dropped.map((x) => x.id).join(", ")} dropped at contract freeze: the engine's scope gate (deliverables plus typed amendments) enforces scope`;
+            if (!T.decisions.includes(note)) T.decisions.push(note);
+          }
+          return d.contract;
+        };
+        let contract = dropScope(await readContract());
         await refreshIssue("contract validation");
         let vc = validateContract(contract, issueText, { repro: reproOn() });
         const missed = await preflightValidates(contract); // #4328: validate commands the host cannot run share the one correction
@@ -1146,7 +1156,7 @@ export async function runCore(o) {
           const problems = [...vc.problems, ...preflightProblems(missed)];
           T.decisions.push(`Contract rejected (${problems[0]}); resumed once`);
           await builder(++attemptN, contractCorrectionPrompt(problems), sessionId, false, planPrompt);
-          contract = await readContract();
+          contract = dropScope(await readContract());
           await refreshIssue("contract validation");
           vc = validateContract(contract, issueText, { repro: reproOn() });
           if (missed.length) misses = await preflightValidates(contract);

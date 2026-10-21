@@ -68,6 +68,7 @@ export function renderMarkdown(report) {
   const out = ["# ForgeDock stats", ""];
   if (!report.groups.length) out.push("No data: no finished runs, telemetry records or issues were found.", "");
   for (const g of report.groups) out.push(...sections(g));
+  if (report.alerts?.length) out.push("## ALERTS", "", ...renderAlerts(report.alerts).map((l) => `- ${l}`), "");
   const e = report.excluded;
   out.push(`Finished runs only. Excluded: ${e.unfinished} unfinished, ${e.noUsage} without usage data (hydrated or empty). "~" = version estimated from release times; "unknown" = no version available. Groups with n < ${report.minN} are flagged low-n.`);
   return out.join("\n");
@@ -79,4 +80,16 @@ export function renderCompact(report) {
   const rows = report.groups.map((g) => [g.version, g.repo, String(g.n), k(g.cost.cacheReadMean), pct(g.flow.mergedPct), pct(g.flow.needsHumanPct),
     pct(g.flow.remediationPct), dur(g.time.wall.p50), f1(g.funnel.perReview), pct(g.gates.acceptance.rate), g.delta ? signed(g.delta.cacheReadMean, k) : NA, g.lowN ? `low-n (<${g.minN})` : "ok"]);
   return table(["Version", "Repo", "n", "Cache-read/issue", "Merged", "Needs-human", "Remediated", "Wall p50", "Findings/review", "Acceptance block", "Delta tokens", "Confidence"], rows).join("\n");
+}
+
+/**
+ * forge#4354: one line per fail-soft alert: event, rate, count/sample lanes, threshold and one example reason. Outcome-code
+ * alerts carry the previous-window share and a factor threshold instead of a percentage.
+ */
+export function renderAlerts(alerts) {
+  return (alerts ?? []).map((a) => {
+    const limit = isNum(a.prevRate) ? `previous window ${pct(a.prevRate)}, threshold ${a.threshold}x` : `threshold ${pct(a.threshold)}`;
+    const ex = a.example ? `, e.g. ${JSON.stringify(String(a.example).slice(0, 200))}` : "";
+    return `${a.event}: ${pct(a.rate)} (${a.count}/${a.sample} lanes, ${limit})${ex}`;
+  });
 }
