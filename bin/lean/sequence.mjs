@@ -5,13 +5,19 @@
  * meta/0007_snapshot.json) that the lane added with a number the base already uses. Union merge (#3969) cannot help: a
  * duplicate number is a semantic collision and a drizzle-style journal is structured JSON. The engine only detects and
  * verifies; the builder renumbers with the repo's own migration generator. Deterministic (git only), never throws.
+ * #4343: a leading calendar date (YYYY-MM-DD, YYYYMMDD) is not a number, and a directory only counts when it holds a
+ * series on the base: a migration journal (`<dir>/meta/_journal.json`, `<dir>/_journal.json`), or >=2 distinct numbers
+ * of the lane file's width that fill at least half of their min..max range (sparse issue-numbered docs are no series).
  */
 import { basename, dirname, posix } from "node:path";
 
 const NUM_RE = /^(\d{3,})[_-]/;
+const DATE_RE = /^(?:19|20)\d\d(-?)(?:0[1-9]|1[0-2])\1(?:0[1-9]|[12]\d|3[01])[_-]/;
 const SKIP_RE = /(?:^|\/)(?:node_modules|vendor|dist|build)\//;
 const lines = (s) => String(s ?? "").split("\n").map((x) => x.trim()).filter(Boolean);
-const numOf = (p) => NUM_RE.exec(basename(p))?.[1] ?? null;
+/** The sequence number a file name starts with, or null (none, or a leading date). */
+export const seqNumber = (name) => { const b = basename(String(name ?? "")); return DATE_RE.test(b) ? null : NUM_RE.exec(b)?.[1] ?? null; };
+const numOf = seqNumber;
 const inDir = (dir) => (dir === "." ? [] : [`${dir}/`]);
 const out = (git) => async (args) => { try { return String(await git(args)); } catch { return ""; } };
 
@@ -35,7 +41,15 @@ export async function sequenceCollisions({ git, base }) {
     const lane = await laneNumbered(git, base);
     const res = [];
     for (const dir of [...new Set(lane.map((f) => dirname(f.path)))]) {
-      const mine = lane.filter((f) => dirname(f.path) === dir).sort((a, b) => Number(numOf(a.path)) - Number(numOf(b.path)) || a.path.localeCompare(b.path));
+      const listed = lines(await g(["-c", "core.quotepath=off", "ls-tree", "-r", "--name-only", base, ...inDir(dir)]));
+      const journal = listed.some((p) => p === posix.join(dir, "_journal.json") || p === posix.join(dir, "meta", "_journal.json"));
+      const baseNums = listed.filter((p) => dirname(p) === dir).map(numOf).filter(Boolean);
+      const series = (w) => {
+        const ns = [...new Set(baseNums.filter((n) => n.length === w).map(Number))];
+        return ns.length >= 2 && ns.length * 2 >= Math.max(...ns) - Math.min(...ns) + 1;
+      };
+      const mine = lane.filter((f) => dirname(f.path) === dir && (journal || series(numOf(f.path).length))).sort((a, b) => Number(numOf(a.path)) - Number(numOf(b.path)) || a.path.localeCompare(b.path));
+      if (!mine.length) continue;
       const theirs = [];
       for (const l of lines(await g(["-c", "core.quotepath=off", "ls-tree", base, ...inDir(dir)]))) {
         const m = /^\d+\s+blob\s+(\S+)\t(.+)$/.exec(l);

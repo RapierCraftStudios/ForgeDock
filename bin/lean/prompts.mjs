@@ -4,6 +4,7 @@
 import { fileURLToPath } from "node:url";
 
 import { reviewSkeleton } from "./conformance.mjs";
+import { seqNumber } from "./sequence.mjs";
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
 export const LEAN_DIR = ".forge-lean";
@@ -177,7 +178,7 @@ export function sequencePrompt(collisions, lane, mode = "local") {
 
 /** #4322: the base-sync conflict addition when a conflicted file is a numbered migration or a journal; "" otherwise. */
 export function sequenceSyncNote(files) {
-  const hit = (files ?? []).some((f) => /(?:^|\/)\d{3,}[_-][^/]*$|(?:^|\/)_journal\.json$/.test(String(f)));
+  const hit = (files ?? []).some((f) => seqNumber(f) || /(?:^|\/)_journal\.json$/.test(String(f)));
   return hit ? ` A numbered migration or its journal conflicts: do not text-merge it. ${RENUMBER_RULE}` : "";
 }
 
