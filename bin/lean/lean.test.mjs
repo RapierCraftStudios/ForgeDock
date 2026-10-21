@@ -2828,12 +2828,13 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.equal(r.heavyQueueMax, 4);
   });
 
-  it("#4331 pre-PR checks: scoped by the test map, concurrent up to FORGE_HOST_PARALLELISM under one heavy slot, timed", async () => {
+  it("#4331/#4344 pre-PR checks: scoped by the test map, concurrent up to FORGE_HOST_PARALLELISM with one heavy slot and a worker share each, timed", async () => {
     const w = heavyWorld(); w.changed = ["commands/foo.md"];
     w.baseFiles = { "origin/staging:.forge/test-map.json": JSON.stringify({ version: 1, entries: [
       { globs: ["commands/**"], command: "bash scripts/check-a.sh", cwd: "." }, { globs: ["bin/**"], command: "bash scripts/check-b.sh", cwd: "." }] }) };
     const ran = []; let live = 0, peak = 0;
-    w.io.runCommand = async ({ command }) => { ran.push(command); peak = Math.max(peak, ++live); await new Promise((r) => setImmediate(r)); w.clock += 1000; live--; return { rc: 0, output: "" }; };
+    const envs = [];
+    w.io.runCommand = async ({ command, env }) => { ran.push(command); envs.push(env.FORGE_HOST_PARALLELISM); peak = Math.max(peak, ++live); await new Promise((r) => setImmediate(r)); w.clock += 1000; live--; return { rc: 0, output: "" }; };
     const prev = process.env.FORGE_HOST_PARALLELISM; process.env.FORGE_HOST_PARALLELISM = "2";
     const dir = tmpDir("core-");
     let r;
@@ -2841,9 +2842,10 @@ describe("batch robustness (#4112-#4115)", () => {
     finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
     assert.deepEqual(ran, ["bash scripts/check-a.sh", "make lint", "make fmt"], "mapped check-b misses commands/foo.md; unmapped ones run");
     assert.equal(peak, 2);
-    assert.equal(w.acq.filter((a) => a.phase === "precheck").length, 1, "one heavy slot for the round");
+    assert.equal(w.acq.filter((a) => a.phase === "precheck").length, 3, "one heavy slot per command");
+    assert.deepEqual(envs, ["1", "1", "1"], "N=2 shared by 2 concurrent commands, not multiplied");
     const [pre] = readLog(dir, 7).filter((e) => e.event === "PRECHECK_COMMANDS");
-    assert.equal(pre.parallelism, 2); assert.ok(pre.ms > 0); assert.ok(pre.results.every((x) => Number.isFinite(x.ms)));
+    assert.equal(pre.parallelism, 2); assert.equal(pre.workers, 1); assert.ok(pre.ms > 0); assert.ok(pre.results.every((x) => Number.isFinite(x.ms)));
     assert.ok(r.precheckMs > 0); assert.equal(r.precheckDeferred, 0);
   });
 
