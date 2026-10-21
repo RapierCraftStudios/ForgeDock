@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { reviewSkeleton } from "./conformance.mjs";
 import { seqNumber } from "./sequence.mjs";
+import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
 export const LEAN_DIR = ".forge-lean";
@@ -203,6 +204,16 @@ export function structurePrompt(edges, mode = "local") {
 /** The repo's devdocs freshness rule failed on the committed change: update the named dossier(s) and commit. */
 export function docsPrompt(output, mode = "local") {
   return `The repository's docs freshness check (scripts/check-devdocs-freshness.sh) fails on this change:\n${String(output ?? "").slice(0, 4000)}\n\nUpdate the module dossier it names (devdocs/modules/*.md; devdocs/index.yaml maps files to dossiers) to describe the behaviour you changed, in the dossier's existing style and in a few lines. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/**
+ * #4363: a fix round in a fresh session (no transcript). It carries the site's task prompt (which holds the capped
+ * failure output), the lane diff, the frozen contract and the issue title and summary, each capped; under FIX_PROMPT_MAX.
+ */
+export function fixSessionPrompt({ task, diff = "", stat = "", base = "", contract = null, title = "", summary = "" }) {
+  const contractText = capText(typeof contract === "string" ? contract : JSON.stringify(contract ?? {}, null, 1), FIX_CAPS.contract);
+  const p = `${HOST_RULES}\n\nYou are fixing one failure on an existing branch in this worktree. You have no earlier session: the issue, the frozen contract and the branch's diff against ${base || "the lane base"} are below; read any file you need.\n\n## Issue: ${String(title).slice(0, 300)}\n${capText(summary, FIX_CAPS.summary)}\n\n## Frozen contract (${CONTRACT_FILE})\n\`\`\`json\n${contractText}\n\`\`\`\n\n## Diff (\`git diff ${base || "<base>"}...HEAD\`)\n\`\`\`diff\n${boundDiff(diff, { stat, base, maxBytes: FIX_CAPS.diff })}\n\`\`\`\n\n## The failure to fix\n${capText(task, FIX_CAPS.task)}`;
+  return capText(p, FIX_PROMPT_MAX - 100);
 }
 
 /** Human-only block reasons (#4124). Everything else agents resolve: a dependency, a split, prod data monitoring can read. */
