@@ -167,7 +167,8 @@ done
 got=$(run_route "3401 --auto-merge --issue 3398"); if [ "$got" = REACHED ]; then ok; else bad "route stopped a valid PR number: '$got'"; fi
 
 # Test 8: the whole staging fence stops (non-zero, no REVIEW_ROUTE post) on a rejected string
-STAGING_FENCE=$(awk '/^```bash/{buf=""; in_f=1; next} /^```$/{if (in_f && buf ~ /STAGING_ARGS_RAW/) {printf "%s", buf; exit}; in_f=0; next} in_f{buf=buf $0 "\n"}' "$STAGING")
+# Cut before the CLI resolution (#4359): the fence ends by running `forgedock review-staging`, which this test never runs.
+STAGING_FENCE=$(awk '/^```bash/{buf=""; in_f=1; next} /^```$/{if (in_f && buf ~ /STAGING_ARGS_RAW/) {printf "%s", buf; exit}; in_f=0; next} in_f && /^FD_ROOT=/{if (buf ~ /STAGING_ARGS_RAW/) {printf "%s", buf; exit}} in_f{buf=buf $0 "\n"}' "$STAGING")
 if [ -n "$STAGING_FENCE" ]; then ok; else bad "staging fence not found"; fi
 run_stg_fence() { gen_script "$STAGING_FENCE" "$1" "$WORK/stgf.sh" 'echo REACHED'; : > "$ERR"; (cd "$WORK" && "${BASH:-bash}" "$WORK/stgf.sh" 2>"$ERR"); }
 got=$(run_stg_fence "\$(touch $SENTINEL)"); rc=$?

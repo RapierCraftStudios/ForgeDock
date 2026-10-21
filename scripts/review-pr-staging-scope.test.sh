@@ -8,6 +8,12 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPEC="$ROOT/commands/review-pr-staging.md"
+# Since #4359 the spec calls `forgedock review-staging`: the 0A/0B.1 blocks live in review-staging-pre.sh, the panel guard,
+# 6.75 delivery and 6.5 verdict handling in review-staging-post.sh, and the 7A-7C wiring in bin/review-staging.mjs.
+PRE="$ROOT/scripts/review-staging-pre.sh"
+POST="$ROOT/scripts/review-staging-post.sh"
+CLI="$ROOT/bin/review-staging.mjs"
+blk() { awk -v n="$2" '$0 == "# BEGIN " n {f=1; next} $0 == "# END " n {f=0} f' "$1"; }
 TC="$ROOT/scripts/trusted-comments.sh"
 PASS=0; FAILN=0
 ok() { PASS=$((PASS+1)); }
@@ -24,10 +30,10 @@ chk HIGH 0; chk high 0; chk " High " 0; chk CRITICAL 0; chk critical 0
 chk MEDIUM 1; chk medium 1; chk LOW 1; chk INFO 1
 chk "" 0; chk "SEVERE" 0; chk "HIGH/MEDIUM" 0
 
-# (2) full-sha reviewed test: the _AGENT regex from the spec, run through the real trusted-comments predicate
-LINE=$(grep -E '^[[:space:]]*_AGENT=' "$SPEC" | head -1)
+# (2) full-sha reviewed test: the _AGENT regex from the 0B.1 scope loop, run through the real trusted-comments predicate
+LINE=$(grep -E '^[[:space:]]*_AGENT=' "$PRE" | head -1)
 RE=$(printf '%s' "$LINE" | sed -n 's/.*count "\(.*\)") ||.*/\1/p')
-if [ -n "$RE" ]; then ok; else bad "_AGENT regex not found in review-pr-staging.md"; fi
+if [ -n "$RE" ]; then ok; else bad "_AGENT regex not found in review-staging-pre.sh"; fi
 FULL=0123456789abcdef0123456789abcdef01234567; SHORT=${FULL:0:7}
 RE=${RE//\\\\/\\}; RE=${RE//\$\{_HEAD\}/$FULL}
 FB=$'<!-- REVIEW-FINDINGS-START -->\nNo findings.\n<!-- REVIEW-FINDINGS-END -->'
@@ -41,7 +47,7 @@ cnt() { bash "$TC" count "$RE"; }
 [ "$(mk $'<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: '"$FULL"$'\n\nno findings block here' Bot | cnt)" = 0 ] && ok || bad "comment without a findings block must not count (panel integrity)"
 
 # (3) _ROUTE regex: real mode on the final head counts, spec-evolution-blocked and a stale sha do not
-RLINE=$(grep -E '^[[:space:]]*_ROUTE=' "$SPEC" | head -1)
+RLINE=$(grep -E '^[[:space:]]*_ROUTE=' "$PRE" | head -1)
 RRE=$(printf '%s' "$RLINE" | sed -n 's/.*count "\(.*\)") ||.*/\1/p'); RRE=${RRE//\\\\/\\}; RRE=${RRE//\$\{_HEAD7\}/$SHORT}
 rcnt() { bash "$TC" count "$RRE"; }
 [ "$(mk '<!-- FORGE:REVIEW_ROUTE mode=single-pr spec=review-pr.md sha='"$SHORT"' -->' Bot | rcnt)" = 1 ] && ok || bad "route marker on the final head should count"
@@ -50,14 +56,14 @@ rcnt() { bash "$TC" count "$RRE"; }
 
 # (4) spec text guards: agents may not be told to suppress findings; no $PWD tier in the classifier resolver; git reads are status-checked
 if grep -q 'MUST NOT report a defect' "$SPEC"; then bad "Phase 2 must not tell agents to suppress findings (7B owns demotion)"; else ok; fi
-if grep -qE "^DEPLOY_WIRING_FILES=.*git diff" "$SPEC"; then bad "DEPLOY_WIRING_FILES must not pipe git diff directly"; else ok; fi
-if grep -q 'git diff-tree .*|| { SCOPE_MODE=full' "$SPEC"; then ok; else bad "git diff-tree reads must fall back to full scope"; fi
+if grep -qE "^DEPLOY_WIRING_FILES=.*git diff" "$SPEC" "$PRE"; then bad "DEPLOY_WIRING_FILES must not pipe git diff directly"; else ok; fi
+if grep -q 'git diff-tree .*|| { SCOPE_MODE=full' "$PRE"; then ok; else bad "git diff-tree reads must fall back to full scope"; fi
 # the staging triage is the shared script: scoped and prior-PR arguments reach `classify`, the scope file and member PR list are built from the persisted 0B.1 state, no classifier logic is copied into the spec
-if grep -qF -- '--scope-files "$SCOPE_FILE"' "$SPEC" && grep -qF -- '--prior-prs "$PRIOR_PRS"' "$SPEC" && grep -q '_scope.env' "$SPEC" && grep -q 'review-finalize.sh' "$SPEC"; then ok; else bad "7A/7C must call review-finalize.sh classify with --scope-files and --prior-prs from the persisted 0B.1 scope"; fi
+if grep -qF '"--scope-files", scopeFile' "$CLI" && grep -qF '"--prior-prs", priorPrs' "$CLI" && grep -qF '_scope.json' "$CLI" && grep -qF '"review-finalize.sh"' "$CLI"; then ok; else bad "the staging CLI must call review-finalize.sh classify with --scope-files and --prior-prs from the persisted 0B.1 scope"; fi
 if grep -qE "^(classify_one|cap_pass|prior_findings_tsv)\(\) \{" "$SPEC"; then bad "review-pr-staging.md must not carry a copy of the classifier, cap or re-flag logic"; else ok; fi
 if grep -qF 'FINDING_TEXT_FILE="$WORKDIR/finding-text.$I"; jq -r' "$ROOT/scripts/review-finalize.sh" && grep -qF -- '--text-file "$FINDING_TEXT_FILE"' "$ROOT/scripts/review-finalize.sh"; then ok; else bad "FINDING_TEXT_FILE must be written before the classifier call in review-finalize.sh"; fi
 grep -q "skip-dedup" "$ROOT/scripts/review-finalize.sh" && ok || bad "review-finalize.sh must skip a deduped finding"
-grep -q "review-prepare.sh" "$SPEC" && grep -q -- "--no-delta" "$SPEC" && ok || bad "staging must call review-prepare.sh --no-delta in 0C"
+grep -q "review-prepare.sh" "$CLI" && grep -q -- "--no-delta" "$CLI" && ok || bad "staging must call review-prepare.sh --no-delta in 0C"
 # (7) fail-closed guard: BLOCKED when the classifier is unresolvable, no manual classifier mode, no classifier-unavailable fallback
 SPEC_FIN="$ROOT/scripts/review-finalize.sh"   # review-pr.md delegates classification to review-finalize.sh, which owns the fail-closed BLOCKED line (#3841)
 if grep -qE 'classifier=manual|echo script \|\| echo manual|classifier-unavailable' "$SPEC"; then bad "review-pr-staging.md must carry no manual classifier mode"; else ok; fi
@@ -68,7 +74,7 @@ done
 # (forge#3778) the spec carries a byte-identical stub per fence; the body lives in scripts/lib/fence-bootstrap.sh, which is SOURCED
 # in a fresh shell (the stub's locator + source line is executed for real, so the stub itself is covered too).
 [ "$(grep '# FENCE_BOOTSTRAP$' "$SPEC" | sort -u | wc -l | tr -d ' ')" -eq 1 ] && ok || bad "FENCE_BOOTSTRAP stubs must be byte-identical"
-[ "$(grep -c '# FENCE_BOOTSTRAP$' "$SPEC")" -ge 3 ] && ok || bad "bootstrap must be carried by 0B.1 and both 7B.5 fences"
+[ "$(grep -c '# FENCE_BOOTSTRAP$' "$SPEC")" -ge 3 ] && ok || bad "bootstrap must be carried by the 7A, 7C and Phase 8 fences"
 grep '^type forge_resolve >/dev/null' "$SPEC" | sed 1q > "$TMP/boot.sh"
 grep '# FENCE_BOOTSTRAP$' "$SPEC" | sed 1q >> "$TMP/boot.sh"
 [ "$(wc -l < "$TMP/boot.sh")" -eq 2 ] && ok || bad "bootstrap stub (locator + source line) not found"
@@ -81,17 +87,17 @@ UNCOVERED=$(awk '
   infence { body = body "\n" $0 }' "$SPEC")
 [ -z "$UNCOVERED" ] && ok || bad "bash fences starting at line(s) ${UNCOVERED}consume cross-fence state without the FENCE_BOOTSTRAP block"
 # the persisted Phase 6.5 / 6.75 values: producers write them, consumers reload them validated
-grep -q 'test_gate_verdict' "$SPEC" && grep -q 'launched_review_agents' "$SPEC" && ok || bad "TEST_GATE_VERDICT and LAUNCHED_REVIEW_AGENTS must be persisted to the scratchpad"
+grep -q 'test_gate_verdict' "$POST" && grep -q 'launched_review_agents' "$POST" && ok || bad "TEST_GATE_VERDICT and LAUNCHED_REVIEW_AGENTS must be persisted to the scratchpad"
 # PR-keyed (concurrent runs in one cwd must not share state) and reset by an executable command, not prose
-if grep -qE '\$_SD/(test_gate_verdict|test_gate_reason|launched_review_agents)|\.forge-scratch\}/launched_review_agents' "$SPEC"; then bad "gate/launched-agent scratch files must be keyed by \${PR_NUMBER}_"; else ok; fi
-grep -qF ': > "$_SD/${PR_NUMBER}_launched_review_agents"' "$SPEC" && grep -qF 'rm -f "$_SD/${PR_NUMBER}_test_gate_verdict" "$_SD/${PR_NUMBER}_test_gate_reason"' "$SPEC" && ok || bad "Phase 2 must truncate and Phase 6.5 must rm -f the PR-keyed scratch files in executable commands"
+if grep -qE '\$_SD/(test_gate_verdict|test_gate_reason|launched_review_agents)|\.forge-scratch\}/launched_review_agents' "$SPEC" "$POST"; then bad "gate/launched-agent scratch files must be keyed by \${PR_NUMBER}_"; else ok; fi
+grep -qF 'io.writeFile(launchedFile, "")' "$CLI" && grep -qF 'rm -f "${_SD:?}/${PR_NUMBER:?}_test_gate_verdict" "${_SD:?}/${PR_NUMBER:?}_test_gate_reason"' "$POST" && ok || bad "the pre-dispatch must truncate the launched-agent file and the test gate must rm -f the PR-keyed verdict files"
 if awk '/^### 7E:/,/^### 7F:/' "$SPEC" | grep -qF '{GH_REPO}'; then bad "7E must not use the {GH_REPO} template token"; else ok; fi
 # (8b) forge#3733: Phase 6.75 fails closed on an empty/absent launched-agent list or empty PR_NUMBER; Phase 6 fails closed on a bad SELECTED_AGENT_COUNT
-F675=$(awk '/^### Phase 6.75/,/^### 7A/' "$SPEC" | awk '/^```bash/{f=1;next} /^```/{if(f)exit} f')
+F675=$(blk "$POST" delivery-check)
 GUARD_LN=$(printf '%s\n' "$F675" | grep -n 'launched-agent list is empty or unreadable' | head -1 | cut -d: -f1)
 LOOP_LN=$(printf '%s\n' "$F675" | grep -n '^for AGENT_DOMAIN in' | head -1 | cut -d: -f1)
 [ -n "$GUARD_LN" ] && [ -n "$LOOP_LN" ] && [ "$GUARD_LN" -lt "$LOOP_LN" ] && ok || bad "6.75 empty-list guard must precede the for AGENT_DOMAIN loop"
-printf '%s\n' "$F675" | sed -n "1,$((LOOP_LN-1))p" | grep -v '^[[:space:]]*gh ' > "$TMP/f675.sh"
+{ echo '_SD="$FORGE_SCRATCHPAD"'; printf '%s\n' "$F675" | sed -n "1,$((LOOP_LN-1))p" | grep -v '^[[:space:]]*gh '; } > "$TMP/f675.sh"
 mkdir -p "$TMP/sd9/empty" "$TMP/sd9/full" "$TMP/bin9"
 printf '#!/bin/sh\necho stub-value\n' > "$TMP/bin9/yq"; printf '#!/bin/sh\nexit 0\n' > "$TMP/bin9/gh"; chmod +x "$TMP/bin9/yq" "$TMP/bin9/gh"
 : > "$TMP/sd9/empty/42_launched_review_agents"
@@ -104,7 +110,7 @@ done
 OUT9=$(run675 "$TMP/sd9/full" 42)
 case "$OUT9" in *"launched-agent list is empty"*) bad "6.75 guard must not fire for a non-empty list (got '$OUT9')" ;; *) ok ;; esac
 # Phase 6 SELECTED_AGENT_COUNT validation: static order + behaviour of the reload/validate lines
-F6=$(awk '/Selected isolated reviewers/{exit} {print}' "$SPEC" | awk '/^```bash/{b=""; f=1; next} /^```/{f=0; next} f{b=b $0 "\n"; last=b} END{printf "%s", last}')
+F6=$(blk "$POST" panel-guard)
 printf '%s' "$F6" | grep -qF 'SELECTED_COUNT_INVALID' && ok || bad "Phase 6 fence must validate SELECTED_AGENT_COUNT (SELECTED_COUNT_INVALID)"
 printf '%s' "$F6" | grep -F 'SELECTED_AGENT_COUNT=' | grep -F 'launched_review_agents' > "$TMP/sel.sh"
 printf '%s\n' 'SELECTED_COUNT_INVALID=false' "$(printf '%s' "$F6" | grep -F 'case "${SELECTED_AGENT_COUNT:-}"')" > "$TMP/selcase.sh"
@@ -140,20 +146,20 @@ case "$OUT8" in *"PR=|"*) ok ;; *) bad "non-numeric staging_pr_number must be re
 OUT8=$( ( unset ALL_PR_NUMBERS; PR_NUMBER=99; export PATH="$TMP/bin:$PATH" FORGE_SCRATCHPAD="$TMP/sd8/full" FORGEDOCK_HOME="$ROOT"; . "$TMP/boot.sh" >/dev/null 2>&1; echo "PR=$PR_NUMBER|ALL=${ALL_PR_NUMBERS:-}" ) )
 [ "$OUT8" = "PR=99|ALL=" ] && ok || bad "in-shell PR_NUMBER must not be overridden by the scratch file (got '$OUT8')"
 # producers persist, and 0B.1 / 7B.5 no longer use the unsubstituted-template repo token or a bare unquoted PR number in gh pr comment
-grep -q 'staging_pr_number' "$SPEC" && grep -q '_bundle-prs.txt' "$SPEC" && ok || bad "Phase -1 / 0A must persist staging_pr_number and _bundle-prs.txt"
-if awk '/^### 0B.1:/,/^## Phase 1:/' "$SPEC" | grep -q '{GH_REPO}'; then bad "0B.1 must not use the {GH_REPO} template token"; else ok; fi
+grep -q 'staging_pr_number' "$CLI" && grep -q '_bundle-prs.txt' "$PRE" && ok || bad "Phase -1 / 0A must persist staging_pr_number and _bundle-prs.txt"
+if grep -v '^[[:space:]]*#' "$PRE" "$POST" | grep -qE '(^|[^$]){GH_REPO}'; then bad "the 0A/0B.1 and post-dispatch scripts must not use the {GH_REPO} template token"; else ok; fi
 if awk '/^### 7A:/,/^### 7D:/' "$SPEC" | grep -qE '\{GH_REPO\}|gh pr comment \$\{PR_NUMBER\}'; then bad "7A-7C must use quoted \$GH_REPO / \$PR_NUMBER"; else ok; fi
 # (7) reviewer templates bind the full head SHA via the dispatch placeholder, not an orchestrator-only shell var
 if grep -qE '^Reviewed-SHA: \$\{REVIEW_SHA_FULL\}$' "$SPEC"; then bad "reviewer template still uses \${REVIEW_SHA_FULL} (unbound in a fresh shell)"; else ok; fi
 [ "$(grep -cE '^Reviewed-SHA: \[REVIEW_SHA\]$' "$SPEC")" -ge 5 ] && ok || bad "all five reviewer templates must use Reviewed-SHA: [REVIEW_SHA]"
 if grep -E '^Reviewed-SHA:' "$SPEC" | grep -qvE '^Reviewed-SHA: \[REVIEW_SHA\]$'; then bad "every Reviewed-SHA template line must be [REVIEW_SHA]"; else ok; fi
-grep -F 'substitute `[REVIEW_SHA]`' "$SPEC" | grep -qF '[REVIEW_SHA_SHORT]' || grep -qF 'Also substitute `[REVIEW_SHA]`' "$SPEC" && ok || bad "dispatch text must bind [REVIEW_SHA]"
+grep -qiF 'substitute `[REVIEW_SHA]`' "$SPEC" && ok || bad "dispatch text must bind [REVIEW_SHA]"
 # (8) cross-PR re-flag (forge#3641) and the per-review cap (forge#3642) now run inside review-finalize.sh classify: scripts/review-finalize.test.sh covers them (bundle re-flag, scope demotion, cap)
 # (9) stale-head delta credit (forge#3638): the spec's bundle_delta_credit runs against real git fixtures and the REAL review-delta.sh / trusted-comments.sh.
 # Fail-closed cases first: every FULL / error / untrusted path must leave the PR's commits UNREVIEWED (empty credit).
 if command -v git >/dev/null 2>&1; then
-awk '/^# BEGIN bundle-delta-credit$/{f=1;next} /^# END bundle-delta-credit$/{f=0} f' "$SPEC" > "$TMP/delta-fn.sh"
-[ -s "$TMP/delta-fn.sh" ] && ok || bad "bundle-delta-credit block not found in the spec"
+awk '/^# BEGIN bundle-delta-credit$/{f=1;next} /^# END bundle-delta-credit$/{f=0} f' "$PRE" > "$TMP/delta-fn.sh"
+[ -s "$TMP/delta-fn.sh" ] && ok || bad "bundle-delta-credit block not found in review-staging-pre.sh"
 RDS="$ROOT/scripts/review-delta.sh"
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
@@ -227,25 +233,25 @@ mkrepo9; commit9 pr.txt pr1b pr1b; R=$(git -C "$W9" rev-parse HEAD); panel9 "$R"
 OUT9=$(credit9 "$H"); N9=$(printf '%s' "${OUT9#*|}" | wc -w)
 [ "${OUT9%%|*}" = 0 ] && [ "$N9" -eq 2 ] && case "$OUT9" in *"$(short9 HEAD)"*|*"$(short9 HEAD~1)"*) false ;; *) true ;; esac && ok || bad "partial review must credit exactly the 2 reviewed commits (got '$OUT9')"
 # spec text guards: the resolver is reused, never copied; carried record accepted; the unchanged cross-PR and merge-resolution paths are still present
-grep -q 'review-delta.sh' "$SPEC" && grep -q 'REVIEW-CARRIED' "$SPEC" && ok || bad "spec must call review-delta.sh and accept the REVIEW-CARRIED record"
-if grep -qE 'merge-base --is-ancestor.*REVIEWED_SHA_STALE|diff_shape\(\)' "$SPEC"; then bad "spec must not carry a second copy of the resolver logic"; else ok; fi
-grep -qF 'printf '"'"'%s\n'"'"' "$_FILES" | sort -u | sed "s|^|$pr |" >> "$_PF"' "$SPEC" && grep -qF 'git diff-tree --no-commit-id --name-only -r --cc "$c"' "$SPEC" && ok || bad "CROSS_PR_FILES accumulation and --cc merge scoping must stay intact"
+grep -q 'review-delta.sh' "$PRE" && grep -q 'REVIEW-CARRIED' "$PRE" && ok || bad "review-staging-pre.sh must call review-delta.sh and accept the REVIEW-CARRIED record"
+if grep -qE 'merge-base --is-ancestor.*REVIEWED_SHA_STALE|diff_shape\(\)' "$SPEC" "$PRE"; then bad "spec must not carry a second copy of the resolver logic"; else ok; fi
+grep -qF 'printf '"'"'%s\n'"'"' "$_FILES" | sort -u | sed "s|^|$pr |" >> "$_PF"' "$PRE" && grep -qF 'git diff-tree --no-commit-id --name-only -r --cc "$c"' "$PRE" && ok || bad "CROSS_PR_FILES accumulation and --cc merge scoping must stay intact"
 [ "$(grep -c '# FENCE_BOOTSTRAP$' "$SPEC" | head -1)" -ge 3 ] && ok || bad "FENCE_BOOTSTRAP stubs must remain"
 # an unresolvable helper fails the fence closed (exit 1), never an unsourced bootstrap
 OUT8=$( ( unset FORGEDOCK_HOME FORGE_HOME FORGE_ROOT CLAUDE_PLUGIN_ROOT CLAUDE_CONFIG_DIR CODEX_HOME FORGE_SOURCED_ROOT FORGEDOCK_MARKETPLACE; export HOME="$TMP/nohome"; cd "$TMP" && bash -c "$(cat "$TMP/boot.sh"); echo reached" ) 2>&1 )
 case "$OUT8" in *BLOCKED*) case "$OUT8" in *reached*) bad "unresolved bootstrap helper must stop the fence" ;; *) ok ;; esac ;; *) bad "unresolved bootstrap helper must print BLOCKED (got '$OUT8')" ;; esac
 # a stale-head PR must not credit its own merge commit (it contains the post-review commits): the DELTA branch only appends DELTA_COMMITS
-if awk '/^bundle_delta_credit\(\)/,/^\}/' "$SPEC" | grep -q 'mergeCommit'; then bad "the DELTA path must not credit the PR merge commit"; else ok; fi
+if awk '/^bundle_delta_credit\(\)/,/^\}/' "$PRE" | grep -q 'mergeCommit'; then bad "the DELTA path must not credit the PR merge commit"; else ok; fi
 # (10) fail-closed gate verdict (forge#3734): an empty/missing/invalid persisted verdict must never become SKIP
-awk '/^\*\*Verdict handling\*\*:/{f=1;next} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' "$SPEC" | grep -v '# FENCE_BOOTSTRAP$' > "$TMP/vh.sh"
+blk "$POST" test-gate-verdict > "$TMP/vh.sh"
 [ -s "$TMP/vh.sh" ] && ok || bad "could not extract the Phase 6.5 verdict-handling fence"
-if awk '/^  \*\)/,/;;/' "$SPEC" | grep -q 'TEST_GATE_VERDICT="SKIP"'; then bad "catch-all arm must not set TEST_GATE_VERDICT=SKIP"; else ok; fi
-grep -qF 'missing/invalid' "$SPEC" && ok || bad "spec must document missing/invalid gate-verdict handling"
-if grep -F 'FORGE:TEST_GATE:RESULT=' "$SPEC" | grep -q 'tail -1 || echo "SKIP"'; then bad "producer must not coerce an absent marker to SKIP"; else ok; fi
+if awk '/^  \*\)/,/;;/' "$POST" | grep -q 'TEST_GATE_VERDICT="SKIP"'; then bad "catch-all arm must not set TEST_GATE_VERDICT=SKIP"; else ok; fi
+grep -qF 'missing/invalid' "$SPEC" && grep -qF 'missing/invalid' "$POST" && ok || bad "spec must document missing/invalid gate-verdict handling"
+if grep -F 'FORGE:TEST_GATE:RESULT=' "$POST" | grep -q 'tail -1 || echo "SKIP"'; then bad "producer must not coerce an absent marker to SKIP"; else ok; fi
 vh10() { # $1 posture, $2 persisted verdict content ('-' = no file), $3 env verdict (optional)
   local sd="$TMP/vh10.$RANDOM"; mkdir -p "$sd"
   [ "$2" = "-" ] || printf '%s\n' "$2" > "$sd/5_test_gate_verdict"
-  ( export _SD="$sd" PR_NUMBER=5 GH_REPO=o/r DEFAULT_BRANCH=main ALL_PR_NUMBERS="5" CONFIG_FILE=/dev/null P10="$1"
+  ( export _SD="$sd" PR_NUMBER=5 GH_REPO=o/r DEFAULT_BRANCH=main ALL_PR_NUMBERS="5" CONFIG_FILE=/dev/null P10="$1" GATE_POSTURE="$1" OVERRIDE_PHRASE="OVERRIDE: x" GH_FLAG="-R o/r"
     [ -z "${3:-}" ] || export TEST_GATE_VERDICT="$3"
     forge_resolve() { :; }; yq() { case "$*" in *posture*) echo "$P10" ;; *) echo "OVERRIDE: x" ;; esac; }; gh() { return 0; }
     . "$TMP/vh.sh" >"$sd/out" 2>&1; echo "rc=0" >> "$sd/out" ) ; local rc=$?
@@ -280,12 +286,12 @@ gh11() {
     *) return 1 ;;
   esac
 }
-[ "$(grep -c '^# BEGIN bundle-pr-kind$' "$SPEC")" -eq 2 ] && [ "$(awk '/^# BEGIN bundle-pr-kind$/{f=1;n++} f{print > ("'"$TMP"'/kind" n ".sh")} /^# END bundle-pr-kind$/{f=0}' "$SPEC"; cmp -s "$TMP/kind1.sh" "$TMP/kind2.sh" && echo same)" = same ] && ok || bad "0A and 0B.1 must carry identical bundle_pr_kind blocks"
-awk '/^# BEGIN bundle-pr-set$/{f=1;next} /^# END bundle-pr-set$/{f=0} f' "$SPEC" | sed 's/{GH_REPO}/o\/r/g' > "$TMP/prset.sh"
+[ "$(grep -c '^# BEGIN bundle-pr-kind$' "$PRE")" -eq 2 ] && [ "$(awk '/^# BEGIN bundle-pr-kind$/{f=1;n++} f{print > ("'"$TMP"'/kind" n ".sh")} /^# END bundle-pr-kind$/{f=0}' "$PRE"; cmp -s "$TMP/kind1.sh" "$TMP/kind2.sh" && echo same)" = same ] && ok || bad "0A and 0B.1 must carry identical bundle_pr_kind blocks"
+awk '/^# BEGIN bundle-pr-set$/{f=1;next} /^# END bundle-pr-set$/{f=0} f' "$PRE" | sed 's/{GH_REPO}/o\/r/g' > "$TMP/prset.sh"
 [ -s "$TMP/prset.sh" ] && ok || bad "bundle-pr-set block not found in Phase 0A"
-OUT11=$( gh() { gh11 "$@"; }; BUNDLE_PRS="5 6 28668 77 90"; MERGE_PRS="90"; . "$TMP/prset.sh"; echo $ALL_PR_NUMBERS "|$SKIPPED_ISSUES" )
+OUT11=$( gh() { gh11 "$@"; }; GH_REPO=o/r; BUNDLE_PRS="5 6 28668 77 90"; MERGE_PRS="90"; . "$TMP/prset.sh"; echo $ALL_PR_NUMBERS "|$SKIPPED_ISSUES" )
 [ "$OUT11" = "5 6 77 90 | 28668" ] && ok || bad "0A must drop the confirmed issue and keep PRs, merge PRs and unclassifiable numbers (got '$OUT11')"
-awk '/^# BEGIN bundle-scope-loop$/{f=1;next} /^# END bundle-scope-loop$/{f=0} f' "$SPEC" > "$TMP/loop.sh"
+awk '/^# BEGIN bundle-scope-loop$/{f=1;next} /^# END bundle-scope-loop$/{f=0} f' "$PRE" > "$TMP/loop.sh"
 [ -s "$TMP/loop.sh" ] && ok || bad "bundle-scope-loop block not found in 0B.1"
 scope11() { # $1 = ALL_PR_NUMBERS; prints "<SCOPE_MODE> <REVIEWED_PR_COUNT>" then the loop output
   ( gh() { gh11 "$@"; }; bundle_delta_credit() { DELTA_COMMITS=""; DELTA_FULL=0; }; . "$TMP/kind1.sh"

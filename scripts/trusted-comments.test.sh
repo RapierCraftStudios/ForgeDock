@@ -67,7 +67,7 @@ eq "trusted synthesis accepted" "$(printf '[%s]' "$(c NONE Bot b "$FAKE_SYN")" |
 eq "synthesis marker mid-body rejected" "$(printf '[%s]' "$(c NONE Bot b "intro${NL}${FAKE_SYN}")" | bash "$TC" count "$SYNTH_RE")" 0
 eq "synthesis for a different head rejected" "$(printf '[%s]' "$(c NONE Bot b "<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->${NL}Reviewed-SHA: ${OTHER}")" | bash "$TC" count "$SYNTH_RE")" 0
 
-# Staging review spec (commands/review-pr-staging.md): same predicate, domains may carry digits/hyphens (bug-hunter-api)
+# Staging review (scripts/review-staging-post.sh delivery, formerly the commands/review-pr-staging.md fences): same predicate, domains may carry digits/hyphens (bug-hunter-api)
 STG_RE="^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${SHA}(\\r?\\n|\$)"
 STG_DOM_RE="^<!-- FORGE:REVIEW-AGENT:bug-hunter-api -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${SHA}(\\r?\\n|\$)"
 STG_TRUE="<!-- FORGE:REVIEW-AGENT:bug-hunter-api -->${NL}Reviewed-SHA: ${SHA}${NL}<!-- FINDING:real-2 -->"

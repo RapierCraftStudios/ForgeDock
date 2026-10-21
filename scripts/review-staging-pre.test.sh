@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # review-staging-pre.test.sh — cases for scripts/review-staging-pre.sh (forge#4358): bundle PR set, open review-finding gate,
-# 0B.1 scope, and byte parity of its BEGIN/END blocks with commands/review-pr-staging.md (until #4359 retargets the spec).
+# 0B.1 scope. Since #4359 the script is the only copy of these blocks (the spec calls `forgedock review-staging`).
 # gh is a PATH stub reading per-case fixtures; git runs against a throwaway repo with a local bare "origin".
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SPEC="$ROOT/commands/review-pr-staging.md"
 PRE="$ROOT/scripts/review-staging-pre.sh"
 PASS=0; FAILN=0
 ok() { PASS=$((PASS+1)); }
@@ -16,12 +15,10 @@ command -v git >/dev/null 2>&1 || { echo "review-staging-pre.test.sh: git missin
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export FORGEDOCK_HOME="$ROOT"   # resolve helpers from this checkout, not an ambient install
 
-# (1) parity: every BEGIN/END block in the script is byte-identical to the spec's ({GH_REPO} -> $GH_REPO)
-blocks() { awk -v n="$2" '$0 == "# BEGIN " n {f=1} f {print} $0 == "# END " n {f=0}' "$1"; }
+# (1) the blocks live only here: present in the script, absent from the spec
 for b in bundle-pr-set bundle-pr-kind bundle-delta-credit bundle-scope-loop; do
-  blocks "$SPEC" "$b" | sed 's/{GH_REPO}/$GH_REPO/g' > "$TMP/spec.$b"
-  blocks "$PRE" "$b" > "$TMP/pre.$b"
-  if [ -s "$TMP/spec.$b" ] && cmp -s "$TMP/spec.$b" "$TMP/pre.$b"; then ok; else bad "block $b drifted from commands/review-pr-staging.md"; fi
+  grep -qx "# BEGIN $b" "$PRE" && grep -qx "# END $b" "$PRE" && ok || bad "block $b missing from review-staging-pre.sh"
+  grep -qx "# BEGIN $b" "$ROOT/commands/review-pr-staging.md" && bad "block $b still copied into commands/review-pr-staging.md" || ok
 done
 
 # (2) usage errors

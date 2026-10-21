@@ -74,6 +74,10 @@ on:
       - 'scripts/review-pr-delta-wiring.test.sh'
       - 'scripts/review-pr-staging-scope.test.sh'
       - 'scripts/review-pr-staging-finding-filter.test.sh'
+      - 'scripts/review-staging-pre.sh'
+      - 'scripts/review-staging-pre.test.sh'
+      - 'scripts/review-staging-post.sh'
+      - 'scripts/review-staging-post.test.sh'
       - 'scripts/close-parent-c3.test.sh'
       - 'scripts/check-spec-size.sh'
       - 'scripts/check-spec-size.test.sh'
@@ -169,6 +173,10 @@ on:
       - 'scripts/review-pr-delta-wiring.test.sh'
       - 'scripts/review-pr-staging-scope.test.sh'
       - 'scripts/review-pr-staging-finding-filter.test.sh'
+      - 'scripts/review-staging-pre.sh'
+      - 'scripts/review-staging-pre.test.sh'
+      - 'scripts/review-staging-post.sh'
+      - 'scripts/review-staging-post.test.sh'
       - 'scripts/close-parent-c3.test.sh'
       - 'scripts/check-spec-size.sh'
       - 'scripts/check-spec-size.test.sh'
@@ -476,13 +484,16 @@ jobs:
           bash scripts/review-pr-delta-wiring.test.sh
           bash scripts/review-pr-staging-scope.test.sh
           bash scripts/review-pr-staging-finding-filter.test.sh
+          bash scripts/review-staging-pre.test.sh
+          bash scripts/review-staging-post.test.sh
           # No args: the script's built-in default file set (all Skill-loaded specs under commands/).
           bash scripts/check-spec-bash.sh
           # Every Bash call is a fresh shell: a fence that reads these variables must bind them itself
           # (re-declare with the orchestrator's values). Deliberate reads: `allowlist:fence-state`.
           bash scripts/check-spec-bash.sh --fence-state PR_NUMBER REPO REPO_FLAG MERGE_ISSUE MERGE_GH_FLAG AUTO_MERGE REVIEW_SHA -- commands/review-pr.md
           # The staging spec binds its state through the FENCE_BOOTSTRAP stub (scripts/lib/fence-bootstrap.sh), which the checker understands.
-          bash scripts/check-spec-bash.sh --fence-state PR_NUMBER GH_REPO DEFAULT_BRANCH STAGING_BRANCH ALL_PR_NUMBERS -- commands/review-pr-staging.md
+          # Its pre/post-dispatch state (ALL_PR_NUMBERS, verdicts) lives in forgedock review-staging since #4359.
+          bash scripts/check-spec-bash.sh --fence-state PR_NUMBER GH_REPO DEFAULT_BRANCH STAGING_BRANCH -- commands/review-pr-staging.md
           # Slice-path writers (protocols.md §1) must re-declare it. Persona files wrap their template in an outer bare fence,
           # which this checker skips; review-pr-gate2.test.sh counts persona reads vs re-declarations instead.
           bash scripts/check-spec-bash.sh --fence-state SLICE_FILE -- commands/review-pr-agents/protocols.md docs/spec/review-protocol.md
