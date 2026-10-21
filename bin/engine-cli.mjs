@@ -170,6 +170,14 @@ export function readReproTest(cwd = process.cwd()) {
 export function readCloseParent(cwd = process.cwd()) {
   try { return String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.decomposition?.close_parent ?? "").trim() === "true"; } catch { return false; }
 }
+/** forge.yaml `lean.fix_model` (#4363, else `engine.lean_fix_model`): the model of fresh fix-round sessions; undefined when absent or invalid. */
+export function readFixModel(cwd = process.cwd()) {
+  try {
+    const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.lean?.fix_model ?? "").trim();
+    if (/^[A-Za-z0-9._:[\]-]+$/.test(v)) return v;
+  } catch { /* fall through to engine.lean_fix_model */ }
+  return readLeanSetting("fix_model", cwd);
+}
 function readLeanSetting(key, cwd = process.cwd()) {
   try {
     const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.[`lean_${key}`] ?? "").trim();
@@ -757,7 +765,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1114,7 +1122,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4256: the placement orchestrate decided for a lane (ctx.placement) reaches it as --placement/--placement-reason.
@@ -1398,6 +1406,59 @@ export async function limitsFromCli(argv, deps = {}) {
     return { cleared: 1 };
   }
   throw new Error(usage);
+}
+
+/**
+ * `forgedock check [--repo DIR] [--base REF] [--json]` (#4364): runs in the lane worktree what the engine runs after the
+ * builder: the frozen validate commands (.forge-lean/contract.json) and the change-scoped pre-PR checks, with the plan
+ * the engine wrote (.forge-lean/check-plan.json; else this checkout's forge.yaml) and the caller's env (lane TMPDIR,
+ * pinned toolchain, heavy shims). Local only: no gh, no push, no workflow. Prints a pass/fail table, records the run in
+ * .forge-lean/self-check.json, and returns {ok, exitCode} (0 pass, 1 fail, 2 usage).
+ */
+export async function checkFromCli(argv, deps = {}) {
+  const usage = "usage: forgedock check [--repo DIR] [--base REF] [--json]";
+  const pre = await import("./lean/precheck.mjs");
+  const { readTestMap, readTestMapAtRef } = await import("./lean/testmap.mjs");
+  const fsp = await import("node:fs/promises");
+  const out = deps.out ?? ((l) => console.log(l)), env = deps.env ?? process.env;
+  const o = {};
+  for (let i = 0; i < argv.length; i++) {
+    const t = argv[i];
+    if (t === "--repo" || t === "--base") { if (!argv[i + 1]) throw Object.assign(new Error(usage), { exitCode: 2 }); o[t.slice(2)] = argv[++i]; }
+    else if (t === "--json") o.json = true;
+    else throw Object.assign(new Error(usage), { exitCode: 2 });
+  }
+  const run0 = deps.git ?? (async (args, cwd) => (await promisify(execFile)("git", args, { cwd, maxBuffer: 64 * 1024 * 1024 })).stdout);
+  const repo = resolvePath(o.repo ?? String(await run0(["rev-parse", "--show-toplevel"], deps.cwd ?? process.cwd())).trim());
+  const git = (args) => run0(args, repo);
+  const readJson = async (f) => { try { return JSON.parse(await (deps.readFile ?? ((p) => fsp.readFile(p, "utf8")))(join(repo, f))); } catch { return null; } };
+  const contract = await readJson(".forge-lean/contract.json");
+  if (!contract) throw Object.assign(new Error(`check: no .forge-lean/contract.json in ${repo}\n${usage}`), { exitCode: 2 });
+  const plan = await readJson(pre.CHECK_PLAN_FILE);
+  const base = o.base ?? plan?.base;
+  if (!base) throw Object.assign(new Error(`check: no check plan from the engine; pass --base REF\n${usage}`), { exitCode: 2 });
+  const verify = plan ? { mode: plan.mode, precheckTotalSeconds: plan.precheckTotalSeconds, precheckTimeoutSeconds: plan.precheckTimeoutSeconds } : { ...parseVerify({}), ...(readVerify(repo) ?? {}) };
+  const learned = plan ? plan.learned : readPrecheckCommands(repo) ?? [];
+  const maxMinutes = plan ? plan.maxMinutes : readPrecheckBudget(repo);
+  // the engine's changed files (lean.mjs changedFiles: base...HEAD still differing from base), plus uncommitted work
+  const names = (x) => String(x ?? "").split("\n").map((f) => f.trim()).filter(Boolean);
+  const touched = names(await git(["diff", "--name-only", `${base}...HEAD`])), differs = new Set(names(await git(["diff", "--name-only", base, "HEAD"])));
+  const files = [...new Set([...touched.filter((f) => differs.has(f)), ...names(await git(["diff", "--name-only", "HEAD"])), ...names(await git(["ls-files", "-o", "--exclude-standard"]))])]
+    .filter((f) => !f.startsWith(".forge-lean/"));
+  const testMap = (await readTestMapAtRef(git, base)) ?? (await readTestMap([repo], (p) => fsp.readFile(p, "utf8")));
+  const picked = pre.planPrecheck({ testMap, files, learned, maxMinutes, verify });
+  const par = String(env.FORGE_HOST_PARALLELISM ?? "").trim(), pinned = /^\d+$/.test(par) && Number(par) > 0;
+  const runCommand = deps.runCommand ?? (await import("./lean/effects.mjs")).runCheckCommand;
+  const r = await pre.selfCheck({ contract, plan: { mode: verify.mode, commands: picked.commands, budgetMs: picked.budgetMs, perCommandMs: picked.perCommandMs },
+    parallelism: pinned ? Number(par) : 1, now: deps.now,
+    run: ({ command, timeoutMs, workers }) => runCommand({ command, cwd: repo, timeoutMs, env: pinned ? { FORGE_HOST_PARALLELISM: String(workers) } : null }) });
+  let fingerprint = null;
+  try { fingerprint = await pre.worktreeFingerprint({ git, base }); } catch { /* recorded without one: the engine reads it as skipped */ }
+  const strip = (x) => (x.status ? { ...(x.id ? { id: x.id } : {}), command: x.command, status: x.status } : { ...(x.id ? { id: x.id } : {}), command: x.command, rc: x.rc, ms: x.ms });
+  const record = { v: 1, at: new Date((deps.now ?? Date.now)()).toISOString(), base, fingerprint, ok: r.ok, validate: r.validate.map(strip), commands: [...r.commands.map(strip), ...r.deferred.map((command) => ({ command, status: "deferred-to-ci" }))] };
+  try { await (deps.writeFile ?? ((p, t) => fsp.writeFile(p, t)))(join(repo, pre.SELF_CHECK_FILE), `${JSON.stringify(record)}\n`); } catch { /* .forge-lean missing: still print */ }
+  out(o.json ? JSON.stringify({ ...r, base, fingerprint }, null, 2) : pre.formatCheckTable(r));
+  return { ...r, base, fingerprint, files, exitCode: r.ok ? 0 : 1 };
 }
 
 /**

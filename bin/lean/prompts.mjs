@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { reviewSkeleton } from "./conformance.mjs";
 import { seqNumber } from "./sequence.mjs";
+import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
 export const LEAN_DIR = ".forge-lean";
@@ -16,6 +17,8 @@ export const CONTRACT_FILE = `${LEAN_DIR}/contract.json`;
 
 /** Change-scoped checks with shared incremental caches (#4218): the builder runs the scoped commands this CLI prints. */
 export const CHECKS_CLI = fileURLToPath(new URL("./checks.mjs", import.meta.url));
+/** #4364: `forgedock check`, the engine's validate and pre-PR checks run in-session before the result is written. */
+export const FORGEDOCK_CLI = fileURLToPath(new URL("../forgedock.mjs", import.meta.url));
 
 const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the repo's full tsc/eslint/test scripts (it widens to the full command itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, run it again with --publish to share the incremental caches. node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.`;
 
@@ -107,6 +110,8 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
 A new dependency between workspace packages in a package.json that no deliverable names (that package.json, with the package in its change) is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
 If the repository has scripts/check-devdocs-freshness.sh, its docs must move with the code: a behaviour change under the paths it checks needs the matching module dossier (devdocs/modules/*.md, per devdocs/index.yaml) updated in the same change. Run it against the base before writing the result; the engine runs it too and resumes you once if it fails.
+
+Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree (the engine runs the same validate and pre-PR checks afterwards) and fix until it passes; if it cannot pass, report the problem as blocked.
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):
 ### Approach
@@ -203,6 +208,16 @@ export function structurePrompt(edges, mode = "local") {
 /** The repo's devdocs freshness rule failed on the committed change: update the named dossier(s) and commit. */
 export function docsPrompt(output, mode = "local") {
   return `The repository's docs freshness check (scripts/check-devdocs-freshness.sh) fails on this change:\n${String(output ?? "").slice(0, 4000)}\n\nUpdate the module dossier it names (devdocs/modules/*.md; devdocs/index.yaml maps files to dossiers) to describe the behaviour you changed, in the dossier's existing style and in a few lines. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/**
+ * #4363: a fix round in a fresh session (no transcript). It carries the site's task prompt (which holds the capped
+ * failure output), the lane diff, the frozen contract and the issue title and summary, each capped; under FIX_PROMPT_MAX.
+ */
+export function fixSessionPrompt({ task, diff = "", stat = "", base = "", contract = null, title = "", summary = "" }) {
+  const contractText = capText(typeof contract === "string" ? contract : JSON.stringify(contract ?? {}, null, 1), FIX_CAPS.contract);
+  const p = `${HOST_RULES}\n\nYou are fixing one failure on an existing branch in this worktree. You have no earlier session: the issue, the frozen contract and the branch's diff against ${base || "the lane base"} are below; read any file you need.\n\n## Issue: ${String(title).slice(0, 300)}\n${capText(summary, FIX_CAPS.summary)}\n\n## Frozen contract (${CONTRACT_FILE})\n\`\`\`json\n${contractText}\n\`\`\`\n\n## Diff (\`git diff ${base || "<base>"}...HEAD\`)\n\`\`\`diff\n${boundDiff(diff, { stat, base, maxBytes: FIX_CAPS.diff })}\n\`\`\`\n\n## The failure to fix\n${capText(task, FIX_CAPS.task)}`;
+  return capText(p, FIX_PROMPT_MAX - 100);
 }
 
 /** Human-only block reasons (#4124). Everything else agents resolve: a dependency, a split, prod data monitoring can read. */
