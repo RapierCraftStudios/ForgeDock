@@ -6,7 +6,8 @@
  * Input record model (every source maps onto it; a missing field is null and degrades to "n/a"):
  *   run   { source, repo, version, issue, run, finished, hydrated, usageEvents, reason, code, remediated,
  *           startTs, endTs, wallMs, phases: { <id>: { cr, out, usd, ms, attempts } },
- *           builderAttempts: [{ attempt, trigger, cost_usd }] (#4362; trigger null before the field existed) }
+ *           builderAttempts: [{ attempt, trigger, cost_usd }] (#4362; trigger null before the field existed),
+ *           pitfallsMatched (#4375: pitfalls in the context pack matching the issue's files; null when unknown, local logs only) }
  *   event { repo, version, issue, pr, ts, event, ...payload }          (FORGE:TELEMETRY gate/review events)
  *   issue { repo, number, isPr, createdAt, closedAt, labels: [name], authorType }
  *
@@ -123,6 +124,7 @@ function flowSection(runs) {
 function reworkSection(runs) {
   const attempts = {}, byTrigger = {};
   let n = 0, usd = 0, firstPass = 0, measured = 0, unknown = 0;
+  const split = { with: { firstPass: 0, n: 0 }, without: { firstPass: 0, n: 0 } }; // #4375: by matching pitfalls in the pack
   for (const r of runs) {
     const list = Array.isArray(r.builderAttempts) ? r.builderAttempts : [];
     for (const a of list) {
@@ -138,8 +140,10 @@ function reworkSection(runs) {
     if (fp == null) { if (!Array.isArray(r.builderAttempts) || list.some((a) => !a?.trigger)) unknown++; continue; }
     measured++;
     if (fp) firstPass++;
+    if (Number.isInteger(r.pitfallsMatched)) { const s = split[r.pitfallsMatched > 0 ? "with" : "without"]; s.n++; if (fp) s.firstPass++; }
   }
-  return { rework: { n, usd, byTrigger, attempts }, firstPass: { rate: ratio(firstPass, measured), firstPass, n: measured, unknown } };
+  const firstPassByPitfalls = Object.fromEntries(Object.entries(split).map(([k, v]) => [k, { rate: ratio(v.firstPass, v.n), ...v }]));
+  return { rework: { n, usd, byTrigger, attempts }, firstPass: { rate: ratio(firstPass, measured), firstPass, n: measured, unknown }, firstPassByPitfalls };
 }
 
 function funnelSection(events, issues) {

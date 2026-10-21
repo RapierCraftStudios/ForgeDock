@@ -603,6 +603,35 @@ describe("rework by trigger and first-pass rate (#4362)", () => {
   });
 });
 
+describe("first-pass rate with and without matching pitfalls (#4375)", () => {
+  const use = (attempt, trigger) => ({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", attempt, trigger, cost_usd: 1, usage: { cache_read_input_tokens: 10, output_tokens: 1 } });
+  const log = (issue, attempts, { term = {}, pack = null } = {}) => [{ event: "RUN_START", issue, repo: "o/r", run: `r${issue}`, version: "1.30.0", ts: "2026-10-20T00:00:00Z" },
+    ...(pack ? [{ event: "CONTEXT_PACK", mode: "shadow", pitfalls: pack }] : []), ...attempts, { event: "RUN_TERMINAL", reason: "merged", ts: "2026-10-20T01:00:00Z", ...term }];
+  const clean = [use(1, "plan"), use(2, "build")], rework = [...clean, use(3, "precheck")];
+
+  it("summariseLog reads pitfalls_matched from RUN_TERMINAL, else the CONTEXT_PACK pitfalls, else null", () => {
+    assert.equal(summariseLog(log(1, clean, { term: { pitfalls_matched: 2 } })).pitfallsMatched, 2);
+    assert.equal(summariseLog(log(1, clean, { pack: [{ sig: "a", match: "files" }, { sig: "b", match: "repo" }] })).pitfallsMatched, 1);
+    assert.equal(summariseLog(log(1, clean)).pitfallsMatched, null, "older logs: unknown");
+  });
+
+  it("aggregate splits the first-pass rate by matching pitfalls and leaves unknown runs out; render prints both rows", () => {
+    const runs = [
+      log(1, clean, { term: { pitfalls_matched: 1 } }), log(2, clean, { term: { pitfalls_matched: 3 } }), log(3, rework, { term: { pitfalls_matched: 1 } }),
+      log(4, rework, { term: { pitfalls_matched: 0 } }), log(5, clean, { term: { pitfalls_matched: 0 } }), log(6, rework, { term: { pitfalls_matched: 0 } }),
+      log(7, clean), // no pitfall field: unknown
+    ].map((l) => summariseLog(l));
+    const g = aggregate({ runs }).groups[0];
+    assert.deepEqual(g.firstPassByPitfalls, { with: { rate: 2 / 3, firstPass: 2, n: 3 }, without: { rate: 1 / 3, firstPass: 1, n: 3 } });
+    assert.equal(g.firstPass.n, 7, "the overall rate still counts every lane");
+    const md = renderMarkdown(aggregate({ runs }));
+    assert.match(md, /first-pass with matching pitfalls \| 67% \(2\/3\)/);
+    assert.match(md, /first-pass without matching pitfalls \| 33% \(1\/3\)/);
+    const none = renderMarkdown(aggregate({ runs: [log(8, clean)].map((l) => summariseLog(l)) }));
+    assert.ok(!/matching pitfalls/.test(none), "no pitfall data: no rows");
+  });
+});
+
 describe("fail-soft alerts (#4354)", () => {
   const ts = (i) => new Date(Date.UTC(2026, 9, 1) + i * 60000).toISOString();
   // One lane per call; `extra` are the events after RUN_START.
