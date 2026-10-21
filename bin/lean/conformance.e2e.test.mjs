@@ -14,6 +14,9 @@ import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { runCore } from "./lean.mjs";
+import { readLog } from "../engine/runlog.mjs";
+import { runCheckCommand } from "./effects.mjs";
+import { checkFromCli } from "../engine-cli.mjs";
 
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
 const git = (args, cwd) => { try { return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: GIT_ENV }); } catch (e) { throw Object.assign(new Error(`git ${args.join(" ")}: ${e.stderr || e.message}`), { stderr: String(e.stderr ?? "") }); } };
@@ -134,7 +137,7 @@ function builderScript(cs) {
   const finish = (t) => { res.validation = [{ id: "V1", command: V1, exit: t.run(V1) }]; t.lean("implementation.md", `### Approach\nrelease in a catch\n\n### Changes\n${t.changed().map((f) => `- ${f}`).join("\n")}\n\n### Acceptance Criteria Status\n- see result\n\n### Verification\n- ${V1}\n\n### Notes\nnone`); t.lean("result.json", res); };
   return async (n, c, t) => {
     if (n === 1) { t.lean("investigation.md", "**Verdict**: CONFIRMED\n**Confidence**: high\n**Severity**: high\n**Task Type**: bug\n\n### Root Cause\ncheck() throws after reserve() with no release"); t.lean("contract.json", cs.contract()); return; }
-    if (n === 2) { cs.impl(t); t.commit("fix: release on 429"); res = { status: "fixed", summary: "release on 429", requirements: (cs.claims ?? claimAll)(cs.contract()), amendments: [] }; finish(t); return; }
+    if (n === 2) { cs.impl(t); t.commit("fix: release on 429"); if (cs.selfCheck) await cs.selfCheck(c.cwd); res = { status: "fixed", summary: "release on 429", requirements: (cs.claims ?? claimAll)(cs.contract()), amendments: [] }; finish(t); return; }
     if (cs.resume) { cs.resume(t, res); t.commit("fix: conformance"); }
     finish(t);
   };
@@ -162,11 +165,12 @@ function oracle(c) {
 }
 const generic = () => "```json\n" + JSON.stringify({ verdict: "PASS", fixes_issue: true, regression: false, reason: "looks good" }) + "\n```";
 
-async function runCase(cs, conformance = "enforce") {
+async function runCase(cs, conformance = "enforce", extra = {}) {
   const dir = tmpDir("conf-e2e-");
   const w = makeWorld(dir, { builder: builderScript(cs), reviewer: (n, c) => (cs.generic ? generic() : oracle(c)) });
-  const ret = await runCore({ issue: 101, repo: "o/r", lane: "staging", cwd: w.repo, worktreeRoot: path.join(dir, "wt"), dir: path.join(dir, "runs"), io: w.io, random: () => 0.5, stableMs: 0, livePollMs: 20, conformance });
-  return w.observe(ret);
+  if (extra.runCommand) w.io.runCommand = extra.runCommand;
+  const ret = await runCore({ issue: 101, repo: "o/r", lane: "staging", cwd: w.repo, worktreeRoot: path.join(dir, "wt"), dir: path.join(dir, "runs"), io: w.io, random: () => 0.5, stableMs: 0, livePollMs: 20, conformance, ...(extra.opts ?? {}) });
+  return { ...w.observe(ret), log: readLog(path.join(dir, "runs"), 101) };
 }
 const blocked = (o, code) => {
   assert.equal(o.ret.terminalReason, "needs-human"); assert.equal(o.ret.code, code);
@@ -224,6 +228,24 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
     merged(o); assert.equal(o.staging.export, false, "the omitted route still leaks, exactly as today");
     assert.match(o.issue.comments.find((c) => c.includes("FORGE:REVIEW")), /would BLOCK \(nonconforming\)[\s\S]*conformance\.omission/);
     assert.deepEqual([o.counts.builder, o.counts.reviewer], [2, 1]);
+  });
+  it("#4364 forgedock check in the lane worktree runs the engine's commands and reaches its verdict", async () => {
+    let cli = null;
+    const learned = [V1, "exit 3"];
+    const o = await runCase({ contract: FULL, impl: (t) => fix(t, ["scrape", "search", "export"]),
+      selfCheck: async (wt) => { cli = await checkFromCli([], { cwd: wt, git: async (a, cwd) => git(a, cwd), out: () => {} }); } },
+    "enforce", { runCommand: runCheckCommand, opts: { precheck: { commands: learned }, verify: { maxRounds: 0 } } });
+    merged(o);
+    const [engine] = o.log.filter((e) => e.event === "PRECHECK_COMMANDS");
+    assert.deepEqual(cli.commands.map(({ command, rc }) => ({ command, rc })), engine.results.map(({ command, rc }) => ({ command, rc })));
+    assert.deepEqual(engine.results.map((r) => r.rc), [0, 3], "one passing and one failing pre-PR command");
+    // validate: the CLI's V1 run agrees with the engine's conformance precheck (no validate failure)
+    assert.deepEqual(cli.validate.map(({ id, rc }) => ({ id, rc })), [{ id: "V1", rc: 0 }]);
+    assert.ok(!o.log.some((e) => e.event === "PRECHECK" && e.failures.length), "the engine's validate verdict passes too");
+    assert.equal(cli.ok, false); assert.equal(cli.exitCode, 1);
+    // the run was on the final tree, so the engine records it as red (not skipped/stale) on both events
+    assert.equal(engine.self_check, "red");
+    assert.deepEqual(o.log.filter((e) => e.event === "SELF_CHECK_MISSING").map((e) => e.state), ["red"]);
   });
   it("6 a generic PASS over an incomplete implementation never merges (review.incomplete)", async () => {
     const o = await runCase({ contract: FULL, impl: (t) => fix(t, ["scrape", "export"]), generic: true });
