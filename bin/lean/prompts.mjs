@@ -16,6 +16,8 @@ export const CONTRACT_FILE = `${LEAN_DIR}/contract.json`;
 
 /** Change-scoped checks with shared incremental caches (#4218): the builder runs the scoped commands this CLI prints. */
 export const CHECKS_CLI = fileURLToPath(new URL("./checks.mjs", import.meta.url));
+/** #4364: `forgedock check`, the engine's validate and pre-PR checks run in-session before the result is written. */
+export const FORGEDOCK_CLI = fileURLToPath(new URL("../forgedock.mjs", import.meta.url));
 
 const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the repo's full tsc/eslint/test scripts (it widens to the full command itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, run it again with --publish to share the incremental caches. node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.`;
 
@@ -107,6 +109,8 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
 A new dependency between workspace packages in a package.json that no deliverable names (that package.json, with the package in its change) is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
 If the repository has scripts/check-devdocs-freshness.sh, its docs must move with the code: a behaviour change under the paths it checks needs the matching module dossier (devdocs/modules/*.md, per devdocs/index.yaml) updated in the same change. Run it against the base before writing the result; the engine runs it too and resumes you once if it fails.
+
+Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree (the engine runs the same validate and pre-PR checks afterwards) and fix until it passes; if it cannot pass, report the problem as blocked.
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):
 ### Approach

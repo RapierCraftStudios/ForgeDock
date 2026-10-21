@@ -122,6 +122,17 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    never failures. `PRECHECK_COMMANDS` results carry `ms`; the event carries round `ms`, `parallelism` and the per-command `workers` share; the lane
    result `precheckMs`/`precheckDeferred` → orchestrate row `precheck_ms`/`precheck_deferred` → batch-report line
    `precheck: <m> total over <n> lanes[, <k> deferred to CI]` (`formatPrecheckSummary`).
+   #4364: selection and budget are one function, `precheck.mjs` `planPrecheck`, shared with **`forgedock check`**
+   (`engine-cli.mjs` `checkFromCli`), which the implement prompt tells the builder to run in-session until green (or
+   report blocked) before writing result.json. The engine writes `.forge-lean/check-plan.json` (base, verify mode,
+   learned commands, budget, timeouts; forge.yaml is gitignored, so not in the worktree) beside contract.json; the CLI
+   runs the contract's validate commands (`ci` and not run in `verify.mode: ci`) and the planned pre-PR commands through
+   `runChecks` + `runCheckCommand` in the builder's env (lane TMPDIR, toolchain, heavy shims gate heavy binaries: no
+   `acquire`), prints a capped pass/fail table and writes `.forge-lean/self-check.json` with `worktreeFingerprint`
+   (sha256 of path + blob sha of every path differing from the merge base, committed or not; `.forge-lean/` excluded).
+   After the implement call a `fixed` result whose record is not green on the current tree logs `SELF_CHECK_MISSING`
+   (`state: skipped|stale|red`); a failed `PRECHECK_COMMANDS` round carries `self_check` (`selfCheckState`). Both are
+   records only: the engine's precheck, conformance and CI stay the gates.
 6b. **Verify by CI** (#4167, forge.yaml `verify.mode` `ci|hybrid`; default `local`
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
