@@ -67,7 +67,10 @@ trap 'rm -rf "$SB"' EXIT
   printf '#!/bin/sh\necho "$*" >> "%s/gh.log"\ncase "$2" in create) echo https://example.test/pr/1;; list) [ -z "$GH_STUB_LIST" ] || echo "$GH_STUB_LIST";; esac\n' "$SB" > "$SB/bin/gh"
   chmod +x "$SB/bin/gh"
 ) >/dev/null 2>&1 || bad "behavioural sandbox setup"
-runStep() { (cd "$SB/work" && PATH="$SB/bin:$PATH" RUNNER_TEMP="$SB/rt" VERSION="$1" bash -c "$RUN") >"$SB/out" 2>&1; }
+# The workflow's bump step sets git user.name/email; give the step that identity here
+# (CI runners have no global git config).
+runStep() { (cd "$SB/work" && PATH="$SB/bin:$PATH" RUNNER_TEMP="$SB/rt" VERSION="$1" \
+  GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t bash -c "$RUN") >"$SB/out" 2>&1; }
 mkdir -p "$SB/rt"
 STAGING_BEFORE=$(git -C "$SB/origin.git" rev-parse staging 2>/dev/null)
 if runStep 1.10.0; then ok "step exits 0"; else bad "step exits 0"; fi
@@ -84,6 +87,13 @@ if GH_STUB_LIST=https://example.test/pr/7 runStep 1.10.0 && grep -q 'Updated exi
 : > "$SB/gh.log"
 if runStep 1.9.0 && grep -q 'nothing to sync' "$SB/out" && [ ! -s "$SB/gh.log" ]; then
   ok "skipped when staging is already at the version"; else bad "skipped when staging is already at the version"; fi
+# A failed commit (no identity) must not push an unchanged branch or open a PR.
+: > "$SB/gh.log"
+git -C "$SB/origin.git" branch -D chore/sync-version-1.11.0 >/dev/null 2>&1 || true
+(cd "$SB/work" && PATH="$SB/bin:$PATH" RUNNER_TEMP="$SB/rt" VERSION=1.11.0 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  GIT_AUTHOR_NAME='' GIT_COMMITTER_NAME='' EMAIL='' bash -c "$RUN") >"$SB/out" 2>&1
+if ! git -C "$SB/origin.git" rev-parse -q --verify chore/sync-version-1.11.0 >/dev/null && [ ! -s "$SB/gh.log" ]; then
+  ok "failed commit pushes nothing and opens no PR"; else bad "failed commit pushes nothing and opens no PR"; fi
 
 has "deploy-pr has the 2A.5 pre-flight" "### 2A.5: Version Sync Pre-flight" "$DEP"
 has "deploy-pr pre-flight compares package.json" "package.json" "$DEP"

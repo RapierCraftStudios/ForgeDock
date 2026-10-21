@@ -247,9 +247,10 @@ jobs:
                   fs.writeFileSync(f, JSON.stringify(j, null, 2) + '\\n');
                 }
               "
-              git add package.json .claude-plugin/plugin.json
-              git commit -m "chore: sync version ${VERSION} to staging"
-              git push -f origin "HEAD:refs/heads/$SYNC_BRANCH"
+              # Chained: a failed commit must never push an unchanged HEAD (empty sync PR).
+              git add package.json .claude-plugin/plugin.json \
+                && git commit -m "chore: sync version ${VERSION} to staging" \
+                && git push -f origin "HEAD:refs/heads/$SYNC_BRANCH"
             ) || { echo "::warning::staging sync: push of $SYNC_BRANCH failed (attempt $attempt), retrying"; continue; }
             SYNC_PR=$(gh pr list --head "$SYNC_BRANCH" --base staging --state open --json url --jq '.[0].url // empty') || SYNC_PR=""
             if [ -n "$SYNC_PR" ]; then
