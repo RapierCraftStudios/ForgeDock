@@ -7,9 +7,9 @@
  * A repo without pins gets nothing: no shim dir, no env, no warning.
  */
 import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join, delimiter, resolve } from "node:path";
+import { join, delimiter, resolve, dirname, isAbsolute } from "node:path";
 
 const PMS = ["pnpm", "yarn", "npm"];
 const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -145,16 +145,50 @@ export function which(name, pathStr = process.env.PATH ?? "", exclude = []) {
 const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const HEADER = "#!/bin/sh\n# forgedock lane toolchain shim (#4163): pinned by the target repo; do not edit.\nexport COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_STRICT=0\n";
 
+/** npx package spec and package name for a pin: yarn >= 2 is published as @yarnpkg/cli-dist; the npm "yarn" package is 1.x only. */
+function npxPackage(pm) {
+  const name = pm.name === "yarn" && Number(pm.version.split(".")[0]) >= 2 ? "@yarnpkg/cli-dist" : pm.name;
+  return { name, spec: `${name}@${pm.version}` };
+}
+
+/** Bin names the npx-launched shims exec for a pin (pnpx runs `pnpm dlx`, so it reuses pnpm). */
+const pinBins = (pm) => (pm.name === "npm" ? ["npm", "npx"] : [pm.name]);
+
+/**
+ * Resolve the pinned manager's real binaries once per lane (#4348): `npx -y -p <pkg>@<ver> -c 'command -v <bin>'`, which
+ * reuses npx's cache or fetches once. A path is kept only when it is an absolute executable file and its package's
+ * `package.json` (`<.bin>/../<pkg>/package.json`) has exactly the pinned version. Returns {bin: absPath}; a failed bin is
+ * omitted (its shim falls back to npx). Never throws.
+ */
+export function resolvePinnedBins(pm, { npx = null, path = process.env.PATH ?? "", run = (f, a, o) => execFileSync(f, a, o) } = {}) {
+  const out = {};
+  if (!npx || !pm || !PMS.includes(pm.name) || !VERSION_RE.test(pm.version)) return out;
+  const pkg = npxPackage(pm);
+  for (const bin of pinBins(pm)) {
+    try {
+      const p = String(run(npx, ["-y", "-p", pkg.spec, "-c", `command -v ${bin}`], { env: { ...process.env, PATH: path }, timeout: 120000, stdio: ["ignore", "pipe", "ignore"] }) ?? "").trim().split("\n").pop().trim();
+      if (!p || !isAbsolute(p) || !statSync(p).isFile()) continue;
+      accessSync(p, constants.X_OK);
+      const meta = JSON.parse(readFileSync(join(dirname(p), "..", ...pkg.name.split("/"), "package.json"), "utf8"));
+      if (meta?.version === pm.version) out[bin] = p;
+    } catch { /* unresolved: the shim falls back to npx */ }
+  }
+  return out;
+}
+
 /**
  * Shim scripts {name: content} for the pinned manager: `corepack <pm>@<ver>` when corepack is on the host PATH, else
  * `npx -y`. Absolute paths are resolved here, so a shim never re-enters the shim dir. Returns {} when neither exists.
+ * `bins` ({bin: absPath} from resolvePinnedBins) makes an npx shim exec that binary directly while it exists, keeping the
+ * npx line as the fallback (#4348).
  */
-export function shimScripts(pm, { corepack = null, npx = null } = {}) {
+export function shimScripts(pm, { corepack = null, npx = null, bins = {} } = {}) {
   if (!pm || !PMS.includes(pm.name) || !VERSION_RE.test(pm.version)) return {};
   const at = `${pm.name}@${pm.version}`;
   const out = {};
+  const direct = (bin, extra = "") => (bins?.[bin] ? `if [ -x ${q(bins[bin])} ]; then exec ${q(bins[bin])}${extra} "$@"; fi\n` : "");
   if (pm.name === "npm") {
-    if (npx) { out.npm = `${HEADER}exec ${q(npx)} -y ${q(at)} "$@"\n`; out.npx = `${HEADER}exec ${q(npx)} -y -p ${q(at)} npx "$@"\n`; }
+    if (npx) { out.npm = `${HEADER}${direct("npm")}exec ${q(npx)} -y ${q(at)} "$@"\n`; out.npx = `${HEADER}${direct("npx")}exec ${q(npx)} -y -p ${q(at)} npx "$@"\n`; }
     return out;
   }
   if (corepack) {
@@ -163,10 +197,9 @@ export function shimScripts(pm, { corepack = null, npx = null } = {}) {
     return out;
   }
   if (!npx) return out;
-  // yarn >= 2 is published as @yarnpkg/cli-dist; the npm "yarn" package is 1.x only.
-  const pkg = pm.name === "yarn" && Number(pm.version.split(".")[0]) >= 2 ? `@yarnpkg/cli-dist@${pm.version}` : at;
-  out[pm.name] = `${HEADER}exec ${q(npx)} -y -p ${q(pkg)} ${pm.name} "$@"\n`;
-  if (pm.name === "pnpm") out.pnpx = `${HEADER}exec ${q(npx)} -y -p ${q(pkg)} pnpm dlx "$@"\n`;
+  const pkg = npxPackage(pm).spec;
+  out[pm.name] = `${HEADER}${direct(pm.name)}exec ${q(npx)} -y -p ${q(pkg)} ${pm.name} "$@"\n`;
+  if (pm.name === "pnpm") out.pnpx = `${HEADER}${direct("pnpm", " dlx")}exec ${q(npx)} -y -p ${q(pkg)} pnpm dlx "$@"\n`;
   return out;
 }
 
@@ -186,15 +219,24 @@ async function writeShimFile(p, content) { await writeFile(p, content); await ch
 
 /**
  * Write executable (0755) shims for the pinned manager into `binDir`; launchers are resolved from `path` with `binDir`
- * excluded. Returns the shim names written ([] when neither corepack nor npx is on `path`).
+ * excluded. When npx is the launcher, `resolveBins` runs once to find the pinned binaries (#4348). Returns
+ * {names, unresolved}: the shim names written ([] when neither corepack nor npx is on `path`) and the bins left on npx.
  */
-export async function writeShims(binDir, pm, { path = process.env.PATH ?? "", find = which, writeShim = writeShimFile, mkdirp = (d) => mkdir(d, { recursive: true }) } = {}) {
-  const scripts = shimScripts(pm, { corepack: find("corepack", path, [binDir]), npx: find("npx", path, [binDir]) });
-  if (!Object.keys(scripts).length) return [];
+async function writeShimSet(binDir, pm, { path = process.env.PATH ?? "", find = which, writeShim = writeShimFile, mkdirp = (d) => mkdir(d, { recursive: true }), resolveBins = resolvePinnedBins } = {}) {
+  const corepack = find("corepack", path, [binDir]), npx = find("npx", path, [binDir]);
+  let bins = {}, unresolved = [];
+  if (!corepack && npx && pm && PMS.includes(pm.name) && VERSION_RE.test(pm.version)) {
+    try { bins = (await resolveBins(pm, { npx, path })) ?? {}; } catch { bins = {}; }
+    unresolved = pinBins(pm).filter((b) => !bins[b]);
+  }
+  const scripts = shimScripts(pm, { corepack, npx, bins });
+  if (!Object.keys(scripts).length) return { names: [], unresolved: [] };
   await mkdirp(binDir);
   for (const [name, content] of Object.entries(scripts)) await writeShim(join(binDir, name), content);
-  return Object.keys(scripts);
+  return { names: Object.keys(scripts), unresolved };
 }
+
+export async function writeShims(binDir, pm, opts = {}) { return (await writeShimSet(binDir, pm, opts)).names; }
 
 /** Short pin text for prompts and decisions, e.g. "pnpm@10.4.1 (package.json packageManager), node 20 (.nvmrc)"; null when nothing is pinned. */
 export function summary(pins) {
@@ -208,7 +250,7 @@ export function summary(pins) {
  *   env is null and shims empty without a usable pm pin; summary is null when nothing is pinned: the caller changes nothing.
  */
 export async function prepareToolchain({ dir, binDir, override = null, read, basePath = process.env.PATH ?? "",
-  writeShim = writeShimFile, mkdirp = (d) => mkdir(d, { recursive: true }), find = which, hostNode = () => hostNodeVersion(basePath) } = {}) {
+  writeShim = writeShimFile, mkdirp = (d) => mkdir(d, { recursive: true }), find = which, resolveBins = resolvePinnedBins, hostNode = () => hostNodeVersion(basePath) } = {}) {
   const pins = await detectPins(dir, { override, ...(read ? { read } : {}) });
   const out = { pins, env: null, shims: [], summary: null, warning: null, notes: [...pins.notes] };
   if (pins.node) {
@@ -219,7 +261,9 @@ export async function prepareToolchain({ dir, binDir, override = null, read, bas
   const pm = pins.pm;
   let effective = pins;
   if (pm && binDir) {
-    out.shims = await writeShims(binDir, pm, { path: basePath, find, writeShim, mkdirp });
+    const set = await writeShimSet(binDir, pm, { path: basePath, find, writeShim, mkdirp, resolveBins });
+    out.shims = set.names;
+    if (set.unresolved.length) out.notes.push(`Toolchain: could not resolve ${set.unresolved.join(", ")} for ${pm.name}@${pm.version} once; its shim launches through npx on every call`);
     if (out.shims.length) out.env = toolchainEnv(binDir, basePath);
     else { out.notes.push(`Toolchain: ${pm.name}@${pm.version} is pinned but neither corepack nor npx is on PATH; the host ${pm.name} is used`); effective = { ...pins, pm: null }; }
   }
