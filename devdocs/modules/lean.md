@@ -152,6 +152,17 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    precheck `validate_failed` or `requirement_unimplemented`, before any
    reviewer run) or `enforce`. Defer/post-deploy requirements become tracked
    follow-ups (`followupItems`, `pendingTracking`).
+   Scope authority (#4350): the engine's scope gate (deliverables plus typed
+   amendments) decides scope, not a builder-written allowlist. `precheck({frozen})`
+   gets the pre-amendment contract; a failed validate that is a scope check
+   (`isScopeCheck`: `git diff|log|show --name-only|--name-status|--stat|--numstat`,
+   `git status --porcelain|--short`) whose only files outside `frozen` are
+   covered by deliverables an `add-deliverable` amendment added, with no scope
+   creep left, is returned in `superseded` (event `VALIDATE_SUPERSEDED`, a
+   decision line), not `conformance.unimplemented`. Real creep still fails as
+   `conformance.scope_creep`, and then the validate failure stands too. The plan
+   prompt discourages such allowlists. Option chosen over rejecting them at
+   freeze because a frozen contract is reused on relaunch.
    Hotspots (forge#4195): `io.hotspots` runs `scripts/hotspots.sh` once
    before the plan call on the issue's `namedPaths` (`hotspotPlanNote`: one
    line per file over `maintenance.hotspot.file_lines`, nothing when none;
