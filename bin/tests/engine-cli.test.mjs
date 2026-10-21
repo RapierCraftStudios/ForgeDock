@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readCloseParent, readVerify, makeIo } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readCloseParent, readVerify, makeIo } from "../engine-cli.mjs";
 import { serializeState } from "../engine/state.mjs";
 import { appendEvent } from "../engine/runlog.mjs";
 
@@ -1017,6 +1017,19 @@ describe("readReproTest (#4271)", () => {
     assert.equal(readReproTest(d), "off");
     writeFileSync(join(d, "forge.yaml"), "lean:\n  repro_test: prefer\n");
     assert.equal(readReproTest(d), "prefer");
+  });
+});
+
+describe("readFixModel (#4363)", () => {
+  it("reads lean.fix_model, else engine.lean_fix_model; absent or invalid is undefined", () => {
+    const d = tmpDir("fix-model-yaml-");
+    assert.equal(readFixModel(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  fix_model: claude-haiku-5-5\n");
+    assert.equal(readFixModel(d), "claude-haiku-5-5");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lean_fix_model: sonnet\n");
+    assert.equal(readFixModel(d), "sonnet");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  fix_model: \"bad model; rm\"\n");
+    assert.equal(readFixModel(d), undefined);
   });
 });
 

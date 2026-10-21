@@ -102,9 +102,17 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 6a. **Declared check commands** (#4240) — forge.yaml `learned.test_commands`
    (`engine-cli.mjs` `readPrecheckCommands`) run in the worktree after the build
    commit via `io.runCommand` (`bash -c`, `verify.precheck_timeout_seconds`,
-   default 300; no Actions minutes). Failures resume the builder in-session
+   default 300; no Actions minutes). Failures go back to the builder
    (`precheckFailurePrompt`, up to `max_rounds`); no commit / rounds exhausted is
    an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
+   #4363 fresh fix sessions (`fixround.mjs` + `lean.mjs` `fixRound`): precheck, CI (verify and merge), docs,
+   structure, enumerating and sequence rounds, and conformance/review FAILs whose failures all cite a `file:line`
+   (`freshFix`/`citesFileLine`), run with `resume: null` on `fixModel` (forge.yaml `lean.fix_model`,
+   `engine-cli.mjs` `readFixModel`; default the reviewer model) and `prompts.mjs` `fixSessionPrompt` (host rules,
+   the site's task prompt, `git diff <base>...HEAD` via `boundDiff`, frozen contract, issue title + `issueSummary`;
+   < 60K chars). The fresh session never adopts its session id; when it makes no commit, one resume of the build
+   session follows in the same round. `PHASE_ATTEMPT_USAGE` gains `mode: fresh|resume` on fix rounds (run log only).
+   Block/contract corrections, CI-unavailable and base-sync conflict resolution still resume; round gates unchanged.
    An optional `.forge/test-map.json` (#4272, `scripts/test-map.sh`; base ref via
    `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) adds the map entries whose
    globs match the changed files to that list (`selectCommands` + `mergeChecks`, #4315: learned first, deduped, so the
