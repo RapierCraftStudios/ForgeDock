@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -62,7 +62,7 @@ describe("amendments", () => {
 
 describe("precheck (deterministic, no reviewer)", () => {
   const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
-  it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [] }));
+  it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [] }));
   it("unauthorized file -> scope_creep; tests and ignored paths are always allowed", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: res, changedFiles: [...files, "src/billing.js", ".forge-lean/x", "tests/test_x.py", "pkg/foo_test.go"], ignore: [".forge-lean/"] })), ["conformance.scope_creep"]);
     for (const t of ["test/a.js", "src/a.test.ts", "tests/test_a.py", "a_test.go", "spec/a.spec.js"]) assert.ok(isTestPath(t), t);
@@ -364,7 +364,7 @@ describe("repro_test on bug lanes (#4271)", () => {
   });
   it("red on base and green on head passes; anything else fails the precheck as conformance.unimplemented", () => {
     const k = { ...C, repro_test: RT };
-    assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [] });
+    assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [], superseded: [] });
     for (const repro of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
       const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
       assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_red_green"]], JSON.stringify(repro));
@@ -423,5 +423,43 @@ describe("#4265 issue scope and failure explanations", () => {
   it("a failed validate names its command", () => {
     const r = precheck({ contract: { requirements: [], deliverables: [], validate: [{ id: "V1", command: "npm test" }] }, result: { validation: [{ id: "V1", exit: 2 }] }, changedFiles: [] });
     assert.equal(r.failures[0].detail, "validate V1 (`npm test`) failed (exit 2)");
+  });
+});
+
+describe("#4350 the engine's scope gate is the authority over a builder's scope-check validate", () => {
+  const ALLOW = 'test -z "$(git diff --name-only origin/main...HEAD | grep -v -x -e src/tool.js -e test/tool.test.js)"';
+  const frozen = {
+    requirements: [{ id: "R1", quote: Q1, disposition: "deliver" }],
+    deliverables: [{ id: "D1", path: "src/tool.js" }],
+    validate: [{ id: "V1", command: "node --test test/tool.test.js" }, { id: "V2", command: ALLOW }],
+  };
+  const amendments = [{ kind: "add-deliverable", path: "docs/tool.md", why: "the docs-freshness rule needs the module doc" }];
+  const effective = applyAmendments(frozen, amendments).contract;
+  const changed = ["src/tool.js", "test/tool.test.js", "docs/tool.md", ".forge-lean/result.json"];
+  const result = { requirements: [{ id: "R1", status: "implemented" }], validation: [{ id: "V1", exit: 0 }, { id: "V2", exit: 1 }], amendments };
+  const run = (o = {}) => precheck({ contract: effective, result, changedFiles: changed, ignore: [".forge-lean/"], validateRuns: { V2: { rc: 1, output: "" } }, frozen, ...o });
+  it("#4350 a scope-allowlist validate that fails only for an amended deliverable is superseded, not conformance.unimplemented", () => {
+    const pc = run();
+    assert.deepEqual(pc.failures, []);
+    assert.equal(pc.ok, true, "the lane is not ended by the stale check");
+    assert.deepEqual(pc.superseded, [{ id: "V2", files: ["docs/tool.md"] }]);
+  });
+  it("#4350 a real out-of-scope edit is still scope creep, and the stale validate failure stands", () => {
+    const pc = run({ changedFiles: [...changed, "src/other.js"] });
+    assert.deepEqual(codes(pc), ["conformance.scope_creep", "conformance.unimplemented"]);
+    assert.match(pc.failures[0].detail, /src\/other\.js/);
+    assert.deepEqual(pc.superseded, []);
+  });
+  it("#4350 a failing non-scope validate, a scope check failing with no amended file, and callers without frozen are unchanged", () => {
+    const testFail = { ...result, validation: [{ id: "V1", exit: 1 }, { id: "V2", exit: 0 }] };
+    assert.deepEqual(codes(run({ result: testFail, validateRuns: { V1: { rc: 1, output: "AssertionError" } } })), ["conformance.unimplemented"]);
+    assert.deepEqual(codes(run({ changedFiles: ["src/tool.js", "test/tool.test.js"] })), ["conformance.unimplemented"], "nothing amended in the diff: the validate failed for its own reason");
+    const legacy = run({ frozen: undefined });
+    assert.deepEqual(codes(legacy), ["conformance.unimplemented"]);
+    assert.deepEqual(legacy.superseded, []);
+  });
+  it("#4350 isScopeCheck recognises file-listing git commands only", () => {
+    for (const c of [ALLOW, "git diff --name-status origin/x...HEAD | grep -c .", "git -C pkg diff --stat $(git merge-base HEAD origin/x)", "git log --name-only -1", "test -z \"$(git status --porcelain)\""]) assert.ok(isScopeCheck(c), c);
+    for (const c of ["npm test", "git diff --check origin/x...HEAD", "pytest -k name_only", "git diff --exit-code -- src/a.js"]) assert.ok(!isScopeCheck(c), c);
   });
 });

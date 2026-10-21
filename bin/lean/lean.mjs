@@ -1446,7 +1446,13 @@ export async function runCore(o) {
       const hotspots = await hotspotsOf({ base, paths: files });
       const validateRuns = await rerunFailedValidates(effective);
       const repoHas = validateRuns && Object.keys(validateRuns).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas });
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen });
+      // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
+      if (pc.superseded?.length) {
+        ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });
+        const note = `Scope-check validate ${pc.superseded.map((x) => x.id).join(", ")} superseded by the scope gate (amended: ${[...new Set(pc.superseded.flatMap((x) => x.files))].join(", ")})`;
+        if (!T.decisions.includes(note)) T.decisions.push(note);
+      }
       Object.assign(verifyFacts, { precheck: pc.failures, amendments: amendProblems, hotspots: Boolean(hotspots && hotspots.enabled !== false && Array.isArray(hotspots.files)) });
       // #4323/#4334: a missing host tool or module, or a repro test the harness could not run, is an environment error:
       // never a conformance failure, never a builder resume

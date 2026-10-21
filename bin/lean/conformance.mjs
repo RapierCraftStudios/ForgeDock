@@ -112,6 +112,17 @@ export function movingBaseDiff(command) {
   return null;
 }
 
+/**
+ * #4350: true when a command lists the change's file names: a `git diff|log|show` segment with --name-only, --name-status,
+ * --stat or --numstat, or `git status --porcelain|--short`. Such a validate is a hand-written scope check; the engine's
+ * scope gate (deliverables plus typed amendments) is the authority over it.
+ */
+export function isScopeCheck(command) {
+  return String(command ?? "").split(/&&|\|\||;|\||\$\(|\)|`/).some((seg) =>
+    /\bgit\b(?:\s+-C\s+\S+)?(?:\s+-c\s+\S+)*\s+(?:diff|log|show)\b[^]*?\s--(?:name-only|name-status|stat|numstat)\b/.test(seg)
+    || /\bgit\b(?:\s+-C\s+\S+)?(?:\s+-c\s+\S+)*\s+status\b[^]*?\s(?:--porcelain|--short|-s)\b/.test(seg));
+}
+
 /** Option names whose value a tool writes (output, report, cache or temp dirs), not reads (#4325). */
 const WRITE_OPT = /^-(?:o|O|-?[\w-]*(?:out|dir|temp|tmp|cache|report|junit|xml|log)[\w-]*)$/i;
 const TMP_PATH = /\$(?:\{TMPDIR(?::-[^}]*)?\}|TMPDIR)\/([^\s"'`;|&<>()=]+)/g;
@@ -261,17 +272,22 @@ export function repoTracks(paths) {
 
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
- * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[]}; each failure carries a
+ * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[], superseded[]}; each failure carries a
  * `kind` (scope_creep, validate_missing, validate_failed, validate_env, requirement_unimplemented, untracked_deferral, hotspot_growth, repro_red_green, repro_env) so callers can
  * tell the builder's own failed checks apart from bookkeeping gaps. `ciVerified` (#4167): the current head passed the
  * engine's CI verification, so a validate id left to CI is not missing; a recorded non-zero exit still fails. `repro` (#4271): the repro_test red-green words, checked when given.
  * `validateRuns` (#4323): the engine's rerun {[id]: {rc, output}} of validate commands recorded as failed. A rerun that passes
  * counts as passed; one that could not find a host tool or module (missingTool, with `repoHas`) is kind validate_env, code
  * env.tool_missing (skipped on a CI-verified head), not a conformance failure.
+ * `frozen` (#4350): the contract before typed amendments. A failed scope-check validate (isScopeCheck) whose only files
+ * outside `frozen` are covered by deliverables an amendment added, with no scope creep left, is superseded by the engine's
+ * scope gate: listed in `superseded` [{id, files}], not a failure. Without `frozen`, `superseded` is always [].
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false }) {
-  const failures = [];
-  const creep = changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(contract, f));
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null }) {
+  const failures = [], superseded = [];
+  const outside = (k) => changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(k, f));
+  const creep = outside(contract);
+  const amendedOnly = frozenAmendedFiles(frozen, contract, outside, creep);
   if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
   const runs = Array.isArray(result?.validation) ? result.validation : [];
   for (const v of contract.validate ?? []) {
@@ -286,6 +302,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
       if (miss && ciVerified) continue;
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)` });
+      else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})` });
     }
   }
@@ -300,7 +317,20 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
   if (repro) failures.push(...reproFailures(contract, repro));
-  return { ok: failures.length === 0, failures };
+  return { ok: failures.length === 0, failures, superseded };
+}
+
+/**
+ * #4350: the changed files outside the frozen contract when every one of them is covered by a deliverable an amendment
+ * added (a path the frozen contract does not list) and the amended contract leaves no scope creep; otherwise null.
+ */
+function frozenAmendedFiles(frozen, contract, outside, creep) {
+  if (!frozen || creep.length) return null;
+  const before = outside(frozen);
+  if (!before.length) return null;
+  const had = new Set((frozen.deliverables ?? []).map((d) => cleanPath(d.path)));
+  const added = (contract.deliverables ?? []).filter((d) => !had.has(cleanPath(d.path)));
+  return before.every((f) => added.some((d) => pathCovers(d.path, f))) ? before : null;
 }
 
 /**
