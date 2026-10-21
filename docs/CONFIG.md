@@ -599,6 +599,32 @@ lean:
 | `repro_test` | string | No | `prefer` (default): on an issue labelled `bug` or `type:bug`, the plan step must freeze a `repro_test` in the contract (`{"path","id","command"}`) when the bug is testable. Before review, the engine runs `scripts/acceptance-red-green.sh` for that command on the host in every verify mode: one targeted test, red on the base (head's changed test files overlaid) and green on head. A test that ran but is not red on the base and green on head fails the precheck as `conformance.unimplemented` (it blocks in shadow too) and goes back to the builder for one in-session fix round. A head the harness could not run at all (timeout, missing runner or dependencies) ends `needs-human` with the recoverable code `env.repro_unrunnable`, not a builder round: the batch runner's recovery lane reruns it through the repo's own toolchain (see docs/OUTCOME-CODES.md). The harness runs with the lane env (`TMPDIR`, toolchain) and the workspace dependency trees, and a repro test file that is new on head is run against the base sources. A bug that is not testable (specs, docs, workflows, environment) records `"repro_test":"none"` with a one-line `repro_test_reason` and the lane continues as before. `off` gives exactly the previous contract and precheck. Each proof emits a `REPRO_RED_GREEN` run-log event (`base`, `head`) and adds a trajectory decision. |
 | `precheck.max_minutes` | number | No | Total budget in minutes (1–120) of one round of pre-PR check commands (#4331). The flat form `lean.precheck_max_minutes` also works and wins. When unset, `verify.precheck_total_seconds` applies (default 600 s). Check commands run change-scoped (a learned command with a test-map entry runs only when its globs match the changed files; unmapped commands always run), concurrently up to the host worker cap under one heavy slot, each timed (`ms` in the `PRECHECK_COMMANDS` run-log event). Commands not started when the budget runs out are recorded `deferred-to-ci` (an anomaly, not a failure) and left to CI. |
 
+## `stats` (OPTIONAL)
+
+Thresholds of the fail-soft alerts (#4354). `forgedock stats` prints them as an `ALERTS` section, and the `forgedock orchestrate` batch report ends with the alerts for the batch's repo. Steps that never fail a run (shared dependency cache, pre-PR check budget, toolchain detection) can degrade silently. The alerts compare their rates in the local run logs (`~/.forge/runs`, or `FORGE_RUNS_DIR` for `forgedock stats`) against these thresholds. They read no network source and use no model.
+
+```yaml
+stats:
+  alerts:
+    window: 50                # last N lanes per repo
+    min_lanes: 10             # fewer lanes in the window: nothing is printed
+    deps_failed_pct: 20       # DEPS_PREPARED status failed, per ecosystem
+    deferred_to_ci_pct: 30    # lanes with a deferred-to-ci pre-PR check
+    toolchain_warning_pct: 50 # lanes repeating the same TOOLCHAIN_WARNING
+    outcome_share_factor: 2   # outcome code share vs the previous window
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `alerts.window` | number | No | Rolling window: the last N lanes of the repo, ordered by `RUN_START`. Each run in a run log is one lane. Default 50. |
+| `alerts.min_lanes` | number | No | With fewer lanes in the window, or no run logs, nothing is printed. Default 10. |
+| `alerts.deps_failed_pct` | number | No | Alert when `DEPS_PREPARED` status `failed` is above this percentage of the lanes that prepared that ecosystem. Default 20. |
+| `alerts.deferred_to_ci_pct` | number | No | Alert when more than this percentage of lanes left a pre-PR check `deferred-to-ci`. Default 30. |
+| `alerts.toolchain_warning_pct` | number | No | Alert when one `TOOLCHAIN_WARNING` text is repeated on more than this percentage of lanes. Default 50. |
+| `alerts.outcome_share_factor` | number | No | Alert when an outcome code other than `completed` has at least this factor of its share in the previous window. The code must be on at least 2 lanes, and the previous window must have at least `min_lanes` lanes. A code new in this window counts. Default 2. |
+
+Each alert line names the event, the rate, the sample size (`count/sample` lanes) and one example reason. When no alert fires, nothing is printed. The flat form `stats.alerts_<key>` also works and wins. `forgedock stats --no-local` skips the alerts.
+
 ## `verify` (OPTIONAL)
 
 Verify-by-CI for the core work-on path (forge#4167). It moves a lane's heavy verification (type-checks, test suites, docker test containers) off the host and onto CI runners, and it catches CI-class failures (lock files, suite wiring, hangs, formatting) before the lane merges into staging. Write it as a block-style section: `parseForgeYaml` does not read inline `{ ... }` maps.

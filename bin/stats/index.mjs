@@ -9,9 +9,10 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { aggregate, DEFAULT_MIN_N } from "./aggregate.mjs";
+import { aggregate, computeAlerts, DEFAULT_ALERTS, DEFAULT_MIN_N } from "./aggregate.mjs";
 import { fetchGithubRecords, isValidRepo, toModel } from "./github-source.mjs";
-import { readLocalRuns, runsDir } from "./local-source.mjs";
+import { readLanes, readLocalRuns, runsDir } from "./local-source.mjs";
+import { parseForgeYaml } from "../forge-utils.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
 import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb } from "./query.mjs";
 
@@ -35,6 +36,10 @@ delta against the previous version and a low-n flag for samples under 10. Missin
   --min-n N             low-n threshold (default ${DEFAULT_MIN_N})
   --release-times FILE  "<version> <epoch-seconds>" lines used to estimate versions of unversioned records
                         (default: git tags v* of the ForgeDock checkout)
+
+ALERTS (forge#4354; local run logs only, skipped with --no-local): fail-soft rates over the last 50 lanes of the repo
+(DEPS_PREPARED failed per ecosystem, deferred-to-ci, repeated TOOLCHAIN_WARNING, outcome codes whose share doubled);
+thresholds under forge.yaml stats.alerts.*. Nothing is printed when none fired or under 10 lanes.
 
 Audit queries (forge#4165; JSON, from structure_delta / run_terminal telemetry, no comment bodies read):
   --edge FROM:TO        merged PRs that added the dependency or import edge FROM -> TO (e.g. @s/web:@s/db)
@@ -153,6 +158,25 @@ export function resolveRepo(explicit, cwd = process.cwd()) {
   return null;
 }
 
+const ALERT_KEYS = { window: "window", min_lanes: "minLanes", deps_failed_pct: "depsFailedPct", deferred_to_ci_pct: "deferredPct",
+  toolchain_warning_pct: "toolchainWarningPct", outcome_share_factor: "outcomeShareFactor" };
+
+/**
+ * forge.yaml `stats.alerts.*` (forge#4354). The one-level parser flattens a nested `alerts:` block under `stats:` to
+ * `stats.<key>`; the flat `stats.alerts_<key>` form also works and wins. Invalid or unreadable values keep DEFAULT_ALERTS.
+ */
+export function readAlertConfig(cwd = process.cwd()) {
+  const out = { ...DEFAULT_ALERTS };
+  try {
+    const s = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.stats ?? {};
+    for (const [key, name] of Object.entries(ALERT_KEYS)) {
+      const raw = String(s[`alerts_${key}`] ?? s[key] ?? "").trim(), n = Number(raw);
+      if (raw !== "" && Number.isFinite(n) && n > 0) out[name] = n;
+    }
+  } catch { /* no forge.yaml: defaults */ }
+  return out;
+}
+
 /** Build the report object. deps: { gh, env, localRuns, now, onProgress, warn, sleep } for tests. Never touches the network when `gh` is stubbed. */
 export async function buildReport(opts, deps = {}) {
   const env = deps.env ?? process.env;
@@ -182,7 +206,9 @@ export async function buildReport(opts, deps = {}) {
   }
   const report = aggregate({ runs: [...model.runs, ...local], events: model.events, issues: model.issues },
     { minN: opts.minN, releaseTimes, ...parseSince(opts.since) });
-  return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache }, local: { runs: local.length } }, ...report };
+  // forge#4354: fail-soft alerts from the local run logs only (no gh call)
+  const alerts = opts.local ? computeAlerts(deps.localLanes ?? readLanes(runsDir(env)), { repo, ...(deps.alertConfig ?? readAlertConfig()) }) : [];
+  return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache }, local: { runs: local.length } }, ...report, alerts };
 }
 
 export async function runStats(argv, deps = {}) {
