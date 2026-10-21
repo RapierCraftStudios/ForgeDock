@@ -77,7 +77,7 @@ export function runsFromRecords(records) {
     const key = `${r.repo}#${r.issue}#${r.run ?? ""}`;
     const run = byRun.get(key) ?? { source: "github", repo: r.repo ?? null, version: r.forge_version ?? null, issue: r.issue, run: r.run ?? null,
       finished: false, hydrated: false, usageEvents: 0, reason: null, code: null, remediated: false, startTs: null, endTs: null, wallMs: null,
-      phases: {}, _first: null };
+      phases: {}, builderAttempts: [], _first: null };
     byRun.set(key, run);
     if (!run._first || r.ts < run._first) run._first = r.ts;
     if (r.event === "run_terminal") {
@@ -94,6 +94,7 @@ export function runsFromRecords(records) {
     if (num(r.duration_ms) != null) p.ms = (p.ms ?? 0) + num(r.duration_ms);
     if (num(r.cost_usd) != null) p.usd = (p.usd ?? 0) + num(r.cost_usd);
     if (id === "remediate") run.remediated = true;
+    if (id === "implement") run.builderAttempts.push({ attempt: num(r.attempt), trigger: r.trigger ?? null, restart_of: r.restart_of ?? null, cost_usd: num(r.cost_usd), _ts: r.ts ?? "" }); // #4362
   }
   const latest = new Map();
   for (const run of byRun.values()) {
@@ -102,7 +103,10 @@ export function runsFromRecords(records) {
     const a = run._first ?? "", b = cur?._first ?? "";
     if (!cur || a > b || (a === b && (run.run ?? "") > (cur.run ?? ""))) latest.set(k, run);
   }
-  return [...latest.values()].map(({ _first, ...run }) => ({ ...run, startTs: _first }));
+  // #4362: attempt order (a timeout restart reuses its number: then record time); stable for equal keys
+  const order = (a, b) => (a.attempt ?? 0) - (b.attempt ?? 0) || (a._ts < b._ts ? -1 : a._ts > b._ts ? 1 : 0);
+  return [...latest.values()].map(({ _first, ...run }) => ({ ...run, startTs: _first,
+    builderAttempts: [...run.builderAttempts].sort(order).map(({ _ts, ...a }) => a) }));
 }
 
 /** Gate/review records (everything that is not a run record) become aggregate events. */

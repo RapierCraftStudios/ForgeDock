@@ -5,7 +5,8 @@
  *
  * Input record model (every source maps onto it; a missing field is null and degrades to "n/a"):
  *   run   { source, repo, version, issue, run, finished, hydrated, usageEvents, reason, code, remediated,
- *           startTs, endTs, wallMs, phases: { <id>: { cr, out, usd, ms, attempts } } }
+ *           startTs, endTs, wallMs, phases: { <id>: { cr, out, usd, ms, attempts } },
+ *           builderAttempts: [{ attempt, trigger, cost_usd }] (#4362; trigger null before the field existed) }
  *   event { repo, version, issue, pr, ts, event, ...payload }          (FORGE:TELEMETRY gate/review events)
  *   issue { repo, number, isPr, createdAt, closedAt, labels: [name], authorType }
  *
@@ -13,6 +14,8 @@
  * count, hydrated runs and runs with no usage events are excluded, tokens are cache-read tokens, and the
  * per-phase mean divides by n (a run that skipped a phase counts 0).
  */
+
+import { REWORK_TRIGGERS, firstPassOf } from "../lean/fixround.mjs";
 
 export const DEFAULT_MIN_N = 10;
 export const UNKNOWN = "unknown";
@@ -111,6 +114,32 @@ function flowSection(runs) {
     remediationPct: ratio(runs.filter((r) => r.remediated).length, n),
     codesN: coded, codes: top,
   };
+}
+
+/**
+ * #4362: builder attempts by trigger (all, and rework only) and the first-pass rate. An attempt without a trigger
+ * (written before the field) counts as "unknown" rework, never dropped; a run without one is unknown for first pass.
+ */
+function reworkSection(runs) {
+  const attempts = {}, byTrigger = {};
+  let n = 0, usd = 0, firstPass = 0, measured = 0, unknown = 0;
+  for (const r of runs) {
+    const list = Array.isArray(r.builderAttempts) ? r.builderAttempts : [];
+    for (const a of list) {
+      const t = a?.trigger || UNKNOWN, c = isNum(a?.cost_usd) ? a.cost_usd : 0;
+      const all = (attempts[t] ??= { n: 0, usd: 0 });
+      all.n++; all.usd += c;
+      if (t !== UNKNOWN && !REWORK_TRIGGERS.includes(t)) continue;
+      const d = (byTrigger[t] ??= { n: 0, usd: 0 });
+      d.n++; d.usd += c; n++; usd += c;
+    }
+    const fp = firstPassOf(list);
+    // unknown: untagged attempts or no attempt list (an older cache); a run that never reached the build is not a lane here
+    if (fp == null) { if (!Array.isArray(r.builderAttempts) || list.some((a) => !a?.trigger)) unknown++; continue; }
+    measured++;
+    if (fp) firstPass++;
+  }
+  return { rework: { n, usd, byTrigger, attempts }, firstPass: { rate: ratio(firstPass, measured), firstPass, n: measured, unknown } };
 }
 
 function funnelSection(events, issues) {
@@ -217,7 +246,8 @@ export function aggregate({ runs = [], events = [], issues = [] } = {}, opts = {
   let groups = [...keys.values()].map(({ version, repo }) => {
     const sel = (list) => list.filter((x) => x.version === version && x.repo === repo);
     const g = { version, repo, cost: costSection(sel(counted)), time: timeSection(sel(counted)), flow: flowSection(sel(counted)),
-      funnel: funnelSection(sel(evs), sel(iss)), gates: gatesSection(sel(evs)), issueFlow: null };
+      funnel: funnelSection(sel(evs), sel(iss)), gates: gatesSection(sel(evs)), issueFlow: null,
+      ...reworkSection(sel(counted)) };
     g.issueFlow = issueFlowSection(sel(iss), g.funnel.introduced);
     g.n = g.flow.n;
     g.lowN = g.n < minN;

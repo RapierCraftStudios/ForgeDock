@@ -565,6 +565,44 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
   });
 });
 
+describe("rework by trigger and first-pass rate (#4362)", () => {
+  const use = (attempt, trigger, usd, phase = "implement") => ({ event: "PHASE_ATTEMPT_USAGE", phase, attempt, ...(trigger ? { trigger } : {}), cost_usd: usd, usage: { cache_read_input_tokens: 10, output_tokens: 1 } });
+  const log = (issue, attempts) => [{ event: "RUN_START", issue, repo: "o/r", run: `r${issue}`, version: "1.30.0", ts: "2026-10-20T00:00:00Z" }, ...attempts,
+    { event: "RUN_TERMINAL", reason: "merged", ts: "2026-10-20T01:00:00Z" }];
+  const runs = [
+    log(1, [use(1, "plan", 1), use(2, "build", 3)]),
+    log(2, [use(1, "plan", 1), use(2, "build", 3), use(3, "precheck", 2), use(4, "review", 4), use(1, "review", 0.2, "review")]),
+    log(3, [use(1, "plan", 1), use(2, "build", 3), use(3, "timeout_restart", 1), use(4, "recovery", 1)]),
+    log(4, [use(1, null, 1), use(2, null, 3), use(3, null, 5)]), // written before the field existed
+    log(5, [use(1, "plan", 1)]), // closed at the plan: never reached the build
+  ].map((l) => summariseLog(l));
+
+  it("summariseLog keeps builder attempts in order with their trigger (null when untagged)", () => {
+    assert.deepEqual(runs[1].builderAttempts.map((a) => a.trigger), ["plan", "build", "precheck", "review"]);
+    assert.deepEqual(runs[3].builderAttempts.map((a) => [a.attempt, a.trigger, a.cost_usd]), [[1, null, 1], [2, null, 3], [3, null, 5]]);
+  });
+
+  it("aggregate counts rework by trigger (untagged as unknown, never dropped) and the first-pass rate with counts", () => {
+    const g = aggregate({ runs }).groups[0];
+    assert.deepEqual(g.rework.byTrigger, { precheck: { n: 1, usd: 2 }, review: { n: 1, usd: 4 }, unknown: { n: 3, usd: 9 } });
+    assert.deepEqual([g.rework.n, g.rework.usd], [5, 15]);
+    assert.deepEqual(g.rework.attempts.build, { n: 3, usd: 9 });
+    assert.deepEqual(g.firstPass, { rate: 2 / 3, firstPass: 2, n: 3, unknown: 1 });
+    const md = renderMarkdown(aggregate({ runs }));
+    assert.match(md, /first-pass rate \| 67% \(2\/3 lanes that reached the build, 1 unknown\)/);
+    assert.match(md, /### Rework by trigger/);
+    assert.match(md, /\| unknown \| 3 \| \$9\.00 \|/);
+    assert.match(md, /\| total \| 5 \| \$15\.00 \|/);
+  });
+
+  it("GitHub phase_attempt records carry the trigger into builderAttempts, ordered by attempt", () => {
+    const rec = (attempt, trigger, ts) => ({ event: "phase_attempt", repo: "o/r", issue: 9, run: "r_9", phase: "implement", attempt, ...(trigger ? { trigger } : {}), cost_usd: 1, output_tokens: 1, ts });
+    const [run] = runsFromRecords([rec(3, "ci_red", "t3"), rec(1, "plan", "t1"), rec(2, "build", "t2"), rec(2, "timeout_restart", "t2b"), rec(4, null, "t4"),
+      { event: "run_terminal", repo: "o/r", issue: 9, run: "r_9", reason: "merged", ts: "t5" }]);
+    assert.deepEqual(run.builderAttempts.map((a) => [a.attempt, a.trigger]), [[1, "plan"], [2, "build"], [2, "timeout_restart"], [3, "ci_red"], [4, null]]);
+  });
+});
+
 describe("fail-soft alerts (#4354)", () => {
   const ts = (i) => new Date(Date.UTC(2026, 9, 1) + i * 60000).toISOString();
   // One lane per call; `extra` are the events after RUN_START.

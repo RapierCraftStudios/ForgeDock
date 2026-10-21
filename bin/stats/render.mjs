@@ -41,7 +41,13 @@ function sections(g) {
   out.push("### Flow", ...table(["metric", "value"], [
     ["merged", pct(f.mergedPct)], ["needs-human", pct(f.needsHumanPct)], ["remediation rate", pct(f.remediationPct)],
     ["top outcome codes (n=" + f.codesN + ")", f.codes.slice(0, 5).map((x) => `${x.code} ${x.count} (${pct(x.pct)})`).join(", ") || NA],
+    ...(g.firstPass ? [["first-pass rate", `${pct(g.firstPass.rate)} (${g.firstPass.firstPass}/${g.firstPass.n} lanes that reached the build, ${g.firstPass.unknown} unknown)`]] : []),
   ]), "");
+  if (g.rework) { // #4362: builder rework rounds by trigger; untagged (older) attempts are "unknown"
+    const w = g.rework, rows = Object.entries(w.byTrigger).sort((a, b) => b[1].usd - a[1].usd || a[0].localeCompare(b[0]));
+    out.push("### Rework by trigger", ...(rows.length ? table(["trigger", "count", "cost"], [...rows.map(([t, d]) => [t, String(d.n), usd(d.usd)]), ["total", String(w.n), usd(w.usd)]])
+      : ["No rework attempts."]), "");
+  }
   const r = g.funnel;
   const sev = Object.entries(r.bySeverity).map(([s, d]) => [s, String(d.total), f1(d.perReview), String(d.ISSUE), String(d.NOTE), String(d.INPR_FIX)]);
   out.push("### Review funnel", `${r.reviews} reviews, ${r.findings} findings (${f1(r.perReview)} per review). Validated issues: ${r.validated}, false positives: ${r.falsePositive}.`, "",

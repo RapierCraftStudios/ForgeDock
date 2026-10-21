@@ -120,6 +120,15 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    < 60K chars). The fresh session never adopts its session id; when it makes no commit, one resume of the build
    session follows in the same round. `PHASE_ATTEMPT_USAGE` gains `mode: fresh|resume` on fix rounds (run log only).
    Block/contract corrections, CI-unavailable and base-sync conflict resolution still resume; round gates unchanged.
+   #4362: every `PHASE_ATTEMPT_USAGE` carries `trigger` (`fixround.mjs` `TRIGGERS`): plan call `plan`, implement
+   `build`, untyped-block resume `block_correction`, contract correction `contract_correction`, `fixRound(kind, task,
+   failures, trigger)` with `precheck`/`structure`/`docs`/`enumerating`/`sequence`/`conformance`/`review`, CI verify
+   `ci_red`, merge-time CI `merge_ci`, CI-unavailable fallback `ci_unavailable`, base-sync conflict `recovery`,
+   reviewer `review`, split grouping `plan`; a CLI idle/timeout retry is `timeout_restart` with `restart_of` (the
+   replaced trigger). A source-scan test in `lean.test.mjs` fails on a call site without a known literal. The lane
+   result carries `firstPass` (`firstPassOf`: no `REWORK_TRIGGERS` attempt after the build; omitted when the lane never
+   reached it) → orchestrate row `first_pass` → batch-report line `first-pass: P% (k/n lanes that reached the build)`
+   (`formatFirstPassSummary`, after the precheck line). `forgedock stats` reads the same fields (`docs/STATS.md`).
    An optional `.forge/test-map.json` (#4272, `scripts/test-map.sh`; base ref via
    `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) adds the map entries whose
    globs match the changed files to that list (`selectCommands` + `mergeChecks`, #4315: learned first, deduped, so the

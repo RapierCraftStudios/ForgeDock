@@ -68,6 +68,8 @@ export function summariseLog(events, fallbackIssue = null) {
     startTs, endTs, wallMs: finished && !Number.isNaN(a) && !Number.isNaN(b) ? Math.max(0, b - a) : null,
     phases,
     contextPack,
+    // #4362: builder attempts in log order with their trigger (null before the field existed)
+    builderAttempts: builderCalls.map((e) => ({ attempt: e.attempt ?? null, trigger: e.trigger ?? null, restart_of: e.restart_of ?? null, cost_usd: Number.isFinite(e.cost_usd) ? e.cost_usd : null })),
     builderTurns: builderCalls.reduce((x, e) => x + n(e.turns), 0),
     cacheTokens: usage.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens) + n(e.usage?.cache_creation_input_tokens), 0),
     costUsd: usage.reduce((x, e) => x + n(e.cost_usd), 0),

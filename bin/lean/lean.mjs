@@ -27,7 +27,7 @@ import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { computeTrigger, TRIGGER_MODES } from "./review-trigger.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt } from "./prompts.mjs";
-import { freshFix, issueSummary } from "./fixround.mjs";
+import { freshFix, issueSummary, firstPassOf } from "./fixround.mjs";
 import { unjustified } from "./enumerating.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport } from "./verify.mjs";
@@ -173,9 +173,12 @@ export async function runCore(o) {
   const ghw = (args) => retrying(() => io.gh(args), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random });
   const git = (args) => io.git(args, { cwd: wt });
 
-  async function attempt(phase, n, r, mode = null) {
-    const rec = { event: "PHASE_ATTEMPT_USAGE", phase, attempt: n, usage: r?.usage ?? null, duration_ms: num(r?.durationMs) ?? 0,
+  const builderTriggers = []; // #4362: implement-attempt triggers in order, for the lane's first-pass flag
+  /** `trigger` (#4362): why the attempt ran, one of fixround.mjs TRIGGERS. */
+  async function attempt(phase, n, r, mode = null, trigger = null, restartOf = null) {
+    const rec = { event: "PHASE_ATTEMPT_USAGE", phase, attempt: n, trigger, ...(restartOf ? { restart_of: restartOf } : {}), usage: r?.usage ?? null, duration_ms: num(r?.durationMs) ?? 0,
       cost_usd: num(r?.costUsd), model: r?.model ?? null, turns: num(r?.turns), ...(mode ? { mode } : {}) };
+    if (phase === "implement") builderTriggers.push({ trigger, restart_of: restartOf });
     ev(rec); await emit(rec);
     const u = r?.usage ?? {};
     usage.cost_usd += r?.costUsd ?? 0;
@@ -358,7 +361,8 @@ export async function runCore(o) {
     }
     await releaseLease(reason, code);
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0,
-      ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}), ...extra };
+      ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
+      ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...extra };
     return done;
   }
   /** #4297/#4316: a recovery lane that ended unmerged keeps needs-human with this evidence (shared text in render.mjs). */
@@ -532,6 +536,7 @@ export async function runCore(o) {
   const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + CONTINUE_NOTE.replace("BASE", lane);
   async function builder(n, prompt, resume, live = false, restart = implementRestart, opts = {}) {
     let timeoutRetries = 0, p = prompt;
+    opts = { ...opts };
     for (;;) {
       try { return await builderOnce(n, p, resume, live, opts); } catch (e) {
         if (!(e?.code === "CLI_IDLE" || e?.code === "CLI_TIMEOUT")) throw e;
@@ -542,13 +547,13 @@ export async function runCore(o) {
         if (timeoutRetries++ >= 1) { e.deferCode = idle ? OUTCOME_CODES.CLI_IDLE : OUTCOME_CODES.CLI_TIMEOUT; e.deferDetail = `builder ${reason}; work checkpointed to ${branch}; rerun resumes from it. ${String(e.message).slice(0, 300)}`; throw e; }
         T.anomalies.push(`builder ${reason}: checkpointed, retried once`);
         T.decisions.push(`Builder ${reason}: uncommitted work checkpointed to the lane branch; retrying once from the checkpoint`);
-        p = restart(); resume = null;
+        p = restart(); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "timeout_restart";
       }
     }
   }
 
-  /** opts (#4363): {model, mode, keepSession}; a fresh fix session keeps the build session id for a fallback resume. */
-  async function builderOnce(n, prompt, resume, live = false, { model = null, mode = null, keepSession = false } = {}) {
+  /** opts (#4363): {model, mode, keepSession, trigger and restartOf (#4362)}; a fresh fix session keeps the build session id for a fallback resume. */
+  async function builderOnce(n, prompt, resume, live = false, { model = null, mode = null, keepSession = false, trigger = null, restartOf = null } = {}) {
     onProgress({ event: "phase_enter", phase: "build" });
     await renew();
     const control = {};
@@ -576,7 +581,7 @@ export async function runCore(o) {
     await renew();
     await registerReported();
     if (r?.sessionId && !keepSession) sessionId = r.sessionId;
-    await attempt("implement", n, r, mode);
+    await attempt("implement", n, r, mode, trigger, restartOf);
     onProgress({ event: "phase_exit", phase: "build", status: "committed" });
     return r;
   }
@@ -975,7 +980,7 @@ export async function runCore(o) {
       let block = result?.status === "blocked" ? await resolveBlock(result) : null;
       if (block?.kind === "untyped" && sessionId) { // #4124: one corrective resume before any untyped block can reach needs-human
         T.decisions.push(`Builder block rejected (${block.problem}); resumed once`);
-        await builder(++attemptN, blockCorrectionPrompt(block.problem), sessionId);
+        await builder(++attemptN, blockCorrectionPrompt(block.problem), sessionId, false, undefined, { trigger: "block_correction" });
         result = await readResult();
         block = result?.status === "blocked" ? await resolveBlock(result) : null;
       }
@@ -1065,7 +1070,7 @@ export async function runCore(o) {
                 await renew();
                 const rr = await callRunner({ role: "grouper", issue, cwd: cwd ?? runTmp ?? wt, model: reviewerModel, resume: null, system: GROUPING_SYSTEM, prompt, noTools: true });
                 await renew();
-                await attempt("group", 1, rr);
+                await attempt("group", 1, rr, null, "plan");
                 return rr?.text ?? "";
               } finally { slot = await heavyAcquire("split"); }
             } });
@@ -1093,15 +1098,15 @@ export async function runCore(o) {
      * #4363: one fix round. Mechanical failures (and a conformance/review FAIL citing file:line) run in a fresh session on
      * the fix model with a narrow prompt; one resume of the build session follows when it made no commit. Else: a resume.
      */
-    async function fixRound(kind, task, failures = []) {
-      if (!freshFix(kind, failures)) return await builder(++attemptN, task, sessionId ?? null, false, undefined, { mode: "resume" });
+    async function fixRound(kind, task, failures, trigger) {
+      if (!freshFix(kind, failures)) return await builder(++attemptN, task, sessionId ?? null, false, undefined, { mode: "resume", trigger });
       const before = String(await git(["rev-parse", "HEAD"])).trim();
       const ex = [".", `:!${LEAN_DIR}`], diff = String(await git(["diff", `${base}...HEAD`, "--", ...ex]).catch(() => "")), stat = String(await git(["diff", "--stat", `${base}...HEAD`, "--", ...ex]).catch(() => ""));
       const prompt = fixSessionPrompt({ task, diff, stat, base, contract: frozen, title: iss?.title ?? "", summary: issueSummary(iss?.body) });
-      const r = await builder(++attemptN, prompt, null, false, () => prompt, { model: fixModel ?? reviewerModel, mode: "fresh", keepSession: true });
+      const r = await builder(++attemptN, prompt, null, false, () => prompt, { model: fixModel ?? reviewerModel, mode: "fresh", keepSession: true, trigger });
       if (!sessionId || String(await git(["rev-parse", "HEAD"])).trim() !== before) return r;
       T.decisions.push(`Fresh ${kind} fix session made no commit; builder session resumed once`);
-      return await builder(++attemptN, task, sessionId, false, undefined, { mode: "resume" });
+      return await builder(++attemptN, task, sessionId, false, undefined, { mode: "resume", trigger });
     }
     if (isSplit) {
       // ---- 3'. refactor:split (#4211): deterministic move + proof replaces the builder; no builder session exists ----
@@ -1131,7 +1136,7 @@ export async function runCore(o) {
       const ctxPack = frozen ? null : await contextPackStep();
       const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + reproPlanNote(reproOn()) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       if (!frozen) {
-        await builder(++attemptN, planPrompt() + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote(), null, true, planPrompt);
+        await builder(++attemptN, planPrompt() + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote(), null, true, planPrompt, { trigger: "plan" });
         planned = true;
         result = await readResult();
         const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
@@ -1166,7 +1171,7 @@ export async function runCore(o) {
         if ((!vc.ok || missed.length) && sessionId) {
           const problems = [...vc.problems, ...preflightProblems(missed)];
           T.decisions.push(`Contract rejected (${problems[0]}); resumed once`);
-          await builder(++attemptN, contractCorrectionPrompt(problems), sessionId, false, planPrompt);
+          await builder(++attemptN, contractCorrectionPrompt(problems), sessionId, false, planPrompt, { trigger: "contract_correction" });
           contract = dropScope(await readContract());
           await refreshIssue("contract validation");
           vc = validateContract(contract, issueText, { repro: reproOn() });
@@ -1199,7 +1204,7 @@ export async function runCore(o) {
       const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote();
       liveKeys = ["implementation"];
       stage = "implement";
-      await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);
+      await builder(++attemptN, implementPrompt, planned ? sessionId : null, true, undefined, { trigger: "build" });
       stage = "fix"; // later builder rounds fix precheck, CI, structure, docs or conformance findings
       result = await readResult();
       { // #4374: the builder's self-review against the shared rubric, log only
@@ -1263,7 +1268,7 @@ export async function runCore(o) {
         T.decisions.push(`Declared check command(s) failed: ${names}; builder resumed (round ${round + 1}/${vcfg.maxRounds})`);
         const before = String(await git(["rev-parse", "HEAD"])).trim();
         const capped = capLogs(failed.map((f) => ({ ...f, log: f.output }))).map((f) => ({ command: f.command, rc: f.rc, output: f.log }));
-        await fixRound("precheck", precheckFailurePrompt(capped, vcfg.mode));
+        await fixRound("precheck", precheckFailurePrompt(capped, vcfg.mode), [], "precheck");
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
         if (String(await git(["rev-parse", "HEAD"])).trim() === before) { T.anomalies.push(`Declared check command(s) failing and the builder made no new commit for them: ${names}`); break; }
@@ -1289,7 +1294,7 @@ export async function runCore(o) {
       let edges = undeclared();
       if (edges.length && sessionId) {
         T.decisions.push(`Undeclared package edge(s) ${edges.map((e) => `${e.from}→${e.to}`).join(", ")}; builder resumed once`);
-        await fixRound("structure", structurePrompt(edges, vcfg.mode));
+        await fixRound("structure", structurePrompt(edges, vcfg.mode), [], "structure");
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
         structure = (await structureOf()) ?? structure;
@@ -1307,7 +1312,7 @@ export async function runCore(o) {
       if (docs && !docs.ok && sessionId) {
         ev({ event: "DOCS_STALE", round: 1 });
         T.decisions.push("Docs freshness check failed; builder resumed once");
-        await fixRound("docs", docsPrompt(docs.output));
+        await fixRound("docs", docsPrompt(docs.output), [], "docs");
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
         docs = await io.docsFreshness({ cwd: wt, base }).catch(() => null);
@@ -1325,7 +1330,7 @@ export async function runCore(o) {
       if (missing.length && sessionId) {
         ev({ event: "ENUMERATING_MISSING", count: missing.length });
         T.decisions.push(`Enumerating test(s) miss new symbol(s): ${missing.slice(0, 5).map((m) => `${m.symbol} → ${m.test}`).join(", ")}; builder resumed once`);
-        await fixRound("enumerating", missingEntriesPrompt(missing, vcfg.mode));
+        await fixRound("enumerating", missingEntriesPrompt(missing, vcfg.mode), [], "enumerating");
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
         missing = await missingNow();
@@ -1341,7 +1346,7 @@ export async function runCore(o) {
       const before = (await io.sequenceSnapshot?.({ cwd: wt, base }).catch(() => null)) ?? [];
       ev({ event: "SEQUENCE_COLLISION", trigger, files: collisions.map((c) => c.lane) });
       T.decisions.push(`Sequence number(s) taken on ${lane} (${trigger}): ${collisions.filter((c) => c.base.length).map((c) => `${c.lane} vs ${c.base.join(", ")}`).join("; ")}; builder renumbers`);
-      await fixRound("sequence", sequencePrompt(collisions, lane, vcfg.mode));
+      await fixRound("sequence", sequencePrompt(collisions, lane, vcfg.mode), [], "sequence");
       result = (await readResult()) ?? result;
       const v = (await io.sequenceVerify?.({ cwd: wt, base, before }).catch(() => null)) ?? { ok: false, problems: ["renumber could not be verified"] };
       if (!v.ok) return { done: await needsHuman(`Sequence-numbered files still collide with ${lane} after the builder renumbered (${trigger}); nothing merged:\n${v.problems.slice(0, 10).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.BASE_CONFLICT) };
@@ -1386,7 +1391,7 @@ export async function runCore(o) {
           ciFellBack = true;
           row("unavailable: local fallback");
           T.decisions.push(`CI verification unavailable (${v.detail}); builder runs the validate commands locally`);
-          await builder(++attemptN, ciUnavailablePrompt(), sessionId ?? null);
+          await builder(++attemptN, ciUnavailablePrompt(), sessionId ?? null, false, undefined, { trigger: "ci_unavailable" });
           await upsertStage("implementation");
           result = (await readResult()) ?? result;
           return { fixes: fixes + 1 };
@@ -1400,7 +1405,7 @@ export async function runCore(o) {
         ciRounds++; fixes++;
         T.decisions.push(`CI verification red (${jobs}); builder resumed with the failed logs (round ${ciRounds}/${vcfg.maxRounds})`);
         ev({ event: "CI_FIX_ROUND", trigger, round: ciRounds, jobs: v.failures.map((f) => f.job) });
-        await fixRound("ci", ciFailurePrompt(v.failures, vcfg.mode));
+        await fixRound("ci", ciFailurePrompt(v.failures, vcfg.mode), [], "ci_red");
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
         if (String(await git(["rev-parse", "HEAD"])).trim() === head) {
@@ -1451,7 +1456,7 @@ export async function runCore(o) {
           prompt: repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first })
             : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE }) });
         await renew();
-        await attempt("review", ++reviewN, rr);
+        await attempt("review", ++reviewN, rr, null, "review");
         const parsed = parseReview(rr?.text);
         review = repair ? mergeReviewRows(first, parsed) : parsed;
         first = review;
@@ -1597,7 +1602,7 @@ export async function runCore(o) {
         T.decisions.push(`Not conforming (${outcome.by}${outcome.inconsistent ? ", reviewer verdict contradicted its rows" : ""}): ${[...new Set(outcome.failures.map((f) => f.code))].join(", ")} (${explained.slice(0, 5).map((f) => String(f.detail).slice(0, 160)).join("; ")}); builder resumed once`);
         // A failed validate may only mean the base moved on: fetch the lane so the resume can merge it (never rebase).
         if (outcome.failures.some((f) => f?.kind === "validate_failed")) { try { await io.git(["fetch", "origin", lane], { cwd: wt }); } catch { /* offline: the resume uses the local ref */ } }
-        await fixRound("conformance", conformanceResumePrompt(outcome.failures, vcfg.mode, lane), outcome.failures);
+        await fixRound("conformance", conformanceResumePrompt(outcome.failures, vcfg.mode, lane), outcome.failures, "conformance");
         await upsertStage("implementation"); // the published note follows the code after every resume
       }
       // Deferrals the reviewer accepted are filed now, before any PR: the batched follow-up must exist and be linked.
@@ -1717,7 +1722,7 @@ export async function runCore(o) {
       } else {
         T.decisions.push(`Base-sync ${syncs}: merging ${base} conflicts in ${files.join(", ") || "unknown files"}; builder resolves`);
         const prompt = `Merging ${base} into this branch conflicts in: ${files.join(", ") || "(see git status)"}. Resolve the conflicts preserving both this fix's intent and the base's changes, ${syncChecks(vcfg.mode)}, and commit the merge.${sequenceSyncNote(files)} Do not push.`;
-        await builder(++attemptN, prompt, sessionId ?? null);
+        await builder(++attemptN, prompt, sessionId ?? null, false, undefined, { trigger: "recovery" }); // #4362: base-sync conflict
         if (await unresolved()) {
           await gitOut(["merge", "--abort"]);
           return await needsHuman(`Base-sync could not resolve the conflicts in ${files.join(", ")} (conflict markers or an unfinished merge remain).`, OUTCOME_CODES.BASE_CONFLICT);
@@ -1744,7 +1749,7 @@ export async function runCore(o) {
         if (rv.env) return await envNeedsHuman(rv.env);
         if (rv?.fail) {
           T.decisions.push(`Base-sync re-review FAIL: builder resumed with the reason`);
-          await fixRound("review", conformanceResumePrompt(rv.failures, vcfg.mode), rv.failures);
+          await fixRound("review", conformanceResumePrompt(rv.failures, vcfg.mode), rv.failures, "review");
           if (await unresolved()) return await needsHuman("Base-sync re-review fix left conflict markers.", OUTCOME_CODES.BASE_CONFLICT);
           if ((await gitOut(["rev-parse", "HEAD"])) !== after) await gitPush(["push", "origin", branch]);
           rv = await doReview();
@@ -1777,7 +1782,7 @@ export async function runCore(o) {
       T.decisions.push(`Required check(s) failed on PR #${pr} (${jobs.join(", ")}); builder resumed with the failed logs (round ${ciRounds}/${vcfg.maxRounds})`);
       ev({ event: "CI_FIX_ROUND", trigger: "merge", round: ciRounds, jobs, pr });
       const before = await gitOut(["rev-parse", "HEAD"]);
-      await fixRound("ci", ciFailurePrompt(failures, vcfg.mode));
+      await fixRound("ci", ciFailurePrompt(failures, vcfg.mode), [], "merge_ci");
       await upsertStage("implementation");
       result = (await readResult()) ?? result;
       if ((await gitOut(["rev-parse", "HEAD"])) === before) {
