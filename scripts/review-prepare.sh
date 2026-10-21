@@ -9,7 +9,7 @@
 # the PR checkout, a SPEC_CLI persona file, forge.yaml paths.root) as data.
 #
 # Usage: review-prepare.sh --pr N --repo owner/name [--merge-issue N] [--thorough true|false] [--out FILE] [--out-dir DIR]
-#                          [--checkout-pr] [--no-delta] [--build-gate block|advisory]
+#                          [--checkout-pr] [--no-delta] [--delta-from SHA] [--build-gate block|advisory]
 #   --pr            PR number (numeric, required)          --repo        owner/name (required)
 #   --merge-issue   issue the PR closes, from --issue (numeric; non-numeric is ignored)
 #   --thorough      true restores the full-union roster    --out         write the context JSON here (default: stdout)
@@ -23,6 +23,11 @@
 #   --no-delta      skip the FULL/DELTA/BASE_SYNC_ONLY resolver: the review mode is always FULL (a staging bundle review always reviews the
 #                   whole bundle), without widening the roster to the full union the way --thorough does; it also enables the pinned
 #                   local-git diff fallback when `gh pr diff` fails (e.g. HTTP 406 over 20,000 lines), which a milestone->staging PR gets without it
+#   --delta-from    explicit DELTA from a caller-supplied earlier reviewed head (forge#4360, `forgedock review-staging --delta`): skips the
+#                   resolver (even with --no-delta), narrows diff, slices and roster to SHA..review sha (the roster is the domains the delta
+#                   files touch). BLOCKED when SHA is not a full commit id in the checkout, equals or is not an ancestor of the review sha,
+#                   or has no trusted FORGE:REVIEW-AGENT body with `Reviewed-SHA: SHA` (no earlier pass to credit). An empty file delta
+#                   is FULL. Not combinable with --thorough true (exit 2).
 # Env: FORGE_CONFIG (forge.yaml path; default: the main checkout's forge.yaml, then the git top-level one),
 #      REVIEW_PREPARE_SLEEP (seconds between mergeability retries, default 5),
 #      REVIEW_PREPARE_INDEX_TIMEOUT (seconds the code-index build may take, default 120; on timeout or failure the slices say
@@ -61,10 +66,10 @@
 
 set -u
 
-PR_NUMBER=""; REPO=""; MERGE_ISSUE=""; THOROUGH="false"; OUT=""; OUT_DIR=""; CHECKOUT_PR="false"; NO_DELTA="false"; BUILD_GATE="block"
+PR_NUMBER=""; REPO=""; MERGE_ISSUE=""; THOROUGH="false"; OUT=""; OUT_DIR=""; CHECKOUT_PR="false"; NO_DELTA="false"; BUILD_GATE="block"; DELTA_FROM_OPT=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --pr|--repo|--merge-issue|--thorough|--out|--out-dir)
+        --pr|--repo|--merge-issue|--thorough|--out|--out-dir|--delta-from)
             [ $# -ge 2 ] || { echo "review-prepare: $1 requires a value" >&2; exit 2; } ;;
     esac
     case "$1" in
@@ -76,6 +81,7 @@ while [ $# -gt 0 ]; do
         --out-dir) OUT_DIR="${2:-}"; shift 2 ;;
         --checkout-pr) CHECKOUT_PR="true"; shift ;;
         --no-delta) NO_DELTA="true"; shift ;;
+        --delta-from) DELTA_FROM_OPT="${2:-}"; [ -n "$DELTA_FROM_OPT" ] || DELTA_FROM_OPT="-"; shift 2 ;;
         --build-gate) case "${2:-}" in block|advisory) BUILD_GATE="$2" ;; *) echo "review-prepare: --build-gate must be block or advisory" >&2; exit 2 ;; esac; shift 2 ;;
         *) echo "review-prepare: unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -85,6 +91,7 @@ case "$REPO" in */*) ;; *) echo "review-prepare: --repo must be owner/name" >&2;
 case "$REPO" in *[!A-Za-z0-9._/-]*|*/*/*|/*|*/) echo "review-prepare: invalid --repo" >&2; exit 2 ;; esac
 case "$MERGE_ISSUE" in *[!0-9]*) MERGE_ISSUE="" ;; esac
 [ "$THOROUGH" = "true" ] || THOROUGH="false"
+if [ -n "$DELTA_FROM_OPT" ] && [ "$THOROUGH" = "true" ]; then echo "review-prepare: --delta-from cannot be combined with --thorough true" >&2; exit 2; fi
 
 # --- trusted helper resolution (install roots only; never cwd) ---
 # shellcheck source=/dev/null  # the resolver lib is found at runtime in the trusted install root
@@ -452,7 +459,23 @@ delta_roster() {
     printf '%s' "$out"
 }
 REVIEW_MODE="FULL"; DELTA_FROM=""; CARRIED_FROM=""; FULL_ROUNDS=0; DELTA_FILES=""
-if [ "$THOROUGH" != "true" ] && [ "$IS_MILESTONE_TO_STAGING" != "true" ] && [ "$NO_DELTA" != "true" ]; then
+if [ -n "$DELTA_FROM_OPT" ]; then
+    # forge#4360: explicit delta. Every check fails closed (BLOCKED); only an empty file delta widens to FULL (below).
+    _dtop="${TOP:-.}"
+    case "$DELTA_FROM_OPT" in *[!0-9a-f]*|"") _dok=false ;; *) { [ "${#DELTA_FROM_OPT}" -eq 40 ] || [ "${#DELTA_FROM_OPT}" -eq 64 ]; } && _dok=true || _dok=false ;; esac
+    if [ "$_dok" != "true" ]; then block "--delta-from is not a full commit id: $(printf '%s' "$DELTA_FROM_OPT" | tr -cd '0-9A-Za-z' | cut -c1-64)"
+    elif [ "$DELTA_FROM_OPT" = "$REVIEW_SHA" ]; then block "--delta-from ${DELTA_FROM_OPT} is the review head: nothing to review"
+    elif ! git -C "$_dtop" cat-file -e "${DELTA_FROM_OPT}^{commit}" 2>/dev/null; then block "--delta-from ${DELTA_FROM_OPT} is not a commit in this checkout (fetch it first)"
+    elif ! git -C "$_dtop" merge-base --is-ancestor "$DELTA_FROM_OPT" "$REVIEW_SHA" 2>/dev/null; then block "--delta-from ${DELTA_FROM_OPT} is not an ancestor of ${REVIEW_SHA} (force-push or rebase): run a full review"
+    else
+        _dn=""
+        [ -n "$TRUSTED_SCRIPT" ] && [ -n "$COMMENTS_JSON" ] \
+            && _dn=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${DELTA_FROM_OPT}(\\r?\\n|$)" 2>/dev/null)
+        case "$_dn" in ''|*[!0-9]*) _dn=0 ;; esac
+        if [ "$_dn" -lt 1 ]; then block "--delta-from ${DELTA_FROM_OPT}: no trusted FORGE:REVIEW-AGENT comment for that head, no earlier pass to credit: run a full review"
+        else REVIEW_MODE="DELTA"; DELTA_FROM="$DELTA_FROM_OPT"; fi
+    fi
+elif [ "$THOROUGH" != "true" ] && [ "$IS_MILESTONE_TO_STAGING" != "true" ] && [ "$NO_DELTA" != "true" ]; then
     read -r RD_KIND RD_ARG RD_ROUNDS <<< "$(review_delta_mode)"
     FULL_ROUNDS="${RD_ROUNDS:-0}"
     case "$RD_KIND" in
@@ -463,7 +486,12 @@ fi
 if [ "$REVIEW_MODE" = "DELTA" ]; then
     DELTA_FILES=$(git -C "${TOP:-.}" -c core.quotepath=off diff --name-only --no-renames "${DELTA_FROM}" "${REVIEW_SHA}" 2>/dev/null) || DELTA_FILES=""
     if [ -z "$DELTA_FILES" ]; then REVIEW_MODE="FULL"; DELTA_FROM=""
-    else SELECTED_AGENTS=$(canonical_roster "$(delta_roster "$FULL_ROUNDS" "$SELECTED_AGENTS" "$DELTA_FILES")"); fi
+    else
+        # an explicit --delta-from always narrows the roster to the domains the delta touches (no full-rounds gate)
+        _drounds="$FULL_ROUNDS"
+        [ -n "$DELTA_FROM_OPT" ] && { _drounds=2; ROSTER_REASON="delta ${DELTA_FROM:0:7}..${REVIEW_SHA:0:7}: domains the delta touches"; }
+        SELECTED_AGENTS=$(canonical_roster "$(delta_roster "$_drounds" "$SELECTED_AGENTS" "$DELTA_FILES")")
+    fi
 fi
 [ "$REVIEW_MODE" = "BASE_SYNC_ONLY" ] && SELECTED_AGENTS=""
 

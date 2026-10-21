@@ -199,6 +199,40 @@ DELTA_KIND=DELTA prep "$WORK/root-delta" --thorough true; eq "thorough never goe
 setup feat/x staging "$FIXFILES" "$DIFF_AUTH_BILL" "notasha"
 DELTA_KIND=DELTA prep "$WORK/root-delta"; eq "unvalidated sha is FULL" .delta.mode FULL
 
+# --- 5b. explicit --delta-from (forge#4360: forgedock review-staging --delta): no resolver involved ---
+earlier_pass() {   # earlier_pass <sha> [association]: one REVIEW-AGENT comment for that head
+    printf '[{"body":"<!-- FORGE:REVIEW-AGENT:security -->\\nReviewed-SHA: %s\\n<!-- REVIEW-FINDINGS-START -->\\n<!-- REVIEW-FINDINGS-END -->","author_association":"%s","user":{"login":"r","type":"User"}}]' "$1" "${2:-OWNER}" > "$FIX/comments.json"
+}
+git -C "$REPO_DIR" checkout -q -b pr-empty pr-branch; git -C "$REPO_DIR" commit -q --allow-empty -m C;   # own branch: pr-branch stays at B (pinned-fallback tests below)
+ SHA_C=$(git -C "$REPO_DIR" rev-parse HEAD)
+git -C "$REPO_DIR" checkout -q -b side main; echo d > "$REPO_DIR/d.txt"; git -C "$REPO_DIR" add -A; git -C "$REPO_DIR" commit -qm D
+SHA_D=$(git -C "$REPO_DIR" rev-parse HEAD); git -C "$REPO_DIR" checkout -q main
+setup staging main "$FIXFILES" "$DIFF_AUTH_BILL"; earlier_pass "$SHA_A"
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"
+rc_is "--delta-from ok" 0; eq "--delta-from mode" .delta.mode DELTA; eq "--delta-from from" .delta.from "$SHA_A"
+eq "--delta-from files" '.delta.files | join(" ")' "services/api/auth.py"
+eq "--delta-from roster is the touched domains, even before 2 full rounds" '.roster.agents | join(" ")' "security auth api"
+eq "--delta-from reason names the delta" '.roster.reason | startswith("delta ")' true
+eq "--delta-from slices narrow to the delta" '.slices.security.paths | join(" ")' "services/api/auth.py"
+eq "--delta-from full_files stays whole" '.full_files | length' 2
+prep "$WORK/root-nodelta" --no-delta; eq "--no-delta without --delta-from stays FULL" .delta.mode FULL
+earlier_pass "$SHA_A" NONE
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "untrusted earlier pass" 3
+eq "untrusted earlier pass blocker" '.blockers | join(" ") | test("no earlier pass to credit")' true
+earlier_pass "$SHA_B"
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "no earlier pass at the from sha" 3
+earlier_pass "$SHA_D"
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_D"; rc_is "non-ancestor from sha" 3
+eq "non-ancestor blocker" '.blockers | join(" ") | test("not an ancestor")' true
+earlier_pass "$SHA_B"
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_B"; rc_is "from sha == head" 3
+eq "head blocker" '.blockers | join(" ") | test("is the review head")' true
+prep "$WORK/root-nodelta" --no-delta --delta-from "0123456789012345678901234567890123456789"; rc_is "unknown commit" 3
+prep "$WORK/root-nodelta" --no-delta --delta-from "abc123"; rc_is "short sha" 3
+setup staging main "$FIXFILES" "$DIFF_AUTH_BILL" "$SHA_C"; earlier_pass "$SHA_B"
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_B"; rc_is "empty delta" 0; eq "empty delta is FULL" .delta.mode FULL
+prep "$WORK/root-nodelta" --delta-from "$SHA_B" --thorough true; rc_is "--delta-from with --thorough" 2
+
 # --- 6. full-build lane: empty trusted config is BLOCKED, never a silent skip ---
 TS_DIFF='diff --git a/web/src/app/page.tsx b/web/src/app/page.tsx
 +x'

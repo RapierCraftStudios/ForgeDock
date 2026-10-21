@@ -151,6 +151,17 @@ touch $SENTINEL"; do
   else bad "staging injection not rejected: '$got'"; fi
 done
 
+# Test 6b (forge#4360): `--delta <full sha>` is forwarded to the CLI; anything but a full lowercase hex SHA is dropped
+DELTA_LINE=$(grep -m1 '^STAGING_DELTA=' "$STAGING")
+if [ -n "$DELTA_LINE" ] && grep -qF '${STAGING_DELTA:+--delta "$STAGING_DELTA"}' "$STAGING"; then ok; else bad "staging --delta parse/forward not found"; fi
+run_delta() { STAGING_ARGS_RAW="$1" "${BASH:-bash}" -c "$DELTA_LINE"$'\n''printf "%s" "$STAGING_DELTA"'; }
+D40=0123456789abcdef0123456789abcdef01234567
+got=$(run_delta "3401 --delta $D40"); if [ "$got" = "$D40" ]; then ok; else bad "staging --delta not parsed: '$got'"; fi
+got=$(run_delta "3401 --delta $D40 --thorough"); if [ "$got" = "$D40" ]; then ok; else bad "staging --delta before a flag: '$got'"; fi
+for v in "abc123" "${D40}0" "XYZ" ""; do
+  got=$(run_delta "3401 --delta $v"); if [ -z "$got" ]; then ok; else bad "staging --delta '$v' not dropped: '$got'"; fi
+done
+
 # Test 7: Phase -1 stops on an empty PR_NUMBER before any `gh pr view` (gh falls back to the current-branch PR)
 GUARD=$(awk '/^  if \[ -z "\$PR_NUMBER" \]; then$/{p=1} p{print} p && /^  fi$/{exit}' "$SPEC")
 if [ -n "$GUARD" ]; then ok; else bad "Phase -1 empty-PR_NUMBER guard not found"; fi

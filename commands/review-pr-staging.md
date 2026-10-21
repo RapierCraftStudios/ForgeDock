@@ -118,15 +118,18 @@ if [ "$STAGING_ARGS_REJECTED" = true ]; then
   exit 1
 fi
 STAGING_THOROUGH=""; case " $STAGING_ARGS_RAW " in *" --thorough "*) STAGING_THOROUGH="--thorough" ;; esac
+STAGING_DELTA=$(printf '%s\n' " $STAGING_ARGS_RAW " | sed -nE 's/.* --delta ([0-9a-f]{40}|[0-9a-f]{64}) .*/\1/p')   # forge#4360, hex only
 # The CLI writes the run-keyed PR pointer later fences reload, so it must derive the same key as scripts/lib/fence-bootstrap.sh.
 FORGE_RUN_KEY="${FORGE_RUN_KEY:-${FORGE_RUN_ID:-${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-${CODEX_THREAD_ID:-${OPENCODE_SESSION_ID:-$PPID}}}}}}"; FORGE_RUN_KEY=$(printf '%s' "$FORGE_RUN_KEY" | tr -c 'A-Za-z0-9_-' '_')
 export FORGE_RUN_KEY
 FD_ROOT=$(forge_resolve review-staging-post.sh); FD_ROOT="${FD_ROOT%/scripts/review-staging-post.sh}"   # install root, never the PR checkout
 [ -n "$FD_ROOT" ] && [ -f "$FD_ROOT/bin/forgedock.mjs" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: the forgedock CLI is not resolvable (set FORGEDOCK_HOME to the ForgeDock install); nothing reviewed (fail closed)"; exit 1; }
-node "$FD_ROOT/bin/forgedock.mjs" review-staging ${PR_ARG_NUM:+"$PR_ARG_NUM"} ${STAGING_THOROUGH:+"$STAGING_THOROUGH"}
+node "$FD_ROOT/bin/forgedock.mjs" review-staging ${PR_ARG_NUM:+"$PR_ARG_NUM"} ${STAGING_THOROUGH:+"$STAGING_THOROUGH"} ${STAGING_DELTA:+--delta "$STAGING_DELTA"}
 ```
 
 Exit 0 prints the manifest. `REVIEW_STAGING: PR #N head <sha>` gives the PR number and the full head SHA. `BUNDLE_PRS:` lists the bundle member PRs. `SCOPE_MODE=` gives the 0B.1 mode. `ROSTER:` gives the tier and reason (record them in the final summary). `CONTEXT_FILE=` names the 0C context. There is one `DISPATCH <domain> <brief file>` line per roster domain. Exit 1 is a stop: the gate printed `RESULT: BLOCK DEPLOY` (report the blocking finding list), or a `REVIEW_RESULT: status: BLOCKED` line names the blocker. Report it and do not continue. A PR with no gate comment at all indicates a gate bypass, not a clean pass.
+
+**Delta pass** (forge#4360): after a fix lands on staging mid-review, re-run with `--delta <previous full head SHA>`. Only that range is reviewed, by the domains it touches (a `DELTA:` manifest line), and the earlier pass is credited. Dispatch only the DISPATCH lines.
 
 ---
 

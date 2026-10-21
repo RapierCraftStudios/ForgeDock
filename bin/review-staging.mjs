@@ -8,6 +8,10 @@
  * Steps: route marker -> bundle PR set -> open review-finding gate (stops on block) -> 0B.1 scope -> review-prepare.sh
  * (stops on BLOCKED) -> roster (ctx.roster, computed by review-roster.sh inside review-prepare.sh) -> briefs -> manifest.
  *
+ * `--delta <from-sha>` (#4360), after a fix landed mid-review: review-prepare.sh --delta-from narrows the diff, slices and roster to
+ * <from>..head (the domains the delta touches); the spec-owned panel is credited from the earlier pass, and --finalize reads the
+ * earlier pass's findings too (review-finalize.sh extract, DELTA mode), so that pass is credited, not redone.
+ *
  * Post-dispatch (#4359), after the reviewers posted and the agent saved the /test-gate output:
  * `--finalize --test-gate-output FILE [--notes-dropped N]`: delivery + panel guard and the 6.5 verdict handling
  * (scripts/review-staging-post.sh), then review-finalize.sh extract, classify (dry run, then for real) and file-prepare;
@@ -24,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { parseForgeYaml } from "./forge-utils.mjs";
 
 const INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
-const USAGE = "usage: forgedock review-staging [<PR number|PR URL>] [--thorough] [--json]\n" +
+const USAGE = "usage: forgedock review-staging [<PR number|PR URL>] [--thorough | --delta <from-sha>] [--json]\n" +
   "       forgedock review-staging [<PR>] --finalize --test-gate-output <file> [--notes-dropped <n>] [--json]\n" +
   "       forgedock review-staging [<PR>] --summary [--filed <issue>]... [--json]";
 const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -39,9 +43,9 @@ class Stop extends Error {
   constructor(code, lines) { super(lines.join("\n")); this.code = code; this.lines = lines; }
 }
 
-/** argv -> {pr, thorough, json, mode, testGateOutput, notesDropped, filed}. Throws Stop(2) on anything else (`--delta` belongs to #4360). */
+/** argv -> {pr, thorough, json, mode, testGateOutput, notesDropped, filed, delta}. Throws Stop(2) on anything else. */
 export function parseArgs(argv) {
-  const o = { pr: null, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [] };
+  const o = { pr: null, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null };
   const setMode = (m, a) => { if (o.mode !== "pre") throw new Stop(2, [`review-staging: ${a} cannot be combined with --${o.mode}`, USAGE]); o.mode = m; };
   const value = (i, a) => { const v = argv[i + 1]; if (v == null || v.startsWith("--")) throw new Stop(2, [`review-staging: ${a} requires a value`, USAGE]); return v; };
   for (let i = 0; i < argv.length; i++) {
@@ -51,6 +55,11 @@ export function parseArgs(argv) {
     else if (a === "--finalize") setMode("finalize", a);
     else if (a === "--summary") setMode("summary", a);
     else if (a === "--test-gate-output") o.testGateOutput = value(i++, a);
+    else if (a === "--delta") {
+      const v = value(i++, a);
+      if (!SHA_RE.test(v)) throw new Stop(2, [`review-staging: --delta takes the full 40/64-hex head SHA of the earlier pass: ${v}`, USAGE]);
+      o.delta = v;
+    }
     else if (a === "--notes-dropped") {
       const v = value(i++, a);
       if (!/^\d+$/.test(v)) throw new Stop(2, [`review-staging: --notes-dropped must be a count: ${v}`, USAGE]);
@@ -70,6 +79,8 @@ export function parseArgs(argv) {
   if (o.mode !== "finalize" && (o.testGateOutput != null || o.notesDropped)) throw new Stop(2, ["review-staging: --test-gate-output/--notes-dropped belong to --finalize", USAGE]);
   if (o.mode !== "summary" && o.filed.length) throw new Stop(2, ["review-staging: --filed belongs to --summary", USAGE]);
   if (o.mode !== "pre" && o.thorough) throw new Stop(2, ["review-staging: --thorough belongs to the pre-dispatch", USAGE]);
+  if (o.mode !== "pre" && o.delta) throw new Stop(2, ["review-staging: --delta belongs to the pre-dispatch (--finalize reads it from the review context)", USAGE]);
+  if (o.thorough && o.delta) throw new Stop(2, ["review-staging: --delta cannot be combined with --thorough", USAGE]);
   if (o.mode === "finalize" && !o.testGateOutput) throw new Stop(2, ["review-staging: --finalize requires --test-gate-output <file> (the saved /test-gate output)", USAGE]);
   return o;
 }
@@ -87,10 +98,13 @@ export function buildManifest(m) {
     `BUNDLE_PRS: ${(m.bundle ?? []).join(" ")}`,
     `SCOPE_MODE=${m.scopeMode}`,
     `ROSTER: tier=${m.tier} agents=${m.briefs.map((b) => b.domain).join(" ")}${m.reason ? ` reason=${m.reason}` : ""}`,
+    ...(m.delta ? [`DELTA: ${m.delta.from}..${m.headSha} files=${m.delta.files.length}`] : []),
     `CONTEXT_FILE=${m.contextFile}`,
     ...m.briefs.map((b) => `DISPATCH ${b.domain} ${b.path}`),
     `NEXT: dispatch one isolated reviewer per DISPATCH line (prompt = the brief file's content) in a single message; before each launch append its domain to ${m.launchedFile}.`,
-    `NEXT: dispatch the spec-owned panel per commands/review-pr-staging.md (${SPEC_PANEL}), appending each domain to the same file.`,
+    m.delta
+      ? `NEXT: delta pass: the spec-owned panel (${SPEC_PANEL}) is credited from the earlier pass at ${m.delta.from.slice(0, 7)}; dispatch only the DISPATCH lines.`
+      : `NEXT: dispatch the spec-owned panel per commands/review-pr-staging.md (${SPEC_PANEL}), appending each domain to the same file.`,
     `NEXT: after every reviewer posted, run /test-gate, save its output to a file, then run: forgedock review-staging ${m.pr} --finalize --test-gate-output <file>`,
   ];
   return lines.join("\n");
@@ -154,8 +168,15 @@ function loadTemplate(io, templates, domain) {
   return protocols && persona ? `${protocols}\n\n---\n\n${persona}` : null;
 }
 
-function scopeSection(scope) {
+function scopeSection(scope, delta, head) {
   const list = (a) => (a?.length ? a.join(" ") : "(none)");
+  if (delta) {
+    return [
+      "## Review scope",
+      `DELTA review: review only the changes in ${delta.from}..${head} (the diff slice above is that range). The earlier pass at ${delta.from} is credited: its findings are carried into triage, so do not re-review unchanged code or re-report findings in it. Report the scope used in your comment.`,
+      `DELTA_FILES: ${list(delta.files)}`,
+    ].join("\n");
+  }
   if (scope.scope_mode !== "scoped") return `## Review scope\nSCOPE_MODE=full: review the full bundle diff. Report the scope used in your comment.`;
   return [
     "## Review scope",
@@ -197,6 +218,7 @@ async function main(argv, io) {
   // Phase -1: PR, head SHA, prior passes, route marker, run-keyed pointer
   const pr = a.pr ?? await openStagingPr(io, c);
   const head = await headSha(io, c, pr);
+  if (a.delta && a.delta === head) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: --delta ${head} is the current head of PR #${pr}: nothing changed since that pass, nothing to review`]);
   const sha7 = head.slice(0, 7);
   let priorRoutes = 0;
   try {
@@ -231,13 +253,17 @@ async function main(argv, io) {
 
   // 0C: prepare (also runs review-roster.sh)
   const ctxFile = join(sd, `review-ctx-${pr}.json`);
-  const p = await bash(io, "review-prepare.sh", ["--pr", String(pr), "--repo", c.ghRepo, "--no-delta", "--build-gate", "advisory", "--out", ctxFile, ...(a.thorough ? ["--thorough", "true"] : [])], env);
+  const p = await bash(io, "review-prepare.sh", ["--pr", String(pr), "--repo", c.ghRepo, "--no-delta", "--build-gate", "advisory", "--out", ctxFile,
+    ...(a.thorough ? ["--thorough", "true"] : []), ...(a.delta ? ["--delta-from", a.delta] : [])], env);
   let ctx = null;
   try { ctx = JSON.parse(io.readFile(ctxFile)); } catch { /* reported below */ }
   if (p.code !== 0 || !ctx) {
     const blockers = (ctx?.blockers ?? []).map((x) => `BLOCKER: ${x}`);
     throw new Stop(1, [...blockers, `REVIEW_RESULT: status: BLOCKED, blocker: review-prepare failed (exit ${p.code}); nothing reviewed (fail closed)`]);
   }
+
+  // Delta (#4360): only when prepare actually narrowed to it (an empty file delta widened to FULL)
+  const delta = ctx.delta?.mode === "DELTA" && SHA_RE.test(ctx.delta.from ?? "") ? { from: ctx.delta.from, files: ctx.delta.files ?? [] } : null;
 
   // Roster + briefs
   const agents = ctx.roster?.agents?.length ? ctx.roster.agents : ["security"];
@@ -262,7 +288,7 @@ async function main(argv, io) {
     const extra = [
       `## Staging review (staging->main PR #${pr}, head ${head})`,
       `Your marker domain is \`${domain}\`: start your comment with \`<!-- FORGE:REVIEW-AGENT:${domain} -->\`, then the line \`Reviewed-SHA: ${head}\`, and end it with the structured findings block.`,
-      scopeSection(scope),
+      scopeSection(scope, delta, head),
       ...(ctx.broken_assumptions?.length ? ["## Pre-found integration issues to verify", ...ctx.broken_assumptions.map((x) => `- ${x}`)] : []),
       ...(priorOpen.length ? ["## Prior open findings (carried forward: do not re-file)", ...priorOpen.map((x) => `- ${x}`)] : []),
       ...(priorResolved.length ? ["## Prior resolved findings (excluded from the verdict)", ...priorResolved.map((x) => `- ${x}`)] : []),
@@ -275,7 +301,7 @@ async function main(argv, io) {
 
   let bundle = [];
   try { bundle = io.readFile(prsFile).split(/\s+/).filter((n) => /^\d+$/.test(n)); } catch { /* reported empty */ }
-  const m = { pr, headSha: head, gate, bundle, scopeMode: scope.scope_mode, tier: ctx.roster?.tier ?? "full", reason: ctx.roster?.reason ?? "", contextFile: ctxFile, launchedFile, briefs, reentry: priorRoutes > 0 };
+  const m = { pr, headSha: head, gate, bundle, scopeMode: scope.scope_mode, tier: ctx.roster?.tier ?? "full", reason: ctx.roster?.reason ?? "", contextFile: ctxFile, launchedFile, briefs, reentry: priorRoutes > 0, delta };
   io.out(a.json ? JSON.stringify(m) : buildManifest(m));
   return 0;
 }
@@ -333,6 +359,9 @@ async function finalize(a, io) {
   // 7A-7C through the shared review-finalize.sh (exit 3 = REVIEW_RESULT: status: BLOCKED was printed)
   const ctxFile = join(sd, `review-ctx-${pr}.json`);
   if (!readText(io, ctxFile)) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: review context ${ctxFile} missing (the pre-dispatch did not run); nothing triaged (fail closed)`, BLOCK_DEPLOY]);
+  // A DELTA context (--delta, #4360) makes extract read the earlier pass's findings too: that pass is credited, not redone.
+  const cd = readJson(io, ctxFile)?.delta;
+  const delta = cd?.mode === "DELTA" && SHA_RE.test(cd.from ?? "") ? { from: cd.from, files: (cd.files ?? []).filter((f) => typeof f === "string" && f) } : null;
   const outDir = join(sd, `review-finalize-${pr}`);
   const rf = async (sub, extra) => {
     const r = await io.run("bash", [join(io.root, "scripts", "review-finalize.sh"), sub, "--pr", String(pr), "--repo", c.ghRepo, "--context", ctxFile, "--out-dir", outDir, ...extra], { env, cwd: io.cwd });
@@ -349,7 +378,8 @@ async function finalize(a, io) {
   const scopeFile = join(sd, `${pr}_scope-files.txt`);
   io.rm(scopeFile);
   if (scopeMode === "scoped") {
-    const files = [...new Set([...(scope.cross_pr_files ?? []), ...(scope.unreviewed_files ?? []), ...(scope.deploy_wiring_files ?? [])].filter(Boolean))].sort();
+    // the delta's own files are always in scope: a finding on the fix is never demoted to NOTE out_of_scope
+    const files = [...new Set([...(scope.cross_pr_files ?? []), ...(scope.unreviewed_files ?? []), ...(scope.deploy_wiring_files ?? []), ...(delta?.files ?? [])].filter(Boolean))].sort();
     io.writeFile(scopeFile, files.length ? `${files.join("\n")}\n` : "");
   }
   const scopeArgs = scopeMode === "scoped" ? ["--scope-files", scopeFile] : [];
@@ -380,7 +410,7 @@ async function finalize(a, io) {
   };
   const items = worklist.items;
   const state = {
-    pr, head, bundle, codeBranch, scopeMode, testGate: { verdict: tg.verdict, reason: tg.reason }, counts, notes,
+    pr, head, bundle, codeBranch, scopeMode, delta, testGate: { verdict: tg.verdict, reason: tg.reason }, counts, notes,
     confirmedCritical: confirmed("CRITICAL"), confirmedHigh: confirmed("HIGH"),
     toFile: items.filter((i) => i.action === "file"), skipped: items.filter((i) => String(i.action).startsWith("skip-")),
   };
@@ -390,6 +420,7 @@ async function finalize(a, io) {
     `REVIEW_STAGING_FINALIZE: PR #${pr} head ${head}`,
     `TEST_GATE: ${tg.verdict} (${tg.reason})`,
     `SCOPE_MODE=${scopeMode}`,
+    ...(delta ? [`DELTA_FROM=${delta.from}`] : []),
     Object.entries(counts).map(([kk, v]) => `${kk.toUpperCase()}=${v}`).join(" "),
     `CODE_BRANCH=${codeBranch}`,
     ...notes.map((n) => `NOTE ${n}`),
@@ -466,6 +497,7 @@ async function summary(a, io) {
     `- findings_filed: ${n.findings_filed ?? 0}${filed.length ? ` (${filed.join(", ")})` : ""}; out_of_scope: ${n.out_of_scope ?? 0}`,
     `- notes_fixed: 0; notes_listed: ${n.notes_listed ?? 0}; notes_dropped: ${n.notes_dropped ?? 0}; notes_capped: ${n.notes_capped ?? 0}; notes_reflag: ${n.notes_reflag ?? 0}`,
     `- deduped: ${deduped.length ? deduped.join("; ") : "(none)"}`,
+    ...(st.delta?.from ? [`- delta pass: ${String(st.delta.from).slice(0, 7)}..${head.slice(0, 7)} (${(st.delta.files ?? []).length} file(s)); earlier pass at ${st.delta.from} credited (its findings re-read by extract)`] : []),
     "",
     ...(await optional("Pipeline cost", "bash", [join(io.root, "scripts", "cost-report.sh"), "--last", "3"], 60_000)),
     "",
