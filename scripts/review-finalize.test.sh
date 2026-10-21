@@ -286,6 +286,45 @@ want "scope: HIGH near an added line" '.findings[] | select(.id == "N-2") | .sco
 want "scope: MEDIUM near an added line" '.findings[] | select(.id == "N-3") | .scope' findings.json "introduced"
 want "scope: every finding carries a valid scope" '[.findings[].scope | select(. == "introduced" or . == "pre-existing" or . == "unknown")] | length' findings.json "$(jq '.findings | length' "$WORK/out/findings.json")"
 want "scope: introduced count" '.counts.findings_introduced' findings.json "$(jq '[.findings[] | select(.scope == "introduced")] | length' "$WORK/out/findings.json")"
+# Gate 3 reads the scenario from the prose and never demotes a CONFIRMED MEDIUM+ for a missing field (#4356); the damper stays for the rest
+reset
+for f in a b c d e f g h; do printf '{"filename":"%s.py","status":"modified","patch":"@@ -9,0 +10,1 @@\\n+new line"}\n' "$f"; done | jq -s . > "$FIX/pr-files.json"
+cm MEMBER User "$(agent_body security "$SHA" '### C-1 confirmed
+Real bug described in prose only.
+### C-2 confirmed lower case
+Real bug described in prose only.
+### C-3 confirmed low
+Prose only.
+### C-4 plain label
+Failure scenario: a missing key crashes the loader
+### C-5 repro label
+- **Repro**: call load() twice
+### C-6 no scenario
+Some prose without the field.
+### C-7 mid-sentence word
+no scenario written here
+### C-8 label on next line
+**Steps to reproduce**:
+
+1. run it
+' '<!-- FINDING:C-1|CONFIRMED|MEDIUM|a.py:10|Confirmed medium without a scenario field -->
+<!-- FINDING:C-2|confirmed|medium|b.py:10|Lower case confirmed medium without a scenario field -->
+<!-- FINDING:C-3|CONFIRMED|LOW|c.py:10|Confirmed low without a scenario field -->
+<!-- FINDING:C-4|LIKELY|MEDIUM|d.py:10|Plain failure scenario label in prose -->
+<!-- FINDING:C-5|POSSIBLE|MEDIUM|e.py:10|Bold repro label in a list item -->
+<!-- FINDING:C-6|POSSIBLE|MEDIUM|f.py:10|Possible medium with no scenario anywhere -->
+<!-- FINDING:C-7|LIKELY|MEDIUM|g.py:10|Scenario word mid sentence only -->
+<!-- FINDING:C-8|LIKELY|MEDIUM|h.py:10|Scenario content on the next line -->')"
+flush; run "$GOOD" extract; rc_is "gate3 prose" "$RC" 0
+want "gate3: CONFIRMED MEDIUM without a scenario is filed" '.findings[] | select(.id == "C-1") | [.scenario, .route] | join(",")' findings.json "absent,file"
+want "gate3: lower-case confirmed medium is filed" '.findings[] | select(.id == "C-2") | .route' findings.json "file"
+want "gate3: CONFIRMED LOW without a scenario is still demoted" '.findings[] | select(.id == "C-3") | .route' findings.json "demoted-no-scenario"
+want "gate3: plain Failure scenario label counts" '.findings[] | select(.id == "C-4") | [.scenario, .route] | join(",")' findings.json "present,file"
+want "gate3: bold Repro label counts" '.findings[] | select(.id == "C-5") | [.scenario, .route] | join(",")' findings.json "present,file"
+want "gate3: POSSIBLE MEDIUM with no scenario is demoted" '.findings[] | select(.id == "C-6") | .route' findings.json "demoted-no-scenario"
+want "gate3: a mid-sentence scenario word is not a label" '.findings[] | select(.id == "C-7") | [.scenario, .route] | join(",")' findings.json "absent,demoted-no-scenario"
+want "gate3: label content on the next line counts" '.findings[] | select(.id == "C-8") | .scenario' findings.json "present"
+want "gate3: demoted count" '.counts.notes_demoted_no_scenario' findings.json "3"
 # an unreadable files API classifies nothing as pre-existing
 reset; echo '[]' > "$FIX/pr-files.json"
 cm MEMBER User "$(agent_body security "$SHA" '### P-1 pre
@@ -625,6 +664,14 @@ want "lineage damps LIKELY medium" '.findings[] | select(.id == "L-1") | .class'
 want "no-scenario note" '.findings[] | select(.id == "L-2") | .disposition' classified.json "NOTE no-scenario"
 posted_has "no-scenario counter" "notes_demoted_no_scenario=1"
 posted_has "no-scenario listed" "- L-2 a.py:9 [LIKELY] Demoted for lack of a scenario: no-scenario"
+# a CONFIRMED MEDIUM that Gate 3 kept (scenario absent, route file) is classified, never a no-scenario NOTE (#4356); marker fields unchanged
+reset
+mkfind K-1 CONFIRMED MEDIUM a.py 5 "Confirmed medium kept without a scenario field"
+FJ=$(printf '%s' "$FJ" | jq -c '.scenario = "absent"'); putfind 1
+run "$GOOD" classify; rc_is "confirmed medium classify" "$RC" 0
+want "confirmed medium without scenario is an issue" '.findings[] | select(.id == "K-1") | .class' classified.json "ISSUE"
+has "confirmed medium without scenario is filed" "FINDINGS_FILED=1"
+posted_has "confirmed medium: marker field set unchanged" "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=0 notes_listed=0 notes_dropped=0 findings_filed=1 inpr_fix=0 contract_demoted=0 findings_dropped_stale=0 findings_preexisting=0 introduced=0 notes_demoted_no_scenario=0 lineage=none classifier=script notes_reflag=0 notes_capped=0 reviewed_sha=${SHA} -->"
 # the PR-body issue in the context alone never sets lineage: only the invoker's --issue does (#3952 SEC-1/QA-2)
 reset; echo review-finding > "$FIX/labels"; mkctx 1 FULL "" 12
 mkfind L-1 LIKELY MEDIUM a.py 2 "Lineage damped medium finding"
