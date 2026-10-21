@@ -37,20 +37,12 @@ for p in infra security scraper; do
   if [ "$reads" -ge 1 ] && [ "$reads" = "$decls" ]; then ok; else bad "$p.md: $reads fences read SLICE_FILE, $decls re-declare it"; fi
 done
 
-# Staging slice path: every placeholder must be bound, and an unresolved SHA must yield a slash-free component.
-STAGING_SPEC="$ROOT/commands/review-pr-staging.md"
-if grep -qE '^REVIEW_SHA_SHORT=.*tr -cd .*unresolved' "$STAGING_SPEC"; then ok; else bad "staging spec does not define a hex-sanitized REVIEW_SHA_SHORT with an unresolved fallback"; fi
-if grep -qF 'Phase -1 `REVIEW_SHA_SHORT`' "$STAGING_SPEC"; then ok; else bad "staging dispatch text does not bind [REVIEW_SHA_SHORT] to Phase -1 REVIEW_SHA_SHORT"; fi
-SHORT_LINE=$(grep -E '^REVIEW_SHA_SHORT=' "$STAGING_SPEC" | head -n 1)
-for full in "" "n/x" "0123456789abcdef0123456789abcdef01234567"; do
-  got=$(REVIEW_SHA_FULL="$full"; eval "$SHORT_LINE"; printf '%s' "$REVIEW_SHA_SHORT")
-  case "$full" in
-    0123*) want="0123456" ;;
-    *) want="unresolved" ;;
-  esac
-  if [ "$got" = "$want" ]; then ok; else bad "REVIEW_SHA_SHORT for '$full' = '$got' (want '$want')"; fi
-  case "$got" in */*) bad "REVIEW_SHA_SHORT contains a slash for '$full'" ;; *) ok ;; esac
-done
+# Staging slice path (#4359): `forgedock review-staging` renders [REVIEW_SHA_SHORT] into the briefs. It derives it only from a validated
+# full head SHA and stops before any brief when none resolves, so the slice path can never carry a / or an unresolved sentinel.
+STAGING_CLI="$ROOT/bin/review-staging.mjs"
+if grep -qF 'const SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;' "$STAGING_CLI" && grep -qF 'if (!SHA_RE.test(head)) throw new Stop(1' "$STAGING_CLI"; then ok; else bad "staging CLI does not refuse an unvalidated head SHA"; fi
+if grep -qF 'const sha7 = head.slice(0, 7);' "$STAGING_CLI" && grep -qF 'REVIEW_SHA_SHORT: sha7' "$STAGING_CLI"; then ok; else bad "staging CLI does not bind [REVIEW_SHA_SHORT] to the validated head's first 7 hex"; fi
+if grep -q 'REVIEW_SHA_SHORT' "$ROOT/commands/review-pr-staging.md"; then bad "staging spec still binds [REVIEW_SHA_SHORT] by hand (the CLI renders the briefs)"; else ok; fi
 
 echo "review-pr-gate2.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]

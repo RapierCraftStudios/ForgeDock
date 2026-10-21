@@ -235,8 +235,8 @@ case "$(p4 FULL 'security auth')" in "PANEL_STATUS: SHORTFALL"*) ok ;; *) bad "u
 # a verdict without a findings block is undelivered (#3976): not complete, never counted
 { cm "$(printf '<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: %s\n\nVerdict: APPROVE, no findings.' "$HEAD")" User MEMBER; cm "$(body_agent auth "$HEAD")" User MEMBER; } | jq -s '.' > "$FAKE_COMMENTS"
 case "$(p4 FULL 'security auth')" in "PANEL_STATUS: SHORTFALL (ACTUAL_AGENT_COUNT=1)"*) ok ;; *) bad "a block-less reviewer comment must not satisfy Phase 4: $(p4 FULL 'security auth')" ;; esac
-# the 3C pending-agent count and the staging 6.75 delivery count carry the same block lookahead as Phase 4
-STAGING="$ROOT/commands/review-pr-staging.md"
+# the 3C pending-agent count and the staging 6.75 delivery count (scripts/review-staging-post.sh) carry the same block lookahead as Phase 4
+STAGING="$ROOT/scripts/review-staging-post.sh"   # owner of the staging 6.75 delivery count (forge#4359)
 for spec in "$SPEC" "$STAGING"; do
   n=$(grep -F 'count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->' "$spec" | wc -l)
   want=2; [ "$spec" = "$STAGING" ] && want=1
