@@ -69,6 +69,7 @@
 import { parseDependsOn } from "../engine/phases.mjs";
 import { classifyNeedsHuman, recoveryCodeOf } from "../engine/outcome-codes.mjs";
 import { recoveryEvidence } from "./render.mjs";
+import { renderAlerts } from "../stats/render.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -670,6 +671,11 @@ export function formatWaitSummary(rows, heavyStats = null) {
   if (!hasRows && !seen && !(hasStats && heavyStats.queued > 0)) return null; // nothing waited, nothing queued: no line
   const waits = hasRows ? Object.entries(by).sort(([a], [b]) => (a < b ? -1 : 1)).map(([p, ms]) => `${p} ${(ms / 60000).toFixed(1)}m`).join(", ") : "none";
   return `waits by phase: ${waits}; heavy queue: now ${hasStats && Number.isInteger(heavyStats.queued) ? heavyStats.queued : "?"}, max ${seen}`;
+}
+
+/** #4354 batch-report tail: the fail-soft alerts (stats computeAlerts) for the batch's repo; [] when none fired. */
+export function formatAlertLines(alerts) {
+  return alerts?.length ? ["ALERTS", ...renderAlerts(alerts)] : [];
 }
 
 /**

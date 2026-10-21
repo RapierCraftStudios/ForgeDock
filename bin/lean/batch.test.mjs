@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S } from "./orchestrate.mjs";
@@ -291,5 +291,44 @@ describe("#4318: the batch dispatcher's signal relabel and the needs-human relab
       const b = hook({ state: "OPEN", body: "" }, { comment: true });
       assert.equal(await b.run(), true);
     });
+  });
+});
+
+describe("#4354: the batch report ends with the fail-soft alerts of the batch's repo", () => {
+  const seed = (dir, repo, status) => {
+    mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 10; i++) {
+      const evs = [{ event: "RUN_START", ts: new Date(Date.UTC(2026, 9, 1, 0, i)).toISOString(), repo, issue: 500 + i },
+        { event: "DEPS_PREPARED", eco: "pnpm", status, reason: "tool not found: spawn pnpm ENOENT" }, { event: "RUN_TERMINAL", reason: "merged", code: "completed" }];
+      writeFileSync(join(dir, `${500 + i}.jsonl`), evs.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    }
+  };
+  const run = async (dir) => {
+    const lines = [], l = console.log;
+    console.log = (...a) => lines.push(a.join(" "));
+    try {
+      await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { dir, batchRoot: tmpDir("alert-batch-"), allowTmpfs: true,
+        emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, sched: null, decide: () => {}, alertConfig: {}, heavyStats: null,
+        leanIo: { gh: async (a) => (a.includes("milestone") ? JSON.stringify({ milestone: null }) : JSON.stringify({ body: "" })), git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : "") },
+        orchestration: { breaker: null, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 2 } },
+        leanModule: { runCore: async () => ({ terminalReason: "merged", pr: 51 }) } });
+    } finally { console.log = l; }
+    return lines.join("\n").split("\n").filter((x) => x.trim());
+  };
+
+  it("prints ALERTS last for the repo's failing dependency cache, nothing for a healthy one or another repo's lanes", async () => {
+    const bad = tmpDir("alert-runs-");
+    seed(bad, "o/r", "failed");
+    const out = await run(bad);
+    const at = out.indexOf("ALERTS");
+    assert.ok(at > 0, out.join("\n"));
+    assert.match(out[at + 1], /^DEPS_PREPARED failed \(pnpm\): 100% \(10\/10 lanes, threshold 20%\), e\.g\. "tool not found: spawn pnpm ENOENT"$/);
+    assert.equal(out.length, at + 2, "the alerts end the report");
+    const good = tmpDir("alert-runs-");
+    seed(good, "o/r", "hit");
+    assert.ok(!(await run(good)).some((x) => /ALERTS|DEPS_PREPARED/.test(x)));
+    const other = tmpDir("alert-runs-");
+    seed(other, "x/y", "failed");
+    assert.ok(!(await run(other)).some((x) => /ALERTS/.test(x)));
   });
 });

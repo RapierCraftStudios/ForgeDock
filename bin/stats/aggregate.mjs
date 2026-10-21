@@ -233,3 +233,54 @@ export function aggregate({ runs = [], events = [], issues = [] } = {}, opts = {
   if (opts.sinceVersion) groups = groups.filter((g) => g.version !== UNKNOWN && compareVersions(g.version, opts.sinceVersion) >= 0);
   return { groups, excluded, minN };
 }
+
+/** forge#4354: fail-soft alert thresholds (forge.yaml `stats.alerts.*`). Percentages are 0..100. */
+export const DEFAULT_ALERTS = { window: 50, minLanes: 10, depsFailedPct: 20, deferredPct: 30, toolchainWarningPct: 50, outcomeShareFactor: 2 };
+
+/**
+ * Rates of fail-soft events over the last `window` lanes of `repo` (lanes from local-source `readLanes`), ordered by start
+ * time. Nothing below `minLanes`. Rules: DEPS_PREPARED failed per ecosystem, deferred-to-ci, each TOOLCHAIN_WARNING text,
+ * and outcome codes (except `completed`) whose share doubled against the previous window. Pure: no I/O, no clock.
+ */
+export function computeAlerts(lanes = [], opts = {}) {
+  const c = { ...DEFAULT_ALERTS };
+  for (const k of Object.keys(DEFAULT_ALERTS)) if (isNum(opts[k]) && opts[k] > 0) c[k] = opts[k];
+  const all = (lanes ?? []).filter((l) => l && (opts.repo == null || l.repo === opts.repo))
+    .map((l, i) => ({ l, i, t: toMs(l.startTs) ?? -Infinity }))
+    .sort((a, b) => a.t - b.t || a.i - b.i).map((x) => x.l);
+  const win = all.slice(-c.window);
+  if (win.length < c.minLanes) return [];
+  const prev = all.slice(Math.max(0, all.length - 2 * c.window), all.length - win.length);
+  const out = [];
+  const add = (event, count, sample, threshold, example, extra = {}) => out.push({ event, rate: count / sample, count, sample, threshold, example, ...extra });
+  const ecos = [...new Set(win.flatMap((l) => l.deps.map((d) => d.eco ?? "unknown")))].sort();
+  for (const eco of ecos) {
+    const used = win.filter((l) => l.deps.some((d) => (d.eco ?? "unknown") === eco));
+    const failed = used.filter((l) => l.deps.some((d) => (d.eco ?? "unknown") === eco && d.status === "failed"));
+    if (failed.length / used.length > c.depsFailedPct / 100) {
+      const ex = failed.flatMap((l) => l.deps).find((d) => (d.eco ?? "unknown") === eco && d.status === "failed");
+      add(`DEPS_PREPARED failed (${eco})`, failed.length, used.length, c.depsFailedPct / 100, ex?.reason ?? null);
+    }
+  }
+  const deferred = win.filter((l) => l.deferred.length);
+  if (deferred.length / win.length > c.deferredPct / 100) add("deferred-to-ci", deferred.length, win.length, c.deferredPct / 100, deferred[deferred.length - 1].deferred[0]);
+  const warnings = [...new Set(win.flatMap((l) => l.toolchainWarnings))].sort();
+  for (const w of warnings) {
+    const hit = win.filter((l) => l.toolchainWarnings.includes(w)).length;
+    if (hit / win.length > c.toolchainWarningPct / 100) add("TOOLCHAIN_WARNING", hit, win.length, c.toolchainWarningPct / 100, w);
+  }
+  const coded = (list) => list.filter((l) => l.code != null);
+  const cw = coded(win), cp = coded(prev);
+  if (cw.length && prev.length >= c.minLanes && cp.length) {
+    const share = (list, code) => list.filter((l) => l.code === code).length / list.length;
+    for (const code of [...new Set(cw.map((l) => l.code))].filter((x) => x !== "completed").sort()) {
+      const hits = cw.filter((l) => l.code === code);
+      const now = share(cw, code), before = share(cp, code);
+      if (hits.length >= 2 && now >= c.outcomeShareFactor * before) {
+        const ex = hits[hits.length - 1];
+        add(`outcome ${code}`, hits.length, cw.length, c.outcomeShareFactor, `#${ex.issue} ${ex.reason ?? code}`, { prevRate: before });
+      }
+    }
+  }
+  return out;
+}

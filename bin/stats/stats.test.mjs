@@ -8,12 +8,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { aggregate, compareVersions, percentile } from "./aggregate.mjs";
+import { aggregate, compareVersions, computeAlerts, DEFAULT_ALERTS, percentile } from "./aggregate.mjs";
 import { cacheDir } from "./cache.mjs";
 import { fetchGithubRecords, parseTelemetryComments, runsFromRecords, toModel } from "./github-source.mjs";
-import { buildReport, makeProgressPrinter, parseArgs, parseSince, runStats, sinceToTimestamp } from "./index.mjs";
-import { readLocalRuns, summariseLog } from "./local-source.mjs";
-import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
+import { buildReport, makeProgressPrinter, parseArgs, parseSince, readAlertConfig, runStats, sinceToTimestamp } from "./index.mjs";
+import { lanesOfLog, readLanes, readLocalRuns, summariseLog } from "./local-source.mjs";
+import { renderAlerts, renderCompact, renderJson, renderMarkdown } from "./render.mjs";
 import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb } from "./query.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -562,5 +562,89 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
     assert.equal(parseArgs(["--context-ab"]).contextAb, true);
     const rep = await buildReport({ repo: "o/r", contextAb: true }, { localRuns: [summariseLog(log("on", "first"))], releaseTimes: [], gh: async () => { throw new Error("no network"); } });
     assert.equal(rep.query.context_ab.first.on.n, 1);
+  });
+});
+
+describe("fail-soft alerts (#4354)", () => {
+  const ts = (i) => new Date(Date.UTC(2026, 9, 1) + i * 60000).toISOString();
+  // One lane per call; `extra` are the events after RUN_START.
+  const lane = (i, extra = [], { repo = "o/r", code = "completed", reason = "merged" } = {}) => [
+    { event: "RUN_START", ts: ts(i), repo, issue: 100 + i }, ...extra, ...(code ? [{ event: "RUN_TERMINAL", reason, code }] : [])];
+  const deps = (eco, status, why = null) => ({ event: "DEPS_PREPARED", eco, status, reason: why });
+  const lanes = (n, f, o) => Array.from({ length: n }, (_, i) => lanesOfLog(lane(i, f(i), typeof o === "function" ? o(i) : o))[0]);
+
+  it("DEPS_PREPARED failed above 20% per ecosystem, with rate, sample and an example reason; healthy ecosystems stay quiet", () => {
+    const l = lanes(10, (i) => [deps("pnpm", i < 3 ? "failed" : "hit", "tool not found: spawn pnpm ENOENT"), deps("uv", "hit")]);
+    const a = computeAlerts(l, { repo: "o/r" });
+    assert.deepEqual(a.map((x) => [x.event, x.count, x.sample]), [["DEPS_PREPARED failed (pnpm)", 3, 10]]);
+    assert.equal(a[0].example, "tool not found: spawn pnpm ENOENT");
+    assert.deepEqual(computeAlerts(lanes(10, (i) => [deps("uv", i < 2 ? "failed" : "hit")]), { repo: "o/r" }), [], "exactly 20% is not above");
+    const line = renderAlerts(a)[0];
+    assert.match(line, /^DEPS_PREPARED failed \(pnpm\): 30% \(3\/10 lanes, threshold 20%\), e\.g\. "tool not found: spawn pnpm ENOENT"$/);
+  });
+
+  it("deferred-to-ci above 30% of lanes and a TOOLCHAIN_WARNING repeated on more than 50% of lanes", () => {
+    const pre = (deferred) => ({ event: "PRECHECK_COMMANDS", round: 0, results: [{ command: "npm test", rc: 0, ms: 5 }, ...(deferred ? [{ command: "npx tsc", status: "deferred-to-ci" }] : [])] });
+    const warn = { event: "TOOLCHAIN_WARNING", warning: "host node v26 does not satisfy the .nvmrc pin \"22\"" };
+    const a = computeAlerts(lanes(10, (i) => [pre(i < 4), ...(i < 6 ? [warn] : [])]), { repo: "o/r" });
+    assert.deepEqual(a.map((x) => [x.event, x.count, x.sample, x.example]), [["deferred-to-ci", 4, 10, "npx tsc"], ["TOOLCHAIN_WARNING", 6, 10, warn.warning]]);
+    assert.deepEqual(computeAlerts(lanes(10, (i) => [pre(i < 3), ...(i < 5 ? [warn] : [])]), { repo: "o/r" }), [], "30% and 50% are not above");
+  });
+
+  it("an outcome code whose share doubled against the previous window; needs a full previous window; completed never alerts", () => {
+    // 20 lanes, window 10: previous window has 1 ci.red (10%), current has 3 (30%)
+    const code = (i) => ({ code: [0, 12, 15, 18].includes(i) ? "ci.red" : "completed", reason: [0, 12, 15, 18].includes(i) ? "needs-human" : "merged" });
+    const l = lanes(20, () => [], code);
+    const a = computeAlerts(l, { repo: "o/r", window: 10 });
+    assert.deepEqual(a.map((x) => [x.event, x.count, x.sample, x.prevRate, x.example]), [["outcome ci.red", 3, 10, 0.1, "#118 needs-human"]]);
+    assert.match(renderAlerts(a)[0], /^outcome ci\.red: 30% \(3\/10 lanes, previous window 10%, threshold 2x\), e\.g\. "#118 needs-human"$/);
+    assert.deepEqual(computeAlerts(l.slice(5), { repo: "o/r", window: 10 }), [], "a previous window under min_lanes never compares");
+    assert.deepEqual(computeAlerts(lanes(20, () => [], (i) => ({ code: i < 15 ? "invalid" : "completed" })), { repo: "o/r", window: 10 }), []);
+  });
+
+  it("rolling window per repo, ordered by start: old failures and other repos fall out; under 10 lanes or no logs gives nothing", () => {
+    const bad = lanes(10, () => [deps("pnpm", "failed", "x")]);
+    const good = lanes(50, () => [deps("pnpm", "hit")]).map((l, i) => ({ ...l, startTs: ts(100 + i) }));
+    assert.deepEqual(computeAlerts([...good, ...bad], { repo: "o/r" }), [], "the 50 newest lanes are healthy");
+    assert.equal(computeAlerts(bad, { repo: "o/r" }).length, 1);
+    assert.deepEqual(computeAlerts(bad, { repo: "x/y" }), []);
+    assert.deepEqual(computeAlerts(bad.slice(1), { repo: "o/r" }), [], "9 lanes is too few");
+    assert.deepEqual(computeAlerts([], { repo: "o/r" }), []);
+    assert.deepEqual(readLanes(join(td, "missing")), []);
+  });
+
+  it("readLanes splits every RUN_START slice of every log (local files only) and keeps the repo", () => {
+    const dir = join(td, "runs"); mkdirSync(dir);
+    const text = (evs) => evs.map((e) => JSON.stringify(e)).join("\n") + "\n";
+    writeFileSync(join(dir, "7.jsonl"), text([...lane(0, [deps("cargo", "failed", "lock drift")]), ...lane(1, [{ event: "WORKTREE_SPARSE_FALLBACK", reason: "no cone" }], { code: null })]) + "{torn");
+    writeFileSync(join(dir, "8.jsonl"), text(lane(2, [], { repo: "a/b" })));
+    const got = readLanes(dir);
+    assert.deepEqual(got.map((l) => [l.repo, l.issue, l.code, l.deps.length, l.sparseFallback]),
+      [["o/r", 100, "completed", 1, null], ["o/r", 101, null, 0, "no cone"], ["a/b", 102, "completed", 0, null]]);
+  });
+
+  it("thresholds come from forge.yaml stats.alerts.* (nested block and flat form) and change the result", () => {
+    assert.deepEqual(readAlertConfig(join(td, "none")), DEFAULT_ALERTS);
+    writeFileSync(join(td, "forge.yaml"), "stats:\n  alerts:\n    min_lanes: 5\n    deps_failed_pct: 50\n    alerts_window: 8\n    window: 30\n    deferred_to_ci_pct: nope\n");
+    const c = readAlertConfig(td);
+    assert.deepEqual(c, { ...DEFAULT_ALERTS, minLanes: 5, depsFailedPct: 50, window: 8 });
+    const l = lanes(6, (i) => [deps("pnpm", i < 2 ? "failed" : "hit", "x")]);
+    assert.deepEqual(computeAlerts(l, { repo: "o/r" }), [], "default min_lanes 10");
+    assert.deepEqual(computeAlerts(l, { repo: "o/r", ...c }), [], "33% is under the configured 50%");
+    assert.equal(computeAlerts(l, { repo: "o/r", ...c, depsFailedPct: 20 }).length, 1);
+  });
+
+  it("stats report carries alerts and renders an ALERTS section only when one fired; --no-local skips them; no gh call for alerts", async () => {
+    const { gh } = fakeGh();
+    const localLanes = lanes(10, () => [deps("pnpm", "failed", "spawn pnpm ENOENT")]);
+    const rep = await buildReport({ repo: "o/r", local: true, cache: false, minN: 10 }, { gh, env: { ...ENV, FORGE_RUNS_DIR: join(td, "none") }, releaseTimes: [], localRuns: [], localLanes, alertConfig: {} });
+    assert.equal(rep.alerts.length, 1);
+    assert.match(renderMarkdown(rep), /## ALERTS\n\n- DEPS_PREPARED failed \(pnpm\): 100% \(10\/10 lanes/);
+    assert.equal(JSON.parse(renderJson(rep)).alerts[0].event, "DEPS_PREPARED failed (pnpm)");
+    const off = await buildReport({ repo: "o/r", local: false, cache: false, minN: 10 }, { gh, env: ENV, releaseTimes: [], localLanes });
+    assert.deepEqual(off.alerts, []);
+    assert.doesNotMatch(renderMarkdown(off), /ALERTS/);
+    // computed from local run logs alone: no gh in scope at all
+    assert.equal(computeAlerts(localLanes, { repo: "o/r" }).length, 1);
   });
 });

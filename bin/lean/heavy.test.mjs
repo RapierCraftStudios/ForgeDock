@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS } from "./heavy.mjs";
 import { checkAdmission, ADMISSION_DEFAULTS } from "./admission.mjs";
-import { formatWaitSummary } from "./orchestrate.mjs";
+import { formatAlertLines, formatWaitSummary } from "./orchestrate.mjs";
 import { readHeavy } from "../engine-cli.mjs";
 
 // Injected pids, clock and host: `live` is the set of pids the registry sees as alive; `mem` the MemAvailable in MB.
@@ -203,5 +203,12 @@ describe("heavy shims and the run wrapper (#4169)", () => {
     assert.equal(formatWaitSummary([{ issue: 3 }], null), null);
     assert.equal(formatWaitSummary([{ issue: 3 }], { queued: 0 }), null, "no waits and an empty queue print no line");
     assert.equal(formatWaitSummary([{ issue: 3 }], { queued: 2 }), "waits by phase: none; heavy queue: now 2, max 0");
+  });
+
+  it("formatAlertLines (#4354): the batch-report alert tail, nothing when no alert fired", () => {
+    assert.deepEqual(formatAlertLines([]), []);
+    assert.deepEqual(formatAlertLines(undefined), []);
+    assert.deepEqual(formatAlertLines([{ event: "deferred-to-ci", rate: 0.4, count: 4, sample: 10, threshold: 0.3, example: "npx tsc" }]),
+      ["ALERTS", 'deferred-to-ci: 40% (4/10 lanes, threshold 30%), e.g. "npx tsc"']);
   });
 });

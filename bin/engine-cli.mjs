@@ -1092,7 +1092,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   sink.batch?.(batch);
   sink.line(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
   const dir = deps.dir ?? runDir();
-  const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists } = await import("./lean/orchestrate.mjs");
+  const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines } = await import("./lean/orchestrate.mjs");
   const { formatPrecheckSummary } = await import("./lean/precheck.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   const { makePrefilter, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
@@ -1310,6 +1310,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (crossLane.length) report.push(`cross-lane edges: ${crossLane.map((e) => `#${e.issue} (${e.lane}) → #${e.dependency} (${e.dependencyLane})`).join(", ")}`);
   if (rows.some((r) => r.outcome === "held")) report.push(`held issues stay pending: forgedock orchestrate --resume ${batch.id}`);
   report.push(formatReclaimed(reclaimed));
+  try { // #4354: fail-soft alerts for the batch's repo from the local run logs, last; nothing when none fired
+    const [{ computeAlerts }, { readLanes }, { readAlertConfig }] = await Promise.all([import("./stats/aggregate.mjs"), import("./stats/local-source.mjs"), import("./stats/index.mjs")]);
+    report.push(...formatAlertLines(computeAlerts(readLanes(dir), { repo, ...(deps.alertConfig ?? readAlertConfig(cwd)) })));
+  } catch { /* alerts never fail a batch */ }
   for (const l of report) sink.line(l);
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
   try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
