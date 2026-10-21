@@ -8,6 +8,7 @@
 import { join, dirname, basename, delimiter } from "node:path";
 import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
+import { readSelfReview, compareSelfReview } from "./selfreview.mjs";
 import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
@@ -1194,6 +1195,10 @@ export async function runCore(o) {
       await builder(++attemptN, implementPrompt, planned ? sessionId : null, true);
       stage = "fix"; // later builder rounds fix precheck, CI, structure, docs or conformance findings
       result = await readResult();
+      { // #4374: the builder's self-review against the shared rubric, log only
+        const sr = readSelfReview(result);
+        if (sr) ev(sr.state === "present" ? { event: "SELF_REVIEW", answers: sr.items.length, no: sr.no } : { event: "SELF_REVIEW_MISSING", state: sr.state });
+      }
       {
         const blocked = await endIfBlocked();
         if (blocked) return blocked;
@@ -1402,7 +1407,7 @@ export async function runCore(o) {
     // A review without usable rows ends needs-human (or, with engine.review_incomplete: degraded, merges flagged).
     await label("in-review");
     const shadow = conformance !== "enforce";
-    let effective = frozen, review = null, lastAmend = "", resumes = 0, verdict = null, degraded = null, triggerSkipped = false;
+    let effective = frozen, review = null, lastAmend = "", resumes = 0, verdict = null, degraded = null, triggerSkipped = false, selfReviewCompared = false;
     const TRIGGER_SKIP = "skipped (review.trigger enforce: no risk trigger)";
     const triggerSkipNote = "## Conformance Review\n**Skipped by `review.trigger: enforce`:** no risk path, package edge or hotspot in the diff, and every deterministic gate passed; no reviewer ran (#4273).";
     async function amend() {
@@ -1444,6 +1449,8 @@ export async function runCore(o) {
         d = decide(review, ctx);
         if (d.review) review = d.review;
         ev({ event: "CONFORMANCE", round: reviewN, state: d.state, failures: d.failures.map((x) => x.code), mode: shadow ? "shadow" : "enforce" });
+        const cmp = selfReviewCompared ? null : compareSelfReview(readSelfReview(result), d); // #4374: once, on the first judgement
+        if (cmp) { selfReviewCompared = true; ev({ event: cmp.agreed ? "SELF_REVIEW_AGREED" : "SELF_REVIEW_DISAGREED", reviewer: cmp.reviewer, self_no: cmp.self_no, failures: d.failures.map((x) => x.code) }); }
         if (!d.state.startsWith("review.")) return d;
       }
       return d;

@@ -94,6 +94,15 @@ A new dependency between workspace packages (a workspace package added to a pack
 ${BLOCK_RULES}`;
 }
 
+/**
+ * #4374: the conformance rubric, one definition shared verbatim by `reviewerPrompt` and the builder's self-review in
+ * `builderImplementPrompt`, so the two cannot drift. Each question is answered yes (OK) or no; codebase-agnostic.
+ */
+export const REVIEW_RUBRIC = `1. Fixed: does the diff resolve the issue as written, delivering every requirement and acceptance criterion of the issue and every contract requirement with disposition deliver?
+2. No regression: is the diff free of breakage of an existing caller, test or behaviour (a concrete path:line failure)?
+3. Contract: is every deliverable changed as described, every preserve item intact and every validate command passing?
+4. Scope: does the diff change only deliverable paths and tests?`;
+
 /** Builder call 2, same session: implement the frozen contract. */
 export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
@@ -116,7 +125,12 @@ When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comment
 ### Verification   (each validate command, its result, and whether the new test fails without the fix)
 ### Notes   (behavior changes, env vars)
 
-Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirements":[{"id":"R1","status":"implemented|partial|missing","evidence":"file:line"}],"validation":[{"id":"V1","command":"","exit":0}],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}],"amendments":[]}
+Last step before writing ${RESULT_FILE}: self-review against the reviewer's rubric. Answer each question below yes or no against \`git diff <base>...HEAD\` (base: the lane the contract was frozen against), with evidence for each (path:line, or a command and its result); fix any "no" in this session and commit before you answer again:
+<rubric>
+${REVIEW_RUBRIC}
+</rubric>
+
+Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirements":[{"id":"R1","status":"implemented|partial|missing","evidence":"file:line"}],"validation":[{"id":"V1","command":"","exit":0}],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}],"self_review":[{"question":"1","answer":"yes|no","evidence":""}],"amendments":[]}
 Docker: start containers with docker run --rm; pass --label for each entry of $FORGE_DOCKER_LABELS on every docker run, volume create, network create and build (compose: on services, volumes, networks); tear down via trap/finally.
 If you started Docker containers or volumes that are still there, list their names in ${RESULT_FILE} as "resources":{"containers":[],"volumes":[]} so the engine removes them when the lane ends.
 If you find you are blocked, write "status":"blocked" with a typed "block" instead.`;
@@ -296,7 +310,7 @@ export function boundDiff(diff, { stat = "", base = "", maxBytes = REVIEW_DIFF_M
 export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
   const sk = JSON.stringify(skeleton ?? reviewSkeleton(contract ?? {}, files, ignore), null, 1);
-  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
+  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
 }
 
 /**
