@@ -311,7 +311,7 @@ added: pinned pm → `corepack <pm>@<ver>` (else `npx -y`) shims in
 `<run tmp>/toolchain/bin`, merged into `callRunner`'s env so the builder, its
 validate commands and git hooks resolve the pin. No pins → no env/prompt change.
 `env.setup` failure is an environment error (`env.setup_failed`), not a build failure.
-#4348: on an npx host (no corepack) `resolvePinnedBins` runs `npx -y -p <pkg>@<ver> -c 'command -v <bin>'`
+#4348: wherever npx launches the shims (an npm pin, or pnpm/yarn without corepack) `resolvePinnedBins` runs `npx -y -p <pkg>@<ver> -c 'command -v <bin>'`
 once per lane and keeps the path only when `<.bin>/../<pkg>/package.json` has the exact pinned version; each shim
 then execs that binary directly (no npx process per call), keeping the `npx -y -p` line as the fallback when
 resolution fails or the cache is pruned (anomaly note names the unresolved bins). Heavy shims still wrap the toolchain shim.

@@ -6,7 +6,7 @@ import { writeFileSync, mkdirSync, chmodSync, existsSync, readFileSync, statSync
 import { join, delimiter } from "node:path";
 import { execFileSync } from "node:child_process";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { detectPins, parsePackageManager, nodeSatisfies, nodeWarning, shimScripts, prepareToolchain, toolchainEnv, writeShims, summary, resolvePinnedBins } from "./toolchain.mjs";
+import { detectPins, parsePackageManager, nodeSatisfies, nodeWarning, shimScripts, prepareToolchain, toolchainEnv, writeShims, summary, resolvePinnedBins, which } from "./toolchain.mjs";
 import { writeHeavyShims } from "./heavy.mjs";
 
 const tmp = (p) => tmpDir(p);
@@ -29,6 +29,8 @@ const fakeHost = ({ corepack = true } = {}) => {
   return d;
 };
 const sysPath = process.env.PATH ?? "";
+// Hosts whose node ships corepack next to npx (e.g. CI's Node 24) would take the corepack branch: npx-only lanes see npx alone.
+const npxOnly = (n, p, ex) => (n === "corepack" ? null : which(n, p, ex));
 
 describe("toolchain pins (#4163)", () => {
   it("parsePackageManager accepts pm@x.y.z (with a +sha suffix) and nothing else", () => {
@@ -97,7 +99,7 @@ describe("toolchain pins (#4163)", () => {
       assert.equal(execFileSync("sh", ["-c", "pnpm --version"], { env: { ...process.env, PATH: basePath } }).toString().trim(), "11.0.0", "the host pnpm is the wrong one");
       const d = repo({ "package.json": { name: "x", packageManager: "pnpm@10.4.1+sha512.ff" } });
       const binDir = join(tmp("tc-run-"), "toolchain", "bin");
-      const tc = await prepareToolchain({ dir: d, binDir, basePath, hostNode: () => "v20.0.0" });
+      const tc = await prepareToolchain({ dir: d, binDir, basePath, find: corepack ? which : npxOnly, hostNode: () => "v20.0.0" });
       assert.ok(tc.env && tc.env.PATH.startsWith(binDir + delimiter), "shim dir first on PATH");
       assert.equal(tc.summary, "pnpm@10.4.1 (package.json packageManager)");
       const env = { ...process.env, ...tc.env };
@@ -183,7 +185,7 @@ describe("toolchain pins (#4163)", () => {
   it("#4348: a pnpm pin is resolved once at lane setup; the shim execs that binary with no npx call", async () => {
     const host = npxHost();
     const binDir = join(tmp("tc-run-"), "toolchain", "bin");
-    const tc = await prepareToolchain({ dir: pinRepo("pnpm@10.4.1"), binDir, basePath: `${host}${delimiter}${sysPath}`, hostNode: () => "v20.0.0" });
+    const tc = await prepareToolchain({ dir: pinRepo("pnpm@10.4.1"), binDir, basePath: `${host}${delimiter}${sysPath}`, find: npxOnly, hostNode: () => "v20.0.0" });
     assert.deepEqual(tc.shims, ["pnpm", "pnpx"]);
     assert.deepEqual(tc.notes, []);
     assert.equal(npxCalls(host).length, 1, "one resolution call");
@@ -198,7 +200,7 @@ describe("toolchain pins (#4163)", () => {
   it("#4348: resolution failure keeps today's npx shim and the pinned version", async () => {
     const host = npxHost({ fail: true });
     const binDir = join(tmp("tc-run-"), "toolchain", "bin");
-    const tc = await prepareToolchain({ dir: pinRepo("pnpm@10.4.1"), binDir, basePath: `${host}${delimiter}${sysPath}`, hostNode: () => "v20.0.0" });
+    const tc = await prepareToolchain({ dir: pinRepo("pnpm@10.4.1"), binDir, basePath: `${host}${delimiter}${sysPath}`, find: npxOnly, hostNode: () => "v20.0.0" });
     const npx = join(host, "npx");
     assert.deepEqual(readFileSync(join(binDir, "pnpm"), "utf8"), shimScripts({ name: "pnpm", version: "10.4.1" }, { npx }).pnpm, "byte-identical to the unresolved form");
     assert.match(tc.notes.join("\n"), /could not resolve pnpm for pnpm@10\.4\.1 once; its shim launches through npx/);
@@ -218,7 +220,7 @@ describe("toolchain pins (#4163)", () => {
   it("#4348: a resolved binary removed mid-lane falls back to npx", async () => {
     const host = npxHost();
     const binDir = join(tmp("tc-run-"), "toolchain", "bin");
-    const tc = await prepareToolchain({ dir: pinRepo("pnpm@10.4.1"), binDir, basePath: `${host}${delimiter}${sysPath}`, hostNode: () => "v20.0.0" });
+    const tc = await prepareToolchain({ dir: pinRepo("pnpm@10.4.1"), binDir, basePath: `${host}${delimiter}${sysPath}`, find: npxOnly, hostNode: () => "v20.0.0" });
     const real = /then exec '([^']+)'/.exec(readFileSync(join(binDir, "pnpm"), "utf8"))[1];
     rmSync(real);
     assert.equal(shimRun(tc, "pnpm --version"), "10.4.1");
@@ -229,7 +231,7 @@ describe("toolchain pins (#4163)", () => {
     it(`#4348: ${pin} resolves ${bins.join(" and ")} from ${pkg}`, async () => {
       const host = npxHost();
       const binDir = join(tmp("tc-run-"), "toolchain", "bin");
-      const tc = await prepareToolchain({ dir: pinRepo(pin), binDir, basePath: `${host}${delimiter}${sysPath}`, hostNode: () => "v20.0.0" });
+      const tc = await prepareToolchain({ dir: pinRepo(pin), binDir, basePath: `${host}${delimiter}${sysPath}`, find: npxOnly, hostNode: () => "v20.0.0" });
       assert.deepEqual(tc.shims, bins);
       assert.deepEqual(tc.notes, []);
       assert.deepEqual(npxCalls(host), bins.map((b) => `-y -p ${pkg} -c command -v ${b}`));
@@ -242,6 +244,17 @@ describe("toolchain pins (#4163)", () => {
     });
   }
 
+  it("#4348: an npm pin is resolved even when corepack is on the host (its shims always launch through npx)", async () => {
+    const host = npxHost();
+    const binDir = join(tmp("tc-run-"), "toolchain", "bin");
+    const find = (n, p, ex) => (n === "corepack" ? "/h/corepack" : which(n, p, ex));
+    const tc = await prepareToolchain({ dir: pinRepo("npm@10.2.0"), binDir, basePath: `${host}${delimiter}${sysPath}`, find, hostNode: () => "v20.0.0" });
+    assert.deepEqual(npxCalls(host), ["-y -p npm@10.2.0 -c command -v npm", "-y -p npm@10.2.0 -c command -v npx"]);
+    assert.match(readFileSync(join(binDir, "npm"), "utf8"), /then exec '[^']*\/node_modules\/\.bin\/npm' "\$@"; fi\n/);
+    assert.equal(shimRun(tc, "npm --version"), "10.2.0");
+    assert.equal(npxCalls(host).length, 2, "no npx call per shim invocation");
+  });
+
   it("#4348: corepack hosts are not resolved; the heavy shim still wraps the toolchain shim", async () => {
     let calls = 0;
     const resolveBins = () => { calls++; return {}; };
@@ -250,7 +263,7 @@ describe("toolchain pins (#4163)", () => {
     assert.deepEqual(cp.notes, []);
     const host = npxHost();
     const root = tmp("tc-run-"), binDir = join(root, "toolchain", "bin"), heavyBin = join(root, "heavy", "bin");
-    const tc = await prepareToolchain({ dir: pinRepo("pnpm@10.4.1"), binDir, basePath: `${host}${delimiter}${sysPath}`, hostNode: () => "v20.0.0" });
+    const tc = await prepareToolchain({ dir: pinRepo("pnpm@10.4.1"), binDir, basePath: `${host}${delimiter}${sysPath}`, find: npxOnly, hostNode: () => "v20.0.0" });
     const names = await writeHeavyShims(heavyBin, { path: tc.env.PATH });
     assert.ok(names.includes("pnpm"));
     assert.match(readFileSync(join(heavyBin, "pnpm"), "utf8"), new RegExp(`run --name 'pnpm' -- '${join(binDir, "pnpm")}' "\\$@"`));

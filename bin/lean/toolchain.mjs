@@ -225,7 +225,8 @@ async function writeShimFile(p, content) { await writeFile(p, content); await ch
 async function writeShimSet(binDir, pm, { path = process.env.PATH ?? "", find = which, writeShim = writeShimFile, mkdirp = (d) => mkdir(d, { recursive: true }), resolveBins = resolvePinnedBins } = {}) {
   const corepack = find("corepack", path, [binDir]), npx = find("npx", path, [binDir]);
   let bins = {}, unresolved = [];
-  if (!corepack && npx && pm && PMS.includes(pm.name) && VERSION_RE.test(pm.version)) {
+  // npx launches the shims for an npm pin, and for pnpm/yarn only without corepack (shimScripts).
+  if (npx && pm && PMS.includes(pm.name) && VERSION_RE.test(pm.version) && (pm.name === "npm" || !corepack)) {
     try { bins = (await resolveBins(pm, { npx, path })) ?? {}; } catch { bins = {}; }
     unresolved = pinBins(pm).filter((b) => !bins[b]);
   }
