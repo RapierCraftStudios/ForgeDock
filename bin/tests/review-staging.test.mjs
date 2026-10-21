@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { reviewStagingFromCli, parseArgs, renderBrief, buildManifest, stagingVerdict } from "../review-staging.mjs";
 
 const HEAD = "0123456789abcdef0123456789abcdef01234567";
+const FROM = "fedcba9876543210fedcba9876543210fedcba98";
 const SD = "/sd";
 const CTX = `${SD}/review-ctx-42.json`;
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -67,13 +68,14 @@ const comments = (w) => w.gh.filter((a) => a[0] === "pr" && a[1] === "comment").
 
 describe("review-staging args", () => {
   it("accepts a number, a PR URL, --thorough and --json", () => {
-    assert.deepEqual(parseArgs(["42"]), { pr: 42, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [] });
+    assert.deepEqual(parseArgs(["42"]), { pr: 42, thorough: false, json: false, mode: "pre", testGateOutput: null, notesDropped: 0, filed: [], delta: null });
     assert.equal(parseArgs(["https://github.com/o/r/pull/77", "--json"]).pr, 77);
     assert.equal(parseArgs([]).pr, null);
     assert.equal(parseArgs(["--thorough"]).thorough, true);
   });
-  it("rejects --delta (#4360), unknown flags and garbage with exit 2", async () => {
-    for (const argv of [["42", "--delta", "abc"], ["--bogus"], ["4x2"], ["42", "43"]]) {
+  it("rejects a short --delta SHA, --delta outside the pre-dispatch or with --thorough, unknown flags and garbage with exit 2", async () => {
+    for (const argv of [["42", "--delta", "abc"], ["42", "--delta"], ["42", "--delta", FROM.toUpperCase()], ["42", "--delta", FROM, "--thorough"], ["--delta", FROM, "--finalize", "--test-gate-output", "x"],
+      ["--summary", "--delta", FROM], ["--bogus"], ["4x2"], ["42", "43"]]) {
       const w = world();
       assert.equal(await reviewStagingFromCli(argv, w.io), 2, argv.join(" "));
       assert.equal(w.gh.length, 0);
@@ -253,7 +255,7 @@ const flagOf = (args, f) => args[args.indexOf(f) + 1];
 
 describe("review-staging post-dispatch args", () => {
   it("parses --finalize/--summary and their options", () => {
-    assert.deepEqual(parseArgs(["42", ...FIN, "--notes-dropped", "2"]), { pr: 42, thorough: false, json: false, mode: "finalize", testGateOutput: "tg.txt", notesDropped: 2, filed: [] });
+    assert.deepEqual(parseArgs(["42", ...FIN, "--notes-dropped", "2"]), { pr: 42, thorough: false, json: false, mode: "finalize", testGateOutput: "tg.txt", notesDropped: 2, filed: [], delta: null });
     assert.deepEqual(parseArgs(["--summary", "--filed", "101", "--filed", "#102,103"]).filed, [101, 102, 103]);
   });
   it("rejects bad combinations with exit 2 and touches nothing", async () => {
@@ -424,5 +426,78 @@ describe("review-staging --summary", () => {
     assert.equal(stagingVerdict({ ...base, confirmedHigh: 1, ciFailing: 1 }).verdict, "BLOCK DEPLOY");
     assert.equal(stagingVerdict({ ...base, testGateInvalid: true }).verdict, "BLOCK DEPLOY");
     assert.equal(stagingVerdict({ ...base, confirmedHigh: 2 }).verdict, "NEEDS FIXES FIRST");
+  });
+});
+
+describe("review-staging --delta (#4360)", () => {
+  const DELTA_CTX = ctxJson({
+    roster: { tier: "medium", reason: "delta fedcba9..0123456: domains the delta touches", agents: ["security"] },
+    delta: { mode: "DELTA", from: FROM, carried_from: "", full_rounds: 0, files: ["a.js"] },
+    slices: { security: { paths: ["a.js"], diff_file: "/slice-security.diff" } },
+  });
+
+  it("parses a full SHA", () => {
+    assert.equal(parseArgs(["42", "--delta", FROM]).delta, FROM);
+  });
+
+  it("passes --delta-from with the unchanged --no-delta, briefs the delta only, and credits the spec panel; markers unchanged", async () => {
+    const w = world({ prepare: { code: 0, ctx: DELTA_CTX } });
+    assert.equal(await reviewStagingFromCli(["42", "--delta", FROM], w.io), 0, w.err.join("\n"));
+    const prep = w.scripts.find((s) => s.script === "review-prepare.sh").args;
+    assert.equal(flagOf(prep, "--delta-from"), FROM);
+    for (const f of ["--no-delta", "--build-gate", "advisory"]) assert.ok(prep.includes(f), f);
+    assert.deepEqual(comments(w), [`<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${HEAD.slice(0, 7)} -->`]);
+    const sec = w.files[`${SD}/review-staging-42/brief-security.md`];
+    assert.ok(sec.includes(`DELTA review: review only the changes in ${FROM}..${HEAD}`) && sec.includes("DELTA_FILES: a.js"));
+    assert.ok(!sec.includes("SCOPE_MODE=scoped"), "the delta replaces the bundle scope text");
+    assert.ok(sec.includes("<!-- FORGE:REVIEW-AGENT:security -->") && sec.includes(`Reviewed-SHA: ${HEAD}`));
+    const out = w.out[0];
+    assert.match(out, new RegExp(`^DELTA: ${FROM}\\.\\.${HEAD} files=1$`, "m"));
+    assert.deepEqual(out.split("\n").filter((l) => l.startsWith("DISPATCH ")), [`DISPATCH security ${SD}/review-staging-42/brief-security.md`]);
+    assert.match(out, /spec-owned panel .* is credited from the earlier pass at fedcba9; dispatch only the DISPATCH lines/);
+    assert.ok(!out.includes("dispatch the spec-owned panel per"));
+  });
+
+  it("--json carries the delta; a FULL context (empty delta fell back) reports none", async () => {
+    const w = world({ prepare: { code: 0, ctx: DELTA_CTX } });
+    assert.equal(await reviewStagingFromCli(["42", "--delta", FROM, "--json"], w.io), 0);
+    assert.deepEqual(JSON.parse(w.out[0]).delta, { from: FROM, files: ["a.js"] });
+    const w2 = world();
+    assert.equal(await reviewStagingFromCli(["42", "--delta", FROM], w2.io), 0);
+    assert.ok(!w2.out[0].includes("DELTA:") && w2.out[0].includes("dispatch the spec-owned panel per"));
+  });
+
+  it("a --delta equal to the head is a stop: no marker, no scripts", async () => {
+    const w = world();
+    assert.equal(await reviewStagingFromCli(["42", "--delta", HEAD], w.io), 1);
+    assert.equal(comments(w).length + w.scripts.length, 0);
+    assert.match(w.err.join("\n"), /nothing to review/);
+  });
+
+  it("a BLOCKED delta prepare (no earlier pass to credit) stops with its blocker", async () => {
+    const w = world({ prepare: { code: 3, ctx: { status: "BLOCKED", blockers: ["--delta-from x: no earlier pass to credit"] } } });
+    assert.equal(await reviewStagingFromCli(["42", "--delta", FROM], w.io), 1);
+    assert.match(w.err.join("\n"), /no earlier pass to credit/);
+  });
+
+  it("--finalize adds the delta files to the scope set and records the delta; --summary names the credited pass", async () => {
+    const w = postWorld({ files: { [CTX]: JSON.stringify(DELTA_CTX) }, scope: { scope_mode: "scoped", cross_pr_files: ["b.js"], unreviewed_files: [], deploy_wiring_files: [] } });
+    assert.equal(await reviewStagingFromCli(FIN, w.io), 0, w.err.join("\n"));
+    assert.equal(w.files[`${SD}/42_scope-files.txt`], "a.js\nb.js\n");
+    assert.equal(flagOf(rfCalls(w)[0].args, "--context"), CTX, "extract reads the DELTA context (it credits the earlier pass)");
+    assert.deepEqual(JSON.parse(w.files[`${SD}/42_finalize.json`]).delta, { from: FROM, files: ["a.js"] });
+    assert.match(w.out[0], new RegExp(`^DELTA_FROM=${FROM}$`, "m"));
+    w.gh.length = 0; w.out.length = 0;
+    assert.equal(await reviewStagingFromCli(["--summary"], w.io), 0, w.err.join("\n"));
+    const b = comments(w)[0];
+    assert.ok(b.includes(`- delta pass: fedcba9..${HEAD.slice(0, 7)} (1 file(s)); earlier pass at ${FROM} credited`));
+    assert.ok(b.startsWith("<!-- FORGE:GATE_PASS -->\n") && b.includes("<!-- FORGE:GATE_PASS:TYPE=staging-review|BUNDLE=5 6 -->"));
+  });
+
+  it("a FULL review records no delta", async () => {
+    const w = postWorld();
+    assert.equal(await reviewStagingFromCli(FIN, w.io), 0);
+    assert.equal(JSON.parse(w.files[`${SD}/42_finalize.json`]).delta, null);
+    assert.ok(!w.out[0].includes("DELTA_FROM="));
   });
 });
