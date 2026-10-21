@@ -11,7 +11,7 @@ import { makeLedger } from "./ledger.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
@@ -2123,6 +2123,24 @@ describe("orchestrate", () => {
     console.log = () => {};
     try { res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], mk({ gc: async () => { throw new Error("docker down"); } })); } finally { console.log = l; }
     assert.equal(res.ok, true);
+  });
+
+  it("#4361 a preflight GC that ran out of budget resumes at the next admission interval even off the ceiling", async () => {
+    const leanIo = { gh: async (a) => (a[0] === "repo" ? "main\n" : a.includes("milestone") ? JSON.stringify({ milestone: null }) : JSON.stringify({ body: "" })),
+      git: async (a) => (a[0] === "ls-remote" && a.at(-1) === "refs/heads/staging" ? "abc\tref\n" : "") };
+    const gcCalls = [], logs = [];
+    let t = 0;
+    const deferred = [5, 0];
+    const l = console.log; console.log = (s) => logs.push(String(s));
+    try {
+      await orchestrateFromCli(["1", "2", "3", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], { dir: tmpDir("core-gc-"), batchRoot: tmpDir("core-gc-batch-"), allowTmpfs: true, emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo,
+        leanModule: { runCore: async (o) => { t += 6 * 60 * 1000; return { terminalReason: "merged", pr: o.issue, cost_usd: 0, wall_ms: 1 }; } },
+        gc: async ({ phase }) => { gcCalls.push(phase); return { reclaimed: 1, deferred: deferred.shift() ?? 0, bytes: 0 }; },
+        host: { loadAvg1: () => 0, cores: () => 4, memAvailableMb: () => 64000 }, now: () => t, hygiene: { auto_gc: true, max_host_load_ratio: 0.8 } });
+    } finally { console.log = l; }
+    // preflight deferred 5 items: the next due admission finishes them; once nothing is pending, no more GC off the ceiling
+    assert.deepEqual(gcCalls, ["preflight", "admission"]);
+    assert.ok(logs.includes("gc (preflight): 5 item(s) deferred to the next admission"), logs.join("\n"));
   });
 
   it("#4125 a lane-refused issue starts no run and its dependents are skipped, not reported as a cycle", async () => {
@@ -4558,6 +4576,43 @@ describe("#4363 fresh fix sessions", () => {
     const w3 = world({ reviews: [bad(), bad(), bad()] });
     const r3 = await run(w3);
     assert.equal(r3.terminalReason, "needs-human"); assert.equal(reviewers(w3).length, 2, "still one review retry");
+  });
+});
+
+describe("#4374 builder self-review against the shared rubric", () => {
+  const SR = [1, 2, 3, 4].map((n) => ({ question: String(n), answer: "yes", evidence: "src/foo.js:3" }));
+  const fixed = { status: "fixed", summary: "fixed foo", evidence: [], tests: ["test/foo.test.js"], self_review: SR };
+  const selfEvents = (dir) => readLog(dir, 7).filter((e) => /^SELF_REVIEW/.test(e.event));
+
+  it("one rubric constant, verbatim in reviewerPrompt and in the implement prompt with the git diff self-check", () => {
+    assert.ok(REVIEW_RUBRIC.length > 0);
+    assert.ok(reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, contract: CONTRACT, diff: "" }).includes(`<rubric>\n${REVIEW_RUBRIC}\n</rubric>`));
+    for (const mode of ["local", "ci", "hybrid"]) {
+      const p = builderImplementPrompt(mode);
+      assert.ok(p.includes(`<rubric>\n${REVIEW_RUBRIC}\n</rubric>`), mode);
+      assert.match(p, /Last step before writing \.forge-lean\/result\.json: self-review[\s\S]*git diff <base>\.\.\.HEAD[\s\S]*evidence for each[\s\S]*fix any "no" in this session/);
+      assert.match(p, /"self_review":\[\{"question":"1","answer":"yes\|no","evidence":""\}\]/);
+      assert.ok(p.indexOf("<rubric>") < p.indexOf("Finally write"), "the self-review comes before the result");
+    }
+  });
+
+  it("a fixed result without self_review is logged SELF_REVIEW_MISSING, never a failure or an extra runner call", async () => {
+    const dir = tmpDir("selfrev-"), w = world({ reviews: [ok()] });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(builders(w).length, 2); assert.equal(reviewers(w).length, 1);
+    assert.deepEqual(selfEvents(dir).map((e) => [e.event, e.state]), [["SELF_REVIEW_MISSING", "missing"]]);
+  });
+
+  it("the run log records the self-review and whether the first reviewer judgement agreed with it", async () => {
+    const dir = tmpDir("selfrev-"), w = world({ result: fixed, reviews: [ok()] });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(builders(w).length, 2); assert.equal(reviewers(w).length, 1);
+    assert.deepEqual(selfEvents(dir).map((e) => e.event), ["SELF_REVIEW", "SELF_REVIEW_AGREED"]);
+    const dir2 = tmpDir("selfrev-"), w2 = world({ result: fixed, resumeResult: fixed, reviews: [bad(), ok()] });
+    await run(w2, { dir: dir2 });
+    const ev2 = selfEvents(dir2);
+    assert.deepEqual(ev2.map((e) => e.event), ["SELF_REVIEW", "SELF_REVIEW_DISAGREED"], "compared once, on the first judgement");
+    assert.equal(ev2[1].reviewer, "nonconforming"); assert.deepEqual(ev2[1].self_no, []);
   });
 });
 

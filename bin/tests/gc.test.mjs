@@ -52,6 +52,11 @@ function world(over = {}) {
       if (a === "rev-list HEAD --not --remotes") return w.unpushed[resolve(cwd)] ? "abc123\n" : "";
       if (args[0] === "rev-parse" && args[1] === "--verify") { const b = args[3].slice(11); if (!w.branches.local.some(([n]) => n === b)) throw new Error("missing"); return "sha\n"; }
       if (args[0] === "rev-list" && args[1].startsWith("refs/heads/")) return w.unpushedBranch[args[1].slice(11)] ? "abc\n" : "";
+      if (args[0] === "ls-remote") {
+        if (w.lsRemoteFails) throw new Error("fatal: unable to access origin");
+        return (w.origin ?? w.branches.remote.map(([n]) => n)).map((n) => `sha${n.length}\trefs/heads/${n}`).join("\n");
+      }
+      if (args[0] === "push" && w.pushFails) { const bad = args.slice(3).filter((b) => w.pushFails.includes(b)); if (bad.length) throw new Error(`remote ref does not exist: ${bad.join(" ")}`); }
       if (args[0] === "for-each-ref") {
         const list = args[2] === "refs/heads/" ? w.branches.local : w.branches.remote.map(([n, t]) => [`origin/${n}`, t]);
         return list.map(([n, t]) => `${n}\t${t}`).join("\n");
@@ -258,7 +263,7 @@ describe("forgedock gc branches (#4180)", () => {
     });
     const r = await run(w, ["--apply", "--branches"]);
     assert.equal(r.code, 0, r.out);
-    assert.deepEqual(destructive(w).sort(), ["branch -D feat/issue-1-lean", "push origin --delete feat/issue-1-lean", "push origin --delete feat/issue-2-lean"]);
+    assert.deepEqual(destructive(w).sort(), ["branch -D feat/issue-1-lean", "push origin --delete feat/issue-1-lean feat/issue-2-lean"]);
     assert.match(r.out, /feat\/issue-3-lean  \(open PR\)/);
     assert.match(r.out, /feat\/issue-6-lean  \(unpushed work\)/);
     assert.ok(!/main|staging|milestone|user\/topic/.test(destructive(w).join(" ")));
@@ -268,6 +273,67 @@ describe("forgedock gc branches (#4180)", () => {
     w.probes.gh = async () => { throw new Error("gh: not logged in"); };
     const r = await run(w, ["--apply", "--branches"]);
     assert.deepEqual(destructive(w), []); assert.match(r.out, /cannot verify open PRs/);
+  });
+});
+
+describe("forgedock gc remote branches vs origin (#4361)", () => {
+  const lane = (n) => `feat/issue-${n}-lean`;
+  const closed = (ns) => Object.fromEntries(ns.map((n) => [n, "CLOSED"]));
+  const range = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
+  const pushes = (w) => w.calls.git.map((g) => g.replace(/ @.*$/, "")).filter((c) => c.startsWith("push origin --delete"));
+  it("#4361 500 stale tracking refs with 0 on origin: no delete pushes", async () => {
+    const ns = range(1, 500);
+    const w = world({ branches: { local: [], remote: ns.map((n) => [lane(n), old()]) }, issues: closed(ns), origin: [] });
+    const r = await run(w, ["--apply", "--branches"]);
+    assert.equal(r.code, 0, r.out);
+    assert.deepEqual(pushes(w), []);
+    assert.ok(!w.calls.gh.some((c) => c.startsWith("issue")), "no issue lookups for refs gone on origin");
+    const prunes = w.calls.git.map((g) => g.replace(/ @.*$/, "")).filter((c) => c.startsWith("branch -r -d"));
+    assert.equal(prunes.length, 10);
+    assert.equal(prunes.flatMap((c) => c.split(" ").slice(3)).length, 500);
+    assert.match(r.out, /already gone on origin \(stale tracking ref\)/);
+    assert.match(r.out, /gc: reclaimed 500 of 500 item\(s\)/);
+  });
+  it("a mixed set: deletes are chunked and only branches that exist on origin are pushed", async () => {
+    const ns = range(1, 120), live = range(1, 70);
+    const w = world({ branches: { local: [], remote: ns.map((n) => [lane(n), old()]) }, issues: closed(ns), origin: ["main", ...live.map(lane)] });
+    const r = await run(w, ["--apply", "--branches"]);
+    assert.equal(r.code, 0, r.out);
+    const p = pushes(w);
+    assert.equal(p.length, 2);
+    const pushed = p.flatMap((c) => c.split(" ").slice(3));
+    assert.ok(p.every((c) => c.split(" ").length - 3 <= 50));
+    assert.deepEqual(pushed.sort(), live.map(lane).sort());
+    assert.ok(!w.calls.gh.some((c) => /^issue view (7[1-9]|[89]\d|1\d\d) /.test(c)), "gone refs need no issue lookup");
+  });
+  it("a failed chunk is retried per branch so only the bad branch fails", async () => {
+    const ns = range(1, 3);
+    const w = world({ branches: { local: [], remote: ns.map((n) => [lane(n), old()]) }, issues: closed(ns), pushFails: [lane(2)] });
+    const r = await run(w, ["--apply", "--branches"]);
+    assert.equal(r.code, 1, r.out);
+    assert.deepEqual(pushes(w), [`push origin --delete ${lane(1)} ${lane(2)} ${lane(3)}`, `push origin --delete ${lane(1)}`, `push origin --delete ${lane(2)}`, `push origin --delete ${lane(3)}`]);
+    assert.match(r.out, /failed: branch origin\/feat\/issue-2-lean/);
+    assert.match(r.out, /gc: reclaimed 2 of 3 item\(s\)/);
+  });
+  it("when origin cannot be listed no remote branch is touched", async () => {
+    const w = world({ branches: { local: [], remote: [[lane(1), old()]] }, issues: closed([1]), lsRemoteFails: true });
+    const r = await run(w, ["--apply", "--branches"]);
+    assert.deepEqual(destructive(w), []);
+    assert.match(r.out, /cannot verify origin/); assert.match(r.out, /git ls-remote origin failed/);
+  });
+  it("a deadline defers what has not started; runOwnedGc reports the deferred count", async () => {
+    const ns = range(1, 120);
+    const w = world({ branches: { local: [], remote: ns.map((n) => [lane(n), old()]) }, issues: closed(ns) });
+    const plan = await planGc({ probes: w.probes, scopes: new Set(["branches"]), now: NOW });
+    const applied = await applyGc(plan, w.probes, { deadline: 0, now: () => 1 });
+    assert.equal(applied.deferred.length, 120); assert.equal(applied.reclaimed.length, 0); assert.deepEqual(pushes(w), []);
+    // a clock that passes the budget after the first chunk: 50 reclaimed, 70 deferred
+    const w2 = world({ branches: { local: [], remote: ns.map((n) => [lane(n), old()]) }, issues: closed(ns) });
+    let t = 0;
+    const git = w2.probes.git; w2.probes.git = async (a, o) => { if (a[0] === "push") t += 1000; return git(a, o); };
+    const res = await runOwnedGc({ probes: w2.probes, scopes: new Set(["branches"]), now: NOW, budgetMs: 500, clock: () => t });
+    assert.equal(res.reclaimed, 50); assert.equal(res.deferred, 70);
+    assert.match(hygieneCheck(res.plan, { applied: res.applied }).detail, /70 deferred/);
   });
 });
 

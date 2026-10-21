@@ -1229,13 +1229,15 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const crossLane = [];
   // #4183: owned-resource GC in preflight and before an admission when the host is near the ceiling (forge.yaml hygiene).
   const gcMod = await import("./gc.mjs");
+  // #4361: GC never holds admission for long; what it cannot finish in the budget resumes at the next beforeAdmit interval.
+  const GC_BUDGET_MS = 60 * 1000;
   const hygiene = deps.hygiene ?? gcMod.readHygiene(cwd);
   const testDeps = deps.leanIo || deps.leanModule || deps.laneScript;
   const gcRun = !hygiene.auto_gc ? null : deps.gc !== undefined ? deps.gc
-    : testDeps ? null : async () => gcMod.runOwnedGc({ probes: gcMod.makeGcProbes({ cwd }), hygiene });
+    : testDeps ? null : async () => gcMod.runOwnedGc({ probes: gcMod.makeGcProbes({ cwd }), hygiene, budgetMs: GC_BUDGET_MS });
   const reclaimed = { enabled: !!hygiene.auto_gc, items: 0, bytes: 0, preflight: 0, admissions: 0, runs: 0 };
   const nowMs = deps.now ?? (() => Date.now());
-  let lastGcAt = null;
+  let lastGcAt = null, gcPending = false;
   const runGcPhase = async (phase) => {
     if (!gcRun) return;
     lastGcAt = nowMs();
@@ -1245,6 +1247,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       reclaimed.items += n; reclaimed.bytes += Number(r.bytes) || 0; reclaimed.runs++;
       reclaimed[phase === "preflight" ? "preflight" : "admissions"] += n;
       for (const note of r.plan?.notes ?? []) console.log(`gc (${phase}): ${note}`);
+      gcPending = Number(r.deferred) > 0;
+      if (gcPending) console.log(`gc (${phase}): ${Number(r.deferred)} item(s) deferred to the next admission`);
     } catch (e) { console.log(`gc (${phase}) failed: ${String(e?.message ?? e).slice(0, 200)}`); }
   };
   await runGcPhase("preflight");
@@ -1257,7 +1261,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const host = deps.host ?? (await import("./lean/effects.mjs")).makeHostProbe();
       near = await nearCeiling({ cfg: readAdmission(cwd), host, ratio: hygiene.max_host_load_ratio });
     } catch { near = false; }
-    if (near) await runGcPhase("admission");
+    if (near || gcPending) await runGcPhase("admission");
   };
   // #4318: SIGINT/SIGTERM of a foreground dispatcher run the batch-exit relabel, then exit 128+signo (the lane pattern above).
   let exitRelabel = null, interrupted = false;
