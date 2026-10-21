@@ -3620,7 +3620,7 @@ describe("shared dependency cache wiring (#4220)", () => {
     const d = { calls: [] };
     w.io.deps = {
       env: () => { if (o.envThrows) throw new Error("boom"); return { UV_CACHE_DIR: "/c/stores/uv-cache", npm_config_store_dir: "/c/stores/pnpm-store", TMPDIR: "/should-not-win" }; },
-      prepare: async (a) => { d.calls.push({ ...a, runnerCallsBefore: w.calls.filter((c) => c[0] === "runner").length, worktreeAdded: w.calls.some((c) => c[1] === "worktree" && c[2] === "add") });
+      prepare: async (a) => { d.calls.push({ ...a, toolchainCalled: !!w.toolchainCalled, runnerCallsBefore: w.calls.filter((c) => c[0] === "runner").length, worktreeAdded: w.calls.some((c) => c[1] === "worktree" && c[2] === "add") });
         if (o.prepareThrows) throw new Error("disk on fire");
         return o.results ?? [{ status: "hit", eco: "pnpm", key: "0123456789abcdef", ms: 1200, reason: null }]; },
     };
@@ -3661,6 +3661,24 @@ describe("shared dependency cache wiring (#4220)", () => {
     assert.equal((await run(w, { dir })).terminalReason, "merged");
     assert.equal(readLog(dir, 7).filter((e) => e.event === "DEPS_PREPARED").length, 0);
     for (const e of w.envs) assert.equal(e.UV_CACHE_DIR, undefined);
+  });
+
+  it("#4347 prepare runs after the toolchain step with its env; a failed or shimless toolchain step leaves the host PATH and the run merges", async () => {
+    const cases = [
+      [async () => { throw new Error("toolchain boom"); }, undefined],
+      [async () => ({ env: null, summary: "pnpm@9.12.0" }), undefined],
+      [async () => ({ env: { PATH: "/shim/bin:/host/bin", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" }, summary: "pnpm@9.12.0" }), "/shim/bin:/host/bin"],
+    ];
+    for (const [tc, path] of cases) {
+      const dir = tmpDir("deps-tc-");
+      const w = world(); const d = depsIo(w);
+      w.io.prepareToolchain = async (a) => { w.toolchainCalled = true; return tc(a); };
+      assert.equal((await run(w, { dir })).terminalReason, "merged");
+      assert.equal(d.calls.length, 1);
+      assert.equal(d.calls[0].toolchainCalled, true, "toolchain prepared before dependency prep");
+      assert.equal(d.calls[0].env?.PATH, path);
+      if (!path) assert.equal(d.calls[0].env, undefined);
+    }
   });
 
   it("#4220 both builder prompts tell the builder how to treat a shared read-only node_modules/.venv (within budget)", () => {

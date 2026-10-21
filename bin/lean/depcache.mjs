@@ -80,7 +80,8 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     return { npm_config_store_dir: store("pnpm-store"), npm_config_cache: store("npm-cache"), UV_CACHE_DIR: store("uv-cache"), UV_LINK_MODE: "hardlink",
       POETRY_CACHE_DIR: store("poetry-cache"), PIP_CACHE_DIR: store("pip-cache"), POETRY_VIRTUALENVS_IN_PROJECT: "true" };
   }
-  const run = (cmd, args, cwd) => exec(cmd, args, { cwd, env: env(), timeoutMs: installTimeoutMs });
+  /** Install/repair command; `laneEnv` (the lane's toolchain env, #4347) sits under the store env, so store keys win. */
+  const run = (cmd, args, cwd, laneEnv) => exec(cmd, args, { cwd, env: laneEnv ? { ...laneEnv, ...env() } : env(), timeoutMs: installTimeoutMs });
   const runtime = async (cmd) => { try { return String(await exec(cmd, ["--version"], { timeoutMs: 30000 })).trim(); } catch { return "unknown"; } };
 
   /** Tracked package.json files (workspace members), relative; root only when git cannot list them. */
@@ -190,7 +191,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     }
   }
 
-  async function prepareOne(wt, keyRoot, d) {
+  async function prepareOne(wt, keyRoot, d, laneEnv) {
     const t0 = now();
     const done = (status, extra = {}) => ({ status, eco: d.eco, key: extra.key ?? null, ms: now() - t0, reason: extra.reason ?? null, ...(extra.published === undefined ? {} : { published: extra.published }) });
     if (d.skip) return done("skipped", { reason: d.skip });
@@ -209,7 +210,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
       const created = [];
       try {
         for (const t of man.trees ?? []) { created.push(t); linkTree(join(snap, t), join(wt, t), { from: man.prefix, to: wt, binDir: binDirFor(d) }); }
-        for (const [c, a] of cmds.repair ?? []) await run(c, a, wt);
+        for (const [c, a] of cmds.repair ?? []) await run(c, a, wt, laneEnv);
         try { fs.writeFileSync(join(snap, "last-used"), String(now())); } catch { /* best effort */ }
         return done("hit", { key });
       } catch (e) {
@@ -218,7 +219,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
       }
     };
     const install = async () => {
-      try { for (const [c, a] of cmds.install) await run(c, a, wt); } catch (e) {
+      try { for (const [c, a] of cmds.install) await run(c, a, wt, laneEnv); } catch (e) {
         rmTrees(wt, expected);
         return { failed: done("failed", { key, reason: `${e?.code === "ENOENT" ? "tool not found" : "install failed"}: ${msg(e)}` }) };
       }
@@ -240,8 +241,11 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     return ins.failed ?? done("miss-installed", { key, published: false, reason: "cache lock busy" });
   }
 
-  /** Materialize or build node_modules/.venv for `wt`; one result per detected ecosystem. Never throws. */
-  async function prepare({ wt, repoKey } = {}) {
+  /**
+   * Materialize or build node_modules/.venv for `wt`; one result per detected ecosystem. Never throws.
+   * `env` (#4347): the lane's toolchain env (PATH with the pinned pm shims) for install/repair; absent means the host PATH.
+   */
+  async function prepare({ wt, repoKey, env: laneEnv } = {}) {
     if (disabled()) return [{ status: "skipped", eco: null, key: null, ms: 0, reason: "FORGE_DEPCACHE=0" }];
     let found;
     try { found = detect(fs, wt); } catch (e) { return [{ status: "failed", eco: null, key: null, ms: 0, reason: msg(e) }]; }
@@ -249,7 +253,7 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
     const keyRoot = join(root, safeSegment(repoKey ?? "repo"));
     const out = [];
     for (const d of found) {
-      try { out.push(await prepareOne(wt, keyRoot, d)); } catch (e) { out.push({ status: "failed", eco: d.eco, key: null, ms: 0, reason: msg(e) }); }
+      try { out.push(await prepareOne(wt, keyRoot, d, laneEnv && typeof laneEnv === "object" ? laneEnv : undefined)); } catch (e) { out.push({ status: "failed", eco: d.eco, key: null, ms: 0, reason: msg(e) }); }
     }
     return out;
   }
