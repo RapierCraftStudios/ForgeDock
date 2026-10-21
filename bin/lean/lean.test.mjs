@@ -1168,6 +1168,27 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal((await run(w)).code, "contract.invalid"); assert.equal(builders(w).length, 2, "plan + one correction");
     assert.match(builders(w)[1][4], /R1: quote is not verbatim[\s\S]*V1: needs command 'jq'/);
   });
+  it("#4353 the #4348 contract shape: an allowlist validate is dropped at freeze (CONTRACT_SCOPE_VALIDATE_DROPPED), the amended lane merges, and a real out-of-scope edit is still scope_creep", async () => {
+    const ALLOW = 'test -z "$(git diff --name-only origin/staging...HEAD | grep -v -x -e src/foo.js -e test/foo.test.js)"';
+    const c = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: ALLOW }] }, files = ["src/foo.js", "test/foo.test.js", "docs/foo.md"];
+    const shape = (changed) => ({ contract: c, changed, amendments: [{ kind: "add-deliverable", path: "docs/foo.md", why: "the docs-freshness rule needs the module doc" }],
+      validation: [{ id: "V1", command: CONTRACT.validate[0].command, exit: 0 }, { id: "V2", command: ALLOW, exit: 1 }], reviews: [conf({}, CONTRACT, files)] });
+    const dir = tmpDir("scope-drop-");
+    const w = world(shape(files));
+    w.io.runCommand = async () => ({ rc: 1, output: "" });
+    assert.equal((await run(w, { dir })).terminalReason, "merged", "the lane is not ended by scope");
+    assert.equal(builders(w).length, 2, "plan + implement: the drop costs no contract correction");
+    const log = readLog(dir, 7);
+    assert.deepEqual(log.filter((e) => e.event === "CONTRACT_SCOPE_VALIDATE_DROPPED").map((e) => e.runs), [[{ id: "V2", command: ALLOW }]]);
+    assert.equal(log.filter((e) => e.event === "VALIDATE_SUPERSEDED").length, 0, "nothing left for the #4350 path to supersede");
+    const posted = w.comments.find((x) => x.includes("FORGE:CONTRACT"));
+    assert.ok(posted.includes("V1") && !posted.includes("grep -v -x"), "the frozen contract has no allowlist validate");
+    assert.ok(traj(w).some((t) => /Scope-check validate V2 dropped at contract freeze/.test(t)));
+    const creep = world(shape([...files, "src/other.js"]));
+    creep.io.runCommand = async () => ({ rc: 1, output: "" });
+    assert.equal((await run(creep)).code, "conformance.scope_creep");
+    assert.ok(builders(creep).some((b) => /changed outside the contract's deliverables: src\/other\.js/.test(b[4])));
+  });
 
   it("a failed validate fetches the lane and the resume says how to catch up with a moved base (merge, never rebase)", async () => {
     const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
@@ -1377,6 +1398,7 @@ describe("structure delta (forge#4159): undeclared package edges block, import g
     assert.equal(reviewerPrompt(args), reviewerPrompt({ ...args, structure: "" }));
     assert.ok(reviewerPrompt({ ...args, structure: "x\ny" }).endsWith("</diff>\n<structure>x y</structure>"));
     assert.match(builderPlanPrompt(7), /"the lint allows it" or "there is a precedent" is not a reason on its own/);
+    assert.match(builderPlanPrompt(7), /Scope is enforced by the engine[^\n]*do not write a file-allowlist or denylist validate[^\n]*the engine drops such a validate at freeze/, "#4353");
     assert.match(builderPlanPrompt(7), /must be a deliverable on that package\.json whose change names the package and gives the reason/);
     assert.match(builderImplementPrompt(), /blocked by the engine: add it through add-deliverable with a why naming the package/);
   });

@@ -123,6 +123,40 @@ export function isScopeCheck(command) {
     || /\bgit\b(?:\s+-C\s+\S+)?(?:\s+-c\s+\S+)*\s+status\b[^]*?\s(?:--porcelain|--short|-s)\b/.test(seg));
 }
 
+const SCOPE_UTILS = new Set(["grep", "egrep", "fgrep", "sort", "uniq", "wc", "test", "[", "[[", "]", "]]", "echo", "printf", "awk", "sed", "head", "tail", "tr", "cut", "comm", "true", "false", "exit"]);
+const SCOPE_GIT = new Set(["diff", "log", "show", "status", "merge-base", "rev-parse"]);
+/**
+ * #4353: true when a command is only a changed-files allowlist or denylist: isScopeCheck holds and every segment's command
+ * is git diff|log|show|status|merge-base|rev-parse or a filter (grep, sort, wc, test, awk, sed…). A command that also runs
+ * anything else (`node --test x && git diff --stat`) is not pure, so it stays a real validate.
+ */
+export function isPureScopeCheck(command) {
+  if (!isScopeCheck(command)) return false;
+  // text after a `)` belongs to the outer command (its arguments), so `)` is dropped instead of starting a segment
+  return String(command ?? "").replace(/\)/g, " ").split(/&&|\|\||;|\||\$\(|`|\n/).every((seg) => {
+    const toks = seg.trim().split(/\s+/).filter(Boolean).map((t) => t.replace(/^["']+|["']+$/g, ""));
+    let i = 0;
+    while (i < toks.length && (toks[i] === "!" || toks[i] === "" || /^[A-Za-z_]\w*=/.test(toks[i]))) i++;
+    if (i >= toks.length) return true;
+    const cmd = toks[i];
+    if (cmd !== "git") return SCOPE_UTILS.has(cmd);
+    for (i++; i < toks.length && (toks[i] === "-C" || toks[i] === "-c"); i += 2);
+    return SCOPE_GIT.has(toks[i]);
+  });
+}
+
+/**
+ * #4353: the contract without its pure scope-check validates (isPureScopeCheck): the engine's scope gate (deliverables plus
+ * typed amendments) is the only scope authority, so they are dropped at freeze, not rejected. Returns {contract, dropped:
+ * [{id, command}]}; a contract that is not an object or has no validate array comes back unchanged.
+ */
+export function dropScopeValidates(contract) {
+  if (!contract || typeof contract !== "object" || Array.isArray(contract) || !Array.isArray(contract.validate)) return { contract, dropped: [] };
+  const dropped = contract.validate.filter((v) => isPureScopeCheck(v?.command)).map((v) => ({ id: v.id, command: v.command }));
+  if (!dropped.length) return { contract, dropped };
+  return { contract: { ...contract, validate: contract.validate.filter((v) => !isPureScopeCheck(v?.command)) }, dropped };
+}
+
 /** Option names whose value a tool writes (output, report, cache or temp dirs), not reads (#4325). */
 const WRITE_OPT = /^-(?:o|O|-?[\w-]*(?:out|dir|temp|tmp|cache|report|junit|xml|log)[\w-]*)$/i;
 const TMP_PATH = /\$(?:\{TMPDIR(?::-[^}]*)?\}|TMPDIR)\/([^\s"'`;|&<>()=]+)/g;
