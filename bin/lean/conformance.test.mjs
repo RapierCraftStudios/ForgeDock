@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -461,5 +461,32 @@ describe("#4350 the engine's scope gate is the authority over a builder's scope-
   it("#4350 isScopeCheck recognises file-listing git commands only", () => {
     for (const c of [ALLOW, "git diff --name-status origin/x...HEAD | grep -c .", "git -C pkg diff --stat $(git merge-base HEAD origin/x)", "git log --name-only -1", "test -z \"$(git status --porcelain)\""]) assert.ok(isScopeCheck(c), c);
     for (const c of ["npm test", "git diff --check origin/x...HEAD", "pytest -k name_only", "git diff --exit-code -- src/a.js"]) assert.ok(!isScopeCheck(c), c);
+  });
+});
+
+describe("#4353 the engine's scope gate is the only scope authority: pure scope validates are dropped at freeze", () => {
+  const ALLOW = 'test -z "$(git diff --name-only origin/main...HEAD | grep -v -x -e src/tool.js -e test/tool.test.js)"';
+  it("#4353 isPureScopeCheck: an allowlist or denylist made only of git listing and filter commands; anything that also runs code is kept", () => {
+    for (const c of [ALLOW, "git diff --name-status origin/x...HEAD | grep -c .", "git -C pkg diff --stat $(git merge-base HEAD origin/x)", "! git diff --name-only origin/x...HEAD | grep -qv '^src/'", "test -z \"$(git status --porcelain)\"", "[ \"$(git diff --name-only origin/x...HEAD | wc -l)\" -le 3 ]"]) assert.ok(isPureScopeCheck(c), c);
+    for (const c of ["npm test", "node --test x && git diff --stat origin/x...HEAD", "git diff --name-only origin/x...HEAD | xargs node --check", "pytest -k name_only", "git diff --exit-code -- src/a.js", "git diff --name-only HEAD~1 | sh"]) assert.ok(!isPureScopeCheck(c), c);
+  });
+  it("#4353 dropScopeValidates removes only pure scope validates and reports them; other contracts are unchanged", () => {
+    const c = { requirements: [{ id: "R1", quote: Q1, disposition: "deliver" }], deliverables: [{ id: "D1", path: "src/tool.js" }],
+      validate: [{ id: "V1", command: "node --test test/tool.test.js" }, { id: "V2", command: ALLOW }, { id: "V3", command: "node --test x && git diff --stat" }] };
+    const d = dropScopeValidates(c);
+    assert.deepEqual(d.dropped, [{ id: "V2", command: ALLOW }]);
+    assert.deepEqual(d.contract.validate.map((v) => v.id), ["V1", "V3"]);
+    assert.equal(c.validate.length, 3, "the input is not mutated");
+    assert.equal(validateContract(d.contract, `${Q1}`).ok, true, "the dropped contract still freezes");
+    const plain = { ...c, validate: [c.validate[0]] };
+    assert.equal(dropScopeValidates(plain).contract, plain); assert.deepEqual(dropScopeValidates(plain).dropped, []);
+    for (const x of [null, [], "x", { requirements: [] }]) assert.deepEqual(dropScopeValidates(x), { contract: x, dropped: [] });
+  });
+  it("#4353 a legacy frozen contract that still carries the allowlist keeps the #4350 superseded path", () => {
+    const frozen = { requirements: [{ id: "R1", quote: Q1, disposition: "deliver" }], deliverables: [{ id: "D1", path: "src/tool.js" }], validate: [{ id: "V1", command: "node --test test/tool.test.js" }, { id: "V2", command: ALLOW }] };
+    const amendments = [{ kind: "add-deliverable", path: "docs/tool.md", why: "module doc" }];
+    const pc = precheck({ contract: applyAmendments(frozen, amendments).contract, frozen, changedFiles: ["src/tool.js", "docs/tool.md"], validateRuns: { V2: { rc: 1, output: "" } },
+      result: { requirements: [{ id: "R1", status: "implemented" }], validation: [{ id: "V1", exit: 0 }, { id: "V2", exit: 1 }], amendments } });
+    assert.equal(pc.ok, true); assert.deepEqual(pc.superseded, [{ id: "V2", files: ["docs/tool.md"] }]);
   });
 });

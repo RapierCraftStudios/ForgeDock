@@ -90,3 +90,43 @@ export function readLocalRuns(dir = runsDir()) {
   }
   return runs;
 }
+
+/**
+ * forge#4354: one lane per RUN_START..next-RUN_START slice (every slice, not only the last), with the fail-soft events the
+ * alert pass rates: DEPS_PREPARED rows, TOOLCHAIN_WARNING texts, deferred-to-ci precheck commands and the terminal code.
+ */
+export function lanesOfLog(events, fallbackIssue = null, fallbackTs = null) {
+  const lanes = [];
+  let cur = null;
+  for (const e of events) {
+    if (e.event === "RUN_START") {
+      cur = { repo: e.repo ?? null, issue: e.issue ?? fallbackIssue, startTs: e.ts ?? fallbackTs, code: null, reason: null,
+        deps: [], toolchainWarnings: [], deferred: [], sparseFallback: null };
+      lanes.push(cur);
+      continue;
+    }
+    if (!cur) continue;
+    if (e.event === "RUN_TERMINAL") { cur.code = e.code ?? null; cur.reason = e.reason ?? null; }
+    else if (e.event === "DEPS_PREPARED") cur.deps.push({ eco: e.eco ?? null, status: e.status ?? null, reason: e.reason ?? null });
+    else if (e.event === "TOOLCHAIN_WARNING" && e.warning) cur.toolchainWarnings.push(String(e.warning));
+    else if (e.event === "PRECHECK_COMMANDS" && Array.isArray(e.results)) {
+      for (const r of e.results) if (r?.status === "deferred-to-ci") cur.deferred.push(String(r.command ?? ""));
+    } else if (e.event === "WORKTREE_SPARSE_FALLBACK") cur.sparseFallback = e.reason ?? "";
+  }
+  return lanes;
+}
+
+/** All lanes in `dir` (a missing dir or an unreadable log yields nothing, never an error). Local files only, no network. */
+export function readLanes(dir = runsDir()) {
+  if (!existsSync(dir)) return [];
+  const lanes = [];
+  for (const f of readdirSync(dir).sort()) {
+    if (!f.endsWith(".jsonl")) continue;
+    try {
+      const m = /^(\d+)\.jsonl$/.exec(f);
+      const mtime = new Date(statSync(join(dir, f)).mtimeMs).toISOString();
+      lanes.push(...lanesOfLog(parseLog(readFileSync(join(dir, f), "utf8")), m ? Number(m[1]) : null, mtime));
+    } catch { /* unreadable log */ }
+  }
+  return lanes;
+}
