@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /** Fixed comment templates for the core work-on. Pure functions, no model calls. Missing fields read "not reported". */
+import { renderCheckpoint } from "./review-delta.mjs";
 
 export const NR = "not reported";
 export const MAX_COMMENT_CHARS = 60000;
@@ -145,22 +146,22 @@ export function renderAmendments(applied, filed = {}) {
 }
 
 /** FORGE:REVIEW for a conforming change: the engine-computed verdict and the reviewer's rows. */
-export function renderReview(rv, contract) {
+export function renderReview(rv, contract, checkpoint = null) {
   const rows = contract.requirements.map((r) => {
     const x = (rv.requirements ?? []).find((y) => y.id === r.id) ?? {};
     return `| ${esc(r.id)} | ${esc(x.status)}${r.tracked ? ` (tracked ${r.tracked})` : ""} | ${esc(x.evidence)} | ${esc(x.validated_by)} |`;
   }).join("\n");
   const cov = rv.issue_coverage ?? [];
-  return `## Conformance Review\n**Verdict:** CONFORMS (computed by the engine from the rows below)\n\n| Requirement | Status | Evidence | Validated by |\n| --- | --- | --- | --- |\n${rows}\n\n**Issue coverage:** ${cov.filter((c) => c.status === "covered").length}/${cov.length} issue requirement(s) covered by the contract\n**Scope:** ${(rv.scope ?? []).map((s) => `\`${escl(s.file)}\` ← ${escl(s.authorized_by)}`).join(", ") || NR}\n**Preserve:** ${(rv.preserve ?? []).map((p) => `${escl(p.id)} ${escl(p.status)}`).join(", ") || "none"}\n**Regressions:** none\n\n**Notes:** ${escl(rv.summary)}`;
+  return `## Conformance Review\n**Verdict:** CONFORMS (computed by the engine from the rows below)\n\n| Requirement | Status | Evidence | Validated by |\n| --- | --- | --- | --- |\n${rows}\n\n**Issue coverage:** ${cov.filter((c) => c.status === "covered").length}/${cov.length} issue requirement(s) covered by the contract\n**Scope:** ${(rv.scope ?? []).map((s) => `\`${escl(s.file)}\` ← ${escl(s.authorized_by)}`).join(", ") || NR}\n**Preserve:** ${(rv.preserve ?? []).map((p) => `${escl(p.id)} ${escl(p.status)}`).join(", ") || "none"}\n**Regressions:** none\n\n**Notes:** ${escl(rv.summary)}${checkpoint ? renderCheckpoint(checkpoint) : ""}`;
 }
 
 /** FORGE:REVIEW in shadow mode: what the enforced gate would have done, without enforcing it. */
-export function renderShadowReview({ would, failures = [], review, contract, degraded = null }) {
+export function renderShadowReview({ would, failures = [], review, contract, degraded = null, checkpoint = null }) {
   const head = would === "conforms" ? "would PASS" : `would BLOCK (${escl(would)})`;
   const rows = review ? `\n\n${renderReview(review, contract).split("\n").slice(2).join("\n")}` : "";
   const fl = failures.length ? `\n\n**What the enforced gate would have flagged:**\n${failures.slice(0, 30).map((f) => `- \`${escl(f.code)}\`: ${escl(f.detail)}`).join("\n")}` : "";
   const dg = degraded ? `\n\n**Review degraded:** the review stayed incomplete after the targeted re-ask; merged with label \`review-degraded\`, follow-up ${escl(degraded)}.` : "";
-  return `## Conformance Review (shadow mode: not enforced)\n**Gate verdict:** ${head}. In shadow mode a requirement not implemented (found by the review or the precheck), a regression, or a review without complete rows blocks; accepted deferrals are filed as follow-ups.${fl}${dg}${rows}`;
+  return `## Conformance Review (shadow mode: not enforced)\n**Gate verdict:** ${head}. In shadow mode a requirement not implemented (found by the review or the precheck), a regression, or a review without complete rows blocks; accepted deferrals are filed as follow-ups.${fl}${dg}${rows}${checkpoint ? renderCheckpoint(checkpoint) : ""}`;
 }
 
 // ---- PR body ----

@@ -4442,3 +4442,86 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.match(builders(w)[2][4], /conflicts in: db\/meta\/_journal\.json[\s\S]*do not text-merge it\. Renumber the lane's files/);
   });
 });
+
+describe("delta re-review and recovery lanes (#4365)", () => {
+  const rowsOf = (t) => JSON.parse(/```json\n([\s\S]*)\n```/.exec(t)[1]);
+  const deltaOk = () => fence({ requirements: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3", validated_by: "V1" }], regressions: [], verdict: "CONFORMS", summary: "fixed" });
+  it("the re-review after a FAIL gets the first verdict, its cited failures and only the fix diff; the reviewed head is logged and posted", async () => {
+    const dir = tmpDir("delta-");
+    const w = world({ reviews: [bad(), deltaOk()] });
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const rv = reviewers(w);
+    assert.equal(rv.length, 2);
+    assert.match(rv[0][4], /<diff>/);
+    assert.match(rv[1][4], /DELTA RE-REVIEW/);
+    assert.match(rv[1][4], /<cited_failures>\n- conformance\.unimplemented: R1 partial/);
+    assert.match(rv[1][4], /<first_verdict>[\s\S]*"status":"partial"/);
+    assert.match(rv[1][4], /<fix_diff>/);
+    assert.doesNotMatch(rv[1][4], /<diff>|<issue_body>|<builder_result>/, "the whole PR is not re-sent");
+    const conf = readLog(dir, 7).filter((e) => e.event === "CONFORMANCE");
+    assert.deepEqual(conf.map((e) => e.review_mode), ["full", "delta"]);
+    assert.equal(conf[1].head, w.head);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "REVIEW_DELTA" && e.kind === "delta" && e.head === w.head));
+    const post = w.comments.find((c) => c.startsWith("<!-- FORGE:REVIEW -->"));
+    assert.ok(post.includes(`**Reviewed head:** \`${w.head}\` (verdict conforms)`));
+    assert.match(post, /<summary>review rows/);
+  });
+  it("a regression added by the fix diff still blocks (verdict rules unchanged)", async () => {
+    const w = world({ reviews: [bad(), fence({ requirements: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3", validated_by: "V1" }], regressions: [{ at: "src/foo.js:9", failure: "throws on empty" }], verdict: "NONCONFORMING" })] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, "conformance.regression");
+    assert.equal(w.merges.length, 0);
+  });
+
+  // A resumed branch whose issue has a frozen contract (no scope hash) and a later human comment: a plain rerun re-plans.
+  const H0 = "a".repeat(40), M = "b".repeat(40);
+  const contractC = () => ({ body: `<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n${renderContract(CONTRACT, contractHash(contractJson(CONTRACT)))}`, author_association: "OWNER", user: { type: "User", login: "op" } });
+  const reviewC = () => ({ body: `<!-- FORGE:REVIEW -->\n${renderReview(rowsOf(ok()), CONTRACT, { head: H0, verdict: "conforms", rows: rowsOf(ok()) })}`, author_association: "OWNER", user: { type: "User", login: "op" } });
+  const human = { body: "Please also keep the old log line.", author_association: "OWNER", user: { type: "User", login: "op" } };
+  /** The branch moved from H0 to M by one commit: a clean base merge, or (`fix`) a plain CI-fix commit. */
+  const recovering = (fix, o = {}) => {
+    const w = world({ prList: [{ number: 77, headRefOid: M, baseRefName: "staging" }], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [contractC(), reviewC(), human], ...o });
+    w.head = M;
+    const g0 = w.io.git;
+    w.io.git = async (a, opt) => {
+      if (a[0] === "rev-list" && a[1] === "--first-parent") return `${M}\n`;
+      if (a[0] === "rev-list" && a[1] === "--parents") return fix ? `${M} ${H0}\n` : `${M} ${H0} ${"c".repeat(40)}\n`;
+      if (a[0] === "merge-tree") return `${"d".repeat(40)}\n`;
+      if (a[0] === "rev-parse" && a[1] === `${M}^{tree}`) return "d".repeat(40);
+      return g0(a, opt);
+    };
+    return w;
+  };
+  it("a recovery lane on a reviewed branch keeps the frozen contract and skips the reviewer for a pure base merge", async () => {
+    const dir = tmpDir("delta-rec-");
+    const w = recovering(false);
+    const r = await run(w, { dir, recover: { code: "base.conflict", attempt: 1 } });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(!builders(w).some((b) => /PLANNING ONLY/.test(b[4])), "no re-plan");
+    assert.ok(!w.comments.some((c) => c.includes("<!-- FORGE:CONTRACT -->")), "no re-freeze");
+    assert.equal(reviewers(w).length, 0, "pure base merge: no reviewer");
+    assert.match(traj(w)[0], /Recovery: frozen contract [0-9a-f]{12} kept \(a human comment was posted after it/);
+    assert.match(traj(w)[0], /Review reused at bbbbbbbbbbbb: 1 clean base merge/);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "REVIEW_DELTA" && e.kind === "base-merge" && e.reviewed === H0));
+    assert.ok(w.comments.find((c) => c.startsWith("<!-- FORGE:REVIEW -->")).includes(`**Reviewed head:** \`${M}\``));
+  });
+  it("a recovery lane whose new commit is a CI fix re-reviews only the delta since the reviewed head", async () => {
+    const w = recovering(true, { reviews: [fence({ regressions: [], verdict: "CONFORMS", summary: "no regression" })] });
+    const r = await run(w, { recover: { code: "ci.red", attempt: 1 } });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(!builders(w).some((b) => /PLANNING ONLY/.test(b[4])));
+    const rv = reviewers(w);
+    assert.equal(rv.length, 1);
+    assert.match(rv[0][4], /DELTA RE-REVIEW[\s\S]*already reviewed at a{40}/);
+    assert.match(rv[0][4], /\(none: the first verdict was CONFORMS\)/);
+  });
+  it("without --recover the same issue re-plans and reviews in full; no checkpoint is a full review", async () => {
+    const w = recovering(false);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.match(builders(w)[0][4], /PLANNING ONLY/);
+    assert.equal(reviewers(w).length, 1);
+    assert.match(reviewers(w)[0][4], /<diff>/);
+  });
+});

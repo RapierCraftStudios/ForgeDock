@@ -163,6 +163,16 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `conformance.scope_creep`, and then the validate failure stands too. The plan
    prompt discourages such allowlists. Option chosen over rejecting them at
    freeze because a frozen contract is reused on relaunch.
+   Delta re-review (#4365, `review-delta.mjs`): every usable review leaves a
+   checkpoint `{head, rows, failures, state}`. The next `reviewOnce` (after a
+   FAIL + resume, a base-sync or a CI-fix round) runs `classifyDelta`: `same`
+   or `base-merge` (every first-parent commit a clean `merge-tree` merge of
+   base history) re-decides the last rows with no reviewer run; `delta` sends
+   `reviewerDeltaPrompt` (first verdict, cited failures, `git diff
+   <reviewed> HEAD` limited to the PR's files) and `mergeDeltaRows` folds the
+   reply into the first rows before the unchanged `decide()`; `full` (no
+   checkpoint, not an ancestor, git error) is the full review. Precheck,
+   validates, trigger and CI still judge the whole change.
    Hotspots (forge#4195): `io.hotspots` runs `scripts/hotspots.sh` once
    before the plan call on the issue's `namedPaths` (`hotspotPlanNote`: one
    line per file over `maintenance.hotspot.file_lines`, nothing when none;
@@ -292,7 +302,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
 `prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
-`refactor.mjs` (`refactor:split` step, #4211),
+`refactor.mjs` (`refactor:split` step, #4211), `review-delta.mjs` (reviewed-head checkpoint, delta re-review, #4365),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
 push/gh/merge retry patterns).
 
@@ -853,3 +863,15 @@ too) and a root `.venv` into the base worktree when the base has none, so a work
 to the environment state: no builder resume, no reviewer. Other non-proofs stay `conformance.unimplemented`. A
 `BASE=SKIPPED` detail now says the base was not run because head did not pass; head's new test files were already
 overlaid (#3630). Cost: 0 LLM calls; saves the wasted resume.
+
+## Entry 2026-10-21 — Delta re-review; recovery lanes keep the contract (#4365)
+
+Re-reviews send only the fix diff since the reviewed head (`review-delta.mjs`, `reviewerDeltaPrompt`); a pure clean
+base merge or no new commit reuses the last rows without a reviewer run. Every FORGE:REVIEW (main, shadow, trigger skip,
+and a `## Conformance Re-review` after a base-sync or CI-fix re-review) ends with `**Reviewed head:** \`<sha>\` (verdict
+…)` and, under 30 000 chars, the rows as a `review rows` json block. Run log: `CONFORMANCE` gains `head` and
+`review_mode` (full|delta|reused); `REVIEW_DELTA {reviewed, head, kind, reason}`; `REVIEW_CHECKPOINT` when a rerun seeds
+the checkpoint from the latest trusted FORGE:REVIEW whose verdict is conforms and whose head is in the branch. A
+`--recover` lane with such a checkpoint keeps a frozen contract that only the humanAfter/quote heuristics called stale;
+a changed issue scope hash still re-plans. Verdict and merge rules unchanged. Cost: re-review prompts shrink to the
+delta; 0 reviewer runs for a pure base merge.

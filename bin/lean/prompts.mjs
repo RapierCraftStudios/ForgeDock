@@ -289,6 +289,45 @@ export function reviewerPrompt({ issue, comments = [], contract, result, files =
 }
 
 /**
+ * #4365: the re-review after a review. Carries the first verdict (its rows), the failures it cited, the reviewed and
+ * current heads and only the fix diff `git diff <reviewed> HEAD`; the whole PR is not re-sent. The reply uses the same
+ * row schema, for the cited rows and the fix-diff files only; the engine merges it into the first rows.
+ */
+export function reviewerDeltaPrompt({ issue, contract, prior = null, failures = [], reviewed, head, files = [], diff = "", stat = "", skeleton }) {
+  const cited = failures.length ? failures.slice(0, 40).map((f) => `- ${f.code}: ${String(f.detail ?? "").slice(0, 400)}`).join("\n") : "(none: the first verdict was CONFORMS)";
+  return `DELTA RE-REVIEW of issue #${issue.number}: ${issue.title}
+
+The change was already reviewed at ${reviewed}. Only the commits since then (up to ${head}) are new; the diff below is just that fix diff (\`git diff ${reviewed}..HEAD\`, limited to the PR's files). Answer exactly two questions:
+1. For each cited failure: does the fix diff fix it? Update that row in the skeleton (status, evidence, validated_by, note).
+2. Does the fix diff add a regression? List every concrete breakage it introduces, plus any cited regression still unfixed, in "regressions" (path:line). An empty list means none.
+Rows the skeleton does not list keep the first review's values; do not re-judge the rest of the change. Read any file in your worktree for context. Fill every skeleton row and set "verdict" consistent with all rows (first review's included).
+
+<cited_failures>
+${cited}
+</cited_failures>
+
+<first_verdict>
+${cap(JSON.stringify(prior ?? {}), 20000)}
+</first_verdict>
+
+<contract>
+${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}
+</contract>
+
+<fix_diff_files>
+${files.join("\n") || "(none)"}
+</fix_diff_files>
+
+<row_skeleton>
+${cap(JSON.stringify(skeleton ?? {}, null, 1), 20000)}
+</row_skeleton>
+
+<fix_diff>
+${boundDiff(diff, { stat, base: reviewed })}
+</fix_diff>`;
+}
+
+/**
  * #4160: the targeted re-ask after an incomplete or inconsistent reply. Only the missing or invalid ids are asked
  * for, with the exact problems and the reviewer's previous reply; no diff is re-sent (the worktree still holds the change).
  */

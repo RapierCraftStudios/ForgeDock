@@ -12,7 +12,7 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
-import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
+import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, parseReview, decide, mergeReviewRows, reviewSkeleton, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths } from "./prefilter.mjs";
 import { preflightProbes, preflightProblems } from "./preflight.mjs";
@@ -25,7 +25,8 @@ import { runChecks } from "./precheck.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { computeTrigger, TRIGGER_MODES } from "./review-trigger.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote } from "./prompts.mjs";
+import { classifyDelta, deltaDiff, citedIds, deltaSkeleton, mergeDeltaRows, parseReviewCheckpoint, renderCheckpoint } from "./review-delta.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerDeltaPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote } from "./prompts.mjs";
 import { unjustified } from "./enumerating.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport } from "./verify.mjs";
@@ -1018,6 +1019,7 @@ export async function runCore(o) {
         let c; try { c = JSON.parse(l); } catch { continue; }
         if (!isTrustedComment(c)) continue;
         const b = String(c?.body ?? "");
+        if (b.startsWith("<!-- FORGE:REVIEW -->")) priorCheckpoint = parseReviewCheckpoint(b) ?? priorCheckpoint; // #4365
         if (!b.startsWith("<!-- FORGE:CONTRACT -->")) { if (found && b.trim() && !b.trimStart().startsWith("<!-- FORGE:")) found.humanAfter = true; continue; }
         const fc = parseContractComment(b);
         if (fc && contractHash(fc.text) === fc.hash) found = { ...fc, humanAfter: false };
@@ -1080,6 +1082,7 @@ export async function runCore(o) {
       return { ...r, contract };
     }
     let frozen = null, hash = null, planned = false, files = [], split = null;
+    let priorCheckpoint = null, reviewed = null; // #4365: the last review {head, review rows, failures, state}
     if (isSplit) {
       // ---- 3'. refactor:split (#4211): deterministic move + proof replaces the builder; no builder session exists ----
       split = await splitStep();
@@ -1093,9 +1096,18 @@ export async function runCore(o) {
           // #4265: a contract planned from an older issue scope is stale: re-plan and freeze a new one instead of judging against it
           await refreshIssue("rerun contract check");
           const gone = (Array.isArray(fc.contract?.requirements) ? fc.contract.requirements : []).filter((r) => r?.disposition === "deliver" && !inIssue(r.quote, issueText)).map((r) => r.id);
-          const stale = fc.scope ? (fc.scope !== scopeHash ? `issue scope ${fc.scope} -> ${scopeHash}` : null)
+          let stale = fc.scope ? (fc.scope !== scopeHash ? `issue scope ${fc.scope} -> ${scopeHash}` : null)
             : fc.humanAfter ? "a human comment was posted after it" : gone.length ? `quote(s) no longer in the issue: ${gone.join(", ")}` : null;
+          // #4365: the last conforming review on the issue, when its head is still in this branch, seeds the delta re-review
+          const cp = priorCheckpoint;
+          if (cp?.verdict === "conforms" && (await git(["merge-base", "--is-ancestor", cp.head, "HEAD"]).then(() => true, () => false))) {
+            reviewed = { head: cp.head, review: cp.rows, failures: [], state: "conforms" };
+            ev({ event: "REVIEW_CHECKPOINT", head: cp.head, rows: Boolean(cp.rows) });
+          }
+          // a recovery lane does a mechanical fix on a reviewed branch: only a changed issue scope re-plans its contract
+          if (stale && recover && reviewed && !fc.scope) { T.decisions.push(`Recovery: frozen contract ${fc.hash} kept (${stale}; reviewed head ${reviewed.head.slice(0, 12)})`); stale = null; }
           if (stale) {
+            reviewed = null;
             ev({ event: "CONTRACT_STALE", hash: fc.hash, scope: fc.scope, now: scopeHash, reason: stale });
             T.decisions.push(`Rerun: frozen contract ${fc.hash} is stale (${stale}); re-planning`);
           } else { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
@@ -1390,12 +1402,46 @@ export async function runCore(o) {
       return a.problems.map((d) => ({ code: OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, detail: d }));
     }
     const IGNORE = [`${LEAN_DIR}/`];
-    /** Up to two reviewer runs; a reply without usable rows (unparseable, incomplete, inconsistent) is re-asked, never charged to the builder. */
+    /** #4365: the reviewed head (and its rows) for FORGE:REVIEW, so a later session can compute the delta; null before any review. */
+    const reviewedCheckpoint = (v) => (reviewed ? { head: reviewed.head, verdict: v, rows: reviewed.review } : null);
+    /** #4365: a base-sync or CI-fix re-review moves the checkpoint; best effort. */
+    const postRereview = async (why) => {
+      if (!reviewed) return;
+      try { await post("FORGE:REVIEW", `## Conformance Re-review (${why})\n**Verdict:** ${reviewed.state === "conforms" ? "CONFORMS" : `${reviewed.state} (shadow: not enforced)`}${renderCheckpoint(reviewedCheckpoint(reviewed.state))}`); } catch { /* the next session reviews in full */ }
+    };
+    /**
+     * Up to two reviewer runs; a reply without usable rows (unparseable, incomplete, inconsistent) is re-asked, never charged
+     * to the builder. #4365: after a review only the fix diff since its head is sent (delta); no new commit or a pure clean
+     * base merge re-decides the last rows instead of running the reviewer. The verdict is always decide()'s.
+     */
     async function reviewOnce() {
-      const diff = String(await git(["diff", `${base}...HEAD`]));
-      const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
+      const head = String(await git(["rev-parse", "HEAD"])).trim();
       const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
       const ctx = { contract: effective, changedFiles: files, issueText, pathExists: (x) => listed.has(x), repoFiles: listed, ignore: IGNORE };
+      const dk = reviewed?.review ? await classifyDelta(git, { reviewed: reviewed.head, head, base }) : { kind: "full" };
+      if (reviewed?.review) ev({ event: "REVIEW_DELTA", reviewed: reviewed.head, head, kind: dk.kind, reason: dk.reason });
+      if (dk.kind === "same" || dk.kind === "base-merge") {
+        const d = decide(reviewed.review, ctx);
+        if (d.state === "conforms" || (dk.kind === "same" && d.state === "nonconforming")) {
+          if (d.review) review = d.review;
+          reviewed = { head, review: d.review ?? reviewed.review, failures: d.failures, state: d.state };
+          T.decisions.push(`Review reused at ${head.slice(0, 12)}: ${dk.reason} (no reviewer run)`);
+          ev({ event: "CONFORMANCE", round: reviewN, state: d.state, failures: d.failures.map((x) => x.code), mode: shadow ? "shadow" : "enforce", head, review_mode: "reused" });
+          return d;
+        }
+      }
+      const delta = dk.kind === "full" ? null : await deltaDiff(git, { reviewed: reviewed.head, base, files, ignore: IGNORE, statOver: REVIEW_DIFF_MAX_BYTES }).catch(() => null);
+      const prior = delta ? reviewed.review : null, cited = delta && reviewed.state !== "conforms" ? reviewed.failures : [];
+      let fresh;
+      if (delta) {
+        const skeleton = deltaSkeleton(reviewSkeleton(effective, files, IGNORE), { cited: citedIds(cited, effective), files: delta.files });
+        fresh = reviewerDeltaPrompt({ issue: iss, contract: effective, prior, failures: cited, reviewed: reviewed.head, head, files: delta.files, diff: delta.diff, stat: delta.stat, skeleton });
+        T.decisions.push(`Delta re-review: ${delta.files.length} file(s) changed since the reviewed head ${reviewed.head.slice(0, 12)}, ${cited.length} cited failure(s)`);
+      } else {
+        const diff = String(await git(["diff", `${base}...HEAD`]));
+        const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
+        fresh = reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE });
+      }
       let d = null, first = null;
       for (let t = 0; t < 3; t++) {
         // #4327: a third run only when the repaired reply is incomplete solely by evidence paths that did not resolve.
@@ -1407,17 +1453,16 @@ export async function runCore(o) {
         const repair = first && (d.state === "review.incomplete" || d.state === "review.inconsistent");
         await renew();
         const rr = await callRunner({ role: "reviewer", issue, cwd: wt, model: reviewerModel, resume: null, system: REVIEWER_SYSTEM, readOnly: true,
-          prompt: repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first })
-            : reviewerPrompt({ issue: iss, comments: trustedComments, contract: effective, result, files, diff, stat, base, structure: structureLine, ignore: IGNORE }) });
+          prompt: repair ? reviewerRepairPrompt({ missing: d.missing ?? [], problems: d.failures.map((f) => f.detail), rows: first }) : fresh });
         await renew();
         await attempt("review", ++reviewN, rr);
         const parsed = parseReview(rr?.text);
-        review = repair ? mergeReviewRows(first, parsed) : parsed;
+        review = repair ? mergeReviewRows(first, parsed) : delta ? mergeDeltaRows(prior, parsed) : parsed;
         first = review;
         d = decide(review, ctx);
         if (d.review) review = d.review;
-        ev({ event: "CONFORMANCE", round: reviewN, state: d.state, failures: d.failures.map((x) => x.code), mode: shadow ? "shadow" : "enforce" });
-        if (!d.state.startsWith("review.")) return d;
+        ev({ event: "CONFORMANCE", round: reviewN, state: d.state, failures: d.failures.map((x) => x.code), mode: shadow ? "shadow" : "enforce", head, review_mode: delta ? "delta" : "full" });
+        if (!d.state.startsWith("review.")) { reviewed = { head, review, failures: d.failures, state: d.state }; return d; }
       }
       return d;
     }
@@ -1570,17 +1615,17 @@ export async function runCore(o) {
           await emit({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: [] });
         }
         T.review = [TRIGGER_SKIP, `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
-        await post("FORGE:REVIEW", triggerSkipNote);
+        await post("FORGE:REVIEW", triggerSkipNote + renderCheckpoint({ head: String(await git(["rev-parse", "HEAD"])).trim(), verdict: "conforms" }));
       } else if (shadow) {
         const wf = verdict.wouldFail ?? [];
         shadowWould = verdict.would;
         ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
         await emit({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
         T.review = [`shadow: would ${verdict.would === "conforms" ? "pass" : `block (${verdict.would})`}`, `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
-        await post("FORGE:REVIEW", renderShadowReview({ would: verdict.would, failures: wf, review: verdict.reviewState === "conforms" || verdict.reviewState === "nonconforming" ? review : null, contract: effective, degraded: degradedReq?.tracked ?? (degraded ? "untracked" : null) }));
+        await post("FORGE:REVIEW", renderShadowReview({ would: verdict.would, failures: wf, review: verdict.reviewState === "conforms" || verdict.reviewState === "nonconforming" ? review : null, contract: effective, degraded: degradedReq?.tracked ?? (degraded ? "untracked" : null), checkpoint: reviewedCheckpoint(verdict.would) }));
       } else {
         T.review = ["CONFORMS", `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
-        await post("FORGE:REVIEW", renderReview(review, effective));
+        await post("FORGE:REVIEW", renderReview(review, effective, reviewedCheckpoint("conforms")));
       }
     }
     ev({ event: "PHASE_COMMIT", phase: "review" });
@@ -1710,6 +1755,7 @@ export async function runCore(o) {
         if (rv.unusable) return await needsHuman(`Reviewer returned no usable review after base-sync (${rv.unusable}).`, UNUSABLE_REVIEW_CODES[rv.unusable]);
         if (rv.fail) return await needsHuman(`Review FAIL after base-sync: ${rv.reason}`, OUTCOME_CODES.REVIEW_FAILED);
         rereview = `${rv.verdict}: ${rv.reason || "no concrete failure"}`;
+        await postRereview(`base-sync ${syncs}`);
       }
       localHead = await gitOut(["rev-parse", "HEAD"]);
       await reportVerify();
@@ -1745,6 +1791,7 @@ export async function runCore(o) {
       if (rv.env) return await envNeedsHuman(rv.env);
       if (rv.fail) return await needsHuman(`Review FAIL after a CI fix round: ${rv.reason}`, OUTCOME_CODES.REVIEW_FAILED);
       await gitPush(["push", "origin", branch]); // plain push of the fix commit: never force
+      await postRereview(`CI fix round ${ciRounds}`);
       localHead = await gitOut(["rev-parse", "HEAD"]);
       await reportVerify();
       return null;
