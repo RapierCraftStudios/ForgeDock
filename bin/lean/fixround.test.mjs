@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { MECHANICAL_KINDS, FIX_PROMPT_MAX, citesFileLine, freshFix, issueSummary, capText } from "./fixround.mjs";
+import { MECHANICAL_KINDS, FIX_PROMPT_MAX, citesFileLine, freshFix, issueSummary, capText, TRIGGERS, REWORK_TRIGGERS, firstPassOf, formatFirstPassSummary } from "./fixround.mjs";
 import { fixSessionPrompt } from "./prompts.mjs";
 
 describe("#4363 fresh fix sessions: which rounds, and the prompt caps", () => {
@@ -46,5 +46,32 @@ describe("#4363 fresh fix sessions: which rounds, and the prompt caps", () => {
     assert.match(p, /no earlier session/); assert.match(p, /## Issue: foo breaks\nfoo crashes on null/);
     assert.match(p, /"id": "R1"/); assert.match(p, /diff --git a\/src\/f0\.js/); assert.match(p, /git diff origin\/staging\.\.\.HEAD/);
     assert.match(p, /lint failed/); assert.match(p, /Host rules/);
+  });
+});
+
+describe("#4362 attempt triggers and first pass", () => {
+  const t = (...xs) => xs.map((trigger) => ({ trigger }));
+  it("the trigger vocabulary is the issue's closed list; rework is a subset", () => {
+    assert.deepEqual([...TRIGGERS], ["plan", "build", "block_correction", "contract_correction", "precheck", "structure", "docs", "enumerating",
+      "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery"]);
+    for (const r of REWORK_TRIGGERS) assert.ok(TRIGGERS.includes(r), r);
+  });
+  it("firstPassOf: null without a build or with an untagged attempt; rework after the build breaks it, repairs do not", () => {
+    assert.equal(firstPassOf(t("plan")), null);
+    assert.equal(firstPassOf([{ trigger: "plan" }, {}]), null);
+    assert.equal(firstPassOf(t("plan", "build")), true);
+    assert.equal(firstPassOf(t("plan", "precheck", "build")), true, "only attempts after the build count");
+    assert.equal(firstPassOf(t("plan", "build", "timeout_restart", "recovery", "ci_unavailable", "block_correction")), true);
+    for (const r of REWORK_TRIGGERS) assert.equal(firstPassOf(t("plan", "build", r)), false, r);
+    const killed = [{ trigger: "plan" }, { trigger: "timeout_restart", restart_of: "build" }];
+    assert.equal(firstPassOf(killed), true, "a killed and restarted build still reached the build");
+    assert.equal(firstPassOf([...killed, { trigger: "review" }]), false);
+    assert.equal(firstPassOf([{ trigger: "timeout_restart", restart_of: "plan" }]), null, "a restarted plan is not the build");
+  });
+  it("formatFirstPassSummary counts only rows that reached the build", () => {
+    assert.equal(formatFirstPassSummary([{ first_pass: true }, { first_pass: false }, { issue: 3 }, { first_pass: true }]), "first-pass: 67% (2/3 lanes that reached the build)");
+    assert.equal(formatFirstPassSummary([{ first_pass: true }]), "first-pass: 100% (1/1 lane that reached the build)");
+    assert.equal(formatFirstPassSummary([{ issue: 1 }]), null);
+    assert.equal(formatFirstPassSummary(undefined), null);
   });
 });

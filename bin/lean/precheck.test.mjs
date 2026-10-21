@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
+import { formatFirstPassSummary } from "./fixround.mjs";
 import { runChecks, formatPrecheckSummary, planPrecheck, selfCheck, selfCheckState, formatCheckTable, worktreeFingerprint } from "./precheck.mjs";
 import { execFileSync } from "node:child_process";
 import { readPrecheckBudget } from "../engine-cli.mjs";
@@ -116,6 +117,12 @@ describe("formatPrecheckSummary (#4331)", () => {
       runOne: async (n) => ({ terminalReason: "merged", ...({ 1: { precheckMs: 90000, precheckDeferred: 1 }, 2: { precheckMs: 30000, precheckDeferred: 0 } })[n] }) });
     assert.deepEqual(rows.map((r) => [r.issue, r.precheck_ms, r.precheck_deferred]), [[1, 90000, 1], [2, 30000, undefined], [3, undefined, undefined]]);
     assert.equal(formatPrecheckSummary(rows), "precheck: 2.0m total over 2 lanes, 1 deferred to CI");
+  });
+  it("#4362: orchestrate rows carry the lane's firstPass as first_pass for the batch first-pass line", async () => {
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 1, readBody: async () => "",
+      runOne: async (n) => ({ terminalReason: "merged", ...({ 1: { firstPass: true }, 2: { firstPass: false } })[n] }) });
+    assert.deepEqual(rows.map((r) => [r.issue, r.first_pass]), [[1, true], [2, false], [3, undefined]]);
+    assert.equal(formatFirstPassSummary(rows), "first-pass: 50% (1/2 lanes that reached the build)");
   });
 });
 

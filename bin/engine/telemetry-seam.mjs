@@ -51,7 +51,7 @@ export function mapRecord(rec, wallMs) {
   if (!rec || typeof rec !== "object") return null;
   if (rec.event === "PHASE_ATTEMPT_USAGE") {
     return { event: "phase_attempt", phase: rec.phase, payload: compact({
-      attempt: rec.attempt, model: rec.model, backend: rec.backend ?? undefined, stages: rec.stages, turns: rec.turns, duration_ms: rec.duration_ms,
+      attempt: rec.attempt, trigger: rec.trigger ?? undefined, restart_of: rec.restart_of ?? undefined, model: rec.model, backend: rec.backend ?? undefined, stages: rec.stages, turns: rec.turns, duration_ms: rec.duration_ms,
       cost_usd: Number.isFinite(rec.cost_usd) ? Math.round(rec.cost_usd * 1e6) / 1e6 : undefined,
       input_tokens: tok(rec.usage, "input_tokens"), output_tokens: tok(rec.usage, "output_tokens"),
       cache_read_tokens: tok(rec.usage, "cache_read_input_tokens"), cache_creation_tokens: tok(rec.usage, "cache_creation_input_tokens"),

@@ -39,7 +39,15 @@ With no local state at all, `forgedock stats --repo <r>` reproduces the report f
 - **Cost**: cache-read tokens per issue (mean, median), per phase (mean over all runs, so phases add up to the per-issue
   mean), per merged issue, output tokens, USD where recorded.
 - **Time**: p50 and p90 duration per phase and wall time per issue.
-- **Flow**: merged %, needs-human %, remediation rate, outcome-code distribution (`docs/OUTCOME-CODES.md`).
+- **Flow**: merged %, needs-human %, remediation rate, outcome-code distribution (`docs/OUTCOME-CODES.md`), and the
+  **first-pass rate** (#4362): the share of lanes that reached the build (a `build` attempt, or the `timeout_restart` of
+  one) with no rework attempt after it, with the count (`k/n lanes`) and how many lanes are `unknown` (their attempts
+  carry no `trigger`: logs written before the field). Rework triggers: `precheck`, `structure`, `docs`, `enumerating`,
+  `sequence`, `ci_red`, `conformance`, `review`, `merge_ci` (`bin/lean/fixround.mjs` `REWORK_TRIGGERS`); a timeout
+  restart, a base-sync `recovery`, a `ci_unavailable` fallback or a `block_correction` does not break first pass.
+- **Rework by trigger** (#4362): count and USD of the builder (`implement`) attempts with a rework trigger, per trigger,
+  plus a total. Attempts without a `trigger` are counted as `unknown`, never dropped. JSON also carries every builder
+  attempt by trigger (`rework.attempts`).
 - **Review funnel**: findings per review by severity, then ISSUE / NOTE / in-PR fix, plus `validated` and `false-positive` issues.
 - **Gates**: block rate per gate (acceptance, diff size OVER, CI, liveness), malformed-check rate, COHESIVE and OVER counts.
 - **Issue flow**: issues created by source (review-finding, pipeline bot, human), closed by kind, net flow, findings per merged issue.

@@ -38,3 +38,34 @@ export function issueSummary(body, max = FIX_CAPS.summary) {
   const t = String(body ?? "").replace(/<!--[\s\S]*?-->/g, "").replace(/\n{3,}/g, "\n\n").trim();
   return capText(t, max);
 }
+
+/**
+ * #4362: why a PHASE_ATTEMPT_USAGE attempt ran (its `trigger`). Every builder, reviewer and grouping call passes one of
+ * these; events written before the field existed read as "unknown" in `forgedock stats`.
+ */
+export const TRIGGERS = Object.freeze(["plan", "build", "block_correction", "contract_correction", "precheck", "structure", "docs", "enumerating",
+  "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery"]);
+
+/** Builder attempts after the build that mean its diff needed rework (environment and engine repairs do not). */
+export const REWORK_TRIGGERS = Object.freeze(["precheck", "structure", "docs", "enumerating", "sequence", "ci_red", "conformance", "review", "merge_ci"]);
+
+/**
+ * First pass of one lane from its implement-phase attempts in order ({trigger, restart_of}): null when it never reached the
+ * build or an attempt has no trigger (not measurable), else true when no rework-trigger attempt follows the first `build`
+ * (or the `timeout_restart` of a build, `restart_of: "build"`, when the build itself was killed).
+ */
+export function firstPassOf(attempts) {
+  const list = Array.isArray(attempts) ? attempts : [];
+  if (list.some((a) => !a?.trigger)) return null;
+  const at = list.findIndex((a) => a.trigger === "build" || (a.trigger === "timeout_restart" && a.restart_of === "build"));
+  if (at < 0) return null;
+  return !list.slice(at + 1).some((a) => REWORK_TRIGGERS.includes(a.trigger));
+}
+
+/** The batch report's first-pass line (rows carry `first_pass`), or null when no lane reached the build. */
+export function formatFirstPassSummary(rows) {
+  const reached = (rows ?? []).filter((r) => typeof r?.first_pass === "boolean");
+  if (!reached.length) return null;
+  const k = reached.filter((r) => r.first_pass).length;
+  return `first-pass: ${Math.round((k / reached.length) * 100)}% (${k}/${reached.length} lane${reached.length === 1 ? "" : "s"} that reached the build)`;
+}

@@ -4560,3 +4560,52 @@ describe("#4363 fresh fix sessions", () => {
     assert.equal(r3.terminalReason, "needs-human"); assert.equal(reviewers(w3).length, 2, "still one review retry");
   });
 });
+
+describe("#4362 attempt triggers", () => {
+  const usage = (dir) => readLog(dir, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE");
+
+  it("every builder/fixRound/attempt call site in lean.mjs passes a string-literal trigger from TRIGGERS", async () => {
+    const { TRIGGERS } = await import("./fixround.mjs");
+    const src = readFileSync(new URL("./lean.mjs", import.meta.url), "utf8");
+    const lines = src.split("\n");
+    const at = (re) => lines.map((l, i) => [l, i + 1]).filter(([l]) => re.test(l));
+    const builderSites = at(/builder\(\+\+attemptN,/), fixSites = at(/fixRound\("/), attemptSites = at(/attempt\("(?!implement)/);
+    assert.ok(builderSites.length >= 9 && fixSites.length >= 9 && attemptSites.length >= 2, "the call sites were found");
+    const known = (lit, l, n) => assert.ok(lit && TRIGGERS.includes(lit), `lean.mjs:${n} passes no known trigger: ${l.trim().slice(0, 120)}`);
+    const fixLines = at(/async function fixRound\(/)[0][1];
+    for (const [l, n] of builderSites) {
+      if (n > fixLines && n < fixLines + 10 && /trigger \}\)/.test(l)) continue; // fixRound forwards its own trigger, checked below
+      known(/trigger: "([a-z_]+)"/.exec(l)?.[1], l, n);
+    }
+    for (const [l, n] of [...fixSites, ...attemptSites]) known(/, "([a-z_]+)"\);/.exec(l)?.[1], l, n);
+    assert.match(src, /opts\.trigger = "timeout_restart"/, "a timeout restart is tagged");
+  });
+
+  it("a precheck fix run tags every attempt (plan, build, precheck; review) and is not first pass; a clean run is", async () => {
+    const w = world(); let rc = 1;
+    w.io.runCommand = async () => ({ rc, output: rc ? "lint: src/foo.js:3 unused var" : "" });
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { const res = await inner(c); if (/declared check commands failed/.test(c.prompt)) rc = 0; return res; };
+    const dir = tmpDir("core-");
+    const r = await run(w, { dir, precheck: { commands: ["make lint"] } });
+    assert.equal(r.terminalReason, "merged");
+    const u = usage(dir);
+    const { TRIGGERS } = await import("./fixround.mjs");
+    for (const e of u) assert.ok(TRIGGERS.includes(e.trigger), `${e.phase} attempt ${e.attempt}: ${e.trigger}`);
+    assert.deepEqual(u.filter((e) => e.phase === "implement").map((e) => e.trigger), ["plan", "build", "precheck"]);
+    assert.ok(u.filter((e) => e.phase === "review").every((e) => e.trigger === "review"));
+    assert.equal(r.firstPass, false);
+    const clean = await run(world(), { dir: tmpDir("core-") });
+    assert.equal(clean.terminalReason, "merged"); assert.equal(clean.firstPass, true);
+  });
+
+  it("an idle-killed build retries as timeout_restart (restart_of build) and still counts as reaching the build", async () => {
+    const w = world({ dirty: true }); const dir = tmpDir("core-idle-");
+    const orig = w.io.runner; let n = 0;
+    w.io.runner = async (c) => { if (c.role === "builder" && n++ === 1) throw Object.assign(new Error("idle"), { code: "CLI_IDLE" }); return orig(c); };
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(usage(dir).filter((e) => e.phase === "implement").map((e) => [e.attempt, e.trigger, e.restart_of ?? null]), [[1, "plan", null], [2, "timeout_restart", "build"]]);
+    assert.equal(r.firstPass, true);
+  });
+});
