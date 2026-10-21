@@ -216,12 +216,13 @@ as `makeHostProbe().activeLanes()`.
 
 ## Dependency cache (#4220)
 
-`depcache.mjs` `prepare` (after the worktree exists) keys each lockfile (pnpm/npm/yarn
+`depcache.mjs` `prepare` (after the worktree and the toolchain step 2b exist) keys each lockfile (pnpm/npm/yarn
 non-PnP, uv/poetry) by sha256 of lock + manifests + runtime + platform. Hit: hardlink the
 read-only snapshot `~/.forge/depcache/<repoKey>/<eco>-<key>/` in (bin scripts copied, build
 path rewritten), then a warm repair install. Miss: frozen install under the key lock, publish
 via tmp + atomic rename. Never fails the run (`DEPS_PREPARED`); runner env gets the shared
-stores; `forgedock gc --deps` reaps; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
+stores; install/repair commands get the lane's toolchain env (#4347: a pm only the shim provides
+resolves; no pin, no shim or a failed toolchain step means the host PATH); `forgedock gc --deps` reaps; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
 
 ## FORGE:STATE lease
 
