@@ -1170,6 +1170,43 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal((await run(w)).code, "contract.invalid"); assert.equal(builders(w).length, 2, "plan + one correction");
     assert.match(builders(w)[1][4], /R1: quote is not verbatim[\s\S]*V1: needs command 'jq'/);
   });
+  it("#4393 replaying the AlterLab#36619 contract flags V4 at preflight, before the builder starts", async () => {
+    const V4 = "uv run --no-project --python 3.12 python -m shared.detection.corpus.tools.check_manifest";
+    const c = { ...CONTRACT, validate: [{ id: "V1", command: "node --test test/foo.test.js" }, { id: "V2", command: "python3 -m pytest -q tests/test_corpus.py" }, { id: "V3", command: "uv run pytest -q tests/test_manifest.py" }, { id: "V4", command: V4 }] };
+    const fixed = { ...c, validate: [...c.validate.slice(0, 3), { id: "V4", command: "uv run python -m shared.detection.corpus.tools.check_manifest" }] };
+    const dir = tmpDir("preflight-run-");
+    const w = world({ contract: c, fixedContract: fixed, validation: fixed.validate.map((v) => ({ id: v.id, command: v.command, exit: 0 })) });
+    const ran = [];
+    w.io.probeCommand = async () => ({ rc: 0, output: "" }); // uv, python3 and pytest are on the host
+    w.io.preflightRun = async (a) => { ran.push([a.command, a.cwd, w.seq.length]); return a.command === V4 ? { rc: 1, output: "Traceback (most recent call last):\nModuleNotFoundError: No module named 'httpx'\n" } : { rc: 1, output: "AssertionError: expected RED on base" }; };
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3, "plan + one contract correction + implement");
+    assert.match(b[1][4], /V4: running it on the base worktree stopped before any test ran: needs Python module 'httpx'[\s\S]*repo's own toolchain/);
+    assert.doesNotMatch(b[1][4], /V[123]:/, "RED on base is not a miss");
+    assert.match(b[2][4], /The engine froze/, "the correction lands before the implement builder");
+    assert.ok(ran.every(([, cwd]) => cwd === WT));
+    const firstImpl = w.seq.indexOf("builder-resume", w.seq.indexOf("builder-resume") + 1);
+    assert.ok(ran.every(([, , at]) => at < firstImpl), "every run happens before the implement session");
+    const pf = readLog(dir, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT");
+    assert.deepEqual(pf.map((e) => [e.corrected, e.found.map((m) => [m.ids, m.tool, m.kind, m.source])]), [[true, [[["V4"], "httpx", "python-module", "run"]]]]);
+    // a timed-out run is no evidence; an unset $VAR is a miss without running the command
+    const t = world({ contract: { ...CONTRACT, validate: [{ id: "V1", command: "node --test test/foo.test.js" }, { id: "V2", command: 'node scripts/x.mjs "$NO_SUCH_VAR_4393"' }] } });
+    const tRan = []; t.io.preflightRun = async (a) => { tRan.push(a.command); return { rc: 124, output: "ModuleNotFoundError: No module named 'httpx'\n(timed out after 30s)" }; };
+    assert.equal((await run(t)).terminalReason, "merged");
+    assert.deepEqual(tRan, ["node --test test/foo.test.js", "node --test test/foo.test.js"], "V2 skipped (env miss), V1 run again after the correction");
+    assert.match(builders(t)[1][4], /V2: uses \$NO_SUCH_VAR_4393, which is unset or empty/);
+  });
+  it("#4393 files the preflight runs create or modify are reverted; paths dirty before are not", async () => {
+    const w = world({ dirty: true });
+    let st = " M src/foo.js\n";
+    const git0 = w.io.git, reverts = [];
+    w.io.git = async (a, o) => { if (a[0] === "status" && a[2] === "--untracked-files=all") return st; if (a[0] === "clean" || (a[0] === "checkout" && a[1] === "--")) { reverts.push(a.join(" ")); return ""; } return git0(a, o); };
+    w.io.preflightRun = async () => { st += "?? .pytest_cache_x/log\n M src/bar.js\n"; return { rc: 0, output: "" }; };
+    await run(w);
+    assert.deepEqual(reverts, ["clean -fdq -- .pytest_cache_x/log", "checkout -- src/bar.js"]);
+    assert.ok(traj(w).some((x) => /Validate preflight reverted 2 path\(s\) its runs changed/.test(x)));
+  });
   it("#4353 the #4348 contract shape: an allowlist validate is dropped at freeze (CONTRACT_SCOPE_VALIDATE_DROPPED), the amended lane merges, and a real out-of-scope edit is still scope_creep", async () => {
     const ALLOW = 'test -z "$(git diff --name-only origin/staging...HEAD | grep -v -x -e src/foo.js -e test/foo.test.js)"';
     const c = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: ALLOW }] }, files = ["src/foo.js", "test/foo.test.js", "docs/foo.md"];

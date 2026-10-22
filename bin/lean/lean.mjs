@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, dropScopeValidates, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths } from "./prefilter.mjs";
-import { preflightProbes, preflightProblems } from "./preflight.mjs";
+import { preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { repoKey } from "../runner.mjs";
@@ -1020,20 +1020,37 @@ export async function runCore(o) {
       }
       T.decisions.push(`Tracked ${reqs.map((r) => `${r.id} (${r.disposition})`).join(", ")} in ${[...new Set(reqs.map((r) => r.tracked))].join(", ")} (${why})`);
     }
-    /** #4328: probe the host for the tools and modules a contract's validate commands need; the misses, [] without io.probeCommand. */
+    /**
+     * #4328: probe the host for the tools and modules a contract's validate commands need; #4393: then flag `$NAME`s the lane
+     * env leaves empty and run each remaining command once on the base worktree (io.preflightRun). The misses; [] without either hook.
+     */
     async function preflightValidates(contract) {
-      if (!io.probeCommand || !contract || typeof contract !== "object") return [];
+      if ((!io.probeCommand && !io.preflightRun) || !contract || typeof contract !== "object") return [];
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
-      const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
-      if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
       const env = laneEnv(), missing = new Set(), misses = []; // #4325: the env the validate commands run with
-      for (const p of probes) {
-        if (p.needs && missing.has(p.needs)) continue;
-        let r;
-        try { r = await io.probeCommand({ command: p.probe, cwd: wt, timeoutMs: 15000, env }); } catch { r = { rc: 127 }; }
-        if (r?.rc === 0 || r?.rc === 124) continue; // a timed-out probe is no evidence either way
-        if (p.kind === "command") missing.add(p.tool);
-        misses.push(p);
+      if (io.probeCommand) {
+        const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
+        if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
+        for (const p of probes) {
+          if (p.needs && missing.has(p.needs)) continue;
+          let r;
+          try { r = await io.probeCommand({ command: p.probe, cwd: wt, timeoutMs: 15000, env }); } catch { r = { rc: 127 }; }
+          if (r?.rc === 0 || r?.rc === 124) continue; // a timed-out probe is no evidence either way
+          if (p.kind === "command") missing.add(p.tool);
+          misses.push({ ...p, source: "probe" });
+        }
+      }
+      const fullEnv = { ...process.env, ...env };
+      for (const v of Array.isArray(contract.validate) ? contract.validate : []) {
+        if (v?.id && typeof v.command === "string") for (const name of unsetEnvVars(v.command, fullEnv)) misses.push({ ids: [v.id], tool: name, kind: "env-var", source: "env" });
+      }
+      if (io.preflightRun) {
+        const skipIds = [...new Set(misses.flatMap((m) => m.ids))];
+        const run = (a) => heavyStep("precheck", () => io.preflightRun({ ...a, cwd: wt }));
+        const r = await runPreflight({ contract, run, git, env, skipIds, now, ...knownToContract(contract, files) });
+        misses.push(...r.misses);
+        if (r.skipped.length) T.anomalies.push(`Validate preflight run budget spent; ${r.skipped.join(", ")} not run on base`);
+        if (r.reverted.length) T.anomalies.push(`Validate preflight reverted ${r.reverted.length} path(s) its runs changed: ${r.reverted.slice(0, 5).join(", ")}`);
       }
       return misses;
     }
@@ -1212,7 +1229,7 @@ export async function runCore(o) {
           if (missed.length) misses = await preflightValidates(contract);
         }
         if (missed.length) {
-          ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind })), corrected: misses.length === 0 });
+          ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), found: missed.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), corrected: misses.length === 0 });
           if (misses.length) {
             T.anomalies.push(`Validate preflight: the host lacks ${misses.map((m) => m.tool).join(", ")} after the contract correction (advisory; a failed rerun ends env.tool_missing)`);
             T.decisions.push(`Validate preflight left ${misses.length} miss(es) after one correction; contract frozen anyway`);
