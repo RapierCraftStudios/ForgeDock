@@ -7,7 +7,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
-import { parseFactsComment } from "./facts.mjs";
+import { parseFactsComment, normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
@@ -78,7 +78,7 @@ function world(o = {}) {
       if (k === "pr list") return JSON.stringify(w.prList);
       if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
       if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
-      if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: o.title ?? "foo breaks", body: b, state: "OPEN", comments: [] }); }
+      if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: o.title ?? "foo breaks", body: b, state: "OPEN", comments: o.viewComments ?? [] }); }
       if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: a[2] === "7" && o.title ? o.title : "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [], ...(o.labels && a[2] === "7" ? { labels: o.labels } : {}) });
       if (k === "pr edit") { w.prEdits.push(a); return ""; }
       if (k === "label create") { w.labelCreates = [...(w.labelCreates ?? []), a]; return ""; }
@@ -5461,6 +5461,48 @@ describe("#4397 independent adversarial verifier", () => {
     const bad1 = withVerifier(world({ reviews: [bad(), bad()] }));
     await run(bad1, { verifier: { mode: "enforce" } });
     assert.equal(bad1.vcalls.length, 0);
+  });
+});
+
+describe("resume digest in builder prompts (#4400)", () => {
+  const BOT = { author: { login: "forge[bot]" }, authorAssociation: "NONE" };
+  const factsRec = `<!-- ${FACTS_MARKER} -->\n${renderFactsRecord(normaliseFacts({ validation: [{ command: "node --test test/foo.test.js", exit: 1 }] }, { files: ["src/foo.js"] }))}`;
+  const needs = "<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\nCI red: test/foo.test.js fails on the null case";
+  const body = `${ISSUE_BODY}\n\n<!-- FORGE:STATE\n${JSON.stringify({ v: 1, issue: 7, terminal: true, terminalReason: "needs-human", terminalCode: "ci.red", failureClasses: ["ci.red"] })}\n-->`;
+  const frozen = () => {
+    const h = contractHash(contractJson(CONTRACT));
+    return { body: `<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n${renderContract(CONTRACT, h)}`, author_association: "OWNER", user: { type: "User", login: "op" } };
+  };
+  const resumedWorld = () => world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozen()], issueBodies: [body], viewComments: [{ body: factsRec, ...BOT }, { body: needs, ...BOT }] });
+
+  it("a resumed lane with a frozen contract gets files changed, the failing validate, the end reason and the requirements; RESUME_DIGEST is logged", async () => {
+    const w = resumedWorld(), dir = tmpDir("lean-resume-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const p = builders(w)[0][4];
+    for (const s of ["Resume digest of the last run", "- needs-human (ci.red); failures ci.red", "FORGE:NEEDS_HUMAN: CI red: test/foo.test.js fails on the null case",
+      "- V1 `node --test test/foo.test.js`: exit 1 (failing)", "- R1: foo must handle a null argument without throwing.", "- src/foo.js", "Start from this state: do not re-derive it."]) assert.ok(p.includes(s), `missing ${s}\n${p}`);
+    const e = readLog(dir, 7).find((x) => x.event === "RESUME_DIGEST");
+    assert.ok(e && e.bytes > 0 && e.validates === 1 && e.files === 2 && e.reason === "needs-human", JSON.stringify(e));
+    assert.match(traj(w)[0], /Resume digest given to the builder/);
+  });
+
+  it("a recovery lane gets the digest after the recovery note", async () => {
+    const w = resumedWorld();
+    await run(w, { recover: { code: "ci.red", attempt: 1 } });
+    const p = builders(w)[0][4];
+    assert.ok(p.indexOf("Recovery pass (ci.red)") >= 0 && p.indexOf("Recovery pass (ci.red)") < p.indexOf("Resume digest of the last run"), p);
+  });
+
+  it("a first run gets no digest; context_pack off gives none; the contract quotes are unchanged", async () => {
+    const first = world({ issueBodies: [body], viewComments: [{ body: factsRec, ...BOT }] });
+    await run(first);
+    assert.ok(!builders(first).some((b) => b[4].includes("Resume digest")));
+    const off = resumedWorld(), dir = tmpDir("lean-resume-off-");
+    await run(off, { dir, contextPack: { mode: "off" } });
+    assert.ok(!builders(off).some((b) => b[4].includes("Resume digest")));
+    assert.ok(!readLog(dir, 7).some((x) => x.event === "RESUME_DIGEST"));
+    assert.ok(!off.comments.some((c) => c.includes("FORGE:CONTRACT")), "the frozen contract is reused, not re-planned");
   });
 });
 

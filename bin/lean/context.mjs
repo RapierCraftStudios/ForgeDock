@@ -180,9 +180,10 @@ async function readComments(gh, repo, n) {
 
 /**
  * Collect the facts for one issue's pack. `io`: {gh, git, exists}; git runs in `cwd` (the lane worktree), base is the
- * base ref. Every source is independent and best effort: a failing source is listed in `errors` and contributes nothing.
+ * base ref; `checkout` (the main checkout, optional) is where repo-fact files absent from the worktree are looked up.
+ * Every source is independent and best effort: a failing source is listed in `errors` and contributes nothing.
  */
-export async function gatherContextFacts({ io, repo, issue, iss, comments = [], cwd, base, sources = CONTEXT_SOURCES, days = DEFAULT_LEDGER_DAYS, now = Date.now(), pitfalls = [] }) {
+export async function gatherContextFacts({ io, repo, issue, iss, comments = [], cwd, checkout = null, base, sources = CONTEXT_SOURCES, days = DEFAULT_LEDGER_DAYS, now = Date.now(), pitfalls = [] }) {
   const facts = { issue: Number(issue), links: [], attempts: [], pitfalls: [], ledger: [], facts: [], lanes: [], errors: [] };
   const body = String(iss?.body ?? "");
   const on = new Set(sources);
@@ -321,7 +322,10 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
         if (rec && overlaps(rec.files)) add(rec, `${pr.linked ? `#${pr.linked}, ` : ""}PR #${c.pr}`, pr.linked, c.pr);
       }
     }
-    for (const p of REPO_FACT_FILES) if (await io.exists(`${cwd}/${p}`)) facts.facts.push(p);
+    // #4400: the .forge/ caches are untracked, so a fresh lane worktree lacks them: the main checkout is the fallback
+    for (const p of REPO_FACT_FILES) {
+      for (const d of [...new Set([cwd, checkout].filter(Boolean))]) if (await io.exists(`${d}/${p}`)) { facts.facts.push(p); break; }
+    }
   });
   return facts;
 }
