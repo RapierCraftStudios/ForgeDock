@@ -962,6 +962,7 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
 /**
  * `forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] [--no-prefilter]`
  * `forgedock orchestrate --resume <batch-id> [issue...]` · `forgedock orchestrate --set-parallel <batch-id> <K>` · `forgedock orchestrate --add <batch-id> <issue...>`
+ * `forgedock orchestrate --cancel <batch-id>`
  * Runs core work-on per issue with K concurrency (default 3), honouring `Depends on` / `Blocked by` among the given issues.
  * A `dependency-open` issue is requeued behind its dependency; a `decomposed` one adds its sub-issues (#4124).
  * The already-fixed pre-filter (#4123) runs before each lane unless `--no-prefilter`.
@@ -983,6 +984,8 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * daemon. `--foreground` or `FORGEDOCK_SCHEDD=0` runs the batch in this process as before (also for injected test deps).
  * `--add <id> N...` (#4408) adds issues to that batch instead of starting a second one: they run under its K and DAG
  * (a running batch picks them up on its next pass, a stopped one on its next `--resume`); `--resume <id> N...` adds N too.
+ * `--cancel <id>` (#4376) stops that one batch, never the shared daemon: it admits nothing more, its running local lanes get
+ * SIGTERM (their teardown saves the work), remote lanes run to their result and the rest end `held`; `--resume <id>` continues it.
  */
 export async function orchestrateFromCli(argv, deps = {}) {
   const inProcess = deps.inProcess || deps.leanModule || deps.laneScript || deps.batchRoot || deps.leanIo
@@ -994,7 +997,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
 const formatRowLine = (r) => (r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`);
 const consoleSink = () => ({ batch: () => {}, row: (r) => console.log(formatRowLine(r)), line: (t) => console.log(t) });
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...>";
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...> | --cancel <id>";
 const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model"];
 const issuesOf = (argv) => {
   const issues = [];
@@ -1044,6 +1047,24 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
 }
 
 /**
+ * `--cancel <id>` (#4376): through the daemon (`viaDaemon`, null when none runs) or the batch's `cancel` file directly.
+ * A finished batch (report written) is left alone.
+ */
+async function cancelBatch({ id, root, viaDaemon = null, print = (l) => console.log(l) }) {
+  if (!id || String(id).startsWith("--")) throw new Error(ORCH_USAGE);
+  let res = viaDaemon ? await viaDaemon() : null;
+  if (!res) {
+    const b = (await import("./lean/batch.mjs")).openBatch(root, id);
+    if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
+    if (b.readReport()) res = { cancelled: false, finished: true };
+    else { b.requestCancel({ reason: "operator" }); res = { cancelled: true }; }
+  }
+  print(res.cancelled ? `batch ${id}: cancel requested; running lanes stop through their teardown, the rest stay held (forgedock orchestrate --resume ${id} continues)`
+    : `batch ${id}: already finished`);
+  return { ok: true, batch: id, cancelled: !!res.cancelled };
+}
+
+/**
  * Daemon client (#4192): argument checks here, then submit / attach / set-parallel over the schedd socket. Prints the
  * streamed rows and lines like the in-process run and returns the same `{rows, crossLane, batch, ok}`.
  */
@@ -1075,6 +1096,14 @@ async function orchestrateClient(argv, deps = {}) {
     return sock ? schedd.request(sock, { op: "add", id, issues }) : null;
   };
   const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
+  if (argv.includes("--cancel")) {
+    const id = flag(argv, "--cancel");
+    return cancelBatch({ id, root: await batchRootOf(), viaDaemon: async () => {
+      let sock = null;
+      try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
+      return sock ? schedd.request(sock, { op: "cancel", id }) : null;
+    } });
+  }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add"), id = argv[i + 1];
     if (!id || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
@@ -1132,6 +1161,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     sink.line(`batch ${b.id}: parallel set to ${k}`);
     return { ok: true, batch: b.id, parallel: k };
   }
+  if (argv.includes("--cancel")) return cancelBatch({ id: flag(argv, "--cancel"), root, print: (l) => sink.line(l) });
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add");
     if (!argv[i + 1] || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
@@ -1175,6 +1205,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     // A resume is the operator's decision to continue: the breaker starts closed again.
     const st = batch.store.load();
     if (st && !keepBreaker) batch.store.save({ ...st, breaker: null, errorTimes: [] });
+    if (!keepBreaker) batch.clearCancel(); // #4376: the operator's resume continues a cancelled batch
     if (daemon && !plan.daemon) batch.writePlan({ ...plan, daemon: true }); // a daemon restart resumes it from now on
     batch.clearReport();
   }
@@ -1266,6 +1297,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     } else {
       lanes = withPlacement(batchMod.detachedLanes({ batch, cwd, env, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs }));
     }
+    // #4376: a cancel stops detached host lanes by SIGTERM to their group (pid-reuse checked by the result path); sandboxes run on.
+    const { killLedgerPid } = await import("./lean/effects.mjs");
+    const stopLane = deps.stopLane ?? ((n, rec) => (rec?.pid && !rec.remote && !rec.handle ? killLedgerPid(rec.pid, batch.resultFile(n)) : false));
+    lanes = { ...lanes, stopLane };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);
   // #4304: recovery lanes run on the core path only (run-issue throws on --recover with full), so a full-path repo gets none.
@@ -1362,7 +1397,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   try {
     rows = await orchestrate({
       beforeAdmit,
-      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, ...lanes,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getCancelled: batch.readCancel, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),

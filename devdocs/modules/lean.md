@@ -477,6 +477,9 @@ arguments, resolves the repo, auto-spawns the daemon (output to
   `addIssues` after re-reading the pending issues' `Depends on`, and records one
   batch decision plus an `added` row. `attach` resumes a finished batch that has
   unrun adds instead of replaying its report.
+- `cancel {id}` (#4376, `--cancel <id>`) writes the batch's `cancel` file. Only that
+  batch stops: no more admissions, SIGTERM to its running local lanes, the rest `held`.
+  With no daemon, the client writes the file itself.
 - `status` reports the daemon pid and hosted batches.
 
 A client exit never stops a batch.
@@ -1062,3 +1065,23 @@ GitHub's) is resolved and fetched once, lazily, by `lazyDefaultBranch` (orchestr
 a parked result as outcome `awaiting-promotion|awaiting-precondition` with $0 and no `runOne` (not SATISFIED: dependents
 skip). `formatOutcomeLists` prints one `awaiting promotion: #A #B (fixes on <lane>, not on <default>)` line instead of
 escalations. Re-evaluation is the next batch or triage run. Cost: 0 LLM calls; per gated issue 1-2 gh reads and one git call.
+
+## Entry 2026-10-23 — Per-batch cancel (#4376)
+
+`forgedock orchestrate --cancel <id>` stops one batch without stopping the shared schedd. The client sends the schedd
+`cancel` op, or, with no daemon, writes `batch.mjs` `requestCancel` (the batch `cancel` file, `{at, reason}`) itself. A
+finished batch (its `report.json` written, not hosted) is left alone; an unknown id fails `no batch`. `orchestrate.mjs`
+reads the file through `getCancelled` every pass, and also every `pollMs` while lanes run or the batch waits on a delay.
+On the first pass that sees it, the runner:
+- admits nothing more, including beforeAdmit GC and recovery relaunches;
+- logs one `cancelled` row and a batch decision, and withdraws its registry offers;
+- calls `stopLane` once per running local lane. engine-cli wires `stopLane` to `killLedgerPid(pid, resultFile)`: SIGTERM
+  to the lane's process group, so its #4179 teardown checkpoints and reports `deferred run.interrupted`.
+
+A lane settling `deferred` or `engine-error` under a cancel is requeued with no deferral and no usage-limit hold. A lane
+the runner launched in the same instant ends `deferred` without starting. Remote lanes (sandboxes) are not stopped: their
+teardown has no checkpoint, so they run to their result. Once nothing runs, the loop ends; every unfinished issue is
+`held` with detail `cancelled by operator` (also the reason for the #4315 queued-recovery relabel) and `report.json` is
+written. `state.json` keeps `cancelled`, but the file stays the authority: an operator `--resume` clears it (`clearCancel`
+next to the breaker reset) and continues the held issues; a daemon restart (`keepBreaker`) keeps it. Cost: 0 LLM calls;
+one small file read per pass. ADR `decisions/4376-orchestrate-cancel.md`.
