@@ -1177,18 +1177,20 @@ export async function runCore(o) {
         } catch { /* the ledger is a cache */ }
       }
     }
+    /** #4394: a failed validate round on the mid tier moves this fix round and every later builder call to the top model. */
+    async function escalateOn(trigger) {
+      if (!shouldEscalate(route, escalated, trigger)) return;
+      escalated = true;
+      const rec = { event: "BUILDER_ESCALATED", from: route.model, to: builderModel ?? "default", trigger };
+      ev(rec); await emit(rec);
+      T.decisions.push(`Builder escalated from ${route.model} to the top model after a failed ${trigger} round`);
+    }
     /**
      * #4363: one fix round. Mechanical failures (and a conformance/review FAIL citing file:line) run in a fresh session on
      * the fix model with a narrow prompt; one resume of the build session follows when it made no commit. Else: a resume.
      */
     async function fixRound(kind, task, failures, trigger, failureText = "") {
-      await notePitfall(trigger, failureText); // #4375: learned once the same gate passes
-      if (shouldEscalate(route, escalated, trigger)) { // #4394: this fix round and every later builder call run on the top model
-        escalated = true;
-        const rec = { event: "BUILDER_ESCALATED", from: route.model, to: builderModel ?? "default", trigger };
-        ev(rec); await emit(rec);
-        T.decisions.push(`Builder escalated from ${route.model} to the top model after a failed ${trigger} round`);
-      }
+      await notePitfall(trigger, failureText); await escalateOn(trigger); // #4375: learned once the same gate passes; #4394
       if (!freshFix(kind, failures)) return await builder(++attemptN, task, sessionId ?? null, false, undefined, { mode: "resume", trigger });
       const before = String(await git(["rev-parse", "HEAD"])).trim();
       const ex = [".", `:!${LEAN_DIR}`], diff = String(await git(["diff", `${base}...HEAD`, "--", ...ex]).catch(() => "")), stat = String(await git(["diff", "--stat", `${base}...HEAD`, "--", ...ex]).catch(() => ""));

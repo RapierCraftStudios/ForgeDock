@@ -14,7 +14,7 @@ import { fetchGithubRecords, isValidRepo, toModel } from "./github-source.mjs";
 import { readLanes, readLocalRuns, runsDir } from "./local-source.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
-import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb } from "./query.mjs";
+import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers } from "./query.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readVerifier, readCloseParent, readVerify, makeIo, checkFromCli } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readBuilderRouting, readVerifier, readCloseParent, readVerify, makeIo, checkFromCli } from "../engine-cli.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { serializeState } from "../engine/state.mjs";
@@ -1032,6 +1032,25 @@ describe("readFixModel (#4363)", () => {
     assert.equal(readFixModel(d), "sonnet");
     writeFileSync(join(d, "forge.yaml"), "lean:\n  fix_model: \"bad model; rm\"\n");
     assert.equal(readFixModel(d), undefined);
+  });
+});
+
+describe("readBuilderRouting (#4394)", () => {
+  it("reads lean.builder_routing and lean.builder_mid_model, else engine.lean_builder_mid_model; absent or invalid is left out", () => {
+    const d = tmpDir("builder-routing-yaml-");
+    assert.equal(readBuilderRouting(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  fix_model: sonnet\n");
+    assert.equal(readBuilderRouting(d), undefined, "neither key set");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  builder_routing: off\n");
+    assert.deepEqual(readBuilderRouting(d), { mode: "off" });
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  builder_routing: sometimes\n");
+    assert.equal(readBuilderRouting(d), undefined, "an invalid mode is ignored");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  builder_routing: on\n  builder_mid_model: claude-haiku-5-5\n");
+    assert.deepEqual(readBuilderRouting(d), { mode: "on", midModel: "claude-haiku-5-5" });
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lean_builder_mid_model: sonnet\n");
+    assert.deepEqual(readBuilderRouting(d), { midModel: "sonnet" });
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  builder_mid_model: \"bad model; rm\"\n");
+    assert.equal(readBuilderRouting(d), undefined, "an invalid model id is rejected");
   });
 });
 
