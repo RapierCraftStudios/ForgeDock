@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readVerifier, readCloseParent, readVerify, makeIo, checkFromCli } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readVerifier, readCloseParent, readVerify, readLaneInstructions, makeIo, checkFromCli } from "../engine-cli.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { serializeState } from "../engine/state.mjs";
@@ -1172,5 +1172,18 @@ describe("forgedock check (#4364)", () => {
   it("local only: the command never reaches GitHub (no gh in its deps or source)", () => {
     const src = checkFromCli.toString();
     assert.doesNotMatch(src, /\bgh\b|workflow run|git", \["push|\["push"/);
+  });
+});
+
+describe("readLaneInstructions (#4395)", () => {
+  it("returns the trimmed engine.lane_instructions path; undefined when unset, empty or no forge.yaml", () => {
+    const d = tmpDir("lane-instr-");
+    assert.equal(readLaneInstructions(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lane_instructions:  devdocs/lane.md \n");
+    assert.equal(readLaneInstructions(d), "devdocs/lane.md");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lane_instructions: \"\"\n");
+    assert.equal(readLaneInstructions(d), undefined, "empty");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  conformance: shadow\n");
+    assert.equal(readLaneInstructions(d), undefined, "unset");
   });
 });

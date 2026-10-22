@@ -328,6 +328,9 @@ branches:
 #   turn_budget_s: 25
 #   turn_budget_m: 60
 #   turn_budget_l: 100
+#   # Lane profile (#4395): lanes run without auto-memory; with this repo-relative
+#   # file (hard rules + doc pointers, <= 16 KB) they also skip CLAUDE.md and get it instead.
+#   lane_instructions: devdocs/lane-instructions.md
 
 # =============================================================================
 # ENV (OPTIONAL)

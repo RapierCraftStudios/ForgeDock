@@ -2015,6 +2015,7 @@ export function listDescendants(pid, { psFn = null, maxCmd = 200 } = {}) {
  * #4405: `busy(children)` (info or null) is asked once idle (at most every min(5 s, idleMs)); while it answers busy (a live
  * heavy step, test or lint child) the kill waits until idleMs + `busyMs` of silence, `onIdleExtend(info)` is told once per
  * idle stretch, and a later kill carries `extended: true` and `heavyQueue` (info.heavyQueue).
+ * #4395: a stream result carries `baselineTokens`, the first assistant turn's context; absent when no message was seen.
  */
 export async function runCliBackendAsync(opts) {
   const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, ...rest } = opts;
@@ -2147,7 +2148,11 @@ export async function runCliBackendAsync(opts) {
     err.extended = idleInfo.extended; err.heavyQueue = idleInfo.heavyQueue;
     throw err;
   }
-  return runCliBackend({ ...rest, spawnFn: () => collected });
+  const r = runCliBackend({ ...rest, spawnFn: () => collected });
+  // #4395: the session baseline is the first assistant turn's context (system prompt, tools, instructions, first prompt).
+  const first = msgUsage.values().next().value;
+  if (first && r && typeof r === "object") r.baselineTokens = toFiniteUsageNumber(first.input_tokens) + toFiniteUsageNumber(first.cache_read_input_tokens) + toFiniteUsageNumber(first.cache_creation_input_tokens);
+  return r;
 }
 
 // ---------------------------------------------------------------------------

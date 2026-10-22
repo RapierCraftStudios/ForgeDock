@@ -1607,7 +1607,8 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(facts([], { file_lines: 1000, growth_lines: 50 })).trim(), "Don't grow a file over 1000 lines by more than 50 lines. Put new code next to it.");
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
-    assert.ok(approxTokens(plan) <= 1800, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths.
+    assert.ok(approxTokens(plan) <= 1850, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1500);
   });
 
@@ -5460,5 +5461,95 @@ describe("#4397 independent adversarial verifier", () => {
     const bad1 = withVerifier(world({ reviews: [bad(), bad()] }));
     await run(bad1, { verifier: { mode: "enforce" } });
     assert.equal(bad1.vcalls.length, 0);
+  });
+});
+
+describe("#4395 lane profile", () => {
+  const LANE = "# Hard rules\nNever push to main.";
+  const capture = (w) => {
+    const seen = [], orig = w.io.runner;
+    w.io.runner = async (c) => { seen.push({ role: c.role, resume: c.resume ?? null, system: c.system, env: c.env ?? {}, noTools: c.noTools ?? false }); return orig(c); };
+    return seen;
+  };
+  const usage = (dir) => readLog(dir, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE");
+
+  it("without lane_instructions every session has auto-memory off, CLAUDE.md kept and system prompts unchanged", async () => {
+    const w = world(), seen = capture(w), dir = tmpDir("core-lp-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(seen.length >= 2);
+    for (const c of seen) { assert.equal(c.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1"); assert.equal("CLAUDE_CODE_DISABLE_CLAUDE_MDS" in c.env, false); }
+    assert.equal(seen.find((c) => c.role === "builder").system, "");
+    assert.equal(seen.find((c) => c.role === "reviewer").system, REVIEWER_SYSTEM);
+    assert.ok(usage(dir).every((e) => e.lane_profile === "memory-off"));
+    assert.match(traj(w)[0], /Lane profile: auto-memory off, CLAUDE\.md loaded/);
+  });
+
+  it("a valid lane file replaces CLAUDE.md: both switches, file appended to fresh sessions only", async () => {
+    const w = world(), seen = capture(w), dir = tmpDir("core-lp-");
+    w.files[`${WT}/devdocs/lane.md`] = `${LANE}\n`;
+    const r = await run(w, { dir, laneInstructions: "devdocs/lane.md" });
+    assert.equal(r.terminalReason, "merged");
+    for (const c of seen) { assert.equal(c.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1"); assert.equal(c.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS, "1"); }
+    const fresh = seen.filter((c) => c.role === "builder" && !c.resume), resumed = seen.filter((c) => c.role === "builder" && c.resume);
+    assert.ok(fresh.length >= 1 && resumed.length >= 1);
+    for (const c of fresh) assert.equal(c.system, LANE);
+    for (const c of resumed) assert.equal(c.system, "", "a resume sends no system prompt");
+    assert.equal(seen.find((c) => c.role === "reviewer").system, `${REVIEWER_SYSTEM}\n\n${LANE}`);
+    assert.ok(usage(dir).every((e) => e.lane_profile === "lane"));
+    assert.match(traj(w)[0], /Lane profile: devdocs\/lane\.md \(\d+ bytes\) instead of CLAUDE\.md/);
+  });
+
+  for (const [path, why] of [["devdocs/missing.md", /not readable/], ["../outside.md", /not a repo-relative path/], ["/etc/passwd", /not a repo-relative path/]]) {
+    it(`a bad lane file (${path}) is an anomaly and falls back to CLAUDE.md with memory off`, async () => {
+      const w = world(), seen = capture(w), dir = tmpDir("core-lp-");
+      const r = await run(w, { dir, laneInstructions: path });
+      assert.equal(r.terminalReason, "merged");
+      for (const c of seen) { assert.equal(c.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1"); assert.equal("CLAUDE_CODE_DISABLE_CLAUDE_MDS" in c.env, false); }
+      assert.equal(seen.find((c) => c.role === "builder").system, "");
+      assert.match(traj(w)[0], new RegExp(`engine\\.lane_instructions .*${why.source}`));
+    });
+  }
+
+  it("an oversized lane file falls back", async () => {
+    const w = world(), seen = capture(w);
+    w.files[`${WT}/big.md`] = "x".repeat(16385);
+    await run(w, { laneInstructions: "big.md" });
+    assert.ok(seen.every((c) => !("CLAUDE_CODE_DISABLE_CLAUDE_MDS" in c.env)));
+    assert.match(traj(w)[0], /over 16384 bytes/);
+  });
+
+  it("FORGEDOCK_FULL_SESSION=1 leaves sessions untouched", async () => {
+    const w = world(), seen = capture(w), dir = tmpDir("core-lp-");
+    w.files[`${WT}/devdocs/lane.md`] = LANE;
+    const prev = process.env.FORGEDOCK_FULL_SESSION; process.env.FORGEDOCK_FULL_SESSION = "1";
+    try { await run(w, { dir, laneInstructions: "devdocs/lane.md" }); } finally { if (prev === undefined) delete process.env.FORGEDOCK_FULL_SESSION; else process.env.FORGEDOCK_FULL_SESSION = prev; }
+    for (const c of seen) { assert.equal("CLAUDE_CODE_DISABLE_AUTO_MEMORY" in c.env, false); assert.equal("CLAUDE_CODE_DISABLE_CLAUDE_MDS" in c.env, false); }
+    assert.equal(seen.find((c) => c.role === "builder").system, "");
+    assert.ok(usage(dir).every((e) => e.lane_profile === "full"));
+  });
+
+  it("PHASE_ATTEMPT_USAGE carries the runner's baseline_tokens", async () => {
+    const w = world(), dir = tmpDir("core-lp-"), orig = w.io.runner;
+    w.io.runner = async (c) => ({ ...(await orig(c)), baselineTokens: c.resume ? null : 21000 });
+    await run(w, { dir });
+    const u = usage(dir);
+    assert.equal(u[0].baseline_tokens, 21000, "the fresh plan call reports its baseline");
+    assert.ok(u.filter((e) => e.phase === "implement" && e.trigger === "build").every((e) => !("baseline_tokens" in e)), "a resumed build reports none");
+  });
+
+  it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
+    const { chmodSync } = await import("node:fs");
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const d = tmpDir("core-async-");
+    const msg = (id, read) => JSON.stringify({ type: "assistant", message: { id, content: [], usage: { input_tokens: 10, output_tokens: 7, cache_read_input_tokens: read, cache_creation_input_tokens: 300 } } });
+    const result = JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "ok", session_id: "s-1", usage: { input_tokens: 20, output_tokens: 14 } });
+    writeFileSync(`${d}/fake`, `#!/bin/sh\necho '${msg("m1", 5000)}'\necho '${msg("m2", 9000)}'\necho '${result}'\n`); chmodSync(`${d}/fake`, 0o755);
+    const r = await runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake`, logger: { log() {} }, stream: true });
+    assert.equal(r.baselineTokens, 5310);
+    const fresh = await makeLeanRunner({ runCli: async () => ({ text: "", baselineTokens: 5310 }) })({ role: "builder", issue: 7, cwd: d, resume: null, system: "", prompt: "go" });
+    assert.equal(fresh.baselineTokens, 5310);
+    const resumed = await makeLeanRunner({ runCli: async () => ({ text: "", baselineTokens: 90000 }) })({ role: "builder", issue: 7, cwd: d, resume: "s-1", system: "", prompt: "go" });
+    assert.equal(resumed.baselineTokens, null);
   });
 });
