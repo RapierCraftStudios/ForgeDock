@@ -68,6 +68,7 @@ export const OUTCOME_CODES = Object.freeze({
   BUILDER_BLOCK_UNTYPED: "builder.block_untyped",
   BUILDER_NO_EVIDENCE: "builder.no_evidence",
   BUILDER_NO_COMMIT: "builder.no_commit",
+  BUDGET_EXCEEDED: "budget.exceeded", // forge#4392: the implement turn budget for the lane's size was spent and the wrap-up did not finish; digest in detail
   REVIEW_FAILED: "review.failed",
   REVIEW_NO_VERDICT: "review.no_verdict",
   // Core work-on conformance gate (bin/lean/conformance.mjs).
@@ -182,13 +183,13 @@ export function codeForTerminalReason(reason) {
  * Batch recovery classes of a lane result (forge#4267). The batch runner recovers `recoverable` rows once
  * (`orchestration.recovery.max_attempts`) and re-queues them; only `human` rows are escalations.
  */
-export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE]);
+export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.BUDGET_EXCEEDED]);
 /** `builder.blocked` is only reached by a typed human block: credentials, spend, promotion, customer, product-decision. */
 export const HUMAN_CODES = Object.freeze([OUTCOME_CODES.BUILDER_BLOCKED]);
 
 /**
  * `recoverable` | `human` | `terminal` for a lane result row ({outcome|terminalReason, code, issueEdited?, conflicting?}).
- * Recoverable: needs-human `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `contract.invalid` after a mid-run issue
+ * Recoverable: needs-human `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `budget.exceeded`, `contract.invalid` after a mid-run issue
  * edit (`issueEdited`), and `ci-pending` on a conflicting PR (`conflicting`). Human: `builder.blocked`. Anything else
  * (another code, or not a needs-human/ci-pending row) is terminal. Pure, never throws.
  */

@@ -2007,9 +2007,11 @@ export function listDescendants(pid, { psFn = null } = {}) {
  * does not count as idle. `onSpawn(child)` receives the ChildProcess.
  * #4390: `contextMax` (stream only; 0 = off) kills the session once one assistant turn's context (input + cache read +
  * cache creation) reaches it, throwing CLI_CONTEXT with the stream-aggregated usage (null when none was seen) and turns.
+ * #4392: `turnMax` (stream only; 0 = off) kills the session once it has produced that many assistant turns (deduped by
+ * message id), throwing CLI_TURNS with `turns`, `turnMax`, `lastTool` and the stream-aggregated usage.
  */
 export async function runCliBackendAsync(opts) {
-  const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, contextMax = 0, ...rest } = opts;
+  const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, contextMax = 0, turnMax = 0, ...rest } = opts;
   let captured = null;
   try {
     runCliBackend({ ...rest, spawnFn: (bin, args, o) => {
@@ -2034,7 +2036,7 @@ export async function runCliBackendAsync(opts) {
   }
   if (typeof wrap === "function") ({ bin, args } = wrap(bin, args));
   const ceiling = maxMs > 0 ? maxMs : o.timeout;
-  let collected, idleInfo = null, ctxInfo = null;
+  let collected, idleInfo = null, ctxInfo = null, turnInfo = null;
   const msgUsage = new Map(); // #4390: assistant message id -> its usage (a message spans several stream lines)
   try {
     collected = await new Promise((resolveP) => {
@@ -2061,10 +2063,10 @@ export async function runCliBackendAsync(opts) {
       const tick = Math.max(20, Math.min(1000, (idleMs || 4000) / 4));
       timer = setInterval(() => {
         const now = Date.now();
-        if (!paused && idleMs > 0 && now - lastActivity >= idleMs && !idleInfo && !ctxInfo) {
+        if (!paused && idleMs > 0 && now - lastActivity >= idleMs && !idleInfo && !ctxInfo && !turnInfo) {
           idleInfo = { lastTool, children: listDescendants(child.pid), idleMs, pid: child.pid };
           kill();
-        } else if (!timedOut && !idleInfo && !ctxInfo && now - startedAt - pausedTotal - (paused ? now - pausedAt : 0) >= ceiling) { timedOut = true; kill(); }
+        } else if (!timedOut && !idleInfo && !ctxInfo && !turnInfo && now - startedAt - pausedTotal - (paused ? now - pausedAt : 0) >= ceiling) { timedOut = true; kill(); }
       }, tick);
       timer.unref?.();
       const noteLine = (line) => {
@@ -2077,7 +2079,8 @@ export async function runCliBackendAsync(opts) {
           if (u && typeof u === "object") {
             msgUsage.set(j.message.id ?? `#${msgUsage.size}`, u);
             const ctx = toFiniteUsageNumber(u.input_tokens) + toFiniteUsageNumber(u.cache_read_input_tokens) + toFiniteUsageNumber(u.cache_creation_input_tokens);
-            if (contextMax > 0 && ctx >= contextMax && !ctxInfo && !idleInfo && !timedOut) { ctxInfo = { context: ctx, lastTool }; kill(); }
+            if (contextMax > 0 && ctx >= contextMax && !ctxInfo && !turnInfo && !idleInfo && !timedOut) { ctxInfo = { context: ctx, lastTool }; kill(); }
+            else if (turnMax > 0 && msgUsage.size >= turnMax && !ctxInfo && !turnInfo && !idleInfo && !timedOut) { turnInfo = { lastTool }; kill(); }
           }
         }
       };
@@ -2099,11 +2102,17 @@ export async function runCliBackendAsync(opts) {
       });
     });
   } finally { if (sysDir) rmSync(sysDir, { recursive: true, force: true }); }
+  const sum = (k) => [...msgUsage.values()].reduce((a, u) => a + toFiniteUsageNumber(u[k]), 0);
+  const streamUsage = () => (msgUsage.size ? { input_tokens: sum("input_tokens"), output_tokens: sum("output_tokens"), cache_creation_input_tokens: sum("cache_creation_input_tokens"), cache_read_input_tokens: sum("cache_read_input_tokens") } : null);
+  if (turnInfo) {
+    const err = new Error(`claude CLI session reached its turn budget (${turnMax} turns) and was stopped`);
+    err.code = "CLI_TURNS"; err.turns = msgUsage.size; err.turnMax = turnMax; err.lastTool = turnInfo.lastTool; err.usage = streamUsage();
+    throw err;
+  }
   if (ctxInfo) {
-    const sum = (k) => [...msgUsage.values()].reduce((a, u) => a + toFiniteUsageNumber(u[k]), 0);
     const err = new Error(`claude CLI session reached ${ctxInfo.context} context tokens (ceiling ${contextMax}) after ${msgUsage.size} turn(s) and was stopped`);
     err.code = "CLI_CONTEXT"; err.context = ctxInfo.context; err.contextMax = contextMax; err.turns = msgUsage.size; err.lastTool = ctxInfo.lastTool;
-    err.usage = msgUsage.size ? { input_tokens: sum("input_tokens"), output_tokens: sum("output_tokens"), cache_creation_input_tokens: sum("cache_creation_input_tokens"), cache_read_input_tokens: sum("cache_read_input_tokens") } : null;
+    err.usage = streamUsage();
     throw err;
   }
   if (idleInfo) {

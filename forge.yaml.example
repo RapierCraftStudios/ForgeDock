@@ -79,6 +79,27 @@ paths:
   #   file: "/home/youruser/credentials.yaml"
 
 # =============================================================================
+# ACCEPTANCE PROBES (optional, #4399)
+# An issue may declare a production check that runs once its fix is on the
+# default branch (`forgedock probe`, and at the start of every orchestrate
+# batch). A fail reopens the issue with the output. No model call.
+# In the issue body (trusted author) or a trusted comment:
+#   ```forge-probe
+#   run: curl -fsS https://example.com/api/health
+#   pass: /"status":"ok"/          # default: exit 0
+#   timeout: 60                     # seconds, max 900
+#   ```
+# =============================================================================
+
+# acceptance_probe:
+#   # Env vars passed to probes (the repo's designated test identity); every
+#   # other variable is dropped, and these values are masked in the output.
+#   env: [PROBE_API_KEY]
+#   timeout_s: 120        # default per-probe timeout
+#   sweep_days: 30        # how far back the sweep looks for closed issues
+#   enabled: true         # false: no sweep at orchestrate start
+
+# =============================================================================
 # BRANCHES (REQUIRED)
 # Branch naming conventions. Used to determine PR targets and source branches.
 # Commands: work-on (PR targeting), review-pr, cleanup
@@ -298,6 +319,15 @@ branches:
 #   # restarted fresh from the frozen contract, the diff and the last validate
 #   # result instead of carrying its whole history. 0 disables.
 #   context_ceiling_tokens: 120000
+#   # Turn budget (#4392): implement turns per lane size. Size is a `size:S|M|L`
+#   # label, else the frozen contract's deliverable paths (S <= 2, M <= 5, else L).
+#   # At the budget the builder is checkpointed and gets one short wrap-up to
+#   # finish or stop with a digest; a stop ends needs-human `budget.exceeded`,
+#   # which orchestrate recovers once. The batch report prints turns by size.
+#   # 0 disables a size.
+#   turn_budget_s: 25
+#   turn_budget_m: 60
+#   turn_budget_l: 100
 
 # =============================================================================
 # ENV (OPTIONAL)

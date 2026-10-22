@@ -17,7 +17,8 @@ import { makeHeavyIo } from "./heavy.mjs";
 import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
-import { sequenceCollisions, snapshotLane, verifyRenumber } from "./sequence.mjs";
+import { sequenceCollisions, snapshotLane, verifyRenumber, renumberLane, resolveSequenceConflicts } from "./sequence.mjs";
+import { makeSequenceLeaseIo } from "./seqlease.mjs";
 import { followupMap } from "./conformance.mjs";
 
 const pexec = promisify(execFile);
@@ -57,7 +58,7 @@ export const noToolFlags = (caps) => (caps?.strictMcp ? ["--tools", ""]
   : ["--disallowedTools", "Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]);
 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, contextMax = 0 }) => {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, contextMax = 0, turnMax = 0 }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
     // #4391: custom subagents (the explorer) for the builder session; null leaves argv unchanged
@@ -65,7 +66,7 @@ export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRun
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
       args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
       logger: { log() {} },
-      idleMs, maxMs, stream: idleMs > 0, control, onSpawn, ...(contextMax > 0 ? { contextMax } : {}), wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
+      idleMs, maxMs, stream: idleMs > 0, control, onSpawn, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}), wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default" };
   };
 }
@@ -325,7 +326,11 @@ export function makeLeanIo({ repo }) {
     /** #4322: sequence-numbered files the lane shares with the base (bin/lean/sequence.mjs); snapshot before, verify after a renumber. */
     sequenceCheck: ({ cwd, base }) => sequenceCollisions({ git: (a) => run("git")(a, { cwd }), base }),
     sequenceSnapshot: ({ cwd, base }) => snapshotLane({ git: (a) => run("git")(a, { cwd }), base }),
-    sequenceVerify: ({ cwd, base, before }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before }),
+    sequenceVerify: ({ cwd, base, before, moves }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before, moves }),
+    /** #4386: the deterministic renumber, sequence-only base-sync resolution, and the host sequence lease at the merge gate. */
+    sequenceRenumber: ({ cwd, base, laneRef, regenerate }) => renumberLane({ git: (a) => run("git")(a, { cwd }), base, cwd, laneRef, regenerate }),
+    sequenceResolve: ({ cwd, files }) => resolveSequenceConflicts({ git: (a) => run("git")(a, { cwd }), files }),
+    sequenceLease: makeSequenceLeaseIo(),
     /**
      * #4271: scripts/acceptance-red-green.sh for the frozen repro_test in cwd; {base, head} words, or null on any failure.
      * `env` (#4325): the lane env (run TMPDIR, toolchain), merged over process.env, so the command sees what the builder saw.

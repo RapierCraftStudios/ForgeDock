@@ -19,6 +19,7 @@ import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
 import { parseExecution } from "./lean/execution.mjs";
+import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lean/budget.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
 
@@ -192,6 +193,14 @@ export function readFixModel(cwd = process.cwd()) {
   } catch { /* fall through to engine.lean_fix_model */ }
   return readLeanSetting("fix_model", cwd);
 }
+/**
+ * forge.yaml `lean.sequence.regenerate` (#4386): the command that regenerates a schema-changing migration's snapshot
+ * after a deterministic renumber. The one-level parser flattens the nested block to `lean.regenerate`; flat
+ * `lean.sequence_regenerate` also works and wins. undefined when absent or unreadable.
+ */
+export function readSequenceRegenerate(cwd = process.cwd()) {
+  try { const l = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.lean ?? {}; return String(l.sequence_regenerate ?? l.regenerate ?? "").trim() || undefined; } catch { return undefined; }
+}
 /** #4389: forge.yaml `post_deploy.precondition_cmd` (exit 0 = ready, 1 = parked, other = ignored), or null. */
 export function readPreconditionCmd(cwd = process.cwd()) {
   try {
@@ -248,6 +257,7 @@ export function readHeavy(cwd = process.cwd()) {
  * `pipeline:`/`engine:` then `lane_limits:` with `memory_max`/`cpu_quota` arrives as `memory_max`/`cpu_quota` (or flat
  * `lane_limits_memory_max`/`lane_limits_cpu_quota`). `engine.cli_idle_minutes` (default 15) and `engine.cli_max_minutes` (default 180).
  * #4390: `engine.context_ceiling_tokens` (default 120000 in runCore; 0 = off).
+ * #4392: `engine.turn_budget_s|m|l` (implement turn budget per lane size; defaults 25/60/100, always returned; 0 = off).
  */
 export function readCoreLimits(cwd = process.cwd()) {
   try {
@@ -260,8 +270,9 @@ export function readCoreLimits(cwd = process.cwd()) {
       ...(posNum(y.engine?.cli_idle_minutes) ? { cliIdleMinutes: posNum(y.engine.cli_idle_minutes) } : {}),
       ...(posNum(y.engine?.cli_max_minutes) ? { cliMaxMinutes: posNum(y.engine.cli_max_minutes) } : {}),
       ...(/^\d+$/.test(String(y.engine?.context_ceiling_tokens ?? "").trim()) ? { contextCeilingTokens: Number(y.engine.context_ceiling_tokens) } : {}),
+      turnBudgets: parseTurnBudgets(y.engine) ?? { ...TURN_BUDGET_DEFAULTS }, // #4392: lanes are budgeted by default
     };
-  } catch { return {}; }
+  } catch { return { turnBudgets: { ...TURN_BUDGET_DEFAULTS } }; }
 }
 /** forge.yaml `engine.merge_wait` (required|all|none); undefined when absent or invalid. */
 export function readMergeWait(cwd = process.cwd()) {
@@ -797,7 +808,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -974,6 +985,7 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * Runs core work-on per issue with K concurrency (default 3), honouring `Depends on` / `Blocked by` among the given issues.
  * A `dependency-open` issue is requeued behind its dependency; a `decomposed` one adds its sub-issues (#4124).
  * The already-fixed pre-filter (#4123) runs before each lane unless `--no-prefilter`.
+ * Declared acceptance probes (#4399, `lean/probe.mjs`) are swept once at batch start unless `--no-probes`.
  * Each issue gets its own lane, worked out from its milestone (#4125); `--lane` is an assertion checked per issue (a
  * mismatch ends `lane-refused`). Dependency edges between lanes are printed before any lane starts. Prints a summary table.
  * Durable (#4121): the batch is kept in `~/.forge/batches/<id>/` and each lane is a detached `run-issue` process, so
@@ -1195,6 +1207,11 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const { formatFirstPassSummary } = await import("./lean/fixround.mjs");
   const { formatShadowSummary } = await import("./lean/conformance.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  // #4399: declared acceptance probes of closed issues whose fix reached the default branch; never fails the batch
+  const sweep = deps.sweepProbes !== undefined ? deps.sweepProbes : (await import("./lean/probe.mjs")).sweepProbes;
+  if (sweep && !argv.includes("--no-probes")) {
+    try { const s = (await import("./lean/probe.mjs")).formatProbeSummary(await sweep({ repo, cwd, io: leanIo })); if (s) sink.line(s); } catch (e) { sink.line(`probes: sweep failed (${String(e?.message ?? e).slice(0, 160)})`); }
+  }
   const { makePrefilter, formatPrefilterSummary, lazyDefaultBranch } = await import("./lean/prefilter.mjs");
   const branches = readBranches(cwd);
   // #4389: the post-deploy gate's default branch is resolved and fetched once, only when a gated issue asks
@@ -1215,7 +1232,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4256: the placement orchestrate decided for a lane (ctx.placement) reaches it as --placement/--placement-reason.
@@ -1412,6 +1429,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (precheckLine) report.push(precheckLine);
   const firstPassLine = formatFirstPassSummary(rows); // #4362
   if (firstPassLine) report.push(firstPassLine);
+  const turnLine = formatTurnSummary(rows); // #4392
+  if (turnLine) report.push(turnLine);
   const shadowLine = formatShadowSummary(rows); // #4398
   if (shadowLine) report.push(shadowLine);
   let day = null;
@@ -1752,4 +1771,29 @@ export async function triageFromCli(argv, deps = {}) {
   if (parked) console.log(parked);
   console.log(`lanes: ${lanes.map((n) => `#${n}`).join(" ") || "(none)"}`);
   return { rows, lanes };
+}
+
+/**
+ * `forgedock probe [issue...] [--repo owner/repo] [--dry-run] [--limit N]` (#4399)
+ * Runs the declared acceptance probes (`lean/probe.mjs`) of the given issues, or of the recently closed issues that
+ * declare one, once their fix is on the default branch; records FORGE:PROBE and reopens on a fail. No model call.
+ */
+export async function probeFromCli(argv, deps = {}) {
+  const valued = ["--repo", "--limit"];
+  const issues = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (valued.includes(argv[i])) { i++; continue; }
+    if (/^#?\d+$/.test(argv[i])) issues.push(parseInt(argv[i].replace("#", ""), 10));
+  }
+  const io = deps.io ?? makeIo();
+  const repo = flag(argv, "--repo") ?? (await resolveDefaultRepo(io));
+  if (!repo) throw new Error("probe needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+  const limit = flag(argv, "--limit") == null ? 50 : parseInt(flag(argv, "--limit"), 10);
+  if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit must be a positive integer");
+  const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  const { sweepProbes, formatProbeSummary } = await import("./lean/probe.mjs");
+  const rows = await sweepProbes({ repo, cwd: process.cwd(), io: leanIo, issues: [...new Set(issues)], limit, dryRun: argv.includes("--dry-run"), ...(deps.spawn ? { spawn: deps.spawn } : {}) });
+  for (const r of rows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
+  console.log(formatProbeSummary(rows) || "probes: nothing to run");
+  return { rows };
 }
