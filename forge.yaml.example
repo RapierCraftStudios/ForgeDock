@@ -792,6 +792,8 @@ branches:
 #   #   # TypeScript project using tsc + vitest
 #   #   typescript:
 #   #     format: "prettier --check \"src/**/*.{ts,tsx}\""
+#   #     # lint: validate runs it (same timeout as typecheck); the core engine prints it in place of the
+#   #     # discovered lint (bin/lean/checks.mjs). Prefer a changed-files, cached lint, e.g. "eslint --cache".
 #   #     lint: "eslint src/"
 #   #     typecheck: "tsc --noEmit"
 #   #     test: "vitest run"
