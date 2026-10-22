@@ -939,7 +939,7 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
 
 /**
  * `forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] [--no-prefilter]`
- * `forgedock orchestrate --resume <batch-id>` · `forgedock orchestrate --set-parallel <batch-id> <K>`
+ * `forgedock orchestrate --resume <batch-id> [issue...]` · `forgedock orchestrate --set-parallel <batch-id> <K>` · `forgedock orchestrate --add <batch-id> <issue...>`
  * Runs core work-on per issue with K concurrency (default 3), honouring `Depends on` / `Blocked by` among the given issues.
  * A `dependency-open` issue is requeued behind its dependency; a `decomposed` one adds its sub-issues (#4124).
  * The already-fixed pre-filter (#4123) runs before each lane unless `--no-prefilter`.
@@ -959,6 +959,8 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * for every batch on the host. This command submits it and streams the rows; Ctrl-C detaches and the batch keeps
  * running; `--resume <id>` reattaches (or replays the report of a finished batch); `--set-parallel` goes through the
  * daemon. `--foreground` or `FORGEDOCK_SCHEDD=0` runs the batch in this process as before (also for injected test deps).
+ * `--add <id> N...` (#4408) adds issues to that batch instead of starting a second one: they run under its K and DAG
+ * (a running batch picks them up on its next pass, a stopped one on its next `--resume`); `--resume <id> N...` adds N too.
  */
 export async function orchestrateFromCli(argv, deps = {}) {
   const inProcess = deps.inProcess || deps.leanModule || deps.laneScript || deps.batchRoot || deps.leanIo
@@ -970,7 +972,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
 const formatRowLine = (r) => (r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`);
 const consoleSink = () => ({ batch: () => {}, row: (r) => console.log(formatRowLine(r)), line: (t) => console.log(t) });
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> | --set-parallel <id> <K>";
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...>";
 const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model"];
 const issuesOf = (argv) => {
   const issues = [];
@@ -985,6 +987,39 @@ const parallelOf = (argv) => {
   if (!Number.isInteger(parallel) || parallel < 1) throw new Error("--parallel must be a positive integer");
   return parallel;
 };
+
+/**
+ * #4408: add `tokens` to batch `id`. Not a plain integer: skipped; not OPEN on the batch's repo (`gh issue view --json
+ * state`): skipped `closed` (`unreadable` when the read fails); the rest go to the batch's `add` file, through the daemon
+ * when `viaDaemon(issues)` answers (non-null), else written here (batch.mjs `addIssues` skips issues already in the batch).
+ */
+async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) => console.log(l) }) {
+  const batchMod = await import("./lean/batch.mjs");
+  const b = batchMod.openBatch(root, id);
+  if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
+  const repo = b.readPlan()?.repo ?? null;
+  const skipped = [], ints = [], state = new Map();
+  for (const t of tokens) {
+    if (/^#?\d+$/.test(String(t))) ints.push(parseInt(String(t).replace("#", ""), 10));
+    else skipped.push({ issue: t, reason: "not an integer" });
+  }
+  for (const n of new Set(ints)) {
+    let st = null;
+    try { st = JSON.parse(await io.gh(["issue", "view", String(n), ...(repo ? ["-R", repo] : []), "--json", "state"]))?.state ?? null; } catch { st = null; }
+    state.set(n, st);
+  }
+  const open = [];
+  for (const n of ints) {
+    const st = state.get(n);
+    if (st === "OPEN") open.push(n);
+    else if (!skipped.some((x) => x.issue === n)) skipped.push({ issue: n, reason: st ? "closed" : "unreadable" });
+  }
+  let res = { added: [], skipped: [] };
+  if (open.length) res = (viaDaemon ? await viaDaemon(open) : null) ?? b.addIssues(open);
+  const out = { ok: true, batch: id, added: res.added ?? [], skipped: [...(res.skipped ?? []), ...skipped] };
+  print(`batch ${id}: added ${out.added.map((n) => `#${n}`).join(" ") || "(none)"}${out.skipped.length ? `; skipped ${out.skipped.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
+  return out;
+}
 
 /**
  * Daemon client (#4192): argument checks here, then submit / attach / set-parallel over the schedd socket. Prints the
@@ -1011,7 +1046,22 @@ async function orchestrateClient(argv, deps = {}) {
     console.log(`batch ${id}: parallel set to ${k}`);
     return { ok: true, batch: id, parallel: k };
   }
+  // #4408: --add, and the extra issues of --resume <id> N..., go to the batch (through the daemon when one runs).
+  const addVia = (id) => async (issues) => {
+    let sock = null;
+    try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
+    return sock ? schedd.request(sock, { op: "add", id, issues }) : null;
+  };
+  const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
+  if (argv.includes("--add")) {
+    const i = argv.indexOf("--add"), id = argv[i + 1];
+    if (!id || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
+    return addToBatch({ id, tokens: argv.slice(i + 2), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id) });
+  }
   const resumeId = flag(argv, "--resume");
+  if (resumeId && argv.slice(argv.indexOf("--resume") + 2).some((t) => !String(t).startsWith("--"))) {
+    await addToBatch({ id: resumeId, tokens: argv.slice(argv.indexOf("--resume") + 2).filter((t) => !String(t).startsWith("--")), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(resumeId) });
+  }
   let msg;
   if (resumeId) msg = { op: "attach", id: resumeId };
   else {
@@ -1060,7 +1110,15 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     sink.line(`batch ${b.id}: parallel set to ${k}`);
     return { ok: true, batch: b.id, parallel: k };
   }
+  if (argv.includes("--add")) {
+    const i = argv.indexOf("--add");
+    if (!argv[i + 1] || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
+    return addToBatch({ id: argv[i + 1], tokens: argv.slice(i + 2), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+  }
   const resumeId = flag(argv, "--resume");
+  if (resumeId && argv.slice(argv.indexOf("--resume") + 2).some((t) => !String(t).startsWith("--"))) {
+    await addToBatch({ id: resumeId, tokens: argv.slice(argv.indexOf("--resume") + 2).filter((t) => !String(t).startsWith("--")), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+  }
   let batch, plan = null;
   if (resumeId) {
     batch = batchMod.openBatch(root, resumeId);
@@ -1280,7 +1338,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   try {
     rows = await orchestrate({
       beforeAdmit,
-      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, ...lanes,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),

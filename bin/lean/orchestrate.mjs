@@ -18,6 +18,9 @@
  * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. An `engine-error` is
  * relaunched once; `breaker` ({errors, window_min}) stops admissions after a burst and lets running lanes finish, the
  * rest stay pending (outcome `held`) for a resume. `getParallel()` is read on every pass, so K can change live.
+ * `getAdded()` (#4408, `forgedock orchestrate --add`) is read on every pass too: issues it returns that are not in the batch
+ * join it through `addIssues` (the still-pending issues' `Depends on` are re-read first, so edges hold both ways), with one
+ * batch decision and one `added` row; while it is set, lanes running with an empty queue still wake every `pollMs`.
  *
  * Maintenance budget (#4197), off unless `maintenance: {share, whenIdle}` is passed: `classify(issue)` gives each issue
  * `{maintenance, priority}` (persisted as `classes`) and admission follows `pickNext`: P0/P1 features, then a maintenance
@@ -161,7 +164,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  * @returns {Promise<Array<{issue:number, outcome:string, pr:?number, cost_usd:number, minutes:number, detail?:string}>>}
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
-  store = null, adopt = null, getParallel = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
+  store = null, adopt = null, getParallel = null, getAdded = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null }) {
   const saved = store?.load?.() ?? null;
@@ -536,9 +539,32 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   })());
   if (typeof onExit === "function") { try { onExit(relabelQueued); } catch { /* best effort */ } }
 
+  // #4408: issues added to the running batch; returns how many joined. Re-reading the cumulative list is a no-op.
+  const drainAdds = async () => {
+    if (!getAdded) return 0;
+    let got = [];
+    try { got = getAdded() ?? []; } catch { got = []; }
+    const fresh = [...new Set((Array.isArray(got) ? got : []).filter((n) => Number.isSafeInteger(n) && n > 0 && !set.has(n)))];
+    if (!fresh.length) return 0;
+    // An edge an operator wrote into a pending issue after the batch started (it waits on an added issue) holds too.
+    for (const n of pending) {
+      let body;
+      try { body = await readBody(n); } catch { continue; }
+      if (drift?.holds) bodies.set(n, body);
+      deps.set(n, [...new Set([...(deps.get(n) ?? []), ...parseDeps(body, n)])]);
+    }
+    await addIssues(fresh);
+    save();
+    const list = fresh.map((n) => `#${n}`).join(", ");
+    decided({ issue: null, what: `added ${list} to the batch (forgedock orchestrate --add)`, why: "operator request", alternative: "start a second batch" });
+    update({ issue: null, outcome: "added", detail: list });
+    return fresh.length;
+  };
   const K = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
   try {
-    while (pending.length || running.size) {
+    for (;;) {
+      await drainAdds();
+      if (!pending.length && !running.size) break;
       // Resolve skips first: a dependency that finished unsatisfied (or never can) skips its dependents.
       for (let i = pending.length - 1; i >= 0; i--) {
         const n = pending[i];
@@ -592,14 +618,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         }
       }
       if (reg) withdrawExcept(wanted);
-      if (tripped && !running.size) break; // breaker: let running lanes finish, keep the rest pending for a resume
-      if (budgetStop && !running.size) break; // execution budget (stop): the same, the rest end held
+      if (tripped && !running.size) { await drainAdds(); break; } // breaker: let running lanes finish, keep the rest pending for a resume
+      if (budgetStop && !running.size) { await drainAdds(); break; } // execution budget (stop): the same, the rest end held
       // Wake for a delayed issue, the end of a usage-limit hold, or (with a live K) a poll.
       const waits = pending.map((n) => notBefore.get(n) ?? 0).filter((x) => x > t);
       if (holdUntil) waits.push(holdUntil);
       let wake = waits.length ? Math.max(0, Math.min(...waits) - t) : null;
       if (getParallel && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
+      if (getAdded && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408: an add while only lanes run
       if (tripped) wake = null;
       if (running.size) {
         if (wake === null) await Promise.race(running.values());
@@ -607,8 +634,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
       else if (pending.length && offered.size) await sleep(wake); // waiting for a host slot
       else if (pending.length && waits.length) await sleep(Math.max(0, Math.min(...waits) - t));
-      else if (pending.length && budgetHeld) break; // maintenance the budget does not admit now: held for a later batch
-      else if (pending.length && driftHeld.size) break; // held by a drift flag (block_dispatch): pending for a later batch
+      else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
+      else if (pending.length && driftHeld.size) { if (await drainAdds()) continue; break; } // held by a drift flag (block_dispatch): pending for a later batch
       else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle
         for (const n of pending.splice(0)) skip(n, "dependency cycle");
         save();
