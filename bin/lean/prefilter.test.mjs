@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { prefilterIssue, flakyReason, makePrefilter, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, DEFAULT_PREFILTER_MODEL } from "./prefilter.mjs";
+import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, DEFAULT_PREFILTER_MODEL } from "./prefilter.mjs";
 import { parsePrefilterVerdict, prefilterPrompt } from "./prompts.mjs";
-import { orchestrate, formatTable } from "./orchestrate.mjs";
+import { orchestrate, formatTable, formatOutcomeLists } from "./orchestrate.mjs";
 import { triageFromCli } from "../engine-cli.mjs";
 
 const fence = (o) => "```json\n" + JSON.stringify(o) + "\n```";
@@ -13,7 +13,7 @@ const fence = (o) => "```json\n" + JSON.stringify(o) + "\n```";
 function world(o = {}) {
   const w = { comments: [], closed: [], labels: [], runner: [], lanes: [], gitCalls: [],
     issues: o.issues ?? {}, prs: o.prs ?? [], commits: o.commits ?? "", paths: new Set(o.paths ?? []), runs: o.runs ?? {}, workflowRuns: o.workflowRuns ?? {}, shaRuns: o.shaRuns ?? {},
-    verdict: o.verdict ?? null };
+    verdict: o.verdict ?? null, mergedPrs: o.mergedPrs ?? [], ancestry: o.ancestry ?? {}, edits: [] };
   w.io = {
     gh: async (a) => {
       const k = a.slice(0, 2).join(" ");
@@ -30,6 +30,8 @@ function world(o = {}) {
       }
       if (k === "issue comment") { w.comments.push([Number(a[2]), a[a.indexOf("--body") + 1]]); return ""; }
       if (k === "issue close") { w.closed.push([Number(a[2]), a[a.indexOf("--reason") + 1]]); return ""; }
+      if (k === "pr list") return JSON.stringify(w.mergedPrs);
+      if (k === "issue edit") { w.edits.push([Number(a[2]), a[5], a[6]]); return ""; }
       throw new Error(`unexpected gh ${a.join(" ")}`);
     },
     git: async (a) => {
@@ -37,6 +39,7 @@ function world(o = {}) {
       if (a[0] === "log") return w.commits;
       if (a[0] === "cat-file") { if (w.paths.has(a[2].replace(/^origin\/staging:/, ""))) return ""; throw new Error("missing"); }
       if (a[0] === "fetch") return "";
+      if (a[0] === "merge-base") { const c = w.ancestry[a[2]] ?? 128; if (c === 0) return ""; throw Object.assign(new Error(`exit ${c}`), { code: c }); }
       if (a[0] === "ls-remote") return a.at(-1) === "refs/heads/staging" ? "abc\trefs/heads/staging\n" : "";
       throw new Error(`unexpected git ${a.join(" ")}`);
     },
@@ -69,6 +72,20 @@ describe("pre-filter (#4123)", () => {
     assert.deepEqual(w.closed, [[12, "not planned"]]);
     assert.deepEqual(w.labels, [[12, "invalid"]]);
     assert.match(w.comments[0][1], /FORGE:PREFILTER/); assert.match(w.comments[0][1], /src\/foo\.js:3 null guard/); assert.match(w.comments[0][1], /PR #90/);
+  });
+
+  it("#4399 an issue reopened by a failed acceptance probe is never re-closed as already-fixed; a pass is no skip", async () => {
+    const probe = (result, author = { login: "rapiercraft-forgedock" }, assoc = "CONTRIBUTOR") => ({ author, authorAssociation: assoc,
+      body: `<!-- FORGE:PROBE -->\n## Acceptance probe: ${result}\n${JSON.stringify({ fix: "abc1234", default_sha: "d", result, exit: result === "pass" ? 0 : 1, ms: 5 })}` });
+    assert.deepEqual(flakyReason({ comments: [probe("fail")] }), { reason: "probe-failed", why: "acceptance probe failed after promotion" });
+    assert.equal(flakyReason({ comments: [probe("fail"), probe("pass")] }), null);
+    assert.equal(flakyReason({ comments: [probe("fail", { login: "someone" }, "NONE")] }), null);
+    const w = world({ issues: { 12: { title: "foo breaks", body: "foo crashes on null", comments: [probe("fail")] } },
+      prs: [{ number: 90, title: "fix: guard foo", body: "Fixes #12", url: "https://github.com/o/r/pull/90" }],
+      verdict: { verdict: "ALREADY-FIXED", summary: "guard added", evidence: ["src/foo.js:3"] } });
+    const r = await pf(w, 12);
+    assert.equal(r.closed, false); assert.match(r.detail, /acceptance probe failed after promotion/);
+    assert.equal(w.runner.length, 0); assert.deepEqual(w.closed, []); assert.deepEqual(w.comments, []);
   });
 
   it("a candidate the validator CONFIRMS (or answers without evidence) is not closed", async () => {
@@ -336,5 +353,126 @@ describe("#4318: the engine's own identity under an installation token or a diff
     const run = makePrefilter({ repo: "o/r", cwd: "/repo", io: w.io });
     await run(34, "staging"); await run(34, "staging"); await run(34, "staging");
     assert.equal(lookups, 4, "user + app, twice: one retry, then cached");
+  });
+});
+
+describe("post-deploy precondition gate (#4389)", () => {
+  const MERGE = "a".repeat(40);
+  const item = (id, disp) => `- [ ] \`${id}: After the next scheduled run, a health row exists\` — ${disp}: only checkable in prod after promotion`;
+  const followup = (parent, items) => `## Problem\n\nDeferred from #${parent}: the items below were declared out of scope.\n\n## Acceptance Criteria\n\n${items.join("\n")}\n\n<!-- FORGE:DEFERRED_FROM: #${parent} -->\n`;
+  const parentPr = [{ number: 90, title: "fix(x): health row (#40)", body: "", mergeCommit: { oid: MERGE } }];
+  const gated = (w, n, extra = {}) => pf(w, n, { defaultBranch: "main", ...extra });
+
+  it("parses the marker and requires every checklist item to be post-deploy", () => {
+    const body = followup(40, [item("R2", "post-deploy")]);
+    assert.equal(deferredFrom(body), 40);
+    assert.equal(deferredFrom("no marker"), null);
+    assert.ok(postDeployOnly(body));
+    assert.ok(!postDeployOnly(followup(40, [item("R2", "post-deploy"), item("R3", "defer")])));
+    assert.ok(!postDeployOnly("no checklist"));
+  });
+
+  it("not an ancestor of the default branch: parked awaiting-promotion, labelled and explained once, no validation run, $0", async () => {
+    const w = world({ issues: { 41: { body: followup(40, [item("R2", "post-deploy")]) } }, mergedPrs: parentPr, ancestry: { [MERGE]: 1 } });
+    const r = await gated(w, 41);
+    assert.equal(r.parked, true); assert.equal(r.kind, "awaiting-promotion"); assert.equal(r.closed, false); assert.equal(r.cost_usd, 0);
+    assert.match(r.detail, /of #40 is not on main/);
+    assert.deepEqual(w.edits, [[41, "--add-label", "awaiting-promotion"]]);
+    assert.equal(w.comments.length, 1); assert.match(w.comments[0][1], /FORGE:PRECONDITION/);
+    assert.equal(w.runner.length, 0); assert.deepEqual(w.closed, []);
+    // already labelled: no second comment
+    const w2 = world({ issues: { 41: { body: followup(40, [item("R2", "post-deploy")]), labels: [{ name: "awaiting-promotion" }] } }, mergedPrs: parentPr, ancestry: { [MERGE]: 1 } });
+    assert.equal((await gated(w2, 41)).parked, true);
+    assert.equal(w2.comments.length, 0);
+  });
+
+  it("an escalated (needs-human) promotion follow-up is parked too; a dry run changes nothing on GitHub", async () => {
+    const w = world({ issues: { 41: { body: followup(40, [item("R2", "post-deploy")]), labels: [{ name: "needs-human" }] } }, mergedPrs: parentPr, ancestry: { [MERGE]: 1 } });
+    const r = await gated(w, 41, { dryRun: true });
+    assert.equal(r.parked, true);
+    assert.deepEqual(w.edits, []); assert.deepEqual(w.comments, []);
+  });
+
+  it("an ancestor (after promotion): not parked, the label is removed, and the issue goes on as before", async () => {
+    const w = world({ issues: { 41: { body: followup(40, [item("R2", "post-deploy")]), labels: [{ name: "awaiting-promotion" }] } }, mergedPrs: parentPr, ancestry: { [MERGE]: 0 } });
+    const r = await gated(w, 41);
+    assert.ok(!r.parked); assert.equal(r.detail, "no already-fixed signal");
+    assert.deepEqual(w.edits, [[41, "--remove-label", "awaiting-promotion"]]);
+    const rows = await orchestrate({ issues: [41], readBody: async () => "", prefilter: makePrefilter({ repo: "o/r", cwd: "/repo", io: w.io, defaultBranch: "main" }),
+      runOne: async () => ({ terminalReason: "merged", pr: 7, cost_usd: 1 }) });
+    assert.deepEqual(rows.map((x) => x.outcome), ["merged"]);
+  });
+
+  it("an unresolvable parent (no merged PR, no trajectory) or an unknown SHA falls through to the lane", async () => {
+    const w = world({ issues: { 41: { body: followup(40, [item("R2", "post-deploy")]) }, 40: { comments: [] } } });
+    const r = await gated(w, 41);
+    assert.ok(!r.parked); assert.deepEqual(w.edits, []);
+    const g = await postDeployGate({ iss: { number: 41, body: followup(40, [item("R2", "post-deploy")]) }, repo: "o/r", lane: "staging", defaultBranch: "main", cwd: "/repo",
+      io: world({ mergedPrs: parentPr, ancestry: { [MERGE]: 128 } }).io });
+    assert.equal(g.state, "unresolved");
+    assert.equal((await postDeployGate({ iss: { number: 41, body: followup(40, [item("R2", "post-deploy")]) }, repo: "o/r", defaultBranch: async () => null, io: world().io })).state, "unresolved");
+  });
+
+  it("the trusted trajectory 'merged at <sha>' is the fallback when no merged PR names the parent", async () => {
+    const w = world({ issues: { 40: { comments: [{ author: { login: "rapiercraft-forgedock" }, authorAssociation: "CONTRIBUTOR", body: "<!-- FORGE:TRAJECTORY -->\n| Merge | merged at abcdef123456 |" },
+      { author: { login: "mallory" }, authorAssociation: "NONE", body: "<!-- FORGE:TRAJECTORY --> merged at 0123456789ab" }] } }, ancestry: { abcdef123456: 1 } });
+    const g = await postDeployGate({ iss: { number: 41, body: followup(40, [item("R2", "post-deploy")]) }, repo: "o/r", lane: "staging", defaultBranch: "main", cwd: "/repo", io: w.io });
+    assert.equal(g.state, "awaiting-promotion"); assert.deepEqual(g.shas, ["abcdef123456"]);
+  });
+
+  it("mixed post-deploy + code items, and issues without DEFERRED_FROM, are unaffected (no gate calls)", async () => {
+    for (const body of [followup(40, [item("R2", "post-deploy"), item("R3", "defer")]), item("R2", "post-deploy")]) {
+      const w = world({ issues: { 41: { body } }, mergedPrs: parentPr, ancestry: { [MERGE]: 1 } });
+      const r = await gated(w, 41);
+      assert.ok(!r.parked); assert.ok(!w.gitCalls.some((a) => a[0] === "merge-base"));
+    }
+    const w = world({ issues: { 41: { body: followup(40, [item("R2", "post-deploy")]), labels: [{ name: "needs-human" }] } } });
+    assert.equal((await pf(w, 41)).detail, "labelled, left to the lane"); // no default branch: gate off, today's behaviour
+  });
+
+  it("post_deploy.precondition_cmd: exit 0 ready, exit 1 parked awaiting-precondition, other exits fail open", async () => {
+    const body = followup(40, [item("R2", "post-deploy")]);
+    for (const [code, state] of [[0, "ready"], [1, "awaiting-precondition"], [2, "unresolved"], [-1, "unresolved"]]) {
+      const w = world({ mergedPrs: parentPr, ancestry: { [MERGE]: 0 } });
+      const calls = [];
+      w.io.execCode = async (cmd, args, opts) => { calls.push([cmd, args, opts.env.FORGE_ISSUE]); return code; };
+      const g = await postDeployGate({ iss: { number: 41, body }, repo: "o/r", lane: "staging", defaultBranch: "main", cwd: "/repo", io: w.io, preconditionCmd: "check-rollout" });
+      assert.equal(g.state, state);
+      assert.deepEqual(calls, [["sh", ["-c", "check-rollout", "precondition", "41"], "41"]]);
+    }
+  });
+
+  it("forgedock triage prints a parked issue, one awaiting-promotion line, and leaves it out of the lanes", async () => {
+    const w = world({ issues: { 41: { body: followup(40, [item("R2", "post-deploy")]) }, 13: { body: "y" } }, mergedPrs: parentPr, ancestry: { [MERGE]: 1 } });
+    const logs = []; const l = console.log; console.log = (x) => logs.push(String(x));
+    let res;
+    try { res = await triageFromCli(["41", "13", "--repo", "o/r", "--lane", "staging", "--dry-run"], { leanIo: w.io }); } finally { console.log = l; }
+    assert.deepEqual(res.lanes, [13]);
+    assert.ok(logs.some((x) => /^#41 → parked \(awaiting-promotion: /.test(x)));
+    assert.ok(logs.includes("awaiting promotion: #41 (fixes on staging, not on main)"));
+    assert.deepEqual(w.edits, []);
+  });
+
+  it("lazyDefaultBranch resolves GitHub's default and fetches it once, only when asked", async () => {
+    const w = world();
+    const d = lazyDefaultBranch({ io: w.io, repo: "o/r", cwd: "/repo" });
+    assert.equal(w.gitCalls.length, 0);
+    assert.equal(await d(), "main"); assert.equal(await d(), "main");
+    assert.deepEqual(w.gitCalls, [["fetch", "origin", "main"]]);
+  });
+
+  it("orchestrate: parked issues start no lane and the report has one awaiting-promotion line, no escalations", async () => {
+    const issues = {}; for (const n of [41, 42, 43]) issues[n] = { body: followup(40, [item("R2", "post-deploy")]) };
+    const w = world({ issues, mergedPrs: parentPr, ancestry: { [MERGE]: 1 } });
+    const lanes = [];
+    const rows = await orchestrate({ issues: [41, 42, 43], readBody: async () => "", prefilter: makePrefilter({ repo: "o/r", cwd: "/repo", io: w.io, defaultBranch: "main" }),
+      resolveLane: async () => ({ ok: true, lane: "staging" }),
+      runOne: async (n) => { lanes.push(n); return { terminalReason: "merged", pr: 1, cost_usd: 1 }; } });
+    assert.deepEqual(lanes, []);
+    assert.deepEqual(rows.map((r) => [r.outcome, r.cost_usd]), [["awaiting-promotion", 0], ["awaiting-promotion", 0], ["awaiting-promotion", 0]]);
+    const lists = formatOutcomeLists(rows);
+    assert.deepEqual(lists, ["awaiting promotion: #41 #42 #43 (fixes on staging, not on main)"]);
+    assert.match(formatTable(rows), /#41\s+awaiting-promotion \(pre-filter\)/);
+    assert.equal(formatParkedLine([{ issue: 1, outcome: "merged" }]), "");
   });
 });

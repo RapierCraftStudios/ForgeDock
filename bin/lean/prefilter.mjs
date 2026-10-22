@@ -10,12 +10,17 @@
  *   3. every repo path the issue names is gone from origin/<lane> -> candidate
  * A candidate gets ONE read-only, single-turn validation on a small model in the main checkout (no worktree). Only an
  * ALREADY-FIXED/INVALID verdict with evidence closes the issue; everything else, and every error, goes to the normal lane.
- * All effects are injected (gh, git, runner, transitionLabel, projector?) so it is unit-testable.
+ * Post-deploy gate (#4389), with `defaultBranch`: a `FORGE:DEFERRED_FROM: #P` follow-up whose checklist items are all
+ * post-deploy is parked (`parked: true`, label `awaiting-promotion`, no lane) while a merge SHA of #P is not an ancestor
+ * of origin/<default>, or while forge.yaml `post_deploy.precondition_cmd` exits 1. Anything unresolvable fails open.
+ * All effects are injected (gh, git, runner, transitionLabel, projector?, execCode?) so it is unit-testable.
  */
+import { execFile } from "node:child_process";
 import { capComment, sanitizeMd, noComments } from "./render.mjs";
 import { PREFILTER_SYSTEM, prefilterPrompt, parsePrefilterVerdict } from "./prompts.mjs";
 import { isTrustedComment } from "../engine/phases.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
+import { probeResultOf } from "./probe.mjs";
 
 export const DEFAULT_PREFILTER_MODEL = "claude-haiku-5-5";
 export const PREFILTER_MARKER = "FORGE:PREFILTER";
@@ -78,11 +83,15 @@ export function flakyReason(iss, own = [bareLogin(APP_SLUG)]) {
   if (FLAKY_RE.test(`${iss.title ?? ""}\n${noComments(String(iss.body ?? ""), " ")}`)) return { reason: "flaky", why: "issue says the failure is intermittent" };
   if ((iss.labels ?? []).some((l) => String(l?.name ?? l).toLowerCase() === "flaky")) return { reason: "flaky", why: "flaky label" };
   const mine = new Set((own ?? []).map(bareLogin));
+  // #4399: the latest pipeline FORGE:PROBE result is a fail: the fix did not hold in production, so no already-fixed close
+  const probe = (iss.comments ?? []).filter((c) => probeResultOf(c?.body) && (trusted(c) || mine.has(bareLogin(loginOf(c))))).at(-1);
+  if (probe && probeResultOf(probe.body).result === "fail") return { reason: "probe-failed", why: "acceptance probe failed after promotion" };
   if ((iss.comments ?? []).some((c) => isMarked(c) && (trusted(c) || mine.has(bareLogin(loginOf(c)))))) return { reason: "reopened", why: "reopened after a pre-filter close" };
   return null;
 }
 /** The own logins, looked up only when an otherwise-untrusted marker comment needs them (no call for most issues). */
-const ownFor = async (iss, resolve) => ((iss.comments ?? []).some((c) => isMarked(c) && !trusted(c)) ? resolve() : undefined);
+const ownFor = async (iss, resolve) => ((iss.comments ?? []).some((c) => (isMarked(c) || probeResultOf(c?.body)) && !trusted(c)) ? resolve() : undefined);
+const selfResolver = (selfLogins, gh) => (typeof selfLogins === "function" ? selfLogins : selfLogins ? async () => selfLogins : () => ownLogins(gh));
 
 const PATH_RE = /(?:^|[\s`'"(\[])((?:\.{0,2}\/)?(?:[\w@.-]+\/)+[\w@.-]+\.[A-Za-z0-9]{1,8})(?::\d+(?:-\d+)?)?(?=$|[\s`'"),.:;\]])/gm;
 /** Repo-relative file paths the issue names (`dir/file.ext`, optionally `:line`); URLs and HTML comments are ignored. */
@@ -115,7 +124,7 @@ export async function collectSignals({ iss, repo, lane, io, cwd, selfLogins = nu
         const sha = latest.head_sha ?? "";
         // #4305: a workflow that failed and passed at the same SHA is flaky; the lookup is any branch (PR run vs push)
         // and only made when the issue itself gave no reason. An unreadable lookup throws: no CI signal.
-        const own = await ownFor(iss, typeof selfLogins === "function" ? selfLogins : selfLogins ? async () => selfLogins : () => ownLogins(io.gh));
+        const own = await ownFor(iss, selfResolver(selfLogins, io.gh));
         let skip = flakyReason(iss, own);
         const same = { reason: "same-sha", why: `failed and passed at ${sha.slice(0, 12)}` };
         if (!skip && sha && failed.head_sha === sha) skip = same;
@@ -139,20 +148,160 @@ export async function collectSignals({ iss, repo, lane, io, cwd, selfLogins = nu
   return sig;
 }
 
+// #4389: post-deploy precondition gate. A follow-up filed by scripts/file-deferred-followups.sh whose items are all
+// post-deploy checks cannot be done before its parent's fix is on the default branch: a git fact, so no lane learns it.
+export const PRECONDITION_MARKER = "FORGE:PRECONDITION";
+export const AWAITING_PROMOTION_LABEL = "awaiting-promotion";
+const DEFERRED_FROM_RE = /<!--\s*FORGE:DEFERRED_FROM:\s*#(\d+)\s*-->/;
+/** The parent #P of a deferred follow-up (`<!-- FORGE:DEFERRED_FROM: #P -->`), or null. */
+export function deferredFrom(body) {
+  const m = DEFERRED_FROM_RE.exec(String(body ?? ""));
+  return m ? Number(m[1]) : null;
+}
+const CHECK_RE = /^\s*[-*]\s+\[[ xX]\]\s+(.*)$/;
+/** True when the body has checklist items and every one is a ``- [ ] `R#: …` — post-deploy: why`` line (conformance followupItems). */
+export function postDeployOnly(body) {
+  const items = noComments(String(body ?? ""), " ").split("\n").map((l) => CHECK_RE.exec(l)?.[1]).filter((x) => x != null);
+  return items.length > 0 && items.every((t) => /^`[^`]*`\s+(?:\*\*known-flaw\*\*\s+)?[—-]+\s*post-deploy:/.test(t));
+}
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
+const isOwnTrusted = (c) => trusted(c) || bareLogin(loginOf(c)) === bareLogin(APP_SLUG);
+/** Merge commits of the merged PRs that claim to fix #parent; else the `merged at <sha>` of its trusted FORGE:TRAJECTORY. */
+export async function parentMergeShas({ parent, repo, io }) {
+  const shas = new Set();
+  try {
+    const prs = JSON.parse(String(await io.gh(["pr", "list", "-R", repo, "--state", "merged", "--search", `#${parent}`, "--json", "number,title,body,mergeCommit", "--limit", "20"])) || "[]");
+    for (const p of prs) if ((claimsFix(p.title, parent) || claimsFix(p.body, parent)) && SHA_RE.test(p.mergeCommit?.oid ?? "")) shas.add(p.mergeCommit.oid);
+  } catch { /* unreadable: try the trajectory */ }
+  if (!shas.size) {
+    try {
+      const v = JSON.parse(String(await io.gh(["issue", "view", String(parent), "-R", repo, "--json", "comments"])));
+      for (const c of v.comments ?? []) {
+        const b = String(c?.body ?? "");
+        const m = b.includes("FORGE:TRAJECTORY") && isOwnTrusted(c) ? /merged at `?([0-9a-f]{7,40})\b/i.exec(b) : null;
+        if (m) shas.add(m[1]);
+      }
+    } catch { /* unreadable: no SHA */ }
+  }
+  return [...shas];
+}
+/** Default `io.execCode`: the exit code of an argv-only child (-1 when it could not run or timed out). */
+function execCode(cmd, args, opts) {
+  return new Promise((res) => {
+    try { execFile(cmd, args, opts, (err) => res(err ? (typeof err.code === "number" ? err.code : -1) : 0)); } catch { res(-1); }
+  });
+}
+/**
+ * #4389: never throws, no model call. `defaultBranch` is a name or an (async) function resolving it (and fetching it).
+ * @returns {Promise<{state:"not-applicable"|"unresolved"|"awaiting-promotion"|"awaiting-precondition"|"ready", parent:?number, shas:string[], default?:string, detail:string}>}
+ * Fail-open: no merge SHA, a git answer other than yes/no, an unknown default branch or a hook error give "unresolved".
+ */
+export async function postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, preconditionCmd = null }) {
+  const parent = deferredFrom(iss?.body);
+  const res = (state, detail, extra = {}) => ({ state, parent, shas: [], detail, ...extra });
+  if (!parent || !postDeployOnly(iss.body)) return res("not-applicable", "");
+  try {
+    const def = typeof defaultBranch === "function" ? await defaultBranch() : defaultBranch;
+    if (!def) return res("unresolved", "default branch unknown");
+    const shas = await parentMergeShas({ parent, repo, io });
+    if (!shas.length) return res("unresolved", `no merge SHA found for #${parent}`);
+    const off = [];
+    for (const sha of shas) {
+      let on;
+      try { await io.git(["merge-base", "--is-ancestor", sha, `origin/${def}`], { cwd }); on = true; } catch (e) { on = e?.code === 1 ? false : null; }
+      if (on === null) return res("unresolved", `${sha.slice(0, 12)} unknown to git`, { shas, default: def });
+      if (!on) off.push(sha);
+    }
+    if (off.length) return res("awaiting-promotion", `fix ${off.map((s) => s.slice(0, 12)).join(", ")} of #${parent} is not on ${def}${lane ? ` (lane ${lane})` : ""}`, { shas, default: def });
+    if (preconditionCmd) {
+      const code = await (io.execCode ?? execCode)("sh", ["-c", preconditionCmd, "precondition", String(iss.number)],
+        { cwd, timeout: 60000, env: { ...process.env, FORGE_ISSUE: String(iss.number) } });
+      if (code === 1) return res("awaiting-precondition", `fix of #${parent} is on ${def}; post_deploy.precondition_cmd says not ready`, { shas, default: def });
+      if (code !== 0) return res("unresolved", `post_deploy.precondition_cmd exited ${code}`, { shas, default: def });
+    }
+    return res("ready", `fix of #${parent} is on ${def}`, { shas, default: def });
+  } catch (e) {
+    return res("unresolved", `gate error (${String(e?.message ?? e).slice(0, 120)})`);
+  }
+}
+/**
+ * #4389: the default branch for the gate, resolved and fetched once, only when a gated issue asks: forge.yaml
+ * `branches.default`, else GitHub's default branch. Null when neither answers (the gate then fails open).
+ */
+export function lazyDefaultBranch({ io, repo, cwd, configured = null }) {
+  let p = null;
+  return () => (p ??= (async () => {
+    let name = configured;
+    if (!name) { try { name = String(await io.gh(["repo", "view", repo, "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"])).trim() || null; } catch { name = null; } }
+    if (name) { try { await io.git(["fetch", "origin", name], { cwd }); } catch { /* offline: use the local ref */ } }
+    return name;
+  })());
+}
+/** #4389: label and explain a parked issue once (the comment only when the label was not there yet); best effort. */
+async function markParked({ issue, repo, io, had, gate }) {
+  const edit = () => io.gh(["issue", "edit", String(issue), "-R", repo, "--add-label", AWAITING_PROMOTION_LABEL]);
+  try { await edit(); } catch {
+    try {
+      await io.gh(["label", "create", AWAITING_PROMOTION_LABEL, "-R", repo, "--force", "--color", "C5DEF5", "--description", "Post-deploy follow-up parked until its parent fix reaches the default branch. Managed by ForgeDock."]);
+      await edit();
+    } catch { /* the comment and the report still show it */ }
+  }
+  if (had) return;
+  const what = gate.state === "awaiting-promotion" ? "awaiting promotion" : "awaiting its post-deploy precondition";
+  const body = `<!-- ${PRECONDITION_MARKER} -->\n## Parked: ${what}\n${sanitizeMd(gate.detail)}.\n\nEvery item here is a post-deploy check, so no lane was started. The next orchestrate or triage run checks again and launches this issue once the precondition holds.`;
+  try { await io.gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(body)]); } catch { /* the label still shows it */ }
+}
+
+/** #4389 batch-report lines: one `awaiting promotion:` line (and one `awaiting precondition:` line) for the parked rows, or "". */
+export function formatParkedLine(rows) {
+  const parked = (rows ?? []).filter((r) => r?.prefilter?.parked);
+  const uniq = (xs) => [...new Set(xs.filter(Boolean))];
+  const out = [];
+  const promo = parked.filter((r) => r.prefilter.kind === "awaiting-promotion");
+  if (promo.length) {
+    const lanes = uniq(promo.map((r) => r.prefilter.lane)), defs = uniq(promo.map((r) => r.prefilter.default));
+    out.push(`awaiting promotion: ${promo.map((r) => `#${r.issue}`).join(" ")} (fixes on ${lanes.join(", ") || "the lane"}, not on ${defs.join(", ") || "the default branch"})`);
+  }
+  const pre = parked.filter((r) => r.prefilter.kind === "awaiting-precondition");
+  if (pre.length) out.push(`awaiting precondition: ${pre.map((r) => `#${r.issue}`).join(" ")} (post_deploy.precondition_cmd not ready)`);
+  return out.join("\n");
+}
+
 /**
  * Pre-filter one issue. Never throws.
  * @returns {Promise<{issue:number, closed:boolean, kind:?string, candidate:boolean, verdict:?string, cost_usd:number, detail:string}>}
  */
-export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAULT_PREFILTER_MODEL, dryRun = false, agentId = null, maxMinutes = 5, selfLogins = null }) {
+export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAULT_PREFILTER_MODEL, dryRun = false, agentId = null, maxMinutes = 5, selfLogins = null, defaultBranch = null, preconditionCmd = null }) {
   const out = { issue, closed: false, kind: null, candidate: false, verdict: null, cost_usd: 0, detail: "" };
   try {
     const iss = JSON.parse(String(await io.gh(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,labels,comments"])));
     if (String(iss.state).toUpperCase() !== "OPEN") return { ...out, detail: "not open" };
-    if ((iss.labels ?? []).some((l) => ["needs-human", "workflow:merged"].includes(l?.name ?? l))) return { ...out, detail: "labelled, left to the lane" };
+    const names = (iss.labels ?? []).map((l) => l?.name ?? l);
+    const labelled = names.some((l) => ["needs-human", "workflow:merged"].includes(l));
+    // #4389: a post-deploy follow-up is gated even when an earlier lane escalated it (needs-human); nothing else changes.
+    const gated = !!defaultBranch && !names.includes("workflow:merged") && deferredFrom(iss.body) != null && postDeployOnly(iss.body);
+    if (labelled && !gated) return { ...out, detail: "labelled, left to the lane" };
     if (io.projector) {
       let st = null;
       try { st = await io.projector.readState(issue); } catch { /* unreadable: proceed */ }
       if (st?.lease && st.lease.until > Date.now() && st.lease.by !== agentId) return { ...out, detail: `leased by ${st.lease.by}` };
+    }
+    if (gated) {
+      const gate = await postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, preconditionCmd });
+      const had = names.includes(AWAITING_PROMOTION_LABEL);
+      if (gate.state === "awaiting-promotion" || gate.state === "awaiting-precondition") {
+        if (!dryRun) await markParked({ issue, repo, io, had, gate });
+        return { ...out, parked: true, kind: gate.state, parent: gate.parent, lane, default: gate.default, detail: gate.detail };
+      }
+      if (gate.state === "ready" && had && !dryRun) {
+        try { await io.gh(["issue", "edit", String(issue), "-R", repo, "--remove-label", AWAITING_PROMOTION_LABEL]); } catch { /* best effort */ }
+      }
+      if (labelled) return { ...out, detail: `labelled, left to the lane (post-deploy gate: ${gate.state}${gate.detail ? `, ${gate.detail}` : ""})` };
+    }
+    // #4399: an issue reopened by a failed acceptance probe goes to a lane, never back to an already-fixed close
+    if ((iss.comments ?? []).some((c) => probeResultOf(c?.body)?.result === "fail")
+      && flakyReason({ comments: iss.comments }, await ownFor(iss, selfResolver(selfLogins, io.gh)))?.reason === "probe-failed") {
+      return { ...out, detail: "acceptance probe failed after promotion (FORGE:PROBE): no already-fixed close; lane" };
     }
     const sig = await collectSignals({ iss, repo, lane, io, cwd, selfLogins });
     const close = async (kind, body, detail) => {

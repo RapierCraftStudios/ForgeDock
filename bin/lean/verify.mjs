@@ -6,6 +6,7 @@
  * failed jobs' log tails for the builder's fix loop. All GitHub effects go through the injected io.
  */
 import { ciPollDelayMs } from "../engine.mjs";
+import { parseE2e } from "./e2e.mjs";
 
 export const VERIFY_MODES = Object.freeze(["local", "ci", "hybrid"]);
 /** Changed files that never need the CI matrix (docs-only lanes skip CI verification). */
@@ -29,8 +30,9 @@ const OK = ["success", "neutral", "skipped"];
 
 /**
  * forge.yaml `verify:` section (block style; parseForgeYaml gives strings) → {mode, workflow, pathsInput, skipPaths,
- * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun}. Invalid values fall back to the defaults; mode defaults to local (today's
- * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`.
+ * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, e2e}. Invalid values fall back to the defaults; mode defaults to local (today's
+ * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`; checks (#4387) is the optional allow-list
+ * of check names that gate CI verification, or null; e2e is the e2e merge gate (#4403, e2e.mjs parseE2e).
  */
 export function parseVerify(sec = {}) {
   const s = sec && typeof sec === "object" ? sec : {};
@@ -47,7 +49,10 @@ export function parseVerify(sec = {}) {
   const tt = Number(str(s.precheck_total_seconds));
   const precheckTotalSeconds = str(s.precheck_total_seconds) !== "" && Number.isInteger(tt) && tt >= 1 && tt <= 7200 ? tt : DEFAULT_PRECHECK_TOTAL_SECONDS;
   const checkRun = str(s.check_run).toLowerCase() === "true";
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun };
+  const rawChecks = Array.isArray(s.checks) ? s.checks : str(s.checks).split(",");
+  const names = rawChecks.map((x) => String(x ?? "").trim()).filter(Boolean);
+  const checks = names.length ? [...new Set(names)] : null;
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);
@@ -83,15 +88,55 @@ export async function collectFailedLogs(io, failedChecks) {
   }
   return capLogs(out);
 }
+const RANK = { failure: 2, pending: 1, success: 0 };
+/**
+ * #4387: one check per name at its latest attempt: the highest check-run id (ids grow monotonically, so a rerun or a later
+ * push/pull_request run of the same job wins). A name with any entry lacking a numeric id keeps its worst state.
+ */
+export function latestPerName(checks) {
+  const by = new Map();
+  for (const c of checks ?? []) { if (!by.has(c?.name)) by.set(c?.name, []); by.get(c?.name).push(c); }
+  return [...by.values()].map((xs) => xs.every((c) => Number.isFinite(Number(c?.id)) && c?.id !== null && c?.id !== "")
+    ? xs.reduce((a, b) => (Number(b.id) > Number(a.id) ? b : a))
+    : xs.reduce((a, b) => ((RANK[b?.state] ?? 1) > (RANK[a?.state] ?? 1) ? b : a)));
+}
+/**
+ * #4387: the check names that gate CI verification: forge.yaml `verify.checks`, else the base branch's required checks
+ * under `merge_wait: required`, else null (every check gates, as before). An unreadable or empty required set is null.
+ */
+export async function ciGate({ io, lane, mergeWait, verify }) {
+  if (verify?.checks?.length) return [...verify.checks];
+  if (mergeWait !== "required" || !io?.requiredChecks) return null;
+  let req = [];
+  try { req = (await io.requiredChecks(lane)) ?? []; } catch { req = []; }
+  return Array.isArray(req) && req.length ? req : null;
+}
+/** #4387: the `rerunOf` of the re-verify after a rerun of `v`'s failed jobs: [{name, id}] (commit checks) or {runId, attempt}. */
+export const rerunTarget = (v) => (v?.failedChecks ? v.failedChecks.map((c) => ({ name: c.name, id: c.id ?? null })) : { runId: v?.runId ?? null, attempt: v?.attempt ?? null });
+/**
+ * #4387: rerun the failed jobs of a red verification once (`io.rerunFailedJobs`, `gh run rerun <id> --failed`), so a
+ * no-commit fix round can tell a flake from a real failure. Returns {ok, runs, jobs, detail}; never throws.
+ */
+export async function rerunFailedOnce({ io, v }) {
+  const jobs = (v?.failures ?? []).map((f) => f.job);
+  const runs = v?.failedChecks ? [...new Set(v.failedChecks.map((c) => runIdOf(c.url)).filter(Boolean))] : v?.runId != null ? [String(v.runId)] : [];
+  if (!io?.rerunFailedJobs) return { ok: false, runs, jobs, detail: "no rerun seam" };
+  if (!runs.length) return { ok: false, runs, jobs, detail: "no Actions run to rerun" };
+  try { for (const id of runs) await io.rerunFailedJobs(id); }
+  catch (e) { return { ok: false, runs, jobs, detail: `rerun could not start: ${String(e?.stderr ?? e?.message ?? e).split("\n")[0].slice(0, 200)}` }; }
+  return { ok: true, runs, jobs, detail: `reran ${runs.length} run(s)` };
+}
 const sameSha = (a, b) => Boolean(a && b) && (String(a).startsWith(b) || String(b).startsWith(a));
 
 /**
  * One CI verification of `head` on `branch`. Returns {result: pass|fail|timeout|unavailable|skipped, failures, runUrl,
  * detail, runId}. `push` is called before any CI call (never for a skipped lane); `exclude` lists run ids already judged,
  * so a re-dispatch on the same head never reuses an old run; `onPoll` runs before each wait (lease renew, progress).
+ * #4387: `gate` (ciGate) limits which commit checks decide; each name counts at its latest attempt. `rerunOf`
+ * (rerunTarget) makes the re-verify after a rerun wait for newer attempts than the ones judged red.
  */
 export async function runCiVerify({ io, branch, head, changedFiles, verify, ciMaxMinutes = 360, now = () => Date.now(), sleep, random = Math.random,
-  push = async () => {}, exclude = [], onPoll = async () => {}, graceMs = DEFAULT_GRACE_MS }) {
+  push = async () => {}, exclude = [], onPoll = async () => {}, graceMs = DEFAULT_GRACE_MS, gate = null, rerunOf = null }) {
   const v = verify ?? parseVerify({});
   const files = verifiableFiles(changedFiles);
   if (skipsCi(files, v.skipPaths)) return { result: "skipped", failures: [], runUrl: null, detail: `all ${files.length} changed file(s) match skip_paths` };
@@ -105,27 +150,41 @@ export async function runCiVerify({ io, branch, head, changedFiles, verify, ciMa
     catch (e) { return unavailable(`workflow ${v.workflow} could not be dispatched: ${String(e?.stderr ?? e?.message ?? e).split("\n")[0].slice(0, 200)}`); }
   } else if (!io.commitChecks) return unavailable("no commit-checks seam");
   const skip = new Set(exclude.map(String));
+  const rerunRun = rerunOf && !Array.isArray(rerunOf) && rerunOf.runId != null ? rerunOf : null;
+  if (rerunRun) skip.delete(String(rerunRun.runId));
+  const staleIds = new Map(Array.isArray(rerunOf) ? rerunOf.filter((c) => c?.id != null).map((c) => [c.name, Number(c.id)]) : []);
+  const gateSet = Array.isArray(gate) && gate.length ? new Set(gate) : null;
   for (let i = 0; ; i++) {
     if (v.workflow) {
       let runs = [];
       try { runs = (await io.workflowRuns({ workflow: v.workflow, branch })) ?? []; } catch { runs = []; }
       const run = runs.find((r) => sameSha(r?.headSha, head) && !skip.has(String(r?.databaseId)));
-      if (run && String(run.status).toLowerCase() === "completed") {
+      const stale = run && rerunRun && String(run.databaseId) === String(rerunRun.runId) && !(Number(run.attempt) > Number(rerunRun.attempt ?? 0));
+      if (run && !stale && String(run.status).toLowerCase() === "completed") {
         const c = String(run.conclusion ?? "").toLowerCase();
         if (OK.includes(c)) return { result: "pass", failures: [], runUrl: run.url ?? null, runId: run.databaseId, detail: `${v.workflow} ${c}` };
         let log = "";
         try { log = String((await io.failedLogs?.(run.databaseId)) ?? ""); } catch { log = ""; }
-        return { result: "fail", failures: capLogs([{ job: run.name ?? v.workflow, url: run.url ?? null, log }]), runUrl: run.url ?? null, runId: run.databaseId, detail: `${v.workflow} ${c || "failed"}` };
+        return { result: "fail", failures: capLogs([{ job: run.name ?? v.workflow, url: run.url ?? null, log }]), runUrl: run.url ?? null, runId: run.databaseId, attempt: run.attempt ?? null, detail: `${v.workflow} ${c || "failed"}` };
       }
       if (!run && now() - startedAt >= graceMs) return unavailable(`no ${v.workflow} run for ${String(head).slice(0, 12)} appeared within ${Math.round(graceMs / 60000)} min`);
     } else {
       let checks = [];
       try { checks = ((await io.commitChecks(head)) ?? []).filter((c) => c?.name !== VERIFY_CHECK_NAME); } catch { checks = []; }
       if (!checks.length && now() - startedAt >= graceMs) return unavailable(`no checks reported for ${String(head).slice(0, 12)} within ${Math.round(graceMs / 60000)} min`);
-      if (checks.length && checks.every((c) => c.state !== "pending")) {
-        const failed = checks.filter((c) => c.state === "failure");
-        if (!failed.length) return { result: "pass", failures: [], runUrl: null, detail: `${checks.length} check(s) green` };
-        return { result: "fail", failures: await collectFailedLogs(io, failed), runUrl: failed[0].url ?? null, detail: `${failed.length} check(s) failed: ${failed.map((c) => c.name).join(", ")}` };
+      const latest = latestPerName(checks).map((c) => (staleIds.has(c.name) && !(Number(c.id) > staleIds.get(c.name)) ? { ...c, state: "pending" } : c));
+      // #4387: only gating checks decide; gate names not reported yet are waited on for the grace period, and with none reported every check gates.
+      const gating = gateSet ? latest.filter((c) => gateSet.has(c.name)) : [];
+      const relevant = gating.length ? gating : latest;
+      const missing = gateSet ? [...gateSet].filter((n) => !latest.some((c) => c.name === n)) : [];
+      const waitMissing = missing.length && now() - startedAt < graceMs;
+      if (relevant.length && !waitMissing && relevant.every((c) => c.state !== "pending")) {
+        const failed = relevant.filter((c) => c.state === "failure");
+        const ignored = gating.length ? latest.filter((c) => !gateSet.has(c.name) && c.state === "failure").map((c) => c.name) : [];
+        const note = ignored.length ? `; ignored non-gating: ${ignored.join(", ")}` : "";
+        if (!failed.length) return { result: "pass", failures: [], runUrl: null, detail: `${relevant.length} ${gating.length ? "gating " : ""}check(s) green${note}` };
+        return { result: "fail", failures: await collectFailedLogs(io, failed), failedChecks: failed.map((c) => ({ name: c.name, id: c.id ?? null, url: c.url ?? null })), runUrl: failed[0].url ?? null,
+          detail: `${failed.length} check(s) failed: ${failed.map((c) => c.name).join(", ")}${note}` };
       }
     }
     if (now() - startedAt >= ciMaxMinutes * 60000) return { result: "timeout", failures: [], runUrl: null, detail: `CI still pending after ${ciMaxMinutes} min` };

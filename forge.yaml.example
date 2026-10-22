@@ -79,6 +79,27 @@ paths:
   #   file: "/home/youruser/credentials.yaml"
 
 # =============================================================================
+# ACCEPTANCE PROBES (optional, #4399)
+# An issue may declare a production check that runs once its fix is on the
+# default branch (`forgedock probe`, and at the start of every orchestrate
+# batch). A fail reopens the issue with the output. No model call.
+# In the issue body (trusted author) or a trusted comment:
+#   ```forge-probe
+#   run: curl -fsS https://example.com/api/health
+#   pass: /"status":"ok"/          # default: exit 0
+#   timeout: 60                     # seconds, max 900
+#   ```
+# =============================================================================
+
+# acceptance_probe:
+#   # Env vars passed to probes (the repo's designated test identity); every
+#   # other variable is dropped, and these values are masked in the output.
+#   env: [PROBE_API_KEY]
+#   timeout_s: 120        # default per-probe timeout
+#   sweep_days: 30        # how far back the sweep looks for closed issues
+#   enabled: true         # false: no sweep at orchestrate start
+
+# =============================================================================
 # BRANCHES (REQUIRED)
 # Branch naming conventions. Used to determine PR targets and source branches.
 # Commands: work-on (PR targeting), review-pr, cleanup
@@ -96,6 +117,20 @@ branches:
   # {slug} is replaced with the milestone title converted to kebab-case
   # Example: milestone "User Auth v2" → "milestone/user-auth-v2"
   feature_pattern: "milestone/{slug}"
+
+# =============================================================================
+# POST-DEPLOY (OPTIONAL)
+# Deferred follow-ups whose items are all post-deploy checks are parked
+# (label awaiting-promotion, no lane) until the parent's fix is on
+# branches.default. precondition_cmd adds a repo-specific readiness check git
+# cannot see (e.g. rollout state), run once the fix is on the default branch:
+# exit 0 = ready, exit 1 = not ready (parked), anything else = ignored (lane).
+# It receives the issue number as $1 and in FORGE_ISSUE.
+# Commands: orchestrate, triage
+# =============================================================================
+
+# post_deploy:
+#   precondition_cmd: "scripts/rollout-ready.sh"
 
 # =============================================================================
 # AGENTS (OPTIONAL)
@@ -279,6 +314,20 @@ branches:
 #   context_pack_sources: "graph,attempts,ledger,facts"   # drop a noisy source
 #   context_pack_bytes: 6144                              # hard cap
 #   context_pack_days: 30                                 # ledger window
+#   # Context ceiling (#4390): a builder session whose per-turn context (input +
+#   # cache read + cache creation) reaches this many tokens is checkpointed and
+#   # restarted fresh from the frozen contract, the diff and the last validate
+#   # result instead of carrying its whole history. 0 disables.
+#   context_ceiling_tokens: 120000
+#   # Turn budget (#4392): implement turns per lane size. Size is a `size:S|M|L`
+#   # label, else the frozen contract's deliverable paths (S <= 2, M <= 5, else L).
+#   # At the budget the builder is checkpointed and gets one short wrap-up to
+#   # finish or stop with a digest; a stop ends needs-human `budget.exceeded`,
+#   # which orchestrate recovers once. The batch report prints turns by size.
+#   # 0 disables a size.
+#   turn_budget_s: 25
+#   turn_budget_m: 60
+#   turn_budget_l: 100
 
 # =============================================================================
 # ENV (OPTIONAL)
@@ -554,6 +603,18 @@ branches:
 #   trigger: shadow
 #   # Globs added to the built-in risk words (comma list or block list).
 #   risk_paths: "src/db/**, *.sql"
+#   # Independent adversarial verifier for the core path (#4397). After a
+#   # conforming review, one fresh read-only call on a model other than the
+#   # builder's gets only the issue, the contract, the diff and the callers of the
+#   # changed functions, and tries to break the change. off (default): no call.
+#   # shadow: log VERIFIER and list findings in FORGE:REVIEW, never block.
+#   # enforce: each file:line finding goes to the conformance fix round. Switch
+#   # to enforce only after a seeded-defect replay in shadow and >=30 shadow runs
+#   # with a verifier/implement cost ratio <= 0.10
+#   # (report: node bin/lean/verifier.mjs [--json]).
+#   verifier: off
+#   # Verifier model (default claude-sonnet-5-5; swapped when it is the builder's).
+#   verifier_model: claude-sonnet-5-5
 
 # =============================================================================
 # DECOMPOSITION (OPTIONAL)

@@ -75,6 +75,11 @@
     "description": "Pipeline stalled — engine/tool failure (not a genuine human-judgment block). Managed by ForgeDock."
   },
   {
+    "name": "awaiting-promotion",
+    "color": "C5DEF5",
+    "description": "Post-deploy follow-up parked until its parent fix reaches the default branch. Managed by ForgeDock."
+  },
+  {
     "name": "blocked-on-human-merge",
     "color": "006B75",
     "description": "Dependent of a gated (needs-human/awaiting-merge) predecessor. Managed by ForgeDock."
