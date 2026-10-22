@@ -335,7 +335,8 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
-`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305),
+`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; an issue whose latest pipeline `FORGE:PROBE` is a fail is never closed as already-fixed, reason `probe-failed`, #4399),
+`probe.mjs` (outcome-based acceptance, #4399; see "Acceptance probes" below),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
@@ -937,3 +938,22 @@ docs, enumerating, sequence, CI pass or a merge for `ci_red`/`merge_ci`, conform
 `pitfalls_matched`. `renderContextRecord` drops the pitfalls section (`publicPackText`) and shows only the count, so no
 pitfall text is posted. `forgedock stats` (local logs) prints the first-pass rate with and without matching pitfalls.
 Cost: 0 LLM calls; one local read and up to a few appends per lane; ≤ ~1 KB of pack bytes when mode is `on`.
+
+## Acceptance probes (#4399)
+
+`probe.mjs` checks a production outcome after promotion, deterministically (0 LLM calls, no lane). An issue declares a
+probe in a fenced ```` ```forge-probe ```` block: `run: <shell command>` (required), `pass: exit 0` (default) or
+`pass: /regex/flags` on stdout, `timeout: <s>` (default forge.yaml `acceptance_probe.timeout_s` or 120, capped at 900). The
+latest trusted comment's block wins, else the body's when its author is trusted (`isTrustedActor`/`isTrustedComment`);
+FORGE marker comments never declare one, and an untrusted declaration is reported `untrusted` and never run. The fix
+commit is the latest trusted FORGE:TRAJECTORY `merged at <sha>`, else the merge commit of the latest merged PR whose
+title/body closes the issue (none: `unresolved`). Promotion is `git merge-base --is-ancestor <fix> origin/<default>`
+(`branches.default`, else GitHub's); not yet: `awaiting-promotion`, nothing runs (`onDefault` is exported for #4389).
+The probe runs as `sh -c` in the checkout, in its own process group (timeout kills it = fail), with only PATH, HOME, LANG,
+TMPDIR plus the names in `acceptance_probe.env` (the repo's designated test identity); those values are masked as `***` in
+the output. The result is a `FORGE:PROBE` comment (JSON line `{fix, default_sha, result, exit, ms}` + the last 4000 chars
+of output); a fail first reopens the issue. A trusted FORGE:PROBE for the same fix is never re-run (`already-recorded`).
+Triggers: `forgedock probe [issue...] [--dry-run] [--limit N]` (no issues = closed within `acceptance_probe.sweep_days`,
+default 30, matching `forge-probe in:body,comments`, capped at 50) and a sweep at the start of every `forgedock orchestrate`
+batch (`--no-probes`; `acceptance_probe.enabled: false` turns the sweep off), printed as one `probes: ...` line; a sweep
+error is one line and never fails the batch. Cost: one search per batch plus 2-3 gh calls per probing issue.

@@ -943,6 +943,7 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * Runs core work-on per issue with K concurrency (default 3), honouring `Depends on` / `Blocked by` among the given issues.
  * A `dependency-open` issue is requeued behind its dependency; a `decomposed` one adds its sub-issues (#4124).
  * The already-fixed pre-filter (#4123) runs before each lane unless `--no-prefilter`.
+ * Declared acceptance probes (#4399, `lean/probe.mjs`) are swept once at batch start unless `--no-probes`.
  * Each issue gets its own lane, worked out from its milestone (#4125); `--lane` is an assertion checked per issue (a
  * mismatch ends `lane-refused`). Dependency edges between lanes are printed before any lane starts. Prints a summary table.
  * Durable (#4121): the batch is kept in `~/.forge/batches/<id>/` and each lane is a detached `run-issue` process, so
@@ -1105,6 +1106,11 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const { formatPrecheckSummary } = await import("./lean/precheck.mjs");
   const { formatFirstPassSummary } = await import("./lean/fixround.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  // #4399: declared acceptance probes of closed issues whose fix reached the default branch; never fails the batch
+  const sweep = deps.sweepProbes !== undefined ? deps.sweepProbes : (await import("./lean/probe.mjs")).sweepProbes;
+  if (sweep && !argv.includes("--no-probes")) {
+    try { const s = (await import("./lean/probe.mjs")).formatProbeSummary(await sweep({ repo, cwd, io: leanIo })); if (s) sink.line(s); } catch (e) { sink.line(`probes: sweep failed (${String(e?.message ?? e).slice(0, 160)})`); }
+  }
   const { makePrefilter, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
   const prefilter = argv.includes("--no-prefilter") ? null
     : makePrefilter({ repo, cwd, io: leanIo, ...prefilterModel(argv) });
@@ -1641,4 +1647,29 @@ export async function triageFromCli(argv, deps = {}) {
   console.log(formatPrefilterSummary(rows));
   console.log(`lanes: ${lanes.map((n) => `#${n}`).join(" ") || "(none)"}`);
   return { rows, lanes };
+}
+
+/**
+ * `forgedock probe [issue...] [--repo owner/repo] [--dry-run] [--limit N]` (#4399)
+ * Runs the declared acceptance probes (`lean/probe.mjs`) of the given issues, or of the recently closed issues that
+ * declare one, once their fix is on the default branch; records FORGE:PROBE and reopens on a fail. No model call.
+ */
+export async function probeFromCli(argv, deps = {}) {
+  const valued = ["--repo", "--limit"];
+  const issues = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (valued.includes(argv[i])) { i++; continue; }
+    if (/^#?\d+$/.test(argv[i])) issues.push(parseInt(argv[i].replace("#", ""), 10));
+  }
+  const io = deps.io ?? makeIo();
+  const repo = flag(argv, "--repo") ?? (await resolveDefaultRepo(io));
+  if (!repo) throw new Error("probe needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+  const limit = flag(argv, "--limit") == null ? 50 : parseInt(flag(argv, "--limit"), 10);
+  if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit must be a positive integer");
+  const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  const { sweepProbes, formatProbeSummary } = await import("./lean/probe.mjs");
+  const rows = await sweepProbes({ repo, cwd: process.cwd(), io: leanIo, issues: [...new Set(issues)], limit, dryRun: argv.includes("--dry-run"), ...(deps.spawn ? { spawn: deps.spawn } : {}) });
+  for (const r of rows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
+  console.log(formatProbeSummary(rows) || "probes: nothing to run");
+  return { rows };
 }
