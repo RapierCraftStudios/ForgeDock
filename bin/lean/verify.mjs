@@ -6,6 +6,7 @@
  * failed jobs' log tails for the builder's fix loop. All GitHub effects go through the injected io.
  */
 import { ciPollDelayMs } from "../engine.mjs";
+import { parseE2e } from "./e2e.mjs";
 
 export const VERIFY_MODES = Object.freeze(["local", "ci", "hybrid"]);
 /** Changed files that never need the CI matrix (docs-only lanes skip CI verification). */
@@ -29,8 +30,8 @@ const OK = ["success", "neutral", "skipped"];
 
 /**
  * forge.yaml `verify:` section (block style; parseForgeYaml gives strings) → {mode, workflow, pathsInput, skipPaths,
- * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun}. Invalid values fall back to the defaults; mode defaults to local (today's
- * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`.
+ * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, e2e}. Invalid values fall back to the defaults; mode defaults to local (today's
+ * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`; e2e is the e2e merge gate (#4403, e2e.mjs parseE2e).
  */
 export function parseVerify(sec = {}) {
   const s = sec && typeof sec === "object" ? sec : {};
@@ -47,7 +48,7 @@ export function parseVerify(sec = {}) {
   const tt = Number(str(s.precheck_total_seconds));
   const precheckTotalSeconds = str(s.precheck_total_seconds) !== "" && Number.isInteger(tt) && tt >= 1 && tt <= 7200 ? tt : DEFAULT_PRECHECK_TOTAL_SECONDS;
   const checkRun = str(s.check_run).toLowerCase() === "true";
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun };
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);

@@ -18,6 +18,7 @@ import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
 import { sequenceCollisions, snapshotLane, verifyRenumber } from "./sequence.mjs";
+import { followupMap } from "./conformance.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -56,14 +57,14 @@ export const noToolFlags = (caps) => (caps?.strictMcp ? ["--tools", ""]
   : ["--disallowedTools", "Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]);
 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, maxTurns = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null }) => {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, maxTurns = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, contextMax = 0 }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
     const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : [])];
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
       args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
       logger: { log() {} },
-      idleMs, maxMs, stream: idleMs > 0, control, onSpawn, wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
+      idleMs, maxMs, stream: idleMs > 0, control, onSpawn, ...(contextMax > 0 ? { contextMax } : {}), wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default" };
   };
 }
@@ -252,13 +253,13 @@ export function makeLeanIo({ repo }) {
       return JSON.parse(await run("gh")(["run", "list", "-R", repo, "--workflow", String(workflow), "--branch", String(branch), "--event", "workflow_dispatch",
         "--limit", "10", "--json", "databaseId,headSha,status,conclusion,url,name"]) || "[]");
     },
-    /** Check runs on a commit (push-triggered CI): [{name, state: success|failure|pending, url}], same mapping as checkStates. */
+    /** Check runs on a commit (push-triggered CI): [{name, state: success|failure|pending, url, conclusion}], same mapping as checkStates. */
     async commitChecks(sha) {
       const out = String(await run("gh")(["api", "--paginate", `repos/${repo}/commits/${sha}/check-runs`, "--jq", ".check_runs[] | {name, status, conclusion, url: .html_url} | @json"]));
       return out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)).map((c) => {
         const v = String(c.status === "completed" ? c.conclusion ?? "" : "").toUpperCase();
         const state = ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(v) ? "success" : ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"].includes(v) ? "failure" : "pending";
-        return { name: c.name, state, url: c.url ?? null };
+        return { name: c.name, state, url: c.url ?? null, conclusion: c.status === "completed" ? String(c.conclusion ?? "").toLowerCase() || null : null }; // #4403: raw conclusion (skipped = not run)
       });
     },
     /**
@@ -283,9 +284,7 @@ export function makeLeanIo({ repo }) {
     async fileFollowups({ parent, items }) {
       const tsv = items.map((i) => `${i.key}\t${i.why}\t`).join("\n") + "\n";
       const out = await runWithInput("bash", [script("file-deferred-followups.sh"), "--parent", String(parent), "--repo", repo], tsv, 180000);
-      const map = {};
-      for (const l of out.split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) map[k] = Number(n); }
-      return map;
+      return followupMap(out, items);
     },
     /**
      * forge#4163: forge.yaml env.setup, once per fresh lane worktree: `bash -c <command>` in cwd with the lane env.
