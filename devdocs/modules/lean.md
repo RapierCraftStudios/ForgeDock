@@ -171,6 +171,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    result carries `firstPass` (`firstPassOf`: no `REWORK_TRIGGERS` attempt after the build; omitted when the lane never
    reached it) → orchestrate row `first_pass` → batch-report line `first-pass: P% (k/n lanes that reached the build)`
    (`formatFirstPassSummary`, after the precheck line). `forgedock stats` reads the same fields (`docs/STATS.md`).
+   #4407: the CLI's `total_cost_usd` is a running total over a resumed session, so `PHASE_ATTEMPT_USAGE` also carries
+   `cost_usd_delta` (this attempt) and `cost_usd_session` (the session total; `cost_usd` stays the raw value), from
+   `fixround.mjs` `sessionCostDelta` keyed on the call's `resume` id. The lane `cost_usd` (orchestrate rows, batch
+   summary, trajectory `cost $`) and `forgedock stats` sum the deltas; old logs fall back to `cost_usd`.
    An optional `.forge/test-map.json` (#4272, `scripts/test-map.sh`; base ref via
    `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) adds the map entries whose
    globs match the changed files to that list (`selectCommands` + `mergeChecks`, #4315: learned first, deduped, so the
