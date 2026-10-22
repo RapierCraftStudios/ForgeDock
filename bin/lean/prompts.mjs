@@ -188,7 +188,7 @@ export function missingEntriesPrompt(missing, mode = "local") {
   return `These tests enumerate the siblings of symbols or files this change adds, but do not name them (CI will fail on the stale list):\n${missing.slice(0, 30).map((m) => `- ${m.symbol} (${m.module}) -> ${m.test}:${m.line}`).join("\n")}\n\nFor each, add the symbol to that test's list, ${NOT_MEMBER}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
-const RENUMBER_RULE = "Renumber the lane's files, never the base's: rename each with git mv to its new number, keep the SQL (or other migration source) byte-identical, regenerate the snapshot and journal with the repo's own migration generator (never hand- or text-merge the journal), keep journal entries strictly ordered, and update every reference to the old name.";
+const RENUMBER_RULE = "Renumber the lane's files, never the base's: rename each with git mv to its new number, keep the SQL (or other migration source) byte-identical (a numbered document such as an ADR changes only its own number in its heading), regenerate the snapshot and journal with the repo's own migration generator (never hand- or text-merge the journal), keep journal entries strictly ordered, and update every reference to the old name.";
 
 /** #4322: lane-added sequence-numbered files whose number the base already uses, at hand-off or after a base-sync. */
 export function sequencePrompt(collisions, lane, mode = "local") {
