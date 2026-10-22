@@ -18,6 +18,8 @@ import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
 import { sequenceCollisions, snapshotLane, verifyRenumber } from "./sequence.mjs";
+import { duplicateExports } from "./postmerge.mjs";
+import { scopedChecks } from "./checks.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -320,6 +322,9 @@ export function makeLeanIo({ repo }) {
     sequenceCheck: ({ cwd, base }) => sequenceCollisions({ git: (a) => run("git")(a, { cwd }), base }),
     sequenceSnapshot: ({ cwd, base }) => snapshotLane({ git: (a) => run("git")(a, { cwd }), base }),
     sequenceVerify: ({ cwd, base, before }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before }),
+    /** #4406: the lane's scoped checks after a base merge (bin/lean/checks.mjs; [] on failure), and same-app duplicate exports (bin/lean/postmerge.mjs). */
+    postMergeChecks: async ({ cwd, base }) => { try { return scopedChecks({ repo: cwd, base }); } catch { return []; } },
+    duplicateExports: ({ cwd, base }) => duplicateExports({ git: (a) => run("git")(a, { cwd }), cwd, base }),
     /**
      * #4271: scripts/acceptance-red-green.sh for the frozen repro_test in cwd; {base, head} words, or null on any failure.
      * `env` (#4325): the lane env (run TMPDIR, toolchain), merged over process.env, so the command sees what the builder saw.

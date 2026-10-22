@@ -7,7 +7,7 @@
  */
 
 /** Fix-round kinds whose failures are mechanical: always a fresh session. */
-export const MECHANICAL_KINDS = Object.freeze(["precheck", "ci", "docs", "structure", "enumerating", "sequence"]);
+export const MECHANICAL_KINDS = Object.freeze(["precheck", "ci", "docs", "structure", "enumerating", "sequence", "post_merge", "duplicate"]);
 
 /** The fresh prompt stays under this many characters; the per-part caps leave room for the fixed text. */
 export const FIX_PROMPT_MAX = 60000;
@@ -44,10 +44,10 @@ export function issueSummary(body, max = FIX_CAPS.summary) {
  * these; events written before the field existed read as "unknown" in `forgedock stats`.
  */
 export const TRIGGERS = Object.freeze(["plan", "build", "block_correction", "contract_correction", "precheck", "structure", "docs", "enumerating",
-  "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery"]);
+  "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "post_merge", "duplicate"]);
 
 /** Builder attempts after the build that mean its diff needed rework (environment and engine repairs do not). */
-export const REWORK_TRIGGERS = Object.freeze(["precheck", "structure", "docs", "enumerating", "sequence", "ci_red", "conformance", "review", "merge_ci"]);
+export const REWORK_TRIGGERS = Object.freeze(["precheck", "structure", "docs", "enumerating", "sequence", "ci_red", "conformance", "review", "merge_ci", "post_merge", "duplicate"]);
 
 /**
  * First pass of one lane from its implement-phase attempts in order ({trigger, restart_of}): null when it never reached the

@@ -2397,6 +2397,58 @@ describe("base-sync (#4100)", () => {
     assert.ok(w.edits.some((e) => e.includes("needs-human")));
   });
 
+  /** #4406: io.postMergeChecks reports the scoped typecheck; `tsc` fails `fails` times on the merged tree, then passes. */
+  const pmWorld = (fails, o = {}) => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["clean"], reviews: [ok(), ok()], ...o });
+    w.pmRuns = [];
+    w.io.postMergeChecks = async (x) => { w.pmArgs = x; return [{ kind: "typecheck", command: "tsc -p apps/web", cwd: ".", mode: "scoped" }, { kind: "lint", command: "eslint .", cwd: ".", mode: "scoped" }]; };
+    w.io.runCommand = async ({ command }) => {
+      if (command !== "tsc -p apps/web") return { rc: 0, output: "" };
+      w.pmRuns.push(w.calls.length);
+      return w.pmRuns.length <= fails ? { rc: 2, output: "apps/web/__tests__/cross-tenant-actions.test.ts(41,3): error TS1117: An object literal cannot have multiple properties with the same name." } : { rc: 0, output: "" };
+    };
+    return w;
+  };
+
+  it("#4406 a base-sync whose merged tree fails typecheck resumes the builder with the errors before pushing", async () => {
+    const w = pmWorld(1);
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.pmRuns.length, 2, "typecheck on the merged tree, then again after the fix");
+    const fix = w.calls.findIndex((c) => c[0] === "runner" && c[1] === "builder" && /TS1117/.test(c[4]));
+    assert.ok(fix > 0, "builder resumed with the typecheck errors");
+    assert.match(w.calls[fix][4], /After merging the base into this branch[\s\S]*tsc -p apps\/web/);
+    const pushes = w.calls.map((c, i) => [c, i]).filter(([c]) => c[0] === "git" && c[1] === "push" && !c.includes("--delete")).map(([, i]) => i);
+    assert.equal(pushes.length, 2, "initial push plus the sync push");
+    assert.ok(fix < pushes[1] && w.pmRuns[0] < pushes[1], "fixed before the base-sync push");
+    assert.equal(reviewers(w).length, 2, "the post-merge fix is re-reviewed");
+    assert.match(syncComment(w), /builder fixed post-merge check failures[\s\S]*Tests run:\*\* tsc -p apps\/web: pass/);
+    assert.equal(w.pmArgs.cwd, WT);
+    noRebaseNoForce(w);
+  });
+
+  it("#4406 a passing post-merge typecheck keeps the clean-merge path: no builder, no re-review; ci mode runs no host typecheck", async () => {
+    let w = pmWorld(0);
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(w.pmRuns.length, 1);
+    assert.equal(builders(w).length, 2);
+    assert.equal(reviewers(w).length, 1);
+    w = pmWorld(1);
+    await run(w, { verify: { mode: "ci" } }).catch(() => null);
+    assert.equal(w.pmRuns.length, 0, "ci mode: the scoped typecheck is left to CI");
+    w = pmWorld(9);
+    await run(w, { verify: { postMerge: "make check" } });
+    assert.equal(w.pmRuns.length, 0, "verify.post_merge replaces the scoped typecheck");
+  });
+
+  it("#4406 a merged tree that still fails after verify.max_rounds is an anomaly; the sync still pushes", async () => {
+    const w = pmWorld(9, { reviews: [ok(), ok(), ok()] });
+    const r = await run(w, { verify: { maxRounds: 1 } });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.pmRuns.length, 2);
+    assert.match(traj(w)[0], /Post-merge check\(s\) still fail after merging origin\/staging/);
+  });
+
   describe("#4266 PR turns conflicting during the CI wait", () => {
     const syncCount = (w) => gitCalls(w).filter((x) => x[0] === "merge" && x[1] === "--no-edit").length;
     /** required check `build` reports nothing (never started) until a base-sync merged, then `then`. */
@@ -3450,7 +3502,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     writeFileSync(`${d}/forge.yaml`, "engine:\n  conformance: shadow\n");
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n");
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, postMerge: null, duplicateExports: true });
   });
 });
 
@@ -4461,6 +4513,29 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     w.io.sequenceVerify = async (x) => { w.verifyArgs = x; return verify; };
     return w;
   };
+
+  const DUP = [{ symbol: "undoActivityAction", path: "apps/web/feed/actions.ts", others: ["apps/web/inbox/actions.ts"] }];
+  it("#4406 a lane export that another module of the same app declares resumes the builder with both paths", async () => {
+    const w = hworld(); const d = [DUP, []]; w.dupCalls = 0;
+    w.io.duplicateExports = async (x) => { w.dupCalls++; w.dupArgs = x; return d.length > 1 ? d.shift() : d[0]; };
+    assert.equal((await run(w)).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3);
+    assert.match(b[2][4], /undoActivityAction: apps\/web\/feed\/actions\.ts \(also exported by apps\/web\/inbox\/actions\.ts\)[\s\S]*Rename the new export or reuse the existing one/);
+    assert.ok(w.seq.indexOf("pr") > w.seq.lastIndexOf("builder-resume"), "fixed before the PR");
+    assert.equal(w.dupCalls, 2);
+    assert.equal(w.dupArgs.cwd, WT);
+  });
+
+  it("#4406 a duplicate that remains after the round is an anomaly; verify.duplicate_exports false skips the check", async () => {
+    let w = hworld(); w.io.duplicateExports = async () => DUP;
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.match(traj(w)[0], /Duplicate export\(s\) remain \(hand-off\): undoActivityAction in apps\/web\/feed\/actions\.ts/);
+    w = hworld(); let called = 0; w.io.duplicateExports = async () => { called++; return DUP; };
+    await run(w, { verify: { duplicateExports: false } });
+    assert.equal(called, 0);
+    assert.equal(builders(w).length, 2);
+  });
 
   it("no enumerating tests and no collisions: no new plan step, no extra builder call (prompts unchanged)", async () => {
     const w = hworld();

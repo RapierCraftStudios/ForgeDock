@@ -333,6 +333,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 ## Other files
 
 `checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),
+`postmerge.mjs` (base-sync post-merge commands and same-app duplicate exports, #4406),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
 `prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305),
@@ -937,3 +938,17 @@ docs, enumerating, sequence, CI pass or a merge for `ci_red`/`merge_ci`, conform
 `pitfalls_matched`. `renderContextRecord` drops the pitfalls section (`publicPackText`) and shows only the count, so no
 pitfall text is posted. `forgedock stats` (local logs) prints the first-pass rate with and without matching pitfalls.
 Cost: 0 LLM calls; one local read and up to a few appends per lane; ≤ ~1 KB of pack bytes when mode is `on`.
+
+## Entry 2026-10-23 — Post-merge typecheck at base-sync and duplicate exports (#4406)
+Sibling lanes can add the same name (an export, a registry key) and git merges both cleanly: duplicate object keys
+(TS1117), or a name-keyed probe map that tests only one of two same-named actions. `baseSync` now checks the merged tree
+before the push whenever the merge moved the head: `postMergeGate` runs `postMergeCommands` (`postmerge.mjs`:
+forge.yaml `verify.post_merge`, else the non-skip typecheck rows of `checks.mjs` `scopedChecks` via `io.postMergeChecks`;
+none in `ci` mode unless configured) through `io.runCommand`. A failure resumes the builder (`fixRound("post_merge")`, trigger `post_merge`,
+`postMergeFailurePrompt`) up to `verify.max_rounds`; still failing is an anomaly (CI stays the gate). Run log:
+`POST_MERGE_CHECKS` {trigger, round, results}. `duplicateGate` (`io.duplicateExports` → `postmerge.mjs`
+`duplicateExports`) runs at hand-off and after each base-sync merge: lane-added declared exports that another non-test
+module under the same manifest root declares (re-exports, default exports and names 3+ modules declare are ignored) get one
+"rename or reuse" round (trigger `duplicate`, `duplicateExportsPrompt`, both paths), then an anomaly; `verify.duplicate_exports: false` turns
+it off. Run log: `DUPLICATE_EXPORTS`. A post-merge or duplicate fix round triggers the base-sync re-review; a clean merge
+that passes both is still not re-reviewed. Cost: 0 LLM calls when clean; one typecheck per base-sync in local/hybrid mode.

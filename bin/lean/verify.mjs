@@ -29,8 +29,9 @@ const OK = ["success", "neutral", "skipped"];
 
 /**
  * forge.yaml `verify:` section (block style; parseForgeYaml gives strings) → {mode, workflow, pathsInput, skipPaths,
- * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun}. Invalid values fall back to the defaults; mode defaults to local (today's
- * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`.
+ * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, postMerge, duplicateExports}. Invalid values fall back to the defaults; mode defaults to local (today's
+ * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`. #4406: postMerge (`post_merge`) is the command run on
+ * the merged tree at base-sync before the push (null: the lane's scoped typecheck); duplicateExports is false only for the literal `false`.
  */
 export function parseVerify(sec = {}) {
   const s = sec && typeof sec === "object" ? sec : {};
@@ -47,7 +48,9 @@ export function parseVerify(sec = {}) {
   const tt = Number(str(s.precheck_total_seconds));
   const precheckTotalSeconds = str(s.precheck_total_seconds) !== "" && Number.isInteger(tt) && tt >= 1 && tt <= 7200 ? tt : DEFAULT_PRECHECK_TOTAL_SECONDS;
   const checkRun = str(s.check_run).toLowerCase() === "true";
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun };
+  const postMerge = str(s.post_merge) || null;
+  const duplicateExports = str(s.duplicate_exports).toLowerCase() !== "false";
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, postMerge, duplicateExports };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);

@@ -22,14 +22,21 @@ function fake(o = {}) {
 
 describe("verify-by-CI config (#4167)", () => {
   it("parseVerify defaults to local and rejects invalid values", () => {
-    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false });
+    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, postMerge: null, duplicateExports: true });
     const v = parseVerify({ mode: "ci", workflow: ".github/workflows/verify.yml", paths_input: "changed_paths", skip_paths: "*.md, docs/** ,", max_rounds: "3" });
-    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false });
+    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, postMerge: null, duplicateExports: true });
     assert.equal(parseVerify({ mode: "remote" }).mode, "local");
     assert.equal(parseVerify({ workflow: "x; rm -rf /" }).workflow, null);
     assert.equal(parseVerify({ max_rounds: "-1" }).maxRounds, 2);
     assert.equal(parseVerify({ max_rounds: "0" }).maxRounds, 0);
     assert.equal(parseVerify({ mode: "hybrid" }).mode, "hybrid");
+  });
+  it("#4406 post_merge is a trimmed command or null; duplicate_exports is off only for the literal false", () => {
+    const v = parseVerify({ post_merge: "  pnpm -r typecheck ", duplicate_exports: "false" });
+    assert.equal(v.postMerge, "pnpm -r typecheck");
+    assert.equal(v.duplicateExports, false);
+    assert.equal(parseVerify({ post_merge: " " }).postMerge, null);
+    assert.equal(parseVerify({ duplicate_exports: "no" }).duplicateExports, true);
   });
   it("globs: a pattern without / matches the basename anywhere; ** spans directories", () => {
     assert.ok(matchesGlob("README.md", "*.md")); assert.ok(matchesGlob("pkg/a/CHANGELOG.md", "*.md"));
