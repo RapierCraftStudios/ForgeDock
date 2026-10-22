@@ -248,6 +248,14 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    logs (`collectFailedLogs`, `ciFailurePrompt`), re-reviews and pushes the fix,
    and waits again; `ci.red` only after `max_rounds` (shared with `ciVerify`) or a
    round with no new commit. Rollups of another head count as pending. `CI_FIX_ROUND`.
+   **e2e merge gate** (#4403, `e2e.mjs`, forge.yaml `verify.e2e*`): before `gh pr merge`,
+   once per reviewed head, a lane whose diff touches `e2e_paths` or whose contract
+   quotes `[type:e2e]` runs `runE2eGate` (label the PR and wait on `e2e_checks`, a
+   `skipped` run = not run; or dispatch `e2e_workflow` via `runCiVerify`). The lane's
+   own failures (`ownFailures`: spec path/basename in the log, empty log, or no spec
+   changed) go through `mergeFixRound`; others are an anomaly (`e2e_blocking: all`
+   blocks them). Timeout → `ci-pending`, unavailable → needs-human. `E2E_VERIFY`.
+   `never`, or no `e2e_label`/`e2e_workflow` configured, keeps today's behaviour.
    **Sequence numbers** (#4322, `sequence.mjs`): before review and the first push,
    and after every base-sync merge (clean or not), lane-added `<NNN>_*` files whose
    number the fetched lane already uses → builder renumbers (`sequencePrompt`; a

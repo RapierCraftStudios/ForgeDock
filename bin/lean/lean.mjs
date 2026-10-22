@@ -33,6 +33,7 @@ import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog
 import { unjustified } from "./enumerating.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport } from "./verify.mjs";
+import { e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
 import { writeHeavyShims, sumWaits } from "./heavy.mjs";
@@ -1986,6 +1987,30 @@ export async function runCore(o) {
       await emit(rec);
     }
 
+    /**
+     * #4403 e2e merge gate (e2e.mjs): a lane touching e2e specs or with [type:e2e] criteria runs the repo's e2e (label or
+     * dispatch) on the reviewed head before merge. Returns null to merge, {again} after a fix round, or {done}.
+     */
+    let e2eHead = null;
+    const e2eRuns = [];
+    async function e2eGate() {
+      const cur = await changedFiles(), want = e2eWanted({ cfg: vcfg.e2e, files: cur, contract: effective });
+      if (!want.run) { if (want.reason === NO_TRIGGER && want.specs.length) T.decisions.push(`e2e not run: ${want.specs.length} e2e spec(s) changed but ${NO_TRIGGER}`); e2eHead = localHead; return null; }
+      const v = await runE2eGate({ io: { ...io, addPrLabel: (n, l) => ghw(["pr", "edit", String(n), "-R", repo, "--add-label", l]) }, pr, branch, head: localHead, cfg: vcfg.e2e, specs: want.specs,
+        changedFiles: cur, ciMaxMinutes, now, sleep, random, exclude: e2eRuns, onPoll: async () => { await renew(); onProgress({ event: "phase_paused", phase: "merge", detail: `e2e pending on PR #${pr}` }); } });
+      if (v.runId != null) e2eRuns.push(v.runId);
+      const own = v.result === "fail" ? (vcfg.e2e.blocking === "all" ? v.failures : ownFailures(v.failures, want.specs)) : [];
+      const rec = { event: "E2E_VERIFY", pr, head: localHead, reason: want.reason, result: v.result, specs: want.specs, failures: v.failures.map((f) => f.job), own: own.map((f) => f.job), blocking: vcfg.e2e.blocking };
+      ev(rec); await emit({ ...rec, phase: "merge" });
+      T.decisions.push(`e2e (${want.reason}): ${v.result} at ${localHead.slice(0, 12)}${v.detail ? ` (${v.detail})` : ""}`);
+      if (v.result === "timeout") return { done: await finish("ci-pending", `PR #${pr} e2e still pending after ${ciMaxMinutes} min`, { pr }) };
+      if (v.result === "unavailable") return { done: await needsHuman(`e2e verification unavailable on PR #${pr} (${v.detail}); nothing merged.`) };
+      if (own.length) { const r = await mergeFixRound(own.map((f) => ({ name: f.job, url: f.url }))); return r ? { done: r } : { again: true }; }
+      if (v.result === "fail") T.anomalies.push(`Pre-existing e2e failure(s) reported, not blocking: ${v.failures.map((f) => f.job).join(", ")}`);
+      e2eHead = localHead;
+      return null;
+    }
+
     // ---- 7. (sync) wait per policy, (sync) merge at the reviewed head ----
     // A rerun on an existing PR goes through the same conflict check, so a conflicting PR from an earlier run recovers.
     for (;;) {
@@ -2047,6 +2072,7 @@ export async function runCore(o) {
           return await needsHuman(`CI passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`, OUTCOME_CODES.MERGE_HEAD_MISMATCH);
         }
       }
+      if (e2eHead !== localHead) { const g = await e2eGate(); if (g?.done) return g.done; if (g?.again) continue; }
       if (syncs > 0 && (await prConflicting()) === "conflict") continue; // the base moved again while waiting
       T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
       laneGuard(resumed?.base ?? lane, "merge");
