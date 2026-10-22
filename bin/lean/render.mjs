@@ -125,7 +125,7 @@ const CONTRACT_BLOCK_RE = /<summary>contract\.json \(sha256 ([0-9a-f]{12})(?:, i
 export function renderContract(c, hash, { compact = false, scope = null } = {}) {
   const json = `<details><summary>contract.json (sha256 ${hash}${scope ? `, issue ${scope}` : ""})</summary>\n\n\`\`\`json\n${contractJson(c)}\n\`\`\`\n</details>`;
   if (compact) return `## Builder Contract (frozen \`${hash}\`)\n\n${c.requirements.length} requirement(s), ${(c.deliverables ?? []).length} deliverable(s); the tables are omitted because the contract is large.\n\n${json}`;
-  const disp = (r) => `${r.disposition}${r.tracked ? ` → ${r.tracked}` : ["defer", "post-deploy"].includes(r.disposition) ? " (filed after review accepts it)" : ""}${r.why ? ` (${escl(r.why)})` : ""}`;
+  const disp = (r) => `${r.disposition}${r.verify === "out_of_band" ? `, verified out of band${r.evidence ? ` (${escl(r.evidence)})` : ""}` : ""}${r.tracked ? ` → ${r.tracked}` : ["defer", "post-deploy"].includes(r.disposition) ? " (filed after review accepts it)" : ""}${r.why ? ` (${escl(r.why)})` : ""}`;
   const req = c.requirements.map((r) => `| ${esc(r.id)} | ${esc(r.quote)} | ${esc(disp(r))} |`).join("\n");
   const del = (c.deliverables ?? []).map((d) => `| ${esc(d.id)} | \`${esc(d.path)}\` | ${esc(d.change)} | ${esc((d.requirements ?? []).join(", "))} |`).join("\n");
   const dec = Array.isArray(c.decisions) && c.decisions.length // forge#4165: decision provenance
@@ -148,7 +148,8 @@ export function renderAmendments(applied, filed = {}) {
 export function renderReview(rv, contract) {
   const rows = contract.requirements.map((r) => {
     const x = (rv.requirements ?? []).find((y) => y.id === r.id) ?? {};
-    return `| ${esc(r.id)} | ${esc(x.status)}${r.tracked ? ` (tracked ${r.tracked})` : ""} | ${esc(x.evidence)} | ${esc(x.validated_by)} |`;
+    const oob = r.verify === "out_of_band" ? ` (out of band${r.evidence ? `: ${r.evidence}` : ""})` : "";
+    return `| ${esc(r.id)} | ${oob ? esc(`${x.status ?? ""}${oob}`) : esc(x.status)}${r.tracked ? ` (tracked ${r.tracked})` : ""} | ${esc(x.evidence)} | ${esc(x.validated_by)} |`;
   }).join("\n");
   const cov = rv.issue_coverage ?? [];
   return `## Conformance Review\n**Verdict:** CONFORMS (computed by the engine from the rows below)\n\n| Requirement | Status | Evidence | Validated by |\n| --- | --- | --- | --- |\n${rows}\n\n**Issue coverage:** ${cov.filter((c) => c.status === "covered").length}/${cov.length} issue requirement(s) covered by the contract\n**Scope:** ${(rv.scope ?? []).map((s) => `\`${escl(s.file)}\` ← ${escl(s.authorized_by)}`).join(", ") || NR}\n**Preserve:** ${(rv.preserve ?? []).map((p) => `${escl(p.id)} ${escl(p.status)}`).join(", ") || "none"}\n**Regressions:** none\n\n**Notes:** ${escl(rv.summary)}`;
@@ -171,7 +172,10 @@ export function renderPrBody({ issue, investigation, contract, implementation, r
     : planFallback(result, gitFiles).split("### Deliverables\n")[1].split("\n\n### ")[0];
   const verify = section(implementation, "Verification") || verification(result);
   const remaining = tracked.length ? `\n\n## Remaining work tracked\n${tracked.map((t) => `- ${t}`).join("\n")}` : "";
-  return `## Root cause\n${root}\n\n## Deliverables\n${deliver}\n\n## Verification\n${verify}${remaining}\n\nCloses #${issue}`;
+  // #4404: requirements measured outside the lane; the change delivers their instrumentation, the named job the result
+  const oob = (contract?.requirements ?? []).filter((r) => r?.verify === "out_of_band");
+  const outOfBand = oob.length ? `\n\n## Verified out of band\n${oob.map((r) => `- ${escl(r.id)}: ${escl(r.quote)} (job ${r.evidence ? `\`${escl(r.evidence).replace(/`/g, "'")}\`` : "not named"})`).join("\n")}` : "";
+  return `## Root cause\n${root}\n\n## Deliverables\n${deliver}\n\n## Verification\n${verify}${remaining}${outOfBand}\n\nCloses #${issue}`;
 }
 
 // ---- trajectory ----

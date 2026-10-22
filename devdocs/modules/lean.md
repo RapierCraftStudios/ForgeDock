@@ -254,6 +254,24 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    The hash and the posted contract cover the dropped contract; a contract
    frozen before the change and recovered on a rerun is not rewritten, so the
    `superseded` path stays for it.
+   Verified out of band (#4404): a deliver requirement may carry
+   `verify: "in_lane"|"out_of_band"` (`VERIFY_MODES`); out_of_band needs
+   `evidence` = the job or workflow that measures it (`validateContract`). At
+   freeze, right after `dropScopeValidates`, `tagOutOfBand` tags every deliver
+   requirement without a `verify` whose quote names Lighthouse, web vitals,
+   field perf/profile, a throttled profile, a nightly or report-only suite, or
+   LCP/INP/TTI/FCP/TTFB (event `CONTRACT_OUT_OF_BAND_TAGGED`, decision line); an
+   explicit `verify` (in_lane opts out) is kept, and an `add-requirement`
+   amendment is tagged the same way. Such a requirement is judged by its
+   instrumentation (budget test or bench committed, job configured), not its
+   measured result: the skeleton row carries `verify`, `job` and
+   `instrumented: null`; completeness needs a boolean `instrumented` (true needs
+   path:line evidence); `decide` passes it on `instrumented: true` whatever the
+   status and fails `conformance.unimplemented` otherwise; `precheck` accepts
+   the builder's `instrumented: true` or `implemented`. `computeTrigger` adds a
+   `gate.ambiguous` reason so the reviewer always runs, and `renderPrBody` lists
+   them under "Verified out of band" with the job name. Not a disposition: no
+   follow-up issue is filed.
    Hotspots (forge#4195): `io.hotspots` runs `scripts/hotspots.sh` once
    before the plan call on the issue's `namedPaths` (`hotspotPlanNote`: one
    line per file over `maintenance.hotspot.file_lines`, nothing when none;
