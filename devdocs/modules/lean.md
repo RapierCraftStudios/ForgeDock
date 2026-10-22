@@ -1081,8 +1081,9 @@ typecheck/test/build keep `...[base]`. `checks.mjs` `configuredLint` reads
 `verification.commands.typescript.lint` from the trusted forge.yaml
 (`lib.mjs` `trustedForgeYaml`, extracted from `plan.mjs` `loadConfig`, forge#4040)
 and prints it (`configured: true`) in place of the discovered JS lint; Python
-checks are never replaced. `HOST_RULES` forbids dependency-closure lints and
-leaves whole-repo checks to CI. Legacy `validate.md` runs `typescript.lint` like
+checks are never replaced. `HOST_RULES` forbids dependency-closure lints (the
+configured lint wins because the builder runs what `checks.mjs` prints; filler
+words were trimmed to keep the implement prompt within its 1500-token budget). Legacy `validate.md` runs `typescript.lint` like
 `typescript.typecheck`.
 
 ## Entry 2026-10-23 — Independent adversarial verifier (#4397)
