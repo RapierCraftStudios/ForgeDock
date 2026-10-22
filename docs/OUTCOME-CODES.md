@@ -65,6 +65,7 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `builder.block_untyped` | Core work-on: the builder stayed `blocked` without a valid typed reason (missing `block`, a non-human `why` such as prod data, or a dependency that is not open) after one corrective resume | lean | `result.json` status `blocked`, twice |
 | `builder.no_evidence` | Core work-on: the builder reported invalid/already-fixed without file:line evidence, so the issue was not closed | lean | `result.json` with empty `evidence` |
 | `builder.no_commit` | Core work-on: the builder made no commit for a fix | lean | No changed files after the builder session |
+| `budget.exceeded` | Core work-on (forge#4392): the implement turn budget for the lane's size (forge.yaml `engine.turn_budget_s|m|l`, defaults 25/60/100) was spent and the one bounded wrap-up session did not finish (it wrote `status: budget-exceeded` or overran its grant). Work is checkpointed on the lane branch; the detail carries the builder's digest (else the diff stat). Ends `needs-human`; recoverable once by `forgedock orchestrate` (the recovery lane continues from the checkpoint or ends with a typed split-required block) | lean | Stream turn count (`CLI_TURNS` from `runCliBackendAsync` `turnMax`), wrap-up result.json status |
 | `review.failed` | Core work-on: the fix/regression review failed twice (or could not resume the builder) | lean | Reviewer verdict FAIL |
 | `review.no_verdict` | Core work-on: the reviewer returned no parseable verdict twice | lean | Unparsable reviewer output |
 | `contract.invalid` | Core work-on: the builder's contract.json stayed invalid after one correction (missing requirement rows, a quote not verbatim from the issue, a defer without a why, no validate commands) | lean | `validateContract` problems after the correction resume |
@@ -95,7 +96,7 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 `forgedock orchestrate` recovers mechanical outcomes inside the batch:
 
 - **recoverable**:
-  - needs-human with `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing` or `env.repro_unrunnable`;
+  - needs-human with `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable` or `budget.exceeded`;
   - `contract.invalid` when the issue was edited mid-run (`issueEdited`);
   - `ci-pending` on a conflicting PR, recovered as `base.conflict`.
 
