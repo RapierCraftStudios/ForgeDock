@@ -38,7 +38,7 @@ import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VER
 import { e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
-import { writeHeavyShims, sumWaits } from "./heavy.mjs";
+import { writeHeavyShims, sumWaits, isHeavyProcess } from "./heavy.mjs";
 import { priorityFromLabels } from "./sched.mjs";
 import { parseContextPackConfig, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp } from "./context.mjs";
 
@@ -177,7 +177,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const vcfg = { ...parseVerify({}), ...(o.verify ?? {}) };
   const learnedCommands = (Array.isArray(o.precheck?.commands) ? o.precheck.commands : []).map((c) => String(c ?? "").trim()).filter(Boolean);
@@ -605,7 +605,8 @@ export async function runCore(o) {
         if (!(e?.code === "CLI_IDLE" || e?.code === "CLI_TIMEOUT")) throw e;
         const idle = e.code === "CLI_IDLE";
         const reason = idle ? "idle timeout" : "timeout";
-        ev({ event: idle ? "CLI_IDLE_KILL" : "CLI_TIMEOUT_KILL", reason, lastTool: e.lastTool ?? null, children: e.children ?? [] });
+        ev({ event: idle ? "CLI_IDLE_KILL" : "CLI_TIMEOUT_KILL", reason, lastTool: e.lastTool ?? null, children: e.children ?? [],
+          ...(idle ? { heavyQueue: e.heavyQueue ?? null, extended: e.extended === true } : {}) });
         await checkpoint(reason);
         if (timeoutRetries++ >= 1) { e.deferCode = idle ? OUTCOME_CODES.CLI_IDLE : OUTCOME_CODES.CLI_TIMEOUT; e.deferDetail = `builder ${reason}; work checkpointed to ${branch}; rerun resumes from it. ${String(e.message).slice(0, 300)}`; throw e; }
         T.anomalies.push(`builder ${reason}: checkpointed, retried once`);
@@ -613,6 +614,14 @@ export async function runCore(o) {
         p = restart(); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "timeout_restart";
       }
     }
+  }
+
+  /** #4405: a silent builder is busy (idle window extended) while a child is a heavy step or its heavy-queue entry is queued/running. */
+  function sessionBusy(children) {
+    const work = children.filter((c) => isHeavyProcess(c.cmd));
+    let heavyQueue = null;
+    try { heavyQueue = io.heavy?.lane?.(children.map((c) => c.pid)) ?? null; } catch { heavyQueue = null; }
+    return work.length || heavyQueue?.queued > 0 || heavyQueue?.running > 0 ? { children: work, heavyQueue } : null;
   }
 
   /** opts (#4363): {model, mode, keepSession, trigger and restartOf (#4362)}; a fresh fix session keeps the build session id for a fallback resume. */
@@ -624,7 +633,9 @@ export async function runCore(o) {
     let spawned = null;
     const onSpawn = (child) => { if (Number.isSafeInteger(child?.pid) && !finishing) { spawned = child.pid; ledgerDo((l) => l.register("pid", child.pid, { marker: basename(String(child.spawnfile ?? "")) || null })); } };
     const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: model ?? builderModel, resume, system: "", prompt, control, onSpawn,
-      idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}) }));
+      idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}),
+      busy: sessionBusy, busyMs: Math.round(cliBusyMinutes * 60000),
+      onIdleExtend: (info) => ev({ event: "CLI_IDLE_EXTENDED", children: info.children, heavyQueue: info.heavyQueue }) }));
     call.then(() => {}, () => {}).finally(() => { if (spawned) ledgerDo((l) => l.release("pid", spawned)); });
     let r;
     call.catch(() => governor.stop());

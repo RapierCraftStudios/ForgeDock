@@ -3338,6 +3338,84 @@ describe("batch robustness (#4112-#4115)", () => {
     }
   });
 
+  // ---- #4405 ----
+  const HEAVY_CHILD = (d) => `printf '#!/bin/sh\\nsleep 1.5\\n' > ${d}/vitest; chmod +x ${d}/vitest`;
+  it("#4405 a silent session with a running heavy-step child is not idle-killed within the extended window", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { isHeavyProcess } = await import("./heavy.mjs");
+    const d0 = tmpDir("core-cli-");
+    const { d, bin } = await fakeCli("waits", `${TOOL}\n${HEAVY_CHILD(d0)}\n${d0}/vitest run\n${RESULT}`);
+    const extended = [];
+    const busy = (children) => { const work = children.filter((c) => isHeavyProcess(c.cmd)); return work.length ? { children: work, heavyQueue: { queued: 0, running: 1 } } : null; };
+    const r = await runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 300, maxMs: 20000,
+      busy, busyMs: 10000, onIdleExtend: (i) => extended.push(i) });
+    assert.equal(r.text, "all done");
+    assert.equal(extended.length, 1, "the extension is reported once per silent stretch");
+    assert.ok(extended[0].children.some((c) => /vitest run/.test(c.cmd)), JSON.stringify(extended[0]));
+  });
+
+  it("#4405 a busy session past idle + busy window is killed as CLI_IDLE with extended and heavyQueue", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { d, bin } = await fakeCli("stuck", `${TOOL}\nsleep 30 &\nwait`);
+    const t0 = Date.now();
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 300, maxMs: 20000,
+      busy: () => ({ children: [], heavyQueue: { queued: 1, running: 0 } }), busyMs: 600 }), (e) => {
+      assert.equal(e.code, "CLI_IDLE"); assert.equal(e.extended, true); assert.deepEqual(e.heavyQueue, { queued: 1, running: 0 });
+      return true;
+    });
+    const took = Date.now() - t0;
+    assert.ok(took >= 850 && took < 8000, `killed after idle + busy window, not before (${took} ms)`);
+  });
+
+  it("#4405 the CLI_TIMEOUT ceiling still applies during an idle extension", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { d, bin } = await fakeCli("busyceil", `${TOOL}\nsleep 30 &\nwait`);
+    const t0 = Date.now();
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 300, maxMs: 1200,
+      busy: () => ({ children: [], heavyQueue: { queued: 0, running: 1 } }), busyMs: 60000 }), (e) => { assert.equal(e.code, "CLI_TIMEOUT", e.message); return true; });
+    assert.ok(Date.now() - t0 < 6000, "killed at maxMs, not after idle + busy window");
+  });
+
+  it("#4405 a silent session with no work children is still killed at the idle timeout when busy is wired", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { isHeavyProcess } = await import("./heavy.mjs");
+    const { d, bin } = await fakeCli("idle2", `${TOOL}\nsleep 30 &\nwait`);
+    const t0 = Date.now(); let asked = 0;
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 400, maxMs: 20000,
+      busy: (ch) => { asked++; return ch.some((c) => isHeavyProcess(c.cmd)) ? { children: ch } : null; }, busyMs: 60000 }), (e) => {
+      assert.equal(e.code, "CLI_IDLE"); assert.equal(e.extended, false); assert.equal(e.heavyQueue, null);
+      assert.ok(e.children.some((c) => /sleep 30/.test(c.cmd)));
+      return true;
+    });
+    assert.ok(asked >= 1); assert.ok(Date.now() - t0 < 3000, "killed at the idle timeout, not the busy window");
+  });
+
+  it("#4405 the builder call wires busy (heavy children or this session's heavy-queue entries) and the kill event carries heavyQueue", async () => {
+    const w = world({ dirty: true }); const dir = tmpDir("core-busy-");
+    const lanes = [];
+    w.io.heavy = { acquire: async () => ({ waitMs: 0, queued: 0, release() {} }), lane: (pids) => { lanes.push(pids); return pids.includes(42) ? { queued: 1, running: 0 } : { queued: 0, running: 0 }; } };
+    const orig = w.io.runner; let n = 0, seen = null;
+    w.io.runner = async (c) => {
+      if (c.role === "builder" && n++ === 1) {
+        seen = c;
+        c.onIdleExtend(c.busy([{ pid: 42, cmd: "node heavy.mjs run --name npm -- npm test" }]));
+        throw Object.assign(new Error("idle"), { code: "CLI_IDLE", lastTool: null, children: [], extended: true, heavyQueue: { queued: 1, running: 0 } });
+      }
+      return orig(c);
+    };
+    const r = await run(w, { dir, cliBusyMinutes: 30 });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(seen.busyMs, 30 * 60000);
+    assert.equal(seen.busy([{ pid: 5, cmd: "sleep 10" }]), null, "a poller alone is not activity");
+    assert.deepEqual(seen.busy([{ pid: 42, cmd: "sleep 10" }]), { children: [], heavyQueue: { queued: 1, running: 0 } }, "this session's queued heavy entry is activity");
+    assert.equal(seen.busy([{ pid: 6, cmd: "/bin/sh /x/vitest run" }]).children.length, 1, "a test runner child is activity");
+    assert.deepEqual(lanes.at(-1), [6]);
+    const log = readLog(dir, 7);
+    assert.deepEqual(log.find((e) => e.event === "CLI_IDLE_EXTENDED").heavyQueue, { queued: 1, running: 0 });
+    const kill = log.find((e) => e.event === "CLI_IDLE_KILL");
+    assert.deepEqual(kill.heavyQueue, { queued: 1, running: 0 }); assert.equal(kill.extended, true);
+  });
+
   it("#4112 a rerun resumes from the checkpoint branch and tells the builder to continue", async () => {
     const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", lastSubject: "wip(forge): checkpoint after idle timeout" });
     const r = await run(w);
