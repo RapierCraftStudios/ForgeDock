@@ -192,6 +192,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    precheck `validate_failed` or `requirement_unimplemented`, before any
    reviewer run) or `enforce`. Defer/post-deploy requirements become tracked
    follow-ups (`followupItems`, `pendingTracking`).
+   Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
+   the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
+   (#4388: a key ending on a space looped on `followup.unavailable`).
    Independent verifier (#4397, `verifier.mjs`, forge.yaml `review.verifier`,
    default `off`): after a conforming review, one fresh read-only call on a
    model other than the builder's tries to break the change; enforce turns its
@@ -347,7 +350,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
-`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305),
+`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
@@ -1010,6 +1013,7 @@ for enforce: a seeded-defect replay in shadow where it catches what the reviewer
 0.10. Cost: 0 LLM calls when off (default); one read-only call per reviewed head when on. ADR
 `decisions/4397-independent-verifier.md`.
 
+<<<<<<< HEAD
 ## Entry 2026-10-23 — Structured FORGE:FACTS for later lanes on the same files (#4401)
 
 `facts.mjs` (pure) defines the record. The implement prompt asks the builder for an optional result.json `facts` key:
@@ -1030,3 +1034,22 @@ their linked issues whose `files` overlap the issue's named paths. The pack list
 hot spots, decisions, conventions, baselines. Each line carries its provenance (`#33, PR #101`). The repo-fact pointers
 follow, all under `facts` (section "Facts from earlier lanes and repo facts"). Cost: 0 LLM calls, about 60 prompt
 tokens, one comment per lane, and no extra GitHub read per PR.
+=======
+## Entry 2026-10-23 — Post-deploy precondition gate in the pre-filter (#4389)
+
+`prefilter.mjs` `postDeployGate`: an open issue whose body carries `<!-- FORGE:DEFERRED_FROM: #P -->` and whose checklist
+items are all `` `R#: …` — post-deploy: `` lines (`postDeployOnly`; the format of `file-deferred-followups.sh` /
+`followupItems`) is checked before any lane. The parent's merge SHAs come from `gh pr list --state merged --search "#P"`
+(`mergeCommit`, PRs that `claimsFix` #P), else the `merged at <sha>` of a trusted `FORGE:TRAJECTORY` on #P. Each is tested
+with `git merge-base --is-ancestor <sha> origin/<default>` (exit 1 = not there). Any SHA not on the default branch parks the
+issue: `{parked: true, kind: "awaiting-promotion"}`, label `awaiting-promotion` (created on demand), one
+`FORGE:PRECONDITION` comment when the label was new, no lane. With every SHA on default, forge.yaml
+`post_deploy.precondition_cmd` (`sh -c <cmd> precondition <issue>`, `FORGE_ISSUE`, 60 s) exit 1 parks
+`awaiting-precondition`. Everything unresolvable (no SHA, git exit ≠ 0/1, unknown default branch, hook exit ≠ 0/1)
+fails open to today's path. The gate runs before the `needs-human` early return, so escalated promotion follow-ups are
+parked too (the label stays). A `ready` issue loses `awaiting-promotion`. The default branch (`branches.default`, else
+GitHub's) is resolved and fetched once, lazily, by `lazyDefaultBranch` (orchestrate and triage). `orchestrate.mjs` settles
+a parked result as outcome `awaiting-promotion|awaiting-precondition` with $0 and no `runOne` (not SATISFIED: dependents
+skip). `formatOutcomeLists` prints one `awaiting promotion: #A #B (fixes on <lane>, not on <default>)` line instead of
+escalations. Re-evaluation is the next batch or triage run. Cost: 0 LLM calls; per gated issue 1-2 gh reads and one git call.
+>>>>>>> origin/staging
