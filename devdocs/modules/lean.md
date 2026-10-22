@@ -81,11 +81,18 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    quote of the requirement a failure names (`explainFailures`), and a failed
    validate names its command. Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
+   A `split` is admitted only by `decompose.mjs` `splitGate` (#4396): every
+   sub-issue's `paths`/`files` disjoint from the others', or the block's `size` over
+   `SPLIT_MIN_FILES` (25) / `SPLIT_MIN_LINES` (1500); otherwise it is `untyped`
+   and the one corrective resume asks for one lane with an ordered checklist.
+   The rationale goes on `FORGE:DECOMPOSED`, the decision line and the result's
+   `decomposition`.
    A split sub-issue may declare `files` (the paths it will edit); `serializeShared`
    adds a `Depends on` edge from each later sub-issue to the nearest earlier one it
    shares a file with and does not already reach, so siblings editing the same hub
    (barrel, union type, shared fixture, index doc) merge one after another instead
    of conflicting; each added edge is a decision. No `files`: unchanged (#4385).
+   The gate runs first; `serializeShared` orders only an admitted split.
    A `split` closes the parent `not planned` once its `FORGE:DECOMPOSED` trail
    and `workflow:decomposed` label are written (label kept; the closing comment
    lists the sub-issues; either write failing leaves it open) (#4337). A
@@ -164,6 +171,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    result carries `firstPass` (`firstPassOf`: no `REWORK_TRIGGERS` attempt after the build; omitted when the lane never
    reached it) → orchestrate row `first_pass` → batch-report line `first-pass: P% (k/n lanes that reached the build)`
    (`formatFirstPassSummary`, after the precheck line). `forgedock stats` reads the same fields (`docs/STATS.md`).
+   #4407: the CLI's `total_cost_usd` is a running total over a resumed session, so `PHASE_ATTEMPT_USAGE` also carries
+   `cost_usd_delta` (this attempt) and `cost_usd_session` (the session total; `cost_usd` stays the raw value), from
+   `fixround.mjs` `sessionCostDelta` keyed on the call's `resume` id. The lane `cost_usd` (orchestrate rows, batch
+   summary, trajectory `cost $`) and `forgedock stats` sum the deltas; old logs fall back to `cost_usd`.
    An optional `.forge/test-map.json` (#4272, `scripts/test-map.sh`; base ref via
    `testmap.mjs` `readTestMapAtRef`, then main checkout, never the lane worktree, #4297) adds the map entries whose
    globs match the changed files to that list (`selectCommands` + `mergeChecks`, #4315: learned first, deduped, so the
@@ -1057,6 +1068,23 @@ docs, enumerating, sequence, CI pass or a merge for `ci_red`/`merge_ci`, conform
 pitfall text is posted. `forgedock stats` (local logs) prints the first-pass rate with and without matching pitfalls.
 Cost: 0 LLM calls; one local read and up to a few appends per lane; ≤ ~1 KB of pack bytes when mode is `on`.
 
+## Entry 2026-10-23 — Idle watchdog counts heavy steps and heavy-queue waits as activity (#4405)
+
+A builder waiting silently on a queued or running heavy step (lint, test, type check) was idle-killed at
+`cli_idle_minutes`. `runCliBackendAsync` (`bin/runner.mjs`) now takes an injected `busy(children)`, `busyMs` and
+`onIdleExtend`. Once the idle threshold is reached it asks `busy` (at most every min(5 s, idleMs)). While the answer is
+busy, the kill waits until idleMs + busyMs of silence. `lean.mjs` `sessionBusy` answers busy when a descendant is a
+heavy step (`heavy.mjs` `isHeavyProcess`: the shim marker `heavy.mjs run`, `classifyStep` on argv0 or on the script
+after an interpreter, `node --test`, `python -m pytest|mypy|tox|unittest`), or when `io.heavy.lane(pids)` finds a queued
+or running heavy entry whose pid is one of the session's descendants. It matches by pid, not issue, because the registry
+is host-wide and shared across repos. `lane()` is read-only and lock-free. Pollers (`sleep`, `until grep`) and MCP
+servers do not count, so a silent session with no work child is still killed at idleMs. The window is
+`engine.cli_busy_minutes` (default 45 = heavy `max_wait_s` plus the idle default), so a stuck child is still killed. Run
+log: `CLI_IDLE_EXTENDED` {children, heavyQueue} once per silent stretch; `CLI_IDLE_KILL` adds `heavyQueue` and `extended`.
+The busy check gets whole command lines (`listDescendants` `maxCmd`; the kill record keeps 200 chars), and because `ps` is
+synchronous, a first "not busy" answer kills only on the next tick, after output written meanwhile has been read.
+Cost: 0 LLM calls; one `ps` and one registry read per check, only while idle.
+
 ## Entry 2026-10-23 — Risk-path enforce, partial investigation close, per-batch shadow line (#4398)
 
 `gate()` (`lean.mjs`) checks the changed files against forge.yaml `review.risk_paths` globs (`review-trigger.mjs` `riskPathHits`;
@@ -1168,3 +1196,16 @@ same issue log). `forgedock stats --tiers` (`builderTierReport` / `renderTiers`)
 would-block), post-merge-rework rate (a later run of a merged issue, or remediated), first-pass yield and mean cost. The
 2-week no-regression check is a post-deploy gate on the default. Cost: 0 LLM calls; mid-tier implement on routed lanes.
 ADR `decisions/4394-builder-model-routing.md`.
+
+## Entry 2026-10-23 — Decomposition gate and $/parent report line (#4396)
+
+`classifyBlock` (`lean.mjs`) passes a `split-required` block through `decompose.mjs` `splitGate`. The split is admitted
+when every sub-issue declares `paths` (or the #4385 `files`) and no path of one equals or sits under another's (independent), or when the
+block's `size` estimate exceeds 25 files or 1500 lines (oversize). Otherwise it is an `untyped` block: the existing
+single corrective resume tells the builder to keep one lane, an ordered checklist with a validate per item, and a
+second unjustified split ends `builder.block_untyped`. An admitted split writes `rationaleLine` into `FORGE:DECOMPOSED`
+and its decision line, and the lane result carries `decomposition {independent, oversize, overlaps, missing, size}`.
+Orchestrate's row keeps `subissues` and `decomposition`. The batch report prints `formatDecompositionSummary`: $/parent
+for decomposed parents (their row plus their sub-lanes, recursively; sub-issues not in the batch are counted as
+outside) against merged single-lane parents. Rationale: `devdocs/decisions/4396-decomposition-gate.md`. Cost: 0 LLM
+calls; an unjustified split spends the one block-correction resume instead of N sub-lanes.
