@@ -10,7 +10,7 @@
 export const SPLIT_MIN_FILES = 25;
 export const SPLIT_MIN_LINES = 1500;
 
-const norm = (p) => String(p).trim().replace(/^(\.\/)+/, "").replace(/\/+$/, "");
+const norm = (p) => String(p).trim().replace(/^(\.?\/+)+/, "").replace(/\/+$/, "");
 const overlaps = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 const count = (v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
 
@@ -28,7 +28,9 @@ function sizeOf(block) {
  */
 export function splitGate(block) {
   const subs = Array.isArray(block?.subissues) ? block.subissues : [];
-  const paths = subs.map((s) => (Array.isArray(s?.paths) ? s.paths.filter((p) => typeof p === "string" && norm(p)).map(norm) : []));
+  // `paths` or the #4385 `files` (the files each sub-issue edits): either declares the area a part touches.
+  const declared = (s) => [...(Array.isArray(s?.paths) ? s.paths : []), ...(Array.isArray(s?.files) ? s.files : [])];
+  const paths = subs.map((s) => [...new Set(declared(s).filter((p) => typeof p === "string" && norm(p)).map(norm))]);
   const missing = paths.flatMap((p, i) => (p.length ? [] : [i]));
   const found = [];
   for (let i = 0; i < paths.length; i++) {
@@ -41,10 +43,10 @@ export function splitGate(block) {
   const oversize = !!size && ((size.files ?? 0) > SPLIT_MIN_FILES || (size.lines ?? 0) > SPLIT_MIN_LINES);
   if (independent || oversize) return { ok: true, rationale: { independent, oversize, overlaps: found, missing, size } };
   const why = [];
-  if (missing.length) why.push(`sub-issue(s) ${missing.join(", ")} declare no "paths"`);
+  if (missing.length) why.push(`sub-issue(s) ${missing.join(", ")} declare no "paths" or "files"`);
   if (found.length) why.push(`the parts overlap (${found.slice(0, 5).map(([i, j, a, b]) => `${i}:${a} ~ ${j}:${b}`).join("; ")})`);
   why.push(size ? `the size estimate (${size.files ?? "?"} files, ${size.lines ?? "?"} lines) is within the ${SPLIT_MIN_FILES}-file / ${SPLIT_MIN_LINES}-line budget` : "the block has no \"size\" estimate");
-  return { ok: false, problem: `the split is not justified: ${why.join("; ")}. Split only when every sub-issue lists "paths" disjoint from the others, or when "size" exceeds ${SPLIT_MIN_FILES} files or ${SPLIT_MIN_LINES} lines. Otherwise keep one lane: write the contract as an ordered checklist, one requirement or deliverable per item, each with its own validate command` };
+  return { ok: false, problem: `the split is not justified: ${why.join("; ")}. Split only when every sub-issue lists "paths" (or "files") disjoint from the others, or when "size" exceeds ${SPLIT_MIN_FILES} files or ${SPLIT_MIN_LINES} lines. Otherwise keep one lane: write the contract as an ordered checklist, one requirement or deliverable per item, each with its own validate command` };
 }
 
 /** One line for the FORGE:DECOMPOSED comment and the decision log. */

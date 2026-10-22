@@ -151,6 +151,37 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { h.cleanup(); }
   });
 
+  it("#4408: --add and --resume <id> N add issues to the live batch (no second batch); an unhosted finished batch runs its adds on --resume", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      const client = { ...h.client, io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ state: a[2] === "9" ? "CLOSED" : "OPEN" }) : "o/r\n") } };
+      const { res } = await withRoot(h, () => capture(async () => {
+        const first = orchestrateFromCli(["1", "--parallel", "3", "--repo", "o/r", "--no-prefilter"], h.client);
+        await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+        const [id] = listBatches(h.root);
+        const add = await orchestrateFromCli(["--add", id, "2", "1", "x", "9"], client);
+        assert.deepEqual(add.added, [2]);
+        assert.deepEqual(add.skipped.map((x) => [x.issue, x.reason]).sort(), [[1, "already in batch"], [9, "closed"], ["x", "not an integer"]]);
+        await until(() => h.launched().includes(2));
+        const resumed = orchestrateFromCli(["--resume", id, "4"], client);
+        await until(() => h.launched().includes(4));
+        assert.deepEqual(listBatches(h.root), [id], "no second batch");
+        writeFileSync(h.release, "");
+        const [done] = await Promise.all([first, resumed]);
+        assert.deepEqual(done.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [4, "merged"]]);
+        // Finished and no longer hosted: the add is persisted and the next --resume runs it instead of replaying the report.
+        const later = await orchestrateFromCli(["--add", id, "6"], client);
+        assert.deepEqual(later.added, [6]);
+        const again = await orchestrateFromCli(["--resume", id], client);
+        assert.deepEqual(again.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [4, "merged"], [6, "merged"]]);
+        return done;
+      }));
+      assert.equal(res.rows.length, 3);
+      assert.deepEqual(h.launched(), [1, 2, 4, 6], "each issue launched once");
+    } finally { h.cleanup(); }
+  });
+
   it("single instance: a live daemon keeps its lock; a dead owner's lock and socket are taken over", async () => {
     const h = host();
     try {

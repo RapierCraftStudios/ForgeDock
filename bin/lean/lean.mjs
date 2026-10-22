@@ -23,16 +23,18 @@ import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { repoKey } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { readTestMap, readTestMapAtRef, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
-import { runChecks, planPrecheck, worktreeFingerprint, selfCheckState, CHECK_PLAN_FILE, SELF_CHECK_FILE } from "./precheck.mjs";
+import { runChecks, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
+import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt } from "./prompts.mjs";
 import { freshFix, issueSummary, firstPassOf } from "./fixround.mjs";
 import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog } from "./pitfalls.mjs";
 import { unjustified } from "./enumerating.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport } from "./verify.mjs";
+import { e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
 import { writeHeavyShims, sumWaits } from "./heavy.mjs";
@@ -81,6 +83,24 @@ export const CI_NOT_STARTED_GRACE_MS = 10 * 60 * 1000;
 export const contractHash = (text) => createHash("sha256").update(String(text)).digest("hex").slice(0, 12);
 
 /**
+ * #4385: siblings that declare a shared file (a barrel, union type, shared fixture, index doc) would conflict after the
+ * first merges; each later sub-issue gets an edge to every earlier one it shares a file with and does not already reach
+ * through its dependsOn. Mutates dependsOn; returns the added edges [{from, to, files}]. No `files`: no edge.
+ */
+export function serializeShared(subs) {
+  const added = [], reach = [];
+  subs.forEach((s, j) => {
+    for (let i = j - 1; i >= 0; i--) { // nearest first: a chain, not a fan-in
+      const shared = (s.files ?? []).filter((f) => (subs[i].files ?? []).includes(f));
+      const r = new Set(s.dependsOn.flatMap((k) => [k, ...reach[k]]));
+      if (shared.length && !r.has(i)) { s.dependsOn.push(i); added.push({ from: j, to: i, files: shared }); }
+    }
+    reach[j] = [...new Set(s.dependsOn.flatMap((k) => [k, ...reach[k]]))];
+  });
+  return added;
+}
+
+/**
  * Typed builder block (#4124), from result.json `block`. Returns {kind:"dependency", issues} | {kind:"split", subissues}
  * | {kind:"human", why} | {kind:"untyped", problem}. Only `human` with an allowed reason may end as needs-human.
  */
@@ -97,8 +117,10 @@ export function classifyBlock(result, issue) {
     if (subs.length > MAX_SUBISSUES) return { kind: "untyped", problem: `the split-required block lists ${subs.length} sub-issues (at most ${MAX_SUBISSUES})` };
     const gate = splitGate({ ...b, subissues: subs }); // #4396: disjoint parts or over the size budget; else one lane
     if (!gate.ok) return { kind: "untyped", problem: gate.problem };
-    return { kind: "split", rationale: gate.rationale, subissues: subs.map((x, i) => ({ title: x.title.trim(), body: x.body,
-      dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))] })) };
+    const subissues = subs.map((x, i) => ({ title: x.title.trim(), body: x.body,
+      dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))],
+      ...(Array.isArray(x.files) ? { files: [...new Set(x.files.filter((f) => typeof f === "string").map((f) => f.trim().replace(/^\.?\/+/, "")).filter(Boolean))] } : {}) }));
+    return { kind: "split", rationale: gate.rationale, subissues, serialized: serializeShared(subissues) };
   }
   if (b.kind === "human") {
     return HUMAN_BLOCK_REASONS.includes(b.why) ? { kind: "human", why: b.why }
@@ -133,6 +155,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {"shadow"|"enforce"} [o.conformance] conformance gate mode (default shadow)
  * @param {"needs-human"|"degraded"} [o.reviewIncomplete] shadow only: what an incomplete review after the re-ask does (default needs-human)
  * @param {object} [o.reviewTrigger] forge.yaml review.trigger/risk_paths (#4273): {mode: shadow (default)|enforce|off, riskPaths: globs}
+ * @param {object} [o.verifier]      forge.yaml review.verifier/verifier_model (#4397): {mode: off (default)|shadow|enforce, model}
  * @param {object} [o.verify]        forge.yaml verify (verify.mjs parseVerify): mode local (default) | ci | hybrid (#4167)
  * @param {object} [o.precheck]      {commands, maxMinutes}: forge.yaml learned.test_commands, run in the worktree before the PR (#4240);
  *                                   maxMinutes: lean.precheck.max_minutes, the round budget (#4331, else verify.precheck_total_seconds)
@@ -151,7 +174,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, contextCeilingTokens = 120000, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const vcfg = { ...parseVerify({}), ...(o.verify ?? {}) };
   const learnedCommands = (Array.isArray(o.precheck?.commands) ? o.precheck.commands : []).map((c) => String(c ?? "").trim()).filter(Boolean);
@@ -159,6 +182,7 @@ export async function runCore(o) {
   const remoteVerify = vcfg.mode !== "local";
   const triggerMode = TRIGGER_MODES.includes(o.reviewTrigger?.mode) ? o.reviewTrigger.mode : "shadow";
   const riskPaths = Array.isArray(o.reviewTrigger?.riskPaths) ? o.reviewTrigger.riskPaths : [];
+  const verifierCfg = parseVerifierConfig(o.verifier ?? {});
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
   // #4267: a batch recovery lane for a mechanical needs-human ({code, attempt, final}); #4302: only a final attempt relabels.
@@ -178,11 +202,12 @@ export async function runCore(o) {
   const git = (args) => io.git(args, { cwd: wt });
 
   const builderTriggers = []; // #4362: implement-attempt triggers in order, for the lane's first-pass flag
+  const impl = { cost: 0, models: new Set() }; // #4397: implement spend and reported models, for the verifier
   /** `trigger` (#4362): why the attempt ran, one of fixround.mjs TRIGGERS. */
   async function attempt(phase, n, r, mode = null, trigger = null, restartOf = null) {
     const rec = { event: "PHASE_ATTEMPT_USAGE", phase, attempt: n, trigger, ...(restartOf ? { restart_of: restartOf } : {}), usage: r?.usage ?? null, duration_ms: num(r?.durationMs) ?? 0,
       cost_usd: num(r?.costUsd), model: r?.model ?? null, turns: num(r?.turns), ...(mode ? { mode } : {}) };
-    if (phase === "implement") builderTriggers.push({ trigger, restart_of: restartOf });
+    if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += num(r?.costUsd) ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); }
     ev(rec); await emit(rec);
     const u = r?.usage ?? {};
     usage.cost_usd += r?.costUsd ?? 0;
@@ -541,11 +566,25 @@ export async function runCore(o) {
   let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
   let enumList = []; // #4322: tests enumerating the members of the paths the issue names, read once before the plan call
   const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + CONTINUE_NOTE.replace("BASE", lane);
+  /** #4390: builder calls stopped at the context ceiling restart fresh; planning (and its corrections) run uncapped. */
+  const UNCEILED = ["plan", "contract_correction", "block_correction"], CONTEXT_RESTARTS_MAX = 3;
   async function builder(n, prompt, resume, live = false, restart = implementRestart, opts = {}) {
-    let timeoutRetries = 0, p = prompt;
+    let timeoutRetries = 0, contextRestarts = 0, p = prompt;
     opts = { ...opts };
+    const ceiled = contextCeilingTokens > 0 && !UNCEILED.includes(opts.trigger);
     for (;;) {
+      // after CONTEXT_RESTARTS_MAX restarts the call runs uncapped: a loop guard, never a refusal of work
+      opts.contextMax = ceiled && contextRestarts < CONTEXT_RESTARTS_MAX ? contextCeilingTokens : 0;
       try { return await builderOnce(n, p, resume, live, opts); } catch (e) {
+        if (e?.code === "CLI_CONTEXT") {
+          contextRestarts++;
+          ev({ event: "CONTEXT_CEILING", context_tokens: e.context ?? null, ceiling: contextCeilingTokens, turns: e.turns ?? null, trigger: opts.trigger ?? null, restart: contextRestarts });
+          await attempt("implement", n, { usage: e.usage ?? null, turns: e.turns ?? null, costUsd: null, model: opts.model ?? builderModel ?? null }, opts.mode, opts.trigger, opts.restartOf);
+          await checkpoint("context ceiling");
+          T.decisions.push(`Builder session reached ${e.context ?? "?"} context tokens (ceiling ${contextCeilingTokens}): checkpointed, restarted fresh from the contract, diff and last validate result`);
+          p = restart() + await contextRestartNote(); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "context_restart";
+          continue;
+        }
         if (!(e?.code === "CLI_IDLE" || e?.code === "CLI_TIMEOUT")) throw e;
         const idle = e.code === "CLI_IDLE";
         const reason = idle ? "idle timeout" : "timeout";
@@ -560,7 +599,7 @@ export async function runCore(o) {
   }
 
   /** opts (#4363): {model, mode, keepSession, trigger and restartOf (#4362)}; a fresh fix session keeps the build session id for a fallback resume. */
-  async function builderOnce(n, prompt, resume, live = false, { model = null, mode = null, keepSession = false, trigger = null, restartOf = null } = {}) {
+  async function builderOnce(n, prompt, resume, live = false, { model = null, mode = null, keepSession = false, trigger = null, restartOf = null, contextMax = 0 } = {}) {
     onProgress({ event: "phase_enter", phase: "build" });
     await renew();
     const control = {};
@@ -568,7 +607,7 @@ export async function runCore(o) {
     let spawned = null;
     const onSpawn = (child) => { if (Number.isSafeInteger(child?.pid) && !finishing) { spawned = child.pid; ledgerDo((l) => l.register("pid", child.pid, { marker: basename(String(child.spawnfile ?? "")) || null })); } };
     const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: model ?? builderModel, resume, system: "", prompt, control, onSpawn,
-      idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits }));
+      idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits, ...(contextMax > 0 ? { contextMax } : {}) }));
     call.then(() => {}, () => {}).finally(() => { if (spawned) ledgerDo((l) => l.release("pid", spawned)); });
     let r;
     call.catch(() => governor.stop());
@@ -591,6 +630,14 @@ export async function runCore(o) {
     await attempt("implement", n, r, mode, trigger, restartOf);
     onProgress({ event: "phase_exit", phase: "build", status: "committed" });
     return r;
+  }
+  /** #4390: the restart summary: `git diff --stat` and hunks against the lane base, and the last `forgedock check` record. */
+  async function contextRestartNote() {
+    const ex = [".", `:!${LEAN_DIR}`];
+    const stat = String(await git(["diff", "--stat", `${base}...HEAD`, "--", ...ex]).catch(() => "")), diff = String(await git(["diff", `${base}...HEAD`, "--", ...ex]).catch(() => ""));
+    let check = "";
+    try { check = String(await io.fs.read(`${wt}/${SELF_CHECK_FILE}`)); } catch { /* none recorded */ }
+    return contextRestartPrompt({ stat, diff, base, check, ceiling: contextCeilingTokens });
   }
   const readContract = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${CONTRACT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
   const readResult = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${RESULT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
@@ -668,6 +715,7 @@ export async function runCore(o) {
       } catch (e) { return await finish("engine-error", `filing sub-issues failed after ${refs(filed) || "none"}: ${e?.message ?? e}`, { subissues: filed }); }
       const why = rationaleLine(b.rationale);
       T.decisions.push(`Builder block: split into ${refs(filed)} (${why})`);
+      for (const e of b.serialized ?? []) T.decisions.push(`Serialised sub-issue #${filed[e.from]} behind #${filed[e.to]}: both edit ${e.files.slice(0, 5).join(", ")} (#4385)`);
       let marked = false;
       try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\nRationale: ${why}\n\n${s}`); marked = true; } catch { /* best effort */ }
       // #4337: with decomposition.close_parent, the tracker closes only once its trail and label exist: dependents then wait on the sub-issues, not on it.
@@ -1323,7 +1371,14 @@ export async function runCore(o) {
         T.decisions.push(`Declared check command(s) failed: ${names}; builder resumed (round ${round + 1}/${vcfg.maxRounds})`);
         const before = String(await git(["rev-parse", "HEAD"])).trim();
         const capped = capLogs(failed.map((f) => ({ ...f, log: f.output }))).map((f) => ({ command: f.command, rc: f.rc, output: f.log }));
-        await fixRound("precheck", precheckFailurePrompt(capped, vcfg.mode), [], "precheck", capped.map((f) => `${f.command}\n${f.output ?? ""}`).join("\n"));
+        // #4390: the builder sees each failure quiet (tail, failing ids, full-log path); the pitfall text stays the capped tail
+        const quiet = await Promise.all(failed.map(async (f, i) => {
+          const rel = `${CHECK_LOG_DIR}/precheck-${round + 1}-${i + 1}.log`;
+          let logPath = null;
+          if (io.fs.write) { try { await io.fs.write(`${wt}/${rel}`, String(f.output ?? "")); logPath = rel; } catch { /* tail only */ } }
+          return { command: f.command, rc: f.rc, output: quietFailure(f.output, { maxChars: capped[i].output.length || 500, logPath }) };
+        }));
+        await fixRound("precheck", precheckFailurePrompt(quiet, vcfg.mode), [], "precheck", capped.map((f) => `${f.command}\n${f.output ?? ""}`).join("\n"));
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
         if (String(await git(["rev-parse", "HEAD"])).trim() === before) { T.anomalies.push(`Declared check command(s) failing and the builder made no new commit for them: ${names}`); break; }
@@ -1529,6 +1584,48 @@ export async function runCore(o) {
       }
       return d;
     }
+    /**
+     * #4397: one independent adversarial verifier call per head: fresh context, read-only, never the builder's model, result
+     * or notes. Returns the failures to enforce ([] in shadow, on an empty diff or on a verifier error, which is an anomaly).
+     */
+    const verifiedHeads = new Map();
+    let verifierRun = null, verifyN = 0;
+    async function runVerifier() {
+      const head = String(await git(["rev-parse", "HEAD"])).trim();
+      if (verifiedHeads.has(head)) return verifiedHeads.get(head);
+      const diff = String(await git(["diff", `${base}...HEAD`]));
+      const run = { mode: verifierCfg.mode, head, findings: [], model: null, swapped: false, cost_usd: 0 };
+      if (!diff.trim()) run.skipped = "empty_diff";
+      else {
+        const bytes = Buffer.byteLength(diff, "utf-8");
+        const stat = bytes > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
+        const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
+        const callers = await callersOf({ symbols: changedSymbols(diff), gitGrep: git, ignore: IGNORE });
+        Object.assign(run, pickVerifierModel({ configured: verifierCfg.model, builderModel, builderReported: [...impl.models] }));
+        const { maxMs, maxTurns } = verifierBudget(bytes);
+        try {
+          await renew();
+          const rr = await callRunner({ role: "verifier", issue, cwd: wt, model: run.model, resume: null, system: VERIFIER_SYSTEM, readOnly: true, maxMs, maxTurns,
+            prompt: verifierPrompt({ issue: iss, comments: trustedComments, contract: effective, diff, stat, base, files, callers }) });
+          await renew();
+          await attempt("verify", ++verifyN, rr, null, "verifier");
+          run.findings = parseVerifierFindings(rr?.text, { pathExists: (x) => listed.has(x) });
+          run.cost_usd = num(rr?.costUsd) ?? 0;
+        } catch (e) {
+          if (e?.deferUsageLimit) throw e;
+          run.error = String(e?.code || e?.message || e).split("\n")[0].slice(0, 200);
+          T.anomalies.push(`Independent verifier failed at ${head.slice(0, 12)}: ${run.error}`);
+        }
+      }
+      const failures = verifierCfg.mode === "enforce" ? findingsToFailures(run.findings) : [];
+      ev({ event: "VERIFIER", mode: run.mode, head, model: run.model, swapped: run.swapped, findings: run.findings.length, cost_usd: run.cost_usd, implement_cost_usd: impl.cost,
+        ratio: impl.cost > 0 ? Math.round((run.cost_usd / impl.cost) * 1000) / 1000 : null, ...(run.skipped ? { skipped: run.skipped } : {}), ...(run.error ? { error: run.error } : {}) });
+      if (run.findings.length) T.decisions.push(`Independent verifier (${run.mode}) found ${run.findings.length} defect(s): ${run.findings.slice(0, 3).map((f) => `${f.file}:${f.line}`).join(", ")}`);
+      verifiedHeads.set(head, failures);
+      verifierRun = run;
+      return failures;
+    }
+    const verifierSection = () => { const n = renderVerifierNote(verifierRun); return n ? `\n\n${n}` : ""; };
     /** #4323: rerun once each validate command the builder recorded as failed, with the lane env; {[id]: {rc, output}} or null. */
     async function rerunFailedValidates(contract) {
       if (!io.runCommand) return null;
@@ -1592,14 +1689,19 @@ export async function runCore(o) {
         }
         triggerSkipped = false;
       }
-      const d = await reviewOnce();
-      if (!shadow) return { ...d, by: "review" };
+      let d = await reviewOnce();
+      // #4397: the verifier runs only on a change every gate and the reviewer passed; in enforce its findings block
+      if (verifierCfg.mode !== "off" && d.state === "conforms" && !pre.length) {
+        const vf = await runVerifier();
+        if (vf.length) d = { state: "nonconforming", failures: vf, by: "verifier" };
+      }
+      if (!shadow) return { ...d, by: d.by ?? "review" };
       // shadow: record what enforce would have done; block only on what the previous reviewer blocked on
       const would = d.state === "conforms" && !pre.length ? "conforms" : d.state.startsWith("review.") ? d.state : "nonconforming";
       const wouldFail = [...pre, ...(d.state === "conforms" ? [] : d.failures)];
       if (d.state.startsWith("review.")) return { ...d, by: "review", would, wouldFail, reviewState: d.state };
       const blocking = d.state === "nonconforming" ? d.failures.filter((f) => SHADOW_BLOCKS.includes(f.code)) : [];
-      return { state: blocking.length ? "nonconforming" : "conforms", by: "review", failures: blocking, would, wouldFail, reviewState: d.state };
+      return { state: blocking.length ? "nonconforming" : "conforms", by: d.by ?? "review", failures: blocking, would, wouldFail, reviewState: d.state };
     }
     const verifyReported = new Set();
     /**
@@ -1693,10 +1795,10 @@ export async function runCore(o) {
         ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
         await emit({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
         T.review = [`shadow: would ${verdict.would === "conforms" ? "pass" : `block (${verdict.would})`}`, `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
-        await post("FORGE:REVIEW", renderShadowReview({ would: verdict.would, failures: wf, review: verdict.reviewState === "conforms" || verdict.reviewState === "nonconforming" ? review : null, contract: effective, degraded: degradedReq?.tracked ?? (degraded ? "untracked" : null) }));
+        await post("FORGE:REVIEW", renderShadowReview({ would: verdict.would, failures: wf, review: verdict.reviewState === "conforms" || verdict.reviewState === "nonconforming" ? review : null, contract: effective, degraded: degradedReq?.tracked ?? (degraded ? "untracked" : null) }) + verifierSection());
       } else {
         T.review = ["CONFORMS", `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
-        await post("FORGE:REVIEW", renderReview(review, effective));
+        await post("FORGE:REVIEW", renderReview(review, effective) + verifierSection());
       }
     }
     ev({ event: "PHASE_COMMIT", phase: "review" });
@@ -1918,6 +2020,30 @@ export async function runCore(o) {
       await emit(rec);
     }
 
+    /**
+     * #4403 e2e merge gate (e2e.mjs): a lane touching e2e specs or with [type:e2e] criteria runs the repo's e2e (label or
+     * dispatch) on the reviewed head before merge. Returns null to merge, {again} after a fix round, or {done}.
+     */
+    let e2eHead = null;
+    const e2eRuns = [];
+    async function e2eGate() {
+      const cur = await changedFiles(), want = e2eWanted({ cfg: vcfg.e2e, files: cur, contract: effective });
+      if (!want.run) { if (want.reason === NO_TRIGGER && want.specs.length) T.decisions.push(`e2e not run: ${want.specs.length} e2e spec(s) changed but ${NO_TRIGGER}`); e2eHead = localHead; return null; }
+      const v = await runE2eGate({ io: { ...io, addPrLabel: (n, l) => ghw(["pr", "edit", String(n), "-R", repo, "--add-label", l]) }, pr, branch, head: localHead, cfg: vcfg.e2e, specs: want.specs,
+        changedFiles: cur, ciMaxMinutes, now, sleep, random, exclude: e2eRuns, onPoll: async () => { await renew(); onProgress({ event: "phase_paused", phase: "merge", detail: `e2e pending on PR #${pr}` }); } });
+      if (v.runId != null) e2eRuns.push(v.runId);
+      const own = v.result === "fail" ? (vcfg.e2e.blocking === "all" ? v.failures : ownFailures(v.failures, want.specs)) : [];
+      const rec = { event: "E2E_VERIFY", pr, head: localHead, reason: want.reason, result: v.result, specs: want.specs, failures: v.failures.map((f) => f.job), own: own.map((f) => f.job), blocking: vcfg.e2e.blocking };
+      ev(rec); await emit({ ...rec, phase: "merge" });
+      T.decisions.push(`e2e (${want.reason}): ${v.result} at ${localHead.slice(0, 12)}${v.detail ? ` (${v.detail})` : ""}`);
+      if (v.result === "timeout") return { done: await finish("ci-pending", `PR #${pr} e2e still pending after ${ciMaxMinutes} min`, { pr }) };
+      if (v.result === "unavailable") return { done: await needsHuman(`e2e verification unavailable on PR #${pr} (${v.detail}); nothing merged.`) };
+      if (own.length) { const r = await mergeFixRound(own.map((f) => ({ name: f.job, url: f.url }))); return r ? { done: r } : { again: true }; }
+      if (v.result === "fail") T.anomalies.push(`Pre-existing e2e failure(s) reported, not blocking: ${v.failures.map((f) => f.job).join(", ")}`);
+      e2eHead = localHead;
+      return null;
+    }
+
     // ---- 7. (sync) wait per policy, (sync) merge at the reviewed head ----
     // A rerun on an existing PR goes through the same conflict check, so a conflicting PR from an earlier run recovers.
     for (;;) {
@@ -1979,6 +2105,7 @@ export async function runCore(o) {
           return await needsHuman(`CI passed for ${gateHead.slice(0, 12)} but the reviewed head is ${localHead.slice(0, 12)}; refusing to merge an unreviewed head.`, OUTCOME_CODES.MERGE_HEAD_MISMATCH);
         }
       }
+      if (e2eHead !== localHead) { const g = await e2eGate(); if (g?.done) return g.done; if (g?.again) continue; }
       if (syncs > 0 && (await prConflicting()) === "conflict") continue; // the base moved again while waiting
       T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
       laneGuard(resumed?.base ?? lane, "merge");

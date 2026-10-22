@@ -332,3 +332,74 @@ describe("#4354: the batch report ends with the fail-soft alerts of the batch's 
     assert.ok(!(await run(other)).some((x) => /ALERTS/.test(x)));
   });
 });
+
+describe("#4408: issues added to a running batch (forgedock orchestrate --add)", () => {
+  const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
+  it("one lane running: an added independent issue starts on the next pass, an added one that Depends on the running issue waits for its merge", async () => {
+    const bodies = { 1: "", 2: "", 3: "Depends on #1" };
+    let added = [];
+    const started = [], g1 = gate(), log = [], decisions = [];
+    const done = orchestrate({ issues: [1], parallel: 3, pollMs: 5, readBody: async (n) => bodies[n] ?? "", getAdded: () => added,
+      decide: (d) => { decisions.push(d); }, onUpdate: (r) => log.push(r),
+      runOne: async (n) => { started.push(n); if (n === 1) await g1.p; return { terminalReason: "merged" }; } });
+    await until(() => started.includes(1));
+    added = [2, 3];
+    await until(() => started.includes(2), 3000);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(started, [1, 2], "#3 waits for #1 to merge");
+    g1.open();
+    const rows = await done;
+    assert.deepEqual(started, [1, 2, 3]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [3, "merged"]]);
+    assert.deepEqual(log.filter((r) => r.outcome === "added").map((r) => r.detail), ["#2, #3"], "one added row; re-reads add nothing");
+    assert.equal(decisions.filter((d) => d.issue === null).length, 1);
+  });
+
+  it("edges hold both ways: a pending issue that Depends on an added one (declared, or written after the batch started) waits for it", async () => {
+    const bodies = { 7: "", 4: "Depends on #5", 8: "", 5: "", 6: "" };
+    let added = [];
+    const started = [], g7 = gate();
+    const done = orchestrate({ issues: [7, 4, 8], parallel: 1, pollMs: 5, readBody: async (n) => bodies[n] ?? "", getAdded: () => added,
+      runOne: async (n) => { started.push(n); if (n === 7) await g7.p; return { terminalReason: "merged" }; } });
+    await until(() => started.includes(7));
+    bodies[8] = "Depends on #6"; // edited while the batch runs
+    added = [5, 6];
+    await new Promise((r) => setTimeout(r, 50));
+    g7.open();
+    const rows = await done;
+    assert.deepEqual(started, [7, 5, 4, 6, 8]);
+    assert.ok(rows.every((r) => r.outcome === "merged"));
+  });
+
+  it("an add after the queue drained still runs before the batch returns; without getAdded nothing changes", async () => {
+    let added = [];
+    const started = [];
+    const rows = await orchestrate({ issues: [1], parallel: 2, pollMs: 5, readBody: async () => "", getAdded: () => added,
+      runOne: async (n) => { started.push(n); if (n === 1) added = [2]; return { terminalReason: "merged" }; } });
+    assert.deepEqual(rows.map((r) => r.issue), [1, 2]);
+    const plain = await orchestrate({ issues: [1], parallel: 2, readBody: async () => "", runOne: async () => ({ terminalReason: "merged" }) });
+    assert.deepEqual(plain.map((r) => r.issue), [1]);
+  });
+
+  it("the add file: integers only, no issue twice, cumulative; --add through the CLI skips closed and unreadable issues", async () => {
+    const root = tmpDir("batch-add-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1] });
+    assert.deepEqual(b.readAdded(), []);
+    const r = b.addIssues([2, "#3", "abc", 1, 2, 0, -4]);
+    assert.deepEqual(r.added, [2, 3]);
+    assert.deepEqual(r.skipped.map((x) => [x.issue, x.reason]), [["abc", "not an integer"], [1, "already in batch"], [2, "already in batch"], [0, "not an integer"], [-4, "not an integer"]]);
+    assert.deepEqual(b.addIssues([5]).added, [5]);
+    assert.deepEqual(b.readAdded(), [2, 3, 5]);
+    assert.deepEqual(b.unrunAdds(), [2, 3, 5]);
+    const views = [];
+    const io = { gh: async (a) => { views.push(a); if (a[2] === "8") throw new Error("gh down"); return JSON.stringify({ state: a[2] === "7" ? "CLOSED" : "OPEN" }); } };
+    const res = await quiet(() => orchestrateFromCli(["--add", "b1", "6", "7", "8", "3", "x"], { batchRoot: root, io }));
+    assert.deepEqual(res.added, [6]);
+    assert.deepEqual(res.skipped.map((x) => [x.issue, x.reason]).sort(), [[3, "already in batch"], [7, "closed"], [8, "unreadable"], ["x", "not an integer"]]);
+    assert.ok(views.every((a) => a.includes("-R") && a.includes("o/r")), "state read against the batch's repo");
+    assert.deepEqual(b.readAdded(), [2, 3, 5, 6]);
+    await assert.rejects(orchestrateFromCli(["--add", "nope", "2"], { batchRoot: root, io }), /no batch nope/);
+  });
+});

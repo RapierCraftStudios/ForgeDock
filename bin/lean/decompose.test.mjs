@@ -26,6 +26,14 @@ describe("splitGate (#4396)", () => {
     }
   });
 
+  it("reads the #4385 per-sub-issue files as the declared area, alone or with paths", () => {
+    const f = (files, paths) => ({ title: "t", body: "b", files, ...(paths ? { paths } : {}) });
+    assert.equal(splitGate({ subissues: [f(["src/a.ts"]), f(["/src/b.ts"])] }).ok, true);
+    const g = splitGate({ subissues: [f(["src/a.ts"]), f(["src/b.ts"], ["src/a.ts"])] });
+    assert.equal(g.ok, false);
+    assert.match(g.problem, /0:src\/a\.ts ~ 1:src\/a\.ts/);
+  });
+
   it("rejects a split whose parts declare no paths and that has no size estimate", () => {
     const g = splitGate({ subissues: [sub(), sub(["src/b"])] });
     assert.equal(g.ok, false);

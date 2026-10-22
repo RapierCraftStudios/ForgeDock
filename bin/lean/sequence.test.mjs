@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { sequenceCollisions, journalProblems, snapshotLane, verifyRenumber } from "./sequence.mjs";
+import { sequenceCollisions, journalProblems, snapshotLane, verifyRenumber, numberOnlyChange } from "./sequence.mjs";
 import { sequencePrompt, sequenceSyncNote } from "./prompts.mjs";
 
 const sh = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
@@ -149,5 +149,74 @@ describe("sequence-numbered migrations at hand-off (#4322)", () => {
       ["drizzle/0000_x.sql", ["drizzle/0000_init.sql"], "0001"],
       ["drizzle/meta/0000_snapshot.json", ["drizzle/meta/0000_snapshot.json"], "0001"],
     ]);
+  });
+});
+
+describe("sequence-numbered documents: two siblings each add an ADR (#4385)", () => {
+  const INDEX = "# ADRs\n\n- [0001](0001-one.md)\n- [0002](0002-two.md)\n- [0003](0003-three.md)\n";
+  /** main: docs/adr/0001..0003 + README index; the lane adds 0004-b.md; main then merges a sibling's 0004-a.md. */
+  function adrFixture() {
+    const d = tmpDir("seq-adr-");
+    sh(d, "init", "-q", "-b", "main");
+    put(d, { "docs/adr/0001-one.md": "# 1. One\n", "docs/adr/0002-two.md": "# 2. Two\n", "docs/adr/0003-three.md": "# 3. Three\n", "docs/adr/README.md": INDEX });
+    commit(d, "init");
+    sh(d, "checkout", "-qb", "lane");
+    put(d, { "docs/adr/0004-b.md": "# 4. Use B\n\nStatus: accepted (ADR 0004)\n", "docs/adr/README.md": `${INDEX}- [0004](0004-b.md)\n` });
+    commit(d, "lane adr");
+    sh(d, "checkout", "-q", "main");
+    put(d, { "docs/adr/0004-a.md": "# 4. Use A\n", "docs/adr/README.md": `${INDEX}- [0004](0004-a.md)\n` });
+    commit(d, "sibling adr");
+    sh(d, "checkout", "-q", "lane");
+    return d;
+  }
+  /** The builder: merge the base (the index conflicts), rename to 0005, fix its own title, write the index. */
+  function renumberAdr(d, { title = "# 5. Use B\n\nStatus: accepted (ADR 0005)\n", index = `${INDEX}- [0004](0004-a.md)\n- [0005](0005-b.md)\n` } = {}) {
+    try { sh(d, "merge", "--no-edit", "main"); } catch { /* README.md conflicts: written below */ }
+    sh(d, "mv", "docs/adr/0004-b.md", "docs/adr/0005-b.md");
+    put(d, { "docs/adr/0005-b.md": title, "docs/adr/README.md": index });
+    commit(d, "renumber adr");
+  }
+
+  it("the lane's ADR collides with the sibling's 0004 and moves to 0005", async () => {
+    const d = adrFixture();
+    const c = await sequenceCollisions({ git: gitIn(d), base: "main" });
+    assert.deepEqual(c.map((x) => [x.lane, x.base, x.next]), [["docs/adr/0004-b.md", ["docs/adr/0004-a.md"], "0005"]]);
+  });
+
+  it("a renumber that changes only the ADR's own number and lists both in the index verifies: distinct numbers, index correct", async () => {
+    const d = adrFixture();
+    const before = await snapshotLane({ git: gitIn(d), base: "main" });
+    renumberAdr(d);
+    const v = await verifyRenumber({ git: gitIn(d), base: "main", before });
+    assert.deepEqual(v, { ok: true, problems: [] });
+    assert.deepEqual(await sequenceCollisions({ git: gitIn(d), base: "main" }), []);
+  });
+
+  it("an index still linking the old name, or a body change beyond the number, fails verification", async () => {
+    const d = adrFixture();
+    const before = await snapshotLane({ git: gitIn(d), base: "main" });
+    renumberAdr(d, { index: `${INDEX}- [0004](0004-a.md)\n- [0004](0004-b.md)\n` });
+    const v = await verifyRenumber({ git: gitIn(d), base: "main", before });
+    assert.equal(v.ok, false);
+    assert.ok(v.problems.some((p) => /docs\/adr\/README\.md: still references 0004-b/.test(p)), v.problems.join("\n"));
+    const d2 = adrFixture();
+    const before2 = await snapshotLane({ git: gitIn(d2), base: "main" });
+    renumberAdr(d2, { title: "# 5. Use C instead\n\nStatus: accepted (ADR 0005)\n" });
+    const v2 = await verifyRenumber({ git: gitIn(d2), base: "main", before: before2 });
+    assert.equal(v2.ok, false);
+    assert.ok(v2.problems.some((p) => /0004-b\.md: content changed/.test(p)), v2.problems.join("\n"));
+  });
+
+  it("numberOnlyChange accepts padded and unpadded own-number edits only", () => {
+    assert.equal(numberOnlyChange("# 16. X (0016)\nsee 160 and 16x\n", "# 17. X (0017)\nsee 160 and 16x\n", "0016", "0017"), true);
+    assert.equal(numberOnlyChange("# 16. X\n", "# 17. Y\n", "0016", "0017"), false);
+    assert.equal(numberOnlyChange("CREATE TABLE t;\n", "CREATE TABLE t;\n", "0007", "0008"), true);
+    assert.equal(numberOnlyChange("a\n", "b\n", null, "0008"), false);
+  });
+
+  it("the renumber prompt names numbered documents and the series index", () => {
+    const p = sequencePrompt([{ dir: "docs/adr", number: "0004", lane: "docs/adr/0004-b.md", base: ["docs/adr/0004-a.md"], next: "0005" }], "staging");
+    assert.match(p, /ADR/);
+    assert.match(p, /series index/);
   });
 });

@@ -6,8 +6,9 @@ import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
+import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
 import { makeLedger } from "./ledger.mjs";
+import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
@@ -465,6 +466,39 @@ describe("core work-on", () => {
     assert.equal(r.terminalReason, "decomposed");
     assert.deepEqual({ independent: r.decomposition.independent, oversize: r.decomposition.oversize }, { independent: false, oversize: true });
     assert.ok(w.comments.some((c) => /FORGE:DECOMPOSED/.test(c) && /size: 40 files, 4000 lines .* oversize yes/.test(c)));
+  });
+
+  it("#4385 split siblings that declare a shared hub file are serialised (chained, no duplicate transitive edge); disjoint or undeclared files stay parallel", () => {
+    const hub = ["src/domain/index.ts", "./src/domain/events.ts"];
+    const BIG = { files: 40, lines: 2000 }; // #4396: shared or undeclared files are admitted only over the size budget
+    const b = classifyBlock({ block: { kind: "split-required", size: BIG, subissues: [
+      { title: "state machine", body: "a", files: [...hub, "src/domain/state.ts"] },
+      { title: "next-date", body: "b", files: [...hub, "src/domain/next.ts"] },
+      { title: "timeline", body: "c", files: ["/src/domain/index.ts", "src/domain/events.ts", "src/domain/timeline.ts"] }] } }, 7);
+    assert.equal(b.kind, "split");
+    assert.deepEqual(b.subissues.map((x) => x.dependsOn), [[], [0], [1]]);
+    assert.deepEqual(b.serialized.map((e) => [e.from, e.to, e.files]), [[1, 0, ["src/domain/index.ts", "src/domain/events.ts"]], [2, 1, ["src/domain/index.ts", "src/domain/events.ts"]]]);
+    const disjoint = classifyBlock({ block: { kind: "split-required", subissues: [
+      { title: "a", body: "a", files: ["src/a.ts"] }, { title: "b", body: "b", files: ["src/b.ts"] }] } }, 7);
+    assert.deepEqual(disjoint.subissues.map((x) => x.dependsOn), [[], []]);
+    assert.deepEqual(disjoint.serialized, []);
+    const legacy = classifyBlock({ block: { kind: "split-required", size: BIG, subissues: [
+      { title: "a", body: "a" }, { title: "b", body: "b" }, { title: "c", body: "c", depends_on: [0] }] } }, 7);
+    assert.deepEqual(legacy.subissues.map((x) => x.dependsOn), [[], [], [0]]);
+    assert.ok(legacy.subissues.every((x) => !("files" in x)));
+    const declared = classifyBlock({ block: { kind: "split-required", size: BIG, subissues: [
+      { title: "a", body: "a", files: ["x.ts"] }, { title: "b", body: "b", files: ["y.ts"], depends_on: [0] }, { title: "c", body: "c", files: ["x.ts"], depends_on: [1] }] } }, 7);
+    assert.deepEqual(declared.subissues.map((x) => x.dependsOn), [[], [0], [1]]);
+    assert.deepEqual(declared.serialized, []);
+  });
+
+  it("#4385 a serialised sibling is filed with the engine-added Depends-on line", async () => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "epic", block: { kind: "split-required", size: { files: 40, lines: 2000 }, subissues: [
+      { title: "part A", body: "do A", files: ["src/domain/index.ts"] }, { title: "part B", body: "do B", files: ["src/domain/index.ts", "src/b.ts"] }] } } }, {});
+    const r = await run(w);
+    assert.equal(r.terminalReason, "decomposed");
+    const bodyB = w.created[1][w.created[1].indexOf("--body") + 1];
+    assert.match(bodyB, /^\*\*Depends on\*\*: #201$/m);
   });
 
   it("#4153 a split of a milestone issue files every sub-issue with the parent's milestone; no milestone passes none", async () => {
@@ -2400,6 +2434,22 @@ describe("runCliBackendAsync", () => {
     assert.equal(a.sessionId, "s-1"); assert.equal(a.text, "hello"); assert.equal(a.costUsd, 0.25);
   });
 
+  it("#4390: contextMax stops a stream session whose turn context reaches it, with aggregated usage and turns", async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const d = tmpDir("core-async-");
+    const line = (id, ctx) => JSON.stringify({ type: "assistant", message: { id, content: [{ type: "tool_use", name: "Bash", input: { command: "ls" } }], usage: { input_tokens: 10, output_tokens: 7, cache_read_input_tokens: ctx, cache_creation_input_tokens: 0 } } });
+    writeFileSync(`${d}/fake`, `#!/bin/sh\necho '${line("m1", 500)}'\necho '${line("m1", 500)}'\necho '${line("m2", 2000)}'\nexec sleep 30\n`); chmodSync(`${d}/fake`, 0o755);
+    const t0 = Date.now();
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake`, logger: { log() {} }, stream: true, contextMax: 1000 }), (e) => {
+      assert.equal(e.code, "CLI_CONTEXT"); assert.equal(e.context, 2010); assert.equal(e.turns, 2, "lines of one message count once");
+      assert.deepEqual(e.usage, { input_tokens: 20, output_tokens: 14, cache_creation_input_tokens: 0, cache_read_input_tokens: 2500 });
+      assert.equal(e.lastTool.name, "Bash");
+      return true;
+    });
+    assert.ok(Date.now() - t0 < 15000, "killed, not waited out");
+  });
+
   it("surfaces a failing CLI as the same CLI_BACKEND_FAILED error", async () => {
     const { writeFileSync, chmodSync } = await import("node:fs");
     const { runCliBackendAsync } = await import("../runner.mjs");
@@ -3568,8 +3618,9 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     const d = tmpDir("verify-yaml-");
     writeFileSync(`${d}/forge.yaml`, "engine:\n  conformance: shadow\n");
     assert.equal(readVerify(d), undefined);
-    writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n");
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false });
+    writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n  e2e_label: full-ci\n  e2e_checks: \"e2e (1),e2e (2)\"\n");
+    const e2e = { mode: "auto", label: "full-ci", workflow: null, pathsInput: null, checks: ["e2e (1)", "e2e (2)"], paths: ["e2e/**", "**/e2e/**", "*.e2e.*", "*.e2e-spec.*", "cypress/**", "playwright/**"], blocking: "changed" };
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, e2e });
   });
 });
 
@@ -4784,6 +4835,54 @@ describe("#4362 attempt triggers", () => {
     assert.deepEqual(usage(dir).filter((e) => e.phase === "implement").map((e) => [e.attempt, e.trigger, e.restart_of ?? null]), [[1, "plan", null], [2, "timeout_restart", "build"]]);
     assert.equal(r.firstPass, true);
   });
+
+  it("#4390: a build stopped at the context ceiling is checkpointed and restarted fresh from contract, diff and last validate", async () => {
+    const w = world({ dirty: true }); const dir = tmpDir("core-ctx-");
+    const orig = w.io.runner, seen = []; let n = 0, contractAtKill = null;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push({ contextMax: c.contextMax ?? 0, resume: c.resume ?? null, prompt: c.prompt });
+      if (c.role === "builder" && n++ === 1) {
+        contractAtKill = w.files[`${WT}/.forge-lean/contract.json`];
+        w.files[`${WT}/.forge-lean/self-check.json`] = '{"v":1,"ok":false,"validate":[{"id":"V1","rc":1}]}';
+        throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 130000, turns: 40, usage: { input_tokens: 40, output_tokens: 900, cache_read_input_tokens: 4000000, cache_creation_input_tokens: 5000 } });
+      }
+      return orig(c);
+    };
+    const r = await run(w, { dir, contextCeilingTokens: 120000 });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(seen[0].contextMax, 0, "the plan call runs uncapped");
+    assert.equal(seen[1].contextMax, 120000, "the build call carries the ceiling");
+    const restart = seen[2];
+    assert.equal(restart.resume, null, "the restart is a fresh session");
+    assert.match(restart.prompt, /The engine froze \.forge-lean\/contract\.json/);
+    assert.match(restart.prompt, /reached the 120000-token context ceiling/);
+    assert.match(restart.prompt, /<diff>\ndiff --git a\/src\/foo\.js/, "changed hunks carried");
+    assert.match(restart.prompt, /"validate":\[\{"id":"V1","rc":1\}\]/, "last validate result carried");
+    assert.equal(w.files[`${WT}/.forge-lean/contract.json`], contractAtKill, "contract unchanged by the restart");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && c.some((x) => /checkpoint after context ceiling/.test(x))), "dirty work checkpointed on the branch");
+    assert.ok(readLog(dir, 7).some((e) => e.event === "CONTEXT_CEILING" && e.context_tokens === 130000 && e.turns === 40));
+    const impl = usage(dir).filter((e) => e.phase === "implement");
+    assert.deepEqual(impl.map((e) => [e.attempt, e.trigger, e.restart_of ?? null]), [[1, "plan", null], [2, "build", null], [2, "context_restart", "build"]]);
+    assert.equal(impl[1].usage.cache_read_input_tokens, 4000000, "the stopped session's tokens are recorded");
+    assert.equal(r.firstPass, true);
+  });
+
+  it("#4390: context restarts are bounded; after three the call runs uncapped, and 0 disables the ceiling", async () => {
+    const w = world(); const dir = tmpDir("core-ctx-");
+    const orig = w.io.runner, caps = [];
+    w.io.runner = async (c) => {
+      if (c.role === "builder") caps.push(c.contextMax ?? 0);
+      if (c.role === "builder" && c.contextMax > 0) throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 999, turns: 1, usage: null });
+      return orig(c);
+    };
+    const r = await run(w, { dir, contextCeilingTokens: 500 });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(caps.slice(0, 5), [0, 500, 500, 500, 0]);
+    const off = world(); const offCaps = []; const o2 = off.io.runner;
+    off.io.runner = async (c) => { if (c.role === "builder") offCaps.push(c.contextMax ?? 0); return o2(c); };
+    assert.equal((await run(off, { dir: tmpDir("core-ctx-"), contextCeilingTokens: 0 })).terminalReason, "merged");
+    assert.ok(offCaps.every((x) => x === 0));
+  });
 });
 
 describe("learned pitfalls (#4375)", () => {
@@ -4843,5 +4942,176 @@ describe("learned pitfalls (#4375)", () => {
     w.io.pitfalls = { read: async () => { throw new Error("EACCES"); }, append: async () => { throw new Error("EROFS"); } };
     w.io.contextFacts = packFacts; failingPrecheck(w);
     assert.equal((await run(w, { contextPack: { mode: "on" }, precheck: { commands: ["npm run lint"] } })).terminalReason, "merged");
+  });
+});
+
+describe("e2e merge gate (#4403)", () => {
+  const SPECS = ["src/foo.js", "test/foo.test.js", "e2e/foo.spec.ts"];
+  const RUN = "https://github.com/o/r/actions/runs/777/job/1";
+  /** commitChecks: the e2e job is skipped until the PR carries the label; then `seq` is consumed (the last repeats). */
+  const withE2e = (w, seq, log = "FAIL e2e/foo.spec.ts > handles null") => {
+    w.labelled = () => w.prEdits.some((a) => a.includes("--add-label"));
+    w.io.commitChecks = async () => {
+      if (!w.labelled()) return [{ name: "e2e", state: "success", conclusion: "skipped", url: RUN }];
+      const st = seq.length > 1 ? seq.shift() : seq[0];
+      return [{ name: "e2e", state: "success", conclusion: "skipped", url: RUN }, { name: "e2e", state: st, conclusion: st === "pending" ? null : st, url: RUN }];
+    };
+    w.io.failedLogs = async () => log;
+    return w;
+  };
+  const cfg = (extra = {}) => parseVerify({ e2e_label: "full-ci", e2e_checks: "e2e", ...extra });
+  const go = (w, extra = {}) => run(w, { conformance: "shadow", verify: cfg(), ...extra });
+  const e2eEvents = (dir) => readLog(dir, 7).filter((e) => e.event === "E2E_VERIFY");
+
+  it("#4403 repro: a lane that changes an e2e spec labels the PR, waits on the e2e check and merges only after it passes", async () => {
+    const w = withE2e(world({ changed: SPECS, reviews: [conf({}, CONTRACT, SPECS)] }), ["pending", "pending", "success"]);
+    const dir = tmpDir("core-");
+    const r = await go(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const label = w.prEdits.find((a) => a.includes("--add-label"));
+    assert.ok(label, "the PR is labelled for the e2e run"); assert.equal(label[label.indexOf("--add-label") + 1], "full-ci");
+    const ev = e2eEvents(dir);
+    assert.deepEqual(ev.map((e) => [e.result, e.specs]), [["pass", ["e2e/foo.spec.ts"]]]);
+    assert.ok(w.seq.indexOf("merge") > -1);
+  });
+
+  it("the lane's own spec failing in e2e: builder fix round, re-review, then merged once e2e is green; no rounds left -> ci.red, nothing merged", async () => {
+    const w = withE2e(world({ changed: SPECS }), ["failure", "success"]);
+    const r = await go(w);
+    assert.equal(r.terminalReason, "merged");
+    const fix = builders(w).filter((b) => /CI failed on the pushed branch/.test(b[4]));
+    assert.equal(fix.length, 1); assert.match(fix[0][4], /e2e\/foo\.spec\.ts/);
+    assert.equal(reviewers(w).length, 2, "the fixed head is reviewed again");
+    const w2 = withE2e(world({ changed: SPECS }), ["failure"]);
+    const r2 = await go(w2, { verify: { ...cfg(), maxRounds: 0 } });
+    assert.equal(r2.terminalReason, "needs-human"); assert.equal(r2.code, OUTCOME_CODES.CI_RED); assert.equal(w2.merges.length, 0);
+  });
+
+  it("an unrelated pre-existing e2e failure is reported, not blocking; e2e_blocking: all blocks it", async () => {
+    const w = withE2e(world({ changed: SPECS }), ["failure"], "FAIL e2e/rosters.spec.ts > lists rosters");
+    const dir = tmpDir("core-");
+    const r = await go(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(e2eEvents(dir).map((e) => [e.result, e.own]), [["fail", []]]);
+    assert.ok(traj(w).some((t) => /Pre-existing e2e failure\(s\) reported, not blocking: e2e/.test(t)));
+    const w2 = withE2e(world({ changed: SPECS }), ["failure"], "FAIL e2e/rosters.spec.ts > lists rosters");
+    const r2 = await go(w2, { verify: { ...cfg({ e2e_blocking: "all" }), maxRounds: 0 } });
+    assert.equal(r2.terminalReason, "needs-human"); assert.equal(w2.merges.length, 0);
+  });
+
+  it("verify.e2e: never (or no label/workflow configured) keeps today's behaviour: no label, no e2e wait, no event", async () => {
+    for (const verify of [cfg({ e2e: "never" }), parseVerify({})]) {
+      const w = withE2e(world({ changed: SPECS }), ["failure"]);
+      const dir = tmpDir("core-");
+      const r = await go(w, { dir, verify });
+      assert.equal(r.terminalReason, "merged");
+      assert.equal(w.prEdits.filter((a) => a.includes("--add-label")).length, 0);
+      assert.equal(e2eEvents(dir).length, 0);
+    }
+  });
+
+  it("a lane without e2e specs or [type:e2e] criteria never runs e2e; e2e that never starts is needs-human, nothing merged", async () => {
+    const w = withE2e(world(), ["failure"]);
+    assert.equal((await go(w)).terminalReason, "merged");
+    assert.equal(w.prEdits.filter((a) => a.includes("--add-label")).length, 0);
+    const w2 = world({ changed: SPECS });
+    w2.io.commitChecks = async () => [{ name: "e2e", state: "success", conclusion: "skipped", url: RUN }];
+    const r2 = await go(w2);
+    assert.equal(r2.terminalReason, "needs-human"); assert.equal(w2.merges.length, 0);
+  });
+});
+
+describe("#4397 independent adversarial verifier", () => {
+  const finding = { file: "src/foo.js", line: 3, input: "foo(null)", expected: "0", actual: "throws TypeError", why: "no guard" };
+  /** Verifier replies in order (an Error throws); every verifier call is recorded in w.vcalls and never reaches the reviewer queue. */
+  const withVerifier = (w, replies = []) => {
+    const orig = w.io.runner; w.vcalls = [];
+    w.io.runner = async (c) => {
+      if (c.role !== "verifier") return orig(c);
+      w.vcalls.push(c);
+      const r = replies.length ? replies.shift() : fence({ findings: [] });
+      if (r instanceof Error) throw r;
+      return { text: r, sessionId: "ver", usage: { input_tokens: 3, output_tokens: 1 }, costUsd: 0.01, durationMs: 300, turns: 2, model: c.model };
+    };
+    return w;
+  };
+  const vEvents = (dir) => readLog(dir, 7).filter((e) => e.event === "VERIFIER");
+  const review = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->"));
+
+  it("verifier off (default): no verifier call, no VERIFIER event, review comment unchanged", async () => {
+    const w = withVerifier(world()); const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(w.vcalls.length, 0);
+    assert.deepEqual(vEvents(dir), []);
+    assert.doesNotMatch(review(w), /Independent verifier/);
+  });
+
+  it("shadow: one fresh read-only call on a model other than the builder's, without the builder's result; findings are advisory", async () => {
+    const w = withVerifier(world(), [fence({ findings: [finding, { file: "src/nope.js", line: 1 }] })]); const dir = tmpDir("core-");
+    const r = await run(w, { dir, conformance: "shadow", builderModel: "claude-sonnet-5-5", verifier: { mode: "shadow" } });
+    assert.equal(r.terminalReason, "merged", "shadow never blocks");
+    assert.equal(w.vcalls.length, 1);
+    const c = w.vcalls[0];
+    assert.equal(c.resume, null); assert.equal(c.readOnly, true);
+    assert.equal(c.model, "claude-opus-5-5", "the configured default is the builder's model, so it is swapped");
+    assert.ok(c.maxMs > 0 && c.maxTurns > 0);
+    assert.match(c.system, /BREAK/);
+    assert.match(c.prompt, /foo crashes on null input\./); assert.match(c.prompt, /<contract>/); assert.match(c.prompt, /\+fix/);
+    assert.doesNotMatch(c.prompt, /fixed foo|builder_result|<rubric>/, "no builder summary or rubric");
+    assert.equal(builders(w).length, 2, "no fix round in shadow");
+    const [e] = vEvents(dir);
+    assert.equal(e.mode, "shadow"); assert.equal(e.model, "claude-opus-5-5"); assert.equal(e.swapped, true); assert.equal(e.findings, 1, "a finding at a missing path is dropped");
+    assert.equal(e.cost_usd, 0.01); assert.ok(e.implement_cost_usd > 0); assert.equal(e.ratio, Math.round((0.01 / e.implement_cost_usd) * 1000) / 1000);
+    assert.match(review(w), /### Independent verifier \(shadow, advisory\)[\s\S]*- `src\/foo\.js:3` input foo\(null\): throws TypeError \(expected 0\)/);
+    const usage = readLog(dir, 7).filter((x) => x.event === "PHASE_ATTEMPT_USAGE" && x.phase === "verify");
+    assert.equal(usage.length, 1); assert.equal(usage[0].trigger, "verifier");
+  });
+
+  it("enforce: a finding feeds the existing conformance fix round (fresh session); the new head is verified again and merges", async () => {
+    const w = withVerifier(world(), [fence({ findings: [finding] }), fence({ findings: [] })]); const dir = tmpDir("core-");
+    const r = await run(w, { dir, verifier: { mode: "enforce", model: "claude-haiku-5-5" } });
+    assert.equal(r.terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3, "plan, implement, one fix round");
+    assert.equal(b[2][2], null, "file:line findings run a fresh fix session");
+    assert.match(b[2][4], /conformance\.regression: independent verifier: src\/foo\.js:3 input foo\(null\): throws TypeError/);
+    assert.equal(w.vcalls.length, 2);
+    assert.ok(w.vcalls.every((c) => c.model === "claude-haiku-5-5"));
+    const ev = vEvents(dir);
+    assert.deepEqual(ev.map((e) => [e.mode, e.findings]), [["enforce", 1], ["enforce", 0]]);
+    assert.notEqual(ev[0].head, ev[1].head);
+    assert.match(review(w), /### Independent verifier \(enforce\)[\s\S]*No concrete defect found\./);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "CONFORMANCE" && e.state === "conforms"));
+  });
+
+  it("enforce: a head is verified once; a fix round that made no commit reuses the verdict and ends needs-human", async () => {
+    const w = withVerifier(world({ freshNoCommit: true }), [fence({ findings: [finding] })]); const dir = tmpDir("core-");
+    const r = await run(w, { dir, verifier: { mode: "enforce" } });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(w.vcalls.length, 1);
+    assert.equal(vEvents(dir).length, 1);
+    assert.equal(w.merges.length, 0);
+  });
+
+  it("enforce with no findings merges after one verifier call; a verifier error is an anomaly, never a failure", async () => {
+    const ok1 = withVerifier(world()); 
+    assert.equal((await run(ok1, { verifier: { mode: "enforce" } })).terminalReason, "merged");
+    assert.equal(ok1.vcalls.length, 1);
+    assert.equal(builders(ok1).length, 2);
+    const w = withVerifier(world(), [Object.assign(new Error("idle"), { code: "CLI_IDLE" })]); const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir, verifier: { mode: "enforce" } })).terminalReason, "merged");
+    assert.equal(vEvents(dir)[0].error, "CLI_IDLE");
+    assert.match(traj(w)[0], /Independent verifier failed at [0-9a-f]{12}: CLI_IDLE/);
+  });
+
+  it("an empty diff skips the call; a failing review never reaches the verifier", async () => {
+    const w = withVerifier(world()); const dir = tmpDir("core-");
+    const g = w.io.git; w.io.git = async (a, o) => (a[0] === "diff" && a.length === 2 ? "" : g(a, o));
+    await run(w, { dir, verifier: { mode: "shadow" } });
+    assert.equal(w.vcalls.length, 0);
+    assert.equal(vEvents(dir)[0].skipped, "empty_diff");
+    const bad1 = withVerifier(world({ reviews: [bad(), bad()] }));
+    await run(bad1, { verifier: { mode: "enforce" } });
+    assert.equal(bad1.vcalls.length, 0);
   });
 });
