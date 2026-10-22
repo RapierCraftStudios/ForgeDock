@@ -7,11 +7,20 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { computeTrigger, parseRiskPaths, riskClassOf, triggerReport, readRunLogs, formatReport } from "./review-trigger.mjs";
+import { computeTrigger, riskPathHits, parseRiskPaths, riskClassOf, triggerReport, readRunLogs, formatReport } from "./review-trigger.mjs";
 
 const HOT = { enabled: true, file_lines: 2000, growth_lines: 150, files: [] };
 const clean = (patch = {}) => computeTrigger({ files: ["src/foo.js", "test/foo.test.js"], hotspots: HOT, ...patch });
 const codes = (t) => t.reasons.map((r) => r.code);
+
+describe("riskPathHits (#4398)", () => {
+  it("only declared review.risk_paths globs count, sorted and unique; built-in risk words never do", () => {
+    assert.deepEqual(riskPathHits(["src/auth/login.ts", "src/billing/b.ts", "src/billing/a.ts", "src/billing/a.ts"], ["src/billing/**"]), ["src/billing/a.ts", "src/billing/b.ts"]);
+    assert.deepEqual(riskPathHits(["src/auth/login.ts"], []), [], "no declared globs: nothing enforces");
+    assert.deepEqual(riskPathHits(["db/x.sql", "lib/a.js"], "db/**, *.sql"), ["db/x.sql"]);
+    assert.deepEqual(riskPathHits(undefined, ["**"]), []);
+  });
+});
 
 describe("computeTrigger (#4273)", () => {
   it("a clean diff with passing gates would skip, with no reasons", () => {

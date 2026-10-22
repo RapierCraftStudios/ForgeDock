@@ -661,10 +661,39 @@ export function reviewSkeleton(contract, changedFiles = [], ignore = []) {
 /** Requirements the reviewer accepted as deferred or post-deploy that still need a tracking issue. */
 export const pendingTracking = (contract) => (contract.requirements ?? []).filter((r) => TRACKED.includes(r.disposition) && !r.tracked);
 
-/** After a conforming merge: close as completed, linking every tracking issue. */
-export function closePlan(contract) {
-  const tracked = [...new Set((contract.requirements ?? []).filter((r) => TRACKED.includes(r.disposition)).map((r) => r.tracked).filter(Boolean))];
-  return { reason: "completed", tracked };
+/** #4398: an `investigate(` (or `investigate:`) issue, whose stated question must be answered before it closes as completed. */
+export const isInvestigation = (title) => /^\s*investigate[(:]/i.test(String(title ?? ""));
+
+/**
+ * After a conforming merge: close as completed, linking every tracking issue. #4398: an investigation with a deferred or
+ * post-deploy requirement, or a deliver requirement whose review row is not implemented, closes "partial" instead; `open`
+ * holds those requirements (the open question, carried forward). A null review (reviewer skipped) judges dispositions only.
+ */
+export function closePlan(contract, { title = null, review = null } = {}) {
+  const reqs = contract.requirements ?? [];
+  const tracked = [...new Set(reqs.filter((r) => TRACKED.includes(r.disposition)).map((r) => r.tracked).filter(Boolean))];
+  if (!isInvestigation(title)) return { reason: "completed", tracked };
+  const rows = Array.isArray(review?.requirements) ? review.requirements : null;
+  const open = reqs.filter((r) => TRACKED.includes(r.disposition)
+    || (r.disposition === "deliver" && rows && rows.find((x) => x?.id === r.id)?.status !== "implemented"));
+  return open.length ? { reason: "partial", tracked, open } : { reason: "completed", tracked };
+}
+
+const UNUSABLE_REVIEW = ["review.incomplete", "review.inconsistent", "review.unparseable"];
+/**
+ * #4398 batch-report line from the lane rows' `conformance` ({mode, would, risk}): shadow lanes, how many the enforced
+ * gate would have blocked, the false-block share (a would-block on an unusable review, the scripts/calibration.mjs
+ * recommendEnforce proxy) and the lanes enforced by a declared risk path. Null when no row carries conformance.
+ */
+export function formatShadowSummary(rows) {
+  const cs = (rows ?? []).map((r) => r?.conformance).filter((c) => c && typeof c === "object");
+  if (!cs.length) return null;
+  const sh = cs.filter((c) => c.mode === "shadow");
+  const would = sh.filter((c) => typeof c.would === "string" && c.would !== "conforms").length;
+  const falseB = sh.filter((c) => UNUSABLE_REVIEW.includes(c.would)).length;
+  const pct = (k) => (sh.length ? `${Math.round((k / sh.length) * 100)}%` : "n/a");
+  const risk = cs.filter((c) => c.risk === true).length;
+  return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}`;
 }
 
 /** One line per requirement for the follow-up script: a stable key (id + quote) and a why. Tabs and newlines removed. */

@@ -44,6 +44,16 @@ export function parseRiskPaths(v) {
 }
 
 /**
+ * #4398: the changed files matching a declared forge.yaml review.risk_paths glob (sorted, unique). Only declared globs
+ * count, never the built-in risk words: a hit makes the conformance gate enforce for that lane. [] without globs.
+ */
+export function riskPathHits(files = [], riskPaths = []) {
+  const globs = parseRiskPaths(riskPaths);
+  if (!globs.length) return [];
+  return [...new Set((files ?? []).map(String))].filter((f) => globs.some((g) => matchesGlob(f, g))).sort();
+}
+
+/**
  * {would_skip, reasons:[{code, detail}]} from facts only. Codes: risk_path, package_edge, hotspot, gate.failed,
  * gate.ambiguous. `hotspots` null/undefined means the facts were unavailable (ambiguous); {enabled:false} is an answer.
  * gates: {precheckFailures[], checkCommandsFailing, ciFellBack}. Reasons are sorted, so equal input gives equal output.
