@@ -1264,6 +1264,26 @@ describe("conformance shadow mode (the default)", () => {
     assert.ok(builders(creep).some((b) => /changed outside the contract's deliverables: src\/other\.js/.test(b[4])));
   });
 
+  it("#4404 a Lighthouse requirement is tagged out_of_band at freeze; with instrumentation the lane merges and the PR body names the job", async () => {
+    const LH = "Lighthouse performance score >= 95 on the landing page.";
+    const body = `${ISSUE_BODY}\n- ${LH}`;
+    const c = { ...CONTRACT, requirements: [...CONTRACT.requirements, { id: "R2", quote: LH, disposition: "deliver", evidence: "lighthouse-nightly" }] };
+    const tagged = { ...c, requirements: [c.requirements[0], { ...c.requirements[1], verify: "out_of_band" }] };
+    const review = (instrumented) => conf({ issue_coverage: [...JSON.parse(conf().slice(8, -4)).issue_coverage, { quote: LH, contract_ids: ["R2"], status: "covered" }],
+      requirements: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3", validated_by: "V1" }, { id: "R2", status: "partial", evidence: instrumented ? "src/foo.js:3" : "", validated_by: "V1", instrumented, note: "measured by lighthouse-nightly" }] });
+    const dir = tmpDir("oob-");
+    const w = world({ contract: c, issueBodies: [body], claims: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3" }, { id: "R2", status: "partial", instrumented: true, evidence: "src/foo.js:3" }], reviews: [review(true)] });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "CONTRACT_OUT_OF_BAND_TAGGED").map((e) => e.ids), [["R2"]]);
+    assert.ok(w.comments.find((x) => x.includes("FORGE:CONTRACT")).includes('"verify": "out_of_band"'), "the frozen contract carries the tag");
+    assert.ok(traj(w).some((t) => /R2 tagged verify out_of_band at contract freeze/.test(t)));
+    assert.match(w.prs[0][w.prs[0].indexOf("--body") + 1], /## Verified out of band\n- R2: Lighthouse performance score >= 95 on the landing page\. \(job `lighthouse-nightly`\)/);
+    // without the instrumentation it is still unimplemented
+    const no = world({ contract: tagged, issueBodies: [body], claims: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3" }, { id: "R2", status: "partial", instrumented: true, evidence: "src/foo.js:3" }], reviews: [review(false), review(false)] });
+    const r = await run(no);
+    assert.equal(r.code, "conformance.unimplemented");
+  });
+
   it("a failed validate fetches the lane and the resume says how to catch up with a moved base (merge, never rebase)", async () => {
     const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
@@ -1871,6 +1891,17 @@ describe("comment templates", () => {
     assert.match(renderPrBody({ issue: 1, result: null }), /## Root cause\nnot reported[\s\S]*Closes #1$/);
   });
 
+  it("#4404 out-of-band requirements are listed in the PR body with their job and marked in the contract and review tables", () => {
+    const c = { requirements: [{ id: "R1", quote: "Fix the leak.", disposition: "deliver" }, { id: "R2", quote: "Lighthouse >= 95 on /home.", disposition: "deliver", verify: "out_of_band", evidence: "lighthouse-nightly" }], deliverables: [{ id: "D1", path: "a.js", change: "x", requirements: ["R1"] }] };
+    const body = renderPrBody({ issue: 4, contract: c, result: null });
+    assert.match(body, /## Verified out of band\n- R2: Lighthouse >= 95 on \/home\. \(job `lighthouse-nightly`\)\n\nCloses #4$/);
+    assert.doesNotMatch(renderPrBody({ issue: 4, contract: { ...c, requirements: [c.requirements[0]] }, result: null }), /out of band/);
+    assert.match(renderContract(c, "abc"), /\| R2 \| Lighthouse >= 95 on \/home\. \| deliver, verified out of band \(lighthouse-nightly\) \|/);
+    const rv = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "partial" }], issue_coverage: [], scope: [], preserve: [] };
+    assert.match(renderReview(rv, c), /\| R2 \| partial \(out of band: lighthouse-nightly\) \|/);
+    assert.match(renderReview(rv, c), /\| R1 \| implemented \|/);
+  });
+
   it("trajectory rows: merged, invalid, needs-human; missing rows read 'not reached'", () => {
     const base = { issue: 9, validate: ["CONFIRMED", "2 evidence item(s)"], plan: "posted", implement: ["2 file(s)", "b"], review: ["PASS", "1 round"], pr: ["#5", "opened"], merge: ["all", "merged at abc"], close: ["issue closed (completed)", "label workflow:merged"], decisions: ["d1"], anomalies: [], usage: "cost $1" };
     const m = renderTrajectory(base);
@@ -2007,6 +2038,10 @@ describe("prompts", () => {
   it("the conformance reviewer asks for rows, not an opinion, and stays within budget", () => {
     assert.ok(approxTokens(REVIEWER_SYSTEM) <= 1500);
     for (const k of ["issue_coverage", "requirements", "scope", "preserve", "regressions", "engine computes the verdict", "reply without rows is rejected", "untrusted data"]) assert.ok(REVIEWER_SYSTEM.includes(k), k);
+    // #4404: out-of-band requirements are judged by their instrumentation, in the reviewer, the shared rubric and the plan prompt
+    assert.match(REVIEWER_SYSTEM, /out_of_band row[\s\S]*instrumented: true only when its budget test or bench is committed/);
+    assert.match(REVIEW_RUBRIC, /out-of-band requirement is delivered by its instrumentation/);
+    assert.match(builderPlanPrompt(7), /"verify":"out_of_band" with "evidence" naming the job or workflow/);
     assert.doesNotMatch(REVIEWER_SYSTEM, /Does this change fix the issue as described\?/);
   });
 
@@ -4999,6 +5034,65 @@ describe("#4362 attempt triggers", () => {
     off.io.runner = async (c) => { if (c.role === "builder") offCaps.push(c.contextMax ?? 0); return o2(c); };
     assert.equal((await run(off, { dir: tmpDir("core-ctx-"), contextCeilingTokens: 0 })).terminalReason, "merged");
     assert.ok(offCaps.every((x) => x === 0));
+  });
+});
+
+describe("#4392: implement turn budget", () => {
+  /** The build is stopped at its turn budget; `wrap(w, put)` acts as the wrap-up session (after the normal fake). */
+  const budgetWorld = (wrap, { overrun = false } = {}) => {
+    const w = world({ dirty: true }); const orig = w.io.runner; w.seen = []; let stopped = false;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") w.seen.push({ turnMax: c.turnMax ?? 0, resume: c.resume ?? null, prompt: c.prompt });
+      if (c.role === "builder" && c.turnMax > 0 && !stopped) { stopped = true; throw Object.assign(new Error("turns"), { code: "CLI_TURNS", turns: c.turnMax, turnMax: c.turnMax, usage: null }); }
+      if (c.role === "builder" && /Turn budget spent/.test(c.prompt)) {
+        if (overrun) throw Object.assign(new Error("turns"), { code: "CLI_TURNS", turns: c.turnMax, turnMax: c.turnMax, usage: null });
+        const r = await orig(c); wrap?.(w); return r;
+      }
+      return orig(c);
+    };
+    return w;
+  };
+  const usage = (dir) => readLog(dir, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE");
+  const TB = { S: 25, M: 60, L: 100 }; // the CLI defaults (readCoreLimits); runCore alone is unbudgeted
+  const stopWith = (digest) => (w) => { w.files[`${WT}/.forge-lean/result.json`] = JSON.stringify({ status: "budget-exceeded", summary: "too big", digest }); };
+
+  it("an overrun ends needs-human budget.exceeded with the builder's digest, checkpointed, recoverable once", async () => {
+    const w = budgetWorld(stopWith("done: parser. remaining: 3 adapters. recommend split")); const dir = tmpDir("core-tb-");
+    const r = await run(w, { dir, turnBudgets: TB });
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, OUTCOME_CODES.BUDGET_EXCEEDED);
+    assert.match(r.detail, /size S, 25 turns/); assert.match(r.detail, /remaining: 3 adapters/);
+    assert.equal(classifyNeedsHuman({ outcome: r.terminalReason, code: r.code }), "recoverable");
+    assert.deepEqual(r.turns, { size: "S", budget: 25, build: 28, total: 31, exceeded: true });
+    assert.deepEqual(w.seen.map((x) => x.turnMax), [0, 25, 5], "plan uncapped, build gets the budget, wrap-up the grant");
+    assert.equal(w.seen[2].resume, null, "the wrap-up is a fresh session");
+    assert.match(w.seen[2].prompt, /The engine froze \.forge-lean\/contract\.json/); assert.match(w.seen[2].prompt, /at most 5 turns/);
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && c.some((x) => /checkpoint after turn budget/.test(x))), "work checkpointed");
+    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes("remaining: 3 adapters")));
+    const log = readLog(dir, 7);
+    assert.ok(log.some((e) => e.event === "TURN_BUDGET_EXCEEDED" && e.size === "S" && e.budget === 25 && e.turns === 25 && e.grant === 5));
+    assert.deepEqual(log.find((e) => e.event === "RUN_TERMINAL").turns, r.turns);
+    assert.deepEqual(usage(dir).filter((e) => e.phase === "implement").map((e) => [e.trigger, e.restart_of ?? null]), [["plan", null], ["build", null], ["budget_wrapup", "build"]]);
+  });
+
+  it("a wrap-up that finishes flows on to merge; an overrun wrap-up stops with the diff stat as digest", async () => {
+    const fin = budgetWorld(null);
+    const r = await run(fin, { dir: tmpDir("core-tb-"), turnBudgets: TB });
+    assert.equal(r.terminalReason, "merged"); assert.equal(r.turns.exceeded, true); assert.equal(r.firstPass, true);
+    const over = budgetWorld(null, { overrun: true });
+    const o2 = await run(over, { dir: tmpDir("core-tb-"), turnBudgets: TB });
+    assert.equal(o2.code, OUTCOME_CODES.BUDGET_EXCEEDED); assert.match(o2.detail, /No builder digest; changes so far/);
+  });
+
+  it("size comes from a size: label over the contract; 0 disables the budget and nothing is capped", async () => {
+    const w = world({ labels: [{ name: "size:L" }] }); const caps = []; const orig = w.io.runner;
+    w.io.runner = async (c) => { if (c.role === "builder") caps.push(c.turnMax ?? 0); return orig(c); };
+    const r = await run(w, { dir: tmpDir("core-tb-"), turnBudgets: { L: 70 } });
+    assert.equal(r.terminalReason, "merged"); assert.deepEqual(caps, [0, 70]);
+    assert.deepEqual(r.turns, { size: "L", budget: 70, build: 3, total: 6, exceeded: false });
+    const off = world(); const offCaps = []; const o2 = off.io.runner;
+    off.io.runner = async (c) => { if (c.role === "builder") offCaps.push(c.turnMax ?? 0); return o2(c); };
+    const r2 = await run(off, { dir: tmpDir("core-tb-"), turnBudgets: { S: 0, M: 0, L: 0 } });
+    assert.equal(r2.terminalReason, "merged"); assert.ok(offCaps.every((x) => x === 0)); assert.equal(r2.turns.budget, 0);
   });
 });
 

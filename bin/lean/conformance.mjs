@@ -157,6 +157,29 @@ export function dropScopeValidates(contract) {
   return { contract: { ...contract, validate: contract.validate.filter((v) => !isPureScopeCheck(v?.command)) }, dropped };
 }
 
+/** #4404: how a deliver requirement is verified: in the lane (default) or by a job outside it (`evidence` names the job). */
+export const VERIFY_MODES = Object.freeze(["in_lane", "out_of_band"]);
+/**
+ * #4404: a requirement quote whose result is only measured outside the lane: Lighthouse, web vitals, field perf or a field
+ * or throttled device profile, a nightly or report-only suite, and the perf metric acronyms (matched case-sensitively below).
+ */
+export const OUT_OF_BAND_RE = /\blighthouse\b|\bweb[- ]vitals\b|\bfield[- ](?:perf\w*|profiles?|data|metrics?)\b|\bthrottled\b|\b(?:nightly|report[- ]only)\b[^.;\n]{0,40}?\b(?:suites?|jobs?|runs?|bench\w*|workflows?)\b/i;
+const PERF_METRIC_RE = /\b(?:LCP|INP|TTI|FCP|TTFB)\b/;
+export const isOutOfBand = (r) => r?.verify === "out_of_band";
+const tagsOutOfBand = (r) => r?.disposition === "deliver" && r?.verify == null && (OUT_OF_BAND_RE.test(String(r?.quote ?? "")) || PERF_METRIC_RE.test(String(r?.quote ?? "")));
+/**
+ * #4404: at freeze, every deliver requirement without a `verify` whose quote names an out-of-lane measurement becomes
+ * verify "out_of_band"; an explicit verify (in_lane too) is never overwritten. Returns {contract, tagged: [ids]}.
+ */
+export function tagOutOfBand(contract) {
+  if (!contract || typeof contract !== "object" || Array.isArray(contract) || !Array.isArray(contract.requirements)) return { contract, tagged: [] };
+  const tagged = contract.requirements.filter(tagsOutOfBand).map((r) => r.id);
+  if (!tagged.length) return { contract, tagged };
+  return { contract: { ...contract, requirements: contract.requirements.map((r) => (tagsOutOfBand(r) ? { ...r, verify: "out_of_band" } : r)) }, tagged };
+}
+/** #4404: the out-of-band requirements as [{id, quote, job}] (job = the requirement's evidence), for the PR body. */
+export const outOfBandRequirements = (contract) => (contract?.requirements ?? []).filter(isOutOfBand).map((r) => ({ id: r.id, quote: r.quote, job: String(r.evidence ?? "").trim() }));
+
 /** Option names whose value a tool writes (output, report, cache or temp dirs), not reads (#4325). */
 const WRITE_OPT = /^-(?:o|O|-?[\w-]*(?:out|dir|temp|tmp|cache|report|junit|xml|log)[\w-]*)$/i;
 const TMP_PATH = /\$(?:\{TMPDIR(?::-[^}]*)?\}|TMPDIR)\/([^\s"'`;|&<>()=]+)/g;
@@ -207,6 +230,9 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     if (!inIssue(r?.quote, issueText)) problems.push(`${id}: quote is not verbatim from the issue (at least ${MIN_QUOTE_CHARS} characters)`);
     if (TRACKED.includes(r?.disposition) && blank(r?.why)) problems.push(`${id}: ${r.disposition} needs a why`);
     if (r?.disposition === "not-applicable" && blank(r?.evidence)) problems.push(`${id}: not-applicable needs file:line evidence`);
+    if (r?.verify != null && !VERIFY_MODES.includes(r.verify)) problems.push(`${id}: verify must be one of ${VERIFY_MODES.join("|")}`);
+    if (isOutOfBand(r) && r?.disposition !== "deliver") problems.push(`${id}: verify out_of_band applies only to a deliver requirement`);
+    else if (isOutOfBand(r) && blank(r?.evidence)) problems.push(`${id}: verify out_of_band needs evidence naming the job or workflow that measures it (or set verify "in_lane" if this change can check it)`);
   }
   const dels = Array.isArray(c.deliverables) ? c.deliverables : [];
   if (reqs.some((r) => r?.disposition === "deliver") && !dels.length) problems.push("deliver requirements but no deliverables");
@@ -258,6 +284,7 @@ export function applyAmendments(frozen, amendments, issueText = null) {
       const r = { disposition: "deliver", ...a.requirement, amended: true };
       if (!DISPOSITIONS.includes(r.disposition)) { problems.push(`add-requirement ${r.id}: bad disposition ${r.disposition}`); continue; }
       if (TRACKED.includes(r.disposition) && blank(r.why)) r.why = a.why;
+      if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
       c.requirements.push(r);
       if (TRACKED.includes(r.disposition)) toTrack.push(r);
     } else if (TRACKED.includes(a.kind) && a.requirement) {
@@ -344,7 +371,11 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   for (const r of contract.requirements ?? []) {
     const s = st.find((x) => x?.id === r.id)?.status;
     if (TRACKED.includes(r.disposition)) continue; // typed deferrals are judged by the reviewer, then filed before the PR
-    if (r.disposition === "deliver") {
+    if (r.disposition === "deliver" && isOutOfBand(r)) {
+      // #4404: measured outside the lane; the builder delivers its instrumentation (budget test or bench committed, job configured)
+      const row = st.find((x) => x?.id === r.id);
+      if (row?.instrumented !== true && s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "requirement_unimplemented", detail: `${r.id} is verified out of band${r.evidence ? ` by ${r.evidence}` : ""} but reported "${s ?? "no status"}" without instrumented: true` });
+    } else if (r.disposition === "deliver") {
       if (s === "deferred" || s === "post-deploy") failures.push({ code: C.CONFORMANCE_UNTRACKED_DEFERRAL, kind: "untracked_deferral", detail: `${r.id} was contracted as deliver but reported "${s}" without a typed amendment` });
       else if (s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "requirement_unimplemented", detail: `${r.id} reported "${s ?? "no status"}"` });
     }
@@ -496,7 +527,7 @@ export function fillEngineRows(rv, { contract, changedFiles = [], repoFiles = []
   out.preserve = pres;
   if (Array.isArray(rv.requirements)) {
     out.requirements = rv.requirements.map((r) => {
-      if (r?.status !== "implemented") return r;
+      if (r?.status !== "implemented" && r?.instrumented !== true) return r;
       const e = evidenceOf(r.evidence, { changedFiles, repoFiles });
       return e ? { ...r, evidence: `${e.path}:${e.line}` } : r;
     });
@@ -524,7 +555,8 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
     const row = rows[0];
     if (!REQ_STATUS.includes(row.status)) { miss(r.id, `${r.id}: status invalid: ${row.status}`); continue; }
     if (TRACKED.includes(r.disposition) && typeof row.deferral_ok !== "boolean") miss(r.id, `${r.id}: a ${r.disposition} requirement needs deferral_ok true|false (is deferring it justified?)`);
-    if (row.status === "implemented") {
+    if (isOutOfBand(r) && typeof row.instrumented !== "boolean") miss(r.id, `${r.id}: a requirement verified out of band needs instrumented true|false (is its budget test or bench committed and its job configured?)`);
+    if (row.status === "implemented" || (isOutOfBand(r) && row.instrumented === true)) {
       const e = evidenceOf(row.evidence, { changedFiles, repoFiles });
       if (!e) miss(r.id, `${r.id}: implemented needs path:line evidence`);
       else if (!changedFiles.includes(e.path) && !pathExists(e.path)) miss(r.id, `${r.id}: evidence path ${e.path} does not exist`);
@@ -560,7 +592,10 @@ export function decide(raw, ctx) {
   for (const c of rv.issue_coverage) if (c.status !== "covered") f.push({ code: C.CONFORMANCE_OMISSION, detail: `issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
   for (const r of ctx.contract.requirements) {
     const row = rv.requirements.find((x) => x.id === r.id);
-    if (r.disposition === "deliver" && row.status !== "implemented") {
+    if (r.disposition === "deliver" && isOutOfBand(r)) {
+      // #4404: the measured result lives in the named job; only the instrumentation is judged here
+      if (row.instrumented !== true) f.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} verified out of band${r.evidence ? ` by ${r.evidence}` : ""}: instrumentation missing${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
+    } else if (r.disposition === "deliver" && row.status !== "implemented") {
       f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} ${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     }
     if (TRACKED.includes(r.disposition) && row.deferral_ok === false) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} ${r.disposition} is not justified${row.note ? `: ${row.note}` : ""}; implement it` });
@@ -616,7 +651,7 @@ export function reviewSkeleton(contract, changedFiles = [], ignore = []) {
   const reqs = contract?.requirements ?? [];
   return {
     issue_coverage: reqs.map((r) => ({ quote: r.quote, contract_ids: [r.id], status: "" })),
-    requirements: reqs.map((r) => ({ id: r.id, status: "", evidence: "", validated_by: "", ...(TRACKED.includes(r.disposition) ? { deferral_ok: null } : {}), note: "" })),
+    requirements: reqs.map((r) => ({ id: r.id, status: "", evidence: "", validated_by: "", ...(TRACKED.includes(r.disposition) ? { deferral_ok: null } : {}), ...(isOutOfBand(r) ? { verify: "out_of_band", job: r.evidence ?? "", instrumented: null } : {}), note: "" })),
     scope: reviewedFiles(changedFiles, ignore).map((f) => ({ file: f, authorized_by: authorizationOf(contract ?? {}, f) ?? "none", note: "" })),
     preserve: (contract?.preserve ?? []).map((x) => ({ id: x.id, status: "unverified", evidence: "" })),
     regressions: [], verdict: "", summary: "",
