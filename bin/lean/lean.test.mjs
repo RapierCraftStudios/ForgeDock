@@ -2402,7 +2402,9 @@ describe("orchestrate maintenance budget (#4197)", () => {
       await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...mk(), maintenance: null });
       assert.deepEqual(ran, [1]);
       // No maintenance scan without the budget; labels (host priority, #4191) ride on the body call, never a call of their own.
-      assert.ok(!calls.some((c) => c.startsWith("issue list") || c.endsWith("--json labels")), calls.join("\n"));
+      // #4399: the batch-start acceptance-probe sweep (`forge-probe` search) is not a maintenance scan.
+      assert.ok(calls.some((c) => c.startsWith("issue list") && c.includes("forge-probe")), calls.join("\n"));
+      assert.ok(!calls.some((c) => (c.startsWith("issue list") && !c.includes("forge-probe")) || c.endsWith("--json labels")), calls.join("\n"));
       ran.length = 0; calls.length = 0;
       const res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...mk(), maintenance: { share: 0.5, whenIdle: true, labels: ["maintenance"] } });
       assert.deepEqual(ran, [1, 9]);

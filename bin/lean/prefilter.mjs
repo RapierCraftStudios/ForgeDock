@@ -20,6 +20,7 @@ import { capComment, sanitizeMd, noComments } from "./render.mjs";
 import { PREFILTER_SYSTEM, prefilterPrompt, parsePrefilterVerdict } from "./prompts.mjs";
 import { isTrustedComment } from "../engine/phases.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
+import { probeResultOf } from "./probe.mjs";
 
 export const DEFAULT_PREFILTER_MODEL = "claude-haiku-5-5";
 export const PREFILTER_MARKER = "FORGE:PREFILTER";
@@ -82,11 +83,15 @@ export function flakyReason(iss, own = [bareLogin(APP_SLUG)]) {
   if (FLAKY_RE.test(`${iss.title ?? ""}\n${noComments(String(iss.body ?? ""), " ")}`)) return { reason: "flaky", why: "issue says the failure is intermittent" };
   if ((iss.labels ?? []).some((l) => String(l?.name ?? l).toLowerCase() === "flaky")) return { reason: "flaky", why: "flaky label" };
   const mine = new Set((own ?? []).map(bareLogin));
+  // #4399: the latest pipeline FORGE:PROBE result is a fail: the fix did not hold in production, so no already-fixed close
+  const probe = (iss.comments ?? []).filter((c) => probeResultOf(c?.body) && (trusted(c) || mine.has(bareLogin(loginOf(c))))).at(-1);
+  if (probe && probeResultOf(probe.body).result === "fail") return { reason: "probe-failed", why: "acceptance probe failed after promotion" };
   if ((iss.comments ?? []).some((c) => isMarked(c) && (trusted(c) || mine.has(bareLogin(loginOf(c)))))) return { reason: "reopened", why: "reopened after a pre-filter close" };
   return null;
 }
 /** The own logins, looked up only when an otherwise-untrusted marker comment needs them (no call for most issues). */
-const ownFor = async (iss, resolve) => ((iss.comments ?? []).some((c) => isMarked(c) && !trusted(c)) ? resolve() : undefined);
+const ownFor = async (iss, resolve) => ((iss.comments ?? []).some((c) => (isMarked(c) || probeResultOf(c?.body)) && !trusted(c)) ? resolve() : undefined);
+const selfResolver = (selfLogins, gh) => (typeof selfLogins === "function" ? selfLogins : selfLogins ? async () => selfLogins : () => ownLogins(gh));
 
 const PATH_RE = /(?:^|[\s`'"(\[])((?:\.{0,2}\/)?(?:[\w@.-]+\/)+[\w@.-]+\.[A-Za-z0-9]{1,8})(?::\d+(?:-\d+)?)?(?=$|[\s`'"),.:;\]])/gm;
 /** Repo-relative file paths the issue names (`dir/file.ext`, optionally `:line`); URLs and HTML comments are ignored. */
@@ -119,7 +124,7 @@ export async function collectSignals({ iss, repo, lane, io, cwd, selfLogins = nu
         const sha = latest.head_sha ?? "";
         // #4305: a workflow that failed and passed at the same SHA is flaky; the lookup is any branch (PR run vs push)
         // and only made when the issue itself gave no reason. An unreadable lookup throws: no CI signal.
-        const own = await ownFor(iss, typeof selfLogins === "function" ? selfLogins : selfLogins ? async () => selfLogins : () => ownLogins(io.gh));
+        const own = await ownFor(iss, selfResolver(selfLogins, io.gh));
         let skip = flakyReason(iss, own);
         const same = { reason: "same-sha", why: `failed and passed at ${sha.slice(0, 12)}` };
         if (!skip && sha && failed.head_sha === sha) skip = same;
@@ -292,6 +297,11 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
         try { await io.gh(["issue", "edit", String(issue), "-R", repo, "--remove-label", AWAITING_PROMOTION_LABEL]); } catch { /* best effort */ }
       }
       if (labelled) return { ...out, detail: `labelled, left to the lane (post-deploy gate: ${gate.state}${gate.detail ? `, ${gate.detail}` : ""})` };
+    }
+    // #4399: an issue reopened by a failed acceptance probe goes to a lane, never back to an already-fixed close
+    if ((iss.comments ?? []).some((c) => probeResultOf(c?.body)?.result === "fail")
+      && flakyReason({ comments: iss.comments }, await ownFor(iss, selfResolver(selfLogins, io.gh)))?.reason === "probe-failed") {
+      return { ...out, detail: "acceptance probe failed after promotion (FORGE:PROBE): no already-fixed close; lane" };
     }
     const sig = await collectSignals({ iss, repo, lane, io, cwd, selfLogins });
     const close = async (kind, body, detail) => {
