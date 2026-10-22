@@ -2281,6 +2281,22 @@ describe("runCliBackendAsync", () => {
     assert.equal(a.sessionId, "s-1"); assert.equal(a.text, "hello"); assert.equal(a.costUsd, 0.25);
   });
 
+  it("#4390: contextMax stops a stream session whose turn context reaches it, with aggregated usage and turns", async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const d = tmpDir("core-async-");
+    const line = (id, ctx) => JSON.stringify({ type: "assistant", message: { id, content: [{ type: "tool_use", name: "Bash", input: { command: "ls" } }], usage: { input_tokens: 10, output_tokens: 7, cache_read_input_tokens: ctx, cache_creation_input_tokens: 0 } } });
+    writeFileSync(`${d}/fake`, `#!/bin/sh\necho '${line("m1", 500)}'\necho '${line("m1", 500)}'\necho '${line("m2", 2000)}'\nexec sleep 30\n`); chmodSync(`${d}/fake`, 0o755);
+    const t0 = Date.now();
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake`, logger: { log() {} }, stream: true, contextMax: 1000 }), (e) => {
+      assert.equal(e.code, "CLI_CONTEXT"); assert.equal(e.context, 2010); assert.equal(e.turns, 2, "lines of one message count once");
+      assert.deepEqual(e.usage, { input_tokens: 20, output_tokens: 14, cache_creation_input_tokens: 0, cache_read_input_tokens: 2500 });
+      assert.equal(e.lastTool.name, "Bash");
+      return true;
+    });
+    assert.ok(Date.now() - t0 < 15000, "killed, not waited out");
+  });
+
   it("surfaces a failing CLI as the same CLI_BACKEND_FAILED error", async () => {
     const { writeFileSync, chmodSync } = await import("node:fs");
     const { runCliBackendAsync } = await import("../runner.mjs");
@@ -4664,6 +4680,54 @@ describe("#4362 attempt triggers", () => {
     assert.equal(r.terminalReason, "merged");
     assert.deepEqual(usage(dir).filter((e) => e.phase === "implement").map((e) => [e.attempt, e.trigger, e.restart_of ?? null]), [[1, "plan", null], [2, "timeout_restart", "build"]]);
     assert.equal(r.firstPass, true);
+  });
+
+  it("#4390: a build stopped at the context ceiling is checkpointed and restarted fresh from contract, diff and last validate", async () => {
+    const w = world({ dirty: true }); const dir = tmpDir("core-ctx-");
+    const orig = w.io.runner, seen = []; let n = 0, contractAtKill = null;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") seen.push({ contextMax: c.contextMax ?? 0, resume: c.resume ?? null, prompt: c.prompt });
+      if (c.role === "builder" && n++ === 1) {
+        contractAtKill = w.files[`${WT}/.forge-lean/contract.json`];
+        w.files[`${WT}/.forge-lean/self-check.json`] = '{"v":1,"ok":false,"validate":[{"id":"V1","rc":1}]}';
+        throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 130000, turns: 40, usage: { input_tokens: 40, output_tokens: 900, cache_read_input_tokens: 4000000, cache_creation_input_tokens: 5000 } });
+      }
+      return orig(c);
+    };
+    const r = await run(w, { dir, contextCeilingTokens: 120000 });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(seen[0].contextMax, 0, "the plan call runs uncapped");
+    assert.equal(seen[1].contextMax, 120000, "the build call carries the ceiling");
+    const restart = seen[2];
+    assert.equal(restart.resume, null, "the restart is a fresh session");
+    assert.match(restart.prompt, /The engine froze \.forge-lean\/contract\.json/);
+    assert.match(restart.prompt, /reached the 120000-token context ceiling/);
+    assert.match(restart.prompt, /<diff>\ndiff --git a\/src\/foo\.js/, "changed hunks carried");
+    assert.match(restart.prompt, /"validate":\[\{"id":"V1","rc":1\}\]/, "last validate result carried");
+    assert.equal(w.files[`${WT}/.forge-lean/contract.json`], contractAtKill, "contract unchanged by the restart");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && c.some((x) => /checkpoint after context ceiling/.test(x))), "dirty work checkpointed on the branch");
+    assert.ok(readLog(dir, 7).some((e) => e.event === "CONTEXT_CEILING" && e.context_tokens === 130000 && e.turns === 40));
+    const impl = usage(dir).filter((e) => e.phase === "implement");
+    assert.deepEqual(impl.map((e) => [e.attempt, e.trigger, e.restart_of ?? null]), [[1, "plan", null], [2, "build", null], [2, "context_restart", "build"]]);
+    assert.equal(impl[1].usage.cache_read_input_tokens, 4000000, "the stopped session's tokens are recorded");
+    assert.equal(r.firstPass, true);
+  });
+
+  it("#4390: context restarts are bounded; after three the call runs uncapped, and 0 disables the ceiling", async () => {
+    const w = world(); const dir = tmpDir("core-ctx-");
+    const orig = w.io.runner, caps = [];
+    w.io.runner = async (c) => {
+      if (c.role === "builder") caps.push(c.contextMax ?? 0);
+      if (c.role === "builder" && c.contextMax > 0) throw Object.assign(new Error("ctx"), { code: "CLI_CONTEXT", context: 999, turns: 1, usage: null });
+      return orig(c);
+    };
+    const r = await run(w, { dir, contextCeilingTokens: 500 });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(caps.slice(0, 5), [0, 500, 500, 500, 0]);
+    const off = world(); const offCaps = []; const o2 = off.io.runner;
+    off.io.runner = async (c) => { if (c.role === "builder") offCaps.push(c.contextMax ?? 0); return o2(c); };
+    assert.equal((await run(off, { dir: tmpDir("core-ctx-"), contextCeilingTokens: 0 })).terminalReason, "merged");
+    assert.ok(offCaps.every((x) => x === 0));
   });
 });
 

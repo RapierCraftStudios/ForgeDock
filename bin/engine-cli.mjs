@@ -218,6 +218,7 @@ export function readHeavy(cwd = process.cwd()) {
  * forge.yaml lane caps and CLI timeouts for the core path (#4115, #4112). The parser flattens one nested level, so
  * `pipeline:`/`engine:` then `lane_limits:` with `memory_max`/`cpu_quota` arrives as `memory_max`/`cpu_quota` (or flat
  * `lane_limits_memory_max`/`lane_limits_cpu_quota`). `engine.cli_idle_minutes` (default 15) and `engine.cli_max_minutes` (default 180).
+ * #4390: `engine.context_ceiling_tokens` (default 120000 in runCore; 0 = off).
  */
 export function readCoreLimits(cwd = process.cwd()) {
   try {
@@ -229,6 +230,7 @@ export function readCoreLimits(cwd = process.cwd()) {
       ...(mem || cpu ? { laneLimits: { ...(mem ? { memory_max: mem } : {}), ...(cpu ? { cpu_quota: cpu } : {}) } } : {}),
       ...(posNum(y.engine?.cli_idle_minutes) ? { cliIdleMinutes: posNum(y.engine.cli_idle_minutes) } : {}),
       ...(posNum(y.engine?.cli_max_minutes) ? { cliMaxMinutes: posNum(y.engine.cli_max_minutes) } : {}),
+      ...(/^\d+$/.test(String(y.engine?.context_ceiling_tokens ?? "").trim()) ? { contextCeilingTokens: Number(y.engine.context_ceiling_tokens) } : {}),
     };
   } catch { return {}; }
 }
@@ -1460,6 +1462,18 @@ export async function checkFromCli(argv, deps = {}) {
   const r = await pre.selfCheck({ contract, plan: { mode: verify.mode, commands: picked.commands, budgetMs: picked.budgetMs, perCommandMs: picked.perCommandMs },
     parallelism: pinned ? Number(par) : 1, now: deps.now,
     run: ({ command, timeoutMs, workers }) => runCommand({ command, cwd: repo, timeoutMs, env: pinned ? { FORGE_HOST_PARALLELISM: String(workers) } : null }) });
+  // #4390: each failure's full output goes to .forge-lean/logs/ (git-excluded); the table shows its tail, ids and the path
+  const failing = [...r.validate.map((x) => [x, `check-${x.id}`]), ...r.commands.map((x, i) => [x, `check-cmd${i + 1}`])].filter(([x]) => !x.status && x.rc !== 0);
+  if (failing.length) {
+    try {
+      await (deps.mkdir ?? ((p) => fsp.mkdir(p, { recursive: true })))(join(repo, pre.CHECK_LOG_DIR));
+      for (const [x, name] of failing) {
+        const rel = `${pre.CHECK_LOG_DIR}/${name.replace(/[^A-Za-z0-9_.-]/g, "_")}.log`;
+        await (deps.writeFile ?? ((p, t) => fsp.writeFile(p, t)))(join(repo, rel), String(x.output ?? ""));
+        x.logPath = rel;
+      }
+    } catch { /* no log files: the table still shows the tails */ }
+  }
   let fingerprint = null;
   try { fingerprint = await pre.worktreeFingerprint({ git, base }); } catch { /* recorded without one: the engine reads it as skipped */ }
   const strip = (x) => (x.status ? { ...(x.id ? { id: x.id } : {}), command: x.command, status: x.status } : { ...(x.id ? { id: x.id } : {}), command: x.command, rc: x.rc, ms: x.ms });

@@ -125,7 +125,24 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    failures, trigger)` with `precheck`/`structure`/`docs`/`enumerating`/`sequence`/`conformance`/`review`, CI verify
    `ci_red`, merge-time CI `merge_ci`, CI-unavailable fallback `ci_unavailable`, base-sync conflict `recovery`,
    reviewer `review`, split grouping `plan`; a CLI idle/timeout retry is `timeout_restart` with `restart_of` (the
-   replaced trigger). A source-scan test in `lean.test.mjs` fails on a call site without a known literal. The lane
+   replaced trigger); a context-ceiling restart (#4390, below) is `context_restart` with `restart_of`, and like
+   `timeout_restart` of the build it counts as reaching the build, not rework.
+   **Context ceiling** (#4390, forge.yaml `engine.context_ceiling_tokens`, default 120000, 0 = off; `readCoreLimits`
+   → runCore `contextCeilingTokens`): every builder call except `plan`/`contract_correction`/`block_correction` passes
+   `contextMax` through `makeLeanRunner` to `runCliBackendAsync`, which reads each stream-json assistant message's
+   `usage` (context = input + cache read + cache creation) and kills the session at the ceiling with `CLI_CONTEXT`
+   (`context`, `turns`, stream-aggregated `usage`, deduped by message id). `builder()` logs `CONTEXT_CEILING`, records
+   the stopped attempt's usage/turns as a `PHASE_ATTEMPT_USAGE` (so killed tokens stay in telemetry), runs
+   `checkpoint("context ceiling")` (commit + push, never loses work) and restarts a fresh session with the call's restart
+   prompt + `prompts.mjs` `contextRestartPrompt`: `git diff --stat` and the hunks against the lane base (`boundDiff`,
+   `RESTART_DIFF_MAX_BYTES` 40 KB) and the last `.forge-lean/self-check.json`; contract.json stays the authority on disk.
+   Context restarts do not use the single idle/timeout retry; after 3 in one call the call runs uncapped (loop guard).
+   **Quiet output** (#4390): `HOST_RULES` tells the builder to run tests quiet, read failures as `tail -40` + failing test
+   ids, read files by range and send output that may pass 8 KB to a `$TMPDIR` file. `precheck.mjs` `quietFailure`
+   (last 40 lines within the char share, failing-test-id lines by pytest/TAP/jest/vitest/go/cargo markers, `full log:`
+   path) formats each failure in `forgedock check`'s table and in the precheck fix prompt; the full output goes to
+   `.forge-lean/logs/` (`CHECK_LOG_DIR`: `check-<V#|cmdN>.log`, `precheck-<round>-<i>.log`). Pitfall learning still
+   reads the capped tail. A source-scan test in `lean.test.mjs` fails on a call site without a known literal. The lane
    result carries `firstPass` (`firstPassOf`: no `REWORK_TRIGGERS` attempt after the build; omitted when the lane never
    reached it) → orchestrate row `first_pass` → batch-report line `first-pass: P% (k/n lanes that reached the build)`
    (`formatFirstPassSummary`, after the precheck line). `forgedock stats` reads the same fields (`docs/STATS.md`).
