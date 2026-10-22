@@ -1104,6 +1104,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines } = await import("./lean/orchestrate.mjs");
   const { formatPrecheckSummary } = await import("./lean/precheck.mjs");
   const { formatFirstPassSummary } = await import("./lean/fixround.mjs");
+  const { formatDecompositionSummary } = await import("./lean/decompose.mjs");
   const { formatShadowSummary } = await import("./lean/conformance.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   const { makePrefilter, formatPrefilterSummary } = await import("./lean/prefilter.mjs");
@@ -1322,6 +1323,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (firstPassLine) report.push(firstPassLine);
   const shadowLine = formatShadowSummary(rows); // #4398
   if (shadowLine) report.push(shadowLine);
+  const decompLine = formatDecompositionSummary(rows); // #4396
+  if (decompLine) report.push(decompLine);
   let day = null;
   try { day = execBudget ? execBudget.dayTotals() : null; } catch { day = null; }
   const sbxLine = formatSandboxSummary(rows, { budget: execConf?.budget ?? null, day });

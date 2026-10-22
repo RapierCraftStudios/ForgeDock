@@ -430,7 +430,7 @@ describe("core work-on", () => {
 
   it("#4124 split-required files sub-issues with Parent / Depends-on lines and ends decomposed", async () => {
     const w = depWorld({ changed: [], result: { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [
-      { title: "part A", body: "do A" }, { title: "part B", body: "do B", depends_on: [0] }] } } }, {});
+      { title: "part A", body: "do A", paths: ["src/a"] }, { title: "part B", body: "do B", paths: ["src/b"], depends_on: [0] }] } } }, {});
     const r = await run(w);
     assert.equal(r.terminalReason, "decomposed");
     assert.deepEqual(r.subissues, [201, 202]);
@@ -438,11 +438,37 @@ describe("core work-on", () => {
     assert.match(bodyB, /^\*\*Parent\*\*: #7$/m);
     assert.match(bodyB, /^\*\*Depends on\*\*: #201$/m);
     assert.ok(w.labels.includes("decomposed"));
+    assert.equal(r.decomposition.independent, true);
+    assert.ok(w.comments.some((c) => /FORGE:DECOMPOSED/.test(c) && /Rationale: independent: yes; size: no estimate vs budget 25 files \/ 1500 lines -> oversize no/.test(c)));
     noNeedsHuman(w);
   });
 
+  it("#4396 a split of overlapping parts within the size budget is rejected once toward one checklist lane; repeated, it is needs-human", async () => {
+    const over = { status: "blocked", summary: "epic", block: { kind: "split-required", size: { files: 6, lines: 300 }, subissues: [
+      { title: "part A", body: "do A", paths: ["src/alerts"] }, { title: "part B", body: "do B", paths: ["src/alerts/routing.ts"] }] } };
+    const w = depWorld({ changed: [], result: over }, {});
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, "builder.block_untyped");
+    assert.equal(w.created.length, 0, "no sub-issue is filed");
+    const resumed = builders(w).filter((c) => c[2]);
+    assert.equal(resumed.length, 1);
+    assert.match(resumed[0][4], /split is not justified/);
+    assert.match(resumed[0][4], /ordered checklist/);
+  });
+
+  it("#4396 an oversize split of overlapping parts is admitted and records the size rationale", async () => {
+    const big = { status: "blocked", summary: "epic", block: { kind: "split-required", size: { files: 40, lines: 4000 }, subissues: [
+      { title: "part A", body: "do A", paths: ["src/alerts"] }, { title: "part B", body: "do B", paths: ["src/alerts/x.ts"] }] } };
+    const w = depWorld({ changed: [], result: big }, {});
+    const r = await run(w);
+    assert.equal(r.terminalReason, "decomposed");
+    assert.deepEqual({ independent: r.decomposition.independent, oversize: r.decomposition.oversize }, { independent: false, oversize: true });
+    assert.ok(w.comments.some((c) => /FORGE:DECOMPOSED/.test(c) && /size: 40 files, 4000 lines .* oversize yes/.test(c)));
+  });
+
   it("#4153 a split of a milestone issue files every sub-issue with the parent's milestone; no milestone passes none", async () => {
-    const split = { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A" }, { title: "part B", body: "do B", depends_on: [0] }] } };
+    const split = { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A", paths: ["src/a"] }, { title: "part B", body: "do B", paths: ["src/b"], depends_on: [0] }] } };
     const w = depWorld({ changed: [], result: split, milestone: "Remote MCP Server", branchesOnOrigin: ["staging", "milestone/remote-mcp-server"] }, {});
     const r = await run(w, { lane: null });
     assert.equal(r.terminalReason, "decomposed");
@@ -464,7 +490,7 @@ describe("core work-on", () => {
     noNeedsHuman(w);
   });
 
-  const splitBlock = { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A" }, { title: "part B", body: "do B", depends_on: [0] }] } };
+  const splitBlock = { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A", paths: ["src/a"] }, { title: "part B", body: "do B", paths: ["src/b"], depends_on: [0] }] } };
   it("#4337 without decomposition.close_parent a split keeps the parent open (opt-in, default false)", async () => {
     const w = depWorld({ changed: [], result: splitBlock }, {});
     assert.equal((await run(w)).terminalReason, "decomposed");
@@ -861,7 +887,7 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     };
     const quiet = {
       invalid: () => world({ changed: [], result: { status: "invalid", summary: "not a bug", evidence: ["src/foo.js:3 already guards null"], tests: [] } }),
-      decomposed: () => withDeps(world({ changed: [], result: { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A" }] } } }), {}),
+      decomposed: () => withDeps(world({ changed: [], result: { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [{ title: "part A", body: "do A", paths: ["src/a"] }] } } }), {}),
       "dependency-open": () => withDeps(world({ changed: [], result: { status: "blocked", summary: "needs #3", block: { kind: "dependency", issues: ["#3"] } } }), { 3: { state: "OPEN", labels: [] } }),
       "engine-error": () => failBuilder(world(), new Error("boom")),
       deferred: () => failBuilder(world(), limitErr),

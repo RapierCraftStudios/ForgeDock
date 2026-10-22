@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { reviewSkeleton } from "./conformance.mjs";
 import { seqNumber } from "./sequence.mjs";
 import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
+import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
 export const LEAN_DIR = ".forge-lean";
@@ -239,7 +240,7 @@ export const HUMAN_BLOCK_REASONS = Object.freeze(["credentials", "spend", "promo
 
 const BLOCK_RULES = `"blocked" needs a typed "block" in ${RESULT_FILE}, one of:
 - {"kind":"dependency","issues":[N]}: an open upstream issue must land first. The engine requeues this issue behind it.
-- {"kind":"split-required","subissues":[{"title":"","body":"","depends_on":[0]}]}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues).
+- {"kind":"split-required","subissues":[{"title":"","body":"","paths":["<file or dir it touches>"],"depends_on":[0]}],"size":{"files":N,"lines":N}}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues) only when every sub-issue's paths are disjoint from the others' or the whole change's size estimate exceeds ${SPLIT_MIN_FILES} files or ${SPLIT_MIN_LINES} lines; otherwise keep one lane: an ordered checklist in the contract with a validate per item.
 - {"kind":"human","why":"${HUMAN_BLOCK_REASONS.join("|")}"}: only an external action agents cannot take, or a product decision too critical for agents.
 "An upstream issue must land first", "needs a split" and "needs prod data that read-only monitoring can read" are never "human".`;
 
