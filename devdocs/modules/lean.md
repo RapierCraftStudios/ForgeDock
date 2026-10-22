@@ -162,6 +162,17 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `RECOVER_HOW` (continue from the checkpoint or a typed split-required block). Plan/corrections and fix rounds are not
    budgeted. The lane result and `RUN_TERMINAL` carry `turns: {size, budget, build, total, exceeded}`; orchestrate copies it
    to the row and the batch report adds `formatTurnSummary` (`turns by size: S n= p50 max/budget; … over budget: #N`).
+   **Lane profile** (#4395, `lean.mjs` section 2a + `callRunner`): every LLM session runs with
+   `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (profile `memory-off`). With forge.yaml `engine.lane_instructions`
+   (`engine-cli.mjs` `readLaneInstructions` → runCore `laneInstructions`) naming a repo-relative file in the lane
+   worktree (no `..`, non-empty, ≤ `LANE_INSTRUCTIONS_MAX_BYTES` 16 KB), profile `lane` also sets
+   `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and appends the file text to the system prompt of fresh tool-using sessions
+   (builder, reviewer, verifier; not resumes, not the noTools grouper). A bad file is a trajectory anomaly and falls back
+   to `memory-off`. `FORGEDOCK_FULL_SESSION=1` is profile `full`: nothing changes. No `--setting-sources`/`--bare`, so
+   user-scope hooks keep running; `laneEnv()` (validate/precheck/setup commands) never gets the switches. Measurement:
+   `runCliBackendAsync` returns `baselineTokens` (first stream assistant message's input + cache read + cache creation);
+   `makeLeanRunner` keeps it for fresh sessions only, and `PHASE_ATTEMPT_USAGE` / telemetry `phase_attempt` carry
+   `baseline_tokens` and `lane_profile`. Decision: `devdocs/decisions/4395-lane-profile.md`.
    **Quiet output** (#4390): `HOST_RULES` tells the builder to run tests quiet, read failures as `tail -40` + failing test
    ids, read files by range and send output that may pass 8 KB to a `$TMPDIR` file. `precheck.mjs` `quietFailure`
    (last 40 lines within the char share, failing-test-id lines by pytest/TAP/jest/vitest/go/cargo markers, `full log:`
@@ -1101,6 +1112,21 @@ The lane result carries `conformance {mode, would, risk}`. Orchestrate's row cop
 `formatShadowSummary`: shadow lanes, would-block share, false-block share (a would-block on an incomplete, inconsistent
 or unparseable review) and risk-enforced lanes. Rationale: `devdocs/decisions/4398-risk-path-enforce.md`. Cost: 0 LLM
 calls; a risk-enforced lane may spend the one builder resume that shadow would have skipped.
+
+## Entry 2026-10-23 — Lint scoped to changed packages; configured typescript.lint (#4381)
+
+`checks.mjs` printed `turbo run lint --filter=...[base]` (changed packages plus
+every dependent), so a change to an upstream package linted the whole repo.
+`scoping.mjs` `scopeMono` now scopes a turbo run whose tasks are all lint tasks
+(`lint`, `lint:*`, `*:lint`) to `--filter=[base]` (selector `turbo-changed`);
+typecheck/test/build keep `...[base]`. `checks.mjs` `configuredLint` reads
+`verification.commands.typescript.lint` from the trusted forge.yaml
+(`lib.mjs` `trustedForgeYaml`, extracted from `plan.mjs` `loadConfig`, forge#4040)
+and prints it (`configured: true`) in place of the discovered JS lint; Python
+checks are never replaced. `HOST_RULES` forbids dependency-closure lints (the
+configured lint wins because the builder runs what `checks.mjs` prints; filler
+words were trimmed to keep the implement prompt within its 1500-token budget). Legacy `validate.md` runs `typescript.lint` like
+`typescript.typecheck`.
 
 ## Entry 2026-10-23 — Independent adversarial verifier (#4397)
 
