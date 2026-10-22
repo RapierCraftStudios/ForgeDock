@@ -57,12 +57,12 @@ export const noToolFlags = (caps) => (caps?.strictMcp ? ["--tools", ""]
   : ["--disallowedTools", "Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]);
 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null }) => {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, maxTurns = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
     const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : [])];
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
-      args: [String(issue)], cwd, bin, model, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
+      args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
       logger: { log() {} },
       idleMs, maxMs, stream: idleMs > 0, control, onSpawn, wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default" };
