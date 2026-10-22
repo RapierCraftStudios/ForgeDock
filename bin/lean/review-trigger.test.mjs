@@ -61,6 +61,13 @@ describe("computeTrigger (#4273)", () => {
     assert.deepEqual(a, b);
     assert.deepEqual(codes(a), ["gate.ambiguous", "gate.failed", "risk_path", "risk_path"]);
   });
+  it("#4404 an out-of-band requirement forces the reviewer (only it judges instrumentation)", () => {
+    const t = clean({ contract: { requirements: [{ id: "R2", disposition: "deliver", verify: "out_of_band" }, { id: "R1", disposition: "deliver" }] } });
+    assert.equal(t.would_skip, false);
+    assert.deepEqual(t.reasons, [{ code: "gate.ambiguous", detail: "contract verifies R2 out of band (only the reviewer judges instrumentation)" }]);
+    assert.equal(clean({ contract: { requirements: [{ id: "R1", disposition: "deliver", verify: "in_lane" }] } }).would_skip, true);
+  });
+
   it("parseRiskPaths takes a comma string or a list", () => {
     assert.deepEqual(parseRiskPaths(" a/** , ,*.sql"), ["a/**", "*.sql"]);
     assert.deepEqual(parseRiskPaths(["x", " ", "y "]), ["x", "y"]);

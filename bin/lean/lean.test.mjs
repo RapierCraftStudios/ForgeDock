@@ -1192,6 +1192,26 @@ describe("conformance shadow mode (the default)", () => {
     assert.ok(builders(creep).some((b) => /changed outside the contract's deliverables: src\/other\.js/.test(b[4])));
   });
 
+  it("#4404 a Lighthouse requirement is tagged out_of_band at freeze; with instrumentation the lane merges and the PR body names the job", async () => {
+    const LH = "Lighthouse performance score >= 95 on the landing page.";
+    const body = `${ISSUE_BODY}\n- ${LH}`;
+    const c = { ...CONTRACT, requirements: [...CONTRACT.requirements, { id: "R2", quote: LH, disposition: "deliver", evidence: "lighthouse-nightly" }] };
+    const tagged = { ...c, requirements: [c.requirements[0], { ...c.requirements[1], verify: "out_of_band" }] };
+    const review = (instrumented) => conf({ issue_coverage: [...JSON.parse(conf().slice(8, -4)).issue_coverage, { quote: LH, contract_ids: ["R2"], status: "covered" }],
+      requirements: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3", validated_by: "V1" }, { id: "R2", status: "partial", evidence: instrumented ? "src/foo.js:3" : "", validated_by: "V1", instrumented, note: "measured by lighthouse-nightly" }] });
+    const dir = tmpDir("oob-");
+    const w = world({ contract: c, issueBodies: [body], claims: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3" }, { id: "R2", status: "partial", instrumented: true, evidence: "src/foo.js:3" }], reviews: [review(true)] });
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "CONTRACT_OUT_OF_BAND_TAGGED").map((e) => e.ids), [["R2"]]);
+    assert.ok(w.comments.find((x) => x.includes("FORGE:CONTRACT")).includes('"verify": "out_of_band"'), "the frozen contract carries the tag");
+    assert.ok(traj(w).some((t) => /R2 tagged verify out_of_band at contract freeze/.test(t)));
+    assert.match(w.prs[0][w.prs[0].indexOf("--body") + 1], /## Verified out of band\n- R2: Lighthouse performance score >= 95 on the landing page\. \(job `lighthouse-nightly`\)/);
+    // without the instrumentation it is still unimplemented
+    const no = world({ contract: tagged, issueBodies: [body], claims: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3" }, { id: "R2", status: "partial", instrumented: true, evidence: "src/foo.js:3" }], reviews: [review(false), review(false)] });
+    const r = await run(no);
+    assert.equal(r.code, "conformance.unimplemented");
+  });
+
   it("a failed validate fetches the lane and the resume says how to catch up with a moved base (merge, never rebase)", async () => {
     const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }], resumeValidation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
@@ -1743,6 +1763,17 @@ describe("comment templates", () => {
     assert.match(renderPrBody({ issue: 1, result: null }), /## Root cause\nnot reported[\s\S]*Closes #1$/);
   });
 
+  it("#4404 out-of-band requirements are listed in the PR body with their job and marked in the contract and review tables", () => {
+    const c = { requirements: [{ id: "R1", quote: "Fix the leak.", disposition: "deliver" }, { id: "R2", quote: "Lighthouse >= 95 on /home.", disposition: "deliver", verify: "out_of_band", evidence: "lighthouse-nightly" }], deliverables: [{ id: "D1", path: "a.js", change: "x", requirements: ["R1"] }] };
+    const body = renderPrBody({ issue: 4, contract: c, result: null });
+    assert.match(body, /## Verified out of band\n- R2: Lighthouse >= 95 on \/home\. \(job `lighthouse-nightly`\)\n\nCloses #4$/);
+    assert.doesNotMatch(renderPrBody({ issue: 4, contract: { ...c, requirements: [c.requirements[0]] }, result: null }), /out of band/);
+    assert.match(renderContract(c, "abc"), /\| R2 \| Lighthouse >= 95 on \/home\. \| deliver, verified out of band \(lighthouse-nightly\) \|/);
+    const rv = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "partial" }], issue_coverage: [], scope: [], preserve: [] };
+    assert.match(renderReview(rv, c), /\| R2 \| partial \(out of band: lighthouse-nightly\) \|/);
+    assert.match(renderReview(rv, c), /\| R1 \| implemented \|/);
+  });
+
   it("trajectory rows: merged, invalid, needs-human; missing rows read 'not reached'", () => {
     const base = { issue: 9, validate: ["CONFIRMED", "2 evidence item(s)"], plan: "posted", implement: ["2 file(s)", "b"], review: ["PASS", "1 round"], pr: ["#5", "opened"], merge: ["all", "merged at abc"], close: ["issue closed (completed)", "label workflow:merged"], decisions: ["d1"], anomalies: [], usage: "cost $1" };
     const m = renderTrajectory(base);
@@ -1868,6 +1899,10 @@ describe("prompts", () => {
   it("the conformance reviewer asks for rows, not an opinion, and stays within budget", () => {
     assert.ok(approxTokens(REVIEWER_SYSTEM) <= 1500);
     for (const k of ["issue_coverage", "requirements", "scope", "preserve", "regressions", "engine computes the verdict", "reply without rows is rejected", "untrusted data"]) assert.ok(REVIEWER_SYSTEM.includes(k), k);
+    // #4404: out-of-band requirements are judged by their instrumentation, in the reviewer, the shared rubric and the plan prompt
+    assert.match(REVIEWER_SYSTEM, /out_of_band row[\s\S]*instrumented: true only when its budget test or bench is committed/);
+    assert.match(REVIEW_RUBRIC, /verified out of band is delivered by its instrumentation/);
+    assert.match(builderPlanPrompt(7), /"verify":"out_of_band" with "evidence" naming the job or workflow/);
     assert.doesNotMatch(REVIEWER_SYSTEM, /Does this change fix the issue as described\?/);
   });
 

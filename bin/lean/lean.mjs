@@ -13,7 +13,7 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
-import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, dropScopeValidates, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
+import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths } from "./prefilter.mjs";
 import { preflightProbes, preflightProblems } from "./preflight.mjs";
@@ -1193,7 +1193,13 @@ export async function runCore(o) {
             const note = `Scope-check validate ${d.dropped.map((x) => x.id).join(", ")} dropped at contract freeze: the engine's scope gate (deliverables plus typed amendments) enforces scope`;
             if (!T.decisions.includes(note)) T.decisions.push(note);
           }
-          return d.contract;
+          const o = tagOutOfBand(d.contract); // #4404: a requirement measured outside the lane is judged by its instrumentation
+          if (o.tagged.length) {
+            ev({ event: "CONTRACT_OUT_OF_BAND_TAGGED", ids: o.tagged });
+            const note = `Requirement(s) ${o.tagged.join(", ")} tagged verify out_of_band at contract freeze (measured by a job outside the lane)`;
+            if (!T.decisions.includes(note)) T.decisions.push(note);
+          }
+          return o.contract;
         };
         let contract = dropScope(await readContract());
         await refreshIssue("contract validation");

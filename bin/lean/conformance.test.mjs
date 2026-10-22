@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, VERIFY_MODES } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -488,5 +488,76 @@ describe("#4353 the engine's scope gate is the only scope authority: pure scope 
     const pc = precheck({ contract: applyAmendments(frozen, amendments).contract, frozen, changedFiles: ["src/tool.js", "docs/tool.md"], validateRuns: { V2: { rc: 1, output: "" } },
       result: { requirements: [{ id: "R1", status: "implemented" }], validation: [{ id: "V1", exit: 0 }, { id: "V2", exit: 1 }], amendments } });
     assert.equal(pc.ok, true); assert.deepEqual(pc.superseded, [{ id: "V2", files: ["docs/tool.md"] }]);
+  });
+});
+
+describe("#4404 verified out of band: a requirement measured outside the lane is judged by its instrumentation", () => {
+  const LH = "Lighthouse performance score >= 95 on the landing page.";
+  const TTI = "Interactive < 1 s on a throttled mid-range Android profile.";
+  const NIGHTLY = "The nightly perf suite reports the 1,000-event render time.";
+  const OOB_ISSUE = `${ISSUE}\n- [ ] ${LH}\n- [ ] ${TTI}\n- [ ] ${NIGHTLY}\n- [ ] Field perf stays within budget.`;
+  const k = { ...C, requirements: [...C.requirements, { id: "R3", quote: LH, disposition: "deliver", evidence: "lighthouse-nightly" }] };
+  const tagged = tagOutOfBand(k).contract;
+  const oobRow = { id: "R3", status: "partial", evidence: "web/perf/budget.test.js:4", validated_by: "V1", verify: "out_of_band", job: "lighthouse-nightly", instrumented: true };
+  const oobCtx = { ...ctx, contract: tagged, changedFiles: [...files, "web/perf/budget.test.js"], issueText: OOB_ISSUE };
+  const withRow = (r) => ({ ...good, requirements: [...good.requirements, r], issue_coverage: [...good.issue_coverage, { quote: LH, status: "covered" }] });
+
+  it("a contract requirement mentioning Lighthouse or field perf is tagged out_of_band at plan time", () => {
+    const c = { ...C, requirements: [...C.requirements,
+      { id: "R3", quote: LH, disposition: "deliver" }, { id: "R4", quote: "Field perf stays within budget.", disposition: "deliver" },
+      { id: "R5", quote: TTI, disposition: "deliver" }, { id: "R6", quote: NIGHTLY, disposition: "deliver" },
+      { id: "R7", quote: LH, disposition: "deliver", verify: "in_lane" }, { id: "R8", quote: LH, disposition: "post-deploy", why: "w" }] };
+    const t = tagOutOfBand(c);
+    assert.deepEqual(t.tagged, ["R3", "R4", "R5", "R6"]);
+    assert.deepEqual(t.contract.requirements.filter(isOutOfBand).map((r) => r.id), ["R3", "R4", "R5", "R6"]);
+    assert.equal(t.contract.requirements.find((r) => r.id === "R7").verify, "in_lane"); // an explicit verify wins
+    assert.equal(t.contract.requirements.find((r) => r.id === "R8").verify, undefined); // only deliver requirements
+    assert.equal(c.requirements[2].verify, undefined); // the input contract is not mutated
+    assert.equal(tagOutOfBand(C).contract, C); assert.deepEqual(tagOutOfBand(C).tagged, []);
+    for (const x of [null, [], "x", {}]) assert.deepEqual(tagOutOfBand(x), { contract: x, tagged: [] });
+    assert.deepEqual(VERIFY_MODES, ["in_lane", "out_of_band"]);
+  });
+
+  it("an add-requirement amendment is tagged the same way", () => {
+    const a = applyAmendments(C, [{ kind: "add-requirement", requirement: { id: "R9", quote: LH }, why: "missed" }], OOB_ISSUE);
+    assert.equal(a.contract.requirements.find((r) => r.id === "R9").verify, "out_of_band");
+  });
+
+  it("validateContract: an out-of-band requirement names its job; verify takes only known modes and deliver", () => {
+    assert.deepEqual(validateContract(tagged, OOB_ISSUE), { ok: true, problems: [] });
+    const noJob = tagOutOfBand({ ...C, requirements: [...C.requirements, { id: "R3", quote: LH, disposition: "deliver" }] }).contract;
+    assert.match(validateContract(noJob, OOB_ISSUE).problems.join("\n"), /R3: verify out_of_band needs evidence naming the job/);
+    const bad = { ...C, requirements: [{ ...C.requirements[0], verify: "later" }, { ...C.requirements[1], disposition: "defer", why: "w", verify: "out_of_band", evidence: "j" }] };
+    const p = validateContract(bad, OOB_ISSUE).problems.join("\n");
+    assert.match(p, /R1: verify must be one of in_lane\|out_of_band/); assert.match(p, /R2: verify out_of_band applies only to a deliver requirement/);
+  });
+
+  it("with the instrumentation present the reviewer passes the requirement; without it it is still unimplemented", () => {
+    assert.equal(decide(withRow(oobRow), oobCtx).state, "conforms");
+    const missing = decide(withRow({ ...oobRow, status: "missing", instrumented: false, evidence: "" }), oobCtx);
+    assert.equal(missing.state, "nonconforming"); assert.deepEqual(codes(missing), ["conformance.unimplemented"]);
+    assert.match(missing.failures[0].detail, /R3 verified out of band by lighthouse-nightly: instrumentation missing/);
+    // instrumented is required on an out-of-band row, and instrumented true needs path:line evidence
+    assert.deepEqual(checkCompleteness(withRow({ ...oobRow, instrumented: null }), oobCtx).missing, ["R3"]);
+    assert.deepEqual(checkCompleteness(withRow({ ...oobRow, evidence: "" }), oobCtx).missing, ["R3"]);
+    // the same partial row on an in-lane requirement still fails (unchanged behaviour)
+    const inLane = { ...oobCtx, contract: { ...tagged, requirements: tagged.requirements.map((r) => (r.id === "R3" ? { ...r, verify: "in_lane" } : r)) } };
+    assert.deepEqual(codes(decide(withRow(oobRow), inLane)), ["conformance.unimplemented"]);
+  });
+
+  it("precheck: the builder's instrumented out-of-band row is not unimplemented; a bare partial one is", () => {
+    const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    const ok = { requirements: [...res.requirements, { id: "R3", status: "partial", instrumented: true }], validation: res.validation };
+    assert.equal(precheck({ contract: tagged, result: ok, changedFiles: files }).ok, true);
+    const no = { requirements: [...res.requirements, { id: "R3", status: "partial" }], validation: res.validation };
+    const f = precheck({ contract: tagged, result: no, changedFiles: files }).failures;
+    assert.deepEqual(f.map((x) => x.kind), ["requirement_unimplemented"]); assert.match(f[0].detail, /R3 is verified out of band by lighthouse-nightly/);
+  });
+
+  it("the skeleton row carries the job and an empty instrumented; outOfBandRequirements lists the job", () => {
+    const sk = reviewSkeleton(tagged, files);
+    assert.deepEqual(sk.requirements.find((r) => r.id === "R3"), { id: "R3", status: "", evidence: "", validated_by: "", verify: "out_of_band", job: "lighthouse-nightly", instrumented: null, note: "" });
+    assert.equal("instrumented" in sk.requirements[0], false);
+    assert.deepEqual(outOfBandRequirements(tagged), [{ id: "R3", quote: LH, job: "lighthouse-nightly" }]);
   });
 });

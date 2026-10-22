@@ -69,6 +69,8 @@ export function computeTrigger({ files = [], riskPaths = [], structure = null, h
   if (gates.ciFellBack) add("gate.failed", "CI verification unavailable (local fallback)");
   const tracked = (contract?.requirements ?? []).filter((r) => r?.disposition === "defer" || r?.disposition === "post-deploy").map((r) => r.id);
   if (tracked.length) add("gate.ambiguous", `contract defers ${tracked.sort().join(", ")} (only the reviewer judges deferrals)`);
+  const oob = (contract?.requirements ?? []).filter((r) => r?.verify === "out_of_band").map((r) => r.id);
+  if (oob.length) add("gate.ambiguous", `contract verifies ${oob.sort().join(", ")} out of band (only the reviewer judges instrumentation)`);
   reasons.sort((a, b) => a.code.localeCompare(b.code) || a.detail.localeCompare(b.detail));
   return { would_skip: reasons.length === 0, reasons };
 }
