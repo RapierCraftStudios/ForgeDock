@@ -1145,6 +1145,31 @@ hot spots, decisions, conventions, baselines. Each line carries its provenance (
 follow, all under `facts` (section "Facts from earlier lanes and repo facts"). Cost: 0 LLM calls, about 60 prompt
 tokens, one comment per lane, and no extra GitHub read per PR.
 
+## Entry 2026-10-23 — Resume digest and populated context-pack sources (#4400)
+
+Resumed and recovery lanes used to re-orient from scratch. `textOf` keeps every `<!-- FORGE:` comment out of the quotable
+issue text (#4297), so the last run's own records never reached the builder. `resume.mjs` (pure) adds
+`buildResumeDigest`, a bounded digest (`RESUME_DIGEST_BYTES`, 2048 bytes) built from structured records only. It holds
+the RUN_START `FORGE:STATE` end reason, `terminalCode` and `failureClasses`, kept only when they are outcome codes. The
+lease write keeps them, so they are read before this run ends. It adds the first line of the newest trusted
+`FORGE:NEEDS_HUMAN`/`FORGE:FIX_CI` and the newest trusted `FORGE:FACTS` baselines (validate command + exit, mapped to the
+contract's `V` ids). It lists the frozen contract's `deliver` requirements and the branch's changed files, and ends with
+"start from this state: do not re-derive it". Whole lines drop from the end to fit the cap, so the end reason and
+validate results survive longest. Text is one-lined, comments are stripped and `<` is escaped. `runCore` builds the
+digest once when the lane is resumed, salvaged or a recovery pass, unless `engine.context_pack` is `off`. It is the
+lane's own state, not the shadow-gated hint pack. The digest is appended to the plan rerun prompt, to the implement
+prompt on the frozen-contract path (after the recovery note) and to the context-restart prompt. It never goes into
+`issueText`. A `RESUME_DIGEST {bytes, files, validates, reason}` event and a trajectory decision record it, so recovery
+implement attempts can be compared with first runs.
+
+Why the pack's `facts` source was 0 in all 10 AlterLab lanes on 2026-10-22: (a) there was no `FORGE:FACTS` source before
+#4401; (b) the repo-fact pointers (`.forge/repo-facts.json`, `.forge/test-map.json`) were only looked up in the lane
+worktree, and these untracked caches never exist there. `gatherContextFacts` now takes `checkout` (the main checkout) as
+the fallback, like `factsPath([wt, cwd])` for the builder; the cache key is unchanged. `ledger`, and facts from merged
+PRs, still depend on the issue body naming file paths (`namedPaths`). `attempts` is 0 on a first run by design.
+The `on` vs `shadow` A/B (turns, cache-read and rework per merge, via `forgedock stats --context-ab`) runs after deploy.
+Cost: 0 LLM calls; one `git diff --name-only` on a resumed lane; at most ~500 prompt tokens.
+
 ## Acceptance probes (#4399)
 
 `probe.mjs` checks a production outcome after promotion, deterministically (0 LLM calls, no lane). An issue declares a

@@ -429,3 +429,22 @@ describe("FORGE:FACTS in the context pack (#4401)", () => {
     assert.deepEqual([none.lanes, none.facts], [[], [".forge/test-map.json"]]);
   });
 });
+
+describe("populated pack sources (#4400)", () => {
+  it("repo-fact files that exist only in the main checkout are listed; the worktree alone (the old lookup) lists none", async () => {
+    const io = (dir) => ({ ...fakes().io, exists: async (p) => p.startsWith(`${dir}/`) && (p.endsWith(".forge/repo-facts.json") || p.endsWith(".forge/test-map.json")) });
+    const inCheckout = await gather({ io: io("/main") }, { sources: ["facts"], checkout: "/main" });
+    assert.deepEqual(inCheckout.facts, [".forge/repo-facts.json", ".forge/test-map.json"]);
+    const worktreeOnly = await gather({ io: io("/main") }, { sources: ["facts"] });
+    assert.deepEqual(worktreeOnly.facts, []);
+    const both = await gather({ io: { ...fakes().io, exists: async (p) => p.endsWith(".forge/repo-facts.json") } }, { sources: ["facts"], checkout: "/main" });
+    assert.deepEqual(both.facts, [".forge/repo-facts.json"], "a file in both dirs is listed once");
+  });
+
+  it("an issue with a prior run, a ledger PR on its file and a FORGE:FACTS record has non-zero attempts, ledger and facts", async () => {
+    const rec = `<!-- ${FACTS_MARKER} -->\n${renderFactsRecord(normaliseFacts({ facts: { rejected: [{ approach: "retry only", why: "hid the race" }] } }, { files: ["bin/lean/context.mjs"] }))}`;
+    const f = fakes({ facts33: [{ id: 8, body: rec, ...BOT }] });
+    const p = compileContextPack(await gather(f, { checkout: "/main" }));
+    for (const s of ["attempts", "ledger", "facts"]) assert.ok(p.sources[s] > 0, `${s} is zero: ${JSON.stringify(p.sources)}`);
+  });
+});
