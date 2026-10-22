@@ -162,6 +162,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
    (`max_rounds`, then `ci.red`), slow → `ci-pending`, unavailable → local fallback;
    docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI.
+   Push-check mode gates on `ciGate` (`verify.checks` > required checks under
+   `merge_wait: required` > all) at the latest attempt per name (`latestPerName`, check-run
+   id); a no-commit fix round reruns the failed jobs once (`rerunFailedOnce`,
+   `CI_FLAKE_RERUN`) before `ci.red` (#4387).
    **Validate commands vs a moving base**: `validateContract` rejects a validate
    command whose `git diff` compares against a remote `origin/<x>` tip rather than the
    merge base (`movingBaseDiff`), so the planner fixes it in the one contract
@@ -937,3 +941,14 @@ docs, enumerating, sequence, CI pass or a merge for `ci_red`/`merge_ci`, conform
 `pitfalls_matched`. `renderContextRecord` drops the pitfalls section (`publicPackText`) and shows only the count, so no
 pitfall text is posted. `forgedock stats` (local logs) prints the first-pass rate with and without matching pitfalls.
 Cost: 0 LLM calls; one local read and up to a few appends per lane; ≤ ~1 KB of pack bytes when mode is `on`.
+
+## Entry 2026-10-23 — CI-verify gate, flake rerun, parked dependencies (#4387)
+
+`verify.mjs`: `parseVerify` `checks`; `ciGate` (verify.checks, else `io.requiredChecks(lane)` under `merge_wait:
+required`, else null = all); `latestPerName` (highest check-run id; no ids → worst state); `runCiVerify` `gate` (missing
+gate names waited on for the grace period, none reported → all checks) and `rerunOf` (`rerunTarget`: older attempts count
+pending; workflow mode waits for the run's next `attempt`). `lean.mjs` `ciVerify`: a no-commit fix round calls
+`rerunFailedOnce` (`effects.mjs` `rerunFailedJobs`, `gh run rerun --failed`), logs `CI_FLAKE_RERUN`, continues on green,
+else `ci.red`; merge-time rounds unchanged. `orchestrate.mjs`: `issueLabels` seam (engine-cli `labelNames`, fail-open):
+a `dependency-open` naming a `needs-human` dependency (batch result or out-of-set label) ends `skipped (dependency #N
+needs-human)` without pulling it in.

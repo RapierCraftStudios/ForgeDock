@@ -1293,6 +1293,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       }),
       // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
+      // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
+      issueLabels: labelNames,
       // #4318: a dispatcher signal relabels the queued recoveries before it exits (the daemon resumes its batches instead)
       ...(daemon ? {} : { onExit: (fn) => { exitRelabel = fn; } }),
       conflicting: deps.conflicting ?? (async (_n, pr) => {
