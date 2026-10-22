@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, dropScopeValidates, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths } from "./prefilter.mjs";
-import { preflightProbes, preflightProblems } from "./preflight.mjs";
+import { preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { repoKey } from "../runner.mjs";
@@ -25,7 +25,7 @@ import { readTestMap, readTestMapAtRef, factsPath, TEST_MAP_FILE } from "./testm
 import { runChecks, planPrecheck, worktreeFingerprint, selfCheckState, CHECK_PLAN_FILE, SELF_CHECK_FILE } from "./precheck.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
-import { computeTrigger, TRIGGER_MODES } from "./review-trigger.mjs";
+import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt } from "./prompts.mjs";
 import { freshFix, issueSummary, firstPassOf } from "./fixround.mjs";
 import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog } from "./pitfalls.mjs";
@@ -80,6 +80,24 @@ export const CI_NOT_STARTED_GRACE_MS = 10 * 60 * 1000;
 export const contractHash = (text) => createHash("sha256").update(String(text)).digest("hex").slice(0, 12);
 
 /**
+ * #4385: siblings that declare a shared file (a barrel, union type, shared fixture, index doc) would conflict after the
+ * first merges; each later sub-issue gets an edge to every earlier one it shares a file with and does not already reach
+ * through its dependsOn. Mutates dependsOn; returns the added edges [{from, to, files}]. No `files`: no edge.
+ */
+export function serializeShared(subs) {
+  const added = [], reach = [];
+  subs.forEach((s, j) => {
+    for (let i = j - 1; i >= 0; i--) { // nearest first: a chain, not a fan-in
+      const shared = (s.files ?? []).filter((f) => (subs[i].files ?? []).includes(f));
+      const r = new Set(s.dependsOn.flatMap((k) => [k, ...reach[k]]));
+      if (shared.length && !r.has(i)) { s.dependsOn.push(i); added.push({ from: j, to: i, files: shared }); }
+    }
+    reach[j] = [...new Set(s.dependsOn.flatMap((k) => [k, ...reach[k]]))];
+  });
+  return added;
+}
+
+/**
  * Typed builder block (#4124), from result.json `block`. Returns {kind:"dependency", issues} | {kind:"split", subissues}
  * | {kind:"human", why} | {kind:"untyped", problem}. Only `human` with an allowed reason may end as needs-human.
  */
@@ -94,8 +112,10 @@ export function classifyBlock(result, issue) {
     const subs = (Array.isArray(b.subissues) ? b.subissues : []).filter((x) => x && typeof x.title === "string" && x.title.trim() && typeof x.body === "string");
     if (!subs.length) return { kind: "untyped", problem: "the split-required block lists no sub-issues with a title and body" };
     if (subs.length > MAX_SUBISSUES) return { kind: "untyped", problem: `the split-required block lists ${subs.length} sub-issues (at most ${MAX_SUBISSUES})` };
-    return { kind: "split", subissues: subs.map((x, i) => ({ title: x.title.trim(), body: x.body,
-      dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))] })) };
+    const subissues = subs.map((x, i) => ({ title: x.title.trim(), body: x.body,
+      dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))],
+      ...(Array.isArray(x.files) ? { files: [...new Set(x.files.filter((f) => typeof f === "string").map((f) => f.trim().replace(/^\.?\/+/, "")).filter(Boolean))] } : {}) }));
+    return { kind: "split", subissues, serialized: serializeShared(subissues) };
   }
   if (b.kind === "human") {
     return HUMAN_BLOCK_REASONS.includes(b.why) ? { kind: "human", why: b.why }
@@ -227,6 +247,7 @@ export async function runCore(o) {
   let ctxLane = null; // forge#4275: rerun | child | first, set once the issue is read
   let pitMatched = null; // #4375: pitfalls in the pack that match the issue's files; null when no pack was compiled
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
+  let riskEnforced = null, gateRan = false; // #4398: declared risk paths that made a shadow lane enforce (sticky); the gate ran
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
   let recoverUnlabelled = false; // #4297: the recovery lane removed needs-human; a final ci-pending (or needsHuman()) puts it back
   const runId = `${issue}-${t0}`;
@@ -341,7 +362,7 @@ export async function runCore(o) {
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}),
-      conformance_mode: conformance === "enforce" ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}),
+      conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}),
       context_pack: ctxCfg.mode, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}) }; // forge#4275: the on/off A/B groups runs by these
     ev(term);
     await emit(term);
@@ -360,7 +381,7 @@ export async function runCore(o) {
       try { await ghc(["issue", "edit", String(issue), "-R", repo, "--remove-label", wf]); } catch { /* best effort */ }
     }
     if (["merged", "invalid", "needs-human"].includes(reason)) {
-      if (reason === "merged") T.close = ["issue closed (completed)", "label workflow:merged"];
+      if (reason === "merged") T.close = [extra.close === "partial" ? "issue closed (partial)" : "issue closed (completed)", "label workflow:merged"];
       else if (reason === "invalid") T.close = ["issue closed (not planned)", "label workflow:invalid"];
       else { T.close = ["left open", "label needs-human"]; T.anomalies.push(`needs-human: ${String(detail).split("\n")[0].slice(0, 300)}`); }
       try { await post(["FORGE:TRAJECTORY", REGISTER_MARKER], renderTrajectory({ ...T, usage: usageLine() })); } catch { /* best effort */ }
@@ -368,7 +389,8 @@ export async function runCore(o) {
     await releaseLease(reason, code);
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0,
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
-      ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...extra };
+      ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}),
+      ...(gateRan ? { conformance: { mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", would: shadowWould, risk: Boolean(riskEnforced) } } : {}), ...extra };
     return done;
   }
   /** #4297/#4316: a recovery lane that ended unmerged keeps needs-human with this evidence (shared text in render.mjs). */
@@ -666,6 +688,7 @@ export async function runCore(o) {
         }
       } catch (e) { return await finish("engine-error", `filing sub-issues failed after ${refs(filed) || "none"}: ${e?.message ?? e}`, { subissues: filed }); }
       T.decisions.push(`Builder block: split into ${refs(filed)}`);
+      for (const e of b.serialized ?? []) T.decisions.push(`Serialised sub-issue #${filed[e.from]} behind #${filed[e.to]}: both edit ${e.files.slice(0, 5).join(", ")} (#4385)`);
       let marked = false;
       try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\n${s}`); marked = true; } catch { /* best effort */ }
       // #4337: with decomposition.close_parent, the tracker closes only once its trail and label exist: dependents then wait on the sub-issues, not on it.
@@ -1022,20 +1045,37 @@ export async function runCore(o) {
       }
       T.decisions.push(`Tracked ${reqs.map((r) => `${r.id} (${r.disposition})`).join(", ")} in ${[...new Set(reqs.map((r) => r.tracked))].join(", ")} (${why})`);
     }
-    /** #4328: probe the host for the tools and modules a contract's validate commands need; the misses, [] without io.probeCommand. */
+    /**
+     * #4328: probe the host for the tools and modules a contract's validate commands need; #4393: then flag `$NAME`s the lane
+     * env leaves empty and run each remaining command once on the base worktree (io.preflightRun). The misses; [] without either hook.
+     */
     async function preflightValidates(contract) {
-      if (!io.probeCommand || !contract || typeof contract !== "object") return [];
+      if ((!io.probeCommand && !io.preflightRun) || !contract || typeof contract !== "object") return [];
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
-      const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
-      if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
       const env = laneEnv(), missing = new Set(), misses = []; // #4325: the env the validate commands run with
-      for (const p of probes) {
-        if (p.needs && missing.has(p.needs)) continue;
-        let r;
-        try { r = await io.probeCommand({ command: p.probe, cwd: wt, timeoutMs: 15000, env }); } catch { r = { rc: 127 }; }
-        if (r?.rc === 0 || r?.rc === 124) continue; // a timed-out probe is no evidence either way
-        if (p.kind === "command") missing.add(p.tool);
-        misses.push(p);
+      if (io.probeCommand) {
+        const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
+        if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
+        for (const p of probes) {
+          if (p.needs && missing.has(p.needs)) continue;
+          let r;
+          try { r = await io.probeCommand({ command: p.probe, cwd: wt, timeoutMs: 15000, env }); } catch { r = { rc: 127 }; }
+          if (r?.rc === 0 || r?.rc === 124) continue; // a timed-out probe is no evidence either way
+          if (p.kind === "command") missing.add(p.tool);
+          misses.push({ ...p, source: "probe" });
+        }
+      }
+      const fullEnv = { ...process.env, ...env };
+      for (const v of Array.isArray(contract.validate) ? contract.validate : []) {
+        if (v?.id && typeof v.command === "string") for (const name of unsetEnvVars(v.command, fullEnv)) misses.push({ ids: [v.id], tool: name, kind: "env-var", source: "env" });
+      }
+      if (io.preflightRun) {
+        const skipIds = [...new Set(misses.flatMap((m) => m.ids))];
+        const run = (a) => heavyStep("precheck", () => io.preflightRun({ ...a, cwd: wt }));
+        const r = await runPreflight({ contract, run, git, env, skipIds, now, ...knownToContract(contract, files) });
+        misses.push(...r.misses);
+        if (r.skipped.length) T.anomalies.push(`Validate preflight run budget spent; ${r.skipped.join(", ")} not run on base`);
+        if (r.reverted.length) T.anomalies.push(`Validate preflight reverted ${r.reverted.length} path(s) its runs changed: ${r.reverted.slice(0, 5).join(", ")}`);
       }
       return misses;
     }
@@ -1214,7 +1254,7 @@ export async function runCore(o) {
           if (missed.length) misses = await preflightValidates(contract);
         }
         if (missed.length) {
-          ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind })), corrected: misses.length === 0 });
+          ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), found: missed.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), corrected: misses.length === 0 });
           if (misses.length) {
             T.anomalies.push(`Validate preflight: the host lacks ${misses.map((m) => m.tool).join(", ")} after the contract correction (advisory; a failed rerun ends env.tool_missing)`);
             T.decisions.push(`Validate preflight left ${misses.length} miss(es) after one correction; contract frozen anyway`);
@@ -1481,7 +1521,7 @@ export async function runCore(o) {
     // plus the precheck's equivalent: a failed validate command or a requirement the builder reported as not done (#4160).
     // A review without usable rows ends needs-human (or, with engine.review_incomplete: degraded, merges flagged).
     await label("in-review");
-    const shadow = conformance !== "enforce";
+    let shadow = conformance !== "enforce";
     let effective = frozen, review = null, lastAmend = "", resumes = 0, verdict = null, degraded = null, triggerSkipped = false, selfReviewCompared = false;
     const TRIGGER_SKIP = "skipped (review.trigger enforce: no risk trigger)";
     const triggerSkipNote = "## Conformance Review\n**Skipped by `review.trigger: enforce`:** no risk path, package edge or hotspot in the diff, and every deterministic gate passed; no reviewer ran (#4273).";
@@ -1550,6 +1590,14 @@ export async function runCore(o) {
       await refreshIssue("conformance");
       result = (await readResult()) ?? result;
       files = await changedFiles();
+      gateRan = true;
+      // #4398: a diff touching a declared review.risk_paths glob makes this lane enforce from here on (sticky)
+      const hits = shadow ? riskPathHits(files, riskPaths) : [];
+      if (hits.length) {
+        shadow = false; riskEnforced = hits;
+        ev({ event: "CONFORMANCE_RISK_ENFORCED", paths: hits });
+        T.decisions.push(`Conformance enforced (review.risk_paths): ${hits.slice(0, 10).join(", ")}${hits.length > 10 ? ` and ${hits.length - 10} more` : ""}`);
+      }
       const amendProblems = await amend();
       const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === String(await git(["rev-parse", "HEAD"])).trim();
       const hotspots = await hotspotsOf({ base, paths: files });
@@ -1693,7 +1741,17 @@ export async function runCore(o) {
       }
     }
     ev({ event: "PHASE_COMMIT", phase: "review" });
-    const closing = closePlan(effective);
+    const closing = closePlan(effective, { title: iss.title, review });
+    if (closing.reason === "partial") { // #4398: an investigation whose question is not answered carries it forward
+      const untracked = closing.open.filter((r) => !r.tracked);
+      if (untracked.length) {
+        const carried = untracked.map((r) => ({ ...r, disposition: "defer", why: "investigation question not answered" }));
+        await track(carried, "the investigation's question is not answered");
+        for (const [i, r] of untracked.entries()) r.tracked = carried[i].tracked;
+      }
+      for (const t of closing.open.map((r) => r.tracked).filter(Boolean)) if (!closing.tracked.includes(t)) closing.tracked.push(t);
+      T.decisions.push(`Investigation not answered (${closing.open.map((r) => r.id).join(", ")}): closing as partial, carried forward in ${closing.tracked.join(", ")}`);
+    }
     if (degradedReq?.tracked && !closing.tracked.includes(degradedReq.tracked)) closing.tracked.push(degradedReq.tracked);
 
     // ---- 5. push + PR ----
@@ -2033,8 +2091,11 @@ export async function runCore(o) {
     }
     try { await recordStructure(pr); } catch (e) { ev({ event: "STRUCTURE_DELTA_FAILED", error: String(e?.message ?? e).slice(0, 300) }); }
     await deleteMergedBranch();
-    await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "completed"]).catch(() => {});
-    if (closing.tracked.length) {
+    const partial = closing.reason === "partial";
+    await ghw(["issue", "close", String(issue), "-R", repo, "--reason", partial ? "not planned" : "completed"]).catch(() => {});
+    if (partial) {
+      try { await post("FORGE:TRACKED", `## Closed as partial\nThe investigation's stated question is not answered in this change (PR #${pr}); carried forward in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }
+    } else if (closing.tracked.length) {
       try { await post("FORGE:TRACKED", `## Remaining work tracked\nClosed as completed by PR #${pr}. The contracted deferred and post-deploy requirements are tracked in ${closing.tracked.join(", ")}.`); } catch { /* the PR body links them too */ }
     }
     if (isSplit && split.rest) { // #4211: the rest of a large split is the next PR of the chain, planned already (no grouping call)
@@ -2048,7 +2109,7 @@ export async function runCore(o) {
     await label("merged");
     // forge#4161: the merge-time structure record and the milestone ride on the lane result for orchestrate's drift fold.
     await gatePassed("merge_ci", "ci_red"); // #4375: merged means the required checks are green after a CI fix round
-    return await finish("merged", `PR #${pr}`, { pr, structure: T.structure ?? null, ...(milestone ? { milestone } : {}), ...(lane ? { lane } : {}) });
+    return await finish("merged", `PR #${pr}`, { pr, ...(partial ? { close: "partial" } : {}), structure: T.structure ?? null, ...(milestone ? { milestone } : {}), ...(lane ? { lane } : {}) });
   } catch (e) {
     if (e?.deferUsageLimit) {
       const when = e.resetAt || (Number.isFinite(e.resetAtEpochMs) ? new Date(e.resetAtEpochMs).toISOString() : "unknown");

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
+import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
@@ -76,8 +76,8 @@ function world(o = {}) {
       if (k === "pr list") return JSON.stringify(w.prList);
       if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
       if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
-      if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: "foo breaks", body: b, state: "OPEN", comments: [] }); }
-      if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [], ...(o.labels && a[2] === "7" ? { labels: o.labels } : {}) });
+      if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: o.title ?? "foo breaks", body: b, state: "OPEN", comments: [] }); }
+      if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: a[2] === "7" && o.title ? o.title : "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [], ...(o.labels && a[2] === "7" ? { labels: o.labels } : {}) });
       if (k === "pr edit") { w.prEdits.push(a); return ""; }
       if (k === "label create") { w.labelCreates = [...(w.labelCreates ?? []), a]; return ""; }
       if (k === "issue comment" && w.commentErrors.length) throw new Error(w.commentErrors.shift());
@@ -440,6 +440,38 @@ describe("core work-on", () => {
     assert.match(bodyB, /^\*\*Depends on\*\*: #201$/m);
     assert.ok(w.labels.includes("decomposed"));
     noNeedsHuman(w);
+  });
+
+  it("#4385 split siblings that declare a shared hub file are serialised (chained, no duplicate transitive edge); disjoint or undeclared files stay parallel", () => {
+    const hub = ["src/domain/index.ts", "./src/domain/events.ts"];
+    const b = classifyBlock({ block: { kind: "split-required", subissues: [
+      { title: "state machine", body: "a", files: [...hub, "src/domain/state.ts"] },
+      { title: "next-date", body: "b", files: [...hub, "src/domain/next.ts"] },
+      { title: "timeline", body: "c", files: ["/src/domain/index.ts", "src/domain/events.ts", "src/domain/timeline.ts"] }] } }, 7);
+    assert.equal(b.kind, "split");
+    assert.deepEqual(b.subissues.map((x) => x.dependsOn), [[], [0], [1]]);
+    assert.deepEqual(b.serialized.map((e) => [e.from, e.to, e.files]), [[1, 0, ["src/domain/index.ts", "src/domain/events.ts"]], [2, 1, ["src/domain/index.ts", "src/domain/events.ts"]]]);
+    const disjoint = classifyBlock({ block: { kind: "split-required", subissues: [
+      { title: "a", body: "a", files: ["src/a.ts"] }, { title: "b", body: "b", files: ["src/b.ts"] }] } }, 7);
+    assert.deepEqual(disjoint.subissues.map((x) => x.dependsOn), [[], []]);
+    assert.deepEqual(disjoint.serialized, []);
+    const legacy = classifyBlock({ block: { kind: "split-required", subissues: [
+      { title: "a", body: "a" }, { title: "b", body: "b" }, { title: "c", body: "c", depends_on: [0] }] } }, 7);
+    assert.deepEqual(legacy.subissues.map((x) => x.dependsOn), [[], [], [0]]);
+    assert.ok(legacy.subissues.every((x) => !("files" in x)));
+    const declared = classifyBlock({ block: { kind: "split-required", subissues: [
+      { title: "a", body: "a", files: ["x.ts"] }, { title: "b", body: "b", files: ["y.ts"], depends_on: [0] }, { title: "c", body: "c", files: ["x.ts"], depends_on: [1] }] } }, 7);
+    assert.deepEqual(declared.subissues.map((x) => x.dependsOn), [[], [0], [1]]);
+    assert.deepEqual(declared.serialized, []);
+  });
+
+  it("#4385 a serialised sibling is filed with the engine-added Depends-on line", async () => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [
+      { title: "part A", body: "do A", files: ["src/domain/index.ts"] }, { title: "part B", body: "do B", files: ["src/domain/index.ts", "src/b.ts"] }] } } }, {});
+    const r = await run(w);
+    assert.equal(r.terminalReason, "decomposed");
+    const bodyB = w.created[1][w.created[1].indexOf("--body") + 1];
+    assert.match(bodyB, /^\*\*Depends on\*\*: #201$/m);
   });
 
   it("#4153 a split of a milestone issue files every sub-issue with the parent's milestone; no milestone passes none", async () => {
@@ -1171,6 +1203,43 @@ describe("conformance shadow mode (the default)", () => {
     assert.equal((await run(w)).code, "contract.invalid"); assert.equal(builders(w).length, 2, "plan + one correction");
     assert.match(builders(w)[1][4], /R1: quote is not verbatim[\s\S]*V1: needs command 'jq'/);
   });
+  it("#4393 replaying the AlterLab#36619 contract flags V4 at preflight, before the builder starts", async () => {
+    const V4 = "uv run --no-project --python 3.12 python -m shared.detection.corpus.tools.check_manifest";
+    const c = { ...CONTRACT, validate: [{ id: "V1", command: "node --test test/foo.test.js" }, { id: "V2", command: "python3 -m pytest -q tests/test_corpus.py" }, { id: "V3", command: "uv run pytest -q tests/test_manifest.py" }, { id: "V4", command: V4 }] };
+    const fixed = { ...c, validate: [...c.validate.slice(0, 3), { id: "V4", command: "uv run python -m shared.detection.corpus.tools.check_manifest" }] };
+    const dir = tmpDir("preflight-run-");
+    const w = world({ contract: c, fixedContract: fixed, validation: fixed.validate.map((v) => ({ id: v.id, command: v.command, exit: 0 })) });
+    const ran = [];
+    w.io.probeCommand = async () => ({ rc: 0, output: "" }); // uv, python3 and pytest are on the host
+    w.io.preflightRun = async (a) => { ran.push([a.command, a.cwd, w.seq.length]); return a.command === V4 ? { rc: 1, output: "Traceback (most recent call last):\nModuleNotFoundError: No module named 'httpx'\n" } : { rc: 1, output: "AssertionError: expected RED on base" }; };
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3, "plan + one contract correction + implement");
+    assert.match(b[1][4], /V4: running it on the base worktree stopped before any test ran: needs Python module 'httpx'[\s\S]*repo's own toolchain/);
+    assert.doesNotMatch(b[1][4], /V[123]:/, "RED on base is not a miss");
+    assert.match(b[2][4], /The engine froze/, "the correction lands before the implement builder");
+    assert.ok(ran.every(([, cwd]) => cwd === WT));
+    const firstImpl = w.seq.indexOf("builder-resume", w.seq.indexOf("builder-resume") + 1);
+    assert.ok(ran.every(([, , at]) => at < firstImpl), "every run happens before the implement session");
+    const pf = readLog(dir, 7).filter((e) => e.event === "VALIDATE_PREFLIGHT");
+    assert.deepEqual(pf.map((e) => [e.corrected, e.found.map((m) => [m.ids, m.tool, m.kind, m.source])]), [[true, [[["V4"], "httpx", "python-module", "run"]]]]);
+    // a timed-out run is no evidence; an unset $VAR is a miss without running the command
+    const t = world({ contract: { ...CONTRACT, validate: [{ id: "V1", command: "node --test test/foo.test.js" }, { id: "V2", command: 'node scripts/x.mjs "$NO_SUCH_VAR_4393"' }] } });
+    const tRan = []; t.io.preflightRun = async (a) => { tRan.push(a.command); return { rc: 124, output: "ModuleNotFoundError: No module named 'httpx'\n(timed out after 30s)" }; };
+    assert.equal((await run(t)).terminalReason, "merged");
+    assert.deepEqual(tRan, ["node --test test/foo.test.js", "node --test test/foo.test.js"], "V2 skipped (env miss), V1 run again after the correction");
+    assert.match(builders(t)[1][4], /V2: uses \$NO_SUCH_VAR_4393, which is unset or empty/);
+  });
+  it("#4393 files the preflight runs create or modify are reverted; paths dirty before are not", async () => {
+    const w = world({ dirty: true });
+    let st = " M src/foo.js\n";
+    const git0 = w.io.git, reverts = [];
+    w.io.git = async (a, o) => { if (a[0] === "status" && a[2] === "--untracked-files=all") return st; if (a[0] === "clean" || (a[0] === "checkout" && a[1] === "--")) { reverts.push(a.join(" ")); return ""; } return git0(a, o); };
+    w.io.preflightRun = async () => { st += "?? .pytest_cache_x/log\n M src/bar.js\n"; return { rc: 0, output: "" }; };
+    await run(w);
+    assert.deepEqual(reverts, ["clean -fdq -- .pytest_cache_x/log", "checkout -- src/bar.js"]);
+    assert.ok(traj(w).some((x) => /Validate preflight reverted 2 path\(s\) its runs changed/.test(x)));
+  });
   it("#4353 the #4348 contract shape: an allowlist validate is dropped at freeze (CONTRACT_SCOPE_VALIDATE_DROPPED), the amended lane merges, and a real out-of-scope edit is still scope_creep", async () => {
     const ALLOW = 'test -z "$(git diff --name-only origin/staging...HEAD | grep -v -x -e src/foo.js -e test/foo.test.js)"';
     const c = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: ALLOW }] }, files = ["src/foo.js", "test/foo.test.js", "docs/foo.md"];
@@ -1260,6 +1329,62 @@ describe("conformance shadow mode (the default)", () => {
     assert.doesNotMatch(shadowNote(w), /not filed/);
     assert.match(w.prs[0].join(" "), /Remaining work tracked\n- #900/);
     assert.ok(w.seq.indexOf("pr") > -1 && traj(w)[0].includes("Tracked R2 (defer) in #900"));
+  });
+
+  it("#4398 a diff on a declared review.risk_paths glob makes the shadow gate enforce: a nonconforming risk-path PR never merges", async () => {
+    const dir = tmpDir("risk-");
+    const w = world({ contract: { ...CONTRACT, preserve: [] }, reviews: [omission(), omission()] });
+    const r = await runShadow(w, { dir, reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
+    assert.equal(r.code, "conformance.omission"); assert.equal(builders(w).length, 3, "one builder resume, as in enforce");
+    assert.deepEqual(r.conformance, { mode: "enforce", would: null, risk: true });
+    const log = readLog(dir, 7);
+    assert.deepEqual(log.filter((e) => e.event === "CONFORMANCE_RISK_ENFORCED").map((e) => e.paths), [["src/foo.js"]], "logged once (sticky across the resume)");
+    assert.equal(log.find((e) => e.event === "RUN_TERMINAL").conformance_mode, "enforce");
+    assert.ok(traj(w)[0].includes("Conformance enforced (review.risk_paths): src/foo.js"));
+  });
+
+  it("#4398 risk-enforced lanes merge once conforming; built-in risk words and unmatched globs stay shadow", async () => {
+    const w = world({ contract: { ...CONTRACT, preserve: [] }, reviews: [omission(), ok({}, { ...CONTRACT, preserve: [] })] });
+    const r = await runShadow(w, { reviewTrigger: { mode: "shadow", riskPaths: ["src/foo.js"] } });
+    assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 3);
+    assert.match(w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")), /\*\*Verdict:\*\* CONFORMS/);
+    const s = world({ contract: { ...CONTRACT, preserve: [] }, changed: ["src/auth/foo.js", "test/foo.test.js"], reviews: [omission()] });
+    const rs = await runShadow(s, { reviewTrigger: { mode: "shadow", riskPaths: ["db/**"] } });
+    assert.equal(rs.terminalReason, "merged", "an auth path with no declared glob stays shadow");
+    assert.deepEqual(rs.conformance, { mode: "shadow", would: "nonconforming", risk: false });
+  });
+
+  it("#4398 an investigation whose question is deferred closes partial (not planned), carried forward in the tracking issue", async () => {
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w" }] };
+    const w = world({ title: "investigate(stealth): which signal is rejected", contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
+    const r = await runShadow(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(r.close, "partial");
+    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["not planned"]);
+    assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:TRACKED -->") && /Closed as partial[\s\S]*carried forward in #900/.test(c)));
+    assert.ok(traj(w)[0].includes("| Close | issue closed (partial) |"));
+  });
+
+  it("#4398 an investigation whose answer the review marks deferred is tracked before the PR and closes partial, even though shadow merges it", async () => {
+    const k = { ...CONTRACT, preserve: [] };
+    const w = world({ title: "investigate: foo", contract: k, reviews: [conf({ requirements: [{ id: "R1", status: "deferred", evidence: "", validated_by: "", note: "question open" }] }, k)] });
+    const r = await runShadow(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(r.close, "partial");
+    assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^R1: /); assert.match(w.followups[0].items[0].why, /investigation question not answered/);
+    assert.match(w.prs[0].join(" "), /#900/);
+    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["not planned"]);
+  });
+
+  it("#4398 an answered investigation and a non-investigation with a deferral both close completed", async () => {
+    const a = world({ title: "investigate(x): why foo breaks", contract: { ...CONTRACT, preserve: [] }, reviews: [conf({}, { ...CONTRACT, preserve: [] })] });
+    const ra = await runShadow(a);
+    assert.equal(ra.terminalReason, "merged"); assert.equal(ra.close, undefined);
+    assert.deepEqual(a.closed.map((x) => x[x.indexOf("--reason") + 1]), ["completed"]);
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w" }] };
+    const b = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
+    await runShadow(b);
+    assert.deepEqual(b.closed.map((x) => x[x.indexOf("--reason") + 1]), ["completed"]);
+    assert.ok(traj(b)[0].includes("| Close | issue closed (completed) |"));
   });
 
   it("#4160 base-sync merge files (equal to the base) drop out of the scope check", async () => {

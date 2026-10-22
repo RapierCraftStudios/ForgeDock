@@ -81,6 +81,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    quote of the requirement a failure names (`explainFailures`), and a failed
    validate names its command. Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
+   A split sub-issue may declare `files` (the paths it will edit); `serializeShared`
+   adds a `Depends on` edge from each later sub-issue to the nearest earlier one it
+   shares a file with and does not already reach, so siblings editing the same hub
+   (barrel, union type, shared fixture, index doc) merge one after another instead
+   of conflicting; each added edge is a decision. No `files`: unchanged (#4385).
    A `split` closes the parent `not planned` once its `FORGE:DECOMPOSED` trail
    and `workflow:decomposed` label are written (label kept; the closing comment
    lists the sub-issues; either write failing leaves it open) (#4337). A
@@ -241,13 +246,16 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    number the fetched lane already uses → builder renumbers (`sequencePrompt`; a
    conflicted migration/journal gets `sequenceSyncNote`), then `verifyRenumber`
    (same blob, journal strictly ordered, no collision); still failing → `base.conflict`.
+   Numbered documents (#4385, e.g. `docs/adr/0016-*.md`): a renamed file may differ
+   only in its own number (`numberOnlyChange`, padded or not), and no tracked file
+   may still name a renamed file's old stem (the series index, links).
    #4386: the engine renumbers first (`renumberLane`: `git mv` to max(base)+1…, a Markdown
    file's own heading number, references to the old stem repo-wide, the base journal plus the
    lane's entries with consecutive `idx`, a data-only snapshot cloned from the base tip with a
    new `id`/`prevId`, else `lean.sequence.regenerate`; `SEQUENCE_RENUMBERED`), and only an
    `unsupported` result goes to the builder (`SEQUENCE_RENUMBER_FALLBACK`, reason in the
-   trajectory). `verifyRenumber` accepts a file equal after mapping each move's old stem and
-   its own heading number. A base-sync whose conflicts are all sequence files
+   trajectory). `verifyRenumber` also accepts a file equal after mapping each move's old stem
+   and its own heading number. A base-sync whose conflicts are all sequence files
    (`resolveSequenceConflicts`: base side, journal union, index union) needs no builder, and
    an engine-only delta needs no re-review. The base-sync bound counts syncs against one base
    head (`sameBaseSyncs`); a sync overtaken by a new base head does not count. Merge-gate late
@@ -907,12 +915,33 @@ At contract freeze, `preflightValidates` (`lean.mjs`) probes the host for what e
 (`command -v`), the modules a bare `python`/`python3`/`pythonX.Y` imports via `-c`/`-m` (`importlib.util.find_spec` with
 that interpreter) and the bare packages `node -e`/`-p` code imports (`node_modules/<pkg>` walked up from the worktree).
 Paths, `$VAR` words, names `repoTracks(git ls-files)` holds and names a deliverable's `change` text names are not probed;
-a wrapper (`uv run`, `npx`, ...) probes only the wrapper; at most 20 probes. Probes run through the separate
+a wrapper (`uv run`, `npx`, ...) probes only the wrapper (the #4393 run probe covers what is behind it); at most 20 probes. Probes run through the separate
 `io.probeCommand` hook (`runCheckCommand`) with `laneEnv()` (#4325); no hook, no change. A miss (`preflightProblems`) joins the
 validateContract problems in the existing single `contractCorrectionPrompt` resume. After it the misses are re-probed and
 logged as `VALIDATE_PREFLIGHT` {misses, corrected}; any left are an anomaly only, never a block: the post-build #4323
 rerun still ends `env.tool_missing`. Skipped when the frozen contract is recovered from the issue. Cost: 0 LLM calls when
 the host has the tools; otherwise the one correction resume, instead of a whole implement session lost to `env.tool_missing`.
+
+## Entry 2026-10-23 — Freeze-time execution preflight of validate commands (#4393)
+
+The #4328 probes read the command text, so a wrapped interpreter (`uv run --no-project python -m shared.x`) and a
+transitive import (`shared` imports `httpx`) pass them, and the command first runs after the build (AlterLab#36619:
+`env.tool_missing` after a green implementation, then a recovery lane). `preflightValidates` (`lean.mjs`) now also:
+(1) flags `$NAME`/`${NAME}` references that are unset or empty in `process.env` + `laneEnv()` and that the command does
+not assign (`preflight.mjs` `unsetEnvVars`; single quotes, escapes, `${X:-d}` defaults and bash's own variables are
+skipped), kind `env-var`; (2) runs each validate command without a static or env miss once on the base worktree through
+the separate `io.preflightRun` hook (`runCheckCommand`) inside `heavyStep("precheck")`, 30 s each within a 120 s total
+(`runPreflight`). `runProbeMiss` classifies the output: rc 0, a timeout (124) or a test failure is `runs` (RED on base is
+expected); conformance.mjs `missingTool` (missing command / Python module / Node package) or a missing path (bash exec
+rc 127, python `can't open file`, pytest `file or directory not found`, node `Could not find`) is `unrunnable`. Names
+the repo tracks or a deliverable's change names, and paths that are tracked, deliverables, the repro test or test-shaped
+(`knownToContract`), are not misses. `git status --porcelain --untracked-files=all` before and after the runs: only
+paths the runs newly created (`git clean`) or modified (`git checkout --`) are reverted, an anomaly records them; a path
+dirty before is never touched. Commands the budget leaves are not run (anomaly), not misses. All misses share the one
+`contractCorrectionPrompt` resume before the implement builder, are re-checked after it, and are logged on
+`VALIDATE_PREFLIGHT` (`found`, `misses` with `source` probe|env|run); misses left stay advisory (the post-build #4323
+rerun is still the gate). No hook, no run. Cost: 0 LLM calls, at most 120 s at freeze; one correction resume only when a
+command cannot run, instead of an implement attempt plus a recovery lane.
 
 ## Entry 2026-10-20 — The repro harness links workspace deps on base; an unrunnable head is an environment error (#4334)
 
@@ -952,3 +981,17 @@ docs, enumerating, sequence, CI pass or a merge for `ci_red`/`merge_ci`, conform
 `pitfalls_matched`. `renderContextRecord` drops the pitfalls section (`publicPackText`) and shows only the count, so no
 pitfall text is posted. `forgedock stats` (local logs) prints the first-pass rate with and without matching pitfalls.
 Cost: 0 LLM calls; one local read and up to a few appends per lane; ≤ ~1 KB of pack bytes when mode is `on`.
+
+## Entry 2026-10-23 — Risk-path enforce, partial investigation close, per-batch shadow line (#4398)
+
+`gate()` (`lean.mjs`) checks the changed files against forge.yaml `review.risk_paths` globs (`review-trigger.mjs` `riskPathHits`;
+declared globs only, never the built-in risk words). A hit makes a shadow lane enforce for the rest of the run (sticky:
+precheck, review, resume, base-sync re-review, no degraded merge), logs `CONFORMANCE_RISK_ENFORCED {paths}` once plus a
+decision line, and `RUN_TERMINAL.conformance_mode` reports `enforce`. `closePlan(contract, {title, review})`: an
+`investigate(`/`investigate:` issue (`isInvestigation`) with a defer/post-deploy requirement, or a deliver requirement
+whose review row is not `implemented`, is `partial`. The untracked ones are filed with `track()` before the PR, the issue
+closes `not planned` with a FORGE:TRACKED "Closed as partial" note, and the Close row and lane result say partial.
+The lane result carries `conformance {mode, would, risk}`. Orchestrate's row copies it, and the batch report prints
+`formatShadowSummary`: shadow lanes, would-block share, false-block share (a would-block on an incomplete, inconsistent
+or unparseable review) and risk-enforced lanes. Rationale: `devdocs/decisions/4398-risk-path-enforce.md`. Cost: 0 LLM
+calls; a risk-enforced lane may spend the one builder resume that shadow would have skipped.
