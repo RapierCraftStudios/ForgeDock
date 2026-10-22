@@ -575,6 +575,18 @@ branches:
 #   trigger: shadow
 #   # Globs added to the built-in risk words (comma list or block list).
 #   risk_paths: "src/db/**, *.sql"
+#   # Independent adversarial verifier for the core path (#4397). After a
+#   # conforming review, one fresh read-only call on a model other than the
+#   # builder's gets only the issue, the contract, the diff and the callers of the
+#   # changed functions, and tries to break the change. off (default): no call.
+#   # shadow: log VERIFIER and list findings in FORGE:REVIEW, never block.
+#   # enforce: each file:line finding goes to the conformance fix round. Switch
+#   # to enforce only after a seeded-defect replay in shadow and >=30 shadow runs
+#   # with a verifier/implement cost ratio <= 0.10
+#   # (report: node bin/lean/verifier.mjs [--json]).
+#   verifier: off
+#   # Verifier model (default claude-sonnet-5-5; swapped when it is the builder's).
+#   verifier_model: claude-sonnet-5-5
 
 # =============================================================================
 # DECOMPOSITION (OPTIONAL)
