@@ -92,9 +92,10 @@ export function runsFromRecords(records) {
     p.out += num(r.output_tokens) ?? 0;
     p.attempts++;
     if (num(r.duration_ms) != null) p.ms = (p.ms ?? 0) + num(r.duration_ms);
-    if (num(r.cost_usd) != null) p.usd = (p.usd ?? 0) + num(r.cost_usd);
+    const usd = num(r.cost_usd_delta) ?? num(r.cost_usd); // #4407: cost_usd is a running total for a resumed session
+    if (usd != null) p.usd = (p.usd ?? 0) + usd;
     if (id === "remediate") run.remediated = true;
-    if (id === "implement") run.builderAttempts.push({ attempt: num(r.attempt), trigger: r.trigger ?? null, restart_of: r.restart_of ?? null, cost_usd: num(r.cost_usd), _ts: r.ts ?? "" }); // #4362
+    if (id === "implement") run.builderAttempts.push({ attempt: num(r.attempt), trigger: r.trigger ?? null, restart_of: r.restart_of ?? null, cost_usd: usd, _ts: r.ts ?? "" }); // #4362
   }
   const latest = new Map();
   for (const run of byRun.values()) {

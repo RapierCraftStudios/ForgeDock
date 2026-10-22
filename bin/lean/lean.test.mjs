@@ -133,11 +133,12 @@ function world(o = {}) {
       w.seq.push(c.role + (c.resume ? "-resume" : ""));
       w.envs.push(c.env ?? null);
       if (c.role === "builder") {
+        const cost = c.resume ? (w.sessCost = Math.round(((w.sessCost ?? 0) + 0.1) * 1e9) / 1e9) : (w.sessCost = 0.1); // #4407: a resumed CLI session reports its running total
         const fix = Boolean(c.resume) || /no earlier session/.test(c.prompt); // #4363: a fresh fix session acts like the old resume
         const r = fix ? (w.resumeResult ?? w.result) : w.result;
         const kind = /PLANNING ONLY/.test(c.prompt) ? "plan" : /contract.json is not valid/.test(c.prompt) ? "contract-fix" : "work";
         const n = ++w.builderN;
-        if (o.builder) { await o.builder(w, put, kind, n, c); return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: 0.1, durationMs: 1000, turns: 3, model: "default" }; }
+        if (o.builder) { await o.builder(w, put, kind, n, c); return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: cost, durationMs: 1000, turns: 3, model: "default" }; }
         if (kind === "plan") {
           if (o.live) await o.live(w, put);
           else if (!o.noStages) writeStages(["investigation"]);
@@ -155,7 +156,7 @@ function world(o = {}) {
             validation: (fix && n > 2 ? o.resumeValidation : null) ?? o.validation ?? (w.contract.validate ?? []).map((v) => ({ id: v.id, command: v.command, exit: 0 })), amendments: (fix && n > 2 ? o.resumeAmendments : null) ?? o.amendments ?? [] }));
         }
         if ((fix && !o.freshNoCommit) || /Merging origin\//.test(c.prompt)) { w.head = `bbbb${w.calls.length}`.padEnd(16, "0"); if (!o.leaveConflicts) { w.conflictFiles = []; w.mergeInProgress = false; } }
-        return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: 0.1, durationMs: 1000, turns: 3, model: "default" };
+        return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: cost, durationMs: 1000, turns: 3, model: "default" };
       }
       return { text: w.reviews.length ? w.reviews.shift() : ok(), sessionId: "rev", usage: { input_tokens: 4, output_tokens: 2 }, costUsd: 0.05, durationMs: 500, turns: 2, model: c.model };
     },
@@ -4664,6 +4665,36 @@ describe("#4362 attempt triggers", () => {
     assert.equal(r.terminalReason, "merged");
     assert.deepEqual(usage(dir).filter((e) => e.phase === "implement").map((e) => [e.attempt, e.trigger, e.restart_of ?? null]), [[1, "plan", null], [2, "timeout_restart", "build"]]);
     assert.equal(r.firstPass, true);
+  });
+});
+
+describe("#4407 per-attempt cost deltas", () => {
+  const bad1 = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }] };
+  const usage = (dir) => readLog(dir, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE");
+  const sum = (xs) => Math.round(xs.reduce((a, x) => a + x, 0) * 1e9) / 1e9;
+
+  it("the deltas of a resumed builder session sum to its final total and the lane cost is their sum", async () => {
+    // plan (fresh) -> contract correction (resume) -> build (resume): the CLI reports 0.1, 0.2, 0.3 for the one session
+    const w = world({ contract: bad1, fixedContract: CONTRACT }); const dir = tmpDir("core-4407-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const impl = usage(dir).filter((e) => e.phase === "implement");
+    assert.deepEqual(impl.map((e) => e.trigger), ["plan", "contract_correction", "build"]);
+    for (const e of impl) assert.ok(Number.isFinite(e.cost_usd_delta) && Number.isFinite(e.cost_usd_session), `attempt ${e.attempt} lacks the cost fields`);
+    assert.deepEqual(impl.map((e) => e.cost_usd_session), [0.1, 0.2, 0.3]);
+    assert.equal(sum(impl.map((e) => e.cost_usd_delta)), impl.at(-1).cost_usd_session, "sum of deltas = final session total");
+    const all = usage(dir);
+    assert.equal(Math.round(r.cost_usd * 1e9) / 1e9, sum(all.map((e) => e.cost_usd_delta)), "the lane cost (batch/orchestrate rows) sums the deltas");
+    assert.ok(r.cost_usd < sum(all.map((e) => e.cost_usd)), "not the sum of running totals");
+  });
+
+  it("the trajectory cost line and the run telemetry carry the deltas", async () => {
+    const w = world({ contract: bad1, fixedContract: CONTRACT });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(traj(w)[0].includes("cost $0.3500"), traj(w)[0]);
+    const tel = w.telemetry.filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "implement");
+    assert.deepEqual(tel.map((e) => e.cost_usd_delta), [0.1, 0.1, 0.1]);
   });
 });
 
