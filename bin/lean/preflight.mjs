@@ -5,11 +5,15 @@
  * (each segment's bare executable, Python modules a bare python imports via -c/-m, Node packages `node -e` code imports)
  * and a read-only bash probe for each. The engine runs the probes (lean.mjs) before the implement session, so a validate
  * command the host cannot run is corrected in the plan instead of found after the build (#4323 env.tool_missing).
+ * #4393: text alone misses wrapped interpreters (`uv run python -m x`) and transitive imports, so `runPreflight` also runs
+ * each command once on the base worktree and classifies its output (`runProbeMiss`); `unsetEnvVars` flags `$NAME`s the lane
+ * env leaves empty (#4325).
  */
 import { builtinModules } from "node:module";
+import { missingTool } from "./conformance.mjs";
 
 export const PREFLIGHT_CAP = 20;
-const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package" };
+const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package", path: "path", "env-var": "env var" };
 const PY_RE = /^python(\d+(\.\d+)?)?$/;
 const PY_ARG_FLAGS = new Set(["-W", "-X", "-Q"]);
 const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
@@ -127,7 +131,108 @@ export function preflightProbes(contract, { repoHas = () => false, cap = PREFLIG
   return { probes: all.slice(0, cap), dropped: Math.max(0, all.length - cap) };
 }
 
-/** One contract problem per missed probe: names the validate ids and the tool, and how to fix the plan (never a global install). */
+const FIX_HOW = "run the check through the repo's own toolchain (its virtualenv, lockfile-pinned runner or package scripts) or use a check that does not need it, never a global install";
+/** One contract problem per miss: names the validate ids and the tool (or path, or env var), and how to fix the plan (never a global install). */
 export function preflightProblems(misses) {
-  return (misses ?? []).map((m) => `${m.ids.join(", ")}: needs ${KIND_NAME[m.kind] ?? m.kind} '${m.tool}'${m.interp ? ` (for ${m.interp})` : ""}, which this host lacks, so the validate command cannot run here; run the check through the repo's own toolchain (its virtualenv, lockfile-pinned runner or package scripts) or use a check that does not need it, never a global install`);
+  return (misses ?? []).map((m) => {
+    const ids = m.ids.join(", ");
+    if (m.kind === "env-var") return `${ids}: uses $${m.tool}, which is unset or empty in the lane environment, so the validate command cannot run as written; set it inside the command or ${FIX_HOW}`;
+    if (m.source === "run") return `${ids}: running it on the base worktree stopped before any test ran: needs ${KIND_NAME[m.kind] ?? m.kind} '${m.tool}'${m.line ? ` (\`${m.line}\`)` : ""}, so the validate command cannot run here; ${m.kind === "path" ? "point it at a path the repo or a deliverable has, or " : ""}${FIX_HOW}`;
+    return `${ids}: needs ${KIND_NAME[m.kind] ?? m.kind} '${m.tool}'${m.interp ? ` (for ${m.interp})` : ""}, which this host lacks, so the validate command cannot run here; ${FIX_HOW}`;
+  });
+}
+
+/** #4393: per-command timeout and total budget of the freeze-time runs; a command cut by either is no evidence. */
+export const RUN_PROBE_MS = 30000, RUN_BUDGET_MS = 120000;
+const TIMEOUT_RC = 124;
+// bash sets these itself; they are never "missing from the lane env"
+const SHELL_VARS = new Set(["RANDOM", "SECONDS", "LINENO", "PWD", "OLDPWD", "HOME", "UID", "EUID", "PPID", "BASHPID", "IFS", "HOSTNAME", "SHELL", "USER", "PATH", "BASH", "BASH_SOURCE", "BASH_VERSION", "BASH_REMATCH", "PIPESTATUS", "FUNCNAME", "EPOCHSECONDS", "EPOCHREALTIME", "SHLVL", "OPTARG", "OPTIND", "REPLY", "HOSTTYPE", "OSTYPE", "MACHTYPE", "GROUPS"]);
+
+/**
+ * `$NAME` / `${NAME}` references (outside single quotes, not escaped) that are unset or empty in `env` and that the command
+ * does not assign itself (`NAME=`, `export NAME=`, `for NAME in`). `${NAME:-x}`-style defaults, `${#NAME}` and specials are not flagged.
+ */
+export function unsetEnvVars(command, env = {}) {
+  const s = String(command ?? ""), refs = [];
+  let q = null;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (q === "'") { if (ch === "'") q = null; continue; }
+    if (ch === "\\") { i++; continue; }
+    if (ch === '"') { q = q ? null : '"'; continue; }
+    if (ch === "'" && !q) { q = "'"; continue; }
+    if (ch !== "$") continue;
+    const m = /^\{([A-Za-z_]\w*)(\}|:?[-=+?])|^([A-Za-z_]\w*)/.exec(s.slice(i + 1));
+    if (m && (m[3] || m[2] === "}")) refs.push(m[1] ?? m[3]);
+  }
+  const assigned = (n) => new RegExp(`(^|[\\s;&|(])((export|local|readonly|declare)\\s+)?${n}=|\\bfor\\s+${n}\\s+in\\b`).test(s);
+  return [...new Set(refs)].filter((n) => !SHELL_VARS.has(n) && (env[n] === undefined || env[n] === null || env[n] === "") && !assigned(n));
+}
+
+// [rc, pattern]: bash could not exec a path (127), python could not open its script, pytest / node --test could not find a file
+const PATH_MISSING_RES = [[127, /(?:^|\s)([^\s:'"`]+): No such file or directory/m], [null, /can't open file '([^']+)'/], [null, /file or directory not found: (\S+)/], [null, /Could not find '([^']+)'/]];
+const TESTISH_RE = /(^|\/)(tests?|__tests__|spec)\/|\.(test|spec)\.[^/]+$|(^|\/)test_[^/]*\.py$|_test\.(py|go)$/;
+
+/**
+ * #4393: why one freeze-time run of a validate command shows it cannot run on this host, or null when it ran (passed, or
+ * failed on test content: RED on base is expected), timed out (no evidence) or gave no recognisable reason.
+ * A path counts as missing unless `knownPath(path)` (repo-tracked, a deliverable, the repro test) or it looks like a test the
+ * builder adds; a module goes through conformance.mjs `missingTool` with `repoHas`, as the post-build gate does.
+ * Returns {tool, kind: command|python-module|node-module|path, line} with the output line that showed it.
+ */
+export function runProbeMiss(r, { repoHas = () => false, command = "", knownPath = () => false } = {}) {
+  const rc = r?.rc, out = String(r?.output ?? "");
+  if (!Number.isInteger(rc) || rc === 0 || rc === TIMEOUT_RC) return null;
+  const lineOf = (needle) => (out.split("\n").find((l) => l.includes(needle)) ?? "").trim().slice(0, 160);
+  for (const [onlyRc, re] of PATH_MISSING_RES) {
+    const p = onlyRc === null || onlyRc === rc ? re.exec(out)?.[1] : null;
+    if (!p) continue;
+    if (TESTISH_RE.test(p) || knownPath(p)) return null;
+    return { tool: p, kind: "path", line: lineOf(p) };
+  }
+  const miss = missingTool(r, { repoHas, command });
+  return miss ? { ...miss, line: lineOf(miss.tool) } : null;
+}
+
+/**
+ * #4393: what a freeze-time run may legitimately not find yet: `repoHas` (a name the repo tracks or a deliverable's change
+ * text names) and `knownPath` (a tracked file, a deliverable or the repro test, matched as a suffix of an absolute path).
+ */
+export function knownToContract(contract, files = []) {
+  const changes = (Array.isArray(contract?.deliverables) ? contract.deliverables : []).map((d) => String(d?.change ?? "")).join("\n");
+  const paths = [...files, ...(contract?.deliverables ?? []).map((d) => d?.path), contract?.repro_test?.path].filter((x) => typeof x === "string" && x).map((x) => x.replace(/^\.\//, "").replace(/\/+$/, ""));
+  const segs = new Set(paths.flatMap((x) => x.split("/")));
+  const repoHas = (name) => segs.has(name) || segs.has(`${name}.py`) || new RegExp(`(^|[^\\w@/.-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w/-])`).test(changes);
+  const knownPath = (p) => { const rel = String(p).replace(/^\.\//, ""); return paths.some((k) => rel === k || rel.endsWith(`/${k}`) || rel.startsWith(`${k}/`) || rel.includes(`/${k}/`)); };
+  return { repoHas, knownPath };
+}
+
+const porcelain = (out) => new Map(String(out ?? "").split("\n").filter((l) => l.length > 3).map((l) => [l.slice(3), l.slice(0, 2)]));
+
+/**
+ * #4393: run each `contract.validate[]` command (ids in `skipIds` excepted) once through `run({command, timeoutMs, env})`,
+ * 30 s each inside a 120 s budget, and classify each with `runProbeMiss`. `git(args)` runs in the worktree: whatever the runs
+ * newly created or modified (`git status --porcelain`) is reverted; a path dirty before the runs is never touched.
+ * Returns {misses: [{ids, tool, kind, line, source: "run"}], skipped: ids not run (budget), reverted: paths}.
+ */
+export async function runPreflight({ contract, run, git, env = {}, repoHas = () => false, knownPath = () => false, skipIds = [], now = () => Date.now(), perCommandMs = RUN_PROBE_MS, budgetMs = RUN_BUDGET_MS }) {
+  const misses = [], skipped = [], reverted = [];
+  const todo = (Array.isArray(contract?.validate) ? contract.validate : []).filter((v) => v?.id && typeof v.command === "string" && !skipIds.includes(v.id));
+  if (!todo.length) return { misses, skipped, reverted };
+  const status = async () => porcelain(await git(["status", "--porcelain", "--untracked-files=all"]).catch(() => ""));
+  const before = await status(), deadline = now() + budgetMs;
+  for (const v of todo) {
+    const left = deadline - now();
+    if (left <= 0) { skipped.push(v.id); continue; }
+    let r;
+    try { r = await run({ command: v.command, timeoutMs: Math.min(perCommandMs, left), env }); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
+    const miss = runProbeMiss(r, { repoHas, command: v.command, knownPath });
+    if (miss) misses.push({ ids: [v.id], ...miss, source: "run" });
+  }
+  const after = await status();
+  for (const [path, xy] of after) {
+    if (before.has(path) || path.includes(" -> ")) continue;
+    try { await git(xy === "??" ? ["clean", "-fdq", "--", path] : ["checkout", "--", path]); reverted.push(path); } catch { /* left as is; the scope gate still sees it */ }
+  }
+  return { misses, skipped, reverted };
 }

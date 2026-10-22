@@ -94,21 +94,44 @@ export async function journalProblems({ git, ref = "HEAD", dirs = [] }) {
   return problems;
 }
 
+const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * #4385: `now` is `was` with, at most, its own number `from` replaced by `to` (zero-padded or not, word-bounded), as a
+ * renumbered ADR changes its title (`# 16. X` -> `# 17. X`). Any other byte differs: false.
+ */
+export function numberOnlyChange(was, now, from, to) {
+  if (!from || !to) return false;
+  const parts = String(was).split(new RegExp(`\\b(0*${Number(from)})\\b`));
+  const alt = (tok) => `(?:${[...new Set([tok, to, String(Number(to))])].map(esc).join("|")})`;
+  return new RegExp(`^${parts.map((p, i) => (i % 2 ? alt(p) : esc(p))).join("")}$`).test(String(now));
+}
+
 /** Lane-added numbered files with their blobs, recorded before a renumber so verifyRenumber can prove the SQL kept. */
 export const snapshotLane = ({ git, base }) => laneNumbered(git, base).catch(() => []);
 
 /**
  * After the builder renumbered: no collision remains, every recorded non-JSON file (the SQL; snapshots are regenerated)
- * still exists byte-identical in its directory, and the journals are strictly ordered. @returns {Promise<{ok, problems}>}
+ * still exists byte-identical in its directory (or, renamed, changed only in its own number: #4385), no tracked file
+ * still names a renamed file's old stem (index, links), and the journals are strictly ordered. @returns {Promise<{ok, problems}>}
  */
 export async function verifyRenumber({ git, base, before = [] }) {
   try {
     const problems = [];
     const left = await sequenceCollisions({ git, base });
     for (const c of left.filter((x) => x.base.length)) problems.push(`${c.lane} still shares number ${c.number} with ${c.base.join(", ")}`);
-    const now = await laneNumbered(git, base);
+    const g = out(git), now = await laneNumbered(git, base);
     for (const b of before.filter((f) => !f.path.endsWith(".json"))) {
-      if (!now.some((f) => dirname(f.path) === dirname(b.path) && f.blob === b.blob)) problems.push(`${b.path}: content changed or file gone after renumbering (keep it byte-identical, rename only)`);
+      const peers = now.filter((f) => dirname(f.path) === dirname(b.path));
+      if (peers.some((f) => f.blob === b.blob)) continue;
+      const was = await g(["cat-file", "-p", b.blob]);
+      let kept = false;
+      for (const f of peers) if (!kept && f.path !== b.path && numberOnlyChange(was, await g(["cat-file", "-p", f.blob]), numOf(b.path), numOf(f.path))) kept = true;
+      if (!kept) problems.push(`${b.path}: content changed or file gone after renumbering (keep it byte-identical, rename only)`);
+    }
+    // #4385: a renamed file's old name must not survive in an index or link (docs/adr/README.md listing 0016-b.md).
+    for (const b of before.filter((f) => !f.path.endsWith(".json") && !now.some((x) => x.path === f.path))) {
+      const stem = basename(b.path).replace(/\.[^.]*$/, "");
+      for (const hit of lines(await g(["-c", "core.quotepath=off", "grep", "-l", "-w", "-F", stem, "HEAD", "--"]))) problems.push(`${hit.replace(/^HEAD:/, "")}: still references ${stem} after renumbering (update the index/links)`);
     }
     problems.push(...await journalProblems({ git, dirs: [...new Set([...before, ...now].map((f) => dirname(f.path)))] }));
     return { ok: !problems.length, problems };
