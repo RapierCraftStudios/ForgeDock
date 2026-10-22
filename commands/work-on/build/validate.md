@@ -214,6 +214,7 @@ FORGE_CFG=forge.yaml; [ -f "$FORGE_CFG" ] || { _gcd=$(git rev-parse --git-common
 TS_FORMAT=$(yq '.verification.commands.typescript.format // ""' "$FORGE_CFG" 2>/dev/null || echo '')
 TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' "$FORGE_CFG" 2>/dev/null || echo '')
 TS_BUILD=$(yq '.verification.commands.typescript.build // ""' "$FORGE_CFG" 2>/dev/null || echo '')
+TS_LINT=$(yq '.verification.commands.typescript.lint // ""' "$FORGE_CFG" 2>/dev/null || echo '')
 
 if [ -n "$TS_FORMAT" ]; then
     run_verification_command "typescript.format" "$TS_FORMAT"
@@ -234,8 +235,17 @@ else
     SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }typescript.typecheck/build"
     TS_EXIT=0
 fi
+
+if [ -n "$TS_LINT" ]; then
+    run_verification_command "typescript.lint" "$TS_LINT"
+    TS_LINT_EXIT=$?
+else
+    echo "SKIPPED — typescript.lint not configured in verification.commands"
+    SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }typescript.lint"
+    TS_LINT_EXIT=0
+fi
 ```
-Typecheck or build failures are BLOCKING — fix type errors before continuing.
+Typecheck, build or lint (`TS_LINT_EXIT`) failures are BLOCKING — fix them before continuing. Configure `typescript.lint` as a changed-files, cached lint; it is the lane's only lint (forge#4381).
 
 **Shell scripts**: Verify service interactions — read target middleware files, document what was verified in the V5 summary.
 
