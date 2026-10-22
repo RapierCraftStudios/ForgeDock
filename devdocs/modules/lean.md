@@ -1124,6 +1124,27 @@ for enforce: a seeded-defect replay in shadow where it catches what the reviewer
 0.10. Cost: 0 LLM calls when off (default); one read-only call per reviewed head when on. ADR
 `decisions/4397-independent-verifier.md`.
 
+## Entry 2026-10-23 — Structured FORGE:FACTS for later lanes on the same files (#4401)
+
+`facts.mjs` (pure) defines the record. The implement prompt asks the builder for an optional result.json `facts` key:
+`decisions`, `rejected` [{approach, why}], `hotspots` [{at: file:line, why}] and `conventions`. `normaliseFacts` adds
+`baselines` (result.json `validation` rows with a command and an integer exit) and `files` (the lane's changed files,
+`.forge-lean/` left out). Those files are the path index. Decisions fall back to the frozen contract's `decisions[].choice`.
+Each list is capped at 5 entries (files at 20). Text is one-lined, comments are stripped, and text is capped at 160 chars.
+A rejected approach or hot spot without a why is dropped, and so is a hot spot with `..`. `finishOnce` runs `postLaneFacts`
+before teardown, while result.json still exists. It posts one `<!-- FORGE:FACTS -->` issue comment for every outcome,
+failed lanes included. The comment has a count line and the JSON in a fence, with `<` and backticks escaped. Nothing is
+posted for an empty record or one already on the issue. A failure never changes the lane's outcome. Like every
+`<!-- FORGE:` comment, the record is never quotable contract text (`textOf`, `scopeText`).
+`context.mjs`: the ledger and facts sources share one file-path walk (`git log --first-parent <base> -- namedPaths`) and
+one trusted-comment read per PR (PR + linked issue). The walk runs when either source is on. The `facts` source collects
+up to `MAX_FACT_LANES` (6) records with `parseFactsComment`, which applies the same caps again, from trusted comments
+only. It reads this issue's own records first (earlier attempts, newest first). It then reads records on merged PRs and
+their linked issues whose `files` overlap the issue's named paths. The pack lists them by kind across lanes: rejected,
+hot spots, decisions, conventions, baselines. Each line carries its provenance (`#33, PR #101`). The repo-fact pointers
+follow, all under `facts` (section "Facts from earlier lanes and repo facts"). Cost: 0 LLM calls, about 60 prompt
+tokens, one comment per lane, and no extra GitHub read per PR.
+
 ## Acceptance probes (#4399)
 
 `probe.mjs` checks a production outcome after promotion, deterministically (0 LLM calls, no lane). An issue declares a

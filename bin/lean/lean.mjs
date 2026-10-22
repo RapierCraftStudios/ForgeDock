@@ -40,6 +40,7 @@ import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
 import { writeHeavyShims, sumWaits, isHeavyProcess } from "./heavy.mjs";
 import { priorityFromLabels } from "./sched.mjs";
+import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { parseContextPackConfig, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp } from "./context.mjs";
 
 /**
@@ -260,6 +261,7 @@ export async function runCore(o) {
   const ctxCfg = parseContextPackConfig(o.contextPack ?? {});
   let ctxLane = null; // forge#4275: rerun | child | first, set once the issue is read
   let pitMatched = null; // #4375: pitfalls in the pack that match the issue's files; null when no pack was compiled
+  let factsSeen = []; // #4401: trusted comment bodies on the issue, so an identical FORGE:FACTS is never posted twice
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   let riskEnforced = null, gateRan = false; // #4398: declared risk paths that made a shadow lane enforce (sticky); the gate ran
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
@@ -372,6 +374,7 @@ export async function runCore(o) {
     if (heavyWaitsFile) { // #4169: builder-run heavy waits, read before teardown removes the run TMPDIR
       try { heavyQueueMax = Math.max(heavyQueueMax, sumWaits(await io.fs.read(heavyWaitsFile), waits).queueMax); } catch { /* no heavy step ran */ }
     }
+    await postLaneFacts(); // #4401: before teardown removes the worktree's result.json
     await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
@@ -406,6 +409,19 @@ export async function runCore(o) {
       ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), // #4392
       ...(gateRan ? { conformance: { mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", would: shadowWould, risk: Boolean(riskEnforced) } } : {}), ...extra };
     return done;
+  }
+  /** #4401: post the lane's FORGE:FACTS (result.json facts and validation, changed files, contract decisions); never fails a run. */
+  async function postLaneFacts() {
+    if (!base) return;
+    try {
+      const result = await readResult();
+      const rec = result ? normaliseFacts(result, { files: await stageFiles(), contract: await readContract() }) : null;
+      if (!rec) return;
+      const body = renderFactsRecord(rec);
+      if (factsSeen.some((b) => String(b ?? "").includes(body))) return;
+      await post(FACTS_MARKER, body);
+      T.decisions.push(`FORGE:FACTS: ${rec.rejected.length} rejected approach(es), ${rec.hotspots.length} hot spot(s) on ${rec.files.length} file(s)`);
+    } catch { /* best effort */ }
   }
   /** #4297/#4316: a recovery lane that ended unmerged keeps needs-human with this evidence (shared text in render.mjs). */
   const laneRecoveryEvidence = (reason, code, detail) => recoveryEvidence({ code: recover.code, attempt: recover.attempt, outcome: reason, resultCode: code, detail });
@@ -1045,6 +1061,7 @@ export async function runCore(o) {
     const isEngineComment = (b) => b.trimStart().startsWith("<!-- FORGE:");
     const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => String(c?.body ?? "")).filter((b) => !isEngineComment(b))].join("\n\n");
     let trustedComments = trustedOf(iss), issueEdited = false;
+    factsSeen = trustedComments.map((c) => c?.body);
     let issueText = textOf(iss, trustedComments);
     let scopeHash = contractHash(scopeText(iss, trustedComments)); // #4265: the edit signal and the frozen contract's provenance
     ctxLane = laneType({ resumed: Boolean(resumed || salvagedRef), attempts: priorAttempts(iss.body, trustedComments), body: iss.body });
@@ -1092,7 +1109,7 @@ export async function runCore(o) {
       if (contractHash(issueText) === contractHash(text)) return;
       // #4265: the engine's own writes (FORGE:STATE, FORGE:* comments) refresh the text but are not an issue edit
       const old = scopeHash, now = contractHash(scopeText(next, tc));
-      iss = next; trustedComments = tc; issueText = text; scopeHash = now;
+      iss = next; trustedComments = tc; factsSeen = tc.map((c) => c?.body); issueText = text; scopeHash = now;
       if (old === now) return;
       issueEdited = true;
       ev({ event: "ISSUE_EDITED", old, new: now, stage });
