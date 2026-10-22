@@ -20,7 +20,8 @@ export const CHECKS_CLI = fileURLToPath(new URL("./checks.mjs", import.meta.url)
 /** #4364: `forgedock check`, the engine's validate and pre-PR checks run in-session before the result is written. */
 export const FORGEDOCK_CLI = fileURLToPath(new URL("../forgedock.mjs", import.meta.url));
 
-const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the repo's full tsc/eslint/test scripts (it widens to the full command itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, run it again with --publish to share the incremental caches. node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.`;
+const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the repo's full tsc/eslint/test scripts (it widens to the full command itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, run it again with --publish to share the incremental caches. node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.
+Quiet output (every tool result stays in the session and is re-read on each later turn): run tests in quiet mode (-q, or the runner's dot/summary reporter); on failure look at \`tail -40\` of the output plus the failing test ids (grep its FAILED / not ok / FAIL lines), never the whole log. Read files by range (sed -n a,bp, or Read with offset and limit), never a whole large file. Send any command whose output may exceed 8 KB to a file under $TMPDIR and inspect it with tail or grep.`;
 
 /** Verify-by-CI (#4167): in ci/hybrid mode the engine runs the repo's CI on GitHub runners; the host runs only light checks. */
 const LIGHT = "run only formatters and linters on the files you changed";
@@ -44,6 +45,29 @@ export function ciFailurePrompt(failures, mode = "local") {
 export function precheckFailurePrompt(failures, mode = "local") {
   const list = failures.slice(0, 10).map((f) => `#### \`${f.command}\` (exit ${f.rc})\n${f.output ? `\`\`\`\n${f.output}\n\`\`\`` : "(no output)"}`).join("\n\n");
   return `The repo's declared check commands failed in this worktree, before the PR is opened:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). Re-run each failing command, ${mode === "ci" ? `${LIGHT} otherwise, ` : ""}commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** #4390: byte cap of the diff hunks a context-ceiling restart carries (the stat is always kept). */
+export const RESTART_DIFF_MAX_BYTES = 40 * 1024;
+
+/**
+ * #4390: appended to the restart prompt when the engine stopped a builder session at the context ceiling: the fresh
+ * session continues from the frozen contract, the branch (`git diff --stat` + bounded hunks) and the last validate result.
+ */
+export function contextRestartPrompt({ stat = "", diff = "", base = "", check = "", ceiling = 0 } = {}) {
+  const d = boundDiff(String(diff ?? ""), { stat, base, maxBytes: RESTART_DIFF_MAX_BYTES }).trim();
+  const c = String(check ?? "").trim();
+  return `\n\nContext restart: the previous session on this lane reached the ${ceiling}-token context ceiling and the engine stopped it. Its history is gone, its work is not: ${CONTRACT_FILE} is still the frozen authority, and the branch holds the committed work (uncommitted edits were saved in a \`wip(forge): checkpoint\` commit). Continue from this state; do not start over, and do not re-read what the summary below already shows.
+
+<diff_stat base="${base}">
+${String(stat ?? "").trim() || "(no changes yet)"}
+</diff_stat>
+
+<diff>
+${d || "(no changes yet)"}
+</diff>
+
+Last validate result (${LEAN_DIR}/self-check.json, from \`forgedock check\`): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded; run the validate commands."}`;
 }
 
 /** CI could not run (no workflow run, no checks, dispatch refused): the local fallback (#4167). */
