@@ -298,6 +298,9 @@ branches:
 #   # restarted fresh from the frozen contract, the diff and the last validate
 #   # result instead of carrying its whole history. 0 disables.
 #   context_ceiling_tokens: 120000
+#   # Lane profile (#4395): lanes run without auto-memory; with this repo-relative
+#   # file (hard rules + doc pointers, <= 16 KB) they also skip CLAUDE.md and get it instead.
+#   lane_instructions: devdocs/lane-instructions.md
 
 # =============================================================================
 # ENV (OPTIONAL)

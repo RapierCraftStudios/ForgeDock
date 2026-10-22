@@ -65,7 +65,9 @@ export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRun
       args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
       logger: { log() {} },
       idleMs, maxMs, stream: idleMs > 0, control, onSpawn, ...(contextMax > 0 ? { contextMax } : {}), wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
-    return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default" };
+    // #4395: a resumed session's first turn carries the prior history, so only a fresh session reports a baseline.
+    return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default",
+      baselineTokens: resume ? null : (r.baselineTokens ?? null) };
   };
 }
 

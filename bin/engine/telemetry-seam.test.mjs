@@ -20,6 +20,13 @@ describe("engine telemetry seam", () => {
     assert.equal("trigger" in mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", attempt: 1 }, 0).payload, false);
   });
 
+  it("forge#4395: phase_attempt carries baseline_tokens and lane_profile, omitted when absent", () => {
+    const p = mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", attempt: 1, baseline_tokens: 21000, lane_profile: "lane" }, 0).payload;
+    assert.equal(p.baseline_tokens, 21000); assert.equal(p.lane_profile, "lane");
+    const q = mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", attempt: 1 }, 0).payload;
+    assert.equal("baseline_tokens" in q, false); assert.equal("lane_profile" in q, false);
+  });
+
   it("forge#4257: phase_attempt carries the backend, omitted when unreported", () => {
     assert.equal(mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1, backend: "api" }, 0).payload.backend, "api");
     assert.equal("backend" in mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1, backend: null }, 0).payload, false);

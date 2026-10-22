@@ -2007,6 +2007,7 @@ export function listDescendants(pid, { psFn = null } = {}) {
  * does not count as idle. `onSpawn(child)` receives the ChildProcess.
  * #4390: `contextMax` (stream only; 0 = off) kills the session once one assistant turn's context (input + cache read +
  * cache creation) reaches it, throwing CLI_CONTEXT with the stream-aggregated usage (null when none was seen) and turns.
+ * #4395: a stream result carries `baselineTokens`, the first assistant turn's context; absent when no message was seen.
  */
 export async function runCliBackendAsync(opts) {
   const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, contextMax = 0, ...rest } = opts;
@@ -2112,7 +2113,11 @@ export async function runCliBackendAsync(opts) {
     err.code = "CLI_IDLE"; err.lastTool = idleInfo.lastTool; err.children = idleInfo.children; err.idleMs = idleInfo.idleMs;
     throw err;
   }
-  return runCliBackend({ ...rest, spawnFn: () => collected });
+  const r = runCliBackend({ ...rest, spawnFn: () => collected });
+  // #4395: the session baseline is the first assistant turn's context (system prompt, tools, instructions, first prompt).
+  const first = msgUsage.values().next().value;
+  if (first && r && typeof r === "object") r.baselineTokens = toFiniteUsageNumber(first.input_tokens) + toFiniteUsageNumber(first.cache_read_input_tokens) + toFiniteUsageNumber(first.cache_creation_input_tokens);
+  return r;
 }
 
 // ---------------------------------------------------------------------------

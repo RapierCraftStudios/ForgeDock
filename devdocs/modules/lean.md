@@ -142,6 +142,17 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    prompt + `prompts.mjs` `contextRestartPrompt`: `git diff --stat` and the hunks against the lane base (`boundDiff`,
    `RESTART_DIFF_MAX_BYTES` 40 KB) and the last `.forge-lean/self-check.json`; contract.json stays the authority on disk.
    Context restarts do not use the single idle/timeout retry; after 3 in one call the call runs uncapped (loop guard).
+   **Lane profile** (#4395, `lean.mjs` section 2a + `callRunner`): every LLM session runs with
+   `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (profile `memory-off`). With forge.yaml `engine.lane_instructions`
+   (`engine-cli.mjs` `readLaneInstructions` → runCore `laneInstructions`) naming a repo-relative file in the lane
+   worktree (no `..`, non-empty, ≤ `LANE_INSTRUCTIONS_MAX_BYTES` 16 KB), profile `lane` also sets
+   `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and appends the file text to the system prompt of fresh tool-using sessions
+   (builder, reviewer, verifier; not resumes, not the noTools grouper). A bad file is a trajectory anomaly and falls back
+   to `memory-off`. `FORGEDOCK_FULL_SESSION=1` is profile `full`: nothing changes. No `--setting-sources`/`--bare`, so
+   user-scope hooks keep running; `laneEnv()` (validate/precheck/setup commands) never gets the switches. Measurement:
+   `runCliBackendAsync` returns `baselineTokens` (first stream assistant message's input + cache read + cache creation);
+   `makeLeanRunner` keeps it for fresh sessions only, and `PHASE_ATTEMPT_USAGE` / telemetry `phase_attempt` carry
+   `baseline_tokens` and `lane_profile`. Decision: `devdocs/decisions/4395-lane-profile.md`.
    **Quiet output** (#4390): `HOST_RULES` tells the builder to run tests quiet, read failures as `tail -40` + failing test
    ids, read files by range and send output that may pass 8 KB to a `$TMPDIR` file. `precheck.mjs` `quietFailure`
    (last 40 lines within the char share, failing-test-id lines by pytest/TAP/jest/vitest/go/cargo markers, `full log:`
