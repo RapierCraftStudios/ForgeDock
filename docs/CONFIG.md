@@ -643,6 +643,13 @@ verify:
   check_run: true               # optional; post the forgedock/verify check run (default false)
   post_merge: pnpm -r typecheck # optional; run on the merged tree at base-sync before the push (default: the lane's scoped typecheck)
   duplicate_exports: false      # optional; turn off the same-app duplicate-export check (default true)
+  e2e: auto                     # optional e2e merge gate: auto (default) | always | never
+  e2e_label: full-ci            # PR label that makes the repo's CI run e2e (label path)
+  e2e_checks: "e2e"             # check names of the e2e jobs the label path waits on
+  # e2e_workflow: e2e.yml       # or: a workflow_dispatch workflow that runs e2e (wins over the label)
+  # e2e_paths_input: specs      # its input that receives the changed spec paths
+  # e2e_paths: "e2e/**,tests/e2e/**"  # globs of e2e specs (default below)
+  # e2e_blocking: changed       # changed (default) | all
 ```
 
 | Key | Type | Required | Description |
@@ -657,6 +664,13 @@ verify:
 | `check_run` | boolean | No | Default `false` (no Checks API call, behaviour unchanged). `true`: after each push of a reviewed head (PR open, base-sync, merge-time fix round) the engine posts one completed `forgedock/verify` check run on that head (forge#4270), `success` iff every deterministic gate the lane already ran passed: declared check commands, undeclared package edges, docs freshness, contract scope, validate ids, requirement status, hotspot growth, amendments. The output carries each gate's id, pass/fail and evidence as JSON; the run log records a `VERIFY` event. Report only: ForgeDock never makes it required and never waits on it (it is ignored by its own CI waits); requiring it is the repository's branch-protection choice. Creating check runs needs a token that may (a GitHub App with `checks: write`); a Checks API failure is logged as an anomaly and never fails the lane. |
 | `post_merge` | string | No | Command run in the lane worktree on the merged tree after each base-sync merge, before the push (forge#4406). Default: the typecheck rows of the lane's change-scoped checks (`bin/lean/checks.mjs`), in `local` and `hybrid` mode only; `ci` mode runs no host typecheck unless `post_merge` is set. A failure resumes the builder with the output, up to `max_rounds` rounds, and the fixed head is re-reviewed; still failing is a trajectory anomaly and CI stays the gate. |
 | `duplicate_exports` | boolean | No | Default `true`: at hand-off and after each base-sync merge, names the lane newly exports that another non-test module of the same app or package (nearest `package.json`/`pyproject.toml`/`setup.py`/`go.mod`/`Cargo.toml`) already declares go back to the builder once ("rename or reuse", both paths); one left over is an anomaly (forge#4406). Re-exports, default exports and names 3+ other modules declare (framework conventions) are ignored. `false` turns the check off. |
+| `e2e` | string | No | e2e merge gate (forge#4403). `auto` (default): run e2e when the diff touches `e2e_paths` or a contract requirement quote has `[type:e2e]`. `always`: on every lane except docs-only ones. `never`: today's behaviour. Without `e2e_label` or `e2e_workflow` no e2e can run, so every mode keeps today's behaviour (a lane that changed specs records a decision saying so). |
+| `e2e_label` | string | No | Label added to the PR (`gh pr edit --add-label`) so tiered CI runs its e2e jobs. The label must already exist in the repo. |
+| `e2e_checks` | string | No | Comma-separated check-run names of the e2e jobs the label path waits on. Default: every check on the head except `forgedock/verify`. A check run concluded `skipped` (the unlabelled tier) counts as not run. |
+| `e2e_workflow` | string | No | Workflow file name or id dispatched on the lane branch instead of the label (`workflow_dispatch`); the engine waits for its run of the reviewed head. Wins over `e2e_label`. |
+| `e2e_paths_input` | string | No | `workflow_dispatch` input of `e2e_workflow` that receives the changed spec paths (newline-separated). |
+| `e2e_paths` | string | No | Comma-separated globs of e2e specs (same glob rules as `skip_paths`). Default `e2e/**,**/e2e/**,*.e2e.*,*.e2e-spec.*,cypress/**,playwright/**`. |
+| `e2e_blocking` | string | No | `changed` (default): only failures of the lane's own specs block the merge; other e2e failures are reported as an anomaly. `all`: every e2e failure blocks. |
 
 **Flow** (`ci`/`hybrid`, `bin/lean/verify.mjs` `runCiVerify`):
 
@@ -673,6 +687,13 @@ Each verification emits a `CI_VERIFY` run-log/telemetry event (`mode`, `round`, 
 - **Declared check commands before the PR.** Each `learned.test_commands` entry (a block list under `learned:`) runs with `bash -c` in the lane worktree after the build commit, before review and before the PR, with the per-command timeout above. These run on the host and use no Actions minutes. If they all pass, there is no extra builder turn. A failure resumes the builder in its session with the command, its exit code and the output tail, then the commands run again, up to `max_rounds`. A round with no new commit, or exhausted rounds, is recorded as an anomaly and the lane continues, because CI stays the gate. The engine has no built-in command list: to run `scripts/ci-local.sh`, list it here. Each round emits a `PRECHECK_COMMANDS` run-log event (`round`, `results: [{command, rc}]`).
 - **The same checks in the builder's session (#4364).** The builder runs `forgedock check` in the lane worktree before it writes its result: the contract's validate commands plus the same change-scoped pre-PR commands, budget and worker cap, locally (no GitHub, no Actions minutes). The engine hands it the settings above in `.forge-lean/check-plan.json`; outside a lane, `forgedock check --base REF` reads this file's `learned.test_commands`, `lean.precheck.max_minutes` and `verify:`. A builder result of `fixed` without a passing run on its final tree logs a `SELF_CHECK_MISSING` run-log event (`state`: `skipped`, `stale` or `red`), and a failed pre-PR round's `PRECHECK_COMMANDS` event carries `self_check`. Neither fails the lane: the engine's own checks and CI stay authoritative.
 - **Fix rounds at merge.** When a required check fails on the PR (`engine.merge_wait: required`), the failed jobs' logs (`gh run view --log-failed`, capped) go back to the builder session. The fixed head is re-reviewed and pushed, then the wait starts again. Still red after `max_rounds` (one budget shared with the `ci`/`hybrid` rounds above), or a round with no new commit, ends `needs-human` (`ci.red`). `max_rounds: 0` ends `ci.red` on the first failure. Each round emits a `CI_FIX_ROUND` run-log event (`trigger`, `round`, `jobs`). `merge_wait: all` is unchanged.
+
+**e2e merge gate (forge#4403, every verify mode).** Tiered CI usually skips e2e on lane PRs, so required checks alone let a lane merge with its own e2e specs failing. When the gate runs (see `e2e` above), after the merge wait and before `gh pr merge`, once per reviewed head, the engine labels the PR with `e2e_label` and waits on the head's `e2e_checks` (or dispatches `e2e_workflow` and waits on its run), with the same CI wait budget.
+- Green: the PR merges.
+- Red: a failure is the lane's when its failed-job log names one of the spec files the lane changed (path or basename), when the log is empty, or when the lane changed no spec (a `[type:e2e]` contract). The lane's failures (all failures with `e2e_blocking: all`) go back to the builder like a failed required check: one fix round from the shared `max_rounds` budget, re-review, push, then the wait and the e2e run start again; `ci.red` when the rounds are spent. Other failures are recorded as an anomaly and the PR merges.
+- Still pending at the budget: `ci-pending` (resumable). Label refused, dispatch refused, or no e2e run within 5 minutes: `needs-human`, nothing merged.
+
+Each run emits an `E2E_VERIFY` run-log/telemetry event (`pr`, `head`, `reason`, `result`, `specs`, `failures`, `own`, `blocking`). It spends Actions minutes only after review, on lanes that touch e2e.
 
 **Cost:** `ci`/`hybrid` spend GitHub Actions minutes before review, so they are opt-in per repo. On the green path they add no LLM calls; each red CI round adds one builder resume. The merge gate (`engine.merge_wait`) is unchanged.
 

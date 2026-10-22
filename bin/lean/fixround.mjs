@@ -44,7 +44,8 @@ export function issueSummary(body, max = FIX_CAPS.summary) {
  * these; events written before the field existed read as "unknown" in `forgedock stats`.
  */
 export const TRIGGERS = Object.freeze(["plan", "build", "block_correction", "contract_correction", "precheck", "structure", "docs", "enumerating",
-  "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "verifier", "post_merge", "duplicate"]);
+  "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "verifier", "post_merge", "duplicate",
+  "context_restart"]); // #4390: a session stopped at the context ceiling, restarted fresh (restart_of: the stopped trigger)
 
 /** Builder attempts after the build that mean its diff needed rework (environment and engine repairs do not). */
 export const REWORK_TRIGGERS = Object.freeze(["precheck", "structure", "docs", "enumerating", "sequence", "ci_red", "conformance", "review", "merge_ci", "post_merge", "duplicate"]);
@@ -52,12 +53,12 @@ export const REWORK_TRIGGERS = Object.freeze(["precheck", "structure", "docs", "
 /**
  * First pass of one lane from its implement-phase attempts in order ({trigger, restart_of}): null when it never reached the
  * build or an attempt has no trigger (not measurable), else true when no rework-trigger attempt follows the first `build`
- * (or the `timeout_restart` of a build, `restart_of: "build"`, when the build itself was killed).
+ * (or the `timeout_restart`/`context_restart` of a build, `restart_of: "build"`, when the build itself was killed).
  */
 export function firstPassOf(attempts) {
   const list = Array.isArray(attempts) ? attempts : [];
   if (list.some((a) => !a?.trigger)) return null;
-  const at = list.findIndex((a) => a.trigger === "build" || (a.trigger === "timeout_restart" && a.restart_of === "build"));
+  const at = list.findIndex((a) => a.trigger === "build" || (["timeout_restart", "context_restart"].includes(a.trigger) && a.restart_of === "build"));
   if (at < 0) return null;
   return !list.slice(at + 1).some((a) => REWORK_TRIGGERS.includes(a.trigger));
 }

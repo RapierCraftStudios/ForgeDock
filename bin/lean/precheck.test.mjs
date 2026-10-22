@@ -6,7 +6,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { formatFirstPassSummary } from "./fixround.mjs";
-import { runChecks, formatPrecheckSummary, planPrecheck, selfCheck, selfCheckState, formatCheckTable, worktreeFingerprint } from "./precheck.mjs";
+import { runChecks, formatPrecheckSummary, planPrecheck, selfCheck, selfCheckState, formatCheckTable, worktreeFingerprint, quietFailure } from "./precheck.mjs";
 import { execFileSync } from "node:child_process";
 import { readPrecheckBudget } from "../engine-cli.mjs";
 import { orchestrate } from "./orchestrate.mjs";
@@ -170,6 +170,18 @@ describe("forgedock check core (#4364)", () => {
     const t = formatCheckTable({ ok: false, validate: [{ id: "V1", command: "v", rc: 0, ms: 1200 }], commands: [{ command: "make lint", rc: 2, ms: 10, output: `${"x".repeat(5000)}TAIL` }], deferred: ["slow"] }, 1000);
     assert.match(t, /^PASS +1\.2s {2}V1 v$/m); assert.match(t, /^FAIL exit 2 .* make lint$/m); assert.match(t, /^DEFERRED .* slow$/m);
     assert.match(t, /--- make lint \(exit 2\)\n…x+TAIL/); assert.ok(t.length < 1400, "failure output capped"); assert.match(t, /check: FAIL \(1 failing\)$/);
+  });
+
+  it("#4390 quietFailure: last 40 lines, failing ids across ecosystems, log pointer; short output unchanged", () => {
+    const out = ["FAILED tests/test_x.py::test_a - assert 1 == 2", "not ok 3 - parses dates", " FAIL  src/a.test.ts > adds", "--- FAIL: TestSum (0.00s)", "test parser::empty ... FAILED", "  ✕ renders header (5 ms)",
+      ...Array.from({ length: 100 }, (_, i) => `line ${i}`)].join("\n");
+    const q = quietFailure(out, { logPath: ".forge-lean/logs/check-V1.log" });
+    assert.match(q, /^…line 60\n/); assert.match(q, /line 99\nfailing tests:\n/);
+    for (const id of ["FAILED tests/test_x.py::test_a", "not ok 3 - parses dates", "FAIL  src/a.test.ts > adds", "--- FAIL: TestSum", "test parser::empty ... FAILED", "✕ renders header"]) assert.ok(q.includes(`  ${id}`), id);
+    assert.match(q, /\nfull log: \.forge-lean\/logs\/check-V1\.log$/);
+    assert.equal(quietFailure("ok\nall good\n"), "ok\nall good");
+    assert.equal(quietFailure(""), "(no output)");
+    assert.equal(quietFailure("x".repeat(50), { maxChars: 10 }), `…${"x".repeat(10)}`);
   });
 
   it("worktreeFingerprint: the same content committed or not is the same tree; an edit or new file changes it; .forge-lean is ignored", async () => {

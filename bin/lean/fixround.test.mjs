@@ -53,7 +53,7 @@ describe("#4362 attempt triggers and first pass", () => {
   const t = (...xs) => xs.map((trigger) => ({ trigger }));
   it("the trigger vocabulary is the issue's closed list; rework is a subset", () => {
     assert.deepEqual([...TRIGGERS], ["plan", "build", "block_correction", "contract_correction", "precheck", "structure", "docs", "enumerating",
-      "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "verifier", "post_merge", "duplicate"]);
+      "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "verifier", "post_merge", "duplicate", "context_restart"]);
     for (const r of REWORK_TRIGGERS) assert.ok(TRIGGERS.includes(r), r);
   });
   it("firstPassOf: null without a build or with an untagged attempt; rework after the build breaks it, repairs do not", () => {
@@ -67,6 +67,8 @@ describe("#4362 attempt triggers and first pass", () => {
     assert.equal(firstPassOf(killed), true, "a killed and restarted build still reached the build");
     assert.equal(firstPassOf([...killed, { trigger: "review" }]), false);
     assert.equal(firstPassOf([{ trigger: "timeout_restart", restart_of: "plan" }]), null, "a restarted plan is not the build");
+    assert.equal(firstPassOf([{ trigger: "plan" }, { trigger: "context_restart", restart_of: "build" }]), true, "#4390: a context-ceiling restart of the build reached the build");
+    assert.equal(firstPassOf(t("plan", "build", "context_restart")), true, "#4390: a context restart is not rework");
   });
   it("formatFirstPassSummary counts only rows that reached the build", () => {
     assert.equal(formatFirstPassSummary([{ first_pass: true }, { first_pass: false }, { issue: 3 }, { first_pass: true }]), "first-pass: 67% (2/3 lanes that reached the build)");

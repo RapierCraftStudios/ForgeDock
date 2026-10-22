@@ -6,6 +6,7 @@
  * failed jobs' log tails for the builder's fix loop. All GitHub effects go through the injected io.
  */
 import { ciPollDelayMs } from "../engine.mjs";
+import { parseE2e } from "./e2e.mjs";
 
 export const VERIFY_MODES = Object.freeze(["local", "ci", "hybrid"]);
 /** Changed files that never need the CI matrix (docs-only lanes skip CI verification). */
@@ -29,8 +30,8 @@ const OK = ["success", "neutral", "skipped"];
 
 /**
  * forge.yaml `verify:` section (block style; parseForgeYaml gives strings) → {mode, workflow, pathsInput, skipPaths,
- * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, postMerge, duplicateExports}. Invalid values fall back to the defaults; mode defaults to local (today's
- * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`. #4406: postMerge (`post_merge`) is the command run on
+ * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, postMerge, duplicateExports, e2e}. Invalid values fall back to the defaults; mode defaults to local (today's
+ * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`; e2e is the e2e merge gate (#4403, e2e.mjs parseE2e). #4406: postMerge (`post_merge`) is the command run on
  * the merged tree at base-sync before the push (null: the lane's scoped typecheck); duplicateExports is false only for the literal `false`.
  */
 export function parseVerify(sec = {}) {
@@ -50,7 +51,7 @@ export function parseVerify(sec = {}) {
   const checkRun = str(s.check_run).toLowerCase() === "true";
   const postMerge = str(s.post_merge) || null;
   const duplicateExports = str(s.duplicate_exports).toLowerCase() !== "false";
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, postMerge, duplicateExports };
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, postMerge, duplicateExports, e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);
