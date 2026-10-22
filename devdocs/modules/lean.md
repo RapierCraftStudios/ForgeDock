@@ -285,6 +285,21 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Numbered documents (#4385, e.g. `docs/adr/0016-*.md`): a renamed file may differ
    only in its own number (`numberOnlyChange`, padded or not), and no tracked file
    may still name a renamed file's old stem (the series index, links).
+   #4386: the engine renumbers first (`renumberLane`: `git mv` to max(base)+1…, a Markdown
+   file's own heading number, references to the old stem repo-wide, the base journal plus the
+   lane's entries with consecutive `idx`, a data-only snapshot cloned from the base tip with a
+   new `id`/`prevId`, else `lean.sequence.regenerate`; `SEQUENCE_RENUMBERED`), and only an
+   `unsupported` result goes to the builder (`SEQUENCE_RENUMBER_FALLBACK`, reason in the
+   trajectory). `verifyRenumber` also accepts a file equal after mapping each move's old stem
+   and its own heading number. A base-sync whose conflicts are all sequence files
+   (`resolveSequenceConflicts`: base side, journal union, index union) needs no builder, and
+   an engine-only delta needs no re-review. The base-sync bound counts syncs against one base
+   head (`sameBaseSyncs`); a sync overtaken by a new base head does not count. Merge-gate late
+   binding: a lane with numbered files takes the host sequence lease (`seqlease.mjs`, a
+   one-slot `heavy.mjs` semaphore per (repo, lane, dir) under `schedDir()/seq-lease`,
+   fail-open after the CI wait budget), re-checks against the fetched lane, and a taken number
+   base-syncs + renumbers (`SEQUENCE_LATE_BIND`) and waits for CI again; released at merge
+   or finish.
    Only real series count (#4343): a leading date (`YYYY-MM-DD`, `YYYYMMDD`) is no
    number, and the directory must hold a series on the base — a `_journal.json` /
    `meta/_journal.json`, or ≥2 distinct numbers of the file's width filling at least
