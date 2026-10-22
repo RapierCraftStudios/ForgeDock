@@ -98,6 +98,20 @@ branches:
   feature_pattern: "milestone/{slug}"
 
 # =============================================================================
+# POST-DEPLOY (OPTIONAL)
+# Deferred follow-ups whose items are all post-deploy checks are parked
+# (label awaiting-promotion, no lane) until the parent's fix is on
+# branches.default. precondition_cmd adds a repo-specific readiness check git
+# cannot see (e.g. rollout state), run once the fix is on the default branch:
+# exit 0 = ready, exit 1 = not ready (parked), anything else = ignored (lane).
+# It receives the issue number as $1 and in FORGE_ISSUE.
+# Commands: orchestrate, triage
+# =============================================================================
+
+# post_deploy:
+#   precondition_cmd: "scripts/rollout-ready.sh"
+
+# =============================================================================
 # AGENTS (OPTIONAL)
 # Default model for pipeline agents — the main orchestrator and every
 # sub-agent spawned via the Agent/Task tool while following a command spec
