@@ -333,6 +333,35 @@ describe("#4354: the batch report ends with the fail-soft alerts of the batch's 
   });
 });
 
+describe("#4402: the batch report prints the efficiency lines, fail-soft", () => {
+  const run = async (deps) => {
+    const lines = [], l = console.log;
+    console.log = (...a) => lines.push(a.join(" "));
+    try {
+      await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { dir: tmpDir("eff-runs-"), batchRoot: tmpDir("eff-batch-"), allowTmpfs: true,
+        emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, sched: null, decide: () => {}, alertConfig: {}, heavyStats: null,
+        leanIo: { gh: async (a) => (a.includes("milestone") ? JSON.stringify({ milestone: null }) : a[0] === "api" ? (String(a[1]).endsWith("/comments") ? "" : JSON.stringify({ body: "## Root cause\na.js:1\n## Fix", labels: [] })) : JSON.stringify({ body: "" })),
+          git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : "") },
+        orchestration: { breaker: null, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 2 } },
+        leanModule: { runCore: async () => ({ terminalReason: "merged", pr: 51 }) }, ...deps });
+    } finally { console.log = l; }
+    return lines.join("\n").split("\n").filter((x) => x.trim());
+  };
+  it("prints the batch's efficiency section", async () => {
+    const out = await run({});
+    const at = out.findIndex((x) => x.startsWith("efficiency: merged 1,"));
+    assert.ok(at > 0, out.join("\n"));
+    assert.match(out[at + 3], /^retries\/merge 0\.00 \(env 0, engine 0, code 0, review 0, unknown 0; lane reruns 0\)$/);
+    assert.match(out[at + 5], /^issue quality: full n=1 /);
+    assert.equal(out[at + 6], "acceptance (7d after promotion): pass 0/0, pending 0, unprobed 1");
+  });
+  it("a throwing efficiency stub still ends the batch with its other report lines", async () => {
+    const out = await run({ efficiency: async () => { throw new Error("boom"); } });
+    assert.ok(out.includes("efficiency: n/a (boom)"), out.join("\n"));
+    assert.ok(out.some((x) => x.startsWith("reclaimed:")), out.join("\n"));
+  });
+});
+
 describe("#4408: issues added to a running batch (forgedock orchestrate --add)", () => {
   const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
   it("one lane running: an added independent issue starts on the next pass, an added one that Depends on the running issue waits for its merge", async () => {

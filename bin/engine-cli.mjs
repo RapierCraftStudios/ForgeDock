@@ -1460,6 +1460,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (firstPassLine) report.push(firstPassLine);
   const turnLine = formatTurnSummary(rows); // #4392
   if (turnLine) report.push(turnLine);
+  try { // #4402: $/merge, turns, context, retries by cause, no-action lanes, issue quality, acceptance; never fails a batch
+    const { batchEfficiency, formatEfficiencyLines } = await import("./stats/efficiency.mjs");
+    report.push(...formatEfficiencyLines(await (deps.efficiency ?? batchEfficiency)({ batchDir: batch.dir, runsDir: dir, repo, gh: (a) => leanIo.gh(a), rows })));
+  } catch (e) { report.push(`efficiency: n/a (${String(e?.message ?? e).split("\n")[0].slice(0, 160)})`); }
   const shadowLine = formatShadowSummary(rows); // #4398
   if (shadowLine) report.push(shadowLine);
   const decompLine = formatDecompositionSummary(rows); // #4396
