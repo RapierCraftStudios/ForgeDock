@@ -70,6 +70,25 @@ ${d || "(no changes yet)"}
 Last validate result (${LEAN_DIR}/self-check.json, from \`forgedock check\`): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded; run the validate commands."}`;
 }
 
+/** #4392: the implement turn budget is spent; one bounded fresh session either finishes or stops with a typed digest. */
+export function turnBudgetWrapupPrompt({ size = "?", budget = 0, used = 0, grant = 5, stat = "", diff = "", base = "", check = "" } = {}) {
+  const d = boundDiff(String(diff ?? ""), { stat, base, maxBytes: RESTART_DIFF_MAX_BYTES }).trim();
+  const c = String(check ?? "").trim();
+  return `\n\nTurn budget spent: this lane is size ${size} with an implement budget of ${budget} turns, and ${used} are used. The engine stopped the previous session and saved its work in a \`wip(forge): checkpoint\` commit. You have at most ${grant} turns. Pick one, do not grind:
+- Finish: if the work is complete or nearly so, commit what works, run the validate commands, and write ${RESULT_FILE} with status "fixed" as usual.
+- Stop: otherwise commit nothing new and write ${RESULT_FILE} as {"status":"budget-exceeded","summary":"<one line>","digest":"<what is done, what remains, why it is bigger than planned, and your recommendation: retry, split or re-scope>"}.
+
+<diff_stat base="${base}">
+${String(stat ?? "").trim() || "(no changes yet)"}
+</diff_stat>
+
+<diff>
+${d || "(no changes yet)"}
+</diff>
+
+Last validate result (${LEAN_DIR}/self-check.json): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded."}`;
+}
+
 /** CI could not run (no workflow run, no checks, dispatch refused): the local fallback (#4167). */
 export function ciUnavailablePrompt() {
   return `CI verification is unavailable for this branch, so verification falls back to this host. Run every validate command locally (targeted, as the host rules say), fix any failure, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE} with each command's real exit code. Do not push or touch GitHub.`;
@@ -107,12 +126,12 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"already-fixed|invalid","summary":"one line","evidence":["file:line ..."]} and stop. If it is blocked, write {"status":"blocked","summary":"",...} with a typed "block" (rules below) and stop.
 
 2. Otherwise write ${CONTRACT_FILE}, the frozen hand-off: a developer who never saw the issue must be able to implement and verify it from this file alone.
-{"requirements":[{"id":"R1","quote":"<verbatim sentence or checklist item from the issue>","disposition":"deliver|defer|post-deploy|not-applicable","why":"<required for defer and post-deploy>","evidence":"<file:line, required for not-applicable>"}],
+{"requirements":[{"id":"R1","quote":"<verbatim sentence or checklist item from the issue>","disposition":"deliver|defer|post-deploy|not-applicable","why":"<required for defer and post-deploy>","evidence":"<file:line, required for not-applicable>","verify":"<optional: in_lane|out_of_band>"}],
  "deliverables":[{"id":"D1","path":"<file to change>","change":"<what>","requirements":["R1"]}],
  "preserve":[{"id":"P1","what":"<caller, contract or behaviour that must not change, with its path>"}],
  "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>"}],
  "decisions":[{"id":"K1","choice":"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>","justification":"<why, with file:line>","source":"doc|lint|precedent|spec"}]}
-Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. A requirement you can do in this change is "deliver". List every file you will change as a deliverable; tests are always allowed.
+Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. A requirement you can do in this change is "deliver". A deliver requirement whose result is only measured outside the lane (Lighthouse, a field or throttled device profile, a nightly or report-only suite) is "verify":"out_of_band" with "evidence" naming the job or workflow that measures it; it is delivered by its instrumentation. The engine tags such quotes itself; set "verify":"in_lane" when this change can check it. List every file you will change as a deliverable; tests are always allowed.
 A validate or repro command must not read a $TMPDIR file it does not create itself: each run gets a fresh TMPDIR.
 Scope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (e.g. git diff --name-only piped to grep); the engine drops such a validate at freeze.
 A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when there is none. Then stop.
@@ -124,7 +143,7 @@ ${BLOCK_RULES}`;
  * #4374: the conformance rubric, one definition shared verbatim by `reviewerPrompt` and the builder's self-review in
  * `builderImplementPrompt`, so the two cannot drift. Each question is answered yes (OK) or no; codebase-agnostic.
  */
-export const REVIEW_RUBRIC = `1. Fixed: does the diff resolve the issue as written, delivering every requirement and acceptance criterion of the issue and every contract requirement with disposition deliver?
+export const REVIEW_RUBRIC = `1. Fixed: does the diff resolve the issue as written, delivering every requirement and acceptance criterion of the issue and every contract requirement with disposition deliver? An out-of-band requirement is delivered by its instrumentation (budget test or bench committed, job configured), not its measured result.
 2. No regression: is the diff free of breakage of an existing caller, test or behaviour (a concrete path:line failure)?
 3. Contract: is every deliverable changed as described, every preserve item intact and every validate command passing?
 4. Scope: does the diff change only deliverable paths and tests?`;
@@ -158,7 +177,7 @@ Last step before writing ${RESULT_FILE}: self-review against the reviewer's rubr
 ${REVIEW_RUBRIC}
 </rubric>
 
-Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirements":[{"id":"R1","status":"implemented|partial|missing","evidence":"file:line"}],"validation":[{"id":"V1","command":"","exit":0}],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}],"self_review":[{"question":"1","answer":"yes|no","evidence":""}],"amendments":[]}
+Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirements":[{"id":"R1","status":"implemented|partial|missing","evidence":"file:line","instrumented":"<true if out_of_band bench+job committed>"}],"validation":[{"id":"V1","command":"","exit":0}],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}],"self_review":[{"question":"1","answer":"yes|no","evidence":""}],"amendments":[]}
 Docker: start containers with docker run --rm; pass --label for each entry of $FORGE_DOCKER_LABELS on every docker run, volume create, network create and build (compose: on services, volumes, networks); tear down via trap/finally.
 If you started Docker containers or volumes that are still there, list their names in ${RESULT_FILE} as "resources":{"containers":[],"volumes":[]} so the engine removes them when the lane ends.
 If you find you are blocked, write "status":"blocked" with a typed "block" instead.`;
@@ -296,7 +315,7 @@ export const REVIEWER_SYSTEM = `You are an independent conformance reviewer of o
 
 You receive the GitHub issue with its comments, the frozen contract (requirements quoted from the issue, deliverables, preserve constraints, validate commands) with typed amendments, the builder's result with validation output, the changed files, the diff, and a row skeleton with one row per contract id and changed file. The engine computes the verdict from your rows; a reply without rows is rejected, so fill the skeleton rather than composing rows: fill EVERY row (set each empty status, evidence and validated_by, and each null deferral_ok; keep the ids and files as given):
 - issue_coverage: one row per requirement or acceptance criterion in the issue, quoted verbatim, saying whether the contract covers it, narrows it, or misses it. The skeleton lists the contract's quotes; add a row for any issue requirement the contract does not quote.
-- requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with evidence as a backtick-quoted repo-relative path:line copied verbatim from the changed files, including (group), [slug] and [...slug] folders (e.g. \`apps/web/app/(console)/layout.tsx:12\`, not route.ts:12) and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change.
+- requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with evidence as a backtick-quoted repo-relative path:line copied verbatim from the changed files, including (group), [slug] and [...slug] folders (e.g. \`apps/web/app/(console)/layout.tsx:12\`, not route.ts:12) and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change. For a verify out_of_band row (measured by the named job, not in this lane) set instrumented: true only when its budget test or bench is committed and that job is configured, with that path:line as evidence; false otherwise. Do not judge the measured result.
 - scope: one row per changed file, pre-filled with the engine's authorization: the deliverable id that authorizes it (deliverables may be directories or globs), "test", "incidental" (changelog, lockfile), or "none" with what it changes. Change it only if the diff shows the file does something its deliverable does not cover.
 - preserve: one row per preserve id: intact|violated|unverified, with path:line. The skeleton starts each at "unverified"; set intact only after checking it.
 - regressions: concrete breakages only, each with path:line.

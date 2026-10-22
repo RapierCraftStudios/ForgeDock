@@ -1180,6 +1180,14 @@ describe("forgedock check (#4364)", () => {
     writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: lots\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, undefined);
   });
 
+  it("#4392: readCoreLimits reads engine.turn_budget_s|m|l over the defaults (0 allowed, junk ignored, none set: the defaults)", async () => {
+    const { readCoreLimits } = await import("../engine-cli.mjs");
+    const d = tmpDir("fd-tb-");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  turn_budget_m: 40\n  turn_budget_l: 0\n  turn_budget_s: many\n");
+    assert.deepEqual(readCoreLimits(d).turnBudgets, { S: 25, M: 40, L: 0 });
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  cli_idle_minutes: 5\n"); assert.deepEqual(readCoreLimits(d).turnBudgets, { S: 25, M: 60, L: 100 });
+  });
+
   it("local only: the command never reaches GitHub (no gh in its deps or source)", () => {
     const src = checkFromCli.toString();
     assert.doesNotMatch(src, /\bgh\b|workflow run|git", \["push|\["push"/);
