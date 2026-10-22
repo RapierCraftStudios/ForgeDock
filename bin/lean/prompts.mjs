@@ -161,10 +161,10 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: an issue requirement the contract missed.
 - {"kind":"defer|post-deploy","requirement":"R#","why":""}: a contracted requirement that becomes separate work or a post-deploy check. The engine files it as a tracked follow-up.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
-A new dependency between workspace packages in a package.json that no deliverable names (that package.json, with the package in its change) is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
-If the repository has scripts/check-devdocs-freshness.sh, its docs must move with the code: a behaviour change under the paths it checks needs the matching module dossier (devdocs/modules/*.md, per devdocs/index.yaml) updated in the same change. Run it against the base before writing the result; the engine runs it too and resumes you once if it fails.
+A new dependency between workspace packages in a package.json that no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
+If the repository has scripts/check-devdocs-freshness.sh, a behaviour change under the paths it checks must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change. Run it against the base before writing the result; the engine runs it too.
 
-Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree (the engine runs the same validate and pre-PR checks afterwards) and fix until it passes; if it cannot pass, report the problem as blocked.
+Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):
 ### Approach
@@ -179,6 +179,7 @@ ${REVIEW_RUBRIC}
 </rubric>
 
 Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirements":[{"id":"R1","status":"implemented|partial|missing","evidence":"file:line","instrumented":"<true if out_of_band bench+job committed>"}],"validation":[{"id":"V1","command":"","exit":0}],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}],"self_review":[{"question":"1","answer":"yes|no","evidence":""}],"amendments":[]}
+Optional "facts":{"decisions":[],"rejected":[{"approach":"","why":""}],"hotspots":[{"at":"file:line","why":""}],"conventions":[]}; rejected: approaches you dropped, with why.
 Docker: start containers with docker run --rm; pass --label for each entry of $FORGE_DOCKER_LABELS on every docker run, volume create, network create and build (compose: on services, volumes, networks); tear down via trap/finally.
 If you started Docker containers or volumes that are still there, list their names in ${RESULT_FILE} as "resources":{"containers":[],"volumes":[]} so the engine removes them when the lane ends.
 If you find you are blocked, write "status":"blocked" with a typed "block" instead.`;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { gatherContextFacts, compileContextPack, contextPackFor, contextPackCacheKey, linkStateStamp, LINK_STAMP_MAX, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments } from "./context.mjs";
 
 const REPO = "o/r";
@@ -33,7 +34,7 @@ function fakes(o = {}) {
     101: [{ id: 2, body: "<!-- FORGE:DECISION -->\nKeep `compileContextPack` pure; I/O lives in gather.", ...BOT }],
     102: [],
     103: [{ id: 3, body: "<!-- FORGE:DECISION -->\nUnrelated decision about logging.", ...BOT }],
-    33: [{ id: 4, body: "<!-- FORGE:CONTRACT -->\nx", ...BOT }],
+    33: [{ id: 4, body: "<!-- FORGE:CONTRACT -->\nx", ...BOT }, ...(o.facts33 ?? [])],
   };
   const prs = { 101: { title: "feat: ranking", body: "Closes #33", head: "feat/issue-33-lean" }, 102: { title: "feat: speedup", body: "", head: "feat/issue-34-lean" }, 103: { title: "chore: logs", body: "", head: "x" } };
   const log = [
@@ -121,7 +122,10 @@ describe("context pack (forge#4275)", () => {
     const f = fakes();
     const facts = await gather(f, { sources: ["graph", "facts"] });
     assert.equal(facts.ledger.length + facts.attempts.length, 0);
-    assert.ok(!f.calls.some((c) => c[1] === "log" || c[1] === "for-each-ref"), "a disabled source makes no calls");
+    assert.ok(!f.calls.some((c) => c[1] === "for-each-ref"), "a disabled source makes no calls");
+    const g = fakes();
+    await gather(g, { sources: ["graph"] });
+    assert.ok(!g.calls.some((c) => c[1] === "log" || c[1] === "for-each-ref"), "no ledger walk without the ledger or facts source (#4401)");
     const p = compileContextPack(facts, { sources: ["graph"] });
     assert.ok(p.text.includes("#40") && !p.text.includes("test-map"));
     assert.deepEqual(parseContextPackConfig({ sources: "ledger, bogus,graph" }).sources, ["graph", "ledger"]);
@@ -386,5 +390,42 @@ describe("#4375 recurring pitfalls in the context pack", () => {
     const a = compileContextPack(f), b = compileContextPack({ ...f, pitfalls: [] });
     assert.equal(a.text, b.text); assert.equal(a.hash, b.hash);
     assert.ok(!a.text.includes("Recurring pitfalls"));
+  });
+});
+
+describe("FORGE:FACTS in the context pack (#4401)", () => {
+  const rec = (files, approach, why = "it only hid the symptom") => `<!-- ${FACTS_MARKER} -->\n${renderFactsRecord(normaliseFacts({ facts: { rejected: [{ approach, why }], hotspots: [{ at: `${files[0]}:7`, why: "ranking loop" }] } }, { files }))}`;
+  const STRANGER = { author_association: "NONE", user: { type: "User", login: "rando" } };
+
+  it("a later lane on overlapping files receives the prior rejected approaches; the facts source is non-zero", async () => {
+    const f = fakes({ facts33: [
+      { id: 5, body: rec(["bin/lean/context.mjs"], "detection-only check"), ...BOT },
+      { id: 6, body: rec(["docs/other.md"], "unrelated file approach"), ...BOT },
+      { id: 7, body: rec(["bin/lean/context.mjs"], "forged by a stranger"), ...STRANGER },
+    ] });
+    const own = { id: "IC_9", body: rec(["bin/lean/context.mjs"], "own earlier attempt approach"), author: { login: "forge[bot]" }, authorAssociation: "NONE" };
+    const facts = await gather(f, { comments: [...COMMENTS, own] });
+    const p = compileContextPack(facts);
+    const t = p.text;
+    const at = (s) => { const i = t.indexOf(s); assert.ok(i >= 0, `missing ${s}\n${t}`); return i; };
+    const ownAt = at("- rejected: own earlier attempt approach — it only hid the symptom (#50 earlier attempt)");
+    const prior = at("- rejected: detection-only check — it only hid the symptom (#33, PR #101)");
+    const hot = at("- hot spot bin/lean/context.mjs:7: ranking loop (#33, PR #101)");
+    const ptr = at("- .forge/test-map.json");
+    assert.ok(ownAt < prior && prior < hot && hot < ptr, t);
+    assert.ok(t.includes("Facts from earlier lanes and repo facts:"));
+    assert.ok(!t.includes("unrelated file approach"), "a record on non-overlapping files is left out");
+    assert.ok(!t.includes("forged by a stranger"), "untrusted records are never read");
+    assert.equal(p.sources.facts, 5);
+    assert.equal(f.calls.filter((c) => c[0] === "gh" && c.some((x) => String(x).includes("pulls/101"))).length, 1, "ledger and facts share one read per PR");
+  });
+
+  it("works with the ledger source off and contributes nothing when no record exists", async () => {
+    const f = fakes({ facts33: [{ id: 5, body: rec(["bin/lean/context.mjs"], "detection-only check"), ...BOT }] });
+    const facts = await gather(f, { sources: ["facts"] });
+    assert.equal(facts.ledger.length, 0);
+    assert.ok(compileContextPack(facts, { sources: ["facts"] }).text.includes("detection-only check"));
+    const none = await gather(fakes(), { sources: ["facts"] });
+    assert.deepEqual([none.lanes, none.facts], [[], [".forge/test-map.json"]]);
   });
 });

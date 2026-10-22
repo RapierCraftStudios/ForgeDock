@@ -7,6 +7,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
+import { parseFactsComment } from "./facts.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
@@ -184,7 +185,7 @@ describe("core work-on", () => {
     const r = await run(w, { dir });
     assert.equal(r.terminalReason, "merged");
     assert.equal(r.pr, 77);
-    assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:TRAJECTORY"]);
+    assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:FACTS", "FORGE:TRAJECTORY"]);
     assert.match(w.comments[1], /<!-- FORGE:VALIDATE -->/, "VALIDATE stays as an alias marker");
     assert.match(w.comments[1], /^<!-- FORGE:INVESTIGATION -->\n<!-- FORGE:VALIDATE -->\n## Investigation Report\n\*\*Verdict\*\*: CONFIRMED/);
     assert.match(w.comments[2], /^<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n## Builder Contract \(frozen `[0-9a-f]{12}`\)/, "PLAN stays as an alias marker");
@@ -1951,10 +1952,21 @@ describe("comment templates", () => {
     assert.match(t, /does not conform to the issue and its frozen contract after one builder resume/);
   });
 
+  it("#4401 the lane posts FORGE:FACTS from result.json facts, its validation and changed files; never quotable as a requirement", async () => {
+    const w = world({ result: { status: "fixed", summary: "s", validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }],
+      facts: { rejected: [{ approach: "detection-only guard", why: "hides the cause" }], hotspots: [{ at: "src/foo.js:3", why: "null path" }] } } });
+    assert.equal((await run(w)).terminalReason, "merged");
+    const f = parseFactsComment(w.comments.find((c) => markerOf(c) === "FORGE:FACTS"));
+    assert.deepEqual(f.rejected, [{ approach: "detection-only guard", why: "hides the cause" }]);
+    assert.deepEqual(f.baselines, [{ command: "node --test test/foo.test.js", exit: 0 }]);
+    assert.ok(f.files.length > 0 && !f.files.some((x) => x.startsWith(".forge-lean/")), JSON.stringify(f.files));
+    assert.ok(!scopeText({ title: "t", body: "b" }, [{ body: w.comments.find((c) => markerOf(c) === "FORGE:FACTS") }]).includes("detection-only"));
+  });
+
   it("missing stage files in a real run are rendered from result.json and noted as anomalies", async () => {
     const w = world({ noStages: true, result: { status: "fixed", summary: "fixed foo", evidence: ["src/foo.js:3 x"], root_cause: "bad at src/foo.js:3", changes: [{ file: "src/foo.js", change: "guard", why: "w" }], tests: [{ command: "t", result: "pass", fails_without_fix: false }] } });
     await run(w);
-    assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:TRAJECTORY"]);
+    assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:FACTS", "FORGE:TRAJECTORY"]);
     assert.match(w.comments[1], /Verdict\*\*: CONFIRMED[\s\S]*Root Cause\nnot reported/, "the plan call has no result.json: a placeholder, still posted");
     assert.match(w.comments[3], /fails without fix: no/);
     assert.match(traj(w)[0], /investigation.md missing or empty: rendered from result.json/);
