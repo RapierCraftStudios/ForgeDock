@@ -4726,3 +4726,31 @@ describe("learned pitfalls (#4375)", () => {
     assert.equal((await run(w, { contextPack: { mode: "on" }, precheck: { commands: ["npm run lint"] } })).terminalReason, "merged");
   });
 });
+
+describe("explorer subagent (#4391)", () => {
+  const capture = (w) => { const seen = []; const inner = w.io.runner; w.io.runner = async (c) => { seen.push({ role: c.role, agents: c.agents ?? null }); return inner(c); }; return seen; };
+
+  it("on: builder calls get the explorer agent, plan/implement prompts the rule, reviewer none; RUN_TERMINAL tags explore", async () => {
+    const w = world(), seen = capture(w), dir = tmpDir("core-");
+    assert.equal((await run(w, { dir, explore: { mode: "on", model: "claude-haiku-5-5" } })).terminalReason, "merged");
+    const b = seen.filter((s) => s.role === "builder");
+    assert.ok(b.length >= 2 && b.every((s) => s.agents?.explorer?.model === "claude-haiku-5-5"));
+    assert.ok(seen.filter((s) => s.role !== "builder").every((s) => s.agents === null));
+    const [plan, impl] = builders(w).map((c) => c[4]);
+    assert.ok(plan.startsWith(builderPlanPrompt(7)));
+    assert.match(plan, /subagent_type "explorer"[\s\S]*Open a file yourself only to edit it or to verify a digest claim/);
+    assert.match(impl, /subagent_type "explorer"/);
+    assert.equal(readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL").explore, "on");
+    assert.match(traj(w).at(-1), /Explorer subagent \(on\): model claude-haiku-5-5/);
+  });
+
+  it("off (default): no agents on any call and prompts identical to an explicit off", async () => {
+    const w = world(), seen = capture(w), off = world(), dir = tmpDir("core-");
+    await run(w, { dir });
+    await run(off, { explore: { mode: "off" } });
+    assert.ok(seen.every((s) => s.agents === null));
+    assert.deepEqual(builders(w).map((c) => c[4]), builders(off).map((c) => c[4]));
+    assert.ok(!builders(w).some((c) => c[4].includes("explorer")));
+    assert.equal(readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL").explore, "off");
+  });
+});
