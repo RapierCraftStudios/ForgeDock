@@ -4990,6 +4990,65 @@ describe("#4362 attempt triggers", () => {
   });
 });
 
+describe("#4392: implement turn budget", () => {
+  /** The build is stopped at its turn budget; `wrap(w, put)` acts as the wrap-up session (after the normal fake). */
+  const budgetWorld = (wrap, { overrun = false } = {}) => {
+    const w = world({ dirty: true }); const orig = w.io.runner; w.seen = []; let stopped = false;
+    w.io.runner = async (c) => {
+      if (c.role === "builder") w.seen.push({ turnMax: c.turnMax ?? 0, resume: c.resume ?? null, prompt: c.prompt });
+      if (c.role === "builder" && c.turnMax > 0 && !stopped) { stopped = true; throw Object.assign(new Error("turns"), { code: "CLI_TURNS", turns: c.turnMax, turnMax: c.turnMax, usage: null }); }
+      if (c.role === "builder" && /Turn budget spent/.test(c.prompt)) {
+        if (overrun) throw Object.assign(new Error("turns"), { code: "CLI_TURNS", turns: c.turnMax, turnMax: c.turnMax, usage: null });
+        const r = await orig(c); wrap?.(w); return r;
+      }
+      return orig(c);
+    };
+    return w;
+  };
+  const usage = (dir) => readLog(dir, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE");
+  const TB = { S: 25, M: 60, L: 100 }; // the CLI defaults (readCoreLimits); runCore alone is unbudgeted
+  const stopWith = (digest) => (w) => { w.files[`${WT}/.forge-lean/result.json`] = JSON.stringify({ status: "budget-exceeded", summary: "too big", digest }); };
+
+  it("an overrun ends needs-human budget.exceeded with the builder's digest, checkpointed, recoverable once", async () => {
+    const w = budgetWorld(stopWith("done: parser. remaining: 3 adapters. recommend split")); const dir = tmpDir("core-tb-");
+    const r = await run(w, { dir, turnBudgets: TB });
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, OUTCOME_CODES.BUDGET_EXCEEDED);
+    assert.match(r.detail, /size S, 25 turns/); assert.match(r.detail, /remaining: 3 adapters/);
+    assert.equal(classifyNeedsHuman({ outcome: r.terminalReason, code: r.code }), "recoverable");
+    assert.deepEqual(r.turns, { size: "S", budget: 25, build: 28, total: 31, exceeded: true });
+    assert.deepEqual(w.seen.map((x) => x.turnMax), [0, 25, 5], "plan uncapped, build gets the budget, wrap-up the grant");
+    assert.equal(w.seen[2].resume, null, "the wrap-up is a fresh session");
+    assert.match(w.seen[2].prompt, /The engine froze \.forge-lean\/contract\.json/); assert.match(w.seen[2].prompt, /at most 5 turns/);
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && c.some((x) => /checkpoint after turn budget/.test(x))), "work checkpointed");
+    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes("remaining: 3 adapters")));
+    const log = readLog(dir, 7);
+    assert.ok(log.some((e) => e.event === "TURN_BUDGET_EXCEEDED" && e.size === "S" && e.budget === 25 && e.turns === 25 && e.grant === 5));
+    assert.deepEqual(log.find((e) => e.event === "RUN_TERMINAL").turns, r.turns);
+    assert.deepEqual(usage(dir).filter((e) => e.phase === "implement").map((e) => [e.trigger, e.restart_of ?? null]), [["plan", null], ["build", null], ["budget_wrapup", "build"]]);
+  });
+
+  it("a wrap-up that finishes flows on to merge; an overrun wrap-up stops with the diff stat as digest", async () => {
+    const fin = budgetWorld(null);
+    const r = await run(fin, { dir: tmpDir("core-tb-"), turnBudgets: TB });
+    assert.equal(r.terminalReason, "merged"); assert.equal(r.turns.exceeded, true); assert.equal(r.firstPass, true);
+    const over = budgetWorld(null, { overrun: true });
+    const o2 = await run(over, { dir: tmpDir("core-tb-"), turnBudgets: TB });
+    assert.equal(o2.code, OUTCOME_CODES.BUDGET_EXCEEDED); assert.match(o2.detail, /No builder digest; changes so far/);
+  });
+
+  it("size comes from a size: label over the contract; 0 disables the budget and nothing is capped", async () => {
+    const w = world({ labels: [{ name: "size:L" }] }); const caps = []; const orig = w.io.runner;
+    w.io.runner = async (c) => { if (c.role === "builder") caps.push(c.turnMax ?? 0); return orig(c); };
+    const r = await run(w, { dir: tmpDir("core-tb-"), turnBudgets: { L: 70 } });
+    assert.equal(r.terminalReason, "merged"); assert.deepEqual(caps, [0, 70]);
+    assert.deepEqual(r.turns, { size: "L", budget: 70, build: 3, total: 6, exceeded: false });
+    const off = world(); const offCaps = []; const o2 = off.io.runner;
+    off.io.runner = async (c) => { if (c.role === "builder") offCaps.push(c.turnMax ?? 0); return o2(c); };
+    const r2 = await run(off, { dir: tmpDir("core-tb-"), turnBudgets: { S: 0, M: 0, L: 0 } });
+    assert.equal(r2.terminalReason, "merged"); assert.ok(offCaps.every((x) => x === 0)); assert.equal(r2.turns.budget, 0);
+  });
+});
+
 describe("learned pitfalls (#4375)", () => {
   const memStore = () => { const recs = []; return { recs, read: async () => recs.map((r) => JSON.parse(JSON.stringify(r))), append: async (_repo, r) => { recs.push(r); } }; };
   const packFacts = async (a) => (await import("./context.mjs")).gatherContextFacts({ ...a, io: {}, sources: ["pitfalls"] });

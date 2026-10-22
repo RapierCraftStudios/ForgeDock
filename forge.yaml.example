@@ -319,6 +319,15 @@ branches:
 #   # restarted fresh from the frozen contract, the diff and the last validate
 #   # result instead of carrying its whole history. 0 disables.
 #   context_ceiling_tokens: 120000
+#   # Turn budget (#4392): implement turns per lane size. Size is a `size:S|M|L`
+#   # label, else the frozen contract's deliverable paths (S <= 2, M <= 5, else L).
+#   # At the budget the builder is checkpointed and gets one short wrap-up to
+#   # finish or stop with a digest; a stop ends needs-human `budget.exceeded`,
+#   # which orchestrate recovers once. The batch report prints turns by size.
+#   # 0 disables a size.
+#   turn_budget_s: 25
+#   turn_budget_m: 60
+#   turn_budget_l: 100
 
 # =============================================================================
 # ENV (OPTIONAL)
