@@ -8,6 +8,7 @@ import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from 
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
 import { makeLedger } from "./ledger.mjs";
+import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
@@ -3449,8 +3450,9 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     const d = tmpDir("verify-yaml-");
     writeFileSync(`${d}/forge.yaml`, "engine:\n  conformance: shadow\n");
     assert.equal(readVerify(d), undefined);
-    writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n");
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false });
+    writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n  e2e_label: full-ci\n  e2e_checks: \"e2e (1),e2e (2)\"\n");
+    const e2e = { mode: "auto", label: "full-ci", workflow: null, pathsInput: null, checks: ["e2e (1)", "e2e (2)"], paths: ["e2e/**", "**/e2e/**", "*.e2e.*", "*.e2e-spec.*", "cypress/**", "playwright/**"], blocking: "changed" };
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, e2e });
   });
 });
 
@@ -4724,5 +4726,81 @@ describe("learned pitfalls (#4375)", () => {
     w.io.pitfalls = { read: async () => { throw new Error("EACCES"); }, append: async () => { throw new Error("EROFS"); } };
     w.io.contextFacts = packFacts; failingPrecheck(w);
     assert.equal((await run(w, { contextPack: { mode: "on" }, precheck: { commands: ["npm run lint"] } })).terminalReason, "merged");
+  });
+});
+
+describe("e2e merge gate (#4403)", () => {
+  const SPECS = ["src/foo.js", "test/foo.test.js", "e2e/foo.spec.ts"];
+  const RUN = "https://github.com/o/r/actions/runs/777/job/1";
+  /** commitChecks: the e2e job is skipped until the PR carries the label; then `seq` is consumed (the last repeats). */
+  const withE2e = (w, seq, log = "FAIL e2e/foo.spec.ts > handles null") => {
+    w.labelled = () => w.prEdits.some((a) => a.includes("--add-label"));
+    w.io.commitChecks = async () => {
+      if (!w.labelled()) return [{ name: "e2e", state: "success", conclusion: "skipped", url: RUN }];
+      const st = seq.length > 1 ? seq.shift() : seq[0];
+      return [{ name: "e2e", state: "success", conclusion: "skipped", url: RUN }, { name: "e2e", state: st, conclusion: st === "pending" ? null : st, url: RUN }];
+    };
+    w.io.failedLogs = async () => log;
+    return w;
+  };
+  const cfg = (extra = {}) => parseVerify({ e2e_label: "full-ci", e2e_checks: "e2e", ...extra });
+  const go = (w, extra = {}) => run(w, { conformance: "shadow", verify: cfg(), ...extra });
+  const e2eEvents = (dir) => readLog(dir, 7).filter((e) => e.event === "E2E_VERIFY");
+
+  it("#4403 repro: a lane that changes an e2e spec labels the PR, waits on the e2e check and merges only after it passes", async () => {
+    const w = withE2e(world({ changed: SPECS, reviews: [conf({}, CONTRACT, SPECS)] }), ["pending", "pending", "success"]);
+    const dir = tmpDir("core-");
+    const r = await go(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const label = w.prEdits.find((a) => a.includes("--add-label"));
+    assert.ok(label, "the PR is labelled for the e2e run"); assert.equal(label[label.indexOf("--add-label") + 1], "full-ci");
+    const ev = e2eEvents(dir);
+    assert.deepEqual(ev.map((e) => [e.result, e.specs]), [["pass", ["e2e/foo.spec.ts"]]]);
+    assert.ok(w.seq.indexOf("merge") > -1);
+  });
+
+  it("the lane's own spec failing in e2e: builder fix round, re-review, then merged once e2e is green; no rounds left -> ci.red, nothing merged", async () => {
+    const w = withE2e(world({ changed: SPECS }), ["failure", "success"]);
+    const r = await go(w);
+    assert.equal(r.terminalReason, "merged");
+    const fix = builders(w).filter((b) => /CI failed on the pushed branch/.test(b[4]));
+    assert.equal(fix.length, 1); assert.match(fix[0][4], /e2e\/foo\.spec\.ts/);
+    assert.equal(reviewers(w).length, 2, "the fixed head is reviewed again");
+    const w2 = withE2e(world({ changed: SPECS }), ["failure"]);
+    const r2 = await go(w2, { verify: { ...cfg(), maxRounds: 0 } });
+    assert.equal(r2.terminalReason, "needs-human"); assert.equal(r2.code, OUTCOME_CODES.CI_RED); assert.equal(w2.merges.length, 0);
+  });
+
+  it("an unrelated pre-existing e2e failure is reported, not blocking; e2e_blocking: all blocks it", async () => {
+    const w = withE2e(world({ changed: SPECS }), ["failure"], "FAIL e2e/rosters.spec.ts > lists rosters");
+    const dir = tmpDir("core-");
+    const r = await go(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(e2eEvents(dir).map((e) => [e.result, e.own]), [["fail", []]]);
+    assert.ok(traj(w).some((t) => /Pre-existing e2e failure\(s\) reported, not blocking: e2e/.test(t)));
+    const w2 = withE2e(world({ changed: SPECS }), ["failure"], "FAIL e2e/rosters.spec.ts > lists rosters");
+    const r2 = await go(w2, { verify: { ...cfg({ e2e_blocking: "all" }), maxRounds: 0 } });
+    assert.equal(r2.terminalReason, "needs-human"); assert.equal(w2.merges.length, 0);
+  });
+
+  it("verify.e2e: never (or no label/workflow configured) keeps today's behaviour: no label, no e2e wait, no event", async () => {
+    for (const verify of [cfg({ e2e: "never" }), parseVerify({})]) {
+      const w = withE2e(world({ changed: SPECS }), ["failure"]);
+      const dir = tmpDir("core-");
+      const r = await go(w, { dir, verify });
+      assert.equal(r.terminalReason, "merged");
+      assert.equal(w.prEdits.filter((a) => a.includes("--add-label")).length, 0);
+      assert.equal(e2eEvents(dir).length, 0);
+    }
+  });
+
+  it("a lane without e2e specs or [type:e2e] criteria never runs e2e; e2e that never starts is needs-human, nothing merged", async () => {
+    const w = withE2e(world(), ["failure"]);
+    assert.equal((await go(w)).terminalReason, "merged");
+    assert.equal(w.prEdits.filter((a) => a.includes("--add-label")).length, 0);
+    const w2 = world({ changed: SPECS });
+    w2.io.commitChecks = async () => [{ name: "e2e", state: "success", conclusion: "skipped", url: RUN }];
+    const r2 = await go(w2);
+    assert.equal(r2.terminalReason, "needs-human"); assert.equal(w2.merges.length, 0);
   });
 });
