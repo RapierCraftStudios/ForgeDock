@@ -3280,6 +3280,15 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(took >= 850 && took < 8000, `killed after idle + busy window, not before (${took} ms)`);
   });
 
+  it("#4405 the CLI_TIMEOUT ceiling still applies during an idle extension", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { d, bin } = await fakeCli("busyceil", `${TOOL}\nsleep 30 &\nwait`);
+    const t0 = Date.now();
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 300, maxMs: 1200,
+      busy: () => ({ children: [], heavyQueue: { queued: 0, running: 1 } }), busyMs: 60000 }), (e) => { assert.equal(e.code, "CLI_TIMEOUT", e.message); return true; });
+    assert.ok(Date.now() - t0 < 6000, "killed at maxMs, not after idle + busy window");
+  });
+
   it("#4405 a silent session with no work children is still killed at the idle timeout when busy is wired", async () => {
     const { runCliBackendAsync } = await import("../runner.mjs");
     const { isHeavyProcess } = await import("./heavy.mjs");

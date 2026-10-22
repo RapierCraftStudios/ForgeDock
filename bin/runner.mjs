@@ -2087,7 +2087,9 @@ export async function runCliBackendAsync(opts) {
             idleInfo = { lastTool, children: listDescendants(child.pid), idleMs, pid: child.pid, extended, heavyQueue: extended ? extendInfo?.heavyQueue ?? null : null };
             kill();
           }
-        } else if (!timedOut && !idleInfo && !ctxInfo && now - startedAt - pausedTotal - (paused ? now - pausedAt : 0) >= ceiling) { timedOut = true; kill(); }
+        }
+        // #4405: a separate check, so the absolute ceiling still applies while the idle kill is extended (busy) or settling.
+        if (!timedOut && !idleInfo && !ctxInfo && now - startedAt - pausedTotal - (paused ? now - pausedAt : 0) >= ceiling) { timedOut = true; kill(); }
       }, tick);
       timer.unref?.();
       const noteLine = (line) => {
