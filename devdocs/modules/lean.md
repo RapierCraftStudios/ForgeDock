@@ -285,6 +285,21 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Numbered documents (#4385, e.g. `docs/adr/0016-*.md`): a renamed file may differ
    only in its own number (`numberOnlyChange`, padded or not), and no tracked file
    may still name a renamed file's old stem (the series index, links).
+   #4386: the engine renumbers first (`renumberLane`: `git mv` to max(base)+1…, a Markdown
+   file's own heading number, references to the old stem repo-wide, the base journal plus the
+   lane's entries with consecutive `idx`, a data-only snapshot cloned from the base tip with a
+   new `id`/`prevId`, else `lean.sequence.regenerate`; `SEQUENCE_RENUMBERED`), and only an
+   `unsupported` result goes to the builder (`SEQUENCE_RENUMBER_FALLBACK`, reason in the
+   trajectory). `verifyRenumber` also accepts a file equal after mapping each move's old stem
+   and its own heading number. A base-sync whose conflicts are all sequence files
+   (`resolveSequenceConflicts`: base side, journal union, index union) needs no builder, and
+   an engine-only delta needs no re-review. The base-sync bound counts syncs against one base
+   head (`sameBaseSyncs`); a sync overtaken by a new base head does not count. Merge-gate late
+   binding: a lane with numbered files takes the host sequence lease (`seqlease.mjs`, a
+   one-slot `heavy.mjs` semaphore per (repo, lane, dir) under `schedDir()/seq-lease`,
+   fail-open after the CI wait budget), re-checks against the fetched lane, and a taken number
+   base-syncs + renumbers (`SEQUENCE_LATE_BIND`) and waits for CI again; released at merge
+   or finish.
    Only real series count (#4343): a leading date (`YYYY-MM-DD`, `YYYYMMDD`) is no
    number, and the directory must hold a series on the base — a `_journal.json` /
    `meta/_journal.json`, or ≥2 distinct numbers of the file's width filling at least
@@ -380,7 +395,8 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `postmerge.mjs` (base-sync post-merge commands and same-app duplicate exports, #4406),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
-`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389),
+`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; an issue whose latest pipeline `FORGE:PROBE` is a fail is never closed as already-fixed, reason `probe-failed`, #4399; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389),
+`probe.mjs` (outcome-based acceptance, #4399; see "Acceptance probes" below),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
@@ -1063,6 +1079,25 @@ module under the same manifest root declares (re-exports, default exports and na
 "rename or reuse" round (trigger `duplicate`, `duplicateExportsPrompt`, both paths), then an anomaly; `verify.duplicate_exports: false` turns
 it off. Run log: `DUPLICATE_EXPORTS`. A post-merge or duplicate fix round triggers the base-sync re-review; a clean merge
 that passes both is still not re-reviewed. Cost: 0 LLM calls when clean; one typecheck per base-sync in local/hybrid mode.
+
+## Acceptance probes (#4399)
+
+`probe.mjs` checks a production outcome after promotion, deterministically (0 LLM calls, no lane). An issue declares a
+probe in a fenced ```` ```forge-probe ```` block: `run: <shell command>` (required), `pass: exit 0` (default) or
+`pass: /regex/flags` on stdout, `timeout: <s>` (default forge.yaml `acceptance_probe.timeout_s` or 120, capped at 900). The
+latest trusted comment's block wins, else the body's when its author is trusted (`isTrustedActor`/`isTrustedComment`);
+FORGE marker comments never declare one, and an untrusted declaration is reported `untrusted` and never run. The fix
+commit is the latest trusted FORGE:TRAJECTORY `merged at <sha>`, else the merge commit of the latest merged PR whose
+title/body closes the issue (none: `unresolved`). Promotion is `git merge-base --is-ancestor <fix> origin/<default>`
+(`branches.default`, else GitHub's); not yet: `awaiting-promotion`, nothing runs (`onDefault` is exported for #4389).
+The probe runs as `sh -c` in the checkout, in its own process group (timeout kills it = fail), with only PATH, HOME, LANG,
+TMPDIR plus the names in `acceptance_probe.env` (the repo's designated test identity); those values are masked as `***` in
+the output. The result is a `FORGE:PROBE` comment (JSON line `{fix, default_sha, result, exit, ms}` + the last 4000 chars
+of output); a fail first reopens the issue. A trusted FORGE:PROBE for the same fix is never re-run (`already-recorded`).
+Triggers: `forgedock probe [issue...] [--dry-run] [--limit N]` (no issues = closed within `acceptance_probe.sweep_days`,
+default 30, matching `forge-probe in:body,comments`, capped at 50) and a sweep at the start of every `forgedock orchestrate`
+batch (`--no-probes`; `acceptance_probe.enabled: false` turns the sweep off), printed as one `probes: ...` line; a sweep
+error is one line and never fails the batch. Cost: one search per batch plus 2-3 gh calls per probing issue.
 
 ## Entry 2026-10-23 — Post-deploy precondition gate in the pre-filter (#4389)
 
