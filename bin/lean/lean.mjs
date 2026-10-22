@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, dropScopeValidates, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths } from "./prefilter.mjs";
-import { preflightProbes, preflightProblems } from "./preflight.mjs";
+import { preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { repoKey } from "../runner.mjs";
@@ -25,6 +25,7 @@ import { readTestMap, readTestMapAtRef, factsPath, TEST_MAP_FILE } from "./testm
 import { runChecks, planPrecheck, worktreeFingerprint, selfCheckState, CHECK_PLAN_FILE, SELF_CHECK_FILE } from "./precheck.mjs";
 import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
+import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt } from "./prompts.mjs";
 import { freshFix, issueSummary, firstPassOf } from "./fixround.mjs";
@@ -80,6 +81,24 @@ export const CI_NOT_STARTED_GRACE_MS = 10 * 60 * 1000;
 export const contractHash = (text) => createHash("sha256").update(String(text)).digest("hex").slice(0, 12);
 
 /**
+ * #4385: siblings that declare a shared file (a barrel, union type, shared fixture, index doc) would conflict after the
+ * first merges; each later sub-issue gets an edge to every earlier one it shares a file with and does not already reach
+ * through its dependsOn. Mutates dependsOn; returns the added edges [{from, to, files}]. No `files`: no edge.
+ */
+export function serializeShared(subs) {
+  const added = [], reach = [];
+  subs.forEach((s, j) => {
+    for (let i = j - 1; i >= 0; i--) { // nearest first: a chain, not a fan-in
+      const shared = (s.files ?? []).filter((f) => (subs[i].files ?? []).includes(f));
+      const r = new Set(s.dependsOn.flatMap((k) => [k, ...reach[k]]));
+      if (shared.length && !r.has(i)) { s.dependsOn.push(i); added.push({ from: j, to: i, files: shared }); }
+    }
+    reach[j] = [...new Set(s.dependsOn.flatMap((k) => [k, ...reach[k]]))];
+  });
+  return added;
+}
+
+/**
  * Typed builder block (#4124), from result.json `block`. Returns {kind:"dependency", issues} | {kind:"split", subissues}
  * | {kind:"human", why} | {kind:"untyped", problem}. Only `human` with an allowed reason may end as needs-human.
  */
@@ -94,8 +113,10 @@ export function classifyBlock(result, issue) {
     const subs = (Array.isArray(b.subissues) ? b.subissues : []).filter((x) => x && typeof x.title === "string" && x.title.trim() && typeof x.body === "string");
     if (!subs.length) return { kind: "untyped", problem: "the split-required block lists no sub-issues with a title and body" };
     if (subs.length > MAX_SUBISSUES) return { kind: "untyped", problem: `the split-required block lists ${subs.length} sub-issues (at most ${MAX_SUBISSUES})` };
-    return { kind: "split", subissues: subs.map((x, i) => ({ title: x.title.trim(), body: x.body,
-      dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))] })) };
+    const subissues = subs.map((x, i) => ({ title: x.title.trim(), body: x.body,
+      dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))],
+      ...(Array.isArray(x.files) ? { files: [...new Set(x.files.filter((f) => typeof f === "string").map((f) => f.trim().replace(/^\.?\/+/, "")).filter(Boolean))] } : {}) }));
+    return { kind: "split", subissues, serialized: serializeShared(subissues) };
   }
   if (b.kind === "human") {
     return HUMAN_BLOCK_REASONS.includes(b.why) ? { kind: "human", why: b.why }
@@ -130,6 +151,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {"shadow"|"enforce"} [o.conformance] conformance gate mode (default shadow)
  * @param {"needs-human"|"degraded"} [o.reviewIncomplete] shadow only: what an incomplete review after the re-ask does (default needs-human)
  * @param {object} [o.reviewTrigger] forge.yaml review.trigger/risk_paths (#4273): {mode: shadow (default)|enforce|off, riskPaths: globs}
+ * @param {object} [o.verifier]      forge.yaml review.verifier/verifier_model (#4397): {mode: off (default)|shadow|enforce, model}
  * @param {object} [o.verify]        forge.yaml verify (verify.mjs parseVerify): mode local (default) | ci | hybrid (#4167)
  * @param {object} [o.precheck]      {commands, maxMinutes}: forge.yaml learned.test_commands, run in the worktree before the PR (#4240);
  *                                   maxMinutes: lean.precheck.max_minutes, the round budget (#4331, else verify.precheck_total_seconds)
@@ -156,6 +178,7 @@ export async function runCore(o) {
   const remoteVerify = vcfg.mode !== "local";
   const triggerMode = TRIGGER_MODES.includes(o.reviewTrigger?.mode) ? o.reviewTrigger.mode : "shadow";
   const riskPaths = Array.isArray(o.reviewTrigger?.riskPaths) ? o.reviewTrigger.riskPaths : [];
+  const verifierCfg = parseVerifierConfig(o.verifier ?? {});
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
   // #4267: a batch recovery lane for a mechanical needs-human ({code, attempt, final}); #4302: only a final attempt relabels.
@@ -175,11 +198,12 @@ export async function runCore(o) {
   const git = (args) => io.git(args, { cwd: wt });
 
   const builderTriggers = []; // #4362: implement-attempt triggers in order, for the lane's first-pass flag
+  const impl = { cost: 0, models: new Set() }; // #4397: implement spend and reported models, for the verifier
   /** `trigger` (#4362): why the attempt ran, one of fixround.mjs TRIGGERS. */
   async function attempt(phase, n, r, mode = null, trigger = null, restartOf = null) {
     const rec = { event: "PHASE_ATTEMPT_USAGE", phase, attempt: n, trigger, ...(restartOf ? { restart_of: restartOf } : {}), usage: r?.usage ?? null, duration_ms: num(r?.durationMs) ?? 0,
       cost_usd: num(r?.costUsd), model: r?.model ?? null, turns: num(r?.turns), ...(mode ? { mode } : {}) };
-    if (phase === "implement") builderTriggers.push({ trigger, restart_of: restartOf });
+    if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += num(r?.costUsd) ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); }
     ev(rec); await emit(rec);
     const u = r?.usage ?? {};
     usage.cost_usd += r?.costUsd ?? 0;
@@ -664,6 +688,7 @@ export async function runCore(o) {
         }
       } catch (e) { return await finish("engine-error", `filing sub-issues failed after ${refs(filed) || "none"}: ${e?.message ?? e}`, { subissues: filed }); }
       T.decisions.push(`Builder block: split into ${refs(filed)}`);
+      for (const e of b.serialized ?? []) T.decisions.push(`Serialised sub-issue #${filed[e.from]} behind #${filed[e.to]}: both edit ${e.files.slice(0, 5).join(", ")} (#4385)`);
       let marked = false;
       try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\n${s}`); marked = true; } catch { /* best effort */ }
       // #4337: with decomposition.close_parent, the tracker closes only once its trail and label exist: dependents then wait on the sub-issues, not on it.
@@ -1020,20 +1045,37 @@ export async function runCore(o) {
       }
       T.decisions.push(`Tracked ${reqs.map((r) => `${r.id} (${r.disposition})`).join(", ")} in ${[...new Set(reqs.map((r) => r.tracked))].join(", ")} (${why})`);
     }
-    /** #4328: probe the host for the tools and modules a contract's validate commands need; the misses, [] without io.probeCommand. */
+    /**
+     * #4328: probe the host for the tools and modules a contract's validate commands need; #4393: then flag `$NAME`s the lane
+     * env leaves empty and run each remaining command once on the base worktree (io.preflightRun). The misses; [] without either hook.
+     */
     async function preflightValidates(contract) {
-      if (!io.probeCommand || !contract || typeof contract !== "object") return [];
+      if ((!io.probeCommand && !io.preflightRun) || !contract || typeof contract !== "object") return [];
       const files = String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean);
-      const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
-      if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
       const env = laneEnv(), missing = new Set(), misses = []; // #4325: the env the validate commands run with
-      for (const p of probes) {
-        if (p.needs && missing.has(p.needs)) continue;
-        let r;
-        try { r = await io.probeCommand({ command: p.probe, cwd: wt, timeoutMs: 15000, env }); } catch { r = { rc: 127 }; }
-        if (r?.rc === 0 || r?.rc === 124) continue; // a timed-out probe is no evidence either way
-        if (p.kind === "command") missing.add(p.tool);
-        misses.push(p);
+      if (io.probeCommand) {
+        const { probes, dropped } = preflightProbes(contract, { repoHas: repoTracks(files) });
+        if (dropped) T.anomalies.push(`Validate preflight probed ${probes.length} tool(s); ${dropped} more not probed`);
+        for (const p of probes) {
+          if (p.needs && missing.has(p.needs)) continue;
+          let r;
+          try { r = await io.probeCommand({ command: p.probe, cwd: wt, timeoutMs: 15000, env }); } catch { r = { rc: 127 }; }
+          if (r?.rc === 0 || r?.rc === 124) continue; // a timed-out probe is no evidence either way
+          if (p.kind === "command") missing.add(p.tool);
+          misses.push({ ...p, source: "probe" });
+        }
+      }
+      const fullEnv = { ...process.env, ...env };
+      for (const v of Array.isArray(contract.validate) ? contract.validate : []) {
+        if (v?.id && typeof v.command === "string") for (const name of unsetEnvVars(v.command, fullEnv)) misses.push({ ids: [v.id], tool: name, kind: "env-var", source: "env" });
+      }
+      if (io.preflightRun) {
+        const skipIds = [...new Set(misses.flatMap((m) => m.ids))];
+        const run = (a) => heavyStep("precheck", () => io.preflightRun({ ...a, cwd: wt }));
+        const r = await runPreflight({ contract, run, git, env, skipIds, now, ...knownToContract(contract, files) });
+        misses.push(...r.misses);
+        if (r.skipped.length) T.anomalies.push(`Validate preflight run budget spent; ${r.skipped.join(", ")} not run on base`);
+        if (r.reverted.length) T.anomalies.push(`Validate preflight reverted ${r.reverted.length} path(s) its runs changed: ${r.reverted.slice(0, 5).join(", ")}`);
       }
       return misses;
     }
@@ -1212,7 +1254,7 @@ export async function runCore(o) {
           if (missed.length) misses = await preflightValidates(contract);
         }
         if (missed.length) {
-          ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind })), corrected: misses.length === 0 });
+          ev({ event: "VALIDATE_PREFLIGHT", misses: misses.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), found: missed.map((m) => ({ ids: m.ids, tool: m.tool, kind: m.kind, source: m.source })), corrected: misses.length === 0 });
           if (misses.length) {
             T.anomalies.push(`Validate preflight: the host lacks ${misses.map((m) => m.tool).join(", ")} after the contract correction (advisory; a failed rerun ends env.tool_missing)`);
             T.decisions.push(`Validate preflight left ${misses.length} miss(es) after one correction; contract frozen anyway`);
@@ -1508,6 +1550,48 @@ export async function runCore(o) {
       }
       return d;
     }
+    /**
+     * #4397: one independent adversarial verifier call per head: fresh context, read-only, never the builder's model, result
+     * or notes. Returns the failures to enforce ([] in shadow, on an empty diff or on a verifier error, which is an anomaly).
+     */
+    const verifiedHeads = new Map();
+    let verifierRun = null, verifyN = 0;
+    async function runVerifier() {
+      const head = String(await git(["rev-parse", "HEAD"])).trim();
+      if (verifiedHeads.has(head)) return verifiedHeads.get(head);
+      const diff = String(await git(["diff", `${base}...HEAD`]));
+      const run = { mode: verifierCfg.mode, head, findings: [], model: null, swapped: false, cost_usd: 0 };
+      if (!diff.trim()) run.skipped = "empty_diff";
+      else {
+        const bytes = Buffer.byteLength(diff, "utf-8");
+        const stat = bytes > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
+        const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
+        const callers = await callersOf({ symbols: changedSymbols(diff), gitGrep: git, ignore: IGNORE });
+        Object.assign(run, pickVerifierModel({ configured: verifierCfg.model, builderModel, builderReported: [...impl.models] }));
+        const { maxMs, maxTurns } = verifierBudget(bytes);
+        try {
+          await renew();
+          const rr = await callRunner({ role: "verifier", issue, cwd: wt, model: run.model, resume: null, system: VERIFIER_SYSTEM, readOnly: true, maxMs, maxTurns,
+            prompt: verifierPrompt({ issue: iss, comments: trustedComments, contract: effective, diff, stat, base, files, callers }) });
+          await renew();
+          await attempt("verify", ++verifyN, rr, null, "verifier");
+          run.findings = parseVerifierFindings(rr?.text, { pathExists: (x) => listed.has(x) });
+          run.cost_usd = num(rr?.costUsd) ?? 0;
+        } catch (e) {
+          if (e?.deferUsageLimit) throw e;
+          run.error = String(e?.code || e?.message || e).split("\n")[0].slice(0, 200);
+          T.anomalies.push(`Independent verifier failed at ${head.slice(0, 12)}: ${run.error}`);
+        }
+      }
+      const failures = verifierCfg.mode === "enforce" ? findingsToFailures(run.findings) : [];
+      ev({ event: "VERIFIER", mode: run.mode, head, model: run.model, swapped: run.swapped, findings: run.findings.length, cost_usd: run.cost_usd, implement_cost_usd: impl.cost,
+        ratio: impl.cost > 0 ? Math.round((run.cost_usd / impl.cost) * 1000) / 1000 : null, ...(run.skipped ? { skipped: run.skipped } : {}), ...(run.error ? { error: run.error } : {}) });
+      if (run.findings.length) T.decisions.push(`Independent verifier (${run.mode}) found ${run.findings.length} defect(s): ${run.findings.slice(0, 3).map((f) => `${f.file}:${f.line}`).join(", ")}`);
+      verifiedHeads.set(head, failures);
+      verifierRun = run;
+      return failures;
+    }
+    const verifierSection = () => { const n = renderVerifierNote(verifierRun); return n ? `\n\n${n}` : ""; };
     /** #4323: rerun once each validate command the builder recorded as failed, with the lane env; {[id]: {rc, output}} or null. */
     async function rerunFailedValidates(contract) {
       if (!io.runCommand) return null;
@@ -1571,14 +1655,19 @@ export async function runCore(o) {
         }
         triggerSkipped = false;
       }
-      const d = await reviewOnce();
-      if (!shadow) return { ...d, by: "review" };
+      let d = await reviewOnce();
+      // #4397: the verifier runs only on a change every gate and the reviewer passed; in enforce its findings block
+      if (verifierCfg.mode !== "off" && d.state === "conforms" && !pre.length) {
+        const vf = await runVerifier();
+        if (vf.length) d = { state: "nonconforming", failures: vf, by: "verifier" };
+      }
+      if (!shadow) return { ...d, by: d.by ?? "review" };
       // shadow: record what enforce would have done; block only on what the previous reviewer blocked on
       const would = d.state === "conforms" && !pre.length ? "conforms" : d.state.startsWith("review.") ? d.state : "nonconforming";
       const wouldFail = [...pre, ...(d.state === "conforms" ? [] : d.failures)];
       if (d.state.startsWith("review.")) return { ...d, by: "review", would, wouldFail, reviewState: d.state };
       const blocking = d.state === "nonconforming" ? d.failures.filter((f) => SHADOW_BLOCKS.includes(f.code)) : [];
-      return { state: blocking.length ? "nonconforming" : "conforms", by: "review", failures: blocking, would, wouldFail, reviewState: d.state };
+      return { state: blocking.length ? "nonconforming" : "conforms", by: d.by ?? "review", failures: blocking, would, wouldFail, reviewState: d.state };
     }
     const verifyReported = new Set();
     /**
@@ -1672,10 +1761,10 @@ export async function runCore(o) {
         ev({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
         await emit({ event: "CONFORMANCE_SHADOW", would: verdict.would, failures: wf.map((f) => f.code) });
         T.review = [`shadow: would ${verdict.would === "conforms" ? "pass" : `block (${verdict.would})`}`, `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
-        await post("FORGE:REVIEW", renderShadowReview({ would: verdict.would, failures: wf, review: verdict.reviewState === "conforms" || verdict.reviewState === "nonconforming" ? review : null, contract: effective, degraded: degradedReq?.tracked ?? (degraded ? "untracked" : null) }));
+        await post("FORGE:REVIEW", renderShadowReview({ would: verdict.would, failures: wf, review: verdict.reviewState === "conforms" || verdict.reviewState === "nonconforming" ? review : null, contract: effective, degraded: degradedReq?.tracked ?? (degraded ? "untracked" : null) }) + verifierSection());
       } else {
         T.review = ["CONFORMS", `${reviewN} reviewer run(s), ${resumes + 1} round(s)`];
-        await post("FORGE:REVIEW", renderReview(review, effective));
+        await post("FORGE:REVIEW", renderReview(review, effective) + verifierSection());
       }
     }
     ev({ event: "PHASE_COMMIT", phase: "review" });

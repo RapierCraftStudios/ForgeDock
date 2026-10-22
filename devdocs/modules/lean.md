@@ -81,6 +81,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    quote of the requirement a failure names (`explainFailures`), and a failed
    validate names its command. Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
+   A split sub-issue may declare `files` (the paths it will edit); `serializeShared`
+   adds a `Depends on` edge from each later sub-issue to the nearest earlier one it
+   shares a file with and does not already reach, so siblings editing the same hub
+   (barrel, union type, shared fixture, index doc) merge one after another instead
+   of conflicting; each added edge is a decision. No `files`: unchanged (#4385).
    A `split` closes the parent `not planned` once its `FORGE:DECOMPOSED` trail
    and `workflow:decomposed` label are written (label kept; the closing comment
    lists the sub-issues; either write failing leaves it open) (#4337). A
@@ -190,6 +195,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
    the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
    (#4388: a key ending on a space looped on `followup.unavailable`).
+   Independent verifier (#4397, `verifier.mjs`, forge.yaml `review.verifier`,
+   default `off`): after a conforming review, one fresh read-only call on a
+   model other than the builder's tries to break the change; enforce turns its
+   `file:line` findings into `conformance.regression` for the same fix round.
    Scope authority (#4350): the engine's scope gate (deliverables plus typed
    amendments) decides scope, not a builder-written allowlist. `precheck({frozen})`
    gets the pre-amendment contract; a failed validate that is a scope check
@@ -244,6 +253,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    number the fetched lane already uses → builder renumbers (`sequencePrompt`; a
    conflicted migration/journal gets `sequenceSyncNote`), then `verifyRenumber`
    (same blob, journal strictly ordered, no collision); still failing → `base.conflict`.
+   Numbered documents (#4385, e.g. `docs/adr/0016-*.md`): a renamed file may differ
+   only in its own number (`numberOnlyChange`, padded or not), and no tracked file
+   may still name a renamed file's old stem (the series index, links).
    Only real series count (#4343): a leading date (`YYYY-MM-DD`, `YYYYMMDD`) is no
    number, and the directory must hold a series on the base — a `_journal.json` /
    `meta/_journal.json`, or ≥2 distinct numbers of the file's width filling at least
@@ -895,12 +907,33 @@ At contract freeze, `preflightValidates` (`lean.mjs`) probes the host for what e
 (`command -v`), the modules a bare `python`/`python3`/`pythonX.Y` imports via `-c`/`-m` (`importlib.util.find_spec` with
 that interpreter) and the bare packages `node -e`/`-p` code imports (`node_modules/<pkg>` walked up from the worktree).
 Paths, `$VAR` words, names `repoTracks(git ls-files)` holds and names a deliverable's `change` text names are not probed;
-a wrapper (`uv run`, `npx`, ...) probes only the wrapper; at most 20 probes. Probes run through the separate
+a wrapper (`uv run`, `npx`, ...) probes only the wrapper (the #4393 run probe covers what is behind it); at most 20 probes. Probes run through the separate
 `io.probeCommand` hook (`runCheckCommand`) with `laneEnv()` (#4325); no hook, no change. A miss (`preflightProblems`) joins the
 validateContract problems in the existing single `contractCorrectionPrompt` resume. After it the misses are re-probed and
 logged as `VALIDATE_PREFLIGHT` {misses, corrected}; any left are an anomaly only, never a block: the post-build #4323
 rerun still ends `env.tool_missing`. Skipped when the frozen contract is recovered from the issue. Cost: 0 LLM calls when
 the host has the tools; otherwise the one correction resume, instead of a whole implement session lost to `env.tool_missing`.
+
+## Entry 2026-10-23 — Freeze-time execution preflight of validate commands (#4393)
+
+The #4328 probes read the command text, so a wrapped interpreter (`uv run --no-project python -m shared.x`) and a
+transitive import (`shared` imports `httpx`) pass them, and the command first runs after the build (AlterLab#36619:
+`env.tool_missing` after a green implementation, then a recovery lane). `preflightValidates` (`lean.mjs`) now also:
+(1) flags `$NAME`/`${NAME}` references that are unset or empty in `process.env` + `laneEnv()` and that the command does
+not assign (`preflight.mjs` `unsetEnvVars`; single quotes, escapes, `${X:-d}` defaults and bash's own variables are
+skipped), kind `env-var`; (2) runs each validate command without a static or env miss once on the base worktree through
+the separate `io.preflightRun` hook (`runCheckCommand`) inside `heavyStep("precheck")`, 30 s each within a 120 s total
+(`runPreflight`). `runProbeMiss` classifies the output: rc 0, a timeout (124) or a test failure is `runs` (RED on base is
+expected); conformance.mjs `missingTool` (missing command / Python module / Node package) or a missing path (bash exec
+rc 127, python `can't open file`, pytest `file or directory not found`, node `Could not find`) is `unrunnable`. Names
+the repo tracks or a deliverable's change names, and paths that are tracked, deliverables, the repro test or test-shaped
+(`knownToContract`), are not misses. `git status --porcelain --untracked-files=all` before and after the runs: only
+paths the runs newly created (`git clean`) or modified (`git checkout --`) are reverted, an anomaly records them; a path
+dirty before is never touched. Commands the budget leaves are not run (anomaly), not misses. All misses share the one
+`contractCorrectionPrompt` resume before the implement builder, are re-checked after it, and are logged on
+`VALIDATE_PREFLIGHT` (`found`, `misses` with `source` probe|env|run); misses left stay advisory (the post-build #4323
+rerun is still the gate). No hook, no run. Cost: 0 LLM calls, at most 120 s at freeze; one correction resume only when a
+command cannot run, instead of an implement attempt plus a recovery lane.
 
 ## Entry 2026-10-20 — The repro harness links workspace deps on base; an unrunnable head is an environment error (#4334)
 
@@ -954,3 +987,28 @@ The lane result carries `conformance {mode, would, risk}`. Orchestrate's row cop
 `formatShadowSummary`: shadow lanes, would-block share, false-block share (a would-block on an incomplete, inconsistent
 or unparseable review) and risk-enforced lanes. Rationale: `devdocs/decisions/4398-risk-path-enforce.md`. Cost: 0 LLM
 calls; a risk-enforced lane may spend the one builder resume that shadow would have skipped.
+
+## Entry 2026-10-23 — Independent adversarial verifier (#4397)
+
+The conformance reviewer reads `<builder_result>` and shares `REVIEW_RUBRIC` with the builder's self-review (#4374), so it is a
+self-audit. `verifier.mjs` adds one independent call. `gate()` runs `runVerifier()` only when the precheck and `reviewOnce`
+conform (not on a `review.trigger` skip) and at most once per head SHA (`verifiedHeads`; a fix round that made no commit
+reuses the verdict). Inputs (`verifierPrompt`): issue, trusted comments, effective contract, changed files, `boundDiff` diff and
+`callersOf` (the repo's `git grep -n -w -I -F` over `changedSymbols(diff)`: names from hunk headers and +/- definition lines,
+JS/TS/Python/Ruby/Go/Rust/Java-style; ≤12 symbols, ≤8 hits each, ≤40 lines, definitions and `.forge-lean/` excluded). Never
+the builder's result, notes or session (`resume: null`, `readOnly`). `VERIFIER_SYSTEM` is adversarial: boundary inputs, the
+issue's non-regression baselines, the listed callers, a repro test that cannot fail; JSON `findings[{file,line,input,expected,
+actual,why}]`. `parseVerifierFindings` keeps ≤10 findings at a tracked file and positive line; anything else is dropped.
+Model: `review.verifier_model` (else `engine.lean_verifier_model`, `engine-cli.mjs` `readVerifier`), default
+`claude-sonnet-5-5`; `pickVerifierModel` swaps to the first of opus/sonnet/haiku that is not the builder's configured or
+reported model (`sameModel`: ids, `[1m]` suffix, bare aliases). Size bound (`verifierBudget`): `maxMs` 3–15 min and
+`maxTurns` 10–40 by diff KB (the lean runner now forwards `maxTurns` when the CLI supports it); empty diff → no call; no
+repair re-ask. Modes: `off` (no call, no event), `shadow` (FORGE:REVIEW gets an advisory "Independent verifier" section, never
+blocks), `enforce` (`findingsToFailures` → `conformance.regression`, kind `verifier`, detail `path:line …`, so `fixRound`
+runs a fresh session; the one-resume budget is unchanged). A verifier error is an anomaly, never a failure (a session-limit
+defer still propagates). Run log: `PHASE_ATTEMPT_USAGE` phase `verify` trigger `verifier`; `VERIFIER {mode, head, model,
+swapped, findings, cost_usd, implement_cost_usd, ratio, skipped?, error?}`. `node bin/lean/verifier.mjs [--json] [--dir]`
+reports per repo runs, findings, errors and the verifier/implement cost ratio (median, max, runs over 0.10). Exit criterion
+for enforce: a seeded-defect replay in shadow where it catches what the reviewer misses, plus ≥30 shadow runs with ratio ≤
+0.10. Cost: 0 LLM calls when off (default); one read-only call per reviewed head when on. ADR
+`decisions/4397-independent-verifier.md`.
