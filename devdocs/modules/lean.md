@@ -836,6 +836,20 @@ Thresholds come from `stats.alerts.*`, and there are no alerts under 10 lanes.
 `forgedock stats` prints the same alerts as `## ALERTS`. A failure while computing
 them never fails the batch. Cost: 0 LLM calls, no network.
 
+After the turns-by-size line, the batch report prints the efficiency section (#4402)
+from `bin/stats/efficiency.mjs` `batchEfficiency` over the in-memory rows, the
+batch's `log.jsonl` settle times and the run-log dir. It covers merged count,
+$/merge (implement and review), turns/merge and context/turn, each split by size
+and by model. It also covers retries/merge by cause (env, engine, code, review,
+unknown, counting lane reruns), no-action lanes (parked post-deploy follow-ups and
+`Builder is blocked (promotion)`), issue quality vs. cost, and the acceptance pass
+rate 7 days after promotion. A merged issue's cost includes its earlier run slices
+(cost to merge). `gh` is called only for merged issues' bodies, labels and
+`FORGE:PROBE` comments. A gh failure turns quality and acceptance into `n/a`, and
+any error prints `efficiency: n/a (...)` without failing the batch.
+`forgedock stats --efficiency` prints the same lines per batch and over trailing
+windows (`docs/STATS.md`). Cost: 0 LLM calls.
+
 ## Entry 2026-10-20 — Complete conformance reviews, blocking shadow gate (#4160)
 
 `decide()` first runs `fillEngineRows` (`conformance.mjs`): engine-authorized scope rows, `unverified` preserve rows and `path:line` evidence normalized to repo paths (`normalizeEvidencePath`) are no longer "incomplete". `reviewerPrompt` embeds `reviewSkeleton` (a row per R/P/scope/coverage id). `checkCompleteness` returns `missing` ids; the retry in `reviewOnce` is `reviewerRepairPrompt` for those ids only (no diff), merged by `mergeReviewRows`. `changedFiles()` drops files equal to the base tip (base-sync merges).
