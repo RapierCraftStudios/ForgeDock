@@ -192,6 +192,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    precheck `validate_failed` or `requirement_unimplemented`, before any
    reviewer run) or `enforce`. Defer/post-deploy requirements become tracked
    follow-ups (`followupItems`, `pendingTracking`).
+   Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
+   the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
+   (#4388: a key ending on a space looped on `followup.unavailable`).
    Independent verifier (#4397, `verifier.mjs`, forge.yaml `review.verifier`,
    default `off`): after a conforming review, one fresh read-only call on a
    model other than the builder's tries to break the change; enforce turns its
