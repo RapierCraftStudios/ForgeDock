@@ -17,7 +17,8 @@ import { makeHeavyIo } from "./heavy.mjs";
 import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
-import { sequenceCollisions, snapshotLane, verifyRenumber } from "./sequence.mjs";
+import { sequenceCollisions, snapshotLane, verifyRenumber, renumberLane, resolveSequenceConflicts } from "./sequence.mjs";
+import { makeSequenceLeaseIo } from "./seqlease.mjs";
 import { followupMap } from "./conformance.mjs";
 
 const pexec = promisify(execFile);
@@ -324,7 +325,11 @@ export function makeLeanIo({ repo }) {
     /** #4322: sequence-numbered files the lane shares with the base (bin/lean/sequence.mjs); snapshot before, verify after a renumber. */
     sequenceCheck: ({ cwd, base }) => sequenceCollisions({ git: (a) => run("git")(a, { cwd }), base }),
     sequenceSnapshot: ({ cwd, base }) => snapshotLane({ git: (a) => run("git")(a, { cwd }), base }),
-    sequenceVerify: ({ cwd, base, before }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before }),
+    sequenceVerify: ({ cwd, base, before, moves }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before, moves }),
+    /** #4386: the deterministic renumber, sequence-only base-sync resolution, and the host sequence lease at the merge gate. */
+    sequenceRenumber: ({ cwd, base, laneRef, regenerate }) => renumberLane({ git: (a) => run("git")(a, { cwd }), base, cwd, laneRef, regenerate }),
+    sequenceResolve: ({ cwd, files }) => resolveSequenceConflicts({ git: (a) => run("git")(a, { cwd }), files }),
+    sequenceLease: makeSequenceLeaseIo(),
     /**
      * #4271: scripts/acceptance-red-green.sh for the frozen repro_test in cwd; {base, head} words, or null on any failure.
      * `env` (#4325): the lane env (run TMPDIR, toolchain), merged over process.env, so the command sees what the builder saw.

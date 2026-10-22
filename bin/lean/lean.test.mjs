@@ -61,7 +61,7 @@ function world(o = {}) {
     contract: o.contract ?? CONTRACT, issueComments: o.issueComments, issueStates: o.issueStates,
     changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], reviews: [...(o.reviews ?? [])], waits: [...(o.waits ?? [])], clock: 0,
     result: o.result ?? { status: "fixed", summary: "fixed foo", evidence: [], tests: ["test/foo.test.js"] },
-    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], pushes: 0, pushErrors: [...(o.pushErrors ?? [])], commentErrors: [...(o.commentErrors ?? [])], dirty: o.dirty ?? false, lastSubject: o.lastSubject ?? "", prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], mergeInProgress: false, markers: false, mergeAttempts: 0, branchDeletes: [],
+    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], pushes: 0, pushErrors: [...(o.pushErrors ?? [])], commentErrors: [...(o.commentErrors ?? [])], dirty: o.dirty ?? false, lastSubject: o.lastSubject ?? "", prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], baseHeads: [...(o.baseHeads ?? ["ba5e000000000000"])], mergeInProgress: false, markers: false, mergeAttempts: 0, branchDeletes: [],
     stages: { ...STAGE_MD, ...(o.stages ?? {}) }, builderN: 0,
     salvageTrees: [...(o.salvageTrees ?? [])], alive: new Set((o.procs ?? []).map((p) => p.pid)), kills: [],
   };
@@ -117,6 +117,7 @@ function world(o = {}) {
       if (a[0] === "diff" && a[1] === "--check") return "";
       if (a[0] === "grep") return w.markers ? "src/foo.js:3:<<<<<<< HEAD" : "";
       if (a[0] === "merge" && a[1] === "--abort") { w.mergeInProgress = false; return ""; }
+      if (a[0] === "rev-parse" && a.length === 2 && /^origin\//.test(String(a[1]))) return w.baseHeads.length > 1 ? w.baseHeads.shift() : w.baseHeads[0]; // #4386: the base head moves only when a test says so
       if (a[0] === "rev-parse") return w.head;
       if (a[0] === "diff" && a[1] === "--name-only" && !a.some((x) => String(x).includes("..."))) return w.changed.filter((f) => !(o.equalToBase ?? []).includes(f)).join("\n");
       if (a[0] === "diff" && a[1] === "--name-only") return w.changed.join("\n");
@@ -2401,7 +2402,9 @@ describe("orchestrate maintenance budget (#4197)", () => {
       await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...mk(), maintenance: null });
       assert.deepEqual(ran, [1]);
       // No maintenance scan without the budget; labels (host priority, #4191) ride on the body call, never a call of their own.
-      assert.ok(!calls.some((c) => c.startsWith("issue list") || c.endsWith("--json labels")), calls.join("\n"));
+      // #4399: the batch-start acceptance-probe sweep (`forge-probe` search) is not a maintenance scan.
+      assert.ok(calls.some((c) => c.startsWith("issue list") && c.includes("forge-probe")), calls.join("\n"));
+      assert.ok(!calls.some((c) => (c.startsWith("issue list") && !c.includes("forge-probe")) || c.endsWith("--json labels")), calls.join("\n"));
       ran.length = 0; calls.length = 0;
       const res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...mk(), maintenance: { share: 0.5, whenIdle: true, labels: ["maintenance"] } });
       assert.deepEqual(ran, [1, 9]);
@@ -4717,6 +4720,76 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     w = hworld({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["db/meta/_journal.json"], reviews: [ok(), ok()] });
     assert.equal((await run(w)).terminalReason, "merged");
     assert.match(builders(w)[2][4], /conflicts in: db\/meta\/_journal\.json[\s\S]*do not text-merge it\. Renumber the lane's files/);
+  });
+
+  describe("#4386 deterministic renumber, base-sync and merge-gate late binding", () => {
+    const MOVES = [{ from: "db/0007_usage.sql", to: "db/0008_usage.sql" }];
+    const syncs = (w) => w.calls.filter((c) => c[0] === "git" && c[1] === "merge" && c[2] === "--no-edit").length;
+    /** `det`: sequenceRenumber results per call; `resolve`: sequenceResolve result; `mine`: sequenceSnapshot (the lane's numbered files). */
+    const dworld = ({ det = [{ ok: true, moves: MOVES, commit: "d".repeat(40) }], resolve = { ok: true }, mine = [{ path: "db/0007_usage.sql", blob: "b1" }], ...o } = {}) => {
+      const w = hworld(o), d = [...det];
+      w.renumbers = []; w.leases = { acquired: [], released: 0 };
+      w.io.sequenceRenumber = async (x) => { w.renumbers.push(x); w.head = `dddd${w.calls.length}`.padEnd(16, "0"); return d.length > 1 ? d.shift() : d[0]; };
+      w.io.sequenceResolve = async (x) => { w.resolveArgs = x; w.conflictFiles = []; w.mergeInProgress = false; return resolve; };
+      w.io.sequenceSnapshot = async () => mine;
+      w.io.sequenceLease = { acquire: async (x) => { w.leases.acquired.push(x); return { waitMs: 0, timedOut: false, release: () => { w.leases.released++; } }; } };
+      return w;
+    };
+
+    it("hand-off: a taken number is renumbered by the engine; no builder session, the trajectory says so", async () => {
+      const w = dworld({ seq: [COLL, []] });
+      assert.equal((await run(w)).terminalReason, "merged");
+      assert.equal(builders(w).length, 2, "plan + implement only");
+      assert.equal(w.renumbers.length, 1);
+      assert.deepEqual(w.verifyArgs.moves, MOVES);
+      assert.match(traj(w).at(-1), /renumbered deterministically \(no builder\): db\/0007_usage\.sql → db\/0008_usage\.sql/);
+    });
+
+    it("base-sync with conflicts only in sequence files: base side taken and renumbered by the engine, zero builder sessions, zero re-reviews", async () => {
+      const w = dworld({ seq: [[], COLL, []], prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["db/meta/_journal.json", "db/meta/0007_snapshot.json"] });
+      assert.equal((await run(w)).terminalReason, "merged");
+      assert.equal(builders(w).length, 2, "no builder for the conflict or the renumber");
+      assert.equal(reviewers(w).length, 1, "no re-review");
+      assert.deepEqual(w.resolveArgs.files, ["db/meta/_journal.json", "db/meta/0007_snapshot.json"]);
+      assert.ok(w.renumbers[0].laneRef, "renumbered from the pre-merge lane head");
+      assert.match(w.comments.find((c) => c.includes("<!-- FORGE:BASE_SYNC -->")), /deterministic: base side taken[\s\S]*renumbered deterministically[\s\S]*not required \(deterministic renumber \+ base merge\)/);
+    });
+
+    it("a schema-changing migration without lean.sequence.regenerate falls back to the builder renumber and the trajectory records why", async () => {
+      const w = dworld({ seq: [COLL, []], det: [{ unsupported: "schema-changing migration db/0007_usage.sql needs lean.sequence.regenerate (its snapshot cannot be cloned)" }] });
+      assert.equal((await run(w, { sequenceRegenerate: null })).terminalReason, "merged");
+      assert.equal(builders(w).length, 3, "the builder renumbers");
+      assert.match(builders(w)[2][4], /already uses sequence numbers/);
+      assert.match(traj(w).at(-1), /Deterministic renumber not possible \(schema-changing migration db\/0007_usage\.sql needs lean\.sequence\.regenerate/);
+      assert.equal(w.renumbers[0].regenerate, null);
+    });
+
+    it("syncs overtaken by a new base head do not count toward MAX_SYNCS: overtaken 3 times still merges; 2 syncs against one base head is base.conflict", async () => {
+      let w = dworld({ prView: [CONFLICTING, CONFLICTING, CONFLICTING, CONFLICTING, CONFLICTING, OKSTATE], mergeResults: ["clean", "clean", "clean"], baseHeads: ["base0", "base1", "base2", "base3"], mine: [] }); // the loop re-reads mergeability after each sync
+      assert.equal((await run(w)).terminalReason, "merged");
+      assert.equal(syncs(w), 3);
+      w = dworld({ prView: [CONFLICTING], mergeResults: ["clean", "clean", "clean"], baseHeads: ["base1"], mine: [] });
+      const r = await run(w);
+      assert.equal(r.code, OUTCOME_CODES.BASE_CONFLICT);
+      assert.equal(syncs(w), 2);
+    });
+
+    it("merge gate: under the sequence lease a number taken since review is renumbered, CI waited again, merged; a lane without numbered files never takes the lease", async () => {
+      let w = dworld({ seq: [[], COLL, COLL, []] }); // hand-off clean; the late check and the gate's base-sync see the taken number
+      assert.equal((await run(w)).terminalReason, "merged");
+      assert.equal(w.leases.acquired.length, 1);
+      assert.deepEqual(w.leases.acquired[0].dirs, ["db"]);
+      assert.equal(w.leases.acquired[0].lane, "staging");
+      assert.equal(w.renumbers.length, 1, "late renumber at the gate");
+      assert.equal(builders(w).length, 2);
+      assert.equal(reviewers(w).length, 1, "no re-review for the late renumber");
+      assert.match(w.comments.find((c) => c.includes("<!-- FORGE:BASE_SYNC -->")), /merge gate: sequence number taken/);
+      assert.ok(w.leases.released >= 1);
+      assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+      w = dworld({ mine: [] });
+      assert.equal((await run(w)).terminalReason, "merged");
+      assert.equal(w.leases.acquired.length, 0);
+    });
   });
 });
 
