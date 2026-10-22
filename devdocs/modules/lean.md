@@ -81,6 +81,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    quote of the requirement a failure names (`explainFailures`), and a failed
    validate names its command. Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
+   A split sub-issue may declare `files` (the paths it will edit); `serializeShared`
+   adds a `Depends on` edge from each later sub-issue to the nearest earlier one it
+   shares a file with and does not already reach, so siblings editing the same hub
+   (barrel, union type, shared fixture, index doc) merge one after another instead
+   of conflicting; each added edge is a decision. No `files`: unchanged (#4385).
    A `split` closes the parent `not planned` once its `FORGE:DECOMPOSED` trail
    and `workflow:decomposed` label are written (label kept; the closing comment
    lists the sub-issues; either write failing leaves it open) (#4337). A
@@ -241,6 +246,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    number the fetched lane already uses → builder renumbers (`sequencePrompt`; a
    conflicted migration/journal gets `sequenceSyncNote`), then `verifyRenumber`
    (same blob, journal strictly ordered, no collision); still failing → `base.conflict`.
+   Numbered documents (#4385, e.g. `docs/adr/0016-*.md`): a renamed file may differ
+   only in its own number (`numberOnlyChange`, padded or not), and no tracked file
+   may still name a renamed file's old stem (the series index, links).
    Only real series count (#4343): a leading date (`YYYY-MM-DD`, `YYYYMMDD`) is no
    number, and the directory must hold a series on the base — a `_journal.json` /
    `meta/_journal.json`, or ≥2 distinct numbers of the file's width filling at least

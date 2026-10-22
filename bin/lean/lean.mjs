@@ -80,6 +80,24 @@ export const CI_NOT_STARTED_GRACE_MS = 10 * 60 * 1000;
 export const contractHash = (text) => createHash("sha256").update(String(text)).digest("hex").slice(0, 12);
 
 /**
+ * #4385: siblings that declare a shared file (a barrel, union type, shared fixture, index doc) would conflict after the
+ * first merges; each later sub-issue gets an edge to every earlier one it shares a file with and does not already reach
+ * through its dependsOn. Mutates dependsOn; returns the added edges [{from, to, files}]. No `files`: no edge.
+ */
+export function serializeShared(subs) {
+  const added = [], reach = [];
+  subs.forEach((s, j) => {
+    for (let i = j - 1; i >= 0; i--) { // nearest first: a chain, not a fan-in
+      const shared = (s.files ?? []).filter((f) => (subs[i].files ?? []).includes(f));
+      const r = new Set(s.dependsOn.flatMap((k) => [k, ...reach[k]]));
+      if (shared.length && !r.has(i)) { s.dependsOn.push(i); added.push({ from: j, to: i, files: shared }); }
+    }
+    reach[j] = [...new Set(s.dependsOn.flatMap((k) => [k, ...reach[k]]))];
+  });
+  return added;
+}
+
+/**
  * Typed builder block (#4124), from result.json `block`. Returns {kind:"dependency", issues} | {kind:"split", subissues}
  * | {kind:"human", why} | {kind:"untyped", problem}. Only `human` with an allowed reason may end as needs-human.
  */
@@ -94,8 +112,10 @@ export function classifyBlock(result, issue) {
     const subs = (Array.isArray(b.subissues) ? b.subissues : []).filter((x) => x && typeof x.title === "string" && x.title.trim() && typeof x.body === "string");
     if (!subs.length) return { kind: "untyped", problem: "the split-required block lists no sub-issues with a title and body" };
     if (subs.length > MAX_SUBISSUES) return { kind: "untyped", problem: `the split-required block lists ${subs.length} sub-issues (at most ${MAX_SUBISSUES})` };
-    return { kind: "split", subissues: subs.map((x, i) => ({ title: x.title.trim(), body: x.body,
-      dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))] })) };
+    const subissues = subs.map((x, i) => ({ title: x.title.trim(), body: x.body,
+      dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))],
+      ...(Array.isArray(x.files) ? { files: [...new Set(x.files.filter((f) => typeof f === "string").map((f) => f.trim().replace(/^\.?\/+/, "")).filter(Boolean))] } : {}) }));
+    return { kind: "split", subissues, serialized: serializeShared(subissues) };
   }
   if (b.kind === "human") {
     return HUMAN_BLOCK_REASONS.includes(b.why) ? { kind: "human", why: b.why }
@@ -664,6 +684,7 @@ export async function runCore(o) {
         }
       } catch (e) { return await finish("engine-error", `filing sub-issues failed after ${refs(filed) || "none"}: ${e?.message ?? e}`, { subissues: filed }); }
       T.decisions.push(`Builder block: split into ${refs(filed)}`);
+      for (const e of b.serialized ?? []) T.decisions.push(`Serialised sub-issue #${filed[e.from]} behind #${filed[e.to]}: both edit ${e.files.slice(0, 5).join(", ")} (#4385)`);
       let marked = false;
       try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\n${s}`); marked = true; } catch { /* best effort */ }
       // #4337: with decomposition.close_parent, the tracker closes only once its trail and label exist: dependents then wait on the sub-issues, not on it.
