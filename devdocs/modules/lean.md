@@ -470,6 +470,13 @@ arguments, resolves the repo, auto-spawns the daemon (output to
   in the daemon (breaker reset, as an operator resume).
 - `set-parallel {id, k}` sets K live. With no daemon running, the client writes
   the `parallel` file itself.
+- `add {id, issues}` (#4408, `--add <id> N...`, also `--resume <id> N...`) merges
+  issues into the batch's cumulative `add` file, hosted or not. The client skips
+  closed issues first; non-integers and issues already in the batch are skipped.
+  The runner re-reads the file every pass (`getAdded`), adds new issues through
+  `addIssues` after re-reading the pending issues' `Depends on`, and records one
+  batch decision plus an `added` row. `attach` resumes a finished batch that has
+  unrun adds instead of replaying its report.
 - `status` reports the daemon pid and hosted batches.
 
 A client exit never stops a batch.
