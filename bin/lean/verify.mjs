@@ -6,6 +6,7 @@
  * failed jobs' log tails for the builder's fix loop. All GitHub effects go through the injected io.
  */
 import { ciPollDelayMs } from "../engine.mjs";
+import { parseE2e } from "./e2e.mjs";
 
 export const VERIFY_MODES = Object.freeze(["local", "ci", "hybrid"]);
 /** Changed files that never need the CI matrix (docs-only lanes skip CI verification). */
@@ -29,9 +30,9 @@ const OK = ["success", "neutral", "skipped"];
 
 /**
  * forge.yaml `verify:` section (block style; parseForgeYaml gives strings) → {mode, workflow, pathsInput, skipPaths,
- * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks}. Invalid values fall back to the defaults; mode defaults to local (today's
+ * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, e2e}. Invalid values fall back to the defaults; mode defaults to local (today's
  * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`; checks (#4387) is the optional allow-list
- * of check names that gate CI verification, or null.
+ * of check names that gate CI verification, or null; e2e is the e2e merge gate (#4403, e2e.mjs parseE2e).
  */
 export function parseVerify(sec = {}) {
   const s = sec && typeof sec === "object" ? sec : {};
@@ -51,7 +52,7 @@ export function parseVerify(sec = {}) {
   const rawChecks = Array.isArray(s.checks) ? s.checks : str(s.checks).split(",");
   const names = rawChecks.map((x) => String(x ?? "").trim()).filter(Boolean);
   const checks = names.length ? [...new Set(names)] : null;
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks };
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);
