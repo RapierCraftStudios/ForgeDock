@@ -159,7 +159,7 @@ ${REVIEW_RUBRIC}
 </rubric>
 
 Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirements":[{"id":"R1","status":"implemented|partial|missing","evidence":"file:line"}],"validation":[{"id":"V1","command":"","exit":0}],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}],"self_review":[{"question":"1","answer":"yes|no","evidence":""}],"amendments":[]}
-Add "facts":{"decisions":[""],"rejected":[{"approach":"","why":""}],"hotspots":[{"at":"file:line","why":""}],"conventions":[""]} to it: approaches you tried or weighed and dropped, with why, risky lines and conventions you matched. Later lanes on these files read them.
+Optional "facts":{"decisions":[],"rejected":[{"approach":"","why":""}],"hotspots":[{"at":"file:line","why":""}],"conventions":[]}; rejected: approaches you dropped, with why.
 Docker: start containers with docker run --rm; pass --label for each entry of $FORGE_DOCKER_LABELS on every docker run, volume create, network create and build (compose: on services, volumes, networks); tear down via trap/finally.
 If you started Docker containers or volumes that are still there, list their names in ${RESULT_FILE} as "resources":{"containers":[],"volumes":[]} so the engine removes them when the lane ends.
 If you find you are blocked, write "status":"blocked" with a typed "block" instead.`;
