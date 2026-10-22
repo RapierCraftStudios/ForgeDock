@@ -53,7 +53,7 @@ describe("#4362 attempt triggers and first pass", () => {
   const t = (...xs) => xs.map((trigger) => ({ trigger }));
   it("the trigger vocabulary is the issue's closed list; rework is a subset", () => {
     assert.deepEqual([...TRIGGERS], ["plan", "build", "block_correction", "contract_correction", "precheck", "structure", "docs", "enumerating",
-      "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "context_restart"]);
+      "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "verifier", "context_restart"]);
     for (const r of REWORK_TRIGGERS) assert.ok(TRIGGERS.includes(r), r);
   });
   it("firstPassOf: null without a build or with an untagged attempt; rework after the build breaks it, repairs do not", () => {

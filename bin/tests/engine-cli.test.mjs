@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readCloseParent, readVerify, makeIo, checkFromCli } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readVerifier, readCloseParent, readVerify, makeIo, checkFromCli } from "../engine-cli.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { serializeState } from "../engine/state.mjs";
@@ -1032,6 +1032,27 @@ describe("readFixModel (#4363)", () => {
     assert.equal(readFixModel(d), "sonnet");
     writeFileSync(join(d, "forge.yaml"), "lean:\n  fix_model: \"bad model; rm\"\n");
     assert.equal(readFixModel(d), undefined);
+  });
+});
+
+describe("readVerifier (#4397)", () => {
+  it("reads review.verifier and review.verifier_model, else engine.lean_verifier_model; absent or invalid is undefined", () => {
+    const d = tmpDir("verifier-yaml-");
+    assert.equal(readVerifier(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "review:\n  trigger: shadow\n");
+    assert.equal(readVerifier(d), undefined, "absent");
+    for (const m of ["off", "shadow", "enforce"]) {
+      writeFileSync(join(d, "forge.yaml"), `review:\n  verifier: ${m}\n`);
+      assert.deepEqual(readVerifier(d), { mode: m });
+    }
+    writeFileSync(join(d, "forge.yaml"), "review:\n  verifier: loud\n");
+    assert.equal(readVerifier(d), undefined, "invalid mode");
+    writeFileSync(join(d, "forge.yaml"), "review:\n  verifier: shadow\n  verifier_model: claude-haiku-5-5\n");
+    assert.deepEqual(readVerifier(d), { mode: "shadow", model: "claude-haiku-5-5" });
+    writeFileSync(join(d, "forge.yaml"), "review:\n  verifier: enforce\nengine:\n  lean_verifier_model: opus\n");
+    assert.deepEqual(readVerifier(d), { mode: "enforce", model: "opus" });
+    writeFileSync(join(d, "forge.yaml"), "review:\n  verifier: shadow\n  verifier_model: \"bad model; rm\"\n");
+    assert.deepEqual(readVerifier(d), { mode: "shadow" });
   });
 });
 

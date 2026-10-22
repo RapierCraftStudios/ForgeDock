@@ -44,7 +44,7 @@ export function issueSummary(body, max = FIX_CAPS.summary) {
  * these; events written before the field existed read as "unknown" in `forgedock stats`.
  */
 export const TRIGGERS = Object.freeze(["plan", "build", "block_correction", "contract_correction", "precheck", "structure", "docs", "enumerating",
-  "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery",
+  "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "verifier",
   "context_restart"]); // #4390: a session stopped at the context ceiling, restarted fresh (restart_of: the stopped trigger)
 
 /** Builder attempts after the build that mean its diff needed rework (environment and engine repairs do not). */
