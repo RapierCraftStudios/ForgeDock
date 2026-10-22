@@ -699,7 +699,14 @@ export function formatShadowSummary(rows) {
 /** One line per requirement for the follow-up script: a stable key (id + quote) and a why. Tabs and newlines removed. */
 export function followupItems(reqs) {
   const flat = (s) => String(s ?? "").replace(/[\t\r\n`]+/g, " ").replace(/\s+/g, " ").trim();
-  return reqs.map((r) => ({ id: r.id, key: flat(`${r.id}: ${r.quote}`).slice(0, 240), why: flat(`${r.disposition}: ${r.why ?? ""}`).slice(0, 400) }));
+  return reqs.map((r) => ({ id: r.id, key: flat(`${r.id}: ${r.quote}`).slice(0, 240).trim(), why: flat(`${r.disposition}: ${r.why ?? ""}`).slice(0, 400).trim() }));
+}
+
+/** #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}, matched on trimmed keys (the script trims what it echoes); unmatched items omitted. */
+export function followupMap(out, items) {
+  const echoed = new Map();
+  for (const l of String(out ?? "").split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) echoed.set(k.trim(), Number(n)); }
+  return Object.fromEntries(items.filter((i) => echoed.has(String(i.key).trim())).map((i) => [i.key, echoed.get(String(i.key).trim())]));
 }
 
 /**

@@ -1137,6 +1137,30 @@ describe("forgedock check (#4364)", () => {
     await assert.rejects(checkFromCli([], { cwd: empty, git: f.git, out: () => {} }), (e) => e.exitCode === 2 && /contract\.json/.test(e.message));
   });
 
+  it("#4390: a failure prints its tail, failing test ids and a pointer to the full log under .forge-lean/logs/", async () => {
+    const f = fixture({ plan: { v: 1, base: "staging", mode: "local", learned: ["make test"], maxMinutes: null, precheckTotalSeconds: 600, precheckTimeoutSeconds: 30 } });
+    const big = [...Array.from({ length: 200 }, (_, i) => `noise line ${i}`), "FAILED tests/test_a.py::test_one - AssertionError", ...Array.from({ length: 60 }, (_, i) => `trace ${i}`), "1 failed, 9 passed"].join("\n");
+    const lines = [];
+    const r = await checkFromCli([], { cwd: f.dir, git: f.git, runCommand: async (c) => ({ rc: c.command === "make test" ? 1 : 0, output: c.command === "make test" ? big : "" }), env: {}, out: (l) => lines.push(l) });
+    assert.equal(r.exitCode, 1);
+    const t = lines.join("\n");
+    assert.match(t, /--- make test \(exit 1\)\n…trace 21\n/, "the last 40 lines");
+    assert.doesNotMatch(t, /noise line 199/);
+    assert.match(t, /failing tests:\n {2}FAILED tests\/test_a\.py::test_one/);
+    assert.match(t, /full log: \.forge-lean\/logs\/check-cmd1\.log/);
+    assert.equal(readFileSync(join(f.dir, ".forge-lean", "logs", "check-cmd1.log"), "utf8"), big);
+    const saved = JSON.parse(readFileSync(join(f.dir, ".forge-lean", "self-check.json"), "utf8"));
+    assert.deepEqual(Object.keys(saved.commands[0]).sort(), ["command", "ms", "rc"], "self-check record shape unchanged");
+  });
+
+  it("#4390: readCoreLimits reads engine.context_ceiling_tokens (0 allowed, junk ignored)", async () => {
+    const { readCoreLimits } = await import("../engine-cli.mjs");
+    const d = tmpDir("fd-ctx-");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: 90000\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, 90000);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: 0\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, 0);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: lots\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, undefined);
+  });
+
   it("local only: the command never reaches GitHub (no gh in its deps or source)", () => {
     const src = checkFromCli.toString();
     assert.doesNotMatch(src, /\bgh\b|workflow run|git", \["push|\["push"/);
