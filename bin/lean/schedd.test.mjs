@@ -32,6 +32,8 @@ const a = process.argv.slice(2); const n = Number(a[1]); const rf = a[a.indexOf(
 appendFileSync(${JSON.stringify(h.launches)}, n + "\\n");
 const t = setInterval(() => { if (!existsSync(${JSON.stringify(h.release)})) return; clearInterval(t);
   writeFileSync(rf + ".tmp", JSON.stringify({ terminalReason: "merged", pr: 100 + n, cost_usd: 0 })); renameSync(rf + ".tmp", rf); }, 20);
+// Like run-issue's #4179 teardown: SIGTERM reports deferred run.interrupted.
+process.once("SIGTERM", () => { writeFileSync(rf + ".tmp", JSON.stringify({ terminalReason: "deferred", code: "run.interrupted", detail: "interrupted by SIGTERM" })); renameSync(rf + ".tmp", rf); process.exit(143); });
 `);
   h.daemonScript = join(work, "daemon.mjs");
   writeFileSync(h.daemonScript, `import { startDaemon } from ${JSON.stringify(new URL("./schedd.mjs", import.meta.url).href)};
@@ -179,6 +181,36 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       }));
       assert.equal(res.rows.length, 3);
       assert.deepEqual(h.launched(), [1, 2, 4, 6], "each issue launched once");
+    } finally { h.cleanup(); }
+  });
+
+  it("#4376: --cancel stops one batch (its lane torn down, the rest held, report written); the other batch and the daemon run on", async () => {
+    const h = host();
+    try {
+      const d = await h.daemon();
+      await withRoot(h, () => capture(async () => {
+        const a = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
+        await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+        const [idA] = listBatches(h.root);
+        const b = orchestrateFromCli(["5", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
+        await until(() => h.launched().includes(5) && h.lanePids().length === 2);
+        const idB = listBatches(h.root).find((x) => x !== idA);
+        const res = await orchestrateFromCli(["--cancel", idA], h.client);
+        assert.deepEqual(res, { ok: true, batch: idA, cancelled: true });
+        const doneA = await a;
+        assert.deepEqual(doneA.rows.map((r) => [r.issue, r.outcome, r.detail]), [[1, "held", "cancelled by operator"], [2, "held", "cancelled by operator"]]);
+        assert.ok(openBatch(h.root, idA).readReport(), "the cancelled batch wrote its report");
+        assert.deepEqual(h.launched(), [1, 5], "#2 never launched");
+        const st = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" });
+        assert.equal(st.pid, d.pid, "the daemon kept running");
+        assert.deepEqual(st.batches.map((x) => x.id), [idB]);
+        writeFileSync(h.release, "");
+        const doneB = await b;
+        assert.deepEqual(doneB.rows.map((r) => [r.issue, r.outcome]), [[5, "merged"]]);
+        const again = await orchestrateFromCli(["--cancel", idA], h.client);
+        assert.equal(again.cancelled, false, "a finished batch is left alone");
+        await assert.rejects(orchestrateFromCli(["--cancel", "nope"], h.client), /no batch nope/);
+      }));
     } finally { h.cleanup(); }
   });
 

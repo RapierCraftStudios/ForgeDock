@@ -13,8 +13,12 @@
  *   {op:"set-parallel", id, k}    → {type:"ok", parallel}
  *   {op:"add", id, issues}        → {type:"ok", added, skipped, hosted} (#4408): merged into the batch's `add` file, which a
  *                                   hosted runner reads on its next pass and an unhosted batch on its next resume
+ *   {op:"cancel", id}             → {type:"ok", cancelled:true, hosted} (#4376): writes the batch's `cancel` file; that batch
+ *                                   admits nothing more, its running local lanes get SIGTERM (their teardown saves the work)
+ *                                   and the rest end held; no other batch and not the daemon. A finished, unhosted batch:
+ *                                   {type:"ok", cancelled:false, finished:true}, nothing written
  *   {op:"status"}                 → {type:"status", pid, batches:[{id, running}]}
- * Failures answer {type:"error", message}. A client closing its connection never cancels a batch, and stopping the daemon
+ * Failures answer {type:"error", message}. A client closing its connection never cancels a batch (only `cancel` stops one), and stopping the daemon
  * never stops a lane (lanes are detached sessions). On start the daemon resumes every daemon-hosted batch without a
  * report, so live lanes are re-adopted through the batch runner's `adopt`. It exits after `idleMs` with no batch and no client.
  * `runBatch({argv, cwd, env, sink, keepBreaker})` is injected (engine-cli `runBatch`); `sink` gets `batch(b)`, `row(r)`, `line(text)`.
@@ -115,6 +119,13 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       const { added, skipped } = b.addIssues(req.issues ?? []);
       return send({ type: "ok", added, skipped, hosted: hosted.has(req.id) }, true);
+    }
+    if (req.op === "cancel") {
+      const b = openBatch(root, req.id);
+      if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
+      if (!hosted.has(req.id) && b.readReport()) return send({ type: "ok", cancelled: false, finished: true }, true);
+      b.requestCancel({ reason: "operator" });
+      return send({ type: "ok", cancelled: true, hosted: hosted.has(req.id) }, true);
     }
     const sub = (m) => send(m, m.type === "done" || m.type === "error");
     if (req.op === "submit") {
