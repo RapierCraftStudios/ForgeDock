@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, VERIFY_MODES } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, VERIFY_MODES, OUT_OF_BAND_RE } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -541,6 +541,8 @@ describe("#4404 verified out of band: a requirement measured outside the lane is
     assert.equal(tagOutOfBand(C).contract, C); assert.deepEqual(tagOutOfBand(C).tagged, []);
     for (const x of [null, [], "x", {}]) assert.deepEqual(tagOutOfBand(x), { contract: x, tagged: [] });
     assert.deepEqual(VERIFY_MODES, ["in_lane", "out_of_band"]);
+    for (const q of [LH, TTI, NIGHTLY, "Field performance holds.", "Web vitals pass.", "A report-only bench workflow tracks it."]) assert.match(q, OUT_OF_BAND_RE, q);
+    for (const q of ["The nightly build. Then a suite.", "Add a unit test for the parser.", "Run the job locally."]) assert.doesNotMatch(q, OUT_OF_BAND_RE, q);
   });
 
   it("an add-requirement amendment is tagged the same way", () => {
