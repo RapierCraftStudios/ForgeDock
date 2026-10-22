@@ -71,3 +71,18 @@ export function formatFirstPassSummary(rows) {
   const k = reached.filter((r) => r.first_pass).length;
   return `first-pass: ${Math.round((k / reached.length) * 100)}% (${k}/${reached.length} lane${reached.length === 1 ? "" : "s"} that reached the build)`;
 }
+
+/**
+ * #4407: one attempt's cost from the CLI envelope's `total_cost_usd`, which is cumulative over a resumed session.
+ * `last` maps a session id to its last reported total (updated in place). A resumed attempt costs its total minus the
+ * session's previous total; a fresh call, an unknown session or a total below the previous one counts in full, so the
+ * deltas of a session's attempts sum to its final total. A non-finite cost yields nulls and leaves `last` alone.
+ */
+export function sessionCostDelta(last, { resume = null, sessionId = null, cost = null } = {}) {
+  if (!Number.isFinite(cost)) return { delta: null, session: null };
+  const prev = resume ? last.get(resume) : undefined;
+  const delta = Number.isFinite(prev) && cost >= prev ? Math.round((cost - prev) * 1e9) / 1e9 : cost;
+  const key = sessionId ?? resume;
+  if (key) last.set(key, cost);
+  return { delta, session: cost };
+}

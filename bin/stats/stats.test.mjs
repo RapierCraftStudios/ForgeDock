@@ -603,6 +603,29 @@ describe("rework by trigger and first-pass rate (#4362)", () => {
   });
 });
 
+describe("per-attempt cost deltas (#4407)", () => {
+  const use = (attempt, usd, delta, phase = "implement") => ({ event: "PHASE_ATTEMPT_USAGE", phase, attempt, trigger: attempt === 1 ? "plan" : "build", cost_usd: usd,
+    ...(delta === undefined ? {} : { cost_usd_delta: delta, cost_usd_session: usd }), usage: { cache_read_input_tokens: 10, output_tokens: 1 } });
+  const log = (attempts) => [{ event: "RUN_START", issue: 1, repo: "o/r", run: "r1", version: "1.30.0", ts: "2026-10-20T00:00:00Z" }, ...attempts,
+    { event: "RUN_TERMINAL", reason: "merged", ts: "2026-10-20T01:00:00Z" }];
+
+  it("a local run sums cost_usd_delta when present, else cost_usd (old logs)", () => {
+    const r = summariseLog(log([use(1, 2, 2), use(2, 5, 3), use(1, 0.5, 0.5, "review")]));
+    assert.equal(r.costUsd, 5.5);
+    assert.equal(r.phases.implement.usd, 5);
+    assert.deepEqual(r.builderAttempts.map((a) => a.cost_usd), [2, 3]);
+    const old = summariseLog(log([use(1, 2), use(2, 5)]));
+    assert.equal(old.costUsd, 7); assert.deepEqual(old.builderAttempts.map((a) => a.cost_usd), [2, 5]);
+  });
+
+  it("GitHub phase_attempt records sum cost_usd_delta when present, else cost_usd", () => {
+    const rec = (attempt, usd, delta) => ({ event: "phase_attempt", repo: "o/r", issue: 9, run: "r_9", phase: "implement", attempt, cost_usd: usd, ...(delta === undefined ? {} : { cost_usd_delta: delta }), output_tokens: 1, ts: `t${attempt}` });
+    const [run] = runsFromRecords([rec(1, 2, 2), rec(2, 5, 3), rec(3, 4), { event: "run_terminal", repo: "o/r", issue: 9, run: "r_9", reason: "merged", ts: "t9" }]);
+    assert.equal(run.phases.implement.usd, 9);
+    assert.deepEqual(run.builderAttempts.map((a) => a.cost_usd), [2, 3, 4]);
+  });
+});
+
 describe("first-pass rate with and without matching pitfalls (#4375)", () => {
   const use = (attempt, trigger) => ({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", attempt, trigger, cost_usd: 1, usage: { cache_read_input_tokens: 10, output_tokens: 1 } });
   const log = (issue, attempts, { term = {}, pack = null } = {}) => [{ event: "RUN_START", issue, repo: "o/r", run: `r${issue}`, version: "1.30.0", ts: "2026-10-20T00:00:00Z" },
