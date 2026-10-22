@@ -2005,9 +2005,11 @@ export function listDescendants(pid, { psFn = null } = {}) {
  * stream-json so progress is observable (the final `result` line is the envelope); `wrap(bin,args)` rewrites the spawn
  * (cgroup caps); `control` receives {pause, resume} (SIGSTOP/SIGCONT of the child's whole process group) and paused time
  * does not count as idle. `onSpawn(child)` receives the ChildProcess.
+ * #4390: `contextMax` (stream only; 0 = off) kills the session once one assistant turn's context (input + cache read +
+ * cache creation) reaches it, throwing CLI_CONTEXT with the stream-aggregated usage (null when none was seen) and turns.
  */
 export async function runCliBackendAsync(opts) {
-  const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, ...rest } = opts;
+  const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, contextMax = 0, ...rest } = opts;
   let captured = null;
   try {
     runCliBackend({ ...rest, spawnFn: (bin, args, o) => {
@@ -2032,7 +2034,8 @@ export async function runCliBackendAsync(opts) {
   }
   if (typeof wrap === "function") ({ bin, args } = wrap(bin, args));
   const ceiling = maxMs > 0 ? maxMs : o.timeout;
-  let collected, idleInfo = null;
+  let collected, idleInfo = null, ctxInfo = null;
+  const msgUsage = new Map(); // #4390: assistant message id -> its usage (a message spans several stream lines)
   try {
     collected = await new Promise((resolveP) => {
       let stdout = "", stderr = "", settled = false, timedOut = false, paused = false;
@@ -2058,10 +2061,10 @@ export async function runCliBackendAsync(opts) {
       const tick = Math.max(20, Math.min(1000, (idleMs || 4000) / 4));
       timer = setInterval(() => {
         const now = Date.now();
-        if (!paused && idleMs > 0 && now - lastActivity >= idleMs && !idleInfo) {
+        if (!paused && idleMs > 0 && now - lastActivity >= idleMs && !idleInfo && !ctxInfo) {
           idleInfo = { lastTool, children: listDescendants(child.pid), idleMs, pid: child.pid };
           kill();
-        } else if (!timedOut && !idleInfo && now - startedAt - pausedTotal - (paused ? now - pausedAt : 0) >= ceiling) { timedOut = true; kill(); }
+        } else if (!timedOut && !idleInfo && !ctxInfo && now - startedAt - pausedTotal - (paused ? now - pausedAt : 0) >= ceiling) { timedOut = true; kill(); }
       }, tick);
       timer.unref?.();
       const noteLine = (line) => {
@@ -2070,6 +2073,12 @@ export async function runCliBackendAsync(opts) {
         if (j?.type === "result") resultLine = line;
         else if (j?.type === "assistant" && Array.isArray(j.message?.content)) {
           for (const c of j.message.content) if (c?.type === "tool_use") lastTool = { name: c.name, input: JSON.stringify(c.input ?? {}).slice(0, 200), at: Date.now() };
+          const u = j.message.usage;
+          if (u && typeof u === "object") {
+            msgUsage.set(j.message.id ?? `#${msgUsage.size}`, u);
+            const ctx = toFiniteUsageNumber(u.input_tokens) + toFiniteUsageNumber(u.cache_read_input_tokens) + toFiniteUsageNumber(u.cache_creation_input_tokens);
+            if (contextMax > 0 && ctx >= contextMax && !ctxInfo && !idleInfo && !timedOut) { ctxInfo = { context: ctx, lastTool }; kill(); }
+          }
         }
       };
       child.stdout.on("data", (d) => {
@@ -2090,6 +2099,13 @@ export async function runCliBackendAsync(opts) {
       });
     });
   } finally { if (sysDir) rmSync(sysDir, { recursive: true, force: true }); }
+  if (ctxInfo) {
+    const sum = (k) => [...msgUsage.values()].reduce((a, u) => a + toFiniteUsageNumber(u[k]), 0);
+    const err = new Error(`claude CLI session reached ${ctxInfo.context} context tokens (ceiling ${contextMax}) after ${msgUsage.size} turn(s) and was stopped`);
+    err.code = "CLI_CONTEXT"; err.context = ctxInfo.context; err.contextMax = contextMax; err.turns = msgUsage.size; err.lastTool = ctxInfo.lastTool;
+    err.usage = msgUsage.size ? { input_tokens: sum("input_tokens"), output_tokens: sum("output_tokens"), cache_creation_input_tokens: sum("cache_creation_input_tokens"), cache_read_input_tokens: sum("cache_read_input_tokens") } : null;
+    throw err;
+  }
   if (idleInfo) {
     const mins = Math.round((idleInfo.idleMs / 60000) * 10) / 10;
     const err = new Error(`claude CLI had no stream activity for ${mins} min and was killed (idle). Last tool: ${idleInfo.lastTool ? `${idleInfo.lastTool.name} ${idleInfo.lastTool.input}` : "none"}. Live children: ${idleInfo.children.map((c) => `${c.pid}:${c.cmd}`).join("; ") || "none"}`);

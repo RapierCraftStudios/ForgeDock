@@ -11,11 +11,13 @@
  */
 import { createHash } from "node:crypto";
 import { scopeChecks, selectCommands } from "./testmap.mjs";
-import { capLogs } from "./verify.mjs";
+import { LOG_CAP } from "./verify.mjs";
 
 /** #4364: the engine's check plan for `forgedock check` (written beside contract.json) and the CLI's last run record. */
 export const CHECK_PLAN_FILE = ".forge-lean/check-plan.json";
 export const SELF_CHECK_FILE = ".forge-lean/self-check.json";
+/** #4390: full output of each failing check command (`forgedock check`, the engine's precheck round). */
+export const CHECK_LOG_DIR = ".forge-lean/logs";
 
 /** rc of a command killed by its timeout (effects.mjs runCheckCommand). */
 const TIMEOUT_RC = 124;
@@ -142,14 +144,37 @@ export async function selfCheck({ contract, plan, parallelism = 1, now = () => D
   return { ok, validate, commands, deferred: pre.deferred };
 }
 
-/** #4364: the compact pass/fail table `forgedock check` prints, each failure's output tail capped (verify.mjs capLogs). */
-export function formatCheckTable(r, cap) {
+/** #4390: summary lines naming a failing test, as common runners print them (pytest, TAP/node --test, jest/vitest, go, cargo). */
+const FAIL_ID_RE = /^\s*(?:FAILED |ERROR |not ok \d|FAIL |[✕×✗] |--- FAIL: |test \S.* \.\.\. FAILED)/;
+export const QUIET_TAIL_LINES = 40;
+
+/**
+ * #4390 quiet-output contract: one failure as its last `lines` lines (at most `maxChars`, cut marked with `…`), the
+ * failing-test-id lines found anywhere in the output (deduped, at most `maxIds`) and, when given, the full log's path.
+ */
+export function quietFailure(output, { lines = QUIET_TAIL_LINES, maxChars = Infinity, logPath = null, maxIds = 30 } = {}) {
+  const all = String(output ?? "").split("\n");
+  while (all.length && !all[all.length - 1].trim()) all.pop();
+  const from = Math.max(0, all.length - lines);
+  let tail = all.slice(from).join("\n");
+  const cut = from > 0 || tail.length > maxChars;
+  if (tail.length > maxChars) tail = tail.slice(-maxChars);
+  const ids = [...new Set(all.filter((l) => FAIL_ID_RE.test(l)).map((l) => l.trim().slice(0, 300)))];
+  const out = [tail ? `${cut ? "…" : ""}${tail}` : "(no output)"];
+  if (ids.length) out.push(`failing tests:\n${ids.slice(0, maxIds).map((l) => `  ${l}`).join("\n")}${ids.length > maxIds ? `\n  … and ${ids.length - maxIds} more` : ""}`);
+  if (logPath) out.push(`full log: ${logPath}`);
+  return out.join("\n");
+}
+
+/** #4364: the compact pass/fail table `forgedock check` prints; #4390: each failure quiet (`quietFailure`), within `cap` chars. */
+export function formatCheckTable(r, cap = LOG_CAP) {
   const word = (x) => (x.status === "ci" ? "CI" : x.status ? "DEFERRED" : x.rc === 0 ? "PASS" : `FAIL exit ${x.rc}`);
   const rows = [...(r.validate ?? []).map((x) => ({ ...x, label: `${x.id} ${x.command}` })), ...(r.commands ?? []).map((x) => ({ ...x, label: x.command })),
     ...(r.deferred ?? []).map((c) => ({ command: c, label: c, status: "deferred-to-ci" }))];
   const out = rows.map((x) => `${word(x).padEnd(12)} ${Number.isFinite(x.ms) ? `${(x.ms / 1000).toFixed(1)}s`.padStart(7) : "".padStart(7)}  ${x.label}`);
   const failed = rows.filter((x) => !x.status && x.rc !== 0);
-  for (const f of capLogs(failed.map((x) => ({ ...x, log: x.output })), ...(cap ? [cap] : []))) out.push("", `--- ${f.label} (exit ${f.rc})`, f.log || "(no output)");
+  const per = Math.max(500, Math.floor(cap / Math.max(1, failed.length))); // verify.mjs capLogs share
+  for (const f of failed) out.push("", `--- ${f.label} (exit ${f.rc})`, quietFailure(f.output, { maxChars: per, logPath: f.logPath ?? null }));
   out.push("", r.ok ? "check: PASS" : `check: FAIL (${failed.length} failing)`);
   return out.join("\n");
 }

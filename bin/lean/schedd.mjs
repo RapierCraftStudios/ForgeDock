@@ -9,8 +9,10 @@
  * Protocol: newline-delimited JSON, one request per connection.
  *   {op:"submit", argv, cwd, env} → {type:"batch", id, dir}, {type:"row", row}…, {type:"line", text}…, {type:"done", result, report}
  *   {op:"attach", id}             → log.jsonl rows replayed, then live rows/lines and done; a finished batch replays report.json
- *                                   ({type:"done", replay:true}); a batch nobody hosts is resumed here
+ *                                   ({type:"done", replay:true}) unless it has unrun added issues; a batch nobody hosts is resumed here
  *   {op:"set-parallel", id, k}    → {type:"ok", parallel}
+ *   {op:"add", id, issues}        → {type:"ok", added, skipped, hosted} (#4408): merged into the batch's `add` file, which a
+ *                                   hosted runner reads on its next pass and an unhosted batch on its next resume
  *   {op:"status"}                 → {type:"status", pid, batches:[{id, running}]}
  * Failures answer {type:"error", message}. A client closing its connection never cancels a batch, and stopping the daemon
  * never stops a lane (lanes are detached sessions). On start the daemon resumes every daemon-hosted batch without a
@@ -108,6 +110,12 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       b.setParallel(Number(req.k));
       return send({ type: "ok", parallel: Number(req.k) }, true);
     }
+    if (req.op === "add") {
+      const b = openBatch(root, req.id);
+      if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
+      const { added, skipped } = b.addIssues(req.issues ?? []);
+      return send({ type: "ok", added, skipped, hosted: hosted.has(req.id) }, true);
+    }
     const sub = (m) => send(m, m.type === "done" || m.type === "error");
     if (req.op === "submit") {
       const ent = await host({ argv: req.argv ?? [], cwd: req.cwd ?? process.cwd(), env: req.env ?? {} }, sub);
@@ -124,7 +132,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       const rep = b.readReport();
-      if (rep && !(rep.rows ?? []).some((r) => r.outcome === "held")) {
+      if (rep && !(rep.rows ?? []).some((r) => r.outcome === "held") && !b.unrunAdds().length) {
         return send({ type: "done", replay: true, result: { rows: rep.rows ?? [], crossLane: rep.crossLane ?? [], batch: b.id, ok: !!rep.ok }, report: rep.report ?? null }, true);
       }
       const ent = await host({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} }, sub);
