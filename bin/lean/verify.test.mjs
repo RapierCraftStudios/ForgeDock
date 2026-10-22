@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseVerify, matchesGlob, skipsCi, capLogs, runCiVerify, collectFailedLogs, verifyReport, DEFAULT_SKIP_PATHS, LOG_CAP, VERIFY_CHECK_NAME, VERIFY_TEXT_CAP } from "./verify.mjs";
+import { parseVerify, matchesGlob, skipsCi, capLogs, runCiVerify, collectFailedLogs, verifyReport, DEFAULT_SKIP_PATHS, LOG_CAP, VERIFY_CHECK_NAME, VERIFY_TEXT_CAP, latestPerName, ciGate, rerunFailedOnce, rerunTarget } from "./verify.mjs";
 import { precheck } from "./conformance.mjs";
 import { parseE2e } from "./e2e.mjs";
 
@@ -23,9 +23,9 @@ function fake(o = {}) {
 
 describe("verify-by-CI config (#4167)", () => {
   it("parseVerify defaults to local and rejects invalid values", () => {
-    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, e2e: parseE2e({}) });
+    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, checks: null, e2e: parseE2e({}) });
     const v = parseVerify({ mode: "ci", workflow: ".github/workflows/verify.yml", paths_input: "changed_paths", skip_paths: "*.md, docs/** ,", max_rounds: "3" });
-    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, e2e: parseE2e({}) });
+    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, checks: null, e2e: parseE2e({}) });
     assert.equal(parseVerify({ mode: "remote" }).mode, "local");
     assert.equal(parseVerify({ workflow: "x; rm -rf /" }).workflow, null);
     assert.equal(parseVerify({ max_rounds: "-1" }).maxRounds, 2);
@@ -92,6 +92,63 @@ describe("runCiVerify (#4167)", () => {
     assert.deepEqual(r.failures.map((x) => [x.job, Boolean(x.log)]), [["test", true], ["types", false]]);
     const g = fake({ checks: [[]] });
     assert.equal((await runCiVerify(g.args({ verify: parseVerify({ mode: "ci" }) }))).result, "unavailable");
+  });
+});
+
+describe("CI verification gate, latest attempt and flake rerun (#4387)", () => {
+  const CI = parseVerify({ mode: "ci" });
+  const run = (id) => `https://github.com/o/r/actions/runs/${id}/job/1`;
+  it("#4387 required checks gate: a red non-required storybook check passes when required lint and test are green", async () => {
+    const f = fake({ checks: [[{ name: "lint", state: "success", id: 1, url: run(1) }, { name: "test", state: "success", id: 2, url: run(1) }, { name: "storybook (web)", state: "failure", id: 3, url: run(2) }]] });
+    const r = await runCiVerify(f.args({ verify: CI, gate: ["lint", "test"] }));
+    assert.equal(r.result, "pass"); assert.match(r.detail, /ignored non-gating: storybook \(web\)/); assert.deepEqual(f.logsFor, []);
+    const g = fake({ checks: [[{ name: "lint", state: "failure", id: 1, url: run(1) }, { name: "test", state: "success", id: 2, url: run(1) }, { name: "storybook (web)", state: "failure", id: 3, url: run(2) }]] });
+    const red = await runCiVerify(g.args({ verify: CI, gate: ["lint", "test"] }));
+    assert.equal(red.result, "fail"); assert.deepEqual(red.failures.map((x) => x.job), ["lint"]);
+    assert.deepEqual(red.failedChecks, [{ name: "lint", id: 1, url: run(1) }]);
+  });
+  it("#4387 latest attempt per name: a later green run of a check counts as green; a later red one as red", async () => {
+    const f = fake({ checks: [[{ name: "test", state: "failure", id: 10, url: run(5) }, { name: "test", state: "success", id: 11, url: run(6) }, { name: "lint", state: "success", id: 9 }]] });
+    assert.equal((await runCiVerify(f.args({ verify: CI }))).result, "pass");
+    const g = fake({ checks: [[{ name: "test", state: "success", id: 10, url: run(5) }, { name: "test", state: "failure", id: 11, url: run(6) }]] });
+    assert.equal((await runCiVerify(g.args({ verify: CI }))).result, "fail");
+    // without ids the worst state of a name wins (unchanged conservative behaviour)
+    assert.deepEqual(latestPerName([{ name: "t", state: "failure" }, { name: "t", state: "success" }]).map((c) => c.state), ["failure"]);
+  });
+  it("#4387 a gate name not reported yet is waited on for the grace period; with none reported every check gates", async () => {
+    const f = fake({ checks: [[{ name: "lint", state: "success", id: 1 }], [{ name: "lint", state: "success", id: 1 }, { name: "test", state: "failure", id: 2, url: run(3) }]] });
+    assert.equal((await runCiVerify(f.args({ verify: CI, gate: ["lint", "test"] }))).result, "fail");
+    const g = fake({ checks: [[{ name: "storybook", state: "failure", id: 1, url: run(4) }]] });
+    const r = await runCiVerify(g.args({ verify: CI, gate: ["lint", "test"] }));
+    assert.equal(r.result, "fail"); assert.ok(g.clock >= 5 * 60000, "waited for the grace period first");
+  });
+  it("#4387 verify.checks overrides which checks gate CI verification", async () => {
+    const v = parseVerify({ mode: "ci", checks: "lint, test ," });
+    assert.deepEqual(v.checks, ["lint", "test"]);
+    assert.deepEqual(parseVerify({ checks: ["a", " b"] }).checks, ["a", "b"]);
+    const io = { requiredChecks: async () => ["build"] };
+    assert.deepEqual(await ciGate({ io, lane: "staging", mergeWait: "required", verify: v }), ["lint", "test"]);
+    assert.deepEqual(await ciGate({ io, lane: "staging", mergeWait: "required", verify: CI }), ["build"]);
+    assert.equal(await ciGate({ io, lane: "staging", mergeWait: "all", verify: CI }), null);
+    assert.equal(await ciGate({ io: { requiredChecks: async () => { throw new Error("404"); } }, lane: "staging", mergeWait: "required", verify: CI }), null);
+    const f = fake({ checks: [[{ name: "lint", state: "success", id: 1 }, { name: "test", state: "success", id: 2 }, { name: "build", state: "failure", id: 3, url: run(1) }]] });
+    assert.equal((await runCiVerify(f.args({ verify: v, gate: await ciGate({ io, lane: "staging", mergeWait: "required", verify: v }) }))).result, "pass");
+  });
+  it("#4387 rerunFailedOnce reruns each failed Actions run once; the re-verify waits for newer attempts", async () => {
+    const reran = [];
+    const v = { failures: [{ job: "test" }, { job: "types" }], failedChecks: [{ name: "test", id: 4, url: run(55) }, { name: "types", id: 5, url: run(55) }] };
+    const rr = await rerunFailedOnce({ io: { rerunFailedJobs: async (id) => { reran.push(id); } }, v });
+    assert.deepEqual([rr.ok, rr.runs, rr.jobs, reran], [true, ["55"], ["test", "types"], ["55"]]);
+    assert.equal((await rerunFailedOnce({ io: {}, v })).ok, false);
+    assert.match((await rerunFailedOnce({ io: { rerunFailedJobs: async () => { throw new Error("run too old"); } }, v })).detail, /run too old/);
+    const f = fake({ checks: [[{ name: "test", state: "failure", id: 4, url: run(55) }], [{ name: "test", state: "pending", id: 6 }], [{ name: "test", state: "success", id: 6 }]] });
+    const r = await runCiVerify(f.args({ verify: CI, rerunOf: rerunTarget({ failedChecks: [{ name: "test", id: 4 }] }) }));
+    assert.equal(r.result, "pass"); assert.ok(f.clock > 0, "the stale red attempt was not judged");
+  });
+  it("#4387 workflow mode: the re-verify waits for the same run's next attempt", async () => {
+    const f = fake({ runs: [[{ databaseId: 7, headSha: HEAD, status: "completed", conclusion: "failure", attempt: 1 }], [{ databaseId: 7, headSha: HEAD, status: "completed", conclusion: "success", attempt: 2 }]] });
+    const r = await runCiVerify(f.args({ exclude: [7], rerunOf: rerunTarget({ runId: 7, attempt: 1 }) }));
+    assert.equal(r.result, "pass"); assert.equal(r.runId, 7);
   });
 });
 

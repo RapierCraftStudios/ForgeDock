@@ -32,7 +32,7 @@ import { freshFix, issueSummary, firstPassOf } from "./fixround.mjs";
 import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog } from "./pitfalls.mjs";
 import { unjustified } from "./enumerating.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
-import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport } from "./verify.mjs";
+import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget } from "./verify.mjs";
 import { e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
@@ -1475,6 +1475,7 @@ export async function runCore(o) {
     // cannot run falls back once to local validation. A head verified here lets the precheck accept validate ids left to CI.
     let ciVerifiedHead = null, ciFellBack = false, ciRounds = 0;
     const ciSeenRuns = [];
+    let ciGateNames; // #4387: checks that gate CI verification, read once per lane
     /** Verifies the current head; returns {done} with a terminal result, or {fixes} (builder CI-fix rounds that moved the head). */
     async function ciVerify(trigger) {
       let fixes = 0;
@@ -1482,9 +1483,11 @@ export async function runCore(o) {
         const head = String(await git(["rev-parse", "HEAD"])).trim();
         if (head === ciVerifiedHead || ciFellBack) return { fixes };
         files = await changedFiles();
-        const v = await runCiVerify({ io, branch, head, changedFiles: files, verify: vcfg, ciMaxMinutes, now, sleep, random, exclude: ciSeenRuns,
+        if (ciGateNames === undefined) ciGateNames = vcfg.workflow ? null : await ciGate({ io, lane, mergeWait, verify: vcfg });
+        const verifyArgs = { io, branch, head, changedFiles: files, verify: vcfg, ciMaxMinutes, now, sleep, random, exclude: ciSeenRuns, gate: ciGateNames,
           push: () => gitPush(["push", "-u", "origin", branch]),
-          onPoll: async () => { await renew(); onProgress({ event: "phase_paused", phase: "verify", detail: `CI verification pending on ${branch}` }); } });
+          onPoll: async () => { await renew(); onProgress({ event: "phase_paused", phase: "verify", detail: `CI verification pending on ${branch}` }); } };
+        const v = await runCiVerify(verifyArgs);
         if (v.runId != null) ciSeenRuns.push(v.runId);
         const rec = { event: "CI_VERIFY", trigger, mode: vcfg.mode, round: ciRounds, result: v.result, skipped: v.result === "skipped", run_url: v.runUrl ?? null, failures: v.failures.map((f) => f.job) };
         ev(rec); await emit({ ...rec, phase: "verify" });
@@ -1524,7 +1527,18 @@ export async function runCore(o) {
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
         if (String(await git(["rev-parse", "HEAD"])).trim() === head) {
-          return { done: await needsHuman(`CI verification failed on \`${branch}\` (${jobs}) and the builder made no new commit for it; nothing merged.`, OUTCOME_CODES.CI_RED) };
+          // #4387: "no commit" says the failure is not the change's: rerun the failed jobs once to tell a flake from a real failure.
+          const rr = isSplit ? { ok: false, runs: [], jobs: [], detail: "refactor:split" } : await rerunFailedOnce({ io, v });
+          const v2 = rr.ok ? await runCiVerify({ ...verifyArgs, rerunOf: rerunTarget(v) }) : null;
+          if (rr.detail !== "no rerun seam") ev({ event: "CI_FLAKE_RERUN", trigger, head, runs: rr.runs, jobs: rr.jobs, result: v2?.result ?? "rerun-failed", detail: v2?.detail ?? rr.detail });
+          if (v2?.result === "pass") {
+            ciVerifiedHead = head; await gatePassed("ci_red", "merge_ci"); row(`CI green at ${head.slice(0, 12)} after a rerun of the failed jobs`);
+            T.decisions.push(`CI verification red (${jobs}), no fix commit; green after one rerun of the failed jobs (flake)`);
+            return { fixes };
+          }
+          if (v2?.result === "timeout") return { done: await finish("ci-pending", `CI rerun of the failed jobs on ${branch} still pending after ${ciMaxMinutes} min; rerun resumes the branch`) };
+          const how = !rr.ok ? (rr.detail === "no rerun seam" ? "" : ` (rerun of the failed jobs not possible: ${rr.detail})`) : " and stayed red after one rerun of the failed jobs";
+          return { done: await needsHuman(`CI verification failed on \`${branch}\` (${jobs}) and the builder made no new commit for it${how}; nothing merged.`, OUTCOME_CODES.CI_RED) };
         }
       }
     }
