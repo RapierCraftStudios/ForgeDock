@@ -1983,11 +1983,14 @@ export function runCliBackend({
   }
 }
 
-/** Descendant processes of `pid` (pid + command line), best effort. Used to record what was alive when a session was killed. */
-export function listDescendants(pid, { psFn = null } = {}) {
+/**
+ * Descendant processes of `pid` (pid + command line), best effort. Used to record what was alive when a session was killed;
+ * `maxCmd` caps each command line (the #4405 busy check needs it whole: a long script path would cut off the tool name).
+ */
+export function listDescendants(pid, { psFn = null, maxCmd = 200 } = {}) {
   try {
     const out = psFn ? psFn() : execSync("ps -eo pid=,ppid=,args=", { encoding: "utf-8", timeout: 3000, maxBuffer: 8 * 1024 * 1024 });
-    const rows = String(out).split("\n").map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3].slice(0, 200) }));
+    const rows = String(out).split("\n").map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3].slice(0, maxCmd) }));
     const kids = []; const seen = new Set([Number(pid)]);
     for (let grew = true; grew;) { grew = false; for (const r of rows) if (!seen.has(r.pid) && seen.has(r.ppid)) { seen.add(r.pid); kids.push({ pid: r.pid, cmd: r.cmd }); grew = true; } }
     return kids.slice(0, 30);
@@ -2062,12 +2065,18 @@ export async function runCliBackendAsync(opts) {
       timer = setInterval(() => {
         const now = Date.now();
         if (!paused && idleMs > 0 && now - lastActivity >= idleMs && !idleInfo) {
-          let info = null;
+          let info = null, settle = false;
           if (typeof busy === "function" && busyMs > 0 && now - lastActivity < idleMs + busyMs) {
-            if (busyAsk && busyAsk.since === lastActivity && now - busyAsk.at < Math.min(5000, idleMs)) info = busyAsk.info;
-            else { try { info = busy(listDescendants(child.pid)) || null; } catch { info = null; } busyAsk = { at: now, since: lastActivity, info }; }
+            const prev = busyAsk && busyAsk.since === lastActivity ? busyAsk : null;
+            if (prev && now - prev.at < Math.min(5000, idleMs)) info = prev.info;
+            else {
+              try { info = busy(listDescendants(child.pid, { maxCmd: 8192 })) || null; } catch { info = null; }
+              busyAsk = { at: now, since: lastActivity, info };
+              // The synchronous `ps` blocked the loop: output the child wrote meanwhile is read before a first "not busy" kills.
+              settle = !info && !(prev && prev.info === null);
+            }
           }
-          if (info) {
+          if (settle) { /* re-decided next tick */ } else if (info) {
             extendInfo = info;
             if (extendedSince !== lastActivity) { extendedSince = lastActivity; try { onIdleExtend?.(info); } catch { /* observer only */ } }
           } else {

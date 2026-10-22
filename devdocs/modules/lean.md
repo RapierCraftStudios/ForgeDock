@@ -951,4 +951,6 @@ is host-wide and shared across repos. `lane()` is read-only and lock-free. Polle
 servers do not count, so a silent session with no work child is still killed at idleMs. The window is
 `engine.cli_busy_minutes` (default 45 = heavy `max_wait_s` plus the idle default), so a stuck child is still killed. Run
 log: `CLI_IDLE_EXTENDED` {children, heavyQueue} once per silent stretch; `CLI_IDLE_KILL` adds `heavyQueue` and `extended`.
+The busy check gets whole command lines (`listDescendants` `maxCmd`; the kill record keeps 200 chars), and because `ps` is
+synchronous, a first "not busy" answer kills only on the next tick, after output written meanwhile has been read.
 Cost: 0 LLM calls; one `ps` and one registry read per check, only while idle.
