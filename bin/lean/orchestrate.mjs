@@ -361,10 +361,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(r?.waits && typeof r.waits === "object" ? { waits: r.waits } : {}), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
       ...(Number.isFinite(r?.precheckMs) ? { precheck_ms: r.precheckMs } : {}), ...(Number.isInteger(r?.precheckDeferred) && r.precheckDeferred > 0 ? { precheck_deferred: r.precheckDeferred } : {}), // #4331
       ...(typeof r?.firstPass === "boolean" ? { first_pass: r.firstPass } : {}), // #4362
+      ...(r?.turns && typeof r.turns === "object" ? { turns: r.turns } : {}), // #4392
       ...(r?.conformance && typeof r.conformance === "object" ? { conformance: r.conformance } : {}), // #4398
       ...(rec?.placement ? { placement: rec.placement } : {}) };
     const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
     const subs = (Array.isArray(r?.subissues) ? r.subissues : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
+    if (subs.length) row.subissues = subs; // #4396: links a decomposed parent to its sub-lanes in the report
+    if (r?.decomposition && typeof r.decomposition === "object") row.decomposition = r.decomposition;
     if (r?.sandbox && typeof r.sandbox === "object") {
       const prev = sandboxUse.get(n) ?? { minutes: 0, cost_usd: 0, attempts: 0 };
       const m = Number(r.sandbox.minutes) >= 0 ? Number(r.sandbox.minutes) : 0, c = Number(r.sandbox.cost_usd) >= 0 ? Number(r.sandbox.cost_usd) : 0;

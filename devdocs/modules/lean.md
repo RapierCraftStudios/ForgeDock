@@ -81,11 +81,18 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    quote of the requirement a failure names (`explainFailures`), and a failed
    validate names its command. Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
+   A `split` is admitted only by `decompose.mjs` `splitGate` (#4396): every
+   sub-issue's `paths`/`files` disjoint from the others', or the block's `size` over
+   `SPLIT_MIN_FILES` (25) / `SPLIT_MIN_LINES` (1500); otherwise it is `untyped`
+   and the one corrective resume asks for one lane with an ordered checklist.
+   The rationale goes on `FORGE:DECOMPOSED`, the decision line and the result's
+   `decomposition`.
    A split sub-issue may declare `files` (the paths it will edit); `serializeShared`
    adds a `Depends on` edge from each later sub-issue to the nearest earlier one it
    shares a file with and does not already reach, so siblings editing the same hub
    (barrel, union type, shared fixture, index doc) merge one after another instead
    of conflicting; each added edge is a decision. No `files`: unchanged (#4385).
+   The gate runs first; `serializeShared` orders only an admitted split.
    A `split` closes the parent `not planned` once its `FORGE:DECOMPOSED` trail
    and `workflow:decomposed` label are written (label kept; the closing comment
    lists the sub-issues; either write failing leaves it open) (#4337). A
@@ -142,6 +149,19 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    prompt + `prompts.mjs` `contextRestartPrompt`: `git diff --stat` and the hunks against the lane base (`boundDiff`,
    `RESTART_DIFF_MAX_BYTES` 40 KB) and the last `.forge-lean/self-check.json`; contract.json stays the authority on disk.
    Context restarts do not use the single idle/timeout retry; after 3 in one call the call runs uncapped (loop guard).
+   **Turn budget** (#4392, `budget.mjs`, forge.yaml `engine.turn_budget_s|m|l`, defaults 25/60/100, 0 = off;
+   `readCoreLimits` → runCore `turnBudgets`): at contract freeze (or a resumed frozen contract) `laneSize` sizes the lane
+   from a `size:S|M|L` label, else the contract's distinct deliverable paths (S ≤ 2, M ≤ 5, else L). While `stage ===
+   "implement"` every builder call (build plus its context/timeout restarts) passes `turnMax` = budget left;
+   `runCliBackendAsync` kills the stream session at that many deduped assistant turns with `CLI_TURNS`. `builder()`
+   records the attempt, logs `TURN_BUDGET_EXCEEDED`, checkpoints and runs `budgetWrapup`: one fresh session (trigger
+   `budget_wrapup`, `restart_of` the stopped trigger, `wrapupGrant` = max(5, ceil(budget/5)) turns, prompt
+   `turnBudgetWrapupPrompt` with diff and last self-check) that either finishes (the result flows on) or writes
+   `status: budget-exceeded` + `digest`. A stop or overrun (`TURN_BUDGET_STOP`) ends needs-human `budget.exceeded` with
+   `budgetDigest` (builder digest, else diff stat); it is in `RECOVERABLE_CODES`, so the batch reruns it once with
+   `RECOVER_HOW` (continue from the checkpoint or a typed split-required block). Plan/corrections and fix rounds are not
+   budgeted. The lane result and `RUN_TERMINAL` carry `turns: {size, budget, build, total, exceeded}`; orchestrate copies it
+   to the row and the batch report adds `formatTurnSummary` (`turns by size: S n= p50 max/budget; … over budget: #N`).
    **Lane profile** (#4395, `lean.mjs` section 2a + `callRunner`): every LLM session runs with
    `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (profile `memory-off`). With forge.yaml `engine.lane_instructions`
    (`engine-cli.mjs` `readLaneInstructions` → runCore `laneInstructions`) naming a repo-relative file in the lane
@@ -252,6 +272,24 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    The hash and the posted contract cover the dropped contract; a contract
    frozen before the change and recovered on a rerun is not rewritten, so the
    `superseded` path stays for it.
+   Verified out of band (#4404): a deliver requirement may carry
+   `verify: "in_lane"|"out_of_band"` (`VERIFY_MODES`); out_of_band needs
+   `evidence` = the job or workflow that measures it (`validateContract`). At
+   freeze, right after `dropScopeValidates`, `tagOutOfBand` tags every deliver
+   requirement without a `verify` whose quote names Lighthouse, web vitals,
+   field perf/profile, a throttled profile, a nightly or report-only suite, or
+   LCP/INP/TTI/FCP/TTFB (event `CONTRACT_OUT_OF_BAND_TAGGED`, decision line); an
+   explicit `verify` (in_lane opts out) is kept, and an `add-requirement`
+   amendment is tagged the same way. Such a requirement is judged by its
+   instrumentation (budget test or bench committed, job configured), not its
+   measured result: the skeleton row carries `verify`, `job` and
+   `instrumented: null`; completeness needs a boolean `instrumented` (true needs
+   path:line evidence); `decide` passes it on `instrumented: true` whatever the
+   status and fails `conformance.unimplemented` otherwise; `precheck` accepts
+   the builder's `instrumented: true` or `implemented`. `computeTrigger` adds a
+   `gate.ambiguous` reason so the reviewer always runs, and `renderPrBody` lists
+   them under "Verified out of band" with the job name. Not a disposition: no
+   follow-up issue is filed.
    Hotspots (forge#4195): `io.hotspots` runs `scripts/hotspots.sh` once
    before the plan call on the issue's `namedPaths` (`hotspotPlanNote`: one
    line per file over `maintenance.hotspot.file_lines`, nothing when none;
@@ -1123,3 +1161,16 @@ pending; workflow mode waits for the run's next `attempt`). `lean.mjs` `ciVerify
 else `ci.red`; merge-time rounds unchanged. `orchestrate.mjs`: `issueLabels` seam (engine-cli `labelNames`, fail-open):
 a `dependency-open` naming a `needs-human` dependency (batch result or out-of-set label) ends `skipped (dependency #N
 needs-human)` without pulling it in.
+
+## Entry 2026-10-23 — Decomposition gate and $/parent report line (#4396)
+
+`classifyBlock` (`lean.mjs`) passes a `split-required` block through `decompose.mjs` `splitGate`. The split is admitted
+when every sub-issue declares `paths` (or the #4385 `files`) and no path of one equals or sits under another's (independent), or when the
+block's `size` estimate exceeds 25 files or 1500 lines (oversize). Otherwise it is an `untyped` block: the existing
+single corrective resume tells the builder to keep one lane, an ordered checklist with a validate per item, and a
+second unjustified split ends `builder.block_untyped`. An admitted split writes `rationaleLine` into `FORGE:DECOMPOSED`
+and its decision line, and the lane result carries `decomposition {independent, oversize, overlaps, missing, size}`.
+Orchestrate's row keeps `subissues` and `decomposition`. The batch report prints `formatDecompositionSummary`: $/parent
+for decomposed parents (their row plus their sub-lanes, recursively; sub-issues not in the batch are counted as
+outside) against merged single-lane parents. Rationale: `devdocs/decisions/4396-decomposition-gate.md`. Cost: 0 LLM
+calls; an unjustified split spends the one block-correction resume instead of N sub-lanes.
