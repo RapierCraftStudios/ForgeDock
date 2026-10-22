@@ -4851,3 +4851,98 @@ describe("learned pitfalls (#4375)", () => {
     assert.equal((await run(w, { contextPack: { mode: "on" }, precheck: { commands: ["npm run lint"] } })).terminalReason, "merged");
   });
 });
+
+describe("#4397 independent adversarial verifier", () => {
+  const finding = { file: "src/foo.js", line: 3, input: "foo(null)", expected: "0", actual: "throws TypeError", why: "no guard" };
+  /** Verifier replies in order (an Error throws); every verifier call is recorded in w.vcalls and never reaches the reviewer queue. */
+  const withVerifier = (w, replies = []) => {
+    const orig = w.io.runner; w.vcalls = [];
+    w.io.runner = async (c) => {
+      if (c.role !== "verifier") return orig(c);
+      w.vcalls.push(c);
+      const r = replies.length ? replies.shift() : fence({ findings: [] });
+      if (r instanceof Error) throw r;
+      return { text: r, sessionId: "ver", usage: { input_tokens: 3, output_tokens: 1 }, costUsd: 0.01, durationMs: 300, turns: 2, model: c.model };
+    };
+    return w;
+  };
+  const vEvents = (dir) => readLog(dir, 7).filter((e) => e.event === "VERIFIER");
+  const review = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->"));
+
+  it("verifier off (default): no verifier call, no VERIFIER event, review comment unchanged", async () => {
+    const w = withVerifier(world()); const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    assert.equal(w.vcalls.length, 0);
+    assert.deepEqual(vEvents(dir), []);
+    assert.doesNotMatch(review(w), /Independent verifier/);
+  });
+
+  it("shadow: one fresh read-only call on a model other than the builder's, without the builder's result; findings are advisory", async () => {
+    const w = withVerifier(world(), [fence({ findings: [finding, { file: "src/nope.js", line: 1 }] })]); const dir = tmpDir("core-");
+    const r = await run(w, { dir, conformance: "shadow", builderModel: "claude-sonnet-5-5", verifier: { mode: "shadow" } });
+    assert.equal(r.terminalReason, "merged", "shadow never blocks");
+    assert.equal(w.vcalls.length, 1);
+    const c = w.vcalls[0];
+    assert.equal(c.resume, null); assert.equal(c.readOnly, true);
+    assert.equal(c.model, "claude-opus-5-5", "the configured default is the builder's model, so it is swapped");
+    assert.ok(c.maxMs > 0 && c.maxTurns > 0);
+    assert.match(c.system, /BREAK/);
+    assert.match(c.prompt, /foo crashes on null input\./); assert.match(c.prompt, /<contract>/); assert.match(c.prompt, /\+fix/);
+    assert.doesNotMatch(c.prompt, /fixed foo|builder_result|<rubric>/, "no builder summary or rubric");
+    assert.equal(builders(w).length, 2, "no fix round in shadow");
+    const [e] = vEvents(dir);
+    assert.equal(e.mode, "shadow"); assert.equal(e.model, "claude-opus-5-5"); assert.equal(e.swapped, true); assert.equal(e.findings, 1, "a finding at a missing path is dropped");
+    assert.equal(e.cost_usd, 0.01); assert.ok(e.implement_cost_usd > 0); assert.equal(e.ratio, Math.round((0.01 / e.implement_cost_usd) * 1000) / 1000);
+    assert.match(review(w), /### Independent verifier \(shadow, advisory\)[\s\S]*- `src\/foo\.js:3` input foo\(null\): throws TypeError \(expected 0\)/);
+    const usage = readLog(dir, 7).filter((x) => x.event === "PHASE_ATTEMPT_USAGE" && x.phase === "verify");
+    assert.equal(usage.length, 1); assert.equal(usage[0].trigger, "verifier");
+  });
+
+  it("enforce: a finding feeds the existing conformance fix round (fresh session); the new head is verified again and merges", async () => {
+    const w = withVerifier(world(), [fence({ findings: [finding] }), fence({ findings: [] })]); const dir = tmpDir("core-");
+    const r = await run(w, { dir, verifier: { mode: "enforce", model: "claude-haiku-5-5" } });
+    assert.equal(r.terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3, "plan, implement, one fix round");
+    assert.equal(b[2][2], null, "file:line findings run a fresh fix session");
+    assert.match(b[2][4], /conformance\.regression: independent verifier: src\/foo\.js:3 input foo\(null\): throws TypeError/);
+    assert.equal(w.vcalls.length, 2);
+    assert.ok(w.vcalls.every((c) => c.model === "claude-haiku-5-5"));
+    const ev = vEvents(dir);
+    assert.deepEqual(ev.map((e) => [e.mode, e.findings]), [["enforce", 1], ["enforce", 0]]);
+    assert.notEqual(ev[0].head, ev[1].head);
+    assert.match(review(w), /### Independent verifier \(enforce\)[\s\S]*No concrete defect found\./);
+    assert.ok(readLog(dir, 7).some((e) => e.event === "CONFORMANCE" && e.state === "conforms"));
+  });
+
+  it("enforce: a head is verified once; a fix round that made no commit reuses the verdict and ends needs-human", async () => {
+    const w = withVerifier(world({ freshNoCommit: true }), [fence({ findings: [finding] })]); const dir = tmpDir("core-");
+    const r = await run(w, { dir, verifier: { mode: "enforce" } });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(w.vcalls.length, 1);
+    assert.equal(vEvents(dir).length, 1);
+    assert.equal(w.merges.length, 0);
+  });
+
+  it("enforce with no findings merges after one verifier call; a verifier error is an anomaly, never a failure", async () => {
+    const ok1 = withVerifier(world()); 
+    assert.equal((await run(ok1, { verifier: { mode: "enforce" } })).terminalReason, "merged");
+    assert.equal(ok1.vcalls.length, 1);
+    assert.equal(builders(ok1).length, 2);
+    const w = withVerifier(world(), [Object.assign(new Error("idle"), { code: "CLI_IDLE" })]); const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir, verifier: { mode: "enforce" } })).terminalReason, "merged");
+    assert.equal(vEvents(dir)[0].error, "CLI_IDLE");
+    assert.match(traj(w)[0], /Independent verifier failed at [0-9a-f]{12}: CLI_IDLE/);
+  });
+
+  it("an empty diff skips the call; a failing review never reaches the verifier", async () => {
+    const w = withVerifier(world()); const dir = tmpDir("core-");
+    const g = w.io.git; w.io.git = async (a, o) => (a[0] === "diff" && a.length === 2 ? "" : g(a, o));
+    await run(w, { dir, verifier: { mode: "shadow" } });
+    assert.equal(w.vcalls.length, 0);
+    assert.equal(vEvents(dir)[0].skipped, "empty_diff");
+    const bad1 = withVerifier(world({ reviews: [bad(), bad()] }));
+    await run(bad1, { verifier: { mode: "enforce" } });
+    assert.equal(bad1.vcalls.length, 0);
+  });
+});
