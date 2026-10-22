@@ -2136,6 +2136,27 @@ describe("orchestrate", () => {
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [9, "merged"]]);
   });
 
+  it("#4387 an out-of-set dependency labelled needs-human is not pulled in; the issue and its dependents end skipped", async () => {
+    const log = [], asked = [];
+    const rows = await orchestrate({ issues: [1, 2], parallel: 2,
+      readBody: async (n) => (n === 2 ? "**Depends on**: #1" : ""),
+      issueLabels: async (n) => { asked.push(n); return n === 9 ? ["bug", "needs-human"] : []; },
+      runOne: async (n) => { log.push(n); return n === 1 ? { terminalReason: "dependency-open", dependencies: [9], detail: "depends on #9" } : { terminalReason: "merged" }; } });
+    assert.deepEqual(log, [1], "no lane for #9 and none for the dependent #2");
+    assert.deepEqual(asked, [9]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "skipped"], [2, "skipped"]]);
+    assert.equal(rows[0].detail, "dependency #9 needs-human");
+    assert.match(rows[1].detail, /#1/);
+  });
+
+  it("#4387 a dependency that already ended needs-human in this batch is not run again", async () => {
+    const log = [];
+    const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async () => "",
+      runOne: async (n) => { log.push(n); return n === 9 ? { terminalReason: "needs-human", detail: "ci.red" } : { terminalReason: "dependency-open", dependencies: [9] }; } });
+    assert.deepEqual(log, [9, 1]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.detail]), [[9, "needs-human", "ci.red"], [1, "skipped", "dependency #9 needs-human"]]);
+  });
+
   it("#4124 a repeated dependency-open stops after the requeue cap", async () => {
     const h = harness({}, { 1: "dependency-open" });
     const clock = { t: 0 }, starts = [];
@@ -3620,7 +3641,45 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n  e2e_label: full-ci\n  e2e_checks: \"e2e (1),e2e (2)\"\n");
     const e2e = { mode: "auto", label: "full-ci", workflow: null, pathsInput: null, checks: ["e2e (1)", "e2e (2)"], paths: ["e2e/**", "**/e2e/**", "*.e2e.*", "*.e2e-spec.*", "cypress/**", "playwright/**"], blocking: "changed" };
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, e2e });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, checks: null, e2e });
+  });
+
+  describe("#4387 a no-commit CI fix round reruns the failed jobs once", () => {
+    const PUSH = { mode: "ci", skipPaths: ["*.md"], maxRounds: 2 };
+    const RUN = "https://github.com/o/r/actions/runs/77/job/1";
+    /** Commit checks: `test` red (id 1) until a rerun, then `after` (id 2); a non-required storybook stays red; the builder never commits a CI fix. */
+    const flaky = (after) => {
+      const w = world({ validation: ciValidation });
+      w.reran = [];
+      w.io.requiredChecks = async () => ["test"];
+      w.io.commitChecks = async () => [{ name: "storybook (web)", state: "failure", id: 3, url: "https://github.com/o/r/actions/runs/78/job/1" },
+        w.reran.length ? { name: "test", state: after, id: 4, url: RUN } : { name: "test", state: "failure", id: 1, url: RUN }];
+      w.io.failedLogs = async () => "expected 26, got 25";
+      w.io.rerunFailedJobs = async (id) => { w.reran.push(id); };
+      w.io.checkStates = async () => [{ name: "test", state: after, url: RUN, head: w.head }];
+      const inner = w.io.runner;
+      w.io.runner = async (c) => { const h = w.head; const res = await inner(c); if (/CI failed on the pushed branch/.test(c.prompt)) w.head = h; return res; };
+      return w;
+    };
+    const flakeEvents = (dir) => readLog(dir, 7).filter((e) => e.event === "CI_FLAKE_RERUN");
+
+    it("green after the rerun: the lane continues to review and merges; CI_FLAKE_RERUN is logged", async () => {
+      const w = flaky("success"), dir = tmpDir("core-ci-");
+      const r = await run(w, { verify: PUSH, dir });
+      assert.equal(r.terminalReason, "merged");
+      assert.deepEqual(w.reran, ["77"], "only the required check's run is rerun, once");
+      assert.ok(reviewers(w).length >= 1);
+      assert.deepEqual(flakeEvents(dir).map((e) => [e.result, e.jobs]), [["pass", ["test"]]]);
+      assert.match(traj(w)[0], /after a rerun of the failed jobs/);
+    });
+
+    it("still red after the rerun: ci.red as before, with CI_FLAKE_RERUN in the run log", async () => {
+      const w = flaky("failure"), dir = tmpDir("core-ci-");
+      const r = await run(w, { verify: PUSH, dir });
+      assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "ci.red");
+      assert.deepEqual(w.reran, ["77"]); assert.equal(w.merges.length, 0);
+      assert.deepEqual(flakeEvents(dir).map((e) => e.result), ["fail"]);
+    });
   });
 });
 
