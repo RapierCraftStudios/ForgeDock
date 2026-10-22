@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
-import { runCore, contractHash, isProtectedLaneBranch } from "./lean.mjs";
+import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
@@ -439,6 +439,38 @@ describe("core work-on", () => {
     assert.match(bodyB, /^\*\*Depends on\*\*: #201$/m);
     assert.ok(w.labels.includes("decomposed"));
     noNeedsHuman(w);
+  });
+
+  it("#4385 split siblings that declare a shared hub file are serialised (chained, no duplicate transitive edge); disjoint or undeclared files stay parallel", () => {
+    const hub = ["src/domain/index.ts", "./src/domain/events.ts"];
+    const b = classifyBlock({ block: { kind: "split-required", subissues: [
+      { title: "state machine", body: "a", files: [...hub, "src/domain/state.ts"] },
+      { title: "next-date", body: "b", files: [...hub, "src/domain/next.ts"] },
+      { title: "timeline", body: "c", files: ["/src/domain/index.ts", "src/domain/events.ts", "src/domain/timeline.ts"] }] } }, 7);
+    assert.equal(b.kind, "split");
+    assert.deepEqual(b.subissues.map((x) => x.dependsOn), [[], [0], [1]]);
+    assert.deepEqual(b.serialized.map((e) => [e.from, e.to, e.files]), [[1, 0, ["src/domain/index.ts", "src/domain/events.ts"]], [2, 1, ["src/domain/index.ts", "src/domain/events.ts"]]]);
+    const disjoint = classifyBlock({ block: { kind: "split-required", subissues: [
+      { title: "a", body: "a", files: ["src/a.ts"] }, { title: "b", body: "b", files: ["src/b.ts"] }] } }, 7);
+    assert.deepEqual(disjoint.subissues.map((x) => x.dependsOn), [[], []]);
+    assert.deepEqual(disjoint.serialized, []);
+    const legacy = classifyBlock({ block: { kind: "split-required", subissues: [
+      { title: "a", body: "a" }, { title: "b", body: "b" }, { title: "c", body: "c", depends_on: [0] }] } }, 7);
+    assert.deepEqual(legacy.subissues.map((x) => x.dependsOn), [[], [], [0]]);
+    assert.ok(legacy.subissues.every((x) => !("files" in x)));
+    const declared = classifyBlock({ block: { kind: "split-required", subissues: [
+      { title: "a", body: "a", files: ["x.ts"] }, { title: "b", body: "b", files: ["y.ts"], depends_on: [0] }, { title: "c", body: "c", files: ["x.ts"], depends_on: [1] }] } }, 7);
+    assert.deepEqual(declared.subissues.map((x) => x.dependsOn), [[], [0], [1]]);
+    assert.deepEqual(declared.serialized, []);
+  });
+
+  it("#4385 a serialised sibling is filed with the engine-added Depends-on line", async () => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [
+      { title: "part A", body: "do A", files: ["src/domain/index.ts"] }, { title: "part B", body: "do B", files: ["src/domain/index.ts", "src/b.ts"] }] } } }, {});
+    const r = await run(w);
+    assert.equal(r.terminalReason, "decomposed");
+    const bodyB = w.created[1][w.created[1].indexOf("--body") + 1];
+    assert.match(bodyB, /^\*\*Depends on\*\*: #201$/m);
   });
 
   it("#4153 a split of a milestone issue files every sub-issue with the parent's milestone; no milestone passes none", async () => {
