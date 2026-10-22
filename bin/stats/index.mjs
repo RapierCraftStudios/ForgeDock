@@ -48,10 +48,14 @@ Audit queries (forge#4165; JSON, from structure_delta / run_terminal telemetry, 
 Context-pack A/B (forge#4275; local run logs only, no GitHub crawl):
   --context-ab          first-pass yield, builder turns, cache tokens and cost per lane type (rerun, child,
                         first) and context_pack mode (on, off, shadow); --json for JSON
+
+Builder model tiers (forge#4394; local run logs only, no GitHub crawl):
+  --tiers               merge, conformance and post-merge-rework rates, first-pass yield and cost per builder tier
+                        (mid, mid->top escalated, top) and routing class; --json for JSON
 `;
 
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, tiers: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -68,6 +72,7 @@ export function parseArgs(argv) {
     else if (name === "--edge") { const v = take(); if (!parseEdge(v)) throw new Error("--edge must be FROM:TO"); o.edge = v; }
     else if (name === "--milestone") o.milestone = take();
     else if (name === "--context-ab") o.contextAb = true;
+    else if (name === "--tiers") o.tiers = true;
     else if (name === "--min-n") { const v = take(); if (!/^\d+$/.test(v)) throw new Error("--min-n must be a non-negative integer"); o.minN = Number(v); }
     else if (name === "--json") o.json = true;
     else if (name === "--refresh") o.refresh = true;
@@ -189,6 +194,10 @@ export async function buildReport(opts, deps = {}) {
     const runs = (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo);
     return { repo, sources: { local: { runs: runs.length } }, query: { context_ab: contextPackAb(runs) } };
   }
+  if (opts.tiers) { // forge#4394: run logs only
+    const runs = (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo);
+    return { repo, sources: { local: { runs: runs.length } }, query: { tiers: builderTierReport(runs) } };
+  }
   const bound = sinceToTimestamp(opts.since, releaseTimes);
   if (bound.note) (deps.warn ?? ((m) => process.stderr.write(`forgedock stats: ${m}\n`)))(bound.note);
   const gh = await fetchGithubRecords({ repo, since: bound.since, refresh: opts.refresh, useCache: opts.cache, gh: deps.gh, env,
@@ -225,6 +234,7 @@ export async function runStats(argv, deps = {}) {
   }
   try {
     const report = await buildReport(opts, { onProgress: makeProgressPrinter(), ...deps });
+    if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
     if (report.query?.context_ab && !opts.json) { process.stdout.write(`${renderContextAb(report.query.context_ab)}\n`); return 0; }
     process.stdout.write(`${opts.json || report.query ? renderJson(report) : opts.compact ? renderCompact(report) : renderMarkdown(report)}\n`);
     return 0;
