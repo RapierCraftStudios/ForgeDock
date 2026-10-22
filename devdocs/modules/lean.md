@@ -81,11 +81,18 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    quote of the requirement a failure names (`explainFailures`), and a failed
    validate names its command. Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
+   A `split` is admitted only by `decompose.mjs` `splitGate` (#4396): every
+   sub-issue's `paths`/`files` disjoint from the others', or the block's `size` over
+   `SPLIT_MIN_FILES` (25) / `SPLIT_MIN_LINES` (1500); otherwise it is `untyped`
+   and the one corrective resume asks for one lane with an ordered checklist.
+   The rationale goes on `FORGE:DECOMPOSED`, the decision line and the result's
+   `decomposition`.
    A split sub-issue may declare `files` (the paths it will edit); `serializeShared`
    adds a `Depends on` edge from each later sub-issue to the nearest earlier one it
    shares a file with and does not already reach, so siblings editing the same hub
    (barrel, union type, shared fixture, index doc) merge one after another instead
    of conflicting; each added edge is a decision. No `files`: unchanged (#4385).
+   The gate runs first; `serializeShared` orders only an admitted split.
    A `split` closes the parent `not planned` once its `FORGE:DECOMPOSED` trail
    and `workflow:decomposed` label are written (label kept; the closing comment
    lists the sub-issues; either write failing leaves it open) (#4337). A
@@ -1143,3 +1150,16 @@ pending; workflow mode waits for the run's next `attempt`). `lean.mjs` `ciVerify
 else `ci.red`; merge-time rounds unchanged. `orchestrate.mjs`: `issueLabels` seam (engine-cli `labelNames`, fail-open):
 a `dependency-open` naming a `needs-human` dependency (batch result or out-of-set label) ends `skipped (dependency #N
 needs-human)` without pulling it in.
+
+## Entry 2026-10-23 — Decomposition gate and $/parent report line (#4396)
+
+`classifyBlock` (`lean.mjs`) passes a `split-required` block through `decompose.mjs` `splitGate`. The split is admitted
+when every sub-issue declares `paths` (or the #4385 `files`) and no path of one equals or sits under another's (independent), or when the
+block's `size` estimate exceeds 25 files or 1500 lines (oversize). Otherwise it is an `untyped` block: the existing
+single corrective resume tells the builder to keep one lane, an ordered checklist with a validate per item, and a
+second unjustified split ends `builder.block_untyped`. An admitted split writes `rationaleLine` into `FORGE:DECOMPOSED`
+and its decision line, and the lane result carries `decomposition {independent, oversize, overlaps, missing, size}`.
+Orchestrate's row keeps `subissues` and `decomposition`. The batch report prints `formatDecompositionSummary`: $/parent
+for decomposed parents (their row plus their sub-lanes, recursively; sub-issues not in the batch are counted as
+outside) against merged single-lane parents. Rationale: `devdocs/decisions/4396-decomposition-gate.md`. Cost: 0 LLM
+calls; an unjustified split spends the one block-correction resume instead of N sub-lanes.

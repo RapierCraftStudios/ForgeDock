@@ -18,6 +18,7 @@ import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admi
 import { namedPaths } from "./prefilter.mjs";
 import { preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
+import { splitGate, rationaleLine } from "./decompose.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { repoKey } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -116,10 +117,12 @@ export function classifyBlock(result, issue) {
     const subs = (Array.isArray(b.subissues) ? b.subissues : []).filter((x) => x && typeof x.title === "string" && x.title.trim() && typeof x.body === "string");
     if (!subs.length) return { kind: "untyped", problem: "the split-required block lists no sub-issues with a title and body" };
     if (subs.length > MAX_SUBISSUES) return { kind: "untyped", problem: `the split-required block lists ${subs.length} sub-issues (at most ${MAX_SUBISSUES})` };
+    const gate = splitGate({ ...b, subissues: subs }); // #4396: disjoint parts or over the size budget; else one lane
+    if (!gate.ok) return { kind: "untyped", problem: gate.problem };
     const subissues = subs.map((x, i) => ({ title: x.title.trim(), body: x.body,
       dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))],
       ...(Array.isArray(x.files) ? { files: [...new Set(x.files.filter((f) => typeof f === "string").map((f) => f.trim().replace(/^\.?\/+/, "")).filter(Boolean))] } : {}) }));
-    return { kind: "split", subissues, serialized: serializeShared(subissues) };
+    return { kind: "split", rationale: gate.rationale, subissues, serialized: serializeShared(subissues) };
   }
   if (b.kind === "human") {
     return HUMAN_BLOCK_REASONS.includes(b.why) ? { kind: "human", why: b.why }
@@ -751,10 +754,11 @@ export async function runCore(o) {
           filed.push(n);
         }
       } catch (e) { return await finish("engine-error", `filing sub-issues failed after ${refs(filed) || "none"}: ${e?.message ?? e}`, { subissues: filed }); }
-      T.decisions.push(`Builder block: split into ${refs(filed)}`);
+      const why = rationaleLine(b.rationale);
+      T.decisions.push(`Builder block: split into ${refs(filed)} (${why})`);
       for (const e of b.serialized ?? []) T.decisions.push(`Serialised sub-issue #${filed[e.from]} behind #${filed[e.to]}: both edit ${e.files.slice(0, 5).join(", ")} (#4385)`);
       let marked = false;
-      try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\n${s}`); marked = true; } catch { /* best effort */ }
+      try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\nRationale: ${why}\n\n${s}`); marked = true; } catch { /* best effort */ }
       // #4337: with decomposition.close_parent, the tracker closes only once its trail and label exist: dependents then wait on the sub-issues, not on it.
       if (await label("decomposed") && marked && closeParent) {
         try {
@@ -763,7 +767,7 @@ export async function runCore(o) {
           T.decisions.push(`Closed the decomposed parent (not planned); tracked by ${refs(filed)}`);
         } catch { /* best effort: the parent stays open, as before #4337 */ }
       }
-      return await finish("decomposed", `split into ${refs(filed)}`, { code: OUTCOME_CODES.DECOMPOSED, subissues: filed });
+      return await finish("decomposed", `split into ${refs(filed)}`, { code: OUTCOME_CODES.DECOMPOSED, subissues: filed, decomposition: b.rationale });
     }
     return await needsHuman(`Builder is blocked without a valid typed reason after one correction (${b.problem}): ${s}`, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED);
   }
