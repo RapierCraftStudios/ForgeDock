@@ -76,8 +76,8 @@ function world(o = {}) {
       if (k === "pr list") return JSON.stringify(w.prList);
       if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
       if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
-      if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: "foo breaks", body: b, state: "OPEN", comments: [] }); }
-      if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [], ...(o.labels && a[2] === "7" ? { labels: o.labels } : {}) });
+      if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: o.title ?? "foo breaks", body: b, state: "OPEN", comments: [] }); }
+      if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: a[2] === "7" && o.title ? o.title : "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [], ...(o.labels && a[2] === "7" ? { labels: o.labels } : {}) });
       if (k === "pr edit") { w.prEdits.push(a); return ""; }
       if (k === "label create") { w.labelCreates = [...(w.labelCreates ?? []), a]; return ""; }
       if (k === "issue comment" && w.commentErrors.length) throw new Error(w.commentErrors.shift());
@@ -1259,6 +1259,62 @@ describe("conformance shadow mode (the default)", () => {
     assert.doesNotMatch(shadowNote(w), /not filed/);
     assert.match(w.prs[0].join(" "), /Remaining work tracked\n- #900/);
     assert.ok(w.seq.indexOf("pr") > -1 && traj(w)[0].includes("Tracked R2 (defer) in #900"));
+  });
+
+  it("#4398 a diff on a declared review.risk_paths glob makes the shadow gate enforce: a nonconforming risk-path PR never merges", async () => {
+    const dir = tmpDir("risk-");
+    const w = world({ contract: { ...CONTRACT, preserve: [] }, reviews: [omission(), omission()] });
+    const r = await runShadow(w, { dir, reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
+    assert.equal(r.code, "conformance.omission"); assert.equal(builders(w).length, 3, "one builder resume, as in enforce");
+    assert.deepEqual(r.conformance, { mode: "enforce", would: null, risk: true });
+    const log = readLog(dir, 7);
+    assert.deepEqual(log.filter((e) => e.event === "CONFORMANCE_RISK_ENFORCED").map((e) => e.paths), [["src/foo.js"]], "logged once (sticky across the resume)");
+    assert.equal(log.find((e) => e.event === "RUN_TERMINAL").conformance_mode, "enforce");
+    assert.ok(traj(w)[0].includes("Conformance enforced (review.risk_paths): src/foo.js"));
+  });
+
+  it("#4398 risk-enforced lanes merge once conforming; built-in risk words and unmatched globs stay shadow", async () => {
+    const w = world({ contract: { ...CONTRACT, preserve: [] }, reviews: [omission(), ok({}, { ...CONTRACT, preserve: [] })] });
+    const r = await runShadow(w, { reviewTrigger: { mode: "shadow", riskPaths: ["src/foo.js"] } });
+    assert.equal(r.terminalReason, "merged"); assert.equal(builders(w).length, 3);
+    assert.match(w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")), /\*\*Verdict:\*\* CONFORMS/);
+    const s = world({ contract: { ...CONTRACT, preserve: [] }, changed: ["src/auth/foo.js", "test/foo.test.js"], reviews: [omission()] });
+    const rs = await runShadow(s, { reviewTrigger: { mode: "shadow", riskPaths: ["db/**"] } });
+    assert.equal(rs.terminalReason, "merged", "an auth path with no declared glob stays shadow");
+    assert.deepEqual(rs.conformance, { mode: "shadow", would: "nonconforming", risk: false });
+  });
+
+  it("#4398 an investigation whose question is deferred closes partial (not planned), carried forward in the tracking issue", async () => {
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w" }] };
+    const w = world({ title: "investigate(stealth): which signal is rejected", contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
+    const r = await runShadow(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(r.close, "partial");
+    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["not planned"]);
+    assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:TRACKED -->") && /Closed as partial[\s\S]*carried forward in #900/.test(c)));
+    assert.ok(traj(w)[0].includes("| Close | issue closed (partial) |"));
+  });
+
+  it("#4398 an investigation whose answer the review marks deferred is tracked before the PR and closes partial, even though shadow merges it", async () => {
+    const k = { ...CONTRACT, preserve: [] };
+    const w = world({ title: "investigate: foo", contract: k, reviews: [conf({ requirements: [{ id: "R1", status: "deferred", evidence: "", validated_by: "", note: "question open" }] }, k)] });
+    const r = await runShadow(w);
+    assert.equal(r.terminalReason, "merged"); assert.equal(r.close, "partial");
+    assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^R1: /); assert.match(w.followups[0].items[0].why, /investigation question not answered/);
+    assert.match(w.prs[0].join(" "), /#900/);
+    assert.deepEqual(w.closed.map((a) => a[a.indexOf("--reason") + 1]), ["not planned"]);
+  });
+
+  it("#4398 an answered investigation and a non-investigation with a deferral both close completed", async () => {
+    const a = world({ title: "investigate(x): why foo breaks", contract: { ...CONTRACT, preserve: [] }, reviews: [conf({}, { ...CONTRACT, preserve: [] })] });
+    const ra = await runShadow(a);
+    assert.equal(ra.terminalReason, "merged"); assert.equal(ra.close, undefined);
+    assert.deepEqual(a.closed.map((x) => x[x.indexOf("--reason") + 1]), ["completed"]);
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w" }] };
+    const b = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
+    await runShadow(b);
+    assert.deepEqual(b.closed.map((x) => x[x.indexOf("--reason") + 1]), ["completed"]);
+    assert.ok(traj(b)[0].includes("| Close | issue closed (completed) |"));
   });
 
   it("#4160 base-sync merge files (equal to the base) drop out of the scope check", async () => {

@@ -1105,6 +1105,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines } = await import("./lean/orchestrate.mjs");
   const { formatPrecheckSummary } = await import("./lean/precheck.mjs");
   const { formatFirstPassSummary } = await import("./lean/fixround.mjs");
+  const { formatShadowSummary } = await import("./lean/conformance.mjs");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   // #4399: declared acceptance probes of closed issues whose fix reached the default branch; never fails the batch
   const sweep = deps.sweepProbes !== undefined ? deps.sweepProbes : (await import("./lean/probe.mjs")).sweepProbes;
@@ -1325,6 +1326,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (precheckLine) report.push(precheckLine);
   const firstPassLine = formatFirstPassSummary(rows); // #4362
   if (firstPassLine) report.push(firstPassLine);
+  const shadowLine = formatShadowSummary(rows); // #4398
+  if (shadowLine) report.push(shadowLine);
   let day = null;
   try { day = execBudget ? execBudget.dayTotals() : null; } catch { day = null; }
   const sbxLine = formatSandboxSummary(rows, { budget: execConf?.budget ?? null, day });
