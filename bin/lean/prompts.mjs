@@ -70,6 +70,25 @@ ${d || "(no changes yet)"}
 Last validate result (${LEAN_DIR}/self-check.json, from \`forgedock check\`): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded; run the validate commands."}`;
 }
 
+/** #4392: the implement turn budget is spent; one bounded fresh session either finishes or stops with a typed digest. */
+export function turnBudgetWrapupPrompt({ size = "?", budget = 0, used = 0, grant = 5, stat = "", diff = "", base = "", check = "" } = {}) {
+  const d = boundDiff(String(diff ?? ""), { stat, base, maxBytes: RESTART_DIFF_MAX_BYTES }).trim();
+  const c = String(check ?? "").trim();
+  return `\n\nTurn budget spent: this lane is size ${size} with an implement budget of ${budget} turns, and ${used} are used. The engine stopped the previous session and saved its work in a \`wip(forge): checkpoint\` commit. You have at most ${grant} turns. Pick one, do not grind:
+- Finish: if the work is complete or nearly so, commit what works, run the validate commands, and write ${RESULT_FILE} with status "fixed" as usual.
+- Stop: otherwise commit nothing new and write ${RESULT_FILE} as {"status":"budget-exceeded","summary":"<one line>","digest":"<what is done, what remains, why it is bigger than planned, and your recommendation: retry, split or re-scope>"}.
+
+<diff_stat base="${base}">
+${String(stat ?? "").trim() || "(no changes yet)"}
+</diff_stat>
+
+<diff>
+${d || "(no changes yet)"}
+</diff>
+
+Last validate result (${LEAN_DIR}/self-check.json): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded."}`;
+}
+
 /** CI could not run (no workflow run, no checks, dispatch refused): the local fallback (#4167). */
 export function ciUnavailablePrompt() {
   return `CI verification is unavailable for this branch, so verification falls back to this host. Run every validate command locally (targeted, as the host rules say), fix any failure, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE} with each command's real exit code. Do not push or touch GitHub.`;
