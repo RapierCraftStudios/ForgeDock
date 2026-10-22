@@ -130,7 +130,24 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    failures, trigger)` with `precheck`/`structure`/`docs`/`enumerating`/`sequence`/`conformance`/`review`, CI verify
    `ci_red`, merge-time CI `merge_ci`, CI-unavailable fallback `ci_unavailable`, base-sync conflict `recovery`,
    reviewer `review`, split grouping `plan`; a CLI idle/timeout retry is `timeout_restart` with `restart_of` (the
-   replaced trigger). A source-scan test in `lean.test.mjs` fails on a call site without a known literal. The lane
+   replaced trigger); a context-ceiling restart (#4390, below) is `context_restart` with `restart_of`, and like
+   `timeout_restart` of the build it counts as reaching the build, not rework.
+   **Context ceiling** (#4390, forge.yaml `engine.context_ceiling_tokens`, default 120000, 0 = off; `readCoreLimits`
+   → runCore `contextCeilingTokens`): every builder call except `plan`/`contract_correction`/`block_correction` passes
+   `contextMax` through `makeLeanRunner` to `runCliBackendAsync`, which reads each stream-json assistant message's
+   `usage` (context = input + cache read + cache creation) and kills the session at the ceiling with `CLI_CONTEXT`
+   (`context`, `turns`, stream-aggregated `usage`, deduped by message id). `builder()` logs `CONTEXT_CEILING`, records
+   the stopped attempt's usage/turns as a `PHASE_ATTEMPT_USAGE` (so killed tokens stay in telemetry), runs
+   `checkpoint("context ceiling")` (commit + push, never loses work) and restarts a fresh session with the call's restart
+   prompt + `prompts.mjs` `contextRestartPrompt`: `git diff --stat` and the hunks against the lane base (`boundDiff`,
+   `RESTART_DIFF_MAX_BYTES` 40 KB) and the last `.forge-lean/self-check.json`; contract.json stays the authority on disk.
+   Context restarts do not use the single idle/timeout retry; after 3 in one call the call runs uncapped (loop guard).
+   **Quiet output** (#4390): `HOST_RULES` tells the builder to run tests quiet, read failures as `tail -40` + failing test
+   ids, read files by range and send output that may pass 8 KB to a `$TMPDIR` file. `precheck.mjs` `quietFailure`
+   (last 40 lines within the char share, failing-test-id lines by pytest/TAP/jest/vitest/go/cargo markers, `full log:`
+   path) formats each failure in `forgedock check`'s table and in the precheck fix prompt; the full output goes to
+   `.forge-lean/logs/` (`CHECK_LOG_DIR`: `check-<V#|cmdN>.log`, `precheck-<round>-<i>.log`). Pitfall learning still
+   reads the capped tail. A source-scan test in `lean.test.mjs` fails on a call site without a known literal. The lane
    result carries `firstPass` (`firstPassOf`: no `REWORK_TRIGGERS` attempt after the build; omitted when the lane never
    reached it) → orchestrate row `first_pass` → batch-report line `first-pass: P% (k/n lanes that reached the build)`
    (`formatFirstPassSummary`, after the precheck line). `forgedock stats` reads the same fields (`docs/STATS.md`).
@@ -167,6 +184,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
    (`max_rounds`, then `ci.red`), slow → `ci-pending`, unavailable → local fallback;
    docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI.
+   Push-check mode gates on `ciGate` (`verify.checks` > required checks under
+   `merge_wait: required` > all) at the latest attempt per name (`latestPerName`, check-run
+   id); a no-commit fix round reruns the failed jobs once (`rerunFailedOnce`,
+   `CI_FLAKE_RERUN`) before `ci.red` (#4387).
    **Validate commands vs a moving base**: `validateContract` rejects a validate
    command whose `git diff` compares against a remote `origin/<x>` tip rather than the
    merge base (`movingBaseDiff`), so the planner fixes it in the one contract
@@ -248,6 +269,14 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    logs (`collectFailedLogs`, `ciFailurePrompt`), re-reviews and pushes the fix,
    and waits again; `ci.red` only after `max_rounds` (shared with `ciVerify`) or a
    round with no new commit. Rollups of another head count as pending. `CI_FIX_ROUND`.
+   **e2e merge gate** (#4403, `e2e.mjs`, forge.yaml `verify.e2e*`): before `gh pr merge`,
+   once per reviewed head, a lane whose diff touches `e2e_paths` or whose contract
+   quotes `[type:e2e]` runs `runE2eGate` (label the PR and wait on `e2e_checks`, a
+   `skipped` run = not run; or dispatch `e2e_workflow` via `runCiVerify`). The lane's
+   own failures (`ownFailures`: spec path/basename in the log, empty log, or no spec
+   changed) go through `mergeFixRound`; others are an anomaly (`e2e_blocking: all`
+   blocks them). Timeout → `ci-pending`, unavailable → needs-human. `E2E_VERIFY`.
+   `never`, or no `e2e_label`/`e2e_workflow` configured, keeps today's behaviour.
    **Sequence numbers** (#4322, `sequence.mjs`): before review and the first push,
    and after every base-sync merge (clean or not), lane-added `<NNN>_*` files whose
    number the fetched lane already uses → builder renumbers (`sequencePrompt`; a
@@ -445,6 +474,13 @@ arguments, resolves the repo, auto-spawns the daemon (output to
   in the daemon (breaker reset, as an operator resume).
 - `set-parallel {id, k}` sets K live. With no daemon running, the client writes
   the `parallel` file itself.
+- `add {id, issues}` (#4408, `--add <id> N...`, also `--resume <id> N...`) merges
+  issues into the batch's cumulative `add` file, hosted or not. The client skips
+  closed issues first; non-integers and issues already in the batch are skipped.
+  The runner re-reads the file every pass (`getAdded`), adds new issues through
+  `addIssues` after re-reading the pending issues' `Depends on`, and records one
+  batch decision plus an `added` row. `attach` resumes a finished batch that has
+  unrun adds instead of replaying its report.
 - `status` reports the daemon pid and hosted batches.
 
 A client exit never stops a batch.
@@ -1051,3 +1087,14 @@ GitHub's) is resolved and fetched once, lazily, by `lazyDefaultBranch` (orchestr
 a parked result as outcome `awaiting-promotion|awaiting-precondition` with $0 and no `runOne` (not SATISFIED: dependents
 skip). `formatOutcomeLists` prints one `awaiting promotion: #A #B (fixes on <lane>, not on <default>)` line instead of
 escalations. Re-evaluation is the next batch or triage run. Cost: 0 LLM calls; per gated issue 1-2 gh reads and one git call.
+
+## Entry 2026-10-23 — CI-verify gate, flake rerun, parked dependencies (#4387)
+
+`verify.mjs`: `parseVerify` `checks`; `ciGate` (verify.checks, else `io.requiredChecks(lane)` under `merge_wait:
+required`, else null = all); `latestPerName` (highest check-run id; no ids → worst state); `runCiVerify` `gate` (missing
+gate names waited on for the grace period, none reported → all checks) and `rerunOf` (`rerunTarget`: older attempts count
+pending; workflow mode waits for the run's next `attempt`). `lean.mjs` `ciVerify`: a no-commit fix round calls
+`rerunFailedOnce` (`effects.mjs` `rerunFailedJobs`, `gh run rerun --failed`), logs `CI_FLAKE_RERUN`, continues on green,
+else `ci.red`; merge-time rounds unchanged. `orchestrate.mjs`: `issueLabels` seam (engine-cli `labelNames`, fail-open):
+a `dependency-open` naming a `needs-human` dependency (batch result or out-of-set label) ends `skipped (dependency #N
+needs-human)` without pulling it in.
