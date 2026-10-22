@@ -940,3 +940,17 @@ docs, enumerating, sequence, CI pass or a merge for `ci_red`/`merge_ci`, conform
 `pitfalls_matched`. `renderContextRecord` drops the pitfalls section (`publicPackText`) and shows only the count, so no
 pitfall text is posted. `forgedock stats` (local logs) prints the first-pass rate with and without matching pitfalls.
 Cost: 0 LLM calls; one local read and up to a few appends per lane; ≤ ~1 KB of pack bytes when mode is `on`.
+
+## Entry 2026-10-23 — Risk-path enforce, partial investigation close, per-batch shadow line (#4398)
+
+`gate()` (`lean.mjs`) checks the changed files against forge.yaml `review.risk_paths` globs (`review-trigger.mjs` `riskPathHits`;
+declared globs only, never the built-in risk words). A hit makes a shadow lane enforce for the rest of the run (sticky:
+precheck, review, resume, base-sync re-review, no degraded merge), logs `CONFORMANCE_RISK_ENFORCED {paths}` once plus a
+decision line, and `RUN_TERMINAL.conformance_mode` reports `enforce`. `closePlan(contract, {title, review})`: an
+`investigate(`/`investigate:` issue (`isInvestigation`) with a defer/post-deploy requirement, or a deliver requirement
+whose review row is not `implemented`, is `partial`. The untracked ones are filed with `track()` before the PR, the issue
+closes `not planned` with a FORGE:TRACKED "Closed as partial" note, and the Close row and lane result say partial.
+The lane result carries `conformance {mode, would, risk}`. Orchestrate's row copies it, and the batch report prints
+`formatShadowSummary`: shadow lanes, would-block share, false-block share (a would-block on an incomplete, inconsistent
+or unparseable review) and risk-enforced lanes. Rationale: `devdocs/decisions/4398-risk-path-enforce.md`. Cost: 0 LLM
+calls; a risk-enforced lane may spend the one builder resume that shadow would have skipped.
