@@ -4,7 +4,9 @@
  * Thin orchestrate: run core work-on for several issues with bounded concurrency, honouring `Depends on` / `Blocked by`
  * among the given issues (wait for the dependency to merge; skip when it ends anywhere but merged/invalid).
  * A `dependency-open` run is requeued behind its dependencies, pulling an out-of-set one into the batch; a
- * `decomposed` run adds its sub-issues and its dependents wait on them instead (#4124).
+ * `decomposed` run adds its sub-issues and its dependents wait on them instead (#4124). A dependency that is parked
+ * (ended needs-human in this batch, or an out-of-set issue labelled needs-human per `issueLabels(n)`) is never pulled in:
+ * the issue ends `skipped` (`dependency #N needs-human`) and its dependents with it (#4387).
  * No investigation, synthesis or agent spawning. `runOne(issue)` and `readBody(issue)` are injected.
  * Optional `prefilter(issue, lane)` (#4123) runs in the lane slot before `runOne`: when it closed the issue, no lane starts.
  * When it parked the issue (#4389, `parked: true`), no lane starts either and the row ends with the parked kind.
@@ -168,7 +170,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null }) {
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -359,6 +361,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       ...(r?.waits && typeof r.waits === "object" ? { waits: r.waits } : {}), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
       ...(Number.isFinite(r?.precheckMs) ? { precheck_ms: r.precheckMs } : {}), ...(Number.isInteger(r?.precheckDeferred) && r.precheckDeferred > 0 ? { precheck_deferred: r.precheckDeferred } : {}), // #4331
       ...(typeof r?.firstPass === "boolean" ? { first_pass: r.firstPass } : {}), // #4362
+      ...(r?.turns && typeof r.turns === "object" ? { turns: r.turns } : {}), // #4392
       ...(r?.conformance && typeof r.conformance === "object" ? { conformance: r.conformance } : {}), // #4398
       ...(rec?.placement ? { placement: rec.placement } : {}) };
     const depList = (Array.isArray(r?.dependencies) ? r.dependencies : []).filter((d) => Number.isSafeInteger(d) && d > 0 && d !== n);
@@ -371,6 +374,26 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (sandboxUse.has(n)) row.sandbox = { ...sandboxUse.get(n) };
     const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); remoteRun.delete(n); };
+    if (row.outcome === "dependency-open" && depList.length) {
+      // #4387: a parked dependency is not pulled in again (fail-open on an unreadable label).
+      let parked;
+      for (const d of depList) {
+        if (results.get(d)?.outcome === "needs-human") { parked = d; break; }
+        if (set.has(d) || typeof issueLabels !== "function") continue;
+        let names = [];
+        try { names = (await issueLabels(d)) ?? []; } catch { names = []; }
+        if (Array.isArray(names) && names.includes("needs-human")) { parked = d; break; }
+      }
+      if (parked !== undefined) {
+        done();
+        const final = { ...row, outcome: "skipped", detail: `dependency #${parked} needs-human` };
+        results.set(n, final); save();
+        decided({ issue: n, what: `skipped: dependency #${parked} needs-human (not pulled into the batch)`, why: firstLine(row.detail) || "the lane reported an open dependency",
+          alternative: `pull #${parked} in and run it again` });
+        update(final);
+        return;
+      }
+    }
     if (row.outcome === "dependency-open" && depList.length && (requeues.get(n) ?? 0) < MAX_REQUEUES) {
       // A scheduling fact, not a failure: add the edge, pull the dependency in, and run this issue again after it.
       requeues.set(n, (requeues.get(n) ?? 0) + 1);

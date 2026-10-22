@@ -142,6 +142,19 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    prompt + `prompts.mjs` `contextRestartPrompt`: `git diff --stat` and the hunks against the lane base (`boundDiff`,
    `RESTART_DIFF_MAX_BYTES` 40 KB) and the last `.forge-lean/self-check.json`; contract.json stays the authority on disk.
    Context restarts do not use the single idle/timeout retry; after 3 in one call the call runs uncapped (loop guard).
+   **Turn budget** (#4392, `budget.mjs`, forge.yaml `engine.turn_budget_s|m|l`, defaults 25/60/100, 0 = off;
+   `readCoreLimits` → runCore `turnBudgets`): at contract freeze (or a resumed frozen contract) `laneSize` sizes the lane
+   from a `size:S|M|L` label, else the contract's distinct deliverable paths (S ≤ 2, M ≤ 5, else L). While `stage ===
+   "implement"` every builder call (build plus its context/timeout restarts) passes `turnMax` = budget left;
+   `runCliBackendAsync` kills the stream session at that many deduped assistant turns with `CLI_TURNS`. `builder()`
+   records the attempt, logs `TURN_BUDGET_EXCEEDED`, checkpoints and runs `budgetWrapup`: one fresh session (trigger
+   `budget_wrapup`, `restart_of` the stopped trigger, `wrapupGrant` = max(5, ceil(budget/5)) turns, prompt
+   `turnBudgetWrapupPrompt` with diff and last self-check) that either finishes (the result flows on) or writes
+   `status: budget-exceeded` + `digest`. A stop or overrun (`TURN_BUDGET_STOP`) ends needs-human `budget.exceeded` with
+   `budgetDigest` (builder digest, else diff stat); it is in `RECOVERABLE_CODES`, so the batch reruns it once with
+   `RECOVER_HOW` (continue from the checkpoint or a typed split-required block). Plan/corrections and fix rounds are not
+   budgeted. The lane result and `RUN_TERMINAL` carry `turns: {size, budget, build, total, exceeded}`; orchestrate copies it
+   to the row and the batch report adds `formatTurnSummary` (`turns by size: S n= p50 max/budget; … over budget: #N`).
    **Quiet output** (#4390): `HOST_RULES` tells the builder to run tests quiet, read failures as `tail -40` + failing test
    ids, read files by range and send output that may pass 8 KB to a `$TMPDIR` file. `precheck.mjs` `quietFailure`
    (last 40 lines within the char share, failing-test-id lines by pytest/TAP/jest/vitest/go/cargo markers, `full log:`
@@ -184,6 +197,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
    (`max_rounds`, then `ci.red`), slow → `ci-pending`, unavailable → local fallback;
    docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI.
+   Push-check mode gates on `ciGate` (`verify.checks` > required checks under
+   `merge_wait: required` > all) at the latest attempt per name (`latestPerName`, check-run
+   id); a no-commit fix round reruns the failed jobs once (`rerunFailedOnce`,
+   `CI_FLAKE_RERUN`) before `ci.red` (#4387).
    **Validate commands vs a moving base**: `validateContract` rejects a validate
    command whose `git diff` compares against a remote `origin/<x>` tip rather than the
    merge base (`movingBaseDiff`), so the planner fixes it in the one contract
@@ -237,6 +254,24 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    The hash and the posted contract cover the dropped contract; a contract
    frozen before the change and recovered on a rerun is not rewritten, so the
    `superseded` path stays for it.
+   Verified out of band (#4404): a deliver requirement may carry
+   `verify: "in_lane"|"out_of_band"` (`VERIFY_MODES`); out_of_band needs
+   `evidence` = the job or workflow that measures it (`validateContract`). At
+   freeze, right after `dropScopeValidates`, `tagOutOfBand` tags every deliver
+   requirement without a `verify` whose quote names Lighthouse, web vitals,
+   field perf/profile, a throttled profile, a nightly or report-only suite, or
+   LCP/INP/TTI/FCP/TTFB (event `CONTRACT_OUT_OF_BAND_TAGGED`, decision line); an
+   explicit `verify` (in_lane opts out) is kept, and an `add-requirement`
+   amendment is tagged the same way. Such a requirement is judged by its
+   instrumentation (budget test or bench committed, job configured), not its
+   measured result: the skeleton row carries `verify`, `job` and
+   `instrumented: null`; completeness needs a boolean `instrumented` (true needs
+   path:line evidence); `decide` passes it on `instrumented: true` whatever the
+   status and fails `conformance.unimplemented` otherwise; `precheck` accepts
+   the builder's `instrumented: true` or `implemented`. `computeTrigger` adds a
+   `gate.ambiguous` reason so the reviewer always runs, and `renderPrBody` lists
+   them under "Verified out of band" with the job name. Not a disposition: no
+   follow-up issue is filed.
    Hotspots (forge#4195): `io.hotspots` runs `scripts/hotspots.sh` once
    before the plan call on the issue's `namedPaths` (`hotspotPlanNote`: one
    line per file over `maintenance.hotspot.file_lines`, nothing when none;
@@ -281,6 +316,21 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Numbered documents (#4385, e.g. `docs/adr/0016-*.md`): a renamed file may differ
    only in its own number (`numberOnlyChange`, padded or not), and no tracked file
    may still name a renamed file's old stem (the series index, links).
+   #4386: the engine renumbers first (`renumberLane`: `git mv` to max(base)+1…, a Markdown
+   file's own heading number, references to the old stem repo-wide, the base journal plus the
+   lane's entries with consecutive `idx`, a data-only snapshot cloned from the base tip with a
+   new `id`/`prevId`, else `lean.sequence.regenerate`; `SEQUENCE_RENUMBERED`), and only an
+   `unsupported` result goes to the builder (`SEQUENCE_RENUMBER_FALLBACK`, reason in the
+   trajectory). `verifyRenumber` also accepts a file equal after mapping each move's old stem
+   and its own heading number. A base-sync whose conflicts are all sequence files
+   (`resolveSequenceConflicts`: base side, journal union, index union) needs no builder, and
+   an engine-only delta needs no re-review. The base-sync bound counts syncs against one base
+   head (`sameBaseSyncs`); a sync overtaken by a new base head does not count. Merge-gate late
+   binding: a lane with numbered files takes the host sequence lease (`seqlease.mjs`, a
+   one-slot `heavy.mjs` semaphore per (repo, lane, dir) under `schedDir()/seq-lease`,
+   fail-open after the CI wait budget), re-checks against the fetched lane, and a taken number
+   base-syncs + renumbers (`SEQUENCE_LATE_BIND`) and waits for CI again; released at merge
+   or finish.
    Only real series count (#4343): a leading date (`YYYY-MM-DD`, `YYYYMMDD`) is no
    number, and the directory must hold a series on the base — a `_journal.json` /
    `meta/_journal.json`, or ≥2 distinct numbers of the file's width filling at least
@@ -375,7 +425,8 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
-`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389),
+`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; an issue whose latest pipeline `FORGE:PROBE` is a fail is never closed as already-fixed, reason `probe-failed`, #4399; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389),
+`probe.mjs` (outcome-based acceptance, #4399; see "Acceptance probes" below),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
@@ -1062,6 +1113,25 @@ for enforce: a seeded-defect replay in shadow where it catches what the reviewer
 0.10. Cost: 0 LLM calls when off (default); one read-only call per reviewed head when on. ADR
 `decisions/4397-independent-verifier.md`.
 
+## Acceptance probes (#4399)
+
+`probe.mjs` checks a production outcome after promotion, deterministically (0 LLM calls, no lane). An issue declares a
+probe in a fenced ```` ```forge-probe ```` block: `run: <shell command>` (required), `pass: exit 0` (default) or
+`pass: /regex/flags` on stdout, `timeout: <s>` (default forge.yaml `acceptance_probe.timeout_s` or 120, capped at 900). The
+latest trusted comment's block wins, else the body's when its author is trusted (`isTrustedActor`/`isTrustedComment`);
+FORGE marker comments never declare one, and an untrusted declaration is reported `untrusted` and never run. The fix
+commit is the latest trusted FORGE:TRAJECTORY `merged at <sha>`, else the merge commit of the latest merged PR whose
+title/body closes the issue (none: `unresolved`). Promotion is `git merge-base --is-ancestor <fix> origin/<default>`
+(`branches.default`, else GitHub's); not yet: `awaiting-promotion`, nothing runs (`onDefault` is exported for #4389).
+The probe runs as `sh -c` in the checkout, in its own process group (timeout kills it = fail), with only PATH, HOME, LANG,
+TMPDIR plus the names in `acceptance_probe.env` (the repo's designated test identity); those values are masked as `***` in
+the output. The result is a `FORGE:PROBE` comment (JSON line `{fix, default_sha, result, exit, ms}` + the last 4000 chars
+of output); a fail first reopens the issue. A trusted FORGE:PROBE for the same fix is never re-run (`already-recorded`).
+Triggers: `forgedock probe [issue...] [--dry-run] [--limit N]` (no issues = closed within `acceptance_probe.sweep_days`,
+default 30, matching `forge-probe in:body,comments`, capped at 50) and a sweep at the start of every `forgedock orchestrate`
+batch (`--no-probes`; `acceptance_probe.enabled: false` turns the sweep off), printed as one `probes: ...` line; a sweep
+error is one line and never fails the batch. Cost: one search per batch plus 2-3 gh calls per probing issue.
+
 ## Entry 2026-10-23 — Post-deploy precondition gate in the pre-filter (#4389)
 
 `prefilter.mjs` `postDeployGate`: an open issue whose body carries `<!-- FORGE:DEFERRED_FROM: #P -->` and whose checklist
@@ -1079,3 +1149,14 @@ GitHub's) is resolved and fetched once, lazily, by `lazyDefaultBranch` (orchestr
 a parked result as outcome `awaiting-promotion|awaiting-precondition` with $0 and no `runOne` (not SATISFIED: dependents
 skip). `formatOutcomeLists` prints one `awaiting promotion: #A #B (fixes on <lane>, not on <default>)` line instead of
 escalations. Re-evaluation is the next batch or triage run. Cost: 0 LLM calls; per gated issue 1-2 gh reads and one git call.
+
+## Entry 2026-10-23 — CI-verify gate, flake rerun, parked dependencies (#4387)
+
+`verify.mjs`: `parseVerify` `checks`; `ciGate` (verify.checks, else `io.requiredChecks(lane)` under `merge_wait:
+required`, else null = all); `latestPerName` (highest check-run id; no ids → worst state); `runCiVerify` `gate` (missing
+gate names waited on for the grace period, none reported → all checks) and `rerunOf` (`rerunTarget`: older attempts count
+pending; workflow mode waits for the run's next `attempt`). `lean.mjs` `ciVerify`: a no-commit fix round calls
+`rerunFailedOnce` (`effects.mjs` `rerunFailedJobs`, `gh run rerun --failed`), logs `CI_FLAKE_RERUN`, continues on green,
+else `ci.red`; merge-time rounds unchanged. `orchestrate.mjs`: `issueLabels` seam (engine-cli `labelNames`, fail-open):
+a `dependency-open` naming a `needs-human` dependency (batch result or out-of-set label) ends `skipped (dependency #N
+needs-human)` without pulling it in.
