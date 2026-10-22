@@ -187,6 +187,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    precheck `validate_failed` or `requirement_unimplemented`, before any
    reviewer run) or `enforce`. Defer/post-deploy requirements become tracked
    follow-ups (`followupItems`, `pendingTracking`).
+   Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
+   the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
+   (#4388: a key ending on a space looped on `followup.unavailable`).
    Scope authority (#4350): the engine's scope gate (deliverables plus typed
    amendments) decides scope, not a builder-written allowlist. `precheck({frozen})`
    gets the pre-amendment contract; a failed validate that is a scope check
