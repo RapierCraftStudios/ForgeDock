@@ -892,12 +892,33 @@ At contract freeze, `preflightValidates` (`lean.mjs`) probes the host for what e
 (`command -v`), the modules a bare `python`/`python3`/`pythonX.Y` imports via `-c`/`-m` (`importlib.util.find_spec` with
 that interpreter) and the bare packages `node -e`/`-p` code imports (`node_modules/<pkg>` walked up from the worktree).
 Paths, `$VAR` words, names `repoTracks(git ls-files)` holds and names a deliverable's `change` text names are not probed;
-a wrapper (`uv run`, `npx`, ...) probes only the wrapper; at most 20 probes. Probes run through the separate
+a wrapper (`uv run`, `npx`, ...) probes only the wrapper (the #4393 run probe covers what is behind it); at most 20 probes. Probes run through the separate
 `io.probeCommand` hook (`runCheckCommand`) with `laneEnv()` (#4325); no hook, no change. A miss (`preflightProblems`) joins the
 validateContract problems in the existing single `contractCorrectionPrompt` resume. After it the misses are re-probed and
 logged as `VALIDATE_PREFLIGHT` {misses, corrected}; any left are an anomaly only, never a block: the post-build #4323
 rerun still ends `env.tool_missing`. Skipped when the frozen contract is recovered from the issue. Cost: 0 LLM calls when
 the host has the tools; otherwise the one correction resume, instead of a whole implement session lost to `env.tool_missing`.
+
+## Entry 2026-10-23 — Freeze-time execution preflight of validate commands (#4393)
+
+The #4328 probes read the command text, so a wrapped interpreter (`uv run --no-project python -m shared.x`) and a
+transitive import (`shared` imports `httpx`) pass them, and the command first runs after the build (AlterLab#36619:
+`env.tool_missing` after a green implementation, then a recovery lane). `preflightValidates` (`lean.mjs`) now also:
+(1) flags `$NAME`/`${NAME}` references that are unset or empty in `process.env` + `laneEnv()` and that the command does
+not assign (`preflight.mjs` `unsetEnvVars`; single quotes, escapes, `${X:-d}` defaults and bash's own variables are
+skipped), kind `env-var`; (2) runs each validate command without a static or env miss once on the base worktree through
+the separate `io.preflightRun` hook (`runCheckCommand`) inside `heavyStep("precheck")`, 30 s each within a 120 s total
+(`runPreflight`). `runProbeMiss` classifies the output: rc 0, a timeout (124) or a test failure is `runs` (RED on base is
+expected); conformance.mjs `missingTool` (missing command / Python module / Node package) or a missing path (bash exec
+rc 127, python `can't open file`, pytest `file or directory not found`, node `Could not find`) is `unrunnable`. Names
+the repo tracks or a deliverable's change names, and paths that are tracked, deliverables, the repro test or test-shaped
+(`knownToContract`), are not misses. `git status --porcelain --untracked-files=all` before and after the runs: only
+paths the runs newly created (`git clean`) or modified (`git checkout --`) are reverted, an anomaly records them; a path
+dirty before is never touched. Commands the budget leaves are not run (anomaly), not misses. All misses share the one
+`contractCorrectionPrompt` resume before the implement builder, are re-checked after it, and are logged on
+`VALIDATE_PREFLIGHT` (`found`, `misses` with `source` probe|env|run); misses left stay advisory (the post-build #4323
+rerun is still the gate). No hook, no run. Cost: 0 LLM calls, at most 120 s at freeze; one correction resume only when a
+command cannot run, instead of an implement attempt plus a recovery lane.
 
 ## Entry 2026-10-20 — The repro harness links workspace deps on base; an unrunnable head is an environment error (#4334)
 
