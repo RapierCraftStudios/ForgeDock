@@ -2005,9 +2005,12 @@ export function listDescendants(pid, { psFn = null } = {}) {
  * stream-json so progress is observable (the final `result` line is the envelope); `wrap(bin,args)` rewrites the spawn
  * (cgroup caps); `control` receives {pause, resume} (SIGSTOP/SIGCONT of the child's whole process group) and paused time
  * does not count as idle. `onSpawn(child)` receives the ChildProcess.
+ * #4405: `busy(children)` (info or null) is asked once idle (at most every min(5 s, idleMs)); while it answers busy (a live
+ * heavy step, test or lint child) the kill waits until idleMs + `busyMs` of silence, `onIdleExtend(info)` is told once per
+ * idle stretch, and a later kill carries `extended: true` and `heavyQueue` (info.heavyQueue).
  */
 export async function runCliBackendAsync(opts) {
-  const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, ...rest } = opts;
+  const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, busy = null, busyMs = 0, onIdleExtend = null, ...rest } = opts;
   let captured = null;
   try {
     runCliBackend({ ...rest, spawnFn: (bin, args, o) => {
@@ -2039,7 +2042,7 @@ export async function runCliBackendAsync(opts) {
       let lineBuf = "", resultLine = null, lastTool = null;
       const max = o.maxBuffer ?? DEFAULT_SPAWN_MAX_BUFFER_BYTES;
       const startedAt = Date.now();
-      let lastActivity = startedAt, pausedAt = 0, pausedTotal = 0, timer = null;
+      let lastActivity = startedAt, pausedAt = 0, pausedTotal = 0, timer = null, busyAsk = null, extendedSince = null, extendInfo = null;
       const finish = (r) => { if (settled) return; settled = true; clearInterval(timer); resolveP(r); };
       let child;
       const input = typeof o.input === "string" ? o.input : null; // forge#4129: large prompt over stdin
@@ -2059,8 +2062,19 @@ export async function runCliBackendAsync(opts) {
       timer = setInterval(() => {
         const now = Date.now();
         if (!paused && idleMs > 0 && now - lastActivity >= idleMs && !idleInfo) {
-          idleInfo = { lastTool, children: listDescendants(child.pid), idleMs, pid: child.pid };
-          kill();
+          let info = null;
+          if (typeof busy === "function" && busyMs > 0 && now - lastActivity < idleMs + busyMs) {
+            if (busyAsk && busyAsk.since === lastActivity && now - busyAsk.at < Math.min(5000, idleMs)) info = busyAsk.info;
+            else { try { info = busy(listDescendants(child.pid)) || null; } catch { info = null; } busyAsk = { at: now, since: lastActivity, info }; }
+          }
+          if (info) {
+            extendInfo = info;
+            if (extendedSince !== lastActivity) { extendedSince = lastActivity; try { onIdleExtend?.(info); } catch { /* observer only */ } }
+          } else {
+            const extended = extendedSince === lastActivity;
+            idleInfo = { lastTool, children: listDescendants(child.pid), idleMs, pid: child.pid, extended, heavyQueue: extended ? extendInfo?.heavyQueue ?? null : null };
+            kill();
+          }
         } else if (!timedOut && !idleInfo && now - startedAt - pausedTotal - (paused ? now - pausedAt : 0) >= ceiling) { timedOut = true; kill(); }
       }, tick);
       timer.unref?.();
@@ -2092,8 +2106,9 @@ export async function runCliBackendAsync(opts) {
   } finally { if (sysDir) rmSync(sysDir, { recursive: true, force: true }); }
   if (idleInfo) {
     const mins = Math.round((idleInfo.idleMs / 60000) * 10) / 10;
-    const err = new Error(`claude CLI had no stream activity for ${mins} min and was killed (idle). Last tool: ${idleInfo.lastTool ? `${idleInfo.lastTool.name} ${idleInfo.lastTool.input}` : "none"}. Live children: ${idleInfo.children.map((c) => `${c.pid}:${c.cmd}`).join("; ") || "none"}`);
+    const err = new Error(`claude CLI had no stream activity for ${mins} min and was killed (idle${idleInfo.extended ? ", after the busy extension" : ""}). Last tool: ${idleInfo.lastTool ? `${idleInfo.lastTool.name} ${idleInfo.lastTool.input}` : "none"}. Live children: ${idleInfo.children.map((c) => `${c.pid}:${c.cmd}`).join("; ") || "none"}`);
     err.code = "CLI_IDLE"; err.lastTool = idleInfo.lastTool; err.children = idleInfo.children; err.idleMs = idleInfo.idleMs;
+    err.extended = idleInfo.extended; err.heavyQueue = idleInfo.heavyQueue;
     throw err;
   }
   return runCliBackend({ ...rest, spawnFn: () => collected });

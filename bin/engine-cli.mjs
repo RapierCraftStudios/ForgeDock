@@ -218,6 +218,7 @@ export function readHeavy(cwd = process.cwd()) {
  * forge.yaml lane caps and CLI timeouts for the core path (#4115, #4112). The parser flattens one nested level, so
  * `pipeline:`/`engine:` then `lane_limits:` with `memory_max`/`cpu_quota` arrives as `memory_max`/`cpu_quota` (or flat
  * `lane_limits_memory_max`/`lane_limits_cpu_quota`). `engine.cli_idle_minutes` (default 15) and `engine.cli_max_minutes` (default 180).
+ * `engine.cli_busy_minutes` (default 45, #4405): extra silence allowed while the builder has a live heavy step or heavy-queue entry.
  */
 export function readCoreLimits(cwd = process.cwd()) {
   try {
@@ -229,6 +230,7 @@ export function readCoreLimits(cwd = process.cwd()) {
       ...(mem || cpu ? { laneLimits: { ...(mem ? { memory_max: mem } : {}), ...(cpu ? { cpu_quota: cpu } : {}) } } : {}),
       ...(posNum(y.engine?.cli_idle_minutes) ? { cliIdleMinutes: posNum(y.engine.cli_idle_minutes) } : {}),
       ...(posNum(y.engine?.cli_max_minutes) ? { cliMaxMinutes: posNum(y.engine.cli_max_minutes) } : {}),
+      ...(posNum(y.engine?.cli_busy_minutes) ? { cliBusyMinutes: posNum(y.engine.cli_busy_minutes) } : {}),
     };
   } catch { return {}; }
 }

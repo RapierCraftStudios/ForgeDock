@@ -937,3 +937,18 @@ docs, enumerating, sequence, CI pass or a merge for `ci_red`/`merge_ci`, conform
 `pitfalls_matched`. `renderContextRecord` drops the pitfalls section (`publicPackText`) and shows only the count, so no
 pitfall text is posted. `forgedock stats` (local logs) prints the first-pass rate with and without matching pitfalls.
 Cost: 0 LLM calls; one local read and up to a few appends per lane; ≤ ~1 KB of pack bytes when mode is `on`.
+
+## Entry 2026-10-23 — Idle watchdog counts heavy steps and heavy-queue waits as activity (#4405)
+
+A builder waiting silently on a queued or running heavy step (lint, test, type check) was idle-killed at
+`cli_idle_minutes`. `runCliBackendAsync` (`bin/runner.mjs`) now takes an injected `busy(children)`, `busyMs` and
+`onIdleExtend`. Once the idle threshold is reached it asks `busy` (at most every min(5 s, idleMs)). While the answer is
+busy, the kill waits until idleMs + busyMs of silence. `lean.mjs` `sessionBusy` answers busy when a descendant is a
+heavy step (`heavy.mjs` `isHeavyProcess`: the shim marker `heavy.mjs run`, `classifyStep` on argv0 or on the script
+after an interpreter, `node --test`, `python -m pytest|mypy|tox|unittest`), or when `io.heavy.lane(pids)` finds a queued
+or running heavy entry whose pid is one of the session's descendants. It matches by pid, not issue, because the registry
+is host-wide and shared across repos. `lane()` is read-only and lock-free. Pollers (`sleep`, `until grep`) and MCP
+servers do not count, so a silent session with no work child is still killed at idleMs. The window is
+`engine.cli_busy_minutes` (default 45 = heavy `max_wait_s` plus the idle default), so a stuck child is still killed. Run
+log: `CLI_IDLE_EXTENDED` {children, heavyQueue} once per silent stretch; `CLI_IDLE_KILL` adds `heavyQueue` and `extended`.
+Cost: 0 LLM calls; one `ps` and one registry read per check, only while idle.

@@ -64,6 +64,31 @@ export function classifyStep(name, args = []) {
   return "llm";
 }
 
+const INTERP = new Set(["sh", "bash", "dash", "zsh", "node", "nodejs", "python", "python3", "env"]);
+const PY_HEAVY_MODULES = new Set(["pytest", "mypy", "tox", "unittest"]);
+/**
+ * #4405: is this `ps` command line a heavy step (a shim-gated step, test runner, linter, type checker, install)? Looks
+ * through an interpreter (`/bin/sh …/vitest run`, `node …/eslint .`) and knows `node --test` and `python -m pytest`.
+ * Pollers (`sleep`, `until grep …`), MCP servers and plain scripts are not.
+ */
+export function isHeavyProcess(cmd) {
+  const s = String(cmd ?? "");
+  if (/\bheavy\.mjs['"]?\s+run\b/.test(s)) return true;
+  const t = s.trim().split(/\s+/).filter(Boolean);
+  if (!t.length) return false;
+  const base = (x) => x.split("/").pop().replace(/\.(c|m)?js$/, "");
+  if (classifyStep(base(t[0]), t.slice(1)) === "heavy") return true;
+  const b0 = base(t[0]), py = /^python\d*(\.\d+)?$/.test(b0);
+  if (!INTERP.has(b0) && !py) return false;
+  const rest = t.slice(1);
+  if ((b0 === "node" || b0 === "nodejs") && rest.includes("--test")) return true;
+  const mi = rest.indexOf("-m");
+  if (py && mi >= 0 && PY_HEAVY_MODULES.has(rest[mi + 1])) return true;
+  const si = rest.findIndex((x) => !x.startsWith("-") && !/^\w+=/.test(x));
+  if (si < 0 || rest[si - 1] === "-c") return false;
+  return classifyStep(base(rest[si]), rest.slice(si + 1)) === "heavy";
+}
+
 /** Merged heavy config: defaults ← cfg (forge.yaml engine.heavy_*) ← env (FORGE_HEAVY_MAX|STEP_MEM_MB|RESERVE_MB). */
 export function heavyConfig(cfg = {}, env = {}) {
   const pos = (v) => { const x = Number(v); return v !== undefined && v !== null && String(v).trim() !== "" && Number.isFinite(x) && x > 0 ? x : null; };
@@ -175,6 +200,14 @@ export function openHeavy(dir = schedDir(), { cfg = {}, env = {}, host = default
     },
     withdraw: (key) => { try { mutate((s) => { delete s.waiters[key]; }); } catch { /* fail-open */ } },
     release: (key) => { try { mutate((s) => { delete s.holders[key]; delete s.waiters[key]; }); } catch { /* fail-open */ } },
+    /** #4405: {queued, running} of live entries whose pid is in `pids` (one session's processes), read-only; null when unreadable. */
+    lane: (pids = []) => {
+      try {
+        const s = read(), set = new Set([...pids].map(Number));
+        const n = (o) => Object.values(o).filter((e) => set.has(Number(e?.pid)) && alive(e.pid)).length;
+        return { queued: n(s.waiters), running: n(s.holders) };
+      } catch { return null; }
+    },
     /** {holders, queued, maxQueued, max} of live entries, read-only (no lock, no write); null when unreadable. */
     stats: () => {
       try {
@@ -205,10 +238,10 @@ export async function acquireHeavy(h, entry = {}, { pollMs = HEAVY_POLL_MS, slee
   }
 }
 
-/** Default lane effect: `acquire(entry, cfg)` → {waitMs, queued, release()} (cfg = the lane's forge.yaml heavy keys); `stats()`. */
+/** Default lane effect: `acquire(entry, cfg)` → {waitMs, queued, release()} (cfg = the lane's forge.yaml heavy keys); `stats()`; `lane(pids)` (#4405). */
 export function makeHeavyIo({ dir = schedDir(), env = process.env, host } = {}) {
   const open = (cfg) => openHeavy(dir, { cfg, env, ...(host ? { host } : {}) });
-  return { acquire: (entry, cfg = {}) => acquireHeavy(open(cfg), entry), stats: () => open({}).stats() };
+  return { acquire: (entry, cfg = {}) => acquireHeavy(open(cfg), entry), stats: () => open({}).stats(), lane: (pids) => open({}).lane(pids) };
 }
 
 const SHIM_HEADER = "#!/bin/sh\n# forgedock heavy-step shim (#4169): waits for a host heavy-step slot, then runs the real command; do not edit.\n";
