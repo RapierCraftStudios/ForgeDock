@@ -32,7 +32,7 @@ import { freshFix, issueSummary, firstPassOf } from "./fixround.mjs";
 import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog } from "./pitfalls.mjs";
 import { unjustified } from "./enumerating.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
-import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport } from "./verify.mjs";
+import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget } from "./verify.mjs";
 import { e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
@@ -150,6 +150,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {string} [o.builderModel]  default: CLI default
  * @param {string} [o.reviewerModel] default claude-sonnet-5-5
  * @param {string} [o.fixModel]     model of fresh fix-round sessions (#4363, forge.yaml lean.fix_model); default the reviewer model
+ * @param {string} [o.sequenceRegenerate] forge.yaml lean.sequence.regenerate (#4386): snapshot generator for a schema-changing renumbered migration
  * @param {number} [o.ciMaxMinutes]  remote-CI wait budget (default 360); exhaustion is NOT needs-human
  * @param {"shadow"|"enforce"} [o.conformance] conformance gate mode (default shadow)
  * @param {"needs-human"|"degraded"} [o.reviewIncomplete] shadow only: what an incomplete review after the re-ask does (default needs-human)
@@ -268,6 +269,7 @@ export async function runCore(o) {
   // the runner PATH; `waits` ({phase: ms}) and `heavyQueueMax` ride on the lane result for the batch report.
   const heavyCfg = o.heavy ?? {}, heavyOn = Boolean(io.heavy) && heavyCfg.enabled !== false;
   let heavyEnv = null, heavyWaitsFile = null, heavyQueueMax = 0, stage = "plan", iss;
+  let seqLease = null; // #4386: the host sequence lease, held from the merge-gate renumber through the merge
   const waits = {};
   let precheckMs = 0, precheckDeferred = 0, precheckRan = false; // #4331: pre-PR check wall time and deferrals, for the batch report
   const addWait = (phase, ms, queued = 0) => {
@@ -362,6 +364,8 @@ export async function runCore(o) {
     return finishing;
   }
   async function finishOnce(reason, detail = "", extra = {}, codeOverride = null) {
+    try { seqLease?.release(); } catch { /* fail-open */ }
+    seqLease = null;
     if (heavyWaitsFile) { // #4169: builder-run heavy waits, read before teardown removes the run TMPDIR
       try { heavyQueueMax = Math.max(heavyQueueMax, sumWaits(await io.fs.read(heavyWaitsFile), waits).queueMax); } catch { /* no heavy step ran */ }
     }
@@ -1467,15 +1471,35 @@ export async function runCore(o) {
       if (!missing.length) await gatePassed("enumerating");
       if (missing.length) T.anomalies.push(`Enumerating test(s) still miss new symbol(s): ${missing.slice(0, 5).map((m) => `${m.symbol} → ${m.test}`).join(", ")}`);
     }
-    /** #4322: null (nothing to do), {done} (terminal), or {renumbered: true}. Fetches the lane, so the check sees its tip. */
-    async function sequenceHandoff(trigger) {
+    /**
+     * #4322: null (nothing to do), {done} (terminal), or {renumbered: true, deterministic?}. Fetches the lane, so the check
+     * sees its tip. #4386: the engine renumbers first (no builder, no session); the builder only when that is unsupported.
+     * `laneRef`: the pre-merge lane head after a base-sync took the base side of sequence-only conflicts.
+     */
+    async function sequenceHandoff(trigger, { laneRef = null } = {}) {
       if (!io.sequenceCheck || isSplit) return null;
       try { await git(["fetch", "origin", lane]); } catch { /* offline: use the local ref */ }
       const collisions = (await io.sequenceCheck({ cwd: wt, base }).catch(() => null)) ?? [];
       if (!collisions.length) return null;
       const before = (await io.sequenceSnapshot?.({ cwd: wt, base }).catch(() => null)) ?? [];
       ev({ event: "SEQUENCE_COLLISION", trigger, files: collisions.map((c) => c.lane) });
-      T.decisions.push(`Sequence number(s) taken on ${lane} (${trigger}): ${collisions.filter((c) => c.base.length).map((c) => `${c.lane} vs ${c.base.join(", ")}`).join("; ")}; builder renumbers`);
+      const taken = collisions.filter((c) => c.base.length).map((c) => `${c.lane} vs ${c.base.join(", ")}`).join("; ");
+      if (io.sequenceRenumber) {
+        const det = (await io.sequenceRenumber({ cwd: wt, base, ...(laneRef ? { laneRef } : {}), regenerate: o.sequenceRegenerate ?? null }).catch((e) => ({ unsupported: String(e?.message ?? e) }))) ?? { unsupported: "no result" };
+        if (det.ok && det.moves?.length) {
+          ev({ event: "SEQUENCE_RENUMBERED", trigger, mode: "deterministic", moves: det.moves });
+          T.decisions.push(`Sequence number(s) taken on ${lane} (${trigger}): ${taken}; renumbered deterministically (no builder): ${det.moves.map((m) => `${m.from} → ${m.to}`).join(", ")}`);
+          const v = (await io.sequenceVerify?.({ cwd: wt, base, before, moves: det.moves }).catch(() => null)) ?? { ok: false, problems: ["renumber could not be verified"] };
+          if (!v.ok) return { done: await needsHuman(`Sequence-numbered files still collide with ${lane} after the deterministic renumber (${trigger}); nothing merged:\n${v.problems.slice(0, 10).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.BASE_CONFLICT) };
+          await gatePassed("sequence");
+          files = await changedFiles();
+          return { renumbered: true, deterministic: true };
+        }
+        const why = det.unsupported ?? "no movable sequence file";
+        ev({ event: "SEQUENCE_RENUMBER_FALLBACK", trigger, reason: why });
+        T.decisions.push(`Deterministic renumber not possible (${why}); builder renumbers`);
+      }
+      T.decisions.push(`Sequence number(s) taken on ${lane} (${trigger}): ${taken}; builder renumbers`);
       await fixRound("sequence", sequencePrompt(collisions, lane, vcfg.mode), [], "sequence", collisions.map((c) => `sequence number collision: ${c.lane} already taken by ${(c.base ?? []).join(", ")}`).join("\n"));
       result = (await readResult()) ?? result;
       const v = (await io.sequenceVerify?.({ cwd: wt, base, before }).catch(() => null)) ?? { ok: false, problems: ["renumber could not be verified"] };
@@ -1492,6 +1516,7 @@ export async function runCore(o) {
     // cannot run falls back once to local validation. A head verified here lets the precheck accept validate ids left to CI.
     let ciVerifiedHead = null, ciFellBack = false, ciRounds = 0;
     const ciSeenRuns = [];
+    let ciGateNames; // #4387: checks that gate CI verification, read once per lane
     /** Verifies the current head; returns {done} with a terminal result, or {fixes} (builder CI-fix rounds that moved the head). */
     async function ciVerify(trigger) {
       let fixes = 0;
@@ -1499,9 +1524,11 @@ export async function runCore(o) {
         const head = String(await git(["rev-parse", "HEAD"])).trim();
         if (head === ciVerifiedHead || ciFellBack) return { fixes };
         files = await changedFiles();
-        const v = await runCiVerify({ io, branch, head, changedFiles: files, verify: vcfg, ciMaxMinutes, now, sleep, random, exclude: ciSeenRuns,
+        if (ciGateNames === undefined) ciGateNames = vcfg.workflow ? null : await ciGate({ io, lane, mergeWait, verify: vcfg });
+        const verifyArgs = { io, branch, head, changedFiles: files, verify: vcfg, ciMaxMinutes, now, sleep, random, exclude: ciSeenRuns, gate: ciGateNames,
           push: () => gitPush(["push", "-u", "origin", branch]),
-          onPoll: async () => { await renew(); onProgress({ event: "phase_paused", phase: "verify", detail: `CI verification pending on ${branch}` }); } });
+          onPoll: async () => { await renew(); onProgress({ event: "phase_paused", phase: "verify", detail: `CI verification pending on ${branch}` }); } };
+        const v = await runCiVerify(verifyArgs);
         if (v.runId != null) ciSeenRuns.push(v.runId);
         const rec = { event: "CI_VERIFY", trigger, mode: vcfg.mode, round: ciRounds, result: v.result, skipped: v.result === "skipped", run_url: v.runUrl ?? null, failures: v.failures.map((f) => f.job) };
         ev(rec); await emit({ ...rec, phase: "verify" });
@@ -1541,7 +1568,18 @@ export async function runCore(o) {
         await upsertStage("implementation");
         result = (await readResult()) ?? result;
         if (String(await git(["rev-parse", "HEAD"])).trim() === head) {
-          return { done: await needsHuman(`CI verification failed on \`${branch}\` (${jobs}) and the builder made no new commit for it; nothing merged.`, OUTCOME_CODES.CI_RED) };
+          // #4387: "no commit" says the failure is not the change's: rerun the failed jobs once to tell a flake from a real failure.
+          const rr = isSplit ? { ok: false, runs: [], jobs: [], detail: "refactor:split" } : await rerunFailedOnce({ io, v });
+          const v2 = rr.ok ? await runCiVerify({ ...verifyArgs, rerunOf: rerunTarget(v) }) : null;
+          if (rr.detail !== "no rerun seam") ev({ event: "CI_FLAKE_RERUN", trigger, head, runs: rr.runs, jobs: rr.jobs, result: v2?.result ?? "rerun-failed", detail: v2?.detail ?? rr.detail });
+          if (v2?.result === "pass") {
+            ciVerifiedHead = head; await gatePassed("ci_red", "merge_ci"); row(`CI green at ${head.slice(0, 12)} after a rerun of the failed jobs`);
+            T.decisions.push(`CI verification red (${jobs}), no fix commit; green after one rerun of the failed jobs (flake)`);
+            return { fixes };
+          }
+          if (v2?.result === "timeout") return { done: await finish("ci-pending", `CI rerun of the failed jobs on ${branch} still pending after ${ciMaxMinutes} min; rerun resumes the branch`) };
+          const how = !rr.ok ? (rr.detail === "no rerun seam" ? "" : ` (rerun of the failed jobs not possible: ${rr.detail})`) : " and stayed red after one rerun of the failed jobs";
+          return { done: await needsHuman(`CI verification failed on \`${branch}\` (${jobs}) and the builder made no new commit for it${how}; nothing merged.`, OUTCOME_CODES.CI_RED) };
         }
       }
     }
@@ -1866,7 +1904,8 @@ export async function runCore(o) {
     T.decisions.push(`merge_wait=${mergeWait}: ${policyText}`);
 
     // ---- base-sync (#4100): merge the lane into the branch when the PR conflicts; merge only, never rebase or force-push ----
-    let syncs = 0, mergeRetries = 0;
+    // #4386: the bound counts syncs against one base head; a sync overtaken by a new base head made progress.
+    let syncs = 0, sameBaseSyncs = 0, lastSyncBase = null, mergeRetries = 0;
     const MAX_SYNCS = 2;
     const gitOut = async (args) => { try { return String(await git(args)).trim(); } catch { return ""; } };
     /** CONFLICTING / DIRTY, or UNKNOWN after one short re-poll. Unreadable state counts as not conflicting. */
@@ -1901,11 +1940,12 @@ export async function runCore(o) {
     const syncRow = [];
     /** Returns null to continue with the merge flow, or a terminal result. */
     async function baseSync(trigger, soft = false) {
-      if (syncs >= MAX_SYNCS) return await needsHuman(`PR #${pr} still conflicts with ${lane} after ${MAX_SYNCS} base-syncs (${trigger}).`, OUTCOME_CODES.BASE_CONFLICT);
-      syncs++;
       await renew();
       try { await git(["fetch", "origin", lane]); } catch { /* offline: use the local ref */ }
-      const baseSha = (await gitOut(["rev-parse", base])).slice(0, 12);
+      const baseFull = await gitOut(["rev-parse", base]), baseSha = baseFull.slice(0, 12);
+      if (baseFull !== lastSyncBase) { lastSyncBase = baseFull; sameBaseSyncs = 0; }
+      if (sameBaseSyncs >= MAX_SYNCS) return await needsHuman(`PR #${pr} still conflicts with ${lane} after ${MAX_SYNCS} base-syncs against ${baseSha || base} (${trigger}).`, OUTCOME_CODES.BASE_CONFLICT);
+      sameBaseSyncs++; syncs++;
       const before = await gitOut(["rev-parse", "HEAD"]);
       let clean = true, files = [];
       try { await git(["merge", "--no-edit", base]); } catch { clean = false; files = await conflictFiles(); }
@@ -1913,9 +1953,17 @@ export async function runCore(o) {
         await gitOut(["merge", "--abort"]);
         return await needsHuman(`PR #${pr} (refactor:split) conflicts with ${lane} in ${files.join(", ") || "unknown files"}; a split is never resolved by an LLM. Close the PR and rerun on the new base.`, OUTCOME_CODES.BASE_CONFLICT);
       }
-      let how, tests = "not required (clean merge)", rereview = "not required (conflict-free base merge)";
+      let how, tests = "not required (clean merge)", rereview = "not required (conflict-free base merge)", detResolved = false;
+      // #4386: conflicts only in sequence files (numbered, journal, snapshot, their index) resolve without a builder
+      const rs = !clean && io.sequenceResolve ? ((await io.sequenceResolve({ cwd: wt, files }).catch((e) => ({ unsupported: String(e?.message ?? e) }))) ?? {}) : null;
+      if (rs?.unsupported) T.decisions.push(`Base-sync ${syncs}: no deterministic resolution (${rs.unsupported})`);
       if (clean) {
         how = "clean merge of the base into the branch";
+      } else if (rs?.ok) {
+        detResolved = true;
+        T.decisions.push(`Base-sync ${syncs}: conflicts only in sequence files (${files.join(", ")}); base side taken, lane files renumbered by the engine (no builder)`);
+        how = `deterministic: base side taken for ${files.length} sequence file(s)`;
+        tests = "not required (deterministic sequence resolution)";
       } else {
         T.decisions.push(`Base-sync ${syncs}: merging ${base} conflicts in ${files.join(", ") || "unknown files"}; builder resolves`);
         const prompt = `Merging ${base} into this branch conflicts in: ${files.join(", ") || "(see git status)"}. Resolve the conflicts preserving both this fix's intent and the base's changes, ${syncChecks(vcfg.mode)}, and commit the merge.${sequenceSyncNote(files)} Do not push.`;
@@ -1928,11 +1976,11 @@ export async function runCore(o) {
         const r2 = await readResult();
         tests = Array.isArray(r2?.tests) && r2.tests.length ? r2.tests.map((t) => (typeof t === "string" ? t : `${t.command}: ${t.result}`)).join("; ") : NR_TESTS;
       }
-      const sq = await sequenceHandoff(`base-sync ${syncs}`); // #4322: a clean text merge can still bring a taken number
+      const sq = await sequenceHandoff(`base-sync ${syncs}`, detResolved ? { laneRef: before } : {}); // #4322: a clean text merge can still bring a taken number
       if (sq?.done) return sq.done;
-      if (sq?.renumbered) { how += "; builder renumbered sequence-numbered files"; }
+      if (sq?.renumbered) { how += sq.deterministic ? "; lane files renumbered deterministically" : "; builder renumbered sequence-numbered files"; }
       const after = await gitOut(["rev-parse", "HEAD"]);
-      if (soft && clean && after === before) { syncs--; return null; } // UNKNOWN state and nothing to merge: not a conflict
+      if (soft && clean && after === before) { syncs--; sameBaseSyncs--; return null; } // UNKNOWN state and nothing to merge: not a conflict
       if (after !== before) await gitPush(["push", "origin", branch]); // plain push of a merge commit: never force
       let ciFixes = 0;
       if (isSplit && after !== before) { // #4211: the merged head must still be a pure move against the new base
@@ -1941,7 +1989,9 @@ export async function runCore(o) {
         rereview = "refactor-verify re-run against the new base: ok";
       }
       if (remoteVerify && after !== before) { const v = await ciVerify("base-sync"); if (v.done) return v.done; ciFixes = v.fixes; }
-      if (!isSplit && (!clean || sq?.renumbered || ciFixes)) {
+      const engineOnly = !ciFixes && (clean || detResolved) && (!sq?.renumbered || sq.deterministic); // #4386: no builder touched the delta
+      if (!isSplit && engineOnly && (detResolved || sq?.deterministic)) rereview = "not required (deterministic renumber + base merge)";
+      else if (!isSplit && (!clean || sq?.renumbered || ciFixes)) {
         let rv = await doReview();
         if (rv.env) return await envNeedsHuman(rv.env);
         if (rv?.fail) {
@@ -2124,10 +2174,32 @@ export async function runCore(o) {
       }
       if (e2eHead !== localHead) { const g = await e2eGate(); if (g?.done) return g.done; if (g?.again) continue; }
       if (syncs > 0 && (await prConflicting()) === "conflict") continue; // the base moved again while waiting
+      // #4386: late binding. A lane with numbered files holds the host sequence lease from here through the merge and
+      // re-checks its numbers against the fetched lane; a taken number is renumbered by the engine and only CI is waited on.
+      if (io.sequenceCheck && io.sequenceLease && !isSplit) {
+        if (!seqLease) {
+          const mine = (await io.sequenceSnapshot?.({ cwd: wt, base }).catch(() => null)) ?? [];
+          if (mine.length) {
+            seqLease = await io.sequenceLease.acquire({ repo, lane, dirs: [...new Set(mine.map((f) => dirname(f.path)))], issue, maxWaitS: ciMaxMinutes * 60 }).catch(() => null);
+            if (seqLease) T.decisions.push(seqLease.timedOut ? `Sequence lease timed out after ${Math.round((seqLease.waitMs ?? 0) / 1000)}s (fail-open)` : `Sequence lease held (waited ${Math.round((seqLease.waitMs ?? 0) / 1000)}s)`);
+          }
+        }
+        if (seqLease) {
+          try { await git(["fetch", "origin", lane]); } catch { /* offline: use the local ref */ }
+          const late = (await io.sequenceCheck({ cwd: wt, base }).catch(() => null)) ?? [];
+          if (late.length) {
+            ev({ event: "SEQUENCE_LATE_BIND", pr, files: late.map((c) => c.lane) });
+            const r = await baseSync("merge gate: sequence number taken"); if (r) return r;
+            continue; // wait for the required checks of the renumbered head
+          }
+        }
+      }
       T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
       laneGuard(resumed?.base ?? lane, "merge");
       try {
         await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
+        try { seqLease?.release(); } catch { /* fail-open */ }
+        seqLease = null;
         break;
       } catch (e) {
         const msg = `${e?.stderr ?? ""}${e?.message ?? ""}`;

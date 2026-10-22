@@ -74,6 +74,20 @@ describe("pre-filter (#4123)", () => {
     assert.match(w.comments[0][1], /FORGE:PREFILTER/); assert.match(w.comments[0][1], /src\/foo\.js:3 null guard/); assert.match(w.comments[0][1], /PR #90/);
   });
 
+  it("#4399 an issue reopened by a failed acceptance probe is never re-closed as already-fixed; a pass is no skip", async () => {
+    const probe = (result, author = { login: "rapiercraft-forgedock" }, assoc = "CONTRIBUTOR") => ({ author, authorAssociation: assoc,
+      body: `<!-- FORGE:PROBE -->\n## Acceptance probe: ${result}\n${JSON.stringify({ fix: "abc1234", default_sha: "d", result, exit: result === "pass" ? 0 : 1, ms: 5 })}` });
+    assert.deepEqual(flakyReason({ comments: [probe("fail")] }), { reason: "probe-failed", why: "acceptance probe failed after promotion" });
+    assert.equal(flakyReason({ comments: [probe("fail"), probe("pass")] }), null);
+    assert.equal(flakyReason({ comments: [probe("fail", { login: "someone" }, "NONE")] }), null);
+    const w = world({ issues: { 12: { title: "foo breaks", body: "foo crashes on null", comments: [probe("fail")] } },
+      prs: [{ number: 90, title: "fix: guard foo", body: "Fixes #12", url: "https://github.com/o/r/pull/90" }],
+      verdict: { verdict: "ALREADY-FIXED", summary: "guard added", evidence: ["src/foo.js:3"] } });
+    const r = await pf(w, 12);
+    assert.equal(r.closed, false); assert.match(r.detail, /acceptance probe failed after promotion/);
+    assert.equal(w.runner.length, 0); assert.deepEqual(w.closed, []); assert.deepEqual(w.comments, []);
+  });
+
   it("a candidate the validator CONFIRMS (or answers without evidence) is not closed", async () => {
     const mk = (verdict) => world({ issues: { 12: { body: "x" } }, prs: [{ number: 90, title: "fix (#12)", body: "" }], verdict });
     for (const v of [{ verdict: "CONFIRMED", evidence: ["src/foo.js:3 still derefs"] }, { verdict: "ALREADY-FIXED", evidence: [] }, null]) {
