@@ -18,6 +18,7 @@ import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
 import { sequenceCollisions, snapshotLane, verifyRenumber } from "./sequence.mjs";
+import { followupMap } from "./conformance.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -281,9 +282,7 @@ export function makeLeanIo({ repo }) {
     async fileFollowups({ parent, items }) {
       const tsv = items.map((i) => `${i.key}\t${i.why}\t`).join("\n") + "\n";
       const out = await runWithInput("bash", [script("file-deferred-followups.sh"), "--parent", String(parent), "--repo", repo], tsv, 180000);
-      const map = {};
-      for (const l of out.split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) map[k] = Number(n); }
-      return map;
+      return followupMap(out, items);
     },
     /**
      * forge#4163: forge.yaml env.setup, once per fresh lane worktree: `bash -c <command>` in cwd with the lane env.

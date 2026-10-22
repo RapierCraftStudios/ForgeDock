@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, followupMap, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -312,6 +312,15 @@ describe("close plan and follow-up items", () => {
   it("follow-up keys are single-line, tab-free and stable", () => {
     const [i] = followupItems([{ id: "R2", quote: "a\tb\n`c`", disposition: "defer", why: "x\ny" }]);
     assert.equal(i.key, "R2: a b c"); assert.equal(i.why, "defer: x y"); assert.doesNotMatch(i.key + i.why, /[\t\n`]/);
+  });
+  it("a follow-up key whose 240-char cut ends on a space has no trailing whitespace (#4388)", () => {
+    const quote = `${"x".repeat(234)} tail of the quote past the cut`; // "R12: " + 234 chars puts the space at index 239
+    assert.equal(`R12: ${quote}`[239], " ");
+    const [i] = followupItems([{ id: "R12", quote, disposition: "defer", why: "w" }]);
+    assert.equal(i.key, i.key.trim()); assert.equal(i.key.length, 239); assert.doesNotMatch(i.key, /\s$/);
+  });
+  it("followupMap resolves untrimmed item keys from the script's trimmed echo (#4388)", () => {
+    assert.deepEqual(followupMap("R1: a\t42\nnoise\nR2: b\tx\n", [{ key: "R1: a " }, { key: "R2: b" }]), { "R1: a ": 42 });
   });
 });
 
