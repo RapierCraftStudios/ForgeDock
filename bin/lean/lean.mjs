@@ -29,7 +29,7 @@ import { renderInvestigation, renderImplementation, renderReview, renderPrBody, 
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt } from "./prompts.mjs";
-import { freshFix, issueSummary, firstPassOf } from "./fixround.mjs";
+import { freshFix, issueSummary, firstPassOf, sessionCostDelta } from "./fixround.mjs";
 import { makeTurnBudget, laneSize, wrapupGrant, budgetDigest } from "./budget.mjs";
 import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog } from "./pitfalls.mjs";
 import { unjustified } from "./enumerating.mjs";
@@ -38,8 +38,9 @@ import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VER
 import { e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
-import { writeHeavyShims, sumWaits } from "./heavy.mjs";
+import { writeHeavyShims, sumWaits, isHeavyProcess } from "./heavy.mjs";
 import { priorityFromLabels } from "./sched.mjs";
+import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { parseContextPackConfig, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp } from "./context.mjs";
 
 /**
@@ -180,7 +181,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const vcfg = { ...parseVerify({}), ...(o.verify ?? {}) };
   const learnedCommands = (Array.isArray(o.precheck?.commands) ? o.precheck.commands : []).map((c) => String(c ?? "").trim()).filter(Boolean);
@@ -197,6 +198,7 @@ export async function runCore(o) {
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
   const usage = { cost_usd: 0, input: 0, output: 0, cache: 0 };
+  const sessionCosts = new Map(); // #4407: session id -> last reported cumulative cost
   let sessionId = null;
 
   const ev = (e) => appendEvent(dir, issue, e);
@@ -211,15 +213,16 @@ export async function runCore(o) {
   const impl = { cost: 0, models: new Set() }; // #4397: implement spend and reported models, for the verifier
   // #4392: implement turn budget for the lane's size, and its turn tally; off unless given (the CLI passes readCoreLimits' defaults)
   const tb = makeTurnBudget(turnBudgets ?? { S: 0, M: 0, L: 0 });
-  /** `trigger` (#4362): why the attempt ran, one of fixround.mjs TRIGGERS. */
-  async function attempt(phase, n, r, mode = null, trigger = null, restartOf = null) {
+  /** `trigger` (#4362): why the attempt ran, one of fixround.mjs TRIGGERS; `resume` (#4407): the session it resumed. */
+  async function attempt(phase, n, r, mode = null, trigger = null, restartOf = null, resume = null) {
+    const c = sessionCostDelta(sessionCosts, { resume, sessionId: r?.sessionId ?? null, cost: num(r?.costUsd) });
     const rec = { event: "PHASE_ATTEMPT_USAGE", phase, attempt: n, trigger, ...(restartOf ? { restart_of: restartOf } : {}), usage: r?.usage ?? null, duration_ms: num(r?.durationMs) ?? 0,
-      cost_usd: num(r?.costUsd), model: r?.model ?? null, turns: num(r?.turns), ...(mode ? { mode } : {}),
+      cost_usd: num(r?.costUsd), cost_usd_delta: c.delta, cost_usd_session: c.session, model: r?.model ?? null, turns: num(r?.turns), ...(mode ? { mode } : {}),
       ...(num(r?.baselineTokens) != null ? { baseline_tokens: num(r.baselineTokens) } : {}), lane_profile: laneProfile.name };
-    if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += num(r?.costUsd) ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); tb.note(num(r?.turns), stage === "implement"); }
+    if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += c.delta ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); tb.note(num(r?.turns), stage === "implement"); }
     ev(rec); await emit(rec);
     const u = r?.usage ?? {};
-    usage.cost_usd += r?.costUsd ?? 0;
+    usage.cost_usd += c.delta ?? 0;
     usage.input += u.input_tokens ?? 0; usage.output += u.output_tokens ?? 0;
     usage.cache += (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
   }
@@ -262,6 +265,7 @@ export async function runCore(o) {
   const ctxCfg = parseContextPackConfig(o.contextPack ?? {});
   let ctxLane = null; // forge#4275: rerun | child | first, set once the issue is read
   let pitMatched = null; // #4375: pitfalls in the pack that match the issue's files; null when no pack was compiled
+  let factsSeen = []; // #4401: trusted comment bodies on the issue, so an identical FORGE:FACTS is never posted twice
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   let riskEnforced = null, gateRan = false; // #4398: declared risk paths that made a shadow lane enforce (sticky); the gate ran
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
@@ -376,6 +380,7 @@ export async function runCore(o) {
     if (heavyWaitsFile) { // #4169: builder-run heavy waits, read before teardown removes the run TMPDIR
       try { heavyQueueMax = Math.max(heavyQueueMax, sumWaits(await io.fs.read(heavyWaitsFile), waits).queueMax); } catch { /* no heavy step ran */ }
     }
+    await postLaneFacts(); // #4401: before teardown removes the worktree's result.json
     await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
@@ -410,6 +415,19 @@ export async function runCore(o) {
       ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), // #4392
       ...(gateRan ? { conformance: { mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", would: shadowWould, risk: Boolean(riskEnforced) } } : {}), ...extra };
     return done;
+  }
+  /** #4401: post the lane's FORGE:FACTS (result.json facts and validation, changed files, contract decisions); never fails a run. */
+  async function postLaneFacts() {
+    if (!base) return;
+    try {
+      const result = await readResult();
+      const rec = result ? normaliseFacts(result, { files: await stageFiles(), contract: await readContract() }) : null;
+      if (!rec) return;
+      const body = renderFactsRecord(rec);
+      if (factsSeen.some((b) => String(b ?? "").includes(body))) return;
+      await post(FACTS_MARKER, body);
+      T.decisions.push(`FORGE:FACTS: ${rec.rejected.length} rejected approach(es), ${rec.hotspots.length} hot spot(s) on ${rec.files.length} file(s)`);
+    } catch { /* best effort */ }
   }
   /** #4297/#4316: a recovery lane that ended unmerged keeps needs-human with this evidence (shared text in render.mjs). */
   const laneRecoveryEvidence = (reason, code, detail) => recoveryEvidence({ code: recover.code, attempt: recover.attempt, outcome: reason, resultCode: code, detail });
@@ -611,7 +629,8 @@ export async function runCore(o) {
         if (!(e?.code === "CLI_IDLE" || e?.code === "CLI_TIMEOUT")) throw e;
         const idle = e.code === "CLI_IDLE";
         const reason = idle ? "idle timeout" : "timeout";
-        ev({ event: idle ? "CLI_IDLE_KILL" : "CLI_TIMEOUT_KILL", reason, lastTool: e.lastTool ?? null, children: e.children ?? [] });
+        ev({ event: idle ? "CLI_IDLE_KILL" : "CLI_TIMEOUT_KILL", reason, lastTool: e.lastTool ?? null, children: e.children ?? [],
+          ...(idle ? { heavyQueue: e.heavyQueue ?? null, extended: e.extended === true } : {}) });
         await checkpoint(reason);
         if (timeoutRetries++ >= 1) { e.deferCode = idle ? OUTCOME_CODES.CLI_IDLE : OUTCOME_CODES.CLI_TIMEOUT; e.deferDetail = `builder ${reason}; work checkpointed to ${branch}; rerun resumes from it. ${String(e.message).slice(0, 300)}`; throw e; }
         T.anomalies.push(`builder ${reason}: checkpointed, retried once`);
@@ -619,6 +638,14 @@ export async function runCore(o) {
         p = restart(); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "timeout_restart";
       }
     }
+  }
+
+  /** #4405: a silent builder is busy (idle window extended) while a child is a heavy step or its heavy-queue entry is queued/running. */
+  function sessionBusy(children) {
+    const work = children.filter((c) => isHeavyProcess(c.cmd));
+    let heavyQueue = null;
+    try { heavyQueue = io.heavy?.lane?.(children.map((c) => c.pid)) ?? null; } catch { heavyQueue = null; }
+    return work.length || heavyQueue?.queued > 0 || heavyQueue?.running > 0 ? { children: work, heavyQueue } : null;
   }
 
   /** opts (#4363): {model, mode, keepSession, trigger and restartOf (#4362)}; a fresh fix session keeps the build session id for a fallback resume. */
@@ -630,7 +657,9 @@ export async function runCore(o) {
     let spawned = null;
     const onSpawn = (child) => { if (Number.isSafeInteger(child?.pid) && !finishing) { spawned = child.pid; ledgerDo((l) => l.register("pid", child.pid, { marker: basename(String(child.spawnfile ?? "")) || null })); } };
     const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: model ?? builderModel, resume, system: "", prompt, control, onSpawn,
-      idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}) }));
+      idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}),
+      busy: sessionBusy, busyMs: Math.round(cliBusyMinutes * 60000),
+      onIdleExtend: (info) => ev({ event: "CLI_IDLE_EXTENDED", children: info.children, heavyQueue: info.heavyQueue }) }));
     call.then(() => {}, () => {}).finally(() => { if (spawned) ledgerDo((l) => l.release("pid", spawned)); });
     let r;
     call.catch(() => governor.stop());
@@ -650,7 +679,7 @@ export async function runCore(o) {
     await renew();
     await registerReported();
     if (r?.sessionId && !keepSession) sessionId = r.sessionId;
-    await attempt("implement", n, r, mode, trigger, restartOf);
+    await attempt("implement", n, r, mode, trigger, restartOf, resume);
     onProgress({ event: "phase_exit", phase: "build", status: "committed" });
     return r;
   }
@@ -1053,6 +1082,7 @@ export async function runCore(o) {
     const isEngineComment = (b) => b.trimStart().startsWith("<!-- FORGE:");
     const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => String(c?.body ?? "")).filter((b) => !isEngineComment(b))].join("\n\n");
     let trustedComments = trustedOf(iss), issueEdited = false;
+    factsSeen = trustedComments.map((c) => c?.body);
     let issueText = textOf(iss, trustedComments);
     let scopeHash = contractHash(scopeText(iss, trustedComments)); // #4265: the edit signal and the frozen contract's provenance
     ctxLane = laneType({ resumed: Boolean(resumed || salvagedRef), attempts: priorAttempts(iss.body, trustedComments), body: iss.body });
@@ -1100,7 +1130,7 @@ export async function runCore(o) {
       if (contractHash(issueText) === contractHash(text)) return;
       // #4265: the engine's own writes (FORGE:STATE, FORGE:* comments) refresh the text but are not an issue edit
       const old = scopeHash, now = contractHash(scopeText(next, tc));
-      iss = next; trustedComments = tc; issueText = text; scopeHash = now;
+      iss = next; trustedComments = tc; factsSeen = tc.map((c) => c?.body); issueText = text; scopeHash = now;
       if (old === now) return;
       issueEdited = true;
       ev({ event: "ISSUE_EDITED", old, new: now, stage });

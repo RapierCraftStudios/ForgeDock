@@ -189,7 +189,7 @@ describe("conformance gate end-to-end (real git, disposable repo)", { skip: !HAV
     const o = await runCase({ contract: FULL, impl: (t) => fix(t, ["scrape", "search", "export"]) });
     merged(o); assert.ok(o.staging.search && o.staging.export && !o.staging.billingChanged);
     assert.deepEqual([o.counts.builder, o.counts.reviewer], [2, 1]);
-    assert.deepEqual(o.markers, ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:TRAJECTORY"]);
+    assert.deepEqual(o.markers, ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:FACTS", "FORGE:TRAJECTORY"]);
   });
   it("2 omission: the contract silently drops requirement 3; review catches it; issue stays open, nothing merged", async () => {
     const o = await runCase({ contract: OMIT, impl: (t) => fix(t, ["scrape", "search"]) });

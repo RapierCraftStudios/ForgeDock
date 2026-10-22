@@ -7,6 +7,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
+import { parseFactsComment } from "./facts.mjs";
 import { makeLedger } from "./ledger.mjs";
 import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
@@ -135,11 +136,12 @@ function world(o = {}) {
       w.seq.push(c.role + (c.resume ? "-resume" : ""));
       w.envs.push(c.env ?? null);
       if (c.role === "builder") {
+        const cost = c.resume ? (w.sessCost = Math.round(((w.sessCost ?? 0) + 0.1) * 1e9) / 1e9) : (w.sessCost = 0.1); // #4407: a resumed CLI session reports its running total
         const fix = Boolean(c.resume) || /no earlier session/.test(c.prompt); // #4363: a fresh fix session acts like the old resume
         const r = fix ? (w.resumeResult ?? w.result) : w.result;
         const kind = /PLANNING ONLY/.test(c.prompt) ? "plan" : /contract.json is not valid/.test(c.prompt) ? "contract-fix" : "work";
         const n = ++w.builderN;
-        if (o.builder) { await o.builder(w, put, kind, n, c); return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: 0.1, durationMs: 1000, turns: 3, model: "default" }; }
+        if (o.builder) { await o.builder(w, put, kind, n, c); return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: cost, durationMs: 1000, turns: 3, model: "default" }; }
         if (kind === "plan") {
           if (o.live) await o.live(w, put);
           else if (!o.noStages) writeStages(["investigation"]);
@@ -157,7 +159,7 @@ function world(o = {}) {
             validation: (fix && n > 2 ? o.resumeValidation : null) ?? o.validation ?? (w.contract.validate ?? []).map((v) => ({ id: v.id, command: v.command, exit: 0 })), amendments: (fix && n > 2 ? o.resumeAmendments : null) ?? o.amendments ?? [] }));
         }
         if ((fix && !o.freshNoCommit) || /Merging origin\//.test(c.prompt)) { w.head = `bbbb${w.calls.length}`.padEnd(16, "0"); if (!o.leaveConflicts) { w.conflictFiles = []; w.mergeInProgress = false; } }
-        return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: 0.1, durationMs: 1000, turns: 3, model: "default" };
+        return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: cost, durationMs: 1000, turns: 3, model: "default" };
       }
       return { text: w.reviews.length ? w.reviews.shift() : ok(), sessionId: "rev", usage: { input_tokens: 4, output_tokens: 2 }, costUsd: 0.05, durationMs: 500, turns: 2, model: c.model };
     },
@@ -183,7 +185,7 @@ describe("core work-on", () => {
     const r = await run(w, { dir });
     assert.equal(r.terminalReason, "merged");
     assert.equal(r.pr, 77);
-    assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:TRAJECTORY"]);
+    assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:FACTS", "FORGE:TRAJECTORY"]);
     assert.match(w.comments[1], /<!-- FORGE:VALIDATE -->/, "VALIDATE stays as an alias marker");
     assert.match(w.comments[1], /^<!-- FORGE:INVESTIGATION -->\n<!-- FORGE:VALIDATE -->\n## Investigation Report\n\*\*Verdict\*\*: CONFIRMED/);
     assert.match(w.comments[2], /^<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n## Builder Contract \(frozen `[0-9a-f]{12}`\)/, "PLAN stays as an alias marker");
@@ -1951,10 +1953,21 @@ describe("comment templates", () => {
     assert.match(t, /does not conform to the issue and its frozen contract after one builder resume/);
   });
 
+  it("#4401 the lane posts FORGE:FACTS from result.json facts, its validation and changed files; never quotable as a requirement", async () => {
+    const w = world({ result: { status: "fixed", summary: "s", validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 0 }],
+      facts: { rejected: [{ approach: "detection-only guard", why: "hides the cause" }], hotspots: [{ at: "src/foo.js:3", why: "null path" }] } } });
+    assert.equal((await run(w)).terminalReason, "merged");
+    const f = parseFactsComment(w.comments.find((c) => markerOf(c) === "FORGE:FACTS"));
+    assert.deepEqual(f.rejected, [{ approach: "detection-only guard", why: "hides the cause" }]);
+    assert.deepEqual(f.baselines, [{ command: "node --test test/foo.test.js", exit: 0 }]);
+    assert.ok(f.files.length > 0 && !f.files.some((x) => x.startsWith(".forge-lean/")), JSON.stringify(f.files));
+    assert.ok(!scopeText({ title: "t", body: "b" }, [{ body: w.comments.find((c) => markerOf(c) === "FORGE:FACTS") }]).includes("detection-only"));
+  });
+
   it("missing stage files in a real run are rendered from result.json and noted as anomalies", async () => {
     const w = world({ noStages: true, result: { status: "fixed", summary: "fixed foo", evidence: ["src/foo.js:3 x"], root_cause: "bad at src/foo.js:3", changes: [{ file: "src/foo.js", change: "guard", why: "w" }], tests: [{ command: "t", result: "pass", fails_without_fix: false }] } });
     await run(w);
-    assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:TRAJECTORY"]);
+    assert.deepEqual(w.comments.map(markerOf), ["FORGE:STARTED", "FORGE:INVESTIGATION", "FORGE:CONTRACT", "FORGE:IMPLEMENTATION", "FORGE:REVIEW", "FORGE:FACTS", "FORGE:TRAJECTORY"]);
     assert.match(w.comments[1], /Verdict\*\*: CONFIRMED[\s\S]*Root Cause\nnot reported/, "the plan call has no result.json: a placeholder, still posted");
     assert.match(w.comments[3], /fails without fix: no/);
     assert.match(traj(w)[0], /investigation.md missing or empty: rendered from result.json/);
@@ -3336,6 +3349,84 @@ describe("batch robustness (#4112-#4115)", () => {
       assert.equal(w.edits.some((e) => e.includes("needs-human")), false);
       assert.ok(w.pushes >= 1);
     }
+  });
+
+  // ---- #4405 ----
+  const HEAVY_CHILD = (d) => `printf '#!/bin/sh\\nsleep 1.5\\n' > ${d}/vitest; chmod +x ${d}/vitest`;
+  it("#4405 a silent session with a running heavy-step child is not idle-killed within the extended window", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { isHeavyProcess } = await import("./heavy.mjs");
+    const d0 = tmpDir("core-cli-");
+    const { d, bin } = await fakeCli("waits", `${TOOL}\n${HEAVY_CHILD(d0)}\n${d0}/vitest run\n${RESULT}`);
+    const extended = [];
+    const busy = (children) => { const work = children.filter((c) => isHeavyProcess(c.cmd)); return work.length ? { children: work, heavyQueue: { queued: 0, running: 1 } } : null; };
+    const r = await runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 300, maxMs: 20000,
+      busy, busyMs: 10000, onIdleExtend: (i) => extended.push(i) });
+    assert.equal(r.text, "all done");
+    assert.equal(extended.length, 1, "the extension is reported once per silent stretch");
+    assert.ok(extended[0].children.some((c) => /vitest run/.test(c.cmd)), JSON.stringify(extended[0]));
+  });
+
+  it("#4405 a busy session past idle + busy window is killed as CLI_IDLE with extended and heavyQueue", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { d, bin } = await fakeCli("stuck", `${TOOL}\nsleep 30 &\nwait`);
+    const t0 = Date.now();
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 300, maxMs: 20000,
+      busy: () => ({ children: [], heavyQueue: { queued: 1, running: 0 } }), busyMs: 600 }), (e) => {
+      assert.equal(e.code, "CLI_IDLE"); assert.equal(e.extended, true); assert.deepEqual(e.heavyQueue, { queued: 1, running: 0 });
+      return true;
+    });
+    const took = Date.now() - t0;
+    assert.ok(took >= 850 && took < 8000, `killed after idle + busy window, not before (${took} ms)`);
+  });
+
+  it("#4405 the CLI_TIMEOUT ceiling still applies during an idle extension", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { d, bin } = await fakeCli("busyceil", `${TOOL}\nsleep 30 &\nwait`);
+    const t0 = Date.now();
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 300, maxMs: 1200,
+      busy: () => ({ children: [], heavyQueue: { queued: 0, running: 1 } }), busyMs: 60000 }), (e) => { assert.equal(e.code, "CLI_TIMEOUT", e.message); return true; });
+    assert.ok(Date.now() - t0 < 6000, "killed at maxMs, not after idle + busy window");
+  });
+
+  it("#4405 a silent session with no work children is still killed at the idle timeout when busy is wired", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { isHeavyProcess } = await import("./heavy.mjs");
+    const { d, bin } = await fakeCli("idle2", `${TOOL}\nsleep 30 &\nwait`);
+    const t0 = Date.now(); let asked = 0;
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 400, maxMs: 20000,
+      busy: (ch) => { asked++; return ch.some((c) => isHeavyProcess(c.cmd)) ? { children: ch } : null; }, busyMs: 60000 }), (e) => {
+      assert.equal(e.code, "CLI_IDLE"); assert.equal(e.extended, false); assert.equal(e.heavyQueue, null);
+      assert.ok(e.children.some((c) => /sleep 30/.test(c.cmd)));
+      return true;
+    });
+    assert.ok(asked >= 1); assert.ok(Date.now() - t0 < 3000, "killed at the idle timeout, not the busy window");
+  });
+
+  it("#4405 the builder call wires busy (heavy children or this session's heavy-queue entries) and the kill event carries heavyQueue", async () => {
+    const w = world({ dirty: true }); const dir = tmpDir("core-busy-");
+    const lanes = [];
+    w.io.heavy = { acquire: async () => ({ waitMs: 0, queued: 0, release() {} }), lane: (pids) => { lanes.push(pids); return pids.includes(42) ? { queued: 1, running: 0 } : { queued: 0, running: 0 }; } };
+    const orig = w.io.runner; let n = 0, seen = null;
+    w.io.runner = async (c) => {
+      if (c.role === "builder" && n++ === 1) {
+        seen = c;
+        c.onIdleExtend(c.busy([{ pid: 42, cmd: "node heavy.mjs run --name npm -- npm test" }]));
+        throw Object.assign(new Error("idle"), { code: "CLI_IDLE", lastTool: null, children: [], extended: true, heavyQueue: { queued: 1, running: 0 } });
+      }
+      return orig(c);
+    };
+    const r = await run(w, { dir, cliBusyMinutes: 30 });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(seen.busyMs, 30 * 60000);
+    assert.equal(seen.busy([{ pid: 5, cmd: "sleep 10" }]), null, "a poller alone is not activity");
+    assert.deepEqual(seen.busy([{ pid: 42, cmd: "sleep 10" }]), { children: [], heavyQueue: { queued: 1, running: 0 } }, "this session's queued heavy entry is activity");
+    assert.equal(seen.busy([{ pid: 6, cmd: "/bin/sh /x/vitest run" }]).children.length, 1, "a test runner child is activity");
+    assert.deepEqual(lanes.at(-1), [6]);
+    const log = readLog(dir, 7);
+    assert.deepEqual(log.find((e) => e.event === "CLI_IDLE_EXTENDED").heavyQueue, { queued: 1, running: 0 });
+    const kill = log.find((e) => e.event === "CLI_IDLE_KILL");
+    assert.deepEqual(kill.heavyQueue, { queued: 1, running: 0 }); assert.equal(kill.extended, true);
   });
 
   it("#4112 a rerun resumes from the checkpoint branch and tells the builder to continue", async () => {
@@ -5050,6 +5141,36 @@ describe("#4362 attempt triggers", () => {
     off.io.runner = async (c) => { if (c.role === "builder") offCaps.push(c.contextMax ?? 0); return o2(c); };
     assert.equal((await run(off, { dir: tmpDir("core-ctx-"), contextCeilingTokens: 0 })).terminalReason, "merged");
     assert.ok(offCaps.every((x) => x === 0));
+  });
+});
+
+describe("#4407 per-attempt cost deltas", () => {
+  const bad1 = { ...CONTRACT, requirements: [{ id: "R1", quote: "make foo nicer", disposition: "deliver" }] };
+  const usage = (dir) => readLog(dir, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE");
+  const sum = (xs) => Math.round(xs.reduce((a, x) => a + x, 0) * 1e9) / 1e9;
+
+  it("the deltas of a resumed builder session sum to its final total and the lane cost is their sum", async () => {
+    // plan (fresh) -> contract correction (resume) -> build (resume): the CLI reports 0.1, 0.2, 0.3 for the one session
+    const w = world({ contract: bad1, fixedContract: CONTRACT }); const dir = tmpDir("core-4407-");
+    const r = await run(w, { dir });
+    assert.equal(r.terminalReason, "merged");
+    const impl = usage(dir).filter((e) => e.phase === "implement");
+    assert.deepEqual(impl.map((e) => e.trigger), ["plan", "contract_correction", "build"]);
+    for (const e of impl) assert.ok(Number.isFinite(e.cost_usd_delta) && Number.isFinite(e.cost_usd_session), `attempt ${e.attempt} lacks the cost fields`);
+    assert.deepEqual(impl.map((e) => e.cost_usd_session), [0.1, 0.2, 0.3]);
+    assert.equal(sum(impl.map((e) => e.cost_usd_delta)), impl.at(-1).cost_usd_session, "sum of deltas = final session total");
+    const all = usage(dir);
+    assert.equal(Math.round(r.cost_usd * 1e9) / 1e9, sum(all.map((e) => e.cost_usd_delta)), "the lane cost (batch/orchestrate rows) sums the deltas");
+    assert.ok(r.cost_usd < sum(all.map((e) => e.cost_usd)), "not the sum of running totals");
+  });
+
+  it("the trajectory cost line and the run telemetry carry the deltas", async () => {
+    const w = world({ contract: bad1, fixedContract: CONTRACT });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(traj(w)[0].includes("cost $0.3500"), traj(w)[0]);
+    const tel = w.telemetry.filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "implement");
+    assert.deepEqual(tel.map((e) => e.cost_usd_delta), [0.1, 0.1, 0.1]);
   });
 });
 
