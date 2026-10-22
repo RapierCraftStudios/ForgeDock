@@ -7,6 +7,7 @@
  * `decomposed` run adds its sub-issues and its dependents wait on them instead (#4124).
  * No investigation, synthesis or agent spawning. `runOne(issue)` and `readBody(issue)` are injected.
  * Optional `prefilter(issue, lane)` (#4123) runs in the lane slot before `runOne`: when it closed the issue, no lane starts.
+ * When it parked the issue (#4389, `parked: true`), no lane starts either and the row ends with the parked kind.
  * Optional `resolveLane(issue)` (#4125) works out each issue's own lane (milestone branch or staging): an issue whose
  * lane is refused ends `lane-refused` without a run, and a dependency edge between two lanes goes to `onCrossLane`.
  *
@@ -70,6 +71,7 @@ import { parseDependsOn } from "../engine/phases.mjs";
 import { classifyNeedsHuman, recoveryCodeOf } from "../engine/outcome-codes.mjs";
 import { recoveryEvidence } from "./render.mjs";
 import { renderAlerts } from "../stats/render.mjs";
+import { formatParkedLine } from "./prefilter.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -483,6 +485,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       const pf = checked.get(n) ?? null;
       let r;
       if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
+      // #4389: a parked post-deploy follow-up starts no lane; it ends awaiting-promotion|awaiting-precondition, re-checked next batch.
+      else if (pf?.parked) r = { terminalReason: pf.kind, cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
           r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= recoveryMax } } : {}), onStart: (info) => {
@@ -646,6 +650,8 @@ export function formatOutcomeLists(rows) {
     if (!human && (r.outcome === "needs-human" || r.recovery)) out.push(`unrecovered: #${r.issue} (${r.code ?? r.recovery?.code ?? "unclassified"}: ${one(r.recovery ? `recovery ${r.recovery.code} ended ${r.recovery.outcome}: ${r.recovery.detail}` : r.detail)})`);
   }
   const esc = (rows ?? []).filter((r) => r?.outcome === "needs-human" && classifyNeedsHuman(r) === "human");
+  const parked = formatParkedLine(rows); // #4389: one line for every parked post-deploy follow-up, never an escalation
+  if (parked) out.push(parked);
   if (esc.length) out.push(["escalations (human decisions, asked once):", ...esc.map((r) => `- #${r.issue} (${r.code}): ${one(r.detail)}`)].join("\n"));
   return out;
 }
@@ -654,7 +660,7 @@ export function formatTable(rows) {
   // #4255: sandbox minutes and cost next to the token cost, only when some lane ran in a sandbox.
   const sbx = rows.some((r) => r?.sandbox);
   const head = ["issue", "outcome", "PR", "cost", ...(sbx ? ["sbx-min", "sbx-$"] : []), "min"];
-  const body = rows.map((r) => [`#${r.issue}`, r.outcome + (["skipped", "held"].includes(r.outcome) && r.detail ? ` (${r.detail})` : r.prefilter?.closed ? " (pre-filter)" : ""), r.pr ? `#${r.pr}` : "-", `$${(r.cost_usd ?? 0).toFixed(2)}`,
+  const body = rows.map((r) => [`#${r.issue}`, r.outcome + (["skipped", "held"].includes(r.outcome) && r.detail ? ` (${r.detail})` : r.prefilter?.closed || r.prefilter?.parked ? " (pre-filter)" : ""), r.pr ? `#${r.pr}` : "-", `$${(r.cost_usd ?? 0).toFixed(2)}`,
     ...(sbx ? (r.sandbox ? [(Number(r.sandbox.minutes) || 0).toFixed(1), `$${(Number(r.sandbox.cost_usd) || 0).toFixed(2)}`] : ["-", "-"]) : []), String(r.minutes ?? 0)]);
   const w = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)));
   const line = (c) => c.map((x, i) => x.padEnd(w[i])).join("  ").trimEnd();
