@@ -1013,7 +1013,6 @@ for enforce: a seeded-defect replay in shadow where it catches what the reviewer
 0.10. Cost: 0 LLM calls when off (default); one read-only call per reviewed head when on. ADR
 `decisions/4397-independent-verifier.md`.
 
-<<<<<<< HEAD
 ## Entry 2026-10-23 — Structured FORGE:FACTS for later lanes on the same files (#4401)
 
 `facts.mjs` (pure) defines the record. The implement prompt asks the builder for an optional result.json `facts` key:
@@ -1034,7 +1033,7 @@ their linked issues whose `files` overlap the issue's named paths. The pack list
 hot spots, decisions, conventions, baselines. Each line carries its provenance (`#33, PR #101`). The repo-fact pointers
 follow, all under `facts` (section "Facts from earlier lanes and repo facts"). Cost: 0 LLM calls, about 60 prompt
 tokens, one comment per lane, and no extra GitHub read per PR.
-=======
+
 ## Entry 2026-10-23 — Post-deploy precondition gate in the pre-filter (#4389)
 
 `prefilter.mjs` `postDeployGate`: an open issue whose body carries `<!-- FORGE:DEFERRED_FROM: #P -->` and whose checklist
@@ -1052,4 +1051,3 @@ GitHub's) is resolved and fetched once, lazily, by `lazyDefaultBranch` (orchestr
 a parked result as outcome `awaiting-promotion|awaiting-precondition` with $0 and no `runOne` (not SATISFIED: dependents
 skip). `formatOutcomeLists` prints one `awaiting promotion: #A #B (fixes on <lane>, not on <default>)` line instead of
 escalations. Re-evaluation is the next batch or triage run. Cost: 0 LLM calls; per gated issue 1-2 gh reads and one git call.
->>>>>>> origin/staging
