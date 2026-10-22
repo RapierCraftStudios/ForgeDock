@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, followupMap, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -309,9 +309,43 @@ describe("close plan and follow-up items", () => {
     const k = { requirements: [{ id: "R1", disposition: "deliver" }, { id: "R2", disposition: "defer", tracked: "#9" }, { id: "R3", disposition: "post-deploy", tracked: "#9" }] };
     assert.deepEqual(closePlan(k).tracked, ["#9"]);
   });
+  it("#4398 isInvestigation reads the investigate( / investigate: title type only", () => {
+    for (const t of ["investigate(stealth): which signal", "Investigate: why", "  investigate(x)"]) assert.equal(isInvestigation(t), true, t);
+    for (const t of ["fix(investigate): x", "feat: investigate later", "investigation(x)", "", null]) assert.equal(isInvestigation(t), false, String(t));
+  });
+  it("#4398 an investigation closes partial when a requirement is deferred or its answer is not implemented; otherwise completed", () => {
+    const title = "investigate(stealth): which device signal is rejected";
+    const k = { requirements: [{ id: "R1", disposition: "deliver" }, { id: "R2", disposition: "defer", tracked: "#9" }, { id: "R3", disposition: "not-applicable" }] };
+    const p = closePlan(k, { title });
+    assert.equal(p.reason, "partial"); assert.deepEqual(p.open.map((r) => r.id), ["R2"]); assert.deepEqual(p.tracked, ["#9"]);
+    assert.deepEqual(closePlan(k, { title: "fix: foo" }), { reason: "completed", tracked: ["#9"] }, "only investigations change");
+    const d = { requirements: [{ id: "R1", disposition: "deliver" }, { id: "R2", disposition: "deliver" }] };
+    const rows = (s1, s2) => ({ requirements: [{ id: "R1", status: s1 }, { id: "R2", status: s2 }] });
+    assert.deepEqual(closePlan(d, { title, review: rows("implemented", "implemented") }), { reason: "completed", tracked: [] });
+    assert.deepEqual(closePlan(d, { title, review: rows("implemented", "deferred") }).open.map((r) => r.id), ["R2"]);
+    assert.deepEqual(closePlan(d, { title, review: { requirements: [{ id: "R1", status: "implemented" }] } }).open.map((r) => r.id), ["R2"], "a missing row is not an answer");
+    assert.equal(closePlan(d, { title, review: null }).reason, "completed", "a skipped review judges dispositions only");
+  });
+  it("#4398 formatShadowSummary: shadow would-block and false-block shares, risk-enforced lanes; null without conformance rows", () => {
+    assert.equal(formatShadowSummary([{ issue: 1 }]), null); assert.equal(formatShadowSummary(undefined), null);
+    const rows = [{ conformance: { mode: "shadow", would: "conforms", risk: false } }, { conformance: { mode: "shadow", would: "nonconforming", risk: false } },
+      { conformance: { mode: "shadow", would: "review.incomplete", risk: false } }, { conformance: { mode: "shadow", would: null, risk: false } },
+      { conformance: { mode: "enforce", would: null, risk: true } }, { issue: 9 }];
+    assert.equal(formatShadowSummary(rows), "conformance: 4 shadow lanes, would block 2 (50%), false-block 1 (25%: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: 1");
+    assert.match(formatShadowSummary([{ conformance: { mode: "enforce", would: null, risk: false } }]), /0 shadow lanes, would block 0 \(n\/a\)/);
+  });
   it("follow-up keys are single-line, tab-free and stable", () => {
     const [i] = followupItems([{ id: "R2", quote: "a\tb\n`c`", disposition: "defer", why: "x\ny" }]);
     assert.equal(i.key, "R2: a b c"); assert.equal(i.why, "defer: x y"); assert.doesNotMatch(i.key + i.why, /[\t\n`]/);
+  });
+  it("a follow-up key whose 240-char cut ends on a space has no trailing whitespace (#4388)", () => {
+    const quote = `${"x".repeat(234)} tail of the quote past the cut`; // "R12: " + 234 chars puts the space at index 239
+    assert.equal(`R12: ${quote}`[239], " ");
+    const [i] = followupItems([{ id: "R12", quote, disposition: "defer", why: "w" }]);
+    assert.equal(i.key, i.key.trim()); assert.equal(i.key.length, 239); assert.doesNotMatch(i.key, /\s$/);
+  });
+  it("followupMap resolves untrimmed item keys from the script's trimmed echo (#4388)", () => {
+    assert.deepEqual(followupMap("R1: a\t42\nnoise\nR2: b\tx\n", [{ key: "R1: a " }, { key: "R2: b" }]), { "R1: a ": 42 });
   });
 });
 

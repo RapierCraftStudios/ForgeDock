@@ -98,6 +98,20 @@ branches:
   feature_pattern: "milestone/{slug}"
 
 # =============================================================================
+# POST-DEPLOY (OPTIONAL)
+# Deferred follow-ups whose items are all post-deploy checks are parked
+# (label awaiting-promotion, no lane) until the parent's fix is on
+# branches.default. precondition_cmd adds a repo-specific readiness check git
+# cannot see (e.g. rollout state), run once the fix is on the default branch:
+# exit 0 = ready, exit 1 = not ready (parked), anything else = ignored (lane).
+# It receives the issue number as $1 and in FORGE_ISSUE.
+# Commands: orchestrate, triage
+# =============================================================================
+
+# post_deploy:
+#   precondition_cmd: "scripts/rollout-ready.sh"
+
+# =============================================================================
 # AGENTS (OPTIONAL)
 # Default model for pipeline agents — the main orchestrator and every
 # sub-agent spawned via the Agent/Task tool while following a command spec
@@ -279,6 +293,11 @@ branches:
 #   context_pack_sources: "graph,attempts,ledger,facts"   # drop a noisy source
 #   context_pack_bytes: 6144                              # hard cap
 #   context_pack_days: 30                                 # ledger window
+#   # Context ceiling (#4390): a builder session whose per-turn context (input +
+#   # cache read + cache creation) reaches this many tokens is checkpointed and
+#   # restarted fresh from the frozen contract, the diff and the last validate
+#   # result instead of carrying its whole history. 0 disables.
+#   context_ceiling_tokens: 120000
 
 # =============================================================================
 # ENV (OPTIONAL)
@@ -554,6 +573,18 @@ branches:
 #   trigger: shadow
 #   # Globs added to the built-in risk words (comma list or block list).
 #   risk_paths: "src/db/**, *.sql"
+#   # Independent adversarial verifier for the core path (#4397). After a
+#   # conforming review, one fresh read-only call on a model other than the
+#   # builder's gets only the issue, the contract, the diff and the callers of the
+#   # changed functions, and tries to break the change. off (default): no call.
+#   # shadow: log VERIFIER and list findings in FORGE:REVIEW, never block.
+#   # enforce: each file:line finding goes to the conformance fix round. Switch
+#   # to enforce only after a seeded-defect replay in shadow and >=30 shadow runs
+#   # with a verifier/implement cost ratio <= 0.10
+#   # (report: node bin/lean/verifier.mjs [--json]).
+#   verifier: off
+#   # Verifier model (default claude-sonnet-5-5; swapped when it is the builder's).
+#   verifier_model: claude-sonnet-5-5
 
 # =============================================================================
 # DECOMPOSITION (OPTIONAL)

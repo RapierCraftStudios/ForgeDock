@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readCloseParent, readVerify, makeIo, checkFromCli } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readVerifier, readCloseParent, readVerify, makeIo, checkFromCli } from "../engine-cli.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { serializeState } from "../engine/state.mjs";
@@ -1035,6 +1035,27 @@ describe("readFixModel (#4363)", () => {
   });
 });
 
+describe("readVerifier (#4397)", () => {
+  it("reads review.verifier and review.verifier_model, else engine.lean_verifier_model; absent or invalid is undefined", () => {
+    const d = tmpDir("verifier-yaml-");
+    assert.equal(readVerifier(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "review:\n  trigger: shadow\n");
+    assert.equal(readVerifier(d), undefined, "absent");
+    for (const m of ["off", "shadow", "enforce"]) {
+      writeFileSync(join(d, "forge.yaml"), `review:\n  verifier: ${m}\n`);
+      assert.deepEqual(readVerifier(d), { mode: m });
+    }
+    writeFileSync(join(d, "forge.yaml"), "review:\n  verifier: loud\n");
+    assert.equal(readVerifier(d), undefined, "invalid mode");
+    writeFileSync(join(d, "forge.yaml"), "review:\n  verifier: shadow\n  verifier_model: claude-haiku-5-5\n");
+    assert.deepEqual(readVerifier(d), { mode: "shadow", model: "claude-haiku-5-5" });
+    writeFileSync(join(d, "forge.yaml"), "review:\n  verifier: enforce\nengine:\n  lean_verifier_model: opus\n");
+    assert.deepEqual(readVerifier(d), { mode: "enforce", model: "opus" });
+    writeFileSync(join(d, "forge.yaml"), "review:\n  verifier: shadow\n  verifier_model: \"bad model; rm\"\n");
+    assert.deepEqual(readVerifier(d), { mode: "shadow" });
+  });
+});
+
 describe("readCloseParent (#3736, #4337)", () => {
   it("is true only for decomposition.close_parent: true; absent, false, another word or another section's key is false", () => {
     const d = tmpDir("close-parent-yaml-");
@@ -1114,6 +1135,30 @@ describe("forgedock check (#4364)", () => {
     const empty = tmpDir("fd-check-none-");
     execFileSync("git", ["init", "-q"], { cwd: empty, env: GIT_ENV });
     await assert.rejects(checkFromCli([], { cwd: empty, git: f.git, out: () => {} }), (e) => e.exitCode === 2 && /contract\.json/.test(e.message));
+  });
+
+  it("#4390: a failure prints its tail, failing test ids and a pointer to the full log under .forge-lean/logs/", async () => {
+    const f = fixture({ plan: { v: 1, base: "staging", mode: "local", learned: ["make test"], maxMinutes: null, precheckTotalSeconds: 600, precheckTimeoutSeconds: 30 } });
+    const big = [...Array.from({ length: 200 }, (_, i) => `noise line ${i}`), "FAILED tests/test_a.py::test_one - AssertionError", ...Array.from({ length: 60 }, (_, i) => `trace ${i}`), "1 failed, 9 passed"].join("\n");
+    const lines = [];
+    const r = await checkFromCli([], { cwd: f.dir, git: f.git, runCommand: async (c) => ({ rc: c.command === "make test" ? 1 : 0, output: c.command === "make test" ? big : "" }), env: {}, out: (l) => lines.push(l) });
+    assert.equal(r.exitCode, 1);
+    const t = lines.join("\n");
+    assert.match(t, /--- make test \(exit 1\)\n…trace 21\n/, "the last 40 lines");
+    assert.doesNotMatch(t, /noise line 199/);
+    assert.match(t, /failing tests:\n {2}FAILED tests\/test_a\.py::test_one/);
+    assert.match(t, /full log: \.forge-lean\/logs\/check-cmd1\.log/);
+    assert.equal(readFileSync(join(f.dir, ".forge-lean", "logs", "check-cmd1.log"), "utf8"), big);
+    const saved = JSON.parse(readFileSync(join(f.dir, ".forge-lean", "self-check.json"), "utf8"));
+    assert.deepEqual(Object.keys(saved.commands[0]).sort(), ["command", "ms", "rc"], "self-check record shape unchanged");
+  });
+
+  it("#4390: readCoreLimits reads engine.context_ceiling_tokens (0 allowed, junk ignored)", async () => {
+    const { readCoreLimits } = await import("../engine-cli.mjs");
+    const d = tmpDir("fd-ctx-");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: 90000\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, 90000);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: 0\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, 0);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: lots\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, undefined);
   });
 
   it("local only: the command never reaches GitHub (no gh in its deps or source)", () => {

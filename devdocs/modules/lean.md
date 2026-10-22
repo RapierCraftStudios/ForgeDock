@@ -81,6 +81,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    quote of the requirement a failure names (`explainFailures`), and a failed
    validate names its command. Typed blocks (`classifyBlock`):
    `dependency` | `split` (≤ `MAX_SUBISSUES` sub-issues → `decomposed`) | `human`.
+   A split sub-issue may declare `files` (the paths it will edit); `serializeShared`
+   adds a `Depends on` edge from each later sub-issue to the nearest earlier one it
+   shares a file with and does not already reach, so siblings editing the same hub
+   (barrel, union type, shared fixture, index doc) merge one after another instead
+   of conflicting; each added edge is a decision. No `files`: unchanged (#4385).
    A `split` closes the parent `not planned` once its `FORGE:DECOMPOSED` trail
    and `workflow:decomposed` label are written (label kept; the closing comment
    lists the sub-issues; either write failing leaves it open) (#4337). A
@@ -125,7 +130,24 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    failures, trigger)` with `precheck`/`structure`/`docs`/`enumerating`/`sequence`/`conformance`/`review`, CI verify
    `ci_red`, merge-time CI `merge_ci`, CI-unavailable fallback `ci_unavailable`, base-sync conflict `recovery`,
    reviewer `review`, split grouping `plan`; a CLI idle/timeout retry is `timeout_restart` with `restart_of` (the
-   replaced trigger). A source-scan test in `lean.test.mjs` fails on a call site without a known literal. The lane
+   replaced trigger); a context-ceiling restart (#4390, below) is `context_restart` with `restart_of`, and like
+   `timeout_restart` of the build it counts as reaching the build, not rework.
+   **Context ceiling** (#4390, forge.yaml `engine.context_ceiling_tokens`, default 120000, 0 = off; `readCoreLimits`
+   → runCore `contextCeilingTokens`): every builder call except `plan`/`contract_correction`/`block_correction` passes
+   `contextMax` through `makeLeanRunner` to `runCliBackendAsync`, which reads each stream-json assistant message's
+   `usage` (context = input + cache read + cache creation) and kills the session at the ceiling with `CLI_CONTEXT`
+   (`context`, `turns`, stream-aggregated `usage`, deduped by message id). `builder()` logs `CONTEXT_CEILING`, records
+   the stopped attempt's usage/turns as a `PHASE_ATTEMPT_USAGE` (so killed tokens stay in telemetry), runs
+   `checkpoint("context ceiling")` (commit + push, never loses work) and restarts a fresh session with the call's restart
+   prompt + `prompts.mjs` `contextRestartPrompt`: `git diff --stat` and the hunks against the lane base (`boundDiff`,
+   `RESTART_DIFF_MAX_BYTES` 40 KB) and the last `.forge-lean/self-check.json`; contract.json stays the authority on disk.
+   Context restarts do not use the single idle/timeout retry; after 3 in one call the call runs uncapped (loop guard).
+   **Quiet output** (#4390): `HOST_RULES` tells the builder to run tests quiet, read failures as `tail -40` + failing test
+   ids, read files by range and send output that may pass 8 KB to a `$TMPDIR` file. `precheck.mjs` `quietFailure`
+   (last 40 lines within the char share, failing-test-id lines by pytest/TAP/jest/vitest/go/cargo markers, `full log:`
+   path) formats each failure in `forgedock check`'s table and in the precheck fix prompt; the full output goes to
+   `.forge-lean/logs/` (`CHECK_LOG_DIR`: `check-<V#|cmdN>.log`, `precheck-<round>-<i>.log`). Pitfall learning still
+   reads the capped tail. A source-scan test in `lean.test.mjs` fails on a call site without a known literal. The lane
    result carries `firstPass` (`firstPassOf`: no `REWORK_TRIGGERS` attempt after the build; omitted when the lane never
    reached it) → orchestrate row `first_pass` → batch-report line `first-pass: P% (k/n lanes that reached the build)`
    (`formatFirstPassSummary`, after the precheck line). `forgedock stats` reads the same fields (`docs/STATS.md`).
@@ -187,6 +209,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    precheck `validate_failed` or `requirement_unimplemented`, before any
    reviewer run) or `enforce`. Defer/post-deploy requirements become tracked
    follow-ups (`followupItems`, `pendingTracking`).
+   Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
+   the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
+   (#4388: a key ending on a space looped on `followup.unavailable`).
+   Independent verifier (#4397, `verifier.mjs`, forge.yaml `review.verifier`,
+   default `off`): after a conforming review, one fresh read-only call on a
+   model other than the builder's tries to break the change; enforce turns its
+   `file:line` findings into `conformance.regression` for the same fix round.
    Scope authority (#4350): the engine's scope gate (deliverables plus typed
    amendments) decides scope, not a builder-written allowlist. `precheck({frozen})`
    gets the pre-amendment contract; a failed validate that is a scope check
@@ -236,11 +265,22 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    logs (`collectFailedLogs`, `ciFailurePrompt`), re-reviews and pushes the fix,
    and waits again; `ci.red` only after `max_rounds` (shared with `ciVerify`) or a
    round with no new commit. Rollups of another head count as pending. `CI_FIX_ROUND`.
+   **e2e merge gate** (#4403, `e2e.mjs`, forge.yaml `verify.e2e*`): before `gh pr merge`,
+   once per reviewed head, a lane whose diff touches `e2e_paths` or whose contract
+   quotes `[type:e2e]` runs `runE2eGate` (label the PR and wait on `e2e_checks`, a
+   `skipped` run = not run; or dispatch `e2e_workflow` via `runCiVerify`). The lane's
+   own failures (`ownFailures`: spec path/basename in the log, empty log, or no spec
+   changed) go through `mergeFixRound`; others are an anomaly (`e2e_blocking: all`
+   blocks them). Timeout → `ci-pending`, unavailable → needs-human. `E2E_VERIFY`.
+   `never`, or no `e2e_label`/`e2e_workflow` configured, keeps today's behaviour.
    **Sequence numbers** (#4322, `sequence.mjs`): before review and the first push,
    and after every base-sync merge (clean or not), lane-added `<NNN>_*` files whose
    number the fetched lane already uses → builder renumbers (`sequencePrompt`; a
    conflicted migration/journal gets `sequenceSyncNote`), then `verifyRenumber`
    (same blob, journal strictly ordered, no collision); still failing → `base.conflict`.
+   Numbered documents (#4385, e.g. `docs/adr/0016-*.md`): a renamed file may differ
+   only in its own number (`numberOnlyChange`, padded or not), and no tracked file
+   may still name a renamed file's old stem (the series index, links).
    Only real series count (#4343): a leading date (`YYYY-MM-DD`, `YYYYMMDD`) is no
    number, and the directory must hold a series on the base — a `_journal.json` /
    `meta/_journal.json`, or ≥2 distinct numbers of the file's width filling at least
@@ -335,7 +375,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
-`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305),
+`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
@@ -430,6 +470,13 @@ arguments, resolves the repo, auto-spawns the daemon (output to
   in the daemon (breaker reset, as an operator resume).
 - `set-parallel {id, k}` sets K live. With no daemon running, the client writes
   the `parallel` file itself.
+- `add {id, issues}` (#4408, `--add <id> N...`, also `--resume <id> N...`) merges
+  issues into the batch's cumulative `add` file, hosted or not. The client skips
+  closed issues first; non-integers and issues already in the batch are skipped.
+  The runner re-reads the file every pass (`getAdded`), adds new issues through
+  `addIssues` after re-reading the pending issues' `Depends on`, and records one
+  batch decision plus an `added` row. `attach` resumes a finished batch that has
+  unrun adds instead of replaying its report.
 - `status` reports the daemon pid and hosted batches.
 
 A client exit never stops a batch.
@@ -892,12 +939,33 @@ At contract freeze, `preflightValidates` (`lean.mjs`) probes the host for what e
 (`command -v`), the modules a bare `python`/`python3`/`pythonX.Y` imports via `-c`/`-m` (`importlib.util.find_spec` with
 that interpreter) and the bare packages `node -e`/`-p` code imports (`node_modules/<pkg>` walked up from the worktree).
 Paths, `$VAR` words, names `repoTracks(git ls-files)` holds and names a deliverable's `change` text names are not probed;
-a wrapper (`uv run`, `npx`, ...) probes only the wrapper; at most 20 probes. Probes run through the separate
+a wrapper (`uv run`, `npx`, ...) probes only the wrapper (the #4393 run probe covers what is behind it); at most 20 probes. Probes run through the separate
 `io.probeCommand` hook (`runCheckCommand`) with `laneEnv()` (#4325); no hook, no change. A miss (`preflightProblems`) joins the
 validateContract problems in the existing single `contractCorrectionPrompt` resume. After it the misses are re-probed and
 logged as `VALIDATE_PREFLIGHT` {misses, corrected}; any left are an anomaly only, never a block: the post-build #4323
 rerun still ends `env.tool_missing`. Skipped when the frozen contract is recovered from the issue. Cost: 0 LLM calls when
 the host has the tools; otherwise the one correction resume, instead of a whole implement session lost to `env.tool_missing`.
+
+## Entry 2026-10-23 — Freeze-time execution preflight of validate commands (#4393)
+
+The #4328 probes read the command text, so a wrapped interpreter (`uv run --no-project python -m shared.x`) and a
+transitive import (`shared` imports `httpx`) pass them, and the command first runs after the build (AlterLab#36619:
+`env.tool_missing` after a green implementation, then a recovery lane). `preflightValidates` (`lean.mjs`) now also:
+(1) flags `$NAME`/`${NAME}` references that are unset or empty in `process.env` + `laneEnv()` and that the command does
+not assign (`preflight.mjs` `unsetEnvVars`; single quotes, escapes, `${X:-d}` defaults and bash's own variables are
+skipped), kind `env-var`; (2) runs each validate command without a static or env miss once on the base worktree through
+the separate `io.preflightRun` hook (`runCheckCommand`) inside `heavyStep("precheck")`, 30 s each within a 120 s total
+(`runPreflight`). `runProbeMiss` classifies the output: rc 0, a timeout (124) or a test failure is `runs` (RED on base is
+expected); conformance.mjs `missingTool` (missing command / Python module / Node package) or a missing path (bash exec
+rc 127, python `can't open file`, pytest `file or directory not found`, node `Could not find`) is `unrunnable`. Names
+the repo tracks or a deliverable's change names, and paths that are tracked, deliverables, the repro test or test-shaped
+(`knownToContract`), are not misses. `git status --porcelain --untracked-files=all` before and after the runs: only
+paths the runs newly created (`git clean`) or modified (`git checkout --`) are reverted, an anomaly records them; a path
+dirty before is never touched. Commands the budget leaves are not run (anomaly), not misses. All misses share the one
+`contractCorrectionPrompt` resume before the implement builder, are re-checked after it, and are logged on
+`VALIDATE_PREFLIGHT` (`found`, `misses` with `source` probe|env|run); misses left stay advisory (the post-build #4323
+rerun is still the gate). No hook, no run. Cost: 0 LLM calls, at most 120 s at freeze; one correction resume only when a
+command cannot run, instead of an implement attempt plus a recovery lane.
 
 ## Entry 2026-10-20 — The repro harness links workspace deps on base; an unrunnable head is an environment error (#4334)
 
@@ -954,3 +1022,60 @@ log: `CLI_IDLE_EXTENDED` {children, heavyQueue} once per silent stretch; `CLI_ID
 The busy check gets whole command lines (`listDescendants` `maxCmd`; the kill record keeps 200 chars), and because `ps` is
 synchronous, a first "not busy" answer kills only on the next tick, after output written meanwhile has been read.
 Cost: 0 LLM calls; one `ps` and one registry read per check, only while idle.
+
+## Entry 2026-10-23 — Risk-path enforce, partial investigation close, per-batch shadow line (#4398)
+
+`gate()` (`lean.mjs`) checks the changed files against forge.yaml `review.risk_paths` globs (`review-trigger.mjs` `riskPathHits`;
+declared globs only, never the built-in risk words). A hit makes a shadow lane enforce for the rest of the run (sticky:
+precheck, review, resume, base-sync re-review, no degraded merge), logs `CONFORMANCE_RISK_ENFORCED {paths}` once plus a
+decision line, and `RUN_TERMINAL.conformance_mode` reports `enforce`. `closePlan(contract, {title, review})`: an
+`investigate(`/`investigate:` issue (`isInvestigation`) with a defer/post-deploy requirement, or a deliver requirement
+whose review row is not `implemented`, is `partial`. The untracked ones are filed with `track()` before the PR, the issue
+closes `not planned` with a FORGE:TRACKED "Closed as partial" note, and the Close row and lane result say partial.
+The lane result carries `conformance {mode, would, risk}`. Orchestrate's row copies it, and the batch report prints
+`formatShadowSummary`: shadow lanes, would-block share, false-block share (a would-block on an incomplete, inconsistent
+or unparseable review) and risk-enforced lanes. Rationale: `devdocs/decisions/4398-risk-path-enforce.md`. Cost: 0 LLM
+calls; a risk-enforced lane may spend the one builder resume that shadow would have skipped.
+
+## Entry 2026-10-23 — Independent adversarial verifier (#4397)
+
+The conformance reviewer reads `<builder_result>` and shares `REVIEW_RUBRIC` with the builder's self-review (#4374), so it is a
+self-audit. `verifier.mjs` adds one independent call. `gate()` runs `runVerifier()` only when the precheck and `reviewOnce`
+conform (not on a `review.trigger` skip) and at most once per head SHA (`verifiedHeads`; a fix round that made no commit
+reuses the verdict). Inputs (`verifierPrompt`): issue, trusted comments, effective contract, changed files, `boundDiff` diff and
+`callersOf` (the repo's `git grep -n -w -I -F` over `changedSymbols(diff)`: names from hunk headers and +/- definition lines,
+JS/TS/Python/Ruby/Go/Rust/Java-style; ≤12 symbols, ≤8 hits each, ≤40 lines, definitions and `.forge-lean/` excluded). Never
+the builder's result, notes or session (`resume: null`, `readOnly`). `VERIFIER_SYSTEM` is adversarial: boundary inputs, the
+issue's non-regression baselines, the listed callers, a repro test that cannot fail; JSON `findings[{file,line,input,expected,
+actual,why}]`. `parseVerifierFindings` keeps ≤10 findings at a tracked file and positive line; anything else is dropped.
+Model: `review.verifier_model` (else `engine.lean_verifier_model`, `engine-cli.mjs` `readVerifier`), default
+`claude-sonnet-5-5`; `pickVerifierModel` swaps to the first of opus/sonnet/haiku that is not the builder's configured or
+reported model (`sameModel`: ids, `[1m]` suffix, bare aliases). Size bound (`verifierBudget`): `maxMs` 3–15 min and
+`maxTurns` 10–40 by diff KB (the lean runner now forwards `maxTurns` when the CLI supports it); empty diff → no call; no
+repair re-ask. Modes: `off` (no call, no event), `shadow` (FORGE:REVIEW gets an advisory "Independent verifier" section, never
+blocks), `enforce` (`findingsToFailures` → `conformance.regression`, kind `verifier`, detail `path:line …`, so `fixRound`
+runs a fresh session; the one-resume budget is unchanged). A verifier error is an anomaly, never a failure (a session-limit
+defer still propagates). Run log: `PHASE_ATTEMPT_USAGE` phase `verify` trigger `verifier`; `VERIFIER {mode, head, model,
+swapped, findings, cost_usd, implement_cost_usd, ratio, skipped?, error?}`. `node bin/lean/verifier.mjs [--json] [--dir]`
+reports per repo runs, findings, errors and the verifier/implement cost ratio (median, max, runs over 0.10). Exit criterion
+for enforce: a seeded-defect replay in shadow where it catches what the reviewer misses, plus ≥30 shadow runs with ratio ≤
+0.10. Cost: 0 LLM calls when off (default); one read-only call per reviewed head when on. ADR
+`decisions/4397-independent-verifier.md`.
+
+## Entry 2026-10-23 — Post-deploy precondition gate in the pre-filter (#4389)
+
+`prefilter.mjs` `postDeployGate`: an open issue whose body carries `<!-- FORGE:DEFERRED_FROM: #P -->` and whose checklist
+items are all `` `R#: …` — post-deploy: `` lines (`postDeployOnly`; the format of `file-deferred-followups.sh` /
+`followupItems`) is checked before any lane. The parent's merge SHAs come from `gh pr list --state merged --search "#P"`
+(`mergeCommit`, PRs that `claimsFix` #P), else the `merged at <sha>` of a trusted `FORGE:TRAJECTORY` on #P. Each is tested
+with `git merge-base --is-ancestor <sha> origin/<default>` (exit 1 = not there). Any SHA not on the default branch parks the
+issue: `{parked: true, kind: "awaiting-promotion"}`, label `awaiting-promotion` (created on demand), one
+`FORGE:PRECONDITION` comment when the label was new, no lane. With every SHA on default, forge.yaml
+`post_deploy.precondition_cmd` (`sh -c <cmd> precondition <issue>`, `FORGE_ISSUE`, 60 s) exit 1 parks
+`awaiting-precondition`. Everything unresolvable (no SHA, git exit ≠ 0/1, unknown default branch, hook exit ≠ 0/1)
+fails open to today's path. The gate runs before the `needs-human` early return, so escalated promotion follow-ups are
+parked too (the label stays). A `ready` issue loses `awaiting-promotion`. The default branch (`branches.default`, else
+GitHub's) is resolved and fetched once, lazily, by `lazyDefaultBranch` (orchestrate and triage). `orchestrate.mjs` settles
+a parked result as outcome `awaiting-promotion|awaiting-precondition` with $0 and no `runOne` (not SATISFIED: dependents
+skip). `formatOutcomeLists` prints one `awaiting promotion: #A #B (fixes on <lane>, not on <default>)` line instead of
+escalations. Re-evaluation is the next batch or triage run. Cost: 0 LLM calls; per gated issue 1-2 gh reads and one git call.
