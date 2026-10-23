@@ -126,11 +126,17 @@ branches:
 # cannot see (e.g. rollout state), run once the fix is on the default branch:
 # exit 0 = ready, exit 1 = not ready (parked), anything else = ignored (lane).
 # It receives the issue number as $1 and in FORGE_ISSUE.
+# min_age (opt-in, e.g. "24h", "7d", "2w"; "0" = only item windows) keeps the
+# issue parked (awaiting-promotion label, "awaiting min age:" report line)
+# until that long after the fix reached branches.default. A window an item's
+# deferral why states (e.g. "after 7d of data") overrides it for that item;
+# the largest wins. An unknown landing time falls through to the lane.
 # Commands: orchestrate, triage
 # =============================================================================
 
 # post_deploy:
 #   precondition_cmd: "scripts/rollout-ready.sh"
+#   min_age: "24h"
 
 # =============================================================================
 # AGENTS (OPTIONAL)

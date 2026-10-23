@@ -229,6 +229,13 @@ export function readPreconditionCmd(cwd = process.cwd()) {
     return typeof v === "string" && v.trim() ? v.trim() : null;
   } catch { return null; }
 }
+/** #4425: forge.yaml `post_deploy.min_age` ("24h", "7d"; opt-in soak window for parked post-deploy follow-ups) in ms, or null. */
+export async function readPostDeployMinAge(cwd = process.cwd()) {
+  try {
+    const { parseMinAge } = await import("./lean/prefilter.mjs");
+    return parseMinAge(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.post_deploy?.min_age);
+  } catch { return null; }
+}
 /** forge.yaml `lean.explore` (on|off) and `lean.explore_model` (#4391): the builder's explorer subagent; undefined when neither is set or valid. */
 export function readExplore(cwd = process.cwd()) {
   try {
@@ -1294,7 +1301,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const branches = readBranches(cwd);
   // #4389: the post-deploy gate's default branch is resolved and fetched once, only when a gated issue asks
   const prefilter = argv.includes("--no-prefilter") ? null
-    : makePrefilter({ repo, cwd, io: leanIo, ...prefilterModel(argv), defaultBranch: lazyDefaultBranch({ io: leanIo, repo, cwd, configured: branches.default }), preconditionCmd: readPreconditionCmd(cwd) });
+    : makePrefilter({ repo, cwd, io: leanIo, ...prefilterModel(argv), defaultBranch: lazyDefaultBranch({ io: leanIo, repo, cwd, configured: branches.default }), preconditionCmd: readPreconditionCmd(cwd), minAge: await readPostDeployMinAge(cwd) });
   const fetched = new Set();
   const laneOf = async (n) => {
     const r = await resolveLane({ issue: n, repo, io: leanIo, cwd, branches, requested: lane, override: laneOverride });
@@ -1834,7 +1841,7 @@ export async function triageFromCli(argv, deps = {}) {
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   const { prefilterIssue, formatPrefilterSummary, formatParkedLine, lazyDefaultBranch } = await import("./lean/prefilter.mjs");
   const branches = readBranches();
-  const gate = { defaultBranch: lazyDefaultBranch({ io: leanIo, repo, cwd: process.cwd(), configured: branches.default }), preconditionCmd: readPreconditionCmd() }; // #4389
+  const gate = { defaultBranch: lazyDefaultBranch({ io: leanIo, repo, cwd: process.cwd(), configured: branches.default }), preconditionCmd: readPreconditionCmd(), minAge: await readPostDeployMinAge() }; // #4389, #4425
   const parallel = flag(argv, "--parallel") == null ? 8 : parseInt(flag(argv, "--parallel"), 10);
   if (!Number.isInteger(parallel) || parallel < 1) throw new Error("--parallel must be a positive integer");
   // #4141: bounded pool. Each lane is fetched once (memoized promise); output stays in input order.
