@@ -5315,10 +5315,10 @@ describe("#4392: implement turn budget", () => {
   const TB = { S: 25, M: 60, L: 100 }; // the CLI defaults (readCoreLimits); runCore alone is unbudgeted
   const stopWith = (digest) => (w) => { w.files[`${WT}/.forge-lean/result.json`] = JSON.stringify({ status: "budget-exceeded", summary: "too big", digest }); };
 
-  it("an overrun ends needs-human budget.exceeded with the builder's digest, checkpointed, recoverable once", async () => {
+  it("an overrun ends budget-exceeded (#4505) with the builder's digest, checkpointed, recoverable once", async () => {
     const w = budgetWorld(stopWith("done: parser. remaining: 3 adapters. recommend split")); const dir = tmpDir("core-tb-");
     const r = await run(w, { dir, turnBudgets: TB });
-    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, OUTCOME_CODES.BUDGET_EXCEEDED);
+    assert.equal(r.terminalReason, "budget-exceeded"); assert.equal(r.code, OUTCOME_CODES.BUDGET_EXCEEDED);
     assert.match(r.detail, /size S, 25 turns/); assert.match(r.detail, /remaining: 3 adapters/);
     assert.equal(classifyNeedsHuman({ outcome: r.terminalReason, code: r.code }), "recoverable");
     assert.deepEqual(r.turns, { size: "S", budget: 25, build: 28, total: 31, exceeded: true });
@@ -5326,7 +5326,7 @@ describe("#4392: implement turn budget", () => {
     assert.equal(w.seen[2].resume, null, "the wrap-up is a fresh session");
     assert.match(w.seen[2].prompt, /The engine froze \.forge-lean\/contract\.json/); assert.match(w.seen[2].prompt, /at most 5 turns/);
     assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && c.some((x) => /checkpoint after turn budget/.test(x))), "work checkpointed");
-    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes("remaining: 3 adapters")));
+    assert.ok(!w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN")), "#4505: no human escalation");
     const log = readLog(dir, 7);
     assert.ok(log.some((e) => e.event === "TURN_BUDGET_EXCEEDED" && e.size === "S" && e.budget === 25 && e.turns === 25 && e.grant === 5));
     assert.deepEqual(log.find((e) => e.event === "RUN_TERMINAL").turns, r.turns);
@@ -5340,6 +5340,35 @@ describe("#4392: implement turn budget", () => {
     const over = budgetWorld(null, { overrun: true });
     const o2 = await run(over, { dir: tmpDir("core-tb-"), turnBudgets: TB });
     assert.equal(o2.code, OUTCOME_CODES.BUDGET_EXCEEDED); assert.match(o2.detail, /No builder digest; changes so far/);
+  });
+
+  const addNH = (w) => w.edits.filter((e) => e.join(" ") === "issue edit 7 -R o/r --add-label needs-human").length;
+  it("#4505 a turn overrun ends budget-exceeded, not needs-human: no label, no NEEDS_HUMAN comment, recoverable", async () => {
+    const w = budgetWorld(stopWith("done: parser. remaining: tests")); const dir = tmpDir("core-tb-");
+    const r = await run(w, { dir, turnBudgets: TB });
+    assert.equal(r.terminalReason, "budget-exceeded"); assert.equal(r.code, OUTCOME_CODES.BUDGET_EXCEEDED);
+    assert.equal(r.branch, "feat/issue-7-lean", "the checkpoint branch rides on the result"); assert.match(r.detail, /remaining: tests/);
+    assert.equal(addNH(w), 0, "no needs-human label"); assert.ok(!w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN")), "no Needs human comment");
+    assert.equal(classifyNeedsHuman({ outcome: r.terminalReason, code: r.code }), "recoverable");
+    const term = readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.equal(term.reason, "budget-exceeded"); assert.equal(term.code, OUTCOME_CODES.BUDGET_EXCEEDED);
+    assert.ok(w.comments.some((c) => c.includes("FORGE:TRAJECTORY") && /recoverable budget\.exceeded/.test(c)), "the trajectory records the recoverable end");
+  });
+
+  it("#4505 a budget.exceeded recovery lane runs at the next size budget; non-final stays unlabelled, a final overrun is needs-human", async () => {
+    const nonFinal = budgetWorld(stopWith("still more"));
+    const r1 = await run(nonFinal, { dir: tmpDir("core-tb-"), turnBudgets: TB, recover: { code: OUTCOME_CODES.BUDGET_EXCEEDED, attempt: 1, final: false } });
+    assert.deepEqual(nonFinal.seen.map((x) => x.turnMax), [0, 60, 12], "S lane retried at M: 60 turns, wrap-up grant 12");
+    assert.equal(r1.turns.size, "M"); assert.equal(r1.terminalReason, "budget-exceeded"); assert.equal(r1.recovery, true);
+    assert.equal(addNH(nonFinal), 0);
+    assert.ok(builders(nonFinal).some((b) => /Recovery pass \(budget\.exceeded\): .*Continue from the checkpoint/.test(b[4])));
+    const fin = budgetWorld(stopWith("still more"));
+    const r2 = await run(fin, { dir: tmpDir("core-tb-"), turnBudgets: TB, recover: { code: OUTCOME_CODES.BUDGET_EXCEEDED, attempt: 1, final: true } });
+    assert.equal(r2.terminalReason, "needs-human"); assert.equal(r2.code, OUTCOME_CODES.BUDGET_EXCEEDED);
+    assert.equal(addNH(fin), 1, "the failed recovery is a human escalation"); assert.ok(fin.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN")));
+    const other = budgetWorld(stopWith("still more")); // another code's recovery keeps the lane's size
+    const r3 = await run(other, { dir: tmpDir("core-tb-"), turnBudgets: TB, recover: { code: "ci.red", attempt: 1, final: false } });
+    assert.equal(r3.turns.size, "S"); assert.equal(r3.terminalReason, "budget-exceeded");
   });
 
   it("size comes from a size: label over the contract; 0 disables the budget and nothing is capped", async () => {

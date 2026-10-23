@@ -157,9 +157,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    records the attempt, logs `TURN_BUDGET_EXCEEDED`, checkpoints and runs `budgetWrapup`: one fresh session (trigger
    `budget_wrapup`, `restart_of` the stopped trigger, `wrapupGrant` = max(5, ceil(budget/5)) turns, prompt
    `turnBudgetWrapupPrompt` with diff and last self-check) that either finishes (the result flows on) or writes
-   `status: budget-exceeded` + `digest`. A stop or overrun (`TURN_BUDGET_STOP`) ends needs-human `budget.exceeded` with
-   `budgetDigest` (builder digest, else diff stat); it is in `RECOVERABLE_CODES`, so the batch reruns it once with
-   `RECOVER_HOW` (continue from the checkpoint or a typed split-required block). Plan/corrections and fix rounds are not
+   `status: budget-exceeded` + `digest`. A stop or overrun (`TURN_BUDGET_STOP`) ends the non-human reason
+   `budget-exceeded` (code `budget.exceeded`, #4505: no `needs-human` label, no FORGE:NEEDS_HUMAN comment; the result
+   carries `branch` and `budgetDigest`, builder digest else diff stat). `classifyNeedsHuman` calls it recoverable, so the
+   batch reruns it once from the checkpoint branch with `RECOVER_HOW` (continue, or a typed split-required block: the
+   decompose path) at `recoverySize` = `nextSize` (S→M→L, L stays L); dependents stay queued. needs-human only when that
+   final `budget.exceeded` recovery overruns again (the lane labels it), or no recovery runs (orchestrate relabels once
+   and parks dependents). Plan/corrections and fix rounds are not
    budgeted. The lane result and `RUN_TERMINAL` carry `turns: {size, budget, build, total, exceeded}`; orchestrate copies it
    to the row and the batch report adds `formatTurnSummary` (`turns by size: S n= p50 max/budget; … over budget: #N`).
    **Lane profile** (#4395, `lean.mjs` section 2a + `callRunner`): every LLM session runs with

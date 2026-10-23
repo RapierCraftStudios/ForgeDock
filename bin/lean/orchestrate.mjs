@@ -68,10 +68,12 @@
  * In-batch recovery (#4267), on by default: this module recovers only when `recovery: {maxAttempts}` is passed, and the
  * CLI always passes it (forge.yaml `orchestration.recovery.max_attempts`, default 1; 0 disables): a row `classifyNeedsHuman` calls
  * recoverable (needs-human `ci.red` / `base.conflict` / `builder.block_untyped`, `contract.invalid` after a mid-run issue
- * edit, `ci-pending` whose PR `conflicting(issue, pr)` says conflicts) is not final while its persisted `recoveries` stay
+ * edit, `ci-pending` whose PR `conflicting(issue, pr)` says conflicts, the non-human `budget-exceeded` turn overrun of #4505,
+ * recovered at the next size budget) is not final while its persisted `recoveries` stay
  * under `maxAttempts`: it is requeued as a recovery lane (`ctx.recover = {code, attempt, final}`, `final` when attempt ==
  * `maxAttempts`) under the same admission as any lane, so its dependents stay queued. Only a final lane relabels needs-human
- * itself; a non-final attempt that ends needs-human/ci-pending without a successor is relabelled here, once (#4302). A recovery
+ * itself; a non-final attempt that ends needs-human/ci-pending/budget-exceeded without a successor is relabelled here, once (#4302),
+ * as is a first-run budget-exceeded the batch does not recover (#4505: the lane never labels it). A recovery
  * still queued when the batch exits (breaker, budget, hold, or a resume that does not relaunch it) is relabelled once with the
  * full persisted lane reason (#4315); also when the loop throws, and through `onExit(fn)` (the caller's signal handler
  * awaits `fn(cause)`), each once (#4318). `relabelNeedsHuman` may return `false`/"failed" (not recorded, a resume retries)
@@ -500,7 +502,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // #4387: a parked dependency is not pulled in again (fail-open on an unreadable label).
       let parked;
       for (const d of depList) {
-        if (results.get(d)?.outcome === "needs-human") { parked = d; break; }
+        if (["needs-human", "budget-exceeded"].includes(results.get(d)?.outcome)) { parked = d; break; } // #4505: an unrecovered overrun parks too
         if (set.has(d) || typeof issueLabels !== "function") continue;
         let names = [];
         try { names = (await issueLabels(d)) ?? []; } catch { names = []; }
@@ -585,7 +587,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         try { await relabelNeedsHuman({ issue: n, evidence: evidence() }); } catch { /* best effort */ }
       }
     }
-    if (recoveryMax && (row.outcome === "needs-human" || row.outcome === "ci-pending")) {
+    if (recoveryMax && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome)) {
       let isConflicting = false;
       if (row.outcome === "ci-pending" && typeof conflicting === "function" && Number.isInteger(row.pr)) {
         try { isConflicting = (await conflicting(n, row.pr)) === true; } catch { isConflicting = false; }
@@ -605,8 +607,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
     }
     // #4302: a non-final recovery attempt left needs-human/ci-pending unlabelled for its successor; none is launched, so relabel once.
-    if (prior && prior.attempt < recoveryMax && ["needs-human", "ci-pending"].includes(row.outcome) && typeof relabelNeedsHuman === "function") {
+    if (prior && prior.attempt < recoveryMax && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome) && typeof relabelNeedsHuman === "function") {
       try { await relabelNeedsHuman({ issue: n, evidence: evidence() }); } catch { /* best effort */ }
+    }
+    // #4505: a first-run turn overrun is unlabelled by its lane; no recovery follows (off or cap used), so the runner labels it once.
+    if (!prior && row.outcome === "budget-exceeded" && typeof relabelNeedsHuman === "function") {
+      try { await relabelNeedsHuman({ issue: n, evidence: `Implement turn budget overrun (\`budget.exceeded\`) not recovered in this batch:\n${String(row.detail ?? "")}` }); } catch { /* best effort */ }
     }
     results.set(n, row);
     if (row.outcome === "merged" && drift?.onMerged && r?.structure && String(rec?.lane ?? r?.lane ?? "").startsWith("milestone/")) {
@@ -895,7 +901,7 @@ export function formatOutcomeLists(rows) {
   for (const r of rows ?? []) {
     if (!r || r.recovered) continue;
     const human = r.outcome === "needs-human" && classifyNeedsHuman(r) === "human";
-    if (!human && (r.outcome === "needs-human" || r.recovery)) out.push(`unrecovered: #${r.issue} (${r.code ?? r.recovery?.code ?? "unclassified"}: ${one(r.recovery ? `recovery ${r.recovery.code} ended ${r.recovery.outcome}: ${r.recovery.detail}` : r.detail)})`);
+    if (!human && (r.outcome === "needs-human" || r.outcome === "budget-exceeded" || r.recovery)) out.push(`unrecovered: #${r.issue} (${r.code ?? r.recovery?.code ?? "unclassified"}: ${one(r.recovery ? `recovery ${r.recovery.code} ended ${r.recovery.outcome}: ${r.recovery.detail}` : r.detail)})`);
   }
   const esc = (rows ?? []).filter((r) => r?.outcome === "needs-human" && classifyNeedsHuman(r) === "human");
   const parked = formatParkedLine(rows); // #4389: one line for every parked post-deploy follow-up, never an escalation
