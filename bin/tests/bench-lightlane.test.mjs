@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "./_tmp.mjs";
 import { aggregate, calibrate, main, parseRows, runArm, validateCorpus, validateRunConfig } from "../../scripts/bench-lightlane.mjs";
 
 const CORPUS_PATH = new URL("../../docs/eval/corpus/lightlane-v1.json", import.meta.url);
@@ -35,7 +35,7 @@ function fakeRun({ result = null, control = null, oracle = true, diff = 1 } = {}
   return { run, calls };
 }
 
-const withTmp = async (f) => { const d = mkdtempSync(join(tmpdir(), "bench-ll-test-")); try { return await f(d); } finally { rmSync(d, { recursive: true, force: true }); } };
+const withTmp = async (f) => f(tmpDir("bench-ll-test-"));
 
 test("the committed corpus is valid: base 670b715, upstream #1293/#1304/#1308 with full fix shas and oracle commands", () => {
   const c = validateCorpus(corpus());
