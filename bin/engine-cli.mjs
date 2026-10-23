@@ -21,6 +21,7 @@ import { parseVerify } from "./lean/verify.mjs";
 import { parseExecution } from "./lean/execution.mjs";
 import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lean/budget.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
+import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
 import { OUTCOME_CODES } from "./engine/outcome-codes.mjs";
 
 /**
@@ -236,6 +237,10 @@ export function readExplore(cwd = process.cwd()) {
     const out = { ...(["on", "off"].includes(mode) ? { mode } : {}), ...(/^[A-Za-z0-9._:[\]-]+$/.test(model) ? { model } : {}) };
     return Object.keys(out).length ? out : undefined;
   } catch { return undefined; }
+}
+/** forge.yaml `lean.light` (#4448): {mode: off|shadow|on, maxLines, maxFiles} for bin/lean/light.mjs; the defaults when absent or unreadable. */
+export function readLight(cwd = process.cwd()) {
+  try { return parseLightConfig(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.lean ?? {}); } catch { return { ...LIGHT_DEFAULTS }; }
 }
 function readLeanSetting(key, cwd = process.cwd()) {
   try {
