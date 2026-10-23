@@ -39,7 +39,7 @@ const CLAIMED_REASONS = new Set(["merged", "ci-pending"]);
 const OUT_CAP = 1 << 20;
 
 /** Spawn `cmd args` and collect its output (the last 1 MiB of each stream); never throws. */
-export function defaultRun(cmd, args, { cwd, env } = {}) {
+export function benchDefaultRun(cmd, args, { cwd, env } = {}) {
   return new Promise((resolve) => {
     let stdout = "", stderr = "";
     const cap = (s) => (s.length > OUT_CAP ? s.slice(-OUT_CAP) : s);
@@ -100,7 +100,7 @@ async function runOracle(run, dir, issue) {
 }
 
 /** For each corpus issue: the oracle must fail on the base and pass on the fix. -> [{id, red_on_base, green_on_fix}] */
-export async function calibrate({ corpus, run = defaultRun, tmp }) {
+export async function calibrate({ corpus, run = benchDefaultRun, tmp }) {
   const dir = join(tmp, "upstream");
   await git(run, ["clone", "-q", corpus.clone_url, dir], tmp);
   const out = [];
@@ -133,7 +133,7 @@ async function grade({ run, src, head, base, corpus, issue, tmp, tag, apiShape }
 }
 
 /** Run one arm on one corpus issue and grade it -> one row (see aggregate). `now` and `apiShape` are injectable. */
-export async function runArm({ arm, issue, corpus, cfg, run = defaultRun, tmp, now = () => Date.now(), apiShape = detectApiShape }) {
+export async function runArm({ arm, issue, corpus, cfg, run = benchDefaultRun, tmp, now = () => Date.now(), apiShape = detectApiShape }) {
   const tag = `${arm}-${issue.id}`, a = cfg.arms[arm];
   const row = { arm, id: issue.id, cost_usd: null, wall_ms: null, model_ms: null, harness_wall_ms: null, claimed_fix: false, oracle_pass: false, suite_pass: null,
     api_shape: null, light: null, light_eligibility: null, light_upgrade: null, terminal: null };
@@ -239,7 +239,7 @@ export function parseRows(text) {
 const flag = (argv, name) => { const i = argv.indexOf(name); return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[i + 1] : null; };
 const list = (v, all) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : all);
 
-export async function main(argv = process.argv.slice(2), { run = defaultRun, out = process.stdout, err = process.stderr } = {}) {
+export async function main(argv = process.argv.slice(2), { run = benchDefaultRun, out = process.stdout, err = process.stderr } = {}) {
   const cmd = argv[0];
   try {
     if (cmd === "aggregate") {
