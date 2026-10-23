@@ -78,9 +78,44 @@ export function summariseLog(events, fallbackIssue = null) {
     builderTurns: builderCalls.reduce((x, e) => x + n(e.turns), 0),
     cacheTokens: usage.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens) + n(e.usage?.cache_creation_input_tokens), 0),
     costUsd: usage.reduce((x, e) => x + n(costOf(e)), 0),
+    // #4394: the builder tier (RUN_TERMINAL builder_*, else the BUILDER_ROUTE / BUILDER_ESCALATED events); null before routing
+    builderRoute: routeOf(term, ev),
+    conformanceRound: builderCalls.some((e) => e.trigger === "conformance" || e.trigger === "review"),
+    shadowWould: typeof term?.shadow_would === "string" ? term.shadow_would : null,
+    reachedReview: reviewCalls > 0 || typeof term?.shadow_would === "string",
+    // #4394: routes of earlier runs in this log that ended merged: a later run of the same issue is post-merge rework
+    reworkedMerges: earlierMergedRoutes(events.slice(0, s)),
     // first pass: merged off one plan + one implement call, at most one review, no CI fix round
     firstPass: finished && term?.reason === "merged" && builderCalls.length <= 2 && reviewCalls <= 1 && !ev.some((e) => e.event === "CI_FIX_ROUND"),
   };
+}
+
+/** #4394: {tier, class, escalated, model} of a lane, or null when it computed no builder route. */
+function routeOf(term, ev) {
+  if (typeof term?.builder_tier === "string") {
+    return { tier: term.builder_tier, class: term.builder_class ?? null, escalated: term.builder_escalated === true, model: term.builder_model ?? null };
+  }
+  const r = [...ev].reverse().find((e) => e.event === "BUILDER_ROUTE");
+  if (!r) return null;
+  return { tier: r.tier ?? null, class: r.class ?? null, escalated: ev.some((e) => e.event === "BUILDER_ESCALATED"), model: r.model ?? null };
+}
+
+/** #4394: the routes ({tier, class, escalated, model}) of the RUN_START slices in `events` that ended merged with a route. */
+function earlierMergedRoutes(events) {
+  const out = [];
+  let slice = null;
+  const close = () => {
+    if (!slice) return;
+    const term = [...slice].reverse().find((e) => e.event === "RUN_TERMINAL");
+    const rt = term?.reason === "merged" ? routeOf(term, slice) : null;
+    if (rt) out.push(rt);
+  };
+  for (const e of events) {
+    if (e.event === "RUN_START") { close(); slice = []; }
+    if (slice) slice.push(e);
+  }
+  close();
+  return out;
 }
 
 /** All run summaries in `dir` (a missing dir or an unreadable log yields nothing, never an error). */

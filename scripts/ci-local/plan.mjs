@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  Degraded, git, run, resolveRef, fileHash, readAtRef, listAtRef, changedFiles, headSha, sha256, hostClass, homeForgeDir, parseYaml, globToRegex,
+  Degraded, git, run, resolveRef, fileHash, readAtRef, listAtRef, changedFiles, headSha, sha256, hostClass, homeForgeDir, parseYaml, globToRegex, trustedForgeYaml,
 } from './lib.mjs';
 import { makeScopeCtx, scopeCommand } from './scoping.mjs';
 import { missingTool } from './adapters/common.mjs';
@@ -31,17 +31,7 @@ const CI_ADAPTERS = [gha, gitlab, circle, azure, bitbucket, buildkite];
 // base ref's tracked copy, or an untracked/ignored working-tree copy (not part of the PR). A tracked forge.yaml in the
 // worktree is never read.
 function loadConfig(repo, baseRef, baseSha) {
-  let docText = ''; let file = '';
-  const gc = git(repo, ['rev-parse', '--git-common-dir']).out.trim();
-  const top = fs.realpathSync(path.resolve(git(repo, ['rev-parse', '--show-toplevel']).out.trim() || repo));
-  let main = '';
-  if (gc) { const abs = path.resolve(repo, gc); if (path.basename(abs) === '.git') main = fs.realpathSync(path.dirname(abs)); }
-  if (main && main !== top && fs.existsSync(path.join(main, 'forge.yaml'))) { file = path.join(main, 'forge.yaml'); docText = fs.readFileSync(file, 'utf8'); }
-  else if (!main || main === top) {
-    const tracked = git(repo, ['ls-files', '--error-unmatch', '--', 'forge.yaml']).code === 0;
-    if (tracked) { const t = baseSha ? readAtRef(repo, baseRef, 'forge.yaml') : null; if (t) { file = `${baseRef}:forge.yaml`; docText = t; } }
-    else if (fs.existsSync(path.join(repo, 'forge.yaml'))) { file = path.join(repo, 'forge.yaml'); docText = fs.readFileSync(file, 'utf8'); }
-  }
+  const { file, text: docText } = trustedForgeYaml(repo, baseRef, baseSha);
   if (!docText) return { file: '', exclude_jobs: [], include_jobs: [], extra_commands: [], services: 'auto', mode: 'advisory' };
   let doc; try { doc = parseYaml(docText); } catch (e) { if (e instanceof Degraded) throw e; doc = null; }
   const c = (doc && doc.verification && doc.verification.ci_local) || {};

@@ -589,6 +589,8 @@ function scopeTsc(rest, cmd, cwdRel, sctx, join) {
   return scoped(join([rest[0], '-b', ...owners.map((d) => fromCwd(cwdRel, d)), ...flags.filter((f) => f !== '--noEmit')]), owners.length, null, 'tsc-project', { projects: owners });
 }
 
+const isLintTask = (t) => t === 'lint' || t.startsWith('lint:') || t.endsWith(':lint');
+
 function scopeMono(tool, rest, cmd, sctx, join) {
   if (sctx.widen) return full(cmd, sctx.widen, { selector: `${tool}-affected` });
   const base = sctx.from || sctx.baseRef;
@@ -597,7 +599,14 @@ function scopeMono(tool, rest, cmd, sctx, join) {
     if (rest[1] === 'run-many' && !out.some((t) => t === '-t' || t.startsWith('--target'))) return full(cmd, '', { selector: 'unscoped:nx-no-target' });
     return scoped(join([...out, `--base=${base}`]), null, null, 'nx-affected');
   }
-  if (tool === 'turbo' && rest[1] === 'run') { if (rest.some((t) => t.startsWith('--filter'))) return full(cmd, '', { selector: 'unscoped:explicit-filter' }); return scoped(join([...rest, `--filter=...[${base}]`]), null, null, 'turbo-affected'); }
+  if (tool === 'turbo' && rest[1] === 'run') {
+    if (rest.some((t) => t.startsWith('--filter'))) return full(cmd, '', { selector: 'unscoped:explicit-filter' });
+    // #4381: lint is per-file, so a lint-only run covers the changed packages, not their dependents (`...[base]`).
+    const end = rest.findIndex((t, i) => i > 1 && t.startsWith('-'));
+    const tasks = rest.slice(2, end < 0 ? rest.length : end);
+    if (tasks.length && tasks.every(isLintTask)) return scoped(join([...rest, `--filter=[${base}]`]), null, null, 'turbo-changed');
+    return scoped(join([...rest, `--filter=...[${base}]`]), null, null, 'turbo-affected');
+  }
   return null;
 }
 
