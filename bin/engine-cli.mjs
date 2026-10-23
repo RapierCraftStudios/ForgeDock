@@ -1057,6 +1057,15 @@ const issuesOf = (argv) => {
   }
   return issues;
 };
+/** #4469: the operands among `tokens` (`--add`/`--resume` extras): no flags, and no value of a valued flag (`--parallel 5` is not issue #5). */
+const operandsOf = (tokens) => {
+  const out = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (ORCH_VALUED.includes(tokens[i])) { i++; continue; }
+    if (!String(tokens[i]).startsWith("--")) out.push(tokens[i]);
+  }
+  return out;
+};
 const parallelOf = (argv) => {
   const parallel = flag(argv, "--parallel") == null ? 3 : parseInt(flag(argv, "--parallel"), 10);
   if (!Number.isInteger(parallel) || parallel < 1) throw new Error("--parallel must be a positive integer");
@@ -1157,11 +1166,12 @@ async function orchestrateClient(argv, deps = {}) {
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add"), id = argv[i + 1];
     if (!id || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
-    return addToBatch({ id, tokens: argv.slice(i + 2), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id) });
+    return addToBatch({ id, tokens: operandsOf(argv.slice(i + 2)), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id) });
   }
   const resumeId = flag(argv, "--resume");
-  if (resumeId && argv.slice(argv.indexOf("--resume") + 2).some((t) => !String(t).startsWith("--"))) {
-    await addToBatch({ id: resumeId, tokens: argv.slice(argv.indexOf("--resume") + 2).filter((t) => !String(t).startsWith("--")), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(resumeId) });
+  const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
+  if (resumeExtra.length) {
+    await addToBatch({ id: resumeId, tokens: resumeExtra, root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(resumeId) });
   }
   let msg;
   if (resumeId) msg = { op: "attach", id: resumeId };
@@ -1215,11 +1225,12 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add");
     if (!argv[i + 1] || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
-    return addToBatch({ id: argv[i + 1], tokens: argv.slice(i + 2), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+    return addToBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
   }
   const resumeId = flag(argv, "--resume");
-  if (resumeId && argv.slice(argv.indexOf("--resume") + 2).some((t) => !String(t).startsWith("--"))) {
-    await addToBatch({ id: resumeId, tokens: argv.slice(argv.indexOf("--resume") + 2).filter((t) => !String(t).startsWith("--")), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+  const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
+  if (resumeExtra.length) {
+    await addToBatch({ id: resumeId, tokens: resumeExtra, root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
   }
   let batch, plan = null;
   if (resumeId) {

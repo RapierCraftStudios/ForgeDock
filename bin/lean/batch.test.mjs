@@ -431,6 +431,25 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     assert.deepEqual(b.readAdded(), [2, 3, 5, 6]);
     await assert.rejects(orchestrateFromCli(["--add", "nope", "2"], { batchRoot: root, io }), /no batch nope/);
   });
+
+  it("#4469: --resume <id> and --add ignore the values of valued flags (--parallel 5 is not issue #5)", async () => {
+    const root = tmpDir("batch-add-flags-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: [], repo: "o/r" }); // no issues: the resume stops with the usage error after its adds
+    b.store.save({ order: [1] });
+    const views = [];
+    const io = { gh: async (a) => { views.push(a[2]); return JSON.stringify({ state: "OPEN" }); } };
+    await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "--parallel", "5"], { batchRoot: root, io })), /usage/);
+    assert.deepEqual(views, [], "no issue read for a flag value");
+    assert.deepEqual(b.readAdded(), []);
+    await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "--parallel", "5", "6", "--lane", "staging"], { batchRoot: root, io })), /usage/);
+    assert.deepEqual(views, ["6"]);
+    assert.deepEqual(b.readAdded(), [6]);
+    const res = await quiet(() => orchestrateFromCli(["--add", "b1", "7", "--parallel", "5"], { batchRoot: root, io }));
+    assert.deepEqual(res.added, [7]);
+    assert.deepEqual(res.skipped, []);
+    assert.deepEqual(b.readAdded(), [6, 7]);
+  });
 });
 
 describe("#4376: forgedock orchestrate --cancel", () => {
