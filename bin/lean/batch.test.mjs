@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S } from "./orchestrate.mjs";
-import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane } from "./batch.mjs";
+import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeDispatchCheck } from "../engine-cli.mjs";
 
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir, also for spawned dispatchers.
@@ -627,5 +627,35 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     assert.equal(await mk('{"state":"OPEN"}', "[]")(9), null);
     assert.equal(await mk('{"body":"","labels":[]}', '{"body":""}')(9), null, "a stub without state or a list: run");
     assert.equal(await mk(new Error("x"), new Error("y"))(9), null);
+  });
+});
+
+describe("#4504: a resume settles lanes that ended while no dispatcher ran", () => {
+  it("#4504: a resume settles a dead lane's result and requeues a dead lane without one before scheduling, while an earlier live lane still runs", async () => {
+    const dir = tmpDir("batch-4504-");
+    const batch = { resultFile: (n) => join(dir, `${n}.json`), logFile: (n) => join(dir, `${n}.log`) };
+    writeFileSync(batch.resultFile(2), JSON.stringify({ terminalReason: "merged", pr: 102 }));
+    const { adopt } = detachedLanes({ batch, laneArgs: () => [], script: "x", alive: (pid) => pid === 11, pollMs: 5 });
+    let saved = { v: 1, order: [1, 2, 3, 4], deps: { 1: [], 2: [], 3: [], 4: [] }, lanes: {}, crossSeen: [], results: {},
+      running: { 1: { startedAt: 1, pid: 11 }, 2: { startedAt: 1, pid: 22 }, 3: { startedAt: 1, pid: 33 } }, pending: [4],
+      notBefore: {}, requeues: {}, deferrals: {}, engineErrors: {}, prefilter: {}, errorTimes: [], breaker: null };
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const launched = [];
+    const done = orchestrate({ issues: [], parallel: 3, pollMs: 5, readBody: async () => "", store, adopt,
+      runOne: async (n) => { launched.push(n); return { terminalReason: "merged", pr: 100 + n }; } });
+    let rows;
+    try {
+      await until(() => launched.includes(3) && launched.includes(4) && saved.results?.["2"], 3000);
+      assert.equal(saved.results["2"].outcome, "merged", "the dead lane's result is settled");
+      assert.equal(saved.results["2"].pr, 102);
+      assert.ok(saved.running["1"], "the live lane is still running");
+      assert.equal(saved.running["2"], undefined, "the settled lane left running");
+      assert.ok(!launched.includes(1) && !launched.includes(2), "neither adopted lane is relaunched");
+    } finally {
+      writeFileSync(batch.resultFile(1), JSON.stringify({ terminalReason: "merged", pr: 101 })); // the live lane ends
+      rows = await done;
+    }
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.pr]), [[1, "merged", 101], [2, "merged", 102], [3, "merged", 103], [4, "merged", 104]]);
+    assert.deepEqual(launched.sort(), [3, 4], "the dead lane without a result is requeued and run once");
   });
 });
