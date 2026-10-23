@@ -1481,7 +1481,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       beforeAdmit,
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getCancelled: batch.readCancel, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
-      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
+      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null, exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
@@ -1554,11 +1554,6 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
 }
 
 /**
- * #4318: the batch runner's needs-human relabel. Re-reads the issue first: closed, or a live FORGE:STATE lease (the runner
- * never holds one, so it is another actor's) → "skipped". Label first: a failed label add → "failed" with no comment (a
- * resume retries); then the capped FORGE:NEEDS_HUMAN comment, whose failure keeps the label → true.
- */
-/**
  * #4481: the dispatch-time "already done" check: `{outcome:"merged", pr}` when the issue's own lane PR
  * (`feat/issue-N-lean`) merged, `{outcome:"invalid"}` when the issue is closed without one, else null. Anything
  * unreadable (no state, non-JSON, a non-array PR list, a gh error) is null: the lane runs.
@@ -1576,6 +1571,11 @@ export function makeDispatchCheck({ gh, repo }) {
   };
 }
 
+/**
+ * #4318: the batch runner's needs-human relabel. Re-reads the issue first: closed, or a live FORGE:STATE lease (the runner
+ * never holds one, so it is another actor's) → "skipped". Label first: a failed label add → "failed" with no comment (a
+ * resume retries); then the capped FORGE:NEEDS_HUMAN comment, whose failure keeps the label → true.
+ */
 export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
   return async ({ issue, evidence }) => {
     const { stateOf } = await import("./lean/context.mjs");

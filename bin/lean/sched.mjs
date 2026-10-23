@@ -17,8 +17,8 @@
  * (`forgedock sched cap N`), else the caller's forge.yaml `orchestration.global_parallel`, else none. Fail-open: an
  * unreadable registry or a lock not taken within `lockWaitMs` grants (`fallback: true`), since a stuck registry would
  * stall every batch on the host.
- * Per-issue lock (#4481): a key is never granted while a live slot of another batch holds the same (non-null) repo and
- * issue, so two batches that both include issue N (a resumed batch and a new one) never run two lanes for N at once;
+ * Per-issue lock (#4481), asked for per request with `exclusive: true` in the entry (not stored; the batch runner sets it):
+ * such a key is never granted while a live slot of another batch holds the same (non-null) repo and issue, so two batches that both include issue N (a resumed batch and a new one) never run two lanes for N at once;
  * `tryAcquire` answers `{ok:false, conflict:<batch>}` and drops the key from the queue (it would hold a grant rank).
  */
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
@@ -53,9 +53,9 @@ const posInt = (k) => (Number.isInteger(k) && k >= 1 ? k : null);
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const byRank = ([ka, a], [kb, b]) => (a.priority - b.priority) || (a.seq - b.seq) || (ka < kb ? -1 : ka > kb ? 1 : 0);
 const groupOf = (k, e) => e?.repo ?? e?.batch ?? k;
-/** #4481: the batch of another live slot running the same repo and issue as `entry`, or null (no repo: never). */
+/** #4481: the batch of another live slot running the same repo and issue as an `exclusive` `entry`, or null (no repo: never). */
 const holderOf = (s, key, entry) => {
-  if (!entry?.repo || entry.issue == null) return null;
+  if (entry?.exclusive !== true || !entry.repo || entry.issue == null) return null;
   for (const [k, e] of Object.entries(s.slots)) {
     if (k !== key && e?.repo === entry.repo && e?.issue === entry.issue && (e.batch ?? null) !== (entry.batch ?? null)) return e.batch ?? k;
   }
