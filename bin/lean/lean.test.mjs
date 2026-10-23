@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { laneBackendId } from "./limits.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
 import { parseFactsComment, normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
@@ -16,7 +16,9 @@ import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs
 import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
-import { readLog } from "../engine/runlog.mjs";
+import { readLog as readRepoLog } from "../engine/runlog.mjs";
+// #4432: the run log is keyed by repo + issue; every lane in this file runs in repo o/r.
+const readLog = (dir, issue, repo = "o/r") => readRepoLog(dir, issue, { repo });
 import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo } from "./effects.mjs";
 import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
@@ -3875,7 +3877,7 @@ describe("lane resource ledger + teardown on every exit path (#4179)", () => {
     w.io.docker = async (a) => { w.docker.push(a); return ""; };
     w.io.killGroup = async (pid, marker) => { w.killed.push([pid, marker]); return true; };
     w.io.runTmp = { prune: async () => {}, path: (id) => `/home/x/.forge/tmp/runs/${id}`, make: async (_i, id) => `/home/x/.forge/tmp/runs/${id}`, remove: async (d) => { w.tmpRemoved.push(d); return true; } };
-    w.ledgerFile = join(root, o.batch ?? "adhoc", "lean-7.json");
+    w.ledgerFile = join(root, o.batch ?? "adhoc", "o__r__lean-7.json"); // #4432: repo-scoped lane file
     const r0 = w.io.runner;
     w.io.runner = async (c) => {
       if (c.role === "builder") {
@@ -4006,6 +4008,35 @@ describe("lane resource ledger + teardown on every exit path (#4179)", () => {
       assert.deepEqual(w.killed, [[4242, "claude"]], "the builder's process group is signalled");
       tornDown(w, sig);
     }
+  });
+});
+
+describe("two repos with the same issue number on one host (#4432)", () => {
+  /** A lane of `repo` whose ledger lives under the shared `root` (paths recorded) and whose FORGE:STATE holds `lease`. */
+  const lane = (root, lease) => {
+    const w = world(); w.ledgerPaths = []; w.leaseWrites = [];
+    w.io.ledger = (opts) => { const l = makeLedger({ root, ...opts }); w.ledgerPaths.push(l.path); return l; };
+    w.io.projector = { readState: async () => (lease ? { v: 1, lease } : null), writeState: async (_i, st) => { w.leaseWrites.push(st); } };
+    return w;
+  };
+
+  it("separate run logs and ledger files; a live lease in one repo never defers the other", async () => {
+    const dir = tmpDir("core-shared-"), root = tmpDir("ledger-shared-");
+    const held = lane(root, { by: "core_9999", until: 1e15, host: "other-host", pid: 9999 });
+    const r0 = await run(held, { repo: "acme/one", dir, hostName: "h1" });
+    assert.equal(r0.terminalReason, "deferred");
+    assert.equal(r0.code, "lease-held");
+    const two = lane(root, null);
+    assert.equal((await run(two, { repo: "acme/two", dir, hostName: "h1" })).terminalReason, "merged", "repo one's lease is not repo two's");
+    const one = lane(root, null);
+    assert.equal((await run(one, { repo: "acme/one", dir, hostName: "h1" })).terminalReason, "merged");
+    assert.deepEqual(readdirSync(dir).filter((f) => f.endsWith(".jsonl")).sort(), ["acme__one__7.jsonl", "acme__two__7.jsonl"]);
+    for (const repo of ["acme/one", "acme/two"]) {
+      const log = readLog(dir, 7, repo);
+      assert.deepEqual(log.filter((e) => e.event === "RUN_START").map((e) => e.repo), [repo]);
+      assert.equal(log.filter((e) => e.event === "RUN_TERMINAL").length, 1);
+    }
+    assert.deepEqual([one.ledgerPaths, two.ledgerPaths], [[join(root, "adhoc", "acme__one__lean-7.json")], [join(root, "adhoc", "acme__two__lean-7.json")]]);
   });
 });
 

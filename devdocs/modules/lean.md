@@ -1345,3 +1345,19 @@ teardown has no checkpoint, so they run to their result. Once nothing runs, the 
 written. `state.json` keeps `cancelled`, but the file stays the authority: an operator `--resume` clears it (`clearCancel`
 next to the breaker reset) and continues the held issues; a daemon restart (`keepBreaker`) keeps it. Cost: 0 LLM calls;
 one small file read per pass. ADR `decisions/4376-orchestrate-cancel.md`.
+
+## Entry 2026-10-23 — Run logs and lane ledgers keyed by repo (#4432)
+
+Issue numbers are per repo, but `~/.forge/runs` and `~/.forge/ledger` are per host. The run log is now
+`<owner>__<repo>__<N>.jsonl` (`engine/runlog.mjs` `runLogPath`, the `owner__repo` scheme of `pitfalls.mjs`);
+`appendEvent`/`readLog`/`rewriteLog` take an optional `{ repo }` and keep the legacy `<N>.jsonl` without one (the
+interactive hook logs under `<cwd>/.forgedock/run-logs`, already per checkout). Both paths pass the repo: runCore its
+`repo`, the full path `resolveRepo()` before its first read. Read fallback for one release: a repo with no file yet reads
+the legacy file's RUN_START slices of that repo. `migrateRunLogs(dir)` runs at `run-issue` and `orchestrate` start: it
+claims each legacy `<N>.jsonl` by an atomic rename, moves repo slices into the repo files (before any events already
+there, seq renumbered), keeps repo-less slices in `<N>.jsonl`, never throws. `lastLocalRun`, `readLocalRuns`/`readLanes`
+and `efficiency` read the new names. The adhoc lane ledger was `adhoc/lean-<N>.json` for every repo, so one lane's
+teardown could act on another repo's resources: `makeLedger({ repo })` now writes `<batch>/<owner>__<repo>__<lane>.json`
+(the `lane` field and gc are unchanged; old files age out by TTL). The context-pack cache name and prune prefix carry the
+repo too. Audit: leases (FORGE:STATE on the repo's issue), worktrees (under the checkout), depcache (`<repoKey>/`), the
+sequence lease and sched keys were already repo-scoped. Cost: 0 LLM calls; one dir scan per run-issue/orchestrate start.

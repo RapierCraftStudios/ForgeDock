@@ -54,6 +54,24 @@ describe("lane resource ledger (#4179)", () => {
   });
 });
 
+describe("repo-scoped lane files (#4432)", () => {
+  it("ledgers of two repos with the same lane are separate files", () => {
+    const root = tmpDir("ledger-");
+    const one = makeLedger({ root, batch: "adhoc", lane: "lean-2", owner: "core_1", issue: 2, repo: "acme/one" });
+    const two = makeLedger({ root, batch: "adhoc", lane: "lean-2", owner: "core_2", issue: 2, repo: "acme/two" });
+    assert.equal(one.path, join(root, "adhoc", "acme__one__lean-2.json"));
+    assert.notEqual(one.path, two.path);
+    one.register("worktree", "/one/.claude/worktrees/lean-2");
+    two.register("worktree", "/two/.claude/worktrees/lean-2");
+    one.release("worktree", "/one/.claude/worktrees/lean-2");
+    assert.deepEqual(two.entries().map((r) => r.value), ["/two/.claude/worktrees/lean-2"], "one repo's teardown leaves the other's resources");
+    assert.equal(JSON.parse(readFileSync(two.path, "utf8")).repo, "acme/two");
+    assert.equal(JSON.parse(readFileSync(two.path, "utf8")).lane, "lean-2", "the lane field is unchanged");
+    const legacy = makeLedger({ root, batch: "adhoc", lane: "lean-2", issue: 2 });
+    assert.equal(legacy.path, join(root, "adhoc", "lean-2.json"), "no repo: unchanged path");
+  });
+});
+
 describe("live lane count (#4182)", () => {
   it("counts only live, same-host, unexpired lane files across batches, and deletes nothing", async () => {
     const { mkdirSync, writeFileSync } = await import("node:fs");
