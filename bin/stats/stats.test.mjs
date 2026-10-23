@@ -545,6 +545,8 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
     const fixed = log("on", "child"); fixed.splice(-1, 0, { event: "CI_FIX_ROUND", trigger: "build", round: 1 });
     assert.equal(summariseLog(fixed).firstPass, false);
     assert.equal(summariseLog([{ event: "RUN_START", issue: 3 }, { event: "RUN_TERMINAL", reason: "merged" }]).contextPack.mode, "off");
+    assert.equal(summariseLog([{ event: "RUN_START", issue: 3 }, { event: "RUN_TERMINAL", reason: "merged" }]).size, null);
+    assert.equal(summariseLog([{ event: "RUN_START", issue: 3 }, { event: "RUN_TERMINAL", reason: "merged", turns: { size: "L", budget: 100, build: 9 } }]).size, "L"); // #4409
   });
 
   it("reports per lane type and mode, never one blended average", () => {
