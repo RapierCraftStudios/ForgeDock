@@ -19,6 +19,7 @@ import { laneSize, SIZES } from "../lean/budget.mjs";
 import { probeResultOf } from "../lean/probe.mjs";
 import { listBatches } from "../lean/batch.mjs";
 import { isTrustedComment } from "../engine/phases.mjs";
+import { noComments } from "../lean/render.mjs";
 import { readLog, runLogPath } from "../engine/runlog.mjs";
 
 export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -93,7 +94,7 @@ export function sliceRetries(slice) {
 const HEAD_RE = /^[ \t]{0,3}(?:#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$|\*\*([^*\n]+)\*\*)/gm;
 /** Issue-quality tag from the body: root cause, file:line and fix design present (full), some (partial) or none. */
 export function issueQuality(body) {
-  const t = String(body ?? "").replace(/<!--[\s\S]*?-->/g, "");
+  const t = noComments(body);
   const heads = [...t.matchAll(HEAD_RE)].map((m) => m[1] ?? m[2] ?? "");
   const rootCause = heads.some((h) => /root cause/i.test(h));
   const fileLine = citesFileLine([t]);

@@ -355,7 +355,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    trajectory). `verifyRenumber` also accepts a file equal after mapping each move's old stem
    and its own heading number. A base-sync whose conflicts are all sequence files
    (`resolveSequenceConflicts`: base side, journal union, index union) needs no builder, and
-   an engine-only delta needs no re-review. The base-sync bound counts syncs against one base
+   an engine-only delta needs no re-review. A numbered file counts as a sequence file there
+   only when renumberLane can restore the lane's side (#4465): an add/add conflict (no
+   merge-base stage) in a directory holding a series on the merged base (`MERGE_HEAD`). A
+   both-edited `0016-x.md` or `src/404-page.tsx` is `unsupported`: builder, tests, re-review. The base-sync bound counts syncs against one base
    head (`sameBaseSyncs`); a sync overtaken by a new base head does not count. Merge-gate late
    binding: a lane with numbered files takes the host sequence lease (`seqlease.mjs`, a
    one-slot `heavy.mjs` semaphore per (repo, lane, dir) under `schedDir()/seq-lease`,
@@ -453,6 +456,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 
 ## Other files
 
+`apishape.mjs` (public-API-shape change detector for the light lane, #4449; see its entry below),
 `checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),
 `postmerge.mjs` (base-sync post-merge commands and same-app duplicate exports, #4406),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
@@ -1245,7 +1249,8 @@ that passes both is still not re-reviewed. Cost: 0 LLM calls when clean; one typ
 
 `probe.mjs` checks a production outcome after promotion, deterministically (0 LLM calls, no lane). An issue declares a
 probe in a fenced ```` ```forge-probe ```` block: `run: <shell command>` (required), `pass: exit 0` (default) or
-`pass: /regex/flags` on stdout, `timeout: <s>` (default forge.yaml `acceptance_probe.timeout_s` or 120, capped at 900). The
+`pass: /regex/flags` on stdout, `timeout: <s>` (default forge.yaml `acceptance_probe.timeout_s` or 120, capped at 900).
+CRLF/CR line endings (GitHub web UI bodies) are normalised to LF before the block is matched (#4466). The
 latest declarer comment's block wins, else the body's when its author is a declarer (`isProbeDeclarer`, #4468): a human
 whose association is in `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` (default OWNER,MEMBER,COLLABORATOR) or whose login is in
 `FORGE_TRAIL_TRUSTED_LOGINS`, never a Bot/App or `[bot]` login, the engine included (the issues it files quote untrusted PR
@@ -1398,6 +1403,23 @@ as `estimates` (only with the hook); a failing hook is the M default. A settled 
 worst #n …`. Cost: 0 LLM calls; one local run-log read per batch. Tests: `bin/lean/sched.test.mjs` "longest-first
 admission (#4409)", including a virtual-clock replay of the 2026-10-22 batch shape.
 
+## Entry 2026-10-23 — schedd shutdown stops the batch loops before the lock (#4454)
+
+SIGTERM/SIGINT of `forgedock schedd` used to release `schedd.lock` and the socket without stopping the hosted
+`orchestrate()` loops or exiting. Their timers kept a lock-less process dispatching while the next auto-spawned daemon
+resumed the same batches. Now `startDaemon` gives every in-flight `runBatch` (hosted, or still resuming) an
+AbortController and passes its `signal` through `runBatch` to `orchestrate`. `close()` refuses new submits, aborts every
+run, waits for them to settle (bounded by `stopMs`, default `STOP_MS` 10 s; on timeout it logs and goes on), and only
+then removes the lock (if still ours) and the socket. `exitOnSignals(d)` (used by `scheddFromCli`) awaits `close()` and
+exits 128+signo, the #4318 dispatcher convention.
+
+When `signal` aborts, `orchestrate` admits nothing more, wakes every sleep (`nap` races the abort and cancels the timer)
+and lane race, and leaves without awaiting, stopping or settling running lanes. Lanes are detached and keep running. It
+does not relabel queued recoveries. It saves the state once, with `running` records and pending, then ignores later
+saves and settles, and throws `code: "batch.stopped"`. `runBatch` therefore writes no `report.json`, and the next daemon's
+`resumeOnStart` resumes the batch and adopts the lanes. This differs from #4376 cancel, which SIGTERMs lanes and ends the
+batch with a report. Callers without `signal` are unchanged. Cost: 0 LLM calls.
+
 ## Entry 2026-10-23 — Run logs and lane ledgers keyed by repo (#4432)
 
 Issue numbers are per repo, but `~/.forge/runs` and `~/.forge/ledger` are per host. The run log is now
@@ -1413,3 +1435,25 @@ teardown could act on another repo's resources: `makeLedger({ repo })` now write
 (the `lane` field and gc are unchanged; old files age out by TTL). The context-pack cache name and prune prefix carry the
 repo too. Audit: leases (FORGE:STATE on the repo's issue), worktrees (under the checkout), depcache (`<repoKey>/`), the
 sequence lease and sched keys were already repo-scoped. Cost: 0 LLM calls; one dir scan per run-issue/orchestrate start.
+
+## Entry 2026-10-23 — Public API-shape detector (#4449)
+
+`apishape.mjs` adds a deterministic check for API drift such as the more-itertools `ichunked` generator→function
+change from #4442. `detectApiShape({ cwd, base, head })` and the CLI `node bin/lean/apishape.mjs <base>...<head>`
+work the same way. For every file in `git diff -M <base>...<head>`, they index the base and head blobs with
+`scripts/symbol-index.py --shape` (stdlib `ast`) or `scripts/symbol-index.mjs --shape` (the repo's own `typescript`,
+else ts-morph's). The opt-in `--shape` flag adds `async`, `generator` and a normalized `sig` to functions, methods and
+function-valued consts. The sig covers parameter kinds, names and annotation text, and marks defaults with `=` without
+their values. Default indexer output is unchanged.
+
+Public symbols are compared by name:
+- `signature`, `sync-async` or `generator-function` when the shape changes;
+- `renamed` when a vanished public symbol pairs with a new one of the same kind and shape in the same file;
+- `removed` otherwise, including public→private.
+
+Additions never report. Code with no indexer (go, rust, …) or a blob the indexer refuses (parse error, no parser) is
+`unknown`; docs, config, data, test files and `.d.ts` are skipped. Output is
+`{status: none|changed|unknown, changes[], unknown[]}`, and exit 2 means a usage error or a bad ref. The detector is
+not wired into a lane yet: #4448 takes it as one upgrade-trigger input and #4450 runs it. The JS/TS tests need
+`APISHAPE_TS_NODE_MODULES`, and CI requires them with `APISHAPE_REQUIRE_TS=1` on the ts-morph install. Cost: 0 LLM
+calls, two indexer runs per changed source file. ADR `decisions/4449-apishape-detector.md`.

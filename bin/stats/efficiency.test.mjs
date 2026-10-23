@@ -57,6 +57,7 @@ describe("#4402 issue quality and acceptance", () => {
     assert.equal(issueQuality("just words, see a.js:3").tag, "partial");
     assert.equal(issueQuality("plain text").tag, "none");
     assert.equal(issueQuality("<!-- ## Root Cause a.js:1 ## Fix -->\nnothing").tag, "none");
+    assert.equal(issueQuality("<!-- ## Root Cause a.js:1\n## Fix design\nunclosed").tag, "none");
     assert.equal(issueQuality(null).tag, "none");
   });
   it("is pending under 7 days, then pass only when every record within 7 days passes", () => {

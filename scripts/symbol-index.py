@@ -5,13 +5,16 @@
 # symbol-index.py: deterministic Python symbol index + module import-cycle detector for refactor:split (forge#4208).
 # stdlib only (ast). No LLM, no network. Never emits source text, docstrings or literal values.
 #
-# Usage: python3 scripts/symbol-index.py <file.py | dir>...
+# Usage: python3 scripts/symbol-index.py [--shape] <file.py | dir>...
 # Output (stdout, one JSON object):
 #   {"symbols":[{name,kind,start,end,lines,public[,file]}], "edges":[{from,to}],
 #    "imports":[{module,names,line[,file]}], "cycles":[[module,...],...]}
 #   kind: function|async_function|class|method|const. Methods (and nested classes) are named Class.method.
 #   start includes decorators; lines = end - start + 1. public = no leading underscore (method dunders count as
 #   public), and listed in a static __all__ when the module defines one.
+#   --shape (forge#4449, bin/lean/apishape.mjs): function/async_function/method entries also carry async (bool),
+#   generator (yield in the def's own scope) and sig: the normalized parameter list (kinds, names, annotation text,
+#   "=" for a default but never its value) plus " -> <return annotation>". Without --shape the output is unchanged.
 #   One .py file: names are bare. Otherwise (a directory or several files) each entry carries `file` and edge ends
 #   are "<module>:<symbol>"; module names are dotted paths relative to each root (a root that has __init__.py is
 #   itself the top package, so root .../pkg yields pkg.a). edges = references from one indexed symbol to another.
@@ -108,9 +111,47 @@ def module_imports(body):
     return out
 
 
+def is_generator(fn):
+    """True when yield / yield from occurs in fn's own scope (not in nested defs, lambdas or classes)."""
+    work = list(ast.iter_child_nodes(fn))
+    while work:
+        n = work.pop()
+        if isinstance(n, (ast.Yield, ast.YieldFrom)):
+            return True
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            work.extend(ast.iter_child_nodes(n))
+    return False
+
+
+def signature(fn):
+    """Normalized parameter list of a def: names, kinds, annotation text, '=' for a default (never its value)."""
+    a = fn.args
+
+    def one(arg, default=False, prefix=""):
+        out = prefix + arg.arg
+        if arg.annotation is not None:
+            out += ": " + ast.unparse(arg.annotation)
+        return out + ("=" if default else "")
+
+    positional = a.posonlyargs + a.args
+    first_default = len(positional) - len(a.defaults)
+    parts = [one(x, i >= first_default) for i, x in enumerate(positional)]
+    if a.posonlyargs:
+        parts.insert(len(a.posonlyargs), "/")
+    if a.vararg is not None:
+        parts.append(one(a.vararg, prefix="*"))
+    elif a.kwonlyargs:
+        parts.append("*")
+    parts += [one(x, d is not None) for x, d in zip(a.kwonlyargs, a.kw_defaults)]
+    if a.kwarg is not None:
+        parts.append(one(a.kwarg, prefix="**"))
+    sig = "(" + ", ".join(parts) + ")"
+    return sig + (" -> " + ast.unparse(fn.returns) if fn.returns is not None else "")
+
+
 class Module:
-    def __init__(self, path, name, is_pkg):
-        self.path, self.name, self.is_pkg = path, name, is_pkg
+    def __init__(self, path, name, is_pkg, shape=False):
+        self.path, self.name, self.is_pkg, self.shape = path, name, is_pkg, shape
         self.symbols = []      # dicts without file
         self.nodes = {}        # symbol name -> (ast node, owning class name or None)
         self.imports = []      # (ast import node)
@@ -131,8 +172,11 @@ class Module:
 
         def add(name, kind, node, public, owner=None):
             start, end = def_start(node), node.end_lineno or node.lineno
-            self.symbols.append({"name": name, "kind": kind, "start": start, "end": end,
-                                 "lines": end - start + 1, "public": public})
+            sym = {"name": name, "kind": kind, "start": start, "end": end, "lines": end - start + 1, "public": public}
+            if self.shape and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                sym.update({"async": isinstance(node, ast.AsyncFunctionDef), "generator": is_generator(node),
+                            "sig": signature(node)})
+            self.symbols.append(sym)
             self.nodes[name] = (node, owner)
 
         def add_class(node, prefix, public):
@@ -241,12 +285,12 @@ def tarjan(graph):
     return comps
 
 
-def build(paths):
+def build(paths, shape=False):
     entries = walk_roots(paths)
     multi = not (len(entries) == 1 and os.path.isfile(paths[0]) and len(paths) == 1)
     modules, by_name = [], {}
     for path, name, is_pkg in entries:
-        m = Module(path, name, is_pkg)
+        m = Module(path, name, is_pkg, shape)
         m.parse()
         modules.append(m)
         by_name.setdefault(name, m)
@@ -335,15 +379,17 @@ def build(paths):
 
 
 def main(argv):
+    shape = "--shape" in argv
+    argv = [a for a in argv if a != "--shape"]
     if not argv or argv[0] in ("-h", "--help"):
-        sys.stderr.write("usage: symbol-index.py <file.py | dir>...\n")
+        sys.stderr.write("usage: symbol-index.py [--shape] <file.py | dir>...\n")
         return 2
     for p in argv:
         if not os.path.exists(p):
             sys.stderr.write("symbol-index: no such path: %s\n" % p)
             return 2
     try:
-        out = build(argv)
+        out = build(argv, shape)
     except Unsupported as u:
         out = {"unsupported": u.lang, "reason": u.reason}
     sys.stdout.write(json.dumps(out, sort_keys=True, separators=(",", ":")) + "\n")

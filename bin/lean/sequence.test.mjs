@@ -282,6 +282,25 @@ describe("deterministic renumber (#4386)", () => {
     assert.deepEqual(await resolveSequenceConflicts({ git: gitIn(d), files: f2 }), { unsupported: "non-sequence conflict: src/a.ts" });
     assert.ok(readFileSync(join(d, "src/a.ts"), "utf8").includes("<<<<<<<"), "left for the builder");
   });
+
+  it("#4465: a numbered file both sides edited, or one outside a series, is not a sequence conflict: unsupported, the lane's edit kept for the builder", async () => {
+    const conflict = async (base, lane, later, file) => {
+      const d = repo(base, lane, later);
+      assert.throws(() => sh(d, "merge", "--no-edit", "main"));
+      const files = sh(d, "diff", "--name-only", "--diff-filter=U").trim().split("\n");
+      assert.deepEqual(files, [file]);
+      assert.deepEqual(await resolveSequenceConflicts({ git: gitIn(d), files }), { unsupported: `non-sequence conflict: ${file}` });
+      assert.ok(existsSync(join(d, ".git", "MERGE_HEAD")), "merge not committed");
+      assert.match(readFileSync(join(d, file), "utf8"), /<<<<<<<[\s\S]*LANE[\s\S]*BASE/, "lane side still present");
+    };
+    // both edit an existing NNN- source file (no series)
+    await conflict({ "src/404-page.tsx": "a\nb\nc\n" }, { "src/404-page.tsx": "a\nLANE\nc\n" }, { "src/404-page.tsx": "a\nBASE\nc\n" }, "src/404-page.tsx");
+    // both edit an ADR inside a real series: renumberLane only restores lane-added files
+    const adrs = { "docs/adr/0001-one.md": "# 1. One\n", "docs/adr/0002-two.md": "# 2. Two\nx\n", "docs/adr/0003-three.md": "# 3. Three\n" };
+    await conflict(adrs, { "docs/adr/0002-two.md": "# 2. Two\nLANE\n" }, { "docs/adr/0002-two.md": "# 2. Two\nBASE\n" }, "docs/adr/0002-two.md");
+    // both add the same numbered name in a directory without a series
+    await conflict({ "src/a.ts": "1\n" }, { "src/500_error.html": "LANE\n" }, { "src/500_error.html": "BASE\n" }, "src/500_error.html");
+  });
 });
 
 describe("sequence-numbered documents: two siblings each add an ADR (#4385)", () => {

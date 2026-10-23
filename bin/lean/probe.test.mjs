@@ -51,6 +51,16 @@ describe("probe (#4399)", () => {
     assert.equal(parseProbe(`<!--\n${block(["run: ./hidden"])}-->`), null);
   });
 
+  it("parses a CRLF block (web UI authored) exactly like the LF one (#4466)", () => {
+    const crlf = (s) => s.replace(/\n/g, "\r\n");
+    for (const lines of [["run: curl -fsS https://x/health"], ["run: ./p", "pass: /ok: \\d+/i", "timeout: 99999"]]) {
+      assert.deepEqual(parseProbe(crlf(block(lines))), parseProbe(block(lines)));
+    }
+    assert.equal(parseProbe(crlf(block(["run: ./p"]))).run, "./p");
+    assert.equal(declaredProbe({ body: crlf(block(["run: ./body"])), ...OWNER, comments: [] }).probe.run, "./body");
+    assert.equal(parseProbe(crlf(`<!--\n${block(["run: ./hidden"])}-->`)), null);
+  });
+
   it("only trusted actors declare a probe; the latest trusted comment wins; FORGE marker comments never declare", () => {
     const body = block(["run: ./body"]);
     assert.equal(declaredProbe({ body, ...OWNER, comments: [] }).probe.run, "./body");

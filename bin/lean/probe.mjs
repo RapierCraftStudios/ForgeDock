@@ -44,7 +44,7 @@ const isForgeMarker = (body) => /^\s*<!--\s*FORGE:/.test(String(body ?? ""));
 function probeBlocks(text) {
   const blocks = [];
   let open = null;
-  for (const line of text.split("\n").map((l) => l.replace(/\r$/, ""))) {
+  for (const line of text.split("\n")) {
     const m = FENCE_RE.exec(line);
     if (!open) {
       if (m && !(m[1][0] === "`" && m[2].includes("`"))) open = { ch: m[1][0], len: m[1].length, lines: m[2].trim() === "forge-probe" ? [] : null };
@@ -58,7 +58,7 @@ function probeBlocks(text) {
 
 /** The last top-level ```forge-probe block of `text`: {run, pass, timeoutS}, or null when absent or malformed. */
 export function parseProbe(text) {
-  const blocks = probeBlocks(noComments(String(text ?? ""), " "));
+  const blocks = probeBlocks(noComments(String(text ?? ""), " ").replace(/\r\n?/g, "\n"));
   if (!blocks.length) return null;
   const fields = {};
   for (const line of blocks[blocks.length - 1].split("\n")) {

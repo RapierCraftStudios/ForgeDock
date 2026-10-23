@@ -431,6 +431,25 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     assert.deepEqual(b.readAdded(), [2, 3, 5, 6]);
     await assert.rejects(orchestrateFromCli(["--add", "nope", "2"], { batchRoot: root, io }), /no batch nope/);
   });
+
+  it("#4469: --resume <id> and --add ignore the values of valued flags (--parallel 5 is not issue #5)", async () => {
+    const root = tmpDir("batch-add-flags-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: [], repo: "o/r" }); // no issues: the resume stops with the usage error after its adds
+    b.store.save({ order: [1] });
+    const views = [];
+    const io = { gh: async (a) => { views.push(a[2]); return JSON.stringify({ state: "OPEN" }); } };
+    await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "--parallel", "5"], { batchRoot: root, io })), /usage/);
+    assert.deepEqual(views, [], "no issue read for a flag value");
+    assert.deepEqual(b.readAdded(), []);
+    await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "--parallel", "5", "6", "--lane", "staging"], { batchRoot: root, io })), /usage/);
+    assert.deepEqual(views, ["6"]);
+    assert.deepEqual(b.readAdded(), [6]);
+    const res = await quiet(() => orchestrateFromCli(["--add", "b1", "7", "--parallel", "5"], { batchRoot: root, io }));
+    assert.deepEqual(res.added, [7]);
+    assert.deepEqual(res.skipped, []);
+    assert.deepEqual(b.readAdded(), [6, 7]);
+  });
 });
 
 describe("#4376: forgedock orchestrate --cancel", () => {
@@ -525,5 +544,45 @@ describe("#4376: forgedock orchestrate --cancel", () => {
     assert.equal(b.readCancel(), null, "the operator's resume clears the cancel");
     assert.deepEqual(resumed.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
     assert.deepEqual(ran, [1, 2]);
+  });
+});
+
+describe("#4454: orchestrate's shutdown signal (schedd stop)", () => {
+  it("#4454: an aborted signal admits nothing more, leaves without awaiting or stopping the running lane, relabels nothing, keeps it adoptable", async () => {
+    let saved = null;
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const started = [], stops = [], relabels = [];
+    let releaseLane;
+    const lane = new Promise((r) => { releaseLane = r; });
+    const ac = new AbortController();
+    const done = orchestrate({ issues: [1, 2], parallel: 1, pollMs: 5, readBody: async () => "", store, signal: ac.signal,
+      stopLane: (n) => stops.push(n), relabelNeedsHuman: async (x) => { relabels.push(x); return true; },
+      runOne: async (n, _lane, ctx) => { started.push(n); ctx.onStart?.({ pid: 4242 }); if (n === 1) await lane; return { terminalReason: "merged" }; } });
+    await until(() => started.includes(1) && saved?.running?.["1"]?.pid === 4242);
+    const t0 = Date.now();
+    ac.abort();
+    await assert.rejects(done, (e) => e.code === "batch.stopped");
+    assert.ok(Date.now() - t0 < 1000, "the running lane is not awaited");
+    releaseLane();
+    await new Promise((r) => setTimeout(r, 100));
+    assert.deepEqual(started, [1], "nothing admitted after the stop, also once the lane ends");
+    assert.deepEqual(stops, [], "lanes are detached: no stop on shutdown");
+    assert.deepEqual(relabels, []);
+    assert.equal(saved.running["1"].pid, 4242, "the running lane stays in the state for a resume to adopt");
+    assert.deepEqual(saved.pending, [2]);
+    assert.deepEqual(saved.results, {}, "the lane that ended after the stop is not recorded by this process");
+  });
+
+  it("#4454: an abort wakes a loop sleeping on a long requeue delay", async () => {
+    const ac = new AbortController();
+    let deferred = 0;
+    const done = orchestrate({ issues: [9], parallel: 1, readBody: async () => "", signal: ac.signal,
+      runOne: async () => { deferred++; return { terminalReason: "deferred", detail: `leased by x until ${new Date(Date.now() + 3600e3).toISOString()}` }; } });
+    await until(() => deferred === 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const t0 = Date.now();
+    ac.abort();
+    await assert.rejects(done, (e) => e.code === "batch.stopped");
+    assert.ok(Date.now() - t0 < 1000);
   });
 });

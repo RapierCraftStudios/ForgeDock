@@ -8,13 +8,17 @@
 // run prints only {"unsupported":"ts"|"js","reason":"no-parser"} and exits 0.
 // .py targets are handed to symbol-index.py. Never emits source text or literal values.
 //
-// Usage: node scripts/symbol-index.mjs <file | dir>...
+// Usage: node scripts/symbol-index.mjs [--shape] <file | dir>...
 // Output: {"symbols":[{name,kind,start,end,lines,public[,file]}], "edges":[{from,to}],
 //          "imports":[{module,names,line[,file]}], "cycles":[[module,...],...]}
 //   kind: function|async_function|class|method|const|interface|type|enum. public = exported (methods: exported class
 //   and not private/#private). One file: bare names; otherwise `file` on entries and "<module>:<symbol>" edge ends,
 //   module = path relative to its root without extension (index files name their directory). cycles = strongly
 //   connected components of the relative-import graph between indexed modules (`import type` ignored).
+//   --shape (forge#4449, bin/lean/apishape.mjs): functions, methods/accessors/constructors and consts initialised with
+//   an arrow or function expression also carry async, generator (`function*`) and sig: the normalized parameter list
+//   (`...` rest, name, `?` optional, `: <type text>`, `=` for a default but never its value) plus " -> <return type>".
+//   Kinds are unchanged; without --shape the output is unchanged. --shape is forwarded to symbol-index.py.
 // Exit: 0 ok or unsupported | 2 usage or missing path.
 
 import { spawnSync } from "node:child_process";
@@ -94,7 +98,18 @@ function tarjan(graph) {
   return comps;
 }
 
-function index(ts, entries, multi) {
+function fnShape(ts, fn, src) {
+  const K = ts.SyntaxKind;
+  const params = fn.parameters.map((p) => `${p.dotDotDotToken ? "..." : ""}${p.name.getText(src)}${p.questionToken ? "?" : ""}`
+    + `${p.type ? `: ${p.type.getText(src)}` : ""}${p.initializer ? "=" : ""}`);
+  return {
+    async: (ts.getModifiers?.(fn) ?? fn.modifiers ?? []).some((m) => m.kind === K.AsyncKeyword),
+    generator: !!fn.asteriskToken,
+    sig: `(${params.join(", ")})${fn.type ? ` -> ${fn.type.getText(src)}` : ""}`,
+  };
+}
+
+function index(ts, entries, multi, shape = false) {
   const K = ts.SyntaxKind;
   const byFile = new Map(entries.map((e) => [path.resolve(e.file), e]));
   const symbols = [], imports = [], edges = new Set(), graph = new Map(entries.map((e) => [e.module, new Set()]));
@@ -114,7 +129,9 @@ function index(ts, entries, multi) {
     tables.set(e.module, table);
     const add = (name, kind, node, pub, owner = null) => {
       const start = line(src, node.getStart(src)), end = line(src, node.getEnd());
-      symbols.push({ name, kind, start, end, lines: end - start + 1, public: !!pub, ...(multi ? { file: e.file } : {}) });
+      const fn = !shape ? null : ts.isFunctionLike(node) ? node
+        : ts.isVariableDeclaration(node) && node.initializer && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer)) ? node.initializer : null;
+      symbols.push({ name, kind, start, end, lines: end - start + 1, public: !!pub, ...(multi ? { file: e.file } : {}), ...(fn ? fnShape(ts, fn, src) : {}) });
       table.set(name, { node, owner });
     };
     const exportNames = new Set();
@@ -218,9 +235,11 @@ function index(ts, entries, multi) {
   };
 }
 
-function main(argv) {
+function main(args) {
+  const shape = args.includes("--shape");
+  const argv = args.filter((a) => a !== "--shape");
   if (!argv.length || argv[0] === "-h" || argv[0] === "--help") {
-    process.stderr.write("usage: symbol-index.mjs <file | dir>...\n");
+    process.stderr.write("usage: symbol-index.mjs [--shape] <file | dir>...\n");
     return 2;
   }
   for (const p of argv) if (!existsSync(p)) { process.stderr.write(`symbol-index: no such path: ${p}\n`); return 2; }
@@ -229,7 +248,7 @@ function main(argv) {
   if (exts.includes(".py")) {
     if (exts.some((x) => x !== ".py")) return emit({ unsupported: "mixed", reason: "mixed-languages" }), 0;
     const py = path.join(path.dirname(fileURLToPath(import.meta.url)), "symbol-index.py");
-    const r = spawnSync("python3", [py, ...argv], { stdio: "inherit" });
+    const r = spawnSync("python3", [py, ...(shape ? ["--shape"] : []), ...argv], { stdio: "inherit" });
     if (r.error) return emit({ unsupported: "python", reason: "no-python3" }), 0;
     return r.status ?? 2;
   }
@@ -242,7 +261,7 @@ function main(argv) {
   if (!ts) return emit({ unsupported: lang, reason: "no-parser" }), 0;
   const multi = !(argv.length === 1 && files.length === 1);
   let out;
-  try { out = index(ts, entries, multi); } catch (err) {
+  try { out = index(ts, entries, multi, shape); } catch (err) {
     if (err && err.reason) return emit({ unsupported: err.lang, reason: err.reason }), 0;
     throw err;
   }
