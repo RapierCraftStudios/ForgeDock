@@ -73,3 +73,12 @@ describe("resume digest (#4400)", () => {
     assert.ok(!t.includes("<"), t);
   });
 });
+
+describe("#4467: App comments in gh issue view shape", () => {
+  const ghShape = (login) => ({ author: { login }, authorAssociation: "CONTRIBUTOR", body: "<!-- FORGE:NEEDS_HUMAN -->\nCI red on lint" });
+  it("keeps the App's NEEDS_HUMAN (bare login, CONTRIBUTOR, no type) and drops a stranger's", () => {
+    const state = { terminalReason: "needs-human" };
+    assert.ok(buildResumeDigest({ state, comments: [ghShape("rapiercraft-forgedock")] }).text.includes("- FORGE:NEEDS_HUMAN: CI red on lint"));
+    assert.ok(!buildResumeDigest({ state, comments: [ghShape("someone")] }).text.includes("FORGE:NEEDS_HUMAN"));
+  });
+});

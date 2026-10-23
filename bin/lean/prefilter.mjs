@@ -165,7 +165,12 @@ export function postDeployOnly(body) {
   return items.length > 0 && items.every((t) => /^`[^`]*`\s+(?:\*\*known-flaw\*\*\s+)?[—-]+\s*post-deploy:/.test(t));
 }
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
-const isOwnTrusted = (c) => trusted(c) || bareLogin(loginOf(c)) === bareLogin(APP_SLUG);
+/**
+ * #4467: an issue comment the engine may trust, in REST shape (`user.type`) or `gh issue view` shape (`author.login`,
+ * `authorAssociation`): what isTrustedComment trusts, or the ForgeDock App, which `gh issue view` reports as a bare
+ * `rapiercraft-forgedock` CONTRIBUTOR with no type and no `[bot]` suffix (#4315).
+ */
+export const isTrustedIssueComment = (c) => Boolean(c) && (trusted(c) || bareLogin(loginOf(c)) === bareLogin(APP_SLUG));
 /** Merge commits of the merged PRs that claim to fix #parent; else the `merged at <sha>` of its trusted FORGE:TRAJECTORY. */
 export async function parentMergeShas({ parent, repo, io }) {
   const shas = new Set();
@@ -178,7 +183,7 @@ export async function parentMergeShas({ parent, repo, io }) {
       const v = JSON.parse(String(await io.gh(["issue", "view", String(parent), "-R", repo, "--json", "comments"])));
       for (const c of v.comments ?? []) {
         const b = String(c?.body ?? "");
-        const m = b.includes("FORGE:TRAJECTORY") && isOwnTrusted(c) ? /merged at `?([0-9a-f]{7,40})\b/i.exec(b) : null;
+        const m = b.includes("FORGE:TRAJECTORY") && isTrustedIssueComment(c) ? /merged at `?([0-9a-f]{7,40})\b/i.exec(b) : null;
         if (m) shas.add(m[1]);
       }
     } catch { /* unreadable: no SHA */ }

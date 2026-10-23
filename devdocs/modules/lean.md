@@ -1453,3 +1453,13 @@ Additions never report. Code with no indexer (go, rust, …) or a blob the index
 not wired into a lane yet: #4448 takes it as one upgrade-trigger input and #4450 runs it. The JS/TS tests need
 `APISHAPE_TS_NODE_MODULES`, and CI requires them with `APISHAPE_REQUIRE_TS=1` on the ts-morph install. Cost: 0 LLM
 calls, two indexer runs per changed source file. ADR `decisions/4449-apishape-detector.md`.
+
+## Entry 2026-10-23 — App comments in gh issue view shape are trusted (#4467)
+
+`gh issue view --json comments` reports the ForgeDock App as a bare `rapiercraft-forgedock` with `CONTRIBUTOR` and no
+type or `[bot]` suffix, so the gh-shape trust filters in `resume.mjs`, `context.mjs` and `lean.mjs` `trustedOf` dropped the
+engine's own FORGE:NEEDS_HUMAN/FIX_CI/FACTS records: the resume digest lost the end reason and validate baselines and
+`priorAttempts` read a first attempt. The pre-filter's #4315 rule is now the one shared predicate,
+`prefilter.mjs` `isTrustedIssueComment`: what `isTrustedComment` trusts, or a login whose bare form (lowercased, `app/`
+and `[bot]` stripped) is `APP_SLUG`. Other CONTRIBUTOR logins stay untrusted; a differently named App still needs
+`FORGE_TRAIL_TRUSTED_LOGINS`. REST readers (`readFrozenContract`, context `readComments`, probe) are unchanged. Cost: 0.

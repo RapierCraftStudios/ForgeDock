@@ -10,10 +10,10 @@
  */
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { isTrustedComment, parseDependsOn } from "../engine/phases.mjs";
+import { parseDependsOn } from "../engine/phases.mjs";
 import { codeForTerminalReason } from "../engine/outcome-codes.mjs";
 import { runLogKey } from "../engine/runlog.mjs";
-import { namedPaths } from "./prefilter.mjs";
+import { namedPaths, isTrustedIssueComment as trusted } from "./prefilter.mjs";
 import { parseContractComment, noComments } from "./render.mjs";
 import { REPO_FACTS_FILE, TEST_MAP_FILE } from "./testmap.mjs";
 import { parseFactsComment, factsLines, FACTS_RANK } from "./facts.mjs";
@@ -163,10 +163,6 @@ const outcomeOf = (st) => {
   return codeOf(c) && c !== "unclassified" ? c : null;
 };
 const failuresOf = (st) => (Array.isArray(st?.failureClasses) ? [...new Set(st.failureClasses.map(codeOf).filter(Boolean))].sort().slice(0, 5) : []);
-const trusted = (c) => {
-  const login = String(c?.author?.login ?? c?.user?.login ?? "");
-  return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
-};
 /** First line of a FORGE record that is not a marker or a heading. */
 const recordLine = (body) => oneLine(noComments(body).split("\n").map((l) => l.trim()).find((l) => l && !/^#+\s/.test(l)) ?? "");
 const markerOf = (body) => /^\s*<!--\s*FORGE:([A-Z_]+)\s*-->/.exec(String(body ?? ""))?.[1] ?? null;
