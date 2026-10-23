@@ -1539,6 +1539,22 @@ text with the light diff's files, and `upgradeNote(reasons)`. The branch is neve
 Cost: a light lane with no trigger makes one builder call plus the review, with no plan session. An upgrade costs the
 light session on top of the full lane. ADR `decisions/4442-light-lane.md`.
 
+## Entry 2026-10-23 — Light-lane fixed overhead stripped (#4451)
+
+`lean.mjs` decides light eligibility before the plan-context steps. A fresh, eligible lane in mode `on` (`lightTry`)
+skips `hotspotsOf` (plan facts) and `contextPackStep` (no CONTEXT_PACK, no FORGE:CONTEXT). On `LIGHT_UPGRADE`, both run
+before the plan call, so the full lane keeps them. When the light lane finishes without an upgrade, the run-wide `light`
+flag also skips the implement-time structure delta, the gate's `hotspotsOf` (null hotspots), and the `structureOf` call
+in the merge-time record. The STRUCTURE_DELTA merge record is still written from the local numstat. Light diffs are
+capped by `light.mjs` (default 40 lines / 2 files), so neither the hotspot-growth gate nor an undeclared package edge
+can reach them unnoticed (a risk path upgrades).
+Light targeted tests run through `lightlane.mjs` `runLightTests` → `precheck.mjs` `runChecks`. They run concurrently up
+to `verifyParallelism()`, with one heavy slot per running command and a per-command FORGE_HOST_PARALLELISM share. There
+is no round budget, so a timeout stays a failure. `runLightStep` runs `reproOf`, `numstat` and `apiShape` concurrently.
+Wall vs model time: `attempt()` sums each session's `duration_ms` into `model_ms`. The lane result and RUN_TERMINAL
+carry `wall_ms` and `model_ms` (RUN_TERMINAL also has `light`), and the orchestrate batch row copies both. A warm
+worktree pool reused across issues is deferred; deps are already warm via the shared cache (#4220). Cost: 0 LLM calls.
+
 ## Entry 2026-10-23 — FORGE:LITE receipt and the light/full split in the batch report (#4452)
 
 After `LIGHT_DONE`, and again after `LIGHT_UPGRADE`, `runCore` posts a `FORGE:LITE` comment. The body comes from
