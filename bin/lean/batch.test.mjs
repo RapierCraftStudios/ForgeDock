@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S } from "./orchestrate.mjs";
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane } from "./batch.mjs";
-import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman } from "../engine-cli.mjs";
+import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeDispatchCheck } from "../engine-cli.mjs";
 
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir, also for spawned dispatchers.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("batch-sched-");
@@ -584,5 +584,41 @@ describe("#4454: orchestrate's shutdown signal (schedd stop)", () => {
     ac.abort();
     await assert.rejects(done, (e) => e.code === "batch.stopped");
     assert.ok(Date.now() - t0 < 1000);
+  });
+});
+
+describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () => {
+  it("a requeued issue whose PR merged meanwhile ends merged without a second lane", async () => {
+    const { now, sleep } = fakeClock();
+    let runs = 0, checks = 0;
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep,
+      dispatchCheck: async () => (++checks === 1 ? null : { outcome: "merged", pr: 77, detail: "PR #77 already merged" }),
+      runOne: async () => { runs++; return { terminalReason: "deferred", code: "host.busy", retryInSeconds: 60 }; } });
+    assert.deepEqual([runs, checks], [1, 2], "checked on every start, the requeue included");
+    assert.deepEqual([rows[0].outcome, rows[0].pr], ["merged", 77]);
+    assert.match(rows[0].detail, /skipped at dispatch: PR #77 already merged/);
+  });
+
+  it("a closed issue ends invalid without a lane and its dependents still run; a throwing check runs the lane", async () => {
+    const ran = [];
+    const rows = await orchestrate({ issues: [1, 2], readBody: async (n) => (n === 2 ? "Depends on #1" : ""),
+      dispatchCheck: async (n) => (n === 1 ? { outcome: "invalid", detail: "issue closed" } : (() => { throw new Error("gh down"); })()),
+      runOne: async (n) => { ran.push(n); return { terminalReason: "merged", cost_usd: 0 }; } });
+    assert.deepEqual(ran, [2]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "invalid"], [2, "merged"]]);
+  });
+
+  it("makeDispatchCheck: merged head-branch PR, closed issue, open issue, unreadable answers fail open", async () => {
+    const mk = (issue, prs) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+      if (a[0] === "issue") { assert.deepEqual(a, ["issue", "view", "9", "-R", "o/r", "--json", "state"]); if (issue instanceof Error) throw issue; return issue; }
+      assert.deepEqual(a.slice(0, 6), ["pr", "list", "-R", "o/r", "--head", "feat/issue-9-lean"]);
+      if (prs instanceof Error) throw prs;
+      return prs;
+    } });
+    assert.deepEqual(await mk('{"state":"OPEN"}', '[{"number":12}]')(9), { outcome: "merged", pr: 12, detail: "PR #12 already merged" });
+    assert.deepEqual(await mk('{"state":"CLOSED"}', "[]")(9), { outcome: "invalid", detail: "issue closed" });
+    assert.equal(await mk('{"state":"OPEN"}', "[]")(9), null);
+    assert.equal(await mk('{"body":"","labels":[]}', '{"body":""}')(9), null, "a stub without state or a list: run");
+    assert.equal(await mk(new Error("x"), new Error("y"))(9), null);
   });
 });

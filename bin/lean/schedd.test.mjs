@@ -214,6 +214,43 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { h.cleanup(); }
   });
 
+  it("#4481: a cancelled batch is not resumed by a schedd restart, also when the cancel landed while no daemon ran", async () => {
+    const h = host();
+    try {
+      const statusIds = async () => (await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" })).batches.map((x) => x.id);
+      const kill = async (d) => { const gone = new Promise((r) => d.on("exit", r)); d.kill("SIGKILL"); await gone; };
+      let d = await h.daemon();
+      await withRoot(h, () => capture(async () => {
+        // A: cancelled through the daemon, then the daemon restarts.
+        const a = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
+        await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+        const [idA] = listBatches(h.root);
+        assert.equal((await orchestrateFromCli(["--cancel", idA], h.client)).cancelled, true);
+        await a;
+        await kill(d);
+        d = await h.daemon();
+        await new Promise((r) => setTimeout(r, 300));
+        assert.deepEqual(await statusIds(), [], "the restarted daemon hosts no cancelled batch");
+        assert.deepEqual(h.launched(), [1]);
+        // B: the daemon dies mid-batch, the cancel is written with no daemon running; the next daemon only winds it down.
+        orchestrateFromCli(["3", "4", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client).catch(() => {});
+        await until(() => h.launched().length === 2 && h.lanePids().length === 1);
+        const idB = listBatches(h.root).find((x) => x !== idA);
+        await kill(d);
+        openBatch(h.root, idB).requestCancel({ reason: "operator" });
+        d = await h.daemon();
+        await until(() => !!openBatch(h.root, idB).readReport());
+        assert.deepEqual(openBatch(h.root, idB).readReport().rows.map((r) => [r.issue, r.outcome]), [[3, "held"], [4, "held"]]);
+        assert.deepEqual(h.launched(), [1, 3], "no lane launched after the cancel");
+        await kill(d);
+        d = await h.daemon();
+        await new Promise((r) => setTimeout(r, 300));
+        assert.deepEqual(await statusIds(), [], "and the next restart resumes neither batch");
+        assert.deepEqual(h.launched(), [1, 3]);
+      }));
+    } finally { h.cleanup(); }
+  });
+
   it("single instance: a live daemon keeps its lock; a dead owner's lock and socket are taken over", async () => {
     const h = host();
     try {

@@ -17,6 +17,9 @@
  * (`forgedock sched cap N`), else the caller's forge.yaml `orchestration.global_parallel`, else none. Fail-open: an
  * unreadable registry or a lock not taken within `lockWaitMs` grants (`fallback: true`), since a stuck registry would
  * stall every batch on the host.
+ * Per-issue lock (#4481): a key is never granted while a live slot of another batch holds the same (non-null) repo and
+ * issue, so two batches that both include issue N (a resumed batch and a new one) never run two lanes for N at once;
+ * `tryAcquire` answers `{ok:false, conflict:<batch>}` and drops the key from the queue (it would hold a grant rank).
  */
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
@@ -50,6 +53,14 @@ const posInt = (k) => (Number.isInteger(k) && k >= 1 ? k : null);
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const byRank = ([ka, a], [kb, b]) => (a.priority - b.priority) || (a.seq - b.seq) || (ka < kb ? -1 : ka > kb ? 1 : 0);
 const groupOf = (k, e) => e?.repo ?? e?.batch ?? k;
+/** #4481: the batch of another live slot running the same repo and issue as `entry`, or null (no repo: never). */
+const holderOf = (s, key, entry) => {
+  if (!entry?.repo || entry.issue == null) return null;
+  for (const [k, e] of Object.entries(s.slots)) {
+    if (k !== key && e?.repo === entry.repo && e?.issue === entry.issue && (e.batch ?? null) !== (entry.batch ?? null)) return e.batch ?? k;
+  }
+  return null;
+};
 
 /**
  * Queue entries `[key, entry]` in grant order: priority ascending, then a weighted fair share across repos within each
@@ -88,7 +99,7 @@ export function grantOrder(s) {
 
 /**
  * Handle on the registry. `pid` is this dispatcher; `alive(pid)` is the liveness probe (injected in tests).
- * @returns {{dir, tryAcquire, offer, withdraw, release, setLanePid, adoptSlot, cap, setCap, weights, setWeight, list}}
+ * @returns {{dir, tryAcquire, holder, offer, withdraw, release, setLanePid, adoptSlot, cap, setCap, weights, setWeight, list}}
  */
 export function openSched(dir = schedDir(), { now = () => Date.now(), pid = process.pid, alive = pidAlive, lockWaitMs = LOCK_WAIT_MS } = {}) {
   const file = join(dir, "registry.json"), lockFile = join(dir, "registry.lock");
@@ -167,6 +178,8 @@ export function openSched(dir = schedDir(), { now = () => Date.now(), pid = proc
       try {
         return mutate((s) => {
           if (s.slots[key]) return { ok: true };
+          const holder = holderOf(s, key, entry);
+          if (holder !== null) { delete s.queue[key]; return { ok: false, conflict: holder, reason: `#${entry.issue} has a live lane in batch ${holder}` }; }
           enqueue(s, key, entry);
           const cap = effCap(s, callerCap);
           if (cap !== null) {
@@ -182,6 +195,8 @@ export function openSched(dir = schedDir(), { now = () => Date.now(), pid = proc
         });
       } catch (e) { return { ok: true, fallback: true, reason: e?.message ?? String(e) }; }
     },
+    /** #4481: the other batch holding a live slot for `{repo, issue}` (not `batch`), or null; null on any error. */
+    holder: (entry = {}) => { try { return mutate((s) => holderOf(s, null, entry)); } catch { return null; } },
     /** Queue entries `[{key, batch, repo, issue, priority}]` (their FIFO position is kept on a re-offer). */
     offer: (entries) => { try { mutate((s) => { for (const e of entries) enqueue(s, e.key, e); }); } catch { /* fail-open */ } },
     withdraw: (keys) => { if (!keys.length) return; try { mutate((s) => { for (const k of keys) delete s.queue[k]; }); } catch { /* fail-open */ } },
