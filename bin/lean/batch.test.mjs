@@ -609,13 +609,20 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
   });
 
   it("makeDispatchCheck: merged head-branch PR, closed issue, open issue, unreadable answers fail open", async () => {
-    const mk = (issue, prs) => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
+    const mk = (issue, prs, events = "") => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
       if (a[0] === "issue") { assert.deepEqual(a, ["issue", "view", "9", "-R", "o/r", "--json", "state"]); if (issue instanceof Error) throw issue; return issue; }
+      if (a[0] === "api") { assert.equal(a[1], "repos/o/r/issues/9/events"); if (events instanceof Error) throw events; return events; }
       assert.deepEqual(a.slice(0, 6), ["pr", "list", "-R", "o/r", "--head", "feat/issue-9-lean"]);
       if (prs instanceof Error) throw prs;
       return prs;
     } });
-    assert.deepEqual(await mk('{"state":"OPEN"}', '[{"number":12}]')(9), { outcome: "merged", pr: 12, detail: "PR #12 already merged" });
+    const merged = '[{"number":12,"mergedAt":"2026-10-23T08:00:00Z"}]';
+    assert.deepEqual(await mk('{"state":"OPEN"}', merged)(9), { outcome: "merged", pr: 12, detail: "PR #12 already merged" }, "open, never reopened: the merge is still closing it");
+    assert.deepEqual(await mk('{"state":"OPEN"}', merged, "2026-10-22T08:00:00Z\n")(9), { outcome: "merged", pr: 12, detail: "PR #12 already merged" }, "reopened before the merge");
+    assert.equal(await mk('{"state":"OPEN"}', merged, "2026-10-22T08:00:00Z\n2026-10-23T09:00:00Z\n")(9), null, "reopened after the merge (failed probe, rework): the lane runs");
+    assert.equal(await mk('{"state":"OPEN"}', merged, new Error("api down"))(9), null, "unreadable reopen history: the lane runs");
+    assert.equal(await mk('{"state":"OPEN"}', '[{"number":12}]')(9), null, "no mergedAt: the lane runs");
+    assert.deepEqual(await mk('{"state":"CLOSED"}', merged, new Error("not read"))(9), { outcome: "merged", pr: 12, detail: "PR #12 already merged" }, "closed: no reopen lookup");
     assert.deepEqual(await mk('{"state":"CLOSED"}', "[]")(9), { outcome: "invalid", detail: "issue closed" });
     assert.equal(await mk('{"state":"OPEN"}', "[]")(9), null);
     assert.equal(await mk('{"body":"","labels":[]}', '{"body":""}')(9), null, "a stub without state or a list: run");
