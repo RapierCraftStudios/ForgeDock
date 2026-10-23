@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readVerifier, readCloseParent, readVerify, makeIo, checkFromCli } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readBuilderRouting, readVerifier, readCloseParent, readVerify, readLaneInstructions, makeIo, checkFromCli } from "../engine-cli.mjs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { serializeState } from "../engine/state.mjs";
@@ -1035,6 +1035,25 @@ describe("readFixModel (#4363)", () => {
   });
 });
 
+describe("readBuilderRouting (#4394)", () => {
+  it("reads lean.builder_routing and lean.builder_mid_model, else engine.lean_builder_mid_model; absent or invalid is left out", () => {
+    const d = tmpDir("builder-routing-yaml-");
+    assert.equal(readBuilderRouting(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  fix_model: sonnet\n");
+    assert.equal(readBuilderRouting(d), undefined, "neither key set");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  builder_routing: off\n");
+    assert.deepEqual(readBuilderRouting(d), { mode: "off" });
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  builder_routing: sometimes\n");
+    assert.equal(readBuilderRouting(d), undefined, "an invalid mode is ignored");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  builder_routing: on\n  builder_mid_model: claude-haiku-5-5\n");
+    assert.deepEqual(readBuilderRouting(d), { mode: "on", midModel: "claude-haiku-5-5" });
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lean_builder_mid_model: sonnet\n");
+    assert.deepEqual(readBuilderRouting(d), { midModel: "sonnet" });
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  builder_mid_model: \"bad model; rm\"\n");
+    assert.equal(readBuilderRouting(d), undefined, "an invalid model id is rejected");
+  });
+});
+
 describe("readVerifier (#4397)", () => {
   it("reads review.verifier and review.verifier_model, else engine.lean_verifier_model; absent or invalid is undefined", () => {
     const d = tmpDir("verifier-yaml-");
@@ -1161,8 +1180,29 @@ describe("forgedock check (#4364)", () => {
     writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: lots\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, undefined);
   });
 
+  it("#4392: readCoreLimits reads engine.turn_budget_s|m|l over the defaults (0 allowed, junk ignored, none set: the defaults)", async () => {
+    const { readCoreLimits } = await import("../engine-cli.mjs");
+    const d = tmpDir("fd-tb-");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  turn_budget_m: 40\n  turn_budget_l: 0\n  turn_budget_s: many\n");
+    assert.deepEqual(readCoreLimits(d).turnBudgets, { S: 25, M: 40, L: 0 });
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  cli_idle_minutes: 5\n"); assert.deepEqual(readCoreLimits(d).turnBudgets, { S: 25, M: 60, L: 100 });
+  });
+
   it("local only: the command never reaches GitHub (no gh in its deps or source)", () => {
     const src = checkFromCli.toString();
     assert.doesNotMatch(src, /\bgh\b|workflow run|git", \["push|\["push"/);
+  });
+});
+
+describe("readLaneInstructions (#4395)", () => {
+  it("returns the trimmed engine.lane_instructions path; undefined when unset, empty or no forge.yaml", () => {
+    const d = tmpDir("lane-instr-");
+    assert.equal(readLaneInstructions(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lane_instructions:  devdocs/lane.md \n");
+    assert.equal(readLaneInstructions(d), "devdocs/lane.md");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lane_instructions: \"\"\n");
+    assert.equal(readLaneInstructions(d), undefined, "empty");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  conformance: shadow\n");
+    assert.equal(readLaneInstructions(d), undefined, "unset");
   });
 });

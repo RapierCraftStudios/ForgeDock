@@ -93,6 +93,26 @@ export function readAtRef(repo, ref, file) {
   return r.code === 0 ? r.out : null;
 }
 
+/**
+ * forge#4040 (SEC-2): forge.yaml from a TRUSTED copy only, never from the PR's own tree: {file, text} ('' when none).
+ * In order: the main checkout's forge.yaml (a worktree's git common dir points at it); for a plain checkout, the base
+ * ref's tracked copy, or an untracked/ignored working-tree copy (not part of the PR). A tracked worktree copy is never read.
+ */
+export function trustedForgeYaml(repo, baseRef, baseSha) {
+  let docText = ''; let file = '';
+  const gc = git(repo, ['rev-parse', '--git-common-dir']).out.trim();
+  const top = fs.realpathSync(path.resolve(git(repo, ['rev-parse', '--show-toplevel']).out.trim() || repo));
+  let main = '';
+  if (gc) { const abs = path.resolve(repo, gc); if (path.basename(abs) === '.git') main = fs.realpathSync(path.dirname(abs)); }
+  if (main && main !== top && fs.existsSync(path.join(main, 'forge.yaml'))) { file = path.join(main, 'forge.yaml'); docText = fs.readFileSync(file, 'utf8'); }
+  else if (!main || main === top) {
+    const tracked = git(repo, ['ls-files', '--error-unmatch', '--', 'forge.yaml']).code === 0;
+    if (tracked) { const t = baseSha ? readAtRef(repo, baseRef, 'forge.yaml') : null; if (t) { file = `${baseRef}:forge.yaml`; docText = t; } }
+    else if (fs.existsSync(path.join(repo, 'forge.yaml'))) { file = path.join(repo, 'forge.yaml'); docText = fs.readFileSync(file, 'utf8'); }
+  }
+  return { file, text: docText };
+}
+
 export function listAtRef(repo, ref) {
   const r = git(repo, ['ls-tree', '-r', '--name-only', ref]);
   return r.code === 0 ? r.out.split('\n').filter(Boolean) : [];

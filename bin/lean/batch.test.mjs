@@ -333,6 +333,35 @@ describe("#4354: the batch report ends with the fail-soft alerts of the batch's 
   });
 });
 
+describe("#4402: the batch report prints the efficiency lines, fail-soft", () => {
+  const run = async (deps) => {
+    const lines = [], l = console.log;
+    console.log = (...a) => lines.push(a.join(" "));
+    try {
+      await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { dir: tmpDir("eff-runs-"), batchRoot: tmpDir("eff-batch-"), allowTmpfs: true,
+        emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, sched: null, decide: () => {}, alertConfig: {}, heavyStats: null,
+        leanIo: { gh: async (a) => (a.includes("milestone") ? JSON.stringify({ milestone: null }) : a[0] === "api" ? (String(a[1]).endsWith("/comments") ? "" : JSON.stringify({ body: "## Root cause\na.js:1\n## Fix", labels: [] })) : JSON.stringify({ body: "" })),
+          git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : "") },
+        orchestration: { breaker: null, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 2 } },
+        leanModule: { runCore: async () => ({ terminalReason: "merged", pr: 51 }) }, ...deps });
+    } finally { console.log = l; }
+    return lines.join("\n").split("\n").filter((x) => x.trim());
+  };
+  it("prints the batch's efficiency section", async () => {
+    const out = await run({});
+    const at = out.findIndex((x) => x.startsWith("efficiency: merged 1,"));
+    assert.ok(at > 0, out.join("\n"));
+    assert.match(out[at + 3], /^retries\/merge 0\.00 \(env 0, engine 0, code 0, review 0, unknown 0; lane reruns 0\)$/);
+    assert.match(out[at + 5], /^issue quality: full n=1 /);
+    assert.equal(out[at + 6], "acceptance (7d after promotion): pass 0/0, pending 0, unprobed 1");
+  });
+  it("a throwing efficiency stub still ends the batch with its other report lines", async () => {
+    const out = await run({ efficiency: async () => { throw new Error("boom"); } });
+    assert.ok(out.includes("efficiency: n/a (boom)"), out.join("\n"));
+    assert.ok(out.some((x) => x.startsWith("reclaimed:")), out.join("\n"));
+  });
+});
+
 describe("#4408: issues added to a running batch (forgedock orchestrate --add)", () => {
   const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
   it("one lane running: an added independent issue starts on the next pass, an added one that Depends on the running issue waits for its merge", async () => {
@@ -401,5 +430,100 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     assert.ok(views.every((a) => a.includes("-R") && a.includes("o/r")), "state read against the batch's repo");
     assert.deepEqual(b.readAdded(), [2, 3, 5, 6]);
     await assert.rejects(orchestrateFromCli(["--add", "nope", "2"], { batchRoot: root, io }), /no batch nope/);
+  });
+});
+
+describe("#4376: forgedock orchestrate --cancel", () => {
+  it("the cancel file: requestCancel / readCancel / clearCancel; invalid content reads as null", () => {
+    const b = openBatch(tmpDir("batch-cancel-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    assert.equal(b.readCancel(), null);
+    b.requestCancel({ reason: "operator" });
+    assert.equal(b.readCancel().reason, "operator");
+    assert.match(b.readCancel().at, /^\d{4}-\d\d-\d\dT/);
+    b.clearCancel();
+    assert.equal(b.readCancel(), null);
+    writeFileSync(join(b.dir, "cancel"), "[1]\n");
+    assert.equal(b.readCancel(), null);
+    writeFileSync(join(b.dir, "cancel"), "not json");
+    assert.equal(b.readCancel(), null);
+  });
+
+  it("a cancel while a lane runs: no more admissions, the lane is stopped once, its interrupt is no deferral, the rest end held; a resume runs them", async () => {
+    let cancel = null, saved = null;
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const started = [], stops = [], log = [];
+    let release;
+    const stopped = new Promise((r) => { release = r; });
+    const done = orchestrate({ issues: [1, 2, 3], parallel: 1, pollMs: 5, readBody: async () => "", store, getCancelled: () => cancel,
+      stopLane: (n, rec) => { stops.push([n, rec.pid]); release(); }, onUpdate: (r) => log.push(r),
+      runOne: async (n, _lane, ctx) => {
+        started.push(n);
+        ctx.onStart?.({ pid: 4242 });
+        if (n !== 1) return { terminalReason: "merged" };
+        await stopped; // the lane's SIGTERM teardown reports deferred run.interrupted
+        return { terminalReason: "deferred", code: "run.interrupted", detail: "interrupted by SIGTERM" };
+      } });
+    await until(() => started.includes(1));
+    cancel = { at: new Date().toISOString(), reason: "operator" };
+    const rows = await done;
+    assert.deepEqual(started, [1], "nothing admitted after the cancel");
+    assert.deepEqual(stops, [[1, 4242]], "the running lane is stopped exactly once");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.detail]), [[1, "held", "cancelled by operator"], [2, "held", "cancelled by operator"], [3, "held", "cancelled by operator"]]);
+    assert.equal(log.filter((r) => r.outcome === "cancelled").length, 1);
+    assert.deepEqual(saved.deferrals, {}, "an operator stop is not counted as a deferral");
+    assert.ok(saved.cancelled, "the cancel is persisted with the batch state");
+    // The operator's resume clears the cancel file: the held issues run.
+    cancel = null;
+    const resumed = await orchestrate({ issues: [], parallel: 1, pollMs: 5, readBody: async () => "", store, getCancelled: () => cancel,
+      runOne: async (n) => { started.push(n); return { terminalReason: "merged" }; } });
+    assert.deepEqual(resumed.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [3, "merged"]]);
+    assert.equal(saved.cancelled, undefined);
+  });
+
+  it("without getCancelled nothing changes: a deferred lane still counts a deferral", async () => {
+    let saved = null, k = 0;
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const { now, sleep } = fakeClock();
+    const rows = await orchestrate({ issues: [1], parallel: 1, readBody: async () => "", store, now, sleep, stopLane: () => { throw new Error("never"); },
+      runOne: async () => (k++ ? { terminalReason: "merged" } : { terminalReason: "deferred", code: "run.interrupted" }) });
+    assert.equal(rows[0].outcome, "merged");
+    assert.deepEqual(saved.deferrals, { 1: 1 });
+  });
+
+  it("through the CLI: --cancel during a lane holds the rest, a finished batch is left alone, unknown ids reject, --resume clears it", async () => {
+    const root = tmpDir("batch-cancel-cli-");
+    const leanIo = {
+      gh: async (a) => (a.includes("milestone") ? JSON.stringify({ milestone: null }) : JSON.stringify({ body: "" })),
+      git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : ""),
+    };
+    const ran = [];
+    const deps = { dir: tmpDir("cancel-run-"), batchRoot: root, batchId: "bc1", allowTmpfs: true, emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo, sched: null,
+      decide: () => {}, orchestration: { breaker: null, maxDeferrals: 3, globalParallel: null },
+      leanModule: { runCore: async (o) => {
+        ran.push(o.issue);
+        if (o.issue === 1) {
+          const res = await quiet(() => orchestrateFromCli(["--cancel", "bc1"], { batchRoot: root }));
+          assert.equal(res.cancelled, true);
+        }
+        return { terminalReason: "merged", pr: 50 + o.issue };
+      } } };
+    const first = await quiet(() => orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], deps));
+    assert.deepEqual(first.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "held"]]);
+    assert.equal(first.rows[1].detail, "cancelled by operator");
+    assert.deepEqual(ran, [1]);
+    const b = openBatch(root, "bc1");
+    assert.ok(b.readCancel());
+    const lines = [];
+    const l = console.log;
+    console.log = (...a) => lines.push(a.join(" "));
+    try { assert.equal((await orchestrateFromCli(["--cancel", "bc1"], { batchRoot: root })).cancelled, false); } finally { console.log = l; }
+    assert.match(lines.join("\n"), /batch bc1: already finished/);
+    await assert.rejects(orchestrateFromCli(["--cancel", "nope"], { batchRoot: root }), /no batch nope/);
+    await assert.rejects(orchestrateFromCli(["--cancel"], { batchRoot: root }), /usage: forgedock orchestrate/);
+    const resumed = await quiet(() => orchestrateFromCli(["--resume", "bc1"], deps));
+    assert.equal(b.readCancel(), null, "the operator's resume clears the cancel");
+    assert.deepEqual(resumed.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
+    assert.deepEqual(ran, [1, 2]);
   });
 });

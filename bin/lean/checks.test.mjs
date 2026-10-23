@@ -7,7 +7,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { discoverChecks, scopedChecks, cacheEntry, hydrate, publish, withCacheFlags, LOCAL_CACHE } from "./checks.mjs";
+import { discoverChecks, scopedChecks, configuredLint, cacheEntry, hydrate, publish, withCacheFlags, LOCAL_CACHE } from "./checks.mjs";
+import { yqAvailable } from "../../scripts/ci-local/lib.mjs";
 
 const TMP = tmpDir("checks-4218-");
 process.env.FORGE_CI_LOCAL_HOME = path.join(TMP, "forge-home");
@@ -180,4 +181,80 @@ test("discovery: declared workspace packages' scripts win over the root; undecla
     "scripts/fixtures/demo/package.json": JSON.stringify({ name: "demo", scripts: { test: "jest", lint: "eslint ." } }),
   });
   assert.deepEqual(discoverChecks(r).map((c) => `${c.kind}:${c.command}:${c.cwd}`), ["typecheck:pnpm run typecheck:apps/web", "test:pnpm run test:."]);
+});
+
+// #4381: lint is scoped to the changed packages, never their dependency closure; a configured typescript.lint wins.
+const HAS_YQ = yqAvailable();
+const turboMonorepo = (extra = {}) => repo({
+  ".gitignore": "node_modules/\nforge.yaml\n",
+  "package.json": JSON.stringify({ name: "root", private: true, workspaces: ["apps/*", "packages/*"] }),
+  "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+  "turbo.json": JSON.stringify({ tasks: { lint: {}, typecheck: {}, test: {} } }),
+  "packages/db/package.json": JSON.stringify({ name: "db", scripts: { lint: "eslint ." } }),
+  "packages/db/src/index.ts": "export const db = 1;\n",
+  "apps/api/package.json": JSON.stringify({ name: "api", dependencies: { db: "workspace:*" } }),
+  "apps/api/src/index.ts": "export const api = 1;\n",
+  ...extra,
+});
+const TS_LINT_YAML = "verification:\n  commands:\n    typescript:\n      lint: \"pnpm exec eslint --cache packages/db/src\"\n";
+
+test("turbo monorepo: an upstream package change lints only the changed packages; typecheck/test keep dependents", () => {
+  const r = turboMonorepo();
+  touch(r, "packages/db/src/index.ts");
+  const c = byKind(scopedChecks({ repo: r, base: "main", lint: null }));
+  assert.equal(c.lint.selector, "turbo-changed");
+  assert.match(c.lint.command, /^npx turbo run lint '--filter=\[[0-9a-f]{40}\]'$/);
+  assert.doesNotMatch(c.lint.command, /\.\.\.\[/);
+  assert.match(c.typecheck.command, /^npx turbo run typecheck '--filter=\.\.\.\[[0-9a-f]{40}\]'$/);
+  assert.match(c.test.command, /^npx turbo run test '--filter=\.\.\.\[[0-9a-f]{40}\]'$/);
+});
+
+test("turbo: lint-only task lists (lint:*, *:lint) scope to changed packages; mixed lists keep the closure", () => {
+  const r = turboMonorepo();
+  touch(r, "packages/db/src/index.ts");
+  const run = (command) => scopedChecks({ repo: r, base: "main", checks: [{ kind: "lint", command, cwd: "." }], lint: null })[0];
+  assert.equal(run("turbo run lint:types web:lint --concurrency 2").selector, "turbo-changed");
+  assert.equal(run("turbo run lint build").selector, "turbo-affected");
+  assert.equal(run("turbo run lint --filter=web").mode, "full");
+});
+
+test("configured typescript.lint in the main checkout's forge.yaml replaces the discovered lint", { skip: !HAS_YQ && "yq not installed" }, () => {
+  const r = turboMonorepo();
+  fs.writeFileSync(path.join(r, "forge.yaml"), TS_LINT_YAML);
+  const wt = path.join(TMP, `wt${n++}`);
+  git(r, "worktree", "add", "-q", "-b", "lane", wt, "main");
+  touch(wt, "packages/db/src/index.ts");
+  const checks = scopedChecks({ repo: wt, base: "main" });
+  const lints = checks.filter((c) => c.kind === "lint");
+  assert.equal(lints.length, 1);
+  assert.equal(lints[0].configured, true);
+  assert.doesNotMatch(lints[0].command, /turbo/);
+  assert.match(lints[0].command, /eslint .*packages\/db\/src/);
+  assert.deepEqual(checks.map((c) => c.kind), ["typecheck", "lint", "test"]);
+});
+
+test("a PR-tracked forge.yaml is not trusted; without the slot the output equals discovery-only", { skip: !HAS_YQ && "yq not installed" }, () => {
+  const r = turboMonorepo();
+  touch(r, "packages/db/src/index.ts");
+  const before = scopedChecks({ repo: r, base: "main", lint: null });
+  assert.deepEqual(scopedChecks({ repo: r, base: "main" }), before);
+  fs.writeFileSync(path.join(r, "forge.yaml"), "verification:\n  commands:\n    python:\n      lint: \"ruff check .\"\n");
+  assert.deepEqual(scopedChecks({ repo: r, base: "main" }), before);
+  fs.writeFileSync(path.join(r, "forge.yaml"), TS_LINT_YAML);
+  git(r, "add", "-f", "forge.yaml");
+  git(r, "commit", "-qm", "pr config");
+  assert.equal(configuredLint(r, "main"), null);
+  const lint = scopedChecks({ repo: r, base: "main" }).find((c) => c.kind === "lint");
+  assert.equal(lint.configured, undefined);
+  assert.match(lint.command, /^npx turbo run lint/);
+});
+
+test("Python: a configured typescript.lint or python.lint never replaces ruff", { skip: !HAS_YQ && "yq not installed" }, () => {
+  const r = pyRepo("uv.lock", "version = 1\n");
+  fs.appendFileSync(path.join(r, ".gitignore"), "forge.yaml\n");
+  git(r, "commit", "-qam", "ignore forge.yaml");
+  fs.writeFileSync(path.join(r, "forge.yaml"), "verification:\n  commands:\n    python:\n      lint: \"ruff check src\"\n");
+  fs.appendFileSync(path.join(r, "pkg/alpha.py"), "# change\n");
+  assert.equal(configuredLint(r, "main"), null);
+  assert.equal(byKind(scopedChecks({ repo: r, base: "main" })).lint.command, "uv run ruff check pkg/alpha.py");
 });

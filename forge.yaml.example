@@ -319,6 +319,18 @@ branches:
 #   # restarted fresh from the frozen contract, the diff and the last validate
 #   # result instead of carrying its whole history. 0 disables.
 #   context_ceiling_tokens: 120000
+#   # Turn budget (#4392): implement turns per lane size. Size is a `size:S|M|L`
+#   # label, else the frozen contract's deliverable paths (S <= 2, M <= 5, else L).
+#   # At the budget the builder is checkpointed and gets one short wrap-up to
+#   # finish or stop with a digest; a stop ends needs-human `budget.exceeded`,
+#   # which orchestrate recovers once. The batch report prints turns by size.
+#   # 0 disables a size.
+#   turn_budget_s: 25
+#   turn_budget_m: 60
+#   turn_budget_l: 100
+#   # Lane profile (#4395): lanes run without auto-memory; with this repo-relative
+#   # file (hard rules + doc pointers, <= 16 KB) they also skip CLAUDE.md and get it instead.
+#   lane_instructions: devdocs/lane-instructions.md
 
 # =============================================================================
 # ENV (OPTIONAL)
@@ -608,6 +620,20 @@ branches:
 #   verifier_model: claude-sonnet-5-5
 
 # =============================================================================
+# LEAN BUILDER (OPTIONAL)
+# Explorer subagent for the core path (#4391). on: the builder session gets a
+# read-only `explorer` subagent (claude --agents) that answers discovery
+# questions with a bounded file/line digest in a throwaway context, and the
+# plan/implement prompts tell the builder to use it. off (default): builder
+# argv and prompts are unchanged. RUN_TERMINAL carries `explore` for the A/B.
+# Commands: run-issue, orchestrate (core path)
+# =============================================================================
+
+# lean:
+#   explore: off            # off | on
+#   explore_model: haiku    # model of the explorer subagent (haiku, sonnet or a model id)
+
+# =============================================================================
 # DECOMPOSITION (OPTIONAL)
 # What happens to a decomposed parent issue. Default false: the parent stays
 # open until its last child closes. When true, work-on:decompose (D6.5) closes
@@ -844,6 +870,8 @@ branches:
 #   #   # TypeScript project using tsc + vitest
 #   #   typescript:
 #   #     format: "prettier --check \"src/**/*.{ts,tsx}\""
+#   #     # lint: validate runs it (same timeout as typecheck); the core engine prints it in place of the
+#   #     # discovered lint (bin/lean/checks.mjs). Prefer a changed-files, cached lint, e.g. "eslint --cache".
 #   #     lint: "eslint src/"
 #   #     typecheck: "tsc --noEmit"
 #   #     test: "vitest run"

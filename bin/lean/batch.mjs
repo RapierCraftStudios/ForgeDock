@@ -6,6 +6,7 @@
  * A batch lives in `~/.forge/batches/<id>/` (or `FORGEDOCK_BATCH_DIR`): `plan.json` (the command), `state.json` (the
  * scheduler state, rewritten after every transition), `log.jsonl` (one line per lane update), `parallel` (live K),
  * `add` (issues added to the batch by `--add`, #4408: a cumulative JSON set the runner re-reads every pass),
+ * `cancel` (`{at, reason}` written by `--cancel`, #4376: the runner stops admitting and stops its local lanes; a resume clears it),
  * `lanes/<issue>.{json,log}` (each lane's result and output) and `report.json` (the final rows and printed report, written
  * when the scheduler loop returns; `forgedock orchestrate --resume` on a finished batch replays it, #4192). Every write is tmp + fsync + rename, and the root must be
  * on disk, never tmpfs. A lane is its own session (`setsid` through `detached`), so killing the dispatcher leaves it
@@ -117,6 +118,11 @@ export function openBatch(root, id) {
       if (added.length) writeAtomic(f("add"), JSON.stringify([...new Set([...readAdded(f("add")), ...added])].sort((a, b) => a - b)) + "\n");
       return { added, skipped };
     },
+    /** `--cancel` (#4376): `{at, reason}` in the `cancel` file; the runner re-reads it every pass. */
+    requestCancel: ({ reason = "operator" } = {}) => writeAtomic(f("cancel"), JSON.stringify({ at: new Date().toISOString(), reason: String(reason) }) + "\n"),
+    /** The cancel record, or null when missing or invalid. */
+    readCancel: () => { const v = readJson(f("cancel")); return v && typeof v === "object" && !Array.isArray(v) && typeof v.at === "string" ? v : null; },
+    clearCancel: () => rmSync(f("cancel"), { force: true }),
     /** Added issues the batch never took into its `order` (a finished or unhosted batch with pending adds). */
     unrunAdds: () => { const order = new Set(readJson(f("state.json"))?.order ?? []); return readAdded(f("add")).filter((n) => !order.has(n)); },
     /** The lane updates in `log.jsonl`, in order (unparsable lines skipped). */

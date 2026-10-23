@@ -97,3 +97,51 @@ export function renderContextAb(ab) {
   const rows = CONTEXT_LANE_TYPES.flatMap((lt) => ["on", "off", "shadow"].map((m) => { const g = ab[lt][m]; return `| ${lt} | ${m} | ${g.n} | ${f(g.first_pass_yield)} | ${f(g.builder_turns)} | ${f(g.cache_tokens)} | ${f(g.cost_usd)} |`; }));
   return `| Lane type | Mode | n | First-pass yield | Builder turns | Cache tokens | Cost USD |\n| --- | --- | --- | --- | --- | --- | --- |\n${rows.join("\n")}`;
 }
+
+/**
+ * forge#4394: builder model tiers over local run summaries (local-source.mjs summariseLog): tier mid, mid->top
+ * (escalated) or top, each with its routing class. merge_rate: merged / finished. conformance_rate: of the lanes that
+ * reached review, those with no conformance/review fix round and no shadow would-block. post_merge_rework_rate: merges
+ * reworked later (a later run of the same issue, or a remediate phase) / merges, where a log's earlier merged runs count
+ * as merges too. Runs without a route (older logs, refactor:split) are counted under `unrouted` only.
+ */
+export const BUILDER_TIERS = Object.freeze(["mid", "mid->top", "top"]);
+export function builderTierReport(runs) {
+  const mean = (xs) => (xs.length ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 1e4) / 1e4 : null);
+  const rate = (k, n) => (n ? Math.round((k / n) * 1e4) / 1e4 : null);
+  const tierOf = (rt) => (rt?.tier === "mid" ? (rt.escalated ? "mid->top" : "mid") : rt?.tier === "top" ? "top" : null);
+  const groups = new Map();
+  const group = (tier, cls) => {
+    const k = `${tier}\u0000${cls}`;
+    if (!groups.has(k)) groups.set(k, { tier, class: cls, n: 0, merged: 0, reviewed: 0, conforming: 0, merges: 0, reworked: 0, firstPass: 0, cost: [] });
+    return groups.get(k);
+  };
+  let unrouted = 0;
+  for (const r of runs ?? []) {
+    for (const m of Array.isArray(r?.reworkedMerges) ? r.reworkedMerges : []) {
+      const t = tierOf(m);
+      if (t) { const g = group(t, m.class ?? "unknown"); g.merges++; g.reworked++; }
+    }
+    if (!r?.finished) continue;
+    const t = tierOf(r.builderRoute);
+    if (!t) { unrouted++; continue; }
+    const g = group(t, r.builderRoute.class ?? "unknown");
+    g.n++;
+    g.cost.push(Number.isFinite(r.costUsd) ? r.costUsd : 0);
+    if (r.firstPass) g.firstPass++;
+    if (r.reason === "merged") { g.merged++; g.merges++; if (r.remediated) g.reworked++; }
+    if (r.reachedReview) { g.reviewed++; if (!r.conformanceRound && (r.shadowWould == null || r.shadowWould === "conforms")) g.conforming++; }
+  }
+  const rows = [...groups.values()]
+    .sort((a, b) => BUILDER_TIERS.indexOf(a.tier) - BUILDER_TIERS.indexOf(b.tier) || a.class.localeCompare(b.class))
+    .map((g) => ({ tier: g.tier, class: g.class, n: g.n, merge_rate: rate(g.merged, g.n), conformance_rate: rate(g.conforming, g.reviewed), reviewed: g.reviewed,
+      post_merge_rework_rate: rate(g.reworked, g.merges), merges: g.merges, first_pass_yield: rate(g.firstPass, g.n), cost_usd: mean(g.cost) }));
+  return { rows, unrouted };
+}
+
+/** Markdown table for builderTierReport. */
+export function renderTiers(rep) {
+  const f = (v) => (v == null ? "n/a" : String(v));
+  const rows = (rep?.rows ?? []).map((g) => `| ${g.tier} | ${g.class} | ${g.n} | ${f(g.merge_rate)} | ${f(g.conformance_rate)} (${g.reviewed}) | ${f(g.post_merge_rework_rate)} (${g.merges}) | ${f(g.first_pass_yield)} | ${f(g.cost_usd)} |`);
+  return `| Tier | Class | n | Merge rate | Conformance rate (reviewed) | Post-merge rework (merges) | First-pass yield | Cost USD |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n${rows.length ? rows.join("\n") : "| none | | 0 | | | | | |"}\n\n${rep?.unrouted ?? 0} finished run(s) without a builder route (before #4394) left out.`;
+}

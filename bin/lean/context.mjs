@@ -15,6 +15,7 @@ import { codeForTerminalReason } from "../engine/outcome-codes.mjs";
 import { namedPaths } from "./prefilter.mjs";
 import { parseContractComment, noComments } from "./render.mjs";
 import { REPO_FACTS_FILE, TEST_MAP_FILE } from "./testmap.mjs";
+import { parseFactsComment, factsLines, FACTS_RANK } from "./facts.mjs";
 
 // noComments lives in render.mjs (#4298: one comment-strip helper for context, conformance and prefilter).
 export { noComments };
@@ -28,6 +29,8 @@ export const DEFAULT_PITFALL_LANES = 50;
 /** Bounds on GitHub reads per pack: linked issues read, ledger PRs inspected. */
 export const MAX_LINKS = 20;
 export const MAX_LEDGER_PRS = 8;
+/** #4401: FORGE:FACTS records (earlier lanes) read into one pack: this issue's own attempts first, then the file-path ledger. */
+export const MAX_FACT_LANES = 6;
 export const REPO_FACT_FILES = Object.freeze([REPO_FACTS_FILE, TEST_MAP_FILE]);
 const ATTEMPT_MARKERS = ["NEEDS_HUMAN", "BASE_SYNC", "FIX_CI"];
 const LINE_MAX = 200;
@@ -177,10 +180,11 @@ async function readComments(gh, repo, n) {
 
 /**
  * Collect the facts for one issue's pack. `io`: {gh, git, exists}; git runs in `cwd` (the lane worktree), base is the
- * base ref. Every source is independent and best effort: a failing source is listed in `errors` and contributes nothing.
+ * base ref; `checkout` (the main checkout, optional) is where repo-fact files absent from the worktree are looked up.
+ * Every source is independent and best effort: a failing source is listed in `errors` and contributes nothing.
  */
-export async function gatherContextFacts({ io, repo, issue, iss, comments = [], cwd, base, sources = CONTEXT_SOURCES, days = DEFAULT_LEDGER_DAYS, now = Date.now(), pitfalls = [] }) {
-  const facts = { issue: Number(issue), links: [], attempts: [], pitfalls: [], ledger: [], facts: [], errors: [] };
+export async function gatherContextFacts({ io, repo, issue, iss, comments = [], cwd, checkout = null, base, sources = CONTEXT_SOURCES, days = DEFAULT_LEDGER_DAYS, now = Date.now(), pitfalls = [] }) {
+  const facts = { issue: Number(issue), links: [], attempts: [], pitfalls: [], ledger: [], facts: [], lanes: [], errors: [] };
   const body = String(iss?.body ?? "");
   const on = new Set(sources);
   const step = async (name, fn) => { if (!on.has(name)) return; try { await fn(); } catch (e) { facts.errors.push(`${name}: ${oneLine(e?.message ?? e, 120)}`); } };
@@ -240,30 +244,47 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
     }
   });
 
-  await step("ledger", async () => {
-    const paths = namedPaths(body);
-    const symbols = issueSymbols(body);
-    if (!paths.length || !base) return;
+  // The file-path ledger walk (merged PRs on the issue's named paths) and each PR's trusted records, shared by the ledger
+  // and facts sources (#4401): run once per gather, and only when a source that needs them is on.
+  const paths = namedPaths(body);
+  let walked = null;
+  const walk = () => (walked ??= (async () => {
+    if (!paths.length || !base) return [];
     const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
     const out = String(await git(["log", "--first-parent", `--since=${since}`, "--format=%x1e%H%x1f%s%x1f%b%x1f", "--name-only", base, "--", ...paths]));
-    const commits = out.split("\x1e").filter((x) => x.trim()).map((rec) => {
+    return out.split("\x1e").filter((x) => x.trim()).map((rec) => {
       const [sha, subject = "", msg = "", files = ""] = rec.split("\x1f");
       const pr = Number(/Merge pull request #(\d+)/.exec(subject)?.[1] ?? /\(#(\d+)\)\s*$/.exec(subject)?.[1]) || null;
       return { sha: sha.trim(), subject: subject.trim(), msg, pr, files: files.split("\n").map((f) => f.trim()).filter(Boolean),
         revert: /^Revert\b/.test(subject.trim()) || /\/revert-\d+-/.test(subject) || /^This reverts commit [0-9a-f]{7,40}/m.test(msg) };
     });
+  })());
+  const prReads = new Map();
+  const prInfo = (n) => {
+    if (!prReads.has(n)) prReads.set(n, (async () => {
+      const pr = JSON.parse(String(await io.gh(["api", `repos/${repo}/pulls/${n}`, "--jq", "{title, body, head: .head.ref}"])));
+      const linked = Number(/issue-(\d+)/.exec(String(pr.head ?? ""))?.[1] ?? /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/i.exec(String(pr.body ?? ""))?.[1]) || null;
+      const recs = [...(await readComments(io.gh, repo, n)), ...(linked ? await readComments(io.gh, repo, linked) : [])].filter(trusted);
+      return { title: pr.title, linked, recs };
+    })());
+    return prReads.get(n);
+  };
+  const ledgerPrs = async () => (await walk()).filter((x) => x.pr || x.revert).slice(0, MAX_LEDGER_PRS);
+
+  await step("ledger", async () => {
+    const symbols = issueSymbols(body);
+    const commits = await walk();
+    if (!commits.length) return;
     const reverts = commits.filter((c) => c.revert);
     const revertedBy = (c) => reverts.find((r) => r !== c && ((c.pr && (new RegExp(`#${c.pr}\\b`).test(`${r.subject}\n${r.msg}`) || new RegExp(`/revert-${c.pr}-`).test(r.subject))) || r.msg.includes(c.sha) || r.msg.includes(c.sha.slice(0, 12))));
-    for (const c of commits.filter((x) => x.pr || x.revert).slice(0, MAX_LEDGER_PRS)) {
+    for (const c of await ledgerPrs()) {
       let title = c.subject, notes = [];
       const reverted = c.revert ? null : revertedBy(c);
       if (c.pr) {
         try {
-          const pr = JSON.parse(String(await io.gh(["api", `repos/${repo}/pulls/${c.pr}`, "--jq", "{title, body, head: .head.ref}"])));
+          const pr = await prInfo(c.pr);
           title = oneLine(pr.title ?? title, 120);
-          const linked = Number(/issue-(\d+)/.exec(String(pr.head ?? ""))?.[1] ?? /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/i.exec(String(pr.body ?? ""))?.[1]) || null;
-          const recs = [...(await readComments(io.gh, repo, c.pr)), ...(linked ? await readComments(io.gh, repo, linked) : [])].filter(trusted);
-          for (const r of recs) {
+          for (const r of pr.recs) {
             const m = markerOf(r.body);
             if (m === "DECISION") notes.push(...String(r.body).split("\n").slice(1).map((l) => oneLine(l, 160)).filter((l) => l && !l.startsWith("#")).map((l) => `decision: ${l}`));
             if (m === "CONTRACT") for (const d of parseContractComment(r.body)?.contract?.decisions ?? []) notes.push(oneLine(`decision ${d?.id ?? ""}: ${d?.choice ?? ""}`, 160));
@@ -279,7 +300,32 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
   });
 
   await step("facts", async () => {
-    for (const p of REPO_FACT_FILES) if (await io.exists(`${cwd}/${p}`)) facts.facts.push(p);
+    // #4401: FORGE:FACTS of earlier lanes: this issue's own attempts (newest first), then merged PRs on the issue's files
+    // whose record names an overlapping file. Only trusted comments; a malformed record contributes nothing.
+    const seen = new Set();
+    const add = (rec, ref, n, pr) => {
+      const key = JSON.stringify(rec);
+      if (!rec || seen.has(key) || facts.lanes.length >= MAX_FACT_LANES) return;
+      seen.add(key);
+      facts.lanes.push({ ref, issue: n, pr, ...rec });
+    };
+    for (const c of [...comments].reverse()) if (trusted(c)) add(parseFactsComment(c?.body), `#${issue} earlier attempt`, Number(issue), null);
+    const overlaps = (files) => files.some((f) => paths.some((p) => f === p || f.startsWith(`${p.replace(/\/+$/, "")}/`) || p.startsWith(`${f}/`)));
+    let prs = [];
+    try { prs = await ledgerPrs(); } catch (e) { facts.errors.push(`facts: ledger ${oneLine(e?.message ?? e, 80)}`); }
+    for (const c of prs) {
+      if (!c.pr || facts.lanes.length >= MAX_FACT_LANES) continue;
+      let pr;
+      try { pr = await prInfo(c.pr); } catch (e) { facts.errors.push(`facts: PR #${c.pr} ${oneLine(e?.message ?? e, 80)}`); continue; }
+      for (const r of [...pr.recs].reverse()) {
+        const rec = parseFactsComment(r.body);
+        if (rec && overlaps(rec.files)) add(rec, `${pr.linked ? `#${pr.linked}, ` : ""}PR #${c.pr}`, pr.linked, c.pr);
+      }
+    }
+    // #4400: the .forge/ caches are untracked, so a fresh lane worktree lacks them: the main checkout is the fallback
+    for (const p of REPO_FACT_FILES) {
+      for (const d of [...new Set([cwd, checkout].filter(Boolean))]) if (await io.exists(`${d}/${p}`)) { facts.facts.push(p); break; }
+    }
   });
   return facts;
 }
@@ -306,11 +352,16 @@ export function compileContextPack(facts, { budgetBytes = DEFAULT_CONTEXT_BYTES,
   if (on.has("attempts")) for (const a of facts?.attempts ?? []) cand.push({ src: "attempts", line: `- ${a.ref}: ${oneLine(a.line)}` });
   if (on.has("pitfalls")) for (const p of facts?.pitfalls ?? []) cand.push({ src: "pitfalls", line: pitfallLine(p), pit: { sig: p.sig, match: p.match } });
   if (on.has("ledger")) for (const p of facts?.ledger ?? []) cand.push({ src: "ledger", line: ledgerLine(p) });
-  if (on.has("facts")) for (const f of facts?.facts ?? []) cand.push({ src: "facts", line: `- ${f} (repo facts file; read it if relevant)` });
+  if (on.has("facts")) {
+    // #4401: earlier lanes' facts by kind (rejected approaches first, across lanes), then the repo-fact file pointers
+    const lanes = (facts?.lanes ?? []).map((l) => factsLines(l, l.ref));
+    for (const k of FACTS_RANK) for (const l of lanes) for (const line of l[k]) cand.push({ src: "facts", line: oneLine(line) });
+    for (const f of facts?.facts ?? []) cand.push({ src: "facts", line: `- ${f} (repo facts file; read it if relevant)` });
+  }
   const found = Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, cand.filter((c) => c.src === s).length]));
   const empty = { text: "", bytes: 0, items: 0, truncated: 0, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, 0])), found, hash: null, pitfalls: [] };
   if (!cand.length) return empty;
-  const titles = { graph: "Linked issues and PRs", attempts: "Prior attempts at this issue", pitfalls: "Recurring pitfalls in this repo (past rework)", ledger: "Merged PRs on the same symbols (reverts, decisions, findings)", facts: "Repo facts" };
+  const titles = { graph: "Linked issues and PRs", attempts: "Prior attempts at this issue", pitfalls: "Recurring pitfalls in this repo (past rework)", ledger: "Merged PRs on the same symbols (reverts, decisions, findings)", facts: "Facts from earlier lanes and repo facts" };
   const head = `Context pack for #${facts.issue}`;
   const size = (s) => Buffer.byteLength(s, "utf8");
   const kept = [];

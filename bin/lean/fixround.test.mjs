@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { MECHANICAL_KINDS, FIX_PROMPT_MAX, citesFileLine, freshFix, issueSummary, capText, TRIGGERS, REWORK_TRIGGERS, firstPassOf, formatFirstPassSummary } from "./fixround.mjs";
+import { MECHANICAL_KINDS, FIX_PROMPT_MAX, citesFileLine, freshFix, issueSummary, capText, TRIGGERS, REWORK_TRIGGERS, firstPassOf, formatFirstPassSummary, sessionCostDelta } from "./fixround.mjs";
 import { fixSessionPrompt } from "./prompts.mjs";
 
 describe("#4363 fresh fix sessions: which rounds, and the prompt caps", () => {
@@ -53,7 +53,7 @@ describe("#4362 attempt triggers and first pass", () => {
   const t = (...xs) => xs.map((trigger) => ({ trigger }));
   it("the trigger vocabulary is the issue's closed list; rework is a subset", () => {
     assert.deepEqual([...TRIGGERS], ["plan", "build", "block_correction", "contract_correction", "precheck", "structure", "docs", "enumerating",
-      "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "verifier", "post_merge", "duplicate", "context_restart"]);
+      "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "verifier", "post_merge", "duplicate", "context_restart", "budget_wrapup"]);
     for (const r of REWORK_TRIGGERS) assert.ok(TRIGGERS.includes(r), r);
   });
   it("firstPassOf: null without a build or with an untagged attempt; rework after the build breaks it, repairs do not", () => {
@@ -75,5 +75,37 @@ describe("#4362 attempt triggers and first pass", () => {
     assert.equal(formatFirstPassSummary([{ first_pass: true }]), "first-pass: 100% (1/1 lane that reached the build)");
     assert.equal(formatFirstPassSummary([{ issue: 1 }]), null);
     assert.equal(formatFirstPassSummary(undefined), null);
+  });
+});
+
+describe("#4407 sessionCostDelta: per-attempt cost from a resumed session's running total", () => {
+  it("a session of N attempts: the deltas sum to the final session total", () => {
+    const last = new Map(), totals = [2.33, 2.41, 15.25, 16.31];
+    const ds = totals.map((cost, i) => sessionCostDelta(last, { resume: i ? "s" : null, sessionId: "s", cost }));
+    assert.deepEqual(ds.map((d) => d.session), totals);
+    assert.equal(Math.round(ds.reduce((a, d) => a + d.delta, 0) * 1e9) / 1e9, 16.31);
+    assert.deepEqual(ds.map((d) => d.delta), [2.33, 0.08, 12.84, 1.06]);
+  });
+
+  it("a fresh call, an unknown session and a total below the previous one count in full", () => {
+    const last = new Map([["s", 5]]);
+    assert.equal(sessionCostDelta(last, { resume: null, sessionId: "s", cost: 1 }).delta, 1, "fresh");
+    assert.equal(sessionCostDelta(new Map(), { resume: "x", sessionId: "x", cost: 3 }).delta, 3, "unknown session");
+    const l2 = new Map([["s", 5]]);
+    assert.equal(sessionCostDelta(l2, { resume: "s", sessionId: "s", cost: 2 }).delta, 2, "below the previous total");
+  });
+
+  it("a non-finite cost yields nulls and leaves the map alone", () => {
+    const last = new Map([["s", 1]]);
+    assert.deepEqual(sessionCostDelta(last, { resume: "s", sessionId: "s", cost: null }), { delta: null, session: null });
+    assert.deepEqual(sessionCostDelta(last, { resume: "s", sessionId: "s", cost: NaN }), { delta: null, session: null });
+    assert.deepEqual([...last], [["s", 1]]);
+  });
+
+  it("a resume that returns a new session id: the next resume of that id subtracts its total", () => {
+    const last = new Map();
+    sessionCostDelta(last, { resume: null, sessionId: "a", cost: 1 });
+    assert.equal(sessionCostDelta(last, { resume: "a", sessionId: "b", cost: 1.5 }).delta, 0.5);
+    assert.equal(sessionCostDelta(last, { resume: "b", sessionId: "b", cost: 2 }).delta, 0.5);
   });
 });

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, mkdirSync, chmodSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS } from "./heavy.mjs";
+import { classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS, isHeavyProcess } from "./heavy.mjs";
 import { checkAdmission, ADMISSION_DEFAULTS } from "./admission.mjs";
 import { formatAlertLines, formatWaitSummary } from "./orchestrate.mjs";
 import { readHeavy } from "../engine-cli.mjs";
@@ -47,6 +47,29 @@ describe("step classes (#4169)", () => {
     writeFileSync(join(d, "forge.yaml"), "engine:\n  heavy_max: 2\n  heavy_step_mem_mb: 2500\n  heavy_enabled: false\n");
     assert.deepEqual(readHeavy(d), { enabled: false, max: 2, step_mem_mb: 2500 });
     assert.deepEqual(readHeavy(tmpDir("heavy-none-")), {});
+  });
+});
+
+describe("idle-detector inputs (#4405)", () => {
+  it("isHeavyProcess: shim steps, test runners and linters behind an interpreter are heavy; pollers, MCP servers and git are not", () => {
+    for (const c of ["/usr/bin/node /x/bin/lean/heavy.mjs run --name npm -- /usr/bin/npm test", "/bin/sh /x/vitest run", "node /x/node_modules/.bin/eslint .",
+      "node --test a.test.mjs", "python3 -m pytest -q", "pytest -x", "cargo test", "env CI=1 jest"]) assert.equal(isHeavyProcess(c), true, c);
+    for (const c of ["sleep 10", "bash -c until grep -q done out; do sleep 10; done", "node mcp-server.js", "git status", "npm --version", "", null]) assert.equal(isHeavyProcess(c), false, String(c));
+  });
+
+  it("lane(pids) counts only this session's live queued and running entries, read-only", () => {
+    const { handle, live, dir } = world({ mem: 64000, cores: 2 });
+    const a = handle(201), b = handle(202), c = handle(301);
+    assert.equal(a.tryAcquire("a", { issue: 7 }).ok, true);
+    assert.equal(b.tryAcquire("b", { issue: 7 }).ok, false);
+    assert.equal(c.tryAcquire("c", { issue: 7 }).ok, false);
+    const before = readFileSync(join(dir, "heavy.json"), "utf8");
+    assert.deepEqual(a.lane([201, 202, 999]), { queued: 1, running: 1 });
+    assert.deepEqual(a.lane([301]), { queued: 1, running: 0 }, "same issue number, other session: matched by pid only");
+    assert.deepEqual(a.lane([]), { queued: 0, running: 0 });
+    live.delete(201);
+    assert.deepEqual(a.lane([201, 202]), { queued: 1, running: 0 }, "a dead holder does not count");
+    assert.equal(readFileSync(join(dir, "heavy.json"), "utf8"), before, "lane() never writes the registry");
   });
 });
 

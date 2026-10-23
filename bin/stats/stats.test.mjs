@@ -14,7 +14,7 @@ import { fetchGithubRecords, parseTelemetryComments, runsFromRecords, toModel } 
 import { buildReport, makeProgressPrinter, parseArgs, parseSince, readAlertConfig, runStats, sinceToTimestamp } from "./index.mjs";
 import { lanesOfLog, readLanes, readLocalRuns, summariseLog } from "./local-source.mjs";
 import { renderAlerts, renderCompact, renderJson, renderMarkdown } from "./render.mjs";
-import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb } from "./query.mjs";
+import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers } from "./query.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fx = (f) => join(here, "fixtures", f);
@@ -565,6 +565,49 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
   });
 });
 
+describe("builder model tiers over run logs (forge#4394)", () => {
+  const use = (phase, trigger, usd = 1) => ({ event: "PHASE_ATTEMPT_USAGE", phase, trigger, cost_usd: usd, usage: { cache_read_input_tokens: 1, output_tokens: 1 } });
+  const slice = (issue, { tier = "mid", cls = "small", escalated = false, reason = "merged", triggers = ["plan", "build"], review = true, shadow } = {}) => [
+    { event: "RUN_START", issue, repo: "o/r", run: `r${issue}` },
+    ...triggers.map((t) => use("implement", t)), ...(review ? [use("review", "review", 0.5)] : []),
+    { event: "RUN_TERMINAL", reason, code: "x", ...(shadow ? { shadow_would: shadow } : {}), builder_tier: tier, builder_class: cls, builder_escalated: escalated, builder_model: tier === "mid" ? "claude-sonnet-5-5" : "default" },
+  ];
+
+  it("summariseLog reads builderRoute from RUN_TERMINAL, else the BUILDER_ROUTE/BUILDER_ESCALATED events; null before routing", () => {
+    const s = summariseLog(slice(1, { escalated: true, triggers: ["plan", "build", "conformance"], shadow: "conformance.scope" }));
+    assert.deepEqual(s.builderRoute, { tier: "mid", class: "small", escalated: true, model: "claude-sonnet-5-5" });
+    assert.equal(s.conformanceRound, true); assert.equal(s.shadowWould, "conformance.scope"); assert.equal(s.reachedReview, true);
+    const evs = [{ event: "RUN_START", issue: 2 }, { event: "BUILDER_ROUTE", tier: "mid", class: "docs-config-test", model: "m" }, { event: "BUILDER_ESCALATED", from: "m", to: "default", trigger: "ci_red" }, { event: "RUN_TERMINAL", reason: "merged" }];
+    assert.deepEqual(summariseLog(evs).builderRoute, { tier: "mid", class: "docs-config-test", escalated: true, model: "m" });
+    const old = summariseLog([{ event: "RUN_START", issue: 3 }, { event: "RUN_TERMINAL", reason: "merged" }]);
+    assert.equal(old.builderRoute, null); assert.equal(old.conformanceRound, false); assert.equal(old.shadowWould, null);
+  });
+
+  it("reports merge, conformance and post-merge-rework rates per tier and class; unrouted runs are left out", () => {
+    const reworked = [...slice(5, { tier: "top", cls: "large" }), ...slice(5, { tier: "top", cls: "large", reason: "needs-human" })]; // a later run of a merged issue
+    const runs = [slice(1), slice(2, { triggers: ["plan", "build", "review"] }), slice(3, { reason: "needs-human", review: false }),
+      slice(4, { escalated: true, triggers: ["plan", "build", "precheck"] }), reworked, [{ event: "RUN_START", issue: 9 }, { event: "RUN_TERMINAL", reason: "merged" }]].map((l) => summariseLog(l));
+    const rep = builderTierReport(runs);
+    assert.equal(rep.unrouted, 1);
+    assert.deepEqual(rep.rows.map((g) => [g.tier, g.class]), [["mid", "small"], ["mid->top", "small"], ["top", "large"]]);
+    const [mid, esc, top] = rep.rows;
+    assert.deepEqual([mid.n, mid.merge_rate, mid.reviewed, mid.conformance_rate, mid.merges, mid.post_merge_rework_rate, mid.first_pass_yield], [3, 0.6667, 2, 0.5, 2, 0, 0.3333]);
+    assert.deepEqual([esc.n, esc.merge_rate, esc.conformance_rate], [1, 1, 1]);
+    assert.deepEqual([top.n, top.merge_rate, top.merges, top.post_merge_rework_rate], [1, 0, 1, 1]);
+    const md = renderTiers(rep);
+    assert.match(md, /\| mid \| small \| 3 \| 0\.6667 \| 0\.5 \(2\) \| 0 \(2\) \| 0\.3333 \|/);
+    assert.match(md, /\| top \| large \| 1 \| 0 \| .* \| 1 \(1\) \|/);
+    assert.match(md, /1 finished run\(s\) without a builder route/);
+    assert.match(renderTiers(builderTierReport([])), /\| none \|/);
+  });
+
+  it("--tiers reads run logs only (no GitHub crawl); other reports carry no tiers", async () => {
+    assert.equal(parseArgs(["--tiers"]).tiers, true); assert.equal(parseArgs([]).tiers, false);
+    const rep = await buildReport({ repo: "o/r", tiers: true }, { localRuns: [summariseLog(slice(1))], releaseTimes: [], gh: async () => { throw new Error("no network"); } });
+    assert.equal(rep.query.tiers.rows[0].n, 1);
+  });
+});
+
 describe("rework by trigger and first-pass rate (#4362)", () => {
   const use = (attempt, trigger, usd, phase = "implement") => ({ event: "PHASE_ATTEMPT_USAGE", phase, attempt, ...(trigger ? { trigger } : {}), cost_usd: usd, usage: { cache_read_input_tokens: 10, output_tokens: 1 } });
   const log = (issue, attempts) => [{ event: "RUN_START", issue, repo: "o/r", run: `r${issue}`, version: "1.30.0", ts: "2026-10-20T00:00:00Z" }, ...attempts,
@@ -600,6 +643,29 @@ describe("rework by trigger and first-pass rate (#4362)", () => {
     const [run] = runsFromRecords([rec(3, "ci_red", "t3"), rec(1, "plan", "t1"), rec(2, "build", "t2"), rec(2, "timeout_restart", "t2b"), rec(4, null, "t4"),
       { event: "run_terminal", repo: "o/r", issue: 9, run: "r_9", reason: "merged", ts: "t5" }]);
     assert.deepEqual(run.builderAttempts.map((a) => [a.attempt, a.trigger]), [[1, "plan"], [2, "build"], [2, "timeout_restart"], [3, "ci_red"], [4, null]]);
+  });
+});
+
+describe("per-attempt cost deltas (#4407)", () => {
+  const use = (attempt, usd, delta, phase = "implement") => ({ event: "PHASE_ATTEMPT_USAGE", phase, attempt, trigger: attempt === 1 ? "plan" : "build", cost_usd: usd,
+    ...(delta === undefined ? {} : { cost_usd_delta: delta, cost_usd_session: usd }), usage: { cache_read_input_tokens: 10, output_tokens: 1 } });
+  const log = (attempts) => [{ event: "RUN_START", issue: 1, repo: "o/r", run: "r1", version: "1.30.0", ts: "2026-10-20T00:00:00Z" }, ...attempts,
+    { event: "RUN_TERMINAL", reason: "merged", ts: "2026-10-20T01:00:00Z" }];
+
+  it("a local run sums cost_usd_delta when present, else cost_usd (old logs)", () => {
+    const r = summariseLog(log([use(1, 2, 2), use(2, 5, 3), use(1, 0.5, 0.5, "review")]));
+    assert.equal(r.costUsd, 5.5);
+    assert.equal(r.phases.implement.usd, 5);
+    assert.deepEqual(r.builderAttempts.map((a) => a.cost_usd), [2, 3]);
+    const old = summariseLog(log([use(1, 2), use(2, 5)]));
+    assert.equal(old.costUsd, 7); assert.deepEqual(old.builderAttempts.map((a) => a.cost_usd), [2, 5]);
+  });
+
+  it("GitHub phase_attempt records sum cost_usd_delta when present, else cost_usd", () => {
+    const rec = (attempt, usd, delta) => ({ event: "phase_attempt", repo: "o/r", issue: 9, run: "r_9", phase: "implement", attempt, cost_usd: usd, ...(delta === undefined ? {} : { cost_usd_delta: delta }), output_tokens: 1, ts: `t${attempt}` });
+    const [run] = runsFromRecords([rec(1, 2, 2), rec(2, 5, 3), rec(3, 4), { event: "run_terminal", repo: "o/r", issue: 9, run: "r_9", reason: "merged", ts: "t9" }]);
+    assert.equal(run.phases.implement.usd, 9);
+    assert.deepEqual(run.builderAttempts.map((a) => a.cost_usd), [2, 3, 4]);
   });
 });
 

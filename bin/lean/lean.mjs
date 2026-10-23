@@ -13,11 +13,12 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
-import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, dropScopeValidates, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
+import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths } from "./prefilter.mjs";
 import { preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
+import { splitGate, rationaleLine } from "./decompose.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { repoKey } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -27,9 +28,11 @@ import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
-import { freshFix, issueSummary, firstPassOf } from "./fixround.mjs";
+import { freshFix, issueSummary, firstPassOf, sessionCostDelta } from "./fixround.mjs";
+import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
+import { makeTurnBudget, laneSize, wrapupGrant, budgetDigest } from "./budget.mjs";
 import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog } from "./pitfalls.mjs";
 import { unjustified } from "./enumerating.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
@@ -37,9 +40,12 @@ import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VER
 import { e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
-import { writeHeavyShims, sumWaits } from "./heavy.mjs";
+import { writeHeavyShims, sumWaits, isHeavyProcess } from "./heavy.mjs";
 import { priorityFromLabels } from "./sched.mjs";
-import { parseContextPackConfig, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp } from "./context.mjs";
+import { parseExploreConfig, explorerAgents, explorePlanRule, exploreBuildRule } from "./explore.mjs";
+import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
+import { parseContextPackConfig, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
+import { buildResumeDigest } from "./resume.mjs";
 
 /**
  * #4267: what a recovery lane does per code. Codebase-agnostic: the repo's own checks and logs only. Keys stay in step
@@ -50,6 +56,7 @@ export const RECOVER_HOW = Object.freeze({
   [OUTCOME_CODES.BASE_CONFLICT]: "the PR conflicts with origin/BASE. Merge origin/BASE, resolve every conflict keeping both sides' intent, re-run the validate commands and push new commits only",
   [OUTCOME_CODES.BUILDER_BLOCK_UNTYPED]: "an earlier run escalated an in-scope technical choice. Do not block on it: pick the option most consistent with the issue, the repo's conventions and prior merged decisions, and name the alternative you did not take in your summary",
   [OUTCOME_CODES.CONTRACT_INVALID]: "the issue was edited while the earlier run planned. Plan against the current issue text",
+  [OUTCOME_CODES.BUDGET_EXCEEDED]: "an earlier run spent the implement turn budget for this issue's size; its digest is in the earlier run's detail and the branch holds its checkpointed work. Continue from the checkpoint against the frozen contract without starting over; if the remaining work cannot fit the budget, stop with a typed split-required block naming the sub-issues instead of grinding",
   [OUTCOME_CODES.ENV_TOOL_MISSING]: "a validate command could not run because the host lacks the tool or module named in the earlier run's detail; the change may already be correct. Do not edit the deliverables for it and never install anything globally: run the same check through the repo's own toolchain (its virtualenv, lockfile-pinned runner or package scripts), record that exit under the same validate id and name the command you used in your summary",
   [OUTCOME_CODES.ENV_REPRO_UNRUNNABLE]: "the repro harness could not run the contract's repro_test on head (timeout, missing runner or dependencies); the change may already be correct. Do not edit the deliverables or stub dependencies for it and never install anything globally: run the repro command through the repo's own toolchain and installed dependencies, and when it cannot run in this checkout, fix the repro_test command (not the code) so it does",
 });
@@ -70,6 +77,8 @@ const SHADOW_BLOCKS = [OUTCOME_CODES.CONFORMANCE_UNIMPLEMENTED, OUTCOME_CODES.CO
  * over-threshold file (maintenance.hotspot_growth, forge#4195). Scope creep stays recorded-only.
  */
 const SHADOW_PRE_BLOCKS = [...SHADOW_BLOCKS, OUTCOME_CODES.MAINTENANCE_HOTSPOT_GROWTH];
+/** #4395: cap on the engine.lane_instructions file; a larger one is not slim and falls back to CLAUDE.md. */
+export const LANE_INSTRUCTIONS_MAX_BYTES = 16384;
 /** forge.yaml engine.review_incomplete (#4160): "needs-human" (default), or "degraded": in shadow, merge an incomplete review with a review-degraded label and a tracked follow-up. */
 export const REVIEW_INCOMPLETE_MODES = Object.freeze(["needs-human", "degraded"]);
 export const REVIEW_DEGRADED_LABEL = "review-degraded";
@@ -115,10 +124,12 @@ export function classifyBlock(result, issue) {
     const subs = (Array.isArray(b.subissues) ? b.subissues : []).filter((x) => x && typeof x.title === "string" && x.title.trim() && typeof x.body === "string");
     if (!subs.length) return { kind: "untyped", problem: "the split-required block lists no sub-issues with a title and body" };
     if (subs.length > MAX_SUBISSUES) return { kind: "untyped", problem: `the split-required block lists ${subs.length} sub-issues (at most ${MAX_SUBISSUES})` };
+    const gate = splitGate({ ...b, subissues: subs }); // #4396: disjoint parts or over the size budget; else one lane
+    if (!gate.ok) return { kind: "untyped", problem: gate.problem };
     const subissues = subs.map((x, i) => ({ title: x.title.trim(), body: x.body,
       dependsOn: [...new Set((Array.isArray(x.depends_on) ? x.depends_on : []).filter((j) => Number.isInteger(j) && j >= 0 && j < i))],
       ...(Array.isArray(x.files) ? { files: [...new Set(x.files.filter((f) => typeof f === "string").map((f) => f.trim().replace(/^\.?\/+/, "")).filter(Boolean))] } : {}) }));
-    return { kind: "split", subissues, serialized: serializeShared(subissues) };
+    return { kind: "split", rationale: gate.rationale, subissues, serialized: serializeShared(subissues) };
   }
   if (b.kind === "human") {
     return HUMAN_BLOCK_REASONS.includes(b.why) ? { kind: "human", why: b.why }
@@ -149,6 +160,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {string} [o.builderModel]  default: CLI default
  * @param {string} [o.reviewerModel] default claude-sonnet-5-5
  * @param {string} [o.fixModel]     model of fresh fix-round sessions (#4363, forge.yaml lean.fix_model); default the reviewer model
+ * @param {object} [o.builderRouting] forge.yaml lean.builder_routing/builder_mid_model (#4394): {mode: on (default)|off, midModel}
  * @param {string} [o.sequenceRegenerate] forge.yaml lean.sequence.regenerate (#4386): snapshot generator for a schema-changing renumbered migration
  * @param {number} [o.ciMaxMinutes]  remote-CI wait budget (default 360); exhaustion is NOT needs-human
  * @param {"shadow"|"enforce"} [o.conformance] conformance gate mode (default shadow)
@@ -164,8 +176,10 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {number} [o.splitMaxLines] refactor:split moved-line budget per PR (default 4000); the rest becomes a chained issue (#4211)
  * @param {string} [o.toolchainOverride] forge.yaml env.toolchain: "<pm>@<x.y.z>" or "off" (#4163)
  * @param {string} [o.envSetup]      forge.yaml env.setup: run once per fresh worktree before the builder (#4163)
+ * @param {string} [o.laneInstructions] forge.yaml engine.lane_instructions (#4395): repo-relative file appended to fresh sessions instead of CLAUDE.md
  * @param {number} [o.sparseMaxKb]   forge.yaml env.sparse_max_kb: tracked blobs >= this many KB stay out of the lane checkout (default 1024; 0 = off, #4221)
  * @param {object} [o.placement]     {where: local|remote, reason, mode}: the dispatcher's lane placement (#4256), kept in FORGE:STATE
+ * @param {object} [o.explore]       {mode: on|off, model}: forge.yaml lean.explore / lean.explore_model (#4391, default off): the explorer subagent
  * @param {object} [o.contextPack]   {mode: shadow|on|off, sources, bytes, days}: forge.yaml engine.context_pack* (#4275, default shadow)
  * @param {object} [o.recover]       {code, attempt, final}: a batch recovery lane (#4267) for a mechanical needs-human; removes the label,
  *                                   posts FORGE:DECISION and resumes the open PR on the rerun path with a recovery note. `final`
@@ -173,7 +187,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  */
 export async function runCore(o) {
   const { issue, repo, lane: requestedLane = null, laneOverride = false, branches = {}, cwd, dir, io, builderModel = null, reviewerModel = DEFAULT_REVIEWER_MODEL, fixModel = null,
-    toolchainOverride = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, contextCeilingTokens = 120000, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
+    toolchainOverride = null, envSetup = null, ciMaxMinutes = 360, conformance = "shadow", reviewIncomplete = "needs-human", reproTest = "prefer", closeParent = false, mergeWait = "required", maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES, cliIdleMinutes = 15, cliMaxMinutes = 180, cliBusyMinutes = 45, contextCeilingTokens = 120000, turnBudgets = null, laneLimits = null, maxMergeRetries = 5, sessionLimitMaxWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS, onProgress = () => {}, emitTelemetry = null, random = Math.random } = o;
   const now = io.now ?? (() => Date.now());
   const vcfg = { ...parseVerify({}), ...(o.verify ?? {}) };
   const learnedCommands = (Array.isArray(o.precheck?.commands) ? o.precheck.commands : []).map((c) => String(c ?? "").trim()).filter(Boolean);
@@ -182,6 +196,10 @@ export async function runCore(o) {
   const triggerMode = TRIGGER_MODES.includes(o.reviewTrigger?.mode) ? o.reviewTrigger.mode : "shadow";
   const riskPaths = Array.isArray(o.reviewTrigger?.riskPaths) ? o.reviewTrigger.riskPaths : [];
   const verifierCfg = parseVerifierConfig(o.verifier ?? {});
+  const routingCfg = parseBuilderRouting(o.builderRouting ?? {});
+  // #4394: the build's model tier, routed from the frozen contract; a failed validate round on the mid tier escalates once
+  let route = null, escalated = false;
+  const laneModel = () => (route?.tier === "mid" && !escalated ? route.model : builderModel);
   const sleep = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   let lane = null, base = null, defaults = [], milestone = null; // set by lane resolution, before the lease
   // #4267: a batch recovery lane for a mechanical needs-human ({code, attempt, final}); #4302: only a final attempt relabels.
@@ -190,6 +208,7 @@ export async function runCore(o) {
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
   const usage = { cost_usd: 0, input: 0, output: 0, cache: 0 };
+  const sessionCosts = new Map(); // #4407: session id -> last reported cumulative cost
   let sessionId = null;
 
   const ev = (e) => appendEvent(dir, issue, e);
@@ -202,14 +221,18 @@ export async function runCore(o) {
 
   const builderTriggers = []; // #4362: implement-attempt triggers in order, for the lane's first-pass flag
   const impl = { cost: 0, models: new Set() }; // #4397: implement spend and reported models, for the verifier
-  /** `trigger` (#4362): why the attempt ran, one of fixround.mjs TRIGGERS. */
-  async function attempt(phase, n, r, mode = null, trigger = null, restartOf = null) {
+  // #4392: implement turn budget for the lane's size, and its turn tally; off unless given (the CLI passes readCoreLimits' defaults)
+  const tb = makeTurnBudget(turnBudgets ?? { S: 0, M: 0, L: 0 });
+  /** `trigger` (#4362): why the attempt ran, one of fixround.mjs TRIGGERS; `resume` (#4407): the session it resumed. */
+  async function attempt(phase, n, r, mode = null, trigger = null, restartOf = null, resume = null) {
+    const c = sessionCostDelta(sessionCosts, { resume, sessionId: r?.sessionId ?? null, cost: num(r?.costUsd) });
     const rec = { event: "PHASE_ATTEMPT_USAGE", phase, attempt: n, trigger, ...(restartOf ? { restart_of: restartOf } : {}), usage: r?.usage ?? null, duration_ms: num(r?.durationMs) ?? 0,
-      cost_usd: num(r?.costUsd), model: r?.model ?? null, turns: num(r?.turns), ...(mode ? { mode } : {}) };
-    if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += num(r?.costUsd) ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); }
+      cost_usd: num(r?.costUsd), cost_usd_delta: c.delta, cost_usd_session: c.session, model: r?.model ?? null, turns: num(r?.turns), ...(mode ? { mode } : {}),
+      ...(num(r?.baselineTokens) != null ? { baseline_tokens: num(r.baselineTokens) } : {}), lane_profile: laneProfile.name };
+    if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += c.delta ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); tb.note(num(r?.turns), stage === "implement"); }
     ev(rec); await emit(rec);
     const u = r?.usage ?? {};
-    usage.cost_usd += r?.costUsd ?? 0;
+    usage.cost_usd += c.delta ?? 0;
     usage.input += u.input_tokens ?? 0; usage.output += u.output_tokens ?? 0;
     usage.cache += (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
   }
@@ -250,8 +273,11 @@ export async function runCore(o) {
   const T = { issue, validate: null, plan: null, implement: null, review: null, pr: null, merge: null, close: null, decisions: [], anomalies: [] };
   const failureClasses = new Set(); // forge#4275: conformance failure codes seen this run (gate failures, shadow would-fail)
   const ctxCfg = parseContextPackConfig(o.contextPack ?? {});
+  const exploreCfg = parseExploreConfig(o.explore ?? {}); // #4391
+  if (exploreCfg.mode === "on") T.decisions.push(`Explorer subagent (on): model ${exploreCfg.model}`);
   let ctxLane = null; // forge#4275: rerun | child | first, set once the issue is read
   let pitMatched = null; // #4375: pitfalls in the pack that match the issue's files; null when no pack was compiled
+  let factsSeen = []; // #4401: trusted comment bodies on the issue, so an identical FORGE:FACTS is never posted twice
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   let riskEnforced = null, gateRan = false; // #4398: declared risk paths that made a shadow lane enforce (sticky); the gate ran
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
@@ -259,6 +285,8 @@ export async function runCore(o) {
   const runId = `${issue}-${t0}`;
   let runTmp = null;
   let sparse = null; // #4221: {excluded, maxKb} when the lane worktree is a sparse checkout; null leaves prompts unchanged
+  // #4395: lane profile. full (FORGEDOCK_FULL_SESSION=1): unchanged sessions; memory-off: no auto-memory; lane: also no CLAUDE.md, the lane file appended
+  let laneProfile = { name: process.env.FORGEDOCK_FULL_SESSION === "1" ? "full" : "memory-off", text: null };
   let toolchain = null; // #4163: {env, summary} when the repo pins its toolchain (env only with a pm shim); null leaves runner env and prompts unchanged
   // #4169: heavy steps take a host semaphore slot (io.heavy); LLM phases are not gated. `heavyEnv` puts the heavy shims on
   // the runner PATH; `waits` ({phase: ms}) and `heavyQueueMax` ride on the lane result for the batch report.
@@ -364,12 +392,14 @@ export async function runCore(o) {
     if (heavyWaitsFile) { // #4169: builder-run heavy waits, read before teardown removes the run TMPDIR
       try { heavyQueueMax = Math.max(heavyQueueMax, sumWaits(await io.fs.read(heavyWaitsFile), waits).queueMax); } catch { /* no heavy step ran */ }
     }
+    await postLaneFacts(); // #4401: before teardown removes the worktree's result.json
     await teardown(reason, extra); // first: unpushed work is pushed while this run still holds the lease
     const code = codeOverride ?? codeForTerminalReason(reason);
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}),
       conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}),
-      context_pack: ctxCfg.mode, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}) }; // forge#4275: the on/off A/B groups runs by these
+      context_pack: ctxCfg.mode, explore: exploreCfg.mode, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
+      ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
     ev(term);
     await emit(term);
     // #4297: only a final failure the runner never requeues puts needs-human back (needsHuman() relabels on its own path). invalid,
@@ -395,9 +425,23 @@ export async function runCore(o) {
     await releaseLease(reason, code);
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0,
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
-      ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}),
+      ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), // #4392
+      ...(route ? { builderRoute: { tier: route.tier, class: route.class, escalated, model: route.model ?? "default" } } : {}),
       ...(gateRan ? { conformance: { mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", would: shadowWould, risk: Boolean(riskEnforced) } } : {}), ...extra };
     return done;
+  }
+  /** #4401: post the lane's FORGE:FACTS (result.json facts and validation, changed files, contract decisions); never fails a run. */
+  async function postLaneFacts() {
+    if (!base) return;
+    try {
+      const result = await readResult();
+      const rec = result ? normaliseFacts(result, { files: await stageFiles(), contract: await readContract() }) : null;
+      if (!rec) return;
+      const body = renderFactsRecord(rec);
+      if (factsSeen.some((b) => String(b ?? "").includes(body))) return;
+      await post(FACTS_MARKER, body);
+      T.decisions.push(`FORGE:FACTS: ${rec.rejected.length} rejected approach(es), ${rec.hotspots.length} hot spot(s) on ${rec.files.length} file(s)`);
+    } catch { /* best effort */ }
   }
   /** #4297/#4316: a recovery lane that ended unmerged keeps needs-human with this evidence (shared text in render.mjs). */
   const laneRecoveryEvidence = (reason, code, detail) => recoveryEvidence({ code: recover.code, attempt: recover.attempt, outcome: reason, resultCode: code, detail });
@@ -496,7 +540,9 @@ export async function runCore(o) {
       const labels = dockerLabels({ batch: o.batchId ?? "adhoc", lane: `lean-${issue}`, issue, expires: now() + LEDGER_TTL_MS }).join(" ");
       // #4169: heavy shims first on PATH; the phase/issue/priority label each heavy step's slot and wait record.
       const heavy = heavyEnv ? { ...heavyEnv, FORGE_LANE_PHASE: args.role === "builder" ? stage : String(args.role ?? "step"), FORGE_LANE_ISSUE: String(issue), FORGE_LANE_PRIORITY: String(lanePriority()) } : {};
-      try { return await io.runner({ ...args, env: { ...laneEnv(), FORGE_DOCKER_LABELS: labels, ...(runTmp ? { CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}), ...heavy } }); }
+      const lp = laneProfile.name, profEnv = lp === "full" ? {} : { CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1", ...(lp === "lane" ? { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" } : {}) };
+      const system = lp === "lane" && !args.resume && !args.noTools ? [args.system, laneProfile.text].filter(Boolean).join("\n\n") : args.system;
+      try { return await io.runner({ ...args, system, env: { ...laneEnv(), FORGE_DOCKER_LABELS: labels, ...(runTmp ? { CLAUDE_CODE_TMPDIR: runTmp } : {}), ...(toolchain?.env ?? {}), ...heavy, ...profEnv } }); }
       catch (e) {
         const epoch = Number.isFinite(e?.resetAtEpochMs) ? e.resetAtEpochMs : null;
         if (!(e?.usageLimit === true || epoch !== null)) throw e;
@@ -567,7 +613,8 @@ export async function runCore(o) {
   const tcOpts = () => ({ toolchain: toolchain?.summary ?? null, sparse, ...(facts ? { facts } : {}) });
   let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
   let enumList = []; // #4322: tests enumerating the members of the paths the issue names, read once before the plan call
-  const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + CONTINUE_NOTE.replace("BASE", lane);
+  let resumeNote = ""; // #4400: the resume digest of the last run (resume.mjs), "" on a first run or with context_pack off
+  const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + exploreBuildRule(exploreCfg) + CONTINUE_NOTE.replace("BASE", lane) + resumeNote;
   /** #4390: builder calls stopped at the context ceiling restart fresh; planning (and its corrections) run uncapped. */
   const UNCEILED = ["plan", "contract_correction", "block_correction"], CONTEXT_RESTARTS_MAX = 3;
   async function builder(n, prompt, resume, live = false, restart = implementRestart, opts = {}) {
@@ -577,11 +624,18 @@ export async function runCore(o) {
     for (;;) {
       // after CONTEXT_RESTARTS_MAX restarts the call runs uncapped: a loop guard, never a refusal of work
       opts.contextMax = ceiled && contextRestarts < CONTEXT_RESTARTS_MAX ? contextCeilingTokens : 0;
+      const budgeted = stage === "implement" && tb.on(); // #4392: the build and its restarts spend the implement turn budget
+      if (budgeted && tb.remaining() <= 0) return await budgetWrapup(n, opts);
+      opts.turnMax = budgeted ? tb.remaining() : 0;
       try { return await builderOnce(n, p, resume, live, opts); } catch (e) {
+        if (e?.code === "CLI_TURNS") {
+          await attempt("implement", n, { usage: e.usage ?? null, turns: e.turns ?? null, costUsd: null, model: opts.model ?? builderModel ?? null }, opts.mode, opts.trigger, opts.restartOf);
+          return await budgetWrapup(n, opts);
+        }
         if (e?.code === "CLI_CONTEXT") {
           contextRestarts++;
           ev({ event: "CONTEXT_CEILING", context_tokens: e.context ?? null, ceiling: contextCeilingTokens, turns: e.turns ?? null, trigger: opts.trigger ?? null, restart: contextRestarts });
-          await attempt("implement", n, { usage: e.usage ?? null, turns: e.turns ?? null, costUsd: null, model: opts.model ?? builderModel ?? null }, opts.mode, opts.trigger, opts.restartOf);
+          await attempt("implement", n, { usage: e.usage ?? null, turns: e.turns ?? null, costUsd: null, model: opts.model ?? laneModel() ?? null }, opts.mode, opts.trigger, opts.restartOf);
           await checkpoint("context ceiling");
           T.decisions.push(`Builder session reached ${e.context ?? "?"} context tokens (ceiling ${contextCeilingTokens}): checkpointed, restarted fresh from the contract, diff and last validate result`);
           p = restart() + await contextRestartNote(); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "context_restart";
@@ -590,7 +644,8 @@ export async function runCore(o) {
         if (!(e?.code === "CLI_IDLE" || e?.code === "CLI_TIMEOUT")) throw e;
         const idle = e.code === "CLI_IDLE";
         const reason = idle ? "idle timeout" : "timeout";
-        ev({ event: idle ? "CLI_IDLE_KILL" : "CLI_TIMEOUT_KILL", reason, lastTool: e.lastTool ?? null, children: e.children ?? [] });
+        ev({ event: idle ? "CLI_IDLE_KILL" : "CLI_TIMEOUT_KILL", reason, lastTool: e.lastTool ?? null, children: e.children ?? [],
+          ...(idle ? { heavyQueue: e.heavyQueue ?? null, extended: e.extended === true } : {}) });
         await checkpoint(reason);
         if (timeoutRetries++ >= 1) { e.deferCode = idle ? OUTCOME_CODES.CLI_IDLE : OUTCOME_CODES.CLI_TIMEOUT; e.deferDetail = `builder ${reason}; work checkpointed to ${branch}; rerun resumes from it. ${String(e.message).slice(0, 300)}`; throw e; }
         T.anomalies.push(`builder ${reason}: checkpointed, retried once`);
@@ -600,16 +655,26 @@ export async function runCore(o) {
     }
   }
 
+  /** #4405: a silent builder is busy (idle window extended) while a child is a heavy step or its heavy-queue entry is queued/running. */
+  function sessionBusy(children) {
+    const work = children.filter((c) => isHeavyProcess(c.cmd));
+    let heavyQueue = null;
+    try { heavyQueue = io.heavy?.lane?.(children.map((c) => c.pid)) ?? null; } catch { heavyQueue = null; }
+    return work.length || heavyQueue?.queued > 0 || heavyQueue?.running > 0 ? { children: work, heavyQueue } : null;
+  }
+
   /** opts (#4363): {model, mode, keepSession, trigger and restartOf (#4362)}; a fresh fix session keeps the build session id for a fallback resume. */
-  async function builderOnce(n, prompt, resume, live = false, { model = null, mode = null, keepSession = false, trigger = null, restartOf = null, contextMax = 0 } = {}) {
+  async function builderOnce(n, prompt, resume, live = false, { model = null, mode = null, keepSession = false, trigger = null, restartOf = null, contextMax = 0, turnMax = 0 } = {}) {
     onProgress({ event: "phase_enter", phase: "build" });
     await renew();
     const control = {};
     const governor = startGovernor(control);
     let spawned = null;
     const onSpawn = (child) => { if (Number.isSafeInteger(child?.pid) && !finishing) { spawned = child.pid; ledgerDo((l) => l.register("pid", child.pid, { marker: basename(String(child.spawnfile ?? "")) || null })); } };
-    const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: model ?? builderModel, resume, system: "", prompt, control, onSpawn,
-      idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits, ...(contextMax > 0 ? { contextMax } : {}) }));
+    const call = Promise.resolve(callRunner({ role: "builder", issue, cwd: wt, model: model ?? laneModel(), resume, system: "", prompt, control, onSpawn, agents: explorerAgents(exploreCfg),
+      idleMs: Math.round(cliIdleMinutes * 60000), maxMs: Math.round(cliMaxMinutes * 60000), laneLimits, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}),
+      busy: sessionBusy, busyMs: Math.round(cliBusyMinutes * 60000),
+      onIdleExtend: (info) => ev({ event: "CLI_IDLE_EXTENDED", children: info.children, heavyQueue: info.heavyQueue }) }));
     call.then(() => {}, () => {}).finally(() => { if (spawned) ledgerDo((l) => l.release("pid", spawned)); });
     let r;
     call.catch(() => governor.stop());
@@ -629,17 +694,43 @@ export async function runCore(o) {
     await renew();
     await registerReported();
     if (r?.sessionId && !keepSession) sessionId = r.sessionId;
-    await attempt("implement", n, r, mode, trigger, restartOf);
+    await attempt("implement", n, r, mode, trigger, restartOf, resume);
     onProgress({ event: "phase_exit", phase: "build", status: "committed" });
     return r;
   }
   /** #4390: the restart summary: `git diff --stat` and hunks against the lane base, and the last `forgedock check` record. */
-  async function contextRestartNote() {
+  async function restartFacts() {
     const ex = [".", `:!${LEAN_DIR}`];
     const stat = String(await git(["diff", "--stat", `${base}...HEAD`, "--", ...ex]).catch(() => "")), diff = String(await git(["diff", `${base}...HEAD`, "--", ...ex]).catch(() => ""));
     let check = "";
     try { check = String(await io.fs.read(`${wt}/${SELF_CHECK_FILE}`)); } catch { /* none recorded */ }
-    return contextRestartPrompt({ stat, diff, base, check, ceiling: contextCeilingTokens });
+    return { stat, diff, base, check };
+  }
+  const contextRestartNote = async () => contextRestartPrompt({ ...await restartFacts(), ceiling: contextCeilingTokens });
+  /**
+   * #4392: the implement turn budget is spent. Checkpoint, then one fresh session of `wrapupGrant` turns either finishes
+   * (its result flows on as usual) or stops with a digest; a stop or an overrun ends needs-human `budget.exceeded`.
+   */
+  async function budgetWrapup(n, opts) {
+    const size = tb.size, budget = tb.budget(), used = tb.record().build, grant = wrapupGrant(budget);
+    tb.markExceeded();
+    ev({ event: "TURN_BUDGET_EXCEEDED", size, budget, turns: used, grant });
+    await checkpoint("turn budget");
+    T.decisions.push(`Implement turn budget spent (size ${size}, ${used}/${budget} turns): checkpointed; one wrap-up session of ${grant} turns to finish or stop with a digest`);
+    const facts = await restartFacts();
+    const wopts = { ...opts, trigger: "budget_wrapup", restartOf: opts.restartOf ?? opts.trigger ?? null, contextMax: 0, turnMax: grant };
+    let r = null, overran = false;
+    try { r = await builderOnce(n, implementRestart() + turnBudgetWrapupPrompt({ size, budget, used, grant, ...facts }), null, false, wopts); } catch (e) {
+      if (e?.code !== "CLI_TURNS") throw e;
+      overran = true;
+      await attempt("implement", n, { usage: e.usage ?? null, turns: e.turns ?? null, costUsd: null, model: opts.model ?? builderModel ?? null }, opts.mode, wopts.trigger, wopts.restartOf);
+      await checkpoint("turn budget wrap-up");
+    }
+    const res = await readResult();
+    if (!overran && res?.status !== "budget-exceeded") return r;
+    ev({ event: "TURN_BUDGET_STOP", size, budget, turns: tb.record().build, overran });
+    const digest = budgetDigest({ size, budget, used: tb.record().build, digest: res?.status === "budget-exceeded" ? res.digest : null, stat: facts.stat, check: facts.check });
+    throw Object.assign(new Error(digest), { laneCode: OUTCOME_CODES.BUDGET_EXCEEDED });
   }
   const readContract = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${CONTRACT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
   const readResult = async () => { try { const j = JSON.parse(await io.fs.read(`${wt}/${RESULT_FILE}`)); return j && typeof j === "object" ? j : null; } catch { return null; } };
@@ -715,10 +806,11 @@ export async function runCore(o) {
           filed.push(n);
         }
       } catch (e) { return await finish("engine-error", `filing sub-issues failed after ${refs(filed) || "none"}: ${e?.message ?? e}`, { subissues: filed }); }
-      T.decisions.push(`Builder block: split into ${refs(filed)}`);
+      const why = rationaleLine(b.rationale);
+      T.decisions.push(`Builder block: split into ${refs(filed)} (${why})`);
       for (const e of b.serialized ?? []) T.decisions.push(`Serialised sub-issue #${filed[e.from]} behind #${filed[e.to]}: both edit ${e.files.slice(0, 5).join(", ")} (#4385)`);
       let marked = false;
-      try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\n${s}`); marked = true; } catch { /* best effort */ }
+      try { await post("FORGE:DECOMPOSED", `## Split into sub-issues\n${filed.map((n, i) => `- #${n} ${b.subissues[i].title}`).join("\n")}\n\nRationale: ${why}\n\n${s}`); marked = true; } catch { /* best effort */ }
       // #4337: with decomposition.close_parent, the tracker closes only once its trail and label exist: dependents then wait on the sub-issues, not on it.
       if (await label("decomposed") && marked && closeParent) {
         try {
@@ -727,7 +819,7 @@ export async function runCore(o) {
           T.decisions.push(`Closed the decomposed parent (not planned); tracked by ${refs(filed)}`);
         } catch { /* best effort: the parent stays open, as before #4337 */ }
       }
-      return await finish("decomposed", `split into ${refs(filed)}`, { code: OUTCOME_CODES.DECOMPOSED, subissues: filed });
+      return await finish("decomposed", `split into ${refs(filed)}`, { code: OUTCOME_CODES.DECOMPOSED, subissues: filed, decomposition: b.rationale });
     }
     return await needsHuman(`Builder is blocked without a valid typed reason after one correction (${b.problem}): ${s}`, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED);
   }
@@ -791,6 +883,7 @@ export async function runCore(o) {
   try {
     iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels,updatedAt"]));
   } catch (e) { return finish("engine-error", `cannot read issue: ${e.message}`); }
+  const priorState = stateOf(iss.body); // #4400: the last run's end (the lease write keeps its terminal fields), read before this run ends
   if (String(iss.state).toUpperCase() === "CLOSED") {
     // #4337: a closed decomposed tracker is not "already done": its dependents wait on its sub-issues (the batch re-points
     // them). A trusted revocation reopens it and the run continues. An unreadable trail lists none (fail closed).
@@ -894,6 +987,19 @@ export async function runCore(o) {
     }
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
     await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
+    // ---- 2a. lane profile (#4395): the repo's lane instruction file replaces CLAUDE.md; a bad one falls back with an anomaly ----
+    const lanePath = typeof o.laneInstructions === "string" ? o.laneInstructions.trim() : "";
+    if (laneProfile.name !== "full" && lanePath) {
+      let why = null, text = "";
+      if (lanePath.startsWith("/") || lanePath.split(/[\\/]/).includes("..")) why = "not a repo-relative path";
+      else { try { text = String(await io.fs.read(`${wt}/${lanePath}`) ?? "").trim(); } catch { why = "not readable in the lane worktree"; } }
+      if (!why && !text) why = "empty";
+      if (!why && Buffer.byteLength(text, "utf8") > LANE_INSTRUCTIONS_MAX_BYTES) why = `over ${LANE_INSTRUCTIONS_MAX_BYTES} bytes`;
+      if (why) T.anomalies.push(`forge.yaml engine.lane_instructions \`${lanePath.slice(0, 200)}\` ${why}; lanes keep CLAUDE.md (auto-memory off)`);
+      else laneProfile = { name: "lane", text };
+    }
+    T.decisions.push(laneProfile.name === "lane" ? `Lane profile: ${lanePath} (${Buffer.byteLength(laneProfile.text, "utf8")} bytes) instead of CLAUDE.md, auto-memory off`
+      : laneProfile.name === "full" ? "Lane profile: full session (FORGEDOCK_FULL_SESSION=1)" : "Lane profile: auto-memory off, CLAUDE.md loaded");
     // ---- 2b. toolchain pins + env.setup (#4163): before the builder; zero LLM. No pins and no setup changes nothing ----
     try {
       const tc = await (io.prepareToolchain ?? prepareToolchain)({ dir: wt, override: toolchainOverride, read: io.fs.read,
@@ -992,6 +1098,7 @@ export async function runCore(o) {
     const isEngineComment = (b) => b.trimStart().startsWith("<!-- FORGE:");
     const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => String(c?.body ?? "")).filter((b) => !isEngineComment(b))].join("\n\n");
     let trustedComments = trustedOf(iss), issueEdited = false;
+    factsSeen = trustedComments.map((c) => c?.body);
     let issueText = textOf(iss, trustedComments);
     let scopeHash = contractHash(scopeText(iss, trustedComments)); // #4265: the edit signal and the frozen contract's provenance
     ctxLane = laneType({ resumed: Boolean(resumed || salvagedRef), attempts: priorAttempts(iss.body, trustedComments), body: iss.body });
@@ -1007,7 +1114,7 @@ export async function runCore(o) {
         // #4316: linked-issue states are part of the key; a failed lookup only drops them from it
         const links = await linkStateStamp({ gh: ghc, repo, issue, body: iss.body }).catch(() => "");
         const r = await contextPackFor({ cfg: ctxCfg, issue, headSha, cacheDir: dir, fs: io.fs, stamp: { scope: scopeHash, attempts: priorAttempts(iss.body, trustedComments), links, pitfalls: pits.map((x) => x.sig) },
-          gather: () => io.contextFacts({ repo, issue, iss, comments: trustedComments, cwd: wt, base, sources: ctxCfg.sources, days: ctxCfg.days, now: now(), pitfalls: pits }) });
+          gather: () => io.contextFacts({ repo, issue, iss, comments: trustedComments, cwd: wt, checkout: cwd, base, sources: ctxCfg.sources, days: ctxCfg.days, now: now(), pitfalls: pits }) });
         const p = r.pack;
         const inPack = Array.isArray(p.pitfalls) ? p.pitfalls : [];
         pitMatched = inPack.filter((x) => x.match === "files").length;
@@ -1039,7 +1146,7 @@ export async function runCore(o) {
       if (contractHash(issueText) === contractHash(text)) return;
       // #4265: the engine's own writes (FORGE:STATE, FORGE:* comments) refresh the text but are not an issue edit
       const old = scopeHash, now = contractHash(scopeText(next, tc));
-      iss = next; trustedComments = tc; issueText = text; scopeHash = now;
+      iss = next; trustedComments = tc; factsSeen = tc.map((c) => c?.body); issueText = text; scopeHash = now;
       if (old === now) return;
       issueEdited = true;
       ev({ event: "ISSUE_EDITED", old, new: now, stage });
@@ -1197,17 +1304,25 @@ export async function runCore(o) {
         } catch { /* the ledger is a cache */ }
       }
     }
+    /** #4394: a failed validate round on the mid tier moves this fix round and every later builder call to the top model. */
+    async function escalateOn(trigger) {
+      if (!shouldEscalate(route, escalated, trigger)) return;
+      escalated = true;
+      const rec = { event: "BUILDER_ESCALATED", from: route.model, to: builderModel ?? "default", trigger };
+      ev(rec); await emit(rec);
+      T.decisions.push(`Builder escalated from ${route.model} to the top model after a failed ${trigger} round`);
+    }
     /**
      * #4363: one fix round. Mechanical failures (and a conformance/review FAIL citing file:line) run in a fresh session on
      * the fix model with a narrow prompt; one resume of the build session follows when it made no commit. Else: a resume.
      */
     async function fixRound(kind, task, failures, trigger, failureText = "") {
-      await notePitfall(trigger, failureText); // #4375: learned once the same gate passes
+      await notePitfall(trigger, failureText); await escalateOn(trigger); // #4375: learned once the same gate passes; #4394
       if (!freshFix(kind, failures)) return await builder(++attemptN, task, sessionId ?? null, false, undefined, { mode: "resume", trigger });
       const before = String(await git(["rev-parse", "HEAD"])).trim();
       const ex = [".", `:!${LEAN_DIR}`], diff = String(await git(["diff", `${base}...HEAD`, "--", ...ex]).catch(() => "")), stat = String(await git(["diff", "--stat", `${base}...HEAD`, "--", ...ex]).catch(() => ""));
       const prompt = fixSessionPrompt({ task, diff, stat, base, contract: frozen, title: iss?.title ?? "", summary: issueSummary(iss?.body) });
-      const r = await builder(++attemptN, prompt, null, false, () => prompt, { model: fixModel ?? reviewerModel, mode: "fresh", keepSession: true, trigger });
+      const r = await builder(++attemptN, prompt, null, false, () => prompt, { model: escalated ? null : fixModel ?? reviewerModel, mode: "fresh", keepSession: true, trigger });
       if (!sessionId || String(await git(["rev-parse", "HEAD"])).trim() !== before) return r;
       T.decisions.push(`Fresh ${kind} fix session made no commit; builder session resumed once`);
       return await builder(++attemptN, task, sessionId, false, undefined, { mode: "resume", trigger });
@@ -1233,14 +1348,23 @@ export async function runCore(o) {
           } else { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
         }
       }
+      if ((resumed || salvagedRef || recover) && ctxCfg.mode !== "off") {
+        // #4400: the last run's own records as a bounded digest in the builder prompts; never in issueText (contract quotes)
+        const d = buildResumeDigest({ state: priorState, comments: trustedComments, contract: frozen, files: resumed ? await changedFiles().catch(() => []) : [], lane });
+        resumeNote = d.text;
+        if (d.text) {
+          ev({ event: "RESUME_DIGEST", bytes: Buffer.byteLength(d.text, "utf8"), files: d.files, validates: d.validates, reason: d.reason });
+          T.decisions.push(`Resume digest given to the builder: ${d.files} file(s), ${d.validates} validate result(s)${d.reason ? `, last run ${d.reason}` : ""}`);
+        }
+      }
       await label("building");
       hotFacts = await hotspotsOf({ paths: namedPaths(iss.body ?? "") });
       enumList = io.enumeratingTests ? ((await io.enumeratingTests({ cwd: wt, paths: namedPaths(iss.body ?? "") }).catch(() => null)) ?? []) : [];
       facts = await factsPath([wt, cwd], io.fs?.exists);
       const ctxPack = frozen ? null : await contextPackStep();
-      const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + reproPlanNote(reproOn()) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
+      const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + reproPlanNote(reproOn()) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       if (!frozen) {
-        await builder(++attemptN, planPrompt() + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote(), null, true, planPrompt, { trigger: "plan" });
+        await builder(++attemptN, planPrompt() + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote, null, true, planPrompt, { trigger: "plan" });
         planned = true;
         result = await readResult();
         const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
@@ -1265,7 +1389,13 @@ export async function runCore(o) {
             const note = `Scope-check validate ${d.dropped.map((x) => x.id).join(", ")} dropped at contract freeze: the engine's scope gate (deliverables plus typed amendments) enforces scope`;
             if (!T.decisions.includes(note)) T.decisions.push(note);
           }
-          return d.contract;
+          const o = tagOutOfBand(d.contract); // #4404: a requirement measured outside the lane is judged by its instrumentation
+          if (o.tagged.length) {
+            ev({ event: "CONTRACT_OUT_OF_BAND_TAGGED", ids: o.tagged });
+            const note = `Requirement(s) ${o.tagged.join(", ")} tagged verify out_of_band at contract freeze (measured by a job outside the lane)`;
+            if (!T.decisions.includes(note)) T.decisions.push(note);
+          }
+          return o.contract;
         };
         let contract = dropScope(await readContract());
         await refreshIssue("contract validation");
@@ -1302,10 +1432,17 @@ export async function runCore(o) {
         T.validate = "resumed (existing branch)";
       }
       T.plan = [`contract ${hash}`, `${frozen.requirements.length} requirement(s)`];
+      tb.setSize(laneSize({ contract: frozen, labels: (iss?.labels ?? []).map((l) => l?.name ?? l) })); // #4392
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
       // #4364: what `forgedock check` needs from the operator's forge.yaml (gitignored, so not in the worktree)
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CHECK_PLAN_FILE}`, `${JSON.stringify({ v: 1, base, mode: vcfg.mode, learned: learnedCommands, maxMinutes: Number(o.precheck?.maxMinutes) > 0 ? Number(o.precheck.maxMinutes) : null, precheckTotalSeconds: vcfg.precheckTotalSeconds, precheckTimeoutSeconds: vcfg.precheckTimeoutSeconds })}\n`); } catch { /* the CLI falls back to forge.yaml */ } }
-      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote();
+      route = routeBuilder({ contract: frozen, riskPaths, cfg: routingCfg, topModel: builderModel }); // #4394
+      {
+        const rec = { event: "BUILDER_ROUTE", mode: route.mode, class: route.class, tier: route.tier, model: route.model ?? "default", risk: route.risk };
+        ev(rec); await emit(rec);
+        T.decisions.push(`Builder routed to the ${route.tier} tier (${route.class}; ${route.model ?? "CLI default"})`);
+      }
+      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + exploreBuildRule(exploreCfg) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote);
       liveKeys = ["implementation"];
       stage = "implement";
       await builder(++attemptN, implementPrompt, planned ? sessionId : null, true, undefined, { trigger: "build" });
@@ -1682,7 +1819,7 @@ export async function runCore(o) {
         const stat = bytes > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
         const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
         const callers = await callersOf({ symbols: changedSymbols(diff), gitGrep: git, ignore: IGNORE });
-        Object.assign(run, pickVerifierModel({ configured: verifierCfg.model, builderModel, builderReported: [...impl.models] }));
+        Object.assign(run, pickVerifierModel({ configured: verifierCfg.model, builderModel, builderReported: [...impl.models, ...(route?.tier === "mid" ? [route.model] : [])] }));
         const { maxMs, maxTurns } = verifierBudget(bytes);
         try {
           await renew();

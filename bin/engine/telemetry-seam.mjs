@@ -3,8 +3,10 @@
 /**
  * forge#3835: the engine's `emitTelemetry` seam writer. Maps the run-log shaped records the engine hands to the
  * seam onto FORGE:TELEMETRY events so `forgedock stats` can rebuild Cost, Time and outcome codes from GitHub alone:
- *   PHASE_ATTEMPT_USAGE -> `phase_attempt` (attempt, model, backend, turns, duration_ms, cost_usd, *_tokens)
- *   RUN_TERMINAL        -> `run_terminal`  (reason, code, wall_ms; lean adds milestone, conformance_mode, shadow_would and the pr)
+ *   PHASE_ATTEMPT_USAGE -> `phase_attempt` (attempt, model, backend, turns, duration_ms, cost_usd, cost_usd_delta, cost_usd_session, *_tokens;
+ *                          lean adds baseline_tokens and lane_profile, forge#4395)
+ *   RUN_TERMINAL        -> `run_terminal`  (reason, code, wall_ms; lean adds milestone, conformance_mode, shadow_would, the pr and
+ *                          builder_tier/class/model/escalated 0|1, forge#4394)
  *   SANDBOX_USAGE       -> `sandbox_usage` (provider, sandbox_id, minutes, cost_usd, batch; one per settled remote lane, forge#4255)
  *   STRUCTURE_DELTA     -> `structure_delta` (edges_added/removed, import_files_added/removed, boundary_changed/loosened 0|1; forge#4159)
  *                          lean's merge-time record (forge#4165) adds milestone, the pr and string lists: deps_added and
@@ -53,13 +55,18 @@ export function mapRecord(rec, wallMs) {
     return { event: "phase_attempt", phase: rec.phase, payload: compact({
       attempt: rec.attempt, trigger: rec.trigger ?? undefined, restart_of: rec.restart_of ?? undefined, model: rec.model, backend: rec.backend ?? undefined, stages: rec.stages, turns: rec.turns, duration_ms: rec.duration_ms,
       cost_usd: Number.isFinite(rec.cost_usd) ? Math.round(rec.cost_usd * 1e6) / 1e6 : undefined,
+      cost_usd_delta: Number.isFinite(rec.cost_usd_delta) ? Math.round(rec.cost_usd_delta * 1e6) / 1e6 : undefined, // #4407
+      cost_usd_session: Number.isFinite(rec.cost_usd_session) ? Math.round(rec.cost_usd_session * 1e6) / 1e6 : undefined,
       input_tokens: tok(rec.usage, "input_tokens"), output_tokens: tok(rec.usage, "output_tokens"),
       cache_read_tokens: tok(rec.usage, "cache_read_input_tokens"), cache_creation_tokens: tok(rec.usage, "cache_creation_input_tokens"),
+      baseline_tokens: rec.baseline_tokens, lane_profile: rec.lane_profile,
     }) };
   }
   if (rec.event === "RUN_TERMINAL") {
     return { event: "run_terminal", phase: null, ...prOf(rec), payload: compact({ reason: rec.reason, code: rec.code, wall_ms: wallMs,
-      milestone: rec.milestone, conformance_mode: rec.conformance_mode, shadow_would: rec.shadow_would }) };
+      milestone: rec.milestone, conformance_mode: rec.conformance_mode, shadow_would: rec.shadow_would,
+      builder_tier: rec.builder_tier, builder_class: rec.builder_class, builder_model: rec.builder_model, // #4394: the model per merge
+      builder_escalated: typeof rec.builder_escalated === "boolean" ? Number(rec.builder_escalated) : undefined }) };
   }
   if (rec.event === "SANDBOX_USAGE") {
     return { event: "sandbox_usage", phase: null, payload: compact({ provider: rec.provider, sandbox_id: rec.sandbox_id, minutes: rec.minutes,
