@@ -17,7 +17,7 @@ import { LEAN_DIR, RESULT_FILE, IMPLEMENTATION_FILE, FORGEDOCK_CLI, hostRules } 
 const UPGRADE_NOTE_MAX = 10;
 const DETAIL_MAX = 200;
 const one = (s, max = DETAIL_MAX) => {
-  const t = String(s ?? "").replace(/<!--|-->/g, " ").replace(/\s+/g, " ").trim().replace(/</g, "&lt;");
+  const t = String(s ?? "").replace(/<!--|--!?>/g, " ").replace(/\s+/g, " ").trim().replace(/</g, "&lt;");
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 };
 
