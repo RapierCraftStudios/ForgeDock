@@ -8,6 +8,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync, lstatSync
 import { tmpDir } from "../tests/_tmp.mjs";
 import { join, dirname, relative } from "node:path";
 import { makeDepCache } from "./depcache.mjs";
+import { prepareToolchain } from "./toolchain.mjs";
 
 const scratch = () => tmpDir("fd-depcache-");
 const put = (p, text, mode) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, text, mode ? { mode } : undefined); };
@@ -79,6 +80,10 @@ function fakeExec({ failInstall = false, installDelayMs = 0 } = {}) {
       put(join(cwd, "node_modules/left-pad/cli.js"), "#!/usr/bin/env node\n", 0o755);
       mkdirSync(join(cwd, "node_modules/.bin"), { recursive: true });
       symlinkSync("../left-pad/cli.js", join(cwd, "node_modules/.bin/left-pad"));
+      return "";
+    }
+    if (cmd === "yarn") {
+      put(join(cwd, "node_modules/left-pad/index.js"), `// ${readFileSync(join(cwd, "yarn.lock"), "utf8").length}\n`);
       return "";
     }
     if (cmd === "uv" && args[0] === "venv") { put(join(cwd, ".venv/pyvenv.cfg"), "home = /usr/bin\nrelocatable = true\n"); return ""; }
@@ -294,5 +299,81 @@ describe("depcache (#4220): shared dependency installs keyed by lock hash", () =
     rmSync(`${fresh}.lock`);
     assert.equal((await pruner.prune()).length, 1);
     assert.ok(!existsSync(fresh));
+  });
+});
+
+describe("depcache (#4347): installs and repairs run with the lane toolchain env", () => {
+  const PMS = new Set(["pnpm", "pnpx", "yarn", "npm", "npx"]);
+  /** A host with no global package manager: pm commands resolve only when PATH starts with the toolchain shim dir. */
+  const shimOnlyExec = (f, binDir) => {
+    const seen = [];
+    const exec = async (cmd, args, o = {}) => {
+      if (PMS.has(cmd)) {
+        seen.push({ cmd, args: [...args], env: o.env });
+        if (!String(o.env?.PATH ?? "").startsWith(binDir)) throw Object.assign(new Error(`spawn ${cmd} ENOENT`), { code: "ENOENT" });
+      }
+      return f.exec(cmd, args, o);
+    };
+    return { exec, seen };
+  };
+  /** The real toolchain step: corepack on the host PATH, no global pm; shims recorded, not written. */
+  const laneToolchain = async (wt, binDir) => {
+    const tc = await prepareToolchain({ dir: wt, binDir, basePath: "/host/bin", find: (n) => (n === "corepack" ? "/host/bin/corepack" : null),
+      writeShim: async () => {}, mkdirp: async () => {}, hostNode: () => "v22.1.0" });
+    assert.ok(tc.env, "a packageManager pin yields a toolchain env");
+    return tc.env;
+  };
+
+  it("#4347 a packageManager-pinned pnpm repo with no host pnpm installs and repairs through the lane toolchain env", async () => {
+    const base = scratch(), root = join(base, "cache"), binDir = join(base, "toolchain", "bin");
+    const f = fakeExec(), x = shimOnlyExec(f, binDir);
+    const cache = makeDepCache({ root, exec: x.exec, env: {}, pollMs: 5 });
+    const lane = (name) => { const wt = join(base, "wt", name); FIXTURES.pnpm(wt); put(join(wt, "package.json"), '{"name":"web","private":true,"packageManager":"pnpm@9.12.0"}'); return wt; };
+    const a = lane("a");
+    const env = await laneToolchain(a, binDir);
+    const [r1] = await cache.prepare({ wt: a, repoKey: "r", env });
+    assert.equal(r1.status, "miss-installed", r1.reason);
+    assert.ok(existsSync(join(a, "node_modules/lodash/index.js")));
+    const [r2] = await cache.prepare({ wt: lane("b"), repoKey: "r", env });
+    assert.equal(r2.status, "hit", r2.reason);
+    assert.deepEqual(x.seen.map((c) => [c.cmd, c.args.includes("--offline")]), [["pnpm", false], ["pnpm", true]], "install then repair");
+    for (const c of x.seen) {
+      assert.ok(c.env.PATH.startsWith(`${binDir}:`), "the shim dir leads PATH");
+      assert.equal(c.env.COREPACK_ENABLE_DOWNLOAD_PROMPT, "0");
+      assert.equal(c.env.npm_config_store_dir, join(root, "stores", "pnpm-store"), "the store env stays");
+    }
+    // Without the toolchain env (the toolchain step failed or wrote no shim) it is the host PATH, as before.
+    const [r3] = await makeDepCache({ root: join(base, "cache2"), exec: x.exec, env: {} }).prepare({ wt: lane("c"), repoKey: "r" });
+    assert.equal(r3.status, "failed");
+    assert.match(r3.reason, /tool not found: spawn pnpm ENOENT/);
+  });
+
+  it("#4347 a pinned yarn (node-modules linker) repo installs through the shim env", async () => {
+    const base = scratch(), binDir = join(base, "toolchain", "bin");
+    const x = shimOnlyExec(fakeExec(), binDir);
+    const wt = join(base, "wt", "y");
+    put(join(wt, "package.json"), '{"name":"app","packageManager":"yarn@4.5.0"}');
+    put(join(wt, "yarn.lock"), "__metadata:\n  version: 8\n");
+    put(join(wt, ".yarnrc.yml"), "nodeLinker: node-modules\n");
+    const env = await laneToolchain(wt, binDir);
+    const [r] = await makeDepCache({ root: join(base, "cache"), exec: x.exec, env: {} }).prepare({ wt, repoKey: "r", env });
+    assert.equal(r.status, "miss-installed", r.reason);
+    assert.deepEqual(x.seen.map((c) => [c.cmd, c.args]), [["yarn", ["install", "--immutable"]]]);
+    assert.ok(x.seen[0].env.PATH.startsWith(`${binDir}:`));
+  });
+
+  it("#4347 a plain npm repo without pins passes exactly the store env, as before; store keys win over the lane env", async () => {
+    const s = setup("npm");
+    const [r] = await s.cache.prepare({ wt: s.lane("plain"), repoKey: "r" });
+    assert.equal(r.status, "miss-installed", r.reason);
+    const inst = s.f.calls.filter((c) => c.cmd === "npm");
+    assert.equal(inst.length, 1);
+    const seen = [];
+    const cache = makeDepCache({ root: join(s.base, "cache2"), exec: async (cmd, args, o = {}) => { if (cmd === "npm") seen.push(o); return s.f.exec(cmd, args, o); }, env: {} });
+    await cache.prepare({ wt: s.lane("plain2"), repoKey: "r" });
+    assert.deepEqual(seen[0].env, cache.env(), "no lane env: only the store env");
+    await cache.prepare({ wt: s.lane("pinned"), repoKey: "r2", env: { PATH: "/shim:/host", npm_config_cache: "/lane/should-not-win" } });
+    assert.equal(seen[1].env.PATH, "/shim:/host");
+    assert.equal(seen[1].env.npm_config_cache, cache.env().npm_config_cache);
   });
 });

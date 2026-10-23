@@ -23,6 +23,8 @@ export FORGE_TELEMETRY=off
 export FORGE_CI_LOCAL_HOME="$T/home"
 export FORGE_CI_LOCAL_SLOTS=4
 unset FORGE_CI_LOCAL_SERVICES FORGE_CI_LOCAL_NO_YQ FORGE_CI_LOCAL_BUDGET_SECONDS FORGE_CI_LOCAL_JOB_TIMEOUT FORGE_CI_LOCAL_NO_CACHE
+# A lane's FORGE_HOST_PARALLELISM cap (#4182) would serialise the parallelism fixtures below; capParallel has its own test.
+unset FORGE_HOST_PARALLELISM
 HOST=$(uname -s)
 
 pass=0; fail=0

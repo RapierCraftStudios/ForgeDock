@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # review-pr-staging-finding-filter.test.sh — fixtures for the anchored open-finding filter (forge#3800).
-# The spec's `# FINDING_PR_FILTER` line is extracted and run against issue shapes: the gate must keep a
+# The staging gate's `# FINDING_PR_FILTER` line (scripts/review-staging-pre.sh since #4359) is extracted and run against issue shapes: the gate must keep a
 # hit only when its title suffix or `**Source**:` line names exactly PR #N; hidden markers never count.
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
@@ -12,10 +12,10 @@ bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 command -v jq >/dev/null 2>&1 || { echo "review-pr-staging-finding-filter.test.sh: jq missing, skipped"; exit 0; }
 
 extract() { grep -E '# FINDING_PR_FILTER$' "$1" | sed 's/[[:space:]]*# FINDING_PR_FILTER$//; s/^[[:space:]]*//'; }
-SPEC="$ROOT/commands/review-pr-staging.md"
+SPEC="$ROOT/scripts/review-staging-pre.sh"   # owner of the staging 0A gate (forge#4359)
 DEF="$(extract "$SPEC" | sort -u)"
-[ "$(printf '%s\n' "$DEF" | grep -c .)" -eq 1 ] && ok || bad "review-pr-staging.md must carry one identical FINDING_PR_FILTER definition"
-[ "$(extract "$ROOT/commands/deploy-info.md" | sort -u)" = "$DEF" ] && ok || bad "deploy-info.md filter differs from review-pr-staging.md"
+[ "$(printf '%s\n' "$DEF" | grep -c .)" -eq 1 ] && ok || bad "review-staging-pre.sh must carry one identical FINDING_PR_FILTER definition"
+[ "$(extract "$ROOT/commands/deploy-info.md" | sort -u)" = "$DEF" ] && ok || bad "deploy-info.md filter differs from review-staging-pre.sh"
 [ "$(grep -c -F 'FINDING_PR_FILTER' "$SPEC")" -ge 3 ] && ok || bad "filter must be referenced by all three queries"
 grep -q -F 'OVERRIDE: shipping with open findings' "$SPEC" && ok || bad "OVERRIDE text missing"
 eval "$DEF"

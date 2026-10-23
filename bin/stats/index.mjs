@@ -9,16 +9,20 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { aggregate, DEFAULT_MIN_N } from "./aggregate.mjs";
-import { fetchGithubRecords, isValidRepo, toModel } from "./github-source.mjs";
-import { readLocalRuns, runsDir } from "./local-source.mjs";
+import { aggregate, computeAlerts, DEFAULT_ALERTS, DEFAULT_MIN_N } from "./aggregate.mjs";
+import { defaultGh, fetchGithubRecords, isValidRepo, toModel } from "./github-source.mjs";
+import { readLanes, readLocalRuns, runsDir } from "./local-source.mjs";
+import { parseForgeYaml } from "../forge-utils.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
-import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb } from "./query.mjs";
+import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers } from "./query.mjs";
+import { batchEfficiency, windowEfficiency, formatEfficiencyLines, parseWindows } from "./efficiency.mjs";
+import { batchRoot } from "../lean/batch.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
 export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <owner/repo>] [--json] [--refresh]
                       [--compact] [--no-local] [--no-cache] [--min-n N] [--release-times FILE]
+       forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--repo <owner/repo>] [--json]
 
 Version-over-version report: Cost, Time, Flow, Review funnel, Gates and Issue flow per (version, repo), with a
 delta against the previous version and a low-n flag for samples under 10. Missing data prints n/a.
@@ -36,6 +40,10 @@ delta against the previous version and a low-n flag for samples under 10. Missin
   --release-times FILE  "<version> <epoch-seconds>" lines used to estimate versions of unversioned records
                         (default: git tags v* of the ForgeDock checkout)
 
+ALERTS (forge#4354; local run logs only, skipped with --no-local): fail-soft rates over the last 50 lanes of the repo
+(DEPS_PREPARED failed per ecosystem, deferred-to-ci, repeated TOOLCHAIN_WARNING, outcome codes whose share doubled);
+thresholds under forge.yaml stats.alerts.*. Nothing is printed when none fired or under 10 lanes.
+
 Audit queries (forge#4165; JSON, from structure_delta / run_terminal telemetry, no comment bodies read):
   --edge FROM:TO        merged PRs that added the dependency or import edge FROM -> TO (e.g. @s/web:@s/db)
   --milestone M         conformance verdict mix and per-day structure series for milestone M
@@ -43,10 +51,20 @@ Audit queries (forge#4165; JSON, from structure_delta / run_terminal telemetry, 
 Context-pack A/B (forge#4275; local run logs only, no GitHub crawl):
   --context-ab          first-pass yield, builder turns, cache tokens and cost per lane type (rerun, child,
                         first) and context_pack mode (on, off, shadow); --json for JSON
+
+Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues' bodies, labels and probes):
+  --efficiency          $/merge, turns/merge, context/turn per size and model, retries/merge by cause, no-action
+                        lanes, issue quality vs cost and the acceptance pass rate 7 days after promotion
+  --batch <id>          also report one batch (~/.forge/batches/<id>, FORGEDOCK_BATCH_DIR)
+  --window <list>       trailing windows over the repo's batches (default 7d,30d)
+
+Builder model tiers (forge#4394; local run logs only, no GitHub crawl):
+  --tiers               merge, conformance and post-merge-rework rates, first-pass yield and cost per builder tier
+                        (mid, mid->top escalated, top) and routing class; --json for JSON
 `;
 
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, tiers: false, efficiency: false, batch: null, windows: null, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -63,6 +81,10 @@ export function parseArgs(argv) {
     else if (name === "--edge") { const v = take(); if (!parseEdge(v)) throw new Error("--edge must be FROM:TO"); o.edge = v; }
     else if (name === "--milestone") o.milestone = take();
     else if (name === "--context-ab") o.contextAb = true;
+    else if (name === "--tiers") o.tiers = true;
+    else if (name === "--efficiency") o.efficiency = true;
+    else if (name === "--batch") { const v = take(); if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) throw new Error(`invalid --batch id: ${v}`); o.batch = v; }
+    else if (name === "--window") o.windows = parseWindows(take());
     else if (name === "--min-n") { const v = take(); if (!/^\d+$/.test(v)) throw new Error("--min-n must be a non-negative integer"); o.minN = Number(v); }
     else if (name === "--json") o.json = true;
     else if (name === "--refresh") o.refresh = true;
@@ -72,6 +94,7 @@ export function parseArgs(argv) {
     else if (name === "--help" || name === "-h") o.help = true;
     else throw new Error(`unknown argument: ${a}`);
   }
+  if ((o.batch || o.windows) && !o.efficiency) throw new Error("--batch and --window need --efficiency");
   return o;
 }
 
@@ -153,6 +176,25 @@ export function resolveRepo(explicit, cwd = process.cwd()) {
   return null;
 }
 
+const ALERT_KEYS = { window: "window", min_lanes: "minLanes", deps_failed_pct: "depsFailedPct", deferred_to_ci_pct: "deferredPct",
+  toolchain_warning_pct: "toolchainWarningPct", outcome_share_factor: "outcomeShareFactor" };
+
+/**
+ * forge.yaml `stats.alerts.*` (forge#4354). The one-level parser flattens a nested `alerts:` block under `stats:` to
+ * `stats.<key>`; the flat `stats.alerts_<key>` form also works and wins. Invalid or unreadable values keep DEFAULT_ALERTS.
+ */
+export function readAlertConfig(cwd = process.cwd()) {
+  const out = { ...DEFAULT_ALERTS };
+  try {
+    const s = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.stats ?? {};
+    for (const [key, name] of Object.entries(ALERT_KEYS)) {
+      const raw = String(s[`alerts_${key}`] ?? s[key] ?? "").trim(), n = Number(raw);
+      if (raw !== "" && Number.isFinite(n) && n > 0) out[name] = n;
+    }
+  } catch { /* no forge.yaml: defaults */ }
+  return out;
+}
+
 /** Build the report object. deps: { gh, env, localRuns, now, onProgress, warn, sleep } for tests. Never touches the network when `gh` is stubbed. */
 export async function buildReport(opts, deps = {}) {
   const env = deps.env ?? process.env;
@@ -161,9 +203,20 @@ export async function buildReport(opts, deps = {}) {
   if (opts.releaseTimes) releaseTimes = parseReleaseTimes(readFileSync(opts.releaseTimes, "utf8"));
   else if (deps.releaseTimes) releaseTimes = deps.releaseTimes;
   else releaseTimes = gitTagTimes();
+  if (opts.efficiency) { // forge#4402: local batch dirs + run logs; gh only for merged issues
+    const root = deps.batchRoot ?? batchRoot(env), rd = deps.runsDir ?? runsDir(env), now = deps.now?.() ?? Date.now(), gh = deps.gh ?? defaultGh;
+    const efficiency = {};
+    if (opts.batch) efficiency.batch = await batchEfficiency({ batchDir: join(root, opts.batch), runsDir: rd, repo, gh, now });
+    efficiency.windows = await windowEfficiency({ batchRoot: root, runsDir: rd, repo, gh, now, windows: opts.windows ?? parseWindows("7d,30d") });
+    return { repo, query: { efficiency } };
+  }
   if (opts.contextAb) { // forge#4275: run logs only
     const runs = (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo);
     return { repo, sources: { local: { runs: runs.length } }, query: { context_ab: contextPackAb(runs) } };
+  }
+  if (opts.tiers) { // forge#4394: run logs only
+    const runs = (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo);
+    return { repo, sources: { local: { runs: runs.length } }, query: { tiers: builderTierReport(runs) } };
   }
   const bound = sinceToTimestamp(opts.since, releaseTimes);
   if (bound.note) (deps.warn ?? ((m) => process.stderr.write(`forgedock stats: ${m}\n`)))(bound.note);
@@ -182,7 +235,9 @@ export async function buildReport(opts, deps = {}) {
   }
   const report = aggregate({ runs: [...model.runs, ...local], events: model.events, issues: model.issues },
     { minN: opts.minN, releaseTimes, ...parseSince(opts.since) });
-  return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache }, local: { runs: local.length } }, ...report };
+  // forge#4354: fail-soft alerts from the local run logs only (no gh call)
+  const alerts = opts.local ? computeAlerts(deps.localLanes ?? readLanes(runsDir(env)), { repo, ...(deps.alertConfig ?? readAlertConfig()) }) : [];
+  return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache }, local: { runs: local.length } }, ...report, alerts };
 }
 
 export async function runStats(argv, deps = {}) {
@@ -199,6 +254,14 @@ export async function runStats(argv, deps = {}) {
   }
   try {
     const report = await buildReport(opts, { onProgress: makeProgressPrinter(), ...deps });
+    if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
+    if (report.query?.efficiency && !opts.json) {
+      const e = report.query.efficiency;
+      const lines = [...(e.batch ? formatEfficiencyLines(e.batch, `batch ${e.batch.batch ?? opts.batch}`) : []),
+        ...Object.entries(e.windows).flatMap(([w, m]) => formatEfficiencyLines(m, `${w}, ${m.batches} batch${m.batches === 1 ? "" : "es"}`))];
+      process.stdout.write(`${lines.join("\n")}\n`);
+      return 0;
+    }
     if (report.query?.context_ab && !opts.json) { process.stdout.write(`${renderContextAb(report.query.context_ab)}\n`); return 0; }
     process.stdout.write(`${opts.json || report.query ? renderJson(report) : opts.compact ? renderCompact(report) : renderMarkdown(report)}\n`);
     return 0;

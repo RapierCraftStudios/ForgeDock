@@ -5,7 +5,9 @@
  *
  * Input record model (every source maps onto it; a missing field is null and degrades to "n/a"):
  *   run   { source, repo, version, issue, run, finished, hydrated, usageEvents, reason, code, remediated,
- *           startTs, endTs, wallMs, phases: { <id>: { cr, out, usd, ms, attempts } } }
+ *           startTs, endTs, wallMs, phases: { <id>: { cr, out, usd, ms, attempts } },
+ *           builderAttempts: [{ attempt, trigger, cost_usd }] (#4362; trigger null before the field existed),
+ *           pitfallsMatched (#4375: pitfalls in the context pack matching the issue's files; null when unknown, local logs only) }
  *   event { repo, version, issue, pr, ts, event, ...payload }          (FORGE:TELEMETRY gate/review events)
  *   issue { repo, number, isPr, createdAt, closedAt, labels: [name], authorType }
  *
@@ -13,6 +15,8 @@
  * count, hydrated runs and runs with no usage events are excluded, tokens are cache-read tokens, and the
  * per-phase mean divides by n (a run that skipped a phase counts 0).
  */
+
+import { REWORK_TRIGGERS, firstPassOf } from "../lean/fixround.mjs";
 
 export const DEFAULT_MIN_N = 10;
 export const UNKNOWN = "unknown";
@@ -111,6 +115,35 @@ function flowSection(runs) {
     remediationPct: ratio(runs.filter((r) => r.remediated).length, n),
     codesN: coded, codes: top,
   };
+}
+
+/**
+ * #4362: builder attempts by trigger (all, and rework only) and the first-pass rate. An attempt without a trigger
+ * (written before the field) counts as "unknown" rework, never dropped; a run without one is unknown for first pass.
+ */
+function reworkSection(runs) {
+  const attempts = {}, byTrigger = {};
+  let n = 0, usd = 0, firstPass = 0, measured = 0, unknown = 0;
+  const split = { with: { firstPass: 0, n: 0 }, without: { firstPass: 0, n: 0 } }; // #4375: by matching pitfalls in the pack
+  for (const r of runs) {
+    const list = Array.isArray(r.builderAttempts) ? r.builderAttempts : [];
+    for (const a of list) {
+      const t = a?.trigger || UNKNOWN, c = isNum(a?.cost_usd) ? a.cost_usd : 0;
+      const all = (attempts[t] ??= { n: 0, usd: 0 });
+      all.n++; all.usd += c;
+      if (t !== UNKNOWN && !REWORK_TRIGGERS.includes(t)) continue;
+      const d = (byTrigger[t] ??= { n: 0, usd: 0 });
+      d.n++; d.usd += c; n++; usd += c;
+    }
+    const fp = firstPassOf(list);
+    // unknown: untagged attempts or no attempt list (an older cache); a run that never reached the build is not a lane here
+    if (fp == null) { if (!Array.isArray(r.builderAttempts) || list.some((a) => !a?.trigger)) unknown++; continue; }
+    measured++;
+    if (fp) firstPass++;
+    if (Number.isInteger(r.pitfallsMatched)) { const s = split[r.pitfallsMatched > 0 ? "with" : "without"]; s.n++; if (fp) s.firstPass++; }
+  }
+  const firstPassByPitfalls = Object.fromEntries(Object.entries(split).map(([k, v]) => [k, { rate: ratio(v.firstPass, v.n), ...v }]));
+  return { rework: { n, usd, byTrigger, attempts }, firstPass: { rate: ratio(firstPass, measured), firstPass, n: measured, unknown }, firstPassByPitfalls };
 }
 
 function funnelSection(events, issues) {
@@ -217,7 +250,8 @@ export function aggregate({ runs = [], events = [], issues = [] } = {}, opts = {
   let groups = [...keys.values()].map(({ version, repo }) => {
     const sel = (list) => list.filter((x) => x.version === version && x.repo === repo);
     const g = { version, repo, cost: costSection(sel(counted)), time: timeSection(sel(counted)), flow: flowSection(sel(counted)),
-      funnel: funnelSection(sel(evs), sel(iss)), gates: gatesSection(sel(evs)), issueFlow: null };
+      funnel: funnelSection(sel(evs), sel(iss)), gates: gatesSection(sel(evs)), issueFlow: null,
+      ...reworkSection(sel(counted)) };
     g.issueFlow = issueFlowSection(sel(iss), g.funnel.introduced);
     g.n = g.flow.n;
     g.lowN = g.n < minN;
@@ -232,4 +266,55 @@ export function aggregate({ runs = [], events = [], issues = [] } = {}, opts = {
   }
   if (opts.sinceVersion) groups = groups.filter((g) => g.version !== UNKNOWN && compareVersions(g.version, opts.sinceVersion) >= 0);
   return { groups, excluded, minN };
+}
+
+/** forge#4354: fail-soft alert thresholds (forge.yaml `stats.alerts.*`). Percentages are 0..100. */
+export const DEFAULT_ALERTS = { window: 50, minLanes: 10, depsFailedPct: 20, deferredPct: 30, toolchainWarningPct: 50, outcomeShareFactor: 2 };
+
+/**
+ * Rates of fail-soft events over the last `window` lanes of `repo` (lanes from local-source `readLanes`), ordered by start
+ * time. Nothing below `minLanes`. Rules: DEPS_PREPARED failed per ecosystem, deferred-to-ci, each TOOLCHAIN_WARNING text,
+ * and outcome codes (except `completed`) whose share doubled against the previous window. Pure: no I/O, no clock.
+ */
+export function computeAlerts(lanes = [], opts = {}) {
+  const c = { ...DEFAULT_ALERTS };
+  for (const k of Object.keys(DEFAULT_ALERTS)) if (isNum(opts[k]) && opts[k] > 0) c[k] = opts[k];
+  const all = (lanes ?? []).filter((l) => l && (opts.repo == null || l.repo === opts.repo))
+    .map((l, i) => ({ l, i, t: toMs(l.startTs) ?? -Infinity }))
+    .sort((a, b) => a.t - b.t || a.i - b.i).map((x) => x.l);
+  const win = all.slice(-c.window);
+  if (win.length < c.minLanes) return [];
+  const prev = all.slice(Math.max(0, all.length - 2 * c.window), all.length - win.length);
+  const out = [];
+  const add = (event, count, sample, threshold, example, extra = {}) => out.push({ event, rate: count / sample, count, sample, threshold, example, ...extra });
+  const ecos = [...new Set(win.flatMap((l) => l.deps.map((d) => d.eco ?? "unknown")))].sort();
+  for (const eco of ecos) {
+    const used = win.filter((l) => l.deps.some((d) => (d.eco ?? "unknown") === eco));
+    const failed = used.filter((l) => l.deps.some((d) => (d.eco ?? "unknown") === eco && d.status === "failed"));
+    if (failed.length / used.length > c.depsFailedPct / 100) {
+      const ex = failed.flatMap((l) => l.deps).find((d) => (d.eco ?? "unknown") === eco && d.status === "failed");
+      add(`DEPS_PREPARED failed (${eco})`, failed.length, used.length, c.depsFailedPct / 100, ex?.reason ?? null);
+    }
+  }
+  const deferred = win.filter((l) => l.deferred.length);
+  if (deferred.length / win.length > c.deferredPct / 100) add("deferred-to-ci", deferred.length, win.length, c.deferredPct / 100, deferred[deferred.length - 1].deferred[0]);
+  const warnings = [...new Set(win.flatMap((l) => l.toolchainWarnings))].sort();
+  for (const w of warnings) {
+    const hit = win.filter((l) => l.toolchainWarnings.includes(w)).length;
+    if (hit / win.length > c.toolchainWarningPct / 100) add("TOOLCHAIN_WARNING", hit, win.length, c.toolchainWarningPct / 100, w);
+  }
+  const coded = (list) => list.filter((l) => l.code != null);
+  const cw = coded(win), cp = coded(prev);
+  if (cw.length && prev.length >= c.minLanes && cp.length) {
+    const share = (list, code) => list.filter((l) => l.code === code).length / list.length;
+    for (const code of [...new Set(cw.map((l) => l.code))].filter((x) => x !== "completed").sort()) {
+      const hits = cw.filter((l) => l.code === code);
+      const now = share(cw, code), before = share(cp, code);
+      if (hits.length >= 2 && now >= c.outcomeShareFactor * before) {
+        const ex = hits[hits.length - 1];
+        add(`outcome ${code}`, hits.length, cw.length, c.outcomeShareFactor, `#${ex.issue} ${ex.reason ?? code}`, { prevRate: before });
+      }
+    }
+  }
+  return out;
 }

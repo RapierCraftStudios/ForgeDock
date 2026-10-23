@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S } from "./orchestrate.mjs";
@@ -291,5 +291,298 @@ describe("#4318: the batch dispatcher's signal relabel and the needs-human relab
       const b = hook({ state: "OPEN", body: "" }, { comment: true });
       assert.equal(await b.run(), true);
     });
+  });
+});
+
+describe("#4354: the batch report ends with the fail-soft alerts of the batch's repo", () => {
+  const seed = (dir, repo, status) => {
+    mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < 10; i++) {
+      const evs = [{ event: "RUN_START", ts: new Date(Date.UTC(2026, 9, 1, 0, i)).toISOString(), repo, issue: 500 + i },
+        { event: "DEPS_PREPARED", eco: "pnpm", status, reason: "tool not found: spawn pnpm ENOENT" }, { event: "RUN_TERMINAL", reason: "merged", code: "completed" }];
+      writeFileSync(join(dir, `${500 + i}.jsonl`), evs.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    }
+  };
+  const run = async (dir) => {
+    const lines = [], l = console.log;
+    console.log = (...a) => lines.push(a.join(" "));
+    try {
+      await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { dir, batchRoot: tmpDir("alert-batch-"), allowTmpfs: true,
+        emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, sched: null, decide: () => {}, alertConfig: {}, heavyStats: null,
+        leanIo: { gh: async (a) => (a.includes("milestone") ? JSON.stringify({ milestone: null }) : JSON.stringify({ body: "" })), git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : "") },
+        orchestration: { breaker: null, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 2 } },
+        leanModule: { runCore: async () => ({ terminalReason: "merged", pr: 51 }) } });
+    } finally { console.log = l; }
+    return lines.join("\n").split("\n").filter((x) => x.trim());
+  };
+
+  it("prints ALERTS last for the repo's failing dependency cache, nothing for a healthy one or another repo's lanes", async () => {
+    const bad = tmpDir("alert-runs-");
+    seed(bad, "o/r", "failed");
+    const out = await run(bad);
+    const at = out.indexOf("ALERTS");
+    assert.ok(at > 0, out.join("\n"));
+    assert.match(out[at + 1], /^DEPS_PREPARED failed \(pnpm\): 100% \(10\/10 lanes, threshold 20%\), e\.g\. "tool not found: spawn pnpm ENOENT"$/);
+    assert.equal(out.length, at + 2, "the alerts end the report");
+    const good = tmpDir("alert-runs-");
+    seed(good, "o/r", "hit");
+    assert.ok(!(await run(good)).some((x) => /ALERTS|DEPS_PREPARED/.test(x)));
+    const other = tmpDir("alert-runs-");
+    seed(other, "x/y", "failed");
+    assert.ok(!(await run(other)).some((x) => /ALERTS/.test(x)));
+  });
+});
+
+describe("#4402: the batch report prints the efficiency lines, fail-soft", () => {
+  const run = async (deps) => {
+    const lines = [], l = console.log;
+    console.log = (...a) => lines.push(a.join(" "));
+    try {
+      await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { dir: tmpDir("eff-runs-"), batchRoot: tmpDir("eff-batch-"), allowTmpfs: true,
+        emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, sched: null, decide: () => {}, alertConfig: {}, heavyStats: null,
+        leanIo: { gh: async (a) => (a.includes("milestone") ? JSON.stringify({ milestone: null }) : a[0] === "api" ? (String(a[1]).endsWith("/comments") ? "" : JSON.stringify({ body: "## Root cause\na.js:1\n## Fix", labels: [] })) : JSON.stringify({ body: "" })),
+          git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : "") },
+        orchestration: { breaker: null, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 2 } },
+        leanModule: { runCore: async () => ({ terminalReason: "merged", pr: 51 }) }, ...deps });
+    } finally { console.log = l; }
+    return lines.join("\n").split("\n").filter((x) => x.trim());
+  };
+  it("prints the batch's efficiency section", async () => {
+    const out = await run({});
+    const at = out.findIndex((x) => x.startsWith("efficiency: merged 1,"));
+    assert.ok(at > 0, out.join("\n"));
+    assert.match(out[at + 3], /^retries\/merge 0\.00 \(env 0, engine 0, code 0, review 0, unknown 0; lane reruns 0\)$/);
+    assert.match(out[at + 5], /^issue quality: full n=1 /);
+    assert.equal(out[at + 6], "acceptance (7d after promotion): pass 0/0, pending 0, unprobed 1");
+  });
+  it("a throwing efficiency stub still ends the batch with its other report lines", async () => {
+    const out = await run({ efficiency: async () => { throw new Error("boom"); } });
+    assert.ok(out.includes("efficiency: n/a (boom)"), out.join("\n"));
+    assert.ok(out.some((x) => x.startsWith("reclaimed:")), out.join("\n"));
+  });
+});
+
+describe("#4408: issues added to a running batch (forgedock orchestrate --add)", () => {
+  const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
+  it("one lane running: an added independent issue starts on the next pass, an added one that Depends on the running issue waits for its merge", async () => {
+    const bodies = { 1: "", 2: "", 3: "Depends on #1" };
+    let added = [];
+    const started = [], g1 = gate(), log = [], decisions = [];
+    const done = orchestrate({ issues: [1], parallel: 3, pollMs: 5, readBody: async (n) => bodies[n] ?? "", getAdded: () => added,
+      decide: (d) => { decisions.push(d); }, onUpdate: (r) => log.push(r),
+      runOne: async (n) => { started.push(n); if (n === 1) await g1.p; return { terminalReason: "merged" }; } });
+    await until(() => started.includes(1));
+    added = [2, 3];
+    await until(() => started.includes(2), 3000);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(started, [1, 2], "#3 waits for #1 to merge");
+    g1.open();
+    const rows = await done;
+    assert.deepEqual(started, [1, 2, 3]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [3, "merged"]]);
+    assert.deepEqual(log.filter((r) => r.outcome === "added").map((r) => r.detail), ["#2, #3"], "one added row; re-reads add nothing");
+    assert.equal(decisions.filter((d) => d.issue === null).length, 1);
+  });
+
+  it("edges hold both ways: a pending issue that Depends on an added one (declared, or written after the batch started) waits for it", async () => {
+    const bodies = { 7: "", 4: "Depends on #5", 8: "", 5: "", 6: "" };
+    let added = [];
+    const started = [], g7 = gate();
+    const done = orchestrate({ issues: [7, 4, 8], parallel: 1, pollMs: 5, readBody: async (n) => bodies[n] ?? "", getAdded: () => added,
+      runOne: async (n) => { started.push(n); if (n === 7) await g7.p; return { terminalReason: "merged" }; } });
+    await until(() => started.includes(7));
+    bodies[8] = "Depends on #6"; // edited while the batch runs
+    added = [5, 6];
+    await new Promise((r) => setTimeout(r, 50));
+    g7.open();
+    const rows = await done;
+    assert.deepEqual(started, [7, 5, 4, 6, 8]);
+    assert.ok(rows.every((r) => r.outcome === "merged"));
+  });
+
+  it("an add after the queue drained still runs before the batch returns; without getAdded nothing changes", async () => {
+    let added = [];
+    const started = [];
+    const rows = await orchestrate({ issues: [1], parallel: 2, pollMs: 5, readBody: async () => "", getAdded: () => added,
+      runOne: async (n) => { started.push(n); if (n === 1) added = [2]; return { terminalReason: "merged" }; } });
+    assert.deepEqual(rows.map((r) => r.issue), [1, 2]);
+    const plain = await orchestrate({ issues: [1], parallel: 2, readBody: async () => "", runOne: async () => ({ terminalReason: "merged" }) });
+    assert.deepEqual(plain.map((r) => r.issue), [1]);
+  });
+
+  it("the add file: integers only, no issue twice, cumulative; --add through the CLI skips closed and unreadable issues", async () => {
+    const root = tmpDir("batch-add-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1] });
+    assert.deepEqual(b.readAdded(), []);
+    const r = b.addIssues([2, "#3", "abc", 1, 2, 0, -4]);
+    assert.deepEqual(r.added, [2, 3]);
+    assert.deepEqual(r.skipped.map((x) => [x.issue, x.reason]), [["abc", "not an integer"], [1, "already in batch"], [2, "already in batch"], [0, "not an integer"], [-4, "not an integer"]]);
+    assert.deepEqual(b.addIssues([5]).added, [5]);
+    assert.deepEqual(b.readAdded(), [2, 3, 5]);
+    assert.deepEqual(b.unrunAdds(), [2, 3, 5]);
+    const views = [];
+    const io = { gh: async (a) => { views.push(a); if (a[2] === "8") throw new Error("gh down"); return JSON.stringify({ state: a[2] === "7" ? "CLOSED" : "OPEN" }); } };
+    const res = await quiet(() => orchestrateFromCli(["--add", "b1", "6", "7", "8", "3", "x"], { batchRoot: root, io }));
+    assert.deepEqual(res.added, [6]);
+    assert.deepEqual(res.skipped.map((x) => [x.issue, x.reason]).sort(), [[3, "already in batch"], [7, "closed"], [8, "unreadable"], ["x", "not an integer"]]);
+    assert.ok(views.every((a) => a.includes("-R") && a.includes("o/r")), "state read against the batch's repo");
+    assert.deepEqual(b.readAdded(), [2, 3, 5, 6]);
+    await assert.rejects(orchestrateFromCli(["--add", "nope", "2"], { batchRoot: root, io }), /no batch nope/);
+  });
+
+  it("#4469: --resume <id> and --add ignore the values of valued flags (--parallel 5 is not issue #5)", async () => {
+    const root = tmpDir("batch-add-flags-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: [], repo: "o/r" }); // no issues: the resume stops with the usage error after its adds
+    b.store.save({ order: [1] });
+    const views = [];
+    const io = { gh: async (a) => { views.push(a[2]); return JSON.stringify({ state: "OPEN" }); } };
+    await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "--parallel", "5"], { batchRoot: root, io })), /usage/);
+    assert.deepEqual(views, [], "no issue read for a flag value");
+    assert.deepEqual(b.readAdded(), []);
+    await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "--parallel", "5", "6", "--lane", "staging"], { batchRoot: root, io })), /usage/);
+    assert.deepEqual(views, ["6"]);
+    assert.deepEqual(b.readAdded(), [6]);
+    const res = await quiet(() => orchestrateFromCli(["--add", "b1", "7", "--parallel", "5"], { batchRoot: root, io }));
+    assert.deepEqual(res.added, [7]);
+    assert.deepEqual(res.skipped, []);
+    assert.deepEqual(b.readAdded(), [6, 7]);
+  });
+});
+
+describe("#4376: forgedock orchestrate --cancel", () => {
+  it("the cancel file: requestCancel / readCancel / clearCancel; invalid content reads as null", () => {
+    const b = openBatch(tmpDir("batch-cancel-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    assert.equal(b.readCancel(), null);
+    b.requestCancel({ reason: "operator" });
+    assert.equal(b.readCancel().reason, "operator");
+    assert.match(b.readCancel().at, /^\d{4}-\d\d-\d\dT/);
+    b.clearCancel();
+    assert.equal(b.readCancel(), null);
+    writeFileSync(join(b.dir, "cancel"), "[1]\n");
+    assert.equal(b.readCancel(), null);
+    writeFileSync(join(b.dir, "cancel"), "not json");
+    assert.equal(b.readCancel(), null);
+  });
+
+  it("a cancel while a lane runs: no more admissions, the lane is stopped once, its interrupt is no deferral, the rest end held; a resume runs them", async () => {
+    let cancel = null, saved = null;
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const started = [], stops = [], log = [];
+    let release;
+    const stopped = new Promise((r) => { release = r; });
+    const done = orchestrate({ issues: [1, 2, 3], parallel: 1, pollMs: 5, readBody: async () => "", store, getCancelled: () => cancel,
+      stopLane: (n, rec) => { stops.push([n, rec.pid]); release(); }, onUpdate: (r) => log.push(r),
+      runOne: async (n, _lane, ctx) => {
+        started.push(n);
+        ctx.onStart?.({ pid: 4242 });
+        if (n !== 1) return { terminalReason: "merged" };
+        await stopped; // the lane's SIGTERM teardown reports deferred run.interrupted
+        return { terminalReason: "deferred", code: "run.interrupted", detail: "interrupted by SIGTERM" };
+      } });
+    await until(() => started.includes(1));
+    cancel = { at: new Date().toISOString(), reason: "operator" };
+    const rows = await done;
+    assert.deepEqual(started, [1], "nothing admitted after the cancel");
+    assert.deepEqual(stops, [[1, 4242]], "the running lane is stopped exactly once");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.detail]), [[1, "held", "cancelled by operator"], [2, "held", "cancelled by operator"], [3, "held", "cancelled by operator"]]);
+    assert.equal(log.filter((r) => r.outcome === "cancelled").length, 1);
+    assert.deepEqual(saved.deferrals, {}, "an operator stop is not counted as a deferral");
+    assert.ok(saved.cancelled, "the cancel is persisted with the batch state");
+    // The operator's resume clears the cancel file: the held issues run.
+    cancel = null;
+    const resumed = await orchestrate({ issues: [], parallel: 1, pollMs: 5, readBody: async () => "", store, getCancelled: () => cancel,
+      runOne: async (n) => { started.push(n); return { terminalReason: "merged" }; } });
+    assert.deepEqual(resumed.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [3, "merged"]]);
+    assert.equal(saved.cancelled, undefined);
+  });
+
+  it("without getCancelled nothing changes: a deferred lane still counts a deferral", async () => {
+    let saved = null, k = 0;
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const { now, sleep } = fakeClock();
+    const rows = await orchestrate({ issues: [1], parallel: 1, readBody: async () => "", store, now, sleep, stopLane: () => { throw new Error("never"); },
+      runOne: async () => (k++ ? { terminalReason: "merged" } : { terminalReason: "deferred", code: "run.interrupted" }) });
+    assert.equal(rows[0].outcome, "merged");
+    assert.deepEqual(saved.deferrals, { 1: 1 });
+  });
+
+  it("through the CLI: --cancel during a lane holds the rest, a finished batch is left alone, unknown ids reject, --resume clears it", async () => {
+    const root = tmpDir("batch-cancel-cli-");
+    const leanIo = {
+      gh: async (a) => (a.includes("milestone") ? JSON.stringify({ milestone: null }) : JSON.stringify({ body: "" })),
+      git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : ""),
+    };
+    const ran = [];
+    const deps = { dir: tmpDir("cancel-run-"), batchRoot: root, batchId: "bc1", allowTmpfs: true, emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo, sched: null,
+      decide: () => {}, orchestration: { breaker: null, maxDeferrals: 3, globalParallel: null },
+      leanModule: { runCore: async (o) => {
+        ran.push(o.issue);
+        if (o.issue === 1) {
+          const res = await quiet(() => orchestrateFromCli(["--cancel", "bc1"], { batchRoot: root }));
+          assert.equal(res.cancelled, true);
+        }
+        return { terminalReason: "merged", pr: 50 + o.issue };
+      } } };
+    const first = await quiet(() => orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], deps));
+    assert.deepEqual(first.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "held"]]);
+    assert.equal(first.rows[1].detail, "cancelled by operator");
+    assert.deepEqual(ran, [1]);
+    const b = openBatch(root, "bc1");
+    assert.ok(b.readCancel());
+    const lines = [];
+    const l = console.log;
+    console.log = (...a) => lines.push(a.join(" "));
+    try { assert.equal((await orchestrateFromCli(["--cancel", "bc1"], { batchRoot: root })).cancelled, false); } finally { console.log = l; }
+    assert.match(lines.join("\n"), /batch bc1: already finished/);
+    await assert.rejects(orchestrateFromCli(["--cancel", "nope"], { batchRoot: root }), /no batch nope/);
+    await assert.rejects(orchestrateFromCli(["--cancel"], { batchRoot: root }), /usage: forgedock orchestrate/);
+    const resumed = await quiet(() => orchestrateFromCli(["--resume", "bc1"], deps));
+    assert.equal(b.readCancel(), null, "the operator's resume clears the cancel");
+    assert.deepEqual(resumed.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
+    assert.deepEqual(ran, [1, 2]);
+  });
+});
+
+describe("#4454: orchestrate's shutdown signal (schedd stop)", () => {
+  it("#4454: an aborted signal admits nothing more, leaves without awaiting or stopping the running lane, relabels nothing, keeps it adoptable", async () => {
+    let saved = null;
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const started = [], stops = [], relabels = [];
+    let releaseLane;
+    const lane = new Promise((r) => { releaseLane = r; });
+    const ac = new AbortController();
+    const done = orchestrate({ issues: [1, 2], parallel: 1, pollMs: 5, readBody: async () => "", store, signal: ac.signal,
+      stopLane: (n) => stops.push(n), relabelNeedsHuman: async (x) => { relabels.push(x); return true; },
+      runOne: async (n, _lane, ctx) => { started.push(n); ctx.onStart?.({ pid: 4242 }); if (n === 1) await lane; return { terminalReason: "merged" }; } });
+    await until(() => started.includes(1) && saved?.running?.["1"]?.pid === 4242);
+    const t0 = Date.now();
+    ac.abort();
+    await assert.rejects(done, (e) => e.code === "batch.stopped");
+    assert.ok(Date.now() - t0 < 1000, "the running lane is not awaited");
+    releaseLane();
+    await new Promise((r) => setTimeout(r, 100));
+    assert.deepEqual(started, [1], "nothing admitted after the stop, also once the lane ends");
+    assert.deepEqual(stops, [], "lanes are detached: no stop on shutdown");
+    assert.deepEqual(relabels, []);
+    assert.equal(saved.running["1"].pid, 4242, "the running lane stays in the state for a resume to adopt");
+    assert.deepEqual(saved.pending, [2]);
+    assert.deepEqual(saved.results, {}, "the lane that ended after the stop is not recorded by this process");
+  });
+
+  it("#4454: an abort wakes a loop sleeping on a long requeue delay", async () => {
+    const ac = new AbortController();
+    let deferred = 0;
+    const done = orchestrate({ issues: [9], parallel: 1, readBody: async () => "", signal: ac.signal,
+      runOne: async () => { deferred++; return { terminalReason: "deferred", detail: `leased by x until ${new Date(Date.now() + 3600e3).toISOString()}` }; } });
+    await until(() => deferred === 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const t0 = Date.now();
+    ac.abort();
+    await assert.rejects(done, (e) => e.code === "batch.stopped");
+    assert.ok(Date.now() - t0 < 1000);
   });
 });

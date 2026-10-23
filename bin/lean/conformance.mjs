@@ -112,6 +112,74 @@ export function movingBaseDiff(command) {
   return null;
 }
 
+/**
+ * #4350: true when a command lists the change's file names: a `git diff|log|show` segment with --name-only, --name-status,
+ * --stat or --numstat, or `git status --porcelain|--short`. Such a validate is a hand-written scope check; the engine's
+ * scope gate (deliverables plus typed amendments) is the authority over it.
+ */
+export function isScopeCheck(command) {
+  return String(command ?? "").split(/&&|\|\||;|\||\$\(|\)|`/).some((seg) =>
+    /\bgit\b(?:\s+-C\s+\S+)?(?:\s+-c\s+\S+)*\s+(?:diff|log|show)\b[^]*?\s--(?:name-only|name-status|stat|numstat)\b/.test(seg)
+    || /\bgit\b(?:\s+-C\s+\S+)?(?:\s+-c\s+\S+)*\s+status\b[^]*?\s(?:--porcelain|--short|-s)\b/.test(seg));
+}
+
+const SCOPE_UTILS = new Set(["grep", "egrep", "fgrep", "sort", "uniq", "wc", "test", "[", "[[", "]", "]]", "echo", "printf", "awk", "sed", "head", "tail", "tr", "cut", "comm", "true", "false", "exit"]);
+const SCOPE_GIT = new Set(["diff", "log", "show", "status", "merge-base", "rev-parse"]);
+/**
+ * #4353: true when a command is only a changed-files allowlist or denylist: isScopeCheck holds and every segment's command
+ * is git diff|log|show|status|merge-base|rev-parse or a filter (grep, sort, wc, test, awk, sed…). A command that also runs
+ * anything else (`node --test x && git diff --stat`) is not pure, so it stays a real validate.
+ */
+export function isPureScopeCheck(command) {
+  if (!isScopeCheck(command)) return false;
+  // text after a `)` belongs to the outer command (its arguments), so `)` is dropped instead of starting a segment
+  return String(command ?? "").replace(/\)/g, " ").split(/&&|\|\||;|\||\$\(|`|\n/).every((seg) => {
+    const toks = seg.trim().split(/\s+/).filter(Boolean).map((t) => t.replace(/^["']+|["']+$/g, ""));
+    let i = 0;
+    while (i < toks.length && (toks[i] === "!" || toks[i] === "" || /^[A-Za-z_]\w*=/.test(toks[i]))) i++;
+    if (i >= toks.length) return true;
+    const cmd = toks[i];
+    if (cmd !== "git") return SCOPE_UTILS.has(cmd);
+    for (i++; i < toks.length && (toks[i] === "-C" || toks[i] === "-c"); i += 2);
+    return SCOPE_GIT.has(toks[i]);
+  });
+}
+
+/**
+ * #4353: the contract without its pure scope-check validates (isPureScopeCheck): the engine's scope gate (deliverables plus
+ * typed amendments) is the only scope authority, so they are dropped at freeze, not rejected. Returns {contract, dropped:
+ * [{id, command}]}; a contract that is not an object or has no validate array comes back unchanged.
+ */
+export function dropScopeValidates(contract) {
+  if (!contract || typeof contract !== "object" || Array.isArray(contract) || !Array.isArray(contract.validate)) return { contract, dropped: [] };
+  const dropped = contract.validate.filter((v) => isPureScopeCheck(v?.command)).map((v) => ({ id: v.id, command: v.command }));
+  if (!dropped.length) return { contract, dropped };
+  return { contract: { ...contract, validate: contract.validate.filter((v) => !isPureScopeCheck(v?.command)) }, dropped };
+}
+
+/** #4404: how a deliver requirement is verified: in the lane (default) or by a job outside it (`evidence` names the job). */
+export const VERIFY_MODES = Object.freeze(["in_lane", "out_of_band"]);
+/**
+ * #4404: a requirement quote whose result is only measured outside the lane: Lighthouse, web vitals, field perf or a field
+ * or throttled device profile, a nightly or report-only suite, and the perf metric acronyms (matched case-sensitively below).
+ */
+export const OUT_OF_BAND_RE = /\blighthouse\b|\bweb[- ]vitals\b|\bfield[- ](?:perf\w*|profiles?|data|metrics?)\b|\bthrottled\b|\b(?:nightly|report[- ]only)\b[^.;\n]{0,40}?\b(?:suites?|jobs?|runs?|bench\w*|workflows?)\b/i;
+const PERF_METRIC_RE = /\b(?:LCP|INP|TTI|FCP|TTFB)\b/;
+export const isOutOfBand = (r) => r?.verify === "out_of_band";
+const tagsOutOfBand = (r) => r?.disposition === "deliver" && r?.verify == null && (OUT_OF_BAND_RE.test(String(r?.quote ?? "")) || PERF_METRIC_RE.test(String(r?.quote ?? "")));
+/**
+ * #4404: at freeze, every deliver requirement without a `verify` whose quote names an out-of-lane measurement becomes
+ * verify "out_of_band"; an explicit verify (in_lane too) is never overwritten. Returns {contract, tagged: [ids]}.
+ */
+export function tagOutOfBand(contract) {
+  if (!contract || typeof contract !== "object" || Array.isArray(contract) || !Array.isArray(contract.requirements)) return { contract, tagged: [] };
+  const tagged = contract.requirements.filter(tagsOutOfBand).map((r) => r.id);
+  if (!tagged.length) return { contract, tagged };
+  return { contract: { ...contract, requirements: contract.requirements.map((r) => (tagsOutOfBand(r) ? { ...r, verify: "out_of_band" } : r)) }, tagged };
+}
+/** #4404: the out-of-band requirements as [{id, quote, job}] (job = the requirement's evidence), for the PR body. */
+export const outOfBandRequirements = (contract) => (contract?.requirements ?? []).filter(isOutOfBand).map((r) => ({ id: r.id, quote: r.quote, job: String(r.evidence ?? "").trim() }));
+
 /** Option names whose value a tool writes (output, report, cache or temp dirs), not reads (#4325). */
 const WRITE_OPT = /^-(?:o|O|-?[\w-]*(?:out|dir|temp|tmp|cache|report|junit|xml|log)[\w-]*)$/i;
 const TMP_PATH = /\$(?:\{TMPDIR(?::-[^}]*)?\}|TMPDIR)\/([^\s"'`;|&<>()=]+)/g;
@@ -162,6 +230,9 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     if (!inIssue(r?.quote, issueText)) problems.push(`${id}: quote is not verbatim from the issue (at least ${MIN_QUOTE_CHARS} characters)`);
     if (TRACKED.includes(r?.disposition) && blank(r?.why)) problems.push(`${id}: ${r.disposition} needs a why`);
     if (r?.disposition === "not-applicable" && blank(r?.evidence)) problems.push(`${id}: not-applicable needs file:line evidence`);
+    if (r?.verify != null && !VERIFY_MODES.includes(r.verify)) problems.push(`${id}: verify must be one of ${VERIFY_MODES.join("|")}`);
+    if (isOutOfBand(r) && r?.disposition !== "deliver") problems.push(`${id}: verify out_of_band applies only to a deliver requirement`);
+    else if (isOutOfBand(r) && blank(r?.evidence)) problems.push(`${id}: verify out_of_band needs evidence naming the job or workflow that measures it (or set verify "in_lane" if this change can check it)`);
   }
   const dels = Array.isArray(c.deliverables) ? c.deliverables : [];
   if (reqs.some((r) => r?.disposition === "deliver") && !dels.length) problems.push("deliver requirements but no deliverables");
@@ -213,6 +284,7 @@ export function applyAmendments(frozen, amendments, issueText = null) {
       const r = { disposition: "deliver", ...a.requirement, amended: true };
       if (!DISPOSITIONS.includes(r.disposition)) { problems.push(`add-requirement ${r.id}: bad disposition ${r.disposition}`); continue; }
       if (TRACKED.includes(r.disposition) && blank(r.why)) r.why = a.why;
+      if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
       c.requirements.push(r);
       if (TRACKED.includes(r.disposition)) toTrack.push(r);
     } else if (TRACKED.includes(a.kind) && a.requirement) {
@@ -261,17 +333,22 @@ export function repoTracks(paths) {
 
 /**
  * Deterministic checks before any reviewer tokens are spent: unauthorized files, failed or missing validation,
- * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[]}; each failure carries a
+ * requirements not implemented, deferrals without a tracking issue, and unexempted hotspot growth. Returns {ok, failures[], superseded[]}; each failure carries a
  * `kind` (scope_creep, validate_missing, validate_failed, validate_env, requirement_unimplemented, untracked_deferral, hotspot_growth, repro_red_green, repro_env) so callers can
  * tell the builder's own failed checks apart from bookkeeping gaps. `ciVerified` (#4167): the current head passed the
  * engine's CI verification, so a validate id left to CI is not missing; a recorded non-zero exit still fails. `repro` (#4271): the repro_test red-green words, checked when given.
  * `validateRuns` (#4323): the engine's rerun {[id]: {rc, output}} of validate commands recorded as failed. A rerun that passes
  * counts as passed; one that could not find a host tool or module (missingTool, with `repoHas`) is kind validate_env, code
  * env.tool_missing (skipped on a CI-verified head), not a conformance failure.
+ * `frozen` (#4350): the contract before typed amendments. A failed scope-check validate (isScopeCheck) whose only files
+ * outside `frozen` are covered by deliverables an amendment added, with no scope creep left, is superseded by the engine's
+ * scope gate: listed in `superseded` [{id, files}], not a failure. Without `frozen`, `superseded` is always [].
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false }) {
-  const failures = [];
-  const creep = changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(contract, f));
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null }) {
+  const failures = [], superseded = [];
+  const outside = (k) => changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(k, f));
+  const creep = outside(contract);
+  const amendedOnly = frozenAmendedFiles(frozen, contract, outside, creep);
   if (creep.length) failures.push({ code: C.CONFORMANCE_SCOPE_CREEP, kind: "scope_creep", detail: `changed outside the contract's deliverables: ${creep.join(", ")}` });
   const runs = Array.isArray(result?.validation) ? result.validation : [];
   for (const v of contract.validate ?? []) {
@@ -286,6 +363,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
       if (miss && ciVerified) continue;
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)` });
+      else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})` });
     }
   }
@@ -293,14 +371,31 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   for (const r of contract.requirements ?? []) {
     const s = st.find((x) => x?.id === r.id)?.status;
     if (TRACKED.includes(r.disposition)) continue; // typed deferrals are judged by the reviewer, then filed before the PR
-    if (r.disposition === "deliver") {
+    if (r.disposition === "deliver" && isOutOfBand(r)) {
+      // #4404: measured outside the lane; the builder delivers its instrumentation (budget test or bench committed, job configured)
+      const row = st.find((x) => x?.id === r.id);
+      if (row?.instrumented !== true && s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "requirement_unimplemented", detail: `${r.id} is verified out of band${r.evidence ? ` by ${r.evidence}` : ""} but reported "${s ?? "no status"}" without instrumented: true` });
+    } else if (r.disposition === "deliver") {
       if (s === "deferred" || s === "post-deploy") failures.push({ code: C.CONFORMANCE_UNTRACKED_DEFERRAL, kind: "untracked_deferral", detail: `${r.id} was contracted as deliver but reported "${s}" without a typed amendment` });
       else if (s !== "implemented") failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "requirement_unimplemented", detail: `${r.id} reported "${s ?? "no status"}"` });
     }
   }
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
   if (repro) failures.push(...reproFailures(contract, repro));
-  return { ok: failures.length === 0, failures };
+  return { ok: failures.length === 0, failures, superseded };
+}
+
+/**
+ * #4350: the changed files outside the frozen contract when every one of them is covered by a deliverable an amendment
+ * added (a path the frozen contract does not list) and the amended contract leaves no scope creep; otherwise null.
+ */
+function frozenAmendedFiles(frozen, contract, outside, creep) {
+  if (!frozen || creep.length) return null;
+  const before = outside(frozen);
+  if (!before.length) return null;
+  const had = new Set((frozen.deliverables ?? []).map((d) => cleanPath(d.path)));
+  const added = (contract.deliverables ?? []).filter((d) => !had.has(cleanPath(d.path)));
+  return before.every((f) => added.some((d) => pathCovers(d.path, f))) ? before : null;
 }
 
 /**
@@ -432,7 +527,7 @@ export function fillEngineRows(rv, { contract, changedFiles = [], repoFiles = []
   out.preserve = pres;
   if (Array.isArray(rv.requirements)) {
     out.requirements = rv.requirements.map((r) => {
-      if (r?.status !== "implemented") return r;
+      if (r?.status !== "implemented" && r?.instrumented !== true) return r;
       const e = evidenceOf(r.evidence, { changedFiles, repoFiles });
       return e ? { ...r, evidence: `${e.path}:${e.line}` } : r;
     });
@@ -460,7 +555,8 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
     const row = rows[0];
     if (!REQ_STATUS.includes(row.status)) { miss(r.id, `${r.id}: status invalid: ${row.status}`); continue; }
     if (TRACKED.includes(r.disposition) && typeof row.deferral_ok !== "boolean") miss(r.id, `${r.id}: a ${r.disposition} requirement needs deferral_ok true|false (is deferring it justified?)`);
-    if (row.status === "implemented") {
+    if (isOutOfBand(r) && typeof row.instrumented !== "boolean") miss(r.id, `${r.id}: a requirement verified out of band needs instrumented true|false (is its budget test or bench committed and its job configured?)`);
+    if (row.status === "implemented" || (isOutOfBand(r) && row.instrumented === true)) {
       const e = evidenceOf(row.evidence, { changedFiles, repoFiles });
       if (!e) miss(r.id, `${r.id}: implemented needs path:line evidence`);
       else if (!changedFiles.includes(e.path) && !pathExists(e.path)) miss(r.id, `${r.id}: evidence path ${e.path} does not exist`);
@@ -496,7 +592,10 @@ export function decide(raw, ctx) {
   for (const c of rv.issue_coverage) if (c.status !== "covered") f.push({ code: C.CONFORMANCE_OMISSION, detail: `issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
   for (const r of ctx.contract.requirements) {
     const row = rv.requirements.find((x) => x.id === r.id);
-    if (r.disposition === "deliver" && row.status !== "implemented") {
+    if (r.disposition === "deliver" && isOutOfBand(r)) {
+      // #4404: the measured result lives in the named job; only the instrumentation is judged here
+      if (row.instrumented !== true) f.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} verified out of band${r.evidence ? ` by ${r.evidence}` : ""}: instrumentation missing${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
+    } else if (r.disposition === "deliver" && row.status !== "implemented") {
       f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} ${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     }
     if (TRACKED.includes(r.disposition) && row.deferral_ok === false) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} ${r.disposition} is not justified${row.note ? `: ${row.note}` : ""}; implement it` });
@@ -552,7 +651,7 @@ export function reviewSkeleton(contract, changedFiles = [], ignore = []) {
   const reqs = contract?.requirements ?? [];
   return {
     issue_coverage: reqs.map((r) => ({ quote: r.quote, contract_ids: [r.id], status: "" })),
-    requirements: reqs.map((r) => ({ id: r.id, status: "", evidence: "", validated_by: "", ...(TRACKED.includes(r.disposition) ? { deferral_ok: null } : {}), note: "" })),
+    requirements: reqs.map((r) => ({ id: r.id, status: "", evidence: "", validated_by: "", ...(TRACKED.includes(r.disposition) ? { deferral_ok: null } : {}), ...(isOutOfBand(r) ? { verify: "out_of_band", job: r.evidence ?? "", instrumented: null } : {}), note: "" })),
     scope: reviewedFiles(changedFiles, ignore).map((f) => ({ file: f, authorized_by: authorizationOf(contract ?? {}, f) ?? "none", note: "" })),
     preserve: (contract?.preserve ?? []).map((x) => ({ id: x.id, status: "unverified", evidence: "" })),
     regressions: [], verdict: "", summary: "",
@@ -562,16 +661,52 @@ export function reviewSkeleton(contract, changedFiles = [], ignore = []) {
 /** Requirements the reviewer accepted as deferred or post-deploy that still need a tracking issue. */
 export const pendingTracking = (contract) => (contract.requirements ?? []).filter((r) => TRACKED.includes(r.disposition) && !r.tracked);
 
-/** After a conforming merge: close as completed, linking every tracking issue. */
-export function closePlan(contract) {
-  const tracked = [...new Set((contract.requirements ?? []).filter((r) => TRACKED.includes(r.disposition)).map((r) => r.tracked).filter(Boolean))];
-  return { reason: "completed", tracked };
+/** #4398: an `investigate(` (or `investigate:`) issue, whose stated question must be answered before it closes as completed. */
+export const isInvestigation = (title) => /^\s*investigate[(:]/i.test(String(title ?? ""));
+
+/**
+ * After a conforming merge: close as completed, linking every tracking issue. #4398: an investigation with a deferred or
+ * post-deploy requirement, or a deliver requirement whose review row is not implemented, closes "partial" instead; `open`
+ * holds those requirements (the open question, carried forward). A null review (reviewer skipped) judges dispositions only.
+ */
+export function closePlan(contract, { title = null, review = null } = {}) {
+  const reqs = contract.requirements ?? [];
+  const tracked = [...new Set(reqs.filter((r) => TRACKED.includes(r.disposition)).map((r) => r.tracked).filter(Boolean))];
+  if (!isInvestigation(title)) return { reason: "completed", tracked };
+  const rows = Array.isArray(review?.requirements) ? review.requirements : null;
+  const open = reqs.filter((r) => TRACKED.includes(r.disposition)
+    || (r.disposition === "deliver" && rows && rows.find((x) => x?.id === r.id)?.status !== "implemented"));
+  return open.length ? { reason: "partial", tracked, open } : { reason: "completed", tracked };
+}
+
+const UNUSABLE_REVIEW = ["review.incomplete", "review.inconsistent", "review.unparseable"];
+/**
+ * #4398 batch-report line from the lane rows' `conformance` ({mode, would, risk}): shadow lanes, how many the enforced
+ * gate would have blocked, the false-block share (a would-block on an unusable review, the scripts/calibration.mjs
+ * recommendEnforce proxy) and the lanes enforced by a declared risk path. Null when no row carries conformance.
+ */
+export function formatShadowSummary(rows) {
+  const cs = (rows ?? []).map((r) => r?.conformance).filter((c) => c && typeof c === "object");
+  if (!cs.length) return null;
+  const sh = cs.filter((c) => c.mode === "shadow");
+  const would = sh.filter((c) => typeof c.would === "string" && c.would !== "conforms").length;
+  const falseB = sh.filter((c) => UNUSABLE_REVIEW.includes(c.would)).length;
+  const pct = (k) => (sh.length ? `${Math.round((k / sh.length) * 100)}%` : "n/a");
+  const risk = cs.filter((c) => c.risk === true).length;
+  return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}`;
 }
 
 /** One line per requirement for the follow-up script: a stable key (id + quote) and a why. Tabs and newlines removed. */
 export function followupItems(reqs) {
   const flat = (s) => String(s ?? "").replace(/[\t\r\n`]+/g, " ").replace(/\s+/g, " ").trim();
-  return reqs.map((r) => ({ id: r.id, key: flat(`${r.id}: ${r.quote}`).slice(0, 240), why: flat(`${r.disposition}: ${r.why ?? ""}`).slice(0, 400) }));
+  return reqs.map((r) => ({ id: r.id, key: flat(`${r.id}: ${r.quote}`).slice(0, 240).trim(), why: flat(`${r.disposition}: ${r.why ?? ""}`).slice(0, 400).trim() }));
+}
+
+/** #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}, matched on trimmed keys (the script trims what it echoes); unmatched items omitted. */
+export function followupMap(out, items) {
+  const echoed = new Map();
+  for (const l of String(out ?? "").split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) echoed.set(k.trim(), Number(n)); }
+  return Object.fromEntries(items.filter((i) => echoed.has(String(i.key).trim())).map((i) => [i.key, echoed.get(String(i.key).trim())]));
 }
 
 /**

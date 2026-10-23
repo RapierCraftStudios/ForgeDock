@@ -7,11 +7,20 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { computeTrigger, parseRiskPaths, riskClassOf, triggerReport, readRunLogs, formatReport } from "./review-trigger.mjs";
+import { computeTrigger, riskPathHits, parseRiskPaths, riskClassOf, triggerReport, readRunLogs, formatReport } from "./review-trigger.mjs";
 
 const HOT = { enabled: true, file_lines: 2000, growth_lines: 150, files: [] };
 const clean = (patch = {}) => computeTrigger({ files: ["src/foo.js", "test/foo.test.js"], hotspots: HOT, ...patch });
 const codes = (t) => t.reasons.map((r) => r.code);
+
+describe("riskPathHits (#4398)", () => {
+  it("only declared review.risk_paths globs count, sorted and unique; built-in risk words never do", () => {
+    assert.deepEqual(riskPathHits(["src/auth/login.ts", "src/billing/b.ts", "src/billing/a.ts", "src/billing/a.ts"], ["src/billing/**"]), ["src/billing/a.ts", "src/billing/b.ts"]);
+    assert.deepEqual(riskPathHits(["src/auth/login.ts"], []), [], "no declared globs: nothing enforces");
+    assert.deepEqual(riskPathHits(["db/x.sql", "lib/a.js"], "db/**, *.sql"), ["db/x.sql"]);
+    assert.deepEqual(riskPathHits(undefined, ["**"]), []);
+  });
+});
 
 describe("computeTrigger (#4273)", () => {
   it("a clean diff with passing gates would skip, with no reasons", () => {
@@ -61,6 +70,13 @@ describe("computeTrigger (#4273)", () => {
     assert.deepEqual(a, b);
     assert.deepEqual(codes(a), ["gate.ambiguous", "gate.failed", "risk_path", "risk_path"]);
   });
+  it("#4404 an out-of-band requirement forces the reviewer (only it judges instrumentation)", () => {
+    const t = clean({ contract: { requirements: [{ id: "R2", disposition: "deliver", verify: "out_of_band" }, { id: "R1", disposition: "deliver" }] } });
+    assert.equal(t.would_skip, false);
+    assert.deepEqual(t.reasons, [{ code: "gate.ambiguous", detail: "contract verifies R2 out of band (only the reviewer judges instrumentation)" }]);
+    assert.equal(clean({ contract: { requirements: [{ id: "R1", disposition: "deliver", verify: "in_lane" }] } }).would_skip, true);
+  });
+
   it("parseRiskPaths takes a comma string or a list", () => {
     assert.deepEqual(parseRiskPaths(" a/** , ,*.sql"), ["a/**", "*.sql"]);
     assert.deepEqual(parseRiskPaths(["x", " ", "y "]), ["x", "y"]);

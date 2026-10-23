@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { gatherContextFacts, compileContextPack, contextPackFor, contextPackCacheKey, linkStateStamp, LINK_STAMP_MAX, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments } from "./context.mjs";
 
 const REPO = "o/r";
@@ -33,7 +34,7 @@ function fakes(o = {}) {
     101: [{ id: 2, body: "<!-- FORGE:DECISION -->\nKeep `compileContextPack` pure; I/O lives in gather.", ...BOT }],
     102: [],
     103: [{ id: 3, body: "<!-- FORGE:DECISION -->\nUnrelated decision about logging.", ...BOT }],
-    33: [{ id: 4, body: "<!-- FORGE:CONTRACT -->\nx", ...BOT }],
+    33: [{ id: 4, body: "<!-- FORGE:CONTRACT -->\nx", ...BOT }, ...(o.facts33 ?? [])],
   };
   const prs = { 101: { title: "feat: ranking", body: "Closes #33", head: "feat/issue-33-lean" }, 102: { title: "feat: speedup", body: "", head: "feat/issue-34-lean" }, 103: { title: "chore: logs", body: "", head: "x" } };
   const log = [
@@ -109,6 +110,21 @@ describe("context pack (forge#4275)", () => {
     assert.notEqual(contextPackCacheKey(50, "abc", cfg), contextPackCacheKey(51, "abc", cfg));
   });
 
+  it("#4432: the cache key and the prune prefix are repo-scoped, so another repo's pack for the same number survives", async () => {
+    const store = new Map();
+    const fs = { read: async (p) => { if (!store.has(p)) throw new Error("ENOENT"); return store.get(p); }, write: async (p, t) => { store.set(p, t); },
+      list: async () => [...store.keys()].map((p) => p.slice("/runs/".length)), rm: async (p) => { store.delete(p); } };
+    const cfg = parseContextPackConfig({});
+    const g = async () => gather(fakes());
+    assert.match(contextPackCacheKey(50, "abc", cfg, {}, "acme/one"), /^context-acme__one__50-abc-/);
+    assert.equal(contextPackCacheKey(50, "abc", cfg, {}), contextPackCacheKey(50, "abc", cfg), "no repo: today's key");
+    await contextPackFor({ cfg, issue: 50, repo: "acme/one", headSha: "abc", cacheDir: "/runs", fs, gather: g });
+    await contextPackFor({ cfg, issue: 50, repo: "acme/two", headSha: "def", cacheDir: "/runs", fs, gather: g });
+    assert.deepEqual([...store.keys()].map((k) => k.split("-").slice(0, 2).join("-")).sort(), ["/runs/context-acme__one__50", "/runs/context-acme__two__50"]);
+    const again = await contextPackFor({ cfg, issue: 50, repo: "acme/one", headSha: "abc", cacheDir: "/runs", fs, gather: g });
+    assert.equal(again.cached, true);
+  });
+
   it("drops whole items past the byte cap, falls back to one line for a parent body, counts truncation", async () => {
     const facts = await gather(fakes());
     const p = compileContextPack(facts, { budgetBytes: 130 });
@@ -121,7 +137,10 @@ describe("context pack (forge#4275)", () => {
     const f = fakes();
     const facts = await gather(f, { sources: ["graph", "facts"] });
     assert.equal(facts.ledger.length + facts.attempts.length, 0);
-    assert.ok(!f.calls.some((c) => c[1] === "log" || c[1] === "for-each-ref"), "a disabled source makes no calls");
+    assert.ok(!f.calls.some((c) => c[1] === "for-each-ref"), "a disabled source makes no calls");
+    const g = fakes();
+    await gather(g, { sources: ["graph"] });
+    assert.ok(!g.calls.some((c) => c[1] === "log" || c[1] === "for-each-ref"), "no ledger walk without the ledger or facts source (#4401)");
     const p = compileContextPack(facts, { sources: ["graph"] });
     assert.ok(p.text.includes("#40") && !p.text.includes("test-map"));
     assert.deepEqual(parseContextPackConfig({ sources: "ledger, bogus,graph" }).sources, ["graph", "ledger"]);
@@ -166,7 +185,9 @@ describe("context pack (forge#4275)", () => {
   });
 
   it("config, lane type and parsers", () => {
-    assert.deepEqual(parseContextPackConfig({}), { mode: "shadow", sources: ["graph", "attempts", "ledger", "facts"], budgetBytes: 6144, days: 30 });
+    assert.deepEqual(parseContextPackConfig({}), { mode: "shadow", sources: ["graph", "attempts", "pitfalls", "ledger", "facts"], budgetBytes: 6144, days: 30, pitfallLanes: 50 });
+    assert.equal(parseContextPackConfig({ pitfallLanes: 12 }).pitfallLanes, 12);
+    assert.equal(parseContextPackConfig({ pitfallLanes: -3 }).pitfallLanes, 50);
     assert.equal(parseContextPackConfig({ mode: "ON" }).mode, "on");
     assert.equal(parseContextPackConfig({ mode: "nope" }).mode, "shadow");
     assert.equal(laneType({ body: "x\n**Parent**: #3" }), "child");
@@ -183,7 +204,7 @@ describe("context pack (forge#4275)", () => {
     const p = compileContextPack(await gather(fakes()));
     const r = renderContextRecord(p, { mode: "shadow", laneType: "rerun" });
     assert.match(r, /^<details><summary>Context pack: \d+ item\(s\), \d+ bytes, 0 dropped \(mode shadow, lane rerun, hash [0-9a-f]{12}\)<\/summary>/);
-    assert.match(r, /Sources \(included\/found\): graph 5\/5, attempts 3\/3, ledger 3\/3, facts 1\/1/);
+    assert.match(r, /Sources \(included\/found\): graph 5\/5, attempts 3\/3, pitfalls 0\/0, ledger 3\/3, facts 1\/1/);
     assert.ok(r.includes(p.text));
   });
 });
@@ -334,5 +355,119 @@ describe("#4298 context-pack cache and shared names", () => {
     writeFileSync(`${d}/forge.yaml`, "engine:\n  context_pack: on\n");
     assert.deepEqual(readContextPack(d, (m) => warns.push(m)), { mode: "on" });
     assert.equal(warns.length, 1, "a valid mode does not warn");
+    writeFileSync(`${d}/forge.yaml`, "engine:\n  context_pack_pitfall_lanes: 20\n");
+    assert.deepEqual(readContextPack(d, (m) => warns.push(m)), { pitfallLanes: 20 }, "#4375: the pitfall aging window");
+  });
+});
+
+describe("#4375 recurring pitfalls in the context pack", () => {
+  const PITS = [
+    { sig: "precheck:aaaaaaaaaaaa", trigger: "precheck", lesson: "precheck: src/a.ts:12:5 error 'x' is defined but never used no-unused-vars", globs: ["src/*.ts"], count: 4, match: "files" },
+    { sig: "docs:bbbbbbbbbbbb", trigger: "docs", lesson: "docs: devdocs/modules/lean.md is stale for bin/lean/lean.mjs", globs: ["devdocs/modules/*.md"], count: 2, match: "repo" },
+  ];
+  const facts = (pitfalls) => gatherContextFacts({ io: { gh: async () => { throw new Error("no gh"); }, git: async () => "", exists: async () => false }, repo: REPO, issue: 50, iss: { number: 50, body: "plain" }, comments: [], cwd: "/wt", base: "origin/staging", sources: ["pitfalls"], pitfalls });
+
+  it("compiles the given pitfalls in order, inside the byte budget, and lists the kept signatures", async () => {
+    const p = compileContextPack(await facts(PITS));
+    assert.ok(p.text.includes("Recurring pitfalls in this repo (past rework):"), p.text);
+    const a = p.text.indexOf("[precheck]"), b = p.text.indexOf("[docs]");
+    assert.ok(a > 0 && b > a, p.text);
+    assert.ok(p.text.includes("(src/*.ts); seen 4×"));
+    assert.deepEqual(p.pitfalls, [{ sig: PITS[0].sig, match: "files" }, { sig: PITS[1].sig, match: "repo" }]);
+    assert.equal(p.sources.pitfalls, 2);
+    const small = compileContextPack(await facts(PITS), { budgetBytes: 200 });
+    assert.ok(small.bytes <= 200 && small.truncated >= 1, `${small.bytes} ${small.truncated}`);
+    assert.deepEqual(small.pitfalls, small.text.includes("[docs]") ? p.pitfalls : [p.pitfalls[0]]);
+    assert.equal(compileContextPack(await facts(PITS), { sources: ["graph"] }).pitfalls.length, 0, "source off: no pitfalls");
+  });
+
+  it("the posted FORGE:CONTEXT record never carries pitfall text, only the count", async () => {
+    const f = await gather(fakes());
+    const p = compileContextPack({ ...f, pitfalls: (await facts(PITS)).pitfalls });
+    assert.ok(p.text.includes("no-unused-vars"));
+    const r = renderContextRecord(p, { mode: "on", laneType: "first" });
+    for (const x of ["no-unused-vars", "Recurring pitfalls", "src/*.ts", "devdocs/modules/lean.md is stale"]) assert.ok(!r.includes(x), x);
+    assert.match(r, /pitfalls 2\/2/);
+    assert.ok(r.includes("Prior attempts at this issue:") && r.includes("Merged PRs on the same symbols"), "the other sections stay");
+  });
+
+  it("the cache key changes when the selected pitfall signatures change", () => {
+    const cfg = parseContextPackConfig({});
+    const k0 = contextPackCacheKey(50, "abc", cfg, { scope: "s", attempts: 0 });
+    assert.equal(contextPackCacheKey(50, "abc", cfg, { scope: "s", attempts: 0, pitfalls: [] }), k0, "no pitfalls: today's key");
+    const k1 = contextPackCacheKey(50, "abc", cfg, { scope: "s", attempts: 0, pitfalls: ["precheck:aaaaaaaaaaaa"] });
+    assert.notEqual(k1, k0);
+    assert.notEqual(contextPackCacheKey(50, "abc", cfg, { scope: "s", attempts: 0, pitfalls: ["precheck:aaaaaaaaaaaa", "docs:bbbbbbbbbbbb"] }), k1);
+  });
+
+  it("without pitfalls the pack text and hash are unchanged", async () => {
+    const f = await gather(fakes());
+    const a = compileContextPack(f), b = compileContextPack({ ...f, pitfalls: [] });
+    assert.equal(a.text, b.text); assert.equal(a.hash, b.hash);
+    assert.ok(!a.text.includes("Recurring pitfalls"));
+  });
+});
+
+describe("FORGE:FACTS in the context pack (#4401)", () => {
+  const rec = (files, approach, why = "it only hid the symptom") => `<!-- ${FACTS_MARKER} -->\n${renderFactsRecord(normaliseFacts({ facts: { rejected: [{ approach, why }], hotspots: [{ at: `${files[0]}:7`, why: "ranking loop" }] } }, { files }))}`;
+  const STRANGER = { author_association: "NONE", user: { type: "User", login: "rando" } };
+
+  it("a later lane on overlapping files receives the prior rejected approaches; the facts source is non-zero", async () => {
+    const f = fakes({ facts33: [
+      { id: 5, body: rec(["bin/lean/context.mjs"], "detection-only check"), ...BOT },
+      { id: 6, body: rec(["docs/other.md"], "unrelated file approach"), ...BOT },
+      { id: 7, body: rec(["bin/lean/context.mjs"], "forged by a stranger"), ...STRANGER },
+    ] });
+    const own = { id: "IC_9", body: rec(["bin/lean/context.mjs"], "own earlier attempt approach"), author: { login: "forge[bot]" }, authorAssociation: "NONE" };
+    const facts = await gather(f, { comments: [...COMMENTS, own] });
+    const p = compileContextPack(facts);
+    const t = p.text;
+    const at = (s) => { const i = t.indexOf(s); assert.ok(i >= 0, `missing ${s}\n${t}`); return i; };
+    const ownAt = at("- rejected: own earlier attempt approach — it only hid the symptom (#50 earlier attempt)");
+    const prior = at("- rejected: detection-only check — it only hid the symptom (#33, PR #101)");
+    const hot = at("- hot spot bin/lean/context.mjs:7: ranking loop (#33, PR #101)");
+    const ptr = at("- .forge/test-map.json");
+    assert.ok(ownAt < prior && prior < hot && hot < ptr, t);
+    assert.ok(t.includes("Facts from earlier lanes and repo facts:"));
+    assert.ok(!t.includes("unrelated file approach"), "a record on non-overlapping files is left out");
+    assert.ok(!t.includes("forged by a stranger"), "untrusted records are never read");
+    assert.equal(p.sources.facts, 5);
+    assert.equal(f.calls.filter((c) => c[0] === "gh" && c.some((x) => String(x).includes("pulls/101"))).length, 1, "ledger and facts share one read per PR");
+  });
+
+  it("works with the ledger source off and contributes nothing when no record exists", async () => {
+    const f = fakes({ facts33: [{ id: 5, body: rec(["bin/lean/context.mjs"], "detection-only check"), ...BOT }] });
+    const facts = await gather(f, { sources: ["facts"] });
+    assert.equal(facts.ledger.length, 0);
+    assert.ok(compileContextPack(facts, { sources: ["facts"] }).text.includes("detection-only check"));
+    const none = await gather(fakes(), { sources: ["facts"] });
+    assert.deepEqual([none.lanes, none.facts], [[], [".forge/test-map.json"]]);
+  });
+});
+
+describe("populated pack sources (#4400)", () => {
+  it("repo-fact files that exist only in the main checkout are listed; the worktree alone (the old lookup) lists none", async () => {
+    const io = (dir) => ({ ...fakes().io, exists: async (p) => p.startsWith(`${dir}/`) && (p.endsWith(".forge/repo-facts.json") || p.endsWith(".forge/test-map.json")) });
+    const inCheckout = await gather({ io: io("/main") }, { sources: ["facts"], checkout: "/main" });
+    assert.deepEqual(inCheckout.facts, [".forge/repo-facts.json", ".forge/test-map.json"]);
+    const worktreeOnly = await gather({ io: io("/main") }, { sources: ["facts"] });
+    assert.deepEqual(worktreeOnly.facts, []);
+    const both = await gather({ io: { ...fakes().io, exists: async (p) => p.endsWith(".forge/repo-facts.json") } }, { sources: ["facts"], checkout: "/main" });
+    assert.deepEqual(both.facts, [".forge/repo-facts.json"], "a file in both dirs is listed once");
+  });
+
+  it("an issue with a prior run, a ledger PR on its file and a FORGE:FACTS record has non-zero attempts, ledger and facts", async () => {
+    const rec = `<!-- ${FACTS_MARKER} -->\n${renderFactsRecord(normaliseFacts({ facts: { rejected: [{ approach: "retry only", why: "hid the race" }] } }, { files: ["bin/lean/context.mjs"] }))}`;
+    const f = fakes({ facts33: [{ id: 8, body: rec, ...BOT }] });
+    const p = compileContextPack(await gather(f, { checkout: "/main" }));
+    for (const s of ["attempts", "ledger", "facts"]) assert.ok(p.sources[s] > 0, `${s} is zero: ${JSON.stringify(p.sources)}`);
+  });
+});
+
+describe("#4467: priorAttempts reads App comments in gh issue view shape", () => {
+  const ghShape = (login) => ({ author: { login }, authorAssociation: "CONTRIBUTOR", body: "<!-- FORGE:NEEDS_HUMAN -->\nstuck" });
+  it("counts the App's NEEDS_HUMAN, not a stranger's", () => {
+    assert.equal(priorAttempts("", [ghShape("rapiercraft-forgedock")]), 1);
+    assert.equal(priorAttempts("", [ghShape("someone")]), 0);
   });
 });

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches } from "./batch.mjs";
 import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv } from "./schedd.mjs";
-import { formatTable } from "./orchestrate.mjs";
+import { formatTable, orchestrate } from "./orchestrate.mjs";
 import { orchestrateFromCli } from "../engine-cli.mjs";
 
 const until = async (cond, ms = 15000) => {
@@ -32,16 +32,18 @@ const a = process.argv.slice(2); const n = Number(a[1]); const rf = a[a.indexOf(
 appendFileSync(${JSON.stringify(h.launches)}, n + "\\n");
 const t = setInterval(() => { if (!existsSync(${JSON.stringify(h.release)})) return; clearInterval(t);
   writeFileSync(rf + ".tmp", JSON.stringify({ terminalReason: "merged", pr: 100 + n, cost_usd: 0 })); renameSync(rf + ".tmp", rf); }, 20);
+// Like run-issue's #4179 teardown: SIGTERM reports deferred run.interrupted.
+process.once("SIGTERM", () => { writeFileSync(rf + ".tmp", JSON.stringify({ terminalReason: "deferred", code: "run.interrupted", detail: "interrupted by SIGTERM" })); renameSync(rf + ".tmp", rf); process.exit(143); });
 `);
   h.daemonScript = join(work, "daemon.mjs");
-  writeFileSync(h.daemonScript, `import { startDaemon } from ${JSON.stringify(new URL("./schedd.mjs", import.meta.url).href)};
+  writeFileSync(h.daemonScript, `import { startDaemon, exitOnSignals } from ${JSON.stringify(new URL("./schedd.mjs", import.meta.url).href)};
 import { runBatch } from ${JSON.stringify(new URL("../engine-cli.mjs", import.meta.url).href)};
 const deps = { allowTmpfs: true, laneScript: ${JSON.stringify(stub)}, pollMs: 30, orchestration: { breaker: null, maxDeferrals: 3 }, io: { gh: async () => "o/r\\n" },
   leanIo: { gh: async (a) => a.includes("milestone") ? JSON.stringify({ milestone: null }) : a[0] === "repo" ? "main\\n" : JSON.stringify({ body: a[2] === "3" ? "Depends on #1" : "", labels: [] }),
     git: async (a) => (a[0] === "ls-remote" ? "abc\\trefs/heads/staging\\n" : "") } };
 const d = await startDaemon({ runBatch: (a) => runBatch({ ...a, daemon: true, deps }), idleMs: 600000 });
 if (!d.running) process.exit(3);
-process.once("SIGTERM", () => d.close());
+exitOnSignals(d); // the forgedock schedd handler (#4454)
 await d.closed;
 `);
   h.env = { ...process.env, FORGEDOCK_SCHED_DIR: h.sched, FORGEDOCK_BATCH_DIR: h.root, FORGEDOCK_LIMITS_FILE: join(work, "limits.json") };
@@ -151,6 +153,67 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { h.cleanup(); }
   });
 
+  it("#4408: --add and --resume <id> N add issues to the live batch (no second batch); an unhosted finished batch runs its adds on --resume", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      const client = { ...h.client, io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ state: a[2] === "9" ? "CLOSED" : "OPEN" }) : "o/r\n") } };
+      const { res } = await withRoot(h, () => capture(async () => {
+        const first = orchestrateFromCli(["1", "--parallel", "3", "--repo", "o/r", "--no-prefilter"], h.client);
+        await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+        const [id] = listBatches(h.root);
+        const add = await orchestrateFromCli(["--add", id, "2", "1", "x", "9"], client);
+        assert.deepEqual(add.added, [2]);
+        assert.deepEqual(add.skipped.map((x) => [x.issue, x.reason]).sort(), [[1, "already in batch"], [9, "closed"], ["x", "not an integer"]]);
+        await until(() => h.launched().includes(2));
+        const resumed = orchestrateFromCli(["--resume", id, "4"], client);
+        await until(() => h.launched().includes(4));
+        assert.deepEqual(listBatches(h.root), [id], "no second batch");
+        writeFileSync(h.release, "");
+        const [done] = await Promise.all([first, resumed]);
+        assert.deepEqual(done.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [4, "merged"]]);
+        // Finished and no longer hosted: the add is persisted and the next --resume runs it instead of replaying the report.
+        const later = await orchestrateFromCli(["--add", id, "6"], client);
+        assert.deepEqual(later.added, [6]);
+        const again = await orchestrateFromCli(["--resume", id], client);
+        assert.deepEqual(again.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [4, "merged"], [6, "merged"]]);
+        return done;
+      }));
+      assert.equal(res.rows.length, 3);
+      assert.deepEqual(h.launched(), [1, 2, 4, 6], "each issue launched once");
+    } finally { h.cleanup(); }
+  });
+
+  it("#4376: --cancel stops one batch (its lane torn down, the rest held, report written); the other batch and the daemon run on", async () => {
+    const h = host();
+    try {
+      const d = await h.daemon();
+      await withRoot(h, () => capture(async () => {
+        const a = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
+        await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+        const [idA] = listBatches(h.root);
+        const b = orchestrateFromCli(["5", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
+        await until(() => h.launched().includes(5) && h.lanePids().length === 2);
+        const idB = listBatches(h.root).find((x) => x !== idA);
+        const res = await orchestrateFromCli(["--cancel", idA], h.client);
+        assert.deepEqual(res, { ok: true, batch: idA, cancelled: true });
+        const doneA = await a;
+        assert.deepEqual(doneA.rows.map((r) => [r.issue, r.outcome, r.detail]), [[1, "held", "cancelled by operator"], [2, "held", "cancelled by operator"]]);
+        assert.ok(openBatch(h.root, idA).readReport(), "the cancelled batch wrote its report");
+        assert.deepEqual(h.launched(), [1, 5], "#2 never launched");
+        const st = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" });
+        assert.equal(st.pid, d.pid, "the daemon kept running");
+        assert.deepEqual(st.batches.map((x) => x.id), [idB]);
+        writeFileSync(h.release, "");
+        const doneB = await b;
+        assert.deepEqual(doneB.rows.map((r) => [r.issue, r.outcome]), [[5, "merged"]]);
+        const again = await orchestrateFromCli(["--cancel", idA], h.client);
+        assert.equal(again.cancelled, false, "a finished batch is left alone");
+        await assert.rejects(orchestrateFromCli(["--cancel", "nope"], h.client), /no batch nope/);
+      }));
+    } finally { h.cleanup(); }
+  });
+
   it("single instance: a live daemon keeps its lock; a dead owner's lock and socket are taken over", async () => {
     const h = host();
     try {
@@ -168,6 +231,89 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
         assert.equal(st.pid, process.pid);
       } finally { await third.close(); }
       assert.equal(existsSync(scheddPaths(h.sched).lock), false, "lock released on close");
+    } finally { h.cleanup(); }
+  });
+
+  it("#4454: close() stops every hosted batch loop before releasing the lock; no batch admits a lane after close()", async () => {
+    const dir = tmpDir("schedd-stop-"), root = join(dir, "batches"), lock = scheddPaths(dir).lock;
+    const started = { a: [], b: [] }, stoppedWithLock = {};
+    let releaseLane;
+    const lane = new Promise((r) => { releaseLane = r; });
+    // An unref'd cancellable sleep: a base without the stop cannot hang the test process on the 30-min requeue delay.
+    const sleep = (ms, sig) => new Promise((r) => { const t = setTimeout(r, ms); t.unref(); sig?.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true }); });
+    const runBatch = async ({ argv, sink, signal }) => {
+      const id = argv[0];
+      sink.batch({ id, dir: join(root, id) });
+      try {
+        return await orchestrate({ issues: id === "a" ? [1, 2] : [9], parallel: 1, readBody: async () => "", signal, sleep,
+          runOne: async (n) => {
+            started[id].push(n);
+            if (n === 1) { await lane; return { terminalReason: "merged" }; } // a detached lane, still running at shutdown
+            if (n === 9) return { terminalReason: "deferred", detail: `leased by x until ${new Date(Date.now() + 3600e3).toISOString()}` };
+            return { terminalReason: "merged" };
+          } });
+      } finally { stoppedWithLock[id] = existsSync(lock); }
+    };
+    const d = await startDaemon({ dir, root, runBatch, log: () => {}, resumeOnStart: false });
+    const submit = async (id) => request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: [id], cwd: dir, env: {} }).catch((e) => e);
+    const clients = [submit("a"), submit("b")]; // each resolves (or rejects) once its connection ends
+    await until(() => started.a.length === 1 && started.b.length === 1);
+    await new Promise((r) => setTimeout(r, 100)); // b is asleep on its requeue delay
+    const t0 = Date.now();
+    await d.close();
+    assert.ok(Date.now() - t0 < 3000, `close() took ${Date.now() - t0} ms`);
+    assert.deepEqual(stoppedWithLock, { a: true, b: true }, "both batch loops stopped while the lock was still held");
+    assert.equal(existsSync(lock), false, "lock released after the loops stopped");
+    assert.equal(existsSync(scheddPaths(dir).sock), false);
+    releaseLane();
+    await new Promise((r) => setTimeout(r, 200));
+    assert.deepEqual(started, { a: [1], b: [9] }, "no hosted batch admits a lane after close()");
+    await Promise.all(clients);
+  });
+
+  it("#4454: close() waits at most stopMs for a batch that ignores the stop, then releases the lock", async () => {
+    const dir = tmpDir("schedd-bound-");
+    const d = await startDaemon({ dir, root: join(dir, "batches"), log: () => {}, resumeOnStart: false, stopMs: 200,
+      runBatch: ({ sink }) => { sink.batch({ id: "x", dir }); return new Promise(() => {}); } });
+    request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["x"], cwd: dir, env: {} }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 50));
+    const t0 = Date.now();
+    await d.close();
+    const took = Date.now() - t0;
+    assert.ok(took >= 150 && took < 2000, `close() took ${took} ms`);
+    assert.equal(existsSync(scheddPaths(dir).lock), false);
+  });
+
+  it("#4454: kill -TERM stops both batches and exits 143 within the bound; lanes keep running; the next daemon resumes and adopts them", async () => {
+    const h = host();
+    try {
+      const d1 = await h.daemon();
+      await withRoot(h, () => capture(async () => {
+        const a = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client).then(() => null, (e) => e);
+        await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+        const [idA] = listBatches(h.root);
+        const b = orchestrateFromCli(["5", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client).then(() => null, (e) => e);
+        await until(() => h.launched().includes(5) && h.lanePids().length === 2);
+        const idB = listBatches(h.root).find((x) => x !== idA);
+        const lanes = h.lanePids();
+        const exit = new Promise((r) => d1.on("exit", (code) => r(code)));
+        const t0 = Date.now();
+        d1.kill("SIGTERM");
+        assert.equal(await exit, 143);
+        assert.ok(Date.now() - t0 < 12000, "exits within the bound");
+        for (const pid of lanes) assert.equal(isLaneAlive(pid, null), true, "lanes keep running");
+        assert.equal(existsSync(scheddPaths(h.sched).lock), false);
+        assert.equal(openBatch(h.root, idA).readReport(), null, "a stopped batch writes no report");
+        assert.equal(openBatch(h.root, idB).readReport(), null);
+        assert.match(String((await a)?.message), /--resume/);
+        await b;
+        await h.daemon(); // resumes both batches
+        const ra = orchestrateFromCli(["--resume", idA], h.client), rb = orchestrateFromCli(["--resume", idB], h.client);
+        setTimeout(() => writeFileSync(h.release, ""), 200);
+        assert.deepEqual((await ra).rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
+        assert.deepEqual((await rb).rows.map((r) => [r.issue, r.outcome]), [[5, "merged"]]);
+        assert.deepEqual(h.launched(), [1, 2, 5], "adopted, not relaunched");
+      }));
     } finally { h.cleanup(); }
   });
 

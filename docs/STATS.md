@@ -34,12 +34,64 @@ printed to stderr while crawling, so `--json` stdout stays parseable.
 
 With no local state at all, `forgedock stats --repo <r>` reproduces the report from GitHub alone.
 
+## Efficiency (`--efficiency`, forge#4402)
+
+```bash
+npx forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--repo <owner/repo>] [--json]
+```
+
+Per batch (`--batch`, a dir under `~/.forge/batches`, `FORGEDOCK_BATCH_DIR`) and over trailing windows (`--window`,
+default `7d,30d`: the union of the repo's batches whose `plan.created` falls in the window, where an issue in several
+batches counts once with its latest row). The orchestrate batch report prints the same lines for the batch it just ran.
+The code is in `bin/stats/efficiency.mjs`.
+
+- **Cohort and cost to merge.** A merged issue counts every `RUN_START..RUN_TERMINAL` slice of its run log
+  (`~/.forge/runs/<issue>.jsonl`) that started at or before its settle time (its latest batch `log.jsonl` row) and
+  belongs to the repo. Earlier failed lanes from other batches or ad-hoc runs count too. Attempt cost is
+  `cost_usd_delta`, else `cost_usd`.
+- **$/merge, turns/merge, context/turn**: all-phase cost ÷ merged, with implement and review totals; implement turns ÷
+  merged; implement cache-read ÷ implement turns. These are also split by size (the merging run's `turns.size`, else a
+  `size:` label, else `unknown`) and by model (the implement attempt's `model`).
+- **Retries/merge by cause.** For builder attempts, the trigger decides the cause:
+
+  | Cause | Triggers |
+  | --- | --- |
+  | env | `ci_unavailable` |
+  | engine | `timeout_restart`, `context_restart`, `budget_wrapup`, `recovery` |
+  | code | `precheck`, `structure`, `docs`, `enumerating`, `sequence`, `ci_red`, `conformance`, `merge_ci`, `block_correction`, `contract_correction` |
+  | review | `review` |
+
+  `plan`, `build` and `verifier` are not retries. A lane rerun (every run slice of a merged issue but the last) counts
+  by the code that ended it: `env.*` is env; `engine.*`, `run.*`, `followup.*`, `base.*`, `dependency.*` are engine;
+  `ci.*`, `conformance.*`, `precheck.*`, `budget.*`, `builder.*`, `contract.*` are code; `review.*` is review; anything
+  else is unknown.
+- **No action**: rows parked by the pre-filter (`awaiting-promotion`, `awaiting-precondition`) and lanes that ended
+  `builder.blocked` with `Builder is blocked (promotion)`, with their count and cost.
+- **Issue quality vs. cost**: each merged issue's body is tagged `full` (a root-cause heading, a `file:line` and a
+  fix/design/approach/proposal heading), `partial` (some of these) or `none`, and n, $/merge and turns/merge are
+  compared per tag.
+- **Acceptance (7d after promotion)**: from trusted `FORGE:PROBE` comments (#4399). An issue whose first record is
+  under 7 days old is pending. After that it passes when every record within 7 days of the first one passed. The
+  first record is the observed promotion, because a probe runs only once the fix is on the default branch.
+
+Limits: logs written before #4362 carry no trigger, so implement attempts beyond the plan and build calls count as
+`unknown`. Logs written before #4407 sum running session totals. Lanes run outside a batch are in no window. `gh` (for
+merged issues only) is the one network call; when it fails, quality and acceptance print `n/a` with the reason.
+
 ## Sections (per version and repo)
 
 - **Cost**: cache-read tokens per issue (mean, median), per phase (mean over all runs, so phases add up to the per-issue
   mean), per merged issue, output tokens, USD where recorded.
 - **Time**: p50 and p90 duration per phase and wall time per issue.
-- **Flow**: merged %, needs-human %, remediation rate, outcome-code distribution (`docs/OUTCOME-CODES.md`).
+- **Flow**: merged %, needs-human %, remediation rate, outcome-code distribution (`docs/OUTCOME-CODES.md`), and the
+  **first-pass rate** (#4362): the share of lanes that reached the build (a `build` attempt, or the `timeout_restart` of
+  one) with no rework attempt after it, with the count (`k/n lanes`) and how many lanes are `unknown` (their attempts
+  carry no `trigger`: logs written before the field). Rework triggers: `precheck`, `structure`, `docs`, `enumerating`,
+  `sequence`, `ci_red`, `conformance`, `review`, `merge_ci` (`bin/lean/fixround.mjs` `REWORK_TRIGGERS`); a timeout
+  restart, a base-sync `recovery`, a `ci_unavailable` fallback or a `block_correction` does not break first pass.
+- **Rework by trigger** (#4362): count and USD of the builder (`implement`) attempts with a rework trigger, per trigger,
+  plus a total. Attempts without a `trigger` are counted as `unknown`, never dropped. JSON also carries every builder
+  attempt by trigger (`rework.attempts`).
 - **Review funnel**: findings per review by severity, then ISSUE / NOTE / in-PR fix, plus `validated` and `false-positive` issues.
 - **Gates**: block rate per gate (acceptance, diff size OVER, CI, liveness), malformed-check rate, COHESIVE and OVER counts.
 - **Issue flow**: issues created by source (review-finding, pipeline bot, human), closed by kind, net flow, findings per merged issue.

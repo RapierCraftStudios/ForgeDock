@@ -10,22 +10,28 @@
  */
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { isTrustedComment, parseDependsOn } from "../engine/phases.mjs";
+import { parseDependsOn } from "../engine/phases.mjs";
 import { codeForTerminalReason } from "../engine/outcome-codes.mjs";
-import { namedPaths } from "./prefilter.mjs";
+import { runLogKey } from "../engine/runlog.mjs";
+import { namedPaths, isTrustedIssueComment as trusted } from "./prefilter.mjs";
 import { parseContractComment, noComments } from "./render.mjs";
 import { REPO_FACTS_FILE, TEST_MAP_FILE } from "./testmap.mjs";
+import { parseFactsComment, factsLines, FACTS_RANK } from "./facts.mjs";
 
 // noComments lives in render.mjs (#4298: one comment-strip helper for context, conformance and prefilter).
 export { noComments };
 
 export const CONTEXT_MODES = Object.freeze(["shadow", "on", "off"]);
-export const CONTEXT_SOURCES = Object.freeze(["graph", "attempts", "ledger", "facts"]);
+export const CONTEXT_SOURCES = Object.freeze(["graph", "attempts", "pitfalls", "ledger", "facts"]);
 export const DEFAULT_CONTEXT_BYTES = 6144;
 export const DEFAULT_LEDGER_DAYS = 30;
+/** #4375: a pitfall not seen in this many lanes of the repo ages out (forge.yaml engine.context_pack_pitfall_lanes). */
+export const DEFAULT_PITFALL_LANES = 50;
 /** Bounds on GitHub reads per pack: linked issues read, ledger PRs inspected. */
 export const MAX_LINKS = 20;
 export const MAX_LEDGER_PRS = 8;
+/** #4401: FORGE:FACTS records (earlier lanes) read into one pack: this issue's own attempts first, then the file-path ledger. */
+export const MAX_FACT_LANES = 6;
 export const REPO_FACT_FILES = Object.freeze([REPO_FACTS_FILE, TEST_MAP_FILE]);
 const ATTEMPT_MARKERS = ["NEEDS_HUMAN", "BASE_SYNC", "FIX_CI"];
 const LINE_MAX = 200;
@@ -38,13 +44,13 @@ const oneLine = (s, max = LINE_MAX) => {
 const stripComments = (s) => noComments(s).replace(/\r\n/g, "\n").trim();
 const byNum = (a, b) => a - b;
 
-/** forge.yaml engine.context_pack (+ _sources, _bytes, _days) normalised; invalid values fall back to the defaults. */
-export function parseContextPackConfig({ mode, sources, bytes, days } = {}) {
+/** forge.yaml engine.context_pack (+ _sources, _bytes, _days, _pitfall_lanes) normalised; invalid values fall back to the defaults. */
+export function parseContextPackConfig({ mode, sources, bytes, days, pitfallLanes } = {}) {
   const m = String(mode ?? "").trim().toLowerCase();
   const list = Array.isArray(sources) ? sources : typeof sources === "string" && sources.trim() ? sources.split(/[\s,]+/) : null;
   const picked = list ? CONTEXT_SOURCES.filter((s) => list.map((x) => String(x).trim().toLowerCase()).includes(s)) : [...CONTEXT_SOURCES];
   const pos = (v, d) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : d; };
-  return { mode: CONTEXT_MODES.includes(m) ? m : "shadow", sources: picked, budgetBytes: pos(bytes, DEFAULT_CONTEXT_BYTES), days: pos(days, DEFAULT_LEDGER_DAYS) };
+  return { mode: CONTEXT_MODES.includes(m) ? m : "shadow", sources: picked, budgetBytes: pos(bytes, DEFAULT_CONTEXT_BYTES), days: pos(days, DEFAULT_LEDGER_DAYS), pitfallLanes: pos(pitfallLanes, DEFAULT_PITFALL_LANES) };
 }
 
 /** `**Parent**: #N` (decomposition sub-issue body line); null when absent. */
@@ -102,14 +108,15 @@ export function priorAttempts(body, comments = []) {
 }
 
 /**
- * Cache key for a compiled pack: issue + base head SHA, plus the config that shapes it and (#4298, #4304) the hash of the
+ * Cache key for a compiled pack: issue (with `repo`, #4432: repo-scoped) + base head SHA, plus the config that shapes it and (#4298, #4304) the hash of the
  * issue's human scope text (`scope`) and prior-attempt count, so an edit or a new attempt on the same base compiles a
  * fresh pack. Not `updatedAt`: the lane's own FORGE:STATE/CONTEXT posts and label edits bump it, so the cache never hit.
+ * #4375: `stamp.pitfalls` (the selected pitfall signatures) joins the key, so a newly learned pitfall is never served stale.
  */
-export const contextPackCacheKey = (issue, headSha, cfg = {}, stamp = {}) =>
-  `context-${issue}-${String(headSha ?? "").trim().slice(0, 40) || "nohead"}-${hash12(JSON.stringify([cfg.sources ?? [], cfg.budgetBytes ?? null, cfg.days ?? null,
+export const contextPackCacheKey = (issue, headSha, cfg = {}, stamp = {}, repo = null) =>
+  `context-${runLogKey(issue, repo)}-${String(headSha ?? "").trim().slice(0, 40) || "nohead"}-${hash12(JSON.stringify([cfg.sources ?? [], cfg.budgetBytes ?? null, cfg.days ?? null,
     ...(stamp?.scope != null || stamp?.attempts != null ? [String(stamp.scope ?? ""), Number(stamp.attempts) || 0] : []),
-    ...(stamp?.links ? [`links:${stamp.links}`] : [])]))}.json`;
+    ...(stamp?.links ? [`links:${stamp.links}`] : []), ...(stamp?.pitfalls?.length ? [`pitfalls:${stamp.pitfalls.join(",")}`] : [])]))}.json`;
 
 /** Max referenced issues whose state is read for the cache stamp (#4318: one GraphQL call for all of them). */
 export const LINK_STAMP_MAX = 100;
@@ -156,10 +163,6 @@ const outcomeOf = (st) => {
   return codeOf(c) && c !== "unclassified" ? c : null;
 };
 const failuresOf = (st) => (Array.isArray(st?.failureClasses) ? [...new Set(st.failureClasses.map(codeOf).filter(Boolean))].sort().slice(0, 5) : []);
-const trusted = (c) => {
-  const login = String(c?.author?.login ?? c?.user?.login ?? "");
-  return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
-};
 /** First line of a FORGE record that is not a marker or a heading. */
 const recordLine = (body) => oneLine(noComments(body).split("\n").map((l) => l.trim()).find((l) => l && !/^#+\s/.test(l)) ?? "");
 const markerOf = (body) => /^\s*<!--\s*FORGE:([A-Z_]+)\s*-->/.exec(String(body ?? ""))?.[1] ?? null;
@@ -174,10 +177,11 @@ async function readComments(gh, repo, n) {
 
 /**
  * Collect the facts for one issue's pack. `io`: {gh, git, exists}; git runs in `cwd` (the lane worktree), base is the
- * base ref. Every source is independent and best effort: a failing source is listed in `errors` and contributes nothing.
+ * base ref; `checkout` (the main checkout, optional) is where repo-fact files absent from the worktree are looked up.
+ * Every source is independent and best effort: a failing source is listed in `errors` and contributes nothing.
  */
-export async function gatherContextFacts({ io, repo, issue, iss, comments = [], cwd, base, sources = CONTEXT_SOURCES, days = DEFAULT_LEDGER_DAYS, now = Date.now() }) {
-  const facts = { issue: Number(issue), links: [], attempts: [], ledger: [], facts: [], errors: [] };
+export async function gatherContextFacts({ io, repo, issue, iss, comments = [], cwd, checkout = null, base, sources = CONTEXT_SOURCES, days = DEFAULT_LEDGER_DAYS, now = Date.now(), pitfalls = [] }) {
+  const facts = { issue: Number(issue), links: [], attempts: [], pitfalls: [], ledger: [], facts: [], lanes: [], errors: [] };
   const body = String(iss?.body ?? "");
   const on = new Set(sources);
   const step = async (name, fn) => { if (!on.has(name)) return; try { await fn(); } catch (e) { facts.errors.push(`${name}: ${oneLine(e?.message ?? e, 120)}`); } };
@@ -230,30 +234,54 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
     for (const l of refs) { const [ref, sha] = l.split(" "); facts.attempts.push({ kind: "salvage", ref, line: `salvaged uncommitted work at ${sha ?? "?"} (git diff HEAD ${ref} --stat)` }); }
   });
 
-  await step("ledger", async () => {
-    const paths = namedPaths(body);
-    const symbols = issueSymbols(body);
-    if (!paths.length || !base) return;
+  // #4375: already read and selected by the engine from the local ledger (pitfalls.mjs selectPitfalls); no I/O here
+  await step("pitfalls", async () => {
+    for (const p of Array.isArray(pitfalls) ? pitfalls : []) {
+      if (p && typeof p.sig === "string") facts.pitfalls.push({ sig: p.sig, trigger: String(p.trigger ?? ""), lesson: oneLine(p.lesson ?? "", 160), globs: (p.globs ?? []).slice(0, 5), count: Number(p.count) || 1, match: p.match === "files" ? "files" : "repo" });
+    }
+  });
+
+  // The file-path ledger walk (merged PRs on the issue's named paths) and each PR's trusted records, shared by the ledger
+  // and facts sources (#4401): run once per gather, and only when a source that needs them is on.
+  const paths = namedPaths(body);
+  let walked = null;
+  const walk = () => (walked ??= (async () => {
+    if (!paths.length || !base) return [];
     const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
     const out = String(await git(["log", "--first-parent", `--since=${since}`, "--format=%x1e%H%x1f%s%x1f%b%x1f", "--name-only", base, "--", ...paths]));
-    const commits = out.split("\x1e").filter((x) => x.trim()).map((rec) => {
+    return out.split("\x1e").filter((x) => x.trim()).map((rec) => {
       const [sha, subject = "", msg = "", files = ""] = rec.split("\x1f");
       const pr = Number(/Merge pull request #(\d+)/.exec(subject)?.[1] ?? /\(#(\d+)\)\s*$/.exec(subject)?.[1]) || null;
       return { sha: sha.trim(), subject: subject.trim(), msg, pr, files: files.split("\n").map((f) => f.trim()).filter(Boolean),
         revert: /^Revert\b/.test(subject.trim()) || /\/revert-\d+-/.test(subject) || /^This reverts commit [0-9a-f]{7,40}/m.test(msg) };
     });
+  })());
+  const prReads = new Map();
+  const prInfo = (n) => {
+    if (!prReads.has(n)) prReads.set(n, (async () => {
+      const pr = JSON.parse(String(await io.gh(["api", `repos/${repo}/pulls/${n}`, "--jq", "{title, body, head: .head.ref}"])));
+      const linked = Number(/issue-(\d+)/.exec(String(pr.head ?? ""))?.[1] ?? /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/i.exec(String(pr.body ?? ""))?.[1]) || null;
+      const recs = [...(await readComments(io.gh, repo, n)), ...(linked ? await readComments(io.gh, repo, linked) : [])].filter(trusted);
+      return { title: pr.title, linked, recs };
+    })());
+    return prReads.get(n);
+  };
+  const ledgerPrs = async () => (await walk()).filter((x) => x.pr || x.revert).slice(0, MAX_LEDGER_PRS);
+
+  await step("ledger", async () => {
+    const symbols = issueSymbols(body);
+    const commits = await walk();
+    if (!commits.length) return;
     const reverts = commits.filter((c) => c.revert);
     const revertedBy = (c) => reverts.find((r) => r !== c && ((c.pr && (new RegExp(`#${c.pr}\\b`).test(`${r.subject}\n${r.msg}`) || new RegExp(`/revert-${c.pr}-`).test(r.subject))) || r.msg.includes(c.sha) || r.msg.includes(c.sha.slice(0, 12))));
-    for (const c of commits.filter((x) => x.pr || x.revert).slice(0, MAX_LEDGER_PRS)) {
+    for (const c of await ledgerPrs()) {
       let title = c.subject, notes = [];
       const reverted = c.revert ? null : revertedBy(c);
       if (c.pr) {
         try {
-          const pr = JSON.parse(String(await io.gh(["api", `repos/${repo}/pulls/${c.pr}`, "--jq", "{title, body, head: .head.ref}"])));
+          const pr = await prInfo(c.pr);
           title = oneLine(pr.title ?? title, 120);
-          const linked = Number(/issue-(\d+)/.exec(String(pr.head ?? ""))?.[1] ?? /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/i.exec(String(pr.body ?? ""))?.[1]) || null;
-          const recs = [...(await readComments(io.gh, repo, c.pr)), ...(linked ? await readComments(io.gh, repo, linked) : [])].filter(trusted);
-          for (const r of recs) {
+          for (const r of pr.recs) {
             const m = markerOf(r.body);
             if (m === "DECISION") notes.push(...String(r.body).split("\n").slice(1).map((l) => oneLine(l, 160)).filter((l) => l && !l.startsWith("#")).map((l) => `decision: ${l}`));
             if (m === "CONTRACT") for (const d of parseContractComment(r.body)?.contract?.decisions ?? []) notes.push(oneLine(`decision ${d?.id ?? ""}: ${d?.choice ?? ""}`, 160));
@@ -269,7 +297,32 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
   });
 
   await step("facts", async () => {
-    for (const p of REPO_FACT_FILES) if (await io.exists(`${cwd}/${p}`)) facts.facts.push(p);
+    // #4401: FORGE:FACTS of earlier lanes: this issue's own attempts (newest first), then merged PRs on the issue's files
+    // whose record names an overlapping file. Only trusted comments; a malformed record contributes nothing.
+    const seen = new Set();
+    const add = (rec, ref, n, pr) => {
+      const key = JSON.stringify(rec);
+      if (!rec || seen.has(key) || facts.lanes.length >= MAX_FACT_LANES) return;
+      seen.add(key);
+      facts.lanes.push({ ref, issue: n, pr, ...rec });
+    };
+    for (const c of [...comments].reverse()) if (trusted(c)) add(parseFactsComment(c?.body), `#${issue} earlier attempt`, Number(issue), null);
+    const overlaps = (files) => files.some((f) => paths.some((p) => f === p || f.startsWith(`${p.replace(/\/+$/, "")}/`) || p.startsWith(`${f}/`)));
+    let prs = [];
+    try { prs = await ledgerPrs(); } catch (e) { facts.errors.push(`facts: ledger ${oneLine(e?.message ?? e, 80)}`); }
+    for (const c of prs) {
+      if (!c.pr || facts.lanes.length >= MAX_FACT_LANES) continue;
+      let pr;
+      try { pr = await prInfo(c.pr); } catch (e) { facts.errors.push(`facts: PR #${c.pr} ${oneLine(e?.message ?? e, 80)}`); continue; }
+      for (const r of [...pr.recs].reverse()) {
+        const rec = parseFactsComment(r.body);
+        if (rec && overlaps(rec.files)) add(rec, `${pr.linked ? `#${pr.linked}, ` : ""}PR #${c.pr}`, pr.linked, c.pr);
+      }
+    }
+    // #4400: the .forge/ caches are untracked, so a fresh lane worktree lacks them: the main checkout is the fallback
+    for (const p of REPO_FACT_FILES) {
+      for (const d of [...new Set([cwd, checkout].filter(Boolean))]) if (await io.exists(`${d}/${p}`)) { facts.facts.push(p); break; }
+    }
   });
   return facts;
 }
@@ -279,25 +332,33 @@ export async function gatherContextFacts({ io, repo, issue, iss, comments = [], 
 // forge#4297: codes are re-checked here too, so facts read back from the cache get the same whitelist
 const linkLine = (l) => { const fails = (Array.isArray(l.failures) ? l.failures : []).map(codeOf).filter(Boolean), res = codeOf(l.result);
   return `- #${l.number} [${l.rel}${l.kind === "pr" ? ", PR" : ""}] ${l.state ?? "?"}${l.title ? ` "${l.title}"` : ""}${codeOf(l.code) ? `; outcome ${l.code}` : ""}${res ? `; ${res}` : ""}${fails.length ? `; failures ${fails.join(", ")}` : ""}`; };
+const pitfallLine = (p) => `- [${p.trigger}] ${oneLine(p.lesson, 160)}${p.globs?.length ? ` (${p.globs.join(", ")})` : ""}; seen ${p.count}×`;
 const ledgerLine = (p) => `- ${p.pr ? `PR #${p.pr}` : "commit"} ${p.sha}${p.revert ? " [revert]" : ""}${p.reverted ? ` [reverted by ${p.reverted}]` : ""} "${p.title}"${p.files?.length ? ` (${p.files.join(", ")})` : ""}${p.notes?.length ? ` — ${p.notes.join("; ")}` : ""}`;
 
 /**
  * The pack text for `facts`, ranked: explicit links (parent > Depends on > body links > cross-references > siblings),
- * prior attempts, the symbol ledger (newest first), repo-fact pointers. One line per item; a parent or dependency also
+ * prior attempts, recurring pitfalls of the repo (#4375, in the engine's selected order), the symbol ledger (newest first), repo-fact pointers. One line per item; a parent or dependency also
  * carries its full body when it fits. Items that do not fit `budgetBytes` are dropped whole and counted in `truncated`.
- * @returns {{text:string, bytes:number, items:number, truncated:number, sources:object, found:object, hash:string|null}}
+ * `pitfalls` lists the kept pitfalls ({sig, match}) for the run log (#4375).
+ * @returns {{text:string, bytes:number, items:number, truncated:number, sources:object, found:object, hash:string|null, pitfalls:object[]}}
  */
 export function compileContextPack(facts, { budgetBytes = DEFAULT_CONTEXT_BYTES, sources = CONTEXT_SOURCES } = {}) {
   const on = new Set(sources);
   const cand = [];
   if (on.has("graph")) for (const l of facts?.links ?? []) cand.push({ src: "graph", line: linkLine(l), full: l.body ? `${linkLine(l)}\n${l.body.split("\n").map((x) => `  > ${x}`).join("\n")}` : null });
   if (on.has("attempts")) for (const a of facts?.attempts ?? []) cand.push({ src: "attempts", line: `- ${a.ref}: ${oneLine(a.line)}` });
+  if (on.has("pitfalls")) for (const p of facts?.pitfalls ?? []) cand.push({ src: "pitfalls", line: pitfallLine(p), pit: { sig: p.sig, match: p.match } });
   if (on.has("ledger")) for (const p of facts?.ledger ?? []) cand.push({ src: "ledger", line: ledgerLine(p) });
-  if (on.has("facts")) for (const f of facts?.facts ?? []) cand.push({ src: "facts", line: `- ${f} (repo facts file; read it if relevant)` });
+  if (on.has("facts")) {
+    // #4401: earlier lanes' facts by kind (rejected approaches first, across lanes), then the repo-fact file pointers
+    const lanes = (facts?.lanes ?? []).map((l) => factsLines(l, l.ref));
+    for (const k of FACTS_RANK) for (const l of lanes) for (const line of l[k]) cand.push({ src: "facts", line: oneLine(line) });
+    for (const f of facts?.facts ?? []) cand.push({ src: "facts", line: `- ${f} (repo facts file; read it if relevant)` });
+  }
   const found = Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, cand.filter((c) => c.src === s).length]));
-  const empty = { text: "", bytes: 0, items: 0, truncated: 0, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, 0])), found, hash: null };
+  const empty = { text: "", bytes: 0, items: 0, truncated: 0, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, 0])), found, hash: null, pitfalls: [] };
   if (!cand.length) return empty;
-  const titles = { graph: "Linked issues and PRs", attempts: "Prior attempts at this issue", ledger: "Merged PRs on the same symbols (reverts, decisions, findings)", facts: "Repo facts" };
+  const titles = { graph: "Linked issues and PRs", attempts: "Prior attempts at this issue", pitfalls: "Recurring pitfalls in this repo (past rework)", ledger: "Merged PRs on the same symbols (reverts, decisions, findings)", facts: "Facts from earlier lanes and repo facts" };
   const head = `Context pack for #${facts.issue}`;
   const size = (s) => Buffer.byteLength(s, "utf8");
   const kept = [];
@@ -306,7 +367,7 @@ export function compileContextPack(facts, { budgetBytes = DEFAULT_CONTEXT_BYTES,
     const secCost = kept.some((k) => k.src === c.src) ? 0 : size(`\n${titles[c.src]}:`) + 1;
     const pick = [c.full, c.line].find((t) => t && used + secCost + size(t) + 1 <= budgetBytes);
     if (!pick) { truncated++; continue; }
-    kept.push({ src: c.src, text: pick });
+    kept.push({ src: c.src, text: pick, pit: c.pit });
     used += secCost + size(pick) + 1;
   }
   if (!kept.length) return { ...empty, truncated };
@@ -316,13 +377,25 @@ export function compileContextPack(facts, { budgetBytes = DEFAULT_CONTEXT_BYTES,
     if (rows.length) parts.push(`\n${titles[s]}:`, ...rows.map((r) => r.text));
   }
   const text = parts.join("\n");
-  return { text, bytes: size(text), items: kept.length, truncated, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, kept.filter((k) => k.src === s).length])), found, hash: hash12(text) };
+  return { text, bytes: size(text), items: kept.length, truncated, sources: Object.fromEntries(CONTEXT_SOURCES.map((s) => [s, kept.filter((k) => k.src === s).length])), found, hash: hash12(text), pitfalls: kept.filter((k) => k.pit).map((k) => k.pit) };
 }
 
-/** The collapsed FORGE:CONTEXT issue record body (without the marker). */
+/** The pack text without its pitfalls section (#4375: pitfalls are local only and never posted). */
+export function publicPackText(text) {
+  const out = [];
+  let skip = false;
+  for (const l of String(text ?? "").split("\n")) {
+    if (/^[^\s-].*:$/.test(l)) skip = l === "Recurring pitfalls in this repo (past rework):";
+    else if (skip && l === "") skip = false;
+    if (!skip) out.push(l);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+}
+
+/** The collapsed FORGE:CONTEXT issue record body (without the marker); pitfalls show as a count only (#4375). */
 export function renderContextRecord(pack, { mode, laneType: lt }) {
-  const src = CONTEXT_SOURCES.map((s) => `${s} ${pack.sources[s]}/${pack.found[s]}`).join(", ");
-  return `<details><summary>Context pack: ${pack.items} item(s), ${pack.bytes} bytes, ${pack.truncated} dropped (mode ${mode}, lane ${lt}, hash ${pack.hash})</summary>\n\nSources (included/found): ${src}\n\n~~~~text\n${noComments(pack.text).replace(/~~~~/g, "~~~")}\n~~~~\n</details>`;
+  const src = CONTEXT_SOURCES.map((s) => `${s} ${pack.sources?.[s] ?? 0}/${pack.found?.[s] ?? 0}`).join(", ");
+  return `<details><summary>Context pack: ${pack.items} item(s), ${pack.bytes} bytes, ${pack.truncated} dropped (mode ${mode}, lane ${lt}, hash ${pack.hash})</summary>\n\nSources (included/found): ${src}${pack.sources?.pitfalls ? " (pitfalls are local only, not shown)" : ""}\n\n~~~~text\n${noComments(publicPackText(pack.text)).replace(/~~~~/g, "~~~")}\n~~~~\n</details>`;
 }
 
 /**
@@ -331,19 +404,19 @@ export function renderContextRecord(pack, { mode, laneType: lt }) {
  * reported source errors is not cached (#4298), the write goes through a temp file and a rename, and the issue's other
  * cached packs are pruned. A cache miss or any write/rename/prune failure is not an error.
  */
-export async function contextPackFor({ cfg, issue, headSha, cacheDir, fs, gather, stamp = {} }) {
-  const name = cacheDir && headSha ? contextPackCacheKey(issue, headSha, cfg, stamp) : null;
+export async function contextPackFor({ cfg, issue, repo = null, headSha, cacheDir, fs, gather, stamp = {} }) {
+  const name = cacheDir && headSha ? contextPackCacheKey(issue, headSha, cfg, stamp, repo) : null;
   const file = name ? join(cacheDir, name) : null;
   if (file && fs?.read) {
     try { const c = JSON.parse(await fs.read(file)); if (c?.pack && typeof c.pack.text === "string") return { ...c, cached: true }; } catch { /* miss */ }
   }
   const facts = await gather();
   const out = { pack: compileContextPack(facts, cfg), errors: facts?.errors ?? [] };
-  if (file && fs?.write && !out.errors.length) await cachePack(fs, cacheDir, file, name, issue, JSON.stringify(out));
+  if (file && fs?.write && !out.errors.length) await cachePack(fs, cacheDir, file, name, runLogKey(issue, repo), JSON.stringify(out));
   return { ...out, cached: false };
 }
 
-async function cachePack(fs, cacheDir, file, name, issue, text) {
+async function cachePack(fs, cacheDir, file, name, key, text) {
   try {
     if (typeof fs.rename === "function") {
       const tmp = `${file}.${process.pid}.tmp`;
@@ -353,7 +426,7 @@ async function cachePack(fs, cacheDir, file, name, issue, text) {
   } catch { return; /* cache is optional */ }
   if (typeof fs.list !== "function" || typeof fs.rm !== "function") return;
   try {
-    const prefix = `context-${issue}-`;
+    const prefix = `context-${key}-`;
     for (const f of await fs.list(cacheDir)) {
       if (f !== name && f.startsWith(prefix) && f.endsWith(".json")) { try { await fs.rm(join(cacheDir, f)); } catch { /* best effort */ } }
     }

@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readCloseParent, readVerify, makeIo } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine, readPrecheckCommands, readEnvConfig, readReproTest, readFixModel, readBuilderRouting, readVerifier, readCloseParent, readVerify, readLaneInstructions, makeIo, checkFromCli } from "../engine-cli.mjs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { serializeState } from "../engine/state.mjs";
 import { appendEvent } from "../engine/runlog.mjs";
 
@@ -1020,6 +1022,59 @@ describe("readReproTest (#4271)", () => {
   });
 });
 
+describe("readFixModel (#4363)", () => {
+  it("reads lean.fix_model, else engine.lean_fix_model; absent or invalid is undefined", () => {
+    const d = tmpDir("fix-model-yaml-");
+    assert.equal(readFixModel(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  fix_model: claude-haiku-5-5\n");
+    assert.equal(readFixModel(d), "claude-haiku-5-5");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lean_fix_model: sonnet\n");
+    assert.equal(readFixModel(d), "sonnet");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  fix_model: \"bad model; rm\"\n");
+    assert.equal(readFixModel(d), undefined);
+  });
+});
+
+describe("readBuilderRouting (#4394)", () => {
+  it("reads lean.builder_routing and lean.builder_mid_model, else engine.lean_builder_mid_model; absent or invalid is left out", () => {
+    const d = tmpDir("builder-routing-yaml-");
+    assert.equal(readBuilderRouting(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  fix_model: sonnet\n");
+    assert.equal(readBuilderRouting(d), undefined, "neither key set");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  builder_routing: off\n");
+    assert.deepEqual(readBuilderRouting(d), { mode: "off" });
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  builder_routing: sometimes\n");
+    assert.equal(readBuilderRouting(d), undefined, "an invalid mode is ignored");
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  builder_routing: on\n  builder_mid_model: claude-haiku-5-5\n");
+    assert.deepEqual(readBuilderRouting(d), { mode: "on", midModel: "claude-haiku-5-5" });
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lean_builder_mid_model: sonnet\n");
+    assert.deepEqual(readBuilderRouting(d), { midModel: "sonnet" });
+    writeFileSync(join(d, "forge.yaml"), "lean:\n  builder_mid_model: \"bad model; rm\"\n");
+    assert.equal(readBuilderRouting(d), undefined, "an invalid model id is rejected");
+  });
+});
+
+describe("readVerifier (#4397)", () => {
+  it("reads review.verifier and review.verifier_model, else engine.lean_verifier_model; absent or invalid is undefined", () => {
+    const d = tmpDir("verifier-yaml-");
+    assert.equal(readVerifier(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "review:\n  trigger: shadow\n");
+    assert.equal(readVerifier(d), undefined, "absent");
+    for (const m of ["off", "shadow", "enforce"]) {
+      writeFileSync(join(d, "forge.yaml"), `review:\n  verifier: ${m}\n`);
+      assert.deepEqual(readVerifier(d), { mode: m });
+    }
+    writeFileSync(join(d, "forge.yaml"), "review:\n  verifier: loud\n");
+    assert.equal(readVerifier(d), undefined, "invalid mode");
+    writeFileSync(join(d, "forge.yaml"), "review:\n  verifier: shadow\n  verifier_model: claude-haiku-5-5\n");
+    assert.deepEqual(readVerifier(d), { mode: "shadow", model: "claude-haiku-5-5" });
+    writeFileSync(join(d, "forge.yaml"), "review:\n  verifier: enforce\nengine:\n  lean_verifier_model: opus\n");
+    assert.deepEqual(readVerifier(d), { mode: "enforce", model: "opus" });
+    writeFileSync(join(d, "forge.yaml"), "review:\n  verifier: shadow\n  verifier_model: \"bad model; rm\"\n");
+    assert.deepEqual(readVerifier(d), { mode: "shadow" });
+  });
+});
+
 describe("readCloseParent (#3736, #4337)", () => {
   it("is true only for decomposition.close_parent: true; absent, false, another word or another section's key is false", () => {
     const d = tmpDir("close-parent-yaml-");
@@ -1056,5 +1111,98 @@ describe("verify.check_run plumbing (#4270)", () => {
       const w = await io.waitCiGreen(7, "o/r", 0, { ignore: ["lint"] });
       assert.equal(w.rc, 0); assert.match(w.text, /CI_GATE: PASS/);
     } finally { process.env.PATH = PATH; }
+  });
+});
+
+describe("forgedock check (#4364)", () => {
+  const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+  function fixture({ plan = null, forgeYaml = null } = {}) {
+    const dir = tmpDir("fd-check-");
+    const g = (a) => execFileSync("git", a, { cwd: dir, encoding: "utf8", env: GIT_ENV });
+    g(["init", "-q", "-b", "main"]); writeFileSync(join(dir, "a.js"), "1\n"); g(["add", "-A"]); g(["commit", "-q", "-m", "base"]); g(["branch", "staging"]);
+    writeFileSync(join(dir, ".git", "info", "exclude"), ".forge-lean/\nforge.yaml\n");
+    writeFileSync(join(dir, "a.js"), "2\n"); g(["commit", "-qam", "work"]);
+    mkdirSync(join(dir, ".forge-lean"));
+    writeFileSync(join(dir, ".forge-lean", "contract.json"), JSON.stringify({ validate: [{ id: "V1", command: "node --test a.test.mjs" }] }));
+    if (plan) writeFileSync(join(dir, ".forge-lean", "check-plan.json"), JSON.stringify(plan));
+    if (forgeYaml) writeFileSync(join(dir, "forge.yaml"), forgeYaml);
+    return { dir, git: async (a, cwd) => execFileSync("git", a, { cwd, encoding: "utf8", env: GIT_ENV }) };
+  }
+  const recorder = (rc = {}) => { const calls = []; return { calls, runCommand: async (c) => { calls.push(c); return { rc: rc[c.command] ?? 0, output: `${c.command} out` }; } }; };
+
+  it("runs the plan's validate and pre-PR commands locally in the worktree, with the worker share, and records the run", async () => {
+    const f = fixture({ plan: { v: 1, base: "staging", mode: "local", learned: ["make lint", "make test"], maxMinutes: null, precheckTotalSeconds: 600, precheckTimeoutSeconds: 30 } });
+    const rec = recorder({ "make test": 4 }), lines = [];
+    const r = await checkFromCli([], { cwd: f.dir, git: f.git, runCommand: rec.runCommand, env: { FORGE_HOST_PARALLELISM: "4" }, out: (l) => lines.push(l) });
+    assert.deepEqual(rec.calls.map((c) => [c.command, c.cwd, c.timeoutMs]), [["node --test a.test.mjs", f.dir, 30000], ["make lint", f.dir, 30000], ["make test", f.dir, 30000]]);
+    assert.deepEqual(rec.calls.map((c) => c.env), [{ FORGE_HOST_PARALLELISM: "4" }, { FORGE_HOST_PARALLELISM: "2" }, { FORGE_HOST_PARALLELISM: "2" }]);
+    assert.deepEqual(r.files, ["a.js"]); assert.equal(r.ok, false); assert.equal(r.exitCode, 1);
+    assert.match(lines.join("\n"), /FAIL exit 4 .* make test[\s\S]*check: FAIL \(1 failing\)/);
+    const saved = JSON.parse(readFileSync(join(f.dir, ".forge-lean", "self-check.json"), "utf8"));
+    assert.equal(saved.ok, false); assert.equal(saved.fingerprint, r.fingerprint); assert.match(saved.fingerprint, /^[0-9a-f]{64}$/);
+    assert.deepEqual(saved.commands.map((c) => [c.command, c.rc]), [["make lint", 0], ["make test", 4]]);
+  });
+
+  it("without an engine plan it reads this checkout's forge.yaml and needs --base; usage errors exit 2", async () => {
+    const f = fixture({ forgeYaml: "learned:\n  test_commands:\n    - make lint\nverify:\n  mode: ci\n" });
+    await assert.rejects(checkFromCli([], { cwd: f.dir, git: f.git, runCommand: recorder().runCommand, out: () => {} }), (e) => e.exitCode === 2 && /--base/.test(e.message));
+    await assert.rejects(checkFromCli(["--bogus"], { cwd: f.dir, git: f.git, out: () => {} }), (e) => e.exitCode === 2);
+    const rec = recorder();
+    const r = await checkFromCli(["--base", "staging", "--json"], { cwd: f.dir, git: f.git, runCommand: rec.runCommand, env: {}, out: () => {} });
+    assert.deepEqual(rec.calls.map((c) => [c.command, c.env]), [["make lint", null]], "verify.mode ci leaves validates to CI");
+    assert.deepEqual(r.validate, [{ id: "V1", command: "node --test a.test.mjs", status: "ci" }]); assert.equal(r.exitCode, 0);
+    const empty = tmpDir("fd-check-none-");
+    execFileSync("git", ["init", "-q"], { cwd: empty, env: GIT_ENV });
+    await assert.rejects(checkFromCli([], { cwd: empty, git: f.git, out: () => {} }), (e) => e.exitCode === 2 && /contract\.json/.test(e.message));
+  });
+
+  it("#4390: a failure prints its tail, failing test ids and a pointer to the full log under .forge-lean/logs/", async () => {
+    const f = fixture({ plan: { v: 1, base: "staging", mode: "local", learned: ["make test"], maxMinutes: null, precheckTotalSeconds: 600, precheckTimeoutSeconds: 30 } });
+    const big = [...Array.from({ length: 200 }, (_, i) => `noise line ${i}`), "FAILED tests/test_a.py::test_one - AssertionError", ...Array.from({ length: 60 }, (_, i) => `trace ${i}`), "1 failed, 9 passed"].join("\n");
+    const lines = [];
+    const r = await checkFromCli([], { cwd: f.dir, git: f.git, runCommand: async (c) => ({ rc: c.command === "make test" ? 1 : 0, output: c.command === "make test" ? big : "" }), env: {}, out: (l) => lines.push(l) });
+    assert.equal(r.exitCode, 1);
+    const t = lines.join("\n");
+    assert.match(t, /--- make test \(exit 1\)\n…trace 21\n/, "the last 40 lines");
+    assert.doesNotMatch(t, /noise line 199/);
+    assert.match(t, /failing tests:\n {2}FAILED tests\/test_a\.py::test_one/);
+    assert.match(t, /full log: \.forge-lean\/logs\/check-cmd1\.log/);
+    assert.equal(readFileSync(join(f.dir, ".forge-lean", "logs", "check-cmd1.log"), "utf8"), big);
+    const saved = JSON.parse(readFileSync(join(f.dir, ".forge-lean", "self-check.json"), "utf8"));
+    assert.deepEqual(Object.keys(saved.commands[0]).sort(), ["command", "ms", "rc"], "self-check record shape unchanged");
+  });
+
+  it("#4390: readCoreLimits reads engine.context_ceiling_tokens (0 allowed, junk ignored)", async () => {
+    const { readCoreLimits } = await import("../engine-cli.mjs");
+    const d = tmpDir("fd-ctx-");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: 90000\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, 90000);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: 0\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, 0);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  context_ceiling_tokens: lots\n"); assert.equal(readCoreLimits(d).contextCeilingTokens, undefined);
+  });
+
+  it("#4392: readCoreLimits reads engine.turn_budget_s|m|l over the defaults (0 allowed, junk ignored, none set: the defaults)", async () => {
+    const { readCoreLimits } = await import("../engine-cli.mjs");
+    const d = tmpDir("fd-tb-");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  turn_budget_m: 40\n  turn_budget_l: 0\n  turn_budget_s: many\n");
+    assert.deepEqual(readCoreLimits(d).turnBudgets, { S: 25, M: 40, L: 0 });
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  cli_idle_minutes: 5\n"); assert.deepEqual(readCoreLimits(d).turnBudgets, { S: 25, M: 60, L: 100 });
+  });
+
+  it("local only: the command never reaches GitHub (no gh in its deps or source)", () => {
+    const src = checkFromCli.toString();
+    assert.doesNotMatch(src, /\bgh\b|workflow run|git", \["push|\["push"/);
+  });
+});
+
+describe("readLaneInstructions (#4395)", () => {
+  it("returns the trimmed engine.lane_instructions path; undefined when unset, empty or no forge.yaml", () => {
+    const d = tmpDir("lane-instr-");
+    assert.equal(readLaneInstructions(d), undefined, "no forge.yaml");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lane_instructions:  devdocs/lane.md \n");
+    assert.equal(readLaneInstructions(d), "devdocs/lane.md");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lane_instructions: \"\"\n");
+    assert.equal(readLaneInstructions(d), undefined, "empty");
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  conformance: shadow\n");
+    assert.equal(readLaneInstructions(d), undefined, "unset");
   });
 });

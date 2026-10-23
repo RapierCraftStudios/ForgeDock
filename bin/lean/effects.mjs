@@ -15,8 +15,14 @@ import { makeLedger, countLiveLanes, ledgerRoot } from "./ledger.mjs";
 import { makeDepCache } from "./depcache.mjs";
 import { makeHeavyIo } from "./heavy.mjs";
 import { gatherContextFacts } from "./context.mjs";
+import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
-import { sequenceCollisions, snapshotLane, verifyRenumber } from "./sequence.mjs";
+import { sequenceCollisions, snapshotLane, verifyRenumber, renumberLane, resolveSequenceConflicts } from "./sequence.mjs";
+import { duplicateExports } from "./postmerge.mjs";
+import { scopedChecks } from "./checks.mjs";
+import { makeSequenceLeaseIo } from "./seqlease.mjs";
+import { followupMap } from "./conformance.mjs";
+import { toolStats } from "./toolstats.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -55,15 +61,18 @@ export const noToolFlags = (caps) => (caps?.strictMcp ? ["--tools", ""]
   : ["--disallowedTools", "Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]);
 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null }) => {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
-    const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : [])];
+    // #4391: custom subagents (the explorer) for the builder session; null leaves argv unchanged
+    const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : []), ...(agents ? ["--agents", JSON.stringify(agents)] : [])];
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
-      args: [String(issue)], cwd, bin, model, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
+      args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
       logger: { log() {} },
-      idleMs, maxMs, stream: idleMs > 0, control, onSpawn, wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
-    return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default" };
+      idleMs, maxMs, stream: idleMs > 0, control, onSpawn, busy, busyMs, onIdleExtend, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}), wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
+    // #4395: a resumed session's first turn carries the prior history, so only a fresh session reports a baseline.
+    return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default",
+      baselineTokens: resume ? null : (r.baselineTokens ?? null), tools: toolStats(r.toolUses) }; // #4410: tool calls per turn, re-reads
   };
 }
 
@@ -240,22 +249,28 @@ export function makeLeanIo({ repo }) {
     runCommand: runCheckCommand,
     /** #4328: a read-only freeze-time probe of a validate command's tool or module (separate from runCommand). */
     probeCommand: runCheckCommand,
+    /** #4393: freeze-time execution of a validate command on the base worktree (not read-only; the engine reverts what it changes). */
+    preflightRun: runCheckCommand,
     /** #4167 verify-by-CI: `gh workflow run` on the lane branch; inputs become -f key=value. */
     async dispatchWorkflow({ workflow, ref, inputs = {} }) {
       await run("gh")(["workflow", "run", String(workflow), "-R", repo, "--ref", String(ref), ...Object.entries(inputs).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
     },
-    /** Recent workflow_dispatch runs of `workflow` on `branch`, newest first: [{databaseId, headSha, status, conclusion, url, name}]. */
+    /** Recent workflow_dispatch runs of `workflow` on `branch`, newest first: [{databaseId, headSha, status, conclusion, url, name, attempt}]. */
     async workflowRuns({ workflow, branch }) {
       return JSON.parse(await run("gh")(["run", "list", "-R", repo, "--workflow", String(workflow), "--branch", String(branch), "--event", "workflow_dispatch",
-        "--limit", "10", "--json", "databaseId,headSha,status,conclusion,url,name"]) || "[]");
+        "--limit", "10", "--json", "databaseId,headSha,status,conclusion,url,name,attempt"]) || "[]");
     },
-    /** Check runs on a commit (push-triggered CI): [{name, state: success|failure|pending, url}], same mapping as checkStates. */
+    /** #4387: rerun the failed jobs of an Actions run once (`gh run rerun <id> --failed`); throws when it cannot start. */
+    async rerunFailedJobs(runId) {
+      await run("gh")(["run", "rerun", String(runId), "--failed", "-R", repo]);
+    },
+    /** Check runs on a commit (push-triggered CI): [{name, state: success|failure|pending, url, id, conclusion}], same mapping as checkStates; `id` orders attempts (#4387). */
     async commitChecks(sha) {
-      const out = String(await run("gh")(["api", "--paginate", `repos/${repo}/commits/${sha}/check-runs`, "--jq", ".check_runs[] | {name, status, conclusion, url: .html_url} | @json"]));
+      const out = String(await run("gh")(["api", "--paginate", `repos/${repo}/commits/${sha}/check-runs`, "--jq", ".check_runs[] | {id, name, status, conclusion, url: .html_url} | @json"]));
       return out.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)).map((c) => {
         const v = String(c.status === "completed" ? c.conclusion ?? "" : "").toUpperCase();
         const state = ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(v) ? "success" : ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"].includes(v) ? "failure" : "pending";
-        return { name: c.name, state, url: c.url ?? null };
+        return { name: c.name, state, url: c.url ?? null, id: c.id ?? null, conclusion: c.status === "completed" ? String(c.conclusion ?? "").toLowerCase() || null : null }; // #4387 id orders attempts; #4403 raw conclusion (skipped = not run)
       });
     },
     /**
@@ -280,9 +295,7 @@ export function makeLeanIo({ repo }) {
     async fileFollowups({ parent, items }) {
       const tsv = items.map((i) => `${i.key}\t${i.why}\t`).join("\n") + "\n";
       const out = await runWithInput("bash", [script("file-deferred-followups.sh"), "--parent", String(parent), "--repo", repo], tsv, 180000);
-      const map = {};
-      for (const l of out.split("\n")) { const [k, n] = l.split("\t"); if (k && /^\d+$/.test(String(n ?? "").trim())) map[k] = Number(n); }
-      return map;
+      return followupMap(out, items);
     },
     /**
      * forge#4163: forge.yaml env.setup, once per fresh lane worktree: `bash -c <command>` in cwd with the lane env.
@@ -303,6 +316,8 @@ export function makeLeanIo({ repo }) {
     async structureDelta({ cwd, base }) {
       try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
     },
+    /** #4375: the repo's learned-pitfall ledger, local only (~/.forge/pitfalls, FORGE_PITFALLS_DIR). */
+    pitfalls: makePitfallStore(),
     /** forge#4275: the context pack's facts for one issue (bin/lean/context.mjs), from gh and git only; sources fail independently. */
     contextFacts: (args) => gatherContextFacts({ ...args, io: { gh: run("gh"), git: run("git"), exists: async (p) => existsSync(p) } }),
     /** forge#4195: scripts/hotspots.sh facts for `paths` in cwd (growth since base when given); null on any failure. */
@@ -316,7 +331,14 @@ export function makeLeanIo({ repo }) {
     /** #4322: sequence-numbered files the lane shares with the base (bin/lean/sequence.mjs); snapshot before, verify after a renumber. */
     sequenceCheck: ({ cwd, base }) => sequenceCollisions({ git: (a) => run("git")(a, { cwd }), base }),
     sequenceSnapshot: ({ cwd, base }) => snapshotLane({ git: (a) => run("git")(a, { cwd }), base }),
-    sequenceVerify: ({ cwd, base, before }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before }),
+    sequenceVerify: ({ cwd, base, before, moves }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before, moves }),
+    /** #4386: the deterministic renumber, sequence-only base-sync resolution, and the host sequence lease at the merge gate. */
+    sequenceRenumber: ({ cwd, base, laneRef, regenerate }) => renumberLane({ git: (a) => run("git")(a, { cwd }), base, cwd, laneRef, regenerate }),
+    sequenceResolve: ({ cwd, files }) => resolveSequenceConflicts({ git: (a) => run("git")(a, { cwd }), files }),
+    sequenceLease: makeSequenceLeaseIo(),
+    /** #4406: the lane's scoped checks after a base merge (bin/lean/checks.mjs; [] on failure), and same-app duplicate exports (bin/lean/postmerge.mjs). */
+    postMergeChecks: async ({ cwd, base }) => { try { return scopedChecks({ repo: cwd, base }); } catch { return []; } },
+    duplicateExports: ({ cwd, base }) => duplicateExports({ git: (a) => run("git")(a, { cwd }), cwd, base }),
     /**
      * #4271: scripts/acceptance-red-green.sh for the frozen repro_test in cwd; {base, head} words, or null on any failure.
      * `env` (#4325): the lane env (run TMPDIR, toolchain), merged over process.env, so the command sees what the builder saw.

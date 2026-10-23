@@ -151,6 +151,17 @@ touch $SENTINEL"; do
   else bad "staging injection not rejected: '$got'"; fi
 done
 
+# Test 6b (forge#4360): `--delta <full sha>` is forwarded to the CLI; anything but a full lowercase hex SHA is dropped
+DELTA_LINE=$(grep -m1 '^STAGING_DELTA=' "$STAGING")
+if [ -n "$DELTA_LINE" ] && grep -qF '${STAGING_DELTA:+--delta "$STAGING_DELTA"}' "$STAGING"; then ok; else bad "staging --delta parse/forward not found"; fi
+run_delta() { STAGING_ARGS_RAW="$1" "${BASH:-bash}" -c "$DELTA_LINE"$'\n''printf "%s" "$STAGING_DELTA"'; }
+D40=0123456789abcdef0123456789abcdef01234567
+got=$(run_delta "3401 --delta $D40"); if [ "$got" = "$D40" ]; then ok; else bad "staging --delta not parsed: '$got'"; fi
+got=$(run_delta "3401 --delta $D40 --thorough"); if [ "$got" = "$D40" ]; then ok; else bad "staging --delta before a flag: '$got'"; fi
+for v in "abc123" "${D40}0" "XYZ" ""; do
+  got=$(run_delta "3401 --delta $v"); if [ -z "$got" ]; then ok; else bad "staging --delta '$v' not dropped: '$got'"; fi
+done
+
 # Test 7: Phase -1 stops on an empty PR_NUMBER before any `gh pr view` (gh falls back to the current-branch PR)
 GUARD=$(awk '/^  if \[ -z "\$PR_NUMBER" \]; then$/{p=1} p{print} p && /^  fi$/{exit}' "$SPEC")
 if [ -n "$GUARD" ]; then ok; else bad "Phase -1 empty-PR_NUMBER guard not found"; fi
@@ -167,7 +178,8 @@ done
 got=$(run_route "3401 --auto-merge --issue 3398"); if [ "$got" = REACHED ]; then ok; else bad "route stopped a valid PR number: '$got'"; fi
 
 # Test 8: the whole staging fence stops (non-zero, no REVIEW_ROUTE post) on a rejected string
-STAGING_FENCE=$(awk '/^```bash/{buf=""; in_f=1; next} /^```$/{if (in_f && buf ~ /STAGING_ARGS_RAW/) {printf "%s", buf; exit}; in_f=0; next} in_f{buf=buf $0 "\n"}' "$STAGING")
+# Cut before the CLI resolution (#4359): the fence ends by running `forgedock review-staging`, which this test never runs.
+STAGING_FENCE=$(awk '/^```bash/{buf=""; in_f=1; next} /^```$/{if (in_f && buf ~ /STAGING_ARGS_RAW/) {printf "%s", buf; exit}; in_f=0; next} in_f && /^FD_ROOT=/{if (buf ~ /STAGING_ARGS_RAW/) {printf "%s", buf; exit}} in_f{buf=buf $0 "\n"}' "$STAGING")
 if [ -n "$STAGING_FENCE" ]; then ok; else bad "staging fence not found"; fi
 run_stg_fence() { gen_script "$STAGING_FENCE" "$1" "$WORK/stgf.sh" 'echo REACHED'; : > "$ERR"; (cd "$WORK" && "${BASH:-bash}" "$WORK/stgf.sh" 2>"$ERR"); }
 got=$(run_stg_fence "\$(touch $SENTINEL)"); rc=$?

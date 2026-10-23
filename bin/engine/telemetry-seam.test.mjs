@@ -14,8 +14,26 @@ function harness(over = {}) {
 }
 
 describe("engine telemetry seam", () => {
+  it("#4362: phase_attempt carries the trigger, omitted when absent", () => {
+    assert.equal(mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", attempt: 3, trigger: "ci_red" }, 0).payload.trigger, "ci_red");
+    assert.equal("trigger" in mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", attempt: 1, trigger: null }, 0).payload, false);
+    assert.equal("trigger" in mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", attempt: 1 }, 0).payload, false);
+  });
+
+  it("forge#4395: phase_attempt carries baseline_tokens and lane_profile, omitted when absent", () => {
+    const p = mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", attempt: 1, baseline_tokens: 21000, lane_profile: "lane" }, 0).payload;
+    assert.equal(p.baseline_tokens, 21000); assert.equal(p.lane_profile, "lane");
+    const q = mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", attempt: 1 }, 0).payload;
+    assert.equal("baseline_tokens" in q, false); assert.equal("lane_profile" in q, false);
+  });
+
   it("forge#4257: phase_attempt carries the backend, omitted when unreported", () => {
     assert.equal(mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1, backend: "api" }, 0).payload.backend, "api");
+    // #4407: the per-attempt cost and the session running total ride along; absent fields are omitted
+    const c = mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", attempt: 3, cost_usd: 2.5, cost_usd_delta: 0.123456789, cost_usd_session: 2.5 }, 0).payload;
+    assert.deepEqual([c.cost_usd, c.cost_usd_delta, c.cost_usd_session], [2.5, 0.123457, 2.5]);
+    const none = mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", attempt: 1, cost_usd: 1, cost_usd_delta: null }, 0).payload;
+    assert.equal("cost_usd_delta" in none, false); assert.equal("cost_usd_session" in none, false);
     assert.equal("backend" in mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1, backend: null }, 0).payload, false);
     assert.equal("backend" in mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1 }, 0).payload, false);
   });

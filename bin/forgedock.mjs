@@ -3289,8 +3289,10 @@ function help() {
     ["npx forgedock bootstrap <idea|docs> [--dry-run] [--spike <path>] | --plan <plan.json> [--dry-run]", "Headless /bootstrap: idea to orchestrate-ready backlog (--dry-run previews milestones, titles, DAG and estimated agent cost without GitHub writes); --plan validates and creates (or previews) a plan, and re-running resumes from GitHub"],
     ["npx forgedock run-issue <issue> [--lane <lane>] [--lane-override] [--path core|full] [--retry] [--wait-lease]", "Run the lean core work-on on one issue (default; --path full = legacy multi-phase pipeline; the lane comes from the issue: milestone → milestone/<slug>, else staging; --lane is an assertion, never the default branch) (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
     ["npx forgedock orchestrate <issue...> [--parallel K] [--lane L]", "Run core work-on on several issues with bounded concurrency and Depends-on ordering; each issue on its own lane, cross-lane dependencies reported"],
-    ["npx forgedock orchestrate --resume <id> | --set-parallel <id> K", "Reattach to a batch hosted by the schedd daemon (a finished one replays its report, an orphaned one is resumed with live lanes re-adopted), or change its concurrency live"],
+    ["npx forgedock orchestrate --resume <id> [N...] | --set-parallel <id> K | --add <id> N... | --cancel <id>", "Reattach to a batch hosted by the schedd daemon (a finished one replays its report, an orphaned one is resumed with live lanes re-adopted), change its concurrency live, add issues to a running (or held) batch under its K and DAG, or stop one batch without stopping schedd (running lanes torn down with their work saved, the rest held for --resume)"],
     ["npx forgedock triage <issue...> [--lane L] [--dry-run]", "Already-fixed pre-filter: close issues a merged PR or green CI already resolved; print the rest"],
+    ["npx forgedock probe [issue...] [--dry-run]", "Run declared acceptance probes for closed issues whose fix is on the default branch; a fail reopens the issue"],
+    ["npx forgedock check [--base REF] [--json]", "Run the lane's frozen validate commands and change-scoped pre-PR checks locally in this worktree, as the engine will (no GitHub, no Actions)"],
     ["npx forgedock limits show | clear <id>|--all", "Show or clear per-account usage-limit holds shared by orchestrate batches"],
     ["npx forgedock sched show | cap <N>|--clear | weight <owner/repo> <N>|--clear", "Show the host lane registry, set the host-wide lane cap shared by orchestrate batches, or set a repo's share of slots within a priority (default equal)"],
     ["npx forgedock schedd [status]", "Host scheduler daemon hosting every orchestrate batch (auto-spawned by orchestrate; run in the foreground for a systemd-user unit); status shows its pid and batches"],
@@ -3301,6 +3303,9 @@ function help() {
     ["npx forgedock config migrate [dir]", "Backfill missing optional sections into an existing forge.yaml (idempotent)"],
     ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
     ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
+    ["npx forgedock review-staging [<PR>] [--thorough] [--json]", "Staging->main review pre-dispatch: route marker, open-finding gate, scope, prepare, roster; writes one reviewer brief per domain"],
+    ["npx forgedock review-staging [<PR>] --finalize --test-gate-output <file>", "Staging->main review post-dispatch: delivery, test-gate verdict, extract/classify/file-prepare; prints the findings to file"],
+    ["npx forgedock review-staging [<PR>] --summary [--filed <N>]...", "Staging->main review Phase 8: verdict and summary comment with the FORGE:GATE_PASS / FORGE:GATE_FAILURE marker"],
     ["npx forgedock stats [--since <ver|date>] [--repo owner/repo] [--json] [--refresh]", "Version-over-version cost/time/flow/review/gate report from GitHub telemetry (no model)"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block) and reclaim ForgeDock-owned leftovers (forge.yaml hygiene TTLs)"],
@@ -3868,10 +3873,10 @@ async function watch() {
 // The journey-routed commands render their own branded marks (hero/compact);
 // splash() would double-brand them. Engine-surface commands, help, and
 // unknown-command output keep the logo.
-const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
+const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "triage", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "sched", "schedd", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "sched", "schedd", "check", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4081,6 +4086,12 @@ switch (command) {
     }
     break;
   }
+  case "review-staging": {
+    // #4358: deterministic staging->main review pre-dispatch; writes one reviewer brief per roster domain.
+    const { reviewStagingFromCli } = await import("./review-staging.mjs");
+    exitCode = await reviewStagingFromCli(restArgs);
+    break;
+  }
   case "gc": {
     // Reaper (#4180): dry-run report by default; --apply reclaims only ForgeDock-owned resources (ledger, label, lane naming, own tmp).
     const { runGc } = await import("./gc.mjs");
@@ -4095,6 +4106,17 @@ switch (command) {
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;
+    }
+    break;
+  }
+  case "check": {
+    // #4364: the builder's in-session run of the engine's validate and pre-PR checks; local only
+    const { checkFromCli } = await import("./engine-cli.mjs");
+    try {
+      exitCode = (await checkFromCli(restArgs)).exitCode;
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = err.exitCode ?? 1;
     }
     break;
   }
@@ -4133,6 +4155,16 @@ switch (command) {
     const { triageFromCli } = await import("./engine-cli.mjs");
     try {
       await triageFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "probe": {
+    const { probeFromCli } = await import("./engine-cli.mjs");
+    try {
+      await probeFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;

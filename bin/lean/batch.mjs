@@ -5,6 +5,8 @@
  *
  * A batch lives in `~/.forge/batches/<id>/` (or `FORGEDOCK_BATCH_DIR`): `plan.json` (the command), `state.json` (the
  * scheduler state, rewritten after every transition), `log.jsonl` (one line per lane update), `parallel` (live K),
+ * `add` (issues added to the batch by `--add`, #4408: a cumulative JSON set the runner re-reads every pass),
+ * `cancel` (`{at, reason}` written by `--cancel`, #4376: the runner stops admitting and stops its local lanes; a resume clears it),
  * `lanes/<issue>.{json,log}` (each lane's result and output) and `report.json` (the final rows and printed report, written
  * when the scheduler loop returns; `forgedock orchestrate --resume` on a finished batch replays it, #4192). Every write is tmp + fsync + rename, and the root must be
  * on disk, never tmpfs. A lane is its own session (`setsid` through `detached`), so killing the dispatcher leaves it
@@ -61,6 +63,11 @@ export function writeAtomic(file, data) {
 
 const readJson = (file) => { try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; } };
 
+const readAdded = (file) => {
+  const v = readJson(file);
+  return Array.isArray(v) ? [...new Set(v.filter((n) => Number.isSafeInteger(n) && n > 0))].sort((a, b) => a - b) : [];
+};
+
 export function newBatchId(now = Date.now(), pid = process.pid) {
   return `b${new Date(now).toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15)}-${pid}`;
 }
@@ -93,6 +100,31 @@ export function openBatch(root, id) {
       if (!Number.isInteger(k) || k < 1) throw new Error("parallel must be a positive integer");
       writeAtomic(f("parallel"), `${k}\n`);
     },
+    /** Issues added by `--add` (#4408): the `add` file, sorted unique positive integers; [] when missing or invalid. */
+    readAdded: () => readAdded(f("add")),
+    /**
+     * Merge `list` into the `add` file. Not a plain positive integer: skipped `not an integer`; already in state.json
+     * `order`, in the file or earlier in `list`: skipped `already in batch`. @returns {{added:number[], skipped:Array<{issue, reason}>}}
+     */
+    addIssues: (list) => {
+      const have = new Set([...(readJson(f("state.json"))?.order ?? []), ...readAdded(f("add"))]);
+      const added = [], skipped = [];
+      for (const x of Array.isArray(list) ? list : []) {
+        const n = typeof x === "number" ? x : typeof x === "string" && /^#?\d+$/.test(x.trim()) ? parseInt(x.trim().replace("#", ""), 10) : NaN;
+        if (!Number.isSafeInteger(n) || n < 1) { skipped.push({ issue: x, reason: "not an integer" }); continue; }
+        if (have.has(n)) { skipped.push({ issue: n, reason: "already in batch" }); continue; }
+        have.add(n); added.push(n);
+      }
+      if (added.length) writeAtomic(f("add"), JSON.stringify([...new Set([...readAdded(f("add")), ...added])].sort((a, b) => a - b)) + "\n");
+      return { added, skipped };
+    },
+    /** `--cancel` (#4376): `{at, reason}` in the `cancel` file; the runner re-reads it every pass. */
+    requestCancel: ({ reason = "operator" } = {}) => writeAtomic(f("cancel"), JSON.stringify({ at: new Date().toISOString(), reason: String(reason) }) + "\n"),
+    /** The cancel record, or null when missing or invalid. */
+    readCancel: () => { const v = readJson(f("cancel")); return v && typeof v === "object" && !Array.isArray(v) && typeof v.at === "string" ? v : null; },
+    clearCancel: () => rmSync(f("cancel"), { force: true }),
+    /** Added issues the batch never took into its `order` (a finished or unhosted batch with pending adds). */
+    unrunAdds: () => { const order = new Set(readJson(f("state.json"))?.order ?? []); return readAdded(f("add")).filter((n) => !order.has(n)); },
     /** The lane updates in `log.jsonl`, in order (unparsable lines skipped). */
     readLog: () => {
       let text = "";

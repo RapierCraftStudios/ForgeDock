@@ -44,6 +44,16 @@ export function parseRiskPaths(v) {
 }
 
 /**
+ * #4398: the changed files matching a declared forge.yaml review.risk_paths glob (sorted, unique). Only declared globs
+ * count, never the built-in risk words: a hit makes the conformance gate enforce for that lane. [] without globs.
+ */
+export function riskPathHits(files = [], riskPaths = []) {
+  const globs = parseRiskPaths(riskPaths);
+  if (!globs.length) return [];
+  return [...new Set((files ?? []).map(String))].filter((f) => globs.some((g) => matchesGlob(f, g))).sort();
+}
+
+/**
  * {would_skip, reasons:[{code, detail}]} from facts only. Codes: risk_path, package_edge, hotspot, gate.failed,
  * gate.ambiguous. `hotspots` null/undefined means the facts were unavailable (ambiguous); {enabled:false} is an answer.
  * gates: {precheckFailures[], checkCommandsFailing, ciFellBack}. Reasons are sorted, so equal input gives equal output.
@@ -69,6 +79,8 @@ export function computeTrigger({ files = [], riskPaths = [], structure = null, h
   if (gates.ciFellBack) add("gate.failed", "CI verification unavailable (local fallback)");
   const tracked = (contract?.requirements ?? []).filter((r) => r?.disposition === "defer" || r?.disposition === "post-deploy").map((r) => r.id);
   if (tracked.length) add("gate.ambiguous", `contract defers ${tracked.sort().join(", ")} (only the reviewer judges deferrals)`);
+  const oob = (contract?.requirements ?? []).filter((r) => r?.verify === "out_of_band").map((r) => r.id);
+  if (oob.length) add("gate.ambiguous", `contract verifies ${oob.sort().join(", ")} out of band (only the reviewer judges instrumentation)`);
   reasons.sort((a, b) => a.code.localeCompare(b.code) || a.detail.localeCompare(b.detail));
   return { would_skip: reasons.length === 0, reasons };
 }

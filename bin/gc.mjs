@@ -223,7 +223,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
       const sameHost = j.host === P.host;
       // A live owner on this host is a running lane, even past `expires` (long CI waits refresh it only on register).
       const stale = sameHost ? !(Number.isSafeInteger(j.pid) && P.alive(j.pid)) : Number(j.expires) < now;
-      ledgers.push({ path, batch: j.batch, lane: j.lane, stale });
+      ledgers.push({ path, batch: j.batch, lane: j.lane, repo: j.repo ?? null, stale });
       for (const r of j.resources) {
         const type = TYPE_OF_KIND[r.kind];
         if (!type) continue;
@@ -343,6 +343,9 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
         const id = local ? name : `origin/${name}`;
         if (seen.has(`branch:${id}`) || liveIds.has(`branch:${name}`)) continue;
         const it = { type: "branch", id, branch: name, local, sizeBytes: null, ageMs: age(Number(ts) * 1000), owned: true, action: "report", reason: "" };
+        // #4361: a tracking ref is not origin. Missing on origin = a stale ref, pruned locally (no push, no gh lookups).
+        if (!local && originHeads === null) { it.reason = "cannot verify origin"; add(it); continue; }
+        if (!local && !originHeads.has(name)) { it.gone = true; it.action = "reclaim"; it.reason = "already gone on origin (stale tracking ref)"; add(it); continue; }
         const why = await branchBlock(name, { local });
         if (why) it.reason = why;
         else if (!(it.ageMs >= ttl("branch"))) it.reason = "younger than TTL";
@@ -355,6 +358,12 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
       }
     };
     await scan("refs/heads/", true);
+    // #4361: one ls-remote is the truth about origin; the local tracking refs may hold hundreds of long-deleted branches.
+    let originHeads = null;
+    try {
+      originHeads = new Set();
+      for (const l of String(await git(["ls-remote", "--heads", "origin"])).split("\n")) { const r = l.split("\t")[1]?.trim(); if (r?.startsWith("refs/heads/")) originHeads.add(r.slice(11)); }
+    } catch (e) { originHeads = null; notes.push(`git ls-remote origin failed: ${errText(e)}`); }
     await scan("refs/remotes/origin/", false);
   }
 
@@ -449,14 +458,23 @@ const SANDBOX_TEARDOWN = {
 };
 const defaultSandboxTeardown = (P) => async (provider, handle) => (SANDBOX_TEARDOWN[provider] ? SANDBOX_TEARDOWN[provider](P, handle) : false);
 
-/** Reclaim every owned item marked "reclaim"; release ledger entries that were reclaimed. Never touches anything else. */
-export async function applyGc(plan, probes) {
+/** Remote branch deletes per `git push` (#4361): one round trip per chunk, not per branch. */
+export const GC_PUSH_CHUNK = 50;
+
+/**
+ * Reclaim every owned item marked "reclaim"; release ledger entries that were reclaimed. Never touches anything else.
+ * With a `deadline` (#4361) items not started by then are returned in `deferred` for a later run.
+ */
+export async function applyGc(plan, probes, { deadline = null, now = () => Date.now() } = {}) {
   const P = probes, fs = P.fs ?? nodeFs;
-  const reclaimed = [], failed = [];
+  const reclaimed = [], failed = [], deferred = [], remote = [];
   const git = (args) => P.git(args, { cwd: P.cwd });
+  const late = () => deadline != null && now() >= deadline;
   let prune = false;
   for (const it of plan.items) {
     if (!(it.owned === true && it.action === "reclaim")) continue;
+    if (it.type === "branch" && !it.local) { remote.push(it); continue; }
+    if (late()) { deferred.push(it); continue; }
     try {
       switch (it.type) {
         case "container": await P.docker(["rm", "-f", it.id]); break;
@@ -481,24 +499,37 @@ export async function applyGc(plan, probes) {
           break;
         case "branch":
           if (it.gone) break;
-          if (it.local) await git(["branch", "-D", it.branch]);
-          else await git(["push", "origin", "--delete", it.branch]);
+          await git(["branch", "-D", it.branch]);
           break;
         default: throw new Error(`unknown type ${it.type}`);
       }
       reclaimed.push(it);
       if (it.ledger) {
         const l = plan.ledgers.find((x) => x.path === it.ledger);
-        if (l) { const led = makeLedger({ root: dirname(dirname(l.path)), batch: l.batch, lane: l.lane, fs }); if (led.path === l.path) led.release(it.kind, it.value); }
+        if (l) { const led = makeLedger({ root: dirname(dirname(l.path)), batch: l.batch, lane: l.lane, repo: l.repo, fs }); if (led.path === l.path) led.release(it.kind, it.value); }
       }
     } catch (e) { failed.push({ ...it, error: errText(e) }); }
   }
+  // #4361: stale tracking refs are pruned locally; branches still on origin are deleted GC_PUSH_CHUNK per push. A failed
+  // chunk is retried one branch at a time so each failure stays attributed to its branch.
+  const flush = async (items, cmd) => {
+    for (let i = 0; i < items.length; i += GC_PUSH_CHUNK) {
+      const chunk = items.slice(i, i + GC_PUSH_CHUNK);
+      if (late()) { deferred.push(...chunk); continue; }
+      try { await git(cmd(chunk)); reclaimed.push(...chunk); continue; } catch { /* retry singly */ }
+      for (const it of chunk) {
+        try { await git(cmd([it])); reclaimed.push(it); } catch (e) { failed.push({ ...it, error: errText(e) }); }
+      }
+    }
+  };
+  await flush(remote.filter((it) => it.gone), (c) => ["branch", "-r", "-d", ...c.map((it) => `origin/${it.branch}`)]);
+  await flush(remote.filter((it) => !it.gone), (c) => ["push", "origin", "--delete", ...c.map((it) => it.branch)]);
   if (prune) { try { await git(["worktree", "prune"]); } catch { /* best effort */ } }
   for (const l of plan.ledgers.filter((x) => x.stale)) {
-    const led = makeLedger({ root: dirname(dirname(l.path)), batch: l.batch, lane: l.lane, fs });
+    const led = makeLedger({ root: dirname(dirname(l.path)), batch: l.batch, lane: l.lane, repo: l.repo, fs }); // #4432: repo-keyed file name
     if (led.path === l.path && led.read() && led.entries().length === 0) led.remove();
   }
-  return { reclaimed, failed };
+  return { reclaimed, failed, deferred };
 }
 
 const fmtSize = (b) => (b == null ? "?" : b >= 1073741824 ? `${(b / 1073741824).toFixed(1)}G` : b >= 1048576 ? `${(b / 1048576).toFixed(1)}M` : b >= 1024 ? `${Math.round(b / 1024)}K` : `${b}B`);
@@ -521,7 +552,7 @@ export function formatGcReport(plan, { applied = null } = {}) {
   for (const n of plan.notes) L.push(`  note: ${n}`);
   for (const f of applied?.failed ?? []) L.push(`  failed: ${f.type} ${f.id}: ${f.error}`);
   const n = plan.items.filter((i) => i.owned && i.action === "reclaim").length;
-  L.push(applied ? `gc: reclaimed ${applied.reclaimed.length} of ${n} item(s)` : `gc: ${n} item(s) reclaimable; run with --apply to reclaim`);
+  L.push(applied ? `gc: reclaimed ${applied.reclaimed.length} of ${n} item(s)${applied.deferred?.length ? `, ${applied.deferred.length} deferred` : ""}` : `gc: ${n} item(s) reclaimable; run with --apply to reclaim`);
   return L.join("\n") + "\n";
 }
 
@@ -541,18 +572,20 @@ export async function runGc(argv = [], { probes, hygiene = null, now = Date.now(
 
 /**
  * Plan + apply with forge.yaml hygiene settings (orchestrate preflight/admission GC, #4183). Never throws: a failure
- * becomes a note. Returns {plan, applied, reclaimed, bytes}.
+ * becomes a note. With `budgetMs` (#4361) apply stops at the deadline; the rest is counted in `deferred` for the next run.
+ * Returns {plan, applied, reclaimed, deferred, bytes}.
  */
-export async function runOwnedGc({ probes, hygiene = HYGIENE_DEFAULTS, scopes = new Set(GC_SCOPES), now = Date.now() } = {}) {
-  let plan = null, applied = { reclaimed: [], failed: [] };
+export async function runOwnedGc({ probes, hygiene = HYGIENE_DEFAULTS, scopes = new Set(GC_SCOPES), now = Date.now(), budgetMs = null, clock = () => Date.now() } = {}) {
+  let plan = null, applied = { reclaimed: [], failed: [], deferred: [] };
+  const deadline = Number.isFinite(budgetMs) ? clock() + budgetMs : null;
   try {
     plan = await planGc({ probes, scopes, ttlMs: hygieneTtls(hygiene), deleteMergedBranches: hygiene.delete_merged_branches !== false, now });
-    applied = await applyGc(plan, probes);
+    applied = await applyGc(plan, probes, { deadline, now: clock });
   } catch (e) {
     plan = plan ?? { items: [], summary: {}, notes: [], ledgers: [], scopes: [...scopes], olderThanMs: LEDGER_TTL_MS };
     plan.notes.push(`gc failed: ${errText(e)}`);
   }
-  return { plan, applied, reclaimed: applied.reclaimed.length, bytes: applied.reclaimed.reduce((s, i) => s + (i.sizeBytes ?? 0), 0) };
+  return { plan, applied, reclaimed: applied.reclaimed.length, deferred: applied.deferred?.length ?? 0, bytes: applied.reclaimed.reduce((s, i) => s + (i.sizeBytes ?? 0), 0) };
 }
 
 /**
@@ -569,10 +602,10 @@ export function hygieneCheck(plan, { applied = null, ttlMs = plan?.ttlMs ?? hygi
   const reclaimable = items.filter((i) => i.owned && i.action === "reclaim").length;
   const stale = items.filter((i) => !i.owned && i.ageMs != null && i.ageMs >= (ttlMs?.[i.type] ?? LEDGER_TTL_MS)).length;
   const bits = [`owned: ${parts.length ? parts.join(", ") : "none"}`];
-  if (applied) bits.push(`reclaimed ${applied.reclaimed.length} of ${reclaimable}${applied.failed.length ? ` (${applied.failed.length} failed)` : ""}`);
+  if (applied) bits.push(`reclaimed ${applied.reclaimed.length} of ${reclaimable}${applied.failed.length ? ` (${applied.failed.length} failed)` : ""}${applied.deferred?.length ? ` (${applied.deferred.length} deferred)` : ""}`);
   else bits.push(`${reclaimable} reclaimable`);
   if (stale) bits.push(`${stale} unowned stale (report only)`);
-  const pending = applied ? applied.failed.length : reclaimable;
+  const pending = applied ? applied.failed.length + (applied.deferred?.length ?? 0) : reclaimable;
   const status = pending > 0 || stale > 0 ? "warn" : "pass";
   let detail = bits.join("; ");
   if (!applied && reclaimable > 0) detail += ". Run: npx forgedock doctor --fix  (or: npx forgedock gc --apply)";

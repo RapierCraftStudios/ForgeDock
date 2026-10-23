@@ -4,6 +4,9 @@
 import { fileURLToPath } from "node:url";
 
 import { reviewSkeleton } from "./conformance.mjs";
+import { seqNumber } from "./sequence.mjs";
+import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
+import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
 export const LEAN_DIR = ".forge-lean";
@@ -15,8 +18,11 @@ export const CONTRACT_FILE = `${LEAN_DIR}/contract.json`;
 
 /** Change-scoped checks with shared incremental caches (#4218): the builder runs the scoped commands this CLI prints. */
 export const CHECKS_CLI = fileURLToPath(new URL("./checks.mjs", import.meta.url));
+/** #4364: `forgedock check`, the engine's validate and pre-PR checks run in-session before the result is written. */
+export const FORGEDOCK_CLI = fileURLToPath(new URL("../forgedock.mjs", import.meta.url));
 
-const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR. When $FORGE_HOST_PARALLELISM is set, cap verification workers at it: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the repo's full tsc/eslint/test scripts (it widens to the full command itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, run it again with --publish to share the incremental caches. node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.`;
+const HOST_RULES = `Host rules (many lanes share this machine): run only targeted tests (specific files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare with git show or git diff origin/<base>. Never install browsers. Keep scratch files under $TMPDIR. Cap verification workers at $FORGE_HOST_PARALLELISM when set: turbo --concurrency, vitest/jest --maxWorkers, playwright --workers, node --test --test-concurrency (eslint via turbo). For any typecheck, lint or test you run, first run \`node ${CHECKS_CLI} --base origin/<base>\` after your edits and run the scoped commands it prints instead of the full tsc/eslint/test scripts (it widens itself when impact is unknown: lockfile, tsconfig, CI config); once they pass, rerun it with --publish to share the incremental caches. Lint changed packages only, never dependents (turbo ...[base], nx affected). node_modules/.venv may be hardlinked read-only from a shared cache: after changing a lockfile, or when an install fails with EACCES, delete that dir first (rm -rf is safe), then install; never chmod or edit files inside it.
+Quiet output (tool results are re-read every later turn): run tests quietly (-q or a dot/summary reporter); on failure read \`tail -40\` plus the failing test ids (grep FAILED / not ok / FAIL), never the whole log. Send output over 8 KB to a $TMPDIR file; tail or grep it. Issue independent read-only calls (reads, greps, git log/blame, gh) in the same turn or one shell call. Read each file's ranges once (sed -n a,bp or Read offset/limit, never a whole large file) and keep notes; don't re-read it.`;
 
 /** Verify-by-CI (#4167): in ci/hybrid mode the engine runs the repo's CI on GitHub runners; the host runs only light checks. */
 const LIGHT = "run only formatters and linters on the files you changed";
@@ -40,6 +46,60 @@ export function ciFailurePrompt(failures, mode = "local") {
 export function precheckFailurePrompt(failures, mode = "local") {
   const list = failures.slice(0, 10).map((f) => `#### \`${f.command}\` (exit ${f.rc})\n${f.output ? `\`\`\`\n${f.output}\n\`\`\`` : "(no output)"}`).join("\n\n");
   return `The repo's declared check commands failed in this worktree, before the PR is opened:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). Re-run each failing command, ${mode === "ci" ? `${LIGHT} otherwise, ` : ""}commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** #4406: the tree after merging the base fails the post-merge check commands (verify.post_merge or the scoped typecheck). */
+export function postMergeFailurePrompt(failures, mode = "local") {
+  const list = failures.slice(0, 10).map((f) => `#### \`${f.command}\` (exit ${f.rc})\n${f.output ? `\`\`\`\n${f.output}\n\`\`\`` : "(no output)"}`).join("\n\n");
+  return `After merging the base into this branch, the merged tree fails these check commands (sibling changes merged without a text conflict, e.g. duplicate keys or same-named symbols):\n\n${list}\n\nFix the cause keeping both this fix's intent and the base's changes (rename rather than drop either side). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** #4406: names this change newly exports that another module of the same app or package already declares. */
+export function duplicateExportsPrompt(findings, mode = "local") {
+  const rows = findings.slice(0, 30).map((d) => `- ${d.symbol}: ${d.path} (also exported by ${(d.others ?? []).join(", ")})`).join("\n");
+  return `This change exports names that another module of the same app or package already exports:\n${rows}\n\nRename the new export or reuse the existing one, and update every reference and any registry, map or test keyed by the name (same-named entries collide or leave one unprobed). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** #4390: byte cap of the diff hunks a context-ceiling restart carries (the stat is always kept). */
+export const RESTART_DIFF_MAX_BYTES = 40 * 1024;
+
+/**
+ * #4390: appended to the restart prompt when the engine stopped a builder session at the context ceiling: the fresh
+ * session continues from the frozen contract, the branch (`git diff --stat` + bounded hunks) and the last validate result.
+ */
+export function contextRestartPrompt({ stat = "", diff = "", base = "", check = "", ceiling = 0 } = {}) {
+  const d = boundDiff(String(diff ?? ""), { stat, base, maxBytes: RESTART_DIFF_MAX_BYTES }).trim();
+  const c = String(check ?? "").trim();
+  return `\n\nContext restart: the previous session on this lane reached the ${ceiling}-token context ceiling and the engine stopped it. Its history is gone, its work is not: ${CONTRACT_FILE} is still the frozen authority, and the branch holds the committed work (uncommitted edits were saved in a \`wip(forge): checkpoint\` commit). Continue from this state; do not start over, and do not re-read what the summary below already shows.
+
+<diff_stat base="${base}">
+${String(stat ?? "").trim() || "(no changes yet)"}
+</diff_stat>
+
+<diff>
+${d || "(no changes yet)"}
+</diff>
+
+Last validate result (${LEAN_DIR}/self-check.json, from \`forgedock check\`): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded; run the validate commands."}`;
+}
+
+/** #4392: the implement turn budget is spent; one bounded fresh session either finishes or stops with a typed digest. */
+export function turnBudgetWrapupPrompt({ size = "?", budget = 0, used = 0, grant = 5, stat = "", diff = "", base = "", check = "" } = {}) {
+  const d = boundDiff(String(diff ?? ""), { stat, base, maxBytes: RESTART_DIFF_MAX_BYTES }).trim();
+  const c = String(check ?? "").trim();
+  return `\n\nTurn budget spent: this lane is size ${size} with an implement budget of ${budget} turns, and ${used} are used. The engine stopped the previous session and saved its work in a \`wip(forge): checkpoint\` commit. You have at most ${grant} turns. Pick one, do not grind:
+- Finish: if the work is complete or nearly so, commit what works, run the validate commands, and write ${RESULT_FILE} with status "fixed" as usual.
+- Stop: otherwise commit nothing new and write ${RESULT_FILE} as {"status":"budget-exceeded","summary":"<one line>","digest":"<what is done, what remains, why it is bigger than planned, and your recommendation: retry, split or re-scope>"}.
+
+<diff_stat base="${base}">
+${String(stat ?? "").trim() || "(no changes yet)"}
+</diff_stat>
+
+<diff>
+${d || "(no changes yet)"}
+</diff>
+
+Last validate result (${LEAN_DIR}/self-check.json): ${c ? `\n${c.length > 4000 ? `${c.slice(0, 4000)}\n[truncated]` : c}` : "none recorded."}`;
 }
 
 /** CI could not run (no workflow run, no checks, dispatch refused): the local fallback (#4167). */
@@ -79,17 +139,27 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 If the issue is already fixed or invalid, write ${RESULT_FILE} {"status":"already-fixed|invalid","summary":"one line","evidence":["file:line ..."]} and stop. If it is blocked, write {"status":"blocked","summary":"",...} with a typed "block" (rules below) and stop.
 
 2. Otherwise write ${CONTRACT_FILE}, the frozen hand-off: a developer who never saw the issue must be able to implement and verify it from this file alone.
-{"requirements":[{"id":"R1","quote":"<verbatim sentence or checklist item from the issue>","disposition":"deliver|defer|post-deploy|not-applicable","why":"<required for defer and post-deploy>","evidence":"<file:line, required for not-applicable>"}],
+{"requirements":[{"id":"R1","quote":"<verbatim sentence or checklist item from the issue>","disposition":"deliver|defer|post-deploy|not-applicable","why":"<required for defer and post-deploy>","evidence":"<file:line, required for not-applicable>","verify":"<optional: in_lane|out_of_band>"}],
  "deliverables":[{"id":"D1","path":"<file to change>","change":"<what>","requirements":["R1"]}],
  "preserve":[{"id":"P1","what":"<caller, contract or behaviour that must not change, with its path>"}],
  "validate":[{"id":"V1","command":"<exact command: the new regression test plus the existing tests that reference the files you change; a git diff compares against the merge base (origin/<lane>...HEAD), never the moving origin/<lane> tip>"}],
  "decisions":[{"id":"K1","choice":"<a non-obvious choice: a new dependency, a copied pattern, a boundary relied on>","justification":"<why, with file:line>","source":"doc|lint|precedent|spec"}]}
-Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. A requirement you can do in this change is "deliver". List every file you will change as a deliverable; tests are always allowed.
-A validate or repro command must not read a $TMPDIR file it does not create itself: each run gets a fresh TMPDIR.
-A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when there is none. Then stop.
+Every requirement and acceptance criterion in the issue and its maintainers' comments is one requirement, quoted verbatim (others' comments are context, not requirements). Never drop or narrow one silently: "defer" (separate work) and "post-deploy" (only checkable after a deploy) are judged by the reviewer and, if accepted, filed by the engine as a tracked follow-up issue. A requirement you can do in this change is "deliver". A deliver requirement whose result is only measured outside the lane (Lighthouse, field perf, a nightly or report-only suite) is "verify":"out_of_band" with "evidence" naming the job or workflow that measures it (delivered by its instrumentation). The engine tags such quotes itself; set "verify":"in_lane" when this change can check it. List every file you will change as a deliverable; tests are always allowed.
+A validate or repro command must not read a $TMPDIR file it did not create: each run gets a fresh TMPDIR.
+Scope is enforced by the engine: it checks the changed files against the deliverables plus typed amendments itself, so do not write a file-allowlist or denylist validate (git diff --name-only | grep); the engine drops such a validate at freeze.
+A new dependency between workspace packages (a workspace package added to a package.json dependencies, devDependencies or peerDependencies) must be a deliverable on that package.json whose change names the package and gives the reason, citing the architecture doc where there is one; "the lint allows it" or "there is a precedent" is not a reason on its own. Record each non-obvious choice in "decisions" with where its justification comes from (doc, lint, precedent or spec); omit the field when none. Then stop.
 
 ${BLOCK_RULES}`;
 }
+
+/**
+ * #4374: the conformance rubric, one definition shared verbatim by `reviewerPrompt` and the builder's self-review in
+ * `builderImplementPrompt`, so the two cannot drift. Each question is answered yes (OK) or no; codebase-agnostic.
+ */
+export const REVIEW_RUBRIC = `1. Fixed: does the diff resolve the issue as written, delivering every requirement and acceptance criterion of the issue and every contract requirement with disposition deliver? An out-of-band requirement is delivered by its instrumentation (budget test or bench committed, job configured), not its measured result.
+2. No regression: is the diff free of breakage of an existing caller, test or behaviour (a concrete path:line failure)?
+3. Contract: is every deliverable changed as described, every preserve item intact and every validate command passing?
+4. Scope: does the diff change only deliverable paths and tests?`;
 
 /** Builder call 2, same session: implement the frozen contract. */
 export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null } = {}) {
@@ -103,8 +173,10 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: an issue requirement the contract missed.
 - {"kind":"defer|post-deploy","requirement":"R#","why":""}: a contracted requirement that becomes separate work or a post-deploy check. The engine files it as a tracked follow-up.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
-A new dependency between workspace packages in a package.json that no deliverable names (that package.json, with the package in its change) is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
-If the repository has scripts/check-devdocs-freshness.sh, its docs must move with the code: a behaviour change under the paths it checks needs the matching module dossier (devdocs/modules/*.md, per devdocs/index.yaml) updated in the same change. Run it against the base before writing the result; the engine runs it too and resumes you once if it fails.
+A new dependency between workspace packages in a package.json that no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
+If the repository has scripts/check-devdocs-freshness.sh, a behaviour change under the paths it checks must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change. Run it against the base before writing the result; the engine runs it too.
+
+Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):
 ### Approach
@@ -113,7 +185,13 @@ When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comment
 ### Verification   (each validate command, its result, and whether the new test fails without the fix)
 ### Notes   (behavior changes, env vars)
 
-Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirements":[{"id":"R1","status":"implemented|partial|missing","evidence":"file:line"}],"validation":[{"id":"V1","command":"","exit":0}],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}],"amendments":[]}
+Last step before writing ${RESULT_FILE}: self-review against the reviewer's rubric. Answer each question below yes or no against \`git diff <base>...HEAD\` (base: the lane the contract was frozen against), with evidence for each (path:line, or a command and its result); fix any "no" in this session and commit before you answer again:
+<rubric>
+${REVIEW_RUBRIC}
+</rubric>
+
+Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirements":[{"id":"R1","status":"implemented|partial|missing","evidence":"file:line","instrumented":"<true if out_of_band bench+job committed>"}],"validation":[{"id":"V1","command":"","exit":0}],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}],"self_review":[{"question":"1","answer":"yes|no","evidence":""}],"amendments":[]}
+Optional "facts":{"decisions":[],"rejected":[{"approach":"","why":""}],"hotspots":[{"at":"file:line","why":""}],"conventions":[]}; rejected: approaches you dropped, with why.
 Docker: start containers with docker run --rm; pass --label for each entry of $FORGE_DOCKER_LABELS on every docker run, volume create, network create and build (compose: on services, volumes, networks); tear down via trap/finally.
 If you started Docker containers or volumes that are still there, list their names in ${RESULT_FILE} as "resources":{"containers":[],"volumes":[]} so the engine removes them when the lane ends.
 If you find you are blocked, write "status":"blocked" with a typed "block" instead.`;
@@ -167,7 +245,7 @@ export function missingEntriesPrompt(missing, mode = "local") {
   return `These tests enumerate the siblings of symbols or files this change adds, but do not name them (CI will fail on the stale list):\n${missing.slice(0, 30).map((m) => `- ${m.symbol} (${m.module}) -> ${m.test}:${m.line}`).join("\n")}\n\nFor each, add the symbol to that test's list, ${NOT_MEMBER}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
-const RENUMBER_RULE = "Renumber the lane's files, never the base's: rename each with git mv to its new number, keep the SQL (or other migration source) byte-identical, regenerate the snapshot and journal with the repo's own migration generator (never hand- or text-merge the journal), keep journal entries strictly ordered, and update every reference to the old name.";
+const RENUMBER_RULE = "Renumber the lane's files, never the base's: rename each with git mv to its new number, keep the SQL (or other migration source) byte-identical, change a numbered document (e.g. an ADR) only in its own number (its title), regenerate the snapshot and journal with the repo's own migration generator (never hand- or text-merge the journal), keep journal entries strictly ordered, and update every reference to the old name, including the series index (e.g. docs/adr/README.md) so it lists both the base's entry and yours.";
 
 /** #4322: lane-added sequence-numbered files whose number the base already uses, at hand-off or after a base-sync. */
 export function sequencePrompt(collisions, lane, mode = "local") {
@@ -177,7 +255,7 @@ export function sequencePrompt(collisions, lane, mode = "local") {
 
 /** #4322: the base-sync conflict addition when a conflicted file is a numbered migration or a journal; "" otherwise. */
 export function sequenceSyncNote(files) {
-  const hit = (files ?? []).some((f) => /(?:^|\/)\d{3,}[_-][^/]*$|(?:^|\/)_journal\.json$/.test(String(f)));
+  const hit = (files ?? []).some((f) => seqNumber(f) || /(?:^|\/)_journal\.json$/.test(String(f)));
   return hit ? ` A numbered migration or its journal conflicts: do not text-merge it. ${RENUMBER_RULE}` : "";
 }
 
@@ -203,12 +281,22 @@ export function docsPrompt(output, mode = "local") {
   return `The repository's docs freshness check (scripts/check-devdocs-freshness.sh) fails on this change:\n${String(output ?? "").slice(0, 4000)}\n\nUpdate the module dossier it names (devdocs/modules/*.md; devdocs/index.yaml maps files to dossiers) to describe the behaviour you changed, in the dossier's existing style and in a few lines. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
+/**
+ * #4363: a fix round in a fresh session (no transcript). It carries the site's task prompt (which holds the capped
+ * failure output), the lane diff, the frozen contract and the issue title and summary, each capped; under FIX_PROMPT_MAX.
+ */
+export function fixSessionPrompt({ task, diff = "", stat = "", base = "", contract = null, title = "", summary = "" }) {
+  const contractText = capText(typeof contract === "string" ? contract : JSON.stringify(contract ?? {}, null, 1), FIX_CAPS.contract);
+  const p = `${HOST_RULES}\n\nYou are fixing one failure on an existing branch in this worktree. You have no earlier session: the issue, the frozen contract and the branch's diff against ${base || "the lane base"} are below; read any file you need.\n\n## Issue: ${String(title).slice(0, 300)}\n${capText(summary, FIX_CAPS.summary)}\n\n## Frozen contract (${CONTRACT_FILE})\n\`\`\`json\n${contractText}\n\`\`\`\n\n## Diff (\`git diff ${base || "<base>"}...HEAD\`)\n\`\`\`diff\n${boundDiff(diff, { stat, base, maxBytes: FIX_CAPS.diff })}\n\`\`\`\n\n## The failure to fix\n${capText(task, FIX_CAPS.task)}`;
+  return capText(p, FIX_PROMPT_MAX - 100);
+}
+
 /** Human-only block reasons (#4124). Everything else agents resolve: a dependency, a split, prod data monitoring can read. */
 export const HUMAN_BLOCK_REASONS = Object.freeze(["credentials", "spend", "promotion", "customer", "product-decision"]);
 
 const BLOCK_RULES = `"blocked" needs a typed "block" in ${RESULT_FILE}, one of:
 - {"kind":"dependency","issues":[N]}: an open upstream issue must land first. The engine requeues this issue behind it.
-- {"kind":"split-required","subissues":[{"title":"","body":"","depends_on":[0]}]}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues).
+- {"kind":"split-required","subissues":[{"title":"","body":"","depends_on":[0],"files":["<path>"]}],"size":{"files":N,"lines":N}}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues; files = the files or dirs each will edit, also accepted as "paths") only when every sub-issue's files are disjoint from the others' or the whole change's size estimate exceeds ${SPLIT_MIN_FILES} files or ${SPLIT_MIN_LINES} lines; otherwise keep one lane: an ordered checklist in the contract with a validate per item. In an admitted split, when siblings would edit the same hub (a barrel or index export list, a union type, a shared test fixture, an index doc), pre-stage its slots in the earliest sub-issue and make the others depend on it, or give each sibling its own per-feature file; the engine serialises sub-issues that still share a file.
 - {"kind":"human","why":"${HUMAN_BLOCK_REASONS.join("|")}"}: only an external action agents cannot take, or a product decision too critical for agents.
 "An upstream issue must land first", "needs a split" and "needs prod data that read-only monitoring can read" are never "human".`;
 
@@ -241,7 +329,7 @@ export const REVIEWER_SYSTEM = `You are an independent conformance reviewer of o
 
 You receive the GitHub issue with its comments, the frozen contract (requirements quoted from the issue, deliverables, preserve constraints, validate commands) with typed amendments, the builder's result with validation output, the changed files, the diff, and a row skeleton with one row per contract id and changed file. The engine computes the verdict from your rows; a reply without rows is rejected, so fill the skeleton rather than composing rows: fill EVERY row (set each empty status, evidence and validated_by, and each null deferral_ok; keep the ids and files as given):
 - issue_coverage: one row per requirement or acceptance criterion in the issue, quoted verbatim, saying whether the contract covers it, narrows it, or misses it. The skeleton lists the contract's quotes; add a row for any issue requirement the contract does not quote.
-- requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with evidence as a backtick-quoted repo-relative path:line copied verbatim from the changed files, including (group), [slug] and [...slug] folders (e.g. \`apps/web/app/(console)/layout.tsx:12\`, not route.ts:12) and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change.
+- requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with evidence as a backtick-quoted repo-relative path:line copied verbatim from the changed files, including (group), [slug] and [...slug] folders (e.g. \`apps/web/app/(console)/layout.tsx:12\`, not route.ts:12) and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change. For a verify out_of_band row (measured by the named job, not in this lane) set instrumented: true only when its budget test or bench is committed and that job is configured, with that path:line as evidence; false otherwise. Do not judge the measured result.
 - scope: one row per changed file, pre-filled with the engine's authorization: the deliverable id that authorizes it (deliverables may be directories or globs), "test", "incidental" (changelog, lockfile), or "none" with what it changes. Change it only if the diff shows the file does something its deliverable does not cover.
 - preserve: one row per preserve id: intact|violated|unverified, with path:line. The skeleton starts each at "unverified"; set intact only after checking it.
 - regressions: concrete breakages only, each with path:line.
@@ -283,7 +371,7 @@ export function boundDiff(diff, { stat = "", base = "", maxBytes = REVIEW_DIFF_M
 export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
   const sk = JSON.stringify(skeleton ?? reviewSkeleton(contract ?? {}, files, ignore), null, 1);
-  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
+  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
 }
 
 /**

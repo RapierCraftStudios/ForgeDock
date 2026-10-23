@@ -9,7 +9,7 @@
 # the PR checkout, a SPEC_CLI persona file, forge.yaml paths.root) as data.
 #
 # Usage: review-prepare.sh --pr N --repo owner/name [--merge-issue N] [--thorough true|false] [--out FILE] [--out-dir DIR]
-#                          [--checkout-pr] [--no-delta] [--build-gate block|advisory]
+#                          [--checkout-pr] [--no-delta] [--delta-from SHA] [--build-gate block|advisory]
 #   --pr            PR number (numeric, required)          --repo        owner/name (required)
 #   --merge-issue   issue the PR closes, from --issue (numeric; non-numeric is ignored)
 #   --thorough      true restores the full-union roster    --out         write the context JSON here (default: stdout)
@@ -23,6 +23,11 @@
 #   --no-delta      skip the FULL/DELTA/BASE_SYNC_ONLY resolver: the review mode is always FULL (a staging bundle review always reviews the
 #                   whole bundle), without widening the roster to the full union the way --thorough does; it also enables the pinned
 #                   local-git diff fallback when `gh pr diff` fails (e.g. HTTP 406 over 20,000 lines), which a milestone->staging PR gets without it
+#   --delta-from    explicit DELTA from a caller-supplied earlier reviewed head (forge#4360, `forgedock review-staging --delta`): skips the
+#                   resolver (even with --no-delta), narrows diff, slices and roster to SHA..review sha (the roster is the domains the delta
+#                   files touch). BLOCKED when SHA is not a full commit id in the checkout, equals or is not an ancestor of the review sha,
+#                   or has no trusted FORGE:REVIEW-AGENT body with `Reviewed-SHA: SHA` (no earlier pass to credit). An empty file delta
+#                   is FULL. Not combinable with --thorough true (exit 2).
 # Env: FORGE_CONFIG (forge.yaml path; default: the main checkout's forge.yaml, then the git top-level one),
 #      REVIEW_PREPARE_SLEEP (seconds between mergeability retries, default 5),
 #      REVIEW_PREPARE_INDEX_TIMEOUT (seconds the code-index build may take, default 120; on timeout or failure the slices say
@@ -61,10 +66,10 @@
 
 set -u
 
-PR_NUMBER=""; REPO=""; MERGE_ISSUE=""; THOROUGH="false"; OUT=""; OUT_DIR=""; CHECKOUT_PR="false"; NO_DELTA="false"; BUILD_GATE="block"
+PR_NUMBER=""; REPO=""; MERGE_ISSUE=""; THOROUGH="false"; OUT=""; OUT_DIR=""; CHECKOUT_PR="false"; NO_DELTA="false"; BUILD_GATE="block"; DELTA_FROM_OPT=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --pr|--repo|--merge-issue|--thorough|--out|--out-dir)
+        --pr|--repo|--merge-issue|--thorough|--out|--out-dir|--delta-from)
             [ $# -ge 2 ] || { echo "review-prepare: $1 requires a value" >&2; exit 2; } ;;
     esac
     case "$1" in
@@ -76,6 +81,7 @@ while [ $# -gt 0 ]; do
         --out-dir) OUT_DIR="${2:-}"; shift 2 ;;
         --checkout-pr) CHECKOUT_PR="true"; shift ;;
         --no-delta) NO_DELTA="true"; shift ;;
+        --delta-from) DELTA_FROM_OPT="${2:-}"; [ -n "$DELTA_FROM_OPT" ] || DELTA_FROM_OPT="-"; shift 2 ;;
         --build-gate) case "${2:-}" in block|advisory) BUILD_GATE="$2" ;; *) echo "review-prepare: --build-gate must be block or advisory" >&2; exit 2 ;; esac; shift 2 ;;
         *) echo "review-prepare: unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -85,6 +91,7 @@ case "$REPO" in */*) ;; *) echo "review-prepare: --repo must be owner/name" >&2;
 case "$REPO" in *[!A-Za-z0-9._/-]*|*/*/*|/*|*/) echo "review-prepare: invalid --repo" >&2; exit 2 ;; esac
 case "$MERGE_ISSUE" in *[!0-9]*) MERGE_ISSUE="" ;; esac
 [ "$THOROUGH" = "true" ] || THOROUGH="false"
+if [ -n "$DELTA_FROM_OPT" ] && [ "$THOROUGH" = "true" ]; then echo "review-prepare: --delta-from cannot be combined with --thorough true" >&2; exit 2; fi
 
 # --- trusted helper resolution (install roots only; never cwd) ---
 # shellcheck source=/dev/null  # the resolver lib is found at runtime in the trusted install root
@@ -125,7 +132,7 @@ cleanup() { restore_ref; rm -rf "$TMP_DIR"; }
 trap cleanup EXIT
 
 # --- Phase 1A: fetch ---
-PR_INFO=$(gh pr view "$PR_NUMBER" -R "$REPO" --json number,title,author,baseRefName,headRefName,headRefOid,isCrossRepository,additions,deletions,changedFiles 2>/dev/null) || PR_INFO=""
+PR_INFO=$(gh pr view "$PR_NUMBER" -R "$REPO" --json number,title,author,baseRefName,headRefName,headRefOid,isCrossRepository,additions,deletions,changedFiles,labels 2>/dev/null) || PR_INFO=""
 printf '%s' "$PR_INFO" | jq -e . >/dev/null 2>&1 || PR_INFO=""
 if [ -z "$PR_INFO" ]; then block "gh pr view failed for #${PR_NUMBER}"; fi
 pj() { printf '%s' "$PR_INFO" | jq -r "$1 // empty" 2>/dev/null; }
@@ -452,7 +459,53 @@ delta_roster() {
     printf '%s' "$out"
 }
 REVIEW_MODE="FULL"; DELTA_FROM=""; CARRIED_FROM=""; FULL_ROUNDS=0; DELTA_FILES=""
-if [ "$THOROUGH" != "true" ] && [ "$IS_MILESTONE_TO_STAGING" != "true" ] && [ "$NO_DELTA" != "true" ]; then
+if [ -n "$DELTA_FROM_OPT" ]; then
+    # forge#4360: explicit delta. Every check fails closed (BLOCKED); only an empty file delta widens to FULL (below).
+    _dtop="${TOP:-.}"
+    case "$DELTA_FROM_OPT" in *[!0-9a-f]*|"") _dok=false ;; *) { [ "${#DELTA_FROM_OPT}" -eq 40 ] || [ "${#DELTA_FROM_OPT}" -eq 64 ]; } && _dok=true || _dok=false ;; esac
+    if [ "$_dok" != "true" ]; then block "--delta-from is not a full commit id: $(printf '%s' "$DELTA_FROM_OPT" | tr -cd '0-9A-Za-z' | cut -c1-64)"
+    elif [ "$DELTA_FROM_OPT" = "$REVIEW_SHA" ]; then block "--delta-from ${DELTA_FROM_OPT} is the review head: nothing to review"
+    elif ! git -C "$_dtop" cat-file -e "${DELTA_FROM_OPT}^{commit}" 2>/dev/null; then block "--delta-from ${DELTA_FROM_OPT} is not a commit in this checkout (fetch it first)"
+    elif ! git -C "$_dtop" merge-base --is-ancestor "$DELTA_FROM_OPT" "$REVIEW_SHA" 2>/dev/null; then block "--delta-from ${DELTA_FROM_OPT} is not an ancestor of ${REVIEW_SHA} (force-push or rebase): run a full review"
+    elif printf '%s' "$PR_INFO" | jq -e '[.labels[]?.name] | index("review-degraded") != null' >/dev/null 2>&1; then block "--delta-from ${DELTA_FROM_OPT}: the PR is labelled review-degraded (an earlier panel was incomplete): run a full review"
+    else
+        # forge#4471: the earlier pass must be complete and non-degraded, as scripts/review-delta.sh requires of a checkpoint:
+        # an agent body with a findings block for <from>, a post-panel-guard proof naming <from> (staging summary, synthesized
+        # block, or a # PR Review Summary whose Agents count matches) and no degraded marker after its first agent body.
+        _dv="error"
+        if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$COMMENTS_JSON" ]; then
+            _db=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->|^<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->|# PR Review Summary|^<!-- FORGE:GATE_(PASS|FAILURE) -->|<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity|<!-- FORGE:REVIEW_DEGRADED|<!-- FORGE:REVIEW_BLOCKED' 2>/dev/null) \
+                && _dv=$(printf '%s\n' "$_db" | jq -s -r --arg f "$DELTA_FROM_OPT" '
+                    def shas($t; $re): [ $t | scan($re) | .[0] ];
+                    def one($a): if ($a | length) == 1 then $a[0] else null end;
+                    def rsha: "(?:^|\\n)Reviewed-SHA: ([0-9a-f]{40}|[0-9a-f]{64})\\r?(?:\\n|$)";
+                    to_entries as $E
+                    | [ $E[] | select((.value | test("\\A<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->")) and (.value | test("<!-- REVIEW-FINDINGS-START -->")))
+                        | select(one(shas(.value; rsha)) == $f)
+                        | {i: .key, d: (.value | capture("\\A<!-- FORGE:REVIEW-AGENT:(?<d>[a-z0-9-]+) -->").d)} ] as $AG
+                    | if ($AG | length) == 0 then "no-agent" else
+                        ($AG | map(.i) | min) as $first | ($AG | map(.d) | unique | length) as $nd
+                        | ([ $E[] | .value as $t | select(
+                              (($t | test("\\A<!-- FORGE:GATE_(?:PASS|FAILURE) -->\\r?\\n## Staging Review:"))
+                                and one(shas($t; "\\*\\*Head\\*\\*: `([0-9a-f]{40}|[0-9a-f]{64})`")) == $f)
+                              or (($t | startswith("<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->")) and one(shas($t; rsha)) == $f)
+                              or (($t | test("# PR Review Summary"))
+                                and one(shas($t; "\\*\\*Reviewed commit\\*\\*: `?([0-9a-f]{40}|[0-9a-f]{64})`?(?:[ |\\r\\n]|$)")) == $f
+                                and one(shas($t; "\\*\\*Agents\\*\\*: ([0-9]+)")) == ($nd | tostring))) ] | length) as $proof
+                        | ([ $E[] | select(.key > $first)
+                             | select(.value | test("<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity|<!-- FORGE:REVIEW_DEGRADED|<!-- FORGE:REVIEW_BLOCKED")) ] | length) as $deg
+                        | if $deg > 0 then "degraded" elif $proof == 0 then "no-proof" else "ok" end
+                      end' 2>/dev/null) || _dv="error"
+        fi
+        case "$_dv" in
+            ok) REVIEW_MODE="DELTA"; DELTA_FROM="$DELTA_FROM_OPT" ;;
+            no-agent) block "--delta-from ${DELTA_FROM_OPT}: no trusted FORGE:REVIEW-AGENT comment with a findings block for that head, no earlier pass to credit: run a full review" ;;
+            no-proof) block "--delta-from ${DELTA_FROM_OPT}: no trusted proof that the earlier panel completed (staging summary, synthesized block or PR Review Summary for that head): run a full review" ;;
+            degraded) block "--delta-from ${DELTA_FROM_OPT}: the earlier pass is degraded (review-panel-integrity / REVIEW_DEGRADED / REVIEW_BLOCKED after its agents): run a full review" ;;
+            *) block "--delta-from ${DELTA_FROM_OPT}: could not read the trusted review comments, no earlier pass to credit: run a full review" ;;
+        esac
+    fi
+elif [ "$THOROUGH" != "true" ] && [ "$IS_MILESTONE_TO_STAGING" != "true" ] && [ "$NO_DELTA" != "true" ]; then
     read -r RD_KIND RD_ARG RD_ROUNDS <<< "$(review_delta_mode)"
     FULL_ROUNDS="${RD_ROUNDS:-0}"
     case "$RD_KIND" in
@@ -463,7 +516,21 @@ fi
 if [ "$REVIEW_MODE" = "DELTA" ]; then
     DELTA_FILES=$(git -C "${TOP:-.}" -c core.quotepath=off diff --name-only --no-renames "${DELTA_FROM}" "${REVIEW_SHA}" 2>/dev/null) || DELTA_FILES=""
     if [ -z "$DELTA_FILES" ]; then REVIEW_MODE="FULL"; DELTA_FROM=""
-    else SELECTED_AGENTS=$(canonical_roster "$(delta_roster "$FULL_ROUNDS" "$SELECTED_AGENTS" "$DELTA_FILES")"); fi
+    else
+        # an explicit --delta-from always narrows the roster to the domains the delta touches (no full-rounds gate)
+        _drounds="$FULL_ROUNDS"
+        # forge#4471: an explicit delta that changes the review specs/config cannot credit the earlier pass (same list as
+        # scripts/review-delta.sh, which answers FULL there; review-prepare.test.sh checks the two lists match)
+        if [ -n "$DELTA_FROM_OPT" ]; then
+            while IFS= read -r _df; do
+                case "$_df" in
+                    forge.yaml|commands/review-pr*.md|commands/review-pr-agents/*|scripts/review-delta.sh|scripts/trusted-comments.sh|scripts/verify-phase-trail.sh|docs/spec/review-protocol.md|scripts/classify-finding.sh) block "--delta-from ${DELTA_FROM}: the delta changes ${_df} (review spec/config), the earlier pass cannot be credited: run a full review"; break ;;
+                esac
+            done <<< "$DELTA_FILES"
+        fi
+        [ -n "$DELTA_FROM_OPT" ] && { _drounds=2; ROSTER_REASON="delta ${DELTA_FROM:0:7}..${REVIEW_SHA:0:7}: domains the delta touches"; }
+        SELECTED_AGENTS=$(canonical_roster "$(delta_roster "$_drounds" "$SELECTED_AGENTS" "$DELTA_FILES")")
+    fi
 fi
 [ "$REVIEW_MODE" = "BASE_SYNC_ONLY" ] && SELECTED_AGENTS=""
 

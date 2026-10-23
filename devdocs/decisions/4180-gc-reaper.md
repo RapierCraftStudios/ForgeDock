@@ -36,6 +36,12 @@ The following are always reported and never touched:
 
 If a probe fails, the item is reported. A probe failure never leads to a reclaim.
 
+## Origin, chunking and budget (#4361)
+
+- Remote lane branches are checked against one `git ls-remote --heads origin`, not the local tracking refs. A tracking ref whose branch is gone on origin is pruned locally (`git branch -r -d`, chunked), with no push and no issue lookup. If origin cannot be listed, remote branches are reported only.
+- Branches that still exist on origin are deleted `GC_PUSH_CHUNK` (50) per `git push origin --delete`. A failed chunk is retried one branch at a time.
+- `applyGc` takes an optional deadline. Orchestrate's preflight and admission GC run with a 60 s budget (`runOwnedGc({budgetMs})`). Items not started in time are returned as `deferred`, and the next `beforeAdmit` interval runs GC again even when the host is not near the ceiling.
+
 ## Rejected
 
 - **`docker system prune` / `docker volume prune`:** these delete the user's own unlabelled resources.

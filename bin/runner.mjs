@@ -1983,16 +1983,22 @@ export function runCliBackend({
   }
 }
 
-/** Descendant processes of `pid` (pid + command line), best effort. Used to record what was alive when a session was killed. */
-export function listDescendants(pid, { psFn = null } = {}) {
+/**
+ * Descendant processes of `pid` (pid + command line), best effort. Used to record what was alive when a session was killed;
+ * `maxCmd` caps each command line (the #4405 busy check needs it whole: a long script path would cut off the tool name).
+ */
+export function listDescendants(pid, { psFn = null, maxCmd = 200 } = {}) {
   try {
     const out = psFn ? psFn() : execSync("ps -eo pid=,ppid=,args=", { encoding: "utf-8", timeout: 3000, maxBuffer: 8 * 1024 * 1024 });
-    const rows = String(out).split("\n").map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3].slice(0, 200) }));
+    const rows = String(out).split("\n").map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3].slice(0, maxCmd) }));
     const kids = []; const seen = new Set([Number(pid)]);
     for (let grew = true; grew;) { grew = false; for (const r of rows) if (!seen.has(r.pid) && seen.has(r.ppid)) { seen.add(r.pid); kids.push({ pid: r.pid, cmd: r.cmd }); grew = true; } }
     return kids.slice(0, 30);
   } catch { return []; }
 }
+
+/** #4410: cap of the tool uses one stream session records. */
+const TOOL_USES_MAX = 5000;
 
 /**
  * Async twin of runCliBackend (core work-on live comments): the CLI runs under child_process.spawn so the caller's event
@@ -2005,9 +2011,19 @@ export function listDescendants(pid, { psFn = null } = {}) {
  * stream-json so progress is observable (the final `result` line is the envelope); `wrap(bin,args)` rewrites the spawn
  * (cgroup caps); `control` receives {pause, resume} (SIGSTOP/SIGCONT of the child's whole process group) and paused time
  * does not count as idle. `onSpawn(child)` receives the ChildProcess.
+ * #4390: `contextMax` (stream only; 0 = off) kills the session once one assistant turn's context (input + cache read +
+ * cache creation) reaches it, throwing CLI_CONTEXT with the stream-aggregated usage (null when none was seen) and turns.
+ * #4392: `turnMax` (stream only; 0 = off) kills the session once it has produced that many assistant turns (deduped by
+ * message id), throwing CLI_TURNS with `turns`, `turnMax`, `lastTool` and the stream-aggregated usage.
+ * #4405: `busy(children)` (info or null) is asked once idle (at most every min(5 s, idleMs)); while it answers busy (a live
+ * heavy step, test or lint child) the kill waits until idleMs + `busyMs` of silence, `onIdleExtend(info)` is told once per
+ * idle stretch, and a later kill carries `extended: true` and `heavyQueue` (info.heavyQueue).
+ * #4395: a stream result carries `baselineTokens`, the first assistant turn's context; absent when no message was seen.
+ * #4410: a stream result (and a CLI_TURNS / CLI_CONTEXT error) carries `toolUses`, [{msg, name, path, cmd}] per tool_use
+ * (deduped by tool_use id, capped at TOOL_USES_MAX), for bin/lean/toolstats.mjs; absent on the non-stream path.
  */
 export async function runCliBackendAsync(opts) {
-  const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, ...rest } = opts;
+  const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, ...rest } = opts;
   let captured = null;
   try {
     runCliBackend({ ...rest, spawnFn: (bin, args, o) => {
@@ -2032,14 +2048,16 @@ export async function runCliBackendAsync(opts) {
   }
   if (typeof wrap === "function") ({ bin, args } = wrap(bin, args));
   const ceiling = maxMs > 0 ? maxMs : o.timeout;
-  let collected, idleInfo = null;
+  let collected, idleInfo = null, ctxInfo = null, turnInfo = null;
+  const msgUsage = new Map(); // #4390: assistant message id -> its usage (a message spans several stream lines)
+  const toolUses = new Map(); // #4410: tool_use id -> {msg, name, path, cmd}
   try {
     collected = await new Promise((resolveP) => {
       let stdout = "", stderr = "", settled = false, timedOut = false, paused = false;
       let lineBuf = "", resultLine = null, lastTool = null;
       const max = o.maxBuffer ?? DEFAULT_SPAWN_MAX_BUFFER_BYTES;
       const startedAt = Date.now();
-      let lastActivity = startedAt, pausedAt = 0, pausedTotal = 0, timer = null;
+      let lastActivity = startedAt, pausedAt = 0, pausedTotal = 0, timer = null, busyAsk = null, extendedSince = null, extendInfo = null;
       const finish = (r) => { if (settled) return; settled = true; clearInterval(timer); resolveP(r); };
       let child;
       const input = typeof o.input === "string" ? o.input : null; // forge#4129: large prompt over stdin
@@ -2058,10 +2076,29 @@ export async function runCliBackendAsync(opts) {
       const tick = Math.max(20, Math.min(1000, (idleMs || 4000) / 4));
       timer = setInterval(() => {
         const now = Date.now();
-        if (!paused && idleMs > 0 && now - lastActivity >= idleMs && !idleInfo) {
-          idleInfo = { lastTool, children: listDescendants(child.pid), idleMs, pid: child.pid };
-          kill();
-        } else if (!timedOut && !idleInfo && now - startedAt - pausedTotal - (paused ? now - pausedAt : 0) >= ceiling) { timedOut = true; kill(); }
+        if (!paused && idleMs > 0 && now - lastActivity >= idleMs && !idleInfo && !ctxInfo && !turnInfo) {
+          let info = null, settle = false;
+          if (typeof busy === "function" && busyMs > 0 && now - lastActivity < idleMs + busyMs) {
+            const prev = busyAsk && busyAsk.since === lastActivity ? busyAsk : null;
+            if (prev && now - prev.at < Math.min(5000, idleMs)) info = prev.info;
+            else {
+              try { info = busy(listDescendants(child.pid, { maxCmd: 8192 })) || null; } catch { info = null; }
+              busyAsk = { at: now, since: lastActivity, info };
+              // The synchronous `ps` blocked the loop: output the child wrote meanwhile is read before a first "not busy" kills.
+              settle = !info && !(prev && prev.info === null);
+            }
+          }
+          if (settle) { /* re-decided next tick */ } else if (info) {
+            extendInfo = info;
+            if (extendedSince !== lastActivity) { extendedSince = lastActivity; try { onIdleExtend?.(info); } catch { /* observer only */ } }
+          } else {
+            const extended = extendedSince === lastActivity;
+            idleInfo = { lastTool, children: listDescendants(child.pid), idleMs, pid: child.pid, extended, heavyQueue: extended ? extendInfo?.heavyQueue ?? null : null };
+            kill();
+          }
+        }
+        // #4405: a separate check, so the absolute ceiling still applies while the idle kill is extended (busy) or settling.
+        if (!timedOut && !idleInfo && !ctxInfo && !turnInfo && now - startedAt - pausedTotal - (paused ? now - pausedAt : 0) >= ceiling) { timedOut = true; kill(); }
       }, tick);
       timer.unref?.();
       const noteLine = (line) => {
@@ -2069,7 +2106,20 @@ export async function runCliBackendAsync(opts) {
         let j; try { j = JSON.parse(line); } catch { return; }
         if (j?.type === "result") resultLine = line;
         else if (j?.type === "assistant" && Array.isArray(j.message?.content)) {
-          for (const c of j.message.content) if (c?.type === "tool_use") lastTool = { name: c.name, input: JSON.stringify(c.input ?? {}).slice(0, 200), at: Date.now() };
+          for (const c of j.message.content) {
+            if (c?.type !== "tool_use") continue;
+            lastTool = { name: c.name, input: JSON.stringify(c.input ?? {}).slice(0, 200), at: Date.now() };
+            const key = c.id ?? `${j.message.id}#${toolUses.size}`, inp = c.input ?? {};
+            if (!toolUses.has(key) && toolUses.size < TOOL_USES_MAX) toolUses.set(key, { msg: j.message.id ?? null, name: c.name ?? null,
+              path: typeof (inp.file_path ?? inp.path) === "string" ? (inp.file_path ?? inp.path) : null, cmd: typeof inp.command === "string" ? inp.command.slice(0, 1000) : null });
+          }
+          const u = j.message.usage;
+          if (u && typeof u === "object") {
+            msgUsage.set(j.message.id ?? `#${msgUsage.size}`, u);
+            const ctx = toFiniteUsageNumber(u.input_tokens) + toFiniteUsageNumber(u.cache_read_input_tokens) + toFiniteUsageNumber(u.cache_creation_input_tokens);
+            if (contextMax > 0 && ctx >= contextMax && !ctxInfo && !turnInfo && !idleInfo && !timedOut) { ctxInfo = { context: ctx, lastTool }; kill(); }
+            else if (turnMax > 0 && msgUsage.size >= turnMax && !ctxInfo && !turnInfo && !idleInfo && !timedOut) { turnInfo = { lastTool }; kill(); }
+          }
         }
       };
       child.stdout.on("data", (d) => {
@@ -2090,13 +2140,32 @@ export async function runCliBackendAsync(opts) {
       });
     });
   } finally { if (sysDir) rmSync(sysDir, { recursive: true, force: true }); }
-  if (idleInfo) {
-    const mins = Math.round((idleInfo.idleMs / 60000) * 10) / 10;
-    const err = new Error(`claude CLI had no stream activity for ${mins} min and was killed (idle). Last tool: ${idleInfo.lastTool ? `${idleInfo.lastTool.name} ${idleInfo.lastTool.input}` : "none"}. Live children: ${idleInfo.children.map((c) => `${c.pid}:${c.cmd}`).join("; ") || "none"}`);
-    err.code = "CLI_IDLE"; err.lastTool = idleInfo.lastTool; err.children = idleInfo.children; err.idleMs = idleInfo.idleMs;
+  const sum = (k) => [...msgUsage.values()].reduce((a, u) => a + toFiniteUsageNumber(u[k]), 0);
+  const streamUsage = () => (msgUsage.size ? { input_tokens: sum("input_tokens"), output_tokens: sum("output_tokens"), cache_creation_input_tokens: sum("cache_creation_input_tokens"), cache_read_input_tokens: sum("cache_read_input_tokens") } : null);
+  if (turnInfo) {
+    const err = new Error(`claude CLI session reached its turn budget (${turnMax} turns) and was stopped`);
+    err.code = "CLI_TURNS"; err.turns = msgUsage.size; err.turnMax = turnMax; err.lastTool = turnInfo.lastTool; err.usage = streamUsage(); err.toolUses = [...toolUses.values()];
     throw err;
   }
-  return runCliBackend({ ...rest, spawnFn: () => collected });
+  if (ctxInfo) {
+    const err = new Error(`claude CLI session reached ${ctxInfo.context} context tokens (ceiling ${contextMax}) after ${msgUsage.size} turn(s) and was stopped`);
+    err.code = "CLI_CONTEXT"; err.context = ctxInfo.context; err.contextMax = contextMax; err.turns = msgUsage.size; err.lastTool = ctxInfo.lastTool;
+    err.usage = streamUsage(); err.toolUses = [...toolUses.values()];
+    throw err;
+  }
+  if (idleInfo) {
+    const mins = Math.round((idleInfo.idleMs / 60000) * 10) / 10;
+    const err = new Error(`claude CLI had no stream activity for ${mins} min and was killed (idle${idleInfo.extended ? ", after the busy extension" : ""}). Last tool: ${idleInfo.lastTool ? `${idleInfo.lastTool.name} ${idleInfo.lastTool.input}` : "none"}. Live children: ${idleInfo.children.map((c) => `${c.pid}:${c.cmd}`).join("; ") || "none"}`);
+    err.code = "CLI_IDLE"; err.lastTool = idleInfo.lastTool; err.children = idleInfo.children; err.idleMs = idleInfo.idleMs;
+    err.extended = idleInfo.extended; err.heavyQueue = idleInfo.heavyQueue;
+    throw err;
+  }
+  const r = runCliBackend({ ...rest, spawnFn: () => collected });
+  // #4395: the session baseline is the first assistant turn's context (system prompt, tools, instructions, first prompt).
+  const first = msgUsage.values().next().value;
+  if (stream && toolUses.size && r && typeof r === "object") r.toolUses = [...toolUses.values()];
+  if (first && r && typeof r === "object") r.baselineTokens = toFiniteUsageNumber(first.input_tokens) + toFiniteUsageNumber(first.cache_read_input_tokens) + toFiniteUsageNumber(first.cache_creation_input_tokens);
+  return r;
 }
 
 // ---------------------------------------------------------------------------
