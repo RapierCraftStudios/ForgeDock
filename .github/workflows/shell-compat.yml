@@ -136,6 +136,7 @@ jobs:
       - name: Run trusted-comments.test.sh
         run: |
           bash scripts/trusted-comments.test.sh
+          bash scripts/refresh-bot-token.test.sh
           bash scripts/remediation-marker-match.test.sh
           bash scripts/architect-resume-match.test.sh
           bash scripts/builder-resume-match.test.sh

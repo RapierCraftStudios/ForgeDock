@@ -1351,6 +1351,25 @@ describe("pickPhase", () => {
       assert.equal(await openDependency(42, io({ 42: rec({ body: dep, author_association: "NONE" }), 7: rec() }, calls)), null);
       assert.equal(calls.length, 1);
     });
+
+    it("#4506 every #N on an and-joined line with parenthetical text is checked", async () => {
+      const body = "Depends on #8 (schema) and #7 (api).";
+      assert.deepEqual(await openDependency(42, io({ 42: rec({ body }), 8: rec({ state: "closed" }), 7: rec() })), { open: [7] });
+    });
+
+    it("release review #4515: only the leading #N list counts; trailing prose, notes and code spans add no edge", async () => {
+      const { parseDependsOn } = await import("../engine/phases.mjs");
+      const cases = [
+        ["Depends on #36648 (action results must reach) and #36649 (the included action budget)", [36648, 36649]],
+        ["Depends on #36651 (executor test harness) and #36648.", [36651, 36648]],
+        ["- Depends on: #7 and #8", [7, 8]], ["**Depends on**: #7, and #8", [7, 8]], ["Depends on #7 & #9", [7, 9]],
+        ["Depends on #5. Fixes #99", [5]], ["- Blocked by #4 — see PR #77", [4]], ["Depends on #5 (supersedes #3, closed)", [5]],
+        ["Depends on: #5 — see #99 for background", [5]], ["Blocked by #3 (fixes #77)", [3]], ["Depends on #4. Note: unrelated to #12.", [4]],
+        ["Depends on #4 `#8`", [4]], ["Depends on #5 (not #9, see `#12`)", [5]],
+      ];
+      for (const [body, want] of cases) assert.deepEqual(parseDependsOn(body, null), want, body);
+    });
+
     it("#4121 every declaration form is honoured: unbolded, no colon, Blocked by, several numbers", async () => {
       for (const body of ["depends on #7", "**Depends on** #7", "Depends on #8, #7", "- Blocked by: #7", "**Blocked by:** #7 — why"])
         assert.deepEqual(await openDependency(42, io({ 42: rec({ body }), 7: rec(), 8: rec({ state: "closed" }) })), { open: [7] }, body);

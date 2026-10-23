@@ -24,6 +24,9 @@
  * Shutdown (#4454): `close()` aborts every hosted batch's `signal` (its loop admits nothing more and leaves, lanes keep
  * running, no report is written), waits for them up to `stopMs`, and only then releases `schedd.lock` and the socket, so a
  * daemon started next never resumes a batch this one still dispatches. `exitOnSignals` exits 128+signo after that.
+ * Exit reasons (#4503): every exit logs a line: `idle, exiting`, `exiting (<signal>|uncaught: …)`, `lost lock|socket …,
+ * exiting` (checked every `lockCheckMs`: the lock no longer holds this pid, or the socket is gone; nothing it does not own
+ * is removed), then `exited (code N)`. Taking over a dead owner's lock is logged, so a SIGKILLed daemon leaves a trace.
  * `runBatch({argv, cwd, env, sink, keepBreaker, signal})` is injected (engine-cli `runBatch`); `sink` gets `batch(b)`, `row(r)`, `line(text)`.
  */
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
@@ -35,6 +38,7 @@ import { batchRoot, listBatches, openBatch } from "./batch.mjs";
 
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
+export const LOCK_CHECK_MS = 5 * 1000;
 
 export function scheddPaths(dir = schedDir()) {
   return { dir, sock: join(dir, "schedd.sock"), lock: join(dir, "schedd.lock"), log: join(dir, "schedd.log") };
@@ -54,17 +58,19 @@ export function mergeEnv(base, kept) {
   return { ...out, ...kept };
 }
 
-/** Take the daemon lock; null when another live daemon holds it. */
+/** Take the daemon lock: `{took}` (the dead owner's pid it replaced, or null); null when another live daemon holds it. */
 function takeLock(lock, pid, alive) {
+  let took = null;
   for (let i = 0; i < 5; i++) {
     try {
       const fd = openSync(lock, "wx");
       try { writeSync(fd, String(pid)); } finally { closeSync(fd); }
-      return true;
+      return { took };
     } catch (e) { if (e?.code !== "EEXIST") throw e; }
     let owner = NaN;
     try { owner = parseInt(readFileSync(lock, "utf8"), 10); } catch { continue; }
     if (Number.isInteger(owner) && owner !== pid && alive(owner)) return null;
+    if (Number.isInteger(owner) && owner !== pid) took = owner;
     rmSync(lock, { force: true });
   }
   return null;
@@ -74,10 +80,13 @@ function takeLock(lock, pid, alive) {
  * Start the daemon. @returns {Promise<{running:true, pid, close, closed:Promise} | {running:false, owner:number}>}
  */
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
-  root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS } = {}) {
+  root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
+  lockCheckMs = LOCK_CHECK_MS } = {}) {
   const p = scheddPaths(dir);
   mkdirSync(dir, { recursive: true });
-  if (!takeLock(p.lock, pid, alive)) {
+  const lock = takeLock(p.lock, pid, alive);
+  if (lock?.took) log(`schedd: took over the lock of dead pid ${lock.took} (it exited without a clean shutdown)`);
+  if (!lock) {
     let owner = NaN;
     try { owner = parseInt(readFileSync(p.lock, "utf8"), 10); } catch { /* gone */ }
     log(`schedd: already running (pid ${owner})`);
@@ -88,7 +97,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   const hosted = new Map(); // batch id -> {id, dir, subs:Set<fn>}
   const conns = new Set();
   const runs = new Map(); // every runBatch in flight (hosted or not yet started) -> its AbortController (#4454)
-  let closing = null, resolveClosed;
+  const starting = new Map(); // batch id -> host() promise of a start-up resume not yet hosted (#4503: an attach waits for it)
+  let closing = null, resolveClosed, keepSock = false;
   let lastActive = Date.now();
   const touch = () => { lastActive = Date.now(); };
 
@@ -143,6 +153,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       return send({ type: "batch", id: ent.id, dir: ent.dir });
     }
     if (req.op === "attach") {
+      if (!hosted.has(req.id) && starting.has(req.id)) await starting.get(req.id).catch(() => {});
       const live = hosted.get(req.id);
       if (live) {
         // Synchronous read + subscribe: no row is lost or doubled between the replay and the live stream.
@@ -191,6 +202,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   const close = () => {
     if (closing) return closing;
     clearInterval(idleTimer);
+    clearInterval(lockTimer);
     for (const c of conns) c.destroy();
     const stopping = [...runs.keys()];
     for (const ac of runs.values()) ac.abort();
@@ -198,9 +210,11 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     // #4454: the lock goes only once every hosted batch loop has stopped (or `stopMs` passed: the caller exits regardless)
     const stopped = stopping.length ? Promise.race([Promise.allSettled(stopping).then(() => true), new Promise((r) => { timer = setTimeout(() => r(false), stopMs); })])
       .then((ok) => { clearTimeout(timer); if (!ok) log(`schedd: ${runs.size} batch(es) did not stop within ${stopMs} ms`); }) : Promise.resolve();
-    closing = Promise.all([new Promise((r) => server.close(() => r())), stopped]).then(() => {
+    // A lost lock: the socket path may be the successor's, and closing the server unlinks it (libuv), so leave it unref'd.
+    const serverClosed = keepSock ? Promise.resolve(server.unref()) : new Promise((r) => server.close(() => r()));
+    closing = Promise.all([serverClosed, stopped]).then(() => {
       try { if (parseInt(readFileSync(p.lock, "utf8"), 10) === pid) rmSync(p.lock, { force: true }); } catch { /* gone */ }
-      rmSync(p.sock, { force: true });
+      if (!keepSock) rmSync(p.sock, { force: true });
       resolveClosed();
     });
     return closing;
@@ -209,6 +223,15 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     if (!hosted.size && !conns.size && Date.now() - lastActive >= idleMs) { log("schedd: idle, exiting"); close(); }
   }, Math.min(idleMs, 30_000));
   idleTimer.unref?.();
+  // #4503: a daemon whose lock or socket was taken stops (its batches stay resumable) instead of running unreachable.
+  const lockTimer = setInterval(() => {
+    if (closing) return;
+    let owner = NaN;
+    try { owner = parseInt(readFileSync(p.lock, "utf8"), 10); } catch { /* gone */ }
+    if (owner !== pid) { keepSock = true; log(`schedd: lost lock (owner ${Number.isInteger(owner) ? `pid ${owner}` : "none"}), exiting`); close(); }
+    else if (!existsSync(p.sock)) { log(`schedd: lost socket ${p.sock}, exiting`); close(); }
+  }, lockCheckMs);
+  lockTimer.unref?.();
 
   // Daemon restart: resume every daemon-hosted batch that never wrote its report; live lanes are re-adopted.
   if (resumeOnStart) {
@@ -216,22 +239,35 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const b = openBatch(root, id);
       if (!b.readPlan()?.daemon || b.readReport()) continue;
       log(`schedd: resuming batch ${id}`);
-      host({ argv: ["--resume", id], cwd: process.cwd(), env: {}, keepBreaker: true }).catch((e) => log(`schedd: resume ${id} failed: ${e?.message ?? e}`));
+      const started = host({ argv: ["--resume", id], cwd: process.cwd(), env: {}, keepBreaker: true });
+      starting.set(id, started);
+      started.catch((e) => log(`schedd: resume ${id} failed: ${e?.message ?? e}`)).finally(() => starting.delete(id));
     }
   }
   return { running: true, pid, sock: p.sock, close, closed };
 }
 
-/** #4454: on SIGTERM/SIGINT stop the daemon (`close()`: batch loops first, then lock and socket), then exit 128+signo, once. */
-export function exitOnSignals(d, { on = (s, f) => process.once(s, f), exit = (c) => process.exit(c), signals = ["SIGTERM", "SIGINT"] } = {}) {
-  const SIGNO = { SIGINT: 2, SIGTERM: 15 };
+/**
+ * #4454: on SIGTERM/SIGINT/SIGHUP stop the daemon (`close()`: batch loops first, then lock and socket), then exit 128+signo,
+ * once; an uncaught exception or unhandled rejection does the same and exits 1. #4503: each logs its reason first, and the
+ * process `exit` logs `schedd: exited (code N)`.
+ */
+export function exitOnSignals(d, { on = (s, f) => (s.startsWith("SIG") || s === "exit" ? process.once(s, f) : process.on(s, f)),
+  exit = (c) => process.exit(c), log = (m) => console.log(m), signals = ["SIGTERM", "SIGINT", "SIGHUP"] } = {}) {
+  const SIGNO = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 };
   let fired = false;
-  for (const sig of signals) on(sig, async () => {
+  const stop = async (reason, code, detail = null) => {
     if (fired) return;
     fired = true;
+    log(`schedd: exiting (${reason})`);
+    if (detail) log(detail);
     try { await d.close(); } catch { /* exit anyway */ }
-    exit(128 + (SIGNO[sig] ?? 0));
-  });
+    exit(code);
+  };
+  for (const sig of signals) on(sig, () => stop(sig, 128 + (SIGNO[sig] ?? 0)));
+  on("uncaughtException", (e) => stop(`uncaught: ${String(e?.message ?? e).split("\n")[0]}`, 1, e?.stack ?? null));
+  on("unhandledRejection", (e) => stop(`unhandled rejection: ${String(e?.message ?? e).split("\n")[0]}`, 1, e?.stack ?? null));
+  on("exit", (code) => log(`schedd: exited (code ${code})`));
 }
 
 /** Connect to the daemon, spawning it (`spawnDaemon()`) when nobody listens. @returns {Promise<import("node:net").Socket>} */

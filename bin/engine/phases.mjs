@@ -309,19 +309,40 @@ async function readIssueRecord(n, io) {
 }
 
 // A declaration line: optional list marker, optional bold, "Depends on" or "Blocked by" (any case), optional colon
-// inside or after the bold, then one or more `#N` separated by commas, "and", "&" or spaces (#4121).
-const DEPENDS_ON_RE = /^[ \t]*(?:[-*+][ \t]+)?(?:\*\*|__)?(?:depends on|blocked by)[ \t]*:?(?:\*\*|__)?[ \t]*:?[ \t]*(#\d+\b(?:[ \t]*(?:,|&|\band\b)?[ \t]*#\d+\b)*)/gim;
+// inside or after the bold, then a list of `#N` (#4121, #4506). The list is `#N` items joined by `,` `&` `and` `or`
+// (each item may carry a parenthetical note, whose own `#N` are prose); any other text ends it, so a trailing
+// "see #99", "Fixes #12", a code span or a sentence never adds an edge (release review #4515).
+const DEPENDS_ON_RE = /^[ \t]*(?:[-*+][ \t]+)?(?:\*\*|__)?(?:depends on|blocked by)[ \t]*:?(?:\*\*|__)?[ \t]*:?[ \t]*(#\d+\b[^\n]*)/gim;
+const DEP_ITEM_RE = /^(?<![\w/])#(\d+)\b(?:[ \t]*\([^()\n]*\))?/;
+const DEP_JOIN_RE = /^[ \t]*(?:,[ \t]*(?:(?:and|or)\b[ \t]*)?|&[ \t]*|(?:and|or)\b[ \t]*)/i;
+
+/** The `#N` list at the start of a declaration's tail: items and joiners only, stopping at the first other text. */
+function dependsOnList(tail) {
+  const out = [];
+  let rest = tail;
+  for (;;) {
+    const item = DEP_ITEM_RE.exec(rest);
+    if (!item) break;
+    out.push(Number(item[1]));
+    rest = rest.slice(item[0].length);
+    const join = DEP_JOIN_RE.exec(rest);
+    if (!join || !/^#\d/.test(rest.slice(join[0].length))) break;
+    rest = rest.slice(join[0].length);
+  }
+  return out;
+}
 
 /**
  * Issue numbers an issue body declares it waits on: `**Depends on**: #X`, `**Depends on** #X, #Y`, `Depends on #X`,
- * `- Depends on: #X and #Y`, `Blocked by #X`. Only declaration lines count; a mid-line mention is prose. Shared by the
- * engine's admission (`openDependency`) and `forgedock orchestrate` so both agree on what blocks what.
+ * `- Depends on: #X and #Y`, `Depends on #X (why) and #Y (why)`, `Blocked by #X`. Only declaration lines count, and on
+ * them only the leading `#N` list; a mid-line or trailing mention is prose. Shared by the engine's admission
+ * (`openDependency`) and `forgedock orchestrate` so both agree on what blocks what.
  * @returns {number[]} unique, positive, never `issue` itself
  */
 export function parseDependsOn(body, issue = null) {
   const out = new Set();
   for (const m of String(body ?? "").replace(/\r\n/g, "\n").matchAll(DEPENDS_ON_RE)) {
-    for (const r of m[1].matchAll(/#(\d+)/g)) out.add(Number(r[1]));
+    for (const n of dependsOnList(m[1])) out.add(n);
   }
   return [...out].filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue));
 }
@@ -329,8 +350,8 @@ export function parseDependsOn(body, issue = null) {
 /**
  * forge#3932: does the issue declare a `Depends on` / `Blocked by` dependency that is still OPEN?
  * Honoured only when the issue BODY's author is trusted (`isTrustedComment`: OWNER/MEMBER/COLLABORATOR,
- * Bot, or FORGE_TRAIL_TRUSTED_LOGINS) and only for a declaration line `parseDependsOn` accepts (mid-line
- * prose is ignored). A self-reference is ignored. Returns `null` (nothing blocking), `{ open: [N, ...] }`, or `{ unreadable: true, detail }`
+ * Bot, or FORGE_TRAIL_TRUSTED_LOGINS) and only for a declaration line's leading `#N` list as `parseDependsOn` reads it (mid-line
+ * and trailing prose is ignored). A self-reference is ignored. Returns `null` (nothing blocking), `{ open: [N, ...] }`, or `{ unreadable: true, detail }`
  * when the issue or a declared dependency cannot be read (fail closed: the caller refuses the run).
  * An empty read of the issue itself means "no body to trust" and yields `null`.
  */

@@ -181,7 +181,10 @@ export async function waitLane({ batch, issue, pid, alive = isLaneAlive, sleep =
   }
 }
 
-/** Lane seams for `orchestrate()`: `runOne` launches a detached lane, `adopt` re-attaches to a live one (else null). */
+/**
+ * Lane seams for `orchestrate()`: `runOne` launches a detached lane, `adopt` re-attaches to a live one (else null). A lane
+ * that already ended resolves at once with its result file; a live one calls `ctx.onLive()` before it is awaited (#4504).
+ */
 export function detachedLanes({ batch, laneArgs, script, cwd, env, bin, alive = isLaneAlive, pollMs, spawnFn }) {
   return {
     runOne: async (n, lane, ctx = {}) => {
@@ -189,9 +192,12 @@ export function detachedLanes({ batch, laneArgs, script, cwd, env, bin, alive = 
       ctx.onStart?.({ pid });
       return waitLane({ batch, issue: n, pid, alive, pollMs });
     },
-    adopt: async (n, rec) => {
+    adopt: async (n, rec, ctx = {}) => {
       const rf = batch.resultFile(n);
-      if (!existsSync(rf) && !alive(rec.pid, rf)) return null;
+      if (!existsSync(rf)) {
+        if (!alive(rec.pid, rf)) return null;
+        ctx.onLive?.();
+      }
       return waitLane({ batch, issue: n, pid: rec.pid, alive, pollMs });
     },
   };
