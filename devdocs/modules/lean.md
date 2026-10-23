@@ -182,6 +182,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `cat` / `sed -n` / `head` / `tail` operand (grep is not counted). `makeLeanRunner` returns it as `tools`, and
    `PHASE_ATTEMPT_USAGE` carries `tools` when present. This is a local run-log field only: the telemetry seam does not
    map it.
+   **Re-read nudge** (#4456): the builder session (`builderOnce`, full and light lane) runs with `rereadNudge: true`, and
+   `makeLeanRunner` appends `rereadNudgeFlags()`: `--settings` registering `bin/hooks/reread-nudge.mjs` as a PostToolUse
+   hook on `Read|Bash` (reviewer, verifier and grouper sessions are unchanged). The hook counts reads per path with
+   toolstats `readPaths` (resolved against the session cwd) in `<tmpdir>/forgedock-reread/<session_id>.json`, and on
+   exactly the `REREAD_MIN` (3rd) read returns an `additionalContext` reminder to use notes or the excerpt already in
+   context. Advisory and fail-open: always exit 0, no output on error. Its effect is read off `forgedock stats
+   --efficiency` `rereads_per_merge`.
    **Quiet output** (#4390): `HOST_RULES` tells the builder to run tests quiet, read failures as `tail -40` + failing test
    ids, read files by range and send output that may pass 8 KB to a `$TMPDIR` file. `precheck.mjs` `quietFailure`
    (last 40 lines within the char share, failing-test-id lines by pytest/TAP/jest/vitest/go/cargo markers, `full log:`
