@@ -815,6 +815,15 @@ the old path with no extra calls. The pack never enters `issueText`, and neither
 the bot's `FORGE:CONTEXT` comment (#4297), so contract quotes stay issue-only. `forgedock stats --context-ab` reports first-pass yield,
 builder turns, cache tokens and cost per lane type and mode; the default moves to
 `on` only once that A/B shows a win.
+`ab` (#4444) runs the experiment: `contextArm` (context.mjs) hashes `repo#issue`
+(sha256, first byte parity) to a stable `on` or `shadow` arm, so reruns stay in
+their arm. The lane uses the arm as its effective mode, logs it as `context_pack` /
+`CONTEXT_PACK.mode` (never `ab`) and tags `context_ab: true` on both events. The
+default stays `shadow`. `--context-ab` also reports, per cell, merged n, builder turns
+and cache-read per merge and the rework rate (remediated, after an earlier merge,
+or a rerun lane). `recovery` pairs each rerun's implement attempt (builder calls
+other than the plan call) with the first/child run of the same issue (its own log's
+earlier slice, else the earliest such run) as mean turn and output-token ratios.
 
 ## Entry 2026-10-20 — Resource hygiene: preflight and admission GC (#4183)
 

@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
-import { gatherContextFacts, compileContextPack, contextPackFor, contextPackCacheKey, linkStateStamp, LINK_STAMP_MAX, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments } from "./context.mjs";
+import { gatherContextFacts, compileContextPack, contextPackFor, contextArm, contextPackCacheKey, linkStateStamp, LINK_STAMP_MAX, parseContextPackConfig, laneType, priorAttempts, issueSymbols, bodyLinks, parentOf, renderContextRecord, DEFAULT_CONTEXT_BYTES, noComments } from "./context.mjs";
 
 const REPO = "o/r";
 const BOT = { author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
@@ -357,6 +357,23 @@ describe("#4298 context-pack cache and shared names", () => {
     assert.equal(warns.length, 1, "a valid mode does not warn");
     writeFileSync(`${d}/forge.yaml`, "engine:\n  context_pack_pitfall_lanes: 20\n");
     assert.deepEqual(readContextPack(d, (m) => warns.push(m)), { pitfallLanes: 20 }, "#4375: the pitfall aging window");
+  });
+
+  it("#4444: ab is a valid mode, and contextArm gives each issue a stable on|shadow arm", async () => {
+    const { readContextPack } = await import("../engine-cli.mjs");
+    const { tmpDir } = await import("../tests/_tmp.mjs");
+    const { writeFileSync } = await import("node:fs");
+    const d = tmpDir("ctxab-"), warns = [];
+    writeFileSync(`${d}/forge.yaml`, "engine:\n  context_pack: ab\n");
+    assert.deepEqual(readContextPack(d, (m) => warns.push(m)), { mode: "ab" });
+    assert.equal(warns.length, 0);
+    assert.equal(parseContextPackConfig({ mode: "AB" }).mode, "ab");
+    assert.equal(parseContextPackConfig({}).mode, "shadow", "the default stays shadow");
+    for (const mode of ["shadow", "on", "off"]) assert.deepEqual(contextArm({ mode, repo: "o/r", issue: 1 }), { mode, ab: false });
+    const arms = Array.from({ length: 40 }, (_, i) => contextArm({ mode: "ab", repo: "o/r", issue: i + 1 }));
+    assert.ok(arms.every((a) => a.ab && ["on", "shadow"].includes(a.mode)));
+    assert.ok(arms.some((a) => a.mode === "on") && arms.some((a) => a.mode === "shadow"), "both arms are populated");
+    assert.deepEqual(contextArm({ mode: "ab", repo: "O/R", issue: 7 }), contextArm({ mode: "ab", repo: "o/r", issue: 7 }), "stable per issue");
   });
 });
 

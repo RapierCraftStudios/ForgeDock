@@ -125,7 +125,7 @@ const warnedContextPack = new Set();
 const stderrWarn = (m) => { if (!warnedContextPack.has(m)) { warnedContextPack.add(m); process.stderr.write(`${m}\n`); } };
 /**
  * forge.yaml context pack (#4275), flat keys under `engine` (the parser flattens one level): `context_pack`
- * (shadow|on|off), `context_pack_sources` (comma list of graph,attempts,ledger,facts), `context_pack_bytes`,
+ * (shadow|on|off|ab, #4444), `context_pack_sources` (comma list of graph,attempts,ledger,facts), `context_pack_bytes`,
  * `context_pack_days`. undefined when none is set (the core defaults to shadow). An invalid mode warns through `warn`
  * (stderr, once per message per process) and is dropped; the other keys are kept (#4298).
  */
@@ -133,8 +133,8 @@ export function readContextPack(cwd = process.cwd(), warn = stderrWarn) {
   try {
     const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine ?? {};
     let mode = String(e.context_pack ?? "").trim().toLowerCase();
-    if (mode && !["shadow", "on", "off"].includes(mode)) {
-      warn(`forge.yaml engine.context_pack: invalid mode "${mode}" (expected shadow|on|off); using the default, other context_pack_* keys kept`);
+    if (mode && !["shadow", "on", "off", "ab"].includes(mode)) {
+      warn(`forge.yaml engine.context_pack: invalid mode "${mode}" (expected shadow|on|off|ab); using the default, other context_pack_* keys kept`);
       mode = "";
     }
     const out = { ...(mode ? { mode } : {}), ...(e.context_pack_sources != null ? { sources: String(e.context_pack_sources) } : {}),
