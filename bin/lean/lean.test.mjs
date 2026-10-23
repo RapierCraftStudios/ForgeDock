@@ -5924,6 +5924,16 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     });
   }
 
+  it("#4453 the run result carries light, the eligibility verdict and the upgrade reason codes (for the three-way bench)", async () => {
+    const lit = await run(lworld(), { dir: tmpDir("light-res-"), ...ON });
+    assert.equal(lit.light, true); assert.equal(lit.light_eligibility, "eligible"); assert.ok(!("light_upgrade" in lit));
+    const up = await run(lworld({ repro: { base: "PASSED", head: "RAN" } }), { dir: tmpDir("light-res-up-"), ...ON });
+    assert.equal(up.light, false); assert.equal(up.light_eligibility, "eligible"); assert.ok(up.light_upgrade.includes("repro_not_red"), JSON.stringify(up.light_upgrade));
+    const off = await run(lworld(), { dir: tmpDir("light-res-off-"), light: { mode: "off" } });
+    assert.equal(off.light, false); assert.equal(off.light_eligibility, "off"); assert.ok(!("light_upgrade" in off));
+    assert.equal(typeof off.cost_usd, "number"); assert.ok(Number.isFinite(off.wall_ms) && Number.isFinite(off.model_ms), "#4451 fields unchanged");
+  });
+
   it("shadow (the default) only reports the verdict: the lane keeps plan -> implement", async () => {
     const w = lworld(), dir = tmpDir("light-sh-");
     assert.equal((await run(w, { dir })).terminalReason, "merged");
