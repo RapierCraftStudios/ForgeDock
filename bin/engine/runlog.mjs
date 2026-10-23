@@ -1,17 +1,21 @@
 /**
  * Append-only per-issue run-log (the crash-safe local hot path).
- * One JSON event per line at {dir}/{issue}.jsonl. seq is assigned monotonically.
+ * One JSON event per line at {dir}/{owner}__{repo}__{issue}.jsonl (#4432: issue numbers are per repo), or the legacy
+ * {dir}/{issue}.jsonl when no repo is given. seq is assigned monotonically.
  */
-import { readFileSync, appendFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, appendFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
-function logPath(dir, issue) { return join(dir, `${issue}.jsonl`); }
+const segment = (s) => { const v = String(s ?? "").replace(/[^A-Za-z0-9._-]/g, "_"); return !v || /^\.+$/.test(v) ? "_" : v; };
+/** #4432: `<owner>__<repo>__<issue>` with a repo (same scheme as pitfalls.mjs), else the legacy `<issue>`. */
+export const runLogKey = (issue, repo = null) => (repo ? `${String(repo).split("/").map(segment).join("__")}__${issue}` : String(issue));
+export function runLogPath(dir, issue, repo = null) { return join(dir, `${runLogKey(issue, repo)}.jsonl`); }
 
-/** Append an event; assigns the next seq based on the current line count. */
-export function appendEvent(dir, issue, event) {
+/** Append an event; assigns the next seq based on the current line count (of the repo file only). */
+export function appendEvent(dir, issue, event, { repo = null } = {}) {
   mkdirSync(dir, { recursive: true });
-  const path = logPath(dir, issue);
-  const seq = readLog(dir, issue).length + 1;
+  const path = runLogPath(dir, issue, repo);
+  const seq = parseLog(path).length + 1;
   // forge#3696: wall-clock ISO-8601 `ts` on every appended event. Placed before the
   // spread so a caller-supplied `ts` wins. rewriteLog() deliberately does not stamp:
   // a hydrated rewrite time would be a false timestamp. Old logs lack `ts` and still parse.
@@ -23,16 +27,39 @@ export function appendEvent(dir, issue, event) {
  * Used to reconstruct the local log from a remote FORGE:STATE index on
  * hydrate (C2), so the local log and the GitHub-wins state stay consistent.
  */
-export function rewriteLog(dir, issue, events) {
+export function rewriteLog(dir, issue, events, { repo = null } = {}) {
   mkdirSync(dir, { recursive: true });
-  const path = logPath(dir, issue);
+  const path = runLogPath(dir, issue, repo);
   const lines = events.map((e, i) => JSON.stringify({ seq: i + 1, ...e }));
   writeFileSync(path, lines.length ? lines.join("\n") + "\n" : "");
 }
 
-/** Read all complete events; a truncated final line (crash mid-write) is ignored. */
-export function readLog(dir, issue) {
-  const path = logPath(dir, issue);
+/**
+ * Read all complete events; a truncated final line (crash mid-write) is ignored.
+ * #4432: with a repo whose file does not exist yet, the legacy `<issue>.jsonl` slices of that repo are returned
+ * (read fallback for one release: remove after one release, together with migrateRunLogs).
+ */
+export function readLog(dir, issue, { repo = null } = {}) {
+  const path = runLogPath(dir, issue, repo);
+  if (repo && !existsSync(path)) return repoSlices(parseLog(runLogPath(dir, issue)), repo);
+  return parseLog(path);
+}
+
+/** The RUN_START slices of `events` whose RUN_START.repo is `repo` (events before the first RUN_START excluded). */
+function repoSlices(events, repo) {
+  let cur = null;
+  const out = [];
+  for (const e of events) {
+    if (e.event === "RUN_START") cur = e.repo ?? null;
+    if (cur != null && cur === repo) out.push(e);
+  }
+  return out;
+}
+
+/** #4432: the events of one run-log file by path (for enumerators that list the dir); same parse rules as readLog. */
+export const readLogFile = (path) => parseLog(path);
+
+function parseLog(path) {
   if (!existsSync(path)) return [];
   const lines = readFileSync(path, "utf-8").split("\n");
   // Drop trailing empty lines to find the last non-empty line.
@@ -53,6 +80,49 @@ export function readLog(dir, issue) {
     }
   }
   return out;
+}
+
+/**
+ * #4432: split each legacy `<issue>.jsonl` (shared by every repo on the host) into the repo files by RUN_START.repo.
+ * The file is claimed by an atomic rename (one winner); migrated slices go before any events already in the repo
+ * file, seq renumbered 1..n (appendEvent derives seq from the line count), other fields kept. Slices without a repo
+ * (and events before the first RUN_START) stay in `<issue>.jsonl`. Idempotent, never throws. Remove after one release.
+ */
+export function migrateRunLogs(dir) {
+  const res = { files: 0, slices: 0, kept: 0 };
+  let names = [];
+  try { names = readdirSync(dir); } catch { return res; }
+  for (const f of names) {
+    const m = /^(\d+)\.jsonl$/.exec(f);
+    if (!m) continue;
+    const legacy = join(dir, f), claim = `${legacy}.migrating-${process.pid}`;
+    try { renameSync(legacy, claim); } catch { continue; } // another process won, or it is gone
+    try {
+      let events = [];
+      try { events = parseLog(claim); } catch { renameSync(claim, legacy); continue; } // corrupt: leave as it was
+      const byRepo = new Map(), kept = [];
+      let cur = null;
+      for (const e of events) {
+        if (e.event === "RUN_START") { cur = e.repo ?? null; if (cur) { byRepo.set(cur, byRepo.get(cur) ?? []); res.slices++; } else res.kept++; }
+        (cur ? byRepo.get(cur) : kept).push(e);
+      }
+      for (const [repo, evs] of byRepo) {
+        const target = runLogPath(dir, m[1], repo), tmp = `${target}.tmp-${process.pid}`;
+        const all = [...evs, ...parseLog(target)].map(({ seq, ...e }, i) => JSON.stringify({ seq: i + 1, ...e }));
+        writeFileSync(tmp, all.join("\n") + "\n");
+        renameSync(tmp, target);
+      }
+      if (kept.length) {
+        const n = parseLog(legacy).length; // a repo-less writer may have recreated it meanwhile
+        appendFileSync(legacy, kept.map(({ seq, ...e }, i) => JSON.stringify({ seq: n + i + 1, ...e })).join("\n") + "\n");
+      }
+      unlinkSync(claim);
+      res.files++;
+    } catch {
+      try { if (existsSync(claim)) renameSync(claim, legacy); } catch { /* best effort */ }
+    }
+  }
+  return res;
 }
 
 /** Fold events into a RunState. The commit rule lives here. */

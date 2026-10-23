@@ -453,6 +453,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 
 ## Other files
 
+`apishape.mjs` (public-API-shape change detector for the light lane, #4449; see its entry below),
 `checks.mjs` (change-scoped typecheck/lint/test commands and shared tsc/eslint caches, #4218),
 `postmerge.mjs` (base-sync post-merge commands and same-app duplicate exports, #4406),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
@@ -1394,6 +1395,44 @@ as `estimates` (only with the hook); a failing hook is the M default. A settled 
 `formatEstimateSummary` adds the batch-report line `estimates: N lanes, est X min vs actual Y min; median |error| Z min;
 worst #n …`. Cost: 0 LLM calls; one local run-log read per batch. Tests: `bin/lean/sched.test.mjs` "longest-first
 admission (#4409)", including a virtual-clock replay of the 2026-10-22 batch shape.
+
+## Entry 2026-10-23 — Run logs and lane ledgers keyed by repo (#4432)
+
+Issue numbers are per repo, but `~/.forge/runs` and `~/.forge/ledger` are per host. The run log is now
+`<owner>__<repo>__<N>.jsonl` (`engine/runlog.mjs` `runLogPath`, the `owner__repo` scheme of `pitfalls.mjs`);
+`appendEvent`/`readLog`/`rewriteLog` take an optional `{ repo }` and keep the legacy `<N>.jsonl` without one (the
+interactive hook logs under `<cwd>/.forgedock/run-logs`, already per checkout). Both paths pass the repo: runCore its
+`repo`, the full path `resolveRepo()` before its first read. Read fallback for one release: a repo with no file yet reads
+the legacy file's RUN_START slices of that repo. `migrateRunLogs(dir)` runs at `run-issue` and `orchestrate` start: it
+claims each legacy `<N>.jsonl` by an atomic rename, moves repo slices into the repo files (before any events already
+there, seq renumbered), keeps repo-less slices in `<N>.jsonl`, never throws. `lastLocalRun`, `readLocalRuns`/`readLanes`
+and `efficiency` read the new names. The adhoc lane ledger was `adhoc/lean-<N>.json` for every repo, so one lane's
+teardown could act on another repo's resources: `makeLedger({ repo })` now writes `<batch>/<owner>__<repo>__<lane>.json`
+(the `lane` field and gc are unchanged; old files age out by TTL). The context-pack cache name and prune prefix carry the
+repo too. Audit: leases (FORGE:STATE on the repo's issue), worktrees (under the checkout), depcache (`<repoKey>/`), the
+sequence lease and sched keys were already repo-scoped. Cost: 0 LLM calls; one dir scan per run-issue/orchestrate start.
+
+## Entry 2026-10-23 — Public API-shape detector (#4449)
+
+`apishape.mjs` adds a deterministic check for API drift such as the more-itertools `ichunked` generator→function
+change from #4442. `detectApiShape({ cwd, base, head })` and the CLI `node bin/lean/apishape.mjs <base>...<head>`
+work the same way. For every file in `git diff -M <base>...<head>`, they index the base and head blobs with
+`scripts/symbol-index.py --shape` (stdlib `ast`) or `scripts/symbol-index.mjs --shape` (the repo's own `typescript`,
+else ts-morph's). The opt-in `--shape` flag adds `async`, `generator` and a normalized `sig` to functions, methods and
+function-valued consts. The sig covers parameter kinds, names and annotation text, and marks defaults with `=` without
+their values. Default indexer output is unchanged.
+
+Public symbols are compared by name:
+- `signature`, `sync-async` or `generator-function` when the shape changes;
+- `renamed` when a vanished public symbol pairs with a new one of the same kind and shape in the same file;
+- `removed` otherwise, including public→private.
+
+Additions never report. Code with no indexer (go, rust, …) or a blob the indexer refuses (parse error, no parser) is
+`unknown`; docs, config, data, test files and `.d.ts` are skipped. Output is
+`{status: none|changed|unknown, changes[], unknown[]}`, and exit 2 means a usage error or a bad ref. The detector is
+not wired into a lane yet: #4448 takes it as one upgrade-trigger input and #4450 runs it. The JS/TS tests need
+`APISHAPE_TS_NODE_MODULES`, and CI requires them with `APISHAPE_REQUIRE_TS=1` on the ts-morph install. Cost: 0 LLM
+calls, two indexer runs per changed source file. ADR `decisions/4449-apishape-detector.md`.
 
 ## Entry 2026-10-23 — Light-lane eligibility and upgrade triggers (#4448)
 

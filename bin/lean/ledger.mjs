@@ -48,9 +48,11 @@ export function dockerLabels({ batch, lane, issue, expires } = {}) {
   return [`forgedock.owner=1`, `forgedock.batch=${v(batch)}`, `forgedock.lane=${v(lane)}`, `forgedock.issue=${v(issue)}`, `forgedock.expires=${v(expires)}`];
 }
 
-export function makeLedger({ root = ledgerRoot(), batch = "adhoc", lane, owner, issue, host = hostname(), pid = process.pid, now = () => Date.now(), ttlMs = LEDGER_TTL_MS, fs = nodeFs } = {}) {
+/** #4432: with a `repo`, the lane file is `<batch>/<owner>__<repo>__<lane>.json` (issue numbers, hence lane names, are per repo). */
+export function makeLedger({ root = ledgerRoot(), batch = "adhoc", lane, owner, issue, repo = null, host = hostname(), pid = process.pid, now = () => Date.now(), ttlMs = LEDGER_TTL_MS, fs = nodeFs } = {}) {
   const dir = join(root, safeSegment(batch));
-  const path = join(dir, `${safeSegment(lane ?? `lane-${issue}`)}.json`);
+  const repoPrefix = repo ? `${String(repo).split("/").map(safeSegment).join("__")}__` : "";
+  const path = join(dir, `${repoPrefix}${safeSegment(lane ?? `lane-${issue}`)}.json`);
   const read = () => { try { const j = JSON.parse(fs.readFileSync(path, "utf8")); return j && typeof j === "object" && Array.isArray(j.resources) ? j : null; } catch { return null; } };
   const write = (j) => {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -58,7 +60,7 @@ export function makeLedger({ root = ledgerRoot(), batch = "adhoc", lane, owner, 
     fs.writeFileSync(tmp, JSON.stringify(j, null, 2) + "\n");
     fs.renameSync(tmp, path);
   };
-  const fresh = () => { const c = now(); return { v: 1, owner, batch: String(batch), lane: String(lane ?? `lane-${issue}`), issue, host, pid, created: c, expires: c + ttlMs, resources: [] }; };
+  const fresh = () => { const c = now(); return { v: 1, owner, batch: String(batch), lane: String(lane ?? `lane-${issue}`), issue, ...(repo ? { repo: String(repo) } : {}), host, pid, created: c, expires: c + ttlMs, resources: [] }; };
   const same = (r, kind, value) => r.kind === kind && String(r.value) === String(value);
   return {
     path,

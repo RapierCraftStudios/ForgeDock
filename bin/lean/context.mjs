@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { isTrustedComment, parseDependsOn } from "../engine/phases.mjs";
 import { codeForTerminalReason } from "../engine/outcome-codes.mjs";
+import { runLogKey } from "../engine/runlog.mjs";
 import { namedPaths } from "./prefilter.mjs";
 import { parseContractComment, noComments } from "./render.mjs";
 import { REPO_FACTS_FILE, TEST_MAP_FILE } from "./testmap.mjs";
@@ -107,13 +108,13 @@ export function priorAttempts(body, comments = []) {
 }
 
 /**
- * Cache key for a compiled pack: issue + base head SHA, plus the config that shapes it and (#4298, #4304) the hash of the
+ * Cache key for a compiled pack: issue (with `repo`, #4432: repo-scoped) + base head SHA, plus the config that shapes it and (#4298, #4304) the hash of the
  * issue's human scope text (`scope`) and prior-attempt count, so an edit or a new attempt on the same base compiles a
  * fresh pack. Not `updatedAt`: the lane's own FORGE:STATE/CONTEXT posts and label edits bump it, so the cache never hit.
  * #4375: `stamp.pitfalls` (the selected pitfall signatures) joins the key, so a newly learned pitfall is never served stale.
  */
-export const contextPackCacheKey = (issue, headSha, cfg = {}, stamp = {}) =>
-  `context-${issue}-${String(headSha ?? "").trim().slice(0, 40) || "nohead"}-${hash12(JSON.stringify([cfg.sources ?? [], cfg.budgetBytes ?? null, cfg.days ?? null,
+export const contextPackCacheKey = (issue, headSha, cfg = {}, stamp = {}, repo = null) =>
+  `context-${runLogKey(issue, repo)}-${String(headSha ?? "").trim().slice(0, 40) || "nohead"}-${hash12(JSON.stringify([cfg.sources ?? [], cfg.budgetBytes ?? null, cfg.days ?? null,
     ...(stamp?.scope != null || stamp?.attempts != null ? [String(stamp.scope ?? ""), Number(stamp.attempts) || 0] : []),
     ...(stamp?.links ? [`links:${stamp.links}`] : []), ...(stamp?.pitfalls?.length ? [`pitfalls:${stamp.pitfalls.join(",")}`] : [])]))}.json`;
 
@@ -407,19 +408,19 @@ export function renderContextRecord(pack, { mode, laneType: lt }) {
  * reported source errors is not cached (#4298), the write goes through a temp file and a rename, and the issue's other
  * cached packs are pruned. A cache miss or any write/rename/prune failure is not an error.
  */
-export async function contextPackFor({ cfg, issue, headSha, cacheDir, fs, gather, stamp = {} }) {
-  const name = cacheDir && headSha ? contextPackCacheKey(issue, headSha, cfg, stamp) : null;
+export async function contextPackFor({ cfg, issue, repo = null, headSha, cacheDir, fs, gather, stamp = {} }) {
+  const name = cacheDir && headSha ? contextPackCacheKey(issue, headSha, cfg, stamp, repo) : null;
   const file = name ? join(cacheDir, name) : null;
   if (file && fs?.read) {
     try { const c = JSON.parse(await fs.read(file)); if (c?.pack && typeof c.pack.text === "string") return { ...c, cached: true }; } catch { /* miss */ }
   }
   const facts = await gather();
   const out = { pack: compileContextPack(facts, cfg), errors: facts?.errors ?? [] };
-  if (file && fs?.write && !out.errors.length) await cachePack(fs, cacheDir, file, name, issue, JSON.stringify(out));
+  if (file && fs?.write && !out.errors.length) await cachePack(fs, cacheDir, file, name, runLogKey(issue, repo), JSON.stringify(out));
   return { ...out, cached: false };
 }
 
-async function cachePack(fs, cacheDir, file, name, issue, text) {
+async function cachePack(fs, cacheDir, file, name, key, text) {
   try {
     if (typeof fs.rename === "function") {
       const tmp = `${file}.${process.pid}.tmp`;
@@ -429,7 +430,7 @@ async function cachePack(fs, cacheDir, file, name, issue, text) {
   } catch { return; /* cache is optional */ }
   if (typeof fs.list !== "function" || typeof fs.rm !== "function") return;
   try {
-    const prefix = `context-${issue}-`;
+    const prefix = `context-${key}-`;
     for (const f of await fs.list(cacheDir)) {
       if (f !== name && f.startsWith(prefix) && f.endsWith(".json")) { try { await fs.rm(join(cacheDir, f)); } catch { /* best effort */ } }
     }

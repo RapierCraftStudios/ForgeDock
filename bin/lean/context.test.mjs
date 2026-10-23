@@ -110,6 +110,21 @@ describe("context pack (forge#4275)", () => {
     assert.notEqual(contextPackCacheKey(50, "abc", cfg), contextPackCacheKey(51, "abc", cfg));
   });
 
+  it("#4432: the cache key and the prune prefix are repo-scoped, so another repo's pack for the same number survives", async () => {
+    const store = new Map();
+    const fs = { read: async (p) => { if (!store.has(p)) throw new Error("ENOENT"); return store.get(p); }, write: async (p, t) => { store.set(p, t); },
+      list: async () => [...store.keys()].map((p) => p.slice("/runs/".length)), rm: async (p) => { store.delete(p); } };
+    const cfg = parseContextPackConfig({});
+    const g = async () => gather(fakes());
+    assert.match(contextPackCacheKey(50, "abc", cfg, {}, "acme/one"), /^context-acme__one__50-abc-/);
+    assert.equal(contextPackCacheKey(50, "abc", cfg, {}), contextPackCacheKey(50, "abc", cfg), "no repo: today's key");
+    await contextPackFor({ cfg, issue: 50, repo: "acme/one", headSha: "abc", cacheDir: "/runs", fs, gather: g });
+    await contextPackFor({ cfg, issue: 50, repo: "acme/two", headSha: "def", cacheDir: "/runs", fs, gather: g });
+    assert.deepEqual([...store.keys()].map((k) => k.split("-").slice(0, 2).join("-")).sort(), ["/runs/context-acme__one__50", "/runs/context-acme__two__50"]);
+    const again = await contextPackFor({ cfg, issue: 50, repo: "acme/one", headSha: "abc", cacheDir: "/runs", fs, gather: g });
+    assert.equal(again.cached, true);
+  });
+
   it("drops whole items past the byte cap, falls back to one line for a parent body, counts truncation", async () => {
     const facts = await gather(fakes());
     const p = compileContextPack(facts, { budgetBytes: 130 });

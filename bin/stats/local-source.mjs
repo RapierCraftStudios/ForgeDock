@@ -126,7 +126,7 @@ export function readLocalRuns(dir = runsDir()) {
   for (const f of readdirSync(dir).sort()) {
     if (!f.endsWith(".jsonl")) continue;
     try {
-      const m = /^(\d+)\.jsonl$/.exec(f);
+      const m = /(?:^|__)(\d+)\.jsonl$/.exec(f); // #4432: `<issue>.jsonl` or `<owner>__<repo>__<issue>.jsonl`
       const sum = summariseLog(parseLog(readFileSync(join(dir, f), "utf8")), m ? Number(m[1]) : null);
       if (sum) runs.push({ ...sum, mtimeTs: new Date(statSync(join(dir, f)).mtimeMs).toISOString() });
     } catch { /* unreadable log */ }
@@ -166,7 +166,7 @@ export function readLanes(dir = runsDir()) {
   for (const f of readdirSync(dir).sort()) {
     if (!f.endsWith(".jsonl")) continue;
     try {
-      const m = /^(\d+)\.jsonl$/.exec(f);
+      const m = /(?:^|__)(\d+)\.jsonl$/.exec(f); // #4432: `<issue>.jsonl` or `<owner>__<repo>__<issue>.jsonl`
       const mtime = new Date(statSync(join(dir, f)).mtimeMs).toISOString();
       lanes.push(...lanesOfLog(parseLog(readFileSync(join(dir, f), "utf8")), m ? Number(m[1]) : null, mtime));
     } catch { /* unreadable log */ }
