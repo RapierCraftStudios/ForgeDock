@@ -4,7 +4,12 @@ import assert from "node:assert/strict";
 import { rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendEvent, readLog, deriveState, rewriteLog } from "../engine/runlog.mjs";
+import { appendEvent as appendRepoEvent, readLog as readRepoLog, deriveState, rewriteLog as rewriteRepoLog, runLogPath } from "../engine/runlog.mjs";
+// #4432: the full path keys its run log by repo; this file's fake gh answers `repo view` with acme/widgets.
+const LOG_REPO = { repo: "acme/widgets" };
+const readLog = (dir, issue) => readRepoLog(dir, issue, LOG_REPO);
+const appendEvent = (dir, issue, e) => appendRepoEvent(dir, issue, e, LOG_REPO);
+const rewriteLog = (dir, issue, events) => rewriteRepoLog(dir, issue, events, LOG_REPO);
 import { runIssue } from "../engine.mjs";
 import { serializeState } from "../engine/state.mjs";
 import { asComments, inv as investigationComment, ctx, arch, builder, remediation, decomposed } from "./helpers/comments.mjs";
@@ -71,7 +76,7 @@ describe("runlog", () => {
 
   it("readLog tolerates a truncated final line (crash mid-write)", () => {
     appendEvent(dir, 42, { event: "RUN_START", issue: 42 });
-    appendFileSync(join(dir, "42.jsonl"), '{"seq":2,"event":"PHA'); // no newline, partial JSON
+    appendFileSync(runLogPath(dir, 42, LOG_REPO.repo), '{"seq":2,"event":"PHA'); // no newline, partial JSON
     const events = readLog(dir, 42);
     assert.equal(events.length, 1); // partial final line ignored
   });
@@ -108,8 +113,8 @@ describe("runlog", () => {
 
   it("readLog throws on corrupted non-final line (mid-file data loss)", () => {
     appendEvent(dir, 42, { event: "RUN_START", issue: 42 });
-    appendFileSync(join(dir, "42.jsonl"), "not json\n"); // corrupted line in the middle
-    appendFileSync(join(dir, "42.jsonl"), '{"seq":3,"event":"PHASE_COMMIT","phase":"investigate","outputs":{}}\n');
+    appendFileSync(runLogPath(dir, 42, LOG_REPO.repo), "not json\n"); // corrupted line in the middle
+    appendFileSync(runLogPath(dir, 42, LOG_REPO.repo), '{"seq":3,"event":"PHASE_COMMIT","phase":"investigate","outputs":{}}\n');
     assert.throws(
       () => readLog(dir, 42),
       /corrupt run-log line/,
@@ -215,7 +220,7 @@ describe("runlog timestamps (forge#3696)", () => {
   });
 
   it("an old log without ts parses and derives the same state as a stamped one", () => {
-    appendFileSync(join(dir, "9.jsonl"),
+    appendFileSync(runLogPath(dir, 9, LOG_REPO.repo),
       JSON.stringify({ seq: 1, event: "RUN_START", issue: 9, run: "r", lane: "staging" }) + "\n" +
       JSON.stringify({ seq: 2, event: "PHASE_COMMIT", phase: "investigate", outputs: {} }) + "\n");
     const old = deriveState(readLog(dir, 9));

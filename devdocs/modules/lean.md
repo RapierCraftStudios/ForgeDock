@@ -1395,6 +1395,22 @@ as `estimates` (only with the hook); a failing hook is the M default. A settled 
 worst #n …`. Cost: 0 LLM calls; one local run-log read per batch. Tests: `bin/lean/sched.test.mjs` "longest-first
 admission (#4409)", including a virtual-clock replay of the 2026-10-22 batch shape.
 
+## Entry 2026-10-23 — Run logs and lane ledgers keyed by repo (#4432)
+
+Issue numbers are per repo, but `~/.forge/runs` and `~/.forge/ledger` are per host. The run log is now
+`<owner>__<repo>__<N>.jsonl` (`engine/runlog.mjs` `runLogPath`, the `owner__repo` scheme of `pitfalls.mjs`);
+`appendEvent`/`readLog`/`rewriteLog` take an optional `{ repo }` and keep the legacy `<N>.jsonl` without one (the
+interactive hook logs under `<cwd>/.forgedock/run-logs`, already per checkout). Both paths pass the repo: runCore its
+`repo`, the full path `resolveRepo()` before its first read. Read fallback for one release: a repo with no file yet reads
+the legacy file's RUN_START slices of that repo. `migrateRunLogs(dir)` runs at `run-issue` and `orchestrate` start: it
+claims each legacy `<N>.jsonl` by an atomic rename, moves repo slices into the repo files (before any events already
+there, seq renumbered), keeps repo-less slices in `<N>.jsonl`, never throws. `lastLocalRun`, `readLocalRuns`/`readLanes`
+and `efficiency` read the new names. The adhoc lane ledger was `adhoc/lean-<N>.json` for every repo, so one lane's
+teardown could act on another repo's resources: `makeLedger({ repo })` now writes `<batch>/<owner>__<repo>__<lane>.json`
+(the `lane` field and gc are unchanged; old files age out by TTL). The context-pack cache name and prune prefix carry the
+repo too. Audit: leases (FORGE:STATE on the repo's issue), worktrees (under the checkout), depcache (`<repoKey>/`), the
+sequence lease and sched keys were already repo-scoped. Cost: 0 LLM calls; one dir scan per run-issue/orchestrate start.
+
 ## Entry 2026-10-23 — Public API-shape detector (#4449)
 
 `apishape.mjs` adds a deterministic check for API drift such as the more-itertools `ichunked` generator→function
