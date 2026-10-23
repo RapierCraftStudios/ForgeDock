@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, DEFAULT_PREFILTER_MODEL } from "./prefilter.mjs";
+import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, isTrustedIssueComment, DEFAULT_PREFILTER_MODEL } from "./prefilter.mjs";
 import { parsePrefilterVerdict, prefilterPrompt } from "./prompts.mjs";
 import { orchestrate, formatTable, formatOutcomeLists } from "./orchestrate.mjs";
 import { triageFromCli } from "../engine-cli.mjs";
@@ -474,5 +474,16 @@ describe("post-deploy precondition gate (#4389)", () => {
     assert.deepEqual(lists, ["awaiting promotion: #41 #42 #43 (fixes on staging, not on main)"]);
     assert.match(formatTable(rows), /#41\s+awaiting-promotion \(pre-filter\)/);
     assert.equal(formatParkedLine([{ issue: 1, outcome: "merged" }]), "");
+  });
+});
+
+describe("#4467: isTrustedIssueComment", () => {
+  it("trusts the App in gh issue view and REST shapes and trusted associations; not other contributors", () => {
+    assert.equal(isTrustedIssueComment({ author: { login: "rapiercraft-forgedock" }, authorAssociation: "CONTRIBUTOR" }), true);
+    assert.equal(isTrustedIssueComment({ user: { login: "rapiercraft-forgedock[bot]", type: "Bot" }, author_association: "NONE" }), true);
+    assert.equal(isTrustedIssueComment({ author: { login: "app/rapiercraft-forgedock" }, authorAssociation: "NONE" }), true);
+    assert.equal(isTrustedIssueComment({ author: { login: "owner" }, authorAssociation: "OWNER" }), true);
+    assert.equal(isTrustedIssueComment({ author: { login: "someone" }, authorAssociation: "CONTRIBUTOR" }), false);
+    assert.equal(isTrustedIssueComment(null), false);
   });
 });

@@ -8,9 +8,9 @@
  * line of the newest trusted FORGE:NEEDS_HUMAN or FORGE:FIX_CI, and the frozen contract's deliver requirements.
  * Pure: no I/O, never throws. It goes into builder prompts only, never into the text contract quotes are checked against.
  */
-import { isTrustedComment } from "../engine/phases.mjs";
 import { noComments } from "./render.mjs";
 import { parseFactsComment } from "./facts.mjs";
+import { isTrustedIssueComment as trusted } from "./prefilter.mjs";
 
 export const RESUME_DIGEST_BYTES = 2048;
 const LINE_MAX = 200;
@@ -24,10 +24,6 @@ const one = (s, max = LINE_MAX) => {
 };
 const code = (v) => (typeof v === "string" && CODE_RE.test(v) ? v : null);
 const markerOf = (body) => /^\s*<!--\s*FORGE:([A-Z_]+)\s*-->/.exec(String(body ?? ""))?.[1] ?? null;
-const trusted = (c) => {
-  const login = String(c?.author?.login ?? c?.user?.login ?? "");
-  return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
-};
 /** First line of a record that is not the marker or a heading. */
 const recordLine = (body) => one(noComments(String(body ?? "")).split("\n").map((l) => l.trim()).find((l) => l && !/^#+\s/.test(l)) ?? "");
 
