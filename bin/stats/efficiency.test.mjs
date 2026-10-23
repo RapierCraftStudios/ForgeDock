@@ -114,10 +114,38 @@ describe("#4402 efficiencyMetrics", () => {
   });
   it("renders n/a, never NaN, for an empty cohort", () => {
     const lines = formatEfficiencyLines(efficiencyMetrics({}));
-    assert.equal(lines.length, 7);
+    assert.equal(lines.length, 8);
     assert.ok(!lines.some((l) => /NaN|undefined/.test(l)), lines.join("\n"));
     assert.match(lines[0], /^efficiency: merged 0, n\/a\/merge/);
     assert.equal(lines[6], "acceptance (7d after promotion): n/a");
+    assert.equal(lines[7], "tools: calls/turn p50 n/a, re-reads (>=3x same path)/merge n/a");
+  });
+});
+
+describe("#4410 tool calls per turn and re-reads", () => {
+  const tools = (calls, turns, rereads) => ({ tools: { calls, turns, per_turn: calls / turns, rereads, top: [] } });
+  const logs = new Map([
+    [1, [start("2026-10-01T00:00:00Z"), att("implement", { trigger: "plan", ...tools(4, 4, 0) }), att("implement", { trigger: "build", ...tools(8, 4, 2) }),
+      att("review", tools(50, 1, 9)), term("merged", "completed")]],
+    [2, [start("2026-10-01T00:00:00Z"), att("implement", { trigger: "build", ...tools(30, 10, 1) }), term("merged", "completed")]],
+    [3, [start("2026-10-01T00:00:00Z"), att("implement", { trigger: "build", ...tools(5, 5, 0) }), term("merged", "completed")]],
+    [4, [start("2026-10-01T00:00:00Z"), att("implement", { trigger: "build" }), term("merged", "completed")]],
+  ]);
+  const entries = [1, 2, 3, 4].map((issue) => ({ row: { issue, outcome: "merged" }, settleAt: null }));
+  const m = efficiencyMetrics({ entries, logs, repo: "o/r", now: NOW });
+
+  it("p50 over lanes with tool data of implement calls / implement tool turns; re-reads per such lane", () => {
+    // lane 1: 12/8 = 1.5 (review excluded), lane 2: 3, lane 3: 1; lane 4 has no tool data
+    assert.equal(m.tool_calls_per_turn_p50, 1.5);
+    assert.equal(m.rereads_per_merge, 1);
+    const p = Object.fromEntries(m.per_issue.map((x) => [x.issue, x]));
+    assert.equal(p[1].implement_tool_calls_per_turn, 1.5); assert.equal(p[1].implement_rereads, 2);
+    assert.equal("implement_tool_calls_per_turn" in p[4], false);
+    assert.equal(formatEfficiencyLines(m).at(-1), "tools: calls/turn p50 1.50, re-reads (>=3x same path)/merge 1.00");
+  });
+  it("null without tool data (older logs)", () => {
+    const e = efficiencyMetrics({ entries: [entries[3]], logs, repo: "o/r", now: NOW });
+    assert.equal(e.tool_calls_per_turn_p50, null); assert.equal(e.rereads_per_merge, null);
   });
 });
 
