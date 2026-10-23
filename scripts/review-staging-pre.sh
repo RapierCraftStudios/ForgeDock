@@ -8,8 +8,10 @@
 #        review-staging-pre.sh gate   --repo R --pr N --prs-file F
 #        review-staging-pre.sh scope  --repo R --default D --staging S --pr N --prs-file F --sd DIR
 #   bundle  fetches D and S, prints the bundle PR list and writes DIR/<N>_bundle-prs.txt (same file the spec persists).
+#           Exit 1 when the fetch fails or the bundle PR set is empty (fail closed: never an empty bundle to gate).
 #   gate    open review-finding gate: posts FORGE:GATE_FAILURE / FORGE:GATE_PASS on PR N (bodies unchanged from the spec).
-#           Exit 0 = pass (or trusted override, last line "RESULT: PASS"), 1 = blocked.
+#           Exit 0 = pass (or trusted override, last line "RESULT: PASS"), 1 = blocked. An empty --prs-file or any failed
+#           gh read blocks (TYPE=gate-read-failure, never waived by an override): no GATE_PASS without real reads (forge#4470).
 #   scope   0B.1: writes DIR/<N>_scope.env (printf %q, read by 7A), DIR/<N>_bundle-pr-files.txt and DIR/<N>_scope.json
 #           {scope_mode, reviewed_pr_count, reviewed_commits, unreviewed_commits, unreviewed_files, cross_pr_files,
 #           deploy_wiring_files}; prints the one-line SCOPE_MODE summary. Every failed read widens scope to full.
@@ -60,18 +62,18 @@ fi
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; _SELF_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)"; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" "${CLAUDE_PLUGIN_ROOT:-}" "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/* "$_SELF_ROOT"; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 
 if [ "$CMD" = bundle ]; then
-git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH
+git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH || { echo "review-staging-pre: git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH failed: bundle PR set unknown (fail closed)" >&2; exit 1; }
 
 # Step 1: Find all PR numbers in the staging→main bundle
 # These are the PRs whose commits are included in staging but not yet in main
 BUNDLE_PRS=$(git log origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH --oneline \
-  | grep -oP '#\d+' \
+  | grep -oE '#[0-9]+' \
   | sort -u \
   | tr -d '#')
 
 # Also extract PR numbers from merge commit subjects (most reliable)
 MERGE_PRS=$(git log origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH --merges --oneline \
-  | grep -oP '(?<=pull request #)\d+' \
+  | sed -n 's/.*pull request #\([0-9][0-9]*\).*/\1/p' \
   | sort -u)
 
 # BEGIN bundle-pr-set
@@ -96,17 +98,26 @@ if [ -n "${PR_NUMBER:-}" ]; then
   _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"
   printf '%s\n' "$ALL_PR_NUMBERS" > "$_SD/${PR_NUMBER}_bundle-prs.txt"
 fi
+[ -n "$ALL_PR_NUMBERS" ] || { echo "review-staging-pre: the staging→main bundle PR set is empty: nothing to gate (fail closed)" >&2; exit 1; }
 exit 0
 fi
 
 if [ "$CMD" = gate ]; then
 
 # Step 2: For each PR in the bundle, check for open review-finding issues and degraded panels
+if [ -z "$ALL_PR_NUMBERS" ]; then
+  echo "⛔ DEPLOY BLOCKED — the bundle PR list ($PRS_FILE) is empty: nothing was checked, so the gate cannot pass."
+  echo "RESULT: BLOCK DEPLOY"
+  exit 1
+fi
 BLOCKING_FINDINGS=""
 DEGRADED_REVIEWS=""
+READ_FAILURES=""
 for pr_num in $ALL_PR_NUMBERS; do
+  # Capture each gh read and test its own status (as the scope step does): a failed read is never "not degraded" / "no findings".
   IS_REVIEW_DEGRADED=$(gh pr view "$pr_num" -R $GH_REPO --json labels \
-    --jq '[.labels[].name] | any(. == "review-degraded")' 2>/dev/null || echo "false")
+    --jq '[.labels[].name] | any(. == "review-degraded")' 2>/dev/null) || IS_REVIEW_DEGRADED=unreadable
+  case "$IS_REVIEW_DEGRADED" in true|false) ;; *) READ_FAILURES="$READ_FAILURES #${pr_num}(labels)" ;; esac
   if [ "$IS_REVIEW_DEGRADED" = "true" ]; then
     DEGRADED_REVIEWS="${DEGRADED_REVIEWS}
 **PR #${pr_num}** has a \`review-degraded\` label and requires a full fresh-context re-review."
@@ -116,13 +127,17 @@ for pr_num in $ALL_PR_NUMBERS; do
   # candidate fetch (full-text, tokenized: it also hits hidden markers and longer numbers), so
   # narrow it with the anchored FINDING_PR_FILTER: title suffix `PR #N)` or a `**Source**: PR #N` line.
   FINDING_PR_FILTER='[.[] | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
-  OPEN_FINDINGS=$(gh issue list -R $GH_REPO \
+  OPEN_FINDINGS=""
+  if _RAW=$(gh issue list -R $GH_REPO \
     --label "review-finding" \
     --state open \
     --search "PR #${pr_num}" \
     --limit 20 \
-    --json number,title,body 2>/dev/null \
-    | jq -r --arg n "${pr_num}" "$FINDING_PR_FILTER" 2>/dev/null)  # uses FINDING_PR_FILTER
+    --json number,title,body 2>/dev/null) && printf '%s' "$_RAW" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    OPEN_FINDINGS=$(printf '%s' "$_RAW" | jq -r --arg n "${pr_num}" "$FINDING_PR_FILTER" 2>/dev/null) || READ_FAILURES="$READ_FAILURES #${pr_num}(findings)"  # uses FINDING_PR_FILTER
+  else
+    READ_FAILURES="$READ_FAILURES #${pr_num}(findings)"
+  fi
 
   if [ -n "$OPEN_FINDINGS" ]; then
     BLOCKING_FINDINGS="${BLOCKING_FINDINGS}
@@ -130,6 +145,25 @@ for pr_num in $ALL_PR_NUMBERS; do
 ${OPEN_FINDINGS}"
   fi
 done
+
+# An unreadable review state is not a known finding either: block before any override is consulted (forge#4470).
+if [ -n "$READ_FAILURES" ]; then
+  echo "⛔ DEPLOY BLOCKED — could not read review state for bundle PR(s):${READ_FAILURES}"
+  echo "Re-run the gate once GitHub reads succeed."
+  echo "RESULT: BLOCK DEPLOY"
+  if [ -n "$PR_NUMBER" ]; then
+    gh pr comment "$PR_NUMBER" -R $GH_REPO --body "<!-- FORGE:GATE_FAILURE -->
+## Deploy Gate: BLOCKED
+
+**Gate**: open-review-finding (read failure)
+**Unreadable**:${READ_FAILURES}
+
+The degraded-label or open review-finding reads failed, so the gate cannot certify the bundle. Re-run the staging review once GitHub reads succeed.
+
+<!-- FORGE:GATE_FAILURE:TYPE=gate-read-failure -->" 2>/dev/null || true
+  fi
+  exit 1
+fi
 
 # A degraded panel is a review-integrity failure, not a finding that an override may waive.
 if [ -n "$DEGRADED_REVIEWS" ]; then
