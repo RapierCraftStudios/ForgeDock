@@ -36,7 +36,7 @@ const isForgeMarker = (body) => /^\s*<!--\s*FORGE:/.test(String(body ?? ""));
 
 /** The last ```forge-probe block of `text`: {run, pass, timeoutS}, or null when absent or malformed. */
 export function parseProbe(text) {
-  const blocks = [...noComments(String(text ?? ""), " ").matchAll(BLOCK_RE)];
+  const blocks = [...noComments(String(text ?? ""), " ").replace(/\r\n?/g, "\n").matchAll(BLOCK_RE)];
   if (!blocks.length) return null;
   const fields = {};
   for (const line of blocks[blocks.length - 1][1].split("\n")) {
