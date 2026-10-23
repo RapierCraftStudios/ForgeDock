@@ -239,7 +239,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
         await kill(d);
         openBatch(h.root, idB).requestCancel({ reason: "operator" });
         d = await h.daemon();
-        await until(() => !!openBatch(h.root, idB).readReport());
+        try { await until(() => !!openBatch(h.root, idB).readReport()); } catch (e) { const fs = await import("node:fs"); const out = []; const walk = (d) => { for (const f of fs.readdirSync(d)) { const q = d + "/" + f; const st = fs.statSync(q); if (st.isDirectory()) walk(q); else if (st.isFile()) out.push("== " + q + "\n" + fs.readFileSync(q, "utf8").slice(0, 3000)); } }; walk(h.work); out.push("launched " + h.launched()); fs.writeFileSync(process.env.TMPDIR + "/dump.txt", out.join("\n")); throw e; }
         assert.deepEqual(openBatch(h.root, idB).readReport().rows.map((r) => [r.issue, r.outcome]), [[3, "held"], [4, "held"]]);
         assert.deepEqual(h.launched(), [1, 3], "no lane launched after the cancel");
         await kill(d);
