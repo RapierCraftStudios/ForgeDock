@@ -48,7 +48,7 @@ import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { parseContextPackConfig, contextArm, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
 import { buildResumeDigest } from "./resume.mjs";
 import { lightEligibility } from "./light.mjs";
-import { runLightStep, lightBuildPrompt, upgradeNote } from "./lightlane.mjs";
+import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
 /**
  * #4267: what a recovery lane does per code. Codebase-agnostic: the repo's own checks and logs only. Keys stay in step
@@ -234,6 +234,7 @@ export async function runCore(o) {
       ...(num(r?.baselineTokens) != null ? { baseline_tokens: num(r.baselineTokens) } : {}), ...(r?.tools ? { tools: r.tools } : {}), lane_profile: laneProfile.name }; // #4410
     if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += c.delta ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); tb.note(num(r?.turns), stage === "implement"); }
     ev(rec); await emit(rec);
+    modelMs += rec.duration_ms; // #4451: model time next to the lane's wall time
     const u = r?.usage ?? {};
     usage.cost_usd += c.delta ?? 0;
     usage.input += u.input_tokens ?? 0; usage.output += u.output_tokens ?? 0;
@@ -288,6 +289,7 @@ export async function runCore(o) {
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   let riskEnforced = null, gateRan = false; // #4398: declared risk paths that made a shadow lane enforce (sticky); the gate ran
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
+  let light = false, modelMs = 0; // #4451: the light lane finished without an upgrade (skips structure/hotspot gates); summed session time
   let recoverUnlabelled = false; // #4297: the recovery lane removed needs-human; a final ci-pending (or needsHuman()) puts it back
   const runId = `${issue}-${t0}`;
   let runTmp = null;
@@ -405,7 +407,7 @@ export async function runCore(o) {
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}),
       conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}),
-      context_pack: ctxCfg.mode, ...ctxAb, explore: exploreCfg.mode, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
+      context_pack: ctxCfg.mode, ...ctxAb, explore: exploreCfg.mode, wall_ms: now() - t0, model_ms: modelMs, light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
     ev(term);
     await emit(term);
@@ -430,7 +432,7 @@ export async function runCore(o) {
       try { await post(["FORGE:TRAJECTORY", REGISTER_MARKER], renderTrajectory({ ...T, usage: usageLine() })); } catch { /* best effort */ }
     }
     await releaseLease(reason, code);
-    done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0,
+    done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs,
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
       ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), // #4392
       ...(route ? { builderRoute: { tier: route.tier, class: route.class, escalated, model: route.model ?? "default" } } : {}),
@@ -1362,42 +1364,49 @@ export async function runCore(o) {
         }
       }
       await label("building");
-      hotFacts = await hotspotsOf({ paths: namedPaths(iss.body ?? "") });
-      enumList = io.enumeratingTests ? ((await io.enumeratingTests({ cwd: wt, paths: namedPaths(iss.body ?? "") }).catch(() => null)) ?? []) : [];
-      facts = await factsPath([wt, cwd], io.fs?.exists);
-      const ctxPack = frozen ? null : await contextPackStep();
-      const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + reproPlanNote(reproOn()) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       // #4450: the light lane (lean.light mode on, eligible, fresh lane): one builder session, derived contract, or an upgrade
       const elig = lightEligibility({ title: iss.title, body: iss.body ?? "", labels: iss.labels ?? [], predictedFiles: namedPaths(iss.body ?? ""), riskPaths, cfg: o.light ?? {} });
       ev({ event: "LIGHT_ELIGIBILITY", mode: elig.mode, verdict: elig.verdict, light: elig.light, reasons: elig.reasons });
       if (elig.mode !== "off") T.decisions.push(`Light lane ${elig.mode}: ${elig.verdict}${elig.reasons.length ? ` (${elig.reasons.map((x) => x.code).join(", ")})` : ""}`);
+      // #4451: a light try skips the hotspots and the context pack; an upgrade computes them before the plan call
+      const lightTry = elig.light && !frozen && !resumed && !salvagedRef && !recover;
+      if (!lightTry) hotFacts = await hotspotsOf({ paths: namedPaths(iss.body ?? "") });
+      enumList = io.enumeratingTests ? ((await io.enumeratingTests({ cwd: wt, paths: namedPaths(iss.body ?? "") }).catch(() => null)) ?? []) : [];
+      facts = await factsPath([wt, cwd], io.fs?.exists);
+      let ctxPack = frozen || lightTry ? null : await contextPackStep();
+      const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + reproPlanNote(reproOn()) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       let lightDone = false, lightCommits = false;
-      if (elig.light && !frozen && !resumed && !salvagedRef && !recover) {
+      if (lightTry) {
         liveKeys = ["implementation"]; stage = "implement";
         tb.setSize(laneSize({ labels: (iss?.labels ?? []).map((l) => l?.name ?? l) }));
         const lr = await runLightStep({ title: iss.title, issueText, riskPaths, cfg: o.light ?? {}, validate: (c) => validateContract(c, issueText, { repro: reproOn() }),
           build: () => builder(++attemptN, lightBuildPrompt(issue, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList), null, true, undefined, { trigger: "build" }),
           readResult, checkpoint: () => checkpoint("light build"), changedFiles, reproOf, numstat: () => git(["diff", "--numstat", `${base}...HEAD`]),
-          runTests: async (cmds) => (io.runCommand ? Promise.all(cmds.map((command) => heavyStep("precheck", () => io.runCommand({ command, cwd: wt, env: laneEnv() })).then((x) => ({ command, rc: x?.rc ?? 1, output: String(x?.output ?? "") })))) : null),
+          runTests: async (cmds) => (io.runCommand ? runLightTests({ commands: cmds, parallelism: Number(verifyParallelism()) || 1, now, acquire: () => heavyAcquire("precheck"), // #4451: host-capped
+            run: ({ command, workers }) => { const env = laneEnv(); return io.runCommand({ command, cwd: wt, env: env.FORGE_HOST_PARALLELISM ? { ...env, FORGE_HOST_PARALLELISM: String(workers) } : env }); } }) : null),
           fixTests: (failed) => builder(++attemptN, precheckFailurePrompt(capLogs(failed.map((f) => ({ ...f, log: f.output }))).map((f) => ({ command: f.command, rc: f.rc, output: f.log })), vcfg.mode), sessionId, false, undefined, { mode: "resume", trigger: "precheck" }),
           apiShape: () => (io.apiShape ? io.apiShape({ cwd: wt, base }).catch(() => null) : null) });
         stage = "plan"; liveKeys = ["investigation"]; result = (await readResult()) ?? result;
         if (!lr.upgrade) {
-          lightDone = true; frozen = lr.contract; hash = contractHash(contractJson(frozen));
+          lightDone = true; light = true; frozen = lr.contract; hash = contractHash(contractJson(frozen));
           let body = renderContract(frozen, hash, { scope: scopeHash });
           if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash });
           await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
           ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: 0, derived: "light" });
-          ev({ event: "LIGHT_DONE", files: lr.files.length, test_failures: lr.testFailures, repro: lr.repro });
+          ev({ event: "LIGHT_DONE", files: lr.files.length, test_failures: lr.testFailures, repro: lr.repro, cost_usd: usage.cost_usd });
           T.decisions.push(`Light lane: one builder session, contract ${hash} derived from the diff and the test`);
+          try { await post("FORGE:LITE", renderLiteReceipt({ lr, eligibility: elig, costUsd: usage.cost_usd, contractHash: hash })); } catch { /* #4452: the receipt is best effort */ }
         } else {
           lightCommits = lr.files.length > 0;
-          ev({ event: "LIGHT_UPGRADE", reasons: lr.reasons });
+          ev({ event: "LIGHT_UPGRADE", reasons: lr.reasons, cost_usd: usage.cost_usd });
           T.decisions.push(`Light lane upgraded to the full lane: ${lr.reasons.map((x) => x.code).join(", ")}`);
+          try { await post("FORGE:LITE", renderLiteReceipt({ lr, eligibility: elig, costUsd: usage.cost_usd })); } catch { /* #4452: the receipt is best effort */ }
           const d = buildResumeDigest({ state: null, comments: trustedComments, contract: null, files: lr.files, lane });
           resumeNote = d.text + upgradeNote(lr.reasons);
           result = null; // the light result.json must not read as the plan's verdict
           if (io.fs.write) { try { await io.fs.write(`${wt}/${RESULT_FILE}`, "{}\n"); } catch { /* the plan overwrites it */ } }
+          hotFacts = await hotspotsOf({ paths: namedPaths(iss.body ?? "") }); // #4451: the full lane keeps its plan facts
+          ctxPack = await contextPackStep();
         }
       }
       if (!frozen) {
@@ -1569,7 +1578,7 @@ export async function runCore(o) {
       const d = await io.structureDelta({ cwd: wt, base }).catch(() => null);
       return d && typeof d === "object" && Array.isArray(d.package_edges_added) ? d : null; // `{}`: no workspace packages
     };
-    let structure = await structureOf();
+    let structure = light ? null : await structureOf(); // #4451: no structure delta on a light lane
     if (structure) {
       const pairs = structure.import_pairs ?? [], sum = (k) => pairs.reduce((n, p) => n + (Number(p?.[k]) || 0), 0);
       const rec = { event: "STRUCTURE_DELTA", edges_added: structure.package_edges_added.length, edges_removed: (structure.package_edges_removed ?? []).length,
@@ -1911,7 +1920,7 @@ export async function runCore(o) {
       }
       const amendProblems = await amend();
       const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === String(await git(["rev-parse", "HEAD"])).trim();
-      const hotspots = await hotspotsOf({ base, paths: files });
+      const hotspots = light ? null : await hotspotsOf({ base, paths: files }); // #4451
       const validateRuns = await rerunFailedValidates(effective);
       const repoHas = validateRuns && Object.keys(validateRuns).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
       const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen });
@@ -2273,7 +2282,7 @@ export async function runCore(o) {
      * only: the single telemetry write is the run's one extra API call. Also feeds the trajectory's Structure table.
      */
     async function recordStructure(pr) {
-      const d = (await structureOf()) ?? {};
+      const d = (light ? null : await structureOf()) ?? {}; // #4451
       const numstat = String(await git(["diff", "--numstat", "--no-renames", `${base}...HEAD`]).catch(() => ""));
       const top_growth = numstat.split("\n").map((l) => l.split("\t")).filter((x) => x.length >= 3 && /^\d+$/.test(x[0]) && Number(x[0]) > 0 && !x[2].startsWith(`${LEAN_DIR}/`))
         .map(([a, , file]) => ({ file, lines: Number(a) })).sort((a, b) => b.lines - a.lines || a.file.localeCompare(b.file)).slice(0, 5);

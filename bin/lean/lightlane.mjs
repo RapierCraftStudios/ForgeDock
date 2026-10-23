@@ -11,6 +11,7 @@
 import { classifyPath } from "./routing.mjs";
 import { upgradeTriggers } from "./light.mjs";
 import { inIssue } from "./conformance.mjs";
+import { runChecks } from "./precheck.mjs";
 import { LEAN_DIR, RESULT_FILE, IMPLEMENTATION_FILE, FORGEDOCK_CLI, hostRules } from "./prompts.mjs";
 
 const UPGRADE_NOTE_MAX = 10;
@@ -106,15 +107,27 @@ export function upgradeNote(reasons) {
 }
 
 /**
+ * #4451: the light targeted tests, concurrently through precheck.mjs runChecks (one heavy slot per running command, the
+ * worker cap `parallelism` divided among them) with no round budget: every command runs, none is deferred to CI.
+ * run({command, workers}) -> {rc, output}. Returns [{command, rc, output}] in input order.
+ */
+export async function runLightTests({ commands, parallelism = 1, run, acquire, now = () => Date.now() }) {
+  // the per-command limit stays far below the budget, so runChecks never sees a budget cut: a timeout (rc 124) stays a failure
+  const { results } = await runChecks({ commands, parallelism, budgetMs: Number.MAX_SAFE_INTEGER, perCommandMs: 2 ** 40, now, acquire, run: ({ command, workers }) => run({ command, workers }) });
+  return results.map(({ command, rc, output }) => ({ command, rc, output }));
+}
+
+/**
  * One light lane step. ctx callbacks (all async unless noted): build() runs the one builder session; readResult();
  * checkpoint() commits uncommitted work; changedFiles(); numstat() -> `git diff --numstat` text; runTests(commands) ->
  * [{command, rc, output}] or null (no runner); fixTests(failed) resumes the builder once; reproOf(contract) -> {base, head}
  * or null; apiShape() -> detectApiShape output or null; validate(contract) -> {ok, problems} (sync). Plus title, issueText,
- * riskPaths, cfg. Returns {upgrade:false, contract, files, repro, testFailures} or {upgrade:true, reasons, files, ...}.
+ * riskPaths, cfg. Returns {upgrade:false, contract, files, repro, testFailures} or {upgrade:true, reasons, files, ...}, plus the
+ * gate inputs of the FORGE:LITE receipt (#4452): diff (parseNumstat), apiShape (apiShapeReasons), testCommands, testRuns.
  * Never throws: an internal error is the upgrade reason light_error.
  */
 export async function runLightStep(ctx) {
-  const up = (reasons, extra = {}) => ({ upgrade: true, reasons, contract: null, files: [], repro: null, testFailures: 0, ...extra });
+  const up = (reasons, extra = {}) => ({ upgrade: true, reasons, contract: null, files: [], repro: null, testFailures: 0, diff: null, apiShape: null, testCommands: [], testRuns: null, ...extra });
   try {
     await ctx.build();
     const result = await ctx.readResult();
@@ -138,13 +151,69 @@ export async function runLightStep(ctx) {
       if (failed.length) testFailures = 2;
     }
     const now = await ctx.changedFiles();
-    const repro = await ctx.reproOf(contract);
-    const diff = parseNumstat(await ctx.numstat());
-    const apiShape = apiShapeReasons(await ctx.apiShape());
+    // #4451: the three deterministic gates are independent, so they run concurrently
+    const [repro, numstat, shape] = await Promise.all([ctx.reproOf(contract), ctx.numstat(), ctx.apiShape()]);
+    const diff = parseNumstat(numstat), apiShape = apiShapeReasons(shape);
     const t = upgradeTriggers({ diff, repro, testFailures, riskPaths: ctx.riskPaths ?? [], apiShape, cfg: ctx.cfg ?? {} });
     const latest = deriveLightContract({ title: ctx.title, issueText: ctx.issueText, result: (await ctx.readResult()) ?? result, files: now });
-    return { upgrade: t.upgrade, reasons: t.reasons, contract: t.upgrade ? null : (ctx.validate(latest)?.ok ? latest : contract), files: now, repro, testFailures };
+    return { upgrade: t.upgrade, reasons: t.reasons, contract: t.upgrade ? null : (ctx.validate(latest)?.ok ? latest : contract), files: now, repro, testFailures,
+      diff, apiShape, testCommands: commands, testRuns: runs == null ? null : (runs ?? []).length };
   } catch (e) {
     return up([{ code: "light_error", detail: one(e?.message ?? e) }]);
   }
+}
+
+const usd = (x) => (typeof x === "number" && Number.isFinite(x) ? `$${x.toFixed(4)}` : "n/a");
+const RECEIPT_ROWS_MAX = 10;
+const bullets = (xs) => {
+  const lines = xs.slice(0, RECEIPT_ROWS_MAX).map((x) => `  - ${x}`);
+  if (xs.length > RECEIPT_ROWS_MAX) lines.push(`  - … ${xs.length - RECEIPT_ROWS_MAX} more`);
+  return lines;
+};
+
+/**
+ * The FORGE:LITE receipt of a light lane (#4452, parent #4442), without the marker (pure): outcome, diff stat, red/green
+ * repro, gates (targeted tests, API shape, derived contract), cost and eligibility, plus the upgrade reasons when the lane
+ * moved to the full pipeline. `costUsd` is the lane's true cost so far: the sum of #4407 per-session deltas, never a
+ * running session total. `lr` is runLightStep's return; `eligibility` is lightEligibility's.
+ */
+export function renderLiteReceipt({ lr = {}, eligibility = null, costUsd = null, contractHash = null } = {}) {
+  const r = lr && typeof lr === "object" ? lr : {};
+  const upgraded = !!r.upgrade;
+  const rows = Array.isArray(r.diff?.files) ? r.diff.files : null;
+  const nonTest = rows ? rows.filter((f) => classifyPath(String(f.path ?? "")) !== "test") : [];
+  const add = (xs) => xs.reduce((n, f) => n + (Number(f.added) || 0), 0), del = (xs) => xs.reduce((n, f) => n + (Number(f.deleted) || 0), 0);
+  const diff = rows
+    ? `${rows.length} file(s), +${add(rows)}/-${del(rows)} (non-test: ${nonTest.length} file(s), ${add(nonTest) + del(nonTest)} line(s))`
+    : `n/a${Array.isArray(r.files) && r.files.length ? ` (${r.files.length} changed file(s))` : ""}`;
+  const rp = r.repro && typeof r.repro === "object" ? r.repro : null;
+  const repro = rp ? `base ${one(rp.base || "?", 40)} → head ${one(rp.head || "?", 40)}${rp.base === "FAILED" ? " (red on base)" : " (not red on base)"}` : "n/a";
+  const cmds = Array.isArray(r.testCommands) ? r.testCommands : [];
+  const fails = Number(r.testFailures) || 0;
+  const tests = r.testRuns == null ? (cmds.length ? `${cmds.length} command(s), no runner` : "not run")
+    : `${cmds.length} command(s), ${fails ? (fails >= 2 ? "failed twice" : "failed once, passed after one fix") : "passed"}`;
+  const api = Array.isArray(r.apiShape) ? (r.apiShape.length ? `${r.apiShape.length} change(s)/unknown` : "unchanged") : "not checked";
+  const contract = upgraded ? "not derived (upgraded)" : contractHash ? `derived, valid (\`${one(contractHash, 20)}\`)` : "derived, valid";
+  const e = eligibility && typeof eligibility === "object" ? eligibility : {};
+  const eReasons = (Array.isArray(e.reasons) ? e.reasons : []).filter((x) => x && x.code).map((x) => `${one(x.code, 40)}: ${one(x.detail)}`);
+  const lines = [
+    `## Light lane ${upgraded ? "upgraded to the full lane" : "receipt"}`,
+    `**Outcome:** ${upgraded ? "upgraded" : "light"}`,
+    `**Diff:** ${diff}`,
+    `**Red/green:** ${repro}`,
+    "**Gates:**",
+    `  - targeted tests: ${tests}`,
+    ...bullets(cmds.map((c) => `\`${one(c, 120)}\``)).map((x) => `  ${x}`),
+    `  - API shape: ${api}`,
+    ...(Array.isArray(r.apiShape) ? bullets(r.apiShape.map((x) => one(x))).map((x) => `  ${x}`) : []),
+    `  - contract: ${contract}`,
+    `**Cost:** ${usd(costUsd)} (true per-session cost, #4407 deltas)`,
+    `**Eligibility:** ${one(e.verdict ?? "unknown", 20)} (mode ${one(e.mode ?? "?", 10)})${e.verdict === "eligible" && !eReasons.length ? ": repro or expected behaviour, predicted files within limits, size S, no risk path" : ""}`,
+    ...bullets(eReasons),
+  ];
+  if (upgraded) {
+    const ups = (Array.isArray(r.reasons) ? r.reasons : []).filter((x) => x && x.code).map((x) => `${one(x.code, 40)}: ${one(x.detail)}`);
+    lines.push("**Upgrade reasons:**", ...bullets(ups.length ? ups : ["unknown"]));
+  }
+  return lines.join("\n");
 }
