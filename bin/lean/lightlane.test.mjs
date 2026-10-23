@@ -211,7 +211,7 @@ describe("renderLiteReceipt (#4452)", () => {
     assert.match(body, /contract: not derived \(upgraded\)/);
     assert.match(body, /\*\*Upgrade reasons:\*\*[\s\S]*- api_shape: [\s\S]*- repro_not_red: [\s\S]*- tests_failed_twice: /);
     assert.match(body, /- no_repro: x y &lt;b>/);
-    assert.ok(!/<!--|-->/.test(body));
+    assert.ok(!/<!--|--!?>/.test(body));
   });
 
   it("an early upgrade (no commit) renders n/a, never undefined", async () => {
