@@ -783,3 +783,20 @@ describe("fail-soft alerts (#4354)", () => {
     assert.equal(computeAlerts(localLanes, { repo: "o/r" }).length, 1);
   });
 });
+
+describe("env.tool_missing per release (forge#4414)", () => {
+  // The #4393 replay criterion is read as outcome-code counts per engine version; pin that the report surfaces them.
+  const run = (issue, version, reason, code) => ({ issue, repo: "o/r", version, reason, code, finished: true, usageEvents: 1, endTs: "2026-10-23T10:00:00Z", phases: { implement: { cr: 1, out: 1, ms: 1 } } });
+  const runs = [run(1, "1.30.0", "needs-human", "env.tool_missing"), run(2, "1.30.0", "merged", "completed"),
+    run(3, "1.31.0", "merged", "completed"), run(4, "1.31.0", "needs-human", "dependency.open")];
+  const codesOf = (g) => Object.fromEntries(g.flow.codes.map((c) => [c.code, c.count]));
+
+  it("counts env.tool_missing per version and drops pre-release lanes with sinceVersion", () => {
+    const all = aggregate({ runs }, { releaseTimes: [] });
+    assert.equal(codesOf(all.groups.find((g) => g.version === "1.30.0"))["env.tool_missing"], 1);
+    const after = aggregate({ runs }, { releaseTimes: [], sinceVersion: "1.31.0" });
+    assert.deepEqual(after.groups.map((g) => g.version), ["1.31.0"]);
+    assert.equal(codesOf(after.groups[0])["env.tool_missing"], undefined);
+    assert.equal(after.groups[0].flow.codesN, 2);
+  });
+});
