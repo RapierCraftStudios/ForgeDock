@@ -7,7 +7,10 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runIssue } from "../engine.mjs";
-import { readLog, deriveState } from "../engine/runlog.mjs";
+import { readLog as readRepoLog, deriveState } from "../engine/runlog.mjs";
+// #4432: the full path keys its run log by repo; this file's fake gh answers `repo view` with acme/widgets.
+const LOG_REPO = { repo: "acme/widgets" };
+const readLog = (dir, issue) => readRepoLog(dir, issue, LOG_REPO);
 import { PHASES } from "../engine/phases.mjs";
 import { parseState } from "../engine/state.mjs";
 import {
