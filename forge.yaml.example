@@ -620,6 +620,20 @@ branches:
 #   verifier_model: claude-sonnet-5-5
 
 # =============================================================================
+# LEAN BUILDER (OPTIONAL)
+# Explorer subagent for the core path (#4391). on: the builder session gets a
+# read-only `explorer` subagent (claude --agents) that answers discovery
+# questions with a bounded file/line digest in a throwaway context, and the
+# plan/implement prompts tell the builder to use it. off (default): builder
+# argv and prompts are unchanged. RUN_TERMINAL carries `explore` for the A/B.
+# Commands: run-issue, orchestrate (core path)
+# =============================================================================
+
+# lean:
+#   explore: off            # off | on
+#   explore_model: haiku    # model of the explorer subagent (haiku, sonnet or a model id)
+
+# =============================================================================
 # DECOMPOSITION (OPTIONAL)
 # What happens to a decomposed parent issue. Default false: the parent stays
 # open until its last child closes. When true, work-on:decompose (D6.5) closes

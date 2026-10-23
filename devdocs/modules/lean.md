@@ -1299,6 +1299,18 @@ for decomposed parents (their row plus their sub-lanes, recursively; sub-issues 
 outside) against merged single-lane parents. Rationale: `devdocs/decisions/4396-decomposition-gate.md`. Cost: 0 LLM
 calls; an unjustified split spends the one block-correction resume instead of N sub-lanes.
 
+## Entry 2026-10-23 — Explorer subagent for builder discovery (#4391)
+
+`explore.mjs` defines an `explorer` custom subagent (read-only; tools Read, Grep, Glob, Bash; model `lean.explore_model`,
+default `haiku`) whose prompt returns one digest of at most 60 lines: Files (path:start-end), Call sites, Tests to extend
+(with the command that runs them), Conventions to match, Open questions. forge.yaml `lean.explore: on` (`engine-cli.mjs`
+`readExplore`, runCore `o.explore`) passes it on every builder call as `--agents <json>` (`effects.mjs` `makeLeanRunner`
+`agents`; reviewer and grouper never get it) and appends a rule to the plan and implement prompts: discover through the
+explorer, keep the digest, open a file only to edit it or to verify a digest claim. Off (default) leaves argv and prompts
+byte-identical. `RUN_TERMINAL` carries `explore: on|off`; the A/B compares plan/build `PHASE_ATTEMPT_USAGE` turns and
+`cache_read_input_tokens`, merge rate and conformance verdicts by that tag over the same issues. Cost: 0 engine LLM calls;
+~120 prompt tokens per builder prompt when on; explorer calls are billed inside the builder call's `cost_usd`.
+
 ## Entry 2026-10-23 — Per-batch cancel (#4376)
 
 `forgedock orchestrate --cancel <id>` stops one batch without stopping the shared schedd. The client sends the schedd
