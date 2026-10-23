@@ -452,6 +452,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `probe.mjs` (outcome-based acceptance, #4399; see "Acceptance probes" below),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
+`light.mjs` (light-lane eligibility and upgrade triggers, forge.yaml `lean.light`, #4448; see its entry below),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
 push/gh/merge retry patterns).
 
@@ -1345,3 +1346,33 @@ teardown has no checkpoint, so they run to their result. Once nothing runs, the 
 written. `state.json` keeps `cancelled`, but the file stays the authority: an operator `--resume` clears it (`clearCancel`
 next to the breaker reset) and continues the held issues; a daemon restart (`keepBreaker`) keeps it. Cost: 0 LLM calls;
 one small file read per pass. ADR `decisions/4376-orchestrate-cancel.md`.
+
+## Entry 2026-10-23 — Light-lane eligibility and upgrade triggers (#4448)
+
+`light.mjs` (pure: no I/O, no model call) is the gatekeeper of the light lane (#4442: one builder session plus the
+deterministic gates). It reuses `riskClassOf`/`riskPathHits` (review-trigger.mjs), `classifyPath` (routing.mjs),
+`laneSize` (budget.mjs), `isInvestigation` (conformance.mjs) and `postDeployOnly` (prefilter.mjs).
+`lightEligibility({title, body, labels, predictedFiles, riskPaths, cfg})` returns `{mode, verdict, eligible, light,
+reasons:[{code, detail}]}`, reasons sorted by code then detail. Hard reasons make the verdict `ineligible`:
+- `files`: more than `max_files` predicted non-test files (tests never count: the light lane writes a failing test first);
+- `size`: a `size:M` or `size:L` label;
+- `risk_path`: a predicted file with a built-in risk word or matching a `review.risk_paths` glob (same rule as builder routing);
+- `investigate`: an `investigate(` / `investigate:` title;
+- `post_deploy`: a `post-deploy` or `awaiting-promotion` label, or a body whose checklist items are all post-deploy checks;
+- `decision`: a `decision`, `needs-decision`, `product-decision`, `rfc` or `adr` label (optionally `type:`-prefixed), or a
+  `decision(`, `rfc(` or `adr(` (or `:`) title.
+
+With no hard reason, soft reasons make it `ambiguous`, for the caller's cheap classifier (this module never calls one):
+`no_repro` (the body, HTML comments stripped, has no code fence and no steps to reproduce / repro / expected or actual
+behaviour, result or output line) and `files_unknown` (no predicted non-test file). Otherwise it is `eligible`.
+Modes: `off` returns verdict `off` with `eligible: false` and no reasons (never eligible); `shadow` (default) computes the
+verdict and reasons, `light` stays false so the lane shape does not change; `on` sets `light` for an eligible issue.
+`upgradeTriggers({diff, repro, testFailures, riskPaths, apiShape, cfg})` returns `{upgrade, reasons}`: `diff_lines`
+(added+deleted of non-test numstat rows above `max_lines`, binary `-` counts 0), `diff_files` (more than `max_files`
+non-test files), `repro_not_red` (repro base word is not `FAILED`, or no repro result), `tests_failed_twice` (two or more
+failed targeted-test runs), `risk_path` (any diff path, tests included) and `api_shape` (each entry of the #4449 detector's
+output, strings or `{symbol, kind}`). Config: forge.yaml `lean.light: {mode: off|shadow|on, max_lines: 40, max_files: 2}`.
+The one-level forge.yaml parser flattens the nested block to `lean.mode|max_lines|max_files`; flat
+`lean.light_mode|light_max_lines|light_max_files` also work and win. An unknown mode is `shadow`, and a limit that is not a
+positive integer keeps its default. `readLight(cwd)` in `engine-cli.mjs` reads it. Nothing calls the module yet: the lane
+wiring (light session, derived contract, upgrade to the full lane) is #4450, so every lane runs as before. Cost: 0 LLM calls.
