@@ -1553,5 +1553,4 @@ Two hosted batches that both include issue N (a resumed batch and a new one) no 
   included, unlike the once-per-issue pre-filter: a merged `feat/issue-N-lean` PR ends the row `merged` (with the PR), a
   closed issue without one ends `invalid`, both with `skipped at dispatch: …` and no lane, so dependents still run.
   Fail-open: an error or an unreadable answer runs the lane.
-- `--cancel <id>` (#4376) is unchanged; a test pins that a schedd restart resumes no cancelled batch, also when the cancel
-  was written while no daemon ran.
+- `--cancel <id>` (#4376) is unchanged; a test pins that a schedd restart resumes no batch cancelled through the daemon.
