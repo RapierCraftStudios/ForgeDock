@@ -18,7 +18,8 @@
  * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
  * limit holds admissions for that account until its reset, and non-host deferrals stop after `maxDeferrals`.
  * Usage-limit holds (#4190) are keyed by backend identity in `limits` (the host store, shared by every batch on the
- * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. An `engine-error` is
+ * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. While held, the
+ * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset. An `engine-error` is
  * relaunched once; `breaker` ({errors, window_min}) stops admissions after a burst and lets running lanes finish, the
  * rest stay pending (outcome `held`) for a resume. `getParallel()` is read on every pass, so K can change live.
  * `getAdded()` (#4408, `forgedock orchestrate --add`) is read on every pass too: issues it returns that are not in the batch
@@ -688,6 +689,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       const waits = pending.map((n) => notBefore.get(n) ?? 0).filter((x) => x > t);
       if (holdUntil) waits.push(holdUntil);
       let wake = waits.length ? Math.max(0, Math.min(...waits) - t) : null;
+      if (holdUntil && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4446: a cleared hold (forgedock limits clear) admits on the next poll
       if (getParallel && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if (getAdded && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408: an add while only lanes run
@@ -698,7 +700,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         else { const ac = new AbortController(); await Promise.race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
       } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
       else if (pending.length && offered.size) await sleep(wake); // waiting for a host slot
-      else if (pending.length && waits.length) await sleep(Math.min(Math.max(0, Math.min(...waits) - t), getCancelled ? pollMs : Infinity));
+      else if (pending.length && waits.length) await sleep(Math.min(wake, getCancelled ? pollMs : Infinity)); // wake is poll-capped by a hold or a live K
       else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
       else if (pending.length && driftHeld.size) { if (await drainAdds()) continue; break; } // held by a drift flag (block_dispatch): pending for a later batch
       else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle
