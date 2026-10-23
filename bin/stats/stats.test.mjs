@@ -538,7 +538,7 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
 
   it("summariseLog carries mode, lane type, builder turns, cache tokens, cost and first-pass", () => {
     const s = summariseLog(log("on", "child"));
-    assert.deepEqual(s.contextPack, { mode: "on", laneType: "child" });
+    assert.deepEqual(s.contextPack, { mode: "on", laneType: "child", ab: false });
     assert.deepEqual([s.builderTurns, s.cacheTokens, s.costUsd, s.firstPass], [10, 2130, 1.1, true]);
     assert.equal(summariseLog(log("on", "child", { builds: 4 })).firstPass, false);
     assert.equal(summariseLog(log("on", "child", { reason: "needs-human" })).firstPass, false);
@@ -553,8 +553,8 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
     const runs = [log("on", "first"), log("on", "first", { builds: 4, reviews: 2 }), log("off", "first"), log("shadow", "rerun"),
       [{ event: "RUN_START", issue: 2 }, { event: "RUN_TERMINAL", reason: "merged" }]].map((l) => summariseLog(l));
     const ab = contextPackAb(runs);
-    assert.deepEqual(Object.keys(ab), ["rerun", "child", "first"]);
-    assert.deepEqual(ab.first.on, { n: 2, first_pass_yield: 0.5, builder_turns: 15, cache_tokens: 3195, cost_usd: 1.65 });
+    assert.deepEqual(Object.keys(ab), ["rerun", "child", "first", "recovery"]);
+    assert.deepEqual(ab.first.on, { n: 2, first_pass_yield: 0.5, builder_turns: 15, cache_tokens: 3195, cost_usd: 1.65, merged: 2, turns_per_merge: 15, cache_read_per_merge: 3150, rework_rate: 0 });
     assert.equal(ab.first.off.n, 1); assert.equal(ab.first.off.first_pass_yield, 1);
     assert.equal(ab.rerun.shadow.n, 1); assert.equal(ab.child.on.n, 0); assert.equal(ab.child.on.cost_usd, null);
     assert.match(renderContextAb(ab), /\| first \| on \| 2 \| 0\.5 \| 15 \| 3195 \| 1\.65 \|/);
@@ -564,6 +564,44 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
     assert.equal(parseArgs(["--context-ab"]).contextAb, true);
     const rep = await buildReport({ repo: "o/r", contextAb: true }, { localRuns: [summariseLog(log("on", "first"))], releaseTimes: [], gh: async () => { throw new Error("no network"); } });
     assert.equal(rep.query.context_ab.first.on.n, 1);
+  });
+});
+
+describe("context-pack A/B per merge, rework and recovery vs first (#4444)", () => {
+  const use = (trigger, turns, cr, out) => ({ event: "PHASE_ATTEMPT_USAGE", phase: "implement", trigger, turns, cost_usd: 0.5, usage: { cache_read_input_tokens: cr, cache_creation_input_tokens: 10, output_tokens: out } });
+  const slice = (issue, lt, { reason = "merged", mode = "on", ab = false, calls = [["plan", 2, 100, 10], ["build", 10, 1000, 400]], extra = [] } = {}) => [
+    { event: "RUN_START", issue, repo: "o/r", run: `r${issue}${lt}`, ts: lt === "rerun" ? "2026-10-02T00:00:00Z" : "2026-10-01T00:00:00Z" },
+    ...calls.map((c) => use(...c)), ...extra,
+    { event: "RUN_TERMINAL", reason, code: "x", context_pack: mode, lane_type: lt, ...(ab ? { context_ab: true } : {}) },
+  ];
+
+  it("summariseLog: cache-read alone, the implement attempt without the plan call, the ab tag and the log's first-run baseline", () => {
+    const s = summariseLog([...slice(5, "first"), ...slice(5, "rerun", { ab: true, calls: [["recover", 3, 50, 100]] })]);
+    assert.equal(s.cacheReadTokens, 50);
+    assert.deepEqual(s.implementAttempt, { turns: 3, output_tokens: 100 });
+    assert.deepEqual(s.firstRunAttempt, { turns: 10, output_tokens: 400 });
+    assert.equal(s.contextPack.ab, true);
+    assert.equal(summariseLog(slice(5, "first")).firstRunAttempt, null);
+    assert.deepEqual(summariseLog(slice(6, "first", { calls: [] })).implementAttempt, null);
+  });
+
+  it("per-merge turns and cache-read, rework rate and the same-issue recovery ratio", () => {
+    const runs = [summariseLog(slice(1, "first")), summariseLog(slice(2, "first", { reason: "needs-human" })),
+      summariseLog(slice(3, "first", { extra: [{ event: "PHASE_COMMIT", phase: "remediate" }] })),
+      summariseLog([...slice(4, "first"), ...slice(4, "rerun", { calls: [["recover", 5, 0, 100]] })]),
+      summariseLog(slice(1, "rerun", { calls: [["recover", 2, 0, 200]] }))];
+    const ab = contextPackAb(runs);
+    // three runs: 12 builder turns each, 1100 cache-read each, two merged
+    assert.deepEqual([ab.first.on.merged, ab.first.on.turns_per_merge, ab.first.on.cache_read_per_merge, ab.first.on.rework_rate], [2, 18, 1650, 0.3333]);
+    assert.equal(ab.rerun.on.rework_rate, 1);
+    assert.equal(ab.child.on.turns_per_merge, null);
+    // issue 4: 5/10 turns, 100/400 output (own log); issue 1: 2/10 turns, 200/400 output (earlier first run in `runs`)
+    assert.deepEqual(ab.recovery, { pairs: 2, mean_turn_ratio: 0.35, mean_output_ratio: 0.375 });
+    const md = renderContextAb(ab);
+    assert.match(md, /\| Merged \| Turns\/merge \| Cache-read\/merge \| Rework rate \|/);
+    assert.match(md, /\| first \| on \| 3 \| .* \| 2 \| 18 \| 1650 \| 0\.3333 \|/);
+    assert.match(md, /Recovery vs first run \(same issue\): 2 pair\(s\), implement turns ratio 0\.35, output tokens ratio 0\.375/);
+    assert.deepEqual(contextPackAb([]).recovery, { pairs: 0, mean_turn_ratio: null, mean_output_ratio: null });
   });
 });
 

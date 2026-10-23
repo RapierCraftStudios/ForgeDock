@@ -85,17 +85,55 @@ export function contextPackAb(runs) {
     for (const mode of ["on", "off", "shadow"]) {
       const rs = runs.filter((r) => r?.finished && r.contextPack?.laneType === lt && r.contextPack?.mode === mode);
       out[lt][mode] = { n: rs.length, first_pass_yield: mean(rs.map((r) => (r.firstPass ? 1 : 0))), builder_turns: mean(rs.map((r) => r.builderTurns ?? 0)),
-        cache_tokens: mean(rs.map((r) => r.cacheTokens ?? 0)), cost_usd: mean(rs.map((r) => r.costUsd ?? 0)) };
+        cache_tokens: mean(rs.map((r) => r.cacheTokens ?? 0)), cost_usd: mean(rs.map((r) => r.costUsd ?? 0)), ...perMerge(rs, lt) };
     }
   }
+  out.recovery = recoveryVsFirst(runs);
   return out;
+}
+
+const round4 = (v) => Math.round(v * 1e4) / 1e4;
+/**
+ * #4444: per-merge A/B metrics of one cell: builder turns and cache-read over the cell's runs divided by its merges (null
+ * without a merge), and rework rate: runs that were remediated, followed an earlier merge, or are a rerun lane, over n.
+ */
+function perMerge(rs, lt) {
+  const merged = rs.filter((r) => r.reason === "merged").length;
+  const sum = (f) => rs.reduce((x, r) => x + (Number.isFinite(f(r)) ? f(r) : 0), 0);
+  const reworked = rs.filter((r) => r.remediated || (r.reworkedMerges?.length ?? 0) > 0 || lt === "rerun").length;
+  return { merged, turns_per_merge: merged ? round4(sum((r) => r.builderTurns) / merged) : null,
+    cache_read_per_merge: merged ? round4(sum((r) => r.cacheReadTokens) / merged) : null, rework_rate: rs.length ? round4(reworked / rs.length) : null };
+}
+
+/**
+ * #4444 (R8): a rerun lane's implement attempt against the first run on the same issue. The baseline is the earlier
+ * first/child slice of the rerun's own log (firstRunAttempt), else the earliest finished first/child run of the same
+ * repo+issue in `runs`. Ratios are rerun / first per pair (a zero baseline is skipped); null without a pair.
+ */
+export function recoveryVsFirst(runs) {
+  const key = (r) => `${String(r?.repo ?? "").toLowerCase()}#${r?.issue}`;
+  const firsts = new Map();
+  for (const r of [...runs].filter((x) => x?.finished && ["first", "child"].includes(x.contextPack?.laneType) && x.implementAttempt)
+    .sort((a, b) => String(a.startTs ?? "").localeCompare(String(b.startTs ?? "")))) if (!firsts.has(key(r))) firsts.set(key(r), r.implementAttempt);
+  const turnR = [], outR = [];
+  for (const r of runs) {
+    if (!r?.finished || r.contextPack?.laneType !== "rerun" || !r.implementAttempt) continue;
+    const base = r.firstRunAttempt ?? firsts.get(key(r));
+    if (!base) continue;
+    if (base.turns > 0) turnR.push(r.implementAttempt.turns / base.turns);
+    if (base.output_tokens > 0) outR.push(r.implementAttempt.output_tokens / base.output_tokens);
+  }
+  const mean = (xs) => (xs.length ? round4(xs.reduce((a, b) => a + b, 0) / xs.length) : null);
+  return { pairs: Math.max(turnR.length, outR.length), mean_turn_ratio: mean(turnR), mean_output_ratio: mean(outR) };
 }
 
 /** Markdown table for contextPackAb. */
 export function renderContextAb(ab) {
   const f = (v) => (v == null ? "n/a" : String(v));
-  const rows = CONTEXT_LANE_TYPES.flatMap((lt) => ["on", "off", "shadow"].map((m) => { const g = ab[lt][m]; return `| ${lt} | ${m} | ${g.n} | ${f(g.first_pass_yield)} | ${f(g.builder_turns)} | ${f(g.cache_tokens)} | ${f(g.cost_usd)} |`; }));
-  return `| Lane type | Mode | n | First-pass yield | Builder turns | Cache tokens | Cost USD |\n| --- | --- | --- | --- | --- | --- | --- |\n${rows.join("\n")}`;
+  const rows = CONTEXT_LANE_TYPES.flatMap((lt) => ["on", "off", "shadow"].map((m) => { const g = ab[lt][m]; return `| ${lt} | ${m} | ${g.n} | ${f(g.first_pass_yield)} | ${f(g.builder_turns)} | ${f(g.cache_tokens)} | ${f(g.cost_usd)} | ${f(g.merged)} | ${f(g.turns_per_merge)} | ${f(g.cache_read_per_merge)} | ${f(g.rework_rate)} |`; }));
+  const rc = ab.recovery; // #4444: R8, rerun implement attempt vs the first run on the same issue
+  const rec = rc ? `\n\nRecovery vs first run (same issue): ${rc.pairs} pair(s), implement turns ratio ${f(rc.mean_turn_ratio)}, output tokens ratio ${f(rc.mean_output_ratio)}` : "";
+  return `| Lane type | Mode | n | First-pass yield | Builder turns | Cache tokens | Cost USD | Merged | Turns/merge | Cache-read/merge | Rework rate |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n${rows.join("\n")}${rec}`;
 }
 
 /**
