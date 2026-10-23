@@ -12,9 +12,9 @@ import { aggregate, compareVersions, computeAlerts, DEFAULT_ALERTS, percentile }
 import { cacheDir } from "./cache.mjs";
 import { fetchGithubRecords, parseTelemetryComments, runsFromRecords, toModel } from "./github-source.mjs";
 import { buildReport, makeProgressPrinter, parseArgs, parseSince, readAlertConfig, runStats, sinceToTimestamp } from "./index.mjs";
-import { lanesOfLog, readLanes, readLocalRuns, summariseLog } from "./local-source.mjs";
+import { lanesOfLog, readLanes, readLocalLaneRuns, readLocalRuns, summariseLog } from "./local-source.mjs";
 import { renderAlerts, renderCompact, renderJson, renderMarkdown } from "./render.mjs";
-import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers } from "./query.mjs";
+import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers, exploreAb, renderExploreAb } from "./query.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fx = (f) => join(here, "fixtures", f);
@@ -564,6 +564,62 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
     assert.equal(parseArgs(["--context-ab"]).contextAb, true);
     const rep = await buildReport({ repo: "o/r", contextAb: true }, { localRuns: [summariseLog(log("on", "first"))], releaseTimes: [], gh: async () => { throw new Error("no network"); } });
     assert.equal(rep.query.context_ab.first.on.n, 1);
+  });
+});
+
+describe("explorer A/B over run logs (forge#4418)", () => {
+  const use = (phase, turns, cr) => ({ event: "PHASE_ATTEMPT_USAGE", phase, turns, cost_usd: 0.5, usage: { cache_read_input_tokens: cr, cache_creation_input_tokens: 10, output_tokens: 1 } });
+  const slice = (issue, explore, { size = "M", turns = 5, cr = 1000, reason = "merged", triggers = ["plan", "build"], review = true } = {}) => [
+    { event: "RUN_START", issue, repo: "o/r", run: `r${issue}${explore}` },
+    ...triggers.map((t) => ({ ...use("implement", turns, cr), trigger: t })), ...(review ? [use("review", 2, 100)] : []),
+    { event: "RUN_TERMINAL", reason, code: "x", ...(explore ? { explore } : {}), ...(size ? { turns: { size, budget: 100, build: 9 } } : {}) },
+  ];
+
+  it("summariseLog carries the explore tag and the plan + build cache-read", () => {
+    const on = summariseLog(slice(1, "on"));
+    assert.deepEqual([on.explore, on.builderCacheRead, on.builderTurns, on.cacheTokens], ["on", 2000, 10, 2130]);
+    assert.equal(summariseLog(slice(1, "off")).explore, "off");
+    assert.equal(summariseLog(slice(1, null)).explore, null);
+    assert.equal(summariseLog(slice(1, "maybe")).explore, null);
+  });
+
+  it("readLocalLaneRuns keeps every RUN_START slice of a log", () => {
+    const dir = tmpDir("explore-ab-");
+    try {
+      writeFileSync(join(dir, "o__r__7.jsonl"), [...slice(7, "on"), ...slice(7, "off", { reason: "needs-human" })].map((e) => JSON.stringify(e)).join("\n"));
+      const runs = readLocalLaneRuns(dir);
+      assert.deepEqual(runs.map((r) => [r.issue, r.explore, r.reason]), [[7, "on", "merged"], [7, "off", "needs-human"]]);
+      assert.equal(readLocalRuns(dir).length, 1);
+      assert.deepEqual(readLocalLaneRuns(join(dir, "missing")), []);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("reports per size and mode, pairs same issues and leaves untagged runs out", () => {
+    const runs = [slice(1, "on", { size: "L", turns: 3, cr: 500 }), slice(1, "off", { size: "L", turns: 10, cr: 4000 }),
+      slice(2, "on", { size: "L", turns: 4, cr: 600, triggers: ["plan", "build", "conformance"] }), slice(3, "off", { size: "S", reason: "needs-human", review: false }),
+      slice(4, null), slice(5, "on", { size: null })].map((l) => summariseLog(l));
+    const ab = exploreAb(runs);
+    assert.deepEqual(Object.keys(ab.by_size), ["S", "M", "L", "unsized"]);
+    assert.deepEqual(ab.by_size.L.on, { n: 2, builder_turns: 9, builder_cache_read: 1400, merge_rate: 1, conformance_rate: 0.5, reviewed: 2 });
+    assert.deepEqual(ab.by_size.L.off, { n: 1, builder_turns: 20, builder_cache_read: 8000, merge_rate: 1, conformance_rate: 1, reviewed: 1 });
+    assert.deepEqual([ab.by_size.S.off.merge_rate, ab.by_size.S.off.conformance_rate, ab.by_size.M.on.n, ab.by_size.M.on.builder_turns], [0, null, 0, null]);
+    assert.equal(ab.by_size.unsized.on.n, 1);
+    assert.equal(ab.untagged, 1);
+    assert.equal(ab.paired.issues, 1);
+    assert.deepEqual([ab.paired.on.n, ab.paired.on.builder_cache_read, ab.paired.off.n, ab.paired.off.builder_cache_read], [1, 1000, 1, 8000]);
+    const md = renderExploreAb(ab);
+    assert.match(md, /\| L \| on \| 2 \| 9 \| 1400 \| 1 \| 0\.5 \(2\) \|/);
+    assert.match(md, /\| paired \| off \| 1 \| 20 \| 8000 \| 1 \| 1 \(1\) \|/);
+    assert.match(md, /Same issues in both modes: 1/);
+    assert.match(md, /1 finished run\(s\) without an explore tag/);
+  });
+
+  it("--explore-ab reads run logs only (no GitHub crawl)", async () => {
+    assert.equal(parseArgs(["--explore-ab"]).exploreAb, true);
+    assert.equal(parseArgs([]).exploreAb, false);
+    const rep = await buildReport({ repo: "o/r", exploreAb: true }, { localRuns: [summariseLog(slice(1, "on")), { ...summariseLog(slice(2, "on")), repo: "x/y" }], releaseTimes: [], gh: async () => { throw new Error("no network"); } });
+    assert.equal(rep.query.explore_ab.by_size.M.on.n, 1);
+    assert.equal(rep.sources.local.runs, 1);
   });
 });
 

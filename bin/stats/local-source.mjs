@@ -76,6 +76,9 @@ export function summariseLog(events, fallbackIssue = null) {
     pitfallsMatched: Number.isInteger(term?.pitfalls_matched) ? term.pitfalls_matched
       : Array.isArray(cp?.pitfalls) ? cp.pitfalls.filter((p) => p?.match === "files").length : null,
     builderTurns: builderCalls.reduce((x, e) => x + n(e.turns), 0),
+    // #4418: the explorer A/B tag (null before #4391 wrote it) and the main-session (plan + build) cache-read
+    explore: term?.explore === "on" || term?.explore === "off" ? term.explore : null,
+    builderCacheRead: builderCalls.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens), 0),
     size: term?.turns?.size ?? null, // #4409: S|M|L from the lane's turn record, buckets the admission estimate history
     cacheTokens: usage.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens) + n(e.usage?.cache_creation_input_tokens), 0),
     costUsd: usage.reduce((x, e) => x + n(costOf(e)), 0),
@@ -129,6 +132,29 @@ export function readLocalRuns(dir = runsDir()) {
       const m = /(?:^|__)(\d+)\.jsonl$/.exec(f); // #4432: `<issue>.jsonl` or `<owner>__<repo>__<issue>.jsonl`
       const sum = summariseLog(parseLog(readFileSync(join(dir, f), "utf8")), m ? Number(m[1]) : null);
       if (sum) runs.push({ ...sum, mtimeTs: new Date(statSync(join(dir, f)).mtimeMs).toISOString() });
+    } catch { /* unreadable log */ }
+  }
+  return runs;
+}
+
+/**
+ * #4418: one run summary per RUN_START slice of every log in `dir` (readLocalRuns keeps only the last), so an on run and an
+ * off run of the same issue both count. summariseLog summarises the last RUN_START of the events it is given.
+ */
+export function readLocalLaneRuns(dir = runsDir()) {
+  if (!existsSync(dir)) return [];
+  const runs = [];
+  for (const f of readdirSync(dir).sort()) {
+    if (!f.endsWith(".jsonl")) continue;
+    try {
+      const m = /(?:^|__)(\d+)\.jsonl$/.exec(f);
+      const events = parseLog(readFileSync(join(dir, f), "utf8"));
+      const mtimeTs = new Date(statSync(join(dir, f)).mtimeMs).toISOString();
+      const starts = events.flatMap((e, i) => (e.event === "RUN_START" ? [i] : []));
+      starts.forEach((_, k) => {
+        const sum = summariseLog(events.slice(0, starts[k + 1] ?? events.length), m ? Number(m[1]) : null);
+        if (sum) runs.push({ ...sum, mtimeTs });
+      });
     } catch { /* unreadable log */ }
   }
   return runs;

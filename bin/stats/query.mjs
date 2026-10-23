@@ -145,3 +145,45 @@ export function renderTiers(rep) {
   const rows = (rep?.rows ?? []).map((g) => `| ${g.tier} | ${g.class} | ${g.n} | ${f(g.merge_rate)} | ${f(g.conformance_rate)} (${g.reviewed}) | ${f(g.post_merge_rework_rate)} (${g.merges}) | ${f(g.first_pass_yield)} | ${f(g.cost_usd)} |`);
   return `| Tier | Class | n | Merge rate | Conformance rate (reviewed) | Post-merge rework (merges) | First-pass yield | Cost USD |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n${rows.length ? rows.join("\n") : "| none | | 0 | | | | | |"}\n\n${rep?.unrouted ?? 0} finished run(s) without a builder route (before #4394) left out.`;
 }
+
+/**
+ * forge#4418: the explorer A/B (#4391) over per-slice run summaries (local-source.mjs readLocalLaneRuns), per size bucket
+ * (RUN_TERMINAL turns.size, set before the build) and RUN_TERMINAL `explore` mode. builder_turns / builder_cache_read:
+ * means over the plan + build calls. merge_rate: merged / n. conformance_rate: as builderTierReport. `paired` keeps only
+ * issues with a finished run in both modes. Untagged runs (before #4391) are counted, never folded into `off`.
+ */
+export const EXPLORE_SIZES = Object.freeze(["S", "M", "L", "unsized"]);
+const EXPLORE_MODES = ["on", "off"];
+export function exploreAb(runs) {
+  const mean = (xs) => (xs.length ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 1e4) / 1e4 : null);
+  const rate = (k, n) => (n ? Math.round((k / n) * 1e4) / 1e4 : null);
+  const finished = (runs ?? []).filter((r) => r?.finished);
+  const tagged = finished.filter((r) => EXPLORE_MODES.includes(r.explore));
+  const stats = (rs) => {
+    const reviewed = rs.filter((r) => r.reachedReview);
+    const conforming = reviewed.filter((r) => !r.conformanceRound && (r.shadowWould == null || r.shadowWould === "conforms"));
+    return { n: rs.length, builder_turns: mean(rs.map((r) => r.builderTurns ?? 0)), builder_cache_read: mean(rs.map((r) => r.builderCacheRead ?? 0)),
+      merge_rate: rate(rs.filter((r) => r.reason === "merged").length, rs.length), conformance_rate: rate(conforming.length, reviewed.length), reviewed: reviewed.length };
+  };
+  const bySize = {};
+  for (const size of EXPLORE_SIZES) {
+    bySize[size] = {};
+    for (const mode of EXPLORE_MODES) bySize[size][mode] = stats(tagged.filter((r) => (EXPLORE_SIZES.includes(r.size) ? r.size : "unsized") === size && r.explore === mode));
+  }
+  const key = (r) => `${r.repo ?? ""}#${r.issue}`;
+  const both = new Set(tagged.filter((r) => r.explore === "on").map(key).filter((k) => tagged.some((r) => r.explore === "off" && key(r) === k)));
+  const pairedRuns = tagged.filter((r) => both.has(key(r)));
+  const paired = { issues: both.size };
+  for (const mode of EXPLORE_MODES) paired[mode] = stats(pairedRuns.filter((r) => r.explore === mode));
+  return { by_size: bySize, paired, untagged: finished.length - tagged.length };
+}
+
+/** Markdown tables for exploreAb. */
+export function renderExploreAb(ab) {
+  const f = (v) => (v == null ? "n/a" : String(v));
+  const row = (label, mode, g) => `| ${label} | ${mode} | ${g.n} | ${f(g.builder_turns)} | ${f(g.builder_cache_read)} | ${f(g.merge_rate)} | ${f(g.conformance_rate)} (${g.reviewed}) |`;
+  const head = "| Size | Explore | n | Builder turns | Builder cache-read | Merge rate | Conformance rate (reviewed) |\n| --- | --- | --- | --- | --- | --- | --- |";
+  const sizes = EXPLORE_SIZES.flatMap((s) => EXPLORE_MODES.map((m) => row(s, m, ab.by_size[s][m])));
+  const paired = EXPLORE_MODES.map((m) => row("paired", m, ab.paired[m]));
+  return `${head}\n${sizes.join("\n")}\n\nSame issues in both modes: ${ab.paired.issues}\n\n${head}\n${paired.join("\n")}\n\n${ab.untagged} finished run(s) without an explore tag (before #4391) left out.`;
+}
