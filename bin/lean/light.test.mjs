@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { LIGHT_MODES, LIGHT_DEFAULTS, parseLightConfig, lightEligibility, upgradeTriggers } from "./light.mjs";
 import { readLight } from "../engine-cli.mjs";
 
@@ -29,7 +29,7 @@ describe("parseLightConfig (#4448)", () => {
     assert.deepEqual(parseLightConfig({ light_max_lines: "4x" }), LIGHT_DEFAULTS);
   });
   it("readLight reads forge.yaml lean.light; absent forge.yaml is the defaults", () => {
-    const d = mkdtempSync(join(tmpdir(), "light-"));
+    const d = tmpDir("light-yaml-");
     assert.deepEqual(readLight(d), LIGHT_DEFAULTS);
     writeFileSync(join(d, "forge.yaml"), "lean:\n  light:\n    mode: on\n    max_lines: 50\n    max_files: 3\n");
     assert.deepEqual(readLight(d), { mode: "on", maxLines: 50, maxFiles: 3 });
