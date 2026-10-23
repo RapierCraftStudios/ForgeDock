@@ -1345,3 +1345,20 @@ teardown has no checkpoint, so they run to their result. Once nothing runs, the 
 written. `state.json` keeps `cancelled`, but the file stays the authority: an operator `--resume` clears it (`clearCancel`
 next to the breaker reset) and continues the held issues; a daemon restart (`keepBreaker`) keeps it. Cost: 0 LLM calls;
 one small file read per pass. ADR `decisions/4376-orchestrate-cancel.md`.
+
+## Entry 2026-10-23 — schedd shutdown stops the batch loops before the lock (#4454)
+
+SIGTERM/SIGINT of `forgedock schedd` used to release `schedd.lock` and the socket without stopping the hosted
+`orchestrate()` loops or exiting. Their timers kept a lock-less process dispatching while the next auto-spawned daemon
+resumed the same batches. Now `startDaemon` gives every in-flight `runBatch` (hosted, or still resuming) an
+AbortController and passes its `signal` through `runBatch` to `orchestrate`. `close()` refuses new submits, aborts every
+run, waits for them to settle (bounded by `stopMs`, default `STOP_MS` 10 s; on timeout it logs and goes on), and only
+then removes the lock (if still ours) and the socket. `exitOnSignals(d)` (used by `scheddFromCli`) awaits `close()` and
+exits 128+signo, the #4318 dispatcher convention.
+
+When `signal` aborts, `orchestrate` admits nothing more, wakes every sleep (`nap` races the abort and cancels the timer)
+and lane race, and leaves without awaiting, stopping or settling running lanes. Lanes are detached and keep running. It
+does not relabel queued recoveries. It saves the state once, with `running` records and pending, then ignores later
+saves and settles, and throws `code: "batch.stopped"`. `runBatch` therefore writes no `report.json`, and the next daemon's
+`resumeOnStart` resumes the batch and adopts the lanes. This differs from #4376 cancel, which SIGTERMs lanes and ends the
+batch with a report. Callers without `signal` are unchanged. Cost: 0 LLM calls.

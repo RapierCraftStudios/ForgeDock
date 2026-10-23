@@ -71,6 +71,9 @@
  * A merged recovery row carries `recovered: <code>`; any other end is final with `recovery` evidence. Human codes (`builder.blocked`) are never recovered. Every operational decision the runner takes
  * (recovery, engine-error relaunch, dependency requeue, sub-issues added) goes to `decide({issue, what, why, alternative})`,
  * fire-and-forget: the runner never waits on it.
+ * Daemon shutdown (#4454): an aborted `signal` stops the runner without ending the batch: nothing more is admitted, every wait
+ * wakes, running lanes are neither awaited nor stopped (they are detached), nothing is relabelled and the state is saved once
+ * with its `running` records, so a `--resume` re-adopts the lanes; then it throws `code: "batch.stopped"` (no rows, no report).
  */
 import { parseDependsOn } from "../engine/phases.mjs";
 import { classifyNeedsHuman, recoveryCodeOf } from "../engine/outcome-codes.mjs";
@@ -170,7 +173,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, getCancelled = null, stopLane = null }) {
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, getCancelled = null, stopLane = null, signal = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -229,8 +232,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
   const firstLine = (x) => String(x ?? "").split("\n")[0].slice(0, 300);
 
+  let halted = false; // #4454: stopped by `signal`; the batch's state is no longer this process's to write
   const save = () => {
-    if (!store) return;
+    if (!store || halted) return;
     store.save({ v: 1, order, deps: toObj(deps), lanes: toObj(lanes), crossSeen: [...crossSeen], results: toObj(results), running: toObj(runRecs),
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
@@ -357,6 +361,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
 
   // Apply one lane's result: requeue it (deferred, dependency-open, engine-error) or record its final row.
   const settle = async (n, r, rec, pf) => {
+    if (halted) return; // #4454: a resume adopts the lane and settles it
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
     const pfCost = recovering.has(n) ? 0 : (pf?.cost_usd ?? 0);
     const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
@@ -519,6 +524,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       // Pre-filter once per issue (a requeued issue is not re-checked); fail-open: an error means a normal lane.
       if (prefilter && !checked.has(n)) { let pf = null; try { pf = await prefilter(n, lane); } catch { pf = null; } checked.set(n, pf); save(); }
       const pf = checked.get(n) ?? null;
+      if (halted) return; // #4454: stopped before launch; no pid, so a resume queues it again
       let r;
       if (cancelled) r = { terminalReason: "deferred", code: "run.interrupted", cost_usd: 0, detail: "cancelled before launch" }; // #4376
       else if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
@@ -622,9 +628,23 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     for (const [n, rec] of runRecs) if (running.has(n)) stop(n, rec);
   };
+  // #4454: the shutdown stop; every wait races it and cancels its sleep.
+  const aborted = signal ? new Promise((r) => { if (signal.aborted) r(); else signal.addEventListener("abort", () => r(), { once: true }); }) : null;
+  const nap = (ms) => {
+    const ac = new AbortController();
+    return Promise.race([sleep(ms, ac.signal), ...(aborted ? [aborted] : [])]).finally(() => ac.abort());
+  };
+  const race = (ps) => Promise.race([...ps, ...(aborted ? [aborted] : [])]);
+  const halt = () => {
+    if (reg) withdrawExcept(new Set());
+    save();
+    halted = true;
+    return Object.assign(new Error("batch stopped: schedd shutting down"), { code: "batch.stopped" });
+  };
   const K = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
   try {
     for (;;) {
+      if (signal?.aborted) throw halt();
       await drainAdds();
       checkCancel();
       if (!pending.length && !running.size) break;
@@ -650,6 +670,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       budgetHeld = false;
       // #4183: a hook (owned-resource GC near the host ceiling) before lanes are admitted; its errors never stop the batch.
       if (beforeAdmit && !tripped && !cancelled && !holdUntil && running.size < K() && pending.some(isReady)) { try { await beforeAdmit(); } catch { /* ignored */ } }
+      if (signal?.aborted) throw halt();
       budgetStop = null;
       const wanted = new Set(); // issues that stay offered in the host registry after this pass
       if (!tripped && !cancelled && !holdUntil && budget) {
@@ -694,11 +715,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (tripped) wake = null;
       if (getCancelled && running.size && !cancelled) wake = Math.min(wake ?? pollMs, pollMs); // #4376: notice a cancel while lanes run
       if (running.size) {
-        if (wake === null) await Promise.race(running.values());
-        else { const ac = new AbortController(); await Promise.race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
+        if (wake === null) await race(running.values());
+        else { const ac = new AbortController(); await race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
       } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
-      else if (pending.length && offered.size) await sleep(wake); // waiting for a host slot
-      else if (pending.length && waits.length) await sleep(Math.min(Math.max(0, Math.min(...waits) - t), getCancelled ? pollMs : Infinity));
+      else if (pending.length && offered.size) await nap(wake); // waiting for a host slot
+      else if (pending.length && waits.length) await nap(Math.min(Math.max(0, Math.min(...waits) - t), getCancelled ? pollMs : Infinity));
       else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
       else if (pending.length && driftHeld.size) { if (await drainAdds()) continue; break; } // held by a drift flag (block_dispatch): pending for a later batch
       else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle
@@ -707,8 +728,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
     }
   } catch (e) {
-    // #4318: an exception out of the loop still relabels the queued recoveries before it propagates
-    try { await relabelQueued(`batch failed: ${firstLine(e?.message ?? e)}`); } catch { /* best effort */ }
+    // #4318: an exception out of the loop still relabels the queued recoveries before it propagates (not a #4454 stop)
+    if (!halted) try { await relabelQueued(`batch failed: ${firstLine(e?.message ?? e)}`); } catch { /* best effort */ }
     throw e;
   }
   if (reg) withdrawExcept(new Set());

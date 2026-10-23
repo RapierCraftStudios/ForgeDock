@@ -1192,7 +1192,7 @@ async function orchestrateClient(argv, deps = {}) {
  * `daemon: true` and the allowlisted env in its plan, so a restarted daemon resumes it on the same account; `keepBreaker`
  * (a daemon restart, not the operator's resume) leaves a tripped breaker tripped. Writes `report.json` when done.
  */
-export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: callerEnv = process.env, sink = consoleSink(), deps = {}, keepBreaker = false, daemon = false }) {
+export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: callerEnv = process.env, sink = consoleSink(), deps = {}, keepBreaker = false, daemon = false, signal = null }) {
   const batchMod = await import("./lean/batch.mjs");
   const root = deps.batchRoot ?? batchMod.batchRoot();
   if (argv.includes("--set-parallel")) {
@@ -1463,6 +1463,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       issueLabels: labelNames,
       // #4318: a dispatcher signal relabels the queued recoveries before it exits (the daemon resumes its batches instead)
       ...(daemon ? {} : { onExit: (fn) => { exitRelabel = fn; } }),
+      // #4454: the daemon's shutdown stop; orchestrate throws batch.stopped, so no report is written and a resume adopts the lanes
+      ...(signal ? { signal } : {}),
       conflicting: deps.conflicting ?? (async (_n, pr) => {
         try { return JSON.parse(await leanIo.gh(["pr", "view", String(pr), "-R", repo, "--json", "mergeable"]))?.mergeable === "CONFLICTING"; } catch { return false; }
       }),
@@ -1561,7 +1563,8 @@ export async function scheddFromCli(argv, deps = {}) {
   if (argv.length) throw new Error("usage: forgedock schedd [status]");
   const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }) });
   if (!d.running) return d;
-  for (const sig of ["SIGTERM", "SIGINT"]) process.once(sig, () => d.close());
+  // #4454: a signal stops the hosted batch loops, then releases the lock and socket, then exits 128+signo
+  schedd.exitOnSignals(d, { ...(deps.processOn ? { on: deps.processOn } : {}), ...(deps.exit ? { exit: deps.exit } : {}) });
   await d.closed;
   return { running: false };
 }
