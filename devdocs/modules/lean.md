@@ -1346,6 +1346,17 @@ written. `state.json` keeps `cancelled`, but the file stays the authority: an op
 next to the breaker reset) and continues the held issues; a daemon restart (`keepBreaker`) keeps it. Cost: 0 LLM calls;
 one small file read per pass. ADR `decisions/4376-orchestrate-cancel.md`.
 
+## Entry 2026-10-23 — A held batch polls the usage-limit store (#4446)
+
+While the account's usage-limit hold is active, `orchestrate.mjs` caps its wake at `pollMs` (5 s default) and the idle
+sleep (pending issues, no running lane) honours that cap. Each pass re-reads `limits.json` through `heldUntil()`, so
+`forgedock limits clear <id>` from any process admits the held batch on its next poll, not at the recorded reset. A
+live K (`getParallel`, `--set-parallel`) also wakes an idle held batch. Before this, only the #4376 cancel seam bounded
+that sleep. A hold still present keeps the batch waiting, and the first admission lands exactly at the reset
+(`wake = min(holdUntil - t, pollMs)`). Per-issue `notBefore` delays are not externally clearable and are capped only
+by the existing seams. No socket notification: the host file is the authority for daemon-hosted and foreground
+dispatchers alike. Cost: 0 LLM calls; one small file read per poll while held.
+
 ## Entry 2026-10-23 — schedd shutdown stops the batch loops before the lock (#4454)
 
 SIGTERM/SIGINT of `forgedock schedd` used to release `schedd.lock` and the socket without stopping the hosted

@@ -108,10 +108,45 @@ describe("account-scoped usage-limit holds (#4190)", () => {
     const limits = openLimits(storeFile(), { now });
     limits.set("A", t0 + 3_600_000, "batch b0 #1");
     const starts = [];
-    const sleep = async (ms) => { limits.clear("A"); c.t += Math.min(ms, 5000); };
+    const sleep = async (ms) => { limits.clear("A"); c.t += ms; }; // faithful: a sleep advances the full time asked for
     await orchestrate({ issues: [1], now, sleep, readBody: async () => "", limits, identity: () => "A", getParallel: () => 1, pollMs: 5000,
       runOne: async () => { starts.push(now()); return { terminalReason: "merged" }; } });
     assert.equal(starts[0], t0 + 5000, "admitted on the poll after the clear, not at the hour-long reset");
+  });
+
+  it("a held batch polls the host store: limits clear admits within one poll without getCancelled or getParallel (#4446)", async () => {
+    const { c, now } = fakeClock();
+    const t0 = c.t;
+    const file = storeFile();
+    const limits = openLimits(file, { now });
+    limits.set("A", t0 + 3_600_000, "batch b0 #1");
+    const sleeps = [];
+    // The operator clears the hold from another process (its own handle on the host file) while the batch sleeps.
+    const sleep = async (ms) => {
+      sleeps.push(ms);
+      if (sleeps.length === 1) await quiet(() => limitsFromCli(["clear", "A"], { limits: openLimits(file, { now }), identity: () => "A" }));
+      c.t += ms;
+    };
+    const starts = [];
+    const rows = await orchestrate({ issues: [1, 2], parallel: 2, now, sleep, readBody: async () => "", limits, identity: () => "A", pollMs: 5000,
+      runOne: async (n) => { starts.push([n, now()]); return { terminalReason: "merged" }; } });
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    assert.ok(starts.every(([, at]) => at <= t0 + 30_000), `admitted within 30s of the clear, got ${JSON.stringify(starts)}`);
+    assert.deepEqual(starts, [[1, t0 + 5000], [2, t0 + 5000]], "admitted on the first poll after the clear");
+  });
+
+  it("a held batch keeps waiting while the hold is present (#4446)", async () => {
+    const { c, now } = fakeClock();
+    const t0 = c.t;
+    const limits = openLimits(storeFile(), { now });
+    limits.set("A", t0 + 3_600_000, "batch b0 #1");
+    const sleeps = [];
+    const sleep = async (ms) => { sleeps.push(ms); c.t += ms; };
+    const starts = [];
+    await orchestrate({ issues: [1], now, sleep, readBody: async () => "", limits, identity: () => "A", pollMs: 5000,
+      runOne: async () => { starts.push(now()); return { terminalReason: "merged" }; } });
+    assert.deepEqual(starts, [t0 + 3_600_000], "admitted exactly at the reset, never earlier");
+    assert.ok(sleeps.length > 1 && sleeps.every((ms) => ms > 0 && ms <= 5000), "re-read the store every poll while held");
   });
 
   it("a legacy batch-local holdUntil is ignored on resume and no longer persisted", async () => {
