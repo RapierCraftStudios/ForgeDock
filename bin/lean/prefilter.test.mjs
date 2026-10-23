@@ -3,9 +3,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, isTrustedIssueComment, DEFAULT_PREFILTER_MODEL, parseMinAge, itemWindowsMs, landedAt } from "./prefilter.mjs";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { execFileSync } from "node:child_process";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parsePrefilterVerdict, prefilterPrompt } from "./prompts.mjs";
 import { orchestrate, formatTable, formatOutcomeLists } from "./orchestrate.mjs";
@@ -519,7 +519,7 @@ describe("post_deploy.min_age soak window (#4425)", () => {
   });
 
   it("landedAt on a real repo: the promotion merge that brought a staging fix in through its second parent", async () => {
-    const d = mkdtempSync(join(tmpdir(), "landed-"));
+    const d = tmpDir("landed-");
     const run = (args, t) => execFileSync("git", args, { cwd: d, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_DATE: `@${t} +0000`, GIT_COMMITTER_DATE: `@${t} +0000`,
       GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } }).trim();
     run(["init", "-q", "-b", "main"], 1);
@@ -575,7 +575,7 @@ describe("post_deploy.min_age soak window (#4425)", () => {
   });
 
   it("readPostDeployMinAge reads forge.yaml post_deploy.min_age; absent or invalid -> null", async () => {
-    const d = mkdtempSync(join(tmpdir(), "minage-"));
+    const d = tmpDir("minage-");
     assert.equal(await readPostDeployMinAge(d), null);
     writeFileSync(join(d, "forge.yaml"), "post_deploy:\n  min_age: \"24h\"\n");
     assert.equal(await readPostDeployMinAge(d), 24 * H * 1000);
