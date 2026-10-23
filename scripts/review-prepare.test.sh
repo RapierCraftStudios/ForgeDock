@@ -200,8 +200,15 @@ setup feat/x staging "$FIXFILES" "$DIFF_AUTH_BILL" "notasha"
 DELTA_KIND=DELTA prep "$WORK/root-delta"; eq "unvalidated sha is FULL" .delta.mode FULL
 
 # --- 5b. explicit --delta-from (forge#4360: forgedock review-staging --delta): no resolver involved ---
-earlier_pass() {   # earlier_pass <sha> [association]: one REVIEW-AGENT comment for that head
-    printf '[{"body":"<!-- FORGE:REVIEW-AGENT:security -->\\nReviewed-SHA: %s\\n<!-- REVIEW-FINDINGS-START -->\\n<!-- REVIEW-FINDINGS-END -->","author_association":"%s","user":{"login":"r","type":"User"}}]' "$1" "${2:-OWNER}" > "$FIX/comments.json"
+cmt() {   # cmt <body> [association]: one comment object
+    jq -n --arg b "$1" --arg a "${2:-OWNER}" '{body: $b, author_association: $a, user: {login: "r", type: "User"}}'
+}
+agent_body() { printf '<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: %s\n<!-- REVIEW-FINDINGS-START -->\n<!-- REVIEW-FINDINGS-END -->' "$1"; }
+# shellcheck disable=SC2016  # the backticks are literal markdown
+staging_summary() { printf '<!-- FORGE:GATE_FAILURE -->\n## Staging Review: NEEDS FIXES FIRST\n\n**Head**: `%s`\n\n<!-- FORGE:GATE_FAILURE:TYPE=staging-review|BUNDLE= -->' "$1"; }
+comments_of() { jq -s . > "$FIX/comments.json"; }   # comments_of < <cmt ...>...
+earlier_pass() {   # earlier_pass <sha> [association]: a complete earlier pass (agent body + post-guard staging summary)
+    { cmt "$(agent_body "$1")" "${2:-OWNER}"; cmt "$(staging_summary "$1")" "${2:-OWNER}"; } | comments_of
 }
 git -C "$REPO_DIR" checkout -q -b pr-empty pr-branch; git -C "$REPO_DIR" commit -q --allow-empty -m C;   # own branch: pr-branch stays at B (pinned-fallback tests below)
  SHA_C=$(git -C "$REPO_DIR" rev-parse HEAD)
@@ -232,6 +239,50 @@ prep "$WORK/root-nodelta" --no-delta --delta-from "abc123"; rc_is "short sha" 3
 setup staging main "$FIXFILES" "$DIFF_AUTH_BILL" "$SHA_C"; earlier_pass "$SHA_B"
 prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_B"; rc_is "empty delta" 0; eq "empty delta is FULL" .delta.mode FULL
 prep "$WORK/root-nodelta" --delta-from "$SHA_B" --thorough true; rc_is "--delta-from with --thorough" 2
+# forge#4471: the earlier pass must be complete and non-degraded, and the delta must not change review specs/config
+setup staging main "$FIXFILES" "$DIFF_AUTH_BILL"
+{ cmt "$(agent_body "$SHA_A")"; cmt "<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->
+panel degraded: 1 of 4 reviewers completed"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "degraded earlier pass blocks --delta-from" 3
+eq "degraded earlier pass blocker" '.blockers | join(" ") | test("earlier pass is degraded")' true
+{ cmt "$(agent_body "$SHA_A")"; cmt "$(staging_summary "$SHA_A")"; cmt "<!-- FORGE:REVIEW_DEGRADED -->"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "REVIEW_DEGRADED after a summarised pass blocks" 3
+{ cmt "<!-- FORGE:REVIEW_DEGRADED -->"; cmt "$(agent_body "$SHA_A")"; cmt "$(staging_summary "$SHA_A")"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "degraded marker before the earlier pass does not disqualify it" 0
+{ cmt "$(agent_body "$SHA_A")"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "partial earlier pass (no post-guard proof) blocks" 3
+eq "partial earlier pass blocker" '.blockers | join(" ") | test("no trusted proof that the earlier panel completed")' true
+{ cmt "$(agent_body "$SHA_A")"; cmt "$(staging_summary "$SHA_A")" NONE; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "untrusted staging summary is no proof" 3
+{ cmt "$(staging_summary "$SHA_B")"; cmt "$(agent_body "$SHA_A")"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "summary for another head is no proof" 3
+{ cmt "<!-- FORGE:REVIEW-AGENT:security -->
+Reviewed-SHA: $SHA_A
+
+no findings block"; cmt "$(staging_summary "$SHA_A")"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "agent body without a findings block blocks" 3
+{ cmt "$(agent_body "$SHA_A")"; cmt "<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->
+Reviewed-SHA: $SHA_A
+<!-- REVIEW-FINDINGS-SYNTHESIZED-END -->"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "synthesized block is a post-guard proof" 0
+{ cmt "$(agent_body "$SHA_A")"; cmt "# PR Review Summary
+**Reviewed commit**: \`$SHA_A\`
+**Agents**: 2"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "PR Review Summary with an Agents count above the domains blocks" 3
+earlier_pass "$SHA_A"
+sed 's/"changedFiles":1}/"changedFiles":1,"labels":[{"name":"review-degraded"}]}/' "$FIX/prinfo.json" > "$FIX/prinfo.tmp" && mv "$FIX/prinfo.tmp" "$FIX/prinfo.json"
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "review-degraded label blocks --delta-from" 3
+eq "review-degraded label blocker" '.blockers | join(" ") | test("labelled review-degraded")' true
+for _sf in forge.yaml scripts/trusted-comments.sh; do
+    git -C "$REPO_DIR" checkout -q -b "pr-spec-$(basename "$_sf")" pr-branch; mkdir -p "$REPO_DIR/$(dirname "$_sf")"; echo x > "$REPO_DIR/$_sf"
+    git -C "$REPO_DIR" add -A; git -C "$REPO_DIR" commit -qm "touch $_sf"; _sh=$(git -C "$REPO_DIR" rev-parse HEAD); git -C "$REPO_DIR" checkout -q main
+    setup staging main "$FIXFILES" "$DIFF_AUTH_BILL" "$_sh"; earlier_pass "$SHA_B"
+    prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_B"; rc_is "delta touching $_sf blocks --delta-from" 3
+    eq "delta touching $_sf blocker" '.blockers | join(" ") | test("review spec/config")' true
+done
+# the spec/config list must stay identical to the resolver's FULL list
+_pl() { grep -oE 'forge\.yaml\|commands/review-pr[^)]*\)' "$1" | head -n 1; }
+if [ -n "$(_pl "$ROOT/scripts/review-delta.sh")" ] && [ "$(_pl "$ROOT/scripts/review-prepare.sh")" = "$(_pl "$ROOT/scripts/review-delta.sh")" ]; then ok; else bad "review-prepare.sh spec/config list drifted from scripts/review-delta.sh"; fi
 
 # --- 6. full-build lane: empty trusted config is BLOCKED, never a silent skip ---
 TS_DIFF='diff --git a/web/src/app/page.tsx b/web/src/app/page.tsx

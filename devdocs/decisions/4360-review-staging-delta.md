@@ -13,11 +13,17 @@ When a fix lands on staging during a staging->main review, the operator re-revie
 
 ## Choice
 
-- `review-prepare.sh --delta-from <sha>` takes the delta base from the caller. It skips the resolver, including under `--no-delta`, which the staging CLI still passes. It fails closed (BLOCKED) in four cases:
+- `review-prepare.sh --delta-from <sha>` takes the delta base from the caller. It skips the resolver, including under `--no-delta`, which the staging CLI still passes. It fails closed (BLOCKED) in these cases:
   - the SHA is not a full commit id in the checkout;
   - the SHA equals the head;
   - the SHA is not an ancestor of the head (force-push or rebase);
   - no trusted `FORGE:REVIEW-AGENT` body carries `Reviewed-SHA: <sha>`, so there is no earlier pass to credit.
+  - (#4471) the PR carries the `review-degraded` label;
+  - (#4471) no trusted agent body for `<sha>` has a findings block, or no trusted post-panel-guard proof names `<sha>`. The proof is the staging summary (`## Staging Review:` with **Head** `<sha>`, posted only after the `review-staging-post.sh delivery` panel guard), a synthesized findings block, or a `# PR Review Summary` whose **Agents** count matches the distinct domains;
+  - (#4471) a trusted `review-panel-integrity` / `REVIEW_DEGRADED` / `REVIEW_BLOCKED` marker was posted after the first agent body for `<sha>`;
+  - (#4471) the delta touches the resolver's review spec/config list (`forge.yaml`, the review specs, `review-delta.sh`, `trusted-comments.sh` and the others in `scripts/review-delta.sh`). A drift test keeps the two lists equal.
+
+  These mirror the checkpoint rules of `scripts/review-delta.sh`. A failure blocks rather than widening to FULL, so an explicit delta never silently becomes a full-panel spend.
 
   An empty file delta widens to FULL, the same as the resolver path.
 - Roster: `delta_roster` over the delta files, without the "two full rounds first" gate, so the roster is the domains the delta touches. Diff and slices narrow to `<sha>..head` through the existing DELTA branches.
