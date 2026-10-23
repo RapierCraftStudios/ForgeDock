@@ -1554,3 +1554,25 @@ is no round budget, so a timeout stays a failure. `runLightStep` runs `reproOf`,
 Wall vs model time: `attempt()` sums each session's `duration_ms` into `model_ms`. The lane result and RUN_TERMINAL
 carry `wall_ms` and `model_ms` (RUN_TERMINAL also has `light`), and the orchestrate batch row copies both. A warm
 worktree pool reused across issues is deferred; deps are already warm via the shared cache (#4220). Cost: 0 LLM calls.
+
+## Entry 2026-10-23 — FORGE:LITE receipt and the light/full split in the batch report (#4452)
+
+After `LIGHT_DONE`, and again after `LIGHT_UPGRADE`, `runCore` posts a `FORGE:LITE` comment. The body comes from
+`lightlane.mjs` `renderLiteReceipt({lr, eligibility, costUsd, contractHash})` (pure) and contains:
+- the outcome: light or upgraded
+- the diff stat (all files and non-test lines)
+- the red/green repro, base → head
+- the gates: the targeted test commands and their result, the API-shape result, and whether the contract was derived
+- the cost, which is `usage.cost_usd`: the sum of the #4407 `cost_usd_delta`s, never a running session total
+- the eligibility verdict, mode and reasons
+- the upgrade reasons, when the lane upgraded
+
+Posting is best effort and never changes the lane outcome. Shadow and full lanes post nothing. `runLightStep` now also
+returns the receipt inputs: `diff`, `apiShape`, `testCommands` and `testRuns`. Its existing fields are unchanged.
+`LIGHT_DONE` and `LIGHT_UPGRADE` now carry `cost_usd`.
+
+In `bin/stats/efficiency.mjs`, `issueSlices` tags each slice with a `shape`: `light` (LIGHT_DONE), `upgraded`
+(LIGHT_UPGRADE) or `full`. `efficiencyMetrics.lanes` counts every in-scope slice of every row, whatever its outcome, by
+shape with its delta cost, plus `upgrade_rate` = upgraded ÷ (light + upgraded). `per_issue[].shape` is the last slice's
+shape. `formatEfficiencyLines` appends a `lanes:` line, so the batch report and `forgedock stats --efficiency` print it.
+Cost: no LLM calls; one extra issue comment per light lane.
