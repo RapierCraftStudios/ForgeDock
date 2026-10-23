@@ -1245,7 +1245,8 @@ that passes both is still not re-reviewed. Cost: 0 LLM calls when clean; one typ
 
 `probe.mjs` checks a production outcome after promotion, deterministically (0 LLM calls, no lane). An issue declares a
 probe in a fenced ```` ```forge-probe ```` block: `run: <shell command>` (required), `pass: exit 0` (default) or
-`pass: /regex/flags` on stdout, `timeout: <s>` (default forge.yaml `acceptance_probe.timeout_s` or 120, capped at 900). The
+`pass: /regex/flags` on stdout, `timeout: <s>` (default forge.yaml `acceptance_probe.timeout_s` or 120, capped at 900).
+CRLF/CR line endings (GitHub web UI bodies) are normalised to LF before the block is matched (#4466). The
 latest trusted comment's block wins, else the body's when its author is trusted (`isTrustedActor`/`isTrustedComment`);
 FORGE marker comments never declare one, and an untrusted declaration is reported `untrusted` and never run. The fix
 commit is the latest trusted FORGE:TRAJECTORY `merged at <sha>`, else the merge commit of the latest merged PR whose
