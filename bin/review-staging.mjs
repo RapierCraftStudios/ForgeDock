@@ -237,6 +237,10 @@ async function main(argv, io) {
   const b = await bash(io, "review-staging-pre.sh", ["bundle", ...common, ...branches, "--sd", sd], env);
   if (b.stdout.trim()) io.err(b.stdout.trim());
   if (b.code !== 0) throw new Stop(1, [b.stderr.trim(), `REVIEW_RESULT: status: BLOCKED, blocker: bundle PR set failed (exit ${b.code})`].filter(Boolean));
+  let bundlePrs = "";
+  try { bundlePrs = io.readFile(prsFile); } catch { /* unreadable: fail closed below */ }
+  // An empty bundle would let the gate pass vacuously (forge#4470): nothing gated is never a pass.
+  if (!bundlePrs.split("\n").some((l) => /^\d+$/.test(l.trim()))) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: bundle PR set is empty or unreadable (${prsFile}); nothing gated (fail closed)`]);
   const g = await bash(io, "review-staging-pre.sh", ["gate", ...common, "--prs-file", prsFile], env);
   if (g.code !== 0) {
     const out = g.stdout.trim();
