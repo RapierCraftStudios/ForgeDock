@@ -1261,6 +1261,31 @@ else `ci.red`; merge-time rounds unchanged. `orchestrate.mjs`: `issueLabels` sea
 a `dependency-open` naming a `needs-human` dependency (batch result or out-of-set label) ends `skipped (dependency #N
 needs-human)` without pulling it in.
 
+## Entry 2026-10-23 — Builder model routing by contract class (#4394)
+
+Implement is about 96% of lane spend and review about 4%, so the build is where a cheaper model pays. `routing.mjs` (pure)
+classes a lane from the frozen contract's deliverable paths: `risk` (`riskClassOf` built-in words, or a `review.risk_paths`
+glob through `riskPathHits`), `docs-config-test` (every path `classifyPath` → test/docs/config; lockfiles are code), `small`
+(≤2 non-test paths) or `large` (more, or none). `runCore` computes the route once, after the contract is frozen or recovered
+on a rerun and before the build call; refactor:split lanes compute none. `docs-config-test` and `small` take the mid tier
+(forge.yaml `lean.builder_mid_model`, else `engine.lean_builder_mid_model`, default `claude-sonnet-5-5`); `risk` and
+`large` take the top model (`builderModel`, null meaning the CLI default). `laneModel()` is the default model of every
+builder call, so the plan and contract-correction calls (made before the route exists) stay on `builderModel`.
+`fixRound` → `escalateOn(trigger)`: on the mid tier, the first `ESCALATE_TRIGGERS` round (`precheck`, `ci_red`,
+`merge_ci`) sets `escalated`. That round and every later builder call run on the top model, and fresh fix sessions pass
+`model: null`, so `fixModel ?? reviewerModel` does not override it. Non-escalated lanes keep today's fresh-fix model. No round
+is added. `pickVerifierModel` also gets the routed mid model as a reported builder model, so the verifier never runs on it.
+`lean.builder_routing: off` (`readBuilderRouting` in `engine-cli.mjs`) keeps every call on `builderModel` and still records
+the class (tier `top`). Run log: `BUILDER_ROUTE {mode, class, tier, model, risk}` and `BUILDER_ESCALATED {from, to,
+trigger}`. `RUN_TERMINAL` and the telemetry `run_terminal` payload gain `builder_tier`, `builder_class`, `builder_model`
+(id or `default`) and `builder_escalated` (0|1 in telemetry). The lane result gains `builderRoute`. Stats: `summariseLog`
+adds `builderRoute`, `conformanceRound`, `shadowWould`, `reachedReview` and `reworkedMerges` (earlier merged slices of the
+same issue log). `forgedock stats --tiers` (`builderTierReport` / `renderTiers`) groups finished routed runs by `mid`,
+`mid->top` and `top` × class: n, merge rate, conformance rate (of reviewed lanes: no conformance/review fix round, no shadow
+would-block), post-merge-rework rate (a later run of a merged issue, or remediated), first-pass yield and mean cost. The
+2-week no-regression check is a post-deploy gate on the default. Cost: 0 LLM calls; mid-tier implement on routed lanes.
+ADR `decisions/4394-builder-model-routing.md`.
+
 ## Entry 2026-10-23 — Decomposition gate and $/parent report line (#4396)
 
 `classifyBlock` (`lean.mjs`) passes a `split-required` block through `decompose.mjs` `splitGate`. The split is admitted

@@ -4960,7 +4960,7 @@ describe("#4363 fresh fix sessions", () => {
 
   it("a precheck failure runs a fresh session: no resume id, the reviewer model by default, a prompt under 60K with no transcript; plan/build keep the builder model", async () => {
     const w = prechecked(); const dir = tmpDir("core-");
-    const r = await run(w, { dir, builderModel: "opus-b", precheck: { commands: ["make lint"] } });
+    const r = await run(w, { dir, builderModel: "opus-b", builderRouting: { mode: "off" }, precheck: { commands: ["make lint"] } });
     assert.equal(r.terminalReason, "merged");
     const fix = builders(w).filter((b) => /declared check commands failed/.test(b[4]));
     assert.equal(fix.length, 1);
@@ -4975,7 +4975,7 @@ describe("#4363 fresh fix sessions", () => {
 
   it("lean.fix_model (fixModel) picks the fix-session model", async () => {
     const w = prechecked();
-    await run(w, { builderModel: "opus-b", fixModel: "haiku-fix", precheck: { commands: ["make lint"] } });
+    await run(w, { builderModel: "opus-b", fixModel: "haiku-fix", builderRouting: { mode: "off" }, precheck: { commands: ["make lint"] } });
     assert.deepEqual(builders(w).filter((b) => FRESH.test(b[4])).map((b) => b[3]), ["haiku-fix"]);
   });
 
@@ -5461,6 +5461,89 @@ describe("#4397 independent adversarial verifier", () => {
     const bad1 = withVerifier(world({ reviews: [bad(), bad()] }));
     await run(bad1, { verifier: { mode: "enforce" } });
     assert.equal(bad1.vcalls.length, 0);
+  });
+});
+
+describe("#4394 builder model routing", () => {
+  const prechecked = () => { // the first precheck fails, the fix round makes it pass
+    const w = world(); let rc = 1;
+    w.io.runCommand = async () => ({ rc, output: rc ? "lint: src/foo.js:3 unused var" : "" });
+    const inner = w.io.runner;
+    w.io.runner = async (c) => { const res = await inner(c); if (/declared check commands failed/.test(c.prompt)) rc = 0; return res; };
+    return w;
+  };
+  const events = (dir, name) => readLog(dir, 7).filter((e) => e.event === name);
+  const isPlan = (b) => /PLANNING ONLY/.test(b[4]);
+  const docsContract = { ...CONTRACT, deliverables: [{ id: "D1", path: "docs/foo.md", change: "document null", requirements: ["R1"] }, { id: "D2", path: "test/foo.test.js", change: "test", requirements: ["R1"] }] };
+
+  it("a docs/test-only contract builds on the mid model; the plan stays on builderModel; RUN_TERMINAL and the result carry the route", async () => {
+    const w = world({ contract: docsContract }); const dir = tmpDir("core-");
+    const r = await run(w, { dir, builderModel: "opus-b" });
+    const b = builders(w);
+    assert.ok(isPlan(b[0])); assert.equal(b[0][3], "opus-b", "the plan keeps the top model");
+    assert.equal(b[1][3], "claude-sonnet-5-5", "the build runs on the mid model");
+    const [route] = events(dir, "BUILDER_ROUTE");
+    assert.deepEqual({ mode: route.mode, class: route.class, tier: route.tier, model: route.model }, { mode: "on", class: "docs-config-test", tier: "mid", model: "claude-sonnet-5-5" });
+    const term = events(dir, "RUN_TERMINAL").at(-1);
+    assert.deepEqual([term.builder_tier, term.builder_class, term.builder_escalated, term.builder_model], ["mid", "docs-config-test", false, "claude-sonnet-5-5"]);
+    assert.deepEqual(r.builderRoute, { tier: "mid", class: "docs-config-test", escalated: false, model: "claude-sonnet-5-5" });
+    assert.match(traj(w)[0], /Builder routed to the mid tier \(docs-config-test; claude-sonnet-5-5\)/);
+    const t = w.telemetry.map((x) => mapRecord(x, 1)).find((x) => x?.event === "run_terminal");
+    assert.equal(t.payload.builder_tier, "mid"); assert.equal(t.payload.builder_escalated, 0);
+  });
+
+  it("lean.builder_mid_model picks the mid model; a declared risk path routes the build to the top model", async () => {
+    const w1 = world(); await run(w1, { builderModel: "opus-b", builderRouting: { midModel: "haiku-mid" } });
+    assert.deepEqual(builders(w1).slice(0, 2).map((b) => b[3]), ["opus-b", "haiku-mid"]);
+    const w2 = world(); const dir = tmpDir("core-");
+    await run(w2, { dir, builderModel: "opus-b", reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
+    assert.ok(builders(w2).every((b) => b[3] === "opus-b"), "every builder call on the top model");
+    const [route] = events(dir, "BUILDER_ROUTE");
+    assert.equal(route.class, "risk"); assert.equal(route.tier, "top"); assert.deepEqual(route.risk, ["src/foo.js"]);
+  });
+
+  it("a failed precheck on the mid tier escalates: BUILDER_ESCALATED, the fix round runs on the top model, RUN_TERMINAL records it", async () => {
+    const w = prechecked(); const dir = tmpDir("core-");
+    const r = await run(w, { dir, builderModel: "opus-b", fixModel: "haiku-fix", precheck: { commands: ["make lint"] } });
+    assert.equal(r.terminalReason, "merged");
+    const fix = builders(w).filter((b) => /declared check commands failed/.test(b[4]));
+    assert.equal(fix.length, 1, "no extra fix round");
+    assert.equal(fix[0][3], "opus-b", "the fresh fix session runs on the top model, not lean.fix_model");
+    const esc = events(dir, "BUILDER_ESCALATED");
+    assert.equal(esc.length, 1); assert.deepEqual([esc[0].from, esc[0].to, esc[0].trigger], ["claude-sonnet-5-5", "opus-b", "precheck"]);
+    const term = events(dir, "RUN_TERMINAL").at(-1);
+    assert.deepEqual([term.builder_tier, term.builder_class, term.builder_escalated, term.builder_model], ["mid", "small", true, "claude-sonnet-5-5"]);
+    assert.equal(r.builderRoute.escalated, true);
+  });
+
+  it("a conformance fix round on the mid tier does not escalate and keeps the fix model", async () => {
+    const w = world({ reviews: [bad("src/foo.js:9 still wrong"), ok()] }); const dir = tmpDir("core-");
+    assert.equal((await run(w, { dir, builderModel: "opus-b", fixModel: "haiku-fix" })).terminalReason, "merged");
+    assert.equal(builders(w)[2][3], "haiku-fix");
+    assert.deepEqual(events(dir, "BUILDER_ESCALATED"), []);
+  });
+
+  it("builder_routing off: plan, build and the resume keep builderModel; the class is still recorded on the top tier", async () => {
+    const w = world({ reviews: [conf({ verdict: "NONCONFORMING", requirements: [{ id: "R1", status: "partial", evidence: "the foo module", validated_by: "V1", note: "x" }] }), ok()] }); const dir = tmpDir("core-");
+    await run(w, { dir, builderModel: "opus-b", builderRouting: { mode: "off" } });
+    assert.ok(builders(w).length >= 3);
+    assert.ok(builders(w).every((b) => b[3] === "opus-b"));
+    const term = events(dir, "RUN_TERMINAL").at(-1);
+    assert.deepEqual([term.builder_tier, term.builder_class, term.builder_model], ["top", "small", "opus-b"]);
+  });
+
+  it("the verifier never runs on the routed mid model", async () => {
+    const w = world(); w.vcalls = [];
+    const orig = w.io.runner;
+    w.io.runner = async (c) => {
+      if (c.role !== "verifier") return orig(c);
+      w.vcalls.push(c);
+      return { text: fence({ findings: [] }), sessionId: "ver", usage: { input_tokens: 3, output_tokens: 1 }, costUsd: 0.01, durationMs: 300, turns: 2, model: c.model };
+    };
+    await run(w, { conformance: "shadow", builderModel: "claude-opus-5-5", verifier: { mode: "shadow", model: "claude-sonnet-5-5" } });
+    assert.equal(builders(w)[1][3], "claude-sonnet-5-5");
+    assert.equal(w.vcalls.length, 1);
+    assert.notEqual(w.vcalls[0].model, "claude-sonnet-5-5");
   });
 });
 

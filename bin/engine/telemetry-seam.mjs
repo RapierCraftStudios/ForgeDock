@@ -5,7 +5,8 @@
  * seam onto FORGE:TELEMETRY events so `forgedock stats` can rebuild Cost, Time and outcome codes from GitHub alone:
  *   PHASE_ATTEMPT_USAGE -> `phase_attempt` (attempt, model, backend, turns, duration_ms, cost_usd, cost_usd_delta, cost_usd_session, *_tokens;
  *                          lean adds baseline_tokens and lane_profile, forge#4395)
- *   RUN_TERMINAL        -> `run_terminal`  (reason, code, wall_ms; lean adds milestone, conformance_mode, shadow_would and the pr)
+ *   RUN_TERMINAL        -> `run_terminal`  (reason, code, wall_ms; lean adds milestone, conformance_mode, shadow_would, the pr and
+ *                          builder_tier/class/model/escalated 0|1, forge#4394)
  *   SANDBOX_USAGE       -> `sandbox_usage` (provider, sandbox_id, minutes, cost_usd, batch; one per settled remote lane, forge#4255)
  *   STRUCTURE_DELTA     -> `structure_delta` (edges_added/removed, import_files_added/removed, boundary_changed/loosened 0|1; forge#4159)
  *                          lean's merge-time record (forge#4165) adds milestone, the pr and string lists: deps_added and
@@ -63,7 +64,9 @@ export function mapRecord(rec, wallMs) {
   }
   if (rec.event === "RUN_TERMINAL") {
     return { event: "run_terminal", phase: null, ...prOf(rec), payload: compact({ reason: rec.reason, code: rec.code, wall_ms: wallMs,
-      milestone: rec.milestone, conformance_mode: rec.conformance_mode, shadow_would: rec.shadow_would }) };
+      milestone: rec.milestone, conformance_mode: rec.conformance_mode, shadow_would: rec.shadow_would,
+      builder_tier: rec.builder_tier, builder_class: rec.builder_class, builder_model: rec.builder_model, // #4394: the model per merge
+      builder_escalated: typeof rec.builder_escalated === "boolean" ? Number(rec.builder_escalated) : undefined }) };
   }
   if (rec.event === "SANDBOX_USAGE") {
     return { event: "sandbox_usage", phase: null, payload: compact({ provider: rec.provider, sandbox_id: rec.sandbox_id, minutes: rec.minutes,

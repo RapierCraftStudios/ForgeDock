@@ -14,7 +14,7 @@ import { defaultGh, fetchGithubRecords, isValidRepo, toModel } from "./github-so
 import { readLanes, readLocalRuns, runsDir } from "./local-source.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
-import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb } from "./query.mjs";
+import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers } from "./query.mjs";
 import { batchEfficiency, windowEfficiency, formatEfficiencyLines, parseWindows } from "./efficiency.mjs";
 import { batchRoot } from "../lean/batch.mjs";
 
@@ -57,10 +57,14 @@ Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues
                         lanes, issue quality vs cost and the acceptance pass rate 7 days after promotion
   --batch <id>          also report one batch (~/.forge/batches/<id>, FORGEDOCK_BATCH_DIR)
   --window <list>       trailing windows over the repo's batches (default 7d,30d)
+
+Builder model tiers (forge#4394; local run logs only, no GitHub crawl):
+  --tiers               merge, conformance and post-merge-rework rates, first-pass yield and cost per builder tier
+                        (mid, mid->top escalated, top) and routing class; --json for JSON
 `;
 
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, efficiency: false, batch: null, windows: null, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, tiers: false, efficiency: false, batch: null, windows: null, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -77,6 +81,7 @@ export function parseArgs(argv) {
     else if (name === "--edge") { const v = take(); if (!parseEdge(v)) throw new Error("--edge must be FROM:TO"); o.edge = v; }
     else if (name === "--milestone") o.milestone = take();
     else if (name === "--context-ab") o.contextAb = true;
+    else if (name === "--tiers") o.tiers = true;
     else if (name === "--efficiency") o.efficiency = true;
     else if (name === "--batch") { const v = take(); if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) throw new Error(`invalid --batch id: ${v}`); o.batch = v; }
     else if (name === "--window") o.windows = parseWindows(take());
@@ -209,6 +214,10 @@ export async function buildReport(opts, deps = {}) {
     const runs = (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo);
     return { repo, sources: { local: { runs: runs.length } }, query: { context_ab: contextPackAb(runs) } };
   }
+  if (opts.tiers) { // forge#4394: run logs only
+    const runs = (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo);
+    return { repo, sources: { local: { runs: runs.length } }, query: { tiers: builderTierReport(runs) } };
+  }
   const bound = sinceToTimestamp(opts.since, releaseTimes);
   if (bound.note) (deps.warn ?? ((m) => process.stderr.write(`forgedock stats: ${m}\n`)))(bound.note);
   const gh = await fetchGithubRecords({ repo, since: bound.since, refresh: opts.refresh, useCache: opts.cache, gh: deps.gh, env,
@@ -245,6 +254,7 @@ export async function runStats(argv, deps = {}) {
   }
   try {
     const report = await buildReport(opts, { onProgress: makeProgressPrinter(), ...deps });
+    if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
     if (report.query?.efficiency && !opts.json) {
       const e = report.query.efficiency;
       const lines = [...(e.batch ? formatEfficiencyLines(e.batch, `batch ${e.batch.batch ?? opts.batch}`) : []),
