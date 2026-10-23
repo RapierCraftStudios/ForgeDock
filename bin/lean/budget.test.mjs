@@ -76,6 +76,23 @@ describe("#4392 turn budget", () => {
     assert.ok(Date.now() - t0 < 15000, "killed, not waited out");
   });
 
+  it("#4410 runCliBackendAsync returns the stream's tool uses, deduped by tool_use id, with path and command", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const d = tmpDir("core-tools-");
+    const use = (id, name, input) => ({ type: "tool_use", id, name, input });
+    const line = (id, content) => JSON.stringify({ type: "assistant", message: { id, content, usage: { input_tokens: 1, output_tokens: 1 } } });
+    const a = line("m1", [use("t1", "Read", { file_path: "a.sh" })]), b = line("m1", [use("t2", "Bash", { command: "sed -n 1,9p a.sh" })]);
+    const c = line("m2", [use("t3", "Grep", { pattern: "x", path: "src" })]);
+    const result = JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "ok", session_id: "s-1", usage: { input_tokens: 2, output_tokens: 2 } });
+    writeFileSync(`${d}/fake`, `#!/bin/sh\necho '${a}'\necho '${a}'\necho '${b}'\necho '${c}'\necho '${result}'\n`); chmodSync(`${d}/fake`, 0o755);
+    const r = await runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake`, logger: { log() {} }, stream: true });
+    assert.deepEqual(r.toolUses, [{ msg: "m1", name: "Read", path: "a.sh", cmd: null }, { msg: "m1", name: "Bash", path: null, cmd: "sed -n 1,9p a.sh" },
+      { msg: "m2", name: "Grep", path: "src", cmd: null }]);
+    writeFileSync(`${d}/fake`, `#!/bin/sh\necho '${a}'\necho '${b}'\necho '${c}'\nexec sleep 30\n`);
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake`, logger: { log() {} }, stream: true, turnMax: 2 }),
+      (e) => e.code === "CLI_TURNS" && e.toolUses.length === 3);
+  });
+
   it("the batch row carries the lane's turns and the report prints a size x turns line with overruns", async () => {
     const T = (size, budget, build, exceeded = false) => ({ size, budget, build, total: build + 3, exceeded });
     const results = { 1: { terminalReason: "merged", turns: T("S", 25, 10) }, 2: { terminalReason: "merged", turns: T("S", 25, 22) }, 3: { terminalReason: "merged", turns: T("S", 25, 30, true) },
