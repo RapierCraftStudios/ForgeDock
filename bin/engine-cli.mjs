@@ -1564,14 +1564,28 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
  * #4481: the dispatch-time "already done" check: `{outcome:"merged", pr}` when the issue's own lane PR
  * (`feat/issue-N-lean`) merged, `{outcome:"invalid"}` when the issue is closed without one, else null. Anything
  * unreadable (no state, non-JSON, a non-array PR list, a gh error) is null: the lane runs.
+ * Release review #4500: an OPEN issue reopened after that PR merged (a failed acceptance probe, #4399, or an operator
+ * reopening it for rework) is new work, so the lane runs; an unreadable reopen history also runs the lane.
  */
 export function makeDispatchCheck({ gh, repo }) {
   const json = async (args) => { try { return JSON.parse(String(await gh(args))); } catch { return null; } };
+  /** Latest `reopened` event time (ms) on the issue, 0 when never reopened, null when unreadable. */
+  const lastReopen = async (n) => {
+    try {
+      const out = String(await gh(["api", `repos/${repo}/issues/${n}/events`, "--paginate", "--jq", '.[] | select(.event == "reopened") | .created_at']));
+      return out.split("\n").map((l) => Date.parse(l.trim())).filter(Number.isFinite).reduce((a, b) => Math.max(a, b), 0);
+    } catch { return null; }
+  };
   return async (n) => {
     const iss = await json(["issue", "view", String(n), "-R", repo, "--json", "state"]);
     const state = typeof iss?.state === "string" ? iss.state.toUpperCase() : null;
-    const prs = await json(["pr", "list", "-R", repo, "--head", `feat/issue-${n}-lean`, "--state", "merged", "--json", "number", "--limit", "1"]);
+    const prs = await json(["pr", "list", "-R", repo, "--head", `feat/issue-${n}-lean`, "--state", "merged", "--json", "number,mergedAt", "--limit", "1"]);
     const pr = Array.isArray(prs) && Number.isInteger(prs[0]?.number) ? prs[0].number : null;
+    if (pr !== null && state === "OPEN") {
+      const mergedAt = Date.parse(prs[0]?.mergedAt ?? "");
+      const reopened = await lastReopen(n);
+      if (reopened === null || !Number.isFinite(mergedAt) || reopened > mergedAt) return null;
+    }
     if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
     if (state === "CLOSED") return { outcome: "invalid", detail: "issue closed" };
     return null;
