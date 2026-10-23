@@ -2146,6 +2146,17 @@ describe("orchestrate", () => {
     assert.deepEqual(parseDeps("This is blocked by #2 and depends on #4\nsee **Depends on**: #5", 1), []);
   });
 
+  it("#4506 parseDeps reads every #N to the end of a declaration line", () => {
+    assert.deepEqual(parseDeps("Depends on #36648 (action results must reach …) and #36649 (the included action budget …)", 1), [36648, 36649]);
+    assert.deepEqual(parseDeps("Depends on #36651 (executor test harness) and #36648.", 1), [36651, 36648]);
+    assert.deepEqual(parseDeps("**Depends on** #2, #3 and #4", 1), [2, 3, 4]);
+    assert.deepEqual(parseDeps("__Depends on__: #5 (x) and #6", 1), [5, 6]);
+    assert.deepEqual(parseDeps("**Blocked by:** #7 (why) & #8", 1), [7, 8]);
+    assert.deepEqual(parseDeps("- depends on: #9 (a), #10", 1), [9, 10]);
+    assert.deepEqual(parseDeps("Depends on #11 and other/repo#12", 1), [11]);
+    assert.deepEqual(parseDeps("This is blocked by #2 and depends on #4", 1), []);
+  });
+
   it("runs at most K at once", async () => {
     const h = harness({});
     const rows = await orchestrate({ issues: [1, 2, 3, 4, 5, 6], parallel: 2, ...h });
