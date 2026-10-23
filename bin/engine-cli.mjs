@@ -1026,7 +1026,8 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * `forgedock orchestrate --cancel <batch-id>`
  * Runs core work-on per issue with K concurrency (default 3), honouring `Depends on` / `Blocked by` among the given issues.
  * A `dependency-open` issue is requeued behind its dependency; a `decomposed` one adds its sub-issues (#4124).
- * The already-fixed pre-filter (#4123) runs before each lane unless `--no-prefilter`.
+ * The already-fixed pre-filter (#4123) runs before each lane unless `--no-prefilter`. Every start, requeues included, first
+ * checks GitHub (#4481, `makeDispatchCheck`): a closed issue or a merged `feat/issue-N-lean` PR ends the row without a lane.
  * Declared acceptance probes (#4399, `lean/probe.mjs`) are swept once at batch start unless `--no-probes`.
  * Each issue gets its own lane, worked out from its milestone (#4125); `--lane` is an assertion checked per issue (a
  * mismatch ends `lane-refused`). Dependency edges between lanes are printed before any lane starts. Prints a summary table.
@@ -1487,7 +1488,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       beforeAdmit,
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getCancelled: batch.readCancel, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
-      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
+      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null, exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
@@ -1498,6 +1499,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       }),
       // A recovery that ended for good without the lane relabelling it (engine-error, deferred): needs-human back, one comment.
       relabelNeedsHuman: deps.relabelNeedsHuman ?? makeRelabelNeedsHuman({ gh: (a) => leanIo.gh(a), repo }),
+      // #4481: a requeued or resumed issue that was closed or whose lane PR merged meanwhile is not run again
+      dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo }),
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
       issueLabels: labelNames,
       // #4318: a dispatcher signal relabels the queued recoveries before it exits (the daemon resumes its batches instead)
@@ -1555,6 +1558,24 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
   try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
+}
+
+/**
+ * #4481: the dispatch-time "already done" check: `{outcome:"merged", pr}` when the issue's own lane PR
+ * (`feat/issue-N-lean`) merged, `{outcome:"invalid"}` when the issue is closed without one, else null. Anything
+ * unreadable (no state, non-JSON, a non-array PR list, a gh error) is null: the lane runs.
+ */
+export function makeDispatchCheck({ gh, repo }) {
+  const json = async (args) => { try { return JSON.parse(String(await gh(args))); } catch { return null; } };
+  return async (n) => {
+    const iss = await json(["issue", "view", String(n), "-R", repo, "--json", "state"]);
+    const state = typeof iss?.state === "string" ? iss.state.toUpperCase() : null;
+    const prs = await json(["pr", "list", "-R", repo, "--head", `feat/issue-${n}-lean`, "--state", "merged", "--json", "number", "--limit", "1"]);
+    const pr = Array.isArray(prs) && Number.isInteger(prs[0]?.number) ? prs[0].number : null;
+    if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
+    if (state === "CLOSED") return { outcome: "invalid", detail: "issue closed" };
+    return null;
+  };
 }
 
 /**

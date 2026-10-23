@@ -41,6 +41,13 @@
  * `priorities`) ranks it host-wide, and the batch's ready issues are tried in priority order. Ready issues it cannot
  * start yet stay offered in the registry (polled every `pollMs`) and are withdrawn once no longer ready; a settled lane
  * releases its slot, an adopted one re-records it.
+ * Per-issue lock (#4481), on with `sched.exclusive` (registry entries ask `exclusive: true`): when another batch holds a live slot for the same repo and issue (`tryAcquire` `conflict`, or
+ * `registry.holder` for a lane placed remote), the issue is not started: it is retried after `pollMs` with one `deferred`
+ * row naming that batch (no deferral count, no breaker), and admission goes on with the next ready issue.
+ *
+ * Dispatch check (#4481), off unless `dispatchCheck(issue)` is passed: it runs before EVERY lane start (first and
+ * requeued, unlike the once-per-issue pre-filter) and returns null (run) or `{outcome: "merged", pr}` / `{outcome:
+ * "invalid"}` for an issue already closed or whose PR merged; the row ends with that outcome and no lane starts. Fail-open.
  *
  * Remote lanes (#4253), off unless `remote: {max, isRemote(issue)}` is passed (execution.mjs): a lane `isRemote` places
  * in a sandbox takes no host registry slot; it starts only while fewer than `max` remote lanes of this batch run (the
@@ -217,7 +224,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   store = null, adopt = null, getParallel = null, getAdded = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, getCancelled = null, stopLane = null,
-  estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null }) {
+  estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -380,7 +387,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     return ready.map((n) => ({ n, p: prioOf(n), b: heads.has(n) || starved(n) ? 0 : 1, s: starved(n) ? enqueued.get(n) : 0, w: weight(n), i: idx.get(n) ?? 0 }))
       .sort((a, b) => a.p - b.p || a.b - b.b || a.s - b.s || b.w - a.w || a.i - b.i).map((x) => x.n);
   };
-  const entryOf = (n) => ({ key: keyOf(n), batch: sched?.batch ?? batchId ?? null, repo: sched?.repo ?? null, issue: n, priority: prioOf(n) });
+  const entryOf = (n) => ({ key: keyOf(n), batch: sched?.batch ?? batchId ?? null, repo: sched?.repo ?? null, issue: n, priority: prioOf(n), ...(sched?.exclusive ? { exclusive: true } : {}) });
   const releaseSlot = (n) => { if (reg && slotted.delete(n)) reg.release(keyOf(n)); };
   const offerFresh = (ns) => { const fresh = ns.filter((n) => !offered.has(n)); if (!fresh.length) return; reg.offer(fresh.map(entryOf)); for (const n of fresh) offered.add(n); };
   const withdrawExcept = (keep) => {
@@ -407,10 +414,28 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (budgetHit === null) update({ issue: null, outcome: "budget", detail: `execution budget reached: ${reason}; ${remote?.onBudget === "local" || remote?.fallbackLocal ? "remaining lanes run locally" : "no further remote lanes admitted"}` });
     budgetHit = reason;
   };
+  // #4481: another batch runs a lane for `n` now: retry after a poll, one row (and decision) per other batch.
+  const busyNoted = new Map(); // issue -> the other batch last reported
+  const busy = (n, other, wanted) => {
+    const delayMs = Math.max(pollMs, 1);
+    notBefore.set(n, now() + delayMs); offered.delete(n); wanted.delete(n);
+    if (busyNoted.get(n) !== other) {
+      busyNoted.set(n, other); save();
+      decided({ issue: n, what: `deferred: batch ${other} runs a lane for #${n}`, why: "one lane per issue on the host (two batches include it)", alternative: "run a second lane on the same branch" });
+      update({ issue: n, outcome: "deferred", pr: null, cost_usd: 0, minutes: 0, detail: `#${n} has a live lane in batch ${other}; retried in ${Math.round(delayMs / 1000)}s` });
+    }
+    return "busy";
+  };
   // A host slot for `n` (a lane-refused issue runs nothing and needs none); refused: `n` stays queued in the registry.
+  // true: start it; false: no capacity now; "busy" (#4481): another batch runs `n`, try the next issue.
   const grant = (n, wanted) => {
     if (lanes.get(n)?.ok === false) return true;
     let p = placeOf(n);
+    if (p?.where === "remote" && reg?.holder) {
+      let other = null;
+      try { other = reg.holder(entryOf(n)) ?? null; } catch { other = null; }
+      if (other !== null) return busy(n, other, wanted);
+    }
     if (p?.where === "remote") {
       const adm = admitRemote();
       if (adm.ok) {
@@ -426,6 +451,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (!reg) { if (p) placed.set(n, p); return true; }
     const r = reg.tryAcquire(keyOf(n), entryOf(n), sched.cap);
+    if (!r?.ok && r?.conflict != null) return busy(n, r.conflict, wanted);
     if (!r?.ok) { offered.add(n); wanted.add(n); return false; }
     offered.delete(n); slotted.add(n);
     if (p) placed.set(n, p);
@@ -605,17 +631,24 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (relabelled.delete(n)) save(); // #4315: the recovery lane launches after all; it removes needs-human itself
     const pl = placed.get(n);
     placed.delete(n);
-    heads.delete(n); enqueued.delete(n);
+    heads.delete(n); enqueued.delete(n); busyNoted.delete(n);
     const rec = { startedAt: now(), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
     runRecs.set(n, rec); notBefore.delete(n); save();
     track(n, (async () => {
       // Pre-filter once per issue (a requeued issue is not re-checked); fail-open: an error means a normal lane.
       if (prefilter && !checked.has(n)) { let pf = null; try { pf = await prefilter(n, lane); } catch { pf = null; } checked.set(n, pf); save(); }
       const pf = checked.get(n) ?? null;
+      // #4481: every start re-checks GitHub: a closed issue or a merged PR ends the row without a lane (fail-open).
+      let gone = null;
+      if (dispatchCheck && !cancelled && !pf?.closed && !pf?.parked) {
+        try { gone = (await dispatchCheck(n)) ?? null; } catch { gone = null; }
+        if (!["merged", "invalid"].includes(gone?.outcome)) gone = null;
+      }
       if (halted) return; // #4454: stopped before launch; no pid, so a resume queues it again
       let r;
       if (cancelled) r = { terminalReason: "deferred", code: "run.interrupted", cost_usd: 0, detail: "cancelled before launch" }; // #4376
       else if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
+      else if (gone) r = { terminalReason: gone.outcome, pr: Number.isInteger(gone.pr) ? gone.pr : null, cost_usd: 0, detail: `skipped at dispatch: ${gone.detail ?? gone.outcome}` };
       // #4389: a parked post-deploy follow-up starts no lane; it ends awaiting-promotion|awaiting-precondition, re-checked next batch.
       else if (pf?.parked) r = { terminalReason: pf.kind, cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
@@ -767,7 +800,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           const n = pickNext(ready, { classes, share: budget.share, whenIdle: budget.whenIdle, started: dispatch.started, maint: dispatch.maint,
             featuresPending: pending.some((p) => !clsOf(classes, p).maintenance) });
           if (n === null) { budgetHeld = ready.length > 0; break; }
-          if (!grant(n, wanted)) break;
+          const g = grant(n, wanted);
+          if (g === "busy") continue; // #4481: not ready any more this pass (notBefore), so `ready` drops it
+          if (!g) break;
           pending.splice(pending.indexOf(n), 1);
           if (lanes.get(n)?.ok !== false) { dispatch.started++; if (clsOf(classes, n).maintenance) dispatch.maint++; }
           start(n); started++;
@@ -779,13 +814,16 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         offerFresh(want);
         for (const n of want) wanted.add(n);
         for (const n of ready) {
-          if (running.size >= K() || !grant(n, wanted)) break;
+          if (running.size >= K()) break;
+          const g = grant(n, wanted);
+          if (g === "busy") continue; // #4481
+          if (!g) break;
           pending.splice(pending.indexOf(n), 1); start(n); started++;
         }
       } else if (!tripped && !cancelled && !holdUntil) {
         for (const n of rank(pending.filter(isReady))) {
           if (running.size >= K()) break;
-          if (grant(n, new Set())) { pending.splice(pending.indexOf(n), 1); start(n); started++; }
+          if (grant(n, new Set()) === true) { pending.splice(pending.indexOf(n), 1); start(n); started++; }
         }
       }
       if (reg) withdrawExcept(wanted);
