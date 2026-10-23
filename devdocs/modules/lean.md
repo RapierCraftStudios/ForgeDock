@@ -173,6 +173,15 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `runCliBackendAsync` returns `baselineTokens` (first stream assistant message's input + cache read + cache creation);
    `makeLeanRunner` keeps it for fresh sessions only, and `PHASE_ATTEMPT_USAGE` / telemetry `phase_attempt` carry
    `baseline_tokens` and `lane_profile`. Decision: `devdocs/decisions/4395-lane-profile.md`.
+   **Batched reads** (#4410): `HOST_RULES` also tells the builder to issue independent read-only calls (reads, greps,
+   git log/blame, gh) in the same turn or one shell call, and to read each file's ranges once and keep notes. The
+   wording replaced older text, so the plan/implement token caps are unchanged. Measurement: `runCliBackendAsync`'s stream
+   parser returns `toolUses` ([{msg, name, path, cmd}], deduped by tool_use id, cap 5000; also on `CLI_TURNS` /
+   `CLI_CONTEXT` errors). `bin/lean/toolstats.mjs` `toolStats` turns them into `{calls, turns, per_turn, rereads, top}`:
+   a turn is an assistant message with a tool use, and a re-read path is one read 3 or more times by Read or by a Bash
+   `cat` / `sed -n` / `head` / `tail` operand (grep is not counted). `makeLeanRunner` returns it as `tools`, and
+   `PHASE_ATTEMPT_USAGE` carries `tools` when present. This is a local run-log field only: the telemetry seam does not
+   map it.
    **Quiet output** (#4390): `HOST_RULES` tells the builder to run tests quiet, read failures as `tail -40` + failing test
    ids, read files by range and send output that may pass 8 KB to a `$TMPDIR` file. `precheck.mjs` `quietFailure`
    (last 40 lines within the char share, failing-test-id lines by pytest/TAP/jest/vitest/go/cargo markers, `full log:`
@@ -849,6 +858,10 @@ rate 7 days after promotion. A merged issue's cost includes its earlier run slic
 (cost to merge). `gh` is called only for merged issues' bodies, labels and
 `FORGE:PROBE` comments. A gh failure turns quality and acceptance into `n/a`, and
 any error prints `efficiency: n/a (...)` without failing the batch.
+The last line (#4410) is `tools: calls/turn p50 X, re-reads (>=3x same path)/merge Y`. For each merged lane with
+`PHASE_ATTEMPT_USAGE.tools`, it takes the implement calls / implement tool turns and prints the median across lanes,
+plus re-read paths per such lane (`tool_calls_per_turn_p50`, `rereads_per_merge`, per-issue
+`implement_tool_calls_per_turn` / `implement_rereads`). Logs without tool data give `n/a`.
 `forgedock stats --efficiency` prints the same lines per batch and over trailing
 windows (`docs/STATS.md`). Cost: 0 LLM calls.
 
@@ -1357,6 +1370,30 @@ that sleep. A hold still present keeps the batch waiting, and the first admissio
 (`wake = min(holdUntil - t, pollMs)`). Per-issue `notBefore` delays are not externally clearable and are capped only
 by the existing seams. No socket notification: the host file is the authority for daemon-hosted and foreground
 dispatchers alike. Cost: 0 LLM calls; one small file read per poll while held.
+
+## Entry 2026-10-23 — Longest-first admission inside a priority level (#4409)
+
+Batch admission used to take ready issues in queue order (FIFO) inside a priority level, and `addIssues` added a decomposed
+lane's sub-issues at the back of the queue. A batch's makespan is set by its longest chain, so long lanes and
+decomposition children started last and became the long pole (AlterLab batch 2026-10-22: a 48 min sub-issue started
+1h18m in, batch 2h46m). `orchestrate.mjs` now ranks `ready` with one `rank()` in all three admission paths (registry
+offer, `pickNext` budget, plain):
+1. priority (unchanged; the host registry `sched.mjs` keeps its cross-batch FIFO, only the in-batch offer order changes);
+2. the head band: decomposed sub-issues (`addIssues(subs, {head: true, parent})` puts them at the front of the queue;
+   persisted `heads`), and, with an estimator, issues queued longer than `starveMs` (default `DEFAULT_STARVE_MS`, 30 min;
+   persisted `enqueued`), oldest first;
+3. the estimate plus the estimates of unfinished in-batch dependents (critical path), descending;
+4. queue order.
+
+The estimate comes from the optional `estimate(issue, {body})` hook (null keeps today's order apart from the head rule).
+engine-cli wires `estimateLaneMinutes`: a post-deploy-only body is `POST_DEPLOY_EST_MIN` (2), otherwise the `size:` label
+(`budget.mjs` `laneSize`; unsized = M) picks the repo's median wall minutes of merged runs of that size from the local
+run logs (`laneHistory`; `summariseLog` now carries `size` from `RUN_TERMINAL turns.size`; at least 3 samples), else
+`EST_DEFAULT_MIN` S 10 / M 25 / L 50. A sub-issue gets the parent's estimate ÷ N, floored at M. Estimates are persisted
+as `estimates` (only with the hook); a failing hook is the M default. A settled row carries `est_minutes`;
+`formatEstimateSummary` adds the batch-report line `estimates: N lanes, est X min vs actual Y min; median |error| Z min;
+worst #n …`. Cost: 0 LLM calls; one local run-log read per batch. Tests: `bin/lean/sched.test.mjs` "longest-first
+admission (#4409)", including a virtual-clock replay of the 2026-10-22 batch shape.
 
 ## Entry 2026-10-23 — Light-lane eligibility and upgrade triggers (#4448)
 

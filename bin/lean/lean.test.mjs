@@ -5766,6 +5766,29 @@ describe("#4395 lane profile", () => {
     assert.ok(u.filter((e) => e.phase === "implement" && e.trigger === "build").every((e) => !("baseline_tokens" in e)), "a resumed build reports none");
   });
 
+  it("#4410 PHASE_ATTEMPT_USAGE carries the runner's tools stats only when present; makeLeanRunner derives them from toolUses", async () => {
+    const tools = { calls: 4, turns: 2, per_turn: 2, rereads: 0, top: [] };
+    const w = world(), dir = tmpDir("core-tools-"), orig = w.io.runner;
+    w.io.runner = async (c) => ({ ...(await orig(c)), tools: c.role === "builder" ? tools : null });
+    await run(w, { dir });
+    const u = usage(dir);
+    assert.ok(u.some((e) => e.phase === "implement" && e.trigger === "build" && e.tools?.per_turn === 2), "a builder attempt carries tools");
+    const rev = readLog(dir, 7).filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "review");
+    assert.ok(rev.length && rev.every((e) => !("tools" in e)), "null tools leave the key absent");
+    const uses = [{ msg: "m1", name: "Read", path: "a", cmd: null }, { msg: "m1", name: "Bash", path: null, cmd: "cat a" }, { msg: "m2", name: "Bash", path: null, cmd: "sed -n 1,2p a" }];
+    const r = await makeLeanRunner({ runCli: async () => ({ text: "", toolUses: uses }) })({ role: "builder", issue: 7, cwd: dir, resume: null, system: "", prompt: "go" });
+    assert.deepEqual(r.tools, { calls: 3, turns: 2, per_turn: 1.5, rereads: 1, top: [{ path: "a", reads: 3 }] });
+    assert.equal((await makeLeanRunner({ runCli: async () => ({ text: "" }) })({ role: "builder", issue: 7, cwd: dir, resume: null, system: "", prompt: "go" })).tools, null);
+  });
+
+  it("#4410 both builder prompts ask for same-turn read-only calls and read-once notes (within budget)", () => {
+    for (const p of [builderPlanPrompt(7), builderImplementPrompt(), builderImplementPrompt("ci")]) {
+      assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
+      assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
+    }
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1500 && approxTokens(builderPlanPrompt(7)) <= 1800);
+  });
+
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
     const { chmodSync } = await import("node:fs");
     const { runCliBackendAsync } = await import("../runner.mjs");

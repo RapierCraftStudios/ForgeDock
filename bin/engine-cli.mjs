@@ -1260,7 +1260,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   sink.batch?.(batch);
   sink.line(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
   const dir = deps.dir ?? runDir();
-  const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines } = await import("./lean/orchestrate.mjs");
+  const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines, estimateLaneMinutes, laneHistory, formatEstimateSummary } = await import("./lean/orchestrate.mjs");
   const { formatPrecheckSummary } = await import("./lean/precheck.mjs");
   const { formatFirstPassSummary } = await import("./lean/fixround.mjs");
   const { formatDecompositionSummary } = await import("./lean/decompose.mjs");
@@ -1447,9 +1447,17 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     exitProc(128 + SIGNO[sig]);
   }]));
   for (const [sig, f] of Object.entries(handlers)) on(sig, f);
+  // #4409: longest-first admission; lane estimates from the size label, a post-deploy-only body and this repo's run history.
+  let estimate = deps.estimate;
+  if (estimate === undefined) {
+    let history = {};
+    try { const { readLocalRuns } = await import("./stats/local-source.mjs"); history = laneHistory(readLocalRuns(dir), repo); } catch { history = {}; }
+    estimate = async (n, { body }) => estimateLaneMinutes({ labels: await labelNames(n), body, history });
+  }
   let rows;
   try {
     rows = await orchestrate({
+      ...(estimate ? { estimate } : {}),
       beforeAdmit,
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getCancelled: batch.readCancel, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
@@ -1494,6 +1502,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (firstPassLine) report.push(firstPassLine);
   const turnLine = formatTurnSummary(rows); // #4392
   if (turnLine) report.push(turnLine);
+  const estLine = formatEstimateSummary(rows); // #4409
+  if (estLine) report.push(estLine);
   try { // #4402: $/merge, turns, context, retries by cause, no-action lanes, issue quality, acceptance; never fails a batch
     const { batchEfficiency, formatEfficiencyLines } = await import("./stats/efficiency.mjs");
     report.push(...formatEfficiencyLines(await (deps.efficiency ?? batchEfficiency)({ batchDir: batch.dir, runsDir: dir, repo, gh: (a) => leanIo.gh(a), rows })));
