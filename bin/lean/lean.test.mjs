@@ -5869,6 +5869,15 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     assert.deepEqual(events(dir, "CONTRACT_FROZEN").map((e) => e.derived), ["light"]);
     assert.ok(w.ran.includes(RT.command), "the engine ran the targeted tests");
     assert.ok(w.rgCalls.length >= 1, "red/green repro gate ran");
+    const lite = w.comments.filter((c) => c.includes("<!-- FORGE:LITE -->"));
+    assert.equal(lite.length, 1, "#4452: one FORGE:LITE receipt");
+    assert.match(lite[0], /\*\*Outcome:\*\* light/);
+    assert.match(lite[0], /\*\*Diff:\*\* 2 file\(s\), \+25\/-1/);
+    assert.match(lite[0], /\*\*Red\/green:\*\* base FAILED → head RAN/);
+    assert.match(lite[0], /targeted tests: 1 command\(s\), passed/);
+    assert.match(lite[0], /\*\*Cost:\*\* \$\d+\.\d{4} \(true per-session cost/);
+    assert.match(lite[0], /\*\*Eligibility:\*\* eligible \(mode on\)/);
+    assert.equal(typeof events(dir, "LIGHT_DONE")[0].cost_usd, "number");
   });
 
   for (const [name, code, o] of [
@@ -5893,6 +5902,9 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
       const later = w.calls.slice(w.calls.indexOf(b[0]), w.calls.indexOf(b[2])).filter((c) => c[0] === "git"); // light session -> full implement
       assert.ok(!later.some((c) => ["reset", "rebase", "clean"].includes(c[1]) || (c[1] === "checkout" && c.includes("-B")) || (c[1] === "branch" && c.includes("-D")) || (c[1] === "push" && c.some((x) => /^--force|^-f$/.test(String(x))))), "the light work is never discarded");
       assert.equal(events(dir, "LIGHT_DONE").length, 0);
+      const lite = w.comments.filter((c) => c.includes("<!-- FORGE:LITE -->"));
+      assert.equal(lite.length, 1, "#4452: the upgraded light lane still posts its receipt");
+      assert.match(lite[0], new RegExp(`\\*\\*Upgrade reasons:\\*\\*[\\s\\S]*- ${code}:`));
     });
   }
 
@@ -5904,6 +5916,7 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     assert.equal(builders(w).length, 2);
     assert.match(builders(w)[0][4], /PLANNING ONLY/);
     assert.ok(!/Light-lane upgrade/.test(builders(w)[0][4]));
+    assert.ok(!w.comments.some((c) => c.includes("<!-- FORGE:LITE -->")), "#4452: no receipt outside a light lane");
   });
 
   it("a resumed lane never goes light, even in mode on", async () => {
