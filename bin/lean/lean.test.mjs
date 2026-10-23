@@ -81,7 +81,7 @@ function world(o = {}) {
       if (k === "repo view") return `${o.defaultBranch ?? "main"}\n`;
       if (k === "issue view" && a.includes("milestone")) { w.seq.push("lane"); return JSON.stringify({ milestone: o.milestone ? { title: o.milestone } : null }); }
       if (k === "issue view" && o.issueBodies && a[2] === "7" && a.some((x) => String(x).startsWith("number,title,body,state,comments"))) { const b = o.issueBodies.length > 1 ? o.issueBodies.shift() : o.issueBodies[0]; return JSON.stringify({ number: 7, title: o.title ?? "foo breaks", body: b, state: "OPEN", comments: o.viewComments ?? [] }); }
-      if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: a[2] === "7" && o.title ? o.title : "foo breaks", body: ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [], ...(o.labels && a[2] === "7" ? { labels: o.labels } : {}) });
+      if (k === "issue view") return JSON.stringify({ number: Number(a[2]), title: a[2] === "7" && o.title ? o.title : "foo breaks", body: a[2] === "7" && o.body ? o.body : ISSUE_BODY, state: w.issueStates?.[a[2]] ?? "OPEN", comments: [], ...(o.labels && a[2] === "7" ? { labels: o.labels } : {}) });
       if (k === "pr edit") { w.prEdits.push(a); return ""; }
       if (k === "label create") { w.labelCreates = [...(w.labelCreates ?? []), a]; return ""; }
       if (k === "issue comment" && w.commentErrors.length) throw new Error(w.commentErrors.shift());
@@ -5833,5 +5833,82 @@ describe("#4395 lane profile", () => {
     assert.equal(fresh.baselineTokens, 5310);
     const resumed = await makeLeanRunner({ runCli: async () => ({ text: "", baselineTokens: 90000 }) })({ role: "builder", issue: 7, cwd: d, resume: "s-1", system: "", prompt: "go" });
     assert.equal(resumed.baselineTokens, null);
+  });
+});
+
+describe("#4450 light lane: one builder session, derived contract, upgrade to the full lane", () => {
+  const RT = { path: "test/foo.test.js", id: "foo handles null", command: "node --test test/foo.test.js" };
+  const BODY = "foo crashes on null input in src/foo.js.\n\nExpected behaviour: foo returns null.\n\n- foo must handle a null argument without throwing.\n- Existing callers of foo keep working.";
+  const RESULT = { status: "fixed", summary: "fixed foo", requirement: "foo must handle a null argument without throwing.", repro_test: RT, tests: [{ command: RT.command, result: "pass", fails_without_fix: true }] };
+  const lworld = (o = {}) => {
+    const w = world({ labels: [{ name: "bug" }], body: BODY, result: RESULT, contract: { ...CONTRACT, repro_test: RT }, ...o });
+    w.numstat = o.numstat ?? "5\t1\tsrc/foo.js\n20\t0\ttest/foo.test.js\n";
+    w.rgCalls = []; w.ran = [];
+    w.io.redGreen = async (x) => { w.rgCalls.push(x.command); return o.repro ?? { base: "FAILED", head: "RAN" }; };
+    w.io.runCommand = async (a) => { w.ran.push(a.command); return { rc: 0, output: "" }; };
+    w.io.apiShape = async () => o.api ?? { status: "none", changes: [], unknown: [] };
+    return w;
+  };
+  const events = (dir, name) => readLog(dir, 7).filter((e) => e.event === name);
+  const ON = { light: { mode: "on" } };
+
+  it("nothing triggers: exactly one builder session (no plan) plus the review; the derived contract is frozen and posted", async () => {
+    const w = lworld(), dir = tmpDir("light-");
+    const r = await run(w, { dir, ...ON });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(builders(w).length, 1, "one builder session");
+    assert.ok(!/PLANNING ONLY/.test(builders(w)[0][4]));
+    assert.match(builders(w)[0][4], /failing regression test first/);
+    assert.equal(reviewers(w).length, 1, "plus the review call");
+    const contract = w.comments.find((c) => c.includes("<!-- FORGE:CONTRACT -->"));
+    assert.match(contract, /\| R1 \| foo must handle a null argument without throwing\. \| deliver \|/);
+    assert.match(contract, /"repro_test"/);
+    assert.equal(events(dir, "LIGHT_ELIGIBILITY")[0].verdict, "eligible");
+    assert.equal(events(dir, "LIGHT_DONE").length, 1);
+    assert.equal(events(dir, "LIGHT_UPGRADE").length, 0);
+    assert.deepEqual(events(dir, "CONTRACT_FROZEN").map((e) => e.derived), ["light"]);
+    assert.ok(w.ran.includes(RT.command), "the engine ran the targeted tests");
+    assert.ok(w.rgCalls.length >= 1, "red/green repro gate ran");
+  });
+
+  for (const [name, code, o] of [
+    ["oversized diff", "diff_lines", { numstat: "80\t3\tsrc/foo.js\n20\t0\ttest/foo.test.js\n" }],
+    ["non-red repro", "repro_not_red", { repro: { base: "PASSED", head: "RAN" } }],
+    ["API change", "api_shape", { api: { status: "changed", changes: [{ file: "src/foo.js", symbol: "foo", change: "sync-async", before: "def", after: "async def" }], unknown: [] } }],
+    ["risk path", "risk_path", { changed: ["src/auth/session.js", "test/foo.test.js"], numstat: "4\t0\tsrc/auth/session.js\n" }],
+  ]) {
+    it(`${name}: upgrades to the full lane with the digest, keeping the light commits`, async () => {
+      const w = lworld(o), dir = tmpDir("light-up-");
+      await run(w, { dir, ...ON });
+      const up = events(dir, "LIGHT_UPGRADE");
+      assert.equal(up.length, 1);
+      assert.ok(up[0].reasons.some((x) => x.code === code), JSON.stringify(up[0].reasons));
+      const b = builders(w);
+      assert.ok(b.length >= 3, "light session, then the full lane's plan and implement");
+      assert.ok(!/PLANNING ONLY/.test(b[0][4]));
+      assert.match(b[1][4], /PLANNING ONLY/);
+      assert.match(b[1][4], /This is a rerun: the branch already holds commits/);
+      assert.match(b[1][4], /Resume digest of the last run on this branch/);
+      assert.match(b[1][4], new RegExp(`Light-lane upgrade[\\s\\S]*- ${code}:`));
+      const later = w.calls.slice(w.calls.indexOf(b[0]), w.calls.indexOf(b[2])).filter((c) => c[0] === "git"); // light session -> full implement
+      assert.ok(!later.some((c) => ["reset", "rebase", "clean"].includes(c[1]) || (c[1] === "checkout" && c.includes("-B")) || (c[1] === "branch" && c.includes("-D")) || (c[1] === "push" && c.some((x) => /^--force|^-f$/.test(String(x))))), "the light work is never discarded");
+      assert.equal(events(dir, "LIGHT_DONE").length, 0);
+    });
+  }
+
+  it("shadow (the default) only reports the verdict: the lane keeps plan -> implement", async () => {
+    const w = lworld(), dir = tmpDir("light-sh-");
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    const e = events(dir, "LIGHT_ELIGIBILITY")[0];
+    assert.equal(e.mode, "shadow"); assert.equal(e.verdict, "eligible"); assert.equal(e.light, false);
+    assert.equal(builders(w).length, 2);
+    assert.match(builders(w)[0][4], /PLANNING ONLY/);
+    assert.ok(!/Light-lane upgrade/.test(builders(w)[0][4]));
+  });
+
+  it("a resumed lane never goes light, even in mode on", async () => {
+    const w = lworld({ remote: "abc\trefs/heads/feat/issue-7-lean\n" }), dir = tmpDir("light-res-");
+    await run(w, { dir, ...ON });
+    assert.equal(events(dir, "LIGHT_DONE").length + events(dir, "LIGHT_UPGRADE").length, 0);
   });
 });

@@ -466,6 +466,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
 `light.mjs` (light-lane eligibility and upgrade triggers, forge.yaml `lean.light`, #4448; see its entry below),
+`lightlane.mjs` (light-lane execution: one builder session, derived contract, upgrade to the full lane, #4450; see its entry below),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
 push/gh/merge retry patterns).
 
@@ -1498,3 +1499,42 @@ The one-level forge.yaml parser flattens the nested block to `lean.mode|max_line
 `lean.light_mode|light_max_lines|light_max_files` also work and win. An unknown mode is `shadow`, and a limit that is not a
 positive integer keeps its default. `readLight(cwd)` in `engine-cli.mjs` reads it. Nothing calls the module yet: the lane
 wiring (light session, derived contract, upgrade to the full lane) is #4450, so every lane runs as before. Cost: 0 LLM calls.
+
+## Entry 2026-10-23 — Light-lane execution (#4450)
+
+`runCore` now calls `lightEligibility` on every lane, before the plan call. It logs `LIGHT_ELIGIBILITY {mode, verdict,
+light, reasons}`, and adds one trajectory decision unless the mode is off, so shadow (the default) reports without changing
+the lane. `engine-cli.mjs` passes `light: readLight(cwd)` at both `runCore` call sites. The predicted files are the
+paths the body names (`namedPaths`), and the risk paths are `review.risk_paths`.
+A lane runs light only in mode `on`, with verdict `eligible` (an `ambiguous` verdict stays full; no classifier call), and
+only as a fresh lane: never resumed, salvaged, recovery, refactor:split or with a recovered frozen contract.
+`lightlane.mjs` `runLightStep` (every effect injected; lean.mjs only wires it):
+1. One builder session (`lightBuildPrompt`, trigger `build`, implement turn budget): failing regression test first, then
+   the fix, then the targeted tests, commit; result.json carries `requirement` (one verbatim issue sentence),
+   `repro_test` and `tests[].command`. A builder that finds the issue invalid, blocked or too big writes
+   `status: "upgrade"`.
+2. `checkpoint("light build")` commits uncommitted work. No commit is `no_commit`, and a status other than `fixed` is
+   `not_fixed`.
+3. `deriveLightContract` (pure) builds the record from the diff and the test:
+   - R1 quotes the builder's sentence when it is verbatim in the issue, else the title;
+   - one deliverable per changed non-test file;
+   - validate is the repro command plus each targeted test command;
+   - `repro_test` is the builder's, else `"none"` with a reason.
+   The same `validateContract` judges it; an invalid one is `contract_invalid`.
+4. Gates:
+   - the engine runs the validate commands (`io.runCommand`, `heavyStep("precheck")`). A failure resumes the builder
+     session once (trigger `precheck`), then reruns them, so two failed runs are `tests_failed_twice`;
+   - the red/green repro (`reproOf`, `io.redGreen`);
+   - `git diff --numstat base...HEAD` (`parseNumstat`);
+   - `io.apiShape` (`effects.mjs` → `apishape.mjs` `detectApiShape`). A status `unknown`, a missing hook or an error
+     is an `api_shape` reason.
+   All of these feed `upgradeTriggers`; any exception is `light_error`.
+No trigger: the derived contract is frozen and posted as FORGE:CONTRACT exactly like a planned one
+(`CONTRACT_FROZEN {derived: "light"}`, `LIGHT_DONE`). The plan and implement calls are skipped, and every later gate runs
+unchanged: declared checks (lint/format), structure, docs, enumerating, the conformance precheck (which reruns the
+repro) and the review.
+Upgrade: `LIGHT_UPGRADE {reasons}` is logged, the light result.json is blanked, and the same run continues into the plan →
+freeze → implement path. The plan prompt gets `PLAN_RERUN_NOTE` (the branch holds commits), the `buildResumeDigest`
+text with the light diff's files, and `upgradeNote(reasons)`. The branch is never reset, so committed work is kept.
+Cost: a light lane with no trigger makes one builder call plus the review, with no plan session. An upgrade costs the
+light session on top of the full lane. ADR `decisions/4442-light-lane.md`.

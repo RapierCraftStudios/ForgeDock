@@ -47,6 +47,8 @@ import { parseExploreConfig, explorerAgents, explorePlanRule, exploreBuildRule }
 import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { parseContextPackConfig, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
 import { buildResumeDigest } from "./resume.mjs";
+import { lightEligibility } from "./light.mjs";
+import { runLightStep, lightBuildPrompt, upgradeNote } from "./lightlane.mjs";
 
 /**
  * #4267: what a recovery lane does per code. Codebase-agnostic: the repo's own checks and logs only. Keys stay in step
@@ -1361,8 +1363,41 @@ export async function runCore(o) {
       facts = await factsPath([wt, cwd], io.fs?.exists);
       const ctxPack = frozen ? null : await contextPackStep();
       const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + reproPlanNote(reproOn()) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
+      // #4450: the light lane (lean.light mode on, eligible, fresh lane): one builder session, derived contract, or an upgrade
+      const elig = lightEligibility({ title: iss.title, body: iss.body ?? "", labels: iss.labels ?? [], predictedFiles: namedPaths(iss.body ?? ""), riskPaths, cfg: o.light ?? {} });
+      ev({ event: "LIGHT_ELIGIBILITY", mode: elig.mode, verdict: elig.verdict, light: elig.light, reasons: elig.reasons });
+      if (elig.mode !== "off") T.decisions.push(`Light lane ${elig.mode}: ${elig.verdict}${elig.reasons.length ? ` (${elig.reasons.map((x) => x.code).join(", ")})` : ""}`);
+      let lightDone = false, lightCommits = false;
+      if (elig.light && !frozen && !resumed && !salvagedRef && !recover) {
+        liveKeys = ["implementation"]; stage = "implement";
+        tb.setSize(laneSize({ labels: (iss?.labels ?? []).map((l) => l?.name ?? l) }));
+        const lr = await runLightStep({ title: iss.title, issueText, riskPaths, cfg: o.light ?? {}, validate: (c) => validateContract(c, issueText, { repro: reproOn() }),
+          build: () => builder(++attemptN, lightBuildPrompt(issue, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList), null, true, undefined, { trigger: "build" }),
+          readResult, checkpoint: () => checkpoint("light build"), changedFiles, reproOf, numstat: () => git(["diff", "--numstat", `${base}...HEAD`]),
+          runTests: async (cmds) => (io.runCommand ? Promise.all(cmds.map((command) => heavyStep("precheck", () => io.runCommand({ command, cwd: wt, env: laneEnv() })).then((x) => ({ command, rc: x?.rc ?? 1, output: String(x?.output ?? "") })))) : null),
+          fixTests: (failed) => builder(++attemptN, precheckFailurePrompt(capLogs(failed.map((f) => ({ ...f, log: f.output }))).map((f) => ({ command: f.command, rc: f.rc, output: f.log })), vcfg.mode), sessionId, false, undefined, { mode: "resume", trigger: "precheck" }),
+          apiShape: () => (io.apiShape ? io.apiShape({ cwd: wt, base }).catch(() => null) : null) });
+        stage = "plan"; liveKeys = ["investigation"]; result = (await readResult()) ?? result;
+        if (!lr.upgrade) {
+          lightDone = true; frozen = lr.contract; hash = contractHash(contractJson(frozen));
+          let body = renderContract(frozen, hash, { scope: scopeHash });
+          if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash });
+          await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
+          ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: 0, derived: "light" });
+          ev({ event: "LIGHT_DONE", files: lr.files.length, test_failures: lr.testFailures, repro: lr.repro });
+          T.decisions.push(`Light lane: one builder session, contract ${hash} derived from the diff and the test`);
+        } else {
+          lightCommits = lr.files.length > 0;
+          ev({ event: "LIGHT_UPGRADE", reasons: lr.reasons });
+          T.decisions.push(`Light lane upgraded to the full lane: ${lr.reasons.map((x) => x.code).join(", ")}`);
+          const d = buildResumeDigest({ state: null, comments: trustedComments, contract: null, files: lr.files, lane });
+          resumeNote = d.text + upgradeNote(lr.reasons);
+          result = null; // the light result.json must not read as the plan's verdict
+          if (io.fs.write) { try { await io.fs.write(`${wt}/${RESULT_FILE}`, "{}\n"); } catch { /* the plan overwrites it */ } }
+        }
+      }
       if (!frozen) {
-        await builder(++attemptN, planPrompt() + (hasCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote, null, true, planPrompt, { trigger: "plan" });
+        await builder(++attemptN, planPrompt() + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote, null, true, planPrompt, { trigger: "plan" });
         planned = true;
         result = await readResult();
         const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
@@ -1427,9 +1462,9 @@ export async function runCore(o) {
         ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
         T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
       } else {
-        T.validate = "resumed (existing branch)";
+        T.validate = lightDone ? "light lane (no plan session)" : "resumed (existing branch)";
       }
-      T.plan = [`contract ${hash}`, `${frozen.requirements.length} requirement(s)`];
+      T.plan = [`contract ${hash}${lightDone ? " (derived, light lane)" : ""}`, `${frozen.requirements.length} requirement(s)`];
       tb.setSize(laneSize({ contract: frozen, labels: (iss?.labels ?? []).map((l) => l?.name ?? l) })); // #4392
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
       // #4364: what `forgedock check` needs from the operator's forge.yaml (gitignored, so not in the worktree)
@@ -1443,7 +1478,7 @@ export async function runCore(o) {
       const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + exploreBuildRule(exploreCfg) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote);
       liveKeys = ["implementation"];
       stage = "implement";
-      await builder(++attemptN, implementPrompt, planned ? sessionId : null, true, undefined, { trigger: "build" });
+      if (!lightDone) await builder(++attemptN, implementPrompt, planned ? sessionId : null, true, undefined, { trigger: "build" });
       stage = "fix"; // later builder rounds fix precheck, CI, structure, docs or conformance findings
       result = await readResult();
       { // #4374: the builder's self-review against the shared rubric, log only

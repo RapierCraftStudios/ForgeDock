@@ -23,6 +23,7 @@ import { scopedChecks } from "./checks.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
 import { followupMap } from "./conformance.mjs";
 import { toolStats } from "./toolstats.mjs";
+import { detectApiShape } from "./apishape.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -315,6 +316,10 @@ export function makeLeanIo({ repo }) {
     /** forge#4159: scripts/structure-delta.sh over base...HEAD in cwd; null on any failure (never fails a run). */
     async structureDelta({ cwd, base }) {
       try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
+    },
+    /** #4450: public-API-shape changes of base...HEAD in cwd (bin/lean/apishape.mjs); any failure is {status: "unknown"} (an upgrade). */
+    async apiShape({ cwd, base }) {
+      try { return await detectApiShape({ cwd, base, head: "HEAD" }); } catch (e) { return { status: "unknown", changes: [], unknown: [{ file: "*", lang: null, reason: String(e?.message ?? e).slice(0, 200) }] }; }
     },
     /** #4375: the repo's learned-pitfall ledger, local only (~/.forge/pitfalls, FORGE_PITFALLS_DIR). */
     pitfalls: makePitfallStore(),
