@@ -5,13 +5,15 @@
  * issue's fix is on the default (production) branch, the probe runs deterministically (no model call, no lane), the
  * result is recorded on the issue as a `FORGE:PROBE` comment, and a fail reopens the issue with the output attached.
  *
- * Declaration: a fenced block in the issue body (author trusted) or in a trusted comment (the latest one wins):
+ * Declaration: a top-level fenced block in the issue body or a comment by a declarer (the latest comment wins):
  *   ```forge-probe
  *   run: curl -fsS https://example.com/health
  *   pass: exit 0            # default; or `pass: /regex/flags` matched against stdout
  *   timeout: 120            # seconds, capped at 900
  *   ```
- * Only trusted actors' commands run (`isTrustedActor`/`isTrustedComment`, fail closed). The fix commit is the latest
+ * Only declarers' commands run (`isProbeDeclarer`, fail closed): a human trusted association or trusted login, never a
+ * Bot/App, the engine included, since bot-filed text quotes untrusted content (#4468). A block nested in another fence
+ * or indented as code is quoted content, not a declaration. The fix commit is the latest
  * trusted FORGE:TRAJECTORY `merged at <sha>`, else the merge commit of the latest merged PR that closes the issue; it is
  * promoted when `git merge-base --is-ancestor <fix> origin/<default>` holds. A recorded result is never re-run for the
  * same fix. The probe gets a minimal env (PATH, HOME, LANG, TMPDIR) plus forge.yaml `acceptance_probe.env` (the repo's
@@ -22,7 +24,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseForgeYaml } from "../forge-utils.mjs";
-import { isTrustedActor, isTrustedComment } from "../engine/phases.mjs";
+import { isTrustedComment } from "../engine/phases.mjs";
 import { noComments } from "./render.mjs";
 
 export const PROBE_MARKER = "FORGE:PROBE";
@@ -31,15 +33,35 @@ export const MAX_TIMEOUT_S = 900;
 export const OUTPUT_TAIL = 4000;
 const BASE_ENV = ["PATH", "HOME", "LANG", "TMPDIR"];
 
-const BLOCK_RE = /^[ \t]*```+[ \t]*forge-probe[ \t]*\n([\s\S]*?)^[ \t]*```+[ \t]*$/gm;
+const FENCE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const isForgeMarker = (body) => /^\s*<!--\s*FORGE:/.test(String(body ?? ""));
 
-/** The last ```forge-probe block of `text`: {run, pass, timeoutS}, or null when absent or malformed. */
+/**
+ * #4468: the contents of the top-level CommonMark fences of `text` whose info string is `forge-probe`. A fence closes on
+ * a line of its own character at least as long; anything inside another fence (a quoted sample) or indented 4+ columns
+ * (an indented code block) is content, never a declaration. An unclosed fence yields nothing.
+ */
+function probeBlocks(text) {
+  const blocks = [];
+  let open = null;
+  for (const line of text.split("\n")) {
+    const m = FENCE_RE.exec(line);
+    if (!open) {
+      if (m && !(m[1][0] === "`" && m[2].includes("`"))) open = { ch: m[1][0], len: m[1].length, lines: m[2].trim() === "forge-probe" ? [] : null };
+    } else if (m && m[1][0] === open.ch && m[1].length >= open.len && !m[2].trim()) {
+      if (open.lines) blocks.push(open.lines.join("\n"));
+      open = null;
+    } else open.lines?.push(line);
+  }
+  return blocks;
+}
+
+/** The last top-level ```forge-probe block of `text`: {run, pass, timeoutS}, or null when absent or malformed. */
 export function parseProbe(text) {
-  const blocks = [...noComments(String(text ?? ""), " ").replace(/\r\n?/g, "\n").matchAll(BLOCK_RE)];
+  const blocks = probeBlocks(noComments(String(text ?? ""), " ").replace(/\r\n?/g, "\n"));
   if (!blocks.length) return null;
   const fields = {};
-  for (const line of blocks[blocks.length - 1][1].split("\n")) {
+  for (const line of blocks[blocks.length - 1].split("\n")) {
     const m = /^\s*(run|pass|timeout)\s*:\s*(.*?)\s*$/i.exec(line);
     if (m && !(m[1].toLowerCase() in fields)) fields[m[1].toLowerCase()] = m[2];
   }
@@ -65,8 +87,21 @@ export function parseProbe(text) {
 const actorOf = (o) => ({ association: o?.author_association, type: o?.user?.type, login: o?.user?.login });
 
 /**
- * The probe the issue declares: the latest trusted comment's block, else the body's when its author is trusted.
- * {probe, source} | {untrusted: true} (a block exists but only from untrusted actors) | null.
+ * #4468: who may declare a probe, a command the host runs. Unlike `isTrustedActor` (which trusts every Bot so engine
+ * markers count), only a human: association in FORGE_TRAIL_TRUSTED_ASSOCIATIONS (default OWNER,MEMBER,COLLABORATOR;
+ * explicitly empty trusts none) or login in FORGE_TRAIL_TRUSTED_LOGINS, never a Bot/App or `[bot]` login, the engine
+ * included: the issues it files quote untrusted PR content. Missing author data fails closed.
+ */
+export function isProbeDeclarer({ association, type, login } = {}) {
+  if (!type || type === "Bot" || /\[bot\]$/i.test(String(login ?? ""))) return false;
+  const list = (v) => String(v).split(",").map((x) => x.trim()).filter(Boolean);
+  return list(process.env.FORGE_TRAIL_TRUSTED_ASSOCIATIONS ?? "OWNER,MEMBER,COLLABORATOR").includes(association ?? "")
+    || list(process.env.FORGE_TRAIL_TRUSTED_LOGINS ?? "").includes(login ?? "");
+}
+
+/**
+ * The probe the issue declares: the latest declarer comment's block, else the body's when its author is a declarer.
+ * {probe, source} | {untrusted: true} (a block exists but only from non-declarers) | null.
  */
 export function declaredProbe(iss) {
   let untrusted = false;
@@ -74,12 +109,12 @@ export function declaredProbe(iss) {
     if (isForgeMarker(c?.body)) continue; // the engine's own comments (a FORGE:PROBE output tail) never declare a probe
     const probe = parseProbe(c?.body);
     if (!probe) continue;
-    if (isTrustedComment(c)) return { probe, source: "comment" };
+    if (isProbeDeclarer(actorOf(c))) return { probe, source: "comment" };
     untrusted = true;
   }
   const probe = parseProbe(iss?.body);
   if (probe) {
-    if (isTrustedActor(actorOf(iss))) return { probe, source: "body" };
+    if (isProbeDeclarer(actorOf(iss))) return { probe, source: "body" };
     untrusted = true;
   }
   return untrusted ? { untrusted: true } : null;
