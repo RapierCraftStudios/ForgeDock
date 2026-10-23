@@ -1345,3 +1345,27 @@ teardown has no checkpoint, so they run to their result. Once nothing runs, the 
 written. `state.json` keeps `cancelled`, but the file stays the authority: an operator `--resume` clears it (`clearCancel`
 next to the breaker reset) and continues the held issues; a daemon restart (`keepBreaker`) keeps it. Cost: 0 LLM calls;
 one small file read per pass. ADR `decisions/4376-orchestrate-cancel.md`.
+
+## Entry 2026-10-23 — Longest-first admission inside a priority level (#4409)
+
+Batch admission used to take ready issues in queue order (FIFO) inside a priority level, and `addIssues` added a decomposed
+lane's sub-issues at the back of the queue. A batch's makespan is set by its longest chain, so long lanes and
+decomposition children started last and became the long pole (AlterLab batch 2026-10-22: a 48 min sub-issue started
+1h18m in, batch 2h46m). `orchestrate.mjs` now ranks `ready` with one `rank()` in all three admission paths (registry
+offer, `pickNext` budget, plain):
+1. priority (unchanged; the host registry `sched.mjs` keeps its cross-batch FIFO, only the in-batch offer order changes);
+2. the head band: decomposed sub-issues (`addIssues(subs, {head: true, parent})` puts them at the front of the queue;
+   persisted `heads`), and, with an estimator, issues queued longer than `starveMs` (default `DEFAULT_STARVE_MS`, 30 min;
+   persisted `enqueued`), oldest first;
+3. the estimate plus the estimates of unfinished in-batch dependents (critical path), descending;
+4. queue order.
+
+The estimate comes from the optional `estimate(issue, {body})` hook (null keeps today's order apart from the head rule).
+engine-cli wires `estimateLaneMinutes`: a post-deploy-only body is `POST_DEPLOY_EST_MIN` (2), otherwise the `size:` label
+(`budget.mjs` `laneSize`; unsized = M) picks the repo's median wall minutes of merged runs of that size from the local
+run logs (`laneHistory`; `summariseLog` now carries `size` from `RUN_TERMINAL turns.size`; at least 3 samples), else
+`EST_DEFAULT_MIN` S 10 / M 25 / L 50. A sub-issue gets the parent's estimate ÷ N, floored at M. Estimates are persisted
+as `estimates` (only with the hook); a failing hook is the M default. A settled row carries `est_minutes`;
+`formatEstimateSummary` adds the batch-report line `estimates: N lanes, est X min vs actual Y min; median |error| Z min;
+worst #n …`. Cost: 0 LLM calls; one local run-log read per batch. Tests: `bin/lean/sched.test.mjs` "longest-first
+admission (#4409)", including a virtual-clock replay of the 2026-10-22 batch shape.
