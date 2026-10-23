@@ -3,7 +3,7 @@
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, renameSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, mkdtempSync, statSync, existsSync, rmSync, writeFileSync, renameSync, readdirSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
 import { promises as fsp } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -234,10 +234,35 @@ export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null }
   });
 }
 
+/**
+ * #4507: a per-run gh HTTP cache (XDG_CACHE_HOME on the gh child only), so concurrent lanes never share a cache entry.
+ * `reset()` drops the current dir (only one this cache created) and switches to a fresh one; with no `root` the dirs
+ * are mkdtemp dirs under `tmp`, removed by `dispose()`.
+ */
+export function makeGhCache({ root = null, tmp = tmpdir() } = {}) {
+  let n = 0, dir = root ? join(root, "gh-cache") : null;
+  const made = new Set();
+  const drop = (d) => { if (d && made.has(d)) { try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } made.delete(d); } };
+  return {
+    env() {
+      if (!dir) return undefined;
+      if (!made.has(dir)) { try { mkdirSync(dir, { recursive: true, mode: 0o700 }); made.add(dir); } catch { return undefined; } }
+      return { XDG_CACHE_HOME: dir };
+    },
+    reset() {
+      drop(dir);
+      if (root) { dir = join(root, `gh-cache-${++n}`); return; }
+      try { dir = mkdtempSync(join(tmp, "forge-gh-cache-")); made.add(dir); } catch { dir = null; }
+    },
+    dispose() { for (const d of [...made]) drop(d); },
+  };
+}
+
 export function makeLeanIo({ repo }) {
   const base = makeIo();
-  const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000 })).stdout;
+  const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) })).stdout;
   return {
+    ghCache: (root) => makeGhCache({ root }),
     gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: makeHeavyIo({ host: makeHostProbe() }), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner(), waitCiGreen: base.waitCiGreen,
     /** Shared dependency cache (#4220): the repo's own package manager, argv only, bounded by the cache's timeout. */
     deps: makeDepCache({ exec: async (cmd, args, { cwd, env, timeoutMs } = {}) => String((await pexec(cmd, args, { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs ?? 0, maxBuffer: 100 * 1024 * 1024 })).stdout) }),
