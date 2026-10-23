@@ -1369,3 +1369,43 @@ that sleep. A hold still present keeps the batch waiting, and the first admissio
 (`wake = min(holdUntil - t, pollMs)`). Per-issue `notBefore` delays are not externally clearable and are capped only
 by the existing seams. No socket notification: the host file is the authority for daemon-hosted and foreground
 dispatchers alike. Cost: 0 LLM calls; one small file read per poll while held.
+
+## Entry 2026-10-23 — Longest-first admission inside a priority level (#4409)
+
+Batch admission used to take ready issues in queue order (FIFO) inside a priority level, and `addIssues` added a decomposed
+lane's sub-issues at the back of the queue. A batch's makespan is set by its longest chain, so long lanes and
+decomposition children started last and became the long pole (AlterLab batch 2026-10-22: a 48 min sub-issue started
+1h18m in, batch 2h46m). `orchestrate.mjs` now ranks `ready` with one `rank()` in all three admission paths (registry
+offer, `pickNext` budget, plain):
+1. priority (unchanged; the host registry `sched.mjs` keeps its cross-batch FIFO, only the in-batch offer order changes);
+2. the head band: decomposed sub-issues (`addIssues(subs, {head: true, parent})` puts them at the front of the queue;
+   persisted `heads`), and, with an estimator, issues queued longer than `starveMs` (default `DEFAULT_STARVE_MS`, 30 min;
+   persisted `enqueued`), oldest first;
+3. the estimate plus the estimates of unfinished in-batch dependents (critical path), descending;
+4. queue order.
+
+The estimate comes from the optional `estimate(issue, {body})` hook (null keeps today's order apart from the head rule).
+engine-cli wires `estimateLaneMinutes`: a post-deploy-only body is `POST_DEPLOY_EST_MIN` (2), otherwise the `size:` label
+(`budget.mjs` `laneSize`; unsized = M) picks the repo's median wall minutes of merged runs of that size from the local
+run logs (`laneHistory`; `summariseLog` now carries `size` from `RUN_TERMINAL turns.size`; at least 3 samples), else
+`EST_DEFAULT_MIN` S 10 / M 25 / L 50. A sub-issue gets the parent's estimate ÷ N, floored at M. Estimates are persisted
+as `estimates` (only with the hook); a failing hook is the M default. A settled row carries `est_minutes`;
+`formatEstimateSummary` adds the batch-report line `estimates: N lanes, est X min vs actual Y min; median |error| Z min;
+worst #n …`. Cost: 0 LLM calls; one local run-log read per batch. Tests: `bin/lean/sched.test.mjs` "longest-first
+admission (#4409)", including a virtual-clock replay of the 2026-10-22 batch shape.
+
+## Entry 2026-10-23 — Run logs and lane ledgers keyed by repo (#4432)
+
+Issue numbers are per repo, but `~/.forge/runs` and `~/.forge/ledger` are per host. The run log is now
+`<owner>__<repo>__<N>.jsonl` (`engine/runlog.mjs` `runLogPath`, the `owner__repo` scheme of `pitfalls.mjs`);
+`appendEvent`/`readLog`/`rewriteLog` take an optional `{ repo }` and keep the legacy `<N>.jsonl` without one (the
+interactive hook logs under `<cwd>/.forgedock/run-logs`, already per checkout). Both paths pass the repo: runCore its
+`repo`, the full path `resolveRepo()` before its first read. Read fallback for one release: a repo with no file yet reads
+the legacy file's RUN_START slices of that repo. `migrateRunLogs(dir)` runs at `run-issue` and `orchestrate` start: it
+claims each legacy `<N>.jsonl` by an atomic rename, moves repo slices into the repo files (before any events already
+there, seq renumbered), keeps repo-less slices in `<N>.jsonl`, never throws. `lastLocalRun`, `readLocalRuns`/`readLanes`
+and `efficiency` read the new names. The adhoc lane ledger was `adhoc/lean-<N>.json` for every repo, so one lane's
+teardown could act on another repo's resources: `makeLedger({ repo })` now writes `<batch>/<owner>__<repo>__<lane>.json`
+(the `lane` field and gc are unchanged; old files age out by TTL). The context-pack cache name and prune prefix carry the
+repo too. Audit: leases (FORGE:STATE on the repo's issue), worktrees (under the checkout), depcache (`<repoKey>/`), the
+sequence lease and sched keys were already repo-scoped. Cost: 0 LLM calls; one dir scan per run-issue/orchestrate start.

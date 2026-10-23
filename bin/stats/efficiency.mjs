@@ -20,6 +20,7 @@ import { probeResultOf } from "../lean/probe.mjs";
 import { listBatches } from "../lean/batch.mjs";
 import { isTrustedComment } from "../engine/phases.mjs";
 import { noComments } from "../lean/render.mjs";
+import { readLog, runLogPath } from "../engine/runlog.mjs";
 
 export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 export const RETRY_CAUSES = Object.freeze(["env", "engine", "code", "review", "unknown"]);
@@ -211,7 +212,11 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
 }
 
 const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; } };
-const readEvents = (runsDir, n) => { try { return parseLog(readFileSync(join(runsDir, `${n}.jsonl`), "utf8")); } catch { return []; } };
+/** #4432: the repo's run log (legacy `<n>.jsonl` only through readLog's fallback); null repo = the legacy file. */
+const readEvents = (runsDir, n, repo = null) => {
+  try { return readLog(runsDir, n, { repo }); } catch { /* a corrupt line: parse the file leniently */ }
+  try { return parseLog(readFileSync(runLogPath(runsDir, n, repo), "utf8")); } catch { return []; }
+};
 const readLogRows = (dir) => { try { return parseLog(readFileSync(join(dir, "log.jsonl"), "utf8")); } catch { return []; } };
 
 /** report.json rows, else state.json results (object or entry list). */
@@ -231,7 +236,7 @@ function settleTimes(logRows) {
 }
 
 async function computeScope({ entries, runsDir, repo, gh, now }) {
-  const logs = new Map(entries.map(({ row }) => [row.issue, readEvents(runsDir, row.issue)]));
+  const logs = new Map(entries.map(({ row }) => [row.issue, readEvents(runsDir, row.issue, repo)]));
   const notes = [];
   let issues = null;
   const mergedIssues = [...new Set(entries.filter(({ row }) => row.outcome === "merged").map(({ row }) => row.issue))];

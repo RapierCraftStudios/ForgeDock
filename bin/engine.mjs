@@ -9,6 +9,13 @@ import { execFileSync } from "node:child_process";
 import { createHash, scryptSync } from "node:crypto";
 import { hostname as osHostname, homedir } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog, scopeEvents } from "./engine/runlog.mjs";
+
+/** #4432: the issue's run log in `dir`, keyed by repo + issue (legacy `<issue>.jsonl` when `repo` is null). */
+const makeRunLog = (dir, issue, repo) => ({
+  append: (e) => appendEvent(dir, issue, e, { repo }),
+  read: () => readLog(dir, issue, { repo }),
+  rewrite: (events) => rewriteLog(dir, issue, events, { repo }),
+});
 import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber, newestCycle, cycleResetProvable, remediationHeadStale, decompositionRevoked, openDependency, reopenRevokedDecomposition } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
@@ -431,7 +438,7 @@ export async function runIssue(opts) {
   // event and forwards it to the telemetry hook (#3834 owns the FORGE:TELEMETRY writer), which can
   // never fail the run.
   const emitOutcome = async (rec) => {
-    appendEvent(dir, issue, rec);
+    runLog.append(rec);
     try { await emitTelemetry?.({ ...rec, issue }); } catch { /* telemetry never fails a run */ }
   };
 
@@ -443,11 +450,23 @@ export async function runIssue(opts) {
   // #4125: no silent lane default; the caller (run-issue --lane) names it, and the CLI refuses the default branch.
   if (typeof lane !== "string" || !lane.trim()) throw new Error("runIssue: lane is required (staging or milestone/<slug>); there is no default");
 
+  // forge#3824: hoisted so RUN_START can carry the repo; #4432: resolved before the first run-log read, which is keyed by it (lazy, memoised; null when unresolved).
+  let repoPromise = null;
+  const resolveRepo = () => (repoPromise ??= (async () => {
+    if (repo) return String(repo).trim();
+    try {
+      const out = await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+      return String(out || "").trim() || null;
+    } catch { return null; }
+  })());
+  // #4432: the run log is keyed by repo + issue (issue numbers are per repo); an unresolved repo keeps the legacy name.
+  const runLog = makeRunLog(dir, issue, await resolveRepo().catch(() => null));
+
   const projector = makeProjector(io);
 
   // 1. Load + reconcile (GitHub wins).
   // #4109: only this (full) path's own events: core-path commits and terminals in the shared log are never replayed here.
-  const local = scopeEvents(readLog(dir, issue)).length ? deriveState(readLog(dir, issue)) : null;
+  const local = scopeEvents(runLog.read()).length ? deriveState(runLog.read()) : null;
   let remote = await projector.readState(issue);
   let { state, action } = reconcileState(local, remote);
   const leaseHeld = (r) => !!(r?.lease && r.lease.until > now() && r.lease.by !== agentId &&
@@ -515,28 +534,19 @@ export async function runIssue(opts) {
       };
     }
   }
-  // forge#3824: hoisted so RUN_START can carry the repo (lazy, memoised; null when unresolved).
-  let repoPromise = null;
-  const resolveRepo = () => (repoPromise ??= (async () => {
-    if (repo) return String(repo).trim();
-    try {
-      const out = await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
-      return String(out || "").trim() || null;
-    } catch { return null; }
-  })());
 
   const runMeta = async () => ({ version: ENGINE_VERSION, forge_version: ENGINE_VERSION, repo: await resolveRepo().catch(() => null) });
   if (!state) {
     state = freshState(issue, lane);
-    appendEvent(dir, issue, { event: "RUN_START", issue, run: state.run, lane, ...(await runMeta()) });
+    runLog.append({ event: "RUN_START", issue, run: state.run, lane, ...(await runMeta()) });
   } else if (action === "hydrate") {
     // GitHub is ahead of (or the only source of) local state. Rebuild the
     // local run-log to match the remote compact index so downstream
     // `deriveState(readLog(...))` calls stay consistent — otherwise the
     // post-commit re-derive below would fold over an empty/stale local log
     // and regress committed/issue/v (C2).
-    rewriteLog(dir, issue, eventsFromIndex(state, await runMeta()));
-    state = deriveState(readLog(dir, issue));
+    runLog.rewrite(eventsFromIndex(state, await runMeta()));
+    state = deriveState(runLog.read());
     // forge#3931: the index does not carry the cycle, so a hydrated log always starts at cycle 0. When a
     // trusted FORGE:CYCLE exists, cycle-scoped progress (or a needs-human/phase-complete/engine-error terminal)
     // belongs to an older cycle ONLY when provably so (cycleResetProvable: terminal index, issue OPEN, no needs-human/remediating label, no open PR): reset via the existing RUN_NEXT_CYCLE event so build runs again instead of
@@ -547,8 +557,8 @@ export async function runIssue(opts) {
       let cyc = 0;
       try { cyc = await newestCycle(issue, io); } catch { cyc = 0; }
       if (cyc > 0) {
-        appendEvent(dir, issue, { event: "RUN_NEXT_CYCLE", issue });
-        state = deriveState(readLog(dir, issue));
+        runLog.append({ event: "RUN_NEXT_CYCLE", issue });
+        state = deriveState(runLog.read());
       }
     }
   }
@@ -630,7 +640,7 @@ export async function runIssue(opts) {
     // forge#3657: publish the cycle boundary on GitHub BEFORE the log flips, so
     // build's reconcilers never re-adopt cycle-1 evidence. Fail closed.
     if (state.terminalReason === "phase-complete") {
-      const localCycles = readLog(dir, issue).filter((e) => e.event === "RUN_NEXT_CYCLE").length;
+      const localCycles = runLog.read().filter((e) => e.event === "RUN_NEXT_CYCLE").length;
       try { await postCycleMarker(issue, await nextCycleNumber(issue, localCycles, io), io); } catch {
         return {
           terminalReason: "not-retryable",
@@ -638,12 +648,12 @@ export async function runIssue(opts) {
         };
       }
     }
-    appendEvent(dir, issue, {
+    runLog.append({
       event: state.terminalReason === "phase-complete" ? "RUN_NEXT_CYCLE" : "RUN_REOPEN",
       issue,
       ...(reopenUncommit ? { uncommit: reopenUncommit } : {}),
     });
-    state = deriveState(readLog(dir, issue));
+    state = deriveState(runLog.read());
     reopened = true;
   }
   // forge#2239: claim the lease unconditionally here — before the phase loop
@@ -882,7 +892,7 @@ export async function runIssue(opts) {
         for (;;) {
         for (;;) {
           try {
-            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId, emitTelemetry, sleep });
+            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, runLog, commandsDir, maxAttempts, backend, model, resolveRepo, agentId, emitTelemetry, sleep });
             break;
           } catch (e) {
             const resetAtMs = e.resetAtEpochMs;
@@ -904,7 +914,7 @@ export async function runIssue(opts) {
             // hasn't committed yet, so a resumed run correctly re-enters
             // pickPhase at this same phase regardless of whether this event
             // was ever written.
-            appendEvent(dir, issue, {
+            runLog.append({
               event: "PHASE_RATE_LIMITED", phase: phase.id,
               resetAt: hasResetEpoch ? resetAtMs : null, resetAtDisplay: e.resetAt || null, waitMs,
               backendId: backendIdentity({ backend, env: process.env }),
@@ -1051,7 +1061,7 @@ export async function runIssue(opts) {
     const commitReason = blockedReason ?? outcome.terminalReason ?? null;
     // forge#3833: the handoff/blocked cause, persisted on the commit event like the reason.
     const commitCode = commitReason ? normalizeCode(outcome.code ?? codeForTerminalReason(commitReason)) : null;
-    appendEvent(dir, issue, {
+    runLog.append({
       event: "PHASE_COMMIT", phase: phase.id, outputs: commitOutputs,
       // forge#3696: `usage` is cumulative over every attempt of the phase; the last attempt's alone is `last_attempt_usage`.
       usage: outcome.usage ?? null, last_attempt_usage: outcome.last_attempt_usage ?? null,
@@ -1061,7 +1071,7 @@ export async function runIssue(opts) {
       backend: outcome.backend ?? null,
       ...(commitReason ? { terminalReason: commitReason, code: commitCode } : {}),
     });
-    state = deriveState(readLog(dir, issue));
+    state = deriveState(runLog.read());
     const terminalReason = blockedReason ?? outcome.terminalReason;
     if (terminalReason) state.terminalReason = terminalReason;
     await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
@@ -1129,14 +1139,14 @@ export async function runIssue(opts) {
     const repoName = await resolveRepo();
     if (typeof io.waitCiGreen !== "function" || pr == null || !repoName) return {};
     const budgetMs = ciPendingMaxMinutes * 60000;
-    const open = readLog(dir, issue).filter((ev) => ev.event === "CI_PENDING_WAIT" && ev.pr === pr).pop();
+    const open = runLog.read().filter((ev) => ev.event === "CI_PENDING_WAIT" && ev.pr === pr).pop();
     const startedAt = open && open.state === "start" && Number.isFinite(open.startedAt) ? open.startedAt : now();
-    if (!(open && open.state === "start")) appendEvent(dir, issue, { event: "CI_PENDING_WAIT", state: "start", pr, startedAt });
+    if (!(open && open.state === "start")) runLog.append({ event: "CI_PENDING_WAIT", state: "start", pr, startedAt });
     let slept = 0, polls = 0, rateLimitSleeps = 0, pollIndex = 0;
     const spentMs = () => Math.max(now() - startedAt, slept);
     const report = async (result) => {
       const minutes = Math.round(spentMs() / 600) / 100;
-      appendEvent(dir, issue, { event: "CI_PENDING_WAIT", state: "end", pr, startedAt, minutes_waited: minutes, result, polls, rate_limit_sleeps: rateLimitSleeps });
+      runLog.append({ event: "CI_PENDING_WAIT", state: "end", pr, startedAt, minutes_waited: minutes, result, polls, rate_limit_sleeps: rateLimitSleeps });
       try { await emitTelemetry?.({ event: "CI_PENDING_WAIT", phase: phaseId, issue, pr, minutes_waited: minutes, result, polls, rate_limit_sleeps: rateLimitSleeps }); } catch { /* telemetry never fails a run */ }
       return minutes;
     };
@@ -1181,14 +1191,14 @@ export async function runIssue(opts) {
   async function terminate(s, reason, detail, code) {
     // forge#3833: absent -> the reason's own code; unknown -> `unclassified` with the raw text kept in `detail`.
     const outcomeCode = code == null ? codeForTerminalReason(reason) : normalizeCode(code);
-    appendEvent(dir, issue, { event: "RUN_TERMINAL", reason, code: outcomeCode,
+    runLog.append({ event: "RUN_TERMINAL", reason, code: outcomeCode,
       ...(outcomeCode === UNCLASSIFIED && detail ? { detail } : {}) });
     // forge#3835: forward the terminal record to the telemetry seam (best-effort, never fails the run).
     try { await emitTelemetry?.({ event: "RUN_TERMINAL", reason, code: outcomeCode, issue }); } catch { /* telemetry never fails a run */ }
     // The terminal write must always land; only the lease field is preserved when another live
     // agent holds it. A failed read falls back to clearing (a lost terminal write would strand the issue).
     const foreign = await foreignLiveLease();
-    const final = { ...deriveState(readLog(dir, issue)), terminal: true, terminalReason: reason, outcomeCode, lease: foreign ?? null };
+    const final = { ...deriveState(runLog.read()), terminal: true, terminalReason: reason, outcomeCode, lease: foreign ?? null };
     await projector.writeState(issue, final);
     // forge#3566: the terminal projection must not leave a stranded `workflow:remediating`
     // next to the terminal label. Best-effort: runs after the terminal write and never throws.
@@ -1237,7 +1247,7 @@ export function cleanupRunTmpdir(issue, { cwd = process.cwd(), env = process.env
 export const INFRA_SPAWN_BACKOFF_MS = Object.freeze([10_000, 30_000, 60_000]);
 
 async function runPhaseWithRetry(phase, state, ctx) {
-  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId, emitTelemetry, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = ctx;
+  const { io, runner, dir, issue, runLog, commandsDir, maxAttempts, backend, model, resolveRepo, agentId, emitTelemetry, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = ctx;
   // forge#3499: build the phase's full argument set ONCE, up front. Every
   // work-on phase sub-skill stops with BLOCKED when a required flag is absent,
   // so an incomplete/invalid set is a deterministic engine failure — fail
@@ -1249,7 +1259,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
   } catch (e) {
     if (e?.code !== "PHASE_ARGS_INVALID") throw e;
     const detail = `phase ${phase.id} args unresolved: ${e.message}`;
-    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt: 0, reason: detail, code: OUTCOME_CODES.ENGINE_ERROR, maxAttempts });
+    runLog.append({ event: "PHASE_FAILED", phase: phase.id, attempt: 0, reason: detail, code: OUTCOME_CODES.ENGINE_ERROR, maxAttempts });
     return { status: "blocked", detail, reason: "engine-error", code: OUTCOME_CODES.ENGINE_ERROR, usage: null };
   }
   // forge#2261: true only if EVERY attempt failed by the runner itself
@@ -1288,7 +1298,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
       cost_usd: extra?.cost_usd ?? null, model: extra?.model ?? null, turns: extra?.turns ?? null,
       backend: extra?.backend ?? null,
     };
-    appendEvent(dir, issue, rec);
+    runLog.append(rec);
     try { await emitTelemetry?.({ ...rec, issue }); } catch { /* telemetry never fails a phase */ }
   };
   // forge#4021: transient CLI spawn failures (ETIMEDOUT/EAGAIN/ENOMEM at spawn) retry on their own bounded
@@ -1296,7 +1306,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
   // so a CLI that merely runs long cannot loop forever.
   let infraRetries = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    appendEvent(dir, issue, { event: "PHASE_START", phase: phase.id, attempt });
+    runLog.append({ event: "PHASE_START", phase: phase.id, attempt });
     let result;
     const t0 = performance.now();
     try {
@@ -1332,7 +1342,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
       if (e.code === "CLI_MAX_TURNS") {
         addUsage(e.usage);
         await recordAttempt(attempt, e.usage, t0, { turns: e.numTurns });
-        appendEvent(dir, issue, {
+        runLog.append({
           event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts,
           turns: e.numTurns ?? null, usage: e.usage ?? null,
         });
@@ -1342,13 +1352,13 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // failure, so rethrow fail-fast and let runIssue end it as a retryable `engine-error` (never needs-human).
       if (isDiskQuotaError(e)) {
         await recordAttempt(attempt, null, t0, null);
-        appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts });
+        runLog.append({ event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts });
         throw e;
       }
       // Transient spawn class: e.code === "CLI_SPAWN_TRANSIENT" (see isTransientSpawnError); retried with infra backoff.
       if (isTransientSpawnError(e) && infraRetries < INFRA_SPAWN_BACKOFF_MS.length) {
         await recordAttempt(attempt, null, t0, null);
-        appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts, infraRetry: infraRetries + 1 });
+        runLog.append({ event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts, infraRetry: infraRetries + 1 });
         await sleep(INFRA_SPAWN_BACKOFF_MS[infraRetries++]);
         attempt--;
         continue;
@@ -1363,7 +1373,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
       const killUsage = e.code === "CLI_TIMEOUT" ? e.usage ?? null : null;
       if (killUsage) addUsage(killUsage);
       await recordAttempt(attempt, killUsage, t0, null);
-      appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts, ...(killUsage ? { usage: killUsage } : {}) });
+      runLog.append({ event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts, ...(killUsage ? { usage: killUsage } : {}) });
       lastCode = OUTCOME_CODES.ENGINE_ERROR;
       continue;
     }
@@ -1377,7 +1387,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
     await recordAttempt(attempt, lastUsage, t0, { cost_usd: result?.costUsd ?? null, model: lastModel, turns: lastTurns, backend: lastBackend });
     const outcome = await phase.detectOutcome(state, io, result);
     if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: cumulativeUsage, last_attempt_usage: lastUsage, model: lastModel, turns: lastTurns, backend: lastBackend };
-    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, code: normalizeCode(outcome.code), maxAttempts, usage: lastUsage, model: lastModel, turns: lastTurns });
+    runLog.append({ event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, code: normalizeCode(outcome.code), maxAttempts, usage: lastUsage, model: lastModel, turns: lastTurns });
     // forge#2176: a phase's detectOutcome can mark a failure as a known,
     // state-derived fixed point — re-running the phase's runner is
     // guaranteed to reproduce the identical failure (e.g. the build phase's

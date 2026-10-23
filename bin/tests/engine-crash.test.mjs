@@ -22,7 +22,10 @@ import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runIssue } from "../engine.mjs";
-import { readLog, deriveState } from "../engine/runlog.mjs";
+import { readLog as readRepoLog, deriveState } from "../engine/runlog.mjs";
+// #4432: the full path keys its run log by repo; this file's fake gh answers `repo view` with acme/widgets.
+const LOG_REPO = { repo: "acme/widgets" };
+const readLog = (dir, issue) => readRepoLog(dir, issue, LOG_REPO);
 import { trusted, builderBody, invBody, asComments, inv as investigationComment, ctx, arch, builder, remediation, decomposed } from "./helpers/comments.mjs";
 
 let dir;
@@ -410,8 +413,8 @@ describe("crash injection: forge#2184 comment-scoped last-match resume semantics
     // already committed locally (mirrors the crashed session having gotten
     // that far before dying), "build" not yet committed.
     const { appendEvent } = await import("../engine/runlog.mjs");
-    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
-    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" }, LOG_REPO);
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} }, LOG_REPO);
 
     const script = {
       "work-on/build": () => {

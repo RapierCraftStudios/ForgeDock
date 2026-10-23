@@ -12,7 +12,7 @@ import { homedir, hostname } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
-import { readLog, deriveState } from "./engine/runlog.mjs";
+import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs } from "./engine/runlog.mjs";
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
@@ -465,16 +465,17 @@ export function formatUsageLine(usage) {
  *
  * @param {string} dir - runDir() (or an injected override for tests)
  * @param {number} issue
+ * @param {string|null} [repo] - "owner/repo" (#4432: the run log is keyed by repo + issue); null = legacy `<issue>.jsonl`
  * @returns {string} multi-line diagnostic block (no trailing newline)
  */
-export function formatTerminalDiagnostics(dir, issue) {
+export function formatTerminalDiagnostics(dir, issue, repo = null) {
   if (!Number.isInteger(issue)) {
     return `  run-log: <invalid issue: ${JSON.stringify(issue)}>`;
   }
-  const runLogPath = join(dir, `${issue}.jsonl`);
+  const logPath = runLogPath(dir, issue, repo);
   let events = [];
   try {
-    events = readLog(dir, issue);
+    events = readLog(dir, issue, { repo });
   } catch {
     // Corrupt/unreadable log — degrade to just the run-log path line below.
   }
@@ -490,7 +491,7 @@ export function formatTerminalDiagnostics(dir, issue) {
     const committed = state.committed.length ? state.committed.join(",") : "";
     lines.push(`  state:   committed=[${committed}] branch=${state.branch ?? "null"} pr=${state.pr ?? "null"}`);
   }
-  lines.push(`  run-log: ${runLogPath}`);
+  lines.push(`  run-log: ${logPath}`);
   const usageLine = formatUsageLine(aggregateUsage(events));
   if (usageLine) lines.push(usageLine);
   return lines.join("\n");
@@ -678,10 +679,12 @@ export function lastLocalRun(dir) {
   withMtime.sort((a, b) => b.mtime - a.mtime);
 
   for (const { f } of withMtime) {
-    const issue = parseInt(f.slice(0, -".jsonl".length), 10);
-    if (!Number.isInteger(issue)) continue;
+    // #4432: `<issue>.jsonl` (legacy) or `<owner>__<repo>__<issue>.jsonl`; the issue is the trailing number.
+    const m = /(?:^|__)(\d+)\.jsonl$/.exec(f);
+    if (!m) continue;
+    const issue = Number(m[1]);
     try {
-      const events = readLog(dir, issue);
+      const events = readLogFile(join(dir, f));
       if (events.length === 0) continue;
       const state = deriveState(events);
       return { issue, terminal: state.terminal, terminalReason: state.terminalReason };
@@ -781,12 +784,16 @@ export async function runFromCli(argv, deps = {}) {
   const agentId = `cli_${sanitizeLeaseHost(hostname())}_${process.pid}`;
   // Injectable for tests (forge#2175) — defaults to the real ~/.forge/runs dir.
   const dir = deps.dir ?? runDir();
+  migrateRunLogs(dir); // #4432: split legacy per-issue logs by repo (best effort, never throws)
+  // #4432: the run log is keyed by repo + issue. The core path needs the repo anyway; the full path tries once per
+  // backoff step without waiting (engine.mjs resolves it again itself), and an unresolved repo keeps the legacy name.
+  const logRepo = repo ?? (await resolveDefaultRepo(io, enginePath === "full" ? { sleep: async () => {} } : {}));
   // forge#2240: print the run-log path at the very start of the run, not only
   // in the non-merged completion diagnostics (formatTerminalDiagnostics prints
   // it too, but only post-completion and only for non-"merged" outcomes). A
   // caller tailing this process's stdout should be able to find the run-log
   // to inspect immediately, without waiting for the run to finish.
-  console.log(`run-log: ${join(dir, `${issue}.jsonl`)}`);
+  console.log(`run-log: ${runLogPath(dir, issue, logRepo)}`);
   // forge#2240: phase-boundary progress lines — the only stdout emitted
   // during the run itself. `runIssue()`'s `onProgress` callback defaults to a
   // no-op, so this is purely additive; engine.mjs never calls console.log
@@ -804,7 +811,7 @@ export async function runFromCli(argv, deps = {}) {
   };
   if (enginePath !== "full") {
     // Core work-on (lean): one builder session, one reviewer, GitHub as the register.
-    const leanRepo = repo ?? (await resolveDefaultRepo(io));
+    const leanRepo = logRepo;
     if (!leanRepo) throw new Error("core path needs the repo: pass --repo or run inside a checkout with a GitHub remote");
     const { runCore } = deps.leanModule ?? (await import("./lean/lean.mjs"));
     const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo: leanRepo });
@@ -876,7 +883,7 @@ export async function runFromCli(argv, deps = {}) {
   // run-log runIssue() just wrote. Skipped for "merged" (the success case)
   // to avoid regressing/cluttering the existing happy-path output.
   if (res.terminalReason !== "merged") {
-    console.log(formatTerminalDiagnostics(dir, issue));
+    console.log(formatTerminalDiagnostics(dir, issue, logRepo));
   } else {
     // forge#2399: formatTerminalDiagnostics() (and its phase/reason/state
     // block) intentionally stays gated to non-merged outcomes above, but the
@@ -884,7 +891,7 @@ export async function runFromCli(argv, deps = {}) {
     // hold on the common success case too — surface just the usage line here
     // rather than the full diagnostic block.
     try {
-      const usageLine = formatUsageLine(aggregateUsage(readLog(dir, issue)));
+      const usageLine = formatUsageLine(aggregateUsage(readLog(dir, issue, { repo: logRepo })));
       if (usageLine) console.log(usageLine);
     } catch {
       // Corrupt/unreadable log — degrade silently, same as formatTerminalDiagnostics.
@@ -1255,7 +1262,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   sink.batch?.(batch);
   sink.line(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
   const dir = deps.dir ?? runDir();
-  const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines } = await import("./lean/orchestrate.mjs");
+  migrateRunLogs(dir); // #4432: split legacy per-issue logs by repo before any lane runs (best effort, never throws)
+  const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines, estimateLaneMinutes, laneHistory, formatEstimateSummary } = await import("./lean/orchestrate.mjs");
   const { formatPrecheckSummary } = await import("./lean/precheck.mjs");
   const { formatFirstPassSummary } = await import("./lean/fixround.mjs");
   const { formatDecompositionSummary } = await import("./lean/decompose.mjs");
@@ -1442,9 +1450,17 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     exitProc(128 + SIGNO[sig]);
   }]));
   for (const [sig, f] of Object.entries(handlers)) on(sig, f);
+  // #4409: longest-first admission; lane estimates from the size label, a post-deploy-only body and this repo's run history.
+  let estimate = deps.estimate;
+  if (estimate === undefined) {
+    let history = {};
+    try { const { readLocalRuns } = await import("./stats/local-source.mjs"); history = laneHistory(readLocalRuns(dir), repo); } catch { history = {}; }
+    estimate = async (n, { body }) => estimateLaneMinutes({ labels: await labelNames(n), body, history });
+  }
   let rows;
   try {
     rows = await orchestrate({
+      ...(estimate ? { estimate } : {}),
       beforeAdmit,
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getCancelled: batch.readCancel, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
@@ -1489,6 +1505,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (firstPassLine) report.push(firstPassLine);
   const turnLine = formatTurnSummary(rows); // #4392
   if (turnLine) report.push(turnLine);
+  const estLine = formatEstimateSummary(rows); // #4409
+  if (estLine) report.push(estLine);
   try { // #4402: $/merge, turns, context, retries by cause, no-action lanes, issue quality, acceptance; never fails a batch
     const { batchEfficiency, formatEfficiencyLines } = await import("./stats/efficiency.mjs");
     report.push(...formatEfficiencyLines(await (deps.efficiency ?? batchEfficiency)({ batchDir: batch.dir, runsDir: dir, repo, gh: (a) => leanIo.gh(a), rows })));

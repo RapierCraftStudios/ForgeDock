@@ -170,7 +170,7 @@ async function runCase(cs, conformance = "enforce", extra = {}) {
   const w = makeWorld(dir, { builder: builderScript(cs), reviewer: (n, c) => (cs.generic ? generic() : oracle(c)) });
   if (extra.runCommand) w.io.runCommand = extra.runCommand;
   const ret = await runCore({ issue: 101, repo: "o/r", lane: "staging", cwd: w.repo, worktreeRoot: path.join(dir, "wt"), dir: path.join(dir, "runs"), io: w.io, random: () => 0.5, stableMs: 0, livePollMs: 20, conformance, ...(extra.opts ?? {}) });
-  return { ...w.observe(ret), log: readLog(path.join(dir, "runs"), 101) };
+  return { ...w.observe(ret), log: readLog(path.join(dir, "runs"), 101, { repo: "o/r" }) }; // #4432: keyed by repo
 }
 const blocked = (o, code) => {
   assert.equal(o.ret.terminalReason, "needs-human"); assert.equal(o.ret.code, code);
