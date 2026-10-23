@@ -23,6 +23,7 @@ import { scopedChecks } from "./checks.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
 import { followupMap } from "./conformance.mjs";
 import { toolStats } from "./toolstats.mjs";
+import { detectApiShape } from "./apishape.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -60,12 +61,18 @@ export function wrapLaneLimits(bin, args, limits) {
 export const noToolFlags = (caps) => (caps?.strictMcp ? ["--tools", ""]
   : ["--disallowedTools", "Read", "Grep", "Glob", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]);
 
+/** #4456: `--settings` registering the re-read nudge (bin/hooks/reread-nudge.mjs) as a PostToolUse hook on Read and Bash. */
+export const REREAD_HOOK = fileURLToPath(new URL("../hooks/reread-nudge.mjs", import.meta.url));
+export const rereadNudgeFlags = (node = process.execPath, hook = REREAD_HOOK) => ["--settings", JSON.stringify({ hooks: { PostToolUse: [{ matcher: "Read|Bash",
+  hooks: [{ type: "command", command: `${JSON.stringify(node)} ${JSON.stringify(hook)}` }] }] } })];
+
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null }) => {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
     // #4391: custom subagents (the explorer) for the builder session; null leaves argv unchanged
-    const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : []), ...(agents ? ["--agents", JSON.stringify(agents)] : [])];
+    const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : []), ...(agents ? ["--agents", JSON.stringify(agents)] : []),
+      ...(rereadNudge && !readOnly && !noTools ? rereadNudgeFlags() : [])]; // #4456: builder sessions only
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
       args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
       logger: { log() {} },
@@ -315,6 +322,10 @@ export function makeLeanIo({ repo }) {
     /** forge#4159: scripts/structure-delta.sh over base...HEAD in cwd; null on any failure (never fails a run). */
     async structureDelta({ cwd, base }) {
       try { return JSON.parse((await pexec("bash", [script("structure-delta.sh"), `${base}...HEAD`], { cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024 })).stdout); } catch { return null; }
+    },
+    /** #4450: public-API-shape changes of base...HEAD in cwd (bin/lean/apishape.mjs); any failure is {status: "unknown"} (an upgrade). */
+    async apiShape({ cwd, base }) {
+      try { return await detectApiShape({ cwd, base, head: "HEAD" }); } catch (e) { return { status: "unknown", changes: [], unknown: [{ file: "*", lang: null, reason: String(e?.message ?? e).slice(0, 200) }] }; }
     },
     /** #4375: the repo's learned-pitfall ledger, local only (~/.forge/pitfalls, FORGE_PITFALLS_DIR). */
     pitfalls: makePitfallStore(),

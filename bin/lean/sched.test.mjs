@@ -434,3 +434,51 @@ describe("longest-first admission (#4409)", () => {
     assert.equal(estCalls, 0);
   });
 });
+
+describe("#4481: one lane per repo and issue across batches", () => {
+  it("the registry refuses a second batch's key for a live repo+issue slot, names the batch and drops it from the queue", () => {
+    const { handle, live } = world();
+    const a = handle(201), b = handle(202);
+    assert.equal(a.tryAcquire("A#5", { batch: "A", repo: "o/r", issue: 5, exclusive: true }, 4).ok, true);
+    const r = b.tryAcquire("B#5", { batch: "B", repo: "o/r", issue: 5, exclusive: true }, 4);
+    assert.deepEqual([r.ok, r.conflict], [false, "A"]);
+    assert.match(r.reason, /#5 has a live lane in batch A/);
+    assert.deepEqual(b.list().queue, [], "a refused key holds no grant rank");
+    assert.equal(b.holder({ batch: "B", repo: "o/r", issue: 5, exclusive: true }), "A");
+    assert.equal(a.holder({ batch: "A", repo: "o/r", issue: 5, exclusive: true }), null, "its own batch is no conflict");
+    assert.equal(b.tryAcquire("B#6", { batch: "B", repo: "o/r", issue: 6, exclusive: true }, 4).ok, true, "another issue");
+    assert.equal(b.tryAcquire("C#5", { batch: "C", repo: "o/other", issue: 5, exclusive: true }, 4).ok, true, "another repo");
+    assert.equal(b.tryAcquire("D#5", { batch: "D", repo: null, issue: 5, exclusive: true }, 4).ok, true, "no repo: unchanged");
+    assert.equal(a.tryAcquire("A#5", { batch: "A", repo: "o/r", issue: 5, exclusive: true }, 4).ok, true, "a granted key stays granted");
+    assert.equal(b.tryAcquire("E#5", { batch: "E", repo: "o/r", issue: 5 }, null).ok, true, "not exclusive: unchanged");
+    b.release("E#5");
+    live.delete(201); // A's dispatcher dies with no lane: its slot is reclaimed
+    assert.equal(b.tryAcquire("B#5", { batch: "B", repo: "o/r", issue: 5, exclusive: true }, 4).ok, true);
+  });
+
+  it("two batches that both include issue N never run two lanes for N; the second defers naming the first and runs its other issues", async () => {
+    const { handle } = world();
+    const regA = handle(301), regB = handle(302);
+    const active = new Map(), maxActive = new Map(), ranB = [];
+    let releaseA;
+    const gateA = new Promise((r) => { releaseA = r; });
+    const lane = (n) => { active.set(n, (active.get(n) ?? 0) + 1); maxActive.set(n, Math.max(maxActive.get(n) ?? 0, active.get(n))); };
+    const pA = orchestrate({ issues: [5], readBody: async () => "", pollMs: 2, batchId: "bA", sched: { registry: regA, batch: "bA", repo: "o/r", cap: null, exclusive: true },
+      runOne: async (n) => { lane(n); await gateA; active.set(n, active.get(n) - 1); return { terminalReason: "merged", cost_usd: 0 }; } });
+    await until(() => active.get(5) === 1, "batch A's lane");
+    const rowsB = [];
+    const pB = orchestrate({ issues: [5, 6], readBody: async () => "", pollMs: 2, batchId: "bB", sched: { registry: regB, batch: "bB", repo: "o/r", cap: null, exclusive: true },
+      onUpdate: (r) => rowsB.push(r),
+      runOne: async (n) => { lane(n); ranB.push(n); active.set(n, active.get(n) - 1); return { terminalReason: "merged", cost_usd: 0 }; } });
+    await until(() => ranB.includes(6), "batch B's other issue");
+    const deferred = rowsB.filter((r) => r.issue === 5 && r.outcome === "deferred");
+    assert.equal(deferred.length, 1, "one row per other batch");
+    assert.match(deferred[0].detail, /live lane in batch bA/);
+    assert.ok(!ranB.includes(5), "no second lane while batch A runs #5");
+    releaseA();
+    await pA;
+    const done = await pB;
+    assert.deepEqual(done.map((r) => [r.issue, r.outcome]).sort(), [[5, "merged"], [6, "merged"]]);
+    assert.equal(maxActive.get(5), 1);
+  });
+});

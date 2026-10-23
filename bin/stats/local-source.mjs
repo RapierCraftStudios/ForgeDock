@@ -58,7 +58,7 @@ export function summariseLog(events, fallbackIssue = null) {
   const usage = ev.filter((e) => e.event === "PHASE_ATTEMPT_USAGE");
   const builderCalls = usage.filter((e) => e.phase === "implement");
   const reviewCalls = usage.filter((e) => e.phase === "review").length;
-  const contextPack = { mode: term?.context_pack ?? cp?.mode ?? "off", laneType: term?.lane_type ?? cp?.lane_type ?? null };
+  const contextPack = { mode: term?.context_pack ?? cp?.mode ?? "off", laneType: term?.lane_type ?? cp?.lane_type ?? null, ab: (term?.context_ab ?? cp?.context_ab) === true };
   const startTs = start.ts ?? null;
   const endTs = finished ? ev[t].ts ?? null : null;
   const a = Date.parse(startTs ?? ""); const b = Date.parse(endTs ?? "");
@@ -76,7 +76,15 @@ export function summariseLog(events, fallbackIssue = null) {
     pitfallsMatched: Number.isInteger(term?.pitfalls_matched) ? term.pitfalls_matched
       : Array.isArray(cp?.pitfalls) ? cp.pitfalls.filter((p) => p?.match === "files").length : null,
     builderTurns: builderCalls.reduce((x, e) => x + n(e.turns), 0),
+    // #4418: the explorer A/B tag (null before #4391 wrote it) and the main-session (plan + build) cache-read
+    explore: term?.explore === "on" || term?.explore === "off" ? term.explore : null,
+    builderCacheRead: builderCalls.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens), 0),
     size: term?.turns?.size ?? null, // #4409: S|M|L from the lane's turn record, buckets the admission estimate history
+    // #4444: cache-read alone (per-merge A/B metric) and the implement attempt (builder calls other than the plan call)
+    cacheReadTokens: usage.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens), 0),
+    implementAttempt: implementAttemptOf(builderCalls),
+    // #4444: the implement attempt of the earliest finished first/child run in this log, the same-issue baseline of a rerun
+    firstRunAttempt: firstRunAttemptOf(events.slice(0, s)),
     cacheTokens: usage.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens) + n(e.usage?.cache_creation_input_tokens), 0),
     costUsd: usage.reduce((x, e) => x + n(costOf(e)), 0),
     // #4394: the builder tier (RUN_TERMINAL builder_*, else the BUILDER_ROUTE / BUILDER_ESCALATED events); null before routing
@@ -88,7 +96,17 @@ export function summariseLog(events, fallbackIssue = null) {
     reworkedMerges: earlierMergedRoutes(events.slice(0, s)),
     // first pass: merged off one plan + one implement call, at most one review, no CI fix round
     firstPass: finished && term?.reason === "merged" && builderCalls.length <= 2 && reviewCalls <= 1 && !ev.some((e) => e.event === "CI_FIX_ROUND"),
+    // #4436: the lane profile (#4395) of this slice's sessions ("mixed" when they differ, null before the field) and the
+    // fresh sessions' first-turn baseline_tokens per phase (resumed sessions carry none)
+    laneProfile: profileOf(usage),
+    baselines: usage.reduce((acc, e) => { if (Number.isFinite(e.baseline_tokens)) (acc[e.phase ?? "other"] ??= []).push(e.baseline_tokens); return acc; }, {}),
   };
+}
+
+/** #4436: the one lane_profile of the usage records, "mixed" when they differ, null when none carries it. */
+function profileOf(usage) {
+  const ps = new Set(usage.map((e) => e.lane_profile).filter((p) => typeof p === "string" && p));
+  return ps.size === 0 ? null : ps.size === 1 ? [...ps][0] : "mixed";
 }
 
 /** #4394: {tier, class, escalated, model} of a lane, or null when it computed no builder route. */
@@ -99,6 +117,31 @@ function routeOf(term, ev) {
   const r = [...ev].reverse().find((e) => e.event === "BUILDER_ROUTE");
   if (!r) return null;
   return { tier: r.tier ?? null, class: r.class ?? null, escalated: ev.some((e) => e.event === "BUILDER_ESCALATED"), model: r.model ?? null };
+}
+
+/** #4444: {turns, output_tokens} of the builder calls other than the plan call; null when there is none. */
+function implementAttemptOf(builderCalls) {
+  const traced = builderCalls.some((e) => typeof e.trigger === "string");
+  const calls = traced ? builderCalls.filter((e) => e.trigger !== "plan") : builderCalls.slice(1);
+  if (!calls.length) return null;
+  return { turns: calls.reduce((x, e) => x + n(e.turns), 0), output_tokens: calls.reduce((x, e) => x + n(e.usage?.output_tokens), 0) };
+}
+
+/** #4444: implementAttemptOf for the earliest finished RUN_START slice of `events` whose lane type was first or child. */
+function firstRunAttemptOf(events) {
+  let slice = null;
+  const slices = [];
+  for (const e of events) {
+    if (e.event === "RUN_START") { slice = []; slices.push(slice); }
+    if (slice) slice.push(e);
+  }
+  for (const sl of slices) {
+    const term = [...sl].reverse().find((e) => e.event === "RUN_TERMINAL");
+    if (!["first", "child"].includes(term?.lane_type)) continue;
+    const att = implementAttemptOf(sl.filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "implement"));
+    if (att) return att;
+  }
+  return null;
 }
 
 /** #4394: the routes ({tier, class, escalated, model}) of the RUN_START slices in `events` that ended merged with a route. */
@@ -119,20 +162,31 @@ function earlierMergedRoutes(events) {
   return out;
 }
 
-/** All run summaries in `dir` (a missing dir or an unreadable log yields nothing, never an error). */
-export function readLocalRuns(dir = runsDir()) {
+/**
+ * All run summaries in `dir` (a missing dir or an unreadable log yields nothing, never an error). One per log (its last
+ * RUN_START slice); with `allSlices` (#4436) one per RUN_START slice, so a before and an after run of one issue both count.
+ */
+export function readLocalRuns(dir = runsDir(), { allSlices = false } = {}) {
   if (!existsSync(dir)) return [];
   const runs = [];
   for (const f of readdirSync(dir).sort()) {
     if (!f.endsWith(".jsonl")) continue;
     try {
       const m = /(?:^|__)(\d+)\.jsonl$/.exec(f); // #4432: `<issue>.jsonl` or `<owner>__<repo>__<issue>.jsonl`
-      const sum = summariseLog(parseLog(readFileSync(join(dir, f), "utf8")), m ? Number(m[1]) : null);
-      if (sum) runs.push({ ...sum, mtimeTs: new Date(statSync(join(dir, f)).mtimeMs).toISOString() });
+      const events = parseLog(readFileSync(join(dir, f), "utf8"));
+      const starts = allSlices ? events.flatMap((e, i) => (e.event === "RUN_START" ? [i] : [])) : [events.length];
+      const mtimeTs = new Date(statSync(join(dir, f)).mtimeMs).toISOString();
+      starts.forEach((_, k) => {
+        const sum = summariseLog(allSlices ? events.slice(0, starts[k + 1] ?? events.length) : events, m ? Number(m[1]) : null);
+        if (sum) runs.push({ ...sum, mtimeTs });
+      });
     } catch { /* unreadable log */ }
   }
   return runs;
 }
+
+/** #4418: every RUN_START slice (readLocalRuns allSlices), so an on run and an off run of the same issue both count. */
+export const readLocalLaneRuns = (dir = runsDir()) => readLocalRuns(dir, { allSlices: true });
 
 /**
  * forge#4354: one lane per RUN_START..next-RUN_START slice (every slice, not only the last), with the fail-soft events the

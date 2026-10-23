@@ -173,6 +173,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `runCliBackendAsync` returns `baselineTokens` (first stream assistant message's input + cache read + cache creation);
    `makeLeanRunner` keeps it for fresh sessions only, and `PHASE_ATTEMPT_USAGE` / telemetry `phase_attempt` carry
    `baseline_tokens` and `lane_profile`. Decision: `devdocs/decisions/4395-lane-profile.md`.
+   Before/after (#4436): `forgedock stats --lane-profile` (`query.mjs` `laneProfileReport` / `renderLaneProfiles`) reads
+   every RUN_START slice (`readLocalRuns(dir, {allSlices: true})`), groups finished runs by `lane_profile` with baseline
+   sessions/median/mean per phase and the conformance rate per profile (the `--tiers` rule); `--issues` pins the issue set.
    **Batched reads** (#4410): `HOST_RULES` also tells the builder to issue independent read-only calls (reads, greps,
    git log/blame, gh) in the same turn or one shell call, and to read each file's ranges once and keep notes. The
    wording replaced older text, so the plan/implement token caps are unchanged. Measurement: `runCliBackendAsync`'s stream
@@ -182,6 +185,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `cat` / `sed -n` / `head` / `tail` operand (grep is not counted). `makeLeanRunner` returns it as `tools`, and
    `PHASE_ATTEMPT_USAGE` carries `tools` when present. This is a local run-log field only: the telemetry seam does not
    map it.
+   **Re-read nudge** (#4456): the builder session (`builderOnce`, full and light lane) runs with `rereadNudge: true`, and
+   `makeLeanRunner` appends `rereadNudgeFlags()`: `--settings` registering `bin/hooks/reread-nudge.mjs` as a PostToolUse
+   hook on `Read|Bash` (reviewer, verifier and grouper sessions are unchanged). The hook counts reads per path with
+   toolstats `readPaths` (resolved against the session cwd) in `<tmpdir>/forgedock-reread/<session_id>.json`, and on
+   exactly the `REREAD_MIN` (3rd) read returns an `additionalContext` reminder to use notes or the excerpt already in
+   context. Advisory and fail-open: always exit 0, no output on error. Its effect is read off `forgedock stats
+   --efficiency` `rereads_per_merge`.
    **Quiet output** (#4390): `HOST_RULES` tells the builder to run tests quiet, read failures as `tail -40` + failing test
    ids, read files by range and send output that may pass 8 KB to a `$TMPDIR` file. `precheck.mjs` `quietFailure`
    (last 40 lines within the char share, failing-test-id lines by pytest/TAP/jest/vitest/go/cargo markers, `full log:`
@@ -461,11 +471,12 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `postmerge.mjs` (base-sync post-merge commands and same-app duplicate exports, #4406),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
-`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; an issue whose latest pipeline `FORGE:PROBE` is a fail is never closed as already-fixed, reason `probe-failed`, #4399; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389),
+`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; an issue whose latest pipeline `FORGE:PROBE` is a fail is never closed as already-fixed, reason `probe-failed`, #4399; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389; opt-in `post_deploy.min_age` soak window parks `awaiting-min-age`, #4425),
 `probe.mjs` (outcome-based acceptance, #4399; see "Acceptance probes" below),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
 `light.mjs` (light-lane eligibility and upgrade triggers, forge.yaml `lean.light`, #4448; see its entry below),
+`lightlane.mjs` (light-lane execution: one builder session, derived contract, upgrade to the full lane, #4450; see its entry below),
 `render.mjs` (comment/PR rendering, size caps), `retry.mjs` (transient
 push/gh/merge retry patterns).
 
@@ -814,6 +825,15 @@ the old path with no extra calls. The pack never enters `issueText`, and neither
 the bot's `FORGE:CONTEXT` comment (#4297), so contract quotes stay issue-only. `forgedock stats --context-ab` reports first-pass yield,
 builder turns, cache tokens and cost per lane type and mode; the default moves to
 `on` only once that A/B shows a win.
+`ab` (#4444) runs the experiment: `contextArm` (context.mjs) hashes `repo#issue`
+(sha256, first byte parity) to a stable `on` or `shadow` arm, so reruns stay in
+their arm. The lane uses the arm as its effective mode, logs it as `context_pack` /
+`CONTEXT_PACK.mode` (never `ab`) and tags `context_ab: true` on both events. The
+default stays `shadow`. `--context-ab` also reports, per cell, merged n, builder turns
+and cache-read per merge and the rework rate (remediated, after an earlier merge,
+or a rerun lane). `recovery` pairs each rerun's implement attempt (builder calls
+other than the plan call) with the first/child run of the same issue (its own log's
+earlier slice, else the earliest such run) as mean turn and output-token ratios.
 
 ## Entry 2026-10-20 — Resource hygiene: preflight and admission GC (#4183)
 
@@ -1288,6 +1308,21 @@ a parked result as outcome `awaiting-promotion|awaiting-precondition` with $0 an
 skip). `formatOutcomeLists` prints one `awaiting promotion: #A #B (fixes on <lane>, not on <default>)` line instead of
 escalations. Re-evaluation is the next batch or triage run. Cost: 0 LLM calls; per gated issue 1-2 gh reads and one git call.
 
+## Entry 2026-10-23 — post_deploy.min_age soak window (#4425)
+
+Opt-in forge.yaml `post_deploy.min_age` (`parseMinAge`: `30m`/`24h`/`7d`/`2w`, a bare number is minutes, `0` allowed; read by
+`readPostDeployMinAge` in `engine-cli.mjs` for orchestrate and triage). Unset: the gate is exactly #4389 (no extra git
+call). Set: once every parent SHA is on the default branch, and before `precondition_cmd`, `postDeployGate` requires
+`max over items (item window ?? min_age)` since the fix landed. An item's window is the largest explicit duration in its
+post-deploy `why` (`itemWindowsMs`, strict number+unit regex h/d/w, no model). `landedAt` takes the landing time from git:
+`rev-list --ancestry-path <sha>..origin/<default>` (descendants) intersected with `log --first-parent` of the same range.
+The oldest mainline descendant is the merge that brought the SHA in (its `%ct`). The SHA's own `%ct` is used when it is on
+the mainline itself or is the tip. `--first-parent --ancestry-path` together returns nothing for a second-parent merge, so
+the two walks stay separate. The latest landing over the SHAs counts. Too young: `{parked: true, kind: "awaiting-min-age",
+eligibleAt}`, the same `awaiting-promotion` label and `FORGE:PRECONDITION` comment, and one `awaiting min age: #A (fix on
+<default>, soak window not elapsed)` report line. An unknown landing time fails open (`unresolved`). `now` (or `io.now`)
+is injectable for tests.
+
 ## Entry 2026-10-23 — CI-verify gate, flake rerun, parked dependencies (#4387)
 
 `verify.mjs`: `parseVerify` `checks`; `ciGate` (verify.checks, else `io.requiredChecks(lane)` under `merge_wait:
@@ -1348,6 +1383,11 @@ explorer, keep the digest, open a file only to edit it or to verify a digest cla
 byte-identical. `RUN_TERMINAL` carries `explore: on|off`; the A/B compares plan/build `PHASE_ATTEMPT_USAGE` turns and
 `cache_read_input_tokens`, merge rate and conformance verdicts by that tag over the same issues. Cost: 0 engine LLM calls;
 ~120 prompt tokens per builder prompt when on; explorer calls are billed inside the builder call's `cost_usd`.
+`forgedock stats --explore-ab` (#4418, `bin/stats/query.mjs` `exploreAb`) is that reader: every RUN_START slice of the
+local run logs (`local-source.mjs` `readLocalLaneRuns`, so an on and an off run of one issue both count), per size bucket
+(`RUN_TERMINAL.turns.size` S/M/L, else unsized) and mode: mean plan+build turns and cache-read, merge rate and conformance
+rate (as `--tiers`), plus a paired section of issues with a finished run in both modes. Untagged (pre-#4391) runs are
+counted and left out, never read as `off`. The A/B result itself stays a post-deploy check.
 
 ## Entry 2026-10-23 — Per-batch cancel (#4376)
 
@@ -1498,3 +1538,96 @@ The one-level forge.yaml parser flattens the nested block to `lean.mode|max_line
 `lean.light_mode|light_max_lines|light_max_files` also work and win. An unknown mode is `shadow`, and a limit that is not a
 positive integer keeps its default. `readLight(cwd)` in `engine-cli.mjs` reads it. Nothing calls the module yet: the lane
 wiring (light session, derived contract, upgrade to the full lane) is #4450, so every lane runs as before. Cost: 0 LLM calls.
+
+## Entry 2026-10-23 — Light-lane execution (#4450)
+
+`runCore` now calls `lightEligibility` on every lane, before the plan call. It logs `LIGHT_ELIGIBILITY {mode, verdict,
+light, reasons}`, and adds one trajectory decision unless the mode is off, so shadow (the default) reports without changing
+the lane. `engine-cli.mjs` passes `light: readLight(cwd)` at both `runCore` call sites. The predicted files are the
+paths the body names (`namedPaths`), and the risk paths are `review.risk_paths`.
+A lane runs light only in mode `on`, with verdict `eligible` (an `ambiguous` verdict stays full; no classifier call), and
+only as a fresh lane: never resumed, salvaged, recovery, refactor:split or with a recovered frozen contract.
+`lightlane.mjs` `runLightStep` (every effect injected; lean.mjs only wires it):
+1. One builder session (`lightBuildPrompt`, trigger `build`, implement turn budget): failing regression test first, then
+   the fix, then the targeted tests, commit; result.json carries `requirement` (one verbatim issue sentence),
+   `repro_test` and `tests[].command`. A builder that finds the issue invalid, blocked or too big writes
+   `status: "upgrade"`.
+2. `checkpoint("light build")` commits uncommitted work. No commit is `no_commit`, and a status other than `fixed` is
+   `not_fixed`.
+3. `deriveLightContract` (pure) builds the record from the diff and the test:
+   - R1 quotes the builder's sentence when it is verbatim in the issue, else the title;
+   - one deliverable per changed non-test file;
+   - validate is the repro command plus each targeted test command;
+   - `repro_test` is the builder's, else `"none"` with a reason.
+   The same `validateContract` judges it; an invalid one is `contract_invalid`.
+4. Gates:
+   - the engine runs the validate commands (`io.runCommand`, `heavyStep("precheck")`). A failure resumes the builder
+     session once (trigger `precheck`), then reruns them, so two failed runs are `tests_failed_twice`;
+   - the red/green repro (`reproOf`, `io.redGreen`);
+   - `git diff --numstat base...HEAD` (`parseNumstat`);
+   - `io.apiShape` (`effects.mjs` → `apishape.mjs` `detectApiShape`). A status `unknown`, a missing hook or an error
+     is an `api_shape` reason.
+   All of these feed `upgradeTriggers`; any exception is `light_error`.
+No trigger: the derived contract is frozen and posted as FORGE:CONTRACT exactly like a planned one
+(`CONTRACT_FROZEN {derived: "light"}`, `LIGHT_DONE`). The plan and implement calls are skipped, and every later gate runs
+unchanged: declared checks (lint/format), structure, docs, enumerating, the conformance precheck (which reruns the
+repro) and the review.
+Upgrade: `LIGHT_UPGRADE {reasons}` is logged, the light result.json is blanked, and the same run continues into the plan →
+freeze → implement path. The plan prompt gets `PLAN_RERUN_NOTE` (the branch holds commits), the `buildResumeDigest`
+text with the light diff's files, and `upgradeNote(reasons)`. The branch is never reset, so committed work is kept.
+Cost: a light lane with no trigger makes one builder call plus the review, with no plan session. An upgrade costs the
+light session on top of the full lane. ADR `decisions/4442-light-lane.md`.
+
+## Entry 2026-10-23 — Light-lane fixed overhead stripped (#4451)
+
+`lean.mjs` decides light eligibility before the plan-context steps. A fresh, eligible lane in mode `on` (`lightTry`)
+skips `hotspotsOf` (plan facts) and `contextPackStep` (no CONTEXT_PACK, no FORGE:CONTEXT). On `LIGHT_UPGRADE`, both run
+before the plan call, so the full lane keeps them. When the light lane finishes without an upgrade, the run-wide `light`
+flag also skips the implement-time structure delta, the gate's `hotspotsOf` (null hotspots), and the `structureOf` call
+in the merge-time record. The STRUCTURE_DELTA merge record is still written from the local numstat. Light diffs are
+capped by `light.mjs` (default 40 lines / 2 files), so neither the hotspot-growth gate nor an undeclared package edge
+can reach them unnoticed (a risk path upgrades).
+Light targeted tests run through `lightlane.mjs` `runLightTests` → `precheck.mjs` `runChecks`. They run concurrently up
+to `verifyParallelism()`, with one heavy slot per running command and a per-command FORGE_HOST_PARALLELISM share. There
+is no round budget, so a timeout stays a failure. `runLightStep` runs `reproOf`, `numstat` and `apiShape` concurrently.
+Wall vs model time: `attempt()` sums each session's `duration_ms` into `model_ms`. The lane result and RUN_TERMINAL
+carry `wall_ms` and `model_ms` (RUN_TERMINAL also has `light`), and the orchestrate batch row copies both. A warm
+worktree pool reused across issues is deferred; deps are already warm via the shared cache (#4220). Cost: 0 LLM calls.
+
+## Entry 2026-10-23 — FORGE:LITE receipt and the light/full split in the batch report (#4452)
+
+After `LIGHT_DONE`, and again after `LIGHT_UPGRADE`, `runCore` posts a `FORGE:LITE` comment. The body comes from
+`lightlane.mjs` `renderLiteReceipt({lr, eligibility, costUsd, contractHash})` (pure) and contains:
+- the outcome: light or upgraded
+- the diff stat (all files and non-test lines)
+- the red/green repro, base → head
+- the gates: the targeted test commands and their result, the API-shape result, and whether the contract was derived
+- the cost, which is `usage.cost_usd`: the sum of the #4407 `cost_usd_delta`s, never a running session total
+- the eligibility verdict, mode and reasons
+- the upgrade reasons, when the lane upgraded
+
+Posting is best effort and never changes the lane outcome. Shadow and full lanes post nothing. `runLightStep` now also
+returns the receipt inputs: `diff`, `apiShape`, `testCommands` and `testRuns`. Its existing fields are unchanged.
+`LIGHT_DONE` and `LIGHT_UPGRADE` now carry `cost_usd`.
+
+In `bin/stats/efficiency.mjs`, `issueSlices` tags each slice with a `shape`: `light` (LIGHT_DONE), `upgraded`
+(LIGHT_UPGRADE) or `full`. `efficiencyMetrics.lanes` counts every in-scope slice of every row, whatever its outcome, by
+shape with its delta cost, plus `upgrade_rate` = upgraded ÷ (light + upgraded). `per_issue[].shape` is the last slice's
+shape. `formatEfficiencyLines` appends a `lanes:` line, so the batch report and `forgedock stats --efficiency` print it.
+Cost: no LLM calls; one extra issue comment per light lane.
+
+## Entry 2026-10-23 — One lane per issue across batches; dispatch-time already-done check (#4481)
+
+Two hosted batches that both include issue N (a resumed batch and a new one) no longer run two lanes for N.
+- Per-issue lock in the host registry (`sched.mjs`): an entry with `exclusive: true` (set by `runBatch` through
+  `sched.exclusive`; not stored) is refused by `tryAcquire` while a live slot of another batch holds the same non-null
+  `repo` and `issue`: `{ok:false, conflict:<batch>}`, and the key leaves the queue so it holds no grant rank.
+  `holder(entry)` answers the same for a lane placed remote. Without `exclusive` (or with no repo), nothing changes.
+- `orchestrate.mjs` `grant()` returns `"busy"` on a conflict: the issue is retried after `pollMs`, one `deferred` row
+  per other batch names it (`#N has a live lane in batch <id>`), no deferral count or breaker, and admission continues
+  with the next ready issue.
+- `dispatchCheck(n)` (injected; `engine-cli.mjs` `makeDispatchCheck`, gh only) runs before every lane start, requeues
+  included, unlike the once-per-issue pre-filter: a merged `feat/issue-N-lean` PR ends the row `merged` (with the PR), a
+  closed issue without one ends `invalid`, both with `skipped at dispatch: …` and no lane, so dependents still run.
+  Fail-open: an error or an unreadable answer runs the lane.
+- `--cancel <id>` (#4376) is unchanged; a test pins that a schedd restart resumes no batch cancelled through the daemon.

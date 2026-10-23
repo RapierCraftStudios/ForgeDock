@@ -78,6 +78,19 @@ Limits: logs written before #4362 carry no trigger, so implement attempts beyond
 `unknown`. Logs written before #4407 sum running session totals. Lanes run outside a batch are in no window. `gh` (for
 merged issues only) is the one network call; when it fails, quality and acceptance print `n/a` with the reason.
 
+## Explorer A/B (`--explore-ab`, forge#4418)
+
+Compares lanes run with forge.yaml `lean.explore: on` against `off` (#4391), from the local run logs only (no GitHub
+crawl). Every RUN_START slice of each log counts, so re-running an issue with the other mode adds a second lane.
+
+- Rows per size bucket (`S`, `M`, `L` from the lane's turn record, else `unsized`) and mode: n, mean builder (plan +
+  build) turns, mean builder `cache_read_input_tokens`, merge rate (merged / finished) and conformance rate (lanes that
+  reached review with no conformance/review fix round and no shadow would-block, over reviewed; same as `--tiers`).
+- A paired table restricted to issues with a finished lane in both modes.
+- Finished lanes without an `explore` tag (before #4391) are counted and left out.
+
+`--json` prints the same data as `query.explore_ab`.
+
 ## Sections (per version and repo)
 
 - **Cost**: cache-read tokens per issue (mean, median), per phase (mean over all runs, so phases add up to the per-issue

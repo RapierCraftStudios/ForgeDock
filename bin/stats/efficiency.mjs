@@ -59,14 +59,18 @@ function parseLog(text) {
   return out;
 }
 
-/** Every RUN_START..RUN_TERMINAL slice of one run log (all of them, not only the last). */
+export const LANE_SHAPES = Object.freeze(["light", "upgraded", "full"]);
+
+/** Every RUN_START..RUN_TERMINAL slice of one run log (all of them, not only the last). `shape` (#4452): light (LIGHT_DONE), upgraded (LIGHT_UPGRADE) or full. */
 export function issueSlices(events) {
   const out = [];
   let cur = null;
   for (const e of Array.isArray(events) ? events : []) {
     if (!e || typeof e !== "object") continue;
-    if (e.event === "RUN_START") { cur = { startTs: e.ts ?? null, repo: e.repo ?? null, terminal: null, attempts: [] }; out.push(cur); continue; }
+    if (e.event === "RUN_START") { cur = { startTs: e.ts ?? null, repo: e.repo ?? null, terminal: null, shape: "full", attempts: [] }; out.push(cur); continue; }
     if (!cur) continue;
+    if (e.event === "LIGHT_DONE") cur.shape = "light";
+    else if (e.event === "LIGHT_UPGRADE") cur.shape = "upgraded";
     if (e.event === "PHASE_ATTEMPT_USAGE") {
       cur.attempts.push({ phase: e.phase ?? "other", trigger: e.trigger ?? null, restart_of: e.restart_of ?? null, model: e.model ?? null,
         turns: num(e.turns), cacheRead: num(e.usage?.cache_read_input_tokens), cost: costOf(e),
@@ -145,9 +149,18 @@ const group = (xs) => {
  */
 export function efficiencyMetrics({ entries = [], logs = new Map(), issues = null, repo = null, now = 0, notes = [] } = {}) {
   const merged = [];
+  const inScope = (row, settleAt) => issueSlices(logs.get(row.issue) ?? []).filter((s) => (!repo || !s.repo || s.repo === repo) && (!settleAt || !s.startTs || s.startTs <= settleAt));
+  // #4452: light/full split and upgrade rate over every lane of every row (all outcomes); cost is the #4407 delta sum
+  const shapes = Object.fromEntries(LANE_SHAPES.map((k) => [k, { n: 0, cost_usd: 0 }]));
+  for (const { row, settleAt } of entries) {
+    if (!Number.isSafeInteger(row?.issue)) continue;
+    for (const s of inScope(row, settleAt)) { const g = shapes[s.shape] ?? shapes.full; g.n++; g.cost_usd += sum(s.attempts.map((a) => a.cost)); }
+  }
+  for (const g of Object.values(shapes)) g.cost_usd = r(g.cost_usd, 1e6);
+  const lanes = { ...shapes, upgrade_rate: r(per(shapes.upgraded.n, shapes.light.n + shapes.upgraded.n)) };
   for (const { row, settleAt } of entries) {
     if (row?.outcome !== "merged") continue;
-    const slices = issueSlices(logs.get(row.issue) ?? []).filter((s) => (!repo || !s.repo || s.repo === repo) && (!settleAt || !s.startTs || s.startTs <= settleAt));
+    const slices = inScope(row, settleAt);
     const atts = slices.flatMap((s) => s.attempts), impl = atts.filter((a) => a.phase === "implement");
     const retries = Object.fromEntries(RETRY_CAUSES.map((c) => [c, 0]));
     for (const s of slices) for (const [c, k] of Object.entries(sliceRetries(s))) retries[c] += k;
@@ -156,7 +169,7 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     const term = [...slices].reverse().find((s) => s.terminal?.reason === "merged")?.terminal;
     merged.push({ issue: row.issue, slices: slices.length, cost: sum(atts.map((a) => a.cost)), implCost: sum(impl.map((a) => a.cost)),
       reviewCost: sum(atts.filter((a) => a.phase === "review").map((a) => a.cost)), implTurns: sum(impl.map((a) => a.turns)), implCache: sum(impl.map((a) => a.cacheRead)),
-      size: term?.size ?? laneSize({ labels: info?.labels ?? [] }) ?? "unknown", impl, retries, info, tools: laneTools(impl) });
+      size: term?.size ?? laneSize({ labels: info?.labels ?? [] }) ?? "unknown", impl, retries, info, tools: laneTools(impl), shape: slices.at(-1)?.shape ?? null });
   }
   const all = group(merged);
   const bySize = {};
@@ -202,10 +215,10 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     retries: { total, per_merge: r(per(total, merged.length), 100), by_cause: retries, lane_reruns: sum(merged.map((m) => Math.max(0, m.slices - 1))) },
     no_action: { lanes: sum(Object.values(noAction).map((g) => g.n)), cost_usd: r(sum(Object.values(noAction).map((g) => g.cost_usd)), 1e6),
       by_kind: Object.fromEntries(Object.entries(noAction).map(([k, g]) => [k, { ...g, cost_usd: r(g.cost_usd, 1e6) }])) },
-    quality, acceptance,
+    quality, acceptance, lanes,
     tool_calls_per_turn_p50: median(withTools.map((m) => m.tools.per_turn)), rereads_per_merge: withTools.length ? r(per(sum(withTools.map((m) => m.tools.rereads)), withTools.length), 100) : null,
     per_issue: merged.map((m) => ({ issue: m.issue, slices: m.slices, cost_usd: r(m.cost, 1e6), implement_usd: r(m.implCost, 1e6), implement_turns: m.implTurns,
-      implement_cache_read: m.implCache, size: m.size, retries: m.retries, ...(m.info ? { quality: issueQuality(m.info.body).tag } : {}),
+      implement_cache_read: m.implCache, size: m.size, retries: m.retries, ...(m.shape ? { shape: m.shape } : {}), ...(m.info ? { quality: issueQuality(m.info.body).tag } : {}),
       ...(m.tools ? { implement_tool_calls_per_turn: m.tools.per_turn, implement_rereads: m.tools.rereads } : {}) })),
     notes,
   };
@@ -315,5 +328,8 @@ export function formatEfficiencyLines(m, label = "") {
   lines.push(a ? `acceptance (7d after promotion): pass ${a.pass}/${a.pass + a.fail}${a.pass_rate == null ? "" : ` (${Math.round(a.pass_rate * 100)}%)`}, pending ${a.pending}, unprobed ${a.unprobed}`
     : "acceptance (7d after promotion): n/a");
   lines.push(`tools: calls/turn p50 ${f(m.tool_calls_per_turn_p50)}, re-reads (>=3x same path)/merge ${f(m.rereads_per_merge)}`); // #4410
+  const ln = m.lanes; // #4452
+  lines.push(ln ? `lanes: ${LANE_SHAPES.map((k) => `${k} ${ln[k]?.n ?? 0} (${usd(ln[k]?.cost_usd ?? 0)})`).join(", ")}; upgrade rate ${ln.upgrade_rate == null ? "n/a"
+    : `${Math.round(ln.upgrade_rate * 100)}% (${ln.upgraded?.n ?? 0}/${(ln.light?.n ?? 0) + (ln.upgraded?.n ?? 0)})`}` : "lanes: n/a");
   return lines;
 }
