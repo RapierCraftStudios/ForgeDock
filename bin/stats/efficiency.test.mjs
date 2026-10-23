@@ -30,6 +30,7 @@ describe("#4402 retry causes", () => {
   it("classifies every builder trigger (property: TRIGGERS ⊆ TRIGGER_CAUSE)", () => {
     for (const t of TRIGGERS) assert.ok(Object.hasOwn(TRIGGER_CAUSE, t), `trigger ${t} has no cause`);
     for (const c of Object.values(TRIGGER_CAUSE)) assert.ok(c === null || RETRY_CAUSES.includes(c));
+    assert.equal(TRIGGER_CAUSE.post_merge, "code"); assert.equal(TRIGGER_CAUSE.duplicate, "code"); // #4406: builder rework on the merged tree
   });
   it("maps lane-rerun codes by family", () => {
     assert.equal(codeCause("env.tool_missing"), "env");

@@ -30,9 +30,10 @@ const OK = ["success", "neutral", "skipped"];
 
 /**
  * forge.yaml `verify:` section (block style; parseForgeYaml gives strings) → {mode, workflow, pathsInput, skipPaths,
- * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, e2e}. Invalid values fall back to the defaults; mode defaults to local (today's
+ * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, duplicateExports, e2e}. Invalid values fall back to the defaults; mode defaults to local (today's
  * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`; checks (#4387) is the optional allow-list
- * of check names that gate CI verification, or null; e2e is the e2e merge gate (#4403, e2e.mjs parseE2e).
+ * of check names that gate CI verification, or null; e2e is the e2e merge gate (#4403, e2e.mjs parseE2e). #4406: postMerge (`post_merge`) is the command run on
+ * the merged tree at base-sync before the push (null: the lane's scoped typecheck); duplicateExports is false only for the literal `false`.
  */
 export function parseVerify(sec = {}) {
   const s = sec && typeof sec === "object" ? sec : {};
@@ -52,7 +53,9 @@ export function parseVerify(sec = {}) {
   const rawChecks = Array.isArray(s.checks) ? s.checks : str(s.checks).split(",");
   const names = rawChecks.map((x) => String(x ?? "").trim()).filter(Boolean);
   const checks = names.length ? [...new Set(names)] : null;
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, e2e: parseE2e(s) };
+  const postMerge = str(s.post_merge) || null;
+  const duplicateExports = str(s.duplicate_exports).toLowerCase() !== "false";
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, duplicateExports, e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);

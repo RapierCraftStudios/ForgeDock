@@ -48,6 +48,18 @@ export function precheckFailurePrompt(failures, mode = "local") {
   return `The repo's declared check commands failed in this worktree, before the PR is opened:\n\n${list}\n\nFix the cause in the code (or record a typed amendment with a why in ${RESULT_FILE}). Re-run each failing command, ${mode === "ci" ? `${LIGHT} otherwise, ` : ""}commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
+/** #4406: the tree after merging the base fails the post-merge check commands (verify.post_merge or the scoped typecheck). */
+export function postMergeFailurePrompt(failures, mode = "local") {
+  const list = failures.slice(0, 10).map((f) => `#### \`${f.command}\` (exit ${f.rc})\n${f.output ? `\`\`\`\n${f.output}\n\`\`\`` : "(no output)"}`).join("\n\n");
+  return `After merging the base into this branch, the merged tree fails these check commands (sibling changes merged without a text conflict, e.g. duplicate keys or same-named symbols):\n\n${list}\n\nFix the cause keeping both this fix's intent and the base's changes (rename rather than drop either side). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
+/** #4406: names this change newly exports that another module of the same app or package already declares. */
+export function duplicateExportsPrompt(findings, mode = "local") {
+  const rows = findings.slice(0, 30).map((d) => `- ${d.symbol}: ${d.path} (also exported by ${(d.others ?? []).join(", ")})`).join("\n");
+  return `This change exports names that another module of the same app or package already exports:\n${rows}\n\nRename the new export or reuse the existing one, and update every reference and any registry, map or test keyed by the name (same-named entries collide or leave one unprobed). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
 /** #4390: byte cap of the diff hunks a context-ceiling restart carries (the stat is always kept). */
 export const RESTART_DIFF_MAX_BYTES = 40 * 1024;
 

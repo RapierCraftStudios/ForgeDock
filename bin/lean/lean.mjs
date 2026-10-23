@@ -28,7 +28,8 @@ import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt } from "./prompts.mjs";
+import { postMergeCommands } from "./postmerge.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta } from "./fixround.mjs";
 import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
 import { makeTurnBudget, laneSize, wrapupGrant, budgetDigest } from "./budget.mjs";
@@ -1625,6 +1626,52 @@ export async function runCore(o) {
       return { renumbered: true };
     }
     { const sq = await sequenceHandoff("hand-off"); if (sq?.done) return sq.done; }
+    /** #4406: same-app duplicate exports (verify.duplicate_exports): one "rename or reuse" round, then an anomaly. True when a fix round ran. */
+    async function duplicateGate(trigger) {
+      if (!io.duplicateExports || isSplit || vcfg.duplicateExports === false) return false;
+      const found = async () => (await io.duplicateExports({ cwd: wt, base }).catch(() => null)) ?? [];
+      let dups = await found();
+      if (dups.length && sessionId) {
+        const text = dups.map((d) => `duplicate export \`${d.symbol}\`: ${d.path} and ${(d.others ?? []).join(", ")}`).join("\n");
+        ev({ event: "DUPLICATE_EXPORTS", trigger, count: dups.length });
+        T.decisions.push(`Duplicate export(s) (${trigger}): ${dups.slice(0, 5).map((d) => `${d.symbol} in ${d.path} vs ${(d.others ?? []).join(", ")}`).join("; ")}; builder resumed once`);
+        await fixRound("duplicate", duplicateExportsPrompt(dups, vcfg.mode), [], "duplicate", text);
+        result = (await readResult()) ?? result;
+        files = await changedFiles();
+        dups = await found();
+        if (dups.length) T.anomalies.push(`Duplicate export(s) remain (${trigger}): ${dups.slice(0, 5).map((d) => `${d.symbol} in ${d.path} vs ${(d.others ?? []).join(", ")}`).join("; ")}`);
+        else await gatePassed("duplicate");
+        return true;
+      }
+      if (dups.length) T.anomalies.push(`Duplicate export(s) (${trigger}): ${dups.slice(0, 5).map((d) => `${d.symbol} in ${d.path}`).join("; ")}`);
+      return false;
+    }
+    await duplicateGate("hand-off");
+    /** #4406: verify.post_merge (else the scoped typecheck) on the merged tree before the base-sync push; fix rounds up to verify.max_rounds. */
+    async function postMergeGate(trigger) {
+      const commands = io.runCommand && !isSplit ? postMergeCommands({ configured: vcfg.postMerge, scoped: (await io.postMergeChecks?.({ cwd: wt, base }).catch(() => [])) ?? [], mode: vcfg.mode }) : [];
+      let fixed = false, results = [];
+      for (let round = 0; commands.length; round++) {
+        await renew();
+        results = [];
+        for (const command of commands) {
+          let x; try { x = await heavyStep("precheck", () => io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() })); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+          results.push({ command, rc: Number(x?.rc ?? 1), output: String(x?.output ?? "") });
+        }
+        ev({ event: "POST_MERGE_CHECKS", trigger, round, results: results.map(({ command, rc }) => ({ command, rc })) });
+        const failed = results.filter((r) => r.rc !== 0), names = failed.map((f) => `\`${f.command}\` (exit ${f.rc})`).join(", ");
+        if (!failed.length) { if (round) await gatePassed("post_merge"); break; }
+        if (round >= vcfg.maxRounds || !sessionId) { T.anomalies.push(`Post-merge check(s) still fail after merging ${base} (${trigger}): ${names}`); break; }
+        T.decisions.push(`Post-merge check(s) failed after merging ${base} (${trigger}): ${names}; builder resumed before the push (round ${round + 1}/${vcfg.maxRounds})`);
+        const before = String(await git(["rev-parse", "HEAD"])).trim();
+        const capped = capLogs(failed.map((f) => ({ ...f, log: f.output }))).map((f) => ({ command: f.command, rc: f.rc, output: f.log }));
+        await fixRound("post_merge", postMergeFailurePrompt(capped, vcfg.mode), [], "post_merge", capped.map((f) => `${f.command}\n${f.output ?? ""}`).join("\n"));
+        result = (await readResult()) ?? result;
+        fixed = true;
+        if ((String(await git(["rev-parse", "HEAD"])).trim()) === before) { T.anomalies.push(`Post-merge check(s) failing and the builder made no new commit for them: ${names}`); break; }
+      }
+      return { fixed, ran: results.map(({ command, rc }) => `${command}: ${rc === 0 ? "pass" : `fail (exit ${rc})`}`).join("; ") };
+    }
     const structureLine = structureNote(structure);
 
     // ---- 3c. verify by CI (#4167): ci|hybrid push the branch and run the repo's CI on GitHub runners, before review ----
@@ -2095,6 +2142,14 @@ export async function runCore(o) {
       const sq = await sequenceHandoff(`base-sync ${syncs}`, detResolved ? { laneRef: before } : {}); // #4322: a clean text merge can still bring a taken number
       if (sq?.done) return sq.done;
       if (sq?.renumbered) { how += sq.deterministic ? "; lane files renumbered deterministically" : "; builder renumbered sequence-numbered files"; }
+      let pm = { fixed: false, ran: "" }, dupFixed = false;
+      if ((await gitOut(["rev-parse", "HEAD"])) !== before) { // #4406: the merged tree, before the push
+        pm = await postMergeGate(`base-sync ${syncs}`);
+        if (pm.ran) tests = clean ? pm.ran : `${tests}; post-merge: ${pm.ran}`;
+        if (pm.fixed) how += "; builder fixed post-merge check failures";
+        dupFixed = await duplicateGate(`base-sync ${syncs}`);
+        if (dupFixed) how += "; builder resolved duplicate exports";
+      }
       const after = await gitOut(["rev-parse", "HEAD"]);
       if (soft && clean && after === before) { syncs--; sameBaseSyncs--; return null; } // UNKNOWN state and nothing to merge: not a conflict
       if (after !== before) await gitPush(["push", "origin", branch]); // plain push of a merge commit: never force
@@ -2105,9 +2160,9 @@ export async function runCore(o) {
         rereview = "refactor-verify re-run against the new base: ok";
       }
       if (remoteVerify && after !== before) { const v = await ciVerify("base-sync"); if (v.done) return v.done; ciFixes = v.fixes; }
-      const engineOnly = !ciFixes && (clean || detResolved) && (!sq?.renumbered || sq.deterministic); // #4386: no builder touched the delta
+      const engineOnly = !ciFixes && !pm.fixed && !dupFixed && (clean || detResolved) && (!sq?.renumbered || sq.deterministic); // #4386: no builder touched the delta
       if (!isSplit && engineOnly && (detResolved || sq?.deterministic)) rereview = "not required (deterministic renumber + base merge)";
-      else if (!isSplit && (!clean || sq?.renumbered || ciFixes)) {
+      else if (!isSplit && (!clean || sq?.renumbered || ciFixes || pm.fixed || dupFixed)) {
         let rv = await doReview();
         if (rv.env) return await envNeedsHuman(rv.env);
         if (rv?.fail) {

@@ -7,7 +7,7 @@ import { fixSessionPrompt } from "./prompts.mjs";
 
 describe("#4363 fresh fix sessions: which rounds, and the prompt caps", () => {
   it("every mechanical kind is fresh; block/contract/conflict kinds are not", () => {
-    assert.deepEqual([...MECHANICAL_KINDS], ["precheck", "ci", "docs", "structure", "enumerating", "sequence"]);
+    assert.deepEqual([...MECHANICAL_KINDS], ["precheck", "ci", "docs", "structure", "enumerating", "sequence", "post_merge", "duplicate"]);
     for (const k of MECHANICAL_KINDS) assert.equal(freshFix(k, []), true, k);
     for (const k of ["block", "contract", "base-sync", "ci-unavailable"]) assert.equal(freshFix(k, [{ detail: "src/a.js:1" }]), false, k);
   });
@@ -53,7 +53,7 @@ describe("#4362 attempt triggers and first pass", () => {
   const t = (...xs) => xs.map((trigger) => ({ trigger }));
   it("the trigger vocabulary is the issue's closed list; rework is a subset", () => {
     assert.deepEqual([...TRIGGERS], ["plan", "build", "block_correction", "contract_correction", "precheck", "structure", "docs", "enumerating",
-      "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "verifier", "context_restart", "budget_wrapup"]);
+      "sequence", "ci_unavailable", "ci_red", "conformance", "review", "merge_ci", "timeout_restart", "recovery", "verifier", "post_merge", "duplicate", "context_restart", "budget_wrapup"]);
     for (const r of REWORK_TRIGGERS) assert.ok(TRIGGERS.includes(r), r);
   });
   it("firstPassOf: null without a build or with an untagged attempt; rework after the build breaks it, repairs do not", () => {
