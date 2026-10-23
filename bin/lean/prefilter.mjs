@@ -12,7 +12,9 @@
  * ALREADY-FIXED/INVALID verdict with evidence closes the issue; everything else, and every error, goes to the normal lane.
  * Post-deploy gate (#4389), with `defaultBranch`: a `FORGE:DEFERRED_FROM: #P` follow-up whose checklist items are all
  * post-deploy is parked (`parked: true`, label `awaiting-promotion`, no lane) while a merge SHA of #P is not an ancestor
- * of origin/<default>, or while forge.yaml `post_deploy.precondition_cmd` exits 1. Anything unresolvable fails open.
+ * of origin/<default>, or while forge.yaml `post_deploy.precondition_cmd` exits 1. With `post_deploy.min_age` (#4425) it also
+ * stays parked (`awaiting-min-age`) until that long (or the longest window an item's why states) after the fix landed on
+ * the default branch. Anything unresolvable fails open.
  * All effects are injected (gh, git, runner, transitionLabel, projector?, execCode?) so it is unit-testable.
  */
 import { execFile } from "node:child_process";
@@ -196,12 +198,52 @@ function execCode(cmd, args, opts) {
     try { execFile(cmd, args, opts, (err) => res(err ? (typeof err.code === "number" ? err.code : -1) : 0)); } catch { res(-1); }
   });
 }
+// #4425: post_deploy.min_age soak window. Deterministic: a strict duration parse, and git for the landing time.
+const UNIT_MS = { m: 60e3, h: 3600e3, d: 86400e3, w: 604800e3 };
+/** forge.yaml `post_deploy.min_age` ("30m", "24h", "7d", "2w"; a bare number is minutes, so "0" is allowed) -> ms, or null. */
+export function parseMinAge(s) {
+  if (s == null) return null;
+  const m = /^(\d+(?:\.\d+)?)\s*([mhdw]?)$/i.exec(String(s).trim());
+  return m ? Math.round(Number(m[1]) * UNIT_MS[(m[2] || "m").toLowerCase()]) : null;
+}
+const WINDOW_RE = /\b(\d+(?:\.\d+)?)\s*(h|hrs?|hours?|d|days?|w|wks?|weeks?)\b/gi;
+const POST_DEPLOY_ITEM_RE = /^`[^`]*`\s+(?:\*\*known-flaw\*\*\s+)?[—-]+\s*post-deploy:(.*)$/;
+/** Per post-deploy checklist item: the largest duration its why states (ms), or null when it states none. */
+export function itemWindowsMs(body) {
+  return noComments(String(body ?? ""), " ").split("\n").map((l) => CHECK_RE.exec(l)?.[1]).filter((x) => x != null)
+    .map((t) => POST_DEPLOY_ITEM_RE.exec(t)).filter(Boolean).map((m) => {
+      const ms = [...m[1].matchAll(WINDOW_RE)].map((w) => Number(w[1]) * UNIT_MS[w[2][0].toLowerCase()]);
+      return ms.length ? Math.round(Math.max(...ms)) : null;
+    });
+}
+/**
+ * Unix seconds when `sha` reached origin/<def>: the oldest first-parent commit of <def> that descends from it (the merge
+ * that brought it in), or the SHA's own commit time when it is on the mainline itself. Null on any git error.
+ */
+export async function landedAt({ sha, def, io, cwd }) {
+  try {
+    // --first-parent with --ancestry-path drops merges that brought the SHA in through a second parent (git 2.55): two walks
+    const range = `${sha}..origin/${def}`;
+    const below = new Set(String(await io.git(["rev-list", "--ancestry-path", range], { cwd })).trim().split(/\s+/).filter(Boolean));
+    const chain = String(await io.git(["log", "--first-parent", "--format=%H %P %ct", range], { cwd })).trim().split("\n").map((l) => l.trim().split(/\s+/));
+    const oldest = chain.filter((c) => below.has(c[0])).at(-1);
+    let own = !oldest;
+    if (!own) {
+      const full = /^[0-9a-f]{40}$/i.test(sha) ? sha : String(await io.git(["rev-parse", `${sha}^{commit}`], { cwd })).trim();
+      own = oldest[1]?.toLowerCase() === full.toLowerCase();
+    }
+    const ct = own ? String(await io.git(["log", "-1", "--format=%ct", sha], { cwd })).trim() : oldest.at(-1);
+    return /^\d+$/.test(ct) ? Number(ct) : null;
+  } catch { return null; }
+}
+const fmtAge = (ms) => (ms % UNIT_MS.d === 0 && ms ? `${ms / UNIT_MS.d}d` : ms % UNIT_MS.h === 0 && ms ? `${ms / UNIT_MS.h}h` : `${Math.round(ms / UNIT_MS.m)}m`);
 /**
  * #4389: never throws, no model call. `defaultBranch` is a name or an (async) function resolving it (and fetching it).
- * @returns {Promise<{state:"not-applicable"|"unresolved"|"awaiting-promotion"|"awaiting-precondition"|"ready", parent:?number, shas:string[], default?:string, detail:string}>}
+ * #4425: `minAge` (ms, opt-in) parks `awaiting-min-age` until max(item window ?? minAge) after the fix landed on <default>.
+ * @returns {Promise<{state:"not-applicable"|"unresolved"|"awaiting-promotion"|"awaiting-min-age"|"awaiting-precondition"|"ready", parent:?number, shas:string[], default?:string, eligibleAt?:string, detail:string}>}
  * Fail-open: no merge SHA, a git answer other than yes/no, an unknown default branch or a hook error give "unresolved".
  */
-export async function postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, preconditionCmd = null }) {
+export async function postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, preconditionCmd = null, minAge = null, now = null }) {
   const parent = deferredFrom(iss?.body);
   const res = (state, detail, extra = {}) => ({ state, parent, shas: [], detail, ...extra });
   if (!parent || !postDeployOnly(iss.body)) return res("not-applicable", "");
@@ -218,6 +260,20 @@ export async function postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, 
       if (!on) off.push(sha);
     }
     if (off.length) return res("awaiting-promotion", `fix ${off.map((s) => s.slice(0, 12)).join(", ")} of #${parent} is not on ${def}${lane ? ` (lane ${lane})` : ""}`, { shas, default: def });
+    if (minAge != null) {
+      const required = Math.max(0, ...itemWindowsMs(iss.body).map((w) => w ?? minAge));
+      let landed = 0;
+      for (const sha of shas) {
+        const t = await landedAt({ sha, def, io, cwd });
+        if (t == null) return res("unresolved", `landing time of ${sha.slice(0, 12)} on ${def} unknown`, { shas, default: def });
+        landed = Math.max(landed, t);
+      }
+      const at = now ?? io.now?.() ?? Date.now(), until = landed * 1000 + required;
+      if (at < until) {
+        const eligibleAt = new Date(until).toISOString();
+        return res("awaiting-min-age", `fix of #${parent} on ${def} since ${new Date(landed * 1000).toISOString()}; min age ${fmtAge(required)} until ${eligibleAt}`, { shas, default: def, eligibleAt });
+      }
+    }
     if (preconditionCmd) {
       const code = await (io.execCode ?? execCode)("sh", ["-c", preconditionCmd, "precondition", String(iss.number)],
         { cwd, timeout: 60000, env: { ...process.env, FORGE_ISSUE: String(iss.number) } });
@@ -252,12 +308,12 @@ async function markParked({ issue, repo, io, had, gate }) {
     } catch { /* the comment and the report still show it */ }
   }
   if (had) return;
-  const what = gate.state === "awaiting-promotion" ? "awaiting promotion" : "awaiting its post-deploy precondition";
+  const what = gate.state === "awaiting-promotion" ? "awaiting promotion" : gate.state === "awaiting-min-age" ? "awaiting its post-deploy soak window" : "awaiting its post-deploy precondition";
   const body = `<!-- ${PRECONDITION_MARKER} -->\n## Parked: ${what}\n${sanitizeMd(gate.detail)}.\n\nEvery item here is a post-deploy check, so no lane was started. The next orchestrate or triage run checks again and launches this issue once the precondition holds.`;
   try { await io.gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(body)]); } catch { /* the label still shows it */ }
 }
 
-/** #4389 batch-report lines: one `awaiting promotion:` line (and one `awaiting precondition:` line) for the parked rows, or "". */
+/** #4389 batch-report lines: one `awaiting promotion:` line (and one `awaiting min age:` / `awaiting precondition:` line) for the parked rows, or "". */
 export function formatParkedLine(rows) {
   const parked = (rows ?? []).filter((r) => r?.prefilter?.parked);
   const uniq = (xs) => [...new Set(xs.filter(Boolean))];
@@ -266,6 +322,11 @@ export function formatParkedLine(rows) {
   if (promo.length) {
     const lanes = uniq(promo.map((r) => r.prefilter.lane)), defs = uniq(promo.map((r) => r.prefilter.default));
     out.push(`awaiting promotion: ${promo.map((r) => `#${r.issue}`).join(" ")} (fixes on ${lanes.join(", ") || "the lane"}, not on ${defs.join(", ") || "the default branch"})`);
+  }
+  const soak = parked.filter((r) => r.prefilter.kind === "awaiting-min-age"); // #4425
+  if (soak.length) {
+    const defs = uniq(soak.map((r) => r.prefilter.default));
+    out.push(`awaiting min age: ${soak.map((r) => `#${r.issue}`).join(" ")} (fix on ${defs.join(", ") || "the default branch"}, soak window not elapsed)`);
   }
   const pre = parked.filter((r) => r.prefilter.kind === "awaiting-precondition");
   if (pre.length) out.push(`awaiting precondition: ${pre.map((r) => `#${r.issue}`).join(" ")} (post_deploy.precondition_cmd not ready)`);
@@ -276,7 +337,7 @@ export function formatParkedLine(rows) {
  * Pre-filter one issue. Never throws.
  * @returns {Promise<{issue:number, closed:boolean, kind:?string, candidate:boolean, verdict:?string, cost_usd:number, detail:string}>}
  */
-export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAULT_PREFILTER_MODEL, dryRun = false, agentId = null, maxMinutes = 5, selfLogins = null, defaultBranch = null, preconditionCmd = null }) {
+export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAULT_PREFILTER_MODEL, dryRun = false, agentId = null, maxMinutes = 5, selfLogins = null, defaultBranch = null, preconditionCmd = null, minAge = null }) {
   const out = { issue, closed: false, kind: null, candidate: false, verdict: null, cost_usd: 0, detail: "" };
   try {
     const iss = JSON.parse(String(await io.gh(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,labels,comments"])));
@@ -292,9 +353,9 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
       if (st?.lease && st.lease.until > Date.now() && st.lease.by !== agentId) return { ...out, detail: `leased by ${st.lease.by}` };
     }
     if (gated) {
-      const gate = await postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, preconditionCmd });
+      const gate = await postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, preconditionCmd, minAge });
       const had = names.includes(AWAITING_PROMOTION_LABEL);
-      if (gate.state === "awaiting-promotion" || gate.state === "awaiting-precondition") {
+      if (["awaiting-promotion", "awaiting-min-age", "awaiting-precondition"].includes(gate.state)) {
         if (!dryRun) await markParked({ issue, repo, io, had, gate });
         return { ...out, parked: true, kind: gate.state, parent: gate.parent, lane, default: gate.default, detail: gate.detail };
       }

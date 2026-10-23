@@ -58,7 +58,7 @@ export function summariseLog(events, fallbackIssue = null) {
   const usage = ev.filter((e) => e.event === "PHASE_ATTEMPT_USAGE");
   const builderCalls = usage.filter((e) => e.phase === "implement");
   const reviewCalls = usage.filter((e) => e.phase === "review").length;
-  const contextPack = { mode: term?.context_pack ?? cp?.mode ?? "off", laneType: term?.lane_type ?? cp?.lane_type ?? null };
+  const contextPack = { mode: term?.context_pack ?? cp?.mode ?? "off", laneType: term?.lane_type ?? cp?.lane_type ?? null, ab: (term?.context_ab ?? cp?.context_ab) === true };
   const startTs = start.ts ?? null;
   const endTs = finished ? ev[t].ts ?? null : null;
   const a = Date.parse(startTs ?? ""); const b = Date.parse(endTs ?? "");
@@ -80,6 +80,11 @@ export function summariseLog(events, fallbackIssue = null) {
     explore: term?.explore === "on" || term?.explore === "off" ? term.explore : null,
     builderCacheRead: builderCalls.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens), 0),
     size: term?.turns?.size ?? null, // #4409: S|M|L from the lane's turn record, buckets the admission estimate history
+    // #4444: cache-read alone (per-merge A/B metric) and the implement attempt (builder calls other than the plan call)
+    cacheReadTokens: usage.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens), 0),
+    implementAttempt: implementAttemptOf(builderCalls),
+    // #4444: the implement attempt of the earliest finished first/child run in this log, the same-issue baseline of a rerun
+    firstRunAttempt: firstRunAttemptOf(events.slice(0, s)),
     cacheTokens: usage.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens) + n(e.usage?.cache_creation_input_tokens), 0),
     costUsd: usage.reduce((x, e) => x + n(costOf(e)), 0),
     // #4394: the builder tier (RUN_TERMINAL builder_*, else the BUILDER_ROUTE / BUILDER_ESCALATED events); null before routing
@@ -112,6 +117,31 @@ function routeOf(term, ev) {
   const r = [...ev].reverse().find((e) => e.event === "BUILDER_ROUTE");
   if (!r) return null;
   return { tier: r.tier ?? null, class: r.class ?? null, escalated: ev.some((e) => e.event === "BUILDER_ESCALATED"), model: r.model ?? null };
+}
+
+/** #4444: {turns, output_tokens} of the builder calls other than the plan call; null when there is none. */
+function implementAttemptOf(builderCalls) {
+  const traced = builderCalls.some((e) => typeof e.trigger === "string");
+  const calls = traced ? builderCalls.filter((e) => e.trigger !== "plan") : builderCalls.slice(1);
+  if (!calls.length) return null;
+  return { turns: calls.reduce((x, e) => x + n(e.turns), 0), output_tokens: calls.reduce((x, e) => x + n(e.usage?.output_tokens), 0) };
+}
+
+/** #4444: implementAttemptOf for the earliest finished RUN_START slice of `events` whose lane type was first or child. */
+function firstRunAttemptOf(events) {
+  let slice = null;
+  const slices = [];
+  for (const e of events) {
+    if (e.event === "RUN_START") { slice = []; slices.push(slice); }
+    if (slice) slice.push(e);
+  }
+  for (const sl of slices) {
+    const term = [...sl].reverse().find((e) => e.event === "RUN_TERMINAL");
+    if (!["first", "child"].includes(term?.lane_type)) continue;
+    const att = implementAttemptOf(sl.filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "implement"));
+    if (att) return att;
+  }
+  return null;
 }
 
 /** #4394: the routes ({tier, class, escalated, model}) of the RUN_START slices in `events` that ended merged with a route. */

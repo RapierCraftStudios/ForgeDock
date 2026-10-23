@@ -4819,6 +4819,22 @@ describe("context pack modes (forge#4275)", () => {
     assert.deepEqual([m.leaseWrites.at(-1).terminalCode, m.leaseWrites.at(-1).failureClasses], [OUTCOME_CODES.COMPLETED, []]);
   });
 
+  it("#4444 ab: the lane runs its issue's arm, logs it as context_pack and tags context_ab", async () => {
+    const { contextArm } = await import("./context.mjs");
+    const arm = contextArm({ mode: "ab", repo: "o/r", issue: 7 }).mode;
+    const w = withPack(), dir = tmpDir("core-");
+    const r = await run(w, { dir, contextPack: { mode: "ab" } });
+    assert.equal(r.terminalReason, "merged");
+    const plan = builders(w)[0][4];
+    assert.equal(/Context pack \(hints, not proof/.test(plan), arm === "on");
+    const log = readLog(dir, 7);
+    const cp = log.find((e) => e.event === "CONTEXT_PACK"), term = log.find((e) => e.event === "RUN_TERMINAL");
+    assert.deepEqual([cp.mode, cp.context_ab, term.context_pack, term.context_ab], [arm, true, arm, true]);
+    const plain = withPack(), d2 = tmpDir("core-");
+    await run(plain, { dir: d2, contextPack: { mode: "shadow" } });
+    assert.equal("context_ab" in readLog(d2, 7).find((e) => e.event === "RUN_TERMINAL"), false);
+  });
+
   it("forge.yaml engine.context_pack* is read flat; invalid mode is ignored", () => {
     const d = tmpDir("ctxcfg-");
     writeFileSync(join(d, "forge.yaml"), "engine:\n  context_pack: on\n  context_pack_sources: graph,attempts\n  context_pack_bytes: 4096\n");

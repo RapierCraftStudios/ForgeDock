@@ -185,6 +185,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `cat` / `sed -n` / `head` / `tail` operand (grep is not counted). `makeLeanRunner` returns it as `tools`, and
    `PHASE_ATTEMPT_USAGE` carries `tools` when present. This is a local run-log field only: the telemetry seam does not
    map it.
+   **Re-read nudge** (#4456): the builder session (`builderOnce`, full and light lane) runs with `rereadNudge: true`, and
+   `makeLeanRunner` appends `rereadNudgeFlags()`: `--settings` registering `bin/hooks/reread-nudge.mjs` as a PostToolUse
+   hook on `Read|Bash` (reviewer, verifier and grouper sessions are unchanged). The hook counts reads per path with
+   toolstats `readPaths` (resolved against the session cwd) in `<tmpdir>/forgedock-reread/<session_id>.json`, and on
+   exactly the `REREAD_MIN` (3rd) read returns an `additionalContext` reminder to use notes or the excerpt already in
+   context. Advisory and fail-open: always exit 0, no output on error. Its effect is read off `forgedock stats
+   --efficiency` `rereads_per_merge`.
    **Quiet output** (#4390): `HOST_RULES` tells the builder to run tests quiet, read failures as `tail -40` + failing test
    ids, read files by range and send output that may pass 8 KB to a `$TMPDIR` file. `precheck.mjs` `quietFailure`
    (last 40 lines within the char share, failing-test-id lines by pytest/TAP/jest/vitest/go/cargo markers, `full log:`
@@ -464,7 +471,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `postmerge.mjs` (base-sync post-merge commands and same-app duplicate exports, #4406),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
-`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; an issue whose latest pipeline `FORGE:PROBE` is a fail is never closed as already-fixed, reason `probe-failed`, #4399; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389),
+`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; an issue whose latest pipeline `FORGE:PROBE` is a fail is never closed as already-fixed, reason `probe-failed`, #4399; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389; opt-in `post_deploy.min_age` soak window parks `awaiting-min-age`, #4425),
 `probe.mjs` (outcome-based acceptance, #4399; see "Acceptance probes" below),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
@@ -818,6 +825,15 @@ the old path with no extra calls. The pack never enters `issueText`, and neither
 the bot's `FORGE:CONTEXT` comment (#4297), so contract quotes stay issue-only. `forgedock stats --context-ab` reports first-pass yield,
 builder turns, cache tokens and cost per lane type and mode; the default moves to
 `on` only once that A/B shows a win.
+`ab` (#4444) runs the experiment: `contextArm` (context.mjs) hashes `repo#issue`
+(sha256, first byte parity) to a stable `on` or `shadow` arm, so reruns stay in
+their arm. The lane uses the arm as its effective mode, logs it as `context_pack` /
+`CONTEXT_PACK.mode` (never `ab`) and tags `context_ab: true` on both events. The
+default stays `shadow`. `--context-ab` also reports, per cell, merged n, builder turns
+and cache-read per merge and the rework rate (remediated, after an earlier merge,
+or a rerun lane). `recovery` pairs each rerun's implement attempt (builder calls
+other than the plan call) with the first/child run of the same issue (its own log's
+earlier slice, else the earliest such run) as mean turn and output-token ratios.
 
 ## Entry 2026-10-20 — Resource hygiene: preflight and admission GC (#4183)
 
@@ -1291,6 +1307,21 @@ GitHub's) is resolved and fetched once, lazily, by `lazyDefaultBranch` (orchestr
 a parked result as outcome `awaiting-promotion|awaiting-precondition` with $0 and no `runOne` (not SATISFIED: dependents
 skip). `formatOutcomeLists` prints one `awaiting promotion: #A #B (fixes on <lane>, not on <default>)` line instead of
 escalations. Re-evaluation is the next batch or triage run. Cost: 0 LLM calls; per gated issue 1-2 gh reads and one git call.
+
+## Entry 2026-10-23 — post_deploy.min_age soak window (#4425)
+
+Opt-in forge.yaml `post_deploy.min_age` (`parseMinAge`: `30m`/`24h`/`7d`/`2w`, a bare number is minutes, `0` allowed; read by
+`readPostDeployMinAge` in `engine-cli.mjs` for orchestrate and triage). Unset: the gate is exactly #4389 (no extra git
+call). Set: once every parent SHA is on the default branch, and before `precondition_cmd`, `postDeployGate` requires
+`max over items (item window ?? min_age)` since the fix landed. An item's window is the largest explicit duration in its
+post-deploy `why` (`itemWindowsMs`, strict number+unit regex h/d/w, no model). `landedAt` takes the landing time from git:
+`rev-list --ancestry-path <sha>..origin/<default>` (descendants) intersected with `log --first-parent` of the same range.
+The oldest mainline descendant is the merge that brought the SHA in (its `%ct`). The SHA's own `%ct` is used when it is on
+the mainline itself or is the tip. `--first-parent --ancestry-path` together returns nothing for a second-parent merge, so
+the two walks stay separate. The latest landing over the SHAs counts. Too young: `{parked: true, kind: "awaiting-min-age",
+eligibleAt}`, the same `awaiting-promotion` label and `FORGE:PRECONDITION` comment, and one `awaiting min age: #A (fix on
+<default>, soak window not elapsed)` report line. An unknown landing time fails open (`unresolved`). `now` (or `io.now`)
+is injectable for tests.
 
 ## Entry 2026-10-23 — CI-verify gate, flake rerun, parked dependencies (#4387)
 
