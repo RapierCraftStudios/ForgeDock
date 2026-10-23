@@ -1199,19 +1199,34 @@ async function orchestrateClient(argv, deps = {}) {
     }
     msg = { op: "submit", argv: sub, cwd: process.cwd(), env: schedd.batchEnv(process.env) };
   }
-  const sock = await connect();
+  let sock = await connect(), req = msg, reattached = false, losses = 0;
   let id = resumeId;
-  try {
-    const done = await schedd.request(sock, msg, (m) => {
-      if (m.type === "batch") id = m.id;
-      else if (m.type === "row") console.log(formatRowLine(m.row));
-      else if (m.type === "line") console.log(m.text);
-      else if (m.type === "done" && m.replay && m.report) console.log(m.report);
-    });
-    return done.result;
-  } catch (e) {
-    if (id && /closed the connection/.test(e?.message ?? "")) throw new Error(`${e.message}; the batch keeps its state: forgedock orchestrate --resume ${id}`);
-    throw e;
+  const onMsg = (m) => {
+    if (m.type === "batch") id = m.id;
+    else if (m.type === "row") { if (!(reattached && m.replay)) console.log(formatRowLine(m.row)); }
+    else if (m.type === "line") console.log(m.text);
+    else if (m.type === "done" && m.replay && m.report) console.log(m.report);
+  };
+  // #4503: when the daemon dies mid-batch, reconnect (spawning one unless `spawnDaemon: null`) and re-attach, within `reconnectMs`.
+  const reconnectMs = deps.reconnectMs ?? 60_000, sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  for (;;) {
+    try {
+      return (await schedd.request(sock, req, onMsg)).result;
+    } catch (e) {
+      if (!id || !(/closed the connection/.test(e?.message ?? "") || ["ECONNRESET", "EPIPE"].includes(e?.code))) throw e;
+      const giveUp = () => new Error(`${e.message}; the batch keeps its state: forgedock orchestrate --resume ${id}`);
+      if (++losses > 10) throw giveUp();
+      console.log(`schedd connection lost; reconnecting to batch ${id}`);
+      const end = Date.now() + reconnectMs;
+      for (sock = null; !sock;) {
+        try { sock = await connect(); } catch {
+          if (Date.now() >= end) throw giveUp();
+          await sleep(250);
+        }
+      }
+      req = { op: "attach", id };
+      reattached = true;
+    }
   }
 }
 

@@ -3,13 +3,22 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches } from "./batch.mjs";
-import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv } from "./schedd.mjs";
+import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv, exitOnSignals } from "./schedd.mjs";
+import { schedDir } from "./sched.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
 import { orchestrateFromCli } from "../engine-cli.mjs";
+
+// #4503: this process, and the env its clients submit for their lanes, never resolve the host's `~/.forge/sched`.
+process.env.FORGEDOCK_SCHED_DIR = tmpDir("schedd-home-");
+// Stub lanes run detached: a host whose test never reached its `finally` still has them reaped when the file ends.
+const hosts = [];
+process.on("exit", () => { for (const h of hosts) h.reap(); });
+const LANE_MAX_MS = 120_000;
 
 const until = async (cond, ms = 15000) => {
   const end = Date.now() + ms;
@@ -24,13 +33,20 @@ const capture = async (fn) => {
 /** A host: sched + batch dirs, a stub lane that waits for `release`, and a daemon script with injected lanes. */
 function host() {
   const work = tmpDir("schedd-");
-  const h = { work, sched: join(work, "s"), root: join(work, "batches"), launches: join(work, "launches"), release: join(work, "release"), procs: [] };
+  const h = { work, sched: join(work, "s"), root: join(work, "batches"), launches: join(work, "launches"), release: join(work, "release"), procs: [],
+    lanePidFile: join(work, "lane-pids"), log: join(work, "schedd.log") };
   writeFileSync(h.launches, "");
+  writeFileSync(h.lanePidFile, "");
+  hosts.push(h);
   const stub = join(work, "stub-lane.mjs");
   writeFileSync(stub, `import { appendFileSync, existsSync, writeFileSync, renameSync } from "node:fs";
 const a = process.argv.slice(2); const n = Number(a[1]); const rf = a[a.indexOf("--result-file") + 1];
 appendFileSync(${JSON.stringify(h.launches)}, n + "\\n");
-const t = setInterval(() => { if (!existsSync(${JSON.stringify(h.release)})) return; clearInterval(t);
+appendFileSync(${JSON.stringify(h.lanePidFile)}, process.pid + "\\n");
+// #4503: a stub whose test run is gone (work dir removed) or that outlived its bound exits instead of polling forever.
+const born = Date.now();
+const t = setInterval(() => { if (!existsSync(${JSON.stringify(work)}) || Date.now() - born > ${LANE_MAX_MS}) process.exit(0);
+  if (!existsSync(${JSON.stringify(h.release)})) return; clearInterval(t);
   writeFileSync(rf + ".tmp", JSON.stringify({ terminalReason: "merged", pr: 100 + n, cost_usd: 0 })); renameSync(rf + ".tmp", rf); }, 20);
 // Like run-issue's #4179 teardown: SIGTERM reports deferred run.interrupted.
 process.once("SIGTERM", () => { writeFileSync(rf + ".tmp", JSON.stringify({ terminalReason: "deferred", code: "run.interrupted", detail: "interrupted by SIGTERM" })); renameSync(rf + ".tmp", rf); process.exit(143); });
@@ -49,7 +65,9 @@ await d.closed;
   h.env = { ...process.env, FORGEDOCK_SCHED_DIR: h.sched, FORGEDOCK_BATCH_DIR: h.root, FORGEDOCK_LIMITS_FILE: join(work, "limits.json") };
   h.daemon = async () => {
     const before = existsSync(scheddPaths(h.sched).lock) ? readFileSync(scheddPaths(h.sched).lock, "utf8") : null;
-    const child = spawn(process.execPath, [h.daemonScript], { env: h.env, stdio: "ignore" });
+    const out = openSync(h.log, "a");
+    let child;
+    try { child = spawn(process.execPath, [h.daemonScript], { env: h.env, stdio: ["ignore", out, out] }); } finally { closeSync(out); }
     h.procs.push(child);
     await until(() => existsSync(scheddPaths(h.sched).sock) && existsSync(scheddPaths(h.sched).lock) && readFileSync(scheddPaths(h.sched).lock, "utf8") === String(child.pid) && readFileSync(scheddPaths(h.sched).lock, "utf8") !== before);
     // Wait for the socket to accept.
@@ -59,9 +77,15 @@ await d.closed;
   h.client = { scheddDir: h.sched, spawnDaemon: null };
   h.launched = () => readFileSync(h.launches, "utf8").trim().split("\n").filter(Boolean).map(Number).sort();
   h.lanePids = () => listBatches(h.root).flatMap((id) => Object.values(openBatch(h.root, id).store.load()?.running ?? {}).map((r) => r.pid).filter(Boolean));
-  h.cleanup = () => {
-    writeFileSync(h.release, "");
+  h.stubPids = () => (existsSync(h.lanePidFile) ? readFileSync(h.lanePidFile, "utf8").trim().split("\n").filter(Boolean).map(Number) : []);
+  h.reap = () => {
     for (const p of h.procs) { try { p.kill("SIGKILL"); } catch { /* gone */ } }
+    for (const pid of h.stubPids()) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+  };
+  h.cleanup = async () => {
+    if (existsSync(h.work)) writeFileSync(h.release, "");
+    h.reap();
+    await until(() => h.stubPids().every((pid) => !isLaneAlive(pid, null)), 5000).catch(() => {});
   };
   return h;
 }
@@ -98,7 +122,7 @@ describe("schedd host scheduler (#4192)", () => {
       const id = done[0].batch;
       await withRoot(h, () => capture(() => orchestrateFromCli(["--set-parallel", id, "5"], h.client)));
       assert.equal(openBatch(h.root, id).readParallel(), 5);
-    } finally { h.cleanup(); }
+    } finally { await h.cleanup(); }
   });
 
   it("a client that disconnects does not stop the batch; --resume reattaches, and replays the report once done", async () => {
@@ -127,7 +151,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       assert.deepEqual(again.res.rows, res.rows);
       assert.ok(again.lines.join("\n").includes(formatTable(res.rows)));
       assert.deepEqual(h.launched(), [1, 2]);
-    } finally { h.cleanup(); }
+    } finally { await h.cleanup(); }
   });
 
   it("a daemon restart resumes the batch from state and re-adopts its live lanes without duplicate launches", async () => {
@@ -150,7 +174,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       assert.deepEqual(res.rows.map((r) => [r.issue, r.outcome, r.pr]), [[1, "merged", 101], [2, "merged", 102], [3, "merged", 103]]);
       assert.deepEqual(h.launched(), [1, 2, 3], "adopted, not relaunched");
       assert.deepEqual(openBatch(h.root, id).store.load().running, {});
-    } finally { h.cleanup(); }
+    } finally { await h.cleanup(); }
   });
 
   it("#4408: --add and --resume <id> N add issues to the live batch (no second batch); an unhosted finished batch runs its adds on --resume", async () => {
@@ -181,7 +205,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       }));
       assert.equal(res.rows.length, 3);
       assert.deepEqual(h.launched(), [1, 2, 4, 6], "each issue launched once");
-    } finally { h.cleanup(); }
+    } finally { await h.cleanup(); }
   });
 
   it("#4376: --cancel stops one batch (its lane torn down, the rest held, report written); the other batch and the daemon run on", async () => {
@@ -211,7 +235,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
         assert.equal(again.cancelled, false, "a finished batch is left alone");
         await assert.rejects(orchestrateFromCli(["--cancel", "nope"], h.client), /no batch nope/);
       }));
-    } finally { h.cleanup(); }
+    } finally { await h.cleanup(); }
   });
 
   it("#4481: a batch cancelled through the daemon is not resumed by a schedd restart", async () => {
@@ -232,7 +256,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
         assert.deepEqual(await statusIds(), [], "the restarted daemon hosts no cancelled batch");
         assert.deepEqual(h.launched(), [1]);
       }));
-    } finally { h.cleanup(); }
+    } finally { await h.cleanup(); }
   });
 
   it("single instance: a live daemon keeps its lock; a dead owner's lock and socket are taken over", async () => {
@@ -252,7 +276,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
         assert.equal(st.pid, process.pid);
       } finally { await third.close(); }
       assert.equal(existsSync(scheddPaths(h.sched).lock), false, "lock released on close");
-    } finally { h.cleanup(); }
+    } finally { await h.cleanup(); }
   });
 
   it("#4454: close() stops every hosted batch loop before releasing the lock; no batch admits a lane after close()", async () => {
@@ -309,11 +333,12 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     const h = host();
     try {
       const d1 = await h.daemon();
-      await withRoot(h, () => capture(async () => {
-        const a = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client).then(() => null, (e) => e);
+      const { lines } = await withRoot(h, () => capture(async () => {
+        // #4503: a gives up at once (reconnectMs 0) with the resume hint; b re-attaches to the next daemon on its own.
+        const a = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], { ...h.client, reconnectMs: 0 }).then(() => null, (e) => e);
         await until(() => h.launched().length === 1 && h.lanePids().length === 1);
         const [idA] = listBatches(h.root);
-        const b = orchestrateFromCli(["5", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client).then(() => null, (e) => e);
+        const b = orchestrateFromCli(["5", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
         await until(() => h.launched().includes(5) && h.lanePids().length === 2);
         const idB = listBatches(h.root).find((x) => x !== idA);
         const lanes = h.lanePids();
@@ -327,15 +352,102 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
         assert.equal(openBatch(h.root, idA).readReport(), null, "a stopped batch writes no report");
         assert.equal(openBatch(h.root, idB).readReport(), null);
         assert.match(String((await a)?.message), /--resume/);
-        await b;
         await h.daemon(); // resumes both batches
-        const ra = orchestrateFromCli(["--resume", idA], h.client), rb = orchestrateFromCli(["--resume", idB], h.client);
+        const ra = orchestrateFromCli(["--resume", idA], h.client);
         setTimeout(() => writeFileSync(h.release, ""), 200);
         assert.deepEqual((await ra).rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
-        assert.deepEqual((await rb).rows.map((r) => [r.issue, r.outcome]), [[5, "merged"]]);
+        assert.deepEqual((await b).rows.map((r) => [r.issue, r.outcome]), [[5, "merged"]], "b re-attached and finished");
         assert.deepEqual(h.launched(), [1, 2, 5], "adopted, not relaunched");
       }));
-    } finally { h.cleanup(); }
+      assert.ok(lines.some((l) => l.startsWith("schedd connection lost; reconnecting to batch ")), "the client said it reconnects");
+      const log = readFileSync(h.log, "utf8");
+      assert.match(log, /^schedd: exiting \(SIGTERM\)$/m);
+      assert.match(log, /^schedd: exited \(code 143\)$/m);
+    } finally { await h.cleanup(); }
+  });
+
+  it("#4503: every schedd exit writes a reason line", async () => {
+    for (const [ev, arg, code, re] of [["SIGTERM", undefined, 143, /^schedd: exiting \(SIGTERM\)$/], ["SIGINT", undefined, 130, /^schedd: exiting \(SIGINT\)$/],
+      ["SIGHUP", undefined, 129, /^schedd: exiting \(SIGHUP\)$/], ["uncaughtException", new Error("boom\nmore"), 1, /^schedd: exiting \(uncaught: boom\)$/],
+      ["unhandledRejection", new Error("nope"), 1, /^schedd: exiting \(unhandled rejection: nope\)$/]]) {
+      const handlers = {}, lines = [], exits = [];
+      exitOnSignals({ close: async () => { lines.push("closed"); } }, { on: (s, f) => { handlers[s] = f; }, exit: (c) => exits.push(c), log: (m) => lines.push(m) });
+      await handlers[ev](arg);
+      assert.match(lines[0], re, `${ev}: the reason is logged before close()`);
+      assert.equal(lines.at(-1), "closed");
+      assert.deepEqual(exits, [code]);
+      handlers.exit(code);
+      assert.equal(lines.at(-1), `schedd: exited (code ${code})`);
+    }
+    const dir = tmpDir("schedd-idle-"), lines = [];
+    const d = await startDaemon({ dir, root: join(dir, "batches"), runBatch: async () => ({}), log: (m) => lines.push(m), resumeOnStart: false, idleMs: 50 });
+    await d.closed;
+    assert.ok(lines.includes("schedd: idle, exiting"));
+  });
+
+  it("#4503: a daemon that lost its lock or socket logs it and stops its batches resumable, never removing the successor's lock or socket; a dead owner's takeover is logged", async () => {
+    const dir = tmpDir("schedd-lost-"), p = scheddPaths(dir), root = join(dir, "batches"), lines = [];
+    let stopped = false;
+    const d = await startDaemon({ dir, root, log: (m) => lines.push(m), resumeOnStart: false, lockCheckMs: 30,
+      runBatch: ({ sink, signal }) => { sink.batch({ id: "x", dir }); return new Promise((_, rej) => signal.addEventListener("abort", () => { stopped = true; rej(Object.assign(new Error("stopped"), { code: "batch.stopped" })); })); } });
+    request(await connectDaemon({ dir, spawnDaemon: null }), { op: "submit", argv: ["x"], cwd: dir, env: {} }).catch(() => {});
+    await until(() => lines.some((l) => l.includes("listening")));
+    await new Promise((r) => setTimeout(r, 50));
+    writeFileSync(p.lock, "999999999"); // a successor (now dead) took the lock
+    await d.closed;
+    assert.ok(lines.includes("schedd: lost lock (owner pid 999999999), exiting"), lines.join("\n"));
+    assert.equal(stopped, true, "the hosted batch loop was stopped (no report: the next daemon resumes it)");
+    assert.equal(readFileSync(p.lock, "utf8"), "999999999", "the successor's lock is left alone");
+    assert.equal(existsSync(p.sock), true, "the successor's socket is left alone");
+
+    const lines2 = [];
+    const d2 = await startDaemon({ dir, root, runBatch: async () => ({}), log: (m) => lines2.push(m), resumeOnStart: false, lockCheckMs: 30 });
+    assert.ok(lines2.includes("schedd: took over the lock of dead pid 999999999 (it exited without a clean shutdown)"), lines2.join("\n"));
+    rmSync(p.sock);
+    await d2.closed;
+    assert.ok(lines2.includes(`schedd: lost socket ${p.sock}, exiting`), lines2.join("\n"));
+    assert.equal(existsSync(p.lock), false, "its own lock is released");
+  });
+
+  it("#4503: a client whose daemon is SIGKILLed re-attaches to the next daemon and finishes, without relaunching a lane", async () => {
+    const h = host();
+    try {
+      const d1 = await h.daemon();
+      await withRoot(h, () => capture(async () => {
+        const a = orchestrateFromCli(["1", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
+        await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+        const gone = new Promise((r) => d1.on("exit", r));
+        d1.kill("SIGKILL");
+        await gone;
+        await new Promise((r) => setTimeout(r, 300)); // the client is retrying against the dead socket
+        await h.daemon();
+        setTimeout(() => writeFileSync(h.release, ""), 200);
+        assert.deepEqual((await a).rows.map((r) => [r.issue, r.outcome]), [[1, "merged"]]);
+        assert.deepEqual(h.launched(), [1], "adopted, not relaunched");
+      }));
+      assert.match(readFileSync(h.log, "utf8"), /^schedd: took over the lock of dead pid \d+ \(it exited without a clean shutdown\)$/m);
+    } finally { await h.cleanup(); }
+  });
+
+  it("#4503: test runs never resolve ~/.forge/sched, and teardown leaves no live stub lane", async () => {
+    assert.notEqual(schedDir(), join(homedir(), ".forge", "sched"));
+    assert.ok(schedDir().startsWith(tmpdir()), schedDir());
+    const h = host();
+    let pids = [], a;
+    try {
+      await h.daemon();
+      await withRoot(h, async () => {
+        a = capture(() => orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-prefilter"], { ...h.client, reconnectMs: 0 })).catch((e) => e);
+        await until(() => h.stubPids().length === 2 && h.lanePids().length === 2);
+      });
+      pids = h.stubPids();
+      for (const pid of pids) assert.equal(isLaneAlive(pid, null), true);
+      const [id] = listBatches(h.root);
+      assert.equal(openBatch(h.root, id).readPlan().env.FORGEDOCK_SCHED_DIR, schedDir(), "the lanes' env pins the test sched dir");
+    } finally { await h.cleanup(); }
+    await a;
+    assert.equal(pids.length, 2);
+    for (const pid of pids) assert.equal(isLaneAlive(pid, null), false, `stub lane ${pid} reaped`);
   });
 
   it("lane env: allowlisted keys come from the client only, the rest from the daemon", () => {
