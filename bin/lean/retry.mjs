@@ -5,7 +5,9 @@
 export const PUSH_TRANSIENT_RE = /remote unpack failed|index-pack failed|RPC failed|unexpected disconnect|early EOF|the remote end hung up|HTTP\/?\s?5\d\d|returned error: 5\d\d|\b50[0234]\b|internal server error|bad gateway|service unavailable|gateway time-?out|connection (?:reset|timed out|refused)|timed out|could not resolve host|broken pipe|ETIMEDOUT|ECONNRESET|temporarily unavailable|\[remote rejected\][^\n]*\(failed\)|unable to write file|unable to create temporary object|unpacker error|failed to write object/i;
 export const PUSH_PERMANENT_RE = /protected branch|GH006|GH013|repository rule violations|permission (?:denied|to .* denied)|denied to|\b403\b|authentication failed|not allowed|hook declined|pre-receive hook declined|\[rejected\]|non-fast-forward|fetch first/i;
 export const GH_TRANSIENT_RE = /HTTP 5\d\d|\b50[0234]\b|secondary rate limit|rate limit exceeded|abuse detection|something went wrong|internal server error|bad gateway|service unavailable|ETIMEDOUT|ECONNRESET|connection reset|timed out|\bEOF\b|temporarily unavailable/i;
-export const MERGE_TRANSIENT_RE = new RegExp(`${GH_TRANSIENT_RE.source}|base branch was modified|head branch was modified|mergeability.*unknown|try again`, "i");
+/** #4507: gh failing to parse its own input: a torn HTTP cache entry (JSON) or a half-written config (YAML). */
+export const GH_PARSE_RE = /invalid character .{0,40}looking for|unexpected end of JSON input|cannot unmarshal|yaml: line \d+|yaml: unmarshal/i;
+export const MERGE_TRANSIENT_RE = new RegExp(`${GH_TRANSIENT_RE.source}|${GH_PARSE_RE.source}|base branch was modified|head branch was modified|mergeability.*unknown|try again`, "i");
 export const MERGE_CONFLICT_RE = /not mergeable|merge conflict|conflict/i;
 
 export const errText = (e) => `${e?.stderr ?? ""}\n${e?.message ?? ""}\n${e?.stdout ?? ""}`;
@@ -28,4 +30,16 @@ export async function retrying(fn, { transient, permanent = null, attempts = 4, 
   }
   last.transientExhausted = true;
   throw last;
+}
+
+/**
+ * #4507: run `call(env)` with the lane's gh cache env; on a gh parse error (corrupt cache) reset the cache and run it
+ * once more. Without a cache it still retries once. Any other error is rethrown unchanged.
+ */
+export async function ghCacheRetry(call, cache) {
+  try { return await call(cache?.env?.()); } catch (e) {
+    if (!GH_PARSE_RE.test(errText(e))) throw e;
+    try { await cache?.reset?.(); } catch { /* retry on the old dir */ }
+    return await call(cache?.env?.());
+  }
 }

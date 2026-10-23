@@ -25,7 +25,7 @@ import { prepareToolchain } from "./toolchain.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
 import { runChecks, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
-import { retrying, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
+import { retrying, ghCacheRetry, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
@@ -216,10 +216,11 @@ export async function runCore(o) {
 
   const ev = (e) => appendEvent(dir, issue, e, { repo }); // #4432: the run log is keyed by repo + issue
   const emit = async (rec) => { try { await emitTelemetry?.({ ...rec, issue }); } catch { /* never fails a run */ } };
-  const ghc = (args) => io.gh(args);
+  let ghCache = null; // #4507: the run's own gh HTTP cache (set once the run tmp dir exists)
+  const ghc = (args) => ghCacheRetry((env) => io.gh(args, env ? { env } : undefined), ghCache);
   const sleepFn = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   /** gh writes (comment, pr create, issue edit/close): retried for 5xx and secondary rate limits (#4114). */
-  const ghw = (args) => retrying(() => io.gh(args), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random });
+  const ghw = (args) => retrying(() => ghc(args), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random });
   const git = (args) => io.git(args, { cwd: wt });
 
   const builderTriggers = []; // #4362: implement-attempt triggers in order, for the lane's first-pass flag
@@ -327,6 +328,7 @@ export async function runCore(o) {
     }
     // Never discard work silently: an unmerged lane commits and pushes what is left before its worktree goes.
     const saved = !wtCreated || reason === "merged" || (await checkpoint(`exit (${reason})`));
+    try { ghCache?.dispose?.(); } catch { /* best effort */ }
     if (runTmp) {
       try { if ((await io.runTmp.remove(runTmp)) !== false) ledgerDo((l) => l.release("tmp", runTmp)); } catch { /* best effort */ }
       runTmp = null;
@@ -890,6 +892,7 @@ export async function runCore(o) {
     try { runTmp = await io.runTmp.make(issue, runId); } catch { runTmp = null; }
     if (runTmp && runTmp !== planned) ledgerDo((l) => l.register("tmp", runTmp));
   }
+  ghCache = io.ghCache?.(runTmp) ?? null;
   ev({ event: "RUN_START", run: `core_${issue}_${t0}`, issue, lane, path: "core", version: ENGINE_VERSION, forge_version: ENGINE_VERSION, repo });
   try {
     iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels,updatedAt"]));
@@ -2133,6 +2136,10 @@ export async function runCore(o) {
       }
       return "unknown";
     };
+    /** #4507: true only when the PR reads MERGED; unreadable counts as not merged. */
+    const prMerged = async () => {
+      try { return String(JSON.parse(String(await ghc(["pr", "view", String(pr), "-R", repo, "--json", "state"])) || "{}").state ?? "").toUpperCase() === "MERGED"; } catch { return false; }
+    };
     /** #4158: MERGEABLE but BLOCKED is a base branch policy block (ruleset / required checks pending), not a conflict. */
     const policyBlocked = async () => {
       let j;
@@ -2424,6 +2431,12 @@ export async function runCore(o) {
         break;
       } catch (e) {
         const msg = `${e?.stderr ?? ""}${e?.message ?? ""}`;
+        if (await prMerged()) { // #4507: the merge went through despite the error
+          T.decisions.push(`gh pr merge errored but PR #${pr} is MERGED: recorded merged (${msg.split("\n")[0].slice(0, 120)})`);
+          try { seqLease?.release(); } catch { /* fail-open */ }
+          seqLease = null;
+          break;
+        }
         if (MERGE_TRANSIENT_RE.test(msg) && !/not mergeable|merge conflict/i.test(msg)) {
           // "Base branch was modified", GraphQL and 5xx are transient: back off, then the loop top re-reads mergeable and the head.
           if (++mergeRetries > maxMergeRetries) return await finish("deferred", `gh pr merge kept failing transiently (${mergeRetries - 1} retries): ${msg.slice(0, 300)}`, { pr, code: OUTCOME_CODES.MERGE_TRANSIENT }, OUTCOME_CODES.MERGE_TRANSIENT);
