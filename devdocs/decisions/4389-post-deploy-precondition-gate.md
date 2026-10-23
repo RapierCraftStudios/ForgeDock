@@ -33,4 +33,12 @@ on main" (~$0.30 and 2 min each), and each one was a separate escalation for a s
 - A FORGE:STATE field: invisible in the issue list. A label is filterable and needs no lease.
 - A `workflow:*` label via `transition-label.sh`: those are lane-managed states and would fight the lane's transitions.
 - Closing the issue: the follow-up's checks still need doing after promotion.
-- `post_deploy.min_age` now: it needs when the SHA reached the default branch and a window parsed from free text. Deferred.
+- `post_deploy.min_age` now: it needs when the SHA reached the default branch and a window parsed from free text. Deferred
+  to #4425.
+
+## Follow-up (#4425)
+
+`post_deploy.min_age` shipped opt-in. The landing time comes from git: the oldest first-parent commit of the default branch
+that descends from the SHA, from `rev-list --ancestry-path` plus `log --first-parent`, not the promotion PR's mergedAt. Per-item
+windows come from the deferral `why` through a strict duration regex (the largest per item wins). Parked state
+`awaiting-min-age` reuses the label. No model call; an unknown landing time fails open.

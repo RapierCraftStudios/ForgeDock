@@ -2,10 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, isTrustedIssueComment, DEFAULT_PREFILTER_MODEL } from "./prefilter.mjs";
+import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, isTrustedIssueComment, DEFAULT_PREFILTER_MODEL, parseMinAge, itemWindowsMs, landedAt } from "./prefilter.mjs";
+import { writeFileSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
 import { parsePrefilterVerdict, prefilterPrompt } from "./prompts.mjs";
 import { orchestrate, formatTable, formatOutcomeLists } from "./orchestrate.mjs";
-import { triageFromCli } from "../engine-cli.mjs";
+import { triageFromCli, readPostDeployMinAge } from "../engine-cli.mjs";
 
 const fence = (o) => "```json\n" + JSON.stringify(o) + "\n```";
 
@@ -474,6 +478,109 @@ describe("post-deploy precondition gate (#4389)", () => {
     assert.deepEqual(lists, ["awaiting promotion: #41 #42 #43 (fixes on staging, not on main)"]);
     assert.match(formatTable(rows), /#41\s+awaiting-promotion \(pre-filter\)/);
     assert.equal(formatParkedLine([{ issue: 1, outcome: "merged" }]), "");
+  });
+});
+
+describe("post_deploy.min_age soak window (#4425)", () => {
+  const MERGE = "a".repeat(40), PROMO = "b".repeat(40), MAIN = "c".repeat(40);
+  const H = 3600, LANDED = 1_800_000_000; // unix seconds of the promotion merge
+  const item = (id, why) => `- [ ] \`${id}: a health row exists\` — post-deploy: ${why}`;
+  const followup = (items) => `## Acceptance Criteria\n\n${items.join("\n")}\n\n<!-- FORGE:DEFERRED_FROM: #40 -->\n`;
+  const parentPr = [{ number: 90, title: "fix(x): health row (#40)", body: "", mergeCommit: { oid: MERGE } }];
+  // the parent fix reached main through promotion merge PROMO (first parent MAIN) at LANDED
+  const soakWorld = (o = {}) => {
+    const w = world({ mergedPrs: parentPr, ancestry: { [MERGE]: 0 }, ...o });
+    const git = w.io.git;
+    w.io.git = async (a, opts) => {
+      if (a[0] === "log" && a[1] === "--first-parent") { w.gitCalls.push(a); return o.walk ?? `${"d".repeat(40)} ${PROMO} ${LANDED + 9 * H}\n${PROMO} ${MAIN} ${MERGE} ${LANDED}\n${MAIN} ${"e".repeat(40)} ${LANDED - H}\n`; }
+      if (a[0] === "rev-list") { w.gitCalls.push(a); return o.below ?? `${"d".repeat(40)}\n${PROMO}\n`; }
+      if (a[0] === "log" && a[1] === "-1") { w.gitCalls.push(a); return String(LANDED - 5 * H); }
+      return git(a, opts);
+    };
+    return w;
+  };
+  const gate = (w, body, extra = {}) => postDeployGate({ iss: { number: 41, body }, repo: "o/r", lane: "staging", defaultBranch: "main", cwd: "/repo", io: w.io, ...extra });
+
+  it("parses min_age and the windows each post-deploy item's why states (largest wins, none -> null)", () => {
+    assert.equal(parseMinAge("24h"), 24 * H * 1000); assert.equal(parseMinAge("7d"), 7 * 24 * H * 1000); assert.equal(parseMinAge("2w"), 14 * 24 * H * 1000);
+    assert.equal(parseMinAge("30m"), 30 * 60e3); assert.equal(parseMinAge("0"), 0); assert.equal(parseMinAge(90), 90 * 60e3);
+    assert.equal(parseMinAge("soon"), null); assert.equal(parseMinAge(null), null);
+    assert.deepEqual(itemWindowsMs(followup([item("R1", "after 24h of traffic, then 7 days of retention"), item("R2", "only in prod")])), [7 * 24 * H * 1000, null]);
+  });
+
+  it("landedAt: the promotion merge time, or the SHA's own time when it is on the mainline", async () => {
+    const w = soakWorld();
+    assert.equal(await landedAt({ sha: MERGE, def: "main", io: w.io, cwd: "/repo" }), LANDED);
+    assert.deepEqual(w.gitCalls.slice(0, 2), [["rev-list", "--ancestry-path", `${MERGE}..origin/main`], ["log", "--first-parent", "--format=%H %P %ct", `${MERGE}..origin/main`]]);
+    const own = soakWorld({ walk: `${PROMO} ${MERGE} ${LANDED}\n`, below: `${PROMO}\n` });
+    assert.equal(await landedAt({ sha: MERGE, def: "main", io: own.io, cwd: "/repo" }), LANDED - 5 * H);
+    const tip = soakWorld({ walk: "", below: "" });
+    assert.equal(await landedAt({ sha: MERGE, def: "main", io: tip.io, cwd: "/repo" }), LANDED - 5 * H);
+  });
+
+  it("landedAt on a real repo: the promotion merge that brought a staging fix in through its second parent", async () => {
+    const d = tmpDir("landed-");
+    const run = (args, t) => execFileSync("git", args, { cwd: d, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_DATE: `@${t} +0000`, GIT_COMMITTER_DATE: `@${t} +0000`,
+      GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } }).trim();
+    run(["init", "-q", "-b", "main"], 1);
+    run(["commit", "-q", "--allow-empty", "-m", "base"], LANDED - 10 * H);
+    run(["checkout", "-q", "-b", "staging"], 1);
+    run(["commit", "-q", "--allow-empty", "-m", "fix"], LANDED - 8 * H);
+    const fix = run(["rev-parse", "HEAD"], 1);
+    run(["checkout", "-q", "main"], 1);
+    run(["commit", "-q", "--allow-empty", "-m", "hotfix on main"], LANDED - 2 * H);
+    run(["merge", "-q", "--no-ff", "-m", "promote", "staging"], LANDED);
+    run(["commit", "-q", "--allow-empty", "-m", "later"], LANDED + 5 * H);
+    run(["update-ref", "refs/remotes/origin/main", "HEAD"], 1);
+    const io = { git: async (a, o) => run(a, 1) + "\n" };
+    assert.equal(await landedAt({ sha: fix, def: "main", io, cwd: d }), LANDED);
+    assert.equal(await landedAt({ sha: fix.slice(0, 12), def: "main", io, cwd: d }), LANDED);
+    assert.equal(await landedAt({ sha: run(["rev-parse", "HEAD~1^1"], 1), def: "main", io, cwd: d }), LANDED - 2 * H); // on the mainline itself
+    assert.equal(await landedAt({ sha: "f".repeat(40), def: "main", io, cwd: d }), null);
+  });
+
+  it("parks awaiting-min-age until max(item window ?? min_age) after landing, then is ready", async () => {
+    const body = followup([item("R1", "wait 7d of production data"), item("R2", "only in prod")]);
+    const g = await gate(soakWorld(), body, { minAge: parseMinAge("24h"), now: (LANDED + 48 * H) * 1000 });
+    assert.equal(g.state, "awaiting-min-age");
+    assert.equal(g.eligibleAt, new Date((LANDED + 7 * 24 * H) * 1000).toISOString());
+    assert.match(g.detail, /^fix of #40 on main since .*; min age 7d until /);
+    // no stated window: the min_age floor applies
+    const short = followup([item("R2", "only in prod")]);
+    assert.equal((await gate(soakWorld(), short, { minAge: parseMinAge("24h"), now: (LANDED + 23 * H) * 1000 })).state, "awaiting-min-age");
+    assert.equal((await gate(soakWorld(), short, { minAge: parseMinAge("24h"), now: (LANDED + 25 * H) * 1000 })).state, "ready");
+    assert.equal((await gate(soakWorld(), body, { minAge: 0, now: (LANDED + 8 * 24 * H) * 1000 })).state, "ready");
+  });
+
+  it("unset min_age changes nothing (no landing-time git calls); an unknown landing time fails open", async () => {
+    const w = soakWorld();
+    assert.equal((await gate(w, followup([item("R1", "wait 7d")]))).state, "ready");
+    assert.ok(!w.gitCalls.some((a) => a[0] === "log" || a[0] === "rev-list"));
+    const broken = soakWorld();
+    const git = broken.io.git;
+    broken.io.git = async (a, o) => { if (a[0] === "rev-list") throw Object.assign(new Error("bad"), { code: 128 }); return git(a, o); };
+    const g = await gate(broken, followup([item("R1", "wait 7d")]), { minAge: 0 });
+    assert.equal(g.state, "unresolved"); assert.match(g.detail, /landing time of aaaaaaaaaaaa on main unknown/);
+  });
+
+  it("prefilterIssue parks it with the awaiting-promotion label, one comment, and an 'awaiting min age:' report line", async () => {
+    const w = soakWorld({ issues: { 41: { body: followup([item("R1", "wait 7d")]) } } });
+    w.io.now = () => (LANDED + H) * 1000;
+    const r = await pf(w, 41, { defaultBranch: "main", minAge: parseMinAge("24h") });
+    assert.equal(r.parked, true); assert.equal(r.kind, "awaiting-min-age"); assert.equal(r.cost_usd, 0);
+    assert.deepEqual(w.edits, [[41, "--add-label", "awaiting-promotion"]]);
+    assert.equal(w.comments.length, 1); assert.match(w.comments[0][1], /Parked: awaiting its post-deploy soak window/);
+    assert.equal(formatParkedLine([{ issue: 41, prefilter: r }, { issue: 42, prefilter: { parked: true, kind: "awaiting-promotion", lane: "staging", default: "main" } }]),
+      "awaiting promotion: #42 (fixes on staging, not on main)\nawaiting min age: #41 (fix on main, soak window not elapsed)");
+  });
+
+  it("readPostDeployMinAge reads forge.yaml post_deploy.min_age; absent or invalid -> null", async () => {
+    const d = tmpDir("minage-");
+    assert.equal(await readPostDeployMinAge(d), null);
+    writeFileSync(join(d, "forge.yaml"), "post_deploy:\n  min_age: \"24h\"\n");
+    assert.equal(await readPostDeployMinAge(d), 24 * H * 1000);
+    writeFileSync(join(d, "forge.yaml"), "post_deploy:\n  min_age: later\n");
+    assert.equal(await readPostDeployMinAge(d), null);
   });
 });
 

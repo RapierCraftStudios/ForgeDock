@@ -21,7 +21,8 @@ import { parseFactsComment, factsLines, FACTS_RANK } from "./facts.mjs";
 // noComments lives in render.mjs (#4298: one comment-strip helper for context, conformance and prefilter).
 export { noComments };
 
-export const CONTEXT_MODES = Object.freeze(["shadow", "on", "off"]);
+/** #4444: `ab` is the experiment mode: each issue gets a stable arm, `on` or `shadow` (contextArm). */
+export const CONTEXT_MODES = Object.freeze(["shadow", "on", "off", "ab"]);
 export const CONTEXT_SOURCES = Object.freeze(["graph", "attempts", "pitfalls", "ledger", "facts"]);
 export const DEFAULT_CONTEXT_BYTES = 6144;
 export const DEFAULT_LEDGER_DAYS = 30;
@@ -51,6 +52,16 @@ export function parseContextPackConfig({ mode, sources, bytes, days, pitfallLane
   const picked = list ? CONTEXT_SOURCES.filter((s) => list.map((x) => String(x).trim().toLowerCase()).includes(s)) : [...CONTEXT_SOURCES];
   const pos = (v, d) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : d; };
   return { mode: CONTEXT_MODES.includes(m) ? m : "shadow", sources: picked, budgetBytes: pos(bytes, DEFAULT_CONTEXT_BYTES), days: pos(days, DEFAULT_LEDGER_DAYS), pitfallLanes: pos(pitfallLanes, DEFAULT_PITFALL_LANES) };
+}
+
+/**
+ * #4444: the effective mode of one lane. In `ab` the arm comes from a stable hash of `repo#issue`, so every rerun of an
+ * issue stays in its arm and the arms are random, matched cohorts per lane type; any other mode passes through.
+ */
+export function contextArm({ mode, repo = "", issue } = {}) {
+  if (mode !== "ab") return { mode, ab: false };
+  const byte = createHash("sha256").update(`${String(repo).toLowerCase()}#${issue}`).digest()[0];
+  return { mode: byte % 2 === 0 ? "on" : "shadow", ab: true };
 }
 
 /** `**Parent**: #N` (decomposition sub-issue body line); null when absent. */

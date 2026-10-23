@@ -125,7 +125,7 @@ const warnedContextPack = new Set();
 const stderrWarn = (m) => { if (!warnedContextPack.has(m)) { warnedContextPack.add(m); process.stderr.write(`${m}\n`); } };
 /**
  * forge.yaml context pack (#4275), flat keys under `engine` (the parser flattens one level): `context_pack`
- * (shadow|on|off), `context_pack_sources` (comma list of graph,attempts,ledger,facts), `context_pack_bytes`,
+ * (shadow|on|off|ab, #4444), `context_pack_sources` (comma list of graph,attempts,ledger,facts), `context_pack_bytes`,
  * `context_pack_days`. undefined when none is set (the core defaults to shadow). An invalid mode warns through `warn`
  * (stderr, once per message per process) and is dropped; the other keys are kept (#4298).
  */
@@ -133,8 +133,8 @@ export function readContextPack(cwd = process.cwd(), warn = stderrWarn) {
   try {
     const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine ?? {};
     let mode = String(e.context_pack ?? "").trim().toLowerCase();
-    if (mode && !["shadow", "on", "off"].includes(mode)) {
-      warn(`forge.yaml engine.context_pack: invalid mode "${mode}" (expected shadow|on|off); using the default, other context_pack_* keys kept`);
+    if (mode && !["shadow", "on", "off", "ab"].includes(mode)) {
+      warn(`forge.yaml engine.context_pack: invalid mode "${mode}" (expected shadow|on|off|ab); using the default, other context_pack_* keys kept`);
       mode = "";
     }
     const out = { ...(mode ? { mode } : {}), ...(e.context_pack_sources != null ? { sources: String(e.context_pack_sources) } : {}),
@@ -227,6 +227,13 @@ export function readPreconditionCmd(cwd = process.cwd()) {
   try {
     const v = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.post_deploy?.precondition_cmd;
     return typeof v === "string" && v.trim() ? v.trim() : null;
+  } catch { return null; }
+}
+/** #4425: forge.yaml `post_deploy.min_age` ("24h", "7d"; opt-in soak window for parked post-deploy follow-ups) in ms, or null. */
+export async function readPostDeployMinAge(cwd = process.cwd()) {
+  try {
+    const { parseMinAge } = await import("./lean/prefilter.mjs");
+    return parseMinAge(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.post_deploy?.min_age);
   } catch { return null; }
 }
 /** forge.yaml `lean.explore` (on|off) and `lean.explore_model` (#4391): the builder's explorer subagent; undefined when neither is set or valid. */
@@ -1295,7 +1302,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const branches = readBranches(cwd);
   // #4389: the post-deploy gate's default branch is resolved and fetched once, only when a gated issue asks
   const prefilter = argv.includes("--no-prefilter") ? null
-    : makePrefilter({ repo, cwd, io: leanIo, ...prefilterModel(argv), defaultBranch: lazyDefaultBranch({ io: leanIo, repo, cwd, configured: branches.default }), preconditionCmd: readPreconditionCmd(cwd) });
+    : makePrefilter({ repo, cwd, io: leanIo, ...prefilterModel(argv), defaultBranch: lazyDefaultBranch({ io: leanIo, repo, cwd, configured: branches.default }), preconditionCmd: readPreconditionCmd(cwd), minAge: await readPostDeployMinAge(cwd) });
   const fetched = new Set();
   const laneOf = async (n) => {
     const r = await resolveLane({ issue: n, repo, io: leanIo, cwd, branches, requested: lane, override: laneOverride });
@@ -1855,7 +1862,7 @@ export async function triageFromCli(argv, deps = {}) {
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   const { prefilterIssue, formatPrefilterSummary, formatParkedLine, lazyDefaultBranch } = await import("./lean/prefilter.mjs");
   const branches = readBranches();
-  const gate = { defaultBranch: lazyDefaultBranch({ io: leanIo, repo, cwd: process.cwd(), configured: branches.default }), preconditionCmd: readPreconditionCmd() }; // #4389
+  const gate = { defaultBranch: lazyDefaultBranch({ io: leanIo, repo, cwd: process.cwd(), configured: branches.default }), preconditionCmd: readPreconditionCmd(), minAge: await readPostDeployMinAge() }; // #4389, #4425
   const parallel = flag(argv, "--parallel") == null ? 8 : parseInt(flag(argv, "--parallel"), 10);
   if (!Number.isInteger(parallel) || parallel < 1) throw new Error("--parallel must be a positive integer");
   // #4141: bounded pool. Each lane is fetched once (memoized promise); output stays in input order.
