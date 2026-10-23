@@ -14,7 +14,7 @@ import { fetchGithubRecords, parseTelemetryComments, runsFromRecords, toModel } 
 import { buildReport, makeProgressPrinter, parseArgs, parseSince, readAlertConfig, runStats, sinceToTimestamp } from "./index.mjs";
 import { lanesOfLog, readLanes, readLocalRuns, summariseLog } from "./local-source.mjs";
 import { renderAlerts, renderCompact, renderJson, renderMarkdown } from "./render.mjs";
-import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers } from "./query.mjs";
+import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers, laneProfileReport, renderLaneProfiles } from "./query.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fx = (f) => join(here, "fixtures", f);
@@ -607,6 +607,71 @@ describe("builder model tiers over run logs (forge#4394)", () => {
     assert.equal(parseArgs(["--tiers"]).tiers, true); assert.equal(parseArgs([]).tiers, false);
     const rep = await buildReport({ repo: "o/r", tiers: true }, { localRuns: [summariseLog(slice(1))], releaseTimes: [], gh: async () => { throw new Error("no network"); } });
     assert.equal(rep.query.tiers.rows[0].n, 1);
+  });
+});
+
+describe("lane profile report (#4436)", () => {
+  const use = (phase, profile, baseline, trigger = "build") => ({ event: "PHASE_ATTEMPT_USAGE", phase, trigger, cost_usd: 1, usage: { cache_read_input_tokens: 1, output_tokens: 1 },
+    ...(profile ? { lane_profile: profile } : {}), ...(baseline != null ? { baseline_tokens: baseline } : {}) });
+  const slice = (issue, profile, { impl = [40000], review = 20000, shadow, triggers } = {}) => [
+    { event: "RUN_START", issue, repo: "o/r", run: `r${issue}${profile}` },
+    ...impl.map((b, i) => use("implement", profile, b, triggers?.[i])), ...(review != null ? [use("review", profile, review, "review")] : []),
+    { event: "RUN_TERMINAL", reason: "merged", ...(shadow ? { shadow_would: shadow } : {}) },
+  ];
+
+  it("summariseLog keeps the slice's lane profile and per-phase baselines; resumed sessions add none", () => {
+    const s = summariseLog(slice(1, "lane", { impl: [30000, null] }));
+    assert.equal(s.laneProfile, "lane");
+    assert.deepEqual(s.baselines, { implement: [30000], review: [20000] });
+    const mixed = summariseLog([{ event: "RUN_START", issue: 2 }, use("implement", "memory-off", 1), use("review", "lane", 2), { event: "RUN_TERMINAL", reason: "merged" }]);
+    assert.equal(mixed.laneProfile, "mixed");
+    const old = summariseLog([{ event: "RUN_START", issue: 3 }, use("implement", null, null), { event: "RUN_TERMINAL", reason: "merged" }]);
+    assert.equal(old.laneProfile, null); assert.deepEqual(old.baselines, {});
+  });
+
+  it("readLocalRuns keeps one summary per log by default and every RUN_START slice with allSlices", () => {
+    const dir = tmpDir("lane-profile-");
+    try {
+      writeFileSync(join(dir, "7.jsonl"), [...slice(7, "memory-off", { impl: [60000] }), ...slice(7, "lane", { impl: [25000] })].map((e) => JSON.stringify(e)).join("\n"));
+      const last = readLocalRuns(dir);
+      assert.equal(last.length, 1); assert.equal(last[0].laneProfile, "lane");
+      const all = readLocalRuns(dir, { allSlices: true });
+      assert.deepEqual(all.map((r) => [r.issue, r.laneProfile, r.baselines.implement[0]]), [[7, "memory-off", 60000], [7, "lane", 25000]]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("compares baseline and conformance per profile on a pinned issue set", () => {
+    const runs = [
+      slice(1, "memory-off", { impl: [60000, 70000] }), slice(2, "memory-off", { impl: [50000], shadow: "conformance.scope" }),
+      slice(1, "lane", { impl: [20000, 30000], review: 10000 }), slice(2, "lane", { impl: [24000], review: 12000, triggers: ["conformance"] }),
+      slice(3, "lane", { impl: [99999] }), [{ event: "RUN_START", issue: 4 }, use("implement", null, null), { event: "RUN_TERMINAL", reason: "merged" }],
+      [{ event: "RUN_START", issue: 5 }, use("implement", "lane", 1)], // unfinished: left out
+    ].map((l) => summariseLog(l));
+    const all = laneProfileReport(runs);
+    assert.deepEqual(all.profiles.map((p) => [p.profile, p.n]), [["memory-off", 2], ["lane", 3], ["unknown", 1]]);
+    assert.deepEqual(all.issues_in_all, []);
+    const rep = laneProfileReport(runs, { issues: [1, 2] });
+    assert.deepEqual(rep.profiles.map((p) => p.profile), ["memory-off", "lane"]);
+    const [before, after] = rep.profiles;
+    assert.deepEqual(before.phases, [{ phase: "implement", sessions: 3, median: 60000, mean: 60000 }, { phase: "review", sessions: 2, median: 20000, mean: 20000 }]);
+    assert.deepEqual(after.phases[0], { phase: "implement", sessions: 3, median: 24000, mean: 24667 });
+    assert.deepEqual([before.reviewed, before.conformance_rate, before.shadow_blocks], [2, 0.5, 1]);
+    assert.deepEqual([after.reviewed, after.conformance_rate, after.shadow_blocks], [2, 0.5, 0]);
+    assert.deepEqual(rep.issues_in_all, [1, 2]);
+    const md = renderLaneProfiles(rep);
+    assert.match(md, /\| lane \| implement \| 3 \| 24000 \| 24667 \|/);
+    assert.match(md, /\| memory-off \| 2 \| 0\.5 \(2\) \| 1 \|/);
+    assert.match(md, /every profile: #1, #2/);
+    assert.match(renderLaneProfiles(laneProfileReport([])), /\| none \|/);
+  });
+
+  it("--lane-profile reads run logs only (no GitHub crawl); --issues takes a comma list", async () => {
+    assert.equal(parseArgs(["--lane-profile"]).laneProfile, true); assert.equal(parseArgs([]).laneProfile, false);
+    assert.deepEqual(parseArgs(["--issues", "4,12"]).issues, [4, 12]); assert.deepEqual(parseArgs(["--issues=7"]).issues, [7]);
+    assert.throws(() => parseArgs(["--issues", "4,x"]), /--issues must be a comma list/);
+    const rep = await buildReport({ repo: "o/r", laneProfile: true, issues: [1] }, { localRuns: [summariseLog(slice(1, "lane")), summariseLog(slice(2, "lane"))],
+      releaseTimes: [], gh: async () => { throw new Error("no network"); } });
+    assert.deepEqual(rep.query.lane_profile.profiles.map((p) => [p.profile, p.n]), [["lane", 1]]);
   });
 });
 

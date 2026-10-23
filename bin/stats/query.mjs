@@ -145,3 +145,53 @@ export function renderTiers(rep) {
   const rows = (rep?.rows ?? []).map((g) => `| ${g.tier} | ${g.class} | ${g.n} | ${f(g.merge_rate)} | ${f(g.conformance_rate)} (${g.reviewed}) | ${f(g.post_merge_rework_rate)} (${g.merges}) | ${f(g.first_pass_yield)} | ${f(g.cost_usd)} |`);
   return `| Tier | Class | n | Merge rate | Conformance rate (reviewed) | Post-merge rework (merges) | First-pass yield | Cost USD |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n${rows.length ? rows.join("\n") : "| none | | 0 | | | | | |"}\n\n${rep?.unrouted ?? 0} finished run(s) without a builder route (before #4394) left out.`;
 }
+
+/**
+ * forge#4436: the #4395 lane baseline before/after, over local run summaries (every RUN_START slice). Finished runs,
+ * optionally pinned to an issue set, grouped by lane profile (null → unknown). Per profile and phase: fresh-session
+ * first-turn baseline_tokens (sessions, median, mean). Per profile: conformance_rate (the builderTierReport rule) and
+ * shadow_blocks (reviewed runs with a would-block verdict). issues_in_all: issues with a finished run under every profile.
+ */
+export const LANE_PROFILES = Object.freeze(["full", "memory-off", "lane", "mixed", "unknown"]);
+export function laneProfileReport(runs, { issues = null } = {}) {
+  const pin = Array.isArray(issues) && issues.length ? new Set(issues) : null;
+  const rate = (k, n) => (n ? Math.round((k / n) * 1e4) / 1e4 : null);
+  const groups = new Map();
+  for (const r of runs ?? []) {
+    if (!r?.finished || (pin && !pin.has(r.issue))) continue;
+    const name = typeof r.laneProfile === "string" && r.laneProfile ? r.laneProfile : "unknown";
+    const g = groups.get(name) ?? { profile: name, n: 0, issues: new Set(), reviewed: 0, conforming: 0, shadow_blocks: 0, phases: {} };
+    groups.set(name, g);
+    g.n++;
+    if (r.issue != null) g.issues.add(r.issue);
+    if (r.reachedReview) {
+      g.reviewed++;
+      if (!r.conformanceRound && (r.shadowWould == null || r.shadowWould === "conforms")) g.conforming++;
+      if (typeof r.shadowWould === "string" && r.shadowWould !== "conforms") g.shadow_blocks++;
+    }
+    for (const [phase, xs] of Object.entries(r.baselines ?? {})) (g.phases[phase] ??= []).push(...xs.filter(Number.isFinite));
+  }
+  const stat = (xs) => {
+    if (!xs.length) return { median: null, mean: null };
+    const s = [...xs].sort((a, b) => a - b), m = s.length >> 1;
+    return { median: Math.round(s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2), mean: Math.round(s.reduce((a, b) => a + b, 0) / s.length) };
+  };
+  const rank = (p) => { const i = LANE_PROFILES.indexOf(p); return i < 0 ? LANE_PROFILES.length : i; };
+  const profiles = [...groups.values()].sort((a, b) => rank(a.profile) - rank(b.profile) || a.profile.localeCompare(b.profile))
+    .map((g) => ({ profile: g.profile, n: g.n, issues: [...g.issues].sort((a, b) => a - b), reviewed: g.reviewed, conformance_rate: rate(g.conforming, g.reviewed),
+      shadow_blocks: g.shadow_blocks, phases: Object.keys(g.phases).sort().map((phase) => ({ phase, sessions: g.phases[phase].length, ...stat(g.phases[phase]) })) }));
+  const issuesInAll = profiles.length ? profiles[0].issues.filter((i) => profiles.every((p) => p.issues.includes(i))) : [];
+  return { profiles, issues_in_all: issuesInAll };
+}
+
+/** Markdown tables for laneProfileReport. */
+export function renderLaneProfiles(rep) {
+  const f = (v) => (v == null ? "n/a" : String(v));
+  const ps = rep?.profiles ?? [];
+  const base = ps.flatMap((p) => (p.phases.length ? p.phases : [{ phase: "n/a", sessions: 0, median: null, mean: null }])
+    .map((x) => `| ${p.profile} | ${x.phase} | ${x.sessions} | ${f(x.median)} | ${f(x.mean)} |`));
+  const conf = ps.map((p) => `| ${p.profile} | ${p.n} | ${f(p.conformance_rate)} (${p.reviewed}) | ${p.shadow_blocks} |`);
+  return `| Profile | Phase | Sessions | Median baseline | Mean baseline |\n| --- | --- | --- | --- | --- |\n${base.length ? base.join("\n") : "| none | | 0 | | |"}\n\n`
+    + `| Profile | Runs | Conformance rate (reviewed) | Shadow would-block |\n| --- | --- | --- | --- |\n${conf.length ? conf.join("\n") : "| none | 0 | | |"}\n\n`
+    + `Issues with a finished run under every profile: ${rep?.issues_in_all?.length ? rep.issues_in_all.map((i) => `#${i}`).join(", ") : "none"}`;
+}

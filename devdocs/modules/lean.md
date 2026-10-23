@@ -173,6 +173,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `runCliBackendAsync` returns `baselineTokens` (first stream assistant message's input + cache read + cache creation);
    `makeLeanRunner` keeps it for fresh sessions only, and `PHASE_ATTEMPT_USAGE` / telemetry `phase_attempt` carry
    `baseline_tokens` and `lane_profile`. Decision: `devdocs/decisions/4395-lane-profile.md`.
+   Before/after (#4436): `forgedock stats --lane-profile` (`query.mjs` `laneProfileReport` / `renderLaneProfiles`) reads
+   every RUN_START slice (`readLocalRuns(dir, {allSlices: true})`), groups finished runs by `lane_profile` with baseline
+   sessions/median/mean per phase and the conformance rate per profile (the `--tiers` rule); `--issues` pins the issue set.
    **Batched reads** (#4410): `HOST_RULES` also tells the builder to issue independent read-only calls (reads, greps,
    git log/blame, gh) in the same turn or one shell call, and to read each file's ranges once and keep notes. The
    wording replaced older text, so the plan/implement token caps are unchanged. Measurement: `runCliBackendAsync`'s stream

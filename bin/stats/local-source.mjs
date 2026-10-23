@@ -88,7 +88,17 @@ export function summariseLog(events, fallbackIssue = null) {
     reworkedMerges: earlierMergedRoutes(events.slice(0, s)),
     // first pass: merged off one plan + one implement call, at most one review, no CI fix round
     firstPass: finished && term?.reason === "merged" && builderCalls.length <= 2 && reviewCalls <= 1 && !ev.some((e) => e.event === "CI_FIX_ROUND"),
+    // #4436: the lane profile (#4395) of this slice's sessions ("mixed" when they differ, null before the field) and the
+    // fresh sessions' first-turn baseline_tokens per phase (resumed sessions carry none)
+    laneProfile: profileOf(usage),
+    baselines: usage.reduce((acc, e) => { if (Number.isFinite(e.baseline_tokens)) (acc[e.phase ?? "other"] ??= []).push(e.baseline_tokens); return acc; }, {}),
   };
+}
+
+/** #4436: the one lane_profile of the usage records, "mixed" when they differ, null when none carries it. */
+function profileOf(usage) {
+  const ps = new Set(usage.map((e) => e.lane_profile).filter((p) => typeof p === "string" && p));
+  return ps.size === 0 ? null : ps.size === 1 ? [...ps][0] : "mixed";
 }
 
 /** #4394: {tier, class, escalated, model} of a lane, or null when it computed no builder route. */
@@ -119,16 +129,24 @@ function earlierMergedRoutes(events) {
   return out;
 }
 
-/** All run summaries in `dir` (a missing dir or an unreadable log yields nothing, never an error). */
-export function readLocalRuns(dir = runsDir()) {
+/**
+ * All run summaries in `dir` (a missing dir or an unreadable log yields nothing, never an error). One per log (its last
+ * RUN_START slice); with `allSlices` (#4436) one per RUN_START slice, so a before and an after run of one issue both count.
+ */
+export function readLocalRuns(dir = runsDir(), { allSlices = false } = {}) {
   if (!existsSync(dir)) return [];
   const runs = [];
   for (const f of readdirSync(dir).sort()) {
     if (!f.endsWith(".jsonl")) continue;
     try {
       const m = /(?:^|__)(\d+)\.jsonl$/.exec(f); // #4432: `<issue>.jsonl` or `<owner>__<repo>__<issue>.jsonl`
-      const sum = summariseLog(parseLog(readFileSync(join(dir, f), "utf8")), m ? Number(m[1]) : null);
-      if (sum) runs.push({ ...sum, mtimeTs: new Date(statSync(join(dir, f)).mtimeMs).toISOString() });
+      const events = parseLog(readFileSync(join(dir, f), "utf8"));
+      const starts = allSlices ? events.flatMap((e, i) => (e.event === "RUN_START" ? [i] : [])) : [events.length];
+      const mtimeTs = new Date(statSync(join(dir, f)).mtimeMs).toISOString();
+      starts.forEach((_, k) => {
+        const sum = summariseLog(allSlices ? events.slice(0, starts[k + 1] ?? events.length) : events, m ? Number(m[1]) : null);
+        if (sum) runs.push({ ...sum, mtimeTs });
+      });
     } catch { /* unreadable log */ }
   }
   return runs;
