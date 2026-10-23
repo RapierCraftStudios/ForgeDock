@@ -1538,3 +1538,20 @@ freeze → implement path. The plan prompt gets `PLAN_RERUN_NOTE` (the branch ho
 text with the light diff's files, and `upgradeNote(reasons)`. The branch is never reset, so committed work is kept.
 Cost: a light lane with no trigger makes one builder call plus the review, with no plan session. An upgrade costs the
 light session on top of the full lane. ADR `decisions/4442-light-lane.md`.
+
+## Entry 2026-10-23 — One lane per issue across batches; dispatch-time already-done check (#4481)
+
+Two hosted batches that both include issue N (a resumed batch and a new one) no longer run two lanes for N.
+- Per-issue lock in the host registry (`sched.mjs`): an entry with `exclusive: true` (set by `runBatch` through
+  `sched.exclusive`; not stored) is refused by `tryAcquire` while a live slot of another batch holds the same non-null
+  `repo` and `issue`: `{ok:false, conflict:<batch>}`, and the key leaves the queue so it holds no grant rank.
+  `holder(entry)` answers the same for a lane placed remote. Without `exclusive` (or with no repo), nothing changes.
+- `orchestrate.mjs` `grant()` returns `"busy"` on a conflict: the issue is retried after `pollMs`, one `deferred` row
+  per other batch names it (`#N has a live lane in batch <id>`), no deferral count or breaker, and admission continues
+  with the next ready issue.
+- `dispatchCheck(n)` (injected; `engine-cli.mjs` `makeDispatchCheck`, gh only) runs before every lane start, requeues
+  included, unlike the once-per-issue pre-filter: a merged `feat/issue-N-lean` PR ends the row `merged` (with the PR), a
+  closed issue without one ends `invalid`, both with `skipped at dispatch: …` and no lane, so dependents still run.
+  Fail-open: an error or an unreadable answer runs the lane.
+- `--cancel <id>` (#4376) is unchanged; a test pins that a schedd restart resumes no cancelled batch, also when the cancel
+  was written while no daemon ran.
