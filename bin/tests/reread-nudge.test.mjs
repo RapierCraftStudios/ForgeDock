@@ -4,9 +4,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "./_tmp.mjs";
 import { payloadReads, nudgeFor, stateFile, main } from "../hooks/reread-nudge.mjs";
 import { makeLeanRunner, rereadNudgeFlags, REREAD_HOOK } from "../lean/effects.mjs";
 import { REREAD_MIN } from "../lean/toolstats.mjs";
@@ -33,7 +33,7 @@ describe("#4456 re-read nudge hook", () => {
   });
 
   it("main keeps per-session state on disk and fails open", () => {
-    const dir = mkdtempSync(join(tmpdir(), "reread-"));
+    const dir = tmpDir("reread-");
     try {
       const outs = [1, 2, 3].map(() => main(JSON.stringify(read("/w/a.mjs")), { dir }));
       assert.deepEqual(outs.slice(0, 2), ["", ""]);
@@ -44,18 +44,18 @@ describe("#4456 re-read nudge hook", () => {
       assert.equal(main("{bad", { dir }), "");
       assert.equal(main(JSON.stringify(bash("ls")), { dir }), "");
       assert.ok(stateFile("../x/y", dir).startsWith(dir + "/"), "session id is sanitised into the state dir");
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally { /* tmpDir cleans up at exit */ }
   });
 
   it("the hook script runs as a CLI: silent twice, then the reminder JSON; exit 0 on bad input", () => {
-    const dir = mkdtempSync(join(tmpdir(), "reread-cli-"));
+    const dir = tmpDir("reread-cli-");
     try {
       const run = (input) => execFileSync(process.execPath, [REREAD_HOOK], { input, env: { ...process.env, TMPDIR: dir }, encoding: "utf8" });
       const p = JSON.stringify(read("/w/z.mjs", `cli-${process.pid}`));
       assert.equal(run(p), ""); assert.equal(run(p), "");
       assert.match(run(p), /"additionalContext"/);
       assert.equal(run("{bad"), "");
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally { /* tmpDir cleans up at exit */ }
   });
 
   it("makeLeanRunner adds the --settings hook only for rereadNudge sessions that can use tools", async () => {
