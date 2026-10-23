@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { deriveLightContract, runLightStep, parseNumstat, apiShapeReasons, upgradeNote, lightBuildPrompt } from "./lightlane.mjs";
+import { deriveLightContract, runLightStep, parseNumstat, apiShapeReasons, upgradeNote, lightBuildPrompt, renderLiteReceipt } from "./lightlane.mjs";
 import { validateContract } from "./conformance.mjs";
 
 const TITLE = "foo crashes on null input";
@@ -115,5 +115,64 @@ describe("runLightStep (#4450)", () => {
     const { ctx, calls } = step({ testRcs: [1, 0] });
     const r = await runLightStep(ctx);
     assert.equal(r.upgrade, false); assert.equal(calls.fix, 1); assert.equal(r.testFailures, 1);
+  });
+});
+
+describe("renderLiteReceipt (#4452)", () => {
+  const ELIG = { mode: "on", verdict: "eligible", eligible: true, light: true, reasons: [] };
+
+  it("renders diff stat, red/green result, gates, true cost and eligibility reason for a light lane", async () => {
+    const r = await runLightStep(step().ctx);
+    const body = renderLiteReceipt({ lr: r, eligibility: ELIG, costUsd: 0.4321, contractHash: "c0ffee12" });
+    assert.match(body, /^## Light lane receipt/);
+    assert.match(body, /\*\*Outcome:\*\* light/);
+    assert.match(body, /\*\*Diff:\*\* 2 file\(s\), \+25\/-1 \(non-test: 1 file\(s\), 6 line\(s\)\)/);
+    assert.match(body, /\*\*Red\/green:\*\* base FAILED → head RAN \(red on base\)/);
+    assert.match(body, /\*\*Gates:\*\*\n  - targeted tests: 2 command\(s\), passed/);
+    assert.match(body, /`node --test test\/foo\.test\.js`/);
+    assert.match(body, /API shape: unchanged/);
+    assert.match(body, /contract: derived, valid \(`c0ffee12`\)/);
+    assert.match(body, /\*\*Cost:\*\* \$0\.4321 \(true per-session cost, #4407 deltas\)/);
+    assert.match(body, /\*\*Eligibility:\*\* eligible \(mode on\): repro or expected behaviour/);
+    assert.ok(!/Upgrade reasons/.test(body));
+    assert.ok(!/<!--|undefined|NaN/.test(body), body);
+  });
+
+  it("an upgraded lane lists the gates that fired and the upgrade reasons; free text is sanitised", async () => {
+    const api = { status: "changed", changes: [{ file: "src/foo.js", symbol: "foo", change: "sync-async" }], unknown: [] };
+    const r = await runLightStep(step({ api, testRcs: [1, 1], repro: { base: "PASSED", head: "RAN" } }).ctx);
+    assert.equal(r.upgrade, true);
+    const elig = { mode: "on", verdict: "eligible", reasons: [{ code: "no_repro", detail: "x <!-- y --> <b>" }] };
+    const body = renderLiteReceipt({ lr: r, eligibility: elig, costUsd: 1.5 });
+    assert.match(body, /^## Light lane upgraded to the full lane/);
+    assert.match(body, /\*\*Outcome:\*\* upgraded/);
+    assert.match(body, /base PASSED → head RAN \(not red on base\)/);
+    assert.match(body, /targeted tests: 2 command\(s\), failed twice/);
+    assert.match(body, /API shape: 1 change\(s\)\/unknown\n {4}- src\/foo\.js: foo sync-async/);
+    assert.match(body, /contract: not derived \(upgraded\)/);
+    assert.match(body, /\*\*Upgrade reasons:\*\*[\s\S]*- api_shape: [\s\S]*- repro_not_red: [\s\S]*- tests_failed_twice: /);
+    assert.match(body, /- no_repro: x y &lt;b>/);
+    assert.ok(!/<!--|-->/.test(body));
+  });
+
+  it("an early upgrade (no commit) renders n/a, never undefined", async () => {
+    const r = await runLightStep(step({ files: [] }).ctx);
+    const body = renderLiteReceipt({ lr: r, eligibility: null, costUsd: null });
+    assert.match(body, /\*\*Diff:\*\* n\/a/);
+    assert.match(body, /\*\*Red\/green:\*\* n\/a/);
+    assert.match(body, /targeted tests: not run/);
+    assert.match(body, /API shape: not checked/);
+    assert.match(body, /\*\*Cost:\*\* n\/a/);
+    assert.match(body, /- no_commit: /);
+    assert.ok(!/undefined|NaN/.test(body), body);
+  });
+
+  it("runLightStep returns the receipt inputs alongside its #4450 fields", async () => {
+    const r = await runLightStep(step().ctx);
+    assert.deepEqual(r.diff, { files: [{ path: "src/foo.js", added: 5, deleted: 1 }, { path: "test/foo.test.js", added: 20, deleted: 0 }] });
+    assert.deepEqual(r.apiShape, []);
+    assert.deepEqual(r.testCommands, ["node --test test/foo.test.js", "node --test test/bar.test.js"]);
+    assert.equal(r.testRuns, 2);
+    for (const k of ["upgrade", "reasons", "contract", "files", "repro", "testFailures"]) assert.ok(k in r, k);
   });
 });

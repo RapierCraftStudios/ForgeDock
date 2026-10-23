@@ -115,11 +115,44 @@ describe("#4402 efficiencyMetrics", () => {
   });
   it("renders n/a, never NaN, for an empty cohort", () => {
     const lines = formatEfficiencyLines(efficiencyMetrics({}));
-    assert.equal(lines.length, 8);
+    assert.equal(lines.length, 9);
     assert.ok(!lines.some((l) => /NaN|undefined/.test(l)), lines.join("\n"));
     assert.match(lines[0], /^efficiency: merged 0, n\/a\/merge/);
     assert.equal(lines[6], "acceptance (7d after promotion): n/a");
     assert.equal(lines[7], "tools: calls/turn p50 n/a, re-reads (>=3x same path)/merge n/a");
+    assert.equal(lines[8], "lanes: light 0 ($0.00), upgraded 0 ($0.00), full 0 ($0.00); upgrade rate n/a");
+  });
+});
+
+describe("#4452 light/full split and upgrade rate", () => {
+  // issue 1: light, merged; 2: light then upgraded in the same run, merged; 3: full, merged; 4: light, failed; 5: upgraded, failed
+  const logs = new Map([
+    [1, [start("2026-10-22T10:00:00Z"), { event: "LIGHT_ELIGIBILITY", light: true }, att("implement", { trigger: "build", cost_usd: 0.9, cost_usd_delta: 0.4 }), { event: "LIGHT_DONE" }, att("review", { cost_usd: 0.05 }), term("merged", "merged")]],
+    [2, [start("2026-10-22T10:00:00Z"), att("implement", { trigger: "build", cost_usd_delta: 0.3 }), { event: "LIGHT_UPGRADE", reasons: [{ code: "diff_lines" }] }, att("implement", { trigger: "plan", cost_usd_delta: 0.5 }), term("merged", "merged")]],
+    [3, [start("2026-10-22T10:00:00Z"), att("implement", { trigger: "plan", cost_usd_delta: 0.6 }), att("implement", { trigger: "build", cost_usd: 1.2, cost_usd_delta: 0.4 }), term("merged", "merged")]],
+    [4, [start("2026-10-22T10:00:00Z"), att("implement", { trigger: "build", cost_usd_delta: 0.2 }), { event: "LIGHT_DONE" }, term("failed", "ci.red")]],
+    [5, [start("2026-10-22T10:00:00Z"), att("implement", { trigger: "build", cost_usd_delta: 0.1 }), { event: "LIGHT_UPGRADE" }, term("failed", "conformance.unimplemented")]],
+  ]);
+  const entries = [1, 2, 3, 4, 5].map((issue) => ({ row: { issue, outcome: issue <= 3 ? "merged" : "failed" }, settleAt: null }));
+  const m = efficiencyMetrics({ entries, logs, repo: "o/r" });
+
+  it("tags each lane slice by shape from LIGHT_DONE / LIGHT_UPGRADE", () => {
+    assert.deepEqual(issueSlices(logs.get(1)).map((s) => s.shape), ["light"]);
+    assert.deepEqual(issueSlices(logs.get(2)).map((s) => s.shape), ["upgraded"]);
+    assert.deepEqual(issueSlices(logs.get(3)).map((s) => s.shape), ["full"]);
+  });
+  it("splits every lane (all outcomes) by shape with true #4407 delta costs and computes the upgrade rate", () => {
+    assert.deepEqual(m.lanes, {
+      light: { n: 2, cost_usd: 0.65 }, // 0.4 delta (not the 0.9 running total) + 0.05 review + 0.2
+      upgraded: { n: 2, cost_usd: 0.9 },
+      full: { n: 1, cost_usd: 1 }, // 0.6 + 0.4 delta, not 1.2
+      upgrade_rate: 0.5,
+    });
+    assert.deepEqual(m.per_issue.map((x) => [x.issue, x.shape]), [[1, "light"], [2, "upgraded"], [3, "full"]]);
+  });
+  it("the batch report prints the split and the upgrade rate", () => {
+    const lines = formatEfficiencyLines(m);
+    assert.equal(lines.at(-1), "lanes: light 2 ($0.65), upgraded 2 ($0.90), full 1 ($1.00); upgrade rate 50% (2/4)");
   });
 });
 
@@ -142,7 +175,7 @@ describe("#4410 tool calls per turn and re-reads", () => {
     const p = Object.fromEntries(m.per_issue.map((x) => [x.issue, x]));
     assert.equal(p[1].implement_tool_calls_per_turn, 1.5); assert.equal(p[1].implement_rereads, 2);
     assert.equal("implement_tool_calls_per_turn" in p[4], false);
-    assert.equal(formatEfficiencyLines(m).at(-1), "tools: calls/turn p50 1.50, re-reads (>=3x same path)/merge 1.00");
+    assert.equal(formatEfficiencyLines(m).find((l) => l.startsWith("tools:")), "tools: calls/turn p50 1.50, re-reads (>=3x same path)/merge 1.00");
   });
   it("null without tool data (older logs)", () => {
     const e = efficiencyMetrics({ entries: [entries[3]], logs, repo: "o/r", now: NOW });
