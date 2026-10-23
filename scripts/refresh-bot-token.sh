@@ -83,12 +83,28 @@ if [[ -z "$INSTALL_TOKEN" ]]; then
 fi
 
 # --- Auth gh CLI ---
-echo "$INSTALL_TOKEN" | gh auth login --with-token 2>/dev/null
+# gh rewrites hosts.yml in place, and concurrent lanes read it (#4507): run the auth in a staging config dir next to
+# the real one, then rename hosts.yml into place (same filesystem, so readers see the old or the new file, never half).
+GH_CFG="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}"
+mkdir -p "$GH_CFG"
+STAGE=$(mktemp -d "$GH_CFG/.hosts-stage.XXXXXX")
+trap 'rm -rf "$STAGE"' EXIT
+for f in config.yml hosts.yml; do
+  if [[ -f "$GH_CFG/$f" ]]; then cp -p "$GH_CFG/$f" "$STAGE/$f"; fi
+done
+
+echo "$INSTALL_TOKEN" | GH_CONFIG_DIR="$STAGE" gh auth login --with-token 2>/dev/null
 
 # --- Clean up stale old bot if present ---
-if gh auth status 2>&1 | grep -q "rapiercraft-forge\[bot\]"; then
-  gh auth logout -h github.com -u "rapiercraft-forge[bot]" 2>/dev/null || true
+if GH_CONFIG_DIR="$STAGE" gh auth status 2>&1 | grep -q "rapiercraft-forge\[bot\]"; then
+  GH_CONFIG_DIR="$STAGE" gh auth logout -h github.com -u "rapiercraft-forge[bot]" 2>/dev/null || true
 fi
+
+if [[ ! -f "$STAGE/hosts.yml" ]]; then
+  echo "ERROR: gh auth login wrote no hosts.yml" >&2
+  exit 1
+fi
+mv -f "$STAGE/hosts.yml" "$GH_CFG/hosts.yml"
 
 if [[ "$INSTALLATION_ID" == "$ORG_INSTALLATION_ID" ]]; then
   echo "rapiercraft-forgedock[bot] token refreshed — org (RapierCraftStudios) ~1h"

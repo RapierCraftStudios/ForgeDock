@@ -411,7 +411,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       await tear(led, h); // every path, after the result is in (tear never throws)
       return started ? withUsage(r, h) : r; // a sandbox that never started used nothing
     },
-    adopt: async (n, rec) => {
+    adopt: async (n, rec, ctx = {}) => {
       const saved = rec?.handle;
       if (!saved?.id || saved.provider !== provider.name) return null;
       // Usage runs from the sandbox's real start (persisted on the handle), not from this adopt.
@@ -420,7 +420,9 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       led?.register("sandbox", h.id, { provider: provider.name, handle: { provider: h.provider, id: h.id, issue: h.issue, ...(Number.isFinite(h.startedAt) ? { startedAt: h.startedAt } : {}) } }); // now owned by this dispatcher
       let r;
       try {
-        r = !(await provider.fetchResult(h)) && (await provider.status(h)) !== "running" ? null : await wait(h); // null: relaunched
+        const ended = await provider.fetchResult(h);
+        if (!ended && (await provider.status(h)) !== "running") r = null; // relaunched
+        else { if (!ended) ctx.onLive?.(); r = await wait(h); } // #4504: a live sandbox is awaited in the background
       } catch (e) {
         r = { terminalReason: "engine-error", detail: `sandbox ${h.id}: ${errText(e)}` };
       }

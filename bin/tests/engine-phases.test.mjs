@@ -1351,6 +1351,12 @@ describe("pickPhase", () => {
       assert.equal(await openDependency(42, io({ 42: rec({ body: dep, author_association: "NONE" }), 7: rec() }, calls)), null);
       assert.equal(calls.length, 1);
     });
+
+    it("#4506 every #N on an and-joined line with parenthetical text is checked", async () => {
+      const body = "Depends on #8 (schema) and #7 (api).";
+      assert.deepEqual(await openDependency(42, io({ 42: rec({ body }), 8: rec({ state: "closed" }), 7: rec() })), { open: [7] });
+    });
+
     it("#4121 every declaration form is honoured: unbolded, no colon, Blocked by, several numbers", async () => {
       for (const body of ["depends on #7", "**Depends on** #7", "Depends on #8, #7", "- Blocked by: #7", "**Blocked by:** #7 — why"])
         assert.deepEqual(await openDependency(42, io({ 42: rec({ body }), 7: rec(), 8: rec({ state: "closed" }) })), { open: [7] }, body);

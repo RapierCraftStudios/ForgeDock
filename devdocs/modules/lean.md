@@ -1632,6 +1632,16 @@ Two hosted batches that both include issue N (a resumed batch and a new one) no 
   Fail-open: an error or an unreadable answer runs the lane.
 - `--cancel <id>` (#4376) is unchanged; a test pins that a schedd restart resumes no batch cancelled through the daemon.
 
+## Entry 2026-10-23 — Resume settles lanes that ended while no dispatcher ran (#4504)
+
+- `orchestrate.mjs` resume starts every `adopt(n, rec, {onLive})` at once and races it against `onLive`. An adopt that
+  resolves first with a result is settled (row in `results`, out of `running`, slot freed) before the scheduling loop; one
+  that resolves with null or throws is requeued. A live lane (`onLive` fired) keeps `adoptSlot` and is awaited in the
+  background, so it no longer holds up the others.
+- Seams: `detachedLanes.adopt` (`batch.mjs`) calls `onLive` only for a live pid with no result file; `providerLanes.adopt`
+  (`execution.mjs`) calls it for a still-running sandbox; the hybrid wrapper in `engine-cli.mjs` forwards `ctx`. A seam that
+  never calls `onLive` is awaited as before. Return values for direct callers are unchanged.
+
 ## Entry 2026-10-23 — schedd logs every exit; clients re-attach after a daemon death (#4503)
 
 A daemon vanished without a line in `schedd.log`, and its client exited, so the batch stalled until some other client

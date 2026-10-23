@@ -14,7 +14,9 @@
  * lane is refused ends `lane-refused` without a run, and a dependency edge between two lanes goes to `onCrossLane`.
  *
  * Durable batch runner (#4121): with a `store` every transition is persisted, so a restarted dispatcher continues the
- * batch; lanes it launched that are still alive are re-attached through `adopt(issue, rec)` instead of relaunched.
+ * batch; lanes it launched that are still alive are re-attached through `adopt(issue, rec, {onLive})` instead of relaunched.
+ * A seam calls `onLive()` before it waits on a live lane (#4504); an adopt that resolves first is settled (or requeued on null)
+ * before scheduling, so a live lane does not hold up the others.
  * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
  * limit holds admissions for that account until its reset, and non-host deferrals stop after `maxDeferrals`.
  * Usage-limit holds (#4190) are keyed by backend identity in `limits` (the host store, shared by every batch on the
@@ -666,15 +668,34 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
 
   // Lanes launched by an earlier dispatcher: re-attach to the live ones, queue the rest again (no result was recorded).
-  for (const [n, rec] of [...runRecs]) {
-    let p = null;
-    if (adopt && (rec?.pid || rec?.handle)) { try { p = await adopt(n, rec); } catch { p = null; } }
-    if (p && rec.remote) { remoteRun.add(n); track(n, Promise.resolve(p).then((r) => settle(n, r, rec, checked.get(n) ?? null))); }
-    else if (p) {
-      if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); }
-      track(n, Promise.resolve(p).then((r) => settle(n, r, rec, checked.get(n) ?? null)));
+  // #4504: every adopt starts at once and races its `onLive` signal, so a live lane never holds up the others: one that
+  // already ended is settled from its result (or requeued without one) before scheduling; a live one is awaited in the background.
+  const requeueLost = (n) => { runRecs.delete(n); if (!pending.includes(n) && !results.has(n)) { pending.unshift(n); enqueued.set(n, now()); } };
+  const adopting = [...runRecs].map(([n, rec]) => {
+    if (!adopt || !(rec?.pid || rec?.handle)) return { n, rec, live: false, p: Promise.resolve(null) };
+    let onLive;
+    const isLive = new Promise((r) => { onLive = () => r(true); });
+    const p = Promise.resolve().then(() => adopt(n, rec, { onLive })).catch(() => null);
+    return { n, rec, p, first: Promise.race([p.then(() => false), isLive]) };
+  });
+  for (const a of adopting) a.live = a.first ? await a.first : false;
+  for (const { n, rec, p, live } of adopting) {
+    if (live) {
+      if (rec.remote) remoteRun.add(n);
+      else if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); }
+      track(n, p.then((r) => {
+        if (r) return settle(n, r, rec, checked.get(n) ?? null);
+        if (halted) return; // #4454: kept for the next resume
+        running.delete(n); releaseSlot(n); remoteRun.delete(n); requeueLost(n); save(); // ended without a result after all
+      }));
+      continue;
     }
-    else { runRecs.delete(n); if (!pending.includes(n) && !results.has(n)) { pending.unshift(n); enqueued.set(n, now()); } }
+    const r = await p;
+    if (!r) { requeueLost(n); continue; }
+    if (rec.remote) remoteRun.add(n);
+    else if (reg) { reg.adoptSlot(keyOf(n), { ...entryOf(n), lanePid: rec.pid }); slotted.add(n); } // released by the settle
+    track(n, Promise.resolve(r).then((x) => settle(n, x, rec, checked.get(n) ?? null)));
+    await running.get(n); // settled before scheduling
   }
   // A resume re-derives each unfinished issue's lane from its current milestone (#4153): a re-milestone takes effect.
   if (saved && resolveLane) {

@@ -309,8 +309,9 @@ async function readIssueRecord(n, io) {
 }
 
 // A declaration line: optional list marker, optional bold, "Depends on" or "Blocked by" (any case), optional colon
-// inside or after the bold, then one or more `#N` separated by commas, "and", "&" or spaces (#4121).
-const DEPENDS_ON_RE = /^[ \t]*(?:[-*+][ \t]+)?(?:\*\*|__)?(?:depends on|blocked by)[ \t]*:?(?:\*\*|__)?[ \t]*:?[ \t]*(#\d+\b(?:[ \t]*(?:,|&|\band\b)?[ \t]*#\d+\b)*)/gim;
+// inside or after the bold, then a `#N` and the rest of the line: every `#N` to the end of the line counts, prose and
+// parentheses between them included (#4121, #4506).
+const DEPENDS_ON_RE = /^[ \t]*(?:[-*+][ \t]+)?(?:\*\*|__)?(?:depends on|blocked by)[ \t]*:?(?:\*\*|__)?[ \t]*:?[ \t]*(#\d+\b[^\n]*)/gim;
 
 /**
  * Issue numbers an issue body declares it waits on: `**Depends on**: #X`, `**Depends on** #X, #Y`, `Depends on #X`,
@@ -321,7 +322,7 @@ const DEPENDS_ON_RE = /^[ \t]*(?:[-*+][ \t]+)?(?:\*\*|__)?(?:depends on|blocked 
 export function parseDependsOn(body, issue = null) {
   const out = new Set();
   for (const m of String(body ?? "").replace(/\r\n/g, "\n").matchAll(DEPENDS_ON_RE)) {
-    for (const r of m[1].matchAll(/#(\d+)/g)) out.add(Number(r[1]));
+    for (const r of m[1].matchAll(/(?<![\w/])#(\d+)\b/g)) out.add(Number(r[1]));
   }
   return [...out].filter((n) => Number.isSafeInteger(n) && n > 0 && n !== Number(issue));
 }

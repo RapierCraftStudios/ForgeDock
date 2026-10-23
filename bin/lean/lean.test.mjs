@@ -19,8 +19,8 @@ import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
 // #4432: the run log is keyed by repo + issue; every lane in this file runs in repo o/r.
 const readLog = (dir, issue, repo = "o/r") => readRepoLog(dir, issue, { repo });
-import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo } from "./effects.mjs";
-import { retrying, PUSH_TRANSIENT_RE } from "./retry.mjs";
+import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
+import { retrying, ghCacheRetry, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
@@ -73,8 +73,10 @@ function world(o = {}) {
   w.writeStages = writeStages;
   w.io = {
     now: () => w.clock, sleep: async (ms) => { w.clock += ms; },
-    gh: async (a) => {
+    gh: async (a, opts) => {
       const k = a.slice(0, 2).join(" ");
+      if (opts?.env) (w.ghEnvs ??= []).push(opts.env);
+      if (k === "pr view" && a.at(-1) === "state" && a.at(-2) === "--json") return JSON.stringify({ state: o.prState ?? "OPEN" });
       if (a[0] === "api" && a.includes("PATCH")) { w.patches.push(a); return "{}"; }
       if (a[0] === "api") return a.some((x) => /\/comments$/.test(x)) ? (w.issueComments ?? []).map((c) => JSON.stringify(c)).join("\n") : "";
       if (k === "pr list") return JSON.stringify(w.prList);
@@ -2146,6 +2148,17 @@ describe("orchestrate", () => {
     assert.deepEqual(parseDeps("This is blocked by #2 and depends on #4\nsee **Depends on**: #5", 1), []);
   });
 
+  it("#4506 parseDeps reads every #N to the end of a declaration line", () => {
+    assert.deepEqual(parseDeps("Depends on #36648 (action results must reach …) and #36649 (the included action budget …)", 1), [36648, 36649]);
+    assert.deepEqual(parseDeps("Depends on #36651 (executor test harness) and #36648.", 1), [36651, 36648]);
+    assert.deepEqual(parseDeps("**Depends on** #2, #3 and #4", 1), [2, 3, 4]);
+    assert.deepEqual(parseDeps("__Depends on__: #5 (x) and #6", 1), [5, 6]);
+    assert.deepEqual(parseDeps("**Blocked by:** #7 (why) & #8", 1), [7, 8]);
+    assert.deepEqual(parseDeps("- depends on: #9 (a), #10", 1), [9, 10]);
+    assert.deepEqual(parseDeps("Depends on #11 and other/repo#12", 1), [11]);
+    assert.deepEqual(parseDeps("This is blocked by #2 and depends on #4", 1), []);
+  });
+
   it("runs at most K at once", async () => {
     const h = harness({});
     const rows = await orchestrate({ issues: [1, 2, 3, 4, 5, 6], parallel: 2, ...h });
@@ -3220,6 +3233,78 @@ describe("batch robustness (#4112-#4115)", () => {
     const w = world({ prView: [{ mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" }], mergeErrors: ["GraphQL: Pull request is not mergeable (mergePullRequest)"], mergeResults: ["clean"] });
     assert.equal((await run(w)).terminalReason, "merged");
     assert.ok(w.comments.some((c) => c.includes("FORGE:BASE_SYNC")));
+  });
+
+  // ---- #4507 ----
+  const CORRUPT = "invalid character '{' looking for beginning of object key string";
+  it("#4507 a gh JSON parse error at merge (corrupt gh cache) is retried and ends merged", async () => {
+    const w = world({ mergeErrors: [CORRUPT] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.mergeAttempts, 2);
+    assert.equal(w.merges.length, 1);
+  });
+
+  it("#4507 a merge error on a PR that is already MERGED records merged, not engine-error", async () => {
+    const w = world({ mergeErrors: ["GraphQL: validation failed (422)"], prState: "MERGED" });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.mergeAttempts, 1);
+    assert.equal(w.closed.length, 1);
+    assert.ok(traj(w)[0].includes("is MERGED: recorded merged"));
+  });
+
+  it("#4507 a persistent gh parse error at merge ends deferred merge.transient, never engine-error", async () => {
+    const w = world({ mergeErrors: Array(40).fill(CORRUPT) });
+    const r = await run(w, { maxMergeRetries: 2 });
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "merge.transient");
+    assert.equal(w.mergeAttempts, 6, "each merge attempt is retried once with a fresh cache");
+  });
+
+  it("#4507 with io.ghCache every engine gh call carries the run's own XDG_CACHE_HOME", async () => {
+    const w = world();
+    w.io.runTmp = { prune: async () => {}, make: async (_i, id) => `/rt/${id}`, remove: async () => true };
+    let made = null, disposed = 0;
+    w.io.ghCache = (root) => { made = root; return { env: () => ({ XDG_CACHE_HOME: `${root}/gh-cache` }), reset() {}, dispose() { disposed++; } }; };
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.match(made, /^\/rt\//);
+    assert.ok(w.ghEnvs.length > 0 && w.ghEnvs.every((e) => e.XDG_CACHE_HOME === `${made}/gh-cache`));
+    assert.equal(disposed, 1);
+  });
+
+  it("#4507 ghCacheRetry retries exactly once on a parse error and rethrows other errors untouched", async () => {
+    let n = 0, resets = 0;
+    const cache = { env: () => ({ XDG_CACHE_HOME: `/c${resets}` }), reset: () => { resets++; } };
+    const seen = [];
+    assert.equal(await ghCacheRetry(async (env) => { seen.push(env.XDG_CACHE_HOME); if (n++ === 0) throw new Error(CORRUPT); return "ok"; }, cache), "ok");
+    assert.deepEqual(seen, ["/c0", "/c1"]); assert.equal(resets, 1);
+    n = 0;
+    await assert.rejects(ghCacheRetry(async () => { n++; throw new Error(CORRUPT); }, null), /invalid character/);
+    assert.equal(n, 2);
+    n = 0;
+    const other = new Error("HTTP 404: Not Found");
+    await assert.rejects(ghCacheRetry(async () => { n++; throw other; }, cache), (e) => e === other);
+    assert.equal(n, 1);
+  });
+
+  it("#4507 makeGhCache: a per-root cache dir, reset swaps in a fresh dir, the no-root fallback is disposed", () => {
+    const root = tmpDir("ghcache-");
+    const c = makeGhCache({ root });
+    const first = c.env().XDG_CACHE_HOME;
+    assert.equal(first, join(root, "gh-cache")); assert.ok(existsSync(first));
+    c.reset();
+    const second = c.env().XDG_CACHE_HOME;
+    assert.notEqual(second, first); assert.ok(existsSync(second)); assert.ok(!existsSync(first));
+    const tmp = tmpDir("ghcache-tmp-");
+    const f = makeGhCache({ tmp });
+    assert.equal(f.env(), undefined);
+    f.reset();
+    const fb = f.env().XDG_CACHE_HOME;
+    assert.ok(fb.startsWith(join(tmp, "forge-gh-cache-")) && existsSync(fb));
+    f.dispose();
+    assert.ok(!existsSync(fb));
+    c.dispose();
+    assert.ok(!existsSync(second)); assert.equal(c.env(), undefined, "no dir is re-created after the run tears down");
   });
 
   // ---- #4114 ----

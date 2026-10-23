@@ -1365,7 +1365,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         const local = batchMod.detachedLanes({ batch, cwd, env, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs });
         lanes = withPlacement({
           runOne: (n, ln, ctx = {}) => (ctx.remote ? remoteLanes : local).runOne(n, ln, ctx),
-          adopt: (n, rec) => (rec?.remote || rec?.handle ? remoteLanes : local).adopt(n, rec),
+          adopt: (n, rec, ctx) => (rec?.remote || rec?.handle ? remoteLanes : local).adopt(n, rec, ctx),
         });
       }
       // #4255: hard execution budget per batch and per host UTC day; every settled sandbox is recorded and reported.
