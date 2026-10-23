@@ -1409,3 +1409,13 @@ teardown could act on another repo's resources: `makeLedger({ repo })` now write
 (the `lane` field and gc are unchanged; old files age out by TTL). The context-pack cache name and prune prefix carry the
 repo too. Audit: leases (FORGE:STATE on the repo's issue), worktrees (under the checkout), depcache (`<repoKey>/`), the
 sequence lease and sched keys were already repo-scoped. Cost: 0 LLM calls; one dir scan per run-issue/orchestrate start.
+
+## Entry 2026-10-23 — App comments in gh issue view shape are trusted (#4467)
+
+`gh issue view --json comments` reports the ForgeDock App as a bare `rapiercraft-forgedock` with `CONTRIBUTOR` and no
+type or `[bot]` suffix, so the gh-shape trust filters in `resume.mjs`, `context.mjs` and `lean.mjs` `trustedOf` dropped the
+engine's own FORGE:NEEDS_HUMAN/FIX_CI/FACTS records: the resume digest lost the end reason and validate baselines and
+`priorAttempts` read a first attempt. The pre-filter's #4315 rule is now the one shared predicate,
+`prefilter.mjs` `isTrustedIssueComment`: what `isTrustedComment` trusts, or a login whose bare form (lowercased, `app/`
+and `[bot]` stripped) is `APP_SLUG`. Other CONTRIBUTOR logins stay untrusted; a differently named App still needs
+`FORGE_TRAIL_TRUSTED_LOGINS`. REST readers (`readFrozenContract`, context `readComments`, probe) are unchanged. Cost: 0.
