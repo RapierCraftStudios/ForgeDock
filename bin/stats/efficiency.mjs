@@ -28,7 +28,7 @@ export const TRIGGER_CAUSE = Object.freeze({
   plan: null, build: null, verifier: null,
   ci_unavailable: "env",
   timeout_restart: "engine", context_restart: "engine", budget_wrapup: "engine", recovery: "engine",
-  precheck: "code", structure: "code", docs: "code", enumerating: "code", sequence: "code", ci_red: "code", conformance: "code",
+  precheck: "code", structure: "code", docs: "code", enumerating: "code", sequence: "code", post_merge: "code", duplicate: "code", ci_red: "code", conformance: "code",
   merge_ci: "code", block_correction: "code", contract_correction: "code",
   review: "review",
 });
