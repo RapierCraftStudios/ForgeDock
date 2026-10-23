@@ -1246,8 +1246,12 @@ that passes both is still not re-reviewed. Cost: 0 LLM calls when clean; one typ
 `probe.mjs` checks a production outcome after promotion, deterministically (0 LLM calls, no lane). An issue declares a
 probe in a fenced ```` ```forge-probe ```` block: `run: <shell command>` (required), `pass: exit 0` (default) or
 `pass: /regex/flags` on stdout, `timeout: <s>` (default forge.yaml `acceptance_probe.timeout_s` or 120, capped at 900). The
-latest trusted comment's block wins, else the body's when its author is trusted (`isTrustedActor`/`isTrustedComment`);
-FORGE marker comments never declare one, and an untrusted declaration is reported `untrusted` and never run. The fix
+latest declarer comment's block wins, else the body's when its author is a declarer (`isProbeDeclarer`, #4468): a human
+whose association is in `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` (default OWNER,MEMBER,COLLABORATOR) or whose login is in
+`FORGE_TRAIL_TRUSTED_LOGINS`, never a Bot/App or `[bot]` login, the engine included (the issues it files quote untrusted PR
+content; the shared `isTrustedActor` still trusts Bots for markers). Only a top-level fence counts (CommonMark: backtick or
+tilde, closed by the same character at least as long): a block nested in another fence or indented as code is quoted
+content. FORGE marker comments never declare one, and an untrusted declaration is reported `untrusted` and never run. The fix
 commit is the latest trusted FORGE:TRAJECTORY `merged at <sha>`, else the merge commit of the latest merged PR whose
 title/body closes the issue (none: `unresolved`). Promotion is `git merge-base --is-ancestor <fix> origin/<default>`
 (`branches.default`, else GitHub's); not yet: `awaiting-promotion`, nothing runs (`onDefault` is exported for #4389).
