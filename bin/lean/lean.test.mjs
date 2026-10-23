@@ -5906,6 +5906,66 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     assert.ok(!/Light-lane upgrade/.test(builders(w)[0][4]));
   });
 
+  /** #4451: lworld plus counting fakes for the overhead the light lane skips; each call notes its position in w.calls */
+  const overhead = (o = {}) => {
+    const w = lworld(o);
+    w.over = { pack: [], hot: [], structure: [] };
+    w.io.contextFacts = async () => { w.over.pack.push(w.calls.length); return { sources: {}, items: [] }; };
+    w.io.hotspots = async (x) => { w.over.hot.push(w.calls.length); return { enabled: true, files: [], base: x.base ?? null }; };
+    w.io.structureDelta = async () => { w.over.structure.push(w.calls.length); return { package_edges_added: [], package_edges_removed: [], import_pairs: [] }; };
+    return w;
+  };
+  it("#4451 a light lane that is not upgraded makes no context-pack, structure or hotspot calls", async () => {
+    const w = overhead(), dir = tmpDir("light-over-");
+    const r = await run(w, { dir, ...ON, contextPack: { mode: "on" } });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(events(dir, "LIGHT_DONE").length, 1);
+    assert.deepEqual(w.over, { pack: [], hot: [], structure: [] });
+    assert.equal(events(dir, "CONTEXT_PACK").length, 0);
+    // only the merge-time record (local numstat, no structure-delta call) remains; no implement-time delta
+    assert.deepEqual(events(dir, "STRUCTURE_DELTA").map((e) => e.phase), ["merge"]);
+    assert.equal(events(dir, "RUN_TERMINAL")[0].light, true);
+  });
+  it("#4451 an upgraded light lane computes the hotspots and the context pack before the plan call and runs the structure delta", async () => {
+    const w = overhead({ numstat: "80\t3\tsrc/foo.js\n20\t0\ttest/foo.test.js\n" }), dir = tmpDir("light-over-up-");
+    await run(w, { dir, ...ON, contextPack: { mode: "on" } });
+    assert.equal(events(dir, "LIGHT_UPGRADE").length, 1);
+    const plan = w.calls.indexOf(builders(w)[1]);
+    // each fake notes w.calls.length when called, i.e. the index the next call takes: <= plan means before the plan call
+    assert.ok(w.over.hot.some((i) => i <= plan) && w.over.pack.some((i) => i <= plan), JSON.stringify({ plan, ...w.over }));
+    assert.ok(w.over.hot.every((i) => i > w.calls.indexOf(builders(w)[0])), "not before the light session");
+    assert.ok(w.over.structure.length >= 1);
+    assert.equal(events(dir, "RUN_TERMINAL")[0].light, false);
+  });
+  it("#4451 a full lane (light off) keeps its context-pack, structure and hotspot calls", async () => {
+    const w = overhead(), dir = tmpDir("light-over-off-");
+    await run(w, { dir, light: { mode: "off" }, contextPack: { mode: "on" } });
+    assert.ok(w.over.pack.length >= 1 && w.over.hot.length >= 1 && w.over.structure.length >= 1, JSON.stringify(w.over));
+  });
+  it("#4451 the light targeted tests run concurrently, never more than FORGE_HOST_PARALLELISM in flight", async () => {
+    const cmds = ["node --test t1.js", "node --test t2.js", "node --test t3.js", "node --test t4.js"];
+    const w = lworld({ result: { ...RESULT, tests: cmds.map((command) => ({ command, result: "pass" })) } }), dir = tmpDir("light-par-");
+    let live = 0, max = 0;
+    const seen = [];
+    w.io.runCommand = async (a) => { live++; max = Math.max(max, live); seen.push(a.env?.FORGE_HOST_PARALLELISM); await new Promise((r) => setTimeout(r, 5)); live--; return { rc: 0, output: "" }; };
+    const prev = process.env.FORGE_HOST_PARALLELISM;
+    process.env.FORGE_HOST_PARALLELISM = "2";
+    try { await run(w, { dir, ...ON }); } finally { if (prev === undefined) delete process.env.FORGE_HOST_PARALLELISM; else process.env.FORGE_HOST_PARALLELISM = prev; }
+    assert.equal(events(dir, "LIGHT_DONE").length, 1);
+    assert.equal(max, 2, "two in flight at once, capped at the host parallelism");
+    assert.ok(seen.every((x) => x === undefined || x === "1"), `each command gets its worker share: ${seen}`);
+  });
+  it("#4451 lane telemetry records wall time and model time separately", async () => {
+    const w = lworld(), dir = tmpDir("light-time-");
+    const r = await run(w, { dir, ...ON });
+    const model = events(dir, "PHASE_ATTEMPT_USAGE").reduce((n, e) => n + e.duration_ms, 0);
+    assert.ok(model > 0);
+    assert.equal(r.model_ms, model);
+    assert.ok(Number.isFinite(r.wall_ms));
+    const term = w.telemetry.find((t) => t.event === "RUN_TERMINAL");
+    assert.equal(term.model_ms, model); assert.ok(Number.isFinite(term.wall_ms));
+  });
+
   it("a resumed lane never goes light, even in mode on", async () => {
     const w = lworld({ remote: "abc\trefs/heads/feat/issue-7-lean\n" }), dir = tmpDir("light-res-");
     await run(w, { dir, ...ON });

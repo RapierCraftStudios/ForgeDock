@@ -11,6 +11,7 @@
 import { classifyPath } from "./routing.mjs";
 import { upgradeTriggers } from "./light.mjs";
 import { inIssue } from "./conformance.mjs";
+import { runChecks } from "./precheck.mjs";
 import { LEAN_DIR, RESULT_FILE, IMPLEMENTATION_FILE, FORGEDOCK_CLI, hostRules } from "./prompts.mjs";
 
 const UPGRADE_NOTE_MAX = 10;
@@ -106,6 +107,17 @@ export function upgradeNote(reasons) {
 }
 
 /**
+ * #4451: the light targeted tests, concurrently through precheck.mjs runChecks (one heavy slot per running command, the
+ * worker cap `parallelism` divided among them) with no round budget: every command runs, none is deferred to CI.
+ * run({command, workers}) -> {rc, output}. Returns [{command, rc, output}] in input order.
+ */
+export async function runLightTests({ commands, parallelism = 1, run, acquire, now = () => Date.now() }) {
+  const unbounded = Number.MAX_SAFE_INTEGER; // budget = per-command limit, so a real timeout (rc 124) stays a failure
+  const { results } = await runChecks({ commands, parallelism, budgetMs: unbounded, perCommandMs: unbounded, now, acquire, run: ({ command, workers }) => run({ command, workers }) });
+  return results.map(({ command, rc, output }) => ({ command, rc, output }));
+}
+
+/**
  * One light lane step. ctx callbacks (all async unless noted): build() runs the one builder session; readResult();
  * checkpoint() commits uncommitted work; changedFiles(); numstat() -> `git diff --numstat` text; runTests(commands) ->
  * [{command, rc, output}] or null (no runner); fixTests(failed) resumes the builder once; reproOf(contract) -> {base, head}
@@ -138,9 +150,9 @@ export async function runLightStep(ctx) {
       if (failed.length) testFailures = 2;
     }
     const now = await ctx.changedFiles();
-    const repro = await ctx.reproOf(contract);
-    const diff = parseNumstat(await ctx.numstat());
-    const apiShape = apiShapeReasons(await ctx.apiShape());
+    // #4451: the three deterministic gates are independent, so they run concurrently
+    const [repro, numstat, shape] = await Promise.all([ctx.reproOf(contract), ctx.numstat(), ctx.apiShape()]);
+    const diff = parseNumstat(numstat), apiShape = apiShapeReasons(shape);
     const t = upgradeTriggers({ diff, repro, testFailures, riskPaths: ctx.riskPaths ?? [], apiShape, cfg: ctx.cfg ?? {} });
     const latest = deriveLightContract({ title: ctx.title, issueText: ctx.issueText, result: (await ctx.readResult()) ?? result, files: now });
     return { upgrade: t.upgrade, reasons: t.reasons, contract: t.upgrade ? null : (ctx.validate(latest)?.ok ? latest : contract), files: now, repro, testFailures };

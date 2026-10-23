@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { deriveLightContract, runLightStep, parseNumstat, apiShapeReasons, upgradeNote, lightBuildPrompt } from "./lightlane.mjs";
+import { deriveLightContract, runLightStep, runLightTests, parseNumstat, apiShapeReasons, upgradeNote, lightBuildPrompt } from "./lightlane.mjs";
 import { validateContract } from "./conformance.mjs";
 
 const TITLE = "foo crashes on null input";
@@ -115,5 +115,63 @@ describe("runLightStep (#4450)", () => {
     const { ctx, calls } = step({ testRcs: [1, 0] });
     const r = await runLightStep(ctx);
     assert.equal(r.upgrade, false); assert.equal(calls.fix, 1); assert.equal(r.testFailures, 1);
+  });
+});
+
+describe("#4451 light prechecks run concurrently, capped by host parallelism", () => {
+  /** fake commands that each wait for an explicit release; records start/end order and the max in flight */
+  const fake = () => {
+    const log = [], gates = new Map();
+    let live = 0, max = 0;
+    const run = ({ command }) => new Promise((resolve) => {
+      live++; max = Math.max(max, live); log.push(`start ${command}`);
+      gates.set(command, () => { live--; log.push(`end ${command}`); resolve({ rc: command === "b" ? 1 : 0, output: command }); });
+    });
+    const tick = () => new Promise((r) => setImmediate(r));
+    return { run, log, gates, tick, max: () => max };
+  };
+  it("parallelism >= count: every command starts before the first finishes; results in input order", async () => {
+    const f = fake();
+    const p = runLightTests({ commands: ["a", "b", "c"], parallelism: 4, run: f.run });
+    await f.tick();
+    assert.deepEqual(f.log, ["start a", "start b", "start c"]);
+    for (const c of ["c", "a", "b"]) { f.gates.get(c)(); await f.tick(); }
+    const r = await p;
+    assert.deepEqual(r, [{ command: "a", rc: 0, output: "a" }, { command: "b", rc: 1, output: "b" }, { command: "c", rc: 0, output: "c" }]);
+    assert.equal(f.max(), 3);
+  });
+  it("parallelism 2 of 4: never more than 2 in flight; the next starts only when a slot frees", async () => {
+    const f = fake();
+    const p = runLightTests({ commands: ["a", "b", "c", "d"], parallelism: 2, run: f.run });
+    await f.tick();
+    assert.deepEqual(f.log, ["start a", "start b"]);
+    f.gates.get("b")(); await f.tick();
+    assert.deepEqual(f.log.slice(2), ["end b", "start c"]);
+    for (const c of ["a", "c"]) { f.gates.get(c)(); await f.tick(); }
+    f.gates.get("d")();
+    assert.equal((await p).length, 4);
+    assert.equal(f.max(), 2);
+  });
+  it("parallelism 1 runs them one after another; a timeout (rc 124) stays a failure, never deferred", async () => {
+    const order = [];
+    const r = await runLightTests({ commands: ["x", "y"], parallelism: 1, run: async ({ command }) => { order.push(command); return { rc: command === "y" ? 124 : 0, output: "" }; } });
+    assert.deepEqual(order, ["x", "y"]);
+    assert.deepEqual(r.map((x) => x.rc), [0, 124]);
+  });
+  it("each held command takes one acquire slot and releases it", async () => {
+    let held = 0, peak = 0;
+    const acquire = async () => { held++; peak = Math.max(peak, held); return { release: () => { held--; } }; };
+    await runLightTests({ commands: ["a", "b", "c"], parallelism: 2, acquire, run: async () => ({ rc: 0, output: "" }) });
+    assert.equal(held, 0); assert.ok(peak <= 2);
+  });
+  it("runLightStep starts the repro, numstat and API-shape gates before any of them resolves", async () => {
+    const started = [], pending = [];
+    const later = (name, v) => () => new Promise((res) => { started.push(name); pending.push(() => res(v)); });
+    const { ctx } = step({ ctx: { reproOf: later("repro", { base: "FAILED", head: "RAN" }), numstat: later("numstat", "5\t1\tsrc/foo.js\n"), apiShape: later("api", { status: "none", changes: [], unknown: [] }) } });
+    const p = runLightStep(ctx);
+    for (let i = 0; i < 20 && started.length < 3; i++) await new Promise((r) => setImmediate(r));
+    assert.deepEqual([...started].sort(), ["api", "numstat", "repro"], "all three in flight together");
+    pending.forEach((f) => f());
+    assert.equal((await p).upgrade, false);
   });
 });
