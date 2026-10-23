@@ -37,6 +37,12 @@ describe("#4363 fresh fix sessions: which rounds, and the prompt caps", () => {
     assert.equal(capText("abc", 5), "abc");
   });
 
+  it("the issue summary leaves no comment opener for nested or unclosed markers", () => {
+    for (const body of ["a <!<!-- x -->-- FORGE:STATE --> b", "a <!-- unclosed FORGE:STATE", "a <!--<!-- x -->--> b"]) {
+      assert.doesNotMatch(issueSummary(body), /<!--|<!/);
+    }
+  });
+
   it("an oversized task, diff and contract still give a prompt under 60K with the title, summary, contract and diff", () => {
     const diff = Array.from({ length: 50 }, (_, i) => `diff --git a/src/f${i}.js b/src/f${i}.js\n${"+line\n".repeat(2000)}`).join("");
     const contract = { requirements: [{ id: "R1", quote: "q".repeat(50000), disposition: "deliver" }] };

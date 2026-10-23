@@ -1062,6 +1062,15 @@ const issuesOf = (argv) => {
   }
   return issues;
 };
+/** #4469: the operands among `tokens` (`--add`/`--resume` extras): no flags, and no value of a valued flag (`--parallel 5` is not issue #5). */
+const operandsOf = (tokens) => {
+  const out = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (ORCH_VALUED.includes(tokens[i])) { i++; continue; }
+    if (!String(tokens[i]).startsWith("--")) out.push(tokens[i]);
+  }
+  return out;
+};
 const parallelOf = (argv) => {
   const parallel = flag(argv, "--parallel") == null ? 3 : parseInt(flag(argv, "--parallel"), 10);
   if (!Number.isInteger(parallel) || parallel < 1) throw new Error("--parallel must be a positive integer");
@@ -1162,11 +1171,12 @@ async function orchestrateClient(argv, deps = {}) {
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add"), id = argv[i + 1];
     if (!id || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
-    return addToBatch({ id, tokens: argv.slice(i + 2), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id) });
+    return addToBatch({ id, tokens: operandsOf(argv.slice(i + 2)), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(id) });
   }
   const resumeId = flag(argv, "--resume");
-  if (resumeId && argv.slice(argv.indexOf("--resume") + 2).some((t) => !String(t).startsWith("--"))) {
-    await addToBatch({ id: resumeId, tokens: argv.slice(argv.indexOf("--resume") + 2).filter((t) => !String(t).startsWith("--")), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(resumeId) });
+  const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
+  if (resumeExtra.length) {
+    await addToBatch({ id: resumeId, tokens: resumeExtra, root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(resumeId) });
   }
   let msg;
   if (resumeId) msg = { op: "attach", id: resumeId };
@@ -1204,7 +1214,7 @@ async function orchestrateClient(argv, deps = {}) {
  * `daemon: true` and the allowlisted env in its plan, so a restarted daemon resumes it on the same account; `keepBreaker`
  * (a daemon restart, not the operator's resume) leaves a tripped breaker tripped. Writes `report.json` when done.
  */
-export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: callerEnv = process.env, sink = consoleSink(), deps = {}, keepBreaker = false, daemon = false }) {
+export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: callerEnv = process.env, sink = consoleSink(), deps = {}, keepBreaker = false, daemon = false, signal = null }) {
   const batchMod = await import("./lean/batch.mjs");
   const root = deps.batchRoot ?? batchMod.batchRoot();
   if (argv.includes("--set-parallel")) {
@@ -1220,11 +1230,12 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add");
     if (!argv[i + 1] || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
-    return addToBatch({ id: argv[i + 1], tokens: argv.slice(i + 2), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+    return addToBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
   }
   const resumeId = flag(argv, "--resume");
-  if (resumeId && argv.slice(argv.indexOf("--resume") + 2).some((t) => !String(t).startsWith("--"))) {
-    await addToBatch({ id: resumeId, tokens: argv.slice(argv.indexOf("--resume") + 2).filter((t) => !String(t).startsWith("--")), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+  const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
+  if (resumeExtra.length) {
+    await addToBatch({ id: resumeId, tokens: resumeExtra, root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
   }
   let batch, plan = null;
   if (resumeId) {
@@ -1484,6 +1495,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       issueLabels: labelNames,
       // #4318: a dispatcher signal relabels the queued recoveries before it exits (the daemon resumes its batches instead)
       ...(daemon ? {} : { onExit: (fn) => { exitRelabel = fn; } }),
+      // #4454: the daemon's shutdown stop; orchestrate throws batch.stopped, so no report is written and a resume adopts the lanes
+      ...(signal ? { signal } : {}),
       conflicting: deps.conflicting ?? (async (_n, pr) => {
         try { return JSON.parse(await leanIo.gh(["pr", "view", String(pr), "-R", repo, "--json", "mergeable"]))?.mergeable === "CONFLICTING"; } catch { return false; }
       }),
@@ -1584,7 +1597,8 @@ export async function scheddFromCli(argv, deps = {}) {
   if (argv.length) throw new Error("usage: forgedock schedd [status]");
   const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }) });
   if (!d.running) return d;
-  for (const sig of ["SIGTERM", "SIGINT"]) process.once(sig, () => d.close());
+  // #4454: a signal stops the hosted batch loops, then releases the lock and socket, then exits 128+signo
+  schedd.exitOnSignals(d, { ...(deps.processOn ? { on: deps.processOn } : {}), ...(deps.exit ? { exit: deps.exit } : {}) });
   await d.closed;
   return { running: false };
 }

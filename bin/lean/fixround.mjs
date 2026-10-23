@@ -6,6 +6,8 @@
  * Repo-agnostic: a failure "cites a file:line" when its text names any `path.ext:N`, whatever the language.
  */
 
+import { noComments } from "./render.mjs";
+
 /** Fix-round kinds whose failures are mechanical: always a fresh session. */
 export const MECHANICAL_KINDS = Object.freeze(["precheck", "ci", "docs", "structure", "enumerating", "sequence", "post_merge", "duplicate"]);
 
@@ -35,7 +37,7 @@ export function capText(s, max) {
 
 /** The issue body without HTML comments (FORGE:STATE and other markers), trimmed and capped. */
 export function issueSummary(body, max = FIX_CAPS.summary) {
-  const t = String(body ?? "").replace(/<!--[\s\S]*?-->/g, "").replace(/\n{3,}/g, "\n\n").trim();
+  const t = noComments(body).replace(/\n{3,}/g, "\n\n").trim();
   return capText(t, max);
 }
 

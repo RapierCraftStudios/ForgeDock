@@ -355,7 +355,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    trajectory). `verifyRenumber` also accepts a file equal after mapping each move's old stem
    and its own heading number. A base-sync whose conflicts are all sequence files
    (`resolveSequenceConflicts`: base side, journal union, index union) needs no builder, and
-   an engine-only delta needs no re-review. The base-sync bound counts syncs against one base
+   an engine-only delta needs no re-review. A numbered file counts as a sequence file there
+   only when renumberLane can restore the lane's side (#4465): an add/add conflict (no
+   merge-base stage) in a directory holding a series on the merged base (`MERGE_HEAD`). A
+   both-edited `0016-x.md` or `src/404-page.tsx` is `unsupported`: builder, tests, re-review. The base-sync bound counts syncs against one base
    head (`sameBaseSyncs`); a sync overtaken by a new base head does not count. Merge-gate late
    binding: a lane with numbered files takes the host sequence lease (`seqlease.mjs`, a
    one-slot `heavy.mjs` semaphore per (repo, lane, dir) under `schedDir()/seq-lease`,
@@ -1247,7 +1250,8 @@ that passes both is still not re-reviewed. Cost: 0 LLM calls when clean; one typ
 
 `probe.mjs` checks a production outcome after promotion, deterministically (0 LLM calls, no lane). An issue declares a
 probe in a fenced ```` ```forge-probe ```` block: `run: <shell command>` (required), `pass: exit 0` (default) or
-`pass: /regex/flags` on stdout, `timeout: <s>` (default forge.yaml `acceptance_probe.timeout_s` or 120, capped at 900). The
+`pass: /regex/flags` on stdout, `timeout: <s>` (default forge.yaml `acceptance_probe.timeout_s` or 120, capped at 900).
+CRLF/CR line endings (GitHub web UI bodies) are normalised to LF before the block is matched (#4466). The
 latest trusted comment's block wins, else the body's when its author is trusted (`isTrustedActor`/`isTrustedComment`);
 FORGE marker comments never declare one, and an untrusted declaration is reported `untrusted` and never run. The fix
 commit is the latest trusted FORGE:TRAJECTORY `merged at <sha>`, else the merge commit of the latest merged PR whose
@@ -1396,6 +1400,23 @@ as `estimates` (only with the hook); a failing hook is the M default. A settled 
 worst #n …`. Cost: 0 LLM calls; one local run-log read per batch. Tests: `bin/lean/sched.test.mjs` "longest-first
 admission (#4409)", including a virtual-clock replay of the 2026-10-22 batch shape.
 
+## Entry 2026-10-23 — schedd shutdown stops the batch loops before the lock (#4454)
+
+SIGTERM/SIGINT of `forgedock schedd` used to release `schedd.lock` and the socket without stopping the hosted
+`orchestrate()` loops or exiting. Their timers kept a lock-less process dispatching while the next auto-spawned daemon
+resumed the same batches. Now `startDaemon` gives every in-flight `runBatch` (hosted, or still resuming) an
+AbortController and passes its `signal` through `runBatch` to `orchestrate`. `close()` refuses new submits, aborts every
+run, waits for them to settle (bounded by `stopMs`, default `STOP_MS` 10 s; on timeout it logs and goes on), and only
+then removes the lock (if still ours) and the socket. `exitOnSignals(d)` (used by `scheddFromCli`) awaits `close()` and
+exits 128+signo, the #4318 dispatcher convention.
+
+When `signal` aborts, `orchestrate` admits nothing more, wakes every sleep (`nap` races the abort and cancels the timer)
+and lane race, and leaves without awaiting, stopping or settling running lanes. Lanes are detached and keep running. It
+does not relabel queued recoveries. It saves the state once, with `running` records and pending, then ignores later
+saves and settles, and throws `code: "batch.stopped"`. `runBatch` therefore writes no `report.json`, and the next daemon's
+`resumeOnStart` resumes the batch and adopts the lanes. This differs from #4376 cancel, which SIGTERMs lanes and ends the
+batch with a report. Callers without `signal` are unchanged. Cost: 0 LLM calls.
+
 ## Entry 2026-10-23 — Run logs and lane ledgers keyed by repo (#4432)
 
 Issue numbers are per repo, but `~/.forge/runs` and `~/.forge/ledger` are per host. The run log is now
@@ -1433,6 +1454,16 @@ Additions never report. Code with no indexer (go, rust, …) or a blob the index
 not wired into a lane yet: #4448 takes it as one upgrade-trigger input and #4450 runs it. The JS/TS tests need
 `APISHAPE_TS_NODE_MODULES`, and CI requires them with `APISHAPE_REQUIRE_TS=1` on the ts-morph install. Cost: 0 LLM
 calls, two indexer runs per changed source file. ADR `decisions/4449-apishape-detector.md`.
+
+## Entry 2026-10-23 — App comments in gh issue view shape are trusted (#4467)
+
+`gh issue view --json comments` reports the ForgeDock App as a bare `rapiercraft-forgedock` with `CONTRIBUTOR` and no
+type or `[bot]` suffix, so the gh-shape trust filters in `resume.mjs`, `context.mjs` and `lean.mjs` `trustedOf` dropped the
+engine's own FORGE:NEEDS_HUMAN/FIX_CI/FACTS records: the resume digest lost the end reason and validate baselines and
+`priorAttempts` read a first attempt. The pre-filter's #4315 rule is now the one shared predicate,
+`prefilter.mjs` `isTrustedIssueComment`: what `isTrustedComment` trusts, or a login whose bare form (lowercased, `app/`
+and `[bot]` stripped) is `APP_SLUG`. Other CONTRIBUTOR logins stay untrusted; a differently named App still needs
+`FORGE_TRAIL_TRUSTED_LOGINS`. REST readers (`readFrozenContract`, context `readComments`, probe) are unchanged. Cost: 0.
 
 ## Entry 2026-10-23 — Light-lane eligibility and upgrade triggers (#4448)
 

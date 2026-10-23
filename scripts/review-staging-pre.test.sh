@@ -32,6 +32,8 @@ mkdir -p "$TMP/bin"
 cat > "$TMP/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 F="$FIX"; a="$*"
+# fail-labels / fail-issues: the degraded-label / review-finding read fails (rate limit, 5xx, expired auth)
+case "$a" in "pr view"*"--json labels"*) [ -f "$F/fail-labels" ] && exit 1 ;; "issue list"*) [ -f "$F/fail-issues" ] && exit 1 ;; esac
 case "$1 $2" in
   "pr comment") while [ $# -gt 0 ]; do [ "$1" = --body ] && { printf '%s\n@@\n' "$2" >> "$F/posted"; }; shift; done; exit 0 ;;
   "pr diff") [ -f "$F/files-$3" ] && { cat "$F/files-$3"; exit 0; }; exit 1 ;;
@@ -96,6 +98,32 @@ OUT=$(run gate --repo o/r --pr 9 --prs-file "$TMP/prs" 2>&1); RC=$?
 newfix untrusted; jq -n '[{number:41,title:"bug (PR #5)",body:"x"}]' > "$FIX/findings-5.json"
 jq -n '[{body:"OVERRIDE: shipping with open findings — x",author_association:"NONE",user:{type:"User",login:"z"}}]' > "$FIX/comments-9.json"
 run gate --repo o/r --pr 9 --prs-file "$TMP/prs" >/dev/null 2>&1; [ $? -eq 1 ] && ok || bad "an untrusted override must not pass"
+# forge#4470: the gate fails closed. A failed gh read or an empty bundle never posts GATE_PASS.
+printf '101\n102\n' > "$TMP/prs2"
+newfix ghfail; : > "$FIX/fail-labels"; : > "$FIX/fail-issues"
+OUT=$(run gate --repo o/r --pr 9 --prs-file "$TMP/prs2" 2>&1); RC=$?
+[ "$RC" -eq 1 ] && ok || bad "gh read failure blocks: gate must exit 1 when every gh read fails (rc $RC)"
+case "$OUT" in *"RESULT: BLOCK DEPLOY"*) ok ;; *) bad "gh read failure blocks: must print RESULT: BLOCK DEPLOY (got '$OUT')" ;; esac
+! grep -q 'FORGE:GATE_PASS' "$FIX/posted" 2>/dev/null && ok || bad "gh read failure blocks: must not post GATE_PASS"
+grep -q 'FORGE:GATE_FAILURE:TYPE=gate-read-failure' "$FIX/posted" 2>/dev/null && ok || bad "gh read failure blocks: must post TYPE=gate-read-failure"
+newfix issuefail; : > "$FIX/fail-issues"
+run gate --repo o/r --pr 9 --prs-file "$TMP/prs" >/dev/null 2>&1; RC=$?
+[ "$RC" -eq 1 ] && ! grep -q 'FORGE:GATE_PASS' "$FIX/posted" 2>/dev/null && ok || bad "a failed review-finding read alone must block without GATE_PASS (rc $RC)"
+newfix labelfail; : > "$FIX/fail-labels"
+run gate --repo o/r --pr 9 --prs-file "$TMP/prs" >/dev/null 2>&1; RC=$?
+[ "$RC" -eq 1 ] && ! grep -q 'FORGE:GATE_PASS' "$FIX/posted" 2>/dev/null && ok || bad "a failed degraded-label read alone must block without GATE_PASS (rc $RC)"
+newfix readfailoverride; : > "$FIX/fail-issues"
+jq -n '[{body:"OVERRIDE: shipping with open findings — known",author_association:"OWNER",user:{type:"User",login:"o"}}]' > "$FIX/comments-9.json"
+run gate --repo o/r --pr 9 --prs-file "$TMP/prs" >/dev/null 2>&1; [ $? -eq 1 ] && ok || bad "a trusted override must not waive a read failure"
+newfix emptyprs; : > "$TMP/prs-empty"
+OUT=$(run gate --repo o/r --pr 9 --prs-file "$TMP/prs-empty" 2>&1); RC=$?
+[ "$RC" -eq 1 ] && ! grep -q 'FORGE:GATE_PASS' "$FIX/posted" 2>/dev/null && ok || bad "an empty prs-file must block without GATE_PASS (rc $RC: $OUT)"
+newfix emptybundle
+run bundle --repo o/r --default staging --staging staging --pr 8 --sd "$TMP/sd" >/dev/null 2>&1; RC=$?
+[ "$RC" -ne 0 ] && ok || bad "an empty bundle PR set must exit non-zero"
+newfix fetchfail
+run bundle --repo o/r --default main --staging no-such-branch --pr 8 --sd "$TMP/sd" >/dev/null 2>&1; RC=$?
+[ "$RC" -ne 0 ] && ok || bad "a failed git fetch must exit non-zero"
 
 # (5) scope: PR 5 reviewed at its final head -> scoped; the direct commit and its files are unreviewed
 newfix scope; H7=${FEAT:0:7}

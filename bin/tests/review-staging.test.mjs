@@ -28,7 +28,7 @@ function ctxJson(o = {}) {
   };
 }
 
-/** World: files, gh calls, script calls. `o.gate`/`o.prepare` choose script outcomes. */
+/** World: files, gh calls, script calls. `o.gate`/`o.prepare` choose script outcomes, `o.bundlePrs` the bundle file. */
 function world(o = {}) {
   const w = { files: { "/repo/forge.yaml": "project:\n  owner: o\n  repo: r\nbranches:\n  default: main\n  staging: staging\n", "/tpl/protocols.md": "PROTO [PR_NUMBER]", "/tpl/security.md": "SEC pr=[PR_NUMBER] sha=[REVIEW_SHA] short=[REVIEW_SHA_SHORT] dom=[AGENT_DOMAIN] files=[FILE_LIST] slice=[DOMAIN_DIFF_SLICE] keep=[UNKNOWN_KEY]", "/tpl/infra.md": "INFRA [DOMAIN_CONTEXT] [INDEX_SLICE] [CHURN_CONTEXT] [PROJECT_NAME]", "/slice-security.diff": "+ x = '[PR_NUMBER]'", "/slice-infra.diff": "+ run: x", ...(o.files ?? {}) }, gh: [], scripts: [], out: [], err: [] };
   w.io = {
@@ -46,7 +46,7 @@ function world(o = {}) {
     run: async (cmd, args, opts) => {
       const script = args[0].split("/").pop(), sub = args[1];
       w.scripts.push({ script, sub, args, env: opts.env });
-      if (script === "review-staging-pre.sh" && sub === "bundle") { w.files[`${SD}/42_bundle-prs.txt`] = "5\n"; return { code: 0, stdout: "PRs in staging→main bundle: 5", stderr: "" }; }
+      if (script === "review-staging-pre.sh" && sub === "bundle") { w.files[`${SD}/42_bundle-prs.txt`] = o.bundlePrs ?? "5\n"; return { code: 0, stdout: "PRs in staging→main bundle: 5", stderr: "" }; }
       if (script === "review-staging-pre.sh" && sub === "gate") return o.gate ?? { code: 0, stdout: "✅ Open review-finding gate: PASSED\nRESULT: PASS\n", stderr: "" };
       if (script === "review-staging-pre.sh" && sub === "scope") { w.files[`${SD}/42_scope.json`] = JSON.stringify(o.scope ?? { scope_mode: "scoped", reviewed_pr_count: 1, reviewed_commits: ["c1"], unreviewed_commits: ["c2"], unreviewed_files: ["b.js"], cross_pr_files: [], deploy_wiring_files: [".github/workflows/ci.yml"] }); return { code: 0, stdout: "SCOPE_MODE=scoped reviewed_prs=1", stderr: "" }; }
       if (script === "review-prepare.sh") {
@@ -127,6 +127,16 @@ describe("review-staging flow", () => {
     assert.equal(comments(w).length, 0);
     assert.equal(w.scripts.length, 0);
     assert.match(w.err.join("\n"), /BLOCKED/);
+  });
+
+  it("an empty bundle PR set stops before the gate (forge#4470)", async () => {
+    for (const bundlePrs of ["", "\n", "x\n"]) {
+      const w = world({ bundlePrs });
+      assert.equal(await reviewStagingFromCli(["42"], w.io), 1);
+      assert.deepEqual(w.scripts.map((s) => s.sub), ["bundle"]);
+      assert.match(w.err.join("\n"), /bundle PR set is empty/);
+      assert.equal(w.out.length, 0);
+    }
   });
 
   it("a blocked gate stops before scope, prepare and briefs", async () => {

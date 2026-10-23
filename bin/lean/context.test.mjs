@@ -463,3 +463,11 @@ describe("populated pack sources (#4400)", () => {
     for (const s of ["attempts", "ledger", "facts"]) assert.ok(p.sources[s] > 0, `${s} is zero: ${JSON.stringify(p.sources)}`);
   });
 });
+
+describe("#4467: priorAttempts reads App comments in gh issue view shape", () => {
+  const ghShape = (login) => ({ author: { login }, authorAssociation: "CONTRIBUTOR", body: "<!-- FORGE:NEEDS_HUMAN -->\nstuck" });
+  it("counts the App's NEEDS_HUMAN, not a stranger's", () => {
+    assert.equal(priorAttempts("", [ghShape("rapiercraft-forgedock")]), 1);
+    assert.equal(priorAttempts("", [ghShape("someone")]), 0);
+  });
+});

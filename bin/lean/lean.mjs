@@ -15,7 +15,7 @@ import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedReco
 import { createHash } from "node:crypto";
 import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
-import { namedPaths } from "./prefilter.mjs";
+import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { resolveLane, isDefaultLane } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
@@ -1091,10 +1091,7 @@ export async function runCore(o) {
     const fromCheckpoint = lastSubject.startsWith("wip(forge): checkpoint");
     const hasCommits = resumed ? (await changedFiles()).length > 0 : false;
     // Requirements may only be quoted from the issue and trusted comments: an untrusted commenter cannot add a contract requirement.
-    const trustedOf = (i) => (i.comments ?? []).filter((c) => {
-      const login = String(c?.author?.login ?? c?.user?.login ?? "");
-      return isTrustedComment({ author_association: c?.authorAssociation ?? c?.author_association, user: { login, type: c?.user?.type ?? (/\[bot\]$|^app\//.test(login) ? "Bot" : "User") } });
-    });
+    const trustedOf = (i) => (i.comments ?? []).filter(isTrustedIssueComment); // #4467: gh shape, the App has no [bot]
     // #4297: engine-posted `<!-- FORGE:` comments (FORGE:CONTEXT carries linked-issue text) are never quotable, as in scopeText
     const isEngineComment = (b) => b.trimStart().startsWith("<!-- FORGE:");
     const textOf = (i, tc) => [i.title, i.body ?? "", ...tc.map((c) => String(c?.body ?? "")).filter((b) => !isEngineComment(b))].join("\n\n");
