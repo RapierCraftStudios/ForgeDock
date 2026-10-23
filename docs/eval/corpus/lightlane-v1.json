@@ -1,0 +1,55 @@
+{
+  "version": "lightlane-v1",
+  "description": "Three-way light-lane benchmark (#4453, parent #4442): three more-itertools bugs reported after the model cutoff, graded by the upstream fix tests. Instructions: docs/eval/lightlane-bench.md.",
+  "upstream": "more-itertools/more-itertools",
+  "license": "MIT",
+  "clone_url": "https://github.com/more-itertools/more-itertools.git",
+  "base": "670b715b307adfe5d2fca08a87ca562cb8bfea2c",
+  "suite_command": "python3 -m unittest discover -q -s tests -t .",
+  "control_prompt": "Fix this issue in the repository in the current directory. Write a failing regression test first, then the fix, then run the targeted tests. Do not use web tools.\n\nIssue: {title}\n\n{body}",
+  "issues": [
+    {
+      "id": "lightlane-1293",
+      "upstream_issue": 1293,
+      "fix_pr": 1294,
+      "fix_sha": "1dd480a08bc2a4c399c84bf21cb1558f8b5fc838",
+      "title": "Repeated zero-cache seekable.peek() retains nested chain iterators",
+      "body": "On current master (`b5e3886`), the fix for #1268 preserves values but each `seekable(..., maxlen=0).peek()` prepends a new `chain` around the previous source. Repeated peeking without advancing retains an iterator chain proportional to the number of calls, despite having no history cache.\n\n```python\nimport tracemalloc\nfrom more_itertools import seekable\n\ns = seekable(range(3), maxlen=0)\ntracemalloc.start()\ns.peek()\nbaseline = tracemalloc.get_traced_memory()[0]\nfor _ in range(10000):\n    assert s.peek() == 0\nprint(tracemalloc.get_traced_memory()[0] - baseline)\nprint(list(s.elements()), list(s))\n```\n\nOn CPython 3.12.13/macOS this retains 2,427,672 additional bytes; output remains `[] [0, 1, 2]`. A single lookahead slot should be sufficient regardless of the number of repeated `peek()`/`bool()` calls. I am checking a fix that reuses the existing `peekable` helper only in the zero-history case, with unchanged bounded/unbounded history behavior.\n\nInvestigation performed with AI assistance.\n",
+      "oracle": {
+        "files": [
+          "tests/test_more.py"
+        ],
+        "command": "python3 -m unittest -q tests.test_more.SeekableTest.test_repeated_zero_cache_peek_has_bounded_memory",
+        "note": "670b715 is the merge parent of the fix, but the fix branch also carries the #1268/#1269 seekable maxlen=0 value fix; on the base the oracle errors with StopIteration, so an arm passes only by bounding memory and keeping the peeked values."
+      }
+    },
+    {
+      "id": "lightlane-1304",
+      "upstream_issue": 1304,
+      "fix_pr": 1305,
+      "fix_sha": "1ea82a711c69f590054987b5cb194157f8ce8ac4",
+      "title": "ichunked(..., 0) raises islice's ValueError on a nonempty iterable",
+      "body": "`ichunked` is documented as being like `chunked`, but with lazy chunks. `chunked` treats `n=0` as \"yield nothing\". `ichunked` only does that when the source is already empty; with any remaining items it calls `islice(iterator, n - 1)` and blows up.\n\nI hit this switching a streaming pipeline from `chunked` to `ichunked` so batches would not be materialized as lists. Chunk size comes from the same config in both paths; `0` means \"this stage is disabled, emit nothing.\"\n\n```python\nfrom more_itertools import chunked, ichunked\n\nrows = [\"a\", \"b\", \"c\"]  # e.g. leftover rows from a DB cursor\nchunk_size = 0          # config: skip this sink\n\nprint(list(chunked(rows, chunk_size)))\n# []\n\nprint([list(c) for c in ichunked(rows, chunk_size)])\n# ValueError: Stop argument for islice() must be None or an integer: 0 <= x <= sys.maxsize.\n```\n\n`IchunkedTests.test_zero` only uses `iterable = []`, which never enters the `for first in iterator` loop, so the `islice(..., n - 1)` path is untested.\n\nNegative `n` has the same leak: `chunked` raises `ValueError: n must be at least 0`, `ichunked` raises islice's \"Indices for islice() must be None or an integer...\".\n\nHappy to send a PR.",
+      "oracle": {
+        "files": [
+          "tests/test_more.py"
+        ],
+        "command": "python3 -m unittest -q tests.test_more.IchunkedTests.test_zero_nonempty tests.test_more.IchunkedTests.test_negative"
+      }
+    },
+    {
+      "id": "lightlane-1308",
+      "upstream_issue": 1308,
+      "fix_pr": 1309,
+      "fix_sha": "67fcf640477c78605580f5ee703a54c73c1e7a8a",
+      "title": "bucket ignores a supplied validator when the callable is falsey",
+      "body": "`bucket` replaces a supplied validator with its default when the callable has a false truth value. An empty callable set is one example:\n\n```python\nfrom more_itertools import bucket\n\nclass AllowedKeys(set):\n    def __call__(self, key):\n        return key in self\n\nallowed = AllowedKeys()\nsource = iter([1, 2, 3])\nbuckets = bucket(source, key=lambda x: x, validator=allowed)\nprint(list(buckets[1]))  # [1]; expected []\n```\n\nThe validator rejects every key, so selecting a bucket should return an empty iterator without consuming `source`. Instead, `validator or (lambda x: True)` discards it. Membership checks and iteration over bucket keys also accept keys the validator rejects. On an infinite input, a lookup for an absent, rejected key can keep scanning rather than return immediately.\n\nI reproduced this on current main (11.1.0). Changing the default selection to `(lambda x: True) if validator is None else validator` preserves the supplied callable. My regression checks rejected selection, membership, source consumption, and key iteration; the full unittest suite passes with that change.\n\nI can send the small fix and regression test if this behavior is unintended.\n",
+      "oracle": {
+        "files": [
+          "tests/test_more.py"
+        ],
+        "command": "python3 -m unittest -q tests.test_more.BucketTests.test_falsey_validator_is_honoured"
+      }
+    }
+  ]
+}
