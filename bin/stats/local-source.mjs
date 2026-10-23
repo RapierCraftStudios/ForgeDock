@@ -76,6 +76,9 @@ export function summariseLog(events, fallbackIssue = null) {
     pitfallsMatched: Number.isInteger(term?.pitfalls_matched) ? term.pitfalls_matched
       : Array.isArray(cp?.pitfalls) ? cp.pitfalls.filter((p) => p?.match === "files").length : null,
     builderTurns: builderCalls.reduce((x, e) => x + n(e.turns), 0),
+    // #4418: the explorer A/B tag (null before #4391 wrote it) and the main-session (plan + build) cache-read
+    explore: term?.explore === "on" || term?.explore === "off" ? term.explore : null,
+    builderCacheRead: builderCalls.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens), 0),
     size: term?.turns?.size ?? null, // #4409: S|M|L from the lane's turn record, buckets the admission estimate history
     // #4444: cache-read alone (per-merge A/B metric) and the implement attempt (builder calls other than the plan call)
     cacheReadTokens: usage.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens), 0),
@@ -181,6 +184,9 @@ export function readLocalRuns(dir = runsDir(), { allSlices = false } = {}) {
   }
   return runs;
 }
+
+/** #4418: every RUN_START slice (readLocalRuns allSlices), so an on run and an off run of the same issue both count. */
+export const readLocalLaneRuns = (dir = runsDir()) => readLocalRuns(dir, { allSlices: true });
 
 /**
  * forge#4354: one lane per RUN_START..next-RUN_START slice (every slice, not only the last), with the fail-soft events the

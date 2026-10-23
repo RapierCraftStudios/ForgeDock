@@ -1383,6 +1383,11 @@ explorer, keep the digest, open a file only to edit it or to verify a digest cla
 byte-identical. `RUN_TERMINAL` carries `explore: on|off`; the A/B compares plan/build `PHASE_ATTEMPT_USAGE` turns and
 `cache_read_input_tokens`, merge rate and conformance verdicts by that tag over the same issues. Cost: 0 engine LLM calls;
 ~120 prompt tokens per builder prompt when on; explorer calls are billed inside the builder call's `cost_usd`.
+`forgedock stats --explore-ab` (#4418, `bin/stats/query.mjs` `exploreAb`) is that reader: every RUN_START slice of the
+local run logs (`local-source.mjs` `readLocalLaneRuns`, so an on and an off run of one issue both count), per size bucket
+(`RUN_TERMINAL.turns.size` S/M/L, else unsized) and mode: mean plan+build turns and cache-read, merge rate and conformance
+rate (as `--tiers`), plus a paired section of issues with a finished run in both modes. Untagged (pre-#4391) runs are
+counted and left out, never read as `off`. The A/B result itself stays a post-deploy check.
 
 ## Entry 2026-10-23 — Per-batch cancel (#4376)
 

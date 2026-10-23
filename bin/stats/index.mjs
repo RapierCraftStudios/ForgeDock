@@ -11,10 +11,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { aggregate, computeAlerts, DEFAULT_ALERTS, DEFAULT_MIN_N } from "./aggregate.mjs";
 import { defaultGh, fetchGithubRecords, isValidRepo, toModel } from "./github-source.mjs";
-import { readLanes, readLocalRuns, runsDir } from "./local-source.mjs";
+import { readLanes, readLocalLaneRuns, readLocalRuns, runsDir } from "./local-source.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
-import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers, laneProfileReport, renderLaneProfiles } from "./query.mjs";
+import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers, exploreAb, renderExploreAb, laneProfileReport, renderLaneProfiles } from "./query.mjs";
 import { batchEfficiency, windowEfficiency, formatEfficiencyLines, parseWindows } from "./efficiency.mjs";
 import { batchRoot } from "../lean/batch.mjs";
 
@@ -52,6 +52,10 @@ Context-pack A/B (forge#4275; local run logs only, no GitHub crawl):
   --context-ab          first-pass yield, builder turns, cache tokens and cost per lane type (rerun, child,
                         first) and context_pack mode (on, off, shadow); --json for JSON
 
+Explorer A/B (forge#4418; local run logs only, every run of each log, no GitHub crawl):
+  --explore-ab          builder turns, builder cache-read, merge and conformance rates per size (S, M, L) and
+                        lean.explore mode (on, off), plus the same issues run in both modes; --json for JSON
+
 Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues' bodies, labels and probes):
   --efficiency          $/merge, turns/merge, context/turn per size and model, retries/merge by cause, no-action
                         lanes, issue quality vs cost and the acceptance pass rate 7 days after promotion
@@ -69,7 +73,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 `;
 
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, tiers: false, laneProfile: false, issues: null, efficiency: false, batch: null, windows: null, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, laneProfile: false, issues: null, efficiency: false, batch: null, windows: null, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -86,6 +90,7 @@ export function parseArgs(argv) {
     else if (name === "--edge") { const v = take(); if (!parseEdge(v)) throw new Error("--edge must be FROM:TO"); o.edge = v; }
     else if (name === "--milestone") o.milestone = take();
     else if (name === "--context-ab") o.contextAb = true;
+    else if (name === "--explore-ab") o.exploreAb = true;
     else if (name === "--tiers") o.tiers = true;
     else if (name === "--lane-profile") o.laneProfile = true;
     else if (name === "--issues") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--issues must be a comma list of issue numbers"); o.issues = v.split(",").map(Number); }
@@ -221,6 +226,10 @@ export async function buildReport(opts, deps = {}) {
     const runs = (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo);
     return { repo, sources: { local: { runs: runs.length } }, query: { context_ab: contextPackAb(runs) } };
   }
+  if (opts.exploreAb) { // forge#4418: run logs only, every RUN_START slice
+    const runs = (deps.localRuns ?? readLocalLaneRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo);
+    return { repo, sources: { local: { runs: runs.length } }, query: { explore_ab: exploreAb(runs) } };
+  }
   if (opts.tiers) { // forge#4394: run logs only
     const runs = (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo);
     return { repo, sources: { local: { runs: runs.length } }, query: { tiers: builderTierReport(runs) } };
@@ -275,6 +284,7 @@ export async function runStats(argv, deps = {}) {
       return 0;
     }
     if (report.query?.context_ab && !opts.json) { process.stdout.write(`${renderContextAb(report.query.context_ab)}\n`); return 0; }
+    if (report.query?.explore_ab && !opts.json) { process.stdout.write(`${renderExploreAb(report.query.explore_ab)}\n`); return 0; }
     process.stdout.write(`${opts.json || report.query ? renderJson(report) : opts.compact ? renderCompact(report) : renderMarkdown(report)}\n`);
     return 0;
   } catch (err) {
