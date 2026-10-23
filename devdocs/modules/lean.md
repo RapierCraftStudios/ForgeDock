@@ -464,7 +464,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `postmerge.mjs` (base-sync post-merge commands and same-app duplicate exports, #4406),
 `execution.mjs` (forge.yaml `execution`, sandbox-provider seam, `local`/`container` providers, #4253; `remote` provider, #4254),
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
-`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; an issue whose latest pipeline `FORGE:PROBE` is a fail is never closed as already-fixed, reason `probe-failed`, #4399; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389),
+`prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; an issue whose latest pipeline `FORGE:PROBE` is a fail is never closed as already-fixed, reason `probe-failed`, #4399; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389; opt-in `post_deploy.min_age` soak window parks `awaiting-min-age`, #4425),
 `probe.mjs` (outcome-based acceptance, #4399; see "Acceptance probes" below),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
@@ -1291,6 +1291,21 @@ GitHub's) is resolved and fetched once, lazily, by `lazyDefaultBranch` (orchestr
 a parked result as outcome `awaiting-promotion|awaiting-precondition` with $0 and no `runOne` (not SATISFIED: dependents
 skip). `formatOutcomeLists` prints one `awaiting promotion: #A #B (fixes on <lane>, not on <default>)` line instead of
 escalations. Re-evaluation is the next batch or triage run. Cost: 0 LLM calls; per gated issue 1-2 gh reads and one git call.
+
+## Entry 2026-10-23 — post_deploy.min_age soak window (#4425)
+
+Opt-in forge.yaml `post_deploy.min_age` (`parseMinAge`: `30m`/`24h`/`7d`/`2w`, a bare number is minutes, `0` allowed; read by
+`readPostDeployMinAge` in `engine-cli.mjs` for orchestrate and triage). Unset: the gate is exactly #4389 (no extra git
+call). Set: once every parent SHA is on the default branch, and before `precondition_cmd`, `postDeployGate` requires
+`max over items (item window ?? min_age)` since the fix landed. An item's window is the largest explicit duration in its
+post-deploy `why` (`itemWindowsMs`, strict number+unit regex h/d/w, no model). `landedAt` takes the landing time from git:
+`rev-list --ancestry-path <sha>..origin/<default>` (descendants) intersected with `log --first-parent` of the same range.
+The oldest mainline descendant is the merge that brought the SHA in (its `%ct`). The SHA's own `%ct` is used when it is on
+the mainline itself or is the tip. `--first-parent --ancestry-path` together returns nothing for a second-parent merge, so
+the two walks stay separate. The latest landing over the SHAs counts. Too young: `{parked: true, kind: "awaiting-min-age",
+eligibleAt}`, the same `awaiting-promotion` label and `FORGE:PRECONDITION` comment, and one `awaiting min age: #A (fix on
+<default>, soak window not elapsed)` report line. An unknown landing time fails open (`unresolved`). `now` (or `io.now`)
+is injectable for tests.
 
 ## Entry 2026-10-23 — CI-verify gate, flake rerun, parked dependencies (#4387)
 
