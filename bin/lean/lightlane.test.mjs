@@ -154,7 +154,8 @@ describe("#4451 light prechecks run concurrently, capped by host parallelism", (
   });
   it("parallelism 1 runs them one after another; a timeout (rc 124) stays a failure, never deferred", async () => {
     const order = [];
-    const r = await runLightTests({ commands: ["x", "y"], parallelism: 1, run: async ({ command }) => { order.push(command); return { rc: command === "y" ? 124 : 0, output: "" }; } });
+    let t = 0; // a clock that advances between commands (a wall clock does too, in a slow run)
+    const r = await runLightTests({ commands: ["x", "y"], parallelism: 1, now: () => (t += 1000), run: async ({ command }) => { order.push(command); return { rc: command === "y" ? 124 : 0, output: "" }; } });
     assert.deepEqual(order, ["x", "y"]);
     assert.deepEqual(r.map((x) => x.rc), [0, 124]);
   });

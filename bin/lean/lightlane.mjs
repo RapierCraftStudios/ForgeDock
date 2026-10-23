@@ -112,8 +112,8 @@ export function upgradeNote(reasons) {
  * run({command, workers}) -> {rc, output}. Returns [{command, rc, output}] in input order.
  */
 export async function runLightTests({ commands, parallelism = 1, run, acquire, now = () => Date.now() }) {
-  const unbounded = Number.MAX_SAFE_INTEGER; // budget = per-command limit, so a real timeout (rc 124) stays a failure
-  const { results } = await runChecks({ commands, parallelism, budgetMs: unbounded, perCommandMs: unbounded, now, acquire, run: ({ command, workers }) => run({ command, workers }) });
+  // the per-command limit stays far below the budget, so runChecks never sees a budget cut: a timeout (rc 124) stays a failure
+  const { results } = await runChecks({ commands, parallelism, budgetMs: Number.MAX_SAFE_INTEGER, perCommandMs: 2 ** 40, now, acquire, run: ({ command, workers }) => run({ command, workers }) });
   return results.map(({ command, rc, output }) => ({ command, rc, output }));
 }
 
