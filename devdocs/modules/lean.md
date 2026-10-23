@@ -355,7 +355,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    trajectory). `verifyRenumber` also accepts a file equal after mapping each move's old stem
    and its own heading number. A base-sync whose conflicts are all sequence files
    (`resolveSequenceConflicts`: base side, journal union, index union) needs no builder, and
-   an engine-only delta needs no re-review. The base-sync bound counts syncs against one base
+   an engine-only delta needs no re-review. A numbered file counts as a sequence file there
+   only when renumberLane can restore the lane's side (#4465): an add/add conflict (no
+   merge-base stage) in a directory holding a series on the merged base (`MERGE_HEAD`). A
+   both-edited `0016-x.md` or `src/404-page.tsx` is `unsupported`: builder, tests, re-review. The base-sync bound counts syncs against one base
    head (`sameBaseSyncs`); a sync overtaken by a new base head does not count. Merge-gate late
    binding: a lane with numbered files takes the host sequence lease (`seqlease.mjs`, a
    one-slot `heavy.mjs` semaphore per (repo, lane, dir) under `schedDir()/seq-lease`,

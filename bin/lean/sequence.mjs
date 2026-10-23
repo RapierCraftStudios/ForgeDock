@@ -39,6 +39,21 @@ async function laneNumbered(git, base, ref = "HEAD") {
 }
 
 /**
+ * #4343: whether `dir` holds a series at `ref`: a migration journal (`<dir>/_journal.json`, `<dir>/meta/_journal.json`),
+ * or >=2 distinct numbers of the given width that fill at least half of their min..max range. @returns {(width) => boolean}
+ */
+async function seriesDir(g, ref, dir) {
+  const listed = lines(await g(["-c", "core.quotepath=off", "ls-tree", "-r", "--name-only", ref, ...inDir(dir)]));
+  const journal = listed.some((p) => p === posix.join(dir, "_journal.json") || p === posix.join(dir, "meta", "_journal.json"));
+  const nums = listed.filter((p) => dirname(p) === dir).map(numOf).filter(Boolean);
+  return (w) => {
+    if (journal) return true;
+    const ns = [...new Set(nums.filter((n) => n.length === w).map(Number))];
+    return ns.length >= 2 && ns.length * 2 >= Math.max(...ns) - Math.min(...ns) + 1;
+  };
+}
+
+/**
  * Collisions: in each directory where a lane-added numbered file shares its number with a different base file (another
  * name, or the same path with other content), every lane-added numbered file there must move, in order, above the base's
  * highest number. @returns {Promise<Array<{dir, number, lane, base:string[], next}>>} (base [] = moves only to keep order)
@@ -49,14 +64,8 @@ export async function sequenceCollisions({ git, base, ref = "HEAD" }) {
     const lane = await laneNumbered(git, base, ref);
     const res = [];
     for (const dir of [...new Set(lane.map((f) => dirname(f.path)))]) {
-      const listed = lines(await g(["-c", "core.quotepath=off", "ls-tree", "-r", "--name-only", base, ...inDir(dir)]));
-      const journal = listed.some((p) => p === posix.join(dir, "_journal.json") || p === posix.join(dir, "meta", "_journal.json"));
-      const baseNums = listed.filter((p) => dirname(p) === dir).map(numOf).filter(Boolean);
-      const series = (w) => {
-        const ns = [...new Set(baseNums.filter((n) => n.length === w).map(Number))];
-        return ns.length >= 2 && ns.length * 2 >= Math.max(...ns) - Math.min(...ns) + 1;
-      };
-      const mine = lane.filter((f) => dirname(f.path) === dir && (journal || series(numOf(f.path).length))).sort((a, b) => Number(numOf(a.path)) - Number(numOf(b.path)) || a.path.localeCompare(b.path));
+      const series = await seriesDir(g, base, dir);
+      const mine = lane.filter((f) => dirname(f.path) === dir && series(numOf(f.path).length)).sort((a, b) => Number(numOf(a.path)) - Number(numOf(b.path)) || a.path.localeCompare(b.path));
       if (!mine.length) continue;
       const theirs = [];
       for (const l of lines(await g(["-c", "core.quotepath=off", "ls-tree", base, ...inDir(dir)]))) {
@@ -186,6 +195,8 @@ const SUPPORTED_RE = /\.(?:sql|md|mdx)$/i;
  * snapshots take the base side (`--theirs`; the lane's originals come back through renumberLane from the pre-merge head;
  * a journal keeps the base entries and appends the lane's, so a lane whose number did not collide keeps its entry),
  * and an index file beside numbered files (README.md, index.md) keeps both sides (union). Commits the merge.
+ * #4465: a numbered file (or snapshot) only counts when renumberLane can restore the lane's side: an add/add conflict
+ * (no merge-base stage, so the lane added it) in a directory that holds a series on the base being merged (MERGE_HEAD).
  * Any other conflicted file: {unsupported}, and the merge is left as is for the builder. Never throws.
  * @returns {Promise<{ok:true}|{unsupported:string}>}
  */
@@ -195,7 +206,18 @@ export async function resolveSequenceConflicts({ git, files = [] }) {
     if (!files.length) return { unsupported: "no conflicted files" };
     const tracked = lines(await g(["-c", "core.quotepath=off", "ls-files"]));
     const indexFile = (f) => INDEX_RE.test(f) && tracked.some((p) => dirname(p) === dirname(f) && numOf(p));
-    const other = files.filter((f) => !(numOf(f) || JOURNAL_RE.test(f) || SNAPSHOT_RE.test(f) || indexFile(f)));
+    const stage1 = new Set(lines(await g(["-c", "core.quotepath=off", "ls-files", "-u"])).map((l) => /^\d+ \S+ (\d)\t(.+)$/.exec(l)).filter((m) => m?.[1] === "1").map((m) => m[2]));
+    const series = new Map();
+    const laneAdded = async (f) => {
+      if (stage1.has(f)) return false; // both sides changed an existing file: the base side would drop the lane's edit
+      if (!series.has(dirname(f))) series.set(dirname(f), await seriesDir(g, "MERGE_HEAD", dirname(f)));
+      return series.get(dirname(f))(numOf(f).length);
+    };
+    const other = [];
+    for (const f of files) {
+      if (JOURNAL_RE.test(f) || (indexFile(f) && !numOf(f))) continue;
+      if (!(numOf(f) && (await laneAdded(f)))) other.push(f);
+    }
     if (other.length) return { unsupported: `non-sequence conflict: ${other.join(", ")}` };
     for (const f of files) {
       if (indexFile(f) && !numOf(f)) {
