@@ -240,21 +240,22 @@ export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null }
  * are mkdtemp dirs under `tmp`, removed by `dispose()`.
  */
 export function makeGhCache({ root = null, tmp = tmpdir() } = {}) {
-  let n = 0, dir = root ? join(root, "gh-cache") : null;
+  let n = 0, dir = root ? join(root, "gh-cache") : null, disposed = false;
   const made = new Set();
   const drop = (d) => { if (d && made.has(d)) { try { rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } made.delete(d); } };
   return {
     env() {
-      if (!dir) return undefined;
+      if (!dir || disposed) return undefined; // after dispose (run teardown) gh falls back to its default cache
       if (!made.has(dir)) { try { mkdirSync(dir, { recursive: true, mode: 0o700 }); made.add(dir); } catch { return undefined; } }
       return { XDG_CACHE_HOME: dir };
     },
     reset() {
       drop(dir);
+      if (disposed) return;
       if (root) { dir = join(root, `gh-cache-${++n}`); return; }
       try { dir = mkdtempSync(join(tmp, "forge-gh-cache-")); made.add(dir); } catch { dir = null; }
     },
-    dispose() { for (const d of [...made]) drop(d); },
+    dispose() { disposed = true; for (const d of [...made]) drop(d); },
   };
 }
 

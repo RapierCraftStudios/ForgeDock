@@ -3292,6 +3292,8 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.ok(fb.startsWith(join(tmp, "forge-gh-cache-")) && existsSync(fb));
     f.dispose();
     assert.ok(!existsSync(fb));
+    c.dispose();
+    assert.ok(!existsSync(second)); assert.equal(c.env(), undefined, "no dir is re-created after the run tears down");
   });
 
   // ---- #4114 ----
