@@ -118,6 +118,11 @@ describe("formatPrecheckSummary (#4331)", () => {
     assert.deepEqual(rows.map((r) => [r.issue, r.precheck_ms, r.precheck_deferred]), [[1, 90000, 1], [2, 30000, undefined], [3, undefined, undefined]]);
     assert.equal(formatPrecheckSummary(rows), "precheck: 2.0m total over 2 lanes, 1 deferred to CI");
   });
+  it("#4451: orchestrate rows carry the lane's wall_ms and model_ms, so wall vs model time can be measured", async () => {
+    const rows = await orchestrate({ issues: [1, 2], parallel: 1, readBody: async () => "",
+      runOne: async (n) => ({ terminalReason: "merged", ...({ 1: { wall_ms: 90000, model_ms: 60000 } })[n] }) });
+    assert.deepEqual(rows.map((r) => [r.issue, r.wall_ms, r.model_ms]), [[1, 90000, 60000], [2, undefined, undefined]]);
+  });
   it("#4362: orchestrate rows carry the lane's firstPass as first_pass for the batch first-pass line", async () => {
     const rows = await orchestrate({ issues: [1, 2, 3], parallel: 1, readBody: async () => "",
       runOne: async (n) => ({ terminalReason: "merged", ...({ 1: { firstPass: true }, 2: { firstPass: false } })[n] }) });

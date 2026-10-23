@@ -14,7 +14,7 @@ import { defaultGh, fetchGithubRecords, isValidRepo, toModel } from "./github-so
 import { readLanes, readLocalLaneRuns, readLocalRuns, runsDir } from "./local-source.mjs";
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
-import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers, exploreAb, renderExploreAb } from "./query.mjs";
+import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers, exploreAb, renderExploreAb, laneProfileReport, renderLaneProfiles } from "./query.mjs";
 import { batchEfficiency, windowEfficiency, formatEfficiencyLines, parseWindows } from "./efficiency.mjs";
 import { batchRoot } from "../lean/batch.mjs";
 
@@ -65,10 +65,15 @@ Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues
 Builder model tiers (forge#4394; local run logs only, no GitHub crawl):
   --tiers               merge, conformance and post-merge-rework rates, first-pass yield and cost per builder tier
                         (mid, mid->top escalated, top) and routing class; --json for JSON
+
+Lane profile baseline (forge#4436; local run logs only, every run of each issue, no GitHub crawl):
+  --lane-profile        first-turn baseline_tokens per lane profile (full, memory-off, lane) and phase, and the
+                        conformance rate per profile; --json for JSON
+  --issues <list>       pin the report to these issues (comma list), for a before/after on the same issue set
 `;
 
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, efficiency: false, batch: null, windows: null, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, laneProfile: false, issues: null, efficiency: false, batch: null, windows: null, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -87,6 +92,8 @@ export function parseArgs(argv) {
     else if (name === "--context-ab") o.contextAb = true;
     else if (name === "--explore-ab") o.exploreAb = true;
     else if (name === "--tiers") o.tiers = true;
+    else if (name === "--lane-profile") o.laneProfile = true;
+    else if (name === "--issues") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--issues must be a comma list of issue numbers"); o.issues = v.split(",").map(Number); }
     else if (name === "--efficiency") o.efficiency = true;
     else if (name === "--batch") { const v = take(); if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) throw new Error(`invalid --batch id: ${v}`); o.batch = v; }
     else if (name === "--window") o.windows = parseWindows(take());
@@ -227,6 +234,10 @@ export async function buildReport(opts, deps = {}) {
     const runs = (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo == null || r.repo === repo);
     return { repo, sources: { local: { runs: runs.length } }, query: { tiers: builderTierReport(runs) } };
   }
+  if (opts.laneProfile) { // forge#4436: run logs only, every RUN_START slice
+    const runs = (deps.localRuns ?? readLocalRuns(runsDir(env), { allSlices: true })).filter((r) => r.repo == null || r.repo === repo);
+    return { repo, sources: { local: { runs: runs.length } }, query: { lane_profile: laneProfileReport(runs, { issues: opts.issues }) } };
+  }
   const bound = sinceToTimestamp(opts.since, releaseTimes);
   if (bound.note) (deps.warn ?? ((m) => process.stderr.write(`forgedock stats: ${m}\n`)))(bound.note);
   const gh = await fetchGithubRecords({ repo, since: bound.since, refresh: opts.refresh, useCache: opts.cache, gh: deps.gh, env,
@@ -263,6 +274,7 @@ export async function runStats(argv, deps = {}) {
   }
   try {
     const report = await buildReport(opts, { onProgress: makeProgressPrinter(), ...deps });
+    if (report.query?.lane_profile && !opts.json) { process.stdout.write(`${renderLaneProfiles(report.query.lane_profile)}\n`); return 0; }
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
     if (report.query?.efficiency && !opts.json) {
       const e = report.query.efficiency;
