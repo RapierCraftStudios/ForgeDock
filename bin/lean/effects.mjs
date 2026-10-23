@@ -22,6 +22,7 @@ import { duplicateExports } from "./postmerge.mjs";
 import { scopedChecks } from "./checks.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
 import { followupMap } from "./conformance.mjs";
+import { toolStats } from "./toolstats.mjs";
 
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
@@ -71,7 +72,7 @@ export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRun
       idleMs, maxMs, stream: idleMs > 0, control, onSpawn, busy, busyMs, onIdleExtend, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}), wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     // #4395: a resumed session's first turn carries the prior history, so only a fresh session reports a baseline.
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default",
-      baselineTokens: resume ? null : (r.baselineTokens ?? null) };
+      baselineTokens: resume ? null : (r.baselineTokens ?? null), tools: toolStats(r.toolUses) }; // #4410: tool calls per turn, re-reads
   };
 }
 

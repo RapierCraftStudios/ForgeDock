@@ -1997,6 +1997,9 @@ export function listDescendants(pid, { psFn = null, maxCmd = 200 } = {}) {
   } catch { return []; }
 }
 
+/** #4410: cap of the tool uses one stream session records. */
+const TOOL_USES_MAX = 5000;
+
 /**
  * Async twin of runCliBackend (core work-on live comments): the CLI runs under child_process.spawn so the caller's event
  * loop keeps turning while the session runs. It returns the SAME envelope (and throws the same errors) because the
@@ -2016,6 +2019,8 @@ export function listDescendants(pid, { psFn = null, maxCmd = 200 } = {}) {
  * heavy step, test or lint child) the kill waits until idleMs + `busyMs` of silence, `onIdleExtend(info)` is told once per
  * idle stretch, and a later kill carries `extended: true` and `heavyQueue` (info.heavyQueue).
  * #4395: a stream result carries `baselineTokens`, the first assistant turn's context; absent when no message was seen.
+ * #4410: a stream result (and a CLI_TURNS / CLI_CONTEXT error) carries `toolUses`, [{msg, name, path, cmd}] per tool_use
+ * (deduped by tool_use id, capped at TOOL_USES_MAX), for bin/lean/toolstats.mjs; absent on the non-stream path.
  */
 export async function runCliBackendAsync(opts) {
   const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, ...rest } = opts;
@@ -2045,6 +2050,7 @@ export async function runCliBackendAsync(opts) {
   const ceiling = maxMs > 0 ? maxMs : o.timeout;
   let collected, idleInfo = null, ctxInfo = null, turnInfo = null;
   const msgUsage = new Map(); // #4390: assistant message id -> its usage (a message spans several stream lines)
+  const toolUses = new Map(); // #4410: tool_use id -> {msg, name, path, cmd}
   try {
     collected = await new Promise((resolveP) => {
       let stdout = "", stderr = "", settled = false, timedOut = false, paused = false;
@@ -2100,7 +2106,13 @@ export async function runCliBackendAsync(opts) {
         let j; try { j = JSON.parse(line); } catch { return; }
         if (j?.type === "result") resultLine = line;
         else if (j?.type === "assistant" && Array.isArray(j.message?.content)) {
-          for (const c of j.message.content) if (c?.type === "tool_use") lastTool = { name: c.name, input: JSON.stringify(c.input ?? {}).slice(0, 200), at: Date.now() };
+          for (const c of j.message.content) {
+            if (c?.type !== "tool_use") continue;
+            lastTool = { name: c.name, input: JSON.stringify(c.input ?? {}).slice(0, 200), at: Date.now() };
+            const key = c.id ?? `${j.message.id}#${toolUses.size}`, inp = c.input ?? {};
+            if (!toolUses.has(key) && toolUses.size < TOOL_USES_MAX) toolUses.set(key, { msg: j.message.id ?? null, name: c.name ?? null,
+              path: typeof (inp.file_path ?? inp.path) === "string" ? (inp.file_path ?? inp.path) : null, cmd: typeof inp.command === "string" ? inp.command.slice(0, 1000) : null });
+          }
           const u = j.message.usage;
           if (u && typeof u === "object") {
             msgUsage.set(j.message.id ?? `#${msgUsage.size}`, u);
@@ -2132,13 +2144,13 @@ export async function runCliBackendAsync(opts) {
   const streamUsage = () => (msgUsage.size ? { input_tokens: sum("input_tokens"), output_tokens: sum("output_tokens"), cache_creation_input_tokens: sum("cache_creation_input_tokens"), cache_read_input_tokens: sum("cache_read_input_tokens") } : null);
   if (turnInfo) {
     const err = new Error(`claude CLI session reached its turn budget (${turnMax} turns) and was stopped`);
-    err.code = "CLI_TURNS"; err.turns = msgUsage.size; err.turnMax = turnMax; err.lastTool = turnInfo.lastTool; err.usage = streamUsage();
+    err.code = "CLI_TURNS"; err.turns = msgUsage.size; err.turnMax = turnMax; err.lastTool = turnInfo.lastTool; err.usage = streamUsage(); err.toolUses = [...toolUses.values()];
     throw err;
   }
   if (ctxInfo) {
     const err = new Error(`claude CLI session reached ${ctxInfo.context} context tokens (ceiling ${contextMax}) after ${msgUsage.size} turn(s) and was stopped`);
     err.code = "CLI_CONTEXT"; err.context = ctxInfo.context; err.contextMax = contextMax; err.turns = msgUsage.size; err.lastTool = ctxInfo.lastTool;
-    err.usage = streamUsage();
+    err.usage = streamUsage(); err.toolUses = [...toolUses.values()];
     throw err;
   }
   if (idleInfo) {
@@ -2151,6 +2163,7 @@ export async function runCliBackendAsync(opts) {
   const r = runCliBackend({ ...rest, spawnFn: () => collected });
   // #4395: the session baseline is the first assistant turn's context (system prompt, tools, instructions, first prompt).
   const first = msgUsage.values().next().value;
+  if (stream && toolUses.size && r && typeof r === "object") r.toolUses = [...toolUses.values()];
   if (first && r && typeof r === "object") r.baselineTokens = toFiniteUsageNumber(first.input_tokens) + toFiniteUsageNumber(first.cache_read_input_tokens) + toFiniteUsageNumber(first.cache_creation_input_tokens);
   return r;
 }

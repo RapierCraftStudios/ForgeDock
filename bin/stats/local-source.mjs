@@ -76,6 +76,7 @@ export function summariseLog(events, fallbackIssue = null) {
     pitfallsMatched: Number.isInteger(term?.pitfalls_matched) ? term.pitfalls_matched
       : Array.isArray(cp?.pitfalls) ? cp.pitfalls.filter((p) => p?.match === "files").length : null,
     builderTurns: builderCalls.reduce((x, e) => x + n(e.turns), 0),
+    size: term?.turns?.size ?? null, // #4409: S|M|L from the lane's turn record, buckets the admission estimate history
     cacheTokens: usage.reduce((x, e) => x + n(e.usage?.cache_read_input_tokens) + n(e.usage?.cache_creation_input_tokens), 0),
     costUsd: usage.reduce((x, e) => x + n(costOf(e)), 0),
     // #4394: the builder tier (RUN_TERMINAL builder_*, else the BUILDER_ROUTE / BUILDER_ESCALATED events); null before routing

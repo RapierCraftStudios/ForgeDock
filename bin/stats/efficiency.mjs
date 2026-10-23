@@ -67,7 +67,8 @@ export function issueSlices(events) {
     if (!cur) continue;
     if (e.event === "PHASE_ATTEMPT_USAGE") {
       cur.attempts.push({ phase: e.phase ?? "other", trigger: e.trigger ?? null, restart_of: e.restart_of ?? null, model: e.model ?? null,
-        turns: num(e.turns), cacheRead: num(e.usage?.cache_read_input_tokens), cost: costOf(e) });
+        turns: num(e.turns), cacheRead: num(e.usage?.cache_read_input_tokens), cost: costOf(e),
+        ...(e.tools && typeof e.tools === "object" ? { calls: num(e.tools.calls), toolTurns: num(e.tools.turns), rereads: num(e.tools.rereads) } : {}) }); // #4410
     } else if (e.event === "RUN_TERMINAL") {
       cur.terminal = { reason: e.reason ?? null, code: e.code ?? null, ts: e.ts ?? null, size: SIZES.includes(e.turns?.size) ? e.turns.size : null };
     }
@@ -118,6 +119,18 @@ export async function fetchIssue(gh, repo, n) {
   return { body: iss?.body ?? "", labels: (Array.isArray(iss?.labels) ? iss.labels : []).map((l) => l?.name ?? l), comments };
 }
 
+/** #4410: a lane's implement tool calls per turn and re-reads, over the attempts that carry tool data; null when none. */
+function laneTools(impl) {
+  const xs = impl.filter((a) => a.calls != null && a.toolTurns > 0);
+  if (!xs.length) return null;
+  return { per_turn: r(sum(xs.map((a) => a.calls)) / sum(xs.map((a) => a.toolTurns)), 100), rereads: sum(xs.map((a) => a.rereads ?? 0)) };
+}
+const median = (xs) => {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b), h = Math.floor(s.length / 2);
+  return s.length % 2 ? s[h] : r((s[h - 1] + s[h]) / 2, 100);
+};
+
 const group = (xs) => {
   const turns = sum(xs.map((x) => x.implTurns)), cache = sum(xs.map((x) => x.implCache));
   return { n: xs.length, cost_usd: r(sum(xs.map((x) => x.cost)), 1e6), usd_per_merge: r(per(sum(xs.map((x) => x.cost)), xs.length)),
@@ -141,7 +154,7 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     const term = [...slices].reverse().find((s) => s.terminal?.reason === "merged")?.terminal;
     merged.push({ issue: row.issue, slices: slices.length, cost: sum(atts.map((a) => a.cost)), implCost: sum(impl.map((a) => a.cost)),
       reviewCost: sum(atts.filter((a) => a.phase === "review").map((a) => a.cost)), implTurns: sum(impl.map((a) => a.turns)), implCache: sum(impl.map((a) => a.cacheRead)),
-      size: term?.size ?? laneSize({ labels: info?.labels ?? [] }) ?? "unknown", impl, retries, info });
+      size: term?.size ?? laneSize({ labels: info?.labels ?? [] }) ?? "unknown", impl, retries, info, tools: laneTools(impl) });
   }
   const all = group(merged);
   const bySize = {};
@@ -154,6 +167,7 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     }
   }
   const retries = Object.fromEntries(RETRY_CAUSES.map((c) => [c, sum(merged.map((m) => m.retries[c]))]));
+  const withTools = merged.filter((m) => m.tools);
   const total = sum(Object.values(retries));
   // no possible action: parked post-deploy follow-ups and promotion-blocked lanes (#4389), over all rows
   const noAction = {};
@@ -187,8 +201,10 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     no_action: { lanes: sum(Object.values(noAction).map((g) => g.n)), cost_usd: r(sum(Object.values(noAction).map((g) => g.cost_usd)), 1e6),
       by_kind: Object.fromEntries(Object.entries(noAction).map(([k, g]) => [k, { ...g, cost_usd: r(g.cost_usd, 1e6) }])) },
     quality, acceptance,
+    tool_calls_per_turn_p50: median(withTools.map((m) => m.tools.per_turn)), rereads_per_merge: withTools.length ? r(per(sum(withTools.map((m) => m.tools.rereads)), withTools.length), 100) : null,
     per_issue: merged.map((m) => ({ issue: m.issue, slices: m.slices, cost_usd: r(m.cost, 1e6), implement_usd: r(m.implCost, 1e6), implement_turns: m.implTurns,
-      implement_cache_read: m.implCache, size: m.size, retries: m.retries, ...(m.info ? { quality: issueQuality(m.info.body).tag } : {}) })),
+      implement_cache_read: m.implCache, size: m.size, retries: m.retries, ...(m.info ? { quality: issueQuality(m.info.body).tag } : {}),
+      ...(m.tools ? { implement_tool_calls_per_turn: m.tools.per_turn, implement_rereads: m.tools.rereads } : {}) })),
     notes,
   };
 }
@@ -292,5 +308,6 @@ export function formatEfficiencyLines(m, label = "") {
   const a = m.acceptance;
   lines.push(a ? `acceptance (7d after promotion): pass ${a.pass}/${a.pass + a.fail}${a.pass_rate == null ? "" : ` (${Math.round(a.pass_rate * 100)}%)`}, pending ${a.pending}, unprobed ${a.unprobed}`
     : "acceptance (7d after promotion): n/a");
+  lines.push(`tools: calls/turn p50 ${f(m.tool_calls_per_turn_p50)}, re-reads (>=3x same path)/merge ${f(m.rereads_per_merge)}`); // #4410
   return lines;
 }

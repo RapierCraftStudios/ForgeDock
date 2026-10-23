@@ -6,7 +6,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { grantOrder, openSched, priorityFromLabels } from "./sched.mjs";
-import { orchestrate } from "./orchestrate.mjs";
+import { orchestrate, estimateLaneMinutes, laneHistory, formatEstimateSummary, EST_DEFAULT_MIN, POST_DEPLOY_EST_MIN } from "./orchestrate.mjs";
 import { schedFromCli } from "../engine-cli.mjs";
 
 const quiet = async (fn) => { const l = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = l; } };
@@ -306,5 +306,131 @@ describe("cross-repo fairness weights (#4193)", () => {
     }
     assert.throws(() => a.setWeight("o/a", 0), /positive integer/);
     assert.throws(() => a.setWeight("", 2), /non-empty/);
+  });
+});
+
+// #4409: a virtual clock. Lane durations and sleeps are timers in virtual ms; the clock jumps to the next timer once the
+// event loop has drained every microtask, so the orchestrator's async chains settle before time moves.
+const vclock = () => {
+  let t = 0, done = false;
+  const timers = [];
+  const at = (ms, signal) => new Promise((res) => {
+    const x = { when: t + ms, res };
+    timers.push(x);
+    signal?.addEventListener("abort", () => { const i = timers.indexOf(x); if (i >= 0) timers.splice(i, 1); res(); }, { once: true });
+  });
+  const tick = () => setImmediate(() => {
+    if (done) return;
+    if (timers.length) { timers.sort((a, b) => a.when - b.when); const x = timers.shift(); t = x.when; x.res(); }
+    tick();
+  });
+  tick();
+  return { now: () => t, at, sleep: (ms, signal) => at(ms, signal), stop: () => { done = true; } };
+};
+const MIN = 60000;
+
+describe("longest-first admission (#4409)", () => {
+  it("estimateLaneMinutes: size label, unsized = M, post-deploy floor, history only with enough merged samples of the repo", () => {
+    assert.equal(estimateLaneMinutes({ labels: ["size:S"] }), EST_DEFAULT_MIN.S);
+    assert.equal(estimateLaneMinutes({ labels: [{ name: "size:L" }] }), EST_DEFAULT_MIN.L);
+    assert.equal(estimateLaneMinutes({}), EST_DEFAULT_MIN.M);
+    assert.equal(estimateLaneMinutes({ labels: ["size:L"], body: "- [ ] `R1: smoke` — post-deploy: needs prod" }), POST_DEPLOY_EST_MIN);
+    const run = (repo, size, min, reason = "merged") => ({ repo, size, reason, wallMs: min * MIN });
+    const h = laneHistory([run("o/r", "S", 4), run("o/r", "S", 6), run("o/r", "S", 8), run("o/r", "S", 100, "needs-human"), run("x/y", "S", 1),
+      run("o/r", "L", 90), run("o/r", "L", 70)], "o/r");
+    assert.deepEqual(h, { S: 6 }, "L has only 2 samples; other repos and unmerged runs never count");
+    assert.equal(estimateLaneMinutes({ labels: ["size:S"], history: h }), 6);
+    assert.equal(estimateLaneMinutes({ labels: ["size:L"], history: h }), EST_DEFAULT_MIN.L);
+  });
+
+  it("admits by estimate, descending, within a priority level; priority across levels is unchanged", async () => {
+    const est = { 1: 5, 2: 50, 3: 20 };
+    const order = [];
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 1, readBody: async () => "", estimate: async (n) => est[n],
+      runOne: async (n) => { order.push(n); return { terminalReason: "merged" }; } });
+    assert.deepEqual(order, [2, 3, 1]);
+    assert.deepEqual(rows.map((r) => r.est_minutes), [5, 50, 20]);
+    const { handle } = world();
+    const order2 = [];
+    await orchestrate({ issues: [1, 2, 3], parallel: 1, readBody: async () => "", estimate: async (n) => est[n], pollMs: 2, batchId: "lpt",
+      sched: { registry: handle(7101), batch: "lpt", repo: "o/r", cap: 4 }, priorityOf: async (n) => (n === 1 ? 1 : 2),
+      runOne: async (n) => { order2.push(n); return { terminalReason: "merged" }; } });
+    assert.deepEqual(order2, [1, 2, 3], "the short P1 still precedes the long P2s");
+  });
+
+  it("decomposed sub-issues are admitted before same-priority FIFO items, with or without an estimator", async () => {
+    for (const estimate of [null, async () => 10]) {
+      const order = [];
+      let store = null;
+      await orchestrate({ issues: [1, 2, 3], parallel: 1, readBody: async () => "", estimate, store: { load: () => null, save: (x) => { store = x; } },
+        runOne: async (n) => { order.push(n); return n === 1 ? { terminalReason: "decomposed", subissues: [8, 9] } : { terminalReason: "merged" }; } });
+      assert.deepEqual(order, [1, 8, 9, 2, 3]);
+      assert.equal("estimates" in store, !!estimate, "no estimates key without an estimator");
+      if (estimate) assert.equal(store.estimates[8], EST_DEFAULT_MIN.M, "parent estimate ÷ N, floored at M");
+    }
+  });
+
+  it("starvation guard: an issue queued past starveMs is bumped ahead of a longer estimate", async () => {
+    // #2 runs 0-10 min; #3 (longer) is added at 1 min; at 10 min #1 has waited 10 min.
+    const run = async (starveMs) => {
+      const c = vclock();
+      const order = [];
+      try {
+        await orchestrate({ issues: [1, 2], parallel: 1, readBody: async () => "", now: c.now, sleep: c.sleep, pollMs: MIN, starveMs,
+          getAdded: () => (c.now() >= MIN ? [3] : []), estimate: async (n) => ({ 1: 5, 2: 30, 3: 40 })[n],
+          runOne: async (n) => { order.push(n); await c.at(10 * MIN); return { terminalReason: "merged" }; } });
+      } finally { c.stop(); }
+      return order;
+    };
+    assert.deepEqual(await run(8 * MIN), [2, 1, 3], "#1 waited past the limit");
+    assert.deepEqual(await run(30 * MIN), [2, 3, 1], "under the limit: longest first");
+  });
+
+  it("critical path: an issue with an in-batch dependent outranks an equal estimate without one", async () => {
+    const order = [];
+    await orchestrate({ issues: [1, 2, 3], parallel: 1, readBody: async (n) => (n === 3 ? "Depends on #2" : ""), estimate: async () => 10,
+      runOne: async (n) => { order.push(n); return { terminalReason: "merged" }; } });
+    assert.deepEqual(order, [2, 1, 3]);
+  });
+
+  it("replay of the 2026-10-22 batch: makespan is about the longest chain, not the FIFO tail", async () => {
+    // K=6; 41 short lanes; #41 (size:L, 40 min) is listed last; #3 decomposes 4 min in; its sub-issue #104 runs 48 min.
+    const c = vclock();
+    const issues = Array.from({ length: 41 }, (_, i) => i + 1);
+    const dur = (n) => (n === 41 ? 40 : n === 3 ? 4 : n === 104 ? 48 : 2) * MIN;
+    const start = new Map();
+    let rows;
+    try {
+      rows = await orchestrate({ issues, parallel: 6, readBody: async () => "", now: c.now, sleep: c.sleep,
+        estimate: async (n) => estimateLaneMinutes({ labels: [n === 41 ? "size:L" : "size:S"] }),
+        runOne: async (n) => {
+          start.set(n, c.now());
+          await c.at(dur(n));
+          return n === 3 ? { terminalReason: "decomposed", subissues: [101, 102, 103, 104] } : { terminalReason: "merged" };
+        } });
+    } finally { c.stop(); }
+    const makespan = c.now() / MIN;
+    assert.equal(rows.filter((r) => r.outcome === "merged").length, 44);
+    assert.equal(start.get(41), 0, "the long lane is admitted first");
+    assert.ok(start.get(104) <= 5 * MIN, `sub-issue #104 started at ${start.get(104) / MIN} min`);
+    assert.ok(makespan <= 56, `makespan ${makespan} min (longest chain 4 + 48)`);
+  });
+
+  it("formatEstimateSummary: estimated vs. actual over lanes that ran", () => {
+    assert.equal(formatEstimateSummary([{ issue: 1, outcome: "merged", minutes: 3 }]), null);
+    assert.equal(formatEstimateSummary([{ issue: 1, outcome: "merged", minutes: 12, est_minutes: 10 }, { issue: 2, outcome: "merged", minutes: 40, est_minutes: 25 },
+      { issue: 3, outcome: "held", minutes: 0, est_minutes: 10 }]),
+    "estimates: 2 lanes, est 35.0 min vs actual 52.0 min; median |error| 8.5 min; worst #2 est 25 actual 40");
+  });
+
+  it("a resume keeps estimates, queue times and the head band from the store", async () => {
+    const saved = { v: 1, order: [1, 2, 3], deps: { 1: [], 2: [], 3: [] }, lanes: {}, crossSeen: [], results: {}, running: {}, pending: [2, 3, 1],
+      estimates: { 1: 50, 2: 5, 3: 20 }, enqueued: { 1: 0, 2: 0, 3: 0 }, heads: [3] };
+    const order = [];
+    let estCalls = 0;
+    await orchestrate({ issues: [], parallel: 1, readBody: async () => "", estimate: async () => { estCalls++; return 1; }, now: () => 0,
+      store: { load: () => saved, save: () => {} }, runOne: async (n) => { order.push(n); return { terminalReason: "merged" }; } });
+    assert.deepEqual(order, [3, 1, 2]);
+    assert.equal(estCalls, 0);
   });
 });
