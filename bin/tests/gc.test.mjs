@@ -76,10 +76,10 @@ const destructive = (w) => [...w.calls.docker, ...w.calls.git.map((g) => g.repla
 const find = (plan, type, id) => plan.items.find((i) => i.type === type && (i.id === id || i.id === resolve(id)));
 const old = (ms = 48 * H) => Math.floor((NOW - ms) / 1000);
 const dockerTime = (ms) => new Date(ms).toISOString().replace("T", " ").replace(/\.\d+Z$/, " +0000 UTC");
-function writeLedger(w, { batch = "b1", lane = "lean-77", pid = 999999, host = HOST, expires = NOW + H, resources = [] } = {}) {
+function writeLedger(w, { batch = "b1", lane = "lean-77", pid = 999999, host = HOST, expires = NOW + H, resources = [], repo = null } = {}) {
   const dir = join(w.ledgerRoot, batch); mkdirSync(dir, { recursive: true });
-  const path = join(dir, `${lane}.json`);
-  writeFileSync(path, JSON.stringify({ v: 1, owner: "core_1", batch, lane, issue: 77, host, pid, created: NOW - 10 * H, expires, resources }));
+  const path = join(dir, `${repo ? repo.split("/").join("__") + "__" : ""}${lane}.json`);
+  writeFileSync(path, JSON.stringify({ v: 1, owner: "core_1", batch, lane, issue: 77, ...(repo ? { repo } : {}), host, pid, created: NOW - 10 * H, expires, resources }));
   return path;
 }
 const run = async (w, argv) => { let out = ""; const code = await runGc(argv, { probes: w.probes, now: NOW, out: (s) => { out += s; }, err: (s) => { out += s; } }); return { code, out }; };
@@ -182,6 +182,16 @@ describe("forgedock gc simulated lane crash (#4180)", () => {
     assert.equal(existsSync(runTmp), false);
     assert.ok(w.calls.git.some((g) => g.startsWith("worktree prune")));
     assert.equal(existsSync(path), false, "ledger cleared once every entry is reclaimed");
+  });
+  it("#4432: a dead-owner repo-keyed ledger (owner__repo__lane.json) is released and removed by --apply", async () => {
+    const w = world();
+    const runTmp = join(w.tmpRoot, "runs", "77-2"); mkdirSync(runTmp, { recursive: true });
+    const path = writeLedger(w, { repo: "acme/widgets", resources: [{ kind: "tmp", value: runTmp, registered: NOW - 2 * H }] });
+    assert.match(path, /acme__widgets__lean-77\.json$/);
+    const r = await run(w, ["--apply"]);
+    assert.equal(r.code, 0, r.out);
+    assert.equal(existsSync(runTmp), false);
+    assert.equal(existsSync(path), false, "repo-keyed ledger cleared once every entry is reclaimed");
   });
   it("a ledger whose owner is alive on this host (a running lane) is never touched", async () => {
     const w = world();

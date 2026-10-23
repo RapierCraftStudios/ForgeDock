@@ -223,7 +223,7 @@ export async function planGc({ probes, scopes = new Set(GC_SCOPES), olderThanMs 
       const sameHost = j.host === P.host;
       // A live owner on this host is a running lane, even past `expires` (long CI waits refresh it only on register).
       const stale = sameHost ? !(Number.isSafeInteger(j.pid) && P.alive(j.pid)) : Number(j.expires) < now;
-      ledgers.push({ path, batch: j.batch, lane: j.lane, stale });
+      ledgers.push({ path, batch: j.batch, lane: j.lane, repo: j.repo ?? null, stale });
       for (const r of j.resources) {
         const type = TYPE_OF_KIND[r.kind];
         if (!type) continue;
@@ -506,7 +506,7 @@ export async function applyGc(plan, probes, { deadline = null, now = () => Date.
       reclaimed.push(it);
       if (it.ledger) {
         const l = plan.ledgers.find((x) => x.path === it.ledger);
-        if (l) { const led = makeLedger({ root: dirname(dirname(l.path)), batch: l.batch, lane: l.lane, fs }); if (led.path === l.path) led.release(it.kind, it.value); }
+        if (l) { const led = makeLedger({ root: dirname(dirname(l.path)), batch: l.batch, lane: l.lane, repo: l.repo, fs }); if (led.path === l.path) led.release(it.kind, it.value); }
       }
     } catch (e) { failed.push({ ...it, error: errText(e) }); }
   }
@@ -526,7 +526,7 @@ export async function applyGc(plan, probes, { deadline = null, now = () => Date.
   await flush(remote.filter((it) => !it.gone), (c) => ["push", "origin", "--delete", ...c.map((it) => it.branch)]);
   if (prune) { try { await git(["worktree", "prune"]); } catch { /* best effort */ } }
   for (const l of plan.ledgers.filter((x) => x.stale)) {
-    const led = makeLedger({ root: dirname(dirname(l.path)), batch: l.batch, lane: l.lane, fs });
+    const led = makeLedger({ root: dirname(dirname(l.path)), batch: l.batch, lane: l.lane, repo: l.repo, fs }); // #4432: repo-keyed file name
     if (led.path === l.path && led.read() && led.entries().length === 0) led.remove();
   }
   return { reclaimed, failed, deferred };
