@@ -1631,3 +1631,26 @@ Two hosted batches that both include issue N (a resumed batch and a new one) no 
   closed issue without one ends `invalid`, both with `skipped at dispatch: …` and no lane, so dependents still run.
   Fail-open: an error or an unreadable answer runs the lane.
 - `--cancel <id>` (#4376) is unchanged; a test pins that a schedd restart resumes no batch cancelled through the daemon.
+
+## Entry 2026-10-23 — schedd logs every exit; clients re-attach after a daemon death (#4503)
+
+A daemon vanished without a line in `schedd.log`, and its client exited, so the batch stalled until some other client
+spawned a daemon. Now every exit writes a reason line. `exitOnSignals(d, {on, exit, log})` handles SIGTERM, SIGINT and
+SIGHUP (128+signo) and `uncaughtException`/`unhandledRejection` (exit 1, stack on the next line): it logs
+`schedd: exiting (<reason>)` before `close()`, and the process `exit` logs `schedd: exited (code N)`. The idle path keeps
+`schedd: idle, exiting`. Every `lockCheckMs` (default `LOCK_CHECK_MS` 5 s) `startDaemon` checks that `schedd.lock` still
+holds its pid and `schedd.sock` exists. If not, it logs `schedd: lost lock (owner …)` or `lost socket …, exiting` and
+stops like `close()`, so its batches stay resumable (no report). On a lost lock it neither closes the server (libuv would
+unlink the successor's socket path) nor removes the socket. Taking over a dead owner's lock logs
+`schedd: took over the lock of dead pid N (it exited without a clean shutdown)`, so a SIGKILL or OOM kill leaves a trace.
+An `attach` that arrives while a start-up resume of that batch is not yet hosted waits for it instead of hosting a second
+copy.
+
+The client (`orchestrateClient`): when the stream drops after the batch id is known, it prints
+`schedd connection lost; reconnecting to batch <id>`, reconnects through `connectDaemon` (spawning a daemon unless
+`spawnDaemon: null`) and sends `attach`, without reprinting replayed rows. It keeps retrying for `deps.reconnectMs`
+(default 60 s) per loss and allows at most 10 losses, then throws the old `--resume <id>` hint.
+
+Tests: `schedd.test.mjs` pins `FORGEDOCK_SCHED_DIR` to a tmp dir in the test process, so the env that clients submit for
+their lanes never resolves `~/.forge/sched`. Stub lanes record their pid, exit once the work dir is gone or after 120 s,
+and are SIGKILLed by `h.cleanup()` and by a process `exit` hook. Cost: 0 LLM calls.
