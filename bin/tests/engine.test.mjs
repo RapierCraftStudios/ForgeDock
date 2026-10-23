@@ -7,7 +7,11 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runIssue, ciPollDelayMs, ciRateLimitSleepMs, backendIdentity, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, isLeaseHolderDead, leaseChildAlive } from "../engine.mjs";
-import { readLog, deriveState, appendEvent } from "../engine/runlog.mjs";
+import { readLog as readRepoLog, deriveState, appendEvent as appendRepoEvent, runLogPath } from "../engine/runlog.mjs";
+// #4432: the full path keys its run log by repo; this file's fake gh answers `repo view` with acme/widgets.
+const LOG_REPO = { repo: "acme/widgets" };
+const readLog = (dir, issue) => readRepoLog(dir, issue, LOG_REPO);
+const appendEvent = (dir, issue, e) => appendRepoEvent(dir, issue, e, LOG_REPO);
 import { pickPhase } from "../engine/phases.mjs";
 import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
 import { VALID_BACKENDS } from "../runner.mjs";
@@ -190,7 +194,6 @@ describe("runIssue", () => {
     const { w, io } = fakeWorld();
     w.markers = investigationComment("COMPLETE") + builder("fix/real-branch-42");
     w.commitsAhead = 2;
-    const { appendEvent } = await import("../engine/runlog.mjs");
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
 
@@ -219,10 +222,10 @@ describe("runIssue", () => {
     const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
     await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", repo: "o/r",
       io, runner, now: () => 1000, maxAttempts: 1 });
-    const start = readLog(dir, 42).find((e) => e.event === "RUN_START");
+    const start = readRepoLog(dir, 42, { repo: "o/r" }).find((e) => e.event === "RUN_START");
     assert.equal(start.repo, "o/r");
     assert.equal(start.version, JSON.parse(readFileSync(join(__dirname, "..", "..", "package.json"), "utf8")).version);
-    assert.equal(deriveState(readLog(dir, 42)).run, "r_42_staging", "deriveState ignores the new fields");
+    assert.equal(deriveState(readRepoLog(dir, 42, { repo: "o/r" })).run, "r_42_staging", "deriveState ignores the new fields");
   });
 
   it("forge#2889: commits a blocked review and hands it to remediation in the same run", async () => {
@@ -1177,7 +1180,6 @@ describe("runIssue", () => {
     w.body = serializeState(remoteIndex);
 
     // Build a local run-log at v=2 (ahead of remote) to trigger remirror.
-    const { appendEvent } = await import("../engine/runlog.mjs");
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
@@ -1405,7 +1407,7 @@ describe("runIssue", () => {
 
     it("an override without a revocation, or neither -> not-retryable, nothing runs", async () => {
       for (const extra of [OVERRIDE, ""]) {
-        rmSync(join(dir, "42.jsonl"), { force: true });
+        rmSync(runLogPath(dir, 42, LOG_REPO.repo), { force: true });
         const { w, io } = fakeWorld();
         staleDecomposedRun(w);
         w.markers += extra;
@@ -1433,7 +1435,6 @@ describe("runIssue", () => {
   it("forge#3499: a legacy run-log that committed context/architect still resolves to build (unknown committed ids are ignored)", async () => {
     const { w, io } = fakeWorld();
     w.markers = investigationComment("COMPLETE") + ctx();
-    const { appendEvent } = await import("../engine/runlog.mjs");
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
@@ -1517,7 +1518,6 @@ describe("runIssue", () => {
     w.labels.push("workflow:merged");
     const runCounts = {};
 
-    const { appendEvent } = await import("../engine/runlog.mjs");
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
@@ -2318,7 +2318,6 @@ describe("runIssue — forge#2239: in-flight lease", () => {
     // null lease. Confirm the post-fix code now claims a real lease in this path too.
     const { w, io } = fakeWorld();
     w.body = ""; // no remote FORGE:STATE block at all
-    const { appendEvent } = await import("../engine/runlog.mjs");
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
 
     let sawLeaseBeforeRunnerCall = null;
@@ -3193,7 +3192,7 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
   it("resumes after a remote-hydrate (no local log)", async () => {
     const { w, io } = fakeWorld();
     await runToEngineError(w, io);
-    rmSync(join(dir, "42.jsonl"));
+    rmSync(runLogPath(dir, 42, LOG_REPO.repo));
     const ran = [];
     const base = okRunner(w);
     const runner = async (a) => { ran.push(a.commandName); return base(a); };
