@@ -1213,7 +1213,7 @@ async function orchestrateClient(argv, deps = {}) {
     try {
       return (await schedd.request(sock, req, onMsg)).result;
     } catch (e) {
-      if (!id || !/closed the connection/.test(e?.message ?? "")) throw e;
+      if (!id || !(/closed the connection/.test(e?.message ?? "") || ["ECONNRESET", "EPIPE"].includes(e?.code))) throw e;
       const giveUp = () => new Error(`${e.message}; the batch keeps its state: forgedock orchestrate --resume ${id}`);
       if (++losses > 10) throw giveUp();
       console.log(`schedd connection lost; reconnecting to batch ${id}`);
