@@ -162,6 +162,17 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `RECOVER_HOW` (continue from the checkpoint or a typed split-required block). Plan/corrections and fix rounds are not
    budgeted. The lane result and `RUN_TERMINAL` carry `turns: {size, budget, build, total, exceeded}`; orchestrate copies it
    to the row and the batch report adds `formatTurnSummary` (`turns by size: S n= p50 max/budget; … over budget: #N`).
+   **Lane profile** (#4395, `lean.mjs` section 2a + `callRunner`): every LLM session runs with
+   `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (profile `memory-off`). With forge.yaml `engine.lane_instructions`
+   (`engine-cli.mjs` `readLaneInstructions` → runCore `laneInstructions`) naming a repo-relative file in the lane
+   worktree (no `..`, non-empty, ≤ `LANE_INSTRUCTIONS_MAX_BYTES` 16 KB), profile `lane` also sets
+   `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` and appends the file text to the system prompt of fresh tool-using sessions
+   (builder, reviewer, verifier; not resumes, not the noTools grouper). A bad file is a trajectory anomaly and falls back
+   to `memory-off`. `FORGEDOCK_FULL_SESSION=1` is profile `full`: nothing changes. No `--setting-sources`/`--bare`, so
+   user-scope hooks keep running; `laneEnv()` (validate/precheck/setup commands) never gets the switches. Measurement:
+   `runCliBackendAsync` returns `baselineTokens` (first stream assistant message's input + cache read + cache creation);
+   `makeLeanRunner` keeps it for fresh sessions only, and `PHASE_ATTEMPT_USAGE` / telemetry `phase_attempt` carry
+   `baseline_tokens` and `lane_profile`. Decision: `devdocs/decisions/4395-lane-profile.md`.
    **Quiet output** (#4390): `HOST_RULES` tells the builder to run tests quiet, read failures as `tail -40` + failing test
    ids, read files by range and send output that may pass 8 KB to a `$TMPDIR` file. `precheck.mjs` `quietFailure`
    (last 40 lines within the char share, failing-test-id lines by pytest/TAP/jest/vitest/go/cargo markers, `full log:`
@@ -539,6 +550,9 @@ arguments, resolves the repo, auto-spawns the daemon (output to
   `addIssues` after re-reading the pending issues' `Depends on`, and records one
   batch decision plus an `added` row. `attach` resumes a finished batch that has
   unrun adds instead of replaying its report.
+- `cancel {id}` (#4376, `--cancel <id>`) writes the batch's `cancel` file. Only that
+  batch stops: no more admissions, SIGTERM to its running local lanes, the rest `held`.
+  With no daemon, the client writes the file itself.
 - `status` reports the daemon pid and hosted batches.
 
 A client exit never stops a batch.
@@ -822,6 +836,20 @@ Thresholds come from `stats.alerts.*`, and there are no alerts under 10 lanes.
 `forgedock stats` prints the same alerts as `## ALERTS`. A failure while computing
 them never fails the batch. Cost: 0 LLM calls, no network.
 
+After the turns-by-size line, the batch report prints the efficiency section (#4402)
+from `bin/stats/efficiency.mjs` `batchEfficiency` over the in-memory rows, the
+batch's `log.jsonl` settle times and the run-log dir. It covers merged count,
+$/merge (implement and review), turns/merge and context/turn, each split by size
+and by model. It also covers retries/merge by cause (env, engine, code, review,
+unknown, counting lane reruns), no-action lanes (parked post-deploy follow-ups and
+`Builder is blocked (promotion)`), issue quality vs. cost, and the acceptance pass
+rate 7 days after promotion. A merged issue's cost includes its earlier run slices
+(cost to merge). `gh` is called only for merged issues' bodies, labels and
+`FORGE:PROBE` comments. A gh failure turns quality and acceptance into `n/a`, and
+any error prints `efficiency: n/a (...)` without failing the batch.
+`forgedock stats --efficiency` prints the same lines per batch and over trailing
+windows (`docs/STATS.md`). Cost: 0 LLM calls.
+
 ## Entry 2026-10-20 — Complete conformance reviews, blocking shadow gate (#4160)
 
 `decide()` first runs `fillEngineRows` (`conformance.mjs`): engine-authorized scope rows, `unverified` preserve rows and `path:line` evidence normalized to repo paths (`normalizeEvidencePath`) are no longer "incomplete". `reviewerPrompt` embeds `reviewSkeleton` (a row per R/P/scope/coverage id). `checkCompleteness` returns `missing` ids; the retry in `reviewOnce` is `reviewerRepairPrompt` for those ids only (no diff), merged by `mergeReviewRows`. `changedFiles()` drops files equal to the base tip (base-sync merges).
@@ -1099,6 +1127,21 @@ The lane result carries `conformance {mode, would, risk}`. Orchestrate's row cop
 or unparseable review) and risk-enforced lanes. Rationale: `devdocs/decisions/4398-risk-path-enforce.md`. Cost: 0 LLM
 calls; a risk-enforced lane may spend the one builder resume that shadow would have skipped.
 
+## Entry 2026-10-23 — Lint scoped to changed packages; configured typescript.lint (#4381)
+
+`checks.mjs` printed `turbo run lint --filter=...[base]` (changed packages plus
+every dependent), so a change to an upstream package linted the whole repo.
+`scoping.mjs` `scopeMono` now scopes a turbo run whose tasks are all lint tasks
+(`lint`, `lint:*`, `*:lint`) to `--filter=[base]` (selector `turbo-changed`);
+typecheck/test/build keep `...[base]`. `checks.mjs` `configuredLint` reads
+`verification.commands.typescript.lint` from the trusted forge.yaml
+(`lib.mjs` `trustedForgeYaml`, extracted from `plan.mjs` `loadConfig`, forge#4040)
+and prints it (`configured: true`) in place of the discovered JS lint; Python
+checks are never replaced. `HOST_RULES` forbids dependency-closure lints (the
+configured lint wins because the builder runs what `checks.mjs` prints; filler
+words were trimmed to keep the implement prompt within its 1500-token budget). Legacy `validate.md` runs `typescript.lint` like
+`typescript.typecheck`.
+
 ## Entry 2026-10-23 — Independent adversarial verifier (#4397)
 
 The conformance reviewer reads `<builder_result>` and shares `REVIEW_RUBRIC` with the builder's self-review (#4374), so it is a
@@ -1144,6 +1187,31 @@ their linked issues whose `files` overlap the issue's named paths. The pack list
 hot spots, decisions, conventions, baselines. Each line carries its provenance (`#33, PR #101`). The repo-fact pointers
 follow, all under `facts` (section "Facts from earlier lanes and repo facts"). Cost: 0 LLM calls, about 60 prompt
 tokens, one comment per lane, and no extra GitHub read per PR.
+
+## Entry 2026-10-23 — Resume digest and populated context-pack sources (#4400)
+
+Resumed and recovery lanes used to re-orient from scratch. `textOf` keeps every `<!-- FORGE:` comment out of the quotable
+issue text (#4297), so the last run's own records never reached the builder. `resume.mjs` (pure) adds
+`buildResumeDigest`, a bounded digest (`RESUME_DIGEST_BYTES`, 2048 bytes) built from structured records only. It holds
+the RUN_START `FORGE:STATE` end reason, `terminalCode` and `failureClasses`, kept only when they are outcome codes. The
+lease write keeps them, so they are read before this run ends. It adds the first line of the newest trusted
+`FORGE:NEEDS_HUMAN`/`FORGE:FIX_CI` and the newest trusted `FORGE:FACTS` baselines (validate command + exit, mapped to the
+contract's `V` ids). It lists the frozen contract's `deliver` requirements and the branch's changed files, and ends with
+"start from this state: do not re-derive it". Whole lines drop from the end to fit the cap, so the end reason and
+validate results survive longest. Text is one-lined, comments are stripped and `<` is escaped. `runCore` builds the
+digest once when the lane is resumed, salvaged or a recovery pass, unless `engine.context_pack` is `off`. It is the
+lane's own state, not the shadow-gated hint pack. The digest is appended to the plan rerun prompt, to the implement
+prompt on the frozen-contract path (after the recovery note) and to the context-restart prompt. It never goes into
+`issueText`. A `RESUME_DIGEST {bytes, files, validates, reason}` event and a trajectory decision record it, so recovery
+implement attempts can be compared with first runs.
+
+Why the pack's `facts` source was 0 in all 10 AlterLab lanes on 2026-10-22: (a) there was no `FORGE:FACTS` source before
+#4401; (b) the repo-fact pointers (`.forge/repo-facts.json`, `.forge/test-map.json`) were only looked up in the lane
+worktree, and these untracked caches never exist there. `gatherContextFacts` now takes `checkout` (the main checkout) as
+the fallback, like `factsPath([wt, cwd])` for the builder; the cache key is unchanged. `ledger`, and facts from merged
+PRs, still depend on the issue body naming file paths (`namedPaths`). `attempts` is 0 on a first run by design.
+The `on` vs `shadow` A/B (turns, cache-read and rework per merge, via `forgedock stats --context-ab`) runs after deploy.
+Cost: 0 LLM calls; one `git diff --name-only` on a resumed lane; at most ~500 prompt tokens.
 
 ## Acceptance probes (#4399)
 
@@ -1230,3 +1298,23 @@ Orchestrate's row keeps `subissues` and `decomposition`. The batch report prints
 for decomposed parents (their row plus their sub-lanes, recursively; sub-issues not in the batch are counted as
 outside) against merged single-lane parents. Rationale: `devdocs/decisions/4396-decomposition-gate.md`. Cost: 0 LLM
 calls; an unjustified split spends the one block-correction resume instead of N sub-lanes.
+
+## Entry 2026-10-23 — Per-batch cancel (#4376)
+
+`forgedock orchestrate --cancel <id>` stops one batch without stopping the shared schedd. The client sends the schedd
+`cancel` op, or, with no daemon, writes `batch.mjs` `requestCancel` (the batch `cancel` file, `{at, reason}`) itself. A
+finished batch (its `report.json` written, not hosted) is left alone; an unknown id fails `no batch`. `orchestrate.mjs`
+reads the file through `getCancelled` every pass, and also every `pollMs` while lanes run or the batch waits on a delay.
+On the first pass that sees it, the runner:
+- admits nothing more, including beforeAdmit GC and recovery relaunches;
+- logs one `cancelled` row and a batch decision, and withdraws its registry offers;
+- calls `stopLane` once per running local lane. engine-cli wires `stopLane` to `killLedgerPid(pid, resultFile)`: SIGTERM
+  to the lane's process group, so its #4179 teardown checkpoints and reports `deferred run.interrupted`.
+
+A lane settling `deferred` or `engine-error` under a cancel is requeued with no deferral and no usage-limit hold. A lane
+the runner launched in the same instant ends `deferred` without starting. Remote lanes (sandboxes) are not stopped: their
+teardown has no checkpoint, so they run to their result. Once nothing runs, the loop ends; every unfinished issue is
+`held` with detail `cancelled by operator` (also the reason for the #4315 queued-recovery relabel) and `report.json` is
+written. `state.json` keeps `cancelled`, but the file stays the authority: an operator `--resume` clears it (`clearCancel`
+next to the breaker reset) and continues the held issues; a daemon restart (`keepBreaker`) keeps it. Cost: 0 LLM calls;
+one small file read per pass. ADR `decisions/4376-orchestrate-cancel.md`.

@@ -170,7 +170,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null }) {
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, getCancelled = null, stopLane = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -191,6 +191,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const holds = limits ?? memoryLimits(now);
   const heldUntil = () => { try { const id = identity(); const u = holds.holdUntil(id); return Number.isFinite(u) && u > now() ? u : null; } catch { return null; } };
   let tripped = saved?.breaker ?? null;
+  // #4376: operator cancel (the batch `cancel` file through `getCancelled`); persisted, but the file stays the authority.
+  let cancelled = getCancelled ? (saved?.cancelled ?? null) : null;
   const budget = maintenance && Number(maintenance.share) > 0 ? { share: Number(maintenance.share), whenIdle: !!maintenance.whenIdle } : null;
   const classes = toMap(saved?.classes); // issue -> {maintenance, priority}; only with a maintenance budget
   const dispatch = { started: saved?.dispatch?.started ?? 0, maint: saved?.dispatch?.maint ?? 0 };
@@ -234,7 +236,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
       ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering) } : {}),
-      ...(relabelled.size ? { relabelled: [...relabelled] } : {}) });
+      ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}) });
   };
   const update = (row) => { store?.log?.(row); onUpdate(row); };
   const classifyOne = async (n) => {
@@ -409,6 +411,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       update({ ...row, detail: `requeued behind ${depList.map((d) => `#${d}`).join(", ")}` });
       return;
     }
+    // #4376: a lane stopped by a cancel is not a scheduling failure: requeued (held at the end), no deferral, no hold.
+    if (cancelled && (row.outcome === "deferred" || row.outcome === "engine-error")) {
+      requeue(n, 0); done(); save();
+      update({ ...row, detail: `stopped by cancel: ${r?.code ?? row.outcome}${r?.detail ? ` ${r.detail}` : ""}` });
+      return;
+    }
     if (row.outcome === "deferred") {
       const pol = deferPolicy(r, { now: now(), deferrals: deferrals.get(n) ?? 0, maxDeferrals });
       if (!pol.capped) {
@@ -512,13 +520,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (prefilter && !checked.has(n)) { let pf = null; try { pf = await prefilter(n, lane); } catch { pf = null; } checked.set(n, pf); save(); }
       const pf = checked.get(n) ?? null;
       let r;
-      if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
+      if (cancelled) r = { terminalReason: "deferred", code: "run.interrupted", cost_usd: 0, detail: "cancelled before launch" }; // #4376
+      else if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       // #4389: a parked post-deploy follow-up starts no lane; it ends awaiting-promotion|awaiting-precondition, re-checked next batch.
       else if (pf?.parked) r = { terminalReason: pf.kind, cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
           r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= recoveryMax } } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
+            if (cancelled) stop(n, rec); // #4376: launched while the cancel arrived
             if (reg && slotted.has(n) && info?.pid) reg.setLanePid(keyOf(n), info.pid);
           } });
         }
@@ -550,7 +560,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   }
   save();
 
-  const heldDetail = (n) => tripped?.detail ?? (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run");
+  const heldDetail = (n) => cancelled ? "cancelled by operator" : tripped?.detail ?? (driftHeld.has(n) ? `drift: ${driftHeld.get(n)} flagged` : budgetStop ? `execution budget: ${budgetStop}` : budgetHeld ? "maintenance share" : "not run");
   // #4315: a recovery queued but never launched (the batch stopped: breaker, budget, hold; or a resume that did not relaunch a
   // lost run) left the issue without needs-human, since a non-final attempt does not relabel. Relabel it once, with the full reason.
   // #4318: also on a throw out of the loop and on a signal (`onExit`); `cause` overrides the held reason. Runs once per process.
@@ -590,10 +600,33 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     update({ issue: null, outcome: "added", detail: list });
     return fresh.length;
   };
+  // #4376: one SIGTERM per running local lane (their teardown saves the work); remote lanes run to their result.
+  const stopSent = new Set();
+  function stop(n, rec) {
+    if (!stopLane || rec?.remote || stopSent.has(n)) return;
+    stopSent.add(n);
+    try { Promise.resolve(stopLane(n, rec)).catch(() => {}); } catch { /* best effort */ }
+  }
+  const checkCancel = () => {
+    if (!getCancelled) return;
+    let c = null;
+    try { c = getCancelled() ?? null; } catch { c = null; }
+    if (!c) { if (cancelled) { cancelled = null; save(); } return; }
+    const first = !cancelled;
+    cancelled = c;
+    if (first) {
+      save();
+      decided({ issue: null, what: "cancelled the batch (forgedock orchestrate --cancel)", why: "operator request", alternative: "stop the shared schedd" });
+      update({ issue: null, outcome: "cancelled", detail: "cancelled by operator (forgedock orchestrate --cancel)" });
+      if (reg) withdrawExcept(new Set());
+    }
+    for (const [n, rec] of runRecs) if (running.has(n)) stop(n, rec);
+  };
   const K = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
   try {
     for (;;) {
       await drainAdds();
+      checkCancel();
       if (!pending.length && !running.size) break;
       // Resolve skips first: a dependency that finished unsatisfied (or never can) skips its dependents.
       for (let i = pending.length - 1; i >= 0; i--) {
@@ -616,10 +649,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       };
       budgetHeld = false;
       // #4183: a hook (owned-resource GC near the host ceiling) before lanes are admitted; its errors never stop the batch.
-      if (beforeAdmit && !tripped && !holdUntil && running.size < K() && pending.some(isReady)) { try { await beforeAdmit(); } catch { /* ignored */ } }
+      if (beforeAdmit && !tripped && !cancelled && !holdUntil && running.size < K() && pending.some(isReady)) { try { await beforeAdmit(); } catch { /* ignored */ } }
       budgetStop = null;
       const wanted = new Set(); // issues that stay offered in the host registry after this pass
-      if (!tripped && !holdUntil && budget) {
+      if (!tripped && !cancelled && !holdUntil && budget) {
         while (running.size < K()) {
           const ready = pending.filter(isReady);
           const n = pickNext(ready, { classes, share: budget.share, whenIdle: budget.whenIdle, started: dispatch.started, maint: dispatch.maint,
@@ -630,7 +663,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           if (lanes.get(n)?.ok !== false) { dispatch.started++; if (clsOf(classes, n).maintenance) dispatch.maint++; }
           start(n); started++;
         }
-      } else if (!tripped && !holdUntil && reg) {
+      } else if (!tripped && !cancelled && !holdUntil && reg) {
         // Priority first, pending order within a priority; the free per-batch K is offered so the host queue keeps FIFO.
         const ready = pending.filter(isReady).map((n, i) => [n, i]).sort((a, b) => prioOf(a[0]) - prioOf(b[0]) || a[1] - b[1]).map(([n]) => n);
         const want = ready.filter((n) => lanes.get(n)?.ok !== false && !isRemote(n)).slice(0, Math.max(0, K() - running.size));
@@ -640,7 +673,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           if (running.size >= K() || !grant(n, wanted)) break;
           pending.splice(pending.indexOf(n), 1); start(n); started++;
         }
-      } else if (!tripped && !holdUntil) {
+      } else if (!tripped && !cancelled && !holdUntil) {
         for (let i = 0; i < pending.length && running.size < K();) {
           const n = pending[i];
           if (isReady(n) && grant(n, new Set())) { pending.splice(i, 1); start(n); started++; }
@@ -649,6 +682,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
       if (reg) withdrawExcept(wanted);
       if (tripped && !running.size) { await drainAdds(); break; } // breaker: let running lanes finish, keep the rest pending for a resume
+      if (cancelled && !running.size) { await drainAdds(); break; } // #4376: cancel: the rest end held for a resume
       if (budgetStop && !running.size) { await drainAdds(); break; } // execution budget (stop): the same, the rest end held
       // Wake for a delayed issue, the end of a usage-limit hold, or (with a live K) a poll.
       const waits = pending.map((n) => notBefore.get(n) ?? 0).filter((x) => x > t);
@@ -658,12 +692,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if (getAdded && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408: an add while only lanes run
       if (tripped) wake = null;
+      if (getCancelled && running.size && !cancelled) wake = Math.min(wake ?? pollMs, pollMs); // #4376: notice a cancel while lanes run
       if (running.size) {
         if (wake === null) await Promise.race(running.values());
         else { const ac = new AbortController(); await Promise.race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
       } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
       else if (pending.length && offered.size) await sleep(wake); // waiting for a host slot
-      else if (pending.length && waits.length) await sleep(Math.max(0, Math.min(...waits) - t));
+      else if (pending.length && waits.length) await sleep(Math.min(Math.max(0, Math.min(...waits) - t), getCancelled ? pollMs : Infinity));
       else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
       else if (pending.length && driftHeld.size) { if (await drainAdds()) continue; break; } // held by a drift flag (block_dispatch): pending for a later batch
       else if (pending.length) { // nothing runnable, nothing running, nothing waiting on time: a dependency cycle

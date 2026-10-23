@@ -328,6 +328,9 @@ branches:
 #   turn_budget_s: 25
 #   turn_budget_m: 60
 #   turn_budget_l: 100
+#   # Lane profile (#4395): lanes run without auto-memory; with this repo-relative
+#   # file (hard rules + doc pointers, <= 16 KB) they also skip CLAUDE.md and get it instead.
+#   lane_instructions: devdocs/lane-instructions.md
 
 # =============================================================================
 # ENV (OPTIONAL)
@@ -853,6 +856,8 @@ branches:
 #   #   # TypeScript project using tsc + vitest
 #   #   typescript:
 #   #     format: "prettier --check \"src/**/*.{ts,tsx}\""
+#   #     # lint: validate runs it (same timeout as typecheck); the core engine prints it in place of the
+#   #     # discovered lint (bin/lean/checks.mjs). Prefer a changed-files, cached lint, e.g. "eslint --cache".
 #   #     lint: "eslint src/"
 #   #     typecheck: "tsc --noEmit"
 #   #     test: "vitest run"

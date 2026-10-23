@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { git, changedFiles, sha256, homeForgeDir, shellSplit, shellQuote, globToRegex } from "../../scripts/ci-local/lib.mjs";
+import { git, changedFiles, sha256, homeForgeDir, shellSplit, shellQuote, globToRegex, parseYaml, trustedForgeYaml } from "../../scripts/ci-local/lib.mjs";
 import { makeScopeCtx, scopeCommand } from "../../scripts/ci-local/scoping.mjs";
 
 const px = path.posix;
@@ -67,16 +67,16 @@ export function discoverChecks(repo) {
     const turbo = turboTasks(repo);
     const scripts = new Map(pkgDirs.map((d) => [d, (readJson(path.join(repo, d, "package.json")) || {}).scripts || {}]));
     for (const [script, kind] of Object.entries(SCRIPT_KINDS)) {
-      if (turbo.has(script)) { out.push({ kind, command: `${exists(repo, "node_modules/.bin/turbo") ? "" : "npx "}turbo run ${script}`, cwd: "." }); continue; }
+      if (turbo.has(script)) { out.push({ kind, command: `${exists(repo, "node_modules/.bin/turbo") ? "" : "npx "}turbo run ${script}`, cwd: ".", eco: "js" }); continue; }
       const ws = pkgDirs.filter((d) => d !== "." && typeof scripts.get(d)[script] === "string").sort();
       const dirs = ws.length ? ws : typeof (scripts.get(".") || {})[script] === "string" ? ["."] : [];
-      for (const d of dirs) out.push({ kind, command: `${pm} run ${script}`, cwd: d, exec: EXEC[pm] });
+      for (const d of dirs) out.push({ kind, command: `${pm} run ${script}`, cwd: d, exec: EXEC[pm], eco: "js" });
     }
   }
   const pyproject = readText(path.join(repo, "pyproject.toml"));
   const run = exists(repo, "uv.lock") ? "uv run " : exists(repo, "poetry.lock") ? "poetry run " : "";
-  if (/^\[tool\.ruff/m.test(pyproject) || exists(repo, "ruff.toml") || exists(repo, ".ruff.toml")) out.push({ kind: "lint", command: `${run}ruff check .`, cwd: "." });
-  if (/^\[tool\.pytest/m.test(pyproject) || exists(repo, "pytest.ini") || tracked.some((f) => px.basename(f) === "conftest.py")) out.push({ kind: "test", command: `${run}pytest`, cwd: "." });
+  if (/^\[tool\.ruff/m.test(pyproject) || exists(repo, "ruff.toml") || exists(repo, ".ruff.toml")) out.push({ kind: "lint", command: `${run}ruff check .`, cwd: ".", eco: "py" });
+  if (/^\[tool\.pytest/m.test(pyproject) || exists(repo, "pytest.ini") || tracked.some((f) => px.basename(f) === "conftest.py")) out.push({ kind: "test", command: `${run}pytest`, cwd: ".", eco: "py" });
   return out;
 }
 
@@ -150,16 +150,39 @@ export function laneChanges(repo, base) {
   return { files: files.filter((f) => !f.startsWith(".forge-lean/")), from };
 }
 
-/** The scoped checks for this lane: [{kind, command, cwd, mode, widen_reason, selector, reason}]. */
-export function scopedChecks({ repo, base, checks = discoverChecks(repo) }) {
+/**
+ * The repo's configured `verification.commands.typescript.lint` (#4381), read only from the trusted forge.yaml copy
+ * (forge#4040: never the PR's own tree). null when absent, empty or unreadable (no yq, parse error).
+ */
+export function configuredLint(repo, base) {
+  try {
+    const mb = git(repo, ["merge-base", base, "HEAD"]).out.trim();
+    const { text } = trustedForgeYaml(repo, base, mb);
+    if (!text) return null;
+    const v = parseYaml(text)?.verification?.commands?.typescript?.lint;
+    return typeof v === "string" && v.trim() ? v.trim() : null;
+  } catch { return null; }
+}
+
+/**
+ * The scoped checks for this lane: [{kind, command, cwd, mode, widen_reason, selector, reason, configured}]. A configured
+ * typescript.lint replaces the discovered JS lint checks (#4381); Python checks are never replaced.
+ */
+export function scopedChecks({ repo, base, checks = discoverChecks(repo), lint = configuredLint(repo, base) }) {
   const { files, from } = laneChanges(repo, base);
   const sctx = makeScopeCtx({ repo, baseRef: base, from, changed: files });
+  if (lint) {
+    const i = checks.findIndex((c) => c.kind === "lint" && c.eco === "js");
+    const own = { kind: "lint", command: lint, cwd: ".", configured: true, ...(exists(repo, "package.json") ? { exec: EXEC[packageManager(repo)] } : {}) };
+    checks = i < 0 ? [...checks, own] : [...checks.slice(0, i), own, ...checks.slice(i).filter((c) => !(c.kind === "lint" && c.eco === "js"))];
+  }
   return checks.map((c) => {
     const r = scopeCommand(c.command, c.cwd === "." ? "" : c.cwd, sctx);
     // A resolved script body (`pnpm run typecheck` -> `tsc -p apps/web`) runs its binary through the package manager.
     const resolved = r.action !== "skip" && c.exec && r.command !== c.command && !SYSTEM_BINS.has(px.basename((shellSplit(r.command) || [""])[0]));
     const out = { kind: c.kind, cwd: c.cwd, command: r.action === "skip" ? "" : resolved ? `${c.exec} ${r.command}` : r.command, mode: r.mode, widen_reason: r.widen_reason || "", selector: r.selector || "" };
     if (r.reason) out.reason = r.reason;
+    if (c.configured) out.configured = true;
     return r.action === "skip" ? out : withCacheFlags(out, repo);
   });
 }
@@ -190,8 +213,8 @@ function main(argv) {
   if (!checks.length) console.log("# no typecheck/lint/test command found");
   for (const c of checks) {
     const where = c.cwd && c.cwd !== "." ? `(cd ${shellQuote(c.cwd)} && ${c.command})` : c.command;
-    if (c.mode === "skip") console.log(`${c.kind} skip  # skipped: ${c.reason || "not affected"}`);
-    else console.log(`${c.kind} ${c.mode} ${where}${c.widen_reason ? `  # widened: ${c.widen_reason}` : ""}`);
+    if (c.mode === "skip") console.log(`${c.kind} skip  # skipped: ${c.reason || "not affected"}${c.configured ? " (configured: verification.commands.typescript.lint)" : ""}`);
+    else console.log(`${c.kind} ${c.mode} ${where}${c.widen_reason ? `  # widened: ${c.widen_reason}` : ""}${c.configured ? "  # configured: verification.commands.typescript.lint" : ""}`);
   }
   return 0;
 }
