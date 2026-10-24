@@ -22,9 +22,10 @@ apt-get install -y -qq ca-certificates curl git jq xz-utils >/dev/null
 if [ ! -x /usr/bin/dockerd ]; then
   log "docker engine"
   install -d -m 0755 /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
   . /etc/os-release
-  echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+  DOCKER_DISTRO=ubuntu; [ "${ID:-}" = debian ] && DOCKER_DISTRO=debian
+  curl -fsSL "https://download.docker.com/linux/${DOCKER_DISTRO}/gpg" -o /etc/apt/keyrings/docker.asc
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${DOCKER_DISTRO} ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
   apt-get update -qq
   apt-get install -y -qq docker-ce docker-ce-cli containerd.io >/dev/null
 fi
@@ -39,8 +40,9 @@ systemctl enable --now docker >/dev/null
 if [ ! -x /opt/node/bin/node ] || [ "$(/opt/node/bin/node --version)" != "v${NODE_VERSION}" ]; then
   log "node ${NODE_VERSION}"
   rm -rf /opt/node
-  curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" | tar -xJ -C /opt
-  mv "/opt/node-v${NODE_VERSION}-linux-x64" /opt/node
+  case "$(uname -m)" in aarch64|arm64) NODE_ARCH=arm64 ;; *) NODE_ARCH=x64 ;; esac
+  curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" | tar -xJ -C /opt
+  mv "/opt/node-v${NODE_VERSION}-linux-${NODE_ARCH}" /opt/node
 fi
 
 log "agent code"

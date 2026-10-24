@@ -1691,6 +1691,16 @@ export async function scheddFromCli(argv, deps = {}) {
 }
 
 /**
+ * `forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>` (#4544)
+ * The built-in remote compute pool (`bin/pool/`). `pool router` runs in the foreground (for a systemd-user unit:
+ * `ExecStart=forgedock pool router`); `router install` installs that unit. `enroll` prints the one-time install command.
+ */
+export async function poolFromCli(argv, deps = {}) {
+  const { runPoolCli } = await import("./pool/cli.mjs");
+  return (deps.runPoolCli ?? runPoolCli)(argv, deps.poolDeps ?? {});
+}
+
+/**
  * `forgedock limits show` · `forgedock limits clear <id>|--all` (#4190)
  * Usage-limit holds are kept per account (backend identity) in `~/.forge/limits.json` (or `FORGEDOCK_LIMITS_FILE`) and
  * shared by every batch on the host. `show` lists the active holds (identity, reset time, source; `*` marks the account

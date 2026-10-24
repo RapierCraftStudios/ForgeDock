@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { parseExecution, detectNeeds, hostCapabilityBlock, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
+import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate, formatTable, formatSandboxSummary } from "./orchestrate.mjs";
@@ -42,6 +42,11 @@ const NO_BUDGET = { batchMinutes: null, batchUsd: null, dayMinutes: null, dayUsd
 const ledgerIn = (root, { pid = process.pid, host = HOST } = {}) => (n) => makeLedger({ root, batch: "bt", lane: `sandbox-${n}`, owner: "orch_test", issue: n, host, pid });
 
 describe("execution config (#4253)", () => {
+  it("pool is a known sandbox provider (#4546)", () => {
+    assert.ok(SANDBOX_PROVIDERS.includes("pool"));
+    assert.equal(parseExecution({ mode: "hybrid", max_remote: "1", provider: "pool" }).provider, "pool");
+  });
+
   it("absent, empty or invalid config is local; max_remote and secrets are validated", () => {
     assert.deepEqual(parseExecution(undefined), { mode: "local", maxRemote: 0, provider: "local", image: null, secrets: [], budget: NO_BUDGET });
     assert.deepEqual(parseExecution({ mode: "cloud", max_remote: "-1" }), { mode: "local", maxRemote: 0, provider: "local", image: null, secrets: [], budget: NO_BUDGET });
