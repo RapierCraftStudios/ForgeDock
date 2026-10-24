@@ -401,6 +401,7 @@ export async function runCore(o) {
   async function finishOnce(reason, detail = "", extra = {}, codeOverride = null) {
     try { seqLease?.release(); } catch { /* fail-open */ }
     seqLease = null;
+    try { await io.sequenceLease?.unreserve?.({ repo, lane, issue }); } catch { /* fail-open (#4526) */ }
     if (heavyWaitsFile) { // #4169: builder-run heavy waits, read before teardown removes the run TMPDIR
       try { heavyQueueMax = Math.max(heavyQueueMax, sumWaits(await io.fs.read(heavyWaitsFile), waits).queueMax); } catch { /* no heavy step ran */ }
     }
@@ -1657,7 +1658,7 @@ export async function runCore(o) {
       ev({ event: "SEQUENCE_COLLISION", trigger, files: collisions.map((c) => c.lane) });
       const taken = collisions.filter((c) => c.base.length).map((c) => `${c.lane} vs ${c.base.join(", ")}`).join("; ");
       if (io.sequenceRenumber) {
-        const det = (await io.sequenceRenumber({ cwd: wt, base, ...(laneRef ? { laneRef } : {}), regenerate: o.sequenceRegenerate ?? null }).catch((e) => ({ unsupported: String(e?.message ?? e) }))) ?? { unsupported: "no result" };
+        const det = (await io.sequenceRenumber({ cwd: wt, base, ...(laneRef ? { laneRef } : {}), regenerate: o.sequenceRegenerate ?? null, reserve: io.sequenceLease?.reserve ? (x) => io.sequenceLease.reserve({ repo, lane, issue, ...x }) : null }).catch((e) => ({ unsupported: String(e?.message ?? e) }))) ?? { unsupported: "no result" };
         if (det.ok && det.moves?.length) {
           ev({ event: "SEQUENCE_RENUMBERED", trigger, mode: "deterministic", moves: det.moves });
           T.decisions.push(`Sequence number(s) taken on ${lane} (${trigger}): ${taken}; renumbered deterministically (no builder): ${det.moves.map((m) => `${m.from} → ${m.to}`).join(", ")}`);
