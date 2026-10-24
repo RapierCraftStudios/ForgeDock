@@ -1719,3 +1719,8 @@ The derived contract's deliverables are the issue-named files (`predictedFiles`)
 
 `execution.provider: pool` (`execution.mjs` `providerByName`) is `remoteProvider` (`name: "pool"`) with the endpoint and token defaulted from the local router config (`poolRouterConfig`: `COMPUTESHARE_CONFIG` or `~/.config/computeshare/router.json`, token from `forgedock_token_file` or the sibling `forgedock.token`); an explicit `endpoint`/`token_env` wins, and no router config plus no endpoint is `execution.provider.misconfigured`. The token is only sent as the Authorization header and kept in the redaction set.
 The dispatcher reads `<cwd>/forge.yaml` (absent is fine) and passes it as `settings.forgeYaml`; `remoteProvider` adds `env.CS_FORGE_YAML_B64` to the launch spec, so the router's `repos` map is optional (it still takes precedence). Placement is unchanged.
+
+## Entry 2026-10-24 — Opt-in local fallback when no pool agent is online (#4547)
+
+`execution.fallback_local: true` (`parseExecution` -> `fallbackLocal`) lets `orchestrate()` grant run a remote-placed lane on the host (`fallback to local: no pool agent online`) while `remote.capacity()` reports `online === 0`; `engine-cli.mjs` samples `online` next to `free` and wires the detached local lanes. Unknown liveness (null, failing `/status`) never triggers it, so the first grant before the first sample still goes remote; default off keeps the uncapped `sandbox.capacity` deferral.
+`httpTransport.capacity()` returns `{free?, online?, total?}` (null when none is valid); the pool router's `GET /status` answers `{online, total, agents:[{name, ok, paused}]}` (online = reachable and not paused) and deliberately has no `free`, so the #4540 cap stays off for the pool.
