@@ -771,3 +771,32 @@ describe("#4550: forgedock orchestrate --requeue", () => {
     assert.equal(b.readReport(), null, "the finished batch is reopened for --resume");
   });
 });
+
+describe("#4540: remote admissions are capped to the provider's free capacity", () => {
+  const run = async (capacity) => {
+    const c = { t: 1_000_000 };
+    const sleep = async (ms) => { await new Promise((r) => setImmediate(r)); c.t += ms; };
+    let live = 0, peak = 0, bounced = 0;
+    const POOL = 2;
+    const rows = await orchestrate({ issues: [1, 2, 3, 4, 5], parallel: 5, now: () => c.t, sleep, pollMs: 1, readBody: async () => "",
+      remote: { max: 5, isRemote: () => true, capacity: capacity(() => POOL - live) },
+      runOne: async (n) => {
+        if (live >= POOL) { bounced++; return { terminalReason: "deferred", code: "sandbox.capacity", retryInSeconds: 1, detail: "sandbox launch: HTTP 503" }; }
+        live++; peak = Math.max(peak, live);
+        try { await new Promise((r) => setTimeout(r, 10)); } finally { live--; }
+        return { terminalReason: "merged", pr: 100 + n };
+      } });
+    return { rows, peak, bounced };
+  };
+  it("queues beyond the free slots inside the batch: no 503 bounce, every issue still runs", async () => {
+    let at = 0;
+    const { rows, bounced } = await run((free) => () => ({ free: free(), at: ++at })); // a fresh sample on every read
+    assert.equal(bounced, 0);
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "merged", "merged", "merged"]);
+  });
+  it("unknown capacity (null) admits as before and the 503 deferral path is the backstop", async () => {
+    const { rows, bounced } = await run(() => () => null);
+    assert.ok(bounced > 0);
+    assert.deepEqual(rows.map((r) => r.outcome).filter((o) => o !== "merged"), []);
+  });
+});

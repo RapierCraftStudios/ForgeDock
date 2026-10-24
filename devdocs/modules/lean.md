@@ -774,7 +774,7 @@ reports them). `remote` is never a default provider; `remoteTransportFor` refuse
 Actions endpoint without `allow_actions: true`. `providerLanes` maps a throwing
 `start` to `needs-human` `sandbox.start_failed` (or `deferred` `sandbox.capacity`
 for a retryable error, which `deferPolicy` requeues uncapped like `host.busy`, forge#4528) instead of engine-error, and tears down after the result is
-in on every path. `gc.mjs` `SANDBOX_TEARDOWN.remote` destroys stale remote
+in on every path. An optional `provider.capacity()` (`GET /status -> {free}`) caps `grant()` remote admissions so lanes queue instead of 503ing (forge#4540). `gc.mjs` `SANDBOX_TEARDOWN.remote` destroys stale remote
 sandboxes through the checkout's forge.yaml transport (probe `sandboxTransport`
 in tests). Contract suite: `sandbox-provider.contract.test.mjs` (container over a
 fake docker, remote over a fake transport). Rationale:
@@ -1721,3 +1721,8 @@ The derived contract's deliverables are the issue-named files (`predictedFiles`)
 `orchestrate()` takes a `getRequeued` seam: each pass `drainRequeues` applies each entry once (keys in state `requeueApplied`), moves the issue and the `skipped` dependents behind it back to pending (prior rows kept in state `requeued`, DAG edges kept), posts a runner `FORGE:DECISION`, and the report row is the latest outcome with a `requeued: #N (reason)` line. The lane starts through the normal K/lease path.
 schedd `op:"requeue"` mirrors `add` and reopens a finished batch (clears its report, hosts it). `--add` is unchanged.
 Cite: #4550.
+
+## Entry 2026-10-24 — `pool` execution provider (#4546)
+
+`execution.provider: pool` (`execution.mjs` `providerByName`) is `remoteProvider` (`name: "pool"`) with the endpoint and token defaulted from the local router config (`poolRouterConfig`: `COMPUTESHARE_CONFIG` or `~/.config/computeshare/router.json`, token from `forgedock_token_file` or the sibling `forgedock.token`); an explicit `endpoint`/`token_env` wins, and no router config plus no endpoint is `execution.provider.misconfigured`. The token is only sent as the Authorization header and kept in the redaction set.
+The dispatcher reads `<cwd>/forge.yaml` (absent is fine) and passes it as `settings.forgeYaml`; `remoteProvider` adds `env.CS_FORGE_YAML_B64` to the launch spec, so the router's `repos` map is optional (it still takes precedence). Placement is unchanged.

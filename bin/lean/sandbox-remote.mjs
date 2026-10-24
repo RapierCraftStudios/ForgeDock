@@ -43,6 +43,7 @@ export function isActionsEndpoint(endpoint) {
  * GET /sandboxes/:id/logs?cursor=N -> {text, cursor}, GET /sandboxes/:id/result -> lane result (404 = none yet),
  * GET /sandboxes/:id/usage -> {minutes}, DELETE /sandboxes/:id (404 = gone). `Authorization: Bearer <token>`.
  * 429/503 on launch is a retryable capacity error (`Retry-After` seconds). Error text never carries the token.
+ * Optional `GET /status -> {free: N}` is the pool's free slots (#4540); anything else (404, error, malformed) is unknown (null).
  */
 export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fetch }) {
   const root = String(endpoint ?? "").replace(/\/+$/, "");
@@ -72,6 +73,9 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     async result(id) { const r = await call("GET", `${p(id)}/result`); return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
     async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes) } : null; },
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
+    async capacity() {
+      try { const r = await call("GET", "/status"); const f = r.data?.free; return r.ok && Number.isInteger(f) && f >= 0 ? { free: f } : null; } catch { return null; }
+    },
   };
 }
 
@@ -79,7 +83,7 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
  * The remote provider. `settings` is parseExecution's output (image, cacheStore, tokenEnv, secrets); `env` is the
  * dispatcher's env (secret values for redaction on adopt); `credentials(name)` resolves a secret (env, then keychain).
  */
-export function remoteProvider({ batch, repo, settings = {}, transport, env = process.env, credentials = (name) => resolveCredential(name, { env }), now = () => Date.now() }) {
+export function remoteProvider({ batch, repo, settings = {}, name = "remote", transport, env = process.env, credentials = (name) => resolveCredential(name, { env }), now = () => Date.now() }) {
   if (!transport) throw new Error("remote provider needs a transport");
   const idFor = (issue) => `fdrsbx-${safeSegment(batch.id)}-${issue}`;
   const errs = new Map(); // sandbox id -> consecutive status errors
@@ -102,7 +106,7 @@ export function remoteProvider({ batch, repo, settings = {}, transport, env = pr
     } catch { /* the next poll retries */ }
   };
   return {
-    name: "remote",
+    name,
     idFor,
     async start({ issue, args = [], env: laneEnv = env, secrets = settings.secrets ?? [] }) {
       const id = idFor(issue);
@@ -115,12 +119,12 @@ export function remoteProvider({ batch, repo, settings = {}, transport, env = pr
         id, issue, batch: batch.id, image: settings.image ?? null,
         repo: { slug: repo, url: repo ? `https://github.com/${repo}.git` : null, ref: li >= 0 ? args[li + 1] ?? null : null },
         cache: settings.cacheStore ? { store: settings.cacheStore, key: safeSegment(String(repo ?? "repo")) } : null,
-        env: scopedEnv({ env: resolved, secrets, batchId: batch.id, repo }),
+        env: { ...scopedEnv({ env: resolved, secrets, batchId: batch.id, repo }), ...(settings.forgeYaml ? { CS_FORGE_YAML_B64: Buffer.from(settings.forgeYaml).toString("base64") } : {}) }, // #4546: the dispatcher's forge.yaml (gitignored in the repo)
         command: ["forgedock", "run-issue", String(issue), ...args, "--result-file", resultFile], result_file: resultFile,
       };
       const startedAt = now();
       await transport.launch(spec);
-      return { provider: "remote", id, issue, startedAt, minutes: 0 };
+      return { provider: name, id, issue, startedAt, minutes: 0 };
     },
     async status(h) {
       let s;
@@ -133,6 +137,9 @@ export function remoteProvider({ batch, repo, settings = {}, transport, env = pr
       const r = await transport.result(h.id);
       if (r) { await pullLogs(h); await minutesOf(h); }
       return r ?? null;
+    },
+    async capacity() {
+      try { return (await transport.capacity?.()) ?? null; } catch { return null; }
     },
     async teardown(h) {
       await minutesOf(h);

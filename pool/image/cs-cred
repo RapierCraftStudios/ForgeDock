@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# cs-cred <github|claude>: prints a current credential, fetched through the agent and cached briefly.
+set -euo pipefail
+kind="${1:?kind}"; ttl=240; [ "$kind" = claude ] && ttl=600
+cache="/tmp/.cs-cred-$kind"
+if [ -s "$cache" ] && [ $(( $(date +%s) - $(stat -c %Y "$cache") )) -lt $ttl ]; then cat "$cache"; exit 0; fi
+[ -n "${CS_CRED_BASE:-}" ] || { echo "no credential relay (CS_CRED_BASE)" >&2; exit 1; }
+tok=$(curl -fsS --max-time 30 -H "authorization: Bearer ${CS_CRED_TOKEN}" "$CS_CRED_BASE/$kind" | jq -r .token)
+[ -n "$tok" ] && [ "$tok" != null ] || { echo "credential fetch failed ($kind)" >&2; exit 1; }
+umask 077; printf '%s' "$tok" > "$cache"; printf '%s' "$tok"

@@ -737,6 +737,7 @@ execution:
   provider: container   # default container when mode is not local
   image: my/lane-image:1  # container provider: an image with git and forgedock; never pulled
   secrets: GH_TOKEN,ANTHROPIC_API_KEY  # env var NAMES forwarded to the sandbox; nothing else is
+  # provider: pool (forge#4546): remote with endpoint and token defaulted to the local router (below); no keys needed
   # provider: remote (forge#4254), only when named explicitly:
   # endpoint: https://runner-pool.example/v1  # sandbox HTTP API (protocol below)
   # token_env: FORGEDOCK_SANDBOX_TOKEN        # credential NAME: read from the env, else the OS keychain
@@ -757,10 +758,10 @@ execution:
 | `mode` | string | No | `local` (default): lanes are detached host processes, as before. `remote`: lanes run in sandboxes of `provider`. `hybrid`: each lane is placed from facts (forge#4256, below). |
 | `max_remote` | integer | No | Remote lanes of the batch that may run at once. They take no slot of the host lane cap (`orchestration.global_parallel`, `forgedock sched cap`); the batch `--parallel` still applies. `0` (default) keeps lanes local. |
 | `heavy` | boolean | No | Hybrid placement override (forge#4523). `true`: every lane that passes rules 1-3 is placed remote. `false`: the detected validation weight is ignored (rule 5 still applies). Unset: detect. It changes placement only: no pre-PR commands run, and host admission (`max_load_per_core`) is unchanged. |
-| `provider` | string | No | `container` (reference: an ephemeral local container), `remote` (a runner pool or remote session over HTTP, forge#4254) or `local`. The default is `container` off `local` mode; `remote` is used only when named. Unknown names fail the batch start. |
+| `provider` | string | No | `container` (reference: an ephemeral local container), `remote` (a runner pool or remote session over HTTP, forge#4254), `pool` (the built-in pool router on this host, forge#4546: `remote` with `endpoint` and `token_env` defaulted from the router config, `COMPUTESHARE_CONFIG` or `~/.config/computeshare/router.json`, and its `forgedock.token`; the repo's `forge.yaml` is sent to every sandbox, so no router `repos` map is needed; missing router config and no `endpoint` fails with `execution.provider.misconfigured`) or `local`. The default is `container` off `local` mode; `remote` and `pool` are used only when named. Unknown names fail the batch start. |
 | `image` | string | No | Container provider image; it must provide `git` and `forgedock`. Started with `--pull never`. |
 | `secrets` | string | No | Comma-separated env var names copied from the dispatcher's env into the sandbox. The sandbox also gets `GH_REPO` (the target repo) and `FORGEDOCK_BATCH_ID`, and nothing else from the host. |
-| `endpoint` | string | `remote` | Base URL of the sandbox API. A GitHub Actions API (`api.github.com`, or any `/actions/` path) is refused unless `allow_actions: true`, so pre-review Actions minutes are never spent implicitly. Missing: the batch start fails (`execution.provider.misconfigured`). |
+| `endpoint` | string | `remote` | Base URL of the sandbox API (`pool`: defaults to the local router). A GitHub Actions API (`api.github.com`, or any `/actions/` path) is refused unless `allow_actions: true`, so pre-review Actions minutes are never spent implicitly. Missing: the batch start fails (`execution.provider.misconfigured`). |
 | `token_env` | string | No | Name of the API credential, sent as `Authorization: Bearer`. Read from the env, else the OS keychain (service `forgedock`, account = the name: `secret-tool store --label forgedock service forgedock account NAME` on Linux, `security add-generic-password -s forgedock -a NAME -w` on macOS). Never written to the ledger, the batch state, logs or GitHub. |
 | `cache_store` | string | No | Shared cache store the remote sandbox mounts (sent as `cache.store` with `cache.key` = the repo). |
 | `allow_actions` | boolean | No | `true` accepts a GitHub Actions endpoint. Default `false`. |
@@ -782,7 +783,7 @@ execution:
 | `GET /sandboxes/:id/usage` | `{minutes}`: billable sandbox minutes, set on the handle and the lane result (`sandbox.minutes`); without it, wall-clock minutes |
 | `DELETE /sandboxes/:id` | Teardown; `404` counts as torn down |
 
-**Start failures** (every provider): a sandbox that cannot start ends the lane `needs-human` with code `sandbox.start_failed`, not relaunched and not counted by the engine-error breaker; a capacity error ends it `deferred` (`sandbox.capacity`), requeued after the provider's retry-in (else 60s) and not counted toward `orchestration.max_deferrals`, so a queue deeper than the pool waits instead of being skipped (forge#4528). See docs/OUTCOME-CODES.md. `forgedock gc --apply --sandboxes` tears a stale remote sandbox down through the same API (the checkout's forge.yaml `execution`).
+**Start failures** (every provider): a sandbox that cannot start ends the lane `needs-human` with code `sandbox.start_failed`, not relaunched and not counted by the engine-error breaker; a capacity error ends it `deferred` (`sandbox.capacity`), requeued after the provider's retry-in (else 60s) and not counted toward `orchestration.max_deferrals`, so a queue deeper than the pool waits instead of being skipped (forge#4528). A pool that serves `GET {endpoint}/status -> {"free": N}` (integer, optional) also caps remote admissions to N per sample, so the extra lanes queue inside the batch instead of bouncing on a 503 (forge#4540); a missing, failing or malformed `/status` is unknown and never blocks admission. See docs/OUTCOME-CODES.md. `forgedock gc --apply --sandboxes` tears a stale remote sandbox down through the same API (the checkout's forge.yaml `execution`).
 
 **Hybrid placement** (`mode: hybrid`, forge#4256, `bin/lean/execution.mjs` `placeLane`, no model call). Each lane is placed when it is admitted. The first matching rule wins:
 

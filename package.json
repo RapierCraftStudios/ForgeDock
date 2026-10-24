@@ -36,6 +36,7 @@
     "bin/",
     "!bin/tests/",
     "!bin/stats/fixtures/",
+    "pool/",
     "commands/",
     "docs/",
     "!docs/site/.vitepress/",
