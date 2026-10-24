@@ -774,7 +774,7 @@ reports them). `remote` is never a default provider; `remoteTransportFor` refuse
 Actions endpoint without `allow_actions: true`. `providerLanes` maps a throwing
 `start` to `needs-human` `sandbox.start_failed` (or `deferred` `sandbox.capacity`
 for a retryable error, which `deferPolicy` requeues uncapped like `host.busy`, forge#4528) instead of engine-error, and tears down after the result is
-in on every path. `gc.mjs` `SANDBOX_TEARDOWN.remote` destroys stale remote
+in on every path. An optional `provider.capacity()` (`GET /status -> {free}`) caps `grant()` remote admissions so lanes queue instead of 503ing (forge#4540). `gc.mjs` `SANDBOX_TEARDOWN.remote` destroys stale remote
 sandboxes through the checkout's forge.yaml transport (probe `sandboxTransport`
 in tests). Contract suite: `sandbox-provider.contract.test.mjs` (container over a
 fake docker, remote over a fake transport). Rationale:

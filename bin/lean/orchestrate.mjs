@@ -270,6 +270,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const reg = sched?.registry ?? null;
   const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
   const remoteMax = remote && Number.isInteger(remote.max) && remote.max >= 0 ? remote.max : 0;
+  let capAt, capAdmits = 0; // #4540: provider capacity sample and the remote admissions made since it
   const remoteRun = new Set(); // remote lanes running now (#4253): admitted against remoteMax, never the host cap
   let budgetLocal = false; // the execution budget refused a remote lane under on_budget local: the rest run on the host
   // #4256: where a lane goes before capacity: `remote.place` (hybrid) or `remote.isRemote` (remote mode).
@@ -452,7 +453,14 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (p?.where === "remote") {
       const adm = admitRemote();
       if (adm.ok) {
-        if (remoteRun.size < remoteMax) { remoteRun.add(n); placed.set(n, p); return true; }
+        // #4540: the provider's free slots (`remote.capacity() -> {free, at}`, sync, null = unknown) cap admissions per sample `at`; the issue queues here instead of a 503.
+        let cap = null;
+        try { cap = remote.capacity?.() ?? null; } catch { cap = null; }
+        if (cap && Number.isInteger(cap.free)) {
+          if (cap.at !== capAt) { capAt = cap.at; capAdmits = 0; }
+          if (capAdmits >= cap.free && remoteRun.size < remoteMax) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
+        }
+        if (remoteRun.size < remoteMax) { remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
         if (!remote.fallbackLocal) return false;
         p = { where: "local", reason: `fallback to local: max_remote ${remoteMax} reached (${p.reason})` }; // #4256: hybrid runs it on the host
       } else {

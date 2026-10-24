@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# claude with a current access token from the router host's logins, fetched per process (see cs-cred).
+if [ -n "${CS_CRED_BASE:-}" ] && [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  CLAUDE_CODE_OAUTH_TOKEN="$(cs-cred claude)" || exit 1; export CLAUDE_CODE_OAUTH_TOKEN
+fi
+exec /opt/node/bin/claude "$@"
