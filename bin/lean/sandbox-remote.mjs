@@ -43,6 +43,7 @@ export function isActionsEndpoint(endpoint) {
  * GET /sandboxes/:id/logs?cursor=N -> {text, cursor}, GET /sandboxes/:id/result -> lane result (404 = none yet),
  * GET /sandboxes/:id/usage -> {minutes}, DELETE /sandboxes/:id (404 = gone). `Authorization: Bearer <token>`.
  * 429/503 on launch is a retryable capacity error (`Retry-After` seconds). Error text never carries the token.
+ * Optional `GET /status -> {free: N}` is the pool's free slots (#4540); anything else (404, error, malformed) is unknown (null).
  */
 export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fetch }) {
   const root = String(endpoint ?? "").replace(/\/+$/, "");
@@ -72,6 +73,9 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     async result(id) { const r = await call("GET", `${p(id)}/result`); return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
     async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes) } : null; },
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
+    async capacity() {
+      try { const r = await call("GET", "/status"); const f = r.data?.free; return r.ok && Number.isInteger(f) && f >= 0 ? { free: f } : null; } catch { return null; }
+    },
   };
 }
 
@@ -133,6 +137,9 @@ export function remoteProvider({ batch, repo, settings = {}, transport, env = pr
       const r = await transport.result(h.id);
       if (r) { await pullLogs(h); await minutesOf(h); }
       return r ?? null;
+    },
+    async capacity() {
+      try { return (await transport.capacity?.()) ?? null; } catch { return null; }
     },
     async teardown(h) {
       await minutesOf(h);
