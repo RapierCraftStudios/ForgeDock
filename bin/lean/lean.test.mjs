@@ -3909,6 +3909,17 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
   });
 
+  it("#4527 base-sync re-review FAIL: the fix round's head is CI-verified before the retry review, which accepts validates left to CI and notes them", async () => {
+    const CONFLICTING = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }, OKSTATE = { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" };
+    const w = withCi(world({ validation: ciValidation, prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], reviews: [ok(), bad("src/foo.js:4 lost base change"), ok()] }));
+    const r = await run(w, { verify: CI });
+    assert.equal(r.terminalReason, "merged", r.reason);
+    assert.equal(reviewers(w).length, 3);
+    assert.equal(new Set(w.ci.runs.map((x) => x.headSha)).size, w.ci.runs.length, "every reviewed head was verified once");
+    assert.equal(w.ci.runs[0].headSha, w.head, "the retry head is CI-verified");
+    assert.match(traj(w)[0], /Validate V1 verified by CI at [0-9a-f]{0,12}/);
+  });
+
   it("docs-only lane: no push for CI, no dispatch; the decision is recorded", async () => {
     const w = withCi(world({ changed: ["README.md", "docs/guide.md"], validation: ciValidation }));
     const r = await run(w, { verify: CI, conformance: "shadow" });

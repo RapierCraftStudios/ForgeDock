@@ -353,9 +353,11 @@ export function repoTracks(paths) {
  * `frozen` (#4350): the contract before typed amendments. A failed scope-check validate (isScopeCheck) whose only files
  * outside `frozen` are covered by deliverables an amendment added, with no scope creep left, is superseded by the engine's
  * scope gate: listed in `superseded` [{id, files}], not a failure. Without `frozen`, `superseded` is always [].
+ * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
+ * tool), for the trajectory; always an array.
  */
 export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null }) {
-  const failures = [], superseded = [];
+  const failures = [], superseded = [], ciCovered = [];
   const outside = (k) => changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(k, f));
   const creep = outside(contract);
   const amendedOnly = frozenAmendedFiles(frozen, contract, outside, creep);
@@ -365,13 +367,13 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     const r = runs.find((x) => x?.id === v.id);
     // #4167: a head the engine verified on CI covers validate ids the builder left to CI (no result, or ci:true without an exit)
     const leftToCi = !r || (r.ci === true && r.exit === undefined);
-    if (ciVerified && leftToCi) continue;
+    if (ciVerified && leftToCi) { ciCovered.push(v.id); continue; }
     if (leftToCi) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
     else if (r.exit !== 0) {
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
-      if (miss && ciVerified) continue;
+      if (miss && ciVerified) { ciCovered.push(v.id); continue; }
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})` });
@@ -392,7 +394,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
   if (repro) failures.push(...reproFailures(contract, repro));
-  return { ok: failures.length === 0, failures, superseded };
+  return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
 
 /**
