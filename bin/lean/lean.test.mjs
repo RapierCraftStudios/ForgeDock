@@ -1616,6 +1616,20 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1500);
   });
 
+  it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
+    const G = ["web/public/openapi*.json"];
+    for (const f of [facts([], { generated_paths: G }), facts([HOT], { enabled: false, generated_paths: G })]) {
+      assert.match(hotspotPlanNote(f), /Generated paths \(forge\.yaml maintenance\.generated_paths, owned by the repo's generator\): web\/public\/openapi\*\.json\. Never list or amend them in/);
+      assert.match(hotspotBuildRule(f), /Generated paths .*web\/public\/openapi\*\.json/);
+    }
+    assert.equal(hotspotPlanNote(facts([], { generated_paths: [] })), "", "no generated_paths: unchanged");
+    const w = hworld(facts([], { generated_paths: G }), [facts([])], { amendments: [{ kind: "add-deliverable", path: "web/public/openapi.json", why: "sync the spec" }] });
+    const r = await run(w);
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
+    assert.match(builders(w)[0][4], /Generated paths .*openapi/);
+    assert.match(nh(w), /add-deliverable web\/public\/openapi\.json: generated path/);
+  });
+
   it("the plan prompt carries the facts, the implement prompt the configured rule; growth within the limit merges; no extra runner calls", async () => {
     const w = hworld(facts([HOT, COLD], { file_lines: 2000, growth_lines: 150 }), [facts([SMALL])]);
     assert.equal((await run(w)).terminalReason, "merged");

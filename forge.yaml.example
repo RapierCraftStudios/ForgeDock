@@ -458,6 +458,8 @@ branches:
 #     exclude_globs:                  # shell patterns (`*` crosses `/`), never checked
 #       - "migrations/*"
 #       - "*.lock"
+#   generated_paths:                  # forge#4519: generated, bot-owned files (shell patterns, `*` crosses `/`):
+#     - "web/public/openapi*.json"    #   never hotspot-checked, and add-deliverable amendments on them are refused
 
 # =============================================================================
 # MILESTONE DRIFT (OPTIONAL, forge#4161)

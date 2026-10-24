@@ -327,6 +327,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `growth_lines` without `hotspot-exempt: <reason>` in a covering deliverable
    or add-deliverable why. A failed script or `enabled: false` turns it off;
    no runner calls are added.
+   Generated files (forge#4519): `hotspots.sh` marks a row `generated` (and
+   so `excluded`) for `linguist-generated`, a `maintenance.generated_paths`
+   glob or an `@generated` / `DO NOT EDIT` header in the first 5 lines, and
+   `hotspotGrowth` never counts it. `generated_paths` (bot-owned) is also in
+   the output head, so `amend()` passes it to `applyAmendments`, which refuses
+   an add-deliverable on a matching path; `hotspotPlanNote`/`hotspotBuildRule`
+   then name those globs in the prompts.
    **Enumerating tests** (#4322, `enumerating.mjs`): before the plan call
    `io.enumeratingTests` lists tests that enumerate the exports or directory
    siblings of the issue's named paths (`enumeratingPlanNote` /
