@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createAgent, safeName } from "../pool/agent.mjs";
 import { createRouter } from "../pool/router.mjs";
+import { tmpDir } from "./_tmp.mjs";
 
 function fakeDocker() {
   const containers = new Map();
@@ -30,7 +30,7 @@ const spec = (id, extra = {}) => ({ id, issue: 1, batch: "b1", repo: { slug: "o/
 function agentFixture(opts = {}) {
   let t = 1_000_000;
   const docker = fakeDocker();
-  const dir = mkdtempSync(join(tmpdir(), "cs-agent-"));
+  const dir = tmpDir("cs-agent-");
   const agent = createAgent({ name: "a1", listen: { host: "127.0.0.1", port: 7711 }, router_url: "http://router:7710", state_dir: dir, allow_cpus: 4, allow_mem_gb: 8, lease_ttl_s: 600, token: "agent-token", ...opts }, { docker, now: () => t, log: quiet, live: opts.live ?? (() => ({ ok: true })) });
   return { agent, docker, dir, advance: (ms) => { t += ms; } };
 }
@@ -87,7 +87,7 @@ function routerFixture(agentsCaps) {
     else if (u.pathname === "/sandboxes" && init.method === "POST") { const p = JSON.parse(init.body); body = { id: p.spec.id, state: "running", env_has_yaml: Boolean(p.spec.env?.CS_FORGE_YAML_B64) }; status = 201; }
     return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   };
-  const dir = mkdtempSync(join(tmpdir(), "cs-router-"));
+  const dir = tmpDir("cs-router-");
   mkdirSync(join(dir, "cfg"));
   writeFileSync(join(dir, "cfg", "forge.yaml"), "project: {}\n");
   const router = createRouter({ state_dir: dir, lane: { cpus: 2, mem_gb: 3 }, enroll_token: "enroll", forgedock_token: "fd", abandon_after_s: 1800, repos: { "o/r": { forge_yaml: join(dir, "cfg", "forge.yaml") } } }, { fetchFn, now: () => t, log: quiet });
@@ -177,7 +177,7 @@ test("router reserves lane + daemon capacity for docker-enabled repos", async ()
     sent.push({ host: u.hostname, body: JSON.parse(init.body) });
     return new Response(JSON.stringify({ state: "running" }), { status: 201 });
   };
-  const router = createRouter({ state_dir: mkdtempSync(join(tmpdir(), "cs-rd-")), lane: { cpus: 2, mem_gb: 3 }, repos: { "o/r": { docker: true } }, enroll_token: "e", forgedock_token: "f" }, { fetchFn, log: quiet });
+  const router = createRouter({ state_dir: tmpDir("cs-rd-"), lane: { cpus: 2, mem_gb: 3 }, repos: { "o/r": { docker: true } }, enroll_token: "e", forgedock_token: "f" }, { fetchFn, log: quiet });
   for (const n of Object.keys(caps)) router.store.data.agents[n] = { url: `http://${n}:7711`, token: "t" };
   const r = await router.launch(spec("dk1"));
   assert.equal(r.body.agent, "big");
@@ -274,7 +274,7 @@ test("router sends burst limits when configured and reserves only the small slic
     sent.push(JSON.parse(init.body));
     return new Response(JSON.stringify({ state: "running" }), { status: 201 });
   };
-  const router = createRouter({ state_dir: mkdtempSync(join(tmpdir(), "cs-rb-")), lane: { cpus: 0.5, mem_gb: 1, limit: { cpus: 4, mem_gb: 4 } }, dind: { cpus: 0.25, mem_gb: 0.5, limit: { cpus: 2, mem_gb: 3 } }, repos: { "o/d": { docker: true } }, enroll_token: "e", forgedock_token: "f" }, { fetchFn, log: quiet });
+  const router = createRouter({ state_dir: tmpDir("cs-rb-"), lane: { cpus: 0.5, mem_gb: 1, limit: { cpus: 4, mem_gb: 4 } }, dind: { cpus: 0.25, mem_gb: 0.5, limit: { cpus: 2, mem_gb: 3 } }, repos: { "o/d": { docker: true } }, enroll_token: "e", forgedock_token: "f" }, { fetchFn, log: quiet });
   router.store.data.agents.a = { url: "http://a:7711", token: "t" };
   await router.launch(spec("plain"));
   await router.launch(spec("dock", { repo: { slug: "o/d", url: "", ref: null } }));
@@ -297,7 +297,7 @@ test("a teardown that fails and is retried records usage once", async () => {
 });
 
 test("credential relay hands out access tokens only; no refresh token leaves the router host", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "cs-cred-"));
+  const dir = tmpDir("cs-cred-");
   const cfgDir = join(dir, ".claude");
   mkdirSync(cfgDir);
   writeFileSync(join(cfgDir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "access-xyz", refreshToken: "refresh-SECRET", expiresAt: Date.now() + 3 * 3600000 } }));
