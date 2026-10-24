@@ -1668,3 +1668,8 @@ The client (`orchestrateClient`): when the stream drops after the batch id is kn
 Tests: `schedd.test.mjs` pins `FORGEDOCK_SCHED_DIR` to a tmp dir in the test process, so the env that clients submit for
 their lanes never resolves `~/.forge/sched`. Stub lanes record their pid, exit once the work dir is gone or after 120 s,
 and are SIGKILLed by `h.cleanup()` and by a process `exit` hook. Cost: 0 LLM calls.
+
+## Entry 2026-10-24 — Feat: parked-PR base sync (#4525)
+
+`bin/lean/basesync.mjs` (`syncParked`, `unionResolve`) merges the moved base into the open PR of a `needs-human` row from `orchestrate()` (new `syncParked` seam, `syncEveryMs`). Clean or pure two-sided list-addition merges (files in `orchestration.base_sync.union_globs`; never sequence/`_journal.json`) are pushed plainly; other conflicts are aborted and their paths posted once per base sha. Opt out: `orchestration.base_sync.enabled: false`. The in-lane `baseSync()` in lean.mjs is untouched.
+Cite: #4525.
