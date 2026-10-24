@@ -256,6 +256,46 @@ describe("gc reaps a remote sandbox left by a dead dispatcher (#4254)", () => {
   });
 });
 
+describe("pool provider (#4546)", () => {
+  const setupPool = () => {
+    const dir = tmpDir("pool-cfg-");
+    const cfg = join(dir, "router.json");
+    writeFileSync(cfg, JSON.stringify({ listen: { host: "100.64.0.1", port: 8123 } }));
+    writeFileSync(join(dir, "forgedock.token"), "pool-token-789\n");
+    return { dir, cfg };
+  };
+  const launchOnce = async (makeProvider) => {
+    const calls = [];
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url, init) => { calls.push({ url: String(url), init }); return { status: 201, ok: true, headers: { get: () => null }, text: async () => "{}" }; };
+    try { await makeProvider().start({ issue: 5, args: ["--lane", "main"], env: {}, secrets: [] }); } finally { globalThis.fetch = real; }
+    return calls[0];
+  };
+
+  it("defaults the endpoint and token to the local router and injects the cwd forge.yaml", async () => {
+    const { cfg } = setupPool();
+    const cwd = tmpDir("pool-cwd-");
+    writeFileSync(join(cwd, "forge.yaml"), "verify:\n  mode: ci\n");
+    const batch = openBatch(tmpDir("pool-b-"), "bt");
+    const make = () => providerByName("pool", { batch, repo: "o/r", cwd, exec: parseExecution({ mode: "remote", provider: "pool" }), env: {}, poolConfigPath: cfg });
+    assert.equal(make().name, "pool");
+    const c = await launchOnce(make);
+    assert.equal(c.url, "http://100.64.0.1:8123/sandboxes");
+    assert.equal(c.init.headers.authorization, "Bearer pool-token-789");
+    const spec = JSON.parse(c.init.body);
+    assert.equal(Buffer.from(spec.env.CS_FORGE_YAML_B64, "base64").toString(), "verify:\n  mode: ci\n");
+  });
+
+  it("an explicit endpoint wins; no forge.yaml adds no env; a missing router config is misconfigured", async () => {
+    const { dir } = setupPool();
+    const batch = openBatch(tmpDir("pool-b2-"), "bt");
+    const c = await launchOnce(() => providerByName("pool", { batch, repo: "o/r", cwd: dir, exec: parseExecution({ provider: "pool", endpoint: "https://pool.example/v1" }), env: {}, poolConfigPath: join(dir, "router.json") }));
+    assert.equal(c.url, "https://pool.example/v1/sandboxes");
+    assert.equal(JSON.parse(c.init.body).env.CS_FORGE_YAML_B64, undefined);
+    assert.throws(() => providerByName("pool", { batch, repo: "o/r", cwd: dir, exec: parseExecution({ provider: "pool" }), env: {}, poolConfigPath: join(dir, "none.json") }), (e) => e.code === "execution.provider.misconfigured");
+  });
+});
+
 describe("remote capacity (GET /status, #4540)", () => {
   const mk = (res) => httpTransport({ endpoint: "https://pool.example/v1", fetchFn: async (url) => { if (res instanceof Error) throw res; assert.equal(url, "https://pool.example/v1/status"); return { status: res.status, ok: res.status < 400, text: async () => res.body ?? "", headers: { get: () => null } }; } });
   it("free integer is reported; 404, malformed, negative and transport errors are unknown (null)", async () => {
