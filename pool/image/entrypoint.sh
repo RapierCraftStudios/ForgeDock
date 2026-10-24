@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Prepares the checkout ForgeDock expects, then execs the lane command (`forgedock run-issue ...`).
+# All output goes to /csout/lane.log, which the agent streams back to ForgeDock.
+set -euo pipefail
+mkdir -p /csout /result /cache
+exec > >(tee -a /csout/lane.log) 2>&1
+
+export HOME=/root
+export UV_CACHE_DIR=/cache/uv npm_config_cache=/cache/npm POETRY_CACHE_DIR=/cache/poetry PIP_CACHE_DIR=/cache/pip
+export TMPDIR=/tmp
+
+echo "[computeshare] sandbox ${CS_SANDBOX_ID:-?} repo ${CS_REPO_SLUG:-?} ref ${CS_REPO_REF:-default} on $(hostname)"
+
+# GitHub auth: the token is fetched on demand through the agent (installation tokens expire hourly), so a long lane
+# never runs on a stale token. `gh` is a shim that exports a fresh GH_TOKEN; git uses the same source as a helper.
+if [ -n "${CS_CRED_BASE:-}" ]; then
+  git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$(cs-cred github)"; }; f'
+elif [ -n "${GH_TOKEN:-}" ]; then
+  gh auth setup-git >/dev/null 2>&1 || true
+fi
+git config --global user.name "${GIT_AUTHOR_NAME:-forgedock}"
+git config --global user.email "${GIT_AUTHOR_EMAIL:-forgedock@localhost}"
+
+if [ -n "${CS_REPO_URL:-}" ]; then
+  # Shared bare mirror in the cache volume: later lanes fetch a delta instead of a full clone.
+  mirror="/cache/git/$(echo "${CS_REPO_SLUG:-repo}" | tr '/' '_').git"
+  if [ -d "$mirror" ]; then
+    git -C "$mirror" fetch --prune --quiet origin '+refs/heads/*:refs/heads/*' || true
+  else
+    mkdir -p /cache/git
+    git clone --mirror --quiet "$CS_REPO_URL" "$mirror"
+  fi
+  rm -rf /work/repo
+  git clone --quiet --reference "$mirror" ${CS_REPO_REF:+--branch "$CS_REPO_REF"} "$CS_REPO_URL" /work/repo
+  cd /work/repo
+fi
+
+if [ -n "${CS_FORGE_YAML_B64:-}" ]; then
+  echo "$CS_FORGE_YAML_B64" | base64 -d > forge.yaml
+  unset CS_FORGE_YAML_B64
+fi
+
+if [ -n "${DOCKER_HOST:-}" ]; then
+  # Docker-enabled sandbox: wait for the private daemon sidecar before the lane starts its stack.
+  for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
+  docker info >/dev/null 2>&1 && echo "[computeshare] private docker daemon ready ($(docker version --format '{{.Server.Version}}'))" \
+    || echo "[computeshare] WARNING: private docker daemon not reachable at $DOCKER_HOST"
+fi
+
+echo "[computeshare] running: $*"
+exec "$@"

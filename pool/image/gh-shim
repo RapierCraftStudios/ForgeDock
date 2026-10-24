@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# gh with a GitHub token that is always current (see cs-cred).
+if [ -n "${CS_CRED_BASE:-}" ]; then GH_TOKEN="$(cs-cred github)" || exit 1; export GH_TOKEN; fi
+exec /usr/bin/gh "$@"
