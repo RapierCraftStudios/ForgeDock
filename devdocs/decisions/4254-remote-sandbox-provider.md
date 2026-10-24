@@ -16,7 +16,7 @@ created: 2026-10-20
 - One `remote` provider (`sandbox-remote.mjs`) over a transport interface (`launch/status/logs/result/usage/destroy`). The shipped transport is a small JSON-over-HTTP protocol (docs/CONFIG.md); any pool or session gateway can front it. The sandbox is addressed by ForgeDock's id, so the ledger entry written before launch is enough to tear it down (#4253 discipline unchanged).
 - Credentials (the API token and the repo's allowlisted secrets) come from the env, else the OS keychain (`credentials.mjs`). The token goes only into the `Authorization` header; secret values only into the launch spec env; streamed logs are redacted.
 - `remote` is never a default provider, and an Actions endpoint is refused unless `allow_actions: true`.
-- A start failure is typed: `needs-human` `sandbox.start_failed` (final, no relaunch, no breaker), or `deferred` `sandbox.capacity` when the transport reports no capacity (429/503).
+- A start failure is typed: `needs-human` `sandbox.start_failed` (final, no relaunch, no breaker), or `deferred` `sandbox.capacity` when the transport reports no capacity (429/503). Since forge#4528 the batch runner requeues `sandbox.capacity` uncapped, like `host.busy`, not bounded by `max_deferrals`.
 - Billable minutes ride on the handle and the lane result; reporting and the budget cap are #4255.
 
 ## Rejected
