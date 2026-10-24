@@ -1878,6 +1878,12 @@ function selfUpdateGlobalInstall(version) {
   }
 }
 
+/** #4545: after an update, push the new code + lane image to pool agents (no-op without a pool router config). */
+async function upgradePoolAgents() {
+  const { upgradeAgentsAfterUpdate } = await import("./pool/version.mjs");
+  await upgradeAgentsAfterUpdate({ warn: (m) => console.log(`  ${YELLOW}${m}${RESET}`) });
+}
+
 async function update() {
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Checking for updates`);
@@ -1994,6 +2000,7 @@ async function update() {
         printGitCloneChangelogSummary(before, after);
       }
       await relinkAndHint();
+      await upgradePoolAgents();
     } catch (err) {
       console.log(
         `  ${YELLOW}Cannot fast-forward — local changes exist. Skipping.${RESET}`,
@@ -2081,6 +2088,7 @@ async function update() {
     }
 
     await relinkAndHint();
+    await upgradePoolAgents();
   }
   console.log("");
 }

@@ -347,3 +347,34 @@ test("router /status exposes agent liveness: paused and unreachable agents are n
   assert.equal(s.online, 1);
   assert.deepEqual(s.agents.map((a) => [a.name, a.ok, a.paused]), [["up", true, false], ["asleep", true, true]]);
 });
+
+test("lane image version equals the dispatcher version (#4545)", async () => {
+  const { laneImageTag, laneBuildArgs, versionOf, repoRoot } = await import("../pool/version.mjs");
+  const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+  assert.equal(versionOf().version, pkg.version);
+  assert.equal(laneImageTag(pkg.version), `forgedock-lane:${pkg.version}`);
+  assert.deepEqual(laneBuildArgs(pkg.version), { FORGEDOCK_VERSION: pkg.version });
+  const df = readFileSync(join(repoRoot, "pool", "image", "Dockerfile"), "utf8");
+  assert.match(df, /^ARG FORGEDOCK_VERSION$/m, "no separate version pin in the Dockerfile");
+  const dir = tmpDir("lane-image-");
+  const docker = { ...fakeDocker(), builds: [], async hasImage() { return false; }, async build(d, tag, args) { this.builds.push({ tag, args }); } };
+  const agent = createAgent({ state_dir: dir, allow_cpus: 2, allow_mem_gb: 4, router_url: "http://x" }, { docker, log: quiet });
+  await agent.ensureImage();
+  assert.deepEqual(docker.builds, [{ tag: `forgedock-lane:${pkg.version}`, args: { FORGEDOCK_VERSION: pkg.version } }]);
+});
+
+test("forgedock update upgrades pool agents only when a router is configured (#4545)", async () => {
+  const { upgradeAgentsAfterUpdate } = await import("../pool/version.mjs");
+  const dir = tmpDir("upd-hook-");
+  const configPath = join(dir, "router.json");
+  const calls = [];
+  const runPoolCli = async (argv) => { calls.push(argv); };
+  assert.equal(await upgradeAgentsAfterUpdate({ configPath, runPoolCli }), "skipped");
+  assert.equal(calls.length, 0);
+  writeFileSync(configPath, "{}");
+  assert.equal(await upgradeAgentsAfterUpdate({ configPath, runPoolCli }), "upgraded");
+  assert.deepEqual(calls, [["upgrade", "--config", configPath]]);
+  const warns = [];
+  assert.equal(await upgradeAgentsAfterUpdate({ configPath, runPoolCli: async () => { throw new Error("boom"); }, warn: (m) => warns.push(m) }), "failed");
+  assert.match(warns[0], /boom/);
+});

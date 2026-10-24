@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,4 +21,24 @@ function dirHash(dir) {
 export function versionOf(root = repoRoot) {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   return { version: pkg.version, code: dirHash(join(root, "bin", "pool")), image: dirHash(join(root, "pool", "image")) };
+}
+
+/** The lane image is tagged and built from the ForgeDock package version (no separate pin). */
+export const laneImageTag = (version) => `forgedock-lane:${version}`;
+export const laneBuildArgs = (version) => ({ FORGEDOCK_VERSION: version });
+
+/**
+ * `forgedock update` hook: push the new code and lane image to every enrolled agent. A no-op on hosts without a
+ * pool router config; never throws (a failed push must not fail the update). Returns "skipped" | "upgraded" | "failed".
+ */
+export async function upgradeAgentsAfterUpdate({ configPath = process.env.COMPUTESHARE_CONFIG ?? join(homedir(), ".config/computeshare/router.json"), runPoolCli, warn = console.warn } = {}) {
+  if (!existsSync(configPath)) return "skipped";
+  try {
+    const run = runPoolCli ?? (await import("./cli.mjs")).runPoolCli;
+    await run(["upgrade", "--config", configPath]);
+    return "upgraded";
+  } catch (e) {
+    warn(`pool upgrade after update failed: ${e.message}`);
+    return "failed";
+  }
 }
