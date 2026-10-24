@@ -454,13 +454,16 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         // #4540: the provider's free slots (`remote.capacity() -> {free, at}`, sync, null = unknown) cap admissions per sample `at`; the issue queues here instead of a 503.
         let cap = null;
         try { cap = remote.capacity?.() ?? null; } catch { cap = null; }
-        if (cap && Number.isInteger(cap.free)) {
+        // #4547: opt-in (`execution.fallback_local`): every pool agent offline or asleep (sampled online 0) runs the lane on the host.
+        if (remote.offlineFallback && cap && cap.online === 0) {
+          p = { where: "local", reason: `fallback to local: no pool agent online (${p.reason})` };
+        } else if (cap && Number.isInteger(cap.free)) {
           if (cap.at !== capAt) { capAt = cap.at; capAdmits = 0; }
           if (capAdmits >= cap.free && remoteRun.size < remoteMax) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
         }
-        if (remoteRun.size < remoteMax) { remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
-        if (!remote.fallbackLocal) return false;
-        p = { where: "local", reason: `fallback to local: max_remote ${remoteMax} reached (${p.reason})` }; // #4256: hybrid runs it on the host
+        if (p.where === "remote" && remoteRun.size < remoteMax) { remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
+        if (p.where === "remote" && !remote.fallbackLocal) return false;
+        if (p.where === "remote") p = { where: "local", reason: `fallback to local: max_remote ${remoteMax} reached (${p.reason})` }; // #4256: hybrid runs it on the host
       } else {
         noteBudget(adm.reason);
         if (remote.onBudget !== "local" && !remote.fallbackLocal) { budgetStop = adm.reason; return false; }

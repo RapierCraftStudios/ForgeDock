@@ -608,3 +608,19 @@ describe("hybrid placement (#4256)", () => {
     assert.deepEqual(res.rows[0].placement, { where: "remote", reason: "heavy validation: tsc" });
   });
 });
+
+describe("#4547: fallback_local and agent liveness", () => {
+  it("parseExecution: fallback_local is opt-in", () => {
+    assert.equal(parseExecution({ mode: "remote", max_remote: "2" }).fallbackLocal, undefined);
+    assert.equal(parseExecution({ mode: "remote", max_remote: "2", fallback_local: "true" }).fallbackLocal, true);
+    assert.equal(parseExecution({ mode: "remote", fallback_local: "yes" }).fallbackLocal, undefined);
+  });
+  it("transport capacity carries free and liveness; none valid is unknown", async () => {
+    const { httpTransport } = await import("./sandbox-remote.mjs");
+    const cap = async (data, ok = true) => httpTransport({ endpoint: "http://pool.test", token: "t", fetchFn: async () => ({ ok, status: ok ? 200 : 500, headers: new Headers(), text: async () => JSON.stringify(data) }) }).capacity();
+    assert.deepEqual(await cap({ online: 0, total: 2, agents: [] }), { online: 0, total: 2 });
+    assert.deepEqual(await cap({ free: 3 }), { free: 3 });
+    assert.equal(await cap({ online: -1 }), null);
+    assert.equal(await cap({ online: 1 }, false), null);
+  });
+});

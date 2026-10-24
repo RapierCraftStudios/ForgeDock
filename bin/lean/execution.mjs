@@ -79,13 +79,14 @@ export function parseExecution(sec = {}) {
   const tokenEnv = ENV_RE.test(str(s.token_env)) ? str(s.token_env) : null;
   const cacheStore = str(s.cache_store) || null;
   const allowActions = str(s.allow_actions).toLowerCase() === "true";
+  const fallbackLocal = str(s.fallback_local).toLowerCase() === "true";
   const heavyRaw = str(s.heavy).toLowerCase();
   const heavy = heavyRaw === "true" ? true : heavyRaw === "false" ? false : null;
   const cap = (v) => { const t = str(v), x = Number(t); return t !== "" && Number.isFinite(x) && x >= 0 ? x : null; };
   const cpm = cap(s.cost_per_minute);
   const budget = { batchMinutes: cap(s.budget_minutes), batchUsd: cap(s.budget_usd), dayMinutes: cap(s.day_budget_minutes), dayUsd: cap(s.day_budget_usd),
     onBudget: str(s.on_budget) === "local" ? "local" : "stop", costPerMinute: cpm ?? 0 };
-  return { mode, maxRemote, provider, image, secrets, budget, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(heavy !== null ? { heavy } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;

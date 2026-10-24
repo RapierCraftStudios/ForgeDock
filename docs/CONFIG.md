@@ -767,6 +767,7 @@ execution:
 | `allow_actions` | boolean | No | `true` accepts a GitHub Actions endpoint. Default `false`. |
 | `budget_minutes`, `budget_usd` | number | No | The `execution.budget` per batch: once the batch's sandbox minutes / estimated USD (settled lanes plus the running ones' elapsed time) reach the cap, no new remote lane is admitted. Missing, non-numeric or negative means no cap. |
 | `day_budget_minutes`, `day_budget_usd` | number | No | The same cap per host UTC day, summed over every batch on the host from the host-day store (`execution-budget.json` in `~/.forge/sched/`, or `FORGEDOCK_EXECUTION_BUDGET_FILE`). A corrupt or unreadable store refuses remote lanes while a day cap is set; remove the file to reset it. |
+| `fallback_local` | boolean | No | `true`: a remote-placed lane runs on the host while the provider reports no agent online (`GET {endpoint}/status -> {"online": N}`, the built-in router answers it with `online`, `total` and per-agent `ok`/`paused`), so a batch completes locally with every pool agent offline or asleep (forge#4547). Default `false`: such lanes defer (`sandbox.capacity`). A missing or failing `/status` is unknown and never triggers it. |
 | `on_budget` | string | No | `stop` (default): running lanes finish and the rest end `held` (`execution budget: ...`) for a later `--resume`. `local`: the rest run as detached host lanes. |
 | `cost_per_minute` | number | No | USD per sandbox-minute, used when the provider reports no cost of its own (the `container` provider never does). Default `0`. |
 

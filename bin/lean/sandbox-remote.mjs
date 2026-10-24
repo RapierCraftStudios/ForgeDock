@@ -74,7 +74,15 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes) } : null; },
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
     async capacity() {
-      try { const r = await call("GET", "/status"); const f = r.data?.free; return r.ok && Number.isInteger(f) && f >= 0 ? { free: f } : null; } catch { return null; }
+      // `free` (#4540) and agent liveness `online`/`total` (#4547) are each optional; none valid is unknown.
+      try {
+        const r = await call("GET", "/status");
+        if (!r.ok) return null;
+        const ok = (v) => Number.isInteger(v) && v >= 0;
+        const { free, online, total } = r.data ?? {};
+        const out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}) };
+        return Object.keys(out).length ? out : null;
+      } catch { return null; }
     },
   };
 }
