@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { createAgent, safeName } from "../pool/agent.mjs";
 import { createRouter } from "../pool/router.mjs";
@@ -315,4 +316,26 @@ test("credential relay hands out access tokens only; no refresh token leaves the
   assert.equal(github.status, 200);
   assert.equal(JSON.parse(github.text).token, "ghs_short_lived");
   assert.doesNotMatch(claude.text + github.text, /refresh/i);
+});
+
+const installDir = new URL("../../pool/install/", import.meta.url).pathname;
+const linuxInstaller = join(installDir, "install-agent-linux.sh");
+
+test("linux installer scripts parse and install the systemd unit without WSL", () => {
+  for (const f of ["install-agent-linux.sh", "install-agent.sh"]) assert.equal(spawnSync("bash", ["-n", join(installDir, f)]).status, 0, f);
+  assert.ok(!/wsl/i.test(readFileSync(linuxInstaller, "utf8")));
+  assert.match(readFileSync(join(installDir, "install-agent.sh"), "utf8"), /computeshare-agent\.service/);
+});
+
+test("linux installer --dry-run resolves settings and redacts the token", () => {
+  const r = spawnSync("bash", [linuxInstaller, "--dry-run", "--router", "http://100.1.1.1:7710", "--token", "sekret", "--name", "box", "--cpus", "6", "--mem", "9", "--port", "7712"],
+    { encoding: "utf8", env: { ...process.env, AGENT_URL: "http://100.2.2.2:7712" } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /router=http:\/\/100\.1\.1\.1:7710 name=box url=http:\/\/100\.2\.2\.2:7712 port=7712 cpus=6 mem_gb=9/);
+  assert.ok(!r.stdout.includes("sekret"));
+});
+
+test("linux installer requires a router and token", () => {
+  const env = { ...process.env }; delete env.ROUTER_URL; delete env.ENROLL_TOKEN;
+  assert.notEqual(spawnSync("bash", [linuxInstaller, "--dry-run"], { env }).status, 0);
 });
