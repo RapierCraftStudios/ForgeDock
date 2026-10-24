@@ -767,7 +767,7 @@ transport (`launch/status/logs/result/usage/destroy`, addressed by ForgeDock's o
 `httpTransport` is the one shipped transport (JSON protocol in docs/CONFIG.md
 `execution`). The launch spec carries the repo to clone, `cache_store`, the scoped
 env (secret names resolved via `credentials.mjs` `resolveCredential`: env, then
-keychain service `forgedock`) and the `run-issue` argv. Logs stream into the batch
+keychain service `forgedock`) and the `run-issue` argv. The env also carries the dispatching host's git identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*` from `git config user.name/email`, `hostGitIdentity`; a lane env identity wins) so sandbox commits have the same author as local lanes; without it the lane image fell back to `forgedock@localhost`, which fails DCO (forge#4561). Logs stream into the batch
 lane log redacted; billable minutes go on `handle.minutes` and `providerLanes`
 copies them to the lane result as `sandbox: {provider, id, minutes, cost_usd}` (#4255
 reports them). `remote` is never a default provider; `remoteTransportFor` refuses a GitHub
