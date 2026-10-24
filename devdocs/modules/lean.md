@@ -241,7 +241,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
    (`max_rounds`, then `ci.red`), slow → `ci-pending`, unavailable → local fallback;
-   docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI.
+   docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI;
+   the trajectory decisions name them (`precheck` `ciCovered`, `VALIDATE_CI_VERIFIED`), and the
+   base-sync re-review retry CI-verifies its fix round's head before reviewing (#4527).
    Push-check mode gates on `ciGate` (`verify.checks` > required checks under
    `merge_wait: required` > all) at the latest attempt per name (`latestPerName`, check-run
    id); a no-commit fix round reruns the failed jobs once (`rerunFailedOnce`,

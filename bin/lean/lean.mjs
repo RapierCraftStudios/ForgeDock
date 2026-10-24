@@ -1928,7 +1928,8 @@ export async function runCore(o) {
         T.decisions.push(`Conformance enforced (review.risk_paths): ${hits.slice(0, 10).join(", ")}${hits.length > 10 ? ` and ${hits.length - 10} more` : ""}`);
       }
       const amendProblems = await amend();
-      const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === String(await git(["rev-parse", "HEAD"])).trim();
+      const gateHead = String(await git(["rev-parse", "HEAD"])).trim();
+      const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === gateHead;
       const hotspots = light ? null : await hotspotsOf({ base, paths: files }); // #4451
       const validateRuns = await rerunFailedValidates(effective);
       const repoHas = validateRuns && Object.keys(validateRuns).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
@@ -1937,6 +1938,12 @@ export async function runCore(o) {
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });
         const note = `Scope-check validate ${pc.superseded.map((x) => x.id).join(", ")} superseded by the scope gate (amended: ${[...new Set(pc.superseded.flatMap((x) => x.files))].join(", ")})`;
+        if (!T.decisions.includes(note)) T.decisions.push(note);
+      }
+      // #4527: name the validate ids CI verified instead of a local run
+      if (pc.ciCovered?.length) {
+        ev({ event: "VALIDATE_CI_VERIFIED", ids: pc.ciCovered, head: gateHead });
+        const note = `Validate ${pc.ciCovered.join(", ")} verified by CI at ${gateHead.slice(0, 12)} (no local result)`;
         if (!T.decisions.includes(note)) T.decisions.push(note);
       }
       Object.assign(verifyFacts, { precheck: pc.failures, amendments: amendProblems, hotspots: Boolean(hotspots && hotspots.enabled !== false && Array.isArray(hotspots.files)) });
@@ -2229,6 +2236,8 @@ export async function runCore(o) {
           await fixRound("review", conformanceResumePrompt(rv.failures, vcfg.mode), rv.failures, "review", failureLog(rv.failures));
           if (await unresolved()) return await needsHuman("Base-sync re-review fix left conflict markers.", OUTCOME_CODES.BASE_CONFLICT);
           if ((await gitOut(["rev-parse", "HEAD"])) !== after) await gitPush(["push", "origin", branch]);
+          // #4527: the fix round's head is CI-verified before the retry review, as in the main loop
+          if (remoteVerify) { const v = await ciVerify("base-sync"); if (v.done) return v.done; }
           rv = await doReview();
           if (rv.env) return await envNeedsHuman(rv.env);
         }
