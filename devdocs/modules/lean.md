@@ -379,6 +379,16 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    fail-open after the CI wait budget), re-checks against the fetched lane, and a taken number
    base-syncs + renumbers (`SEQUENCE_LATE_BIND`) and waits for CI again; released at merge
    or finish.
+   #4526: the renumber picks its numbers under a short host pick lock per (repo, base, dir)
+   (`seqlease.mjs` `reserve`, its own registry `schedDir()/seq-pick/<key>/`, never the merge-gate
+   lease) above every other live lane's reservation in `reserved.json`; a reservation lasts until
+   `unreserve` at finish, its holder's death (pid) or 24h, and a lock or file error keeps the
+   base-derived numbers (fail-open). `verifyRenumber` also accepts a file whose first line only
+   swaps its own stem/number (`headerOnlyChange`, e.g. `-- Migration 0067_x`). A data-only move
+   after a schema-changing one in the same dir goes through the generator (its predecessor is not
+   the base tip), and a move the regular generator writes no snapshot for (hand-written SQL) is
+   rerun as `<regenerate> --custom` with its and later lane SQL withheld; the generator's empty
+   migration is dropped and the lane's SQL and planned journal restored byte-identical.
    Only real series count (#4343): a leading date (`YYYY-MM-DD`, `YYYYMMDD`) is no
    number, and the directory must hold a series on the base — a `_journal.json` /
    `meta/_journal.json`, or ≥2 distinct numbers of the file's width filling at least

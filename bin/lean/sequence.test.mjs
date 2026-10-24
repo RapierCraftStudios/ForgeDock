@@ -346,7 +346,7 @@ describe("deterministic renumber (#4386)", () => {
   });
 
   it("#4526: a hand-written migration with no schema diff after a schema-changing one gets the generator's --custom snapshot and keeps its SQL byte-for-byte", async () => {
-    const FN_SQL = "-- Migration 0050_fn\nCREATE FUNCTION f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;\n";
+    const FN_SQL = "-- hand-written: no schema diff\nCREATE FUNCTION f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;\n";
     const d = repo(
       { "db/0048_init.sql": "CREATE TABLE t (id int);\n", "db/meta/_journal.json": journal("0048_init"), "db/meta/0048_snapshot.json": snap("s48", "s47") },
       { "db/0049_s.sql": "CREATE TABLE s (id int);\n", "db/0050_fn.sql": FN_SQL, "db/meta/_journal.json": journal("0048_init", "0049_s", "0050_fn"),
