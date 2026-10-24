@@ -115,6 +115,7 @@ describe("outcome-codes module", () => {
     assert.equal(codeForTerminalReason("dependency-unreadable"), "dependency.unreadable");
     assert.equal(codeForTerminalReason("dependency-blocked"), "dependency.blocked");
     assert.equal(codeForTerminalReason("needs-human"), "unclassified");
+    assert.equal(codeForTerminalReason("budget-exceeded"), "budget.exceeded"); // forge#4505: the non-human turn-overrun end
   });
   it("docs/OUTCOME-CODES.md and the enum agree in both directions, and carry the version", () => {
     const doc = readFileSync(join(__dirname, "../../docs/OUTCOME-CODES.md"), "utf8");

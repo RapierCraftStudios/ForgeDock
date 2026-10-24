@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, chmodSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { TURN_BUDGET_DEFAULTS, parseTurnBudgets, laneSize, wrapupGrant, makeTurnBudget, budgetDigest, formatTurnSummary } from "./budget.mjs";
+import { TURN_BUDGET_DEFAULTS, parseTurnBudgets, laneSize, nextSize, recoverySize, wrapupGrant, makeTurnBudget, budgetDigest, formatTurnSummary } from "./budget.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 import { OUTCOME_CODES, RECOVERABLE_CODES } from "../engine/outcome-codes.mjs";
 import { RECOVER_HOW } from "./lean.mjs";
@@ -32,6 +32,14 @@ describe("#4392 turn budget", () => {
     assert.equal(laneSize({ contract: contract(9), labels: [{ name: "size:S" }] }), "S");
     assert.equal(laneSize({ contract: contract(1), labels: ["bug", "Size/l"] }), "L");
     assert.equal(laneSize({}), null);
+  });
+
+  it("#4505 a budget.exceeded recovery runs at the next size (S->M->L, L stays L); other lanes keep their size", () => {
+    assert.deepEqual(["S", "M", "L"].map(nextSize), ["M", "L", "L"]);
+    assert.equal(nextSize(null), null); assert.equal(nextSize("XL"), "XL");
+    assert.equal(recoverySize("S", { code: "budget.exceeded", attempt: 1, final: true }), "M");
+    assert.equal(recoverySize("L", { code: "budget.exceeded" }), "L");
+    assert.equal(recoverySize("S", { code: "ci.red" }), "S"); assert.equal(recoverySize("S", null), "S"); assert.equal(recoverySize(null, { code: "budget.exceeded" }), null);
   });
 
   it("the tally: build turns spend the budget, other attempts count only in total; off or unsized is unlimited", () => {

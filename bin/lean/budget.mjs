@@ -5,7 +5,8 @@
  * else the frozen contract's distinct deliverable paths (S <= 2, M <= 5, else L). The budget for the size is forge.yaml
  * `engine.turn_budget_s|m|l` (defaults 25/60/100; 0 disables that size). The implement stage (the build call and its
  * context/timeout restarts) spends it; on overrun the builder gets one wrap-up grant to finish or stop with a digest, and
- * an unfinished lane ends needs-human `budget.exceeded` (recoverable once by the batch). Pure module: no I/O.
+ * an unfinished lane ends the non-human `budget-exceeded` reason (code `budget.exceeded`, #4505): the batch recovers it once
+ * from the checkpoint at the next size (`recoverySize`); only a final recovery that overruns too ends needs-human. Pure module: no I/O.
  */
 
 export const TURN_BUDGET_DEFAULTS = Object.freeze({ S: 25, M: 60, L: 100 });
@@ -35,6 +36,11 @@ export function laneSize({ contract = null, labels = [] } = {}) {
   const n = new Set(contract.deliverables.map((d) => d?.path).filter((p) => typeof p === "string" && p.trim())).size;
   return n <= 2 ? "S" : n <= 5 ? "M" : "L";
 }
+
+/** #4505: the next size up (S -> M -> L; L stays L); anything else unchanged. */
+export const nextSize = (size) => (SIZES.includes(size) ? SIZES[Math.min(SIZES.indexOf(size) + 1, SIZES.length - 1)] : size);
+/** #4505: a `budget.exceeded` recovery lane runs at the next size's budget; any other lane keeps its size. */
+export const recoverySize = (size, recover) => (recover?.code === "budget.exceeded" ? nextSize(size) : size);
 
 /** Turns the wrap-up call may use after the budget is spent. */
 export const wrapupGrant = (budget) => Math.max(5, Math.ceil(budget / 5));

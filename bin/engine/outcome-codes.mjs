@@ -175,6 +175,7 @@ export function codeForTerminalReason(reason) {
     case "dependency-open": return OUTCOME_CODES.DEPENDENCY_OPEN;
     case "dependency-unreadable": return OUTCOME_CODES.DEPENDENCY_UNREADABLE;
     case "dependency-blocked": return OUTCOME_CODES.DEPENDENCY_BLOCKED;
+    case "budget-exceeded": return OUTCOME_CODES.BUDGET_EXCEEDED; // forge#4505: the non-human turn-overrun end
     default: return UNCLASSIFIED;
   }
 }
@@ -190,13 +191,14 @@ export const HUMAN_CODES = Object.freeze([OUTCOME_CODES.BUILDER_BLOCKED]);
 /**
  * `recoverable` | `human` | `terminal` for a lane result row ({outcome|terminalReason, code, issueEdited?, conflicting?}).
  * Recoverable: needs-human `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `budget.exceeded`, `contract.invalid` after a mid-run issue
- * edit (`issueEdited`), and `ci-pending` on a conflicting PR (`conflicting`). Human: `builder.blocked`. Anything else
+ * edit (`issueEdited`), `ci-pending` on a conflicting PR (`conflicting`), and the non-human `budget-exceeded` turn-overrun end (forge#4505). Human: `builder.blocked`. Anything else
  * (another code, or not a needs-human/ci-pending row) is terminal. Pure, never throws.
  */
 export function classifyNeedsHuman(row) {
   if (!row || typeof row !== "object") return "terminal";
   const outcome = row.outcome ?? row.terminalReason;
   if (outcome === "ci-pending") return row.conflicting === true ? "recoverable" : "terminal";
+  if (outcome === "budget-exceeded") return "recoverable";
   if (outcome !== "needs-human") return "terminal";
   if (HUMAN_CODES.includes(row.code)) return "human";
   if (row.code === OUTCOME_CODES.CONTRACT_INVALID) return row.issueEdited === true ? "recoverable" : "terminal";
