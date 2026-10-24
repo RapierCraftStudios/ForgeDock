@@ -46,6 +46,7 @@ import { priorityFromLabels } from "./sched.mjs";
 import { parseExploreConfig, explorerAgents, explorePlanRule, exploreBuildRule } from "./explore.mjs";
 import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { parseContextPackConfig, contextArm, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
+import { isExternalKill } from "./hostkill.mjs";
 import { buildResumeDigest } from "./resume.mjs";
 import { lightEligibility } from "./light.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
@@ -655,13 +656,14 @@ export async function runCore(o) {
           p = restart() + await contextRestartNote(); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "context_restart";
           continue;
         }
-        if (!(e?.code === "CLI_IDLE" || e?.code === "CLI_TIMEOUT")) throw e;
+        const hostKilled = isExternalKill(e); // #4518: SIGTERM/143 we did not send restarts like a timeout, and never ends engine-error
+        if (!(hostKilled || e?.code === "CLI_IDLE" || e?.code === "CLI_TIMEOUT")) throw e;
         const idle = e.code === "CLI_IDLE";
-        const reason = idle ? "idle timeout" : "timeout";
-        ev({ event: idle ? "CLI_IDLE_KILL" : "CLI_TIMEOUT_KILL", reason, lastTool: e.lastTool ?? null, children: e.children ?? [],
+        const reason = hostKilled ? "host kill" : idle ? "idle timeout" : "timeout";
+        ev({ event: hostKilled ? "CLI_HOST_KILL" : idle ? "CLI_IDLE_KILL" : "CLI_TIMEOUT_KILL", reason, lastTool: e.lastTool ?? null, children: e.children ?? [],
           ...(idle ? { heavyQueue: e.heavyQueue ?? null, extended: e.extended === true } : {}) });
         await checkpoint(reason);
-        if (timeoutRetries++ >= 1) { e.deferCode = idle ? OUTCOME_CODES.CLI_IDLE : OUTCOME_CODES.CLI_TIMEOUT; e.deferDetail = `builder ${reason}; work checkpointed to ${branch}; rerun resumes from it. ${String(e.message).slice(0, 300)}`; throw e; }
+        if (timeoutRetries++ >= 1) { e.deferCode = hostKilled ? OUTCOME_CODES.CLI_HOST_KILLED : idle ? OUTCOME_CODES.CLI_IDLE : OUTCOME_CODES.CLI_TIMEOUT; e.deferDetail = `builder ${reason}; work checkpointed to ${branch}; rerun resumes from it. ${String(e.message).slice(0, 300)}`; throw e; }
         T.anomalies.push(`builder ${reason}: checkpointed, retried once`);
         T.decisions.push(`Builder ${reason}: uncommitted work checkpointed to the lane branch; retrying once from the checkpoint`);
         p = restart(); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "timeout_restart";

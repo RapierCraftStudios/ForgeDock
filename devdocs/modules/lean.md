@@ -1668,3 +1668,8 @@ The client (`orchestrateClient`): when the stream drops after the batch id is kn
 Tests: `schedd.test.mjs` pins `FORGEDOCK_SCHED_DIR` to a tmp dir in the test process, so the env that clients submit for
 their lanes never resolves `~/.forge/sched`. Stub lanes record their pid, exit once the work dir is gone or after 120 s,
 and are SIGKILLed by `h.cleanup()` and by a process `exit` hook. Cost: 0 LLM calls.
+
+#4518: an external kill of the builder CLI (`CLI_BACKEND_FAILED` with signal SIGTERM/SIGKILL or status 143/137, classified by
+`bin/lean/hostkill.mjs`; `runCliBackendAsync` attaches `status` and `signal`) is handled like a timeout in `builder()`: checkpoint,
+one fresh restart, then `deferred` with `cli.host_killed`, so it never reaches the batch breaker. The CLI ceiling already excludes
+governor-paused time (`pausedTotal`, `bin/runner.mjs`). Cost: 0 LLM calls.

@@ -1809,6 +1809,7 @@ export function runCliBackend({
           ` Invocation: ${bin} ${argvSummary} (cwd: ${cwd})`,
       );
       err.code = "CLI_BACKEND_FAILED";
+      err.status = result.status ?? null; err.signal = result.signal ?? null; // #4518: lets bin/lean/hostkill.mjs tell an external kill
       // forge#2241: attach the CLI's reported session-limit reset time (when
       // present) so callers (bin/engine.mjs) can surface *when* a
       // quota-exhaustion failure will clear without reading raw logs. Only
