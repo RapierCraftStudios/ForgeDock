@@ -1677,3 +1677,9 @@ The client (`orchestrateClient`): when the stream drops after the batch id is kn
 Tests: `schedd.test.mjs` pins `FORGEDOCK_SCHED_DIR` to a tmp dir in the test process, so the env that clients submit for
 their lanes never resolves `~/.forge/sched`. Stub lanes record their pid, exit once the work dir is gone or after 120 s,
 and are SIGKILLed by `h.cleanup()` and by a process `exit` hook. Cost: 0 LLM calls.
+
+## Entry 2026-10-24 — Light-lane review fixes (#4502)
+
+A kept light lane now runs the same structure delta and hotspot precheck as the full lane (the undeclared package edge gets the one builder resume).
+`runLightStep` rethrows typed builder errors (`isTypedBuilderError`: `laneCode`, `deferCode`, `CLI_*`, `spawnDeterministic`, usage limit), so the lane's own catch ends them (budget-exceeded, deferred, needs-human) with no second builder session; only internal errors stay `light_error`.
+The derived contract's deliverables are the issue-named files (`predictedFiles`); a changed non-test file outside them upgrades with `scope_creep`. The light prompt no longer asks for `forgedock check` (no contract exists yet). `runLightTests` forwards `timeoutMs` (`precheckTimeoutSeconds`) to `io.runCommand`. `RUN_TERMINAL.light` is summarised as `contextPack.light` and `contextPackAb` skips light runs.
