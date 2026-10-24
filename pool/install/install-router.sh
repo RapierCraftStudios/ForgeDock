@@ -4,7 +4,7 @@
 # Installs the computeshare router as a systemd --user service on the host that runs ForgeDock.
 # It listens only on this machine's Tailscale IP. Re-running keeps existing tokens and agent enrollments.
 set -euo pipefail
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/computeshare"
 PORT="${ROUTER_PORT:-7710}"
 TS_IP="$(tailscale ip -4 | head -1)"
