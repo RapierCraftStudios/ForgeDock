@@ -50,7 +50,7 @@ export const dockerCli = {
     }
     return res;
   },
-  async build(dir, tag) { return docker(["build", "-q", "-t", tag, dir], { timeoutMs: 45 * 60000 }); },
+  async build(dir, tag, buildArgs = {}) { return docker(["build", "-q", "-t", tag, ...Object.entries(buildArgs).flatMap(([k, v]) => ["--build-arg", `${k}=${v}`]), dir], { timeoutMs: 45 * 60000 }); },
   /** Removes files the root-owned lane container wrote into a bind mount, using the lane image itself. */
   async wipe(dir, image) { await docker(["run", "--rm", "--network", "none", "-v", `${dir}:/d`, "--entrypoint", "sh", image, "-c", "rm -rf /d/* /d/.[!.]* 2>/dev/null; true"], { timeoutMs: 120000 }); },
 };

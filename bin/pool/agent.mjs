@@ -8,7 +8,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSyn
 import { basename, join } from "node:path";
 import { cpus, hostname } from "node:os";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
-import { repoRoot, versionOf } from "./version.mjs";
+import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
 import { jsonStore } from "./store.mjs";
 
 const LABEL = "computeshare=1";
@@ -62,9 +62,9 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const leaseTtlMs = (cfg.lease_ttl_s ?? 600) * 1000;
   const maxLifeMs = (cfg.max_lifetime_s ?? 6 * 3600) * 1000;
   const keepExitedMs = (cfg.keep_exited_s ?? 2 * 3600) * 1000;
-  const image = cfg.image ?? "computeshare-lane:1";
-
   const running = versionOf(cfg.code_root ?? repoRoot);
+  // The lane image tracks the installed ForgeDock version; only an explicit non-legacy cfg.image overrides it.
+  const image = cfg.image && cfg.image !== "computeshare-lane:1" ? cfg.image : laneImageTag(running.version);
   const upgrade = { state: "idle", error: null };
   const prepull = { error: null };
   const dindImage = cfg.dind_image ?? "docker:27.5.1-dind";
@@ -255,7 +255,11 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       rmSync(next, { recursive: true, force: true }); mkdirSync(next, { recursive: true });
       await run("tar", ["-xzf", tgz, "-C", next]);
       const want = versionOf(next);
-      if (want.image !== running.image) { log.info?.(`rebuilding ${image} (${running.image} -> ${want.image})`); await docker.build(join(next, "pool", "image"), image); }
+      if (want.image !== running.image || want.version !== running.version) {
+        const nextImage = cfg.image && cfg.image !== "computeshare-lane:1" ? cfg.image : laneImageTag(want.version);
+        log.info?.(`rebuilding ${nextImage} (${running.version}/${running.image} -> ${want.version}/${want.image})`);
+        await docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version));
+      }
       await prepullImages();
       rmSync(`${root}.old`, { recursive: true, force: true });
       await run("mv", [root, `${root}.old`]);
@@ -384,7 +388,14 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     }
   }
 
-  return { handle, launch, reap, destroy, capacity, refresh, store, prepullImages };
+  /** Build the lane image for the running ForgeDock version when this host does not have it yet. */
+  async function ensureImage() {
+    if (await docker.hasImage?.(image)) return;
+    log.info?.(`building ${image}`);
+    await docker.build(join(cfg.code_root ?? repoRoot, "pool", "image"), image, laneBuildArgs(running.version));
+  }
+
+  return { handle, launch, reap, destroy, capacity, refresh, store, prepullImages, ensureImage };
 }
 
 /**
@@ -414,6 +425,7 @@ export function startAgent(cfg, deps) {
   server.listen(cfg.listen.port, cfg.listen.host);
   const timer = setInterval(() => agent.reap().catch((e) => console.error("reap failed", e)), (cfg.reap_interval_s ?? 30) * 1000);
   agent.reap().catch((e) => console.error("startup reap failed", e));
+  agent.ensureImage().catch((e) => console.error("lane image build failed", e));
   wslNetworkFixup({ idle: () => agent.capacity().active === 0 })
     .catch((e) => console.error("wsl network fixup failed", e))
     .finally(() => agent.prepullImages());
