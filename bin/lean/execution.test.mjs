@@ -502,6 +502,28 @@ describe("hybrid placement (#4256)", () => {
     assert.deepEqual(await validationWeight({ cwd: repoWith({}), precheckCommands: ["echo ok", "git diff --check"] }), { heavy: false, signals: [] });
   });
 
+  it("validationWeight sees monorepo subdirectory markers (#4523)", async () => {
+    const repo = (files) => { const d = tmpDir("vw-mono-"); for (const [f, t] of Object.entries(files)) { mkdirSync(join(d, f, ".."), { recursive: true }); writeFileSync(join(d, f), t); } return d; };
+    const mono = repo({ "package.json": "{}", "services/x/pyproject.toml": "[project]", "web/tsconfig.json": "{}" });
+    assert.deepEqual(await validationWeight({ cwd: mono }), { heavy: true, signals: ["python", "tsc"] });
+    assert.equal((await validationWeight({ cwd: repo({ "web/package.json": JSON.stringify({ scripts: { lint: "eslint ." } }) }) })).heavy, true);
+    assert.deepEqual(await validationWeight({ cwd: repo({ "node_modules/a/tsconfig.json": "{}", ".git/x/go.mod": "m", "a/b/c/Cargo.toml": "x" }) }), { heavy: false, signals: [] });
+  });
+
+  it("execution.heavy overrides placement only (#4523)", () => {
+    const hy = (heavy) => parseExecution({ mode: "hybrid", max_remote: "2", ...(heavy === undefined ? {} : { heavy }) });
+    assert.equal(hy().heavy, undefined);
+    assert.equal(hy("TRUE").heavy, true);
+    assert.equal(hy("false").heavy, false);
+    assert.equal(hy("maybe").heavy, undefined);
+    const LIGHT = { heavy: false, signals: [] }, HEAVY = { heavy: true, signals: ["tsc"] };
+    assert.deepEqual(placeLane({ exec: hy("true"), weight: LIGHT, headroom: { ok: true } }), { where: "remote", reason: "execution.heavy: true" });
+    assert.deepEqual(placeLane({ exec: hy("false"), weight: HEAVY, headroom: { ok: true } }), { where: "local", reason: "light lane, host has headroom" });
+    assert.equal(placeLane({ exec: hy("false"), weight: HEAVY, headroom: { ok: false, detail: "mem" } }).where, "remote");
+    assert.equal(placeLane({ exec: hy("true"), verifyMode: "ci", weight: LIGHT }).where, "local");
+    assert.equal(placeLane({ exec: parseExecution({ mode: "hybrid", max_remote: "0", heavy: "true" }), weight: LIGHT }).where, "local");
+  });
+
   it("hostHeadroom: memory below the admission floor plus one heavy step, or a configured load ceiling", () => {
     const host = (mem, load = 1, cores = 4) => ({ memAvailableMb: () => mem, loadAvg1: () => load, cores: () => cores });
     assert.deepEqual(hostHeadroom({ host: host(8000) }), { ok: true, detail: "" });

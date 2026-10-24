@@ -797,6 +797,15 @@ on the run record and the row, and in `ctx.placement`. The lane gets it as
 into FORGE:STATE (`placement: {where, reason, mode}`) and a trajectory decision.
 Cost: 0 LLM calls. Rationale: `devdocs/decisions/4256-hybrid-placement.md`.
 
+Monorepos (#4523): `validationWeight` also scans heavy markers and package.json
+scripts one and two directory levels below the root (injectable `list`, default
+`readdir`; skips dot-dirs, `node_modules`, `vendor`, `dist`, `build`, `target`,
+`venv`, `__pycache__`; capped at 200 dirs). Root signals keep their order.
+`execution.heavy: true|false` (`parseExecution`) is a placement-only override in
+`placeLane`: `true` → remote (`execution.heavy: true`) after rules 1-3; `false`
+ignores the detected weight but the headroom rule still applies. It adds no
+pre-PR commands and does not touch admission.
+
 ## Entry 2026-10-20 — Context pack: the issue's graph as plan context (#4275)
 
 Before the plan call (not for refactor:split lanes or a recovered frozen contract)
