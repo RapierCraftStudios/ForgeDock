@@ -46,7 +46,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
   /** The enrolled agent whose token the request carries, or null. */
   function agentFor(req) {
-    const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "");
+    const m = /^Bearer\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
     if (!m) return null;
     return Object.entries(agents()).find(([, a]) => sameSecret(m[1].trim(), a.token))?.[0] ?? null;
   }

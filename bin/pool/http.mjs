@@ -27,7 +27,7 @@ export function sameSecret(a, b) {
 
 /** True when the request carries `Authorization: Bearer <token>`. */
 export function bearerOk(req, token) {
-  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "");
+  const m = /^Bearer\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
   return Boolean(m) && sameSecret(m[1].trim(), token);
 }
 
