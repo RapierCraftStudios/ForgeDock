@@ -648,6 +648,13 @@ describe("core work-on", () => {
     };
     assert.equal(await code(world({ result: { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } } })), "builder.blocked");
     assert.equal(await code(world({ result: { status: "blocked", summary: "need creds" } })), "builder.block_untyped");
+    // #4542: a remote lane that names only a declared host capability is the recoverable env code; anything else stays human.
+    const rb = (summary, extra) => code(world({ result: { status: "blocked", summary, block: { kind: "human", why: "credentials" } } }), extra);
+    const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["sops"] } };
+    assert.equal(await rb("this lane has no sops/age key", remote), "env.capability_remote");
+    assert.equal(await rb("owner must create a third-party account", remote), "builder.blocked");
+    assert.equal(await rb("this lane has no sops/age key", { ...remote, hostCaps: undefined }), "builder.blocked");
+    assert.equal(await rb("this lane has no sops/age key", { ...remote, placement: { where: "local", reason: "x" } }), "builder.blocked");
     assert.equal(await code(world({ changed: [] })), "builder.no_commit");
     assert.equal(await code(world({ waits: [{ rc: 1, text: "lint failed" }] }), { mergeWait: "all" }), "ci.red");
   });

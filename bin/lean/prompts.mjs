@@ -310,7 +310,8 @@ const BLOCK_RULES = `"blocked" needs a typed "block" in ${RESULT_FILE}, one of:
 - {"kind":"dependency","issues":[N]}: an open upstream issue must land first. The engine requeues this issue behind it.
 - {"kind":"split-required","subissues":[{"title":"","body":"","depends_on":[0],"files":["<path>"]}],"size":{"files":N,"lines":N}}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues; files = the files or dirs each will edit, also accepted as "paths") only when every sub-issue's files are disjoint from the others' or the whole change's size estimate exceeds ${SPLIT_MIN_FILES} files or ${SPLIT_MIN_LINES} lines; otherwise keep one lane: an ordered checklist in the contract with a validate per item. In an admitted split, when siblings would edit the same hub (a barrel or index export list, a union type, a shared test fixture, an index doc), pre-stage its slots in the earliest sub-issue and make the others depend on it, or give each sibling its own per-feature file; the engine serialises sub-issues that still share a file.
 - {"kind":"human","why":"${HUMAN_BLOCK_REASONS.join("|")}"}: only an external action agents cannot take, or a product decision too critical for agents.
-"An upstream issue must land first", "needs a split" and "needs prod data that read-only monitoring can read" are never "human".`;
+"An upstream issue must land first", "needs a split" and "needs prod data that read-only monitoring can read" are never "human".
+Remote sandbox lacking a host-only capability (sops, prod_monitor, ops_credentials): name it in the summary; the host reruns the lane.`;
 
 export function blockCorrectionPrompt(problem) {
   return `Your ${RESULT_FILE} says "blocked", but ${String(problem).slice(0, 1000)}. That is not a block that needs a human.\n\n${BLOCK_RULES}\n\nEither do the work (fix, commit, update the stage notes and ${RESULT_FILE}) or write a valid typed "block". Do not push or touch GitHub.`;

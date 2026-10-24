@@ -96,7 +96,7 @@
  * the queue order except that decomposed sub-issues go first. A settled row carries `est_minutes` (estimated vs. actual).
  */
 import { parseDependsOn } from "../engine/phases.mjs";
-import { classifyNeedsHuman, recoveryCodeOf } from "../engine/outcome-codes.mjs";
+import { classifyNeedsHuman, recoveryCodeOf, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { recoveryEvidence } from "./render.mjs";
 import { renderAlerts } from "../stats/render.mjs";
 import { formatParkedLine, postDeployOnly } from "./prefilter.mjs";
@@ -276,6 +276,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #4256: where a lane goes before capacity: `remote.place` (hybrid) or `remote.isRemote` (remote mode).
   const placeOf = (n) => {
     if (!remote) return null;
+    // #4542: a lane recovering from a remote capability block runs on the host, which has the capability.
+    if (recovering.get(n)?.code === OUTCOME_CODES.ENV_CAPABILITY_REMOTE) return { where: "local", reason: "host capability: recovering env.capability_remote" };
     if (budgetLocal) return { where: "local", reason: `fallback to local: execution budget: ${budgetHit ?? "cap reached"}` };
     try {
       if (typeof remote.place === "function") {
