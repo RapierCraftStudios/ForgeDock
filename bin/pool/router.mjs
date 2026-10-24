@@ -114,7 +114,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
 
   async function launch(spec) {
-    if (!spec?.id) return { status: 400, body: { error: "spec.id required" } };
+    if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id)) return { status: 400, body: { error: "spec.id required ([A-Za-z0-9._-], max 128)" } };
     const known = own(sbx(), spec.id);
     if (known && own(agents(), known.agent)) {
       known.touched = now(); store.save();

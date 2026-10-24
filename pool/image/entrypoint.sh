@@ -10,13 +10,21 @@ exec > >(tee -a /csout/lane.log) 2>&1
 export HOME=/root
 export UV_CACHE_DIR=/cache/uv npm_config_cache=/cache/npm POETRY_CACHE_DIR=/cache/poetry PIP_CACHE_DIR=/cache/pip
 export TMPDIR=/tmp
+# ForgeDock's dependency cache (its pnpm store and snapshots) and pnpm's own store live in the persistent per-repo
+# cache volume, so a lane installs from a warm store instead of downloading every package (a cold monorepo install
+# took ~15 min and hit ForgeDock's install timeout). /cache and /work are different volumes, so pnpm imports by copy.
+export FORGE_DEPCACHE_ROOT=/cache/forge-depcache npm_config_store_dir=/cache/pnpm-store
+# Testcontainers' Ryuk reaper never logs "Started" on the sandbox's private dockerd, so every DB test setup failed.
+# The sandbox and its dockerd are discarded after the lane, so the reaper has nothing to add.
+export TESTCONTAINERS_RYUK_DISABLED=true
 
 echo "[computeshare] sandbox ${CS_SANDBOX_ID:-?} repo ${CS_REPO_SLUG:-?} ref ${CS_REPO_REF:-default} on $(hostname)"
 
 # GitHub auth: the token is fetched on demand through the agent (installation tokens expire hourly), so a long lane
 # never runs on a stale token. `gh` is a shim that exports a fresh GH_TOKEN; git uses the same source as a helper.
 if [ -n "${CS_CRED_BASE:-}" ]; then
-  git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$(cs-cred github)"; }; f'
+  # Scoped to github.com: the installation token is never offered to another HTTPS git host (#4565).
+  git config --global credential.https://github.com.helper '!f() { echo username=x-access-token; echo "password=$(cs-cred github)"; }; f'
 elif [ -n "${GH_TOKEN:-}" ]; then
   gh auth setup-git >/dev/null 2>&1 || true
 fi

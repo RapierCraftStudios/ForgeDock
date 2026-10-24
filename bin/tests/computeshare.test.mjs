@@ -166,6 +166,20 @@ test("inherited object keys are never install codes, agents or sandboxes", async
   for (const name of ["constructor", "toString"]) assert.equal(await get(`/agents/${name}/usage`, "fd"), 404, name);
 });
 
+test("agent and router refuse inherited or unsafe sandbox ids (#4566)", async () => {
+  const { agent } = agentFixture();
+  for (const id of ["__proto__", "_x", "../x", ""]) {
+    await assert.rejects(agent.launch({ spec: spec(id), cpus: 1, mem_gb: 1 }), (e) => e.status === 400, id);
+  }
+  assert.equal(Object.prototype.lease, undefined);
+  const get = (url) => new Promise((resolve) => {
+    agent.handle({ method: "GET", url, headers: { authorization: "Bearer agent-token" }, socket: {} }, { writeHead(st) { this.s = st; }, setHeader() {}, end() { resolve(this.s); } });
+  });
+  for (const id of ["constructor", "toString"]) assert.equal(await get(`/sandboxes/${id}`), 404, id);
+  const { router } = routerFixture({});
+  assert.equal((await router.launch(spec("__proto__"))).status, 400);
+});
+
 test("sandbox gets a per-sandbox credential relay, never the router or agent token", async () => {
   const { agent, docker } = agentFixture();
   await agent.launch({ spec: spec("c1"), cpus: 1, mem_gb: 1 });
