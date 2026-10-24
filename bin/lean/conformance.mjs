@@ -261,18 +261,28 @@ export function validateContract(c, issueText, { repro = false } = {}) {
   return { ok: problems.length === 0, problems };
 }
 
+/** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
+const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+
 /**
  * Apply result.json amendments to the frozen contract. Kinds: add-deliverable {path}, add-requirement {requirement},
  * defer|post-deploy {requirement: id}. Every amendment needs a why. Returns {contract, applied[], toTrack[], problems[]}.
+ * `generatedPaths` (forge#4519, forge.yaml maintenance.generated_paths via scripts/hotspots.sh): an add-deliverable on a
+ * matching path is refused; the repo's generator or bot owns that file.
  */
-export function applyAmendments(frozen, amendments, issueText = null) {
+export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [] } = {}) {
   const c = structuredClone(frozen);
   c.deliverables = c.deliverables ?? [];
   const applied = [], toTrack = [], problems = [];
+  const genRes = (Array.isArray(generatedPaths) ? generatedPaths : []).filter((g) => typeof g === "string" && g).map(shellGlobRe);
   for (const a of Array.isArray(amendments) ? amendments : []) {
     const tag = JSON.stringify(a ?? null).slice(0, 100);
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
+      if (genRes.some((re) => re.test(cleanPath(a.path)))) {
+        problems.push(`add-deliverable ${a.path}: generated path (forge.yaml maintenance.generated_paths) is owned by the repo's generator/bot; revert the file instead of amending it in`);
+        continue;
+      }
       const have = c.deliverables.find((d) => d.path === a.path);
       // An existing deliverable keeps its id and gains the why, so an amendment naming a package on an already-listed
       // package.json declares the edge (forge#4159); before, it was reported as applied but changed nothing.
@@ -343,9 +353,11 @@ export function repoTracks(paths) {
  * `frozen` (#4350): the contract before typed amendments. A failed scope-check validate (isScopeCheck) whose only files
  * outside `frozen` are covered by deliverables an amendment added, with no scope creep left, is superseded by the engine's
  * scope gate: listed in `superseded` [{id, files}], not a failure. Without `frozen`, `superseded` is always [].
+ * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
+ * tool), for the trajectory; always an array.
  */
 export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null }) {
-  const failures = [], superseded = [];
+  const failures = [], superseded = [], ciCovered = [];
   const outside = (k) => changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(k, f));
   const creep = outside(contract);
   const amendedOnly = frozenAmendedFiles(frozen, contract, outside, creep);
@@ -355,13 +367,13 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     const r = runs.find((x) => x?.id === v.id);
     // #4167: a head the engine verified on CI covers validate ids the builder left to CI (no result, or ci:true without an exit)
     const leftToCi = !r || (r.ci === true && r.exit === undefined);
-    if (ciVerified && leftToCi) continue;
+    if (ciVerified && leftToCi) { ciCovered.push(v.id); continue; }
     if (leftToCi) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
     else if (r.exit !== 0) {
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
-      if (miss && ciVerified) continue;
+      if (miss && ciVerified) { ciCovered.push(v.id); continue; }
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})` });
@@ -382,7 +394,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
   if (repro) failures.push(...reproFailures(contract, repro));
-  return { ok: failures.length === 0, failures, superseded };
+  return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
 
 /**
@@ -419,7 +431,8 @@ export function reproFailures(contract, { base, head } = {}) {
 
 const EXEMPT_RE = /hotspot-exempt:\s*\S/i;
 /**
- * forge#4195: a changed file already over `file_lines` (not generated, vendored or glob-excluded) that grew by more
+ * forge#4195: a changed file already over `file_lines` (not generated, vendored or glob-excluded; forge#4519: a
+ * `generated` row, from linguist-generated, maintenance.generated_paths or a generated header, never counts) that grew by more
  * than `growth_lines` since the base, with no `hotspot-exempt: <reason>` in a covering deliverable's change or an
  * add-deliverable amendment's why. `hotspots` is scripts/hotspots.sh --base output; null or disabled checks nothing.
  */
@@ -431,7 +444,7 @@ export function hotspotGrowth({ contract, result, hotspots, changedFiles = [] })
   const exempt = (f) => (contract?.deliverables ?? []).some((d) => pathCovers(d.path, f) && EXEMPT_RE.test(String(d.change ?? "")))
     || amends.some((a) => a?.kind === "add-deliverable" && pathCovers(a.path, f) && EXEMPT_RE.test(String(a.why ?? "")));
   return hotspots.files
-    .filter((h) => h?.over && !h.excluded && Number(h.growth) > limit && changed.has(cleanPath(h.path)) && !exempt(h.path))
+    .filter((h) => h?.over && !h.excluded && !h.generated && Number(h.growth) > limit && changed.has(cleanPath(h.path)) && !exempt(h.path))
     .map((h) => ({ code: C.MAINTENANCE_HOTSPOT_GROWTH, kind: "hotspot_growth",
       detail: `${h.path} grew by ${h.growth} lines (now ${h.lines}, limit +${limit} over ${max}) without hotspot-exempt` }));
 }

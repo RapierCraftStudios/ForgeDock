@@ -56,6 +56,32 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
     assert.equal(lines.length, 1); assert.match(lines[0], /^unrecovered: #1 \(ci\.red: recovery ci\.red ended needs-human: CI verification failed again\)$/);
   });
 
+  it("#4505 budget-exceeded: one recovery lane from the checkpoint at the next size; dependents stay queued; no relabel while it recovers", async () => {
+    const BE = (detail, more = {}) => ({ terminalReason: "budget-exceeded", code: "budget.exceeded", detail, branch: "feat/issue-1-lean", ...more });
+    const relabels = [];
+    const { rows, calls, decisions } = await batch({ 1: [BE("Implement turn budget spent (size S, 25 turns; 30 used)"), { terminalReason: "merged", pr: 101 }], 2: [{ terminalReason: "merged", pr: 102 }] },
+      { 2: "**Depends on**: #1" }, { relabelNeedsHuman: async (x) => { relabels.push(x); } });
+    const r = byIssue(rows);
+    assert.deepEqual(calls.filter((c) => c.n === 1).map((c) => c.recover), [null, { code: "budget.exceeded", attempt: 1, final: true }]);
+    assert.equal(r[1].outcome, "merged"); assert.equal(r[1].recovered, "budget.exceeded");
+    assert.equal(r[2].outcome, "merged", "the dependent stayed queued and ran");
+    assert.ok(calls.findIndex((c) => c.n === 2) > calls.findLastIndex((c) => c.n === 1), "the dependent ran after the recovered merge");
+    assert.ok(decisions.some((d) => d.issue === 1 && /recovery lane for budget\.exceeded .*dependents stay queued/.test(d.what)));
+    assert.equal(relabels.length, 0, "never labelled needs-human");
+  });
+
+  it("#4505 an unrecovered budget-exceeded (recovery off) is relabelled once by the runner, parks dependents and is listed unrecovered", async () => {
+    const relabels = [];
+    const { rows, calls } = await batch({ 1: [{ terminalReason: "budget-exceeded", code: "budget.exceeded", detail: "Implement turn budget spent (size S)" }], 2: [] },
+      { 2: "**Depends on**: #1" }, { maxAttempts: 0, relabelNeedsHuman: async (x) => { relabels.push(x); } });
+    const r = byIssue(rows);
+    assert.equal(calls.filter((c) => c.n === 1).length, 1);
+    assert.equal(r[1].outcome, "budget-exceeded");
+    assert.equal(relabels.length, 1); assert.equal(relabels[0].issue, 1); assert.match(relabels[0].evidence, /budget\.exceeded[\s\S]*size S/);
+    assert.equal(r[2].outcome, "skipped"); assert.ok(!calls.some((c) => c.n === 2));
+    assert.ok(formatOutcomeLists(rows).some((l) => /^unrecovered: #1 \(budget\.exceeded: Implement turn budget spent/.test(l)));
+  });
+
   it("human codes (product-decision, spend) are never recovered, still skip dependents and are the only escalations, asked once while other lanes keep running", async () => {
     const { rows, calls, decisions } = await batch({
       1: [NH("builder.blocked", "Builder is blocked (product-decision): pick a pricing model")],

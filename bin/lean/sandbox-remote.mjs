@@ -15,6 +15,7 @@
  * `httpTransport` is the one shipped transport: a small JSON protocol (docs/CONFIG.md `execution`) that a runner pool
  * or a session gateway fronts. Tests use an in-memory transport.
  */
+import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { safeSegment } from "./ledger.mjs";
@@ -41,8 +42,9 @@ export function isActionsEndpoint(endpoint) {
 /**
  * Generic HTTP transport: POST {endpoint}/sandboxes (body = launch spec), GET /sandboxes/:id -> {state},
  * GET /sandboxes/:id/logs?cursor=N -> {text, cursor}, GET /sandboxes/:id/result -> lane result (404 = none yet),
- * GET /sandboxes/:id/usage -> {minutes}, DELETE /sandboxes/:id (404 = gone). `Authorization: Bearer <token>`.
+ * GET /sandboxes/:id/usage -> {minutes, agent?} (agent: the pool agent that ran it, #4549), DELETE /sandboxes/:id (404 = gone). `Authorization: Bearer <token>`.
  * 429/503 on launch is a retryable capacity error (`Retry-After` seconds). Error text never carries the token.
+ * Optional `GET /status -> {free: N}` is the pool's free slots (#4540); anything else (404, error, malformed) is unknown (null).
  */
 export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fetch }) {
   const root = String(endpoint ?? "").replace(/\/+$/, "");
@@ -70,8 +72,19 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     },
     async logs(id, cursor = 0) { const r = await call("GET", `${p(id)}/logs?cursor=${encodeURIComponent(cursor)}`); return r.ok ? { text: String(r.data?.text ?? ""), cursor: r.data?.cursor ?? cursor } : { text: "", cursor }; },
     async result(id) { const r = await call("GET", `${p(id)}/result`); return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
-    async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes) } : null; },
+    async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes), ...(typeof r.data.agent === "string" && r.data.agent ? { agent: r.data.agent } : {}) } : null; }, // agent: #4549, optional
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
+    async capacity() {
+      // `free` (#4540) and agent liveness `online`/`total` (#4547) are each optional; none valid is unknown.
+      try {
+        const r = await call("GET", "/status");
+        if (!r.ok) return null;
+        const ok = (v) => Number.isInteger(v) && v >= 0;
+        const { free, online, total } = r.data ?? {};
+        const out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}) };
+        return Object.keys(out).length ? out : null;
+      } catch { return null; }
+    },
   };
 }
 
@@ -79,7 +92,23 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
  * The remote provider. `settings` is parseExecution's output (image, cacheStore, tokenEnv, secrets); `env` is the
  * dispatcher's env (secret values for redaction on adopt); `credentials(name)` resolves a secret (env, then keychain).
  */
-export function remoteProvider({ batch, repo, settings = {}, transport, env = process.env, credentials = (name) => resolveCredential(name, { env }), now = () => Date.now() }) {
+/** The dispatching host's git identity (`git config user.name/email`), so sandbox commits carry the same author as local lanes. */
+export function hostGitIdentity() {
+  const get = (k) => { try { return execFileSync("git", ["config", k], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { return ""; } };
+  return { name: get("user.name"), email: get("user.email") };
+}
+
+/** GIT_AUTHOR_* and GIT_COMMITTER_* for the sandbox, unless the lane env already sets them; empty when the host has no identity. */
+export function gitIdentityEnv(identity, laneEnv = {}) {
+  const out = {};
+  for (const role of ["AUTHOR", "COMMITTER"]) {
+    const n = laneEnv[`GIT_${role}_NAME`] || identity?.name, e = laneEnv[`GIT_${role}_EMAIL`] || identity?.email;
+    if (n && e) { out[`GIT_${role}_NAME`] = n; out[`GIT_${role}_EMAIL`] = e; }
+  }
+  return out;
+}
+
+export function remoteProvider({ batch, repo, settings = {}, name = "remote", transport, env = process.env, credentials = (name) => resolveCredential(name, { env }), now = () => Date.now(), gitIdentity = hostGitIdentity }) {
   if (!transport) throw new Error("remote provider needs a transport");
   const idFor = (issue) => `fdrsbx-${safeSegment(batch.id)}-${issue}`;
   const errs = new Map(); // sandbox id -> consecutive status errors
@@ -89,7 +118,7 @@ export function remoteProvider({ batch, repo, settings = {}, transport, env = pr
   if (settings.tokenEnv) remember(credentials(settings.tokenEnv));
   const minutesOf = async (h) => {
     let m = null;
-    try { const u = await transport.usage?.(h.id); if (u && Number.isFinite(Number(u.minutes))) m = Number(u.minutes); } catch { m = null; }
+    try { const u = await transport.usage?.(h.id); if (u && Number.isFinite(Number(u.minutes))) m = Number(u.minutes); if (typeof u?.agent === "string" && u.agent) h.agent = u.agent; } catch { m = null; }
     if (m === null && Number.isFinite(h.startedAt)) m = Math.round(((now() - h.startedAt) / 60000) * 10) / 10;
     if (m !== null) h.minutes = Math.max(h.minutes ?? 0, m);
   };
@@ -102,7 +131,7 @@ export function remoteProvider({ batch, repo, settings = {}, transport, env = pr
     } catch { /* the next poll retries */ }
   };
   return {
-    name: "remote",
+    name,
     idFor,
     async start({ issue, args = [], env: laneEnv = env, secrets = settings.secrets ?? [] }) {
       const id = idFor(issue);
@@ -115,12 +144,13 @@ export function remoteProvider({ batch, repo, settings = {}, transport, env = pr
         id, issue, batch: batch.id, image: settings.image ?? null,
         repo: { slug: repo, url: repo ? `https://github.com/${repo}.git` : null, ref: li >= 0 ? args[li + 1] ?? null : null },
         cache: settings.cacheStore ? { store: settings.cacheStore, key: safeSegment(String(repo ?? "repo")) } : null,
-        env: scopedEnv({ env: resolved, secrets, batchId: batch.id, repo }),
+        // The host's git identity: without it the lane image falls back to a placeholder author that fails DCO.
+        env: { ...gitIdentityEnv(gitIdentity(), laneEnv ?? {}), ...scopedEnv({ env: resolved, secrets, batchId: batch.id, repo }), ...(settings.forgeYaml ? { CS_FORGE_YAML_B64: Buffer.from(settings.forgeYaml).toString("base64") } : {}) }, // #4546: the dispatcher's forge.yaml (gitignored in the repo)
         command: ["forgedock", "run-issue", String(issue), ...args, "--result-file", resultFile], result_file: resultFile,
       };
       const startedAt = now();
       await transport.launch(spec);
-      return { provider: "remote", id, issue, startedAt, minutes: 0 };
+      return { provider: name, id, issue, startedAt, minutes: 0 };
     },
     async status(h) {
       let s;
@@ -133,6 +163,9 @@ export function remoteProvider({ batch, repo, settings = {}, transport, env = pr
       const r = await transport.result(h.id);
       if (r) { await pullLogs(h); await minutesOf(h); }
       return r ?? null;
+    },
+    async capacity() {
+      try { return (await transport.capacity?.()) ?? null; } catch { return null; }
     },
     async teardown(h) {
       await minutesOf(h);

@@ -648,6 +648,13 @@ describe("core work-on", () => {
     };
     assert.equal(await code(world({ result: { status: "blocked", summary: "need creds", block: { kind: "human", why: "credentials" } } })), "builder.blocked");
     assert.equal(await code(world({ result: { status: "blocked", summary: "need creds" } })), "builder.block_untyped");
+    // #4542: a remote lane that names only a declared host capability is the recoverable env code; anything else stays human.
+    const rb = (summary, extra) => code(world({ result: { status: "blocked", summary, block: { kind: "human", why: "credentials" } } }), extra);
+    const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["sops"] } };
+    assert.equal(await rb("this lane has no sops/age key", remote), "env.capability_remote");
+    assert.equal(await rb("owner must create a third-party account", remote), "builder.blocked");
+    assert.equal(await rb("this lane has no sops/age key", { ...remote, hostCaps: undefined }), "builder.blocked");
+    assert.equal(await rb("this lane has no sops/age key", { ...remote, placement: { where: "local", reason: "x" } }), "builder.blocked");
     assert.equal(await code(world({ changed: [] })), "builder.no_commit");
     assert.equal(await code(world({ waits: [{ rc: 1, text: "lint failed" }] }), { mergeWait: "all" }), "ci.red");
   });
@@ -1614,6 +1621,20 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths.
     assert.ok(approxTokens(plan) <= 1850, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1500);
+  });
+
+  it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
+    const G = ["web/public/openapi*.json"];
+    for (const f of [facts([], { generated_paths: G }), facts([HOT], { enabled: false, generated_paths: G })]) {
+      assert.match(hotspotPlanNote(f), /Generated paths \(forge\.yaml maintenance\.generated_paths, owned by the repo's generator\): web\/public\/openapi\*\.json\. Never list or amend them in/);
+      assert.match(hotspotBuildRule(f), /Generated paths .*web\/public\/openapi\*\.json/);
+    }
+    assert.equal(hotspotPlanNote(facts([], { generated_paths: [] })), "", "no generated_paths: unchanged");
+    const w = hworld(facts([], { generated_paths: G }), [facts([])], { amendments: [{ kind: "add-deliverable", path: "web/public/openapi.json", why: "sync the spec" }] });
+    const r = await run(w);
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
+    assert.match(builders(w)[0][4], /Generated paths .*openapi/);
+    assert.match(nh(w), /add-deliverable web\/public\/openapi\.json: generated path/);
   });
 
   it("the plan prompt carries the facts, the implement prompt the configured rule; growth within the limit merges; no extra runner calls", async () => {
@@ -3490,6 +3511,28 @@ describe("batch robustness (#4112-#4115)", () => {
     }
   });
 
+  it("#4518 a builder paused for longer than maxMs still gets its full ceiling of active time", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { d, bin } = await fakeCli("paused", `${TOOL}\nsleep 1\n${RESULT}`);
+    const control = {};
+    const call = runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 0, maxMs: 1200, control });
+    await new Promise((res) => setTimeout(res, 100)); control.pause();
+    await new Promise((res) => setTimeout(res, 2200)); control.resume();
+    assert.equal((await call).text, "all done");
+  });
+
+  it("#4518 external SIGTERM (status 143) restarts the builder once, then ends deferred cli.host_killed, never engine-error", async () => {
+    const kill = () => Object.assign(new Error("claude CLI exited with status 143. No output was captured"), { code: "CLI_BACKEND_FAILED", status: 143, signal: null });
+    const w = world({ dirty: true }); const orig = w.io.runner; let n = 0;
+    w.io.runner = async (c) => { if (c.role === "builder" && n++ === 1) throw kill(); return orig(c); };
+    assert.equal((await run(w)).terminalReason, "merged");
+    const w2 = world({ dirty: true });
+    w2.io.runner = async (c) => { if (c.role === "builder") throw kill(); return { text: "" }; };
+    const r = await run(w2);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "cli.host_killed");
+    assert.equal(w2.edits.some((e) => e.includes("needs-human")), false);
+  });
+
   // ---- #4405 ----
   const HEAVY_CHILD = (d) => `printf '#!/bin/sh\\nsleep 1.5\\n' > ${d}/vitest; chmod +x ${d}/vitest`;
   it("#4405 a silent session with a running heavy-step child is not idle-killed within the extended window", async () => {
@@ -3871,6 +3914,17 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     const w = world({ validation: ciValidation });
     const r = await run(w);
     assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
+  });
+
+  it("#4527 base-sync re-review FAIL: the fix round's head is CI-verified before the retry review, which accepts validates left to CI and notes them", async () => {
+    const CONFLICTING = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }, OKSTATE = { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" };
+    const w = withCi(world({ validation: ciValidation, prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], reviews: [ok(), bad("src/foo.js:4 lost base change"), ok()] }));
+    const r = await run(w, { verify: CI });
+    assert.equal(r.terminalReason, "merged", r.reason);
+    assert.equal(reviewers(w).length, 3);
+    assert.equal(new Set(w.ci.runs.map((x) => x.headSha)).size, w.ci.runs.length, "every reviewed head was verified once");
+    assert.equal(w.ci.runs[0].headSha, w.head, "the retry head is CI-verified");
+    assert.match(traj(w)[0], /Validate V1 verified by CI at [0-9a-f]{0,12}/);
   });
 
   it("docs-only lane: no push for CI, no dispatch; the decision is recorded", async () => {
@@ -5106,6 +5160,20 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
       assert.match(traj(w).at(-1), /renumbered deterministically \(no builder\): db\/0007_usage\.sql → db\/0008_usage\.sql/);
     });
 
+    it("#4526: the renumber gets a reserve hook bound to (repo, lane, issue), and the run's reservations are dropped at finish", async () => {
+      const w = dworld({ seq: [COLL, []] }), reserved = [], unreserved = [];
+      w.io.sequenceLease.reserve = async (x) => { reserved.push(x); return { numbers: [9] }; };
+      w.io.sequenceLease.unreserve = async (x) => { unreserved.push(x); };
+      assert.equal((await run(w)).terminalReason, "merged");
+      assert.equal(typeof w.renumbers[0].reserve, "function");
+      assert.deepEqual(await w.renumbers[0].reserve({ dir: "db", floor: 7, count: 1 }), { numbers: [9] });
+      assert.equal(reserved[0].dir, "db");
+      assert.equal(reserved[0].floor, 7);
+      assert.ok(reserved[0].repo && reserved[0].lane && reserved[0].issue, JSON.stringify(reserved[0]));
+      assert.equal(unreserved.length, 1);
+      assert.deepEqual(unreserved[0], { repo: reserved[0].repo, lane: reserved[0].lane, issue: reserved[0].issue });
+    });
+
     it("base-sync with conflicts only in sequence files: base side taken and renumbered by the engine, zero builder sessions, zero re-reviews", async () => {
       const w = dworld({ seq: [[], COLL, []], prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["db/meta/_journal.json", "db/meta/0007_snapshot.json"] });
       assert.equal((await run(w)).terminalReason, "merged");
@@ -5400,10 +5468,10 @@ describe("#4392: implement turn budget", () => {
   const TB = { S: 25, M: 60, L: 100 }; // the CLI defaults (readCoreLimits); runCore alone is unbudgeted
   const stopWith = (digest) => (w) => { w.files[`${WT}/.forge-lean/result.json`] = JSON.stringify({ status: "budget-exceeded", summary: "too big", digest }); };
 
-  it("an overrun ends needs-human budget.exceeded with the builder's digest, checkpointed, recoverable once", async () => {
+  it("an overrun ends budget-exceeded (#4505) with the builder's digest, checkpointed, recoverable once", async () => {
     const w = budgetWorld(stopWith("done: parser. remaining: 3 adapters. recommend split")); const dir = tmpDir("core-tb-");
     const r = await run(w, { dir, turnBudgets: TB });
-    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, OUTCOME_CODES.BUDGET_EXCEEDED);
+    assert.equal(r.terminalReason, "budget-exceeded"); assert.equal(r.code, OUTCOME_CODES.BUDGET_EXCEEDED);
     assert.match(r.detail, /size S, 25 turns/); assert.match(r.detail, /remaining: 3 adapters/);
     assert.equal(classifyNeedsHuman({ outcome: r.terminalReason, code: r.code }), "recoverable");
     assert.deepEqual(r.turns, { size: "S", budget: 25, build: 28, total: 31, exceeded: true });
@@ -5411,7 +5479,7 @@ describe("#4392: implement turn budget", () => {
     assert.equal(w.seen[2].resume, null, "the wrap-up is a fresh session");
     assert.match(w.seen[2].prompt, /The engine froze \.forge-lean\/contract\.json/); assert.match(w.seen[2].prompt, /at most 5 turns/);
     assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && c.some((x) => /checkpoint after turn budget/.test(x))), "work checkpointed");
-    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes("remaining: 3 adapters")));
+    assert.ok(!w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN")), "#4505: no human escalation");
     const log = readLog(dir, 7);
     assert.ok(log.some((e) => e.event === "TURN_BUDGET_EXCEEDED" && e.size === "S" && e.budget === 25 && e.turns === 25 && e.grant === 5));
     assert.deepEqual(log.find((e) => e.event === "RUN_TERMINAL").turns, r.turns);
@@ -5425,6 +5493,35 @@ describe("#4392: implement turn budget", () => {
     const over = budgetWorld(null, { overrun: true });
     const o2 = await run(over, { dir: tmpDir("core-tb-"), turnBudgets: TB });
     assert.equal(o2.code, OUTCOME_CODES.BUDGET_EXCEEDED); assert.match(o2.detail, /No builder digest; changes so far/);
+  });
+
+  const addNH = (w) => w.edits.filter((e) => e.join(" ") === "issue edit 7 -R o/r --add-label needs-human").length;
+  it("#4505 a turn overrun ends budget-exceeded, not needs-human: no label, no NEEDS_HUMAN comment, recoverable", async () => {
+    const w = budgetWorld(stopWith("done: parser. remaining: tests")); const dir = tmpDir("core-tb-");
+    const r = await run(w, { dir, turnBudgets: TB });
+    assert.equal(r.terminalReason, "budget-exceeded"); assert.equal(r.code, OUTCOME_CODES.BUDGET_EXCEEDED);
+    assert.equal(r.branch, "feat/issue-7-lean", "the checkpoint branch rides on the result"); assert.match(r.detail, /remaining: tests/);
+    assert.equal(addNH(w), 0, "no needs-human label"); assert.ok(!w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN")), "no Needs human comment");
+    assert.equal(classifyNeedsHuman({ outcome: r.terminalReason, code: r.code }), "recoverable");
+    const term = readLog(dir, 7).find((e) => e.event === "RUN_TERMINAL");
+    assert.equal(term.reason, "budget-exceeded"); assert.equal(term.code, OUTCOME_CODES.BUDGET_EXCEEDED);
+    assert.ok(w.comments.some((c) => c.includes("FORGE:TRAJECTORY") && /recoverable budget\.exceeded/.test(c)), "the trajectory records the recoverable end");
+  });
+
+  it("#4505 a budget.exceeded recovery lane runs at the next size budget; non-final stays unlabelled, a final overrun is needs-human", async () => {
+    const nonFinal = budgetWorld(stopWith("still more"));
+    const r1 = await run(nonFinal, { dir: tmpDir("core-tb-"), turnBudgets: TB, recover: { code: OUTCOME_CODES.BUDGET_EXCEEDED, attempt: 1, final: false } });
+    assert.deepEqual(nonFinal.seen.map((x) => x.turnMax), [0, 60, 12], "S lane retried at M: 60 turns, wrap-up grant 12");
+    assert.equal(r1.turns.size, "M"); assert.equal(r1.terminalReason, "budget-exceeded"); assert.equal(r1.recovery, true);
+    assert.equal(addNH(nonFinal), 0);
+    assert.ok(builders(nonFinal).some((b) => /Recovery pass \(budget\.exceeded\): .*Continue from the checkpoint/.test(b[4])));
+    const fin = budgetWorld(stopWith("still more"));
+    const r2 = await run(fin, { dir: tmpDir("core-tb-"), turnBudgets: TB, recover: { code: OUTCOME_CODES.BUDGET_EXCEEDED, attempt: 1, final: true } });
+    assert.equal(r2.terminalReason, "needs-human"); assert.equal(r2.code, OUTCOME_CODES.BUDGET_EXCEEDED);
+    assert.equal(addNH(fin), 1, "the failed recovery is a human escalation"); assert.ok(fin.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN")));
+    const other = budgetWorld(stopWith("still more")); // another code's recovery keeps the lane's size
+    const r3 = await run(other, { dir: tmpDir("core-tb-"), turnBudgets: TB, recover: { code: "ci.red", attempt: 1, final: false } });
+    assert.equal(r3.turns.size, "S"); assert.equal(r3.terminalReason, "budget-exceeded");
   });
 
   it("size comes from a size: label over the contract; 0 disables the budget and nothing is capped", async () => {
@@ -5981,6 +6078,36 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     assert.equal(typeof events(dir, "LIGHT_DONE")[0].cost_usd, "number");
   });
 
+  it("#4502 a light lane that adds an undeclared package edge gets the structure gate: one builder resume, then merges", async () => {
+    const EDGE = { from: "@s/db", to: "@s/core", kind: "dependencies", manifest: "packages/db/package.json" };
+    const quiet = { package_edges_added: [], package_edges_removed: [], import_pairs: [], boundary_config_changed: { changed: false, files: [], loosens: false, tightens: false } };
+    const w = lworld(), dir = tmpDir("light-struct-"); const q = [{ ...quiet, package_edges_added: [EDGE] }, quiet];
+    w.io.structureDelta = async () => (q.length > 1 ? q.shift() : q[0]);
+    const r = await run(w, { dir, ...ON });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(events(dir, "LIGHT_DONE").length, 1, "stayed light");
+    assert.equal(builders(w).length, 2, "the light session plus one structure resume");
+    assert.match(builders(w)[1][4], /@s\/db -> @s\/core/);
+    assert.equal(events(dir, "STRUCTURE_DELTA").length >= 1, true);
+  });
+
+  it("#4502 a typed budget error in the light step ends as in the full lane: no second builder session, no upgrade", async () => {
+    const w = lworld(), dir = tmpDir("light-typed-"); const orig = w.io.runner;
+    let tries = 0;
+    w.io.runner = async (c) => { if (c.role === "builder") { tries++; throw Object.assign(new Error("turn budget spent"), { laneCode: OUTCOME_CODES.BUDGET_EXCEEDED }); } return orig(c); };
+    const r = await run(w, { dir, ...ON });
+    assert.equal(r.code, OUTCOME_CODES.BUDGET_EXCEEDED);
+    assert.equal(tries, 1, "no upgrade session");
+    assert.equal(events(dir, "LIGHT_UPGRADE").length, 0);
+  });
+
+  it("#4502 the targeted light tests run with the configured precheck timeout", async () => {
+    const w = lworld(), dir = tmpDir("light-timeout-"); const seen = [];
+    w.io.runCommand = async (a) => { seen.push(a.timeoutMs); return { rc: 0, output: "" }; };
+    await run(w, { dir, ...ON });
+    assert.ok(seen.length && seen.every((t) => Number.isFinite(t) && t > 0 && t < 2 ** 40), `timeouts: ${seen}`);
+  });
+
   for (const [name, code, o] of [
     ["oversized diff", "diff_lines", { numstat: "80\t3\tsrc/foo.js\n20\t0\ttest/foo.test.js\n" }],
     ["non-red repro", "repro_not_red", { repro: { base: "PASSED", head: "RAN" } }],
@@ -6039,15 +6166,14 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     w.io.structureDelta = async () => { w.over.structure.push(w.calls.length); return { package_edges_added: [], package_edges_removed: [], import_pairs: [] }; };
     return w;
   };
-  it("#4451 a light lane that is not upgraded makes no context-pack, structure or hotspot calls", async () => {
+  it("#4451/#4502 a light lane that is not upgraded makes no context-pack call but runs the structure and hotspot gates", async () => {
     const w = overhead(), dir = tmpDir("light-over-");
     const r = await run(w, { dir, ...ON, contextPack: { mode: "on" } });
     assert.equal(r.terminalReason, "merged");
     assert.equal(events(dir, "LIGHT_DONE").length, 1);
-    assert.deepEqual(w.over, { pack: [], hot: [], structure: [] });
+    assert.deepEqual(w.over.pack, []);
+    assert.ok(w.over.hot.length >= 1 && w.over.structure.length >= 1, "#4502: the full lane's gates run");
     assert.equal(events(dir, "CONTEXT_PACK").length, 0);
-    // only the merge-time record (local numstat, no structure-delta call) remains; no implement-time delta
-    assert.deepEqual(events(dir, "STRUCTURE_DELTA").map((e) => e.phase), ["merge"]);
     assert.equal(events(dir, "RUN_TERMINAL")[0].light, true);
   });
   it("#4451 an upgraded light lane computes the hotspots and the context pack before the plan call and runs the structure delta", async () => {

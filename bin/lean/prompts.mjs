@@ -215,18 +215,27 @@ export function reproPlanNote(on) {
   return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.`;
 }
 
+/** forge#4519: the repo's generated, bot-owned globs (forge.yaml maintenance.generated_paths via hotspots.sh); "" when none. */
+function generatedNote(facts) {
+  const globs = Array.isArray(facts?.generated_paths) ? facts.generated_paths.filter((g) => typeof g === "string" && g) : [];
+  if (!globs.length) return "";
+  return `\n\nGenerated paths (forge.yaml maintenance.generated_paths, owned by the repo's generator): ${globs.join(", ")}. Never list or amend them in as deliverables and never commit changes to them; the engine refuses such amendments.`;
+}
+
 /** forge#4195: hotspot facts for the plan prompt: one sentence plus one line per over-threshold file; "" when none. */
 export function hotspotPlanNote(facts) {
-  if (!facts || facts.enabled === false || !Array.isArray(facts.files)) return "";
+  const gen = generatedNote(facts);
+  if (!facts || facts.enabled === false || !Array.isArray(facts.files)) return gen;
   const hot = facts.files.filter((f) => f?.over && !f.excluded);
-  if (!hot.length) return "";
-  return `\n\nHotspots (scripts/hotspots.sh): an Affected File below is over ${facts.file_lines} lines, so the contract must put new logic in a new or neighbouring module and give the hotspot only wiring (an import and a call); growing it by more than ${facts.growth_lines} lines needs "hotspot-exempt: <reason>" in that deliverable's change.\n${hot.map((f) => `- ${f.path}: ${f.lines} lines, ${f.commits_90d} commits/90d`).join("\n")}`;
+  if (!hot.length) return gen;
+  return gen + `\n\nHotspots (scripts/hotspots.sh): an Affected File below is over ${facts.file_lines} lines, so the contract must put new logic in a new or neighbouring module and give the hotspot only wiring (an import and a call); growing it by more than ${facts.growth_lines} lines needs "hotspot-exempt: <reason>" in that deliverable's change.\n${hot.map((f) => `- ${f.path}: ${f.lines} lines, ${f.commits_90d} commits/90d`).join("\n")}`;
 }
 
 /** forge#4195: the builder's growth rule with the effective thresholds; "" when the check is off. */
 export function hotspotBuildRule(facts) {
-  if (!facts || facts.enabled === false || !(facts.file_lines > 0) || !(facts.growth_lines > 0)) return "";
-  return `\n\nDon't grow a file over ${facts.file_lines} lines by more than ${facts.growth_lines} lines. Put new code next to it.`;
+  const gen = generatedNote(facts);
+  if (!facts || facts.enabled === false || !(facts.file_lines > 0) || !(facts.growth_lines > 0)) return gen;
+  return gen + `\n\nDon't grow a file over ${facts.file_lines} lines by more than ${facts.growth_lines} lines. Put new code next to it.`;
 }
 
 /** #4322: tests that enumerate the siblings of a module the issue names (bin/lean/enumerating.mjs), for the plan; "" when none. */
@@ -248,7 +257,7 @@ export function missingEntriesPrompt(missing, mode = "local") {
   return `These tests enumerate the siblings of symbols or files this change adds, but do not name them (CI will fail on the stale list):\n${missing.slice(0, 30).map((m) => `- ${m.symbol} (${m.module}) -> ${m.test}:${m.line}`).join("\n")}\n\nFor each, add the symbol to that test's list, ${NOT_MEMBER}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
-const RENUMBER_RULE = "Renumber the lane's files, never the base's: rename each with git mv to its new number, keep the SQL (or other migration source) byte-identical, change a numbered document (e.g. an ADR) only in its own number (its title), regenerate the snapshot and journal with the repo's own migration generator (never hand- or text-merge the journal), keep journal entries strictly ordered, and update every reference to the old name, including the series index (e.g. docs/adr/README.md) so it lists both the base's entry and yours.";
+const RENUMBER_RULE = "Renumber the lane's files, never the base's: rename each with git mv to its new number, keep the SQL (or other migration source) byte-identical except a first-line header naming its own number/tag, which follows the new one, change a numbered document (e.g. an ADR) only in its own number (its title), regenerate the snapshot and journal with the repo's own migration generator (never hand- or text-merge the journal), keep journal entries strictly ordered, and update every reference to the old name, including the series index (e.g. docs/adr/README.md) so it lists both the base's entry and yours.";
 
 /** #4322: lane-added sequence-numbered files whose number the base already uses, at hand-off or after a base-sync. */
 export function sequencePrompt(collisions, lane, mode = "local") {
@@ -301,7 +310,8 @@ const BLOCK_RULES = `"blocked" needs a typed "block" in ${RESULT_FILE}, one of:
 - {"kind":"dependency","issues":[N]}: an open upstream issue must land first. The engine requeues this issue behind it.
 - {"kind":"split-required","subissues":[{"title":"","body":"","depends_on":[0],"files":["<path>"]}],"size":{"files":N,"lines":N}}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues; files = the files or dirs each will edit, also accepted as "paths") only when every sub-issue's files are disjoint from the others' or the whole change's size estimate exceeds ${SPLIT_MIN_FILES} files or ${SPLIT_MIN_LINES} lines; otherwise keep one lane: an ordered checklist in the contract with a validate per item. In an admitted split, when siblings would edit the same hub (a barrel or index export list, a union type, a shared test fixture, an index doc), pre-stage its slots in the earliest sub-issue and make the others depend on it, or give each sibling its own per-feature file; the engine serialises sub-issues that still share a file.
 - {"kind":"human","why":"${HUMAN_BLOCK_REASONS.join("|")}"}: only an external action agents cannot take, or a product decision too critical for agents.
-"An upstream issue must land first", "needs a split" and "needs prod data that read-only monitoring can read" are never "human".`;
+"An upstream issue must land first", "needs a split" and "needs prod data that read-only monitoring can read" are never "human".
+Remote sandbox lacking a host-only capability (sops, prod_monitor, ops_credentials): name it in the summary; the host reruns the lane.`;
 
 export function blockCorrectionPrompt(problem) {
   return `Your ${RESULT_FILE} says "blocked", but ${String(problem).slice(0, 1000)}. That is not a block that needs a human.\n\n${BLOCK_RULES}\n\nEither do the work (fix, commit, update the stage notes and ${RESULT_FILE}) or write a valid typed "block". Do not push or touch GitHub.`;

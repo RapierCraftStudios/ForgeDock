@@ -380,6 +380,14 @@ branches:
 #   recovery:
 #     max_attempts: 1
 #
+#   # Parked-PR base sync (#4525): a needs-human PR whose base moved is merged
+#   # with the base while the batch runs. Clean or pure two-sided list-addition
+#   # (union_globs) merges are pushed; other conflicts are reported on the issue.
+#   # Default on; enabled: false opts out. _journal.json is never resolved.
+#   base_sync:
+#     enabled: true
+#     union_globs: "CHANGELOG.md, src/registry/*.ts"
+#
 #   cascade:
 #     # Named preset — "all" (pick up everything, no caps, no heuristics),
 #     # "balanced" (default, matches pre-#2234 hardcoded behavior exactly), or
@@ -458,6 +466,8 @@ branches:
 #     exclude_globs:                  # shell patterns (`*` crosses `/`), never checked
 #       - "migrations/*"
 #       - "*.lock"
+#   generated_paths:                  # forge#4519: generated, bot-owned files (shell patterns, `*` crosses `/`):
+#     - "web/public/openapi*.json"    #   never hotspot-checked, and add-deliverable amendments on them are refused
 
 # =============================================================================
 # MILESTONE DRIFT (OPTIONAL, forge#4161)

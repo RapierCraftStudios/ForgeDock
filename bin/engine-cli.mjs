@@ -18,7 +18,7 @@ import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
-import { parseExecution } from "./lean/execution.mjs";
+import { parseExecution, detectNeeds } from "./lean/execution.mjs";
 import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lean/budget.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
@@ -325,6 +325,11 @@ export function readVerify(cwd = process.cwd()) {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
     return sec && typeof sec === "object" ? parseVerify(sec) : undefined;
   } catch { return undefined; }
+}
+/** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
+export function readHostCaps(cwd = process.cwd()) {
+  const e = readExecution(cwd);
+  return e?.hostCapabilities?.length ? { hostCapabilities: e.hostCapabilities, ...(e.hostCapabilityPatterns ? { hostCapabilityPatterns: e.hostCapabilityPatterns } : {}) } : undefined;
 }
 /**
  * forge.yaml `execution:` section (#4253, block style: `execution:` then `  mode: remote`, `  max_remote: 4`,
@@ -849,7 +854,7 @@ export async function runFromCli(argv, deps = {}) {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
       emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
-      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}) });
+      admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}) , ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
     if (interrupted) return lres; // the signal handler reported and exits
@@ -1327,13 +1332,15 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // Lanes: in-process `runCore` when a lean module is injected (tests), otherwise detached `run-issue` processes, or
   // sandboxes when forge.yaml `execution` places them remote (#4253).
   const labelsOf = new Map(); // issue -> label names, filled by readBody (one gh call per issue)
+  const needsOf = new Map(); // issue -> host-only capabilities its body names (#4542), filled by readBody
+  let execForNeeds = null;
   let lanes, remote = null, execBudget = null, execConf = null, hybrid = false;
   const execMode = () => (deps.execution !== undefined ? deps.execution : readExecution(cwd))?.mode ?? "local";
   if (deps.leanModule) {
     const { runCore } = deps.leanModule;
     const emitTelemetry = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
     lanes = { adopt: null, runOne: (n, ln, ctx = {}) => runCore({ issue: n, repo, lane: ln, laneOverride, ...(ctx.placement ? { placement: { ...ctx.placement, mode: execMode() } } : {}), ...(ctx.recover ? { recover: ctx.recover } : {}), branches, cwd, dir, io: leanIo, agentId: `orch_${process.pid}_${n}`, emitTelemetry, batchId: batch.id,
-      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}) }) };
+      admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4256: the placement orchestrate decided for a lane (ctx.placement) reaches it as --placement/--placement-reason.
@@ -1348,6 +1355,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     }, adopt: l.adopt });
     const execMod = await import("./lean/execution.mjs");
     const exec = deps.execution !== undefined ? deps.execution : readExecution(cwd);
+    execForNeeds = exec ?? null;
     hybrid = exec?.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1;
     if (exec && (execMod.placement(exec) === "remote" || hybrid)) {
       // #4253: lanes run in sandboxes, ledger-tracked per lane, admitted against max_remote instead of the host cap.
@@ -1360,7 +1368,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const remoteLanes = execMod.providerLanes({ provider, laneArgs, ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0,
         ...(deps.now ? { now: deps.now } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}) });
       lanes = withPlacement(remoteLanes);
-      if (bud.onBudget === "local" || hybrid) {
+      {
         // #4255: once the budget refuses a remote lane, the rest run as detached host lanes. #4256: hybrid mixes both.
         const local = batchMod.detachedLanes({ batch, cwd, env, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs });
         lanes = withPlacement({
@@ -1373,15 +1381,26 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       execBudget = deps.executionBudget ?? execMod.openExecutionBudget({ budget: bud, file: execMod.executionBudgetFile(env), ...(deps.now ? { now: deps.now } : {}) });
       const emitSbx = deps.emitTelemetry ?? makeEmitTelemetry({ repo });
       // #4256: hybrid places each lane from facts (pure placeLane); validation weight is a repo fact, read once per batch.
-      const place = hybrid ? await (async () => {
+      const relays = Array.isArray(provider.relays) ? provider.relays : [];
+      const place = !hybrid ? (n) => execMod.placeLane({ exec, needs: needsOf.get(n) ?? [], relays }) : await (async () => {
         const verifyMode = (deps.verify !== undefined ? deps.verify : readVerify(cwd))?.mode ?? "local";
         let weight = deps.validationWeight ?? null;
         if (!weight) { try { weight = await execMod.validationWeight({ cwd, precheckCommands: readPrecheckCommands(cwd) ?? [] }); } catch { weight = { heavy: false, signals: [] }; } }
         const headroom = deps.hostHeadroom ?? (() => execMod.hostHeadroom({ cfg: readAdmission(cwd), heavyCfg: readHeavy(cwd) }));
-        return (n) => execMod.placeLane({ exec, verifyMode, labels: labelsOf.get(n) ?? [], weight, headroom: headroom() });
-      })() : null;
+        return (n) => execMod.placeLane({ exec, verifyMode, labels: labelsOf.get(n) ?? [], weight, headroom: headroom(), needs: needsOf.get(n) ?? [], relays });
+      })();
+      // #4540: provider free slots, refreshed in the background (admission is sync); unknown (null) never blocks.
+      let capSample = null, onlineSample = null, capAt = 0, capLast = -Infinity; // #4547: online = agents alive, null unknown
+      const capacity = () => {
+        const t = deps.now ? deps.now() : Date.now();
+        if (typeof provider.capacity === "function" && t - capLast >= (deps.pollMs ?? 5000)) {
+          capLast = t;
+          Promise.resolve().then(() => provider.capacity()).then((c) => { capSample = c && Number.isInteger(c.free) ? c.free : null; onlineSample = c && Number.isInteger(c.online) ? c.online : null; capAt++; }, () => { capSample = null; onlineSample = null; capAt++; });
+        }
+        return capSample === null && onlineSample === null ? null : { free: capSample, online: onlineSample, at: capAt };
+      };
       remote = {
-        max: exec.maxRemote, isRemote: () => true, ...(place ? { place, fallbackLocal: true } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
+        capacity, max: exec.maxRemote, isRemote: () => true, place, ...(hybrid ? { fallbackLocal: true } : {}), ...(exec.fallbackLocal ? { offlineFallback: true } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
         admit: (u) => execBudget.admit(u),
         onUsage: (n, sb, rec) => {
           const startedAt = rec?.handle?.startedAt ?? rec?.startedAt ?? "?";
@@ -1522,6 +1541,17 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(daemon ? {} : { onExit: (fn) => { exitRelabel = fn; } }),
       // #4454: the daemon's shutdown stop; orchestrate throws batch.stopped, so no report is written and a resume adopts the lanes
       ...(signal ? { signal } : {}),
+      // #4525: a parked needs-human PR is merged with its moved base: clean or union-resolved merges are pushed, other conflicts reported
+      ...(deps.syncParked !== undefined ? (deps.syncParked ? { syncParked: deps.syncParked } : {}) : orch.baseSync?.enabled !== true ? {} : { syncParked: async ({ pr, last }) => {
+        try {
+          const v = JSON.parse(await leanIo.gh(["pr", "view", String(pr), "-R", repo, "--json", "state,headRefName,baseRefName,isCrossRepository"]));
+          if (v.state !== "OPEN" || v.isCrossRepository) return { status: "unchanged" };
+          const { execFile } = await import("node:child_process"), { promisify } = await import("node:util");
+          const run = promisify(execFile);
+          return await (await import("./lean/basesync.mjs")).syncParked({ git: async (a, o = {}) => String((await run("git", a, { cwd: o.cwd ?? cwd, maxBuffer: 1 << 24 })).stdout), base: v.baseRefName, branch: v.headRefName,
+            unionGlobs: orch.baseSync?.unionGlobs ?? [], last });
+        } catch (e) { return { status: "error", detail: String(e?.message ?? e).slice(0, 160) }; }
+      } }),
       conflicting: deps.conflicting ?? (async (_n, pr) => {
         try { return JSON.parse(await leanIo.gh(["pr", "view", String(pr), "-R", repo, "--json", "mergeable"]))?.mergeable === "CONFLICTING"; } catch { return false; }
       }),
@@ -1530,8 +1560,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
       },
       readBody: maint || registry || hybrid
-        ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); return v.body; }
-        : async (n) => JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body,
+        ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(v.body, execForNeeds)); return v.body; }
+        : async (n) => { const b = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body; needsOf.set(n, detectNeeds(b, execForNeeds)); return b; },
       onUpdate: (r) => sink.row(r),
     });
   } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
@@ -1658,6 +1688,16 @@ export async function scheddFromCli(argv, deps = {}) {
   schedd.exitOnSignals(d, { ...(deps.processOn ? { on: deps.processOn } : {}), ...(deps.exit ? { exit: deps.exit } : {}) });
   await d.closed;
   return { running: false };
+}
+
+/**
+ * `forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>` (#4544)
+ * The built-in remote compute pool (`bin/pool/`). `pool router` runs in the foreground (for a systemd-user unit:
+ * `ExecStart=forgedock pool router`); `router install` installs that unit. `enroll` prints the one-time install command.
+ */
+export async function poolFromCli(argv, deps = {}) {
+  const { runPoolCli } = await import("./pool/cli.mjs");
+  return (deps.runPoolCli ?? runPoolCli)(argv, deps.poolDeps ?? {});
 }
 
 /**
@@ -1802,6 +1842,8 @@ export async function schedFromCli(argv, deps = {}) {
  * `orchestration.errors|window_min` (or flat `breaker_errors|breaker_window_min`).
  * `orchestration.recovery.max_attempts` (#4267; arrives as `max_attempts`, or flat `recovery_max_attempts`): recovery lanes per
  * issue for a mechanical needs-human, default 1, 0 turns recovery off.
+ * `orchestration.base_sync.enabled` (#4525; default true, false opts out) and `base_sync.union_globs` (comma list of globs of
+ * append-only files whose two-sided line additions a parked PR's base sync keeps both of).
  */
 export function readOrchestration(cwd = process.cwd()) {
   let o = {};
@@ -1811,7 +1853,10 @@ export function readOrchestration(cwd = process.cwd()) {
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
   return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), globalParallel: gp >= 1 ? gp : null,
-    recovery: { maxAttempts: recoveryMax } };
+    recovery: { maxAttempts: recoveryMax },
+    // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).
+    baseSync: { enabled: String(o.base_sync_enabled ?? o.enabled ?? "true").trim().toLowerCase() !== "false",
+      unionGlobs: String(o.base_sync_union_globs ?? o.union_globs ?? "").replace(/^\[|\]$/g, "").split(",").map((x) => x.trim().replace(/^["']|["']$/g, "")).filter(Boolean) } };
 }
 
 /**

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { deriveLightContract, runLightStep, runLightTests, parseNumstat, apiShapeReasons, upgradeNote, lightBuildPrompt, renderLiteReceipt } from "./lightlane.mjs";
+import { isTypedBuilderError, deriveLightContract, runLightStep, runLightTests, parseNumstat, apiShapeReasons, upgradeNote, lightBuildPrompt, renderLiteReceipt } from "./lightlane.mjs";
 import { validateContract } from "./conformance.mjs";
 
 const TITLE = "foo crashes on null input";
@@ -233,5 +233,39 @@ describe("renderLiteReceipt (#4452)", () => {
     assert.deepEqual(r.testCommands, ["node --test test/foo.test.js", "node --test test/bar.test.js"]);
     assert.equal(r.testRuns, 2);
     for (const k of ["upgrade", "reasons", "contract", "files", "repro", "testFailures"]) assert.ok(k in r, k);
+  });
+});
+
+describe("#4502 light lane fixes", () => {
+  it("runLightStep rethrows typed builder errors; internal errors stay light_error", async () => {
+    for (const e of [{ laneCode: "budget.exceeded" }, { deferCode: "cli.idle" }, { code: "CLI_SPAWN_FAILED" }, { code: "CLI_TIMEOUT" }, { spawnDeterministic: true }, { usageLimit: true }]) {
+      const { ctx } = step({ ctx: { build: async () => { throw Object.assign(new Error("typed"), e); } } });
+      await assert.rejects(runLightStep(ctx), (x) => isTypedBuilderError(x) && x.message === "typed");
+    }
+    const { ctx } = step({ ctx: { build: async () => { throw new Error("git broke"); } } });
+    assert.deepEqual(codes(await runLightStep(ctx)), ["light_error"]);
+    assert.equal(isTypedBuilderError(null), false);
+  });
+  it("the light prompt no longer asks for a check that cannot pass", () => {
+    const p = lightBuildPrompt(7);
+    assert.doesNotMatch(p, /forgedock[^\n]* check/);
+    assert.doesNotMatch(p, /\bcheck\b[^\n]*until it passes/);
+    assert.match(p, /git status/);
+  });
+  it("deliverables come from the issue-named files; a diff file outside them upgrades with scope_creep", () => {
+    const c = deriveLightContract({ title: TITLE, issueText: ISSUE, result: RESULT, files: ["src/foo.js", "src/other.js", "test/foo.test.js"], predictedFiles: ["src/foo.js"] });
+    assert.deepEqual(c.deliverables.map((d) => d.path), ["src/foo.js"]);
+  });
+  it("scope_creep: a changed non-test file the issue does not name is an upgrade reason", async () => {
+    const { ctx } = step({ files: ["src/foo.js", "src/other.js", "test/foo.test.js"], numstat: "5\t1\tsrc/foo.js\n2\t0\tsrc/other.js\n20\t0\ttest/foo.test.js\n", ctx: { predictedFiles: ["src/foo.js"] } });
+    const r = await runLightStep(ctx);
+    assert.equal(r.upgrade, true); assert.ok(codes(r).includes("scope_creep"), JSON.stringify(r.reasons));
+    const ok = await runLightStep(step({ ctx: { predictedFiles: ["src/foo.js"] } }).ctx);
+    assert.equal(ok.upgrade, false, JSON.stringify(ok.reasons));
+  });
+  it("runLightTests forwards the configured timeout to the runner", async () => {
+    const seen = [];
+    await runLightTests({ commands: ["a", "b"], timeoutMs: 900000, run: async (x) => { seen.push(x.timeoutMs); return { rc: 0, output: "" }; } });
+    assert.deepEqual(seen, [900000, 900000]);
   });
 });

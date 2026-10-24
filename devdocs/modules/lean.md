@@ -157,9 +157,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    records the attempt, logs `TURN_BUDGET_EXCEEDED`, checkpoints and runs `budgetWrapup`: one fresh session (trigger
    `budget_wrapup`, `restart_of` the stopped trigger, `wrapupGrant` = max(5, ceil(budget/5)) turns, prompt
    `turnBudgetWrapupPrompt` with diff and last self-check) that either finishes (the result flows on) or writes
-   `status: budget-exceeded` + `digest`. A stop or overrun (`TURN_BUDGET_STOP`) ends needs-human `budget.exceeded` with
-   `budgetDigest` (builder digest, else diff stat); it is in `RECOVERABLE_CODES`, so the batch reruns it once with
-   `RECOVER_HOW` (continue from the checkpoint or a typed split-required block). Plan/corrections and fix rounds are not
+   `status: budget-exceeded` + `digest`. A stop or overrun (`TURN_BUDGET_STOP`) ends the non-human reason
+   `budget-exceeded` (code `budget.exceeded`, #4505: no `needs-human` label, no FORGE:NEEDS_HUMAN comment; the result
+   carries `branch` and `budgetDigest`, builder digest else diff stat). `classifyNeedsHuman` calls it recoverable, so the
+   batch reruns it once from the checkpoint branch with `RECOVER_HOW` (continue, or a typed split-required block: the
+   decompose path) at `recoverySize` = `nextSize` (S→M→L, L stays L); dependents stay queued. needs-human only when that
+   final `budget.exceeded` recovery overruns again (the lane labels it), or no recovery runs (orchestrate relabels once
+   and parks dependents). Plan/corrections and fix rounds are not
    budgeted. The lane result and `RUN_TERMINAL` carry `turns: {size, budget, build, total, exceeded}`; orchestrate copies it
    to the row and the batch report adds `formatTurnSummary` (`turns by size: S n= p50 max/budget; … over budget: #N`).
    **Lane profile** (#4395, `lean.mjs` section 2a + `callRunner`): every LLM session runs with
@@ -237,7 +241,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    = unchanged) — `verify.mjs` `runCiVerify` before every review: push, dispatch
    `verify.workflow` (or wait on push checks), red → builder fix with log tails
    (`max_rounds`, then `ci.red`), slow → `ci-pending`, unavailable → local fallback;
-   docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI.
+   docs-only (`skip_paths`) skips. A verified head satisfies validate ids left to CI;
+   the trajectory decisions name them (`precheck` `ciCovered`, `VALIDATE_CI_VERIFIED`), and the
+   base-sync re-review retry CI-verifies its fix round's head before reviewing (#4527).
    Push-check mode gates on `ciGate` (`verify.checks` > required checks under
    `merge_wait: required` > all) at the latest attempt per name (`latestPerName`, check-run
    id); a no-commit fix round reruns the failed jobs once (`rerunFailedOnce`,
@@ -323,6 +329,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `growth_lines` without `hotspot-exempt: <reason>` in a covering deliverable
    or add-deliverable why. A failed script or `enabled: false` turns it off;
    no runner calls are added.
+   Generated files (forge#4519): `hotspots.sh` marks a row `generated` (and
+   so `excluded`) for `linguist-generated`, a `maintenance.generated_paths`
+   glob or an `@generated` / `DO NOT EDIT` header in the first 5 lines, and
+   `hotspotGrowth` never counts it. `generated_paths` (bot-owned) is also in
+   the output head, so `amend()` passes it to `applyAmendments`, which refuses
+   an add-deliverable on a matching path; `hotspotPlanNote`/`hotspotBuildRule`
+   then name those globs in the prompts.
    **Enumerating tests** (#4322, `enumerating.mjs`): before the plan call
    `io.enumeratingTests` lists tests that enumerate the exports or directory
    siblings of the issue's named paths (`enumeratingPlanNote` /
@@ -375,6 +388,16 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    fail-open after the CI wait budget), re-checks against the fetched lane, and a taken number
    base-syncs + renumbers (`SEQUENCE_LATE_BIND`) and waits for CI again; released at merge
    or finish.
+   #4526: the renumber picks its numbers under a short host pick lock per (repo, base, dir)
+   (`seqlease.mjs` `reserve`, its own registry `schedDir()/seq-pick/<key>/`, never the merge-gate
+   lease) above every other live lane's reservation in `reserved.json`; a reservation lasts until
+   `unreserve` at finish, its holder's death (pid) or 24h, and a lock or file error keeps the
+   base-derived numbers (fail-open). `verifyRenumber` also accepts a file whose first line only
+   swaps its own stem/number (`headerOnlyChange`, e.g. `-- Migration 0067_x`). A data-only move
+   after a schema-changing one in the same dir goes through the generator (its predecessor is not
+   the base tip), and a move the regular generator writes no snapshot for (hand-written SQL) is
+   rerun as `<regenerate> --custom` with its and later lane SQL withheld; the generator's empty
+   migration is dropped and the lane's SQL and planned journal restored byte-identical.
    Only real series count (#4343): a leading date (`YYYY-MM-DD`, `YYYYMMDD`) is no
    number, and the directory must hold a series on the base — a `_journal.json` /
    `meta/_journal.json`, or ≥2 distinct numbers of the file's width filling at least
@@ -409,7 +432,9 @@ as `makeHostProbe().activeLanes()`.
 `depcache.mjs` `prepare` (after the worktree and the toolchain step 2b exist) keys each lockfile (pnpm/npm/yarn
 non-PnP, uv/poetry) by sha256 of lock + manifests + runtime + platform. Hit: hardlink the
 read-only snapshot `~/.forge/depcache/<repoKey>/<eco>-<key>/` in (bin scripts copied, build
-path rewritten), then a warm repair install. Miss: frozen install under the key lock, publish
+path rewritten), then a warm repair install. A link or repair that fails (non-EXDEV) removes the
+linked trees and installs fresh after the key lock is released, without publishing: status `materialize-fallback`, or
+`failed` when that install fails too (#4522). Reasons lead with pnpm's `ERR_PNPM_*` line, which pnpm prints on stdout. Miss: frozen install under the key lock, publish
 via tmp + atomic rename. Never fails the run (`DEPS_PREPARED`); runner env gets the shared
 stores; install/repair commands get the lane's toolchain env (#4347: a pm only the shim provides
 resolves; no pin, no shim or a failed toolchain step means the host PATH); `forgedock gc --deps` reaps; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
@@ -742,14 +767,14 @@ transport (`launch/status/logs/result/usage/destroy`, addressed by ForgeDock's o
 `httpTransport` is the one shipped transport (JSON protocol in docs/CONFIG.md
 `execution`). The launch spec carries the repo to clone, `cache_store`, the scoped
 env (secret names resolved via `credentials.mjs` `resolveCredential`: env, then
-keychain service `forgedock`) and the `run-issue` argv. Logs stream into the batch
+keychain service `forgedock`) and the `run-issue` argv. The env also carries the dispatching host's git identity (`GIT_AUTHOR_*`/`GIT_COMMITTER_*` from `git config user.name/email`, `hostGitIdentity`; a lane env identity wins) so sandbox commits have the same author as local lanes; without it the lane image fell back to `forgedock@localhost`, which fails DCO (forge#4561). Logs stream into the batch
 lane log redacted; billable minutes go on `handle.minutes` and `providerLanes`
 copies them to the lane result as `sandbox: {provider, id, minutes, cost_usd}` (#4255
 reports them). `remote` is never a default provider; `remoteTransportFor` refuses a GitHub
 Actions endpoint without `allow_actions: true`. `providerLanes` maps a throwing
 `start` to `needs-human` `sandbox.start_failed` (or `deferred` `sandbox.capacity`
-for a retryable error) instead of engine-error, and tears down after the result is
-in on every path. `gc.mjs` `SANDBOX_TEARDOWN.remote` destroys stale remote
+for a retryable error, which `deferPolicy` requeues uncapped like `host.busy`, forge#4528) instead of engine-error, and tears down after the result is
+in on every path. An optional `provider.capacity()` (`GET /status -> {free}`) caps `grant()` remote admissions so lanes queue instead of 503ing (forge#4540). `gc.mjs` `SANDBOX_TEARDOWN.remote` destroys stale remote
 sandboxes through the checkout's forge.yaml transport (probe `sandboxTransport`
 in tests). Contract suite: `sandbox-provider.contract.test.mjs` (container over a
 fake docker, remote over a fake transport). Rationale:
@@ -792,6 +817,15 @@ on the run record and the row, and in `ctx.placement`. The lane gets it as
 `run-issue --placement/--placement-reason`, and `runCore` `o.placement` writes it
 into FORGE:STATE (`placement: {where, reason, mode}`) and a trajectory decision.
 Cost: 0 LLM calls. Rationale: `devdocs/decisions/4256-hybrid-placement.md`.
+
+Monorepos (#4523): `validationWeight` also scans heavy markers and package.json
+scripts one and two directory levels below the root (injectable `list`, default
+`readdir`; skips dot-dirs, `node_modules`, `vendor`, `dist`, `build`, `target`,
+`venv`, `__pycache__`; capped at 200 dirs). Root signals keep their order.
+`execution.heavy: true|false` (`parseExecution`) is a placement-only override in
+`placeLane`: `true` → remote (`execution.heavy: true`) after rules 1-3; `false`
+ignores the detected weight but the headroom rule still applies. It adds no
+pre-PR commands and does not touch admission.
 
 ## Entry 2026-10-20 — Context pack: the issue's graph as plan context (#4275)
 
@@ -865,7 +899,7 @@ repo (#4354). `formatAlertLines` prints `ALERTS` and one line per alert, or noth
 when no alert fired. The lines come from `computeAlerts` (`bin/stats/aggregate.mjs`)
 over `readLanes` of the batch's run-log dir. Each run in a log is one lane, and the
 window is the last 50 lanes of the repo. The rules are: `DEPS_PREPARED` failed above
-20% per ecosystem, `deferred-to-ci` above 30%, one `TOOLCHAIN_WARNING` on more than
+20% per ecosystem, `materialize-fallback` above the same 20% as a separate alert (#4522), `deferred-to-ci` above 30%, one `TOOLCHAIN_WARNING` on more than
 50% of lanes, and an outcome code whose share doubled against the previous window.
 Thresholds come from `stats.alerts.*`, and there are no alerts under 10 lanes.
 `forgedock stats` prints the same alerts as `## ALERTS`. A failure while computing
@@ -1664,3 +1698,39 @@ The client (`orchestrateClient`): when the stream drops after the batch id is kn
 Tests: `schedd.test.mjs` pins `FORGEDOCK_SCHED_DIR` to a tmp dir in the test process, so the env that clients submit for
 their lanes never resolves `~/.forge/sched`. Stub lanes record their pid, exit once the work dir is gone or after 120 s,
 and are SIGKILLed by `h.cleanup()` and by a process `exit` hook. Cost: 0 LLM calls.
+
+#4518: an external kill of the builder CLI (`CLI_BACKEND_FAILED` with signal SIGTERM/SIGKILL or status 143/137, classified by
+`bin/lean/hostkill.mjs`; `runCliBackendAsync` attaches `status` and `signal`) is handled like a timeout in `builder()`: checkpoint,
+one fresh restart, then `deferred` with `cli.host_killed`, so it never reaches the batch breaker. The CLI ceiling already excludes
+governor-paused time (`pausedTotal`, `bin/runner.mjs`). Cost: 0 LLM calls.
+
+## Entry 2026-10-24 — Feat: parked-PR base sync (#4525)
+
+`bin/lean/basesync.mjs` (`syncParked`, `unionResolve`) merges the moved base into the open PR of a `needs-human` row from `orchestrate()` (new `syncParked` seam, `syncEveryMs`). Clean or pure two-sided list-addition merges (files in `orchestration.base_sync.union_globs`; never sequence/`_journal.json`) are pushed plainly; other conflicts are aborted and their paths posted once per base sha. Opt out: `orchestration.base_sync.enabled: false`. The in-lane `baseSync()` in lean.mjs is untouched.
+Cite: #4525.
+
+## Entry 2026-10-24 — Light-lane review fixes (#4502)
+
+A kept light lane now runs the same structure delta and hotspot precheck as the full lane (the undeclared package edge gets the one builder resume).
+`runLightStep` rethrows typed builder errors (`isTypedBuilderError`: `laneCode`, `deferCode`, `CLI_*`, `spawnDeterministic`, usage limit), so the lane's own catch ends them (budget-exceeded, deferred, needs-human) with no second builder session; only internal errors stay `light_error`.
+The derived contract's deliverables are the issue-named files (`predictedFiles`); a changed non-test file outside them upgrades with `scope_creep`. The light prompt no longer asks for `forgedock check` (no contract exists yet). `runLightTests` forwards `timeoutMs` (`precheckTimeoutSeconds`) to `io.runCommand`. `RUN_TERMINAL.light` is summarised as `contextPack.light` and `contextPackAb` skips light runs.
+
+## Entry 2026-10-24 — Host-only capabilities in placement (#4542)
+
+`placeLane` takes `needs` (host-only capabilities: `sops`, `prod_monitor`, `ops_credentials`, or names declared in `execution.host_capabilities`) and `relays` (what the provider relays; computeshare relays none). A lane needing something not relayed is placed `local` with reason `host capability: <names>` in both `remote` and `hybrid` modes; lanes with no needs are unchanged. `detectNeeds(text, exec)` is zero-LLM: built-in text signals plus declared names and `host_capability_patterns` (`name:regex`, flat key). `engine-cli` fills a per-issue `needsOf` map in `readBody`, and `remote.place` now exists in remote mode too.
+If a remote lane still blocks on credentials and its summary names only a declared host capability (`hostCapabilityBlock`), `endBlocked` in lean.mjs ends it `env.capability_remote` (recoverable, `RECOVER_HOW`); `orchestrate` `placeOf` relaunches it local once. A mixed or unknown need stays `builder.blocked`. `BLOCK_RULES` tells a remote builder to name the missing capability.
+Cite: #4542.
+
+## Entry 2026-10-24 — `pool` execution provider (#4546)
+
+`execution.provider: pool` (`execution.mjs` `providerByName`) is `remoteProvider` (`name: "pool"`) with the endpoint and token defaulted from the local router config (`poolRouterConfig`: `COMPUTESHARE_CONFIG` or `~/.config/computeshare/router.json`, token from `forgedock_token_file` or the sibling `forgedock.token`); an explicit `endpoint`/`token_env` wins, and no router config plus no endpoint is `execution.provider.misconfigured`. The token is only sent as the Authorization header and kept in the redaction set.
+The dispatcher reads `<cwd>/forge.yaml` (absent is fine) and passes it as `settings.forgeYaml`; `remoteProvider` adds `env.CS_FORGE_YAML_B64` to the launch spec, so the router's `repos` map is optional (it still takes precedence). Placement is unchanged.
+
+## Entry 2026-10-24 — Opt-in local fallback when no pool agent is online (#4547)
+
+`execution.fallback_local: true` (`parseExecution` -> `fallbackLocal`) lets `orchestrate()` grant run a remote-placed lane on the host (`fallback to local: no pool agent online`) while `remote.capacity()` reports `online === 0`; `engine-cli.mjs` samples `online` next to `free` and wires the detached local lanes. Unknown liveness (null, failing `/status`) never triggers it, so the first grant before the first sample still goes remote; default off keeps the uncapped `sandbox.capacity` deferral.
+`httpTransport.capacity()` returns `{free?, online?, total?}` (null when none is valid); the pool router's `GET /status` answers `{online, total, agents:[{name, ok, paused}]}` (online = reachable and not paused) and deliberately has no `free`, so the #4540 cap stays off for the pool.
+
+## Entry 2026-10-24 — Per-agent remote lane minutes (#4549)
+
+The router's `GET /sandboxes/:id/usage` forward adds `agent` (the placing agent) to the agent's `{minutes}` body; the field is optional for third-party runners. `httpTransport.usage` returns `{minutes, agent?}`, `remoteProvider` keeps `h.agent`, and `providerLanes` `withUsage` copies it to `sandbox.agent` (omitted when unknown). `orchestrate` accumulates `sandbox.by_agent {name: minutes}` per issue across attempts onto the row, and `formatSandboxSummary` appends `; by agent: a X min, b Y min` only when it exists; the table and non-pool output are unchanged. `forgedock stats --pool` (`bin/stats/pool.mjs`) aggregates `by_agent` from local batch `report.json` rows (latest row per issue); see `docs/STATS.md`.

@@ -62,7 +62,7 @@ describe("amendments", () => {
 
 describe("precheck (deterministic, no reviewer)", () => {
   const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
-  it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [] }));
+  it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [], ciCovered: [] }));
   it("unauthorized file -> scope_creep; tests and ignored paths are always allowed", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: res, changedFiles: [...files, "src/billing.js", ".forge-lean/x", "tests/test_x.py", "pkg/foo_test.go"], ignore: [".forge-lean/"] })), ["conformance.scope_creep"]);
     for (const t of ["test/a.js", "src/a.test.ts", "tests/test_a.py", "a_test.go", "spec/a.spec.js"]) assert.ok(isTestPath(t), t);
@@ -84,6 +84,15 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 1, output: "AssertionError: 1 !== 2" } } })), ["conformance.unimplemented"]);
     const local = precheck({ contract: C, result: failed, changedFiles: files, repoHas: repoTracks(["src/leak/__init__.py"]), validateRuns: { V1: { rc: 1, output: "ModuleNotFoundError: No module named 'leak.core'" } } });
     assert.deepEqual(codes(local), ["conformance.unimplemented"], "a repo module the change did not create is a code defect");
+  });
+  it("#4527 a CI-verified head lists the validate ids it accepted without a local result; a ran-and-failed validate still fails", () => {
+    const C2 = { ...C, validate: [{ id: "V1", command: "node --test a.test.mjs" }, { id: "V2", command: "tsc" }, { id: "V3", command: "lint" }] };
+    const pc = precheck({ contract: C2, result: { ...res, validation: [{ id: "V2", ci: true }, { id: "V3", exit: 0 }] }, changedFiles: files, ciVerified: true });
+    assert.deepEqual(codes(pc), []); assert.deepEqual(pc.ciCovered, ["V1", "V2"]);
+    const local = precheck({ contract: C2, result: { ...res, validation: [{ id: "V2", ci: true }, { id: "V3", exit: 0 }] }, changedFiles: files });
+    assert.deepEqual(local.failures.map((f) => f.kind), ["validate_missing", "validate_missing"]); assert.deepEqual(local.ciCovered, []);
+    const failed = precheck({ contract: C2, result: { ...res, validation: [{ id: "V1", exit: 1 }, { id: "V2", ci: true }, { id: "V3", exit: 0 }] }, changedFiles: files, ciVerified: true });
+    assert.deepEqual(failed.failures.map((f) => f.kind), ["validate_failed"]); assert.deepEqual(failed.ciCovered, ["V2"]);
   });
   it("#4323 missingTool: commands, python and node modules; paths, relative and repo-tracked names are not the environment", () => {
     assert.deepEqual(missingTool({ rc: 127, output: "sh: 1: jq: not found" }), { tool: "jq", kind: "command" });
@@ -362,6 +371,24 @@ describe("hotspot growth precheck (forge#4195)", () => {
     assert.match(pc.failures[0].detail, /^src\/scrape\.js grew by 200 lines \(now 2600, limit \+150 over 2000\) without hotspot-exempt$/);
   });
 
+  it("#4519 generated paths: applyAmendments refuses add-deliverable on maintenance.generated_paths, hotspotGrowth skips generated rows", () => {
+    const gen = ["web/public/openapi*.json", "web/public/openapi-versions/*"];
+    const amends = [{ kind: "add-deliverable", path: "web/public/openapi-versions/3.29.2.json", why: "sync the spec archive" },
+      { kind: "add-deliverable", path: "./web/public/openapi.json", why: "sync the spec" }, { kind: "add-deliverable", path: "src/shared.js", why: "helper" }];
+    const a = applyAmendments(C, amends, null, { generatedPaths: gen });
+    assert.deepEqual(a.applied.map((x) => x.target), ["src/shared.js"]);
+    assert.equal(a.problems.length, 2);
+    assert.match(a.problems[0], /^add-deliverable web\/public\/openapi-versions\/3\.29\.2\.json: generated path \(forge\.yaml maintenance\.generated_paths\)/);
+    assert.ok(!a.contract.deliverables.some((d) => d.path.includes("openapi")), "a refused path never becomes a deliverable");
+    assert.equal(applyAmendments(C, amends).applied.length, 3, "without generatedPaths every add-deliverable applies as before");
+    assert.equal(applyAmendments(C, amends, null, { generatedPaths: ["web/public/openapi.json"] }).applied.length, 2, "a literal glob matches only that path");
+    // linguist-generated / generated_paths / header rows (hotspots.sh `generated`) never trigger hotspot_growth
+    const big = H({ path: "src/scrape.js", lines: 83974, growth: 83974 });
+    assert.equal(run(hs([big])).ok, false);
+    assert.equal(run(hs([{ ...big, generated: true }])).ok, true);
+    assert.equal(run(hs([{ ...big, generated: true, excluded: true }])).ok, true);
+  });
+
   it("within the limit, under the threshold, excluded, unchanged, disabled or no facts: no failure", () => {
     for (const h of [hs([H({ growth: 150 })]), hs([H({ over: false, lines: 1900 })]), hs([H({ excluded: true })]), hs([H({ path: "src/other.js" })]),
       hs([H()], { enabled: false }), hs([H({ growth: null })]), null, undefined, {}]) assert.equal(run(h).ok, true, JSON.stringify(h));
@@ -398,7 +425,7 @@ describe("repro_test on bug lanes (#4271)", () => {
   });
   it("red on base and green on head passes; anything else fails the precheck as conformance.unimplemented", () => {
     const k = { ...C, repro_test: RT };
-    assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [], superseded: [] });
+    assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [], superseded: [], ciCovered: [] });
     for (const repro of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
       const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
       assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_red_green"]], JSON.stringify(repro));
