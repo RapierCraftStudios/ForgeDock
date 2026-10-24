@@ -28,9 +28,7 @@ done
   "lease_interval_s": 60,
   "abandon_after_s": 1800,
   "retry_after_s": 60,
-  "repos": {
-    "RapierCraftStudios/AlterLab": { "forge_yaml": "$HOME/Projects/AlterLab/forge.yaml" }
-  }
+  "repos": {}
 }
 EOF
 

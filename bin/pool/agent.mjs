@@ -59,6 +59,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
   const sb = () => store.data.sandboxes;
+  // Sandbox ids come from requests: read own keys only, so "__proto__" or "constructor" never resolves to an inherited member (#4566).
+  const own = (id) => (typeof id === "string" && Object.hasOwn(sb(), id) ? sb()[id] : undefined);
   const leaseTtlMs = (cfg.lease_ttl_s ?? 600) * 1000;
   const maxLifeMs = (cfg.max_lifetime_s ?? 6 * 3600) * 1000;
   const keepExitedMs = (cfg.keep_exited_s ?? 2 * 3600) * 1000;
@@ -94,8 +96,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   }
 
   async function launch({ spec, cpus, mem_gb, limit = null }) {
-    if (!spec?.id || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id and spec.command are required"), { status: 400 });
-    const existing = sb()[spec.id];
+    if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id) || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id ([A-Za-z0-9._-], max 128) and spec.command are required"), { status: 400 });
+    const existing = own(spec.id);
     if (existing) { existing.lease = now(); store.save(); return { status: 200, body: view(existing) }; }
     const c = capacity();
     if (c.paused || c.cpus_free < cpus || c.mem_free_gb < mem_gb) return { status: 503, body: { error: "no capacity", capacity: c }, retryAfter: 60 };
@@ -191,7 +193,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   }
 
   async function destroy(id, why) {
-    const r = sb()[id];
+    const r = own(id);
     if (!r) return false;
     const history = r.usage?.samples ? JSON.stringify({ at: new Date(now()).toISOString(), id: r.id, issue: r.issue, docker: Boolean(r.docker), minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10, ...usageView(r) }) : null;
     await docker.remove(r.name);
@@ -229,7 +231,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const credCache = {};
   const CRED_TTL = { github: 120000, claude: 300000 };
   async function sandboxCred(id, kind, req) {
-    const r = sb()[id];
+    const r = own(id);
     const m = /^Bearer\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
     if (!r || r.state === "exited" || !m || !sameSecret(m[1].trim(), r.credToken)) return { status: 401, body: { error: "unauthorized" } };
     if (!CRED_TTL[kind]) return { status: 404, body: { error: "unknown credential" } };
@@ -353,11 +355,11 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     [route("GET", "/health"), async () => ({ status: 200, body: { ok: true, ...capacity() } })],
     [route("GET", "/capacity"), async () => ({ status: 200, body: capacity() })],
     [route("POST", "/sandboxes"), async (_p, body) => launch(body ?? {})],
-    [route("GET", "/sandboxes/:id"), async ({ id }) => { const r = sb()[id]; if (!r) return { status: 404, body: { state: "gone" } }; await refresh(r); store.save(); return { status: 200, body: view(r) }; }],
-    [route("GET", "/sandboxes/:id/logs"), async ({ id }, _b, url) => { const r = sb()[id]; return r ? { status: 200, body: readLog(r, url.searchParams.get("cursor")) } : { status: 404, body: { text: "", cursor: 0 } }; }],
-    [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = sb()[id]; const x = r && readResult(r); return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }],
-    [route("GET", "/sandboxes/:id/usage"), async ({ id }) => { const r = sb()[id]; return r ? { status: 200, body: { minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10 } } : { status: 404, body: {} }; }],
-    [route("POST", "/sandboxes/:id/lease"), async ({ id }) => { const r = sb()[id]; if (!r) return { status: 404, body: { state: "gone" } }; r.lease = now(); store.save(); return { status: 200, body: { ok: true } }; }],
+    [route("GET", "/sandboxes/:id"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; await refresh(r); store.save(); return { status: 200, body: view(r) }; }],
+    [route("GET", "/sandboxes/:id/logs"), async ({ id }, _b, url) => { const r = own(id); return r ? { status: 200, body: readLog(r, url.searchParams.get("cursor")) } : { status: 404, body: { text: "", cursor: 0 } }; }],
+    [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r && readResult(r); return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }],
+    [route("GET", "/sandboxes/:id/usage"), async ({ id }) => { const r = own(id); return r ? { status: 200, body: { minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10 } } : { status: 404, body: {} }; }],
+    [route("POST", "/sandboxes/:id/lease"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; r.lease = now(); store.save(); return { status: 200, body: { ok: true } }; }],
     [route("GET", "/usage-history"), async () => {
       let rows = [];
       try { rows = readFileSync(join(stateDir, "usage-history.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { /* none yet */ }

@@ -4,7 +4,7 @@
 # IS_SANDBOX=1: lanes run as root in a throwaway container; Claude Code refuses --dangerously-skip-permissions as root without it.
 FROM ubuntu:24.04
 
-ARG NODE_VERSION=22.12.0
+ARG NODE_VERSION=22.23.3  # lanes need >=22.19 (undici 8 via vitest)
 # Node 22.12 bundles corepack 0.29.4, whose npm signing keys are stale: `corepack pnpm` fails to verify
 # pnpm, so lanes get no dependencies. A current corepack carries the rotated keys.
 ARG COREPACK_VERSION=0.34.7
