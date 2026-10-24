@@ -102,9 +102,9 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
   `--resume`; a batch started without the daemon still needs `forgedock orchestrate --resume <id>`. Change K of a running batch with
   `forgedock orchestrate --set-parallel <id> K`. Issues filed while a batch runs join it with
   `forgedock orchestrate --add <id> N...` (or `--resume <id> N...`), under its K and DAG; never start a second batch
-  for them. Its pre-filter still closes already-fixed ones. The runner requeues `deferred` lanes by code (host busy after its
-  retry-in, a usage limit holds admissions for that account (backend identity) until the reset, across every batch on
-  the host; `forgedock limits show|clear <id>|--all` lists or drops holds; transient merge/push/idle failures back off; non-host
+  for them. Its pre-filter still closes already-fixed ones. The runner requeues `deferred` lanes by code (host busy and a full sandbox pool after their
+  retry-in, uncapped, a usage limit holds admissions for that account (backend identity) until the reset, across every batch on
+  the host; `forgedock limits show|clear <id>|--all` lists or drops holds; transient merge/push/idle failures back off; other
   deferrals stop after `orchestration.max_deferrals`), relaunches an `engine-error` once, and stops admitting after
   `orchestration.breaker` engine-errors (`errors` within `window_min`; held issues continue on `--resume`). Lanes are
   capped host-wide (`orchestration.global_parallel`, `forgedock sched cap N|show`), highest priority first; within a

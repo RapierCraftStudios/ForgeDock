@@ -18,7 +18,8 @@
  * A seam calls `onLive()` before it waits on a live lane (#4504); an adopt that resolves first is settled (or requeued on null)
  * before scheduling, so a live lane does not hold up the others.
  * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
- * limit holds admissions for that account until its reset, and non-host deferrals stop after `maxDeferrals`.
+ * limit holds admissions for that account until its reset, and deferrals other than a busy resource (`host.busy`,
+ * `sandbox.capacity`, #4528) stop after `maxDeferrals`.
  * Usage-limit holds (#4190) are keyed by backend identity in `limits` (the host store, shared by every batch on the
  * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. While held, the
  * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset. An `engine-error` is
@@ -105,11 +106,13 @@ import { laneSize, SIZES } from "./budget.mjs";
 const SATISFIED = new Set(["merged", "invalid"]);
 // Times one issue may be requeued behind a dependency before its dependency-open row is final.
 export const MAX_REQUEUES = 2;
-// Non-host deferrals (anything but host.busy) one issue may take before its deferred row is final.
+// Deferrals other than a busy resource (UNCAPPED_DEFERRALS) one issue may take before its deferred row is final.
 export const DEFAULT_MAX_DEFERRALS = 3;
 // Relaunches of an issue whose lane ended engine-error.
 export const ENGINE_ERROR_RELAUNCHES = 1;
 export const HOST_BUSY_RETRY_S = 60;
+// #4528: a busy host or a full sandbox pool is a wait, not a failure: requeued after its retry-in, never capped.
+const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity"]);
 export const RATE_LIMIT_FALLBACK_S = 15 * 60;
 export const DEFER_BACKOFF_S = 120;
 export const DEFER_BACKOFF_MAX_S = 30 * 60;
@@ -158,12 +161,12 @@ export function parseDeps(body, issue) {
 const posNum = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : null; };
 
 /**
- * When to run a `deferred` issue again. `deferrals` counts this issue's earlier non-host deferrals.
+ * When to run a `deferred` issue again. `deferrals` counts this issue's earlier capped deferrals (not UNCAPPED_DEFERRALS).
  * @returns {{delayMs:number, host?:true, hold?:true} | {capped:true}}
  */
 export function deferPolicy(r, { now, deferrals = 0, maxDeferrals = DEFAULT_MAX_DEFERRALS }) {
   const code = r?.code ?? null;
-  if (code === "host.busy") return { delayMs: (posNum(r?.retryInSeconds) ?? HOST_BUSY_RETRY_S) * 1000, host: true };
+  if (UNCAPPED_DEFERRALS.has(code)) return { delayMs: (posNum(r?.retryInSeconds) ?? HOST_BUSY_RETRY_S) * 1000, host: true };
   const k = deferrals + 1;
   if (k > maxDeferrals) return { capped: true };
   if (code === "rate_limited") {

@@ -669,3 +669,36 @@ describe("#4504: a resume settles lanes that ended while no dispatcher ran", () 
     assert.deepEqual(launched.sort(), [3, 4], "the dead lane without a result is requeued and run once");
   });
 });
+
+describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => {
+  it("sandbox.capacity is uncapped and honours retryInSeconds; other codes still cap at maxDeferrals", () => {
+    assert.deepEqual(deferPolicy({ code: "sandbox.capacity" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
+    assert.deepEqual(deferPolicy({ code: "sandbox.capacity", retryInSeconds: 30 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 30000, host: true });
+    for (const code of ["merge.transient", "gh.unavailable", "cli.idle", "rate_limited", "sandbox.start_failed"]) {
+      assert.deepEqual(deferPolicy({ code, retryInSeconds: 60 }, { now: 0, deferrals: 3, maxDeferrals: 3 }), { capped: true }, code);
+    }
+  });
+
+  it("with K above the pool size every issue eventually runs and none is skipped for capacity", async () => {
+    const c = { t: 1_000_000 };
+    const now = () => c.t;
+    // Fake clock that advances after a macrotask, so running lanes progress while deferred ones wait.
+    const sleep = async (ms) => { await new Promise((r) => setImmediate(r)); c.t += ms; };
+    const POOL = 2;
+    let inUse = 0;
+    const capacityDefers = new Map();
+    const rows = await orchestrate({ issues: [1, 2, 3, 4, 5, 6], parallel: 4, maxDeferrals: 3, now, sleep, readBody: async () => "",
+      runOne: async (n) => {
+        if (inUse >= POOL) {
+          capacityDefers.set(n, (capacityDefers.get(n) ?? 0) + 1);
+          return { terminalReason: "deferred", code: "sandbox.capacity", retryInSeconds: 60, detail: "sandbox launch: HTTP 503" };
+        }
+        inUse++;
+        try { await new Promise((r) => setTimeout(r, 20)); } finally { inUse--; }
+        return { terminalReason: "merged", pr: 100 + n };
+      } });
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]).sort((a, b) => a[0] - b[0]), [1, 2, 3, 4, 5, 6].map((n) => [n, "merged"]));
+    assert.ok(!rows.some((r) => /gave up/.test(r.detail ?? "")));
+    assert.ok(Math.max(...capacityDefers.values()) > 3, "an issue was deferred for capacity more than maxDeferrals times");
+  });
+});
