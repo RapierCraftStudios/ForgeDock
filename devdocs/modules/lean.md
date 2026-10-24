@@ -1714,3 +1714,10 @@ Cite: #4525.
 A kept light lane now runs the same structure delta and hotspot precheck as the full lane (the undeclared package edge gets the one builder resume).
 `runLightStep` rethrows typed builder errors (`isTypedBuilderError`: `laneCode`, `deferCode`, `CLI_*`, `spawnDeterministic`, usage limit), so the lane's own catch ends them (budget-exceeded, deferred, needs-human) with no second builder session; only internal errors stay `light_error`.
 The derived contract's deliverables are the issue-named files (`predictedFiles`); a changed non-test file outside them upgrades with `scope_creep`. The light prompt no longer asks for `forgedock check` (no contract exists yet). `runLightTests` forwards `timeoutMs` (`precheckTimeoutSeconds`) to `io.runCommand`. `RUN_TERMINAL.light` is summarised as `contextPack.light` and `contextPackAb` skips light runs.
+
+## Entry 2026-10-24 — Feat: requeue a terminal issue in a running batch (#4550)
+
+`forgedock orchestrate --requeue <id> N... [--reason]` appends `{issue, reason, by, at}` to the batch's `requeue` file (`batch.requeue`, `readRequeued`, `unrunRequeues` in batch.mjs). It refuses issues not in the batch or not terminal; the CLI also refuses closed and `needs-human`-labelled issues before writing.
+`orchestrate()` takes a `getRequeued` seam: each pass `drainRequeues` applies each entry once (keys in state `requeueApplied`), moves the issue and the `skipped` dependents behind it back to pending (prior rows kept in state `requeued`, DAG edges kept), posts a runner `FORGE:DECISION`, and the report row is the latest outcome with a `requeued: #N (reason)` line. The lane starts through the normal K/lease path.
+schedd `op:"requeue"` mirrors `add` and reopens a finished batch (clears its report, hosts it). `--add` is unchanged.
+Cite: #4550.
