@@ -219,6 +219,8 @@ export function pickNext(ready, { classes, share, whenIdle = false, started = 0,
 }
 
 const toObj = (m) => Object.fromEntries([...m].map(([k, v]) => [String(k), v]));
+/** #4525: how often a parked needs-human PR is re-synced with its base while the batch runs. */
+export const DEFAULT_SYNC_EVERY_MS = 10 * 60 * 1000;
 const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k), v]));
 
 /**
@@ -228,7 +230,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   store = null, adopt = null, getParallel = null, getAdded = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, getCancelled = null, stopLane = null,
-  estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null }) {
+  estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -258,6 +260,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const classes = toMap(saved?.classes); // issue -> {maintenance, priority}; only with a maintenance budget
   const dispatch = { started: saved?.dispatch?.started ?? 0, maint: saved?.dispatch?.maint ?? 0 };
   let budgetHeld = false;
+  const parkedBase = new Map(); // #4525: issue -> base sha its parked PR was last synced (or reported conflicting) against
+  let lastParkedSync = null;
   const bodies = new Map(); // issue -> body, kept in memory for drift.holds only
   const driftHeld = new Map(); // issue -> flagged package dir holding it this pass
   const reg = sched?.registry ?? null;
@@ -857,6 +861,20 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (tripped && !running.size) { await drainAdds(); break; } // breaker: let running lanes finish, keep the rest pending for a resume
       if (cancelled && !running.size) { await drainAdds(); break; } // #4376: cancel: the rest end held for a resume
       if (budgetStop && !running.size) { await drainAdds(); break; } // execution budget (stop): the same, the rest end held
+      // #4525: a parked needs-human PR is merged with its moved base (seam `syncParked`); non-union conflicts are commented once per base sha.
+      const parkedPrs = () => (syncParked ? [...results].filter(([, x]) => x?.outcome === "needs-human" && Number.isInteger(x.pr)) : []);
+      if (syncParked && !signal?.aborted && (lastParkedSync === null || t - lastParkedSync >= syncEveryMs)) {
+        const rows = parkedPrs();
+        if (rows.length) lastParkedSync = t;
+        for (const [n, x] of rows) {
+          let r = null;
+          try { r = await syncParked({ issue: n, pr: x.pr, last: parkedBase.get(n) ?? null }); } catch { r = null; }
+          if (!r?.base || r.status === "error" || r.status === "unchanged") continue;
+          parkedBase.set(n, r.base);
+          if (r.status === "conflict") decided({ issue: n, what: `parked PR #${x.pr} conflicts with its base (${String(r.base).slice(0, 12)}) in ${(r.paths ?? []).join(", ")}`,
+            why: "base-sync of a parked needs-human PR merges only clean or pure list-addition conflicts", alternative: "resolve these paths by hand or rerun the issue on the new base" });
+        }
+      }
       // Wake for a delayed issue, the end of a usage-limit hold, or (with a live K) a poll.
       const waits = pending.map((n) => notBefore.get(n) ?? 0).filter((x) => x > t);
       if (holdUntil) waits.push(holdUntil);
@@ -865,6 +883,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (getParallel && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if (getAdded && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408: an add while only lanes run
+      if (syncParked && running.size && parkedPrs().length) wake = Math.min(wake ?? syncEveryMs, Math.max(0, syncEveryMs - (t - (lastParkedSync ?? t)))); // #4525
       if (tripped) wake = null;
       if (getCancelled && running.size && !cancelled) wake = Math.min(wake ?? pollMs, pollMs); // #4376: notice a cancel while lanes run
       if (running.size) {
