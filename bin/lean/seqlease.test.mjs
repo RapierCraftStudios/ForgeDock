@@ -39,6 +39,20 @@ describe("sequence lease (#4386)", () => {
     assert.equal(b.timedOut, true);
     b.release(); a.release();
   });
+
+  it("#4526: reserve gives each issue distinct numbers above the floor and other issues' live reservations; dead or unreserved entries free them", async () => {
+    const dead = new Set();
+    const io = makeSequenceLeaseIo({ dir: tmpDir("seqlease-"), pickDir: tmpDir("seqpick-"), pollMs: 20, alive: (pid) => !dead.has(pid) });
+    const k = { repo: "o/r", lane: "staging", dir: "db" };
+    const [a, b] = await Promise.all([io.reserve({ ...k, issue: 1, floor: 51, count: 1, pid: 101 }), io.reserve({ ...k, issue: 2, floor: 51, count: 2, pid: 102 })]);
+    assert.deepEqual([...a.numbers, ...b.numbers].sort((x, y) => x - y), [52, 53, 54]);
+    assert.deepEqual((await io.reserve({ ...k, issue: 1, floor: 51, count: 1, pid: 101 })).numbers, [Math.max(...b.numbers) + 1], "own entry replaced, others kept");
+    assert.deepEqual((await io.reserve({ ...k, dir: "docs/adr", issue: 3, floor: 51, pid: 103 })).numbers, [52], "other dir: own registry");
+    assert.deepEqual((await io.reserve({ ...k, lane: "main", issue: 3, floor: 51, pid: 103 })).numbers, [52], "other base: own registry");
+    dead.add(102);
+    await io.unreserve({ repo: "o/r", lane: "staging", issue: 1 });
+    assert.deepEqual((await io.reserve({ ...k, issue: 4, floor: 51, pid: 104 })).numbers, [52], "dead holder and unreserved issue dropped");
+  });
 });
 
 const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };

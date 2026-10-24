@@ -5142,6 +5142,20 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
       assert.match(traj(w).at(-1), /renumbered deterministically \(no builder\): db\/0007_usage\.sql → db\/0008_usage\.sql/);
     });
 
+    it("#4526: the renumber gets a reserve hook bound to (repo, lane, issue), and the run's reservations are dropped at finish", async () => {
+      const w = dworld({ seq: [COLL, []] }), reserved = [], unreserved = [];
+      w.io.sequenceLease.reserve = async (x) => { reserved.push(x); return { numbers: [9] }; };
+      w.io.sequenceLease.unreserve = async (x) => { unreserved.push(x); };
+      assert.equal((await run(w)).terminalReason, "merged");
+      assert.equal(typeof w.renumbers[0].reserve, "function");
+      assert.deepEqual(await w.renumbers[0].reserve({ dir: "db", floor: 7, count: 1 }), { numbers: [9] });
+      assert.equal(reserved[0].dir, "db");
+      assert.equal(reserved[0].floor, 7);
+      assert.ok(reserved[0].repo && reserved[0].lane && reserved[0].issue, JSON.stringify(reserved[0]));
+      assert.equal(unreserved.length, 1);
+      assert.deepEqual(unreserved[0], { repo: reserved[0].repo, lane: reserved[0].lane, issue: reserved[0].issue });
+    });
+
     it("base-sync with conflicts only in sequence files: base side taken and renumbered by the engine, zero builder sessions, zero re-reviews", async () => {
       const w = dworld({ seq: [[], COLL, []], prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["db/meta/_journal.json", "db/meta/0007_snapshot.json"] });
       assert.equal((await run(w)).terminalReason, "merged");

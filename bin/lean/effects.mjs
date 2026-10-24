@@ -370,7 +370,7 @@ export function makeLeanIo({ repo }) {
     sequenceSnapshot: ({ cwd, base }) => snapshotLane({ git: (a) => run("git")(a, { cwd }), base }),
     sequenceVerify: ({ cwd, base, before, moves }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before, moves }),
     /** #4386: the deterministic renumber, sequence-only base-sync resolution, and the host sequence lease at the merge gate. */
-    sequenceRenumber: ({ cwd, base, laneRef, regenerate }) => renumberLane({ git: (a) => run("git")(a, { cwd }), base, cwd, laneRef, regenerate }),
+    sequenceRenumber: ({ cwd, base, laneRef, regenerate, reserve }) => renumberLane({ git: (a) => run("git")(a, { cwd }), base, cwd, laneRef, regenerate, reserve }),
     sequenceResolve: ({ cwd, files }) => resolveSequenceConflicts({ git: (a) => run("git")(a, { cwd }), files }),
     sequenceLease: makeSequenceLeaseIo(),
     /** #4406: the lane's scoped checks after a base merge (bin/lean/checks.mjs; [] on failure), and same-app duplicate exports (bin/lean/postmerge.mjs). */
