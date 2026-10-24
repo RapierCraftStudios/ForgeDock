@@ -295,3 +295,19 @@ describe("pool provider (#4546)", () => {
     assert.throws(() => providerByName("pool", { batch, repo: "o/r", cwd: dir, exec: parseExecution({ provider: "pool" }), env: {}, poolConfigPath: join(dir, "none.json") }), (e) => e.code === "execution.provider.misconfigured");
   });
 });
+
+describe("remote capacity (GET /status, #4540)", () => {
+  const mk = (res) => httpTransport({ endpoint: "https://pool.example/v1", fetchFn: async (url) => { if (res instanceof Error) throw res; assert.equal(url, "https://pool.example/v1/status"); return { status: res.status, ok: res.status < 400, text: async () => res.body ?? "", headers: { get: () => null } }; } });
+  it("free integer is reported; 404, malformed, negative and transport errors are unknown (null)", async () => {
+    assert.deepEqual(await mk({ status: 200, body: '{"free":3}' }).capacity(), { free: 3 });
+    assert.deepEqual(await mk({ status: 200, body: '{"free":0}' }).capacity(), { free: 0 });
+    for (const r of [{ status: 404 }, { status: 200, body: "nope" }, { status: 200, body: '{"free":"2"}' }, { status: 200, body: '{"free":-1}' }, new Error("down")]) assert.equal(await mk(r).capacity(), null);
+  });
+  it("remoteProvider.capacity delegates, and is null without a transport capability or on a throw", async () => {
+    const batch = openBatch(join(tmpDir("cap-"), "batches"), "bt");
+    const p = (transport) => remoteProvider({ batch, repo: "o/r", transport, env: {}, credentials: () => null });
+    assert.deepEqual(await p({ capacity: async () => ({ free: 1 }) }).capacity(), { free: 1 });
+    assert.equal(await p({}).capacity(), null);
+    assert.equal(await p({ capacity: async () => { throw new Error("x"); } }).capacity(), null);
+  });
+});
