@@ -63,13 +63,14 @@ fi
 jq -n --arg name "$AGENT_NAME" --arg router "$ROUTER_URL" --argjson port "$PORT" --argjson cpus "$ALLOW_CPUS" --argjson mem "$ALLOW_MEM_GB" '{
   name: $name, listen: {host: "0.0.0.0", port: $port}, token_file: "/etc/computeshare/agent.token",
   router_url: $router, code_root: "/opt/computeshare",
-  state_dir: "/var/lib/computeshare", image: "computeshare-lane:1",
+  state_dir: "/var/lib/computeshare",
   allow_cpus: $cpus, allow_mem_gb: $mem, lease_ttl_s: 600, max_lifetime_s: 21600, keep_exited_s: 7200, reap_interval_s: 30
 }' > /etc/computeshare/agent.json
 chmod 0600 /etc/computeshare/agent.json
 
 log "building lane image (first run takes several minutes)"
-docker build -q -t computeshare-lane:1 /opt/computeshare/pool/image >/dev/null
+FD_VERSION="$(jq -r .version /opt/computeshare/package.json)"
+docker build -q -t "forgedock-lane:${FD_VERSION}" --build-arg "FORGEDOCK_VERSION=${FD_VERSION}" /opt/computeshare/pool/image >/dev/null
 
 cat > /etc/systemd/system/computeshare-agent.service <<EOF
 [Unit]
