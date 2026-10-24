@@ -362,6 +362,24 @@ describe("hotspot growth precheck (forge#4195)", () => {
     assert.match(pc.failures[0].detail, /^src\/scrape\.js grew by 200 lines \(now 2600, limit \+150 over 2000\) without hotspot-exempt$/);
   });
 
+  it("#4519 generated paths: applyAmendments refuses add-deliverable on maintenance.generated_paths, hotspotGrowth skips generated rows", () => {
+    const gen = ["web/public/openapi*.json", "web/public/openapi-versions/*"];
+    const amends = [{ kind: "add-deliverable", path: "web/public/openapi-versions/3.29.2.json", why: "sync the spec archive" },
+      { kind: "add-deliverable", path: "./web/public/openapi.json", why: "sync the spec" }, { kind: "add-deliverable", path: "src/shared.js", why: "helper" }];
+    const a = applyAmendments(C, amends, null, { generatedPaths: gen });
+    assert.deepEqual(a.applied.map((x) => x.target), ["src/shared.js"]);
+    assert.equal(a.problems.length, 2);
+    assert.match(a.problems[0], /^add-deliverable web\/public\/openapi-versions\/3\.29\.2\.json: generated path \(forge\.yaml maintenance\.generated_paths\)/);
+    assert.ok(!a.contract.deliverables.some((d) => d.path.includes("openapi")), "a refused path never becomes a deliverable");
+    assert.equal(applyAmendments(C, amends).applied.length, 3, "without generatedPaths every add-deliverable applies as before");
+    assert.equal(applyAmendments(C, amends, null, { generatedPaths: ["web/public/openapi.json"] }).applied.length, 2, "a literal glob matches only that path");
+    // linguist-generated / generated_paths / header rows (hotspots.sh `generated`) never trigger hotspot_growth
+    const big = H({ path: "src/scrape.js", lines: 83974, growth: 83974 });
+    assert.equal(run(hs([big])).ok, false);
+    assert.equal(run(hs([{ ...big, generated: true }])).ok, true);
+    assert.equal(run(hs([{ ...big, generated: true, excluded: true }])).ok, true);
+  });
+
   it("within the limit, under the threshold, excluded, unchanged, disabled or no facts: no failure", () => {
     for (const h of [hs([H({ growth: 150 })]), hs([H({ over: false, lines: 1900 })]), hs([H({ excluded: true })]), hs([H({ path: "src/other.js" })]),
       hs([H()], { enabled: false }), hs([H({ growth: null })]), null, undefined, {}]) assert.equal(run(h).ok, true, JSON.stringify(h));

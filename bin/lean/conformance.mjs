@@ -261,18 +261,28 @@ export function validateContract(c, issueText, { repro = false } = {}) {
   return { ok: problems.length === 0, problems };
 }
 
+/** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
+const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+
 /**
  * Apply result.json amendments to the frozen contract. Kinds: add-deliverable {path}, add-requirement {requirement},
  * defer|post-deploy {requirement: id}. Every amendment needs a why. Returns {contract, applied[], toTrack[], problems[]}.
+ * `generatedPaths` (forge#4519, forge.yaml maintenance.generated_paths via scripts/hotspots.sh): an add-deliverable on a
+ * matching path is refused; the repo's generator or bot owns that file.
  */
-export function applyAmendments(frozen, amendments, issueText = null) {
+export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [] } = {}) {
   const c = structuredClone(frozen);
   c.deliverables = c.deliverables ?? [];
   const applied = [], toTrack = [], problems = [];
+  const genRes = (Array.isArray(generatedPaths) ? generatedPaths : []).filter((g) => typeof g === "string" && g).map(shellGlobRe);
   for (const a of Array.isArray(amendments) ? amendments : []) {
     const tag = JSON.stringify(a ?? null).slice(0, 100);
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
+      if (genRes.some((re) => re.test(cleanPath(a.path)))) {
+        problems.push(`add-deliverable ${a.path}: generated path (forge.yaml maintenance.generated_paths) is owned by the repo's generator/bot; revert the file instead of amending it in`);
+        continue;
+      }
       const have = c.deliverables.find((d) => d.path === a.path);
       // An existing deliverable keeps its id and gains the why, so an amendment naming a package on an already-listed
       // package.json declares the edge (forge#4159); before, it was reported as applied but changed nothing.
@@ -419,7 +429,8 @@ export function reproFailures(contract, { base, head } = {}) {
 
 const EXEMPT_RE = /hotspot-exempt:\s*\S/i;
 /**
- * forge#4195: a changed file already over `file_lines` (not generated, vendored or glob-excluded) that grew by more
+ * forge#4195: a changed file already over `file_lines` (not generated, vendored or glob-excluded; forge#4519: a
+ * `generated` row, from linguist-generated, maintenance.generated_paths or a generated header, never counts) that grew by more
  * than `growth_lines` since the base, with no `hotspot-exempt: <reason>` in a covering deliverable's change or an
  * add-deliverable amendment's why. `hotspots` is scripts/hotspots.sh --base output; null or disabled checks nothing.
  */
@@ -431,7 +442,7 @@ export function hotspotGrowth({ contract, result, hotspots, changedFiles = [] })
   const exempt = (f) => (contract?.deliverables ?? []).some((d) => pathCovers(d.path, f) && EXEMPT_RE.test(String(d.change ?? "")))
     || amends.some((a) => a?.kind === "add-deliverable" && pathCovers(a.path, f) && EXEMPT_RE.test(String(a.why ?? "")));
   return hotspots.files
-    .filter((h) => h?.over && !h.excluded && Number(h.growth) > limit && changed.has(cleanPath(h.path)) && !exempt(h.path))
+    .filter((h) => h?.over && !h.excluded && !h.generated && Number(h.growth) > limit && changed.has(cleanPath(h.path)) && !exempt(h.path))
     .map((h) => ({ code: C.MAINTENANCE_HOTSPOT_GROWTH, kind: "hotspot_growth",
       detail: `${h.path} grew by ${h.growth} lines (now ${h.lines}, limit +${limit} over ${max}) without hotspot-exempt` }));
 }

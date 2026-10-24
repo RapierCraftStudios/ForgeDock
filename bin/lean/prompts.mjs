@@ -215,18 +215,27 @@ export function reproPlanNote(on) {
   return `\n\nThis issue is a bug. When it is testable, ${CONTRACT_FILE} must also carry "repro_test":{"path":"<test file>","id":"<test name>","command":"<exact command that runs only that test>"}: a test that fails on the base and passes after the fix. The engine proves it with scripts/acceptance-red-green.sh (head's changed test files are overlaid on the base) and fails the run if it is not red on base and green on head. When it is not testable (specs, docs, workflows, environment), write "repro_test":"none","repro_test_reason":"<one line why>" instead.`;
 }
 
+/** forge#4519: the repo's generated, bot-owned globs (forge.yaml maintenance.generated_paths via hotspots.sh); "" when none. */
+function generatedNote(facts) {
+  const globs = Array.isArray(facts?.generated_paths) ? facts.generated_paths.filter((g) => typeof g === "string" && g) : [];
+  if (!globs.length) return "";
+  return `\n\nGenerated paths (forge.yaml maintenance.generated_paths, owned by the repo's generator): ${globs.join(", ")}. Never list or amend them in as deliverables and never commit changes to them; the engine refuses such amendments.`;
+}
+
 /** forge#4195: hotspot facts for the plan prompt: one sentence plus one line per over-threshold file; "" when none. */
 export function hotspotPlanNote(facts) {
-  if (!facts || facts.enabled === false || !Array.isArray(facts.files)) return "";
+  const gen = generatedNote(facts);
+  if (!facts || facts.enabled === false || !Array.isArray(facts.files)) return gen;
   const hot = facts.files.filter((f) => f?.over && !f.excluded);
-  if (!hot.length) return "";
-  return `\n\nHotspots (scripts/hotspots.sh): an Affected File below is over ${facts.file_lines} lines, so the contract must put new logic in a new or neighbouring module and give the hotspot only wiring (an import and a call); growing it by more than ${facts.growth_lines} lines needs "hotspot-exempt: <reason>" in that deliverable's change.\n${hot.map((f) => `- ${f.path}: ${f.lines} lines, ${f.commits_90d} commits/90d`).join("\n")}`;
+  if (!hot.length) return gen;
+  return gen + `\n\nHotspots (scripts/hotspots.sh): an Affected File below is over ${facts.file_lines} lines, so the contract must put new logic in a new or neighbouring module and give the hotspot only wiring (an import and a call); growing it by more than ${facts.growth_lines} lines needs "hotspot-exempt: <reason>" in that deliverable's change.\n${hot.map((f) => `- ${f.path}: ${f.lines} lines, ${f.commits_90d} commits/90d`).join("\n")}`;
 }
 
 /** forge#4195: the builder's growth rule with the effective thresholds; "" when the check is off. */
 export function hotspotBuildRule(facts) {
-  if (!facts || facts.enabled === false || !(facts.file_lines > 0) || !(facts.growth_lines > 0)) return "";
-  return `\n\nDon't grow a file over ${facts.file_lines} lines by more than ${facts.growth_lines} lines. Put new code next to it.`;
+  const gen = generatedNote(facts);
+  if (!facts || facts.enabled === false || !(facts.file_lines > 0) || !(facts.growth_lines > 0)) return gen;
+  return gen + `\n\nDon't grow a file over ${facts.file_lines} lines by more than ${facts.growth_lines} lines. Put new code next to it.`;
 }
 
 /** #4322: tests that enumerate the siblings of a module the issue names (bin/lean/enumerating.mjs), for the plan; "" when none. */
