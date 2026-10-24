@@ -877,6 +877,13 @@ describe("fail-soft alerts (#4354)", () => {
     assert.match(line, /^DEPS_PREPARED failed \(pnpm\): 30% \(3\/10 lanes, threshold 20%\), e\.g\. "tool not found: spawn pnpm ENOENT"$/);
   });
 
+  it("#4522 DEPS_PREPARED materialize-fallback is its own alert above the same threshold, apart from failed", () => {
+    const why = "materialize failed: ERR_PNPM_TEST_REPAIR  some cause";
+    const a = computeAlerts(lanes(10, (i) => [deps("pnpm", i < 3 ? "materialize-fallback" : "hit", why)]), { repo: "o/r" });
+    assert.deepEqual(a.map((x) => [x.event, x.count, x.sample, x.example]), [["DEPS_PREPARED materialize-fallback (pnpm)", 3, 10, why]]);
+    assert.deepEqual(computeAlerts(lanes(10, (i) => [deps("pnpm", i < 2 ? "materialize-fallback" : "hit", why)]), { repo: "o/r" }), [], "exactly 20% is not above");
+  });
+
   it("deferred-to-ci above 30% of lanes and a TOOLCHAIN_WARNING repeated on more than 50% of lanes", () => {
     const pre = (deferred) => ({ event: "PRECHECK_COMMANDS", round: 0, results: [{ command: "npm test", rc: 0, ms: 5 }, ...(deferred ? [{ command: "npx tsc", status: "deferred-to-ci" }] : [])] });
     const warn = { event: "TOOLCHAIN_WARNING", warning: "host node v26 does not satisfy the .nvmrc pin \"22\"" };
