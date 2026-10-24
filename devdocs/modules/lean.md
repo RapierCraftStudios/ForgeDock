@@ -415,7 +415,9 @@ as `makeHostProbe().activeLanes()`.
 `depcache.mjs` `prepare` (after the worktree and the toolchain step 2b exist) keys each lockfile (pnpm/npm/yarn
 non-PnP, uv/poetry) by sha256 of lock + manifests + runtime + platform. Hit: hardlink the
 read-only snapshot `~/.forge/depcache/<repoKey>/<eco>-<key>/` in (bin scripts copied, build
-path rewritten), then a warm repair install. Miss: frozen install under the key lock, publish
+path rewritten), then a warm repair install. A link or repair that fails (non-EXDEV) removes the
+linked trees and installs fresh after the key lock is released, without publishing: status `materialize-fallback`, or
+`failed` when that install fails too (#4522). Reasons lead with pnpm's `ERR_PNPM_*` line, which pnpm prints on stdout. Miss: frozen install under the key lock, publish
 via tmp + atomic rename. Never fails the run (`DEPS_PREPARED`); runner env gets the shared
 stores; install/repair commands get the lane's toolchain env (#4347: a pm only the shim provides
 resolves; no pin, no shim or a failed toolchain step means the host PATH); `forgedock gc --deps` reaps; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
@@ -799,6 +801,15 @@ on the run record and the row, and in `ctx.placement`. The lane gets it as
 into FORGE:STATE (`placement: {where, reason, mode}`) and a trajectory decision.
 Cost: 0 LLM calls. Rationale: `devdocs/decisions/4256-hybrid-placement.md`.
 
+Monorepos (#4523): `validationWeight` also scans heavy markers and package.json
+scripts one and two directory levels below the root (injectable `list`, default
+`readdir`; skips dot-dirs, `node_modules`, `vendor`, `dist`, `build`, `target`,
+`venv`, `__pycache__`; capped at 200 dirs). Root signals keep their order.
+`execution.heavy: true|false` (`parseExecution`) is a placement-only override in
+`placeLane`: `true` → remote (`execution.heavy: true`) after rules 1-3; `false`
+ignores the detected weight but the headroom rule still applies. It adds no
+pre-PR commands and does not touch admission.
+
 ## Entry 2026-10-20 — Context pack: the issue's graph as plan context (#4275)
 
 Before the plan call (not for refactor:split lanes or a recovered frozen contract)
@@ -871,7 +882,7 @@ repo (#4354). `formatAlertLines` prints `ALERTS` and one line per alert, or noth
 when no alert fired. The lines come from `computeAlerts` (`bin/stats/aggregate.mjs`)
 over `readLanes` of the batch's run-log dir. Each run in a log is one lane, and the
 window is the last 50 lanes of the repo. The rules are: `DEPS_PREPARED` failed above
-20% per ecosystem, `deferred-to-ci` above 30%, one `TOOLCHAIN_WARNING` on more than
+20% per ecosystem, `materialize-fallback` above the same 20% as a separate alert (#4522), `deferred-to-ci` above 30%, one `TOOLCHAIN_WARNING` on more than
 50% of lanes, and an outcome code whose share doubled against the previous window.
 Thresholds come from `stats.alerts.*`, and there are no alerts under 10 lanes.
 `forgedock stats` prints the same alerts as `## ALERTS`. A failure while computing
@@ -1670,3 +1681,9 @@ The client (`orchestrateClient`): when the stream drops after the batch id is kn
 Tests: `schedd.test.mjs` pins `FORGEDOCK_SCHED_DIR` to a tmp dir in the test process, so the env that clients submit for
 their lanes never resolves `~/.forge/sched`. Stub lanes record their pid, exit once the work dir is gone or after 120 s,
 and are SIGKILLed by `h.cleanup()` and by a process `exit` hook. Cost: 0 LLM calls.
+
+## Entry 2026-10-24 — Light-lane review fixes (#4502)
+
+A kept light lane now runs the same structure delta and hotspot precheck as the full lane (the undeclared package edge gets the one builder resume).
+`runLightStep` rethrows typed builder errors (`isTypedBuilderError`: `laneCode`, `deferCode`, `CLI_*`, `spawnDeterministic`, usage limit), so the lane's own catch ends them (budget-exceeded, deferred, needs-human) with no second builder session; only internal errors stay `light_error`.
+The derived contract's deliverables are the issue-named files (`predictedFiles`); a changed non-test file outside them upgrades with `scope_creep`. The light prompt no longer asks for `forgedock check` (no contract exists yet). `runLightTests` forwards `timeoutMs` (`precheckTimeoutSeconds`) to `io.runCommand`. `RUN_TERMINAL.light` is summarised as `contextPack.light` and `contextPackAb` skips light runs.

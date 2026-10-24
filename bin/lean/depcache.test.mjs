@@ -38,7 +38,7 @@ const FIXTURES = {
 const LOCKFILE = { pnpm: "pnpm-lock.yaml", npm: "package-lock.json", uv: "uv.lock", poetry: "poetry.lock" };
 
 /** Fake package managers: write what a real install leaves behind, including the absolute paths that need rewriting. */
-function fakeExec({ failInstall = false, installDelayMs = 0 } = {}) {
+function fakeExec({ failInstall = false, failRepair = false, installDelayMs = 0 } = {}) {
   const calls = [];
   const venv = (cwd, lock) => {
     const v = join(cwd, ".venv");
@@ -65,6 +65,10 @@ function fakeExec({ failInstall = false, installDelayMs = 0 } = {}) {
     if (full && installDelayMs) await new Promise((r) => setTimeout(r, installDelayMs));
     if (full && failInstall) { put(join(cwd, cmd === "uv" || cmd === "poetry" ? ".venv/partial" : "node_modules/partial"), "x"); throw Object.assign(new Error("install failed"), { stderr: "ERR_PNPM_FROZEN_LOCKFILE" }); }
     if (cmd === "pnpm") {
+      if (args.includes("--offline") && failRepair) {
+        // pnpm prints its errors on stdout; execFile's error then carries an empty stderr (#4522).
+        throw Object.assign(new Error("Command failed: pnpm install --frozen-lockfile --offline"), { stderr: "", stdout: "Lockfile is up to date\n ERR_PNPM_TEST_REPAIR  some cause\n" });
+      }
       if (args.includes("--offline")) return ""; // warm repair pass: nothing to do
       const lock = readFileSync(join(cwd, "pnpm-lock.yaml"), "utf8");
       put(join(cwd, "node_modules/.pnpm/lodash@4/node_modules/lodash/index.js"), `module.exports = ${JSON.stringify(lock)};\n`);
@@ -220,6 +224,43 @@ describe("depcache (#4220): shared dependency installs keyed by lock hash", () =
     const [r] = await s2.cache.prepare({ wt, repoKey: "r" });
     assert.equal(r.status, "miss-installed");
     assert.equal(r.published, true, "the stale lock was replaced");
+  });
+
+  it("#4522 a snapshot whose repair fails falls back to a fresh install outside the lock, keeps the snapshot and records pnpm's stdout error", async () => {
+    const s = setup("pnpm");
+    const [ra] = await s.cache.prepare({ wt: s.lane("a"), repoKey: "r" });
+    assert.equal(ra.status, "miss-installed", ra.reason);
+    const [snap] = snapDirs(s.root, "pnpm");
+    const before = snapshotOf(snap);
+    const broken = makeDepCache({ root: s.root, exec: fakeExec({ failRepair: true }).exec, env: {}, pollMs: 5 });
+    const wt = s.lane("b");
+    const [rb] = await broken.prepare({ wt, repoKey: "r" });
+    assert.equal(rb.status, "materialize-fallback", rb.reason);
+    assert.equal(rb.published, false);
+    assert.match(rb.reason, /^materialize failed: ERR_PNPM_TEST_REPAIR {2}some cause/);
+    assert.ok(existsSync(join(wt, "node_modules/lodash/index.js")), "the lane has node_modules");
+    const after = snapshotOf(snap);
+    delete before["last-used"]; delete after["last-used"];
+    assert.deepEqual(after, before, "the snapshot is untouched");
+    assert.deepEqual(readdirSync(join(s.root, "r")).filter((n) => !/^pnpm-[0-9a-f]{16}$/.test(n)), [], "no lock or tmp left");
+
+    const both = makeDepCache({ root: s.root, exec: fakeExec({ failRepair: true, failInstall: true }).exec, env: {}, pollMs: 5 });
+    const wt2 = s.lane("c");
+    const [rc] = await both.prepare({ wt: wt2, repoKey: "r" });
+    assert.equal(rc.status, "failed");
+    assert.match(rc.reason, /^materialize failed: ERR_PNPM_TEST_REPAIR.*; install failed: ERR_PNPM_FROZEN_LOCKFILE/);
+    assert.ok(!existsSync(join(wt2, "node_modules")), "no partial tree");
+  });
+
+  it("#4522 a failed pnpm install records the ERR_PNPM line it printed on stdout", async () => {
+    const s = setup("pnpm");
+    const exec = async (cmd, args, o) => {
+      if (cmd === "pnpm" && !args.includes("--offline")) throw Object.assign(new Error("Command failed: pnpm install --frozen-lockfile"), { stderr: "", stdout: "Progress: resolved 1\n ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with frozen-lockfile\n\nNote that in CI environments this setting is true by default.\nA\nB\nC\n" });
+      return s.f.exec(cmd, args, o);
+    };
+    const [r] = await makeDepCache({ root: s.root, exec, env: {} }).prepare({ wt: s.lane("x"), repoKey: "r" });
+    assert.equal(r.status, "failed");
+    assert.match(r.reason, /^install failed: ERR_PNPM_OUTDATED_LOCKFILE {2}Cannot install with frozen-lockfile A B C$/);
   });
 
   it("a failed install, a missing tool or another filesystem leaves no snapshot and no partial tree", async () => {

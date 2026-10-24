@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { PHASES, parseReviewResult, isCiPendingBlocker, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber, decompositionRevoked, openDependency, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
@@ -1366,6 +1367,29 @@ describe("pickPhase", () => {
         ["Depends on #5. Fixes #99", [5]], ["- Blocked by #4 — see PR #77", [4]], ["Depends on #5 (supersedes #3, closed)", [5]],
         ["Depends on: #5 — see #99 for background", [5]], ["Blocked by #3 (fixes #77)", [3]], ["Depends on #4. Note: unrelated to #12.", [4]],
         ["Depends on #4 `#8`", [4]], ["Depends on #5 (not #9, see `#12`)", [5]],
+      ];
+      for (const [body, want] of cases) assert.deepEqual(parseDependsOn(body, null), want, body);
+    });
+
+    it("#4517 ReDoS: a long blank run after the keyword parses in linear time and every form still parses", async () => {
+      const { parseDependsOn } = await import("../engine/phases.mjs");
+      // Parse in a child with a hard timeout so a backtracking regex fails the test instead of hanging the runner.
+      const mod = new URL("../engine/phases.mjs", import.meta.url).href;
+      const code = `import(${JSON.stringify(mod)}).then(({ parseDependsOn }) => {
+        for (const kw of ["Depends on", "Blocked by", "**Depends on**:"]) {
+          const t0 = process.hrtime.bigint();
+          const got = parseDependsOn(kw + " ".repeat(65000) + "x", null);
+          console.log(JSON.stringify({ got, ms: Number(process.hrtime.bigint() - t0) / 1e6 }));
+        }
+      })`;
+      const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8", timeout: 5000 });
+      assert.equal(r.error, undefined, `parse did not finish in 5 s: ${r.error?.message}`);
+      const runs = r.stdout.trim().split("\n").map((l) => JSON.parse(l));
+      assert.equal(runs.length, 3);
+      for (const { got, ms } of runs) { assert.deepEqual(got, []); assert.ok(ms < 50, `${ms} ms`); }
+      const cases = [
+        ["**Depends on**: #7", [7]], ["**Depends on:** #7", [7]], ["**Depends on** #7", [7]], ["- Depends on #7", [7]],
+        ["Blocked by #7", [7]], ["Depends on #7, #8", [7, 8]], ["Depends on #7 (note) and #8", [7, 8]],
       ];
       for (const [body, want] of cases) assert.deepEqual(parseDependsOn(body, null), want, body);
     });

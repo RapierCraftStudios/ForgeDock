@@ -627,7 +627,7 @@ stats:
   alerts:
     window: 50                # last N lanes per repo
     min_lanes: 10             # fewer lanes in the window: nothing is printed
-    deps_failed_pct: 20       # DEPS_PREPARED status failed, per ecosystem
+    deps_failed_pct: 20       # DEPS_PREPARED status failed, and status materialize-fallback, per ecosystem
     deferred_to_ci_pct: 30    # lanes with a deferred-to-ci pre-PR check
     toolchain_warning_pct: 50 # lanes repeating the same TOOLCHAIN_WARNING
     outcome_share_factor: 2   # outcome code share vs the previous window
@@ -637,7 +637,7 @@ stats:
 |-------|------|----------|-------------|
 | `alerts.window` | number | No | Rolling window: the last N lanes of the repo, ordered by `RUN_START`. Each run in a run log is one lane. Default 50. |
 | `alerts.min_lanes` | number | No | With fewer lanes in the window, or no run logs, nothing is printed. Default 10. |
-| `alerts.deps_failed_pct` | number | No | Alert when `DEPS_PREPARED` status `failed` is above this percentage of the lanes that prepared that ecosystem. Default 20. |
+| `alerts.deps_failed_pct` | number | No | Alert when `DEPS_PREPARED` status `failed` is above this percentage of the lanes that prepared that ecosystem. A separate alert uses the same threshold for status `materialize-fallback`: a cached snapshot failed to link or repair, and the lane installed fresh. Default 20. |
 | `alerts.deferred_to_ci_pct` | number | No | Alert when more than this percentage of lanes left a pre-PR check `deferred-to-ci`. Default 30. |
 | `alerts.toolchain_warning_pct` | number | No | Alert when one `TOOLCHAIN_WARNING` text is repeated on more than this percentage of lanes. Default 50. |
 | `alerts.outcome_share_factor` | number | No | Alert when an outcome code other than `completed` has at least this factor of its share in the previous window. The code must be on at least 2 lanes, and the previous window must have at least `min_lanes` lanes. A code new in this window counts. Default 2. |
@@ -739,6 +739,7 @@ execution:
   budget_usd: 25           # hard cap on estimated sandbox USD per batch
   day_budget_minutes: 2000 # hard cap on sandbox-minutes per host UTC day (all batches, schedd or not)
   day_budget_usd: 80       # hard cap on estimated sandbox USD per host UTC day
+  # heavy: true          # hybrid placement only: true = lanes go remote, false = ignore detected weight; adds no commands, no admission change
   on_budget: stop          # stop (default) | local: what the queue does once a cap is reached
   cost_per_minute: 0.04    # USD per sandbox-minute when the provider reports no cost (default 0)
 ```
@@ -747,6 +748,7 @@ execution:
 |-----|------|----------|-------------|
 | `mode` | string | No | `local` (default): lanes are detached host processes, as before. `remote`: lanes run in sandboxes of `provider`. `hybrid`: each lane is placed from facts (forge#4256, below). |
 | `max_remote` | integer | No | Remote lanes of the batch that may run at once. They take no slot of the host lane cap (`orchestration.global_parallel`, `forgedock sched cap`); the batch `--parallel` still applies. `0` (default) keeps lanes local. |
+| `heavy` | boolean | No | Hybrid placement override (forge#4523). `true`: every lane that passes rules 1-3 is placed remote. `false`: the detected validation weight is ignored (rule 5 still applies). Unset: detect. It changes placement only: no pre-PR commands run, and host admission (`max_load_per_core`) is unchanged. |
 | `provider` | string | No | `container` (reference: an ephemeral local container), `remote` (a runner pool or remote session over HTTP, forge#4254) or `local`. The default is `container` off `local` mode; `remote` is used only when named. Unknown names fail the batch start. |
 | `image` | string | No | Container provider image; it must provide `git` and `forgedock`. Started with `--pull never`. |
 | `secrets` | string | No | Comma-separated env var names copied from the dispatcher's env into the sandbox. The sandbox also gets `GH_REPO` (the target repo) and `FORGEDOCK_BATCH_ID`, and nothing else from the host. |
@@ -779,7 +781,7 @@ execution:
 1. `max_remote: 0` → local.
 2. `verify.mode: ci` → local. Heavy validation already runs, and is billed, on CI, so the lane is not billed twice.
 3. A docs-only lane (issue label `docs`, `documentation` or `type:docs`) → local.
-4. Heavy expected validation → remote. This means a declared check command (`learned.test_commands`) is a type check, linter, test runner or build, or the repo has a heavy toolchain marker: `tsconfig.json`, an eslint config, a package.json `test`/`lint`/`typecheck`/`build` script, `Cargo.toml`, `go.mod`, `pyproject.toml`/`setup.cfg`/`pytest.ini`, `pom.xml` or `build.gradle`.
+4. Heavy expected validation → remote (`execution.heavy: true` forces this, `false` ignores the detected weight). This means a declared check command (`learned.test_commands`) is a type check, linter, test runner or build, or the repo has a heavy toolchain marker, at the root or one or two directory levels down (`web/tsconfig.json`, `services/x/pyproject.toml`; `node_modules`, `vendor`, `dist`, `build`, `target` and dot-directories are skipped): `tsconfig.json`, an eslint config, a package.json `test`/`lint`/`typecheck`/`build` script (also in those subdirectories), `Cargo.toml`, `go.mod`, `pyproject.toml`/`setup.cfg`/`pytest.ini`, `pom.xml` or `build.gradle`.
 5. A host without headroom → remote. "Without headroom" means MemAvailable is below `engine.min_free_mem_mb` + `engine.heavy_step_mem_mb`, or the load per core is above `engine.max_load_per_core` when that is set.
 6. Otherwise → local.
 

@@ -35,7 +35,7 @@
  */
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { cpus, homedir, loadavg } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -79,11 +79,13 @@ export function parseExecution(sec = {}) {
   const tokenEnv = ENV_RE.test(str(s.token_env)) ? str(s.token_env) : null;
   const cacheStore = str(s.cache_store) || null;
   const allowActions = str(s.allow_actions).toLowerCase() === "true";
+  const heavyRaw = str(s.heavy).toLowerCase();
+  const heavy = heavyRaw === "true" ? true : heavyRaw === "false" ? false : null;
   const cap = (v) => { const t = str(v), x = Number(t); return t !== "" && Number.isFinite(x) && x >= 0 ? x : null; };
   const cpm = cap(s.cost_per_minute);
   const budget = { batchMinutes: cap(s.budget_minutes), batchUsd: cap(s.budget_usd), dayMinutes: cap(s.day_budget_minutes), dayUsd: cap(s.day_budget_usd),
     onBudget: str(s.on_budget) === "local" ? "local" : "stop", costPerMinute: cpm ?? 0 };
-  return { mode, maxRemote, provider, image, secrets, budget, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(heavy !== null ? { heavy } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -174,7 +176,8 @@ export function placeLane({ exec = null, verifyMode = "local", labels = [], weig
   if (verifyMode === "ci") return { where: "local", reason: "verify.mode ci: validation runs on CI, not billed twice" };
   const names = (Array.isArray(labels) ? labels : []).map((l) => String(l ?? "").trim().toLowerCase());
   if (names.some((l) => DOCS_LABELS.has(l))) return { where: "local", reason: "docs-only lane" };
-  if (weight?.heavy === true) {
+  if (exec.heavy === true) return { where: "remote", reason: "execution.heavy: true" };
+  if (exec.heavy !== false && weight?.heavy === true) {
     const sig = (Array.isArray(weight.signals) ? weight.signals : []).map(String).filter(Boolean);
     return { where: "remote", reason: `heavy validation${sig.length ? `: ${sig.join(", ")}` : ""}` };
   }
@@ -188,6 +191,9 @@ const HEAVY_MARKERS = Object.freeze([
   ["pom.xml", "maven"], ["build.gradle", "gradle"], ["build.gradle.kts", "gradle"],
   ["eslint.config.js", "eslint"], ["eslint.config.mjs", "eslint"], ["eslint.config.cjs", "eslint"], [".eslintrc", "eslint"], [".eslintrc.js", "eslint"], [".eslintrc.cjs", "eslint"], [".eslintrc.json", "eslint"], [".eslintrc.yml", "eslint"],
 ]);
+const SKIP_DIRS = new Set(["node_modules", "vendor", "dist", "build", "target", "venv", "__pycache__"]);
+const MAX_SCAN_DIRS = 200;
+const defaultList = async (d) => (await readdir(d, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
 const HEAVY_SCRIPTS = Object.freeze(["test", "lint", "typecheck", "type-check", "build"]);
 
 /**
@@ -195,7 +201,7 @@ const HEAVY_SCRIPTS = Object.freeze(["test", "lint", "typecheck", "type-check", 
  * classifies heavy (heavy.mjs `classifyStep`), or a heavy toolchain marker or package.json test/lint/typecheck/build script
  * exists. The toolchain pin (toolchain.mjs `detectPins`) names the package manager among the signals. Zero LLM.
  */
-export async function validationWeight({ cwd = process.cwd(), precheckCommands = [], read = (p) => readFile(p, "utf8") } = {}) {
+export async function validationWeight({ cwd = process.cwd(), precheckCommands = [], read = (p) => readFile(p, "utf8"), list = defaultList } = {}) {
   const signals = [];
   const add = (s) => { if (!signals.includes(s)) signals.push(s); };
   for (const cmd of Array.isArray(precheckCommands) ? precheckCommands : []) {
@@ -203,11 +209,23 @@ export async function validationWeight({ cwd = process.cwd(), precheckCommands =
     if (name && classifyStep(name, args) === "heavy") add(name.split("/").pop());
   }
   const exists = async (f) => { try { await read(join(cwd, f)); return true; } catch { return false; } };
-  for (const [f, sig] of HEAVY_MARKERS) if (await exists(f)) add(sig);
-  let pkg = null;
-  try { pkg = JSON.parse(String(await read(join(cwd, "package.json")))); } catch { pkg = null; }
-  const scripts = pkg?.scripts && typeof pkg.scripts === "object" ? pkg.scripts : {};
-  for (const k of HEAVY_SCRIPTS) if (typeof scripts[k] === "string" && scripts[k].trim()) add(`${k} script`);
+  const scan = async (dir) => {
+    for (const [f, sig] of HEAVY_MARKERS) if (await exists(join(dir, f))) add(sig);
+    let pkg = null;
+    try { pkg = JSON.parse(String(await read(join(cwd, dir, "package.json")))); } catch { pkg = null; }
+    const scripts = pkg?.scripts && typeof pkg.scripts === "object" ? pkg.scripts : {};
+    for (const k of HEAVY_SCRIPTS) if (typeof scripts[k] === "string" && scripts[k].trim()) add(`${k} script`);
+  };
+  await scan("");
+  // Monorepo (#4523): markers one and two levels down (`web/tsconfig.json`, `services/x/pyproject.toml`), bounded.
+  const subdirs = async (dir) => { try { return (await list(join(cwd, dir))).filter((d) => !SKIP_DIRS.has(d) && !d.startsWith(".")).sort(); } catch { return []; } };
+  let scanned = 0;
+  outer: for (const d1 of await subdirs("")) {
+    for (const dir of [d1, ...(await subdirs(d1)).map((d2) => join(d1, d2))]) {
+      if (scanned++ >= MAX_SCAN_DIRS) break outer;
+      await scan(dir);
+    }
+  }
   if (signals.length) {
     let pins = null;
     try { pins = await detectPins(cwd, { read: (p) => read(p) }); } catch { pins = null; }
