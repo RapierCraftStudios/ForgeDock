@@ -212,7 +212,10 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     [route("GET", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}`))],
     [route("GET", "/sandboxes/:id/logs"), fd(async ({ id }, _b, url) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/logs?cursor=${encodeURIComponent(url.searchParams.get("cursor") ?? "0")}`))],
     [route("GET", "/sandboxes/:id/result"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/result`))],
-    [route("GET", "/sandboxes/:id/usage"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/usage`))],
+    [route("GET", "/sandboxes/:id/usage"), fd(async ({ id }) => { // #4549: the placing agent rides along for per-agent minutes
+      const agent = sbx()[id]?.agent, r = await forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/usage`);
+      return agent && r.status === 200 && r.body && typeof r.body === "object" ? { ...r, body: { ...r.body, agent } } : r;
+    })],
     [route("DELETE", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "DELETE", `/sandboxes/${encodeURIComponent(id)}`))],
     [route("GET", "/agents"), fd(async () => ({ status: 200, body: { agents: await capacities(), sandboxes: sbx() } }))],
     [route("POST", "/codes"), fd(async () => ({ status: 200, body: issueCode() }))],

@@ -1725,3 +1725,7 @@ Cite: #4542.
 
 `execution.provider: pool` (`execution.mjs` `providerByName`) is `remoteProvider` (`name: "pool"`) with the endpoint and token defaulted from the local router config (`poolRouterConfig`: `COMPUTESHARE_CONFIG` or `~/.config/computeshare/router.json`, token from `forgedock_token_file` or the sibling `forgedock.token`); an explicit `endpoint`/`token_env` wins, and no router config plus no endpoint is `execution.provider.misconfigured`. The token is only sent as the Authorization header and kept in the redaction set.
 The dispatcher reads `<cwd>/forge.yaml` (absent is fine) and passes it as `settings.forgeYaml`; `remoteProvider` adds `env.CS_FORGE_YAML_B64` to the launch spec, so the router's `repos` map is optional (it still takes precedence). Placement is unchanged.
+
+## Entry 2026-10-24 — Per-agent remote lane minutes (#4549)
+
+The router's `GET /sandboxes/:id/usage` forward adds `agent` (the placing agent) to the agent's `{minutes}` body; the field is optional for third-party runners. `httpTransport.usage` returns `{minutes, agent?}`, `remoteProvider` keeps `h.agent`, and `providerLanes` `withUsage` copies it to `sandbox.agent` (omitted when unknown). `orchestrate` accumulates `sandbox.by_agent {name: minutes}` per issue across attempts onto the row, and `formatSandboxSummary` appends `; by agent: a X min, b Y min` only when it exists; the table and non-pool output are unchanged. `forgedock stats --pool` (`bin/stats/pool.mjs`) aggregates `by_agent` from local batch `report.json` rows (latest row per issue); see `docs/STATS.md`.

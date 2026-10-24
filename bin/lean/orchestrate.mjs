@@ -512,10 +512,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (r?.sandbox && typeof r.sandbox === "object") {
       const prev = sandboxUse.get(n) ?? { minutes: 0, cost_usd: 0, attempts: 0 };
       const m = Number(r.sandbox.minutes) >= 0 ? Number(r.sandbox.minutes) : 0, c = Number(r.sandbox.cost_usd) >= 0 ? Number(r.sandbox.cost_usd) : 0;
-      sandboxUse.set(n, { minutes: Math.round((prev.minutes + m) * 10) / 10, cost_usd: Math.round((prev.cost_usd + c) * 1e6) / 1e6, attempts: prev.attempts + 1 });
+      const by = { ...(prev.by_agent ?? {}) }; // #4549: minutes per pool agent, over attempts
+      if (typeof r.sandbox.agent === "string" && r.sandbox.agent) by[r.sandbox.agent] = Math.round(((by[r.sandbox.agent] ?? 0) + m) * 10) / 10;
+      sandboxUse.set(n, { minutes: Math.round((prev.minutes + m) * 10) / 10, cost_usd: Math.round((prev.cost_usd + c) * 1e6) / 1e6, attempts: prev.attempts + 1, ...(Object.keys(by).length ? { by_agent: by } : {}) });
       try { remote?.onUsage?.(n, r.sandbox, rec); } catch { /* the batch total still counts it */ }
     }
-    if (sandboxUse.has(n)) row.sandbox = { ...sandboxUse.get(n) };
+    if (sandboxUse.has(n)) row.sandbox = { ...sandboxUse.get(n), ...(sandboxUse.get(n).by_agent ? { by_agent: { ...sandboxUse.get(n).by_agent } } : {}) };
     const done = () => { running.delete(n); runRecs.delete(n); releaseSlot(n); remoteRun.delete(n); };
     if (row.outcome === "dependency-open" && depList.length) {
       // #4387: a parked dependency is not pulled in again (fail-open on an unreadable label).
@@ -1002,6 +1004,9 @@ export function formatSandboxSummary(rows, { budget = null, day = null } = {}) {
   if (!sb.length) return null;
   const sum = (f) => sb.reduce((a, r) => a + (Number(f(r)) || 0), 0);
   const parts = [`sandbox: ${sb.length} lane${sb.length === 1 ? "" : "s"}, ${sum((r) => r.sandbox.minutes).toFixed(1)} min, $${sum((r) => r.sandbox.cost_usd).toFixed(2)} (token cost $${sum((r) => r.cost_usd).toFixed(2)})`];
+  const agents = {}; // #4549: remote lane minutes per pool agent
+  for (const r of sb) for (const [a, m] of Object.entries(r.sandbox.by_agent ?? {})) agents[a] = (agents[a] ?? 0) + (Number(m) || 0);
+  if (Object.keys(agents).length) parts.push(`by agent: ${Object.entries(agents).sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0])).map(([a, m]) => `${a} ${m.toFixed(1)} min`).join(", ")}`);
   const caps = [];
   if (budget?.batchMinutes != null) caps.push(`batch ${budget.batchMinutes} min`);
   if (budget?.batchUsd != null) caps.push(`batch $${budget.batchUsd}`);

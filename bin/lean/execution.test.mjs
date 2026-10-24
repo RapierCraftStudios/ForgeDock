@@ -445,6 +445,19 @@ describe("execution budget and sandbox cost (#4255)", () => {
       "sandbox: 1 lane, 12.5 min, $0.25 (token cost $1.50); budget: batch 10 min, day $20; host today 12.5 min, $0.25; cap reached, 1 held");
   });
 
+  it("report: sandbox usage agent becomes per-agent minutes on the row and a by-agent summary suffix (#4549)", async () => {
+    const lines = formatSandboxSummary([
+      { issue: 1, outcome: "merged", cost_usd: 1, sandbox: { minutes: 10, cost_usd: 0, attempts: 1, by_agent: { legion: 10 } } },
+      { issue: 2, outcome: "merged", cost_usd: 1, sandbox: { minutes: 30.5, cost_usd: 0, attempts: 2, by_agent: { legion: 20.5, box2: 10 } } }]);
+    assert.match(lines, /; by agent: legion 30\.5 min, box2 10\.0 min$/);
+    assert.doesNotMatch(formatSandboxSummary([{ issue: 1, outcome: "merged", cost_usd: 1, sandbox: { minutes: 1, cost_usd: 0 } }]), /by agent/);
+    const prov = fakeProvider({ finish: () => ({ terminalReason: "merged", pr: 2 }), usage: async () => ({ minutes: 7, agent: "legion" }) });
+    const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(tmpDir("exec-agent-")), pollMs: 1, now: () => 1000 });
+    const rows = await orchestrate({ issues: [5], parallel: 1, store: null, readBody: async () => "", now: () => 0, remote: { max: 1, isRemote: () => true },
+      runOne: (n, l, ctx) => lanes.runOne(n, l, ctx) });
+    assert.deepEqual(rows[0].sandbox.by_agent, { legion: 7 });
+  });
+
   it("runBatch: rows, report.json and FORGE:TELEMETRY carry each lane's sandbox usage; the host-day store records it", async () => {
     const work = tmpDir("exec-cli-cost-");
     const ledRoot = join(work, "ledger");
