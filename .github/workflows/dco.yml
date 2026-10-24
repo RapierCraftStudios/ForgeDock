@@ -66,6 +66,37 @@ jobs:
           # Project maintainer emails -- exempt from DCO sign-off (author-only).
           EXEMPT_AUTHORS=("yash.dubey803at@gmail.com" "rapiercraftstudios@gmail.com" "admin@ultranews.com")
 
+          # One-time exemption by full commit SHA (a SHA cannot be forged, so this never widens the policy):
+          # ForgeDock lane commits made in remote sandboxes before #4561 used the placeholder author
+          # forgedock@localhost. Owner decision on #4560, 2026-10-24. Never add an email here instead.
+          EXEMPT_SHAS=(
+            "f5dce80cde55da2325614f931a437049faa19eb5"
+            "5ffa7c64cde68ef88f50e152fed218cd3446b28e"
+            "b380b9c03204761a79a2ead50ac39a26583ff262"
+            "e65ca64ffbc32d35d2ce139781857d056953efa9"
+            "5bfd290e8e8a17604a3c2b7c2411ad096e2282ff"
+            "a96c19a9280c52ec3b995f29dc76135bdea9d961"
+            "dc9b8c088fa1683a93ffceba6b64a8a2799596fc"
+            "408a329c2135f52edfd6098e592d413fa13479a4"
+            "6c748599c5b25be6c71aa585939c11c4c7396833"
+            "8f4facec7a8f3818910651bff1a308f472cf7640"
+            "7ec12de71040e41fce57e3361a593109376b63c2"
+            "2cf5a703228fbde2bed47c7aa4ae642824a3e0bc"
+            "a00a08f83aaf37d58247ddfcb4bb584599357d4a"
+            "399603f5e799dc9df9b7281fc70c71df3b8563a5"
+            "cc27de1f51fe6ae632607861e17db9c1fd9526f2"
+            "52154c045d91c945f217eb180142ce4ec4ce2049"
+            "b35cc0fe5eda5092016265ca3dd801b4a614a7ad"
+            "e9b279dd6a6b4429cc55f72f19cc2ef2ed3b263e"
+            "ff877f15fc46ee9cef9eeec4a7510209fdaaac7d"
+            "4b90365314a5bd1ccf069e0ca2f12e655aeb71d2"
+            "856cab55b043d60f8abe7e0add408e30b23735c0"
+            "aa3e5f9b25e49a1f7027ab4d084b18337207b20d"
+            "28caebf788957f9ce387b19fca6273f3000b50aa"
+            "5d33ee286d5276109efd57dd819e9f49b54e42c1"
+            "eea994eff72fa2f701fee8dd1e43089e0a71c0b2"
+          )
+
           # Bots allowed to skip the DCO requirement.
           BOT_LOGINS=("github-actions[bot]" "dependabot[bot]" "dependabot-preview[bot]" "rapiercraft-forgedock[bot]" "rapiercraft-forge[bot]")
 
@@ -171,6 +202,12 @@ jobs:
 
             short_sha="${sha:0:7}"
             TOTAL=$((TOTAL+1))
+
+            if printf '%s\n' "${EXEMPT_SHAS[@]}" | grep -qxF "$sha"; then
+              echo "PASS  $short_sha  $name <$email>  (exempt commit)"
+              PASSES=$((PASSES+1))
+              continue
+            fi
 
             if is_bot_author "$email"; then
               echo "PASS  $short_sha  $name <$email>  (bot allowlist)"
