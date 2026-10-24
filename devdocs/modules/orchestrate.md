@@ -221,3 +221,8 @@ Cite: #3699 / PR #3885.
 
 PR #3912 touched `orchestrate` (commands/orchestrate/phase-4-execution.md). See FORGE:BUILDER comment on issue #3873 for full change list.
 Cite: #3873 / PR #3912.
+
+## Entry 2026-10-24 — Feat: parked-PR base sync (#4525)
+
+`bin/lean/basesync.mjs` (`syncParked`, `unionResolve`) re-syncs the open PR of a `needs-human` row while the batch runs. `orchestrate()` takes a `syncParked` seam and `syncEveryMs` (default 10 min); with no seam nothing changes. The base is merged in a throwaway worktree: clean or union-resolved (both sides purely added lines, file in `orchestration.base_sync.union_globs`, never sequence/`_journal.json`) merges are pushed plainly, never forced; any other conflict is aborted and its paths posted once per base sha as a `FORGE:DECISION`. Opt out with `orchestration.base_sync.enabled: false`. Gotcha: the in-lane `baseSync()` in lean.mjs is the builder-resolved path and is untouched.
+Cite: #4525.

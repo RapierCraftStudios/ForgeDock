@@ -1522,6 +1522,17 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(daemon ? {} : { onExit: (fn) => { exitRelabel = fn; } }),
       // #4454: the daemon's shutdown stop; orchestrate throws batch.stopped, so no report is written and a resume adopts the lanes
       ...(signal ? { signal } : {}),
+      // #4525: a parked needs-human PR is merged with its moved base: clean or union-resolved merges are pushed, other conflicts reported
+      ...(deps.syncParked !== undefined ? (deps.syncParked ? { syncParked: deps.syncParked } : {}) : orch.baseSync?.enabled !== true ? {} : { syncParked: async ({ pr, last }) => {
+        try {
+          const v = JSON.parse(await leanIo.gh(["pr", "view", String(pr), "-R", repo, "--json", "state,headRefName,baseRefName,isCrossRepository"]));
+          if (v.state !== "OPEN" || v.isCrossRepository) return { status: "unchanged" };
+          const { execFile } = await import("node:child_process"), { promisify } = await import("node:util");
+          const run = promisify(execFile);
+          return await (await import("./lean/basesync.mjs")).syncParked({ git: async (a, o = {}) => String((await run("git", a, { cwd: o.cwd ?? cwd, maxBuffer: 1 << 24 })).stdout), base: v.baseRefName, branch: v.headRefName,
+            unionGlobs: orch.baseSync?.unionGlobs ?? [], last });
+        } catch (e) { return { status: "error", detail: String(e?.message ?? e).slice(0, 160) }; }
+      } }),
       conflicting: deps.conflicting ?? (async (_n, pr) => {
         try { return JSON.parse(await leanIo.gh(["pr", "view", String(pr), "-R", repo, "--json", "mergeable"]))?.mergeable === "CONFLICTING"; } catch { return false; }
       }),
@@ -1802,6 +1813,8 @@ export async function schedFromCli(argv, deps = {}) {
  * `orchestration.errors|window_min` (or flat `breaker_errors|breaker_window_min`).
  * `orchestration.recovery.max_attempts` (#4267; arrives as `max_attempts`, or flat `recovery_max_attempts`): recovery lanes per
  * issue for a mechanical needs-human, default 1, 0 turns recovery off.
+ * `orchestration.base_sync.enabled` (#4525; default true, false opts out) and `base_sync.union_globs` (comma list of globs of
+ * append-only files whose two-sided line additions a parked PR's base sync keeps both of).
  */
 export function readOrchestration(cwd = process.cwd()) {
   let o = {};
@@ -1811,7 +1824,10 @@ export function readOrchestration(cwd = process.cwd()) {
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
   return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), globalParallel: gp >= 1 ? gp : null,
-    recovery: { maxAttempts: recoveryMax } };
+    recovery: { maxAttempts: recoveryMax },
+    // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).
+    baseSync: { enabled: String(o.base_sync_enabled ?? o.enabled ?? "true").trim().toLowerCase() !== "false",
+      unionGlobs: String(o.base_sync_union_globs ?? o.union_globs ?? "").replace(/^\[|\]$/g, "").split(",").map((x) => x.trim().replace(/^["']|["']$/g, "")).filter(Boolean) } };
 }
 
 /**

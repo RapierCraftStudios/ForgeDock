@@ -408,6 +408,12 @@ orchestration:
   # Default 1; 0 disables in-batch recovery.
   recovery:
     max_attempts: 1
+
+  # Parked-PR base sync (#4525): while a batch runs, a needs-human PR whose base moved
+  # is merged with the base. Default on; `enabled: false` opts out.
+  base_sync:
+    enabled: true
+    union_globs: "CHANGELOG.md, src/registry/*.ts"
 ```
 
 | Field | Type | Required | Description |
@@ -417,6 +423,8 @@ orchestration:
 | `max_deferrals` | integer | No | `forgedock orchestrate`: requeues of one issue after a non-host `deferred` (usage limit, merge/push transient, CLI idle, lease held, gh unavailable) before its row is final. `host.busy` and `sandbox.capacity` (sandbox pool full) deferrals are not capped. Default: 3 |
 | `global_parallel` | integer | No | `forgedock orchestrate` (#4191): host-wide cap on running lanes across every batch and repo on the host, enforced through the host lane registry (`~/.forge/sched/`, or `FORGEDOCK_SCHED_DIR`). A freed slot goes to the highest-priority queued issue (`priority:P<n>` / `P<n>` labels, unlabelled P2); within a priority, slots are shared across repos by weight (#4193: `forgedock sched weight <owner/repo> N`, `--clear` resets; default equal, FIFO inside a repo), and priority always dominates weights; running lanes are never preempted and `--parallel` K still bounds each batch. `forgedock sched cap N` overrides it live for the whole host (`--clear` reverts); `forgedock sched show` lists the weights, slots and the queue. Default: unset (no global cap) |
 | `recovery.max_attempts` | integer | No | `forgedock orchestrate` in-batch recovery (#4267): how many recovery lanes the batch launches per issue for a `needs-human` with a mechanical code (`ci.red`, `base.conflict`, `ci-pending` on a conflicting PR, `contract.invalid` after a mid-run issue edit, `builder.block_untyped`). A recovery lane (`run-issue --recover <code>`) removes `needs-human`, posts a `FORGE:DECISION`, resumes the open PR and re-queues the issue with its dependents. If it ends anything but `merged`, the issue is labelled `needs-human` again with a recovery-evidence `FORGE:NEEDS_HUMAN` comment. Human codes are never recovered. Flat form: `recovery_max_attempts`. Default: 1; `0` disables in-batch recovery (a mechanical `needs-human` is final, as before). |
+| `base_sync.enabled` | boolean | No | `forgedock orchestrate` parked-PR base sync (#4525): every 10 min while the batch runs, an open PR of a `needs-human` row is merged with its moved base in a throwaway worktree. A clean merge, or one whose only conflicts are hunks where both sides purely added lines in a `union_globs` file, is pushed as a plain merge commit (never forced). Any other conflict is aborted, the branch left alone, and its paths are posted once per base sha as a `FORGE:DECISION` on the issue. Sequence/`_journal.json` files are never resolved here. Flat form: `base_sync_enabled`. Default: `true`; `false` opts out. |
+| `base_sync.union_globs` | string | No | Comma-separated globs (`*` within a segment, `**` across; no `/` matches the file name anywhere) of well-known append-only files (registries, changelogs) whose two-sided line additions the base sync keeps both of. Flat form: `base_sync_union_globs`. Default: none (every conflict is reported). |
 | `cascade.policy` | string | No | `all` \| `balanced` \| `conservative`. Default: `balanced` |
 | `cascade.max_generation` | integer or `"unlimited"` | No | Max cascade generation admitted at Phase 1 resolve time. Default: 1 |
 | `cascade.batch_max_generation` | integer | No | Finite maximum member generation that an automated P3 batch may aggregate. Default: 2 |
