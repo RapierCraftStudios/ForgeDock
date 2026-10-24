@@ -120,6 +120,16 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.equal(starts[1].length, 2);
   });
 
+  it("#4518 cli.host_killed deferrals are requeued and never trip the breaker", async () => {
+    const { now, sleep } = fakeClock();
+    const updates = []; let calls = 0;
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3, breaker: { errors: 1, window_min: 30 },
+      onUpdate: (r) => updates.push(r),
+      runOne: async () => (++calls <= 2 ? { terminalReason: "deferred", code: "cli.host_killed", retryInSeconds: 60, detail: "builder host kill" } : { terminalReason: "merged", pr: 5 }) });
+    assert.equal(rows[0].outcome, "merged");
+    assert.ok(!updates.some((u) => u.outcome === "breaker" || u.outcome === "engine-error"));
+  });
+
   it("the breaker stops admissions after N engine-errors in M minutes and lets running lanes finish", async () => {
     const started = [];
     let releaseSlow;

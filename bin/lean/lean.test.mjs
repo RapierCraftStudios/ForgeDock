@@ -3490,6 +3490,28 @@ describe("batch robustness (#4112-#4115)", () => {
     }
   });
 
+  it("#4518 a builder paused for longer than maxMs still gets its full ceiling of active time", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { d, bin } = await fakeCli("paused", `${TOOL}\nsleep 1\n${RESULT}`);
+    const control = {};
+    const call = runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 0, maxMs: 1200, control });
+    await new Promise((res) => setTimeout(res, 100)); control.pause();
+    await new Promise((res) => setTimeout(res, 2200)); control.resume();
+    assert.equal((await call).text, "all done");
+  });
+
+  it("#4518 external SIGTERM (status 143) restarts the builder once, then ends deferred cli.host_killed, never engine-error", async () => {
+    const kill = () => Object.assign(new Error("claude CLI exited with status 143. No output was captured"), { code: "CLI_BACKEND_FAILED", status: 143, signal: null });
+    const w = world({ dirty: true }); const orig = w.io.runner; let n = 0;
+    w.io.runner = async (c) => { if (c.role === "builder" && n++ === 1) throw kill(); return orig(c); };
+    assert.equal((await run(w)).terminalReason, "merged");
+    const w2 = world({ dirty: true });
+    w2.io.runner = async (c) => { if (c.role === "builder") throw kill(); return { text: "" }; };
+    const r = await run(w2);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "cli.host_killed");
+    assert.equal(w2.edits.some((e) => e.includes("needs-human")), false);
+  });
+
   // ---- #4405 ----
   const HEAVY_CHILD = (d) => `printf '#!/bin/sh\\nsleep 1.5\\n' > ${d}/vitest; chmod +x ${d}/vitest`;
   it("#4405 a silent session with a running heavy-step child is not idle-killed within the extended window", async () => {
