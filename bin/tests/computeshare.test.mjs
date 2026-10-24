@@ -85,6 +85,7 @@ function routerFixture(agentsCaps) {
     const cap = agentsCaps[name];
     let status = 200, body = {};
     if (u.pathname === "/capacity") body = cap;
+    else if (u.pathname.endsWith("/usage")) body = { minutes: 4.2 };
     else if (u.pathname === "/sandboxes" && init.method === "POST") { const p = JSON.parse(init.body); body = { id: p.spec.id, state: "running", env_has_yaml: Boolean(p.spec.env?.CS_FORGE_YAML_B64) }; status = 201; }
     return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   };
@@ -103,6 +104,15 @@ test("router places on the host with the most free CPU and injects forge.yaml", 
   assert.equal(r.body.agent, "big");
   assert.equal(r.body.env_has_yaml, true);
   assert.equal(router.store.data.sandboxes.p1.agent, "big");
+});
+
+test("router usage response names the agent that ran the sandbox (#4549)", async () => {
+  const { router } = routerFixture({ big: { cpus_free: 8, mem_free_gb: 16 } });
+  await router.launch(spec("p9"));
+  let out = null;
+  const res = { writeHead() {}, end(b) { out = JSON.parse(b); } };
+  await router.handle({ method: "GET", url: "/sandboxes/p9/usage", headers: { authorization: "Bearer fd" }, socket: { remoteAddress: "x" } }, res);
+  assert.deepEqual(out, { minutes: 4.2, agent: "big" });
 });
 
 test("router answers 503 with retry-after when no host fits", async () => {
