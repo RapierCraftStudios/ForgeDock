@@ -538,7 +538,7 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
 
   it("summariseLog carries mode, lane type, builder turns, cache tokens, cost and first-pass", () => {
     const s = summariseLog(log("on", "child"));
-    assert.deepEqual(s.contextPack, { mode: "on", laneType: "child", ab: false });
+    assert.deepEqual(s.contextPack, { mode: "on", laneType: "child", ab: false, light: false });
     assert.deepEqual([s.builderTurns, s.cacheTokens, s.costUsd, s.firstPass], [10, 2130, 1.1, true]);
     assert.equal(summariseLog(log("on", "child", { builds: 4 })).firstPass, false);
     assert.equal(summariseLog(log("on", "child", { reason: "needs-human" })).firstPass, false);
@@ -547,6 +547,13 @@ describe("context-pack A/B over run logs (forge#4275)", () => {
     assert.equal(summariseLog([{ event: "RUN_START", issue: 3 }, { event: "RUN_TERMINAL", reason: "merged" }]).contextPack.mode, "off");
     assert.equal(summariseLog([{ event: "RUN_START", issue: 3 }, { event: "RUN_TERMINAL", reason: "merged" }]).size, null);
     assert.equal(summariseLog([{ event: "RUN_START", issue: 3 }, { event: "RUN_TERMINAL", reason: "merged", turns: { size: "L", budget: 100, build: 9 } }]).size, "L"); // #4409
+  });
+
+  it("#4502 light lanes are flagged from RUN_TERMINAL and left out of the A/B", () => {
+    const l = log("on", "first"); l[l.length - 1] = { ...l[l.length - 1], light: true };
+    const s = summariseLog(l);
+    assert.equal(s.contextPack.light, true);
+    assert.equal(contextPackAb([s, summariseLog(log("on", "first"))]).first.on.n, 1);
   });
 
   it("reports per lane type and mode, never one blended average", () => {

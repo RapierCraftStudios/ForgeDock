@@ -23,14 +23,14 @@ const one = (s, max = DETAIL_MAX) => {
 
 /** The one builder session of a light lane: failing test, fix, targeted tests, result.json with what the contract is derived from. */
 export function lightBuildPrompt(n, opts = {}) {
-  return `Resolve issue #${n} (read it with gh issue view ${n} --comments) in ONE session; this is a light lane for a small, well-specified issue. There is no plan step and no frozen contract: the engine derives the contract from your diff and your test.
+  return `Resolve issue #${n} (read it with gh issue view ${n} --comments) in ONE session; this is a light lane for a small, well-specified issue. There is no plan step and no frozen contract: the engine derives the contract from the files the issue names and your test.
 
 ${hostRules(opts)}
 
 1. Write the failing regression test first and run it: it must fail on the current code for the reason the issue describes.
 2. Make the smallest fix that makes it pass. Keep the public API shape unchanged (signatures, sync/async, generator/function, exported names); the engine checks it.
 3. Run the targeted tests (the new test plus the existing tests of the files you changed), run the repo's formatter on the files you changed, and commit. Do not push or touch GitHub.
-4. Run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes.
+4. Re-run the targeted tests once more on the committed tree and make sure \`git status\` is clean (the engine runs its own gates afterwards; there is no contract file to check yet).
 
 When done and committed, write ${IMPLEMENTATION_FILE} (markdown, no HTML comments):
 ### Approach
@@ -79,19 +79,22 @@ export function apiShapeReasons(r) {
  * issue sentence, else the issue title; deliverables: the changed non-test files; validate: the repro command plus each
  * targeted test command; repro_test: the builder's, else "none" with a reason. validateContract judges it like any other.
  */
-export function deriveLightContract({ title = "", issueText = "", result = null, files = [] } = {}) {
+export function deriveLightContract({ title = "", issueText = "", result = null, files = [], predictedFiles = null } = {}) {
   const r = result && typeof result === "object" ? result : {};
   const said = typeof r.requirement === "string" ? r.requirement.trim() : "";
   const quote = said && inIssue(said, issueText) ? said : String(title ?? "").trim();
   const paths = [...new Set((Array.isArray(files) ? files : []).map((f) => String(f ?? "").trim()).filter((f) => f && f !== LEAN_DIR && !f.startsWith(`${LEAN_DIR}/`)))];
-  const code = paths.filter((f) => classifyPath(f) !== "test");
+  const changed = paths.filter((f) => classifyPath(f) !== "test");
+  // #4502: deliverables are what the issue names (the diff cannot fail its own scope check); no named files: the diff, as before
+  const named = Array.isArray(predictedFiles) ? new Set(predictedFiles.map((f) => String(f ?? "").trim())) : null;
+  const code = named ? changed.filter((f) => named.has(f)) : changed;
   const t = r.repro_test;
   const repro = t && typeof t === "object" && !Array.isArray(t) && String(t.path ?? "").trim() && String(t.command ?? "").trim()
     ? { path: String(t.path).trim(), id: String(t.id ?? "").trim(), command: String(t.command).trim() } : null;
   const commands = [...new Set([repro?.command, ...(Array.isArray(r.tests) ? r.tests : []).map((x) => (x && typeof x === "object" ? String(x.command ?? "").trim() : ""))].filter(Boolean))];
   return {
     requirements: [{ id: "R1", quote, disposition: "deliver" }],
-    deliverables: code.map((path, i) => ({ id: `D${i + 1}`, path, change: "light-lane fix (derived from the diff)", requirements: ["R1"] })),
+    deliverables: code.map((path, i) => ({ id: `D${i + 1}`, path, change: "light-lane fix (issue-named file)", requirements: ["R1"] })),
     validate: commands.map((command, i) => ({ id: `V${i + 1}`, command })),
     ...(repro ? { repro_test: repro } : { repro_test: "none", repro_test_reason: "the light-lane builder named no repro test" }),
   };
@@ -109,12 +112,26 @@ export function upgradeNote(reasons) {
 /**
  * #4451: the light targeted tests, concurrently through precheck.mjs runChecks (one heavy slot per running command, the
  * worker cap `parallelism` divided among them) with no round budget: every command runs, none is deferred to CI.
- * run({command, workers}) -> {rc, output}. Returns [{command, rc, output}] in input order.
+ * run({command, timeoutMs, workers}) -> {rc, output}. Returns [{command, rc, output}] in input order.
  */
-export async function runLightTests({ commands, parallelism = 1, run, acquire, now = () => Date.now() }) {
-  // the per-command limit stays far below the budget, so runChecks never sees a budget cut: a timeout (rc 124) stays a failure
-  const { results } = await runChecks({ commands, parallelism, budgetMs: Number.MAX_SAFE_INTEGER, perCommandMs: 2 ** 40, now, acquire, run: ({ command, workers }) => run({ command, workers }) });
+export async function runLightTests({ commands, parallelism = 1, run, acquire, now = () => Date.now(), timeoutMs }) {
+  // #4502: the configured per-command timeout reaches the runner (else io.runCommand's 300 s default applies); the budget stays far above it,
+  // so runChecks never sees a budget cut: a timeout (rc 124) stays a failure
+  const per = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 2 ** 40;
+  const { results } = await runChecks({ commands, parallelism, budgetMs: Number.MAX_SAFE_INTEGER, perCommandMs: per, now, acquire, run: ({ command, timeoutMs: t, workers }) => run({ command, timeoutMs: t, workers }) });
   return results.map(({ command, rc, output }) => ({ command, rc, output }));
+}
+
+/** Non-test changed files (engine dir skipped) that the issue does not name. */
+function scopeCreep(files, predicted) {
+  const named = new Set(predicted.map((f) => String(f ?? "").trim()));
+  return (files ?? []).map((f) => String(f ?? "").trim()).filter((f) => f && f !== LEAN_DIR && !f.startsWith(`${LEAN_DIR}/`) && classifyPath(f) !== "test" && !named.has(f));
+}
+
+/** #4502: a typed builder error (budget, idle/timeout deferral, spawn failure, usage limit) belongs to the lane's own catch, not to an upgrade. */
+export function isTypedBuilderError(e) {
+  if (!e || typeof e !== "object") return false;
+  return Boolean(e.laneCode || e.deferCode || e.spawnDeterministic === true || e.usageLimit || /^CLI_/.test(String(e.code ?? "")) || /usage limit/i.test(String(e.message ?? "")));
 }
 
 /**
@@ -124,7 +141,7 @@ export async function runLightTests({ commands, parallelism = 1, run, acquire, n
  * or null; apiShape() -> detectApiShape output or null; validate(contract) -> {ok, problems} (sync). Plus title, issueText,
  * riskPaths, cfg. Returns {upgrade:false, contract, files, repro, testFailures} or {upgrade:true, reasons, files, ...}, plus the
  * gate inputs of the FORGE:LITE receipt (#4452): diff (parseNumstat), apiShape (apiShapeReasons), testCommands, testRuns.
- * Never throws: an internal error is the upgrade reason light_error.
+ * An internal error is the upgrade reason light_error; a typed builder error (isTypedBuilderError) is rethrown.
  */
 export async function runLightStep(ctx) {
   const up = (reasons, extra = {}) => ({ upgrade: true, reasons, contract: null, files: [], repro: null, testFailures: 0, diff: null, apiShape: null, testCommands: [], testRuns: null, ...extra });
@@ -135,8 +152,13 @@ export async function runLightStep(ctx) {
     const files = await ctx.changedFiles();
     if (!files.length) return up([{ code: "no_commit", detail: `the light builder made no commit (status ${one(result?.status ?? "none", 40)})` }]);
     if (result?.status !== "fixed") return up([{ code: "not_fixed", detail: `light builder status ${one(result?.status ?? "none", 40)}${result?.summary ? `: ${one(result.summary)}` : ""}` }], { files });
-    const contract = deriveLightContract({ title: ctx.title, issueText: ctx.issueText, result, files });
+    const predicted = Array.isArray(ctx.predictedFiles) ? ctx.predictedFiles : null;
+    const contract = deriveLightContract({ title: ctx.title, issueText: ctx.issueText, result, files, predictedFiles: predicted });
     const vc = ctx.validate(contract);
+    if (!vc?.ok && predicted && scopeCreep(files, predicted).length) { // the issue-named deliverables are empty: the diff left the issue's scope
+      const t = upgradeTriggers({ diff: parseNumstat(await ctx.numstat()), repro: null, testFailures: 0, riskPaths: ctx.riskPaths ?? [], apiShape: [], cfg: ctx.cfg ?? {} });
+      return up([{ code: "scope_creep", detail: `changed file(s) the issue does not name: ${one(scopeCreep(files, predicted).slice(0, 5).join(", "))}` }, ...t.reasons], { files });
+    }
     if (!vc?.ok) return up([{ code: "contract_invalid", detail: `derived contract: ${one((vc?.problems ?? [])[0] ?? "invalid")}` }], { files });
 
     let testFailures = 0;
@@ -155,10 +177,13 @@ export async function runLightStep(ctx) {
     const [repro, numstat, shape] = await Promise.all([ctx.reproOf(contract), ctx.numstat(), ctx.apiShape()]);
     const diff = parseNumstat(numstat), apiShape = apiShapeReasons(shape);
     const t = upgradeTriggers({ diff, repro, testFailures, riskPaths: ctx.riskPaths ?? [], apiShape, cfg: ctx.cfg ?? {} });
-    const latest = deriveLightContract({ title: ctx.title, issueText: ctx.issueText, result: (await ctx.readResult()) ?? result, files: now });
-    return { upgrade: t.upgrade, reasons: t.reasons, contract: t.upgrade ? null : (ctx.validate(latest)?.ok ? latest : contract), files: now, repro, testFailures,
+    const outside = predicted ? scopeCreep(now, predicted) : [];
+    const reasons = outside.length ? [...t.reasons, { code: "scope_creep", detail: `changed file(s) the issue does not name: ${one(outside.slice(0, 5).join(", "))}` }] : t.reasons;
+    const latest = deriveLightContract({ title: ctx.title, issueText: ctx.issueText, result: (await ctx.readResult()) ?? result, files: now, predictedFiles: predicted });
+    return { upgrade: t.upgrade || outside.length > 0, reasons, contract: t.upgrade || outside.length ? null : (ctx.validate(latest)?.ok ? latest : contract), files: now, repro, testFailures,
       diff, apiShape, testCommands: commands, testRuns: runs == null ? null : (runs ?? []).length };
   } catch (e) {
+    if (isTypedBuilderError(e)) throw e; // #4502: the lane's own catch ends it as in the full lane, no second builder session
     return up([{ code: "light_error", detail: one(e?.message ?? e) }]);
   }
 }

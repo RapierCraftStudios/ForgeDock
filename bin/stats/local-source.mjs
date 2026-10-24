@@ -58,7 +58,7 @@ export function summariseLog(events, fallbackIssue = null) {
   const usage = ev.filter((e) => e.event === "PHASE_ATTEMPT_USAGE");
   const builderCalls = usage.filter((e) => e.phase === "implement");
   const reviewCalls = usage.filter((e) => e.phase === "review").length;
-  const contextPack = { mode: term?.context_pack ?? cp?.mode ?? "off", laneType: term?.lane_type ?? cp?.lane_type ?? null, ab: (term?.context_ab ?? cp?.context_ab) === true };
+  const contextPack = { mode: term?.context_pack ?? cp?.mode ?? "off", laneType: term?.lane_type ?? cp?.lane_type ?? null, ab: (term?.context_ab ?? cp?.context_ab) === true, light: term?.light === true };
   const startTs = start.ts ?? null;
   const endTs = finished ? ev[t].ts ?? null : null;
   const a = Date.parse(startTs ?? ""); const b = Date.parse(endTs ?? "");
