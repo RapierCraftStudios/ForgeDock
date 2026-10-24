@@ -26,11 +26,14 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   const lane = { cpus: cfg.lane?.cpus ?? 2, mem_gb: cfg.lane?.mem_gb ?? 3 };
   const abandonMs = (cfg.abandon_after_s ?? 1800) * 1000;
   const codes = () => (store.data.codes ??= {});
+  // State maps are keyed by caller input (install codes, agent names, sandbox ids): read own keys only, so a key like
+  // "__proto__" or "constructor" never resolves to an inherited member.
+  const own = (map, key) => (typeof key === "string" && Object.hasOwn(map, key) ? map[key] : undefined);
   const codeTtlMs = (cfg.code_ttl_s ?? 1800) * 1000;
   /** The long-lived enroll token, or an unexpired one-time install code (consumed by a successful enrollment). */
   function enrollOk(token, consume = false) {
     if (sameSecret(token, cfg.enroll_token)) return true;
-    const c = typeof token === "string" ? codes()[token] : null;
+    const c = own(codes(), token);
     if (!c || c.used || c.expires <= now()) return false;
     if (consume) { c.used = true; store.save(); }
     return true;
@@ -43,7 +46,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
   /** The enrolled agent whose token the request carries, or null. */
   function agentFor(req) {
-    const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "");
+    const m = /^Bearer\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
     if (!m) return null;
     return Object.entries(agents()).find(([, a]) => sameSecret(m[1].trim(), a.token))?.[0] ?? null;
   }
@@ -112,17 +115,17 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
 
   async function launch(spec) {
     if (!spec?.id) return { status: 400, body: { error: "spec.id required" } };
-    const known = sbx()[spec.id];
-    if (known && agents()[known.agent]) {
+    const known = own(sbx(), spec.id);
+    if (known && own(agents(), known.agent)) {
       known.touched = now(); store.save();
-      const r = await agentCall(agents()[known.agent], "POST", "/sandboxes", { spec: withForgeYaml(spec), ...sizeFor(spec) });
+      const r = await agentCall(own(agents(), known.agent), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...sizeFor(spec) });
       return { status: r.status, body: r.data, retryAfter: r.retryAfter };
     }
     const size = sizeFor(spec);
     const fits = (await capacities()).filter((c) => c.ok && !c.paused && c.cpus_free >= size.cpus && c.mem_free_gb >= size.mem_gb)
       .sort((a, b) => b.cpus_free - a.cpus_free || b.mem_free_gb - a.mem_free_gb);
     for (const c of fits) {
-      const r = await agentCall(agents()[c.name], "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
+      const r = await agentCall(own(agents(), c.name), "POST", "/sandboxes", { spec: withForgeYaml(spec), ...size }, 120000);
       if (r.status === 503) continue; // raced with another launch; try the next host
       if (r.ok) { sbx()[spec.id] = { agent: c.name, issue: spec.issue ?? null, batch: spec.batch ?? null, createdAt: now(), touched: now() }; store.save(); }
       return { status: r.status, body: { ...(r.data ?? {}), agent: c.name } };
@@ -131,8 +134,8 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   }
 
   async function forward(id, method, path) {
-    const s = sbx()[id];
-    const a = s && agents()[s.agent];
+    const s = own(sbx(), id);
+    const a = s && own(agents(), s.agent);
     if (!a) return { status: 404, body: { state: "gone" } };
     s.touched = now(); store.save();
     try {
@@ -146,7 +149,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   async function tick() {
     for (const [k, c] of Object.entries(codes())) if (c.expires <= now()) delete codes()[k];
     for (const [id, s] of Object.entries(sbx())) {
-      const a = agents()[s.agent];
+      const a = own(agents(), s.agent);
       if (!a) { delete sbx()[id]; continue; }
       try {
         if (now() - s.touched > abandonMs) {
@@ -220,7 +223,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     [route("GET", "/sandboxes/:id/logs"), fd(async ({ id }, _b, url) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/logs?cursor=${encodeURIComponent(url.searchParams.get("cursor") ?? "0")}`))],
     [route("GET", "/sandboxes/:id/result"), fd(async ({ id }) => forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/result`))],
     [route("GET", "/sandboxes/:id/usage"), fd(async ({ id }) => { // #4549: the placing agent rides along for per-agent minutes
-      const agent = sbx()[id]?.agent, r = await forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/usage`);
+      const agent = own(sbx(), id)?.agent, r = await forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/usage`);
       return agent && r.status === 200 && r.body && typeof r.body === "object" ? { ...r, body: { ...r.body, agent } } : r;
     })],
     [route("DELETE", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "DELETE", `/sandboxes/${encodeURIComponent(id)}`))],
@@ -232,25 +235,25 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     [route("GET", "/agent/bundle"), { fn: async () => ({ bundle: true }), auth: "agent" }],
     [route("GET", "/agent/images/:ref"), { fn: async ({ ref }) => ({ image: ref }), auth: "agent" }],
     [route("POST", "/agents/:name/upgrade"), fd(async ({ name }) => {
-      const a = agents()[name];
+      const a = own(agents(), name);
       if (!a) return { status: 404, body: { error: "unknown agent" } };
       const r = await agentCall(a, "POST", "/admin/update", {});
       return { status: r.status, body: { ...(r.data ?? {}), target: versionOf(cfg.repo_root) } };
     })],
     [route("DELETE", "/agents/:name"), fd(async ({ name }) => {
-      if (!agents()[name]) return { status: 404, body: { error: "unknown agent" } };
+      if (!own(agents(), name)) return { status: 404, body: { error: "unknown agent" } };
       for (const [id, x] of Object.entries(sbx())) if (x.agent === name) delete sbx()[id];
       delete agents()[name]; store.save();
       return { status: 200, body: { ok: true } };
     })],
     [route("POST", "/agents/:name/resize"), fd(async ({ name }, body) => {
-      const a = agents()[name];
+      const a = own(agents(), name);
       if (!a) return { status: 404, body: { error: "unknown agent" } };
       const r = await agentCall(a, "POST", "/admin/resize", body ?? {});
       return { status: r.status, body: r.data };
     })],
     [route("GET", "/agents/:name/usage"), fd(async ({ name }) => {
-      const a = agents()[name];
+      const a = own(agents(), name);
       if (!a) return { status: 404, body: { error: "unknown agent" } };
       const r = await agentCall(a, "GET", "/usage-history");
       return { status: r.status, body: r.data };

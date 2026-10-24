@@ -152,6 +152,20 @@ test("one-time install code works for bootstrap until expiry and enrolls exactly
   assert.equal(router.enroll({ token: late, name: "late", url: "http://100.1.1.4:7711" }).status, 401);
 });
 
+test("inherited object keys are never install codes, agents or sandboxes", async () => {
+  const { router } = routerFixture({});
+  const get = (url, auth) => new Promise((resolve) => {
+    router.handle({ method: "GET", url, headers: auth ? { authorization: `Bearer ${auth}` } : {}, socket: {} },
+      { writeHead(st) { this.s = st; }, setHeader() {}, end() { resolve(this.s); } });
+  });
+  for (const token of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+    assert.equal(router.enroll({ token, name: "evil", url: "http://100.1.1.9:7711" }).status, 401, token);
+    assert.equal(await get(`/bootstrap/install.ps1?token=${token}`), 401, token);
+  }
+  assert.equal(Object.prototype.used, undefined);
+  for (const name of ["constructor", "toString"]) assert.equal(await get(`/agents/${name}/usage`, "fd"), 404, name);
+});
+
 test("sandbox gets a per-sandbox credential relay, never the router or agent token", async () => {
   const { agent, docker } = agentFixture();
   await agent.launch({ spec: spec("c1"), cpus: 1, mem_gb: 1 });

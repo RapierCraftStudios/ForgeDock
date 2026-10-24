@@ -54,7 +54,7 @@ function fakeTransport({ launchError = null } = {}) {
 function remoteFixture(batch, { launchError = null } = {}) {
   const transport = fakeTransport({ launchError });
   const provider = remoteProvider({ batch, repo: "o/r", settings: { image: "img:1", cacheStore: "s3://cache", tokenEnv: "FD_TOKEN", secrets: ["GH_TOKEN"] }, transport,
-    env: { GH_TOKEN: SECRET, FD_TOKEN: TOKEN }, credentials: (n) => ({ GH_TOKEN: SECRET, FD_TOKEN: TOKEN })[n] ?? null });
+    env: { GH_TOKEN: SECRET, FD_TOKEN: TOKEN }, credentials: (n) => ({ GH_TOKEN: SECRET, FD_TOKEN: TOKEN })[n] ?? null, gitIdentity: () => ({}) });
   return {
     provider, transport,
     finish: (h, result) => { const b = transport.boxes.get(h.id); b.log += `lane done; token ${SECRET} and ${TOKEN}\n`; b.result = result; b.state = "exited"; b.minutes = 3.5; },
@@ -145,6 +145,23 @@ describe("remote adapter (#4254)", () => {
     const p = remoteProvider({ batch, repo: "o/r", settings: { secrets: ["GH_TOKEN"] }, transport, env: {}, credentials: (n) => (n === "GH_TOKEN" ? "from-keychain" : null) });
     await p.start({ issue: 1, args: [], env: {}, secrets: ["GH_TOKEN"] });
     assert.equal(transport.specs[0].env.GH_TOKEN, "from-keychain");
+  });
+
+  it("the sandbox commits as the dispatching host's git identity; a lane env identity wins", async () => {
+    const batch = openBatch(join(tmpDir("remote-git-"), "batches"), "bt");
+    const transport = fakeTransport();
+    const p = remoteProvider({ batch, repo: "o/r", transport, env: {}, credentials: () => null, gitIdentity: () => ({ name: "bot[bot]", email: "1+bot[bot]@users.noreply.github.com" }) });
+    await p.start({ issue: 1, args: [], env: {} });
+    const env = transport.specs[0].env;
+    for (const role of ["AUTHOR", "COMMITTER"]) {
+      assert.equal(env[`GIT_${role}_NAME`], "bot[bot]");
+      assert.equal(env[`GIT_${role}_EMAIL`], "1+bot[bot]@users.noreply.github.com");
+    }
+    await p.start({ issue: 2, args: [], env: { GIT_AUTHOR_NAME: "lane", GIT_AUTHOR_EMAIL: "lane@example.invalid" } });
+    assert.equal(transport.specs[1].env.GIT_AUTHOR_EMAIL, "lane@example.invalid");
+    const none = remoteProvider({ batch, repo: "o/r", transport, env: {}, credentials: () => null, gitIdentity: () => ({ name: "", email: "" }) });
+    await none.start({ issue: 3, args: [], env: {} });
+    assert.equal("GIT_AUTHOR_EMAIL" in transport.specs[2].env, false);
   });
 
   it("streams the lane log into the batch log, redacted; billable minutes on the handle and on the lane result", async () => {

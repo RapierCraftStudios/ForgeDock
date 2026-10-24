@@ -15,6 +15,7 @@
  * `httpTransport` is the one shipped transport: a small JSON protocol (docs/CONFIG.md `execution`) that a runner pool
  * or a session gateway fronts. Tests use an in-memory transport.
  */
+import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { safeSegment } from "./ledger.mjs";
@@ -91,7 +92,23 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
  * The remote provider. `settings` is parseExecution's output (image, cacheStore, tokenEnv, secrets); `env` is the
  * dispatcher's env (secret values for redaction on adopt); `credentials(name)` resolves a secret (env, then keychain).
  */
-export function remoteProvider({ batch, repo, settings = {}, name = "remote", transport, env = process.env, credentials = (name) => resolveCredential(name, { env }), now = () => Date.now() }) {
+/** The dispatching host's git identity (`git config user.name/email`), so sandbox commits carry the same author as local lanes. */
+export function hostGitIdentity() {
+  const get = (k) => { try { return execFileSync("git", ["config", k], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { return ""; } };
+  return { name: get("user.name"), email: get("user.email") };
+}
+
+/** GIT_AUTHOR_* and GIT_COMMITTER_* for the sandbox, unless the lane env already sets them; empty when the host has no identity. */
+export function gitIdentityEnv(identity, laneEnv = {}) {
+  const out = {};
+  for (const role of ["AUTHOR", "COMMITTER"]) {
+    const n = laneEnv[`GIT_${role}_NAME`] || identity?.name, e = laneEnv[`GIT_${role}_EMAIL`] || identity?.email;
+    if (n && e) { out[`GIT_${role}_NAME`] = n; out[`GIT_${role}_EMAIL`] = e; }
+  }
+  return out;
+}
+
+export function remoteProvider({ batch, repo, settings = {}, name = "remote", transport, env = process.env, credentials = (name) => resolveCredential(name, { env }), now = () => Date.now(), gitIdentity = hostGitIdentity }) {
   if (!transport) throw new Error("remote provider needs a transport");
   const idFor = (issue) => `fdrsbx-${safeSegment(batch.id)}-${issue}`;
   const errs = new Map(); // sandbox id -> consecutive status errors
@@ -127,7 +144,8 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
         id, issue, batch: batch.id, image: settings.image ?? null,
         repo: { slug: repo, url: repo ? `https://github.com/${repo}.git` : null, ref: li >= 0 ? args[li + 1] ?? null : null },
         cache: settings.cacheStore ? { store: settings.cacheStore, key: safeSegment(String(repo ?? "repo")) } : null,
-        env: { ...scopedEnv({ env: resolved, secrets, batchId: batch.id, repo }), ...(settings.forgeYaml ? { CS_FORGE_YAML_B64: Buffer.from(settings.forgeYaml).toString("base64") } : {}) }, // #4546: the dispatcher's forge.yaml (gitignored in the repo)
+        // The host's git identity: without it the lane image falls back to a placeholder author that fails DCO.
+        env: { ...gitIdentityEnv(gitIdentity(), laneEnv ?? {}), ...scopedEnv({ env: resolved, secrets, batchId: batch.id, repo }), ...(settings.forgeYaml ? { CS_FORGE_YAML_B64: Buffer.from(settings.forgeYaml).toString("base64") } : {}) }, // #4546: the dispatcher's forge.yaml (gitignored in the repo)
         command: ["forgedock", "run-issue", String(issue), ...args, "--result-file", resultFile], result_file: resultFile,
       };
       const startedAt = now();

@@ -230,7 +230,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const CRED_TTL = { github: 120000, claude: 300000 };
   async function sandboxCred(id, kind, req) {
     const r = sb()[id];
-    const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "");
+    const m = /^Bearer\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
     if (!r || r.state === "exited" || !m || !sameSecret(m[1].trim(), r.credToken)) return { status: 401, body: { error: "unauthorized" } };
     if (!CRED_TTL[kind]) return { status: 404, body: { error: "unknown credential" } };
     const c = credCache[kind];
