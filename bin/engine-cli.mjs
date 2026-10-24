@@ -1380,8 +1380,18 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         const headroom = deps.hostHeadroom ?? (() => execMod.hostHeadroom({ cfg: readAdmission(cwd), heavyCfg: readHeavy(cwd) }));
         return (n) => execMod.placeLane({ exec, verifyMode, labels: labelsOf.get(n) ?? [], weight, headroom: headroom() });
       })() : null;
+      // #4540: provider free slots, refreshed in the background (admission is sync); unknown (null) never blocks.
+      let capSample = null, capAt = 0, capLast = -Infinity;
+      const capacity = () => {
+        const t = deps.now ? deps.now() : Date.now();
+        if (typeof provider.capacity === "function" && t - capLast >= (deps.pollMs ?? 5000)) {
+          capLast = t;
+          Promise.resolve().then(() => provider.capacity()).then((c) => { capSample = c && Number.isInteger(c.free) ? c.free : null; capAt++; }, () => { capSample = null; capAt++; });
+        }
+        return capSample === null ? null : { free: capSample, at: capAt };
+      };
       remote = {
-        max: exec.maxRemote, isRemote: () => true, ...(place ? { place, fallbackLocal: true } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
+        capacity, max: exec.maxRemote, isRemote: () => true, ...(place ? { place, fallbackLocal: true } : {}), onBudget: bud.onBudget ?? "stop", costPerMinute: bud.costPerMinute ?? 0,
         admit: (u) => execBudget.admit(u),
         onUsage: (n, sb, rec) => {
           const startedAt = rec?.handle?.startedAt ?? rec?.startedAt ?? "?";
