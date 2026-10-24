@@ -27,7 +27,7 @@ echo y >> big.py; lines small.py 10; commit c2
 OUT="$(bash "$S" big.py ./small.py missing/gone.py)"; rc=$?
 eq "rc" "$rc" 0
 eq "defaults" "$(q '[.enabled,.file_lines,.growth_lines]')" '[true,2000,150]'
-eq "big facts" "$(q '.files[0]')" '{"path":"big.py","lines":2102,"commits_90d":2,"hotspot":4204,"over":true,"excluded":false,"base_lines":null,"growth":null}'
+eq "big facts" "$(q '.files[0]')" '{"path":"big.py","lines":2102,"commits_90d":2,"hotspot":4204,"over":true,"generated":false,"excluded":false,"base_lines":null,"growth":null}'
 eq "small facts (./ stripped)" "$(q '.files[1] | [.path,.lines,.commits_90d,.over]')" '["small.py",10,1,false]'
 eq "missing file" "$(q '.files[2] | [.path,.lines,.commits_90d,.over]')" '["missing/gone.py",0,0,false]'
 OUT="$(bash "$S")"; eq "no paths" "$(q '.files')" '[]'
@@ -49,6 +49,13 @@ printf 'gen/** linguist-generated\nvendor/** linguist-vendored=true\n' > .gitatt
 commit gen
 OUT="$(bash "$S" gen/api.py vendor/lib/x.js dist/bundle.js big.py)"
 eq "attr exclusions" "$(q '[.files[] | .excluded]')" '[true,true,false,false]'
+eq "attr generated" "$(q '[.files[] | .generated]')" '[true,false,false,false]'
+# forge#4519: a generated-file header in the first 5 lines marks the file generated
+{ echo '# @generated'; i=0; while [ $i -lt 2500 ]; do echo "l$i"; i=$((i+1)); done; } > hdr.py
+{ i=0; while [ $i -lt 2500 ]; do echo "l$i"; i=$((i+1)); done; echo '# DO NOT EDIT'; } > late.py
+OUT="$(bash "$S" hdr.py late.py)"
+rm -f hdr.py late.py
+eq "header generated" "$(q '[.files[] | [.generated,.excluded]]')" '[[true,true],[false,false]]'
 if [ "$HAVE_YQ" = 1 ]; then
   printf 'maintenance:\n  hotspot:\n    file_lines: 100\n    growth_lines: 5\n    exclude_globs: ["dist/*", "*.lock"]\n' > forge.yaml
   OUT="$(bash "$S" dist/bundle.js small.py big.py)"
@@ -60,7 +67,19 @@ if [ "$HAVE_YQ" = 1 ]; then
   eq "opt-out" "$(q '[.enabled,.files]')" '[false,[]]'
   printf 'maintenance:\n  hotspot:\n    file_lines: nope\n' > forge.yaml
   OUT="$(bash "$S" big.py)"; eq "bad value falls back" "$(q '.file_lines')" 2000
-  rm -f forge.yaml
+  # forge#4519: maintenance.generated_paths marks bot-owned files generated (and so excluded), even over the threshold
+  mkdir -p web/public/openapi-versions
+  lines web/public/openapi.json 2500; lines web/public/openapi-versions/3.29.2.json 2500
+  printf 'maintenance:\n  generated_paths: ["web/public/openapi*.json", "web/public/openapi-versions/*"]\n' > forge.yaml
+  OUT="$(bash "$S" web/public/openapi.json web/public/openapi-versions/3.29.2.json big.py gen/api.py)"
+  eq "generated_paths reported" "$(q '.generated_paths')" '["web/public/openapi*.json","web/public/openapi-versions/*"]'
+  eq "generated_paths: generated" "$(q '[.files[] | .generated]')" '[true,true,false,true]'
+  eq "generated_paths: excluded" "$(q '[.files[] | .excluded]')" '[true,true,false,true]'
+  printf 'maintenance:\n  generated_paths: ["*.json"]\n  hotspot:\n    enabled: false\n' > forge.yaml
+  OUT="$(bash "$S" big.py)"; eq "generated_paths with the gate off" "$(q '[.enabled,.generated_paths,.files]')" '[false,["*.json"],[]]'
+  printf 'maintenance:\n  generated_paths: nope\n' > forge.yaml
+  OUT="$(bash "$S" big.py)"; eq "bad generated_paths falls back" "$(q '.generated_paths')" '[]'
+  rm -rf forge.yaml web
 else
   echo "SKIP: forge.yaml cases need mikefarah yq v4"
 fi
@@ -93,7 +112,7 @@ done
 eq "30k exact commits" "$(q '[.files[] | .commits_90d]')" '[300,60,60,60]'
 eq "30k exact lines" "$(q '[.files[] | .lines]')" '[1,1,1,1]'
 if [ "$best" -lt 1000 ]; then ok; else bad "30k-commit run took ${best} ms (limit 1000)"; fi
-grep -q '"rev-list"' "$TMP/trace.json" && ok || bad "git trace not captured"
+if grep -q '"rev-list"' "$TMP/trace.json"; then ok; else bad "git trace not captured"; fi
 if grep -qE '"(cat-file|show)"' "$TMP/trace.json"; then bad "blob read without --base"; else ok; fi
 if [ -e "$TMP/net.log" ]; then bad "network tool invoked: $(tr '\n' ' ' < "$TMP/net.log")"; else ok; fi
 

@@ -327,6 +327,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `growth_lines` without `hotspot-exempt: <reason>` in a covering deliverable
    or add-deliverable why. A failed script or `enabled: false` turns it off;
    no runner calls are added.
+   Generated files (forge#4519): `hotspots.sh` marks a row `generated` (and
+   so `excluded`) for `linguist-generated`, a `maintenance.generated_paths`
+   glob or an `@generated` / `DO NOT EDIT` header in the first 5 lines, and
+   `hotspotGrowth` never counts it. `generated_paths` (bot-owned) is also in
+   the output head, so `amend()` passes it to `applyAmendments`, which refuses
+   an add-deliverable on a matching path; `hotspotPlanNote`/`hotspotBuildRule`
+   then name those globs in the prompts.
    **Enumerating tests** (#4322, `enumerating.mjs`): before the plan call
    `io.enumeratingTests` lists tests that enumerate the exports or directory
    siblings of the issue's named paths (`enumeratingPlanNote` /
@@ -413,7 +420,9 @@ as `makeHostProbe().activeLanes()`.
 `depcache.mjs` `prepare` (after the worktree and the toolchain step 2b exist) keys each lockfile (pnpm/npm/yarn
 non-PnP, uv/poetry) by sha256 of lock + manifests + runtime + platform. Hit: hardlink the
 read-only snapshot `~/.forge/depcache/<repoKey>/<eco>-<key>/` in (bin scripts copied, build
-path rewritten), then a warm repair install. Miss: frozen install under the key lock, publish
+path rewritten), then a warm repair install. A link or repair that fails (non-EXDEV) removes the
+linked trees and installs fresh after the key lock is released, without publishing: status `materialize-fallback`, or
+`failed` when that install fails too (#4522). Reasons lead with pnpm's `ERR_PNPM_*` line, which pnpm prints on stdout. Miss: frozen install under the key lock, publish
 via tmp + atomic rename. Never fails the run (`DEPS_PREPARED`); runner env gets the shared
 stores; install/repair commands get the lane's toolchain env (#4347: a pm only the shim provides
 resolves; no pin, no shim or a failed toolchain step means the host PATH); `forgedock gc --deps` reaps; `FORGE_DEPCACHE=0` opts out. See `decisions/4220-shared-dep-cache.md`.
@@ -878,7 +887,7 @@ repo (#4354). `formatAlertLines` prints `ALERTS` and one line per alert, or noth
 when no alert fired. The lines come from `computeAlerts` (`bin/stats/aggregate.mjs`)
 over `readLanes` of the batch's run-log dir. Each run in a log is one lane, and the
 window is the last 50 lanes of the repo. The rules are: `DEPS_PREPARED` failed above
-20% per ecosystem, `deferred-to-ci` above 30%, one `TOOLCHAIN_WARNING` on more than
+20% per ecosystem, `materialize-fallback` above the same 20% as a separate alert (#4522), `deferred-to-ci` above 30%, one `TOOLCHAIN_WARNING` on more than
 50% of lanes, and an outcome code whose share doubled against the previous window.
 Thresholds come from `stats.alerts.*`, and there are no alerts under 10 lanes.
 `forgedock stats` prints the same alerts as `## ALERTS`. A failure while computing
@@ -1682,6 +1691,11 @@ and are SIGKILLed by `h.cleanup()` and by a process `exit` hook. Cost: 0 LLM cal
 
 `bin/lean/basesync.mjs` (`syncParked`, `unionResolve`) merges the moved base into the open PR of a `needs-human` row from `orchestrate()` (new `syncParked` seam, `syncEveryMs`). Clean or pure two-sided list-addition merges (files in `orchestration.base_sync.union_globs`; never sequence/`_journal.json`) are pushed plainly; other conflicts are aborted and their paths posted once per base sha. Opt out: `orchestration.base_sync.enabled: false`. The in-lane `baseSync()` in lean.mjs is untouched.
 Cite: #4525.
+
+#4518: an external kill of the builder CLI (`CLI_BACKEND_FAILED` with signal SIGTERM/SIGKILL or status 143/137, classified by
+`bin/lean/hostkill.mjs`; `runCliBackendAsync` attaches `status` and `signal`) is handled like a timeout in `builder()`: checkpoint,
+one fresh restart, then `deferred` with `cli.host_killed`, so it never reaches the batch breaker. The CLI ceiling already excludes
+governor-paused time (`pausedTotal`, `bin/runner.mjs`). Cost: 0 LLM calls.
 
 ## Entry 2026-10-24 — Light-lane review fixes (#4502)
 

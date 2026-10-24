@@ -635,7 +635,7 @@ stats:
   alerts:
     window: 50                # last N lanes per repo
     min_lanes: 10             # fewer lanes in the window: nothing is printed
-    deps_failed_pct: 20       # DEPS_PREPARED status failed, per ecosystem
+    deps_failed_pct: 20       # DEPS_PREPARED status failed, and status materialize-fallback, per ecosystem
     deferred_to_ci_pct: 30    # lanes with a deferred-to-ci pre-PR check
     toolchain_warning_pct: 50 # lanes repeating the same TOOLCHAIN_WARNING
     outcome_share_factor: 2   # outcome code share vs the previous window
@@ -645,7 +645,7 @@ stats:
 |-------|------|----------|-------------|
 | `alerts.window` | number | No | Rolling window: the last N lanes of the repo, ordered by `RUN_START`. Each run in a run log is one lane. Default 50. |
 | `alerts.min_lanes` | number | No | With fewer lanes in the window, or no run logs, nothing is printed. Default 10. |
-| `alerts.deps_failed_pct` | number | No | Alert when `DEPS_PREPARED` status `failed` is above this percentage of the lanes that prepared that ecosystem. Default 20. |
+| `alerts.deps_failed_pct` | number | No | Alert when `DEPS_PREPARED` status `failed` is above this percentage of the lanes that prepared that ecosystem. A separate alert uses the same threshold for status `materialize-fallback`: a cached snapshot failed to link or repair, and the lane installed fresh. Default 20. |
 | `alerts.deferred_to_ci_pct` | number | No | Alert when more than this percentage of lanes left a pre-PR check `deferred-to-ci`. Default 30. |
 | `alerts.toolchain_warning_pct` | number | No | Alert when one `TOOLCHAIN_WARNING` text is repeated on more than this percentage of lanes. Default 50. |
 | `alerts.outcome_share_factor` | number | No | Alert when an outcome code other than `completed` has at least this factor of its share in the previous window. The code must be on at least 2 lanes, and the previous window must have at least `min_lanes` lanes. A code new in this window counts. Default 2. |

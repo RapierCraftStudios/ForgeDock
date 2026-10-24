@@ -1616,6 +1616,20 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1500);
   });
 
+  it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
+    const G = ["web/public/openapi*.json"];
+    for (const f of [facts([], { generated_paths: G }), facts([HOT], { enabled: false, generated_paths: G })]) {
+      assert.match(hotspotPlanNote(f), /Generated paths \(forge\.yaml maintenance\.generated_paths, owned by the repo's generator\): web\/public\/openapi\*\.json\. Never list or amend them in/);
+      assert.match(hotspotBuildRule(f), /Generated paths .*web\/public\/openapi\*\.json/);
+    }
+    assert.equal(hotspotPlanNote(facts([], { generated_paths: [] })), "", "no generated_paths: unchanged");
+    const w = hworld(facts([], { generated_paths: G }), [facts([])], { amendments: [{ kind: "add-deliverable", path: "web/public/openapi.json", why: "sync the spec" }] });
+    const r = await run(w);
+    assert.equal(r.code, "conformance.unimplemented"); assert.equal(w.merges.length, 0);
+    assert.match(builders(w)[0][4], /Generated paths .*openapi/);
+    assert.match(nh(w), /add-deliverable web\/public\/openapi\.json: generated path/);
+  });
+
   it("the plan prompt carries the facts, the implement prompt the configured rule; growth within the limit merges; no extra runner calls", async () => {
     const w = hworld(facts([HOT, COLD], { file_lines: 2000, growth_lines: 150 }), [facts([SMALL])]);
     assert.equal((await run(w)).terminalReason, "merged");
@@ -3488,6 +3502,28 @@ describe("batch robustness (#4112-#4115)", () => {
       assert.equal(w.edits.some((e) => e.includes("needs-human")), false);
       assert.ok(w.pushes >= 1);
     }
+  });
+
+  it("#4518 a builder paused for longer than maxMs still gets its full ceiling of active time", async () => {
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const { d, bin } = await fakeCli("paused", `${TOOL}\nsleep 1\n${RESULT}`);
+    const control = {};
+    const call = runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin, logger: { log() {} }, stream: true, idleMs: 0, maxMs: 1200, control });
+    await new Promise((res) => setTimeout(res, 100)); control.pause();
+    await new Promise((res) => setTimeout(res, 2200)); control.resume();
+    assert.equal((await call).text, "all done");
+  });
+
+  it("#4518 external SIGTERM (status 143) restarts the builder once, then ends deferred cli.host_killed, never engine-error", async () => {
+    const kill = () => Object.assign(new Error("claude CLI exited with status 143. No output was captured"), { code: "CLI_BACKEND_FAILED", status: 143, signal: null });
+    const w = world({ dirty: true }); const orig = w.io.runner; let n = 0;
+    w.io.runner = async (c) => { if (c.role === "builder" && n++ === 1) throw kill(); return orig(c); };
+    assert.equal((await run(w)).terminalReason, "merged");
+    const w2 = world({ dirty: true });
+    w2.io.runner = async (c) => { if (c.role === "builder") throw kill(); return { text: "" }; };
+    const r = await run(w2);
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "cli.host_killed");
+    assert.equal(w2.edits.some((e) => e.includes("needs-human")), false);
   });
 
   // ---- #4405 ----
