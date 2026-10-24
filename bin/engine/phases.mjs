@@ -308,11 +308,11 @@ async function readIssueRecord(n, io) {
   } catch { return null; }
 }
 
-// A declaration line: optional list marker, optional bold, "Depends on" or "Blocked by" (any case), optional colon
-// inside or after the bold, then a list of `#N` (#4121, #4506). The list is `#N` items joined by `,` `&` `and` `or`
+// A declaration line: optional list marker, optional bold, "Depends on" or "Blocked by" (any case), then one linear run of blanks, colons
+// and bold markers (no chained quantifiers: #4517), then a list of `#N` (#4121, #4506). The list is `#N` items joined by `,` `&` `and` `or`
 // (each item may carry a parenthetical note, whose own `#N` are prose); any other text ends it, so a trailing
 // "see #99", "Fixes #12", a code span or a sentence never adds an edge (release review #4515).
-const DEPENDS_ON_RE = /^[ \t]*(?:[-*+][ \t]+)?(?:\*\*|__)?(?:depends on|blocked by)[ \t]*:?(?:\*\*|__)?[ \t]*:?[ \t]*(#\d+\b[^\n]*)/gim;
+const DEPENDS_ON_RE = /^[ \t]*(?:[-*+][ \t]+)?(?:\*\*|__)?(?:depends on|blocked by)[ \t:*_]*(#\d+\b[^\n]*)/gim;
 const DEP_ITEM_RE = /^(?<![\w/])#(\d+)\b(?:[ \t]*\([^()\n]*\))?/;
 const DEP_JOIN_RE = /^[ \t]*(?:,[ \t]*(?:(?:and|or)\b[ \t]*)?|&[ \t]*|(?:and|or)\b[ \t]*)/i;
 

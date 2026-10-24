@@ -797,6 +797,15 @@ on the run record and the row, and in `ctx.placement`. The lane gets it as
 into FORGE:STATE (`placement: {where, reason, mode}`) and a trajectory decision.
 Cost: 0 LLM calls. Rationale: `devdocs/decisions/4256-hybrid-placement.md`.
 
+Monorepos (#4523): `validationWeight` also scans heavy markers and package.json
+scripts one and two directory levels below the root (injectable `list`, default
+`readdir`; skips dot-dirs, `node_modules`, `vendor`, `dist`, `build`, `target`,
+`venv`, `__pycache__`; capped at 200 dirs). Root signals keep their order.
+`execution.heavy: true|false` (`parseExecution`) is a placement-only override in
+`placeLane`: `true` → remote (`execution.heavy: true`) after rules 1-3; `false`
+ignores the detected weight but the headroom rule still applies. It adds no
+pre-PR commands and does not touch admission.
+
 ## Entry 2026-10-20 — Context pack: the issue's graph as plan context (#4275)
 
 Before the plan call (not for refactor:split lanes or a recovered frozen contract)
@@ -1673,3 +1682,9 @@ and are SIGKILLed by `h.cleanup()` and by a process `exit` hook. Cost: 0 LLM cal
 
 `bin/lean/basesync.mjs` (`syncParked`, `unionResolve`) merges the moved base into the open PR of a `needs-human` row from `orchestrate()` (new `syncParked` seam, `syncEveryMs`). Clean or pure two-sided list-addition merges (files in `orchestration.base_sync.union_globs`; never sequence/`_journal.json`) are pushed plainly; other conflicts are aborted and their paths posted once per base sha. Opt out: `orchestration.base_sync.enabled: false`. The in-lane `baseSync()` in lean.mjs is untouched.
 Cite: #4525.
+
+## Entry 2026-10-24 — Light-lane review fixes (#4502)
+
+A kept light lane now runs the same structure delta and hotspot precheck as the full lane (the undeclared package edge gets the one builder resume).
+`runLightStep` rethrows typed builder errors (`isTypedBuilderError`: `laneCode`, `deferCode`, `CLI_*`, `spawnDeterministic`, usage limit), so the lane's own catch ends them (budget-exceeded, deferred, needs-human) with no second builder session; only internal errors stay `light_error`.
+The derived contract's deliverables are the issue-named files (`predictedFiles`); a changed non-test file outside them upgrades with `scope_creep`. The light prompt no longer asks for `forgedock check` (no contract exists yet). `runLightTests` forwards `timeoutMs` (`precheckTimeoutSeconds`) to `io.runCommand`. `RUN_TERMINAL.light` is summarised as `contextPack.light` and `contextPackAb` skips light runs.

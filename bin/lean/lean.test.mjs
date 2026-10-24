@@ -6010,6 +6010,36 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     assert.equal(typeof events(dir, "LIGHT_DONE")[0].cost_usd, "number");
   });
 
+  it("#4502 a light lane that adds an undeclared package edge gets the structure gate: one builder resume, then merges", async () => {
+    const EDGE = { from: "@s/db", to: "@s/core", kind: "dependencies", manifest: "packages/db/package.json" };
+    const quiet = { package_edges_added: [], package_edges_removed: [], import_pairs: [], boundary_config_changed: { changed: false, files: [], loosens: false, tightens: false } };
+    const w = lworld(), dir = tmpDir("light-struct-"); const q = [{ ...quiet, package_edges_added: [EDGE] }, quiet];
+    w.io.structureDelta = async () => (q.length > 1 ? q.shift() : q[0]);
+    const r = await run(w, { dir, ...ON });
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(events(dir, "LIGHT_DONE").length, 1, "stayed light");
+    assert.equal(builders(w).length, 2, "the light session plus one structure resume");
+    assert.match(builders(w)[1][4], /@s\/db -> @s\/core/);
+    assert.equal(events(dir, "STRUCTURE_DELTA").length >= 1, true);
+  });
+
+  it("#4502 a typed budget error in the light step ends as in the full lane: no second builder session, no upgrade", async () => {
+    const w = lworld(), dir = tmpDir("light-typed-"); const orig = w.io.runner;
+    let tries = 0;
+    w.io.runner = async (c) => { if (c.role === "builder") { tries++; throw Object.assign(new Error("turn budget spent"), { laneCode: OUTCOME_CODES.BUDGET_EXCEEDED }); } return orig(c); };
+    const r = await run(w, { dir, ...ON });
+    assert.equal(r.code, OUTCOME_CODES.BUDGET_EXCEEDED);
+    assert.equal(tries, 1, "no upgrade session");
+    assert.equal(events(dir, "LIGHT_UPGRADE").length, 0);
+  });
+
+  it("#4502 the targeted light tests run with the configured precheck timeout", async () => {
+    const w = lworld(), dir = tmpDir("light-timeout-"); const seen = [];
+    w.io.runCommand = async (a) => { seen.push(a.timeoutMs); return { rc: 0, output: "" }; };
+    await run(w, { dir, ...ON });
+    assert.ok(seen.length && seen.every((t) => Number.isFinite(t) && t > 0 && t < 2 ** 40), `timeouts: ${seen}`);
+  });
+
   for (const [name, code, o] of [
     ["oversized diff", "diff_lines", { numstat: "80\t3\tsrc/foo.js\n20\t0\ttest/foo.test.js\n" }],
     ["non-red repro", "repro_not_red", { repro: { base: "PASSED", head: "RAN" } }],
@@ -6068,15 +6098,14 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     w.io.structureDelta = async () => { w.over.structure.push(w.calls.length); return { package_edges_added: [], package_edges_removed: [], import_pairs: [] }; };
     return w;
   };
-  it("#4451 a light lane that is not upgraded makes no context-pack, structure or hotspot calls", async () => {
+  it("#4451/#4502 a light lane that is not upgraded makes no context-pack call but runs the structure and hotspot gates", async () => {
     const w = overhead(), dir = tmpDir("light-over-");
     const r = await run(w, { dir, ...ON, contextPack: { mode: "on" } });
     assert.equal(r.terminalReason, "merged");
     assert.equal(events(dir, "LIGHT_DONE").length, 1);
-    assert.deepEqual(w.over, { pack: [], hot: [], structure: [] });
+    assert.deepEqual(w.over.pack, []);
+    assert.ok(w.over.hot.length >= 1 && w.over.structure.length >= 1, "#4502: the full lane's gates run");
     assert.equal(events(dir, "CONTEXT_PACK").length, 0);
-    // only the merge-time record (local numstat, no structure-delta call) remains; no implement-time delta
-    assert.deepEqual(events(dir, "STRUCTURE_DELTA").map((e) => e.phase), ["merge"]);
     assert.equal(events(dir, "RUN_TERMINAL")[0].light, true);
   });
   it("#4451 an upgraded light lane computes the hotspots and the context pack before the plan call and runs the structure delta", async () => {
