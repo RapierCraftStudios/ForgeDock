@@ -1370,6 +1370,20 @@ describe("pickPhase", () => {
       for (const [body, want] of cases) assert.deepEqual(parseDependsOn(body, null), want, body);
     });
 
+    it("#4517 ReDoS: a long blank run after the keyword parses in linear time and every form still parses", async () => {
+      const { parseDependsOn } = await import("../engine/phases.mjs");
+      for (const kw of ["Depends on", "Blocked by", "**Depends on**:"]) {
+        const t0 = process.hrtime.bigint();
+        assert.deepEqual(parseDependsOn(kw + " ".repeat(65000) + "x", null), []);
+        assert.ok(Number(process.hrtime.bigint() - t0) / 1e6 < 50, kw);
+      }
+      const cases = [
+        ["**Depends on**: #7", [7]], ["**Depends on:** #7", [7]], ["**Depends on** #7", [7]], ["- Depends on #7", [7]],
+        ["Blocked by #7", [7]], ["Depends on #7, #8", [7, 8]], ["Depends on #7 (note) and #8", [7, 8]],
+      ];
+      for (const [body, want] of cases) assert.deepEqual(parseDependsOn(body, null), want, body);
+    });
+
     it("#4121 every declaration form is honoured: unbolded, no colon, Blocked by, several numbers", async () => {
       for (const body of ["depends on #7", "**Depends on** #7", "Depends on #8, #7", "- Blocked by: #7", "**Blocked by:** #7 — why"])
         assert.deepEqual(await openDependency(42, io({ 42: rec({ body }), 7: rec(), 8: rec({ state: "closed" }) })), { open: [7] }, body);
