@@ -1714,3 +1714,9 @@ Cite: #4525.
 A kept light lane now runs the same structure delta and hotspot precheck as the full lane (the undeclared package edge gets the one builder resume).
 `runLightStep` rethrows typed builder errors (`isTypedBuilderError`: `laneCode`, `deferCode`, `CLI_*`, `spawnDeterministic`, usage limit), so the lane's own catch ends them (budget-exceeded, deferred, needs-human) with no second builder session; only internal errors stay `light_error`.
 The derived contract's deliverables are the issue-named files (`predictedFiles`); a changed non-test file outside them upgrades with `scope_creep`. The light prompt no longer asks for `forgedock check` (no contract exists yet). `runLightTests` forwards `timeoutMs` (`precheckTimeoutSeconds`) to `io.runCommand`. `RUN_TERMINAL.light` is summarised as `contextPack.light` and `contextPackAb` skips light runs.
+
+## Entry 2026-10-24 — Host-only capabilities in placement (#4542)
+
+`placeLane` takes `needs` (host-only capabilities: `sops`, `prod_monitor`, `ops_credentials`, or names declared in `execution.host_capabilities`) and `relays` (what the provider relays; computeshare relays none). A lane needing something not relayed is placed `local` with reason `host capability: <names>` in both `remote` and `hybrid` modes; lanes with no needs are unchanged. `detectNeeds(text, exec)` is zero-LLM: built-in text signals plus declared names and `host_capability_patterns` (`name:regex`, flat key). `engine-cli` fills a per-issue `needsOf` map in `readBody`, and `remote.place` now exists in remote mode too.
+If a remote lane still blocks on credentials and its summary names only a declared host capability (`hostCapabilityBlock`), `endBlocked` in lean.mjs ends it `env.capability_remote` (recoverable, `RECOVER_HOW`); `orchestrate` `placeOf` relaunches it local once. A mixed or unknown need stays `builder.blocked`. `BLOCK_RULES` tells a remote builder to name the missing capability.
+Cite: #4542.
