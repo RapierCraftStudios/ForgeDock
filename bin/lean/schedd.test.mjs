@@ -208,6 +208,32 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await h.cleanup(); }
   });
 
+  it("#4550: --requeue on a finished batch with a report reopens it through the daemon and runs the issue again; --add still skips it", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      const client = { ...h.client, io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ state: "OPEN", labels: [] }) : "o/r\n") } };
+      await withRoot(h, () => capture(async () => {
+        writeFileSync(h.release, "");
+        const first = await orchestrateFromCli(["1", "--parallel", "2", "--repo", "o/r", "--no-prefilter"], h.client);
+        assert.deepEqual(first.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"]]);
+        const [id] = listBatches(h.root);
+        const b = openBatch(h.root, id);
+        // The lane ended needs-human and the operator decided it: the finished batch holds that terminal row.
+        b.store.save({ ...b.store.load(), results: { 1: { issue: 1, outcome: "needs-human", pr: null, cost_usd: 0, minutes: 0 } } });
+        const rep = b.readReport();
+        b.writeReport({ ...rep, rows: [{ issue: 1, outcome: "needs-human" }] });
+        assert.deepEqual((await orchestrateFromCli(["--add", id, "1"], client)).skipped.map((x) => x.reason), ["already in batch"]);
+        const res = await orchestrateFromCli(["--requeue", id, "1", "--reason", "decided"], client);
+        assert.deepEqual(res.requeued, [1]);
+        await until(() => h.launched().length === 2);
+        await until(() => b.store.load()?.results?.[1]?.outcome === "merged" && b.readReport()?.rows?.[0]?.outcome === "merged");
+        assert.deepEqual(listBatches(h.root), [id], "no second batch");
+        assert.equal(b.readReport().rows[0].requeued.reason, "decided");
+      }));
+    } finally { await h.cleanup(); }
+  });
+
   it("#4376: --cancel stops one batch (its lane torn down, the rest held, report written); the other batch and the daemon run on", async () => {
     const h = host();
     try {

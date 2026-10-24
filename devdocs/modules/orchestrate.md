@@ -226,3 +226,8 @@ Cite: #3873 / PR #3912.
 
 `bin/lean/basesync.mjs` (`syncParked`, `unionResolve`) re-syncs the open PR of a `needs-human` row while the batch runs. `orchestrate()` takes a `syncParked` seam and `syncEveryMs` (default 10 min); with no seam nothing changes. The base is merged in a throwaway worktree: clean or union-resolved (both sides purely added lines, file in `orchestration.base_sync.union_globs`, never sequence/`_journal.json`) merges are pushed plainly, never forced; any other conflict is aborted and its paths posted once per base sha as a `FORGE:DECISION`. Opt out with `orchestration.base_sync.enabled: false`. Gotcha: the in-lane `baseSync()` in lean.mjs is the builder-resolved path and is untouched.
 Cite: #4525.
+
+## Entry 2026-10-24 — Feat: requeue a terminal issue in a running batch (#4550)
+
+`forgedock orchestrate --requeue <id> N... [--reason]` appends `{issue, reason, by, at}` to the batch's `requeue` file (`batch.requeue`, refuses issues not in the batch or not terminal; the CLI refuses closed and `needs-human`-labelled issues). `orchestrate()` takes a `getRequeued` seam: `drainRequeues` moves the issue and the `skipped` dependents behind it back to pending (prior rows kept in state `requeued`, applied keys in `requeueApplied`), posts a `FORGE:DECISION`, and the report row is the latest outcome with a `requeued:` line. schedd `op:"requeue"` hosts a finished batch again; `--add` is unchanged.
+Cite: #4550.

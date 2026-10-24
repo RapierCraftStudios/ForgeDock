@@ -1047,6 +1047,7 @@ function flag(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i
  * daemon. `--foreground` or `FORGEDOCK_SCHEDD=0` runs the batch in this process as before (also for injected test deps).
  * `--add <id> N...` (#4408) adds issues to that batch instead of starting a second one: they run under its K and DAG
  * (a running batch picks them up on its next pass, a stopped one on its next `--resume`); `--resume <id> N...` adds N too.
+ * `--requeue <id> N... [--reason]` (#4550) returns a terminal issue (and the dependents skipped behind it) to pending after an operator decision.
  * `--cancel <id>` (#4376) stops that one batch, never the shared daemon: it admits nothing more, its running local lanes get
  * SIGTERM (their teardown saves the work), remote lanes run to their result and the rest end `held`; `--resume <id>` continues it.
  */
@@ -1060,8 +1061,8 @@ export async function orchestrateFromCli(argv, deps = {}) {
 const formatRowLine = (r) => (r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`);
 const consoleSink = () => ({ batch: () => {}, row: (r) => console.log(formatRowLine(r)), line: (t) => console.log(t) });
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...> | --cancel <id>";
-const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model"];
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id>";
+const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason"];
 const issuesOf = (argv) => {
   const issues = [];
   for (let i = 0; i < argv.length; i++) {
@@ -1119,6 +1120,41 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
 }
 
 /**
+ * `--requeue <id> N... [--reason "..."]` (#4550): after an operator decision, a terminal issue of the batch (and the dependents
+ * skipped behind it) goes back to pending. Closed issues and issues still labelled `needs-human` are refused before anything is
+ * written. Through the daemon (`viaDaemon`, null when none runs: the batch's `requeue` file, and a finished batch's report is
+ * cleared so `--resume` runs it again). The runner applies the entries and posts the FORGE:DECISION.
+ */
+async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, print = (l) => console.log(l) }) {
+  if (!id || String(id).startsWith("--") || !tokens.length) throw new Error(ORCH_USAGE);
+  const batchMod = await import("./lean/batch.mjs");
+  const b = batchMod.openBatch(root, id);
+  if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
+  const repo = b.readPlan()?.repo ?? null;
+  const refused = [], open = [];
+  for (const t of tokens) {
+    if (!/^#?\d+$/.test(String(t))) { refused.push({ issue: t, reason: "not an integer" }); continue; }
+    const n = parseInt(String(t).replace("#", ""), 10);
+    if (open.includes(n) || refused.some((x) => x.issue === n)) continue;
+    let v = null;
+    try { v = JSON.parse(await io.gh(["issue", "view", String(n), ...(repo ? ["-R", repo] : []), "--json", "state,labels"])); } catch { v = null; }
+    if (!v) refused.push({ issue: n, reason: "unreadable" });
+    else if (v.state !== "OPEN") refused.push({ issue: n, reason: "closed" });
+    else if ((v.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) refused.push({ issue: n, reason: "still labelled needs-human: record the decision and remove the label first" });
+    else open.push(n);
+  }
+  const why = reason || "operator decision", by = "operator";
+  let res = { requeued: [], refused: [] };
+  if (open.length) {
+    res = (viaDaemon ? await viaDaemon(open, why, by) : null) ?? b.requeue(open, { reason: why, by });
+    if (res.reopened === undefined && res.requeued?.length && b.readReport()) b.clearReport(); // no daemon: the next --resume reruns it
+  }
+  const out = { ok: true, batch: id, requeued: res.requeued ?? [], refused: [...(res.refused ?? []), ...refused] };
+  print(`batch ${id}: ${out.requeued.map((n) => `requeued #${n}`).join(" ") || "requeued (none)"}${out.refused.length ? `; refused ${out.refused.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
+  return out;
+}
+
+/**
  * `--cancel <id>` (#4376): through the daemon (`viaDaemon`, null when none runs) or the batch's `cancel` file directly.
  * A finished batch (report written) is left alone.
  */
@@ -1167,6 +1203,11 @@ async function orchestrateClient(argv, deps = {}) {
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
     return sock ? schedd.request(sock, { op: "add", id, issues }) : null;
   };
+  const requeueVia = (id) => async (issues, reason, by) => {
+    let sock = null;
+    try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
+    return sock ? schedd.request(sock, { op: "requeue", id, issues, reason, by }) : null;
+  };
   const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
   if (argv.includes("--cancel")) {
     const id = flag(argv, "--cancel");
@@ -1175,6 +1216,10 @@ async function orchestrateClient(argv, deps = {}) {
       try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
       return sock ? schedd.request(sock, { op: "cancel", id }) : null;
     } });
+  }
+  if (argv.includes("--requeue")) {
+    const i = argv.indexOf("--requeue"), id = argv[i + 1];
+    return requeueBatch({ id, tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: requeueVia(id) });
   }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add"), id = argv[i + 1];
@@ -1250,6 +1295,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     return { ok: true, batch: b.id, parallel: k };
   }
   if (argv.includes("--cancel")) return cancelBatch({ id: flag(argv, "--cancel"), root, print: (l) => sink.line(l) });
+  if (argv.includes("--requeue")) {
+    const i = argv.indexOf("--requeue");
+    return requeueBatch({ id: argv[i + 1], tokens: operandsOf(argv.slice(i + 2)), reason: flag(argv, "--reason"), root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+  }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add");
     if (!argv[i + 1] || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
@@ -1501,7 +1550,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
       beforeAdmit,
-      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getCancelled: batch.readCancel, ...lanes,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null, exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),
