@@ -622,6 +622,22 @@ describe("hybrid placement (#4256)", () => {
   });
 });
 
+describe("#4547: fallback_local and agent liveness", () => {
+  it("parseExecution: fallback_local is opt-in", () => {
+    assert.equal(parseExecution({ mode: "remote", max_remote: "2" }).fallbackLocal, undefined);
+    assert.equal(parseExecution({ mode: "remote", max_remote: "2", fallback_local: "true" }).fallbackLocal, true);
+    assert.equal(parseExecution({ mode: "remote", fallback_local: "yes" }).fallbackLocal, undefined);
+  });
+  it("transport capacity carries free and liveness; none valid is unknown", async () => {
+    const { httpTransport } = await import("./sandbox-remote.mjs");
+    const cap = async (data, ok = true) => httpTransport({ endpoint: "http://pool.test", token: "t", fetchFn: async () => ({ ok, status: ok ? 200 : 500, headers: new Headers(), text: async () => JSON.stringify(data) }) }).capacity();
+    assert.deepEqual(await cap({ online: 0, total: 2, agents: [] }), { online: 0, total: 2 });
+    assert.deepEqual(await cap({ free: 3 }), { free: 3 });
+    assert.equal(await cap({ online: -1 }), null);
+    assert.equal(await cap({ online: 1 }, false), null);
+  });
+});
+
 describe("host capabilities in placement (#4542)", () => {
   it("placeLane: a need the provider does not relay is local in remote and hybrid mode, with the reason", () => {
     assert.deepEqual(placeLane({ exec: { mode: "remote" }, needs: ["sops"] }), { where: "local", reason: "host capability: sops" });

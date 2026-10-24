@@ -350,6 +350,14 @@ test("linux installer requires a router and token", () => {
   assert.notEqual(spawnSync("bash", [linuxInstaller, "--dry-run"], { env }).status, 0);
 });
 
+test("router /status exposes agent liveness: paused and unreachable agents are not online (#4547)", async () => {
+  const { router } = routerFixture({ up: { cpus_free: 4, mem_free_gb: 8 }, asleep: { cpus_free: 4, mem_free_gb: 8, paused: true } });
+  const s = await router.status();
+  assert.equal(s.total, 2);
+  assert.equal(s.online, 1);
+  assert.deepEqual(s.agents.map((a) => [a.name, a.ok, a.paused]), [["up", true, false], ["asleep", true, true]]);
+});
+
 test("lane image version equals the dispatcher version (#4545)", async () => {
   const { laneImageTag, laneBuildArgs, versionOf, repoRoot } = await import("../pool/version.mjs");
   const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));

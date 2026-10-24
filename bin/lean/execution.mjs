@@ -86,6 +86,7 @@ export function parseExecution(sec = {}) {
   const tokenEnv = ENV_RE.test(str(s.token_env)) ? str(s.token_env) : null;
   const cacheStore = str(s.cache_store) || null;
   const allowActions = str(s.allow_actions).toLowerCase() === "true";
+  const fallbackLocal = str(s.fallback_local).toLowerCase() === "true";
   const heavyRaw = str(s.heavy).toLowerCase();
   const heavy = heavyRaw === "true" ? true : heavyRaw === "false" ? false : null;
   const cap = (v) => { const t = str(v), x = Number(t); return t !== "" && Number.isFinite(x) && x >= 0 ? x : null; };
@@ -97,7 +98,7 @@ export function parseExecution(sec = {}) {
   const patRaw = Array.isArray(s.host_capability_patterns) ? s.host_capability_patterns : str(s.host_capability_patterns) ? str(s.host_capability_patterns).split(",") : [];
   const hostCapabilityPatterns = patRaw.map((x) => { const t = str(x), i = t.indexOf(":"); return { name: t.slice(0, i).trim().toLowerCase(), pattern: t.slice(i + 1).trim() }; })
     .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
-  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(heavy !== null ? { heavy } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;

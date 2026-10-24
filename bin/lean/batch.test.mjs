@@ -731,3 +731,32 @@ describe("#4540: remote admissions are capped to the provider's free capacity", 
     assert.deepEqual(rows.map((r) => r.outcome).filter((o) => o !== "merged"), []);
   });
 });
+
+describe("#4547: opt-in local fallback in mode remote when no pool agent is online", () => {
+  const run = async (remoteExtra, online) => {
+    const c = { t: 1_000_000 };
+    const sleep = async (ms) => { await new Promise((r) => setImmediate(r)); c.t += ms; };
+    const where = new Map();
+    let remoteTries = 0;
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 3, now: () => c.t, sleep, pollMs: 1, readBody: async () => "",
+      remote: { max: 3, isRemote: () => true, capacity: () => (online === null ? null : { free: null, online, at: 1 }), ...remoteExtra },
+      runOne: async (n, _ln, ctx = {}) => {
+        where.set(n, ctx.placement?.where ?? "remote");
+        if (ctx.placement?.where !== "local") { remoteTries++; if (online === 0) return { terminalReason: "deferred", code: "sandbox.capacity", retryInSeconds: 1, detail: "HTTP 503" }; }
+        return { terminalReason: "merged", pr: 100 + n };
+      } });
+    return { rows, where, remoteTries };
+  };
+  it("every agent offline: the batch completes on the host", async () => {
+    const { rows, where, remoteTries } = await run({ offlineFallback: true }, 0);
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "merged"]);
+    assert.ok([...where.values()].every((w) => w === "local"));
+    assert.equal(remoteTries, 0);
+  });
+  it("an agent online, or liveness unknown, stays remote", async () => {
+    for (const online of [1, null]) {
+      const { where } = await run({ offlineFallback: true }, online);
+      assert.ok([...where.values()].every((w) => w === "remote"), String(online));
+    }
+  });
+});

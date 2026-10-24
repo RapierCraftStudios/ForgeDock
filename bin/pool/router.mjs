@@ -83,6 +83,13 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     return out;
   }
 
+  /** Agent liveness for the scheduler (#4547): an agent is online when it answers and is not paused. */
+  async function status() {
+    const caps = await capacities();
+    const agentsView = caps.map((c) => ({ name: c.name, ok: c.ok, paused: Boolean(c.paused) }));
+    return { online: agentsView.filter((a) => a.ok && !a.paused).length, total: agentsView.length, agents: agentsView };
+  }
+
   /** Per-repo extras: the gitignored forge.yaml, and a private Docker daemon (with a bigger reservation) when enabled. */
   const repoCfg = (spec) => cfg.repos?.[spec?.repo?.slug] ?? {};
   // Placement counts the (small) reservation; `limit` is each container's hard burst cap (burst model, when configured).
@@ -217,6 +224,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       return agent && r.status === 200 && r.body && typeof r.body === "object" ? { ...r, body: { ...r.body, agent } } : r;
     })],
     [route("DELETE", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "DELETE", `/sandboxes/${encodeURIComponent(id)}`))],
+    [route("GET", "/status"), fd(async () => ({ status: 200, body: await status() }))],
     [route("GET", "/agents"), fd(async () => ({ status: 200, body: { agents: await capacities(), sandboxes: sbx() } }))],
     [route("POST", "/codes"), fd(async () => ({ status: 200, body: issueCode() }))],
     [route("GET", "/agent/creds/github"), { fn: async () => ({ status: 200, body: { token: await githubToken() } }), auth: "agent" }],
@@ -276,7 +284,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     }
   }
 
-  return { handle, launch, tick, enroll, issueCode, capacities, store };
+  return { handle, launch, tick, enroll, issueCode, capacities, status, store };
 }
 
 export function startRouter(cfg, deps) {
