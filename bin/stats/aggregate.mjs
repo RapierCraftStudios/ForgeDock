@@ -295,6 +295,12 @@ export function computeAlerts(lanes = [], opts = {}) {
       const ex = failed.flatMap((l) => l.deps).find((d) => (d.eco ?? "unknown") === eco && d.status === "failed");
       add(`DEPS_PREPARED failed (${eco})`, failed.length, used.length, c.depsFailedPct / 100, ex?.reason ?? null);
     }
+    // #4522: a broken snapshot falls back to a fresh install; the lane has dependencies, but the cache still needs a look.
+    const fell = used.filter((l) => l.deps.some((d) => (d.eco ?? "unknown") === eco && d.status === "materialize-fallback"));
+    if (fell.length / used.length > c.depsFailedPct / 100) {
+      const ex = fell.flatMap((l) => l.deps).find((d) => (d.eco ?? "unknown") === eco && d.status === "materialize-fallback");
+      add(`DEPS_PREPARED materialize-fallback (${eco})`, fell.length, used.length, c.depsFailedPct / 100, ex?.reason ?? null);
+    }
   }
   const deferred = win.filter((l) => l.deferred.length);
   if (deferred.length / win.length > c.deferredPct / 100) add("deferred-to-ci", deferred.length, win.length, c.deferredPct / 100, deferred[deferred.length - 1].deferred[0]);
