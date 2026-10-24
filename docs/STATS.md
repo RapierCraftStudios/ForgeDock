@@ -78,6 +78,13 @@ Limits: logs written before #4362 carry no trigger, so implement attempts beyond
 `unknown`. Logs written before #4407 sum running session totals. Lanes run outside a batch are in no window. `gh` (for
 merged issues only) is the one network call; when it fails, quality and acceptance print `n/a` with the reason.
 
+## Pool utilisation (`--pool`, forge#4549)
+
+`forgedock stats --pool [--window 7d,30d] [--json]` reads the repo's local batch `report.json` rows and prints, per window,
+remote lane minutes, lanes and share of the pool per agent (`sandbox.by_agent`). Rows without agent data print `n/a`.
+The same per-agent minutes appear in the batch report's `sandbox:` line as `by agent: <name> <min> min, ...`.
+Live capacity is `forgedock pool status`.
+
 ## Explorer A/B (`--explore-ab`, forge#4418)
 
 Compares lanes run with forge.yaml `lean.explore: on` against `off` (#4391), from the local run logs only (no GitHub

@@ -454,7 +454,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     try { u = typeof provider.usage === "function" ? await provider.usage(h, { startedAt, endedAt }) : null; } catch { u = null; }
     const minutes = nonNeg(u?.minutes) ?? nonNeg(h?.minutes) ?? round1(Math.max(0, endedAt - startedAt) / 60000);
     const cost = nonNeg(u?.cost_usd) ?? minutes * cpm;
-    return { ...r, sandbox: { provider: provider.name, id: h.id, minutes: round1(minutes), cost_usd: round6(cost) } };
+    const agent = typeof u?.agent === "string" && u.agent ? u.agent : typeof h?.agent === "string" && h.agent ? h.agent : null; // #4549: the pool agent
+    return { ...r, sandbox: { provider: provider.name, id: h.id, minutes: round1(minutes), cost_usd: round6(cost), ...(agent ? { agent } : {}) } };
   };
   const tear = async (led, h) => {
     let ok = false;

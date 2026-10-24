@@ -41,7 +41,7 @@ export function isActionsEndpoint(endpoint) {
 /**
  * Generic HTTP transport: POST {endpoint}/sandboxes (body = launch spec), GET /sandboxes/:id -> {state},
  * GET /sandboxes/:id/logs?cursor=N -> {text, cursor}, GET /sandboxes/:id/result -> lane result (404 = none yet),
- * GET /sandboxes/:id/usage -> {minutes}, DELETE /sandboxes/:id (404 = gone). `Authorization: Bearer <token>`.
+ * GET /sandboxes/:id/usage -> {minutes, agent?} (agent: the pool agent that ran it, #4549), DELETE /sandboxes/:id (404 = gone). `Authorization: Bearer <token>`.
  * 429/503 on launch is a retryable capacity error (`Retry-After` seconds). Error text never carries the token.
  * Optional `GET /status -> {free: N}` is the pool's free slots (#4540); anything else (404, error, malformed) is unknown (null).
  */
@@ -71,7 +71,7 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     },
     async logs(id, cursor = 0) { const r = await call("GET", `${p(id)}/logs?cursor=${encodeURIComponent(cursor)}`); return r.ok ? { text: String(r.data?.text ?? ""), cursor: r.data?.cursor ?? cursor } : { text: "", cursor }; },
     async result(id) { const r = await call("GET", `${p(id)}/result`); return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
-    async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes) } : null; },
+    async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes), ...(typeof r.data.agent === "string" && r.data.agent ? { agent: r.data.agent } : {}) } : null; }, // agent: #4549, optional
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
     async capacity() {
       // `free` (#4540) and agent liveness `online`/`total` (#4547) are each optional; none valid is unknown.
@@ -101,7 +101,7 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
   if (settings.tokenEnv) remember(credentials(settings.tokenEnv));
   const minutesOf = async (h) => {
     let m = null;
-    try { const u = await transport.usage?.(h.id); if (u && Number.isFinite(Number(u.minutes))) m = Number(u.minutes); } catch { m = null; }
+    try { const u = await transport.usage?.(h.id); if (u && Number.isFinite(Number(u.minutes))) m = Number(u.minutes); if (typeof u?.agent === "string" && u.agent) h.agent = u.agent; } catch { m = null; }
     if (m === null && Number.isFinite(h.startedAt)) m = Math.round(((now() - h.startedAt) / 60000) * 10) / 10;
     if (m !== null) h.minutes = Math.max(h.minutes ?? 0, m);
   };
