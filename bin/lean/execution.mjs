@@ -50,7 +50,7 @@ import { classifyStep, heavyConfig, memAvailableMb } from "./heavy.mjs";
 import { detectPins } from "./toolchain.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
-export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote"]);
+export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote", "pool"]);
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
 const ENV_RE = /^[A-Z_][A-Z0-9_]*$/;
 const IMAGE_RE = /^[A-Za-z0-9][A-Za-z0-9._\/:@-]*$/;
@@ -353,6 +353,18 @@ export function remoteTransportFor(exec = {}, { transport = null, env = process.
   return httpTransport({ endpoint: exec.endpoint, token: exec.tokenEnv ? credentials(exec.tokenEnv) : null });
 }
 
+/**
+ * The local pool router's endpoint and token (#4546): `COMPUTESHARE_CONFIG` or `~/.config/computeshare/router.json`
+ * (`listen.host`/`listen.port`), token from `forgedock_token_file` or the sibling `forgedock.token`. Null when unreadable.
+ */
+export function poolRouterConfig({ env = process.env, path = env.COMPUTESHARE_CONFIG || join(homedir(), ".config/computeshare/router.json") } = {}) {
+  const c = readJson(path);
+  if (!c?.listen?.host || !c.listen.port) return null;
+  let token = null;
+  try { token = readFileSync(c.forgedock_token_file ?? join(dirname(path), "forgedock.token"), "utf8").trim() || null; } catch { token = null; }
+  return { endpoint: `http://${c.listen.host}:${c.listen.port}`, token };
+}
+
 /** A provider by name; throws a typed error for an unknown one. `remote` reads `opts.exec` (parseExecution output). */
 export function providerByName(name, opts) {
   if (name === "local") return localProvider(opts);
@@ -361,6 +373,20 @@ export function providerByName(name, opts) {
     const exec = opts?.exec ?? {};
     const env = opts?.env ?? process.env;
     return remoteProvider({ batch: opts.batch, repo: opts.repo, settings: exec, env, transport: remoteTransportFor(exec, { transport: opts?.transport, env }), ...(opts?.now ? { now: opts.now } : {}) });
+  }
+  if (name === "pool") {
+    // #4546: `remote` with the endpoint and token defaulted to the local router, and the repo's forge.yaml sent along.
+    const env = opts?.env ?? process.env;
+    const exec = opts?.exec ?? {};
+    const router = opts?.transport || exec.endpoint ? null : poolRouterConfig({ env, ...(opts?.poolConfigPath ? { path: opts.poolConfigPath } : {}) });
+    if (!opts?.transport && !exec.endpoint && !router) throw typedError("execution.provider.misconfigured", "execution.provider pool needs a local router config (forgedock pool router) or execution.endpoint");
+    let forgeYaml = null;
+    try { forgeYaml = opts?.cwd ? readFileSync(join(opts.cwd, "forge.yaml"), "utf8") : null; } catch { forgeYaml = null; }
+    // The router's token is resolved under a fixed name so remoteProvider redacts it like any `token_env` credential.
+    const tokenEnv = exec.tokenEnv ?? (router?.token ? "FORGEDOCK_POOL_TOKEN" : undefined);
+    const credentials = (n) => (n === "FORGEDOCK_POOL_TOKEN" && !exec.tokenEnv ? router?.token ?? null : resolveCredential(n, { env }));
+    const settings = { ...exec, ...(exec.endpoint ? {} : router ? { endpoint: router.endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}) };
+    return remoteProvider({ batch: opts.batch, repo: opts.repo, settings, name: "pool", env, credentials, transport: remoteTransportFor(settings, { transport: opts?.transport, env, credentials }), ...(opts?.now ? { now: opts.now } : {}) });
   }
   const e = new Error(`unknown execution.provider ${JSON.stringify(name)} (known: ${SANDBOX_PROVIDERS.join(", ")})`);
   e.code = "execution.provider.unknown";

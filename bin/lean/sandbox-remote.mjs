@@ -79,7 +79,7 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
  * The remote provider. `settings` is parseExecution's output (image, cacheStore, tokenEnv, secrets); `env` is the
  * dispatcher's env (secret values for redaction on adopt); `credentials(name)` resolves a secret (env, then keychain).
  */
-export function remoteProvider({ batch, repo, settings = {}, transport, env = process.env, credentials = (name) => resolveCredential(name, { env }), now = () => Date.now() }) {
+export function remoteProvider({ batch, repo, settings = {}, name = "remote", transport, env = process.env, credentials = (name) => resolveCredential(name, { env }), now = () => Date.now() }) {
   if (!transport) throw new Error("remote provider needs a transport");
   const idFor = (issue) => `fdrsbx-${safeSegment(batch.id)}-${issue}`;
   const errs = new Map(); // sandbox id -> consecutive status errors
@@ -102,7 +102,7 @@ export function remoteProvider({ batch, repo, settings = {}, transport, env = pr
     } catch { /* the next poll retries */ }
   };
   return {
-    name: "remote",
+    name,
     idFor,
     async start({ issue, args = [], env: laneEnv = env, secrets = settings.secrets ?? [] }) {
       const id = idFor(issue);
@@ -115,12 +115,12 @@ export function remoteProvider({ batch, repo, settings = {}, transport, env = pr
         id, issue, batch: batch.id, image: settings.image ?? null,
         repo: { slug: repo, url: repo ? `https://github.com/${repo}.git` : null, ref: li >= 0 ? args[li + 1] ?? null : null },
         cache: settings.cacheStore ? { store: settings.cacheStore, key: safeSegment(String(repo ?? "repo")) } : null,
-        env: scopedEnv({ env: resolved, secrets, batchId: batch.id, repo }),
+        env: { ...scopedEnv({ env: resolved, secrets, batchId: batch.id, repo }), ...(settings.forgeYaml ? { CS_FORGE_YAML_B64: Buffer.from(settings.forgeYaml).toString("base64") } : {}) }, // #4546: the dispatcher's forge.yaml (gitignored in the repo)
         command: ["forgedock", "run-issue", String(issue), ...args, "--result-file", resultFile], result_file: resultFile,
       };
       const startedAt = now();
       await transport.launch(spec);
-      return { provider: "remote", id, issue, startedAt, minutes: 0 };
+      return { provider: name, id, issue, startedAt, minutes: 0 };
     },
     async status(h) {
       let s;
