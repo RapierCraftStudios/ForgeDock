@@ -13,6 +13,7 @@ import {
   renameSync,
   unlinkSync,
 } from "fs";
+import { gitignoreAdditions } from "./lean/toolstate.mjs";
 import { execSync, execFileSync, spawnSync } from "child_process";
 import { homedir } from "os";
 import https from "https";
@@ -1025,6 +1026,20 @@ async function statusScreen(c) {
  *                            Independent of FORGEDOCK_BACKEND, which controls
  *                            the separate `forgedock run` engine backend.
  */
+/** #4590: append the tool-state deny-list (.forge-lean/, tool caches) to the repo's .gitignore; append-only, idempotent. */
+function ensureToolStateIgnored(c) {
+  try {
+    const file = join(c.cwd, ".gitignore");
+    const text = existsSync(file) ? readFileSync(file, "utf-8") : "";
+    let next = false;
+    try { next = Boolean(JSON.parse(readFileSync(join(c.cwd, "package.json"), "utf-8"))?.dependencies?.next); } catch { /* no package.json */ }
+    const add = gitignoreAdditions(text, { next });
+    if (!add.length) return;
+    writeFileSync(file, `${text}${text && !text.endsWith("\n") ? "\n" : ""}# ForgeDock lane scratch and tool caches\n${add.join("\n")}\n`);
+    c.stdout.write(`  .gitignore: added ${add.join(", ")}\n`);
+  } catch { /* .gitignore is best effort */ }
+}
+
 async function initFlow(c) {
   const outputPath = join(c.cwd, "forge.yaml");
   const hasExisting = existsSync(outputPath);
@@ -1078,6 +1093,7 @@ async function initFlow(c) {
       stagingBranch: draft.branches.staging.value,
     });
     atomicWriteFile(outputPath, content);
+    ensureToolStateIgnored(c);
     celebrate(c, { written: true, todoCount: 0, isMinimal: true });
     await maybeOfferDemo(c);
     return 0;
@@ -1107,12 +1123,14 @@ async function initFlow(c) {
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
     const lowKeys = manualLowConfidenceKeys(draft, description, v);
     const { todoCount } = writeForgeYaml(v, lowKeys, outputPath);
+    ensureToolStateIgnored(c);
     celebrate(c, { written: true, todoCount });
     await maybeOfferDemo(c);
     return 0;
   }
   const { draft, description } = await setupAfterRead(c, await read(c));
   const reviewed = await review(c, draft, description);
+  if (!reviewed.aborted) ensureToolStateIgnored(c);
   celebrate(c, reviewed);
   if (!reviewed.aborted) await maybeOfferDemo(c);
   return reviewed.aborted ? 1 : 0;

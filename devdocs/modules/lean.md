@@ -1737,3 +1737,7 @@ The dispatcher reads `<cwd>/forge.yaml` (absent is fine) and passes it as `setti
 ## Entry 2026-10-24 — Per-agent remote lane minutes (#4549)
 
 The router's `GET /sandboxes/:id/usage` forward adds `agent` (the placing agent) to the agent's `{minutes}` body; the field is optional for third-party runners. `httpTransport.usage` returns `{minutes, agent?}`, `remoteProvider` keeps `h.agent`, and `providerLanes` `withUsage` copies it to `sandbox.agent` (omitted when unknown). `orchestrate` accumulates `sandbox.by_agent {name: minutes}` per issue across attempts onto the row, and `formatSandboxSummary` appends `; by agent: a X min, b Y min` only when it exists; the table and non-pool output are unchanged. `forgedock stats --pool` (`bin/stats/pool.mjs`) aggregates `by_agent` from local batch `report.json` rows (latest row per issue); see `docs/STATS.md`.
+
+## Entry 2026-10-25 — Tool state never rides a lane branch (#4590)
+
+`toolstate.mjs` holds the deny-list (`.forge-lean/`, `.eslintcache`, `*.tsbuildinfo`, and `next-env.d.ts` when the repo's `.gitignore` ignores it). `gitPush` (`lean.mjs`) first runs `untrackToolState`: files the branch ADDED against the merge base are `git rm --cached` and committed (`TOOLSTATE_UNTRACKED`); files the base tracks are never touched. `checkpoint` unstages deny-listed paths after `add -A`. Salvage still force-adds `.forge-lean` to its private ref. `forgedock init` appends the missing deny-list lines to `.gitignore`.
