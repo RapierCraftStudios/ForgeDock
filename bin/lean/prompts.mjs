@@ -244,6 +244,18 @@ export function enumeratingPlanNote(list) {
   return `\n\nEnumerating tests (found by the engine): these tests list every member of a module or directory this issue names, so a new export, table, job, action, namespace or file there must join their list or CI goes red. List each one you will touch under Affected Files in ${INVESTIGATION_FILE}, and add a validate command that runs only those tests.\n${list.slice(0, 40).map((e) => `- ${e.module} -> ${e.test}:${e.line} (${e.why})`).join("\n")}`;
 }
 
+/** #4585: the repo's verify.invariants as a checklist for the plan; "" when none. */
+export function invariantsPlanNote(list) {
+  if (!Array.isArray(list) || !list.length) return "";
+  return `\n\nRepo-wide invariants (verify.invariants): these commands run before every push whichever tests you choose, and each lists every table, export, key, namespace or file of its kind. A new one needs an entry in every such registry (e.g. registry, export, purge order, seeder, translation status, boundary or placeholder lists). Name each registry you will touch under Affected Files in ${INVESTIGATION_FILE}.\n${list.slice(0, 20).map((c) => `- \`${c}\``).join("\n")}`;
+}
+
+/** #4585: the builder rule for verify.invariants; "" when none. */
+export function invariantsBuildRule(list) {
+  if (!Array.isArray(list) || !list.length) return "";
+  return `\n\nInvariants checklist: for each new table, export, key, namespace, page or file, add its entry to every registry or coverage list that enumerates its kind (e.g. a new table needs registry, export, purge and seeder entries; a new i18n key needs every locale). Then run each command below and fix any failure before you finish.\n${list.slice(0, 20).map((c) => `- \`${c}\``).join("\n")}`;
+}
+
 const NOT_MEMBER = `or, when the symbol is not a member of that list, record {"symbol":"<name>","test":"<test path>","why":"<why it is not a member>"} in ${RESULT_FILE} "not_members"`;
 
 /** #4322: the builder rule citing the plan's enumerating tests; "" when none. */
