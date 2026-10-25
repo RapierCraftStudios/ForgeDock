@@ -90,6 +90,7 @@ describe("review-staging flow", () => {
     assert.deepEqual(comments(w), [`<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${HEAD.slice(0, 7)} -->`]);
     assert.equal(w.files[`${SD}/staging_pr_number.rk`], "42\n");
     assert.equal(w.files[`${SD}/42_launched_review_agents`], "");
+    assert.equal(w.files[`${SD}/42_launched_review_agents.head`], `${HEAD}\n`);
     assert.deepEqual(w.scripts.map((s) => s.sub && s.script === "review-staging-pre.sh" ? s.sub : s.script), ["bundle", "gate", "scope", "review-prepare.sh"]);
     const prep = w.scripts.find((s) => s.script === "review-prepare.sh").args;
     for (const f of ["--no-delta", "--build-gate", "advisory", "--out", CTX]) assert.ok(prep.includes(f), f);

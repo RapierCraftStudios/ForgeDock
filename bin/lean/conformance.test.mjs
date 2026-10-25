@@ -73,6 +73,9 @@ describe("#4574 amendment slips", () => {
     assert.match(a.problems[0], /unknown kind 'rewrite'; valid kinds are add-deliverable, add-requirement, defer, post-deploy/);
     assert.ok(a.problems[0].includes(why));
   });
+  it("an Object.prototype key as kind is an unknown kind, not a slip", () => {
+    assert.match(applyAmendments(C, [{ kind: "constructor", why: "w" }]).problems[0], /unknown kind 'constructor'; valid kinds are add-deliverable/);
+  });
   it("an incomplete known kind names the missing field", () => {
     assert.match(applyAmendments(C, [{ kind: "defer", why: "w" }]).problems[0], /'defer' needs requirement/);
   });

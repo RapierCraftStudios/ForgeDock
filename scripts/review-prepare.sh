@@ -474,10 +474,14 @@ if [ -n "$DELTA_FROM_OPT" ]; then
         # block, or a # PR Review Summary whose Agents count matches) and no degraded marker after its first agent body.
         _dv="error"
         # forge#4573: a panel that delivered every launched domain at <from> but was never finalized (the head moved) is complete too.
-        # The launched list is the PR-keyed file the dispatch persisted; empty or unreadable means no such proof.
+        # The launched list is the PR-keyed file the dispatch persisted; empty or unreadable means no such proof. It counts only when
+        # its .head sidecar names <from>: a later dispatch at another head rewrites the list, so it no longer describes the panel at <from>.
         _dlf="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/${PR_NUMBER}_launched_review_agents"
-        _dl=$(grep -E '^[a-z0-9-]+$' "$_dlf" 2>/dev/null | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))' 2>/dev/null) || _dl="[]"
-        [ -n "$_dl" ] || _dl="[]"
+        _dl="[]"
+        if [ "$(sed -n 1p "${_dlf}.head" 2>/dev/null)" = "$DELTA_FROM_OPT" ]; then
+            _dl=$(grep -E '^[a-z0-9-]+$' "$_dlf" 2>/dev/null | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))' 2>/dev/null) || _dl="[]"
+            [ -n "$_dl" ] || _dl="[]"
+        fi
         if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$COMMENTS_JSON" ]; then
             _db=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->|^<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->|# PR Review Summary|^<!-- FORGE:GATE_(PASS|FAILURE) -->|<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity|<!-- FORGE:REVIEW_DEGRADED|<!-- FORGE:REVIEW_BLOCKED' 2>/dev/null) \
                 && _dv=$(printf '%s\n' "$_db" | jq -s -r --arg f "$DELTA_FROM_OPT" --argjson L "$_dl" '

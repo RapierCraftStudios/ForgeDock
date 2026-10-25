@@ -754,6 +754,22 @@ mkfind K-1 CONFIRMED HIGH c.py 5 "DCO exemption only on staging"; putfind 1
 jq '.findings |= map(. + {class: "ISSUE", disposition: "ISSUE x"})' "$WORK/out/findings.json" > "$WORK/out/classified.json"
 run "$GOOD" file-prepare
 want "delta mode: closed own issue is resolved by that issue" '.items[0] | [.action, (.dedup_of | tostring), (.regression_of | tostring)] | join(",")' worklist.json "skip-resolved,61,null"
+# a closed finding of ANOTHER PR at the same location is no proof this finding was fixed: it stays a regression and blocks
+fp_setup; mkctx 1 DELTA "$OLD_SHA" 12
+echo '[]' > "$FIX/issues-open.json"
+echo '[{"number":62,"title":"fix: unrelated old defect (review finding — PR #3)","body":"see c.py:7"}]' > "$FIX/issues-closed.json"
+mkfind K-3 CONFIRMED HIGH c.py 5 "Brand new defect"; putfind 1
+jq '.findings |= map(. + {class: "ISSUE", disposition: "ISSUE x"})' "$WORK/out/findings.json" > "$WORK/out/classified.json"
+run "$GOOD" file-prepare
+want "delta mode: another PR's closed issue is a regression, never resolved" '.items[0] | [.action, (.regression_of | tostring)] | join(",")' worklist.json "file,62"
+# a **Source**: PR #N line marks the issue as this PR's own
+fp_setup; mkctx 1 DELTA "$OLD_SHA" 12
+echo '[]' > "$FIX/issues-open.json"
+printf '[{"number":63,"title":"fix: renamed title","body":"**Source**: PR #7 — x\\nsee c.py:5"}]' > "$FIX/issues-closed.json"
+mkfind K-4 CONFIRMED HIGH c.py 5 "Renamed defect"; putfind 1
+jq '.findings |= map(. + {class: "ISSUE", disposition: "ISSUE x"})' "$WORK/out/findings.json" > "$WORK/out/classified.json"
+run "$GOOD" file-prepare
+want "delta mode: Source line marks own closed issue" '.items[0] | [.action, (.dedup_of | tostring)] | join(",")' worklist.json "skip-resolved,63"
 # the dedup helper receives the title without the shared suffix
 DEDUP_LOG="$WORK/dedup-args"; : > "$DEDUP_LOG"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$1" >> "%s"\nexit 0\n' "$DEDUP_LOG" > "$GOOD/scripts/issue-dedup.sh"
