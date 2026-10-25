@@ -1621,7 +1621,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line).
     assert.ok(approxTokens(plan) <= 1900, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1500);
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1550); // 1550: #4591 (never hand-name migration files, one rule line)
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
