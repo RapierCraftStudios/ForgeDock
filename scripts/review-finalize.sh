@@ -942,10 +942,12 @@ do_file_prepare() {
         # Title (defense in depth: strip command substitution so the raw title stays readable if it round-trips through an eval-based consumer).
         ISSUE_TITLE="fix: ${F_TITLE} (review finding — PR #${PR_NUMBER})"
         ISSUE_TITLE=$(printf '%s' "$ISSUE_TITLE" | tr '\t\n`' "  '" | sed 's/\$(/$ (/g')
+        # The title is passed WITHOUT the constant "(review finding — PR #N)" suffix: its tokens (review, finding, the PR number) would make
+        # any two findings of one PR a >=3-token match and map a finding to its neighbour's issue (#4569).
         # Step 0: deterministic title dedup (scripts/issue-dedup.sh; also excludes the issue this PR fixes: it is about to be closed, so a
         # finding matched to it is tracked nowhere). Unresolved helper: "not deduped"; NEVER exit 1 (which means "duplicate, skip").
         if [ -n "$DEDUP_SCRIPT" ]; then
-            DEDUP_RESULT=$(bash "$DEDUP_SCRIPT" "$ISSUE_TITLE" "-R $REPO" ${MERGE_ISSUE:+--exclude "$MERGE_ISSUE"} 2>&1); DEDUP_EXIT=$?
+            DEDUP_RESULT=$(bash "$DEDUP_SCRIPT" "fix: ${F_TITLE}" "-R $REPO" ${MERGE_ISSUE:+--exclude "$MERGE_ISSUE"} 2>&1); DEDUP_EXIT=$?
         else
             DEDUP_RESULT=""; DEDUP_EXIT=0
         fi
@@ -965,6 +967,11 @@ do_file_prepare() {
             else
                 # A CLOSED review-finding at the same location +-5 lines is a regression: create with a warning and elevate to priority:P1.
                 [ -n "$F_FILE" ] && REGRESSION=$(line_match "$CLOSED_JSON" "$F_FILE" "$F_LINE" "$F_TITLE" 0)
+                if [ -n "$REGRESSION" ] && [ "$REVIEW_MODE" = "DELTA" ]; then
+                    # DELTA: the earlier pass's finding is credited and its own issue is closed (fixed): resolved, never re-filed (#4569).
+                    ACTION="skip-resolved"; DEDUP_OF="$REGRESSION"; REGRESSION=""
+                    echo "RESOLVED: ${F_FILE}:${F_LINE} was fixed in closed issue #${DEDUP_OF} (delta pass)"
+                fi
                 [ -z "$REGRESSION" ] || echo "REGRESSION: Previously fixed in #${REGRESSION} — elevating priority"
             fi
         fi

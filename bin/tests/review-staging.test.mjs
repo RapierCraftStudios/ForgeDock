@@ -403,6 +403,27 @@ describe("review-staging --summary", () => {
     });
   }
 
+  it("a CONFIRMED HIGH whose filed issue is closed does not block; the summary lists it as resolved (#4569)", async () => {
+    const w = await finalized({
+      findings: [{ id: "INFRA-1", severity: "HIGH", confidence: "CONFIRMED", title: "DCO exemption only on staging" }],
+      items: [{ id: "INFRA-1", action: "skip-resolved", title: "dco", dedup_of: 4564 }],
+    });
+    assert.equal(await reviewStagingFromCli(["--summary"], w.io), 0, w.err.join("\n"));
+    const b = posted(w)[0];
+    assert.ok(b.startsWith("<!-- FORGE:GATE_PASS -->\n"));
+    assert.match(b, /\| Findings \| 0 CRITICAL \/ 0 HIGH/);
+    assert.match(b, /resolved \(excluded from the verdict\): HIGH INFRA-1 DCO exemption only on staging \(closed #4564\)/);
+  });
+
+  it("an open CONFIRMED HIGH still blocks next to a resolved one (#4569)", async () => {
+    const w = await finalized({
+      findings: [{ id: "A-1", severity: "HIGH", confidence: "CONFIRMED", title: "fixed" }, { id: "A-2", severity: "HIGH", confidence: "CONFIRMED", title: "open" }],
+      items: [{ id: "A-1", action: "skip-resolved", dedup_of: 4564 }, { id: "A-2", action: "skip-dedup", dedup_of: 4565 }],
+    });
+    assert.equal(await reviewStagingFromCli(["--summary"], w.io), 1);
+    assert.match(posted(w)[0], /Staging Review: NEEDS FIXES FIRST[\s\S]*1 CONFIRMED HIGH/);
+  });
+
   it("a LIKELY HIGH does not block; a deleted test-gate verdict fails closed", async () => {
     const w = await finalized({ findings: [{ severity: "HIGH", confidence: "LIKELY" }] });
     assert.equal(await reviewStagingFromCli(["--summary"], w.io), 0, w.err.join("\n"));

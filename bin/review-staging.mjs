@@ -405,7 +405,11 @@ async function finalize(a, io) {
   if (!/^[A-Za-z0-9._/-]+$/.test(codeBranch)) codeBranch = c.stagingBranch;
 
   const findings = readJson(io, join(outDir, "findings.json"))?.findings ?? [];
-  const confirmed = (sev) => findings.filter((f) => upper(f.confidence) === "CONFIRMED" && upper(f.severity) === sev).length;
+  // A finding whose own filed issue is already closed (file-prepare: skip-resolved, delta pass) is resolved: it never blocks (#4569).
+  const resolvedBy = new Map(worklist.items.filter((i) => i.action === "skip-resolved").map((i) => [i.id, i.dedup_of]));
+  const resolved = findings.filter((f) => resolvedBy.has(f.id) && upper(f.confidence) === "CONFIRMED" && ["CRITICAL", "HIGH"].includes(upper(f.severity)))
+    .map((f) => ({ id: f.id, severity: upper(f.severity), title: f.title ?? "", issue: resolvedBy.get(f.id) }));
+  const confirmed = (sev) => findings.filter((f) => !resolvedBy.has(f.id) && upper(f.confidence) === "CONFIRMED" && upper(f.severity) === sev).length;
   const outOfScope = Number(/out_of_scope=(\d+)/.exec(readText(io, join(outDir, "note-disposition.md")) ?? "")?.[1] ?? 0);
   const counts = {
     findings_kept: Number(x.FINDINGS_KEPT ?? 0), findings_dropped_stale: Number(x.FINDINGS_DROPPED_STALE ?? 0), findings_preexisting: Number(x.FINDINGS_PREEXISTING ?? 0),
@@ -415,7 +419,7 @@ async function finalize(a, io) {
   const items = worklist.items;
   const state = {
     pr, head, bundle, codeBranch, scopeMode, delta, testGate: { verdict: tg.verdict, reason: tg.reason }, counts, notes,
-    confirmedCritical: confirmed("CRITICAL"), confirmedHigh: confirmed("HIGH"),
+    confirmedCritical: confirmed("CRITICAL"), confirmedHigh: confirmed("HIGH"), resolved,
     toFile: items.filter((i) => i.action === "file"), skipped: items.filter((i) => String(i.action).startsWith("skip-")),
   };
   io.writeFile(join(sd, `${pr}_finalize.json`), JSON.stringify(state));
@@ -500,6 +504,7 @@ async function summary(a, io) {
     `- findings_kept: ${n.findings_kept ?? 0}; dropped_stale: ${n.findings_dropped_stale ?? 0}; pre-existing: ${n.findings_preexisting ?? 0}; notes_demoted_no_scenario: ${n.notes_demoted_no_scenario ?? 0}`,
     `- findings_filed: ${n.findings_filed ?? 0}${filed.length ? ` (${filed.join(", ")})` : ""}; out_of_scope: ${n.out_of_scope ?? 0}`,
     `- notes_fixed: 0; notes_listed: ${n.notes_listed ?? 0}; notes_dropped: ${n.notes_dropped ?? 0}; notes_capped: ${n.notes_capped ?? 0}; notes_reflag: ${n.notes_reflag ?? 0}`,
+    `- resolved (excluded from the verdict): ${(st.resolved ?? []).length ? st.resolved.map((r) => `${r.severity} ${r.id} ${r.title} (closed #${r.issue})`.replace(/\s+/g, " ")).join("; ") : "(none)"}`,
     `- deduped: ${deduped.length ? deduped.join("; ") : "(none)"}`,
     ...(st.delta?.from ? [`- delta pass: ${String(st.delta.from).slice(0, 7)}..${head.slice(0, 7)} (${(st.delta.files ?? []).length} file(s)); earlier pass at ${st.delta.from} credited (its findings re-read by extract)`] : []),
     "",
