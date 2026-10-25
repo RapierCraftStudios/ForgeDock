@@ -17,7 +17,7 @@ import { makeHeavyIo } from "./heavy.mjs";
 import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
-import { sequenceCollisions, snapshotLane, verifyRenumber, renumberLane, resolveSequenceConflicts } from "./sequence.mjs";
+import { sequenceCollisions, snapshotLane, verifyRenumber, renumberLane, resolveSequenceConflicts, generatorProblems } from "./sequence.mjs";
 import { duplicateExports } from "./postmerge.mjs";
 import { scopedChecks } from "./checks.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
@@ -373,6 +373,8 @@ export function makeLeanIo({ repo }) {
     sequenceRenumber: ({ cwd, base, laneRef, regenerate, reserve }) => renumberLane({ git: (a) => run("git")(a, { cwd }), base, cwd, laneRef, regenerate, reserve }),
     sequenceResolve: ({ cwd, files }) => resolveSequenceConflicts({ git: (a) => run("git")(a, { cwd }), files }),
     sequenceLease: makeSequenceLeaseIo(),
+    /** #4591: lane-added migrations the repo's generator did not produce (no journal entry or snapshot); [] on failure. */
+    migrationGenerator: ({ cwd, base }) => generatorProblems({ git: (a) => run("git")(a, { cwd }), base }),
     /** #4406: the lane's scoped checks after a base merge (bin/lean/checks.mjs; [] on failure), and same-app duplicate exports (bin/lean/postmerge.mjs). */
     postMergeChecks: async ({ cwd, base }) => { try { return scopedChecks({ repo: cwd, base }); } catch { return []; } },
     duplicateExports: ({ cwd, base }) => duplicateExports({ git: (a) => run("git")(a, { cwd }), cwd, base }),

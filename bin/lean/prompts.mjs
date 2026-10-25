@@ -63,6 +63,12 @@ export function duplicateExportsPrompt(findings, mode = "local") {
   return `This change exports names that another module of the same app or package already exports:\n${rows}\n\nRename the new export or reuse the existing one, and update every reference and any registry, map or test keyed by the name (same-named entries collide or leave one unprobed). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
+/** #4591: lane-added migrations the repo's generator did not produce. */
+export function migrationGeneratorPrompt(problems, mode = "local") {
+  const rows = problems.slice(0, 30).map((p) => `- ${p}`).join("\n");
+  return `These migration files were named by hand, not produced by the repo's migration generator:\n${rows}\n\nA made-up name or timestamp collides with another lane's migration. Delete each such file, then recreate it with the generator (hand-written SQL: the generator's \`--custom\` mode, e.g. \`drizzle-kit generate --custom --name=<name>\`, then put your SQL in the file it wrote), so the journal entry and snapshot come from it. Never name or number migration files by hand. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
 /** #4390: byte cap of the diff hunks a context-ceiling restart carries (the stat is always kept). */
 export const RESTART_DIFF_MAX_BYTES = 40 * 1024;
 
@@ -176,6 +182,7 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: an issue requirement the contract missed.
 - {"kind":"defer|post-deploy","requirement":"R#","why":""}: a contracted requirement that becomes separate work or a post-deploy check. The engine files it as a tracked follow-up. Not "type"; other kinds are rejected.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
+Never name or number migration files by hand: create every migration with the repo's own generator (\`drizzle-kit generate --custom\` for hand-written SQL); the engine rejects migrations without the generator's journal entry and snapshot.
 A new dependency between workspace packages in a package.json that no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
 If the repository has scripts/check-devdocs-freshness.sh, a behaviour change under the paths it checks must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change. Run it against the base before writing the result; the engine runs it too.
 

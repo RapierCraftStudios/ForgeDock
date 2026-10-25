@@ -5082,6 +5082,23 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.equal(builders(w).length, 2);
   });
 
+  const HAND = ["db/2026_x.sql: not produced by the migration generator (no journal entry added for it)"];
+  it("#4591 a hand-named migration resumes the builder once with the generator rule; a remainder is an anomaly; clean costs no round", async () => {
+    const w = hworld(); const d = [HAND, []];
+    w.io.migrationGenerator = async (x) => { w.genArgs = x; return d.length > 1 ? d.shift() : d[0]; };
+    assert.equal((await run(w)).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3);
+    assert.match(b[2][4], /db\/2026_x\.sql[\s\S]*Never name or number migration files by hand/);
+    assert.equal(w.genArgs.cwd, WT);
+    const w2 = hworld(); w2.io.migrationGenerator = async () => HAND;
+    assert.equal((await run(w2)).terminalReason, "merged");
+    assert.match(traj(w2)[0], /Hand-named migration\(s\) remain \(hand-off\)/);
+    const w3 = hworld(); w3.io.migrationGenerator = async () => [];
+    await run(w3);
+    assert.equal(builders(w3).length, 2);
+  });
+
   it("no enumerating tests and no collisions: no new plan step, no extra builder call (prompts unchanged)", async () => {
     const w = hworld();
     assert.equal((await run(w)).terminalReason, "merged");
