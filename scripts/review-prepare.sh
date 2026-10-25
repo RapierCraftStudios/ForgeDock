@@ -599,7 +599,9 @@ if [ "$REVIEW_MODE" != "BASE_SYNC_ONLY" ]; then
         # Publish atomically: temp file in $OUT_DIR (same filesystem) then rename, so a concurrent reader sees nothing or the whole file.
         tmp=$(mktemp "$OUT_DIR/.slice-XXXXXX") || { echo "review-prepare: cannot create temp slice in $OUT_DIR" >&2; exit 2; }
         if printf '%s\n' "$body" > "$tmp" && chmod 644 "$tmp"; then mv -f "$tmp" "$df"; else rm -f "$tmp"; echo "review-prepare: cannot write slice $df" >&2; exit 2; fi
-        SLICES_JSON=$(printf '%s' "$SLICES_JSON" | jq -c --arg d "$dom" --arg df "$df" --arg p "$paths" '. + {($d): {paths: ($p | split("\n") | map(select(length > 0))), diff_file: $df}}')
+        # paths can exceed the 128 KiB per-argument limit on a huge PR: pass it as a file, not argv
+        printf '%s' "$paths" > "$TMP_DIR/slice-paths" || { echo "review-prepare: cannot write $TMP_DIR/slice-paths" >&2; exit 2; }
+        SLICES_JSON=$(printf '%s' "$SLICES_JSON" | jq -c --arg d "$dom" --arg df "$df" --rawfile p "$TMP_DIR/slice-paths" '. + {($d): {paths: ($p | split("\n") | map(select(length > 0))), diff_file: $df}}')
     }
     slice security ALL ALL
     slice auth '^diff --git.*/(auth|session|jwt|oauth|permission|middleware|login|token)' "auth|session|login|logout|jwt|oauth|token|user|permission|middleware"
@@ -617,43 +619,55 @@ fi
 STATUS="OK"; [ -n "$BLOCKERS" ] && STATUS="BLOCKED"
 j_lines() { printf '%s' "${1}" | jq -R -s -c 'split("\n") | map(select(length > 0))'; }
 j_words() { printf '%s' "${1}" | jq -R -s -c 'split(" ") | map(select(length > 0))'; }
+# Everything that scales with the PR goes to the final jq through a file (--slurpfile/--rawfile): argv caps one argument at 128 KiB.
+jf_lines() { j_lines "$2" > "$TMP_DIR/$1.json"; }
+jf_words() { j_words "$2" > "$TMP_DIR/$1.json"; }
+jf_raw() { printf '%s' "$2" > "$TMP_DIR/$1.txt"; }
+{ jf_lines blockers "$BLOCKERS" && jf_lines p2 "$P2_FINDINGS" && jf_lines asm "$ASSUMPTIONS" && jf_lines dfiles "$DELTA_FILES" && jf_lines full_files "$FILES" \
+    && printf '%s' "$SLICES_JSON" > "$TMP_DIR/slices.json" \
+    && jf_raw churn "$CHURN_CONTEXT" && jf_raw pctx "$PROJECT_CONTEXT" && jf_raw tmono "$MONOLITHIC_CATALOG" \
+    && jf_raw d_auth "$DOMAIN_CONTEXT_AUTH" && jf_raw d_billing "$DOMAIN_CONTEXT_BILLING" && jf_raw d_conc "$DOMAIN_CONTEXT_CONCURRENCY" \
+    && jf_raw d_infra "$DOMAIN_CONTEXT_INFRA" && jf_raw d_db "$DOMAIN_CONTEXT_DATABASE" && jf_raw d_fe "$DOMAIN_CONTEXT_FRONTEND" \
+    && jf_raw d_sec "$DOMAIN_CONTEXT_SECURITY" && jf_raw d_api "$DOMAIN_CONTEXT_API" && jf_raw d_scr "$DOMAIN_CONTEXT_SCRAPING" \
+    && jf_raw i_auth "$IDX_AUTH" && jf_raw i_billing "$IDX_BILLING" && jf_raw i_db "$IDX_DATABASE" && jf_raw i_api "$IDX_API" \
+    && jf_raw i_fe "$IDX_FRONTEND" && jf_raw i_infra "$IDX_INFRA"; } || { echo "review-prepare: cannot write context inputs under $TMP_DIR" >&2; exit 2; }
 CTX=$(jq -n \
-    --arg status "$STATUS" --argjson blockers "$(j_lines "$BLOCKERS")" \
+    --arg status "$STATUS" --slurpfile blockers "$TMP_DIR/blockers.json" \
     --argjson pr_number "$PR_NUMBER" --arg repo "$REPO" --arg title "$TITLE" --arg author "$PR_AUTHOR" --arg head "$HEAD" --arg base "$BASE" \
     --arg sha "$REVIEW_SHA" --arg sha7 "$REVIEW_SHA_SHORT" --argjson adds "$ADDITIONS" --argjson dels "$DELETIONS" --arg nfiles "${NFILES:-}" --arg first "$IS_FIRST_TIME_CONTRIBUTOR" \
     --arg s2m "$IS_STAGING_TO_MAIN" --arg m2s "$IS_MILESTONE_TO_STAGING" --arg rfb "$REQUIRES_FULL_BUILD" --arg thorough "$THOROUGH" \
     --arg mh "$MERGE_HEALTH" --arg mhs "$MERGE_HEALTH_STATE" --argjson mhr "$MERGE_RETRY" \
     --argjson services "$(j_words "$SERVICES")" --argjson domains "$(j_words "$DOMAINS")" \
-    --arg tsb "$TS_BUILD" --arg pyf "$PY_FORMAT" --arg bcs "$BUILD_CONFIG_STATUS" --argjson p2 "$(j_lines "$P2_FINDINGS")" \
-    --argjson asm "$(j_lines "$ASSUMPTIONS")" --argjson risk "$(j_words "$RISK")" --arg churn "$CHURN_CONTEXT" --arg churn_esc "$CHURN_ESCALATION" --arg danger "$DANGER" \
+    --arg tsb "$TS_BUILD" --arg pyf "$PY_FORMAT" --arg bcs "$BUILD_CONFIG_STATUS" --slurpfile p2 "$TMP_DIR/p2.json" \
+    --slurpfile asm "$TMP_DIR/asm.json" --argjson risk "$(j_words "$RISK")" --rawfile churn "$TMP_DIR/churn.txt" --arg churn_esc "$CHURN_ESCALATION" --arg danger "$DANGER" \
     --argjson sa "$SCORE_AUTH" --argjson sb "$SCORE_BILLING" --argjson sc "$SCORE_CONCURRENCY" --argjson sd "$SCORE_DATABASE" --argjson si "$SCORE_INFRA" \
     --argjson ss "$SCORE_SECURITY" --argjson ssc "$SCORE_SCRAPING" --argjson sf "$SCORE_FRONTEND" --argjson sap "$SCORE_API" \
     --arg cissue "$ISSUE_NUM" --arg cflags "$CONTRACT_RISK_FLAGS" \
     --arg rdepth "$REVIEW_DEPTH" --arg rweight "$REVIEW_WEIGHT" --arg rtier "$ROSTER_TIER" --arg rreason "$ROSTER_REASON" --argjson agents "$(j_words "$SELECTED_AGENTS")" \
-    --arg dmode "$REVIEW_MODE" --arg dfrom "$DELTA_FROM" --arg dcarried "$CARRIED_FROM" --argjson drounds "$FULL_ROUNDS" --argjson dfiles "$(j_lines "$DELTA_FILES")" \
-    --arg pname "$PROJECT_NAME" --arg pctx "$PROJECT_CONTEXT" --arg scraping_on "$SCRAPING_ON" --arg rpath "$REPO_PATH" \
-    --arg d_auth "$DOMAIN_CONTEXT_AUTH" --arg d_billing "$DOMAIN_CONTEXT_BILLING" --arg d_conc "$DOMAIN_CONTEXT_CONCURRENCY" --arg d_infra "$DOMAIN_CONTEXT_INFRA" \
-    --arg d_db "$DOMAIN_CONTEXT_DATABASE" --arg d_fe "$DOMAIN_CONTEXT_FRONTEND" --arg d_sec "$DOMAIN_CONTEXT_SECURITY" --arg d_api "$DOMAIN_CONTEXT_API" --arg d_scr "$DOMAIN_CONTEXT_SCRAPING" \
-    --arg tsrc "$TEMPLATE_SOURCE" --arg tbase "$TEMPLATE_BASE" --arg tmono "$MONOLITHIC_CATALOG" \
-    --arg i_auth "$IDX_AUTH" --arg i_billing "$IDX_BILLING" --arg i_db "$IDX_DATABASE" --arg i_api "$IDX_API" --arg i_fe "$IDX_FRONTEND" --arg i_infra "$IDX_INFRA" \
-    --argjson slices "$SLICES_JSON" --argjson full_files "$(j_lines "$FILES")" '
-    {schema_version: 1, status: $status, blockers: $blockers,
+    --arg dmode "$REVIEW_MODE" --arg dfrom "$DELTA_FROM" --arg dcarried "$CARRIED_FROM" --argjson drounds "$FULL_ROUNDS" --slurpfile dfiles "$TMP_DIR/dfiles.json" \
+    --arg pname "$PROJECT_NAME" --rawfile pctx "$TMP_DIR/pctx.txt" --arg scraping_on "$SCRAPING_ON" --arg rpath "$REPO_PATH" \
+    --rawfile d_auth "$TMP_DIR/d_auth.txt" --rawfile d_billing "$TMP_DIR/d_billing.txt" --rawfile d_conc "$TMP_DIR/d_conc.txt" --rawfile d_infra "$TMP_DIR/d_infra.txt" \
+    --rawfile d_db "$TMP_DIR/d_db.txt" --rawfile d_fe "$TMP_DIR/d_fe.txt" --rawfile d_sec "$TMP_DIR/d_sec.txt" --rawfile d_api "$TMP_DIR/d_api.txt" --rawfile d_scr "$TMP_DIR/d_scr.txt" \
+    --arg tsrc "$TEMPLATE_SOURCE" --arg tbase "$TEMPLATE_BASE" --rawfile tmono "$TMP_DIR/tmono.txt" \
+    --rawfile i_auth "$TMP_DIR/i_auth.txt" --rawfile i_billing "$TMP_DIR/i_billing.txt" --rawfile i_db "$TMP_DIR/i_db.txt" --rawfile i_api "$TMP_DIR/i_api.txt" --rawfile i_fe "$TMP_DIR/i_fe.txt" --rawfile i_infra "$TMP_DIR/i_infra.txt" \
+    --slurpfile slices "$TMP_DIR/slices.json" --slurpfile full_files "$TMP_DIR/full_files.json" '
+    {schema_version: 1, status: $status, blockers: $blockers[0],
      pr: {number: $pr_number, repo: $repo, title: $title, author: $author, head_ref: $head, base_ref: $base, review_sha: $sha, review_sha_short: $sha7,
           additions: $adds, deletions: $dels, changed_files: ($nfiles | tonumber? // null), first_time_contributor: ($first == "true")},
      lane: {is_staging_to_main: ($s2m == "true"), is_milestone_to_staging: ($m2s == "true"), requires_full_build: ($rfb == "true"), thorough: ($thorough == "true")},
      merge_health: {mergeable: $mh, state: $mhs, retries: $mhr},
      classification: {services: $services, domains: $domains},
-     phase2: {build_config: {typescript_build: $tsb, python_format: $pyf, status: $bcs}, findings: $p2},
-     broken_assumptions: $asm, risk_signals: $risk, churn_context: $churn, churn_escalation: ($churn_esc == "true"), danger_zone: ($danger == "true"),
+     phase2: {build_config: {typescript_build: $tsb, python_format: $pyf, status: $bcs}, findings: $p2[0]},
+     broken_assumptions: $asm[0], risk_signals: $risk, churn_context: $churn, churn_escalation: ($churn_esc == "true"), danger_zone: ($danger == "true"),
      scores: {AUTH: $sa, BILLING: $sb, CONCURRENCY: $sc, DATABASE: $sd, INFRA: $si, SECURITY: $ss, SCRAPING: $ssc, FRONTEND: $sf, API: $sap},
      contract: {issue: ($cissue | tonumber? // null), flags: $cflags},
      roster: {tier: $rtier, review_depth: $rdepth, review_weight: $rweight, reason: $rreason, agents: $agents},
-     delta: {mode: $dmode, from: $dfrom, carried_from: $dcarried, full_rounds: $drounds, files: $dfiles},
+     delta: {mode: $dmode, from: $dfrom, carried_from: $dcarried, full_rounds: $drounds, files: $dfiles[0]},
      config: {project_name: $pname, project_context: $pctx, scraping_configured: ($scraping_on == "true"), repo_path: $rpath,
               domains: {auth: $d_auth, billing: $d_billing, concurrency: $d_conc, infra: $d_infra, database: $d_db, frontend: $d_fe, security: $d_sec, api: $d_api, scraping: $d_scr}},
      templates: {source: $tsrc, base: $tbase, monolithic_catalog: $tmono},
      index_slices: {auth: $i_auth, billing: $i_billing, database: $i_db, api: $i_api, frontend: $i_fe, infrastructure: $i_infra},
-     slices: $slices, full_files: $full_files}') || { echo "review-prepare: could not assemble the context JSON" >&2; exit 2; }
+     slices: $slices[0], full_files: $full_files[0]}') || { echo "review-prepare: could not assemble the context JSON" >&2; exit 2; }
 if [ -n "$OUT" ]; then printf '%s\n' "$CTX" > "$OUT" || { echo "review-prepare: cannot write $OUT" >&2; exit 2; }; else printf '%s\n' "$CTX"; fi
 [ "$STATUS" = "OK" ] && exit 0
 exit 3
