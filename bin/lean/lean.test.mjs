@@ -129,6 +129,7 @@ function world(o = {}) {
       if (a[0] === "diff" && a[1] === "--numstat") return w.numstat ?? "";
       if (a[0] === "ls-files") return [...new Set(["src/foo.js", "src/bar.js", "test/foo.test.js", ...w.changed])].join("\n");
       if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
+      if (a[0] === "merge-base" && a[1] === "--is-ancestor") { if ((o.shipped ?? []).includes(String(a[2]).replace(/^origin\//, ""))) return ""; throw new Error("not an ancestor"); } // #4593
       if (a[0] === "ls-remote" && String(a.at(-1)).startsWith("refs/heads/")) { const b = a.at(-1).slice("refs/heads/".length); return (o.branchesOnOrigin ?? ["staging", "main"]).includes(b) ? `abc\trefs/heads/${b}\n` : ""; }
       if (a[0] === "ls-remote") return w.remote;
       if (a[0] === "show" && w.baseFiles) { if (!(a[1] in w.baseFiles)) throw new Error(`fatal: path not in ${a[1]}`); return w.baseFiles[a[1]]; }
@@ -3720,6 +3721,28 @@ describe("lane resolution in core work-on (#4125)", () => {
       assert.equal(r.code, code);
       assert.equal(w.merges.length, 0); assert.equal(w.prs.length, 0);
       assert.equal(builders(w).length, 0);
+    }
+  });
+});
+
+describe("shipped lane follows the open PR base (#4593)", () => {
+  const pr = (base) => [{ number: 77, headRefOid: "aaaa1111aaaa1111", baseRefName: base }];
+  const go = (o) => run(world({ milestone: "Old", branchesOnOrigin: ["staging", "milestone/old", "milestone/new"], remote: "abc\trefs/heads/feat/issue-7-lean", ...o }), { lane: undefined });
+  it("proceeds on the PR base when the issue's lane is shipped", async () => {
+    const w = world({ milestone: "Old", branchesOnOrigin: ["staging", "milestone/old", "milestone/new"], shipped: ["milestone/old"], prList: pr("milestone/new"), remote: "abc\trefs/heads/feat/issue-7-lean" });
+    const r = await run(w, { lane: undefined });
+    assert.notEqual(r.terminalReason, "needs-human");
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c.includes("origin/milestone/new..refs/heads/feat/issue-7-lean")), "work is compared against the PR base");
+  });
+  it("stays needs-human when the lane is not shipped, the base is shipped, missing, or the default branch", async () => {
+    for (const [o, code] of [
+      [{ prList: pr("milestone/new") }, "lane.mismatch"],
+      [{ shipped: ["milestone/old", "milestone/new"], prList: pr("milestone/new") }, "lane.mismatch"],
+      [{ shipped: ["milestone/old"], prList: pr("milestone/gone") }, "lane.mismatch"],
+      [{ shipped: ["milestone/old"], prList: pr("main") }, "lane.default_branch"]]) {
+      const r = await go(o);
+      assert.deepEqual([r.terminalReason, r.code], ["needs-human", code], JSON.stringify(o));
     }
   });
 });
