@@ -129,7 +129,7 @@ node "$FD_ROOT/bin/forgedock.mjs" review-staging ${PR_ARG_NUM:+"$PR_ARG_NUM"} ${
 
 Exit 0 prints the manifest. `REVIEW_STAGING: PR #N head <sha>` gives the PR number and the full head SHA. `BUNDLE_PRS:` lists the bundle member PRs. `SCOPE_MODE=` gives the 0B.1 mode. `ROSTER:` gives the tier and reason (record them in the final summary). `CONTEXT_FILE=` names the 0C context. There is one `DISPATCH <domain> <brief file>` line per roster domain. Exit 1 is a stop: the gate printed `RESULT: BLOCK DEPLOY` (report the blocking finding list), or a `REVIEW_RESULT: status: BLOCKED` line names the blocker. Report it and do not continue. A PR with no gate comment at all indicates a gate bypass, not a clean pass.
 
-**Delta pass** (forge#4360): after a fix lands on staging mid-review, re-run with `--delta <previous full head SHA>`. Only that range is reviewed, by the domains it touches (a `DELTA:` manifest line), and the earlier pass is credited. Dispatch only the DISPATCH lines.
+**Delta pass** (forge#4360): after a fix lands on staging mid-review, re-run with `--delta <previous full head SHA>`. Only that range is reviewed, by the domains it touches (a `DELTA:` manifest line), and the earlier pass is credited. The earlier pass counts as complete when it was finalized, or when every launched domain (the PR-keyed launched-agent file) delivered findings at that head with no degraded marker (forge#4573). Dispatch only the DISPATCH lines.
 
 ---
 

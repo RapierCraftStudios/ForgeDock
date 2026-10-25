@@ -107,6 +107,15 @@ describe("review-staging flow", () => {
     assert.ok(w.files[`${SD}/review-staging-42/brief-infra.md`].startsWith("PROTO 42\n\n---\n\nINFRA infra ctx idx churn Proj"));
   });
 
+  it("references a large diff slice by file instead of inlining it, keeping the brief bounded (#4573)", async () => {
+    const big = "+ line of a very large diff\n".repeat(5000);
+    const w = world({ files: { "/slice-security.diff": big } });
+    assert.equal(await reviewStagingFromCli(["42"], w.io), 0, w.err.join("\n"));
+    const sec = w.files[`${SD}/review-staging-42/brief-security.md`];
+    assert.ok(sec.includes("slice=(diff slice too large to inline") && sec.includes("/slice-security.diff"));
+    assert.ok(!sec.includes("very large diff") && sec.length < 4000, `brief is ${sec.length} chars`);
+  });
+
   it("resolves the open staging->main PR when none is given and carries prior findings on re-entry", async () => {
     const w = world({ priorRoutes: "1\n0\n" });
     assert.equal(await reviewStagingFromCli([], w.io), 0, w.err.join("\n"));

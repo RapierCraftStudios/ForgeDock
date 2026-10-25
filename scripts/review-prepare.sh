@@ -473,9 +473,14 @@ if [ -n "$DELTA_FROM_OPT" ]; then
         # an agent body with a findings block for <from>, a post-panel-guard proof naming <from> (staging summary, synthesized
         # block, or a # PR Review Summary whose Agents count matches) and no degraded marker after its first agent body.
         _dv="error"
+        # forge#4573: a panel that delivered every launched domain at <from> but was never finalized (the head moved) is complete too.
+        # The launched list is the PR-keyed file the dispatch persisted; empty or unreadable means no such proof.
+        _dlf="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/${PR_NUMBER}_launched_review_agents"
+        _dl=$(grep -E '^[a-z0-9-]+$' "$_dlf" 2>/dev/null | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))' 2>/dev/null) || _dl="[]"
+        [ -n "$_dl" ] || _dl="[]"
         if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$COMMENTS_JSON" ]; then
             _db=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->|^<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->|# PR Review Summary|^<!-- FORGE:GATE_(PASS|FAILURE) -->|<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity|<!-- FORGE:REVIEW_DEGRADED|<!-- FORGE:REVIEW_BLOCKED' 2>/dev/null) \
-                && _dv=$(printf '%s\n' "$_db" | jq -s -r --arg f "$DELTA_FROM_OPT" '
+                && _dv=$(printf '%s\n' "$_db" | jq -s -r --arg f "$DELTA_FROM_OPT" --argjson L "$_dl" '
                     def shas($t; $re): [ $t | scan($re) | .[0] ];
                     def one($a): if ($a | length) == 1 then $a[0] else null end;
                     def rsha: "(?:^|\\n)Reviewed-SHA: ([0-9a-f]{40}|[0-9a-f]{64})\\r?(?:\\n|$)";
@@ -494,13 +499,15 @@ if [ -n "$DELTA_FROM_OPT" ]; then
                                 and one(shas($t; "\\*\\*Agents\\*\\*: ([0-9]+)")) == ($nd | tostring))) ] | length) as $proof
                         | ([ $E[] | select(.key > $first)
                              | select(.value | test("<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity|<!-- FORGE:REVIEW_DEGRADED|<!-- FORGE:REVIEW_BLOCKED")) ] | length) as $deg
-                        | if $deg > 0 then "degraded" elif $proof == 0 then "no-proof" else "ok" end
+                        | if $deg > 0 then "degraded" elif $proof > 0 then "ok"
+                          elif ($L | length) > 0 and ([ $L[] | . as $d | select($AG | any(.d == $d)) ] | length) == ($L | length) then "ok"
+                          else "no-proof" end
                       end' 2>/dev/null) || _dv="error"
         fi
         case "$_dv" in
             ok) REVIEW_MODE="DELTA"; DELTA_FROM="$DELTA_FROM_OPT" ;;
             no-agent) block "--delta-from ${DELTA_FROM_OPT}: no trusted FORGE:REVIEW-AGENT comment with a findings block for that head, no earlier pass to credit: run a full review" ;;
-            no-proof) block "--delta-from ${DELTA_FROM_OPT}: no trusted proof that the earlier panel completed (staging summary, synthesized block or PR Review Summary for that head): run a full review" ;;
+            no-proof) block "--delta-from ${DELTA_FROM_OPT}: no trusted proof that the earlier panel completed (staging summary, synthesized block or PR Review Summary for that head, nor every launched domain delivered at it): run a full review" ;;
             degraded) block "--delta-from ${DELTA_FROM_OPT}: the earlier pass is degraded (review-panel-integrity / REVIEW_DEGRADED / REVIEW_BLOCKED after its agents): run a full review" ;;
             *) block "--delta-from ${DELTA_FROM_OPT}: could not read the trusted review comments, no earlier pass to credit: run a full review" ;;
         esac
@@ -587,15 +594,25 @@ if [ "$REVIEW_MODE" != "BASE_SYNC_ONLY" ]; then
     # slice <domain> <diff-header regex|ALL> <file-path regex|ALL>
     slice() {
         local dom="$1" dre="$2" fre="$3" body paths tmp df="$OUT_DIR/slice-${REVIEW_SHA_SHORT:-unresolved}-$1.diff"
-        if [ "$dre" = "ALL" ]; then body="$FULL_DIFF"
-        else
-            body=$(printf '%s\n' "$FULL_DIFF" | awk -v re="$dre" '/^diff --git/ { in_block=0 } $0 ~ re { in_block=1 } in_block { print }')
-            [ -n "$body" ] || body="$FULL_DIFF"
-        fi
+        # forge#4573: whole `diff --git` blocks only. A block over the per-file cap, or one that would push the slice over the total
+        # cap, is listed as omitted (never cut mid-file). No fallback to the full diff: an unmatched domain gets a note, not a copy.
+        # The security slice (ALL) lists .github/ blocks last so CI files cannot crowd out source.
+        body=$(printf '%s\n' "$FULL_DIFF" | awk -v re="$dre" -v cap="${REVIEW_SLICE_CAP:-102400}" -v fcap="${REVIEW_SLICE_FILE_CAP:-20000}" '
+            /^diff --git/ { n++; hdr[n] = $0; blk[n] = "" }
+            n { blk[n] = blk[n] $0 "\n" }
+            END {
+                for (pass = 1; pass <= 2; pass++) for (i = 1; i <= n; i++) {
+                    ci = (hdr[i] ~ /^diff --git a\/\.github\//) ? 2 : 1
+                    if (re == "ALL" ? ci != pass : (pass == 2 || hdr[i] !~ re)) continue
+                    l = length(blk[i])
+                    if (l > fcap || used + l > cap) { split(hdr[i], h, " "); om = om "# OMITTED (too large for this slice, read it from the head checkout): " substr(h[3], 3) "\n"; continue }
+                    out = out blk[i]; used += l
+                }
+                printf "%s%s", om, out
+            }')
+        [ -n "$body" ] || body="# No diff blocks for this domain in the review range."
         if [ "$fre" = "ALL" ]; then paths="$SLICE_FILES_SRC"
-        else paths=$(printf '%s\n' "$SLICE_FILES_SRC" | grep -iE "$fre" || echo ""); [ -n "$paths" ] || paths="$SLICE_FILES_SRC"; fi
-        # 100K-char cap, same as the runner's tool-result cap
-        if [ "${#body}" -gt 102400 ]; then body="$(printf '%s' "$body" | head -c 102400)"$'\n'"... [TRUNCATED — diff exceeded 100K chars; focus on the files listed]"; fi
+        else paths=$(printf '%s\n' "$SLICE_FILES_SRC" | grep -iE "$fre" || echo ""); fi
         # Publish atomically: temp file in $OUT_DIR (same filesystem) then rename, so a concurrent reader sees nothing or the whole file.
         tmp=$(mktemp "$OUT_DIR/.slice-XXXXXX") || { echo "review-prepare: cannot create temp slice in $OUT_DIR" >&2; exit 2; }
         if printf '%s\n' "$body" > "$tmp" && chmod 644 "$tmp"; then mv -f "$tmp" "$df"; else rm -f "$tmp"; echo "review-prepare: cannot write slice $df" >&2; exit 2; fi
