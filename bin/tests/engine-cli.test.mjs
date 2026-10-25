@@ -993,6 +993,18 @@ describe("readVerify invariants (#4585)", () => {
   });
 });
 
+describe("readVerify flaky (#4614)", () => {
+  it("reads verify.flaky as a block list, a flow list or a comma string", () => {
+    const d = tmpDir("flaky-yaml-");
+    writeFileSync(join(d, "forge.yaml"), ["verify:", "  mode: ci", "  flaky:", "    - a-test", '    - "b test"', "  max_rounds: 1", ""].join("\n"));
+    assert.deepEqual(readVerify(d).flaky, ["a-test", "b test"]);
+    writeFileSync(join(d, "forge.yaml"), "verify:\n  flaky: [a, b]\n");
+    assert.deepEqual(readVerify(d).flaky, ["a", "b"]);
+    writeFileSync(join(d, "forge.yaml"), 'verify:\n  flaky: "a,b"\n');
+    assert.deepEqual(readVerify(d).flaky, ["a", "b"]);
+  });
+});
+
 describe("readPrecheckCommands (#4240)", () => {
   it("reads learned.test_commands as a block list; absent or empty is undefined", () => {
     const d = tmpDir("precheck-yaml-");

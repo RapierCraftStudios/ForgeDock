@@ -55,8 +55,9 @@ export function parseVerify(sec = {}) {
   const names = rawChecks.map((x) => String(x ?? "").trim()).filter(Boolean);
   const checks = names.length ? [...new Set(names)] : null;
   const postMerge = str(s.post_merge) || null;
-  const rawFlaky = Array.isArray(s.flaky) ? s.flaky : str(s.flaky).split(",");
-  const flaky = [...new Set(rawFlaky.map((x) => String(x ?? "").trim()).filter(Boolean))];
+  // a flow list (`[a, "b c"]`) arrives as one scalar from the one-level reader: strip the brackets and quotes
+  const rawFlaky = Array.isArray(s.flaky) ? s.flaky : str(s.flaky).trim().replace(/^\[(.*)\]$/s, "$1").split(",");
+  const flaky = [...new Set(rawFlaky.map((x) => String(x ?? "").trim().replace(/^(["'])(.*)\1$/s, "$2").trim()).filter(Boolean))];
   const duplicateExports = str(s.duplicate_exports).toLowerCase() !== "false";
   const invariants = [...new Set((Array.isArray(s.invariants) ? s.invariants : []).map((x) => String(x ?? "").trim()).filter(Boolean))];
   return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, invariants, e2e: parseE2e(s) };
@@ -96,13 +97,14 @@ export async function collectFailedLogs(io, failedChecks) {
   return capLogs(out);
 }
 /**
- * #4586: split failures [{job, log}] by `verify.flaky` test ids: a failure is flaky when its job name equals an id or its log
- * contains one. Flaky failures are reported only; `own` is what may block or reach the builder.
+ * #4586: split failures [{job, log}] by `verify.flaky` ids: a failure is flaky when its job name equals an id. Flaky
+ * failures are reported only; `own` is what may block or reach the builder. Never by log text: a job whose log names a
+ * flaky test can also hold a real failure, and an Actions run attaches its failed logs to its first failed check (#4614).
  */
 export function splitFlaky(failures, flaky = []) {
   const ids = (flaky ?? []).filter(Boolean);
   const own = [], known = [];
-  for (const f of failures ?? []) (ids.some((id) => f?.job === id || String(f?.log ?? "").includes(id)) ? known : own).push(f);
+  for (const f of failures ?? []) (ids.includes(f?.job) ? known : own).push(f);
   return { own, flaky: known };
 }
 const RANK = { failure: 2, pending: 1, success: 0 };

@@ -173,11 +173,14 @@ describe("verify.flaky (#4586)", () => {
     assert.deepEqual(parseVerify({ flaky: " a, b ,a," }).flaky, ["a", "b"]);
     assert.deepEqual(parseVerify({ flaky: ["x", " y"] }).flaky, ["x", "y"]);
   });
-  it("splitFlaky matches by job name or log substring", () => {
-    const fs = [{ job: "memory-erasure", log: "" }, { job: "test", log: "FAIL pipeline.test.ts > pdf timing" }, { job: "lint", log: "boom" }];
+  it("parses a flow list scalar, quotes stripped", () => {
+    assert.deepEqual(parseVerify({ flaky: "[a, \"b c\", 'd']" }).flaky, ["a", "b c", "d"]);
+  });
+  it("splitFlaky matches by exact job name only, never log text (#4614)", () => {
+    const fs = [{ job: "memory-erasure", log: "" }, { job: "test", log: "FAIL pdf timing\nFAIL real regression" }, { job: "lint", log: "boom" }];
     const r = splitFlaky(fs, ["memory-erasure", "pdf timing"]);
-    assert.deepEqual(r.flaky.map((f) => f.job), ["memory-erasure", "test"]);
-    assert.deepEqual(r.own.map((f) => f.job), ["lint"]);
+    assert.deepEqual(r.flaky.map((f) => f.job), ["memory-erasure"]);
+    assert.deepEqual(r.own.map((f) => f.job), ["test", "lint"]);
     assert.equal(splitFlaky(fs, []).own.length, 3);
   });
 });

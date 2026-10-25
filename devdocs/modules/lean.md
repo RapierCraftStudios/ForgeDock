@@ -257,7 +257,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    id); the failed jobs are rerun once per head (`rerunFailedOnce`,
    `CI_FLAKE_RERUN`) BEFORE a fix round is counted, in `ciVerify` and at merge time
    (`mergeFixRound`); only a failure that repeats on the same head spends a round (#4387,
-   #4586). `verify.flaky` ids (`splitFlaky`: job name or log substring) are reported
+   #4586). `verify.flaky` ids (`splitFlaky`: exact job name only, never log text, #4614; string, flow or block list) are reported
    (`CI_FLAKY_REPORTED`), never block or reach the builder; a required check still blocks.
    **Validate commands vs a moving base**: `validateContract` rejects a validate
    command whose `git diff` compares against a remote `origin/<x>` tip rather than the

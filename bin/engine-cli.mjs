@@ -337,8 +337,8 @@ export function readVerify(cwd = process.cwd()) {
   try {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
     if (!sec || typeof sec !== "object") return undefined;
-    const invariants = readInvariants(cwd);
-    return parseVerify(invariants ? { ...sec, invariants } : sec);
+    const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky");
+    return parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}) });
   } catch { return undefined; }
 }
 /** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
@@ -1164,7 +1164,7 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, print = (l) =
     res = { changed: op === "hold" ? b.holdIssues(issues) : b.releaseIssues(issues) };
   }
   const list = (res.changed ?? []).map((n) => `#${n}`).join(" ") || "(none)";
-  print(op === "hold" ? `batch ${id}: held ${list}; forgedock orchestrate --release ${id} <issue...> (or --resume) re-admits them`
+  print(op === "hold" ? `batch ${id}: held ${list}; forgedock orchestrate --release ${id} <issue...> (or --resume ${id} <issue...>) re-admits them`
     : `batch ${id}: released ${list}`);
   return { ok: true, batch: id, changed: res.changed ?? [] };
 }
