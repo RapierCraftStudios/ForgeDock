@@ -6,6 +6,7 @@
  * A batch lives in `~/.forge/batches/<id>/` (or `FORGEDOCK_BATCH_DIR`): `plan.json` (the command), `state.json` (the
  * scheduler state, rewritten after every transition), `log.jsonl` (one line per lane update), `parallel` (live K),
  * `add` (issues added to the batch by `--add`, #4408: a cumulative JSON set the runner re-reads every pass),
+ * `hold` (issues held by `--hold`, #4592: a cumulative JSON set; the runner admits none of them until `--release` or a `--resume` names them),
  * `cancel` (`{at, reason}` written by `--cancel`, #4376: the runner stops admitting and stops its local lanes; a resume clears it),
  * `lanes/<issue>.{json,log}` (each lane's result and output) and `report.json` (the final rows and printed report, written
  * when the scheduler loop returns; `forgedock orchestrate --resume` on a finished batch replays it, #4192). Every write is tmp + fsync + rename, and the root must be
@@ -68,6 +69,9 @@ const readAdded = (file) => {
   return Array.isArray(v) ? [...new Set(v.filter((n) => Number.isSafeInteger(n) && n > 0))].sort((a, b) => a - b) : [];
 };
 
+/** The positive integers among `list` (numbers, `7`, `#7`). */
+const ints = (list) => (Array.isArray(list) ? list : []).map((x) => (typeof x === "number" ? x : typeof x === "string" && /^#?\d+$/.test(x.trim()) ? parseInt(x.trim().replace("#", ""), 10) : NaN)).filter((n) => Number.isSafeInteger(n) && n > 0);
+
 export function newBatchId(now = Date.now(), pid = process.pid) {
   return `b${new Date(now).toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15)}-${pid}`;
 }
@@ -118,6 +122,22 @@ export function openBatch(root, id) {
       if (added.length) writeAtomic(f("add"), JSON.stringify([...new Set([...readAdded(f("add")), ...added])].sort((a, b) => a - b)) + "\n");
       return { added, skipped };
     },
+    /** Issues held by `--hold` (#4592): the `hold` file, sorted unique positive integers; [] when missing or invalid. */
+    readHeld: () => readAdded(f("hold")),
+    /** Merge the positive integers of `list` into the `hold` file. @returns {number[]} the issues newly held */
+    holdIssues: (list) => {
+      const have = new Set(readAdded(f("hold")));
+      const added = [...new Set(ints(list))].filter((n) => !have.has(n)).sort((a, b) => a - b);
+      if (added.length) writeAtomic(f("hold"), JSON.stringify([...have, ...added].sort((a, b) => a - b)) + "\n");
+      return added;
+    },
+    /** Remove `list` from the `hold` file. @returns {number[]} the issues that were held */
+    releaseIssues: (list) => {
+      const have = new Set(readAdded(f("hold")));
+      const freed = [...new Set(ints(list))].filter((n) => have.has(n)).sort((a, b) => a - b);
+      if (freed.length) writeAtomic(f("hold"), JSON.stringify([...have].filter((n) => !freed.includes(n)).sort((a, b) => a - b)) + "\n");
+      return freed;
+    },
     /** `--cancel` (#4376): `{at, reason}` in the `cancel` file; the runner re-reads it every pass. */
     requestCancel: ({ reason = "operator" } = {}) => writeAtomic(f("cancel"), JSON.stringify({ at: new Date().toISOString(), reason: String(reason) }) + "\n"),
     /** The cancel record, or null when missing or invalid. */
@@ -146,7 +166,10 @@ export function isLaneAlive(pid, marker, { kill = process.kill.bind(process), pr
   if (!existsSync(procDir)) return true;
   let cmd;
   try { cmd = readFileSync(join(procDir, String(pid), "cmdline"), "utf8"); } catch { return false; }
-  return !marker || cmd.split("\0").includes(marker);
+  if (marker && !cmd.split("\0").includes(marker)) return false;
+  // A zombie (exited, not yet reaped: PID 1 may not reap) answers `kill(pid, 0)` but is not running.
+  try { if (/^\d+ \(.*\) Z /s.test(readFileSync(join(procDir, String(pid), "stat"), "utf8"))) return false; } catch { /* no stat: treat as alive */ }
+  return true;
 }
 
 /**

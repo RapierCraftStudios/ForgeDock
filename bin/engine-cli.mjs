@@ -336,7 +336,9 @@ export function readMergeWait(cwd = process.cwd()) {
 export function readVerify(cwd = process.cwd()) {
   try {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
-    return sec && typeof sec === "object" ? parseVerify(sec) : undefined;
+    if (!sec || typeof sec !== "object") return undefined;
+    const invariants = readInvariants(cwd);
+    return parseVerify(invariants ? { ...sec, invariants } : sec);
   } catch { return undefined; }
 }
 /** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
@@ -363,20 +365,28 @@ export function readExecution(cwd = process.cwd()) {
  * scalars only. undefined when absent, empty or unreadable.
  */
 export function readPrecheckCommands(cwd = process.cwd()) {
+  return readYamlList(cwd, "learned", "test_commands");
+}
+/** #4585: forge.yaml `verify.invariants`, a block list of repo-wide check commands; undefined when absent or empty. */
+export function readInvariants(cwd = process.cwd()) {
+  return readYamlList(cwd, "verify", "invariants");
+}
+function readYamlList(cwd, section, key) {
   let raw;
   try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { return undefined; }
   const out = [];
-  let inLearned = false, listIndent = null;
+  const head = new RegExp(`^${section}:\\s*(#.*)?$`), keyRe = new RegExp(`^\\s+${key}:\\s*(#.*)?$`);
+  let inSection = false, listIndent = null;
   for (const line of raw.split(/\r?\n/)) {
     if (/^\s*(#.*)?$/.test(line)) continue;
-    if (/^\S/.test(line)) { inLearned = /^learned:\s*(#.*)?$/.test(line); listIndent = null; continue; }
-    if (!inLearned) continue;
+    if (/^\S/.test(line)) { inSection = head.test(line); listIndent = null; continue; }
+    if (!inSection) continue;
     const indent = line.length - line.trimStart().length;
     if (listIndent === null) {
-      if (/^\s+test_commands:\s*(#.*)?$/.test(line)) listIndent = indent;
+      if (keyRe.test(line)) listIndent = indent;
       continue;
     }
-    if (indent <= listIndent) { listIndent = /^\s+test_commands:\s*(#.*)?$/.test(line) ? indent : null; continue; }
+    if (indent <= listIndent) { listIndent = keyRe.test(line) ? indent : null; continue; }
     const m = /^\s+-\s+(.*)$/.exec(line);
     if (!m) continue;
     let v = m[1].trim();
@@ -1078,7 +1088,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
 const formatRowLine = (r) => (r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`);
 const consoleSink = () => ({ batch: () => {}, row: (r) => console.log(formatRowLine(r)), line: (t) => console.log(t) });
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...> | --cancel <id>";
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...> | --cancel <id> | --hold <id> <issue...> | --release <id> <issue...>";
 const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model"];
 const issuesOf = (argv) => {
   const issues = [];
@@ -1136,6 +1146,29 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
   return out;
 }
 
+/** #4592: a resume's release line, only when it freed something. */
+const onlyReleased = (l, out = (t) => console.log(t)) => { if (!l.endsWith("(none)")) out(l); };
+
+/**
+ * `--hold <id> N...` / `--release <id> N...` (#4592): the batch's `hold` file, through the daemon (`viaDaemon(op, issues)`, null
+ * when none runs) or directly. A held issue is not admitted (a running lane is not stopped); `--release` (or a `--resume` that
+ * names it) lets it run again. @returns {{ok, batch, changed:number[]}}
+ */
+async function holdBatch({ op, id, tokens, root, viaDaemon = null, print = (l) => console.log(l) }) {
+  const issues = tokens.filter((t) => /^#?\d+$/.test(String(t))).map((t) => parseInt(String(t).replace("#", ""), 10));
+  if (!id || String(id).startsWith("--") || !issues.length) throw new Error(ORCH_USAGE);
+  let res = viaDaemon ? await viaDaemon(op, issues) : null;
+  if (!res) {
+    const b = (await import("./lean/batch.mjs")).openBatch(root, id);
+    if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
+    res = { changed: op === "hold" ? b.holdIssues(issues) : b.releaseIssues(issues) };
+  }
+  const list = (res.changed ?? []).map((n) => `#${n}`).join(" ") || "(none)";
+  print(op === "hold" ? `batch ${id}: held ${list}; forgedock orchestrate --release ${id} <issue...> (or --resume) re-admits them`
+    : `batch ${id}: released ${list}`);
+  return { ok: true, batch: id, changed: res.changed ?? [] };
+}
+
 /**
  * `--cancel <id>` (#4376): through the daemon (`viaDaemon`, null when none runs) or the batch's `cancel` file directly.
  * A finished batch (report written) is left alone.
@@ -1185,6 +1218,11 @@ async function orchestrateClient(argv, deps = {}) {
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
     return sock ? schedd.request(sock, { op: "add", id, issues }) : null;
   };
+  const holdVia = (id) => async (op, issues) => {
+    let sock = null;
+    try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
+    return sock ? schedd.request(sock, { op, id, issues }) : null;
+  };
   const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
   if (argv.includes("--cancel")) {
     const id = flag(argv, "--cancel");
@@ -1193,6 +1231,10 @@ async function orchestrateClient(argv, deps = {}) {
       try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
       return sock ? schedd.request(sock, { op: "cancel", id }) : null;
     } });
+  }
+  for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
+    const id = flag(argv, `--${op}`);
+    return holdBatch({ op, id, tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root: await batchRootOf(), viaDaemon: holdVia(id) });
   }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add"), id = argv[i + 1];
@@ -1203,9 +1245,10 @@ async function orchestrateClient(argv, deps = {}) {
   const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
   if (resumeExtra.length) {
     await addToBatch({ id: resumeId, tokens: resumeExtra, root: await batchRootOf(), io: deps.io ?? makeIo(), viaDaemon: addVia(resumeId) });
+    await holdBatch({ op: "release", id: resumeId, tokens: resumeExtra, root: await batchRootOf(), viaDaemon: holdVia(resumeId), print: (l) => onlyReleased(l) }); // #4592: a named, held issue is re-admitted
   }
   let msg;
-  if (resumeId) msg = { op: "attach", id: resumeId };
+  if (resumeId) msg = { op: "attach", id: resumeId, resume: true };
   else {
     if (!issuesOf(argv).length) throw new Error(ORCH_USAGE);
     parallelOf(argv);
@@ -1268,6 +1311,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     return { ok: true, batch: b.id, parallel: k };
   }
   if (argv.includes("--cancel")) return cancelBatch({ id: flag(argv, "--cancel"), root, print: (l) => sink.line(l) });
+  for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
+    return holdBatch({ op, id: flag(argv, `--${op}`), tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, print: (l) => sink.line(l) });
+  }
   if (argv.includes("--add")) {
     const i = argv.indexOf("--add");
     if (!argv[i + 1] || i + 2 >= argv.length) throw new Error(ORCH_USAGE);
@@ -1277,6 +1323,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const resumeExtra = resumeId ? operandsOf(argv.slice(argv.indexOf("--resume") + 2)) : [];
   if (resumeExtra.length) {
     await addToBatch({ id: resumeId, tokens: resumeExtra, root, io: deps.io ?? makeIo(), print: (l) => sink.line(l) });
+    await holdBatch({ op: "release", id: resumeId, tokens: resumeExtra, root, print: (l) => onlyReleased(l, (t) => sink.line(t)) }); // #4592
   }
   let batch, plan = null;
   if (resumeId) {
@@ -1533,7 +1580,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
       beforeAdmit,
-      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getCancelled: batch.readCancel, ...lanes,
+      issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getCancelled: batch.readCancel, getHeld: batch.readHeld, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null, exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),
@@ -1770,7 +1817,7 @@ export async function checkFromCli(argv, deps = {}) {
   const plan = await readJson(pre.CHECK_PLAN_FILE);
   const base = o.base ?? plan?.base;
   if (!base) throw Object.assign(new Error(`check: no check plan from the engine; pass --base REF\n${usage}`), { exitCode: 2 });
-  const verify = plan ? { mode: plan.mode, precheckTotalSeconds: plan.precheckTotalSeconds, precheckTimeoutSeconds: plan.precheckTimeoutSeconds } : { ...parseVerify({}), ...(readVerify(repo) ?? {}) };
+  const verify = plan ? { mode: plan.mode, precheckTotalSeconds: plan.precheckTotalSeconds, precheckTimeoutSeconds: plan.precheckTimeoutSeconds, invariants: Array.isArray(plan.invariants) ? plan.invariants : [] } : { ...parseVerify({}), ...(readVerify(repo) ?? {}) };
   const learned = plan ? plan.learned : readPrecheckCommands(repo) ?? [];
   const maxMinutes = plan ? plan.maxMinutes : readPrecheckBudget(repo);
   // the engine's changed files (lean.mjs changedFiles: base...HEAD still differing from base), plus uncommitted work

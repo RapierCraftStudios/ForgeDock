@@ -118,6 +118,8 @@ function world(o = {}) {
       if (a[0] === "write-tree") return w.salvageTrees.length ? w.salvageTrees.shift() : "";
       if (a[0] === "rev-parse" && a[1] === "HEAD^{tree}") return "0".repeat(40);
       if (a.includes("commit-tree")) return "c".repeat(40);
+      if (a[0] === "diff" && a.includes("--diff-filter=A")) return (w.added ?? []).join("\0"); // #4590: files the branch added vs the base
+      if (a[0] === "rm" && a[1] === "--cached" && w.added) w.added = w.added.filter((f) => !a.includes(f));
       if (a[0] === "diff" && a.includes("--diff-filter=U")) return w.conflictFiles.join("\n");
       if (a[0] === "diff" && a[1] === "--check") return "";
       if (a[0] === "grep") return w.markers ? "src/foo.js:3:<<<<<<< HEAD" : "";
@@ -4023,7 +4025,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n  e2e_label: full-ci\n  e2e_checks: \"e2e (1),e2e (2)\"\n");
     const e2e = { mode: "auto", label: "full-ci", workflow: null, pathsInput: null, checks: ["e2e (1)", "e2e (2)"], paths: ["e2e/**", "**/e2e/**", "*.e2e.*", "*.e2e-spec.*", "cypress/**", "playwright/**"], blocking: "changed" };
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, e2e });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, invariants: [], e2e });
   });
 
   describe("#4387 a no-commit CI fix round reruns the failed jobs once", () => {
@@ -4476,6 +4478,25 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.ok(log.findIndex((e) => e.event === "PRECHECK_COMMANDS") < log.findIndex((e) => e.event === "PR_OPENED"));
   });
 
+  it("#4585 verify.invariants run in the pre-PR round even with no learned commands, and the prompts carry the checklist", async () => {
+    const w = world(); const ran = [];
+    w.io.runCommand = async ({ command }) => { ran.push(command); return { rc: 0, output: "" }; };
+    const r = await run(w, { verify: { invariants: ["bash scripts/inv.sh"] } });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(ran, ["bash scripts/inv.sh"]);
+    const b = builders(w);
+    assert.match(b[0][4], /Repo-wide invariants[\s\S]*bash scripts\/inv\.sh/); assert.match(b[1][4], /Invariants checklist[\s\S]*bash scripts\/inv\.sh/);
+    const w2 = world(); let n = 0; w2.io.runCommand = async () => { n++; return { rc: 0, output: "" }; };
+    await run(w2); assert.equal(n, 0, "no invariants: nothing runs");
+  });
+
+  it("#4585 a failing invariant resumes the builder like a failed check command", async () => {
+    const w = world(); let n = 0;
+    w.io.runCommand = async () => (n++ ? { rc: 0, output: "" } : { rc: 1, output: "registry missing table x" });
+    await run(w, { verify: { invariants: ["bash scripts/inv.sh"] } });
+    assert.ok(n >= 2, "the invariant is rerun after the builder fix round");
+  });
+
   it("pre-PR: a passing set adds no builder turn; no commands configured runs nothing", async () => {
     const w = world(); let n = 0;
     w.io.runCommand = async () => { n++; return { rc: 0, output: "" }; };
@@ -4514,7 +4535,7 @@ describe("#4364 in-session forgedock check: plan hand-off and self-check record"
   it("writes check-plan.json beside the contract and the implement prompt asks for forgedock check", async () => {
     const w = world(); w.io.runCommand = async () => ({ rc: 0, output: "" });
     assert.equal((await run(w, { precheck: { commands: [" make lint ", ""], maxMinutes: 5 }, verify: { mode: "hybrid" } })).terminalReason, "merged");
-    assert.deepEqual(JSON.parse(w.files[`${WT}/.forge-lean/check-plan.json`]), { v: 1, base: "origin/staging", mode: "hybrid", learned: ["make lint"], maxMinutes: 5, precheckTotalSeconds: 600, precheckTimeoutSeconds: 300 });
+    assert.deepEqual(JSON.parse(w.files[`${WT}/.forge-lean/check-plan.json`]), { v: 1, base: "origin/staging", mode: "hybrid", learned: ["make lint"], invariants: [], maxMinutes: 5, precheckTotalSeconds: 600, precheckTimeoutSeconds: 300 });
     assert.match(builders(w)[1][4], /forgedock\.mjs check` in the worktree[\s\S]*report the problem as blocked/);
   });
 
@@ -6329,6 +6350,32 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     const w = lworld({ remote: "abc\trefs/heads/feat/issue-7-lean\n" }), dir = tmpDir("light-res-");
     await run(w, { dir, ...ON });
     assert.equal(events(dir, "LIGHT_DONE").length + events(dir, "LIGHT_UPGRADE").length, 0);
+  });
+});
+
+describe("tool state never rides the lane branch (#4590)", () => {
+  const untracks = (w) => w.calls.filter((c) => c[0] === "git" && c[1] === "rm" && c[2] === "--cached");
+  const subjects = (w) => w.calls.filter((c) => c[0] === "git" && c[1] === "commit" && c.some((x) => /untrack lane tool state/.test(x)));
+
+  it("a branch that added .forge-lean/ files and tool caches is untracked and committed before the PR push", async () => {
+    const dir = tmpDir("toolstate-");
+    const w = world({}); w.added = ["src/foo.js", ".forge-lean/result.json", "apps/worker/.eslintcache", "packages/a/tsconfig.tsbuildinfo"];
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    const rm = untracks(w);
+    assert.ok(rm.length >= 1, "git rm --cached ran");
+    for (const f of [".forge-lean/result.json", "apps/worker/.eslintcache", "packages/a/tsconfig.tsbuildinfo"]) assert.ok(rm[0].includes(f), f);
+    assert.ok(!rm[0].includes("src/foo.js"), "product files stay");
+    assert.equal(subjects(w).length, 1, "one untrack commit; the next push finds the branch clean");
+    const firstPush = w.calls.findIndex((c) => c[0] === "git" && c[1] === "push");
+    assert.ok(w.calls.findIndex((c) => c === subjects(w)[0]) < firstPush, "committed before the push");
+    assert.ok(readLog(dir, 7).some((e) => e.event === "TOOLSTATE_UNTRACKED"));
+  });
+
+  it("a clean branch makes no untrack commit", async () => {
+    const w = world({}); w.added = ["src/foo.js"];
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(untracks(w).length, 0);
+    assert.equal(subjects(w).length, 0);
   });
 });
 

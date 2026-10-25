@@ -145,6 +145,16 @@ describe("readPrecheckBudget: forge.yaml lean.precheck.max_minutes (#4331)", () 
 describe("forgedock check core (#4364)", () => {
   const MAP = { version: 1, entries: [{ globs: ["src/**"], command: "npm test", cwd: "." }, { globs: ["docs/**"], command: "make docs", cwd: "." }] };
 
+  it("planPrecheck #4585: invariants are appended unscoped, deduped, and kept when the map matches nothing", () => {
+    const p = planPrecheck({ testMap: MAP, files: ["README.md"], learned: ["make lint"], verify: { invariants: ["bash scripts/inv.sh", " make lint ", ""] } });
+    assert.deepEqual(p.commands.at(-1), "bash scripts/inv.sh");
+    assert.equal(p.commands.filter((c) => c === "make lint").length, 1);
+    assert.equal(p.invariants, 2);
+    const only = planPrecheck({ files: [], learned: [], verify: { invariants: ["bash scripts/inv.sh"] } });
+    assert.deepEqual(only.commands, ["bash scripts/inv.sh"]);
+    assert.deepEqual(planPrecheck({ testMap: MAP, files: ["README.md"], learned: ["make lint"] }).commands, ["make lint"], "no invariants: unchanged");
+  });
+
   it("planPrecheck: the engine's selection and budget rule (max_minutes wins, else precheck_total_seconds, else 600 s)", () => {
     const p = planPrecheck({ testMap: MAP, files: ["src/a.js"], learned: [" make lint ", "", "make docs"], verify: { precheckTotalSeconds: 120, precheckTimeoutSeconds: 30 } });
     assert.deepEqual(p.commands, ["make lint", "npm test"]); assert.deepEqual(p.dropped, ["make docs"]);

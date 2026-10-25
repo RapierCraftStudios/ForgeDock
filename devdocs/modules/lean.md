@@ -229,7 +229,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    the worker budget is shared, not multiplied: k concurrent commands each get `FORGE_HOST_PARALLELISM = max(1, floor(N / k))`
    (`FORGE_HOST_PARALLELISM=1` = serial, one worker), within a round budget of
    forge.yaml `lean.precheck.max_minutes` (`engine-cli.mjs` `readPrecheckBudget`, 1..120; else
-   `verify.precheck_total_seconds`, default 600 s). Commands not started before the budget ends, or cut by it (rc 124
+   `verify.precheck_total_seconds`, default 600 s). #4585: `verify.invariants` (block list) are appended to every round unscoped (never dropped by the test map; `planPrecheck`), written to `check-plan.json`, and prompt-side `invariantsPlanNote`/`invariantsBuildRule` give the builder the registry checklist. Commands not started before the budget ends, or cut by it (rc 124
    with the remaining budget as timeout), are `deferred-to-ci` (event entries `{command, status}`, trajectory anomaly),
    never failures. `PRECHECK_COMMANDS` results carry `ms`; the event carries round `ms`, `parallelism` and the per-command `workers` share; the lane
    result `precheckMs`/`precheckDeferred` → orchestrate row `precheck_ms`/`precheck_deferred` → batch-report line
@@ -1753,6 +1753,10 @@ The router's `GET /sandboxes/:id/usage` forward adds `agent` (the placing agent)
 
 `conflictres.mjs` `resolveBaseConflicts` (seam `io.conflictResolve`, config `readBaseMerge` = forge.yaml `lean.base_merge_{union_globs,json_globs,generated_globs,generated_command}`) runs in `lean.mjs` `baseSync` before `sequenceResolve`: union of pure line additions (`basesync.mjs` `unionResolve`), a 3-way JSON key union, and base-side-then-regenerate for generated files. It resolves only files it can fully settle, never sequence files; leftovers go to `sequenceResolve`, then the builder.
 When it settles every conflict, `baseSync` commits the merge and counts it as deterministic (`detResolved`: no builder, no re-review). No config means today's flow. Migrations stay on `sequence.mjs` (#4386, #4526).
+
+## Entry 2026-10-25 — Tool state never rides a lane branch (#4590)
+
+`toolstate.mjs` holds the deny-list (`.forge-lean/`, `.eslintcache`, `*.tsbuildinfo`, and `next-env.d.ts` when the repo's `.gitignore` ignores it). `gitPush` (`lean.mjs`) first runs `untrackToolState`: files the branch ADDED against the merge base are `git rm --cached` and committed (`TOOLSTATE_UNTRACKED`); files the base tracks are never touched. `checkpoint` unstages deny-listed paths after `add -A`. Salvage still force-adds `.forge-lean` to its private ref. `forgedock init` appends the missing deny-list lines to `.gitignore`.
 
 ## Entry 2026-10-25 — Skipped dependents re-admitted when the blocker merges mid-batch (#4595)
 

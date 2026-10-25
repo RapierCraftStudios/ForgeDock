@@ -11,7 +11,7 @@
  */
 import { createHash } from "node:crypto";
 import { loadavg, cpus } from "node:os";
-import { scopeChecks, selectCommands } from "./testmap.mjs";
+import { scopeChecks, selectCommands, mergeChecks } from "./testmap.mjs";
 import { LOG_CAP } from "./verify.mjs";
 
 /** #4364: the engine's check plan for `forgedock check` (written beside contract.json) and the CLI's last run record. */
@@ -124,15 +124,19 @@ export function formatPrecheckSummary(rows) {
 /**
  * #4364: the pre-PR commands and budget for a round: `scopeChecks` over the trimmed learned commands (a mapped learned
  * command runs only when its globs match a changed file); budget lean.precheck.max_minutes, else
- * verify.precheck_total_seconds (default 600 s); per command verify.precheck_timeout_seconds.
- * @returns {{commands:string[], source:string, added:number, dropped:string[], selected:number, budgetMs:number, perCommandMs:number}}
+ * verify.precheck_total_seconds (default 600 s); per command verify.precheck_timeout_seconds. #4585: `invariants`
+ * (verify.invariants) are appended unscoped after the selected commands, deduped; the test map never drops them.
+ * @returns {{commands:string[], source:string, added:number, dropped:string[], selected:number, invariants?:number, budgetMs:number, perCommandMs:number}}
  */
-export function planPrecheck({ testMap = null, files = [], learned = [], maxMinutes, verify = {} }) {
+export function planPrecheck({ testMap = null, files = [], learned = [], maxMinutes, verify = {}, invariants = verify?.invariants }) {
   const list = (Array.isArray(learned) ? learned : []).map((c) => String(c ?? "").trim()).filter(Boolean);
-  const m = scopeChecks(testMap, files, list);
+  const s = scopeChecks(testMap, files, list);
+  const inv = (Array.isArray(invariants) ? invariants : []).map((c) => String(c ?? "").trim()).filter(Boolean);
+  const withInv = mergeChecks(inv, s.commands);
+  const m = inv.length ? { ...s, commands: withInv.commands } : s;
   const max = Number(maxMinutes);
   const budgetMs = (max > 0 ? max * 60 : Number(verify.precheckTotalSeconds) || 600) * 1000;
-  return { ...m, selected: testMap ? selectCommands(testMap, files).length : 0, budgetMs, perCommandMs: (Number(verify.precheckTimeoutSeconds) || 300) * 1000 };
+  return { ...m, ...(inv.length ? { invariants: inv.length } : {}), selected: testMap ? selectCommands(testMap, files).length : 0, budgetMs, perCommandMs: (Number(verify.precheckTimeoutSeconds) || 300) * 1000 };
 }
 
 const lines = (out) => String(out ?? "").split("\n").map((x) => x.trim()).filter(Boolean);
