@@ -1753,6 +1753,11 @@ The router's `GET /sandboxes/:id/usage` forward adds `agent` (the placing agent)
 
 `toolstate.mjs` holds the deny-list (`.forge-lean/`, `.eslintcache`, `*.tsbuildinfo`, and `next-env.d.ts` when the repo's `.gitignore` ignores it). `gitPush` (`lean.mjs`) first runs `untrackToolState`: files the branch ADDED against the merge base are `git rm --cached` and committed (`TOOLSTATE_UNTRACKED`); files the base tracks are never touched. `checkpoint` unstages deny-listed paths after `add -A`. Salvage still force-adds `.forge-lean` to its private ref. `forgedock init` appends the missing deny-list lines to `.gitignore`.
 
+## Entry 2026-10-25 — Skipped dependents re-admitted when the blocker merges mid-batch (#4595)
+
+`orchestrate()` `watchBlockers` re-checks the blocker (`dependency #B ...` in a `skipped` row's detail) through the injected `dispatchCheck` at most every `WATCH_EVERY_MS` (60 s) while lanes run, and once before the batch would end; fail-open.
+A merged or closed blocker is recorded as `merged`/`invalid` (in-batch rows only) and its skipped dependents, transitively, go back to `pending` with one FORGE:DECISION. Skip resolution now runs to a fixpoint, so a chain's tail is skipped on its blocker instead of as `dependency cycle`.
+
 ## Entry 2026-10-25 — A check timeout is infrastructure (#4589)
 
 A command killed by its own timeout (rc 124, `timeoutMs >= perCommandMs`) is retried once by `precheck.mjs` `runWithTimeoutRetry` with `retryTimeoutMs({perMs, load1, cores})` = `perMs * max(2, ceil(load1 / cores))`, at most 3600 s and never below `perMs` (load from `os.loadavg()`, injectable as `runChecks` `load`). The retry is capped by the remaining round budget; a budget-cut timeout, or a retry the budget cuts short, is still deferred to CI. A repeated timeout keeps rc 124 and appends `infra timeout: host load, not a code failure`. Other rcs are never retried; the `runChecks` result shape is unchanged. `lean.mjs` uses the same helper in the post-merge gate and `rerunFailedValidates`. `prompts.mjs` `BLOCK_RULES` tells the builder a timeout is host load, never a block or `human` product decision: run the narrowest targeted command and say the full one could not finish.

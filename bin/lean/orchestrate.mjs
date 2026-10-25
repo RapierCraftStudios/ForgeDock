@@ -7,6 +7,7 @@
  * `decomposed` run adds its sub-issues and its dependents wait on them instead (#4124). A dependency that is parked
  * (ended needs-human in this batch, or an out-of-set issue labelled needs-human per `issueLabels(n)`) is never pulled in:
  * the issue ends `skipped` (`dependency #N needs-human`) and its dependents with it (#4387).
+ * A skipped dependent whose blocker later closes or merges outside its lane is re-admitted (#4595, needs `dispatchCheck`).
  * No investigation, synthesis or agent spawning. `runOne(issue)` and `readBody(issue)` are injected.
  * Optional `prefilter(issue, lane)` (#4123) runs in the lane slot before `runOne`: when it closed the issue, no lane starts.
  * When it parked the issue (#4389, `parked: true`), no lane starts either and the row ends with the parked kind.
@@ -104,6 +105,7 @@ import { laneSize, SIZES } from "./budget.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
+const WATCH_EVERY_MS = 60_000; // #4595
 // Times one issue may be requeued behind a dependency before its dependency-open row is final.
 export const MAX_REQUEUES = 2;
 // Deferrals other than a busy resource (UNCAPPED_DEFERRALS) one issue may take before its deferred row is final.
@@ -811,19 +813,60 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     halted = true;
     return Object.assign(new Error("batch stopped: schedd shutting down"), { code: "batch.stopped" });
   };
+  // #4595: a skipped row whose blocker (`dependency #B ...`) was finished outside the lane is re-admitted: B is re-checked
+  // through `dispatchCheck` (at most every WATCH_EVERY_MS, and once before the batch would end); fail-open.
+  let lastWatch = null;
+  const blockerOf = (n) => { const r = results.get(n); const m = r?.outcome === "skipped" ? /^dependency #(\d+) /.exec(r.detail ?? "") : null; return m ? Number(m[1]) : null; };
+  const watchable = () => !!dispatchCheck && [...results.keys()].some((n) => blockerOf(n) !== null);
+  const watchBlockers = async (final) => {
+    if (!watchable() || cancelled || tripped) return;
+    const t0 = now();
+    if (!final && lastWatch !== null && t0 - lastWatch < WATCH_EVERY_MS) return;
+    lastWatch = t0;
+    const resolved = new Set();
+    const roots = new Set([...results.keys()].map(blockerOf).filter((b) => b !== null && blockerOf(b) === null));
+    for (const b of roots) {
+      let g = null;
+      try { g = (await dispatchCheck(b)) ?? null; } catch { g = null; }
+      if (!g || !SATISFIED.has(g.outcome)) continue;
+      resolved.add(b);
+      const row = results.get(b);
+      if (row) { results.set(b, { ...row, outcome: g.outcome, pr: Number.isInteger(g.pr) ? g.pr : row.pr, detail: g.detail ?? row.detail }); update(results.get(b)); }
+    }
+    const back = new Set();
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const n of results.keys()) {
+        const b = blockerOf(n);
+        if (b !== null && !back.has(n) && (resolved.has(b) || back.has(b))) { back.add(n); grew = true; }
+      }
+    }
+    for (const n of back) {
+      const b = blockerOf(n);
+      results.delete(n);
+      pending.push(n);
+      decided({ issue: n, what: `re-admitted: dependency #${b} merged or closed after this issue was skipped`, why: "the blocker was finished outside this batch lane",
+        alternative: "leave it skipped until the next batch" });
+    }
+    if (back.size) save();
+  };
   const K = () => { let k = null; try { k = getParallel?.(); } catch { k = null; } return Number.isInteger(k) && k >= 1 ? k : parallel; };
   try {
     for (;;) {
       if (signal?.aborted) throw halt();
       await drainAdds();
       checkCancel();
+      await watchBlockers(!pending.length && !running.size);
       if (!pending.length && !running.size) break;
       // Resolve skips first: a dependency that finished unsatisfied (or never can) skips its dependents.
-      for (let i = pending.length - 1; i >= 0; i--) {
-        const n = pending[i];
-        if (results.has(n)) { pending.splice(i, 1); continue; }
-        const bad = edges(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome));
-        if (bad !== undefined) { pending.splice(i, 1); skip(n, `dependency #${bad} ended ${results.get(bad).outcome}`); }
+      for (let again = true; again;) { // #4595: to a fixpoint, so a chain's tail is skipped on its blocker, not as a "cycle"
+        again = false;
+        for (let i = pending.length - 1; i >= 0; i--) {
+          const n = pending[i];
+          if (results.has(n)) { pending.splice(i, 1); continue; }
+          const bad = edges(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome));
+          if (bad !== undefined) { pending.splice(i, 1); skip(n, `dependency #${bad} ended ${results.get(bad).outcome}`); again = true; }
+        }
       }
       const t = now();
       const holdUntil = heldUntil();
@@ -902,6 +945,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if (getAdded && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408: an add while only lanes run
       if (syncParked && running.size && parkedPrs().length) wake = Math.min(wake ?? syncEveryMs, Math.max(0, syncEveryMs - (t - (lastParkedSync ?? t)))); // #4525
+      if (running.size && watchable()) wake = Math.min(wake ?? WATCH_EVERY_MS, WATCH_EVERY_MS); // #4595: re-check the blockers of skipped rows
       if (tripped) wake = null;
       if (getCancelled && running.size && !cancelled) wake = Math.min(wake ?? pollMs, pollMs); // #4376: notice a cancel while lanes run
       if (running.size) {
