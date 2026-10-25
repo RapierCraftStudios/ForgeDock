@@ -171,13 +171,14 @@ export function builderImplementPrompt(mode = "local", { toolchain = null, spars
 
 ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
-The contract changes only through typed amendments in ${RESULT_FILE}, each with a why, which the engine posts on the issue:
-- {"kind":"add-deliverable","path":"<file>","why":""}: a file you must change that the contract did not list.
+The contract changes only through typed amendments in ${RESULT_FILE}, each with a why:
+- {"kind":"add-deliverable","path":"<file>","why":""}: a file the contract did not list.
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: an issue requirement the contract missed.
-- {"kind":"defer|post-deploy","requirement":"R#","why":""}: a contracted requirement that becomes separate work or a post-deploy check. The engine files it as a tracked follow-up. Not "type"; other kinds are rejected.
+- {"kind":"defer|post-deploy","requirement":"R#","why":""}: a requirement that becomes separate work or a post-deploy check. Filed as a tracked follow-up. Not "type"; other kinds are rejected.
+- {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded; judged against text.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
-A new dependency between workspace packages in a package.json that no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
-If the repository has scripts/check-devdocs-freshness.sh, a behaviour change under the paths it checks must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change. Run it against the base before writing the result; the engine runs it too.
+A new workspace-package dependency in a package.json no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
+If the repository has scripts/check-devdocs-freshness.sh, a behaviour change under the paths it checks must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change. Run it against the base first; the engine runs it too.
 
 Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
 
@@ -343,6 +344,7 @@ export const REVIEWER_SYSTEM = `You are an independent conformance reviewer of o
 
 You receive the GitHub issue with its comments, the frozen contract (requirements quoted from the issue, deliverables, preserve constraints, validate commands) with typed amendments, the builder's result with validation output, the changed files, the diff, and a row skeleton with one row per contract id and changed file. The engine computes the verdict from your rows; a reply without rows is rejected, so fill the skeleton rather than composing rows: fill EVERY row (set each empty status, evidence and validated_by, and each null deferral_ok; keep the ids and files as given):
 - issue_coverage: one row per requirement or acceptance criterion in the issue, quoted verbatim, saying whether the contract covers it, narrows it, or misses it. The skeleton lists the contract's quotes; add a row for any issue requirement the contract does not quote.
+- amendment: a requirement with an \`amendment\` is judged against amendment.text and its why, not the quote; its issue_coverage row is covered when the amendment follows from its why. If it does not hold, mark the row partial with note "amendment: <what to change>".
 - requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with evidence as a backtick-quoted repo-relative path:line copied verbatim from the changed files, including (group), [slug] and [...slug] folders (e.g. \`apps/web/app/(console)/layout.tsx:12\`, not route.ts:12) and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change. For a verify out_of_band row (measured by the named job, not in this lane) set instrumented: true only when its budget test or bench is committed and that job is configured, with that path:line as evidence; false otherwise. Do not judge the measured result.
 - scope: one row per changed file, pre-filled with the engine's authorization: the deliverable id that authorizes it (deliverables may be directories or globs), "test", "incidental" (changelog, lockfile), or "none" with what it changes. Change it only if the diff shows the file does something its deliverable does not cover.
 - preserve: one row per preserve id: intact|violated|unverified, with path:line. The skeleton starts each at "unverified"; set intact only after checking it.
