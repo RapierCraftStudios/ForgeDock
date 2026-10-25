@@ -37,7 +37,7 @@ With no local state at all, `forgedock stats --repo <r>` reproduces the report f
 ## Efficiency (`--efficiency`, forge#4402)
 
 ```bash
-npx forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--repo <owner/repo>] [--json]
+npx forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
 ```
 
 Per batch (`--batch`, a dir under `~/.forge/batches`, `FORGEDOCK_BATCH_DIR`) and over trailing windows (`--window`,
@@ -77,6 +77,34 @@ The code is in `bin/stats/efficiency.mjs`.
 Limits: logs written before #4362 carry no trigger, so implement attempts beyond the plan and build calls count as
 `unknown`. Logs written before #4407 sum running session totals. Lanes run outside a batch are in no window. `gh` (for
 merged issues only) is the one network call; when it fails, quality and acceptance print `n/a` with the reason.
+
+Every scope also prints, as its last line (forge#4491):
+
+- **Implement wall p50**: the median over merged lanes of the summed `duration_ms` of their implement attempts, in
+  minutes.
+- **Merge rate**: merged ÷ the cohort's issue rows.
+- **Conformance pass**: the share of rows whose lanes logged a `CONFORMANCE` verdict and whose last verdict is
+  `conforms`.
+
+`--repo` matches batch plans case-insensitively, as GitHub slugs are. Run logs are read under the plans' spelling.
+`--offline` skips the GitHub crawl, so issue quality and acceptance print `n/a`. The crawl is two `gh` calls per merged
+issue, which can take minutes over a large window.
+
+### Before/after A/B (`--compare`, forge#4491)
+
+`--compare <date|version>` compares two cohorts of the repo's batches around a deploy. The pivot is a date or ISO time,
+or a release version resolved to its exact tag time (`--release-times`, else the checkout's `v*` tags).
+
+- **post**: batches created from the pivot to now.
+- **pre**: batches created in the same span before the pivot. Both sides are equally long.
+
+It prints for each cohort turns/merge, implement wall p50, implement calls/turn p50, re-reads/merge, merge rate and
+conformance pass, and then the post − pre delta.
+
+`matched` repeats the comparison on full-shape merged lanes only, per size bucket present on both sides. Light lanes
+(#4452) cut turns on their own, so the unmatched delta mixes the lane mix into any prompt or tool change. With `--json`
+the result is under `query.efficiency.compare`. Cohorts are split by batch `plan.created`, as `--window` is; a lane run
+outside a batch is in neither.
 
 ## Pool utilisation (`--pool`, forge#4549)
 
