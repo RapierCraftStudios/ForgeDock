@@ -15,7 +15,7 @@ import { readLanes, readLocalLaneRuns, readLocalRuns, runsDir } from "./local-so
 import { parseForgeYaml } from "../forge-utils.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
 import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers, exploreAb, renderExploreAb, laneProfileReport, renderLaneProfiles } from "./query.mjs";
-import { batchEfficiency, windowEfficiency, formatEfficiencyLines, parseWindows } from "./efficiency.mjs";
+import { batchEfficiency, windowEfficiency, compareEfficiency, formatEfficiencyLines, formatCompareLines, parseWindows } from "./efficiency.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
 import { batchRoot } from "../lean/batch.mjs";
 
@@ -24,7 +24,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <owner/repo>] [--json] [--refresh]
                       [--compact] [--no-local] [--no-cache] [--min-n N] [--release-times FILE]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
-       forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--repo <owner/repo>] [--json]
+       forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
 
 Version-over-version report: Cost, Time, Flow, Review funnel, Gates and Issue flow per (version, repo), with a
 delta against the previous version and a low-n flag for samples under 10. Missing data prints n/a.
@@ -66,6 +66,10 @@ Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues
                         lanes, issue quality vs cost and the acceptance pass rate 7 days after promotion
   --batch <id>          also report one batch (~/.forge/batches/<id>, FORGEDOCK_BATCH_DIR)
   --window <list>       trailing windows over the repo's batches (default 7d,30d)
+  --compare <date|v>    before/after A/B around a deploy (date or release tag): equal-span cohorts of batches either side,
+                        turns/merge, implement wall p50, calls/turn p50, re-reads/merge, merge and conformance rates,
+                        their delta and full-lane cohorts matched per size (forge#4491)
+  --offline             skip the GitHub crawl for merged issues (issue quality and acceptance print n/a)
 
 Builder model tiers (forge#4394; local run logs only, no GitHub crawl):
   --tiers               merge, conformance and post-merge-rework rates, first-pass yield and cost per builder tier
@@ -78,7 +82,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 `;
 
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -103,6 +107,12 @@ export function parseArgs(argv) {
     else if (name === "--pool") o.pool = true;
     else if (name === "--batch") { const v = take(); if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) throw new Error(`invalid --batch id: ${v}`); o.batch = v; }
     else if (name === "--window") o.windows = parseWindows(take());
+    else if (name === "--compare") { // #4491
+      const v = take(), bad = () => new Error(`--compare must be a date (YYYY-MM-DD[THH:MM:SSZ]) or a version (1.32.0): ${v}`);
+      try { if (!v || !Object.keys(parseSince(v)).length) throw bad(); } catch { throw bad(); }
+      o.compare = v;
+    }
+    else if (name === "--offline") o.offline = true;
     else if (name === "--min-n") { const v = take(); if (!/^\d+$/.test(v)) throw new Error("--min-n must be a non-negative integer"); o.minN = Number(v); }
     else if (name === "--json") o.json = true;
     else if (name === "--refresh") o.refresh = true;
@@ -114,6 +124,7 @@ export function parseArgs(argv) {
   }
   if (o.batch && !o.efficiency) throw new Error("--batch and --window need --efficiency");
   if (o.windows && !o.efficiency && !o.pool) throw new Error("--batch and --window need --efficiency");
+  if ((o.compare || o.offline) && !o.efficiency) throw new Error("--compare and --offline need --efficiency");
   return o;
 }
 
@@ -152,6 +163,15 @@ export function sinceToTimestamp(since, releaseTimes = []) {
     return { since: null, note: `no release time known for ${p.sinceVersion}; crawling the full history (pass --release-times or use a date to bound it)` };
   }
   return { since: null, note: null };
+}
+
+/** #4491: `--compare` pivot in ms: a date as is, a version as its exact tag time (no crawl margin); throws when unknown. */
+export function comparePivot(v, releaseTimes = []) {
+  const p = parseSince(v);
+  if (p.sinceMs != null) return p.sinceMs;
+  const hit = releaseTimes.find((r) => r.v === p.sinceVersion);
+  if (!hit) throw new Error(`--compare: no release time known for ${p.sinceVersion} (pass --release-times or a date)`);
+  return hit.t * 1000;
 }
 
 /** Throttled stderr progress printer (never stdout, so --json stays parseable). */
@@ -227,10 +247,11 @@ export async function buildReport(opts, deps = {}) {
     return { repo, query: { pool } };
   }
   if (opts.efficiency) { // forge#4402: local batch dirs + run logs; gh only for merged issues
-    const root = deps.batchRoot ?? batchRoot(env), rd = deps.runsDir ?? runsDir(env), now = deps.now?.() ?? Date.now(), gh = deps.gh ?? defaultGh;
+    const root = deps.batchRoot ?? batchRoot(env), rd = deps.runsDir ?? runsDir(env), now = deps.now?.() ?? Date.now(), gh = opts.offline ? null : (deps.gh ?? defaultGh);
     const efficiency = {};
     if (opts.batch) efficiency.batch = await batchEfficiency({ batchDir: join(root, opts.batch), runsDir: rd, repo, gh, now });
     efficiency.windows = await windowEfficiency({ batchRoot: root, runsDir: rd, repo, gh, now, windows: opts.windows ?? parseWindows("7d,30d") });
+    if (opts.compare) efficiency.compare = await compareEfficiency({ batchRoot: root, runsDir: rd, repo, gh, now, pivot: comparePivot(opts.compare, releaseTimes) });
     return { repo, query: { efficiency } };
   }
   if (opts.contextAb) { // forge#4275: run logs only
@@ -291,7 +312,8 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.efficiency && !opts.json) {
       const e = report.query.efficiency;
       const lines = [...(e.batch ? formatEfficiencyLines(e.batch, `batch ${e.batch.batch ?? opts.batch}`) : []),
-        ...Object.entries(e.windows).flatMap(([w, m]) => formatEfficiencyLines(m, `${w}, ${m.batches} batch${m.batches === 1 ? "" : "es"}`))];
+        ...Object.entries(e.windows).flatMap(([w, m]) => formatEfficiencyLines(m, `${w}, ${m.batches} batch${m.batches === 1 ? "" : "es"}`)),
+        ...(e.compare ? formatCompareLines(e.compare) : [])];
       process.stdout.write(`${lines.join("\n")}\n`);
       return 0;
     }

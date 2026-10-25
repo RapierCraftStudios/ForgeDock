@@ -8,7 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { listBatches } from "../lean/batch.mjs";
-import { windowLabel } from "./efficiency.mjs";
+import { sameRepo, windowLabel } from "./efficiency.mjs";
 
 const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; } };
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -18,7 +18,7 @@ export function poolUtilisation({ batchRoot, repo = null, windows, now = Date.no
   const batches = (existsSync(batchRoot) ? listBatches(batchRoot) : []).map((id) => {
     const dir = join(batchRoot, id), plan = readJson(join(dir, "plan.json")) ?? {};
     return { dir, plan, created: Date.parse(plan.created ?? "") };
-  }).filter((b) => Number.isFinite(b.created) && (!repo || b.plan.repo === repo)).sort((a, b) => a.created - b.created);
+  }).filter((b) => Number.isFinite(b.created) && (!repo || sameRepo(b.plan.repo, repo))).sort((a, b) => a.created - b.created);
   const out = {};
   for (const w of windows) {
     const inWin = batches.filter((b) => b.created <= now && now - b.created <= w);
