@@ -55,9 +55,11 @@ export function parseVerify(sec = {}) {
   const names = rawChecks.map((x) => String(x ?? "").trim()).filter(Boolean);
   const checks = names.length ? [...new Set(names)] : null;
   const postMerge = str(s.post_merge) || null;
+  const rawFlaky = Array.isArray(s.flaky) ? s.flaky : str(s.flaky).split(",");
+  const flaky = [...new Set(rawFlaky.map((x) => String(x ?? "").trim()).filter(Boolean))];
   const duplicateExports = str(s.duplicate_exports).toLowerCase() !== "false";
   const invariants = [...new Set((Array.isArray(s.invariants) ? s.invariants : []).map((x) => String(x ?? "").trim()).filter(Boolean))];
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, duplicateExports, invariants, e2e: parseE2e(s) };
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, invariants, e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);
@@ -92,6 +94,16 @@ export async function collectFailedLogs(io, failedChecks) {
     out.push({ job: c.name, url: c.url ?? null, log: id && !out.some((x) => runIdOf(x.url) === id) ? logs[id] : "" });
   }
   return capLogs(out);
+}
+/**
+ * #4586: split failures [{job, log}] by `verify.flaky` test ids: a failure is flaky when its job name equals an id or its log
+ * contains one. Flaky failures are reported only; `own` is what may block or reach the builder.
+ */
+export function splitFlaky(failures, flaky = []) {
+  const ids = (flaky ?? []).filter(Boolean);
+  const own = [], known = [];
+  for (const f of failures ?? []) (ids.some((id) => f?.job === id || String(f?.log ?? "").includes(id)) ? known : own).push(f);
+  return { own, flaky: known };
 }
 const RANK = { failure: 2, pending: 1, success: 0 };
 /**

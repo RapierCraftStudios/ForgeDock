@@ -32,6 +32,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 2. **Lane** — `lane.mjs` `resolveLane`: milestone → `branches.feature_pattern`
    (`milestone/{slug}`), else `branches.staging`; never the default branch;
    fail closed with `lane.*` codes → `lane-refused`.
+   An open PR on another non-default base is `needs-human`, except when the resolved lane
+   is shipped (merged into staging, `isShippedLane`) and the PR base is live: the run follows it (#4593).
 3. **Dependencies, then lease** — open `Depends-on` → `dependency-open`
    (orchestrate requeues behind it); then the FORGE:STATE lease.
 4. **Claim + worktree** — `workflow:investigating`, `FORGE:STARTED` comment;
@@ -104,6 +106,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    also used by the engine's `--retry`).
 6. **Implement** — same session; `result.json` with typed amendments
    (`applyAmendments` → `FORGE:AMENDMENT`; #4574: `type`→`kind`, `amend-requirement`/`limitation`→`defer`, an `R#` `id`→`requirement`; a rejected amendment's problem names the valid kinds or missing field and keeps 400 chars, and the one correction round shows 900). An `add-deliverable` on a path the
+   #4594: `amend-requirement` with `text` + `why` keeps the requirement `deliver` and sets `amendment`; the reviewer judges it against that text, and a failing row reads `amendment not accepted` so the one builder resume is the correction turn (without `text` it is still the `defer` slip).
    contract already lists appends its why to that deliverable's `change`, so it
    can declare a package edge on an already-listed package.json (#4159).
    Builder and reviewer runs get `FORGE_DOCKER_LABELS` (`ledger.mjs`
@@ -151,7 +154,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Context restarts do not use the single idle/timeout retry; after 3 in one call the call runs uncapped (loop guard).
    **Turn budget** (#4392, `budget.mjs`, forge.yaml `engine.turn_budget_s|m|l`, defaults 25/60/100, 0 = off;
    `readCoreLimits` → runCore `turnBudgets`): at contract freeze (or a resumed frozen contract) `laneSize` sizes the lane
-   from a `size:S|M|L` label, else the contract's distinct deliverable paths (S ≤ 2, M ≤ 5, else L). While `stage ===
+   from a `size:S|M|L` label, else the contract's distinct deliverable paths (S ≤ 2, M ≤ 5, else L); an L lane gets +10 turns per distinct deliverable path above 5 (cap +2x the L base) and a `budget.exceeded` recovery of L another +ceil(base/2) (`scaledExtra`, #4587). While `stage ===
    "implement"` every builder call (build plus its context/timeout restarts) passes `turnMax` = budget left;
    `runCliBackendAsync` kills the stream session at that many deduped assistant turns with `CLI_TURNS`. `builder()`
    records the attempt, logs `TURN_BUDGET_EXCEEDED`, checkpoints and runs `budgetWrapup`: one fresh session (trigger
@@ -246,8 +249,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    base-sync re-review retry CI-verifies its fix round's head before reviewing (#4527).
    Push-check mode gates on `ciGate` (`verify.checks` > required checks under
    `merge_wait: required` > all) at the latest attempt per name (`latestPerName`, check-run
-   id); a no-commit fix round reruns the failed jobs once (`rerunFailedOnce`,
-   `CI_FLAKE_RERUN`) before `ci.red` (#4387).
+   id); the failed jobs are rerun once per head (`rerunFailedOnce`,
+   `CI_FLAKE_RERUN`) BEFORE a fix round is counted, in `ciVerify` and at merge time
+   (`mergeFixRound`); only a failure that repeats on the same head spends a round (#4387,
+   #4586). `verify.flaky` ids (`splitFlaky`: job name or log substring) are reported
+   (`CI_FLAKY_REPORTED`), never block or reach the builder; a required check still blocks.
    **Validate commands vs a moving base**: `validateContract` rejects a validate
    command whose `git diff` compares against a remote `origin/<x>` tip rather than the
    merge base (`movingBaseDiff`), so the planner fixes it in the one contract
@@ -1737,3 +1743,7 @@ The dispatcher reads `<cwd>/forge.yaml` (absent is fine) and passes it as `setti
 ## Entry 2026-10-24 — Per-agent remote lane minutes (#4549)
 
 The router's `GET /sandboxes/:id/usage` forward adds `agent` (the placing agent) to the agent's `{minutes}` body; the field is optional for third-party runners. `httpTransport.usage` returns `{minutes, agent?}`, `remoteProvider` keeps `h.agent`, and `providerLanes` `withUsage` copies it to `sandbox.agent` (omitted when unknown). `orchestrate` accumulates `sandbox.by_agent {name: minutes}` per issue across attempts onto the row, and `formatSandboxSummary` appends `; by agent: a X min, b Y min` only when it exists; the table and non-pool output are unchanged. `forgedock stats --pool` (`bin/stats/pool.mjs`) aggregates `by_agent` from local batch `report.json` rows (latest row per issue); see `docs/STATS.md`.
+
+## Entry 2026-10-25 — A check timeout is infrastructure (#4589)
+
+A command killed by its own timeout (rc 124, `timeoutMs >= perCommandMs`) is retried once by `precheck.mjs` `runWithTimeoutRetry` with `retryTimeoutMs({perMs, load1, cores})` = `perMs * max(2, ceil(load1 / cores))`, at most 3600 s and never below `perMs` (load from `os.loadavg()`, injectable as `runChecks` `load`). The retry is capped by the remaining round budget; a budget-cut timeout, or a retry the budget cuts short, is still deferred to CI. A repeated timeout keeps rc 124 and appends `infra timeout: host load, not a code failure`. Other rcs are never retried; the `runChecks` result shape is unchanged. `lean.mjs` uses the same helper in the post-merge gate and `rerunFailedValidates`. `prompts.mjs` `BLOCK_RULES` tells the builder a timeout is host load, never a block or `human` product decision: run the narrowest targeted command and say the full one could not finish.

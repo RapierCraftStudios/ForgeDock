@@ -10,6 +10,7 @@
  * which the builder runs in-session (`selfCheck`); `worktreeFingerprint` tells whether that run saw the final tree.
  */
 import { createHash } from "node:crypto";
+import { loadavg, cpus } from "node:os";
 import { scopeChecks, selectCommands, mergeChecks } from "./testmap.mjs";
 import { LOG_CAP } from "./verify.mjs";
 
@@ -22,6 +23,43 @@ export const CHECK_LOG_DIR = ".forge-lean/logs";
 /** rc of a command killed by its timeout (effects.mjs runCheckCommand). */
 const TIMEOUT_RC = 124;
 
+/** Ceiling of a load-scaled retry timeout. */
+const MAX_RETRY_MS = 3600000;
+
+/** Host load per core, from the OS; the default `load` of `runWithTimeoutRetry`. */
+const hostLoad = () => ({ load1: loadavg()[0], cores: cpus().length || 1 });
+
+/**
+ * #4589: the timeout of the one retry after a command hit its own timeout: `perMs * max(2, ceil(load1 / cores))`, at most
+ * 3600 s and never below `perMs`. Deterministic; a timed-out command has no measured duration, so load scales it.
+ */
+export function retryTimeoutMs({ perMs, load1, cores }) {
+  const per = Number(perMs);
+  if (!(per > 0) || !Number.isFinite(per)) return per;
+  const factor = Math.max(2, Math.ceil((Number(load1) || 0) / (Number(cores) > 0 ? Number(cores) : 1)));
+  return Math.max(per, Math.min(per * factor, MAX_RETRY_MS));
+}
+
+/**
+ * #4589: a check timeout (rc 124) is a busy host, not a failing command: run `run(timeoutMs)`, and when it timed out on its
+ * own, once more with `retryTimeoutMs`. `left` (ms still available in a round budget) caps the retry; a retry the budget cut
+ * short is `cut` (left to CI). A repeated timeout keeps rc 124 and says it was infrastructure. Other rcs are never retried.
+ * @param {(timeoutMs:number) => Promise<{rc:number, output?:string}>} run
+ * @returns {Promise<{r:{rc:number, output?:string}, retried:boolean, cut:boolean}>}
+ */
+export async function runWithTimeoutRetry(run, timeoutMs, { left = () => Infinity, load = hostLoad } = {}) {
+  const r = await run(timeoutMs);
+  if (r?.rc !== TIMEOUT_RC || !(timeoutMs > 0) || !Number.isFinite(timeoutMs)) return { r, retried: false, cut: false };
+  let want = timeoutMs;
+  try { want = retryTimeoutMs({ perMs: timeoutMs, ...load() }); } catch { /* no load reading: the minimum factor */ want = timeoutMs * 2; }
+  const t2 = Math.min(want, left());
+  if (!(t2 > timeoutMs)) return { r, retried: false, cut: t2 < want }; // no budget left to retry in: CI runs it
+  const r2 = await run(t2);
+  const cut = r2?.rc === TIMEOUT_RC && t2 < want;
+  if (r2?.rc === TIMEOUT_RC && !cut) return { r: { ...r2, output: `${String(r2.output ?? "")}\n(infra timeout: host load, not a code failure; retried once with ${Math.round(t2 / 1000)}s)` }, retried: true, cut };
+  return { r: r2, retried: true, cut };
+}
+
 /**
  * @param {{commands:string[], parallelism?:number, budgetMs:number, perCommandMs:number, now?:() => number,
  *   acquire?:() => Promise<{release?:Function}|null>,
@@ -30,7 +68,7 @@ const TIMEOUT_RC = 124;
  * @returns {Promise<{results:{command:string, rc:number, output:string, ms:number}[], deferred:string[], ms:number}>}
  *   results in input order (commands that ran and were not cut by the budget); deferred in input order
  */
-export async function runChecks({ commands, parallelism = 1, budgetMs, perCommandMs, now = () => Date.now(), acquire, run }) {
+export async function runChecks({ commands, parallelism = 1, budgetMs, perCommandMs, now = () => Date.now(), acquire, run, load }) {
   const list = Array.isArray(commands) ? commands : [];
   const workers = Math.max(1, Math.floor(Number(parallelism)) || 1);
   const k = Math.max(1, Math.min(workers, list.length)), share = Math.max(1, Math.floor(workers / k));
@@ -44,7 +82,13 @@ export async function runChecks({ commands, parallelism = 1, budgetMs, perComman
     if (left <= 0) return { deferred: true };
     const timeoutMs = Math.min(per, left), t = now();
     let r;
-    try { r = await run({ command, timeoutMs, workers: share }); } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
+    try {
+      if (timeoutMs >= per) { // #4589: its own timeout, not the budget's: one longer retry
+        const x = await runWithTimeoutRetry((ms) => run({ command, timeoutMs: ms, workers: share }), timeoutMs, { left: () => deadline - now(), ...(load ? { load } : {}) });
+        if (x.cut) return { deferred: true };
+        r = x.r;
+      } else r = await run({ command, timeoutMs, workers: share });
+    } catch (e) { r = { rc: 127, output: String(e?.message ?? e) }; }
     const rc = Number.isInteger(r?.rc) ? r.rc : 1;
     // the budget, not the command's own timeout, cut it short: CI runs it
     if (rc === TIMEOUT_RC && timeoutMs < per) return { deferred: true };
