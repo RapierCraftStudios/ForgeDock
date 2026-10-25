@@ -3964,7 +3964,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n  e2e_label: full-ci\n  e2e_checks: \"e2e (1),e2e (2)\"\n");
     const e2e = { mode: "auto", label: "full-ci", workflow: null, pathsInput: null, checks: ["e2e (1)", "e2e (2)"], paths: ["e2e/**", "**/e2e/**", "*.e2e.*", "*.e2e-spec.*", "cypress/**", "playwright/**"], blocking: "changed" };
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, duplicateExports: true, e2e });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, e2e });
   });
 
   describe("#4387 a no-commit CI fix round reruns the failed jobs once", () => {
@@ -4002,6 +4002,31 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
       assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "ci.red");
       assert.deepEqual(w.reran, ["77"]); assert.equal(w.merges.length, 0);
       assert.deepEqual(flakeEvents(dir).map((e) => e.result), ["fail"]);
+    });
+
+    /** #4586: count the builder CI-fix prompts of a world. */
+    const fixPrompts = (w) => { const n = { n: 0 }; const inner = w.io.runner; w.io.runner = async (c) => { if (/CI failed on the pushed branch/.test(c.prompt)) n.n++; return inner(c); }; return n; };
+
+    it("#4586 a flake that goes green on the rerun spends no fix round and never resumes the builder", async () => {
+      const w = flaky("success"), n = fixPrompts(w), dir = tmpDir("core-ci-");
+      const r = await run(w, { verify: PUSH, dir });
+      assert.equal(r.terminalReason, "merged"); assert.equal(n.n, 0); assert.deepEqual(w.reran, ["77"]);
+    });
+
+    it("#4586 a failure that repeats on the same head after the rerun counts one round and reaches the builder", async () => {
+      const w = flaky("failure"), n = fixPrompts(w), dir = tmpDir("core-ci-");
+      const r = await run(w, { verify: PUSH, dir });
+      assert.equal(r.code, "ci.red"); assert.ok(n.n >= 1);
+      assert.equal(readLog(dir, 7).filter((e) => e.event === "CI_FIX_ROUND").length, 1, "one counted round");
+      assert.deepEqual(w.reran, ["77"], "one rerun per head, none after the round");
+    });
+
+    it("#4586 verify.flaky: a listed failing job is reported, never reruns, never feeds the builder, and the lane merges", async () => {
+      const w = flaky("failure"), n = fixPrompts(w), dir = tmpDir("core-ci-");
+      w.io.checkStates = async () => [{ name: "test", state: "success", url: RUN, head: w.head }];
+      const r = await run(w, { verify: { ...PUSH, flaky: ["test"] }, dir });
+      assert.equal(r.terminalReason, "merged"); assert.equal(n.n, 0); assert.deepEqual(w.reran, []);
+      assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "CI_FLAKY_REPORTED").map((e) => e.jobs), [["test"]]);
     });
   });
 });
