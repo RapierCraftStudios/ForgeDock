@@ -17,7 +17,7 @@ import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContr
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
-import { resolveLane, isDefaultLane } from "./lane.mjs";
+import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { repoKey } from "../runner.mjs";
@@ -943,6 +943,17 @@ export async function runCore(o) {
       if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null };
     } catch { /* no resume info: start fresh */ }
     // An open PR on another base (a hand-retargeted PR, or one opened before lane resolution) is never merged (#4125).
+    // #4593: a shipped milestone lane (fully merged into staging) cannot take new work; follow the open PR's live base.
+    if (resumed?.base && resumed.base !== lane && !isDefaultLane(resumed.base, defaults)) {
+      const staging = branches.staging || DEFAULT_STAGING_BRANCH;
+      let baseOnOrigin = false;
+      try { baseOnOrigin = !!String(await io.git(["ls-remote", "--heads", "origin", `refs/heads/${resumed.base}`], { cwd })).trim(); } catch { /* fail closed */ }
+      if (baseOnOrigin && await isShippedLane({ lane, staging, io, cwd }) && !(await isShippedLane({ lane: resumed.base, staging, io, cwd }))) {
+        T.decisions.push(`Lane ${lane} has shipped (merged into ${staging}); following open PR #${resumed.pr} base ${resumed.base}`);
+        ev({ event: "LANE_FOLLOWED_PR_BASE", from: lane, to: resumed.base, pr: resumed.pr });
+        lane = resumed.base; base = `origin/${lane}`;
+      }
+    }
     if (resumed?.base && resumed.base !== lane) {
       return await needsHuman(`Open PR #${resumed.pr} targets \`${resumed.base}\`, but #${issue}'s lane is \`${lane}\`; retarget or close it before rerunning.`,
         isDefaultLane(resumed.base, defaults) ? OUTCOME_CODES.LANE_DEFAULT_BRANCH : OUTCOME_CODES.LANE_MISMATCH);
