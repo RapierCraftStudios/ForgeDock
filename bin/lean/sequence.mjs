@@ -431,3 +431,29 @@ export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerat
     return { ok: true, moves: moves.map(({ from, to }) => ({ from, to })), commit: (await g(["rev-parse", "HEAD"])).trim() || null };
   } catch (e) { return await fail(`deterministic renumber failed: ${String(e?.message ?? e).split("\n")[0]}`); }
 }
+
+/**
+ * #4591: hand-named migrations. In a drizzle-style dir (`<dir>/meta/_journal.json` at `ref`) a lane-added `<tag>.sql` the
+ * generator wrote always has a journal entry the lane added and a `<dir>/meta/<prefix>_snapshot.json` the lane added
+ * (`generate --custom` too); a file named by hand has neither, and its made-up timestamp collides with a sibling lane's.
+ * No journal dir: []. @returns {Promise<string[]>} one problem per file
+ */
+export async function generatorProblems({ git, base, ref = "HEAD" }) {
+  const g = out(git), problems = [];
+  const added = lines(await g(["-c", "core.quotepath=off", "diff", "--name-only", "--diff-filter=A", `${base}...${ref}`])).filter((f) => !SKIP_RE.test(f));
+  const tagsAt = async (r, jp) => { try { return new Set((JSON.parse(await g(["show", `${r}:${jp}`])).entries ?? []).map((e) => e?.tag)); } catch { return new Set(); } };
+  for (const dir of [...new Set(added.filter((f) => f.endsWith(".sql")).map((f) => dirname(f)))]) {
+    const jp = posix.join(dir, "meta", "_journal.json");
+    if (!(await g(["show", `${ref}:${jp}`])).trim()) continue;
+    const [was, now] = [await tagsAt(base, jp), await tagsAt(ref, jp)];
+    for (const f of added.filter((x) => dirname(x) === dir && x.endsWith(".sql"))) {
+      const tag = basename(f, ".sql"), prefix = /^(\d+)[_-]/.exec(tag)?.[1];
+      if (!prefix) continue;
+      const why = [];
+      if (!now.has(tag) || was.has(tag)) why.push("no journal entry added for it");
+      if (!added.includes(posix.join(dir, "meta", `${prefix}_snapshot.json`))) why.push(`no meta/${prefix}_snapshot.json added`);
+      if (why.length) problems.push(`${f}: not produced by the migration generator (${why.join("; ")})`);
+    }
+  }
+  return problems;
+}

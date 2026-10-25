@@ -373,6 +373,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    changed) go through `mergeFixRound`; others are an anomaly (`e2e_blocking: all`
    blocks them). Timeout → `ci-pending`, unavailable → needs-human. `E2E_VERIFY`.
    `never`, or no `e2e_label`/`e2e_workflow` configured, keeps today's behaviour.
+   **Hand-named migrations** (#4591, `generatorProblems`): at hand-off, a lane-added `.sql`
+   in a drizzle-style dir (`meta/_journal.json`) without a lane-added journal entry and
+   `meta/<prefix>_snapshot.json` was not made by the generator; one builder round
+   (`migrationGeneratorPrompt`, stage `sequence`: regenerate, `--custom` for hand SQL), else an
+   anomaly. `builderImplementPrompt` also says never to name migrations by hand.
    **Sequence numbers** (#4322, `sequence.mjs`): before review and the first push,
    and after every base-sync merge (clean or not), lane-added `<NNN>_*` files whose
    number the fetched lane already uses → builder renumbers (`sequencePrompt`; a

@@ -30,7 +30,7 @@ import { renderInvestigation, renderImplementation, renderReview, renderPrBody, 
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
 import { hostCapabilityBlock } from "./execution.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta } from "./fixround.mjs";
 import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
@@ -1729,6 +1729,24 @@ export async function runCore(o) {
       return false;
     }
     await duplicateGate("hand-off");
+    /** #4591: lane-added migrations the repo's generator did not produce: one builder round (stage "sequence"), then an anomaly. */
+    async function migrationGate(trigger) {
+      if (!io.migrationGenerator || isSplit) return;
+      const found = async () => (await io.migrationGenerator({ cwd: wt, base }).catch(() => null)) ?? [];
+      let bad = await found();
+      if (!bad.length) return;
+      ev({ event: "MIGRATION_HAND_NAMED", trigger, count: bad.length });
+      if (sessionId) {
+        T.decisions.push(`Hand-named migration(s) (${trigger}): ${bad.slice(0, 5).join("; ")}; builder resumed once`);
+        await fixRound("sequence", migrationGeneratorPrompt(bad, vcfg.mode), [], "sequence", bad.join("\n"));
+        result = (await readResult()) ?? result;
+        files = await changedFiles();
+        bad = await found();
+      }
+      if (bad.length) T.anomalies.push(`Hand-named migration(s) remain (${trigger}): ${bad.slice(0, 5).join("; ")}`);
+      else await gatePassed("sequence");
+    }
+    await migrationGate("hand-off");
     /** #4406: verify.post_merge (else the scoped typecheck) on the merged tree before the base-sync push; fix rounds up to verify.max_rounds. */
     async function postMergeGate(trigger) {
       const commands = io.runCommand && !isSplit ? postMergeCommands({ configured: vcfg.postMerge, scoped: (await io.postMergeChecks?.({ cwd: wt, base }).catch(() => [])) ?? [], mode: vcfg.mode }) : [];
