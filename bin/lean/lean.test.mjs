@@ -1618,8 +1618,8 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(facts([], { file_lines: 1000, growth_lines: 50 })).trim(), "Don't grow a file over 1000 lines by more than 50 lines. Put new code next to it.");
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
-    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths.
-    assert.ok(approxTokens(plan) <= 1850, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line).
+    assert.ok(approxTokens(plan) <= 1900, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1500);
   });
 
@@ -6220,5 +6220,12 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     const w = lworld({ remote: "abc\trefs/heads/feat/issue-7-lean\n" }), dir = tmpDir("light-res-");
     await run(w, { dir, ...ON });
     assert.equal(events(dir, "LIGHT_DONE").length + events(dir, "LIGHT_UPGRADE").length, 0);
+  });
+});
+
+describe("block rules: a check timeout is not a block (#4589)", () => {
+  it("tells the builder rc 124 is host load, never a human block", async () => {
+    const { blockCorrectionPrompt } = await import("./prompts.mjs");
+    assert.match(blockCorrectionPrompt("x"), /times out \(rc 124\) is host load, never a block/);
   });
 });
