@@ -85,6 +85,9 @@ export function parseArgs(argv) {
   return o;
 }
 
+/** Largest diff slice substituted into a brief; a larger one is referenced by its file (#4573). */
+const INLINE_SLICE_MAX = 16000;
+
 /** Replace every `[KEY]` in one pass: a substituted value is never rescanned, so diff text cannot inject placeholders. */
 export function renderBrief(template, values) {
   return template.replace(/\[([A-Z][A-Z0-9_]*)\]/g, (m, k) => (Object.hasOwn(values, k) && values[k] != null ? String(values[k]) : m));
@@ -282,6 +285,8 @@ async function main(argv, io) {
     const slice = ctx.slices?.[domain];
     let diff = "";
     try { diff = slice?.diff_file ? io.readFile(slice.diff_file) : ""; } catch { diff = ""; }
+    // #4573: the persona templates repeat [DOMAIN_DIFF_SLICE] many times, so only a small slice is inlined; a large one is a pointer to the on-disk slice file.
+    if (diff.length > INLINE_SLICE_MAX) diff = `(diff slice too large to inline: ${diff.length} chars. Read the file ${slice.diff_file} instead, e.g. grep -n or sed -n 'X,Yp' on it, never cat it whole. Files listed as OMITTED at its top are read from the head checkout.)`;
     const values = {
       PR_NUMBER: pr, REVIEW_SHA: head, REVIEW_SHA_SHORT: sha7, AGENT_DOMAIN: domain, GH_REPO: c.ghRepo,
       TITLE: ctx.pr?.title ?? "", FILE_LIST: (slice?.paths ?? ctx.full_files ?? []).join(" "), SERVICES: (ctx.classification?.services ?? []).join(" "),
