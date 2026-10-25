@@ -760,3 +760,70 @@ describe("#4547: opt-in local fallback in mode remote when no pool agent is onli
     }
   });
 });
+
+describe("#4592: forgedock orchestrate --hold / --release", () => {
+  it("the hold file: holdIssues / readHeld / releaseIssues merge sorted unique positive integers; invalid content reads as []", () => {
+    const b = openBatch(tmpDir("batch-hold-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    assert.deepEqual(b.readHeld(), []);
+    assert.deepEqual(b.holdIssues([5, "#3", "x", 0, 5, "7"]), [3, 5, 7]);
+    assert.deepEqual(b.holdIssues([3, 9]), [9], "already held is not newly held");
+    assert.deepEqual(b.readHeld(), [3, 5, 7, 9]);
+    assert.deepEqual(b.releaseIssues([5, 4, "#9"]), [5, 9]);
+    assert.deepEqual(b.readHeld(), [3, 7]);
+    writeFileSync(join(b.dir, "hold"), "not json");
+    assert.deepEqual(b.readHeld(), []);
+  });
+
+  it("a held issue is never admitted; the rest run, the batch ends with it held, and a release (resume) runs it", async () => {
+    let saved = null, held = [2];
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const started = [], log = [];
+    const run = (issues) => orchestrate({ issues, parallel: 2, pollMs: 5, readBody: async () => "", store, getHeld: () => held, onUpdate: (r) => log.push(r),
+      runOne: async (n) => { started.push(n); return { terminalReason: "merged" }; } });
+    const rows = await run([1, 2, 3]);
+    assert.deepEqual(started.sort(), [1, 3], "#2 is not admitted");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "held"], [3, "merged"]]);
+    assert.equal(rows[1].detail, "held by operator");
+    assert.equal(log.filter((r) => r.outcome === "hold").length, 1, "one row when the set changes");
+    held = [];
+    const resumed = await run([]);
+    assert.deepEqual(resumed.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [3, "merged"]]);
+    assert.deepEqual(started.sort(), [1, 2, 3]);
+  });
+
+  it("a release while another lane runs admits the held issue in the same batch", async () => {
+    let saved = null, held = [2], free;
+    const gate = new Promise((r) => { free = r; });
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const started = [];
+    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 5, readBody: async () => "", store, getHeld: () => held,
+      runOne: async (n) => { started.push(n); if (n === 1) await gate; return { terminalReason: "merged" }; } });
+    await until(() => started.includes(1));
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(started, [1]);
+    held = [];
+    await until(() => started.includes(2));
+    free();
+    assert.deepEqual((await done).map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
+  });
+
+  it("through the CLI: --hold / --release write the hold file (usage and unknown batch reject); --resume <id> N releases N", async () => {
+    const root = tmpDir("batch-hold-cli-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: [], repo: "o/r" });
+    b.store.save({ order: [1, 2] });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN" }) };
+    let res = await quiet(() => orchestrateFromCli(["--hold", "b1", "1", "2"], { batchRoot: root, io }));
+    assert.deepEqual(res.changed, [1, 2]);
+    res = await quiet(() => orchestrateFromCli(["--release", "b1", "1"], { batchRoot: root, io }));
+    assert.deepEqual(res.changed, [1]);
+    assert.deepEqual(b.readHeld(), [2]);
+    await assert.rejects(orchestrateFromCli(["--hold", "b1"], { batchRoot: root, io }), /usage/);
+    await assert.rejects(orchestrateFromCli(["--hold", "nope", "1"], { batchRoot: root, io }), /no batch nope/);
+    // A resume naming a held issue re-admits it (the plan has no issues, so the resume stops with the usage error after that step).
+    await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "2"], { batchRoot: root, io })), /usage/);
+    assert.deepEqual(b.readHeld(), []);
+    assert.deepEqual(b.readAdded(), [], "an issue already in the batch is not added again");
+  });
+});

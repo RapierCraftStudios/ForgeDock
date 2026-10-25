@@ -8,7 +8,7 @@
  *
  * Protocol: newline-delimited JSON, one request per connection.
  *   {op:"submit", argv, cwd, env} → {type:"batch", id, dir}, {type:"row", row}…, {type:"line", text}…, {type:"done", result, report}
- *   {op:"attach", id}             → log.jsonl rows replayed, then live rows/lines and done; a finished batch replays report.json
+ *   {op:"attach", id, resume?}    → (`resume` also clears a pending cancel, #4592) log.jsonl rows replayed, then live rows/lines and done; a finished batch replays report.json
  *                                   ({type:"done", replay:true}) unless it has unrun added issues; a batch nobody hosts is resumed here
  *   {op:"set-parallel", id, k}    → {type:"ok", parallel}
  *   {op:"add", id, issues}        → {type:"ok", added, skipped, hosted} (#4408): merged into the batch's `add` file, which a
@@ -17,6 +17,8 @@
  *                                   admits nothing more, its running local lanes get SIGTERM (their teardown saves the work)
  *                                   and the rest end held; no other batch and not the daemon. A finished, unhosted batch:
  *                                   {type:"ok", cancelled:false, finished:true}, nothing written
+ *   {op:"hold"|"release", id, issues} → {type:"ok", changed, hosted} (#4592): merges into / removes from the batch's `hold` file; a hosted
+ *                                   runner admits no held issue from its next pass (running lanes are not stopped)
  *   {op:"status"}                 → {type:"status", pid, batches:[{id, running}]}
  * Failures answer {type:"error", message}. A client closing its connection never cancels a batch (only `cancel` stops one), and stopping the daemon
  * never stops a lane (lanes are detached sessions). On start the daemon resumes every daemon-hosted batch without a
@@ -140,6 +142,12 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const { added, skipped } = b.addIssues(req.issues ?? []);
       return send({ type: "ok", added, skipped, hosted: hosted.has(req.id) }, true);
     }
+    if (req.op === "hold" || req.op === "release") {
+      const b = openBatch(root, req.id);
+      if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
+      const changed = req.op === "hold" ? b.holdIssues(req.issues ?? []) : b.releaseIssues(req.issues ?? []);
+      return send({ type: "ok", changed, hosted: hosted.has(req.id) }, true);
+    }
     if (req.op === "cancel") {
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
@@ -153,6 +161,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       return send({ type: "batch", id: ent.id, dir: ent.dir });
     }
     if (req.op === "attach") {
+      if (req.resume) { const rb = openBatch(root, req.id); if (rb.exists()) rb.clearCancel(); } // #4592: the operator's resume continues a cancelled batch the daemon still hosts
       if (!hosted.has(req.id) && starting.has(req.id)) await starting.get(req.id).catch(() => {});
       const live = hosted.get(req.id);
       if (live) {
