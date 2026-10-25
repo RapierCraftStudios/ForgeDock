@@ -83,3 +83,16 @@ export async function resolveLane({ issue, repo, io, cwd, branches = {}, request
   if (!out.trim()) return refuse(OUTCOME_CODES.LANE_BRANCH_MISSING, `lane branch ${lane} (${why}) does not exist on origin; create it first (e.g. /milestone start) or fix the milestone title`);
   return { ok: true, lane, expected, milestone, overridden, defaults };
 }
+
+/**
+ * #4593: true when `lane` is a non-staging branch fully merged into `staging` (a shipped milestone branch).
+ * Fail closed: any git error (no such ref, offline) is "not shipped".
+ */
+export async function isShippedLane({ lane, staging = DEFAULT_STAGING_BRANCH, io, cwd }) {
+  if (!lane || lane === staging) return false;
+  try {
+    try { await io.git(["fetch", "origin", lane, staging], { cwd }); } catch { /* offline: use the local refs */ }
+    await io.git(["merge-base", "--is-ancestor", `origin/${lane}`, `origin/${staging}`], { cwd });
+    return true;
+  } catch { return false; }
+}
