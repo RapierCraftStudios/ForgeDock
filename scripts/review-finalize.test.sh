@@ -738,6 +738,47 @@ mkfind G-1 CONFIRMED MEDIUM a.py 10 "Duplicate of the linked issue"; putfind 1
 jq '.findings |= map(. + {class: "ISSUE", disposition: "ISSUE x"})' "$WORK/out/findings.json" > "$WORK/out/classified.json"
 run "$GOOD" file-prepare; want "linked issue excluded" '.items[0].action' worklist.json "file"
 
+# #4569: the title suffix never makes two findings of one PR dedup to each other; a DELTA closed match is resolved, a FULL one a regression
+fp_setup
+echo '[{"number":60,"title":"fix: credential helper hands token to any host (review finding — PR #7)","body":"see z.py:90"}]' > "$FIX/issues-open.json"
+echo '[{"number":61,"title":"fix: DCO exemption only on staging (review finding — PR #7)","body":"see c.py:5"}]' > "$FIX/issues-closed.json"
+mkfind K-1 CONFIRMED HIGH c.py 5 "DCO exemption only on staging"
+putfind 1
+jq '.findings |= map(. + {class: "ISSUE", disposition: "ISSUE x"})' "$WORK/out/findings.json" > "$WORK/out/classified.json"
+run "$GOOD" file-prepare
+want "full mode: closed own issue is a regression, not skipped" '.items[0] | [.action, (.regression_of | tostring)] | join(",")' worklist.json "file,61"
+fp_setup; mkctx 1 DELTA "$OLD_SHA" 12
+echo '[{"number":60,"title":"fix: credential helper hands token to any host (review finding — PR #7)","body":"see z.py:90"}]' > "$FIX/issues-open.json"
+echo '[{"number":61,"title":"fix: DCO exemption only on staging (review finding — PR #7)","body":"see c.py:5"}]' > "$FIX/issues-closed.json"
+mkfind K-1 CONFIRMED HIGH c.py 5 "DCO exemption only on staging"; putfind 1
+jq '.findings |= map(. + {class: "ISSUE", disposition: "ISSUE x"})' "$WORK/out/findings.json" > "$WORK/out/classified.json"
+run "$GOOD" file-prepare
+want "delta mode: closed own issue is resolved by that issue" '.items[0] | [.action, (.dedup_of | tostring), (.regression_of | tostring)] | join(",")' worklist.json "skip-resolved,61,null"
+# a closed finding of ANOTHER PR at the same location is no proof this finding was fixed: it stays a regression and blocks
+fp_setup; mkctx 1 DELTA "$OLD_SHA" 12
+echo '[]' > "$FIX/issues-open.json"
+echo '[{"number":62,"title":"fix: unrelated old defect (review finding — PR #3)","body":"see c.py:7"}]' > "$FIX/issues-closed.json"
+mkfind K-3 CONFIRMED HIGH c.py 5 "Brand new defect"; putfind 1
+jq '.findings |= map(. + {class: "ISSUE", disposition: "ISSUE x"})' "$WORK/out/findings.json" > "$WORK/out/classified.json"
+run "$GOOD" file-prepare
+want "delta mode: another PR's closed issue is a regression, never resolved" '.items[0] | [.action, (.regression_of | tostring)] | join(",")' worklist.json "file,62"
+# a **Source**: PR #N line marks the issue as this PR's own
+fp_setup; mkctx 1 DELTA "$OLD_SHA" 12
+echo '[]' > "$FIX/issues-open.json"
+printf '[{"number":63,"title":"fix: renamed title","body":"**Source**: PR #7 — x\\nsee c.py:5"}]' > "$FIX/issues-closed.json"
+mkfind K-4 CONFIRMED HIGH c.py 5 "Renamed defect"; putfind 1
+jq '.findings |= map(. + {class: "ISSUE", disposition: "ISSUE x"})' "$WORK/out/findings.json" > "$WORK/out/classified.json"
+run "$GOOD" file-prepare
+want "delta mode: Source line marks own closed issue" '.items[0] | [.action, (.dedup_of | tostring)] | join(",")' worklist.json "skip-resolved,63"
+# the dedup helper receives the title without the shared suffix
+DEDUP_LOG="$WORK/dedup-args"; : > "$DEDUP_LOG"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$1" >> "%s"\nexit 0\n' "$DEDUP_LOG" > "$GOOD/scripts/issue-dedup.sh"
+fp_setup; mkfind K-2 CONFIRMED MEDIUM d.py 7 "Some other defect"; putfind 1
+jq '.findings |= map(. + {class: "ISSUE", disposition: "ISSUE x"})' "$WORK/out/findings.json" > "$WORK/out/classified.json"
+run "$GOOD" file-prepare
+[ "$(cat "$DEDUP_LOG")" = "fix: Some other defect" ] && ok || bad "dedup helper gets the suffix-less title: '$(cat "$DEDUP_LOG")'"
+mkroot "$GOOD"
+
 # pattern recurrence: exempt severities skip, a prior instance in the same subsystem consolidates
 fp_setup
 echo '[{"number":50,"body":"x commands/work-on/z.md <!-- FORGE:PATTERN: slug-one -->","labels":[],"stateReason":"COMPLETED"}]' > "$FIX/issues-all.json"

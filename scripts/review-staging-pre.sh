@@ -50,6 +50,31 @@ if [ "$CMD" != gate ]; then
   export FORGE_SCRATCHPAD="$SD"
 fi
 _SD="${SD:-${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}}"
+
+# BEGIN gh-retry
+# gh_retry [--search] CMD...: run CMD up to FORGE_GH_RETRY_ATTEMPTS (default 6) times with exponential backoff from
+# FORGE_GH_RETRY_SLEEP seconds (default 2, capped at 16 per wait; --search triples the base for the 30 req/min search API).
+# Prints stdout of the first success and returns 0; returns 1 once every attempt failed, so callers still fail closed/open as before (forge#4572).
+gh_retry() {
+  local mult=1 n=0 max="${FORGE_GH_RETRY_ATTEMPTS:-6}" base="${FORGE_GH_RETRY_SLEEP:-2}" w out
+  [ "${1:-}" = --search ] && { mult=3; shift; }
+  case "$max" in ''|*[!0-9]*|0) max=6 ;; esac
+  case "$base" in ''|*[!0-9]*) base=2 ;; esac
+  while :; do
+    out=$("$@") && { printf '%s' "$out"; return 0; }
+    n=$((n+1)); [ "$n" -ge "$max" ] && return 1
+    w=$((base * mult * (1 << (n-1)))); [ "$w" -gt $((16*mult)) ] && w=$((16*mult))
+    [ "$w" -gt 0 ] && sleep "$w"
+  done
+}
+# END gh-retry
+# One review-finding search fetch; fails (so gh_retry retries) on a gh error or non-array output.
+fetch_findings() {
+  local raw
+  raw=$(gh issue list -R "$GH_REPO" --label "review-finding" --state open --search "PR #${1}" --limit 20 --json number,title,body 2>/dev/null) || return 1
+  printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  printf '%s' "$raw"
+}
 ALL_PR_NUMBERS=""
 if [ "$CMD" != bundle ]; then
   [ -n "$PRS_FILE" ] || { echo "review-staging-pre: --prs-file is required" >&2; exit 2; }
@@ -81,7 +106,7 @@ MERGE_PRS=$(git log origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH --merges --on
 # Merge-subject numbers are PRs by construction; an unclassifiable number is kept (fail open: it may be a PR). forge#4127
 # BEGIN bundle-pr-kind
 # Prints "pr" or "issue" for issue number ${2} in repo ${1}; prints nothing and returns 1 when the read fails or is malformed.
-bundle_pr_kind() { local k; k=$(gh api "repos/${1}/issues/${2}" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
+bundle_pr_kind() { local k; k=$(gh_retry gh api "repos/${1}/issues/${2}" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
 # END bundle-pr-kind
 SUBJECT_PRS=""; SKIPPED_ISSUES=""
 for n in $BUNDLE_PRS; do
@@ -115,7 +140,7 @@ DEGRADED_REVIEWS=""
 READ_FAILURES=""
 for pr_num in $ALL_PR_NUMBERS; do
   # Capture each gh read and test its own status (as the scope step does): a failed read is never "not degraded" / "no findings".
-  IS_REVIEW_DEGRADED=$(gh pr view "$pr_num" -R $GH_REPO --json labels \
+  IS_REVIEW_DEGRADED=$(gh_retry gh pr view "$pr_num" -R $GH_REPO --json labels \
     --jq '[.labels[].name] | any(. == "review-degraded")' 2>/dev/null) || IS_REVIEW_DEGRADED=unreadable
   case "$IS_REVIEW_DEGRADED" in true|false) ;; *) READ_FAILURES="$READ_FAILURES #${pr_num}(labels)" ;; esac
   if [ "$IS_REVIEW_DEGRADED" = "true" ]; then
@@ -128,12 +153,7 @@ for pr_num in $ALL_PR_NUMBERS; do
   # narrow it with the anchored FINDING_PR_FILTER: title suffix `PR #N)` or a `**Source**: PR #N` line.
   FINDING_PR_FILTER='[.[] | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
   OPEN_FINDINGS=""
-  if _RAW=$(gh issue list -R $GH_REPO \
-    --label "review-finding" \
-    --state open \
-    --search "PR #${pr_num}" \
-    --limit 20 \
-    --json number,title,body 2>/dev/null) && printf '%s' "$_RAW" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  if _RAW=$(gh_retry --search fetch_findings "$pr_num"); then
     OPEN_FINDINGS=$(printf '%s' "$_RAW" | jq -r --arg n "${pr_num}" "$FINDING_PR_FILTER" 2>/dev/null) || READ_FAILURES="$READ_FAILURES #${pr_num}(findings)"  # uses FINDING_PR_FILTER
   else
     READ_FAILURES="$READ_FAILURES #${pr_num}(findings)"
@@ -312,7 +332,7 @@ bundle_delta_credit() {
 # END bundle-delta-credit
 # BEGIN bundle-pr-kind
 # Prints "pr" or "issue" for issue number ${2} in repo ${1}; prints nothing and returns 1 when the read fails or is malformed.
-bundle_pr_kind() { local k; k=$(gh api "repos/${1}/issues/${2}" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
+bundle_pr_kind() { local k; k=$(gh_retry gh api "repos/${1}/issues/${2}" --jq 'if .pull_request then "pr" else "issue" end' 2>/dev/null) || return 1; case "$k" in pr|issue) printf '%s' "$k" ;; *) return 1 ;; esac; }
 # END bundle-pr-kind
 # BEGIN bundle-scope-loop
 _WHY=""

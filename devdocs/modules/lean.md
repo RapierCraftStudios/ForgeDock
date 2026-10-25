@@ -103,7 +103,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    trusted `FORGE:DECOMPOSED:REVOKED` reopens it (`reopenRevokedDecomposition`,
    also used by the engine's `--retry`).
 6. **Implement** — same session; `result.json` with typed amendments
-   (`applyAmendments` → `FORGE:AMENDMENT`). An `add-deliverable` on a path the
+   (`applyAmendments` → `FORGE:AMENDMENT`; #4574: `type`→`kind`, `amend-requirement`/`limitation`→`defer`, an `R#` `id`→`requirement`; a rejected amendment's problem names the valid kinds or missing field and keeps 400 chars, and the one correction round shows 900). An `add-deliverable` on a path the
    contract already lists appends its why to that deliverable's `change`, so it
    can declare a package edge on an already-listed package.json (#4159).
    Builder and reviewer runs get `FORGE_DOCKER_LABELS` (`ledger.mjs`
@@ -1058,6 +1058,9 @@ queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 L
   20, one REST call each, `n:?` when unreadable) joins the pack cache key as `stamp.links`; no links keeps the old key.
 - `scripts/review-prepare.sh`: the code-index stderr tail shows the repo root as `<repo>`, strips control characters
   and caps lines at 200 chars. Cost: 0 LLM calls; up to 20 `gh api` reads per context-pack lane.
+- `scripts/review-prepare.sh` (#4571): the final context `jq` takes PR-scaled values (slices, file lists, findings, domain
+  and index text) through `--slurpfile`/`--rawfile` on files under `$TMP_DIR`, never argv, so a 1,000+ file PR no longer
+  dies on the 128 KiB per-argument limit. Output schema unchanged; 0 LLM calls.
 
 ## Entry 2026-10-20 — Missing host tools are an environment error, not conformance (#4323)
 
