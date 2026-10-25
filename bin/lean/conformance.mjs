@@ -57,11 +57,13 @@ export function scopeText(iss, trustedComments = []) {
 /** #4265: failures whose detail starts with a contract requirement id also quote that requirement, so a needs-human names what is unmet. */
 export function explainFailures(failures, contract) {
   const reqs = new Map((contract?.requirements ?? []).map((r) => [String(r?.id ?? ""), String(r?.quote ?? "")]));
+  const amended = new Map((contract?.requirements ?? []).filter((r) => r?.amendment?.text).map((r) => [String(r.id), String(r.amendment.text)]));
   return (failures ?? []).map((f) => {
     const id = /^([A-Za-z][\w-]*)\b/.exec(String(f?.detail ?? ""))?.[1];
     const q = id && reqs.get(id);
     if (!q) return f;
-    return { ...f, detail: `${f.detail} ("${q.length > 160 ? `${q.slice(0, 157)}...` : q}")` };
+    const am = amended.get(id);
+    return { ...f, detail: `${f.detail} ("${q.length > 160 ? `${q.slice(0, 157)}...` : q}"${am ? `, amended to "${am.length > 160 ? `${am.slice(0, 157)}...` : am}"` : ""})` };
   });
 }
 export const isTestPath = (p) => TEST_RE.test(String(p));
@@ -264,7 +266,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
 /** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
-const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED];
+const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement"];
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
 
 /** forge#4574: common builder slips: `type` for `kind`, amend-requirement/limitation as defer, an `R#` in `id` as the requirement. */
@@ -272,7 +274,8 @@ function normalizeAmendment(a) {
   if (!a || typeof a !== "object" || Array.isArray(a)) return a;
   const n = { ...a };
   if (blank(n.kind) && !blank(n.type)) n.kind = n.type;
-  if (Object.hasOwn(AMEND_SLIPS, n.kind)) n.kind = AMEND_SLIPS[n.kind];
+  // #4594: amend-requirement with a revised `text` is a real amendment; without one it stays the slip for defer
+  if (Object.hasOwn(AMEND_SLIPS, n.kind) && !(n.kind === "amend-requirement" && !blank(n.text))) n.kind = AMEND_SLIPS[n.kind];
   if (TRACKED.includes(n.kind) && blank(n.requirement) && /^R\d+$/.test(String(n.id ?? ""))) n.requirement = n.id;
   return n;
 }
@@ -281,7 +284,7 @@ function normalizeAmendment(a) {
 function amendmentProblem(a, tag) {
   const kind = a?.kind;
   const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
-    : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : null;
+    : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)" : null;
   const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
   return `unknown or incomplete amendment: ${why}: ${tag}`;
 }
@@ -320,6 +323,11 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
       c.requirements.push(r);
       if (TRACKED.includes(r.disposition)) toTrack.push(r);
+    } else if (a.kind === "amend-requirement" && !blank(a.requirement)) {
+      // #4594: the requirement stays deliver and keeps its verbatim quote; the reviewer judges it against amendment.text
+      const r = c.requirements.find((x) => x.id === a.requirement);
+      if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
+      r.amendment = { text: String(a.text).trim(), why: String(a.why).trim() }; r.amended = true;
     } else if (TRACKED.includes(a.kind) && a.requirement) {
       const r = c.requirements.find((x) => x.id === a.requirement);
       if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
@@ -625,14 +633,16 @@ export function decide(raw, ctx) {
   const comp = checkCompleteness(rv, ctx);
   if (!comp.complete) return { state: "review.incomplete", failures: comp.problems.map((d) => ({ code: C.REVIEW_INCOMPLETE, detail: d })), missing: comp.missing, review: rv };
   const f = [];
-  for (const c of rv.issue_coverage) if (c.status !== "covered") f.push({ code: C.CONFORMANCE_OMISSION, detail: `issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
+  const amendedOf = (ids) => (ctx.contract.requirements ?? []).find((r) => r.amendment?.text && (ids ?? []).includes(r.id));
+  const notAccepted = (r) => (r ? `amendment not accepted (${r.id} amended to "${String(r.amendment.text).slice(0, 200)}"): ` : "");
+  for (const c of rv.issue_coverage) if (c.status !== "covered") f.push({ code: C.CONFORMANCE_OMISSION, detail: `${notAccepted(amendedOf(c.contract_ids))}issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
   for (const r of ctx.contract.requirements) {
     const row = rv.requirements.find((x) => x.id === r.id);
     if (r.disposition === "deliver" && isOutOfBand(r)) {
       // #4404: the measured result lives in the named job; only the instrumentation is judged here
       if (row.instrumented !== true) f.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} verified out of band${r.evidence ? ` by ${r.evidence}` : ""}: instrumentation missing${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && row.status !== "implemented") {
-      f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} ${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
+      f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     }
     if (TRACKED.includes(r.disposition) && row.deferral_ok === false) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} ${r.disposition} is not justified${row.note ? `: ${row.note}` : ""}; implement it` });
   }
