@@ -324,9 +324,12 @@ export async function windowEfficiency({ batchRoot, runsDir, repo = null, gh = n
 export const COMPARE_KEYS = Object.freeze(["turns_per_merge", "implement_wall_p50_min", "tool_calls_per_turn_p50", "rereads_per_merge", "merge_rate", "conformance_pass_rate"]);
 const delta = (a, b) => Object.fromEntries(COMPARE_KEYS.map((k) => [k, num(a?.[k]) == null || num(b?.[k]) == null ? null : r(b[k] - a[k], 100)]));
 
-/** #4491: full-shape merged lanes per size bucket present in both cohorts (light lanes, #4452, cut turns on their own). */
+/**
+ * #4491: full-shape merged lanes per size bucket present in both cohorts (light lanes, #4452, cut turns on their own).
+ * A merged row with no in-scope run log carries no shape and drops out, so its zero turns do not pull a bucket down.
+ */
 function matchedCohorts(pre, post) {
-  const full = (m) => (m.per_issue ?? []).filter((x) => (x.shape ?? "full") === "full");
+  const full = (m) => (m.per_issue ?? []).filter((x) => x.shape === "full");
   const bySize = (xs) => xs.reduce((o, x) => ((o[x.size] ??= []).push(x), o), {});
   const a = bySize(full(pre)), b = bySize(full(post)), out = {};
   const g = (xs) => {
@@ -401,9 +404,9 @@ export function formatEfficiencyLines(m, label = "") {
 
 const pct = (x) => (num(x) == null ? "n/a" : `${Math.round(x * 100)}%`);
 const rates = (m) => `implement wall p50 ${m.implement_wall_p50_min == null ? "n/a" : `${f(m.implement_wall_p50_min, 1)} min`}, merge rate ${pct(m.merge_rate)}, conformance pass ${pct(m.conformance_pass_rate)}`;
-const sign = (x, d) => (num(x) == null ? "n/a" : `${x > 0 ? "+" : ""}${x.toFixed(d)}`);
-const deltaLine = (d, withRates = true) => `turns/merge ${sign(d.turns_per_merge, 1)}, implement wall p50 ${sign(d.implement_wall_p50_min, 1)} min, calls/turn p50 ${sign(d.tool_calls_per_turn_p50, 2)}, `
-  + `re-reads/merge ${sign(d.rereads_per_merge, 2)}${withRates ? `, merge rate ${sign(d.merge_rate == null ? null : d.merge_rate * 100, 0)} pts, conformance pass ${sign(d.conformance_pass_rate == null ? null : d.conformance_pass_rate * 100, 0)} pts` : ""}`;
+const sign = (x, d, unit = "") => (num(x) == null ? "n/a" : `${x > 0 ? "+" : ""}${x.toFixed(d)}${unit}`);
+const deltaLine = (d, withRates = true) => `turns/merge ${sign(d.turns_per_merge, 1)}, implement wall p50 ${sign(d.implement_wall_p50_min, 1, " min")}, calls/turn p50 ${sign(d.tool_calls_per_turn_p50, 2)}, `
+  + `re-reads/merge ${sign(d.rereads_per_merge, 2)}${withRates ? `, merge rate ${sign(d.merge_rate == null ? null : d.merge_rate * 100, 0, " pts")}, conformance pass ${sign(d.conformance_pass_rate == null ? null : d.conformance_pass_rate * 100, 0, " pts")}` : ""}`;
 const cohortLine = (k, m) => `compare ${k}: n=${m.n ?? m.merged} turns/merge ${f(m.turns_per_merge, 1)}, implement wall p50 ${m.implement_wall_p50_min == null ? "n/a" : `${f(m.implement_wall_p50_min, 1)} min`}, `
   + `calls/turn p50 ${f(m.tool_calls_per_turn_p50)}, re-reads/merge ${f(m.rereads_per_merge)}${"merge_rate" in m ? `, merge rate ${pct(m.merge_rate)}, conformance pass ${pct(m.conformance_pass_rate)}` : ""}`;
 

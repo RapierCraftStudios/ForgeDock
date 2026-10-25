@@ -270,7 +270,8 @@ describe("#4402 forgedock stats --efficiency", () => {
 describe("#4491 before/after compare", () => {
   const PIVOT = Date.parse("2026-10-20T00:00:00Z"), SLUG = "Own/Repo";
   const tools = (calls, turns, rereads) => ({ tools: { calls, turns, per_turn: calls / turns, rereads, top: [] } });
-  // pre batch (10-18): issues 1, 2 merged (M, full), 3 failed; post batch (10-21): issues 4 merged (M, full), 5 merged light, 6 merged (L, full)
+  // pre batch (10-18): issues 1, 2 merged (M, full), 3 failed; post batch (10-21): issues 4 merged (M, full), 5 merged light, 6 merged (L, full);
+  // 8 (pre) and 7 (post) merged with no run log, so both sides hold a size-unknown, shapeless lane
   const lane = (turns, wallMin, t, conf, size = "M", extra = []) => [start("2026-10-01T00:00:00Z", SLUG), att("implement", { trigger: "build", turns, duration_ms: wallMin * 60000, ...t }),
     ...extra, ...(conf ? [{ event: "CONFORMANCE", state: conf }] : []), term("merged", "merged", { turns: { size } })];
   const setup = () => {
@@ -280,9 +281,9 @@ describe("#4491 before/after compare", () => {
       writeFileSync(join(root, id, "plan.json"), JSON.stringify({ v: 1, id, repo: SLUG, created }));
       writeFileSync(join(root, id, "report.json"), JSON.stringify({ rows }));
     };
-    batch("pre", "2026-10-18T00:00:00Z", [{ issue: 1, outcome: "merged" }, { issue: 2, outcome: "merged" }, { issue: 3, outcome: "failed" }]);
+    batch("pre", "2026-10-18T00:00:00Z", [{ issue: 1, outcome: "merged" }, { issue: 2, outcome: "merged" }, { issue: 3, outcome: "failed" }, { issue: 8, outcome: "merged" }]);
     batch("old", "2026-10-10T00:00:00Z", [{ issue: 9, outcome: "merged" }]); // outside the 3-day span
-    batch("post", "2026-10-21T00:00:00Z", [{ issue: 4, outcome: "merged" }, { issue: 5, outcome: "merged" }, { issue: 6, outcome: "merged" }]);
+    batch("post", "2026-10-21T00:00:00Z", [{ issue: 4, outcome: "merged" }, { issue: 5, outcome: "merged" }, { issue: 6, outcome: "merged" }, { issue: 7, outcome: "merged" }]);
     const logs = {
       1: lane(40, 30, tools(40, 40, 2), "conforms"), 2: lane(60, 50, tools(60, 60, 4), "nonconforming"),
       3: [start("2026-10-01T00:00:00Z", SLUG), att("implement", { trigger: "build" }), { event: "CONFORMANCE", state: "nonconforming" }, term("failed", "ci.red")],
@@ -297,22 +298,22 @@ describe("#4491 before/after compare", () => {
     const { root, runs } = setup();
     const c = await compareEfficiency({ batchRoot: root, runsDir: runs, repo: SLUG, pivot: PIVOT, now: PIVOT + 3 * DAY });
     assert.equal(c.span_days, 3);
-    assert.deepEqual([c.pre.batches, c.pre.merged, c.post.batches, c.post.merged], [1, 2, 1, 3]);
+    assert.deepEqual([c.pre.batches, c.pre.merged, c.post.batches, c.post.merged], [1, 3, 1, 4]); // 8 and 7 merged without a run log
     assert.equal(c.pre.implement_wall_p50_min, 40); // median of 30 and 50
     assert.equal(c.post.implement_wall_p50_min, 20);
-    assert.equal(c.pre.merge_rate, 0.6667);
+    assert.equal(c.pre.merge_rate, 0.75);
     assert.equal(c.post.merge_rate, 1);
     assert.equal(c.pre.conformance_pass_rate, 0.3333); // 1 of 3 verdicts
     assert.equal(c.post.conformance_pass_rate, 1); // issue 6 has no verdict
-    assert.equal(c.delta.turns_per_merge, -31.7); // 50 -> (20 + 5 + 30) / 3 = 18.3
+    assert.equal(c.delta.turns_per_merge, -19.5); // (40 + 60 + 0) / 3 = 33.3 -> (20 + 5 + 30 + 0) / 4 = 13.8
     assert.equal(c.delta.implement_wall_p50_min, -20);
-    assert.equal(c.delta.merge_rate, 0.33);
+    assert.equal(c.delta.merge_rate, 0.25);
     assert.equal(c.delta.tool_calls_per_turn_p50, 0);
   });
-  it("compare matches full lanes per size present on both sides (light lanes and unmatched sizes drop out)", async () => {
+  it("compare matches full lanes per size present on both sides (light, log-less lanes and unmatched sizes drop out)", async () => {
     const { root, runs } = setup();
     const c = await compareEfficiency({ batchRoot: root, runsDir: runs, repo: SLUG, pivot: PIVOT, now: PIVOT + 3 * DAY });
-    assert.deepEqual(Object.keys(c.matched), ["M"]);
+    assert.deepEqual(Object.keys(c.matched), ["M"]); // issues 7 and 8 (no log, size unknown) are in no bucket
     assert.deepEqual(c.matched.M.pre, { n: 2, turns_per_merge: 50, implement_wall_p50_min: 40, tool_calls_per_turn_p50: 1, rereads_per_merge: 3 });
     assert.deepEqual(c.matched.M.post, { n: 1, turns_per_merge: 20, implement_wall_p50_min: 20, tool_calls_per_turn_p50: 1.5, rereads_per_merge: 0 });
     assert.equal(c.matched.M.delta.tool_calls_per_turn_p50, 0.5);
@@ -322,20 +323,22 @@ describe("#4491 before/after compare", () => {
     const { root, runs } = setup();
     const lines = formatCompareLines(await compareEfficiency({ batchRoot: root, runsDir: runs, repo: SLUG, pivot: PIVOT, now: PIVOT + 3 * DAY }));
     assert.equal(lines[0], "compare: pivot 2026-10-20T00:00:00.000Z, 3.0 days each side (pre 1 batches, post 1 batches)");
-    assert.match(lines[1], /^compare pre: n=2 turns\/merge 50\.0, implement wall p50 40\.0 min, calls\/turn p50 1\.00, re-reads\/merge 3\.00, merge rate 67%, conformance pass 33%$/);
-    assert.match(lines[3], /^compare delta: turns\/merge -?\d+\.\d, implement wall p50 -20\.0 min, .*merge rate \+33 pts, conformance pass \+67 pts$/);
+    assert.match(lines[1], /^compare pre: n=3 turns\/merge 33\.3, implement wall p50 40\.0 min, calls\/turn p50 1\.00, re-reads\/merge 3\.00, merge rate 75%, conformance pass 33%$/);
+    assert.match(lines[3], /^compare delta: turns\/merge -?\d+\.\d, implement wall p50 -20\.0 min, .*merge rate \+25 pts, conformance pass \+67 pts$/);
     assert.match(lines[4], /^compare matched M: pre n=2 post n=1; delta turns\/merge -30\.0, implement wall p50 -20\.0 min, calls\/turn p50 \+0\.50, re-reads\/merge -3\.00$/);
     assert.ok(!lines.some((l) => /NaN|undefined/.test(l)), lines.join("\n"));
   });
   it("case-insensitive repo: a lowercase --repo matches the plans and reads the run logs under their spelling", async () => {
     const { root, runs } = setup();
     const c = await compareEfficiency({ batchRoot: root, runsDir: runs, repo: "own/repo", pivot: PIVOT, now: PIVOT + 3 * DAY });
-    assert.deepEqual([c.pre.merged, c.post.merged, c.pre.implement_wall_p50_min], [2, 3, 40]);
+    assert.deepEqual([c.pre.merged, c.post.merged, c.pre.implement_wall_p50_min], [3, 4, 40]);
     const w = (await windowEfficiency({ batchRoot: root, runsDir: runs, repo: "OWN/REPO", now: PIVOT + 3 * DAY, windows: [7 * DAY] }))["7d"];
-    assert.deepEqual([w.batches, w.merged], [2, 5]);
+    assert.deepEqual([w.batches, w.merged], [2, 7]);
   });
-  it("compare rejects a pivot in the future", async () => {
+  it("compare rejects a pivot in the future and prints a bare n/a delta for empty cohorts", async () => {
     await assert.rejects(compareEfficiency({ batchRoot: tmpDir("eff-cmp-x-"), runsDir: tmpDir("eff-cmp-y-"), pivot: NOW + DAY, now: NOW }), /pivot/);
+    const empty = formatCompareLines(await compareEfficiency({ batchRoot: tmpDir("eff-cmp-x-"), runsDir: tmpDir("eff-cmp-y-"), pivot: NOW - DAY, now: NOW }));
+    assert.equal(empty[3], "compare delta: turns/merge n/a, implement wall p50 n/a, calls/turn p50 n/a, re-reads/merge n/a, merge rate n/a, conformance pass n/a");
   });
   it("compare and offline flags: parsing, pivot resolution and the offline CLI skips gh", async () => {
     const o = parseArgs(["--efficiency", "--compare", "v1.32.0", "--offline"]);
