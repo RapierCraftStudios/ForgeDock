@@ -1623,7 +1623,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line).
     assert.ok(approxTokens(plan) <= 1900, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1500);
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1550); // 1550: #4591 (never hand-name migration files, one rule line)
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -5185,6 +5185,23 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     await run(w, { verify: { duplicateExports: false } });
     assert.equal(called, 0);
     assert.equal(builders(w).length, 2);
+  });
+
+  const HAND = ["db/2026_x.sql: not produced by the migration generator (no journal entry added for it)"];
+  it("#4591 a hand-named migration resumes the builder once with the generator rule; a remainder is an anomaly; clean costs no round", async () => {
+    const w = hworld(); const d = [HAND, []];
+    w.io.migrationGenerator = async (x) => { w.genArgs = x; return d.length > 1 ? d.shift() : d[0]; };
+    assert.equal((await run(w)).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3);
+    assert.match(b[2][4], /db\/2026_x\.sql[\s\S]*Never name or number migration files by hand/);
+    assert.equal(w.genArgs.cwd, WT);
+    const w2 = hworld(); w2.io.migrationGenerator = async () => HAND;
+    assert.equal((await run(w2)).terminalReason, "merged");
+    assert.match(traj(w2)[0], /Hand-named migration\(s\) remain \(hand-off\)/);
+    const w3 = hworld(); w3.io.migrationGenerator = async () => [];
+    await run(w3);
+    assert.equal(builders(w3).length, 2);
   });
 
   it("no enumerating tests and no collisions: no new plan step, no extra builder call (prompts unchanged)", async () => {
