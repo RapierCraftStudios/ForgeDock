@@ -173,7 +173,7 @@ export const REVIEW_RUBRIC = `1. Fixed: does the diff resolve the issue as writt
 /** Builder call 2, same session: implement the frozen contract. */
 export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
-  return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, run the repo's formatter on the files you changed, and commit. Do not push or touch GitHub.
+  return `The engine froze ${CONTRACT_FILE}; it is now the authority. Implement it exactly: change only deliverable paths (tests are always allowed), keep every preserve item intact, add a regression test, ${remote ? VERIFY_RUN[mode] : "run every validate command"}, run the repo's formatter on changed files, and commit. Do not push or touch GitHub.
 
 ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
@@ -182,10 +182,10 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: an issue requirement the contract missed.
 - {"kind":"defer|post-deploy","requirement":"R#","why":""}: a requirement that becomes separate work or a post-deploy check. Filed as a tracked follow-up. Not "type"; other kinds are rejected.
 - {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded; judged against text.
-New locale keys: translate, never English copies; insert status entries, don't re-sort.
+New keys: translate, never copy English; status entries in place.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
-A new workspace-package dependency in a package.json no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
-If the repository has scripts/check-devdocs-freshness.sh, a behaviour change under the paths it checks must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change. Run it against the base first; the engine runs it too.
+A new workspace-package dependency in a package.json no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or drop it.
+If the repository has scripts/check-devdocs-freshness.sh, a behaviour change under the paths it checks must update the matching dossier (devdocs/modules/*.md) in the same change. Run it against the base first.
 
 Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
 
@@ -202,10 +202,10 @@ ${REVIEW_RUBRIC}
 </rubric>
 
 Finally write ${RESULT_FILE}: {"status":"fixed","summary":"one line","requirements":[{"id":"R1","status":"implemented|partial|missing","evidence":"file:line","instrumented":"<true if out_of_band bench+job committed>"}],"validation":[{"id":"V1","command":"","exit":0}],"tests":[{"command":"","result":"pass|fail: ...","fails_without_fix":true|false|"unknown"}],"self_review":[{"question":"1","answer":"yes|no","evidence":""}],"amendments":[]}
-Optional "facts":{"decisions":[],"rejected":[{"approach":"","why":""}],"hotspots":[{"at":"file:line","why":""}],"conventions":[]}.
+Optional "facts":{"decisions":[],"rejected":[{"approach":"","why":""}],"hotspots":[{"at":"file:line","why":""}],"conventions":[]}; rejected: approaches you dropped, with why.
 Docker: start containers with docker run --rm; pass --label for each entry of $FORGE_DOCKER_LABELS on every docker run, volume create, network create and build (compose: on services, volumes, networks); tear down via trap/finally.
-If you started Docker containers or volumes that are still there, list their names in ${RESULT_FILE} as "resources":{"containers":[],"volumes":[]} so the engine removes them.
-If blocked, write "status":"blocked" with a typed "block".`;
+If you started Docker containers or volumes that are still there, list their names in ${RESULT_FILE} as "resources":{"containers":[],"volumes":[]} so the engine removes them when the lane ends.
+If you find you are blocked, write "status":"blocked" with a typed "block" instead.`;
 }
 
 /**
