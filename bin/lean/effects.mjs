@@ -17,6 +17,7 @@ import { makeHeavyIo } from "./heavy.mjs";
 import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
+import { resolveBaseConflicts } from "./conflictres.mjs";
 import { sequenceCollisions, snapshotLane, verifyRenumber, renumberLane, resolveSequenceConflicts, generatorProblems } from "./sequence.mjs";
 import { duplicateExports } from "./postmerge.mjs";
 import { scopedChecks } from "./checks.mjs";
@@ -375,6 +376,8 @@ export function makeLeanIo({ repo }) {
     /** #4386: the deterministic renumber, sequence-only base-sync resolution, and the host sequence lease at the merge gate. */
     sequenceRenumber: ({ cwd, base, laneRef, regenerate, reserve }) => renumberLane({ git: (a) => run("git")(a, { cwd }), base, cwd, laneRef, regenerate, reserve }),
     sequenceResolve: ({ cwd, files }) => resolveSequenceConflicts({ git: (a) => run("git")(a, { cwd }), files }),
+    /** #4588: deterministic base-merge resolution of union / JSON-map / generated files (bin/lean/conflictres.mjs). */
+    conflictResolve: ({ cwd, files, cfg }) => resolveBaseConflicts({ git: (a) => run("git")(a, { cwd }), cwd, files, cfg }),
     sequenceLease: makeSequenceLeaseIo(),
     /** #4591: lane-added migrations the repo's generator did not produce (no journal entry or snapshot); [] on failure. */
     migrationGenerator: ({ cwd, base }) => generatorProblems({ git: (a) => run("git")(a, { cwd }), base }),
