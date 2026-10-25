@@ -667,6 +667,7 @@ verify:
   precheck_total_seconds: 600   # optional total budget of one pre-PR check round (default 600)
   check_run: true               # optional; post the forgedock/verify check run (default false)
   checks: "lint,test"           # optional; the check names that gate CI verification (default: the required checks)
+  flaky: "memory-erasure,pdf timing"  # optional; known-flaky test ids (job name or log text): reported, never block or feed the builder
   post_merge: pnpm -r typecheck # optional; run on the merged tree at base-sync before the push (default: the lane's scoped typecheck)
   duplicate_exports: false      # optional; turn off the same-app duplicate-export check (default true)
   e2e: auto                     # optional e2e merge gate: auto (default) | always | never
@@ -693,6 +694,7 @@ verify:
 | `duplicate_exports` | boolean | No | Default `true`: at hand-off and after each base-sync merge, names the lane newly exports that another non-test module of the same app or package (nearest `package.json`/`pyproject.toml`/`setup.py`/`go.mod`/`Cargo.toml`) already declares go back to the builder once ("rename or reuse", both paths); one left over is an anomaly (forge#4406). Re-exports, default exports and names 3+ other modules declare (framework conventions) are ignored. `false` turns the check off. |
 | `e2e` | string | No | e2e merge gate (forge#4403). `auto` (default): run e2e when the diff touches `e2e_paths` or a contract requirement quote has `[type:e2e]`. `always`: on every lane except docs-only ones. `never`: today's behaviour. Without `e2e_label` or `e2e_workflow` no e2e can run, so every mode keeps today's behaviour (a lane that changed specs records a decision saying so). |
 | `e2e_label` | string | No | Label added to the PR (`gh pr edit --add-label`) so tiered CI runs its e2e jobs. The label must already exist in the repo. |
+| `flaky` | list | No | Comma-separated (or YAML list) test ids (#4586). A failed CI job whose name equals an id, or whose failed log contains one, is reported (anomaly, `CI_FLAKY_REPORTED`) and never blocks the lane or reaches the builder; the engine's CI verification and e2e gate honour it. A check that is required by branch protection still blocks the merge. Independently of this list, the failed jobs of a red CI verification or required check are rerun once per head before a fix round (`max_rounds`) is counted; only a failure that repeats counts. |
 | `e2e_checks` | string | No | Comma-separated check-run names of the e2e jobs the label path waits on. Default: every check on the head except `forgedock/verify`. A check run concluded `skipped` (the unlabelled tier) counts as not run. |
 | `e2e_workflow` | string | No | Workflow file name or id dispatched on the lane branch instead of the label (`workflow_dispatch`); the engine waits for its run of the reviewed head. Wins over `e2e_label`. |
 | `e2e_paths_input` | string | No | `workflow_dispatch` input of `e2e_workflow` that receives the changed spec paths (newline-separated). |

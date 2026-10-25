@@ -246,8 +246,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    base-sync re-review retry CI-verifies its fix round's head before reviewing (#4527).
    Push-check mode gates on `ciGate` (`verify.checks` > required checks under
    `merge_wait: required` > all) at the latest attempt per name (`latestPerName`, check-run
-   id); a no-commit fix round reruns the failed jobs once (`rerunFailedOnce`,
-   `CI_FLAKE_RERUN`) before `ci.red` (#4387).
+   id); the failed jobs are rerun once per head (`rerunFailedOnce`,
+   `CI_FLAKE_RERUN`) BEFORE a fix round is counted, in `ciVerify` and at merge time
+   (`mergeFixRound`); only a failure that repeats on the same head spends a round (#4387,
+   #4586). `verify.flaky` ids (`splitFlaky`: job name or log substring) are reported
+   (`CI_FLAKY_REPORTED`), never block or reach the builder; a required check still blocks.
    **Validate commands vs a moving base**: `validateContract` rejects a validate
    command whose `git diff` compares against a remote `origin/<x>` tip rather than the
    merge base (`movingBaseDiff`), so the planner fixes it in the one contract
