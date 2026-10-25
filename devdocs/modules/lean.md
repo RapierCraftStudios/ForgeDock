@@ -151,7 +151,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    Context restarts do not use the single idle/timeout retry; after 3 in one call the call runs uncapped (loop guard).
    **Turn budget** (#4392, `budget.mjs`, forge.yaml `engine.turn_budget_s|m|l`, defaults 25/60/100, 0 = off;
    `readCoreLimits` → runCore `turnBudgets`): at contract freeze (or a resumed frozen contract) `laneSize` sizes the lane
-   from a `size:S|M|L` label, else the contract's distinct deliverable paths (S ≤ 2, M ≤ 5, else L). While `stage ===
+   from a `size:S|M|L` label, else the contract's distinct deliverable paths (S ≤ 2, M ≤ 5, else L); an L lane gets +10 turns per distinct deliverable path above 5 (cap +2x the L base) and a `budget.exceeded` recovery of L another +ceil(base/2) (`scaledExtra`, #4587). While `stage ===
    "implement"` every builder call (build plus its context/timeout restarts) passes `turnMax` = budget left;
    `runCliBackendAsync` kills the stream session at that many deduped assistant turns with `CLI_TURNS`. `builder()`
    records the attempt, logs `TURN_BUDGET_EXCEEDED`, checkpoints and runs `budgetWrapup`: one fresh session (trigger
