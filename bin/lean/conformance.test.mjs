@@ -60,6 +60,24 @@ describe("amendments", () => {
   });
 });
 
+describe("#4574 amendment slips", () => {
+  it("type for kind, amend-requirement and limitation apply as defer; an R# id fills requirement", () => {
+    const a = applyAmendments(C, [{ kind: "amend-requirement", id: "R2", why: "stored hashed" }, { id: "A1", requirement: "R1", type: "limitation", why: "plugin limit" }]);
+    assert.deepEqual(a.problems, []);
+    assert.deepEqual(a.toTrack.map((r) => r.id).sort(), ["R1", "R2"]);
+    assert.ok(a.contract.requirements.every((r) => r.disposition === "defer"));
+  });
+  it("an unknown kind names the valid kinds and shows the full amendment", () => {
+    const why = "x".repeat(300);
+    const a = applyAmendments(C, [{ kind: "rewrite", why }]);
+    assert.match(a.problems[0], /unknown kind 'rewrite'; valid kinds are add-deliverable, add-requirement, defer, post-deploy/);
+    assert.ok(a.problems[0].includes(why));
+  });
+  it("an incomplete known kind names the missing field", () => {
+    assert.match(applyAmendments(C, [{ kind: "defer", why: "w" }]).problems[0], /'defer' needs requirement/);
+  });
+});
+
 describe("precheck (deterministic, no reviewer)", () => {
   const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
   it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [], ciCovered: [] }));

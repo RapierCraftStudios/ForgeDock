@@ -264,6 +264,28 @@ export function validateContract(c, issueText, { repro = false } = {}) {
 /** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
+const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED];
+const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
+
+/** forge#4574: common builder slips: `type` for `kind`, amend-requirement/limitation as defer, an `R#` in `id` as the requirement. */
+function normalizeAmendment(a) {
+  if (!a || typeof a !== "object" || Array.isArray(a)) return a;
+  const n = { ...a };
+  if (blank(n.kind) && !blank(n.type)) n.kind = n.type;
+  if (AMEND_SLIPS[n.kind]) n.kind = AMEND_SLIPS[n.kind];
+  if (TRACKED.includes(n.kind) && blank(n.requirement) && /^R\d+$/.test(String(n.id ?? ""))) n.requirement = n.id;
+  return n;
+}
+
+/** The rejection reason, naming the valid kinds or the missing field so the builder's correction round can fix it. */
+function amendmentProblem(a, tag) {
+  const kind = a?.kind;
+  const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
+    : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : null;
+  const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
+  return `unknown or incomplete amendment: ${why}: ${tag}`;
+}
+
 /**
  * Apply result.json amendments to the frozen contract. Kinds: add-deliverable {path}, add-requirement {requirement},
  * defer|post-deploy {requirement: id}. Every amendment needs a why. Returns {contract, applied[], toTrack[], problems[]}.
@@ -275,8 +297,9 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
   c.deliverables = c.deliverables ?? [];
   const applied = [], toTrack = [], problems = [];
   const genRes = (Array.isArray(generatedPaths) ? generatedPaths : []).filter((g) => typeof g === "string" && g).map(shellGlobRe);
-  for (const a of Array.isArray(amendments) ? amendments : []) {
-    const tag = JSON.stringify(a ?? null).slice(0, 100);
+  for (const raw of Array.isArray(amendments) ? amendments : []) {
+    const a = normalizeAmendment(raw);
+    const tag = JSON.stringify(raw ?? null).slice(0, 400);
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
       if (genRes.some((re) => re.test(cleanPath(a.path)))) {
@@ -301,7 +324,7 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       const r = c.requirements.find((x) => x.id === a.requirement);
       if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
       if (!TRACKED.includes(r.disposition)) { r.disposition = a.kind; r.why = a.why; r.amended = true; toTrack.push(r); }
-    } else { problems.push(`unknown or incomplete amendment: ${tag}`); continue; }
+    } else { problems.push(amendmentProblem(a, tag)); continue; }
     applied.push({ kind: a.kind, target: a.path ?? a.requirement?.id ?? a.requirement, why: String(a.why).trim() });
   }
   return { contract: c, applied, toTrack, problems };
