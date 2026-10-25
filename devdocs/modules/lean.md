@@ -185,7 +185,9 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    sessions/median/mean per phase and the conformance rate per profile (the `--tiers` rule); `--issues` pins the issue set.
    **Batched reads** (#4410): `HOST_RULES` also tells the builder to issue independent read-only calls (reads, greps,
    git log/blame, gh) in the same turn or one shell call, and to read each file's ranges once and keep notes. The
-   wording replaced older text, so the plan/implement token caps are unchanged. Measurement: `runCliBackendAsync`'s stream
+   wording replaced older text, so the plan/implement token caps are unchanged. Calls/turn p50 > 1.5 is no longer a
+   target (#4580): p50 stayed 1.00, and whether calls are independent is a judgment no script can enforce; it stays an
+   informational metric and success is judged on turns/merge and implement wall (`decisions/4580-reread-guard-and-batching-target.md`). Measurement: `runCliBackendAsync`'s stream
    parser returns `toolUses` ([{msg, name, path, cmd}], deduped by tool_use id, cap 5000; also on `CLI_TURNS` /
    `CLI_CONTEXT` errors). `bin/lean/toolstats.mjs` `toolStats` turns them into `{calls, turns, per_turn, rereads, top}`:
    a turn is an assistant message with a tool use, and a re-read path is one read 3 or more times by Read or by a Bash
@@ -197,7 +199,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    hook on `Read|Bash` (reviewer, verifier and grouper sessions are unchanged). The hook counts reads per path with
    toolstats `readPaths` (resolved against the session cwd) in `<tmpdir>/forgedock-reread/<session_id>.json`, and on
    exactly the `REREAD_MIN` (3rd) read returns an `additionalContext` reminder to use notes or the excerpt already in
-   context. Advisory and fail-open: always exit 0, no output on error. Its effect is read off `forgedock stats
+   context. Advisory and fail-open: always exit 0, no output on error. #4580: the same script is also a PreToolUse hook
+   on `Read` (`guardFor`): a full-file Read (no offset/limit) of a path read twice already, with an unchanged mtime
+   (`<session_id>.mtime.json`; a changed mtime resets the count), is denied with a reason pointing at notes or a line
+   range. Ranged reads and Bash never deny. Its effect is read off `forgedock stats
    --efficiency` `rereads_per_merge`.
    **Quiet output** (#4390): `HOST_RULES` tells the builder to run tests quiet, read failures as `tail -40` + failing test
    ids, read files by range and send output that may pass 8 KB to a `$TMPDIR` file. `precheck.mjs` `quietFailure`
