@@ -435,5 +435,16 @@ if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; th
     if grep -q "code index timed out after 1s" "$WORK/stderr"; then ok; else bad "index timeout must be reported on stderr"; fi
 fi
 
+# --- 12. oversized slices JSON (>128 KiB, argv per-argument limit) still assembles ---
+BIG_FILES=$(awk 'BEGIN{for(i=1;i<=1100;i++) printf "services/api/auth/very/long/directory/name/to/pad/the/path/out/for/the/test/module_%05d_handler.py\n", i}')
+BIG_DIFF='diff --git a/services/api/auth/x.py b/services/api/auth/x.py
++jwt = 1'
+setup feat/x staging "$BIG_FILES" "$BIG_DIFF"
+prep "$ROOT"
+rc_is "oversized slices JSON" 0
+eq "oversized slices JSON is over 128 KiB" '.slices | tojson | length > 131072' true
+eq "oversized security slice keeps every path" '.slices.security.paths | length' 1100
+eq "oversized full_files keeps every path" '.full_files | length' 1100
+
 echo "review-prepare tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

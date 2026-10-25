@@ -1058,6 +1058,9 @@ queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 L
   20, one REST call each, `n:?` when unreadable) joins the pack cache key as `stamp.links`; no links keeps the old key.
 - `scripts/review-prepare.sh`: the code-index stderr tail shows the repo root as `<repo>`, strips control characters
   and caps lines at 200 chars. Cost: 0 LLM calls; up to 20 `gh api` reads per context-pack lane.
+- `scripts/review-prepare.sh` (#4571): the final context `jq` takes PR-scaled values (slices, file lists, findings, domain
+  and index text) through `--slurpfile`/`--rawfile` on files under `$TMP_DIR`, never argv, so a 1,000+ file PR no longer
+  dies on the 128 KiB per-argument limit. Output schema unchanged; 0 LLM calls.
 
 ## Entry 2026-10-20 — Missing host tools are an environment error, not conformance (#4323)
 
