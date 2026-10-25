@@ -2243,6 +2243,39 @@ describe("orchestrate", () => {
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.detail]), [[9, "needs-human", "ci.red"], [1, "skipped", "dependency #9 needs-human"]]);
   });
 
+  it("#4595 a dependent skipped for a needs-human blocker is re-admitted when the blocker merges meanwhile; its dependents follow", async () => {
+    const log = [];
+    let merged = false;
+    const rows = await orchestrate({ issues: [9, 1, 2], parallel: 1,
+      readBody: async (n) => ({ 1: "**Depends on**: #9", 2: "**Depends on**: #1" })[n] ?? "",
+      dispatchCheck: async (n) => (n === 9 && merged ? { outcome: "merged", pr: 90, detail: "PR #90 already merged" } : null),
+      runOne: async (n) => { log.push(n); if (n === 9) { merged = true; return { terminalReason: "needs-human", detail: "ci.red" }; } return { terminalReason: "merged", pr: 100 + n }; } });
+    assert.deepEqual(log, [9, 1, 2]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[9, "merged"], [1, "merged"], [2, "merged"]]);
+    assert.equal(rows[0].pr, 90);
+  });
+
+  it("#4595 an out-of-set parked blocker that closes re-admits the skipped issue", async () => {
+    const log = [];
+    let closed = false;
+    const rows = await orchestrate({ issues: [1], parallel: 1, readBody: async () => "",
+      issueLabels: async () => ["needs-human"],
+      dispatchCheck: async (n) => (n === 9 && closed ? { outcome: "invalid", detail: "issue closed" } : null),
+      runOne: async (n) => { log.push(n); if (log.length === 1) { closed = true; return { terminalReason: "dependency-open", dependencies: [9] }; } return { terminalReason: "merged" }; } });
+    assert.deepEqual(log, [1, 1]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"]]);
+  });
+
+  it("#4595 an unreadable or still-open blocker leaves the dependent skipped; no dispatchCheck changes nothing", async () => {
+    for (const dispatchCheck of [async () => { throw new Error("gh down"); }, async () => null, undefined]) {
+      const log = [];
+      const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async (n) => (n === 1 ? "**Depends on**: #9" : ""), ...(dispatchCheck ? { dispatchCheck } : {}),
+        runOne: async (n) => { log.push(n); return { terminalReason: "needs-human", detail: "ci.red" }; } });
+      assert.deepEqual(log, [9]);
+      assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[9, "needs-human"], [1, "skipped"]]);
+    }
+  });
+
   it("#4124 a repeated dependency-open stops after the requeue cap", async () => {
     const h = harness({}, { 1: "dependency-open" });
     const clock = { t: 0 }, starts = [];
