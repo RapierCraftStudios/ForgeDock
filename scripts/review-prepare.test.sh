@@ -277,8 +277,14 @@ eq "partial earlier pass blocker" '.blockers | join(" ") | test("no trusted proo
 # forge#4573: an unfinalized panel is complete when every launched domain delivered findings at <from> and nothing is degraded
 export FORGE_SCRATCHPAD="$WORK/sd"; mkdir -p "$FORGE_SCRATCHPAD"
 printf 'security\n' > "$FORGE_SCRATCHPAD/7_launched_review_agents"
+printf '%s\n' "$SHA_A" > "$FORGE_SCRATCHPAD/7_launched_review_agents.head"
 { cmt "$(agent_body "$SHA_A")"; } | comments_of
 prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "complete but unfinalized panel is accepted (#4573)" 0; eq "unfinalized panel mode" .delta.mode DELTA
+printf '%s\n' "$SHA_B" > "$FORGE_SCRATCHPAD/7_launched_review_agents.head"
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "a launched list written for another head is no proof" 3
+rm -f "$FORGE_SCRATCHPAD/7_launched_review_agents.head"
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "a launched list with no head sidecar is no proof" 3
+printf '%s\n' "$SHA_A" > "$FORGE_SCRATCHPAD/7_launched_review_agents.head"
 printf 'security\nauth\n' > "$FORGE_SCRATCHPAD/7_launched_review_agents"
 prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "a launched domain with no findings keeps the delta blocked" 3
 printf 'security\n' > "$FORGE_SCRATCHPAD/7_launched_review_agents"

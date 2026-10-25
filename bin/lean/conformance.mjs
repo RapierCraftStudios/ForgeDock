@@ -272,7 +272,7 @@ function normalizeAmendment(a) {
   if (!a || typeof a !== "object" || Array.isArray(a)) return a;
   const n = { ...a };
   if (blank(n.kind) && !blank(n.type)) n.kind = n.type;
-  if (AMEND_SLIPS[n.kind]) n.kind = AMEND_SLIPS[n.kind];
+  if (Object.hasOwn(AMEND_SLIPS, n.kind)) n.kind = AMEND_SLIPS[n.kind];
   if (TRACKED.includes(n.kind) && blank(n.requirement) && /^R\d+$/.test(String(n.id ?? ""))) n.requirement = n.id;
   return n;
 }

@@ -276,6 +276,8 @@ async function main(argv, io) {
   const agents = ctx.roster?.agents?.length ? ctx.roster.agents : ["security"];
   const launchedFile = join(sd, `${pr}_launched_review_agents`);
   io.writeFile(launchedFile, "");
+  // The head this list describes: review-prepare trusts the list as --delta proof only for this head.
+  io.writeFile(`${launchedFile}.head`, `${head}\n`);
   const briefDir = join(sd, `review-staging-${pr}`);
   io.mkdir(briefDir);
   const briefs = [];
