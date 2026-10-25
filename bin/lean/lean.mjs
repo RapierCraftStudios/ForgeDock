@@ -30,7 +30,7 @@ import { renderInvestigation, renderImplementation, renderReview, renderPrBody, 
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
 import { hostCapabilityBlock } from "./execution.mjs";
-import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, i18nCopiesPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta } from "./fixround.mjs";
 import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
@@ -1713,6 +1713,28 @@ export async function runCore(o) {
       return false;
     }
     await duplicateGate("hand-off");
+    /** #4596: keys added to a non-en locale catalog as English copies: one translate round, then an anomaly. True when a fix round ran. */
+    async function i18nGate(trigger) {
+      if (!io.englishCopies || isSplit) return false;
+      const found = async () => (await io.englishCopies({ cwd: wt, base }).catch(() => null)) ?? [];
+      let cp = await found();
+      const brief = () => cp.slice(0, 5).map((d) => `${d.path}:${d.key}`).join("; ");
+      if (cp.length && sessionId) {
+        ev({ event: "I18N_ENGLISH_COPIES", trigger, count: cp.length });
+        T.decisions.push(`English copies in locale catalogs (${trigger}): ${brief()}; builder resumed once`);
+        await fixRound("duplicate", i18nCopiesPrompt(cp, vcfg.mode), [], "duplicate", cp.map((d) => `english copy \`${d.key}\` in ${d.path}`).join("\n"));
+        result = (await readResult()) ?? result;
+        files = await changedFiles();
+        const before = cp;
+        cp = await found();
+        if (cp.length) T.anomalies.push(`English copies remain in locale catalogs (${trigger}): ${brief()}`);
+        else await gatePassed("i18n");
+        return before.length > 0;
+      }
+      if (cp.length) T.anomalies.push(`English copies in locale catalogs (${trigger}): ${brief()}`);
+      return false;
+    }
+    await i18nGate("hand-off");
     /** #4406: verify.post_merge (else the scoped typecheck) on the merged tree before the base-sync push; fix rounds up to verify.max_rounds. */
     async function postMergeGate(trigger) {
       const commands = io.runCommand && !isSplit ? postMergeCommands({ configured: vcfg.postMerge, scoped: (await io.postMergeChecks?.({ cwd: wt, base }).catch(() => [])) ?? [], mode: vcfg.mode }) : [];
@@ -2228,6 +2250,7 @@ export async function runCore(o) {
         if (pm.fixed) how += "; builder fixed post-merge check failures";
         dupFixed = await duplicateGate(`base-sync ${syncs}`);
         if (dupFixed) how += "; builder resolved duplicate exports";
+        if (await i18nGate(`base-sync ${syncs}`)) how += "; builder translated English-copy keys";
       }
       const after = await gitOut(["rev-parse", "HEAD"]);
       if (soft && clean && after === before) { syncs--; sameBaseSyncs--; return null; } // UNKNOWN state and nothing to merge: not a conflict

@@ -5072,6 +5072,17 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.equal(w.dupArgs.cwd, WT);
   });
 
+  it("#4596 English copies in a locale catalog resume the builder once to translate; a leftover is an anomaly", async () => {
+    const w = hworld(); const c = [[{ path: "messages/ta.json", key: "calendarView.day", value: "Day view", source: "messages/en.json" }], []]; w.cpCalls = 0;
+    w.io.englishCopies = async (x) => { w.cpCalls++; w.cpArgs = x; return c.length > 1 ? c.shift() : c[0]; };
+    assert.equal((await run(w)).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3);
+    assert.match(b[2][4], /messages\/ta\.json: calendarView\.day = "Day view" \(same as messages\/en\.json\)[\s\S]*Translate each/);
+    assert.ok(w.seq.indexOf("pr") > w.seq.lastIndexOf("builder-resume"), "fixed before the PR");
+    assert.equal(w.cpArgs.cwd, WT);
+  });
+
   it("#4406 a duplicate that remains after the round is an anomaly; verify.duplicate_exports false skips the check", async () => {
     let w = hworld(); w.io.duplicateExports = async () => DUP;
     assert.equal((await run(w)).terminalReason, "merged");

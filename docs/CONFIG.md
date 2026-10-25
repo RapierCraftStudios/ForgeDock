@@ -699,6 +699,8 @@ verify:
 | `e2e_paths` | string | No | Comma-separated globs of e2e specs (same glob rules as `skip_paths`). Default `e2e/**,**/e2e/**,*.e2e.*,*.e2e-spec.*,cypress/**,playwright/**`. |
 | `e2e_blocking` | string | No | `changed` (default): only failures of the lane's own specs block the merge; other e2e failures are reported as an anomaly. `all`: every e2e failure blocks. |
 
+**English-copy check (forge#4596).** At hand-off and after each base-sync merge, keys the lane added to a non-`en` JSON locale catalog (`messages/ta.json`, `locales/ta/common.json`) whose value equals the same key in the `en` counterpart go back to the builder once to translate (placeholders kept, status entries inserted in place, never re-sorted); a copy left over is an anomaly. Always on, deterministic, no cost without catalogs. The repo's own `i18n:check` is not run by the engine: list it in `lean.precheck.commands` to run it before the PR.
+
 **Flow** (`ci`/`hybrid`, `bin/lean/verify.mjs` `runCiVerify`):
 
 1. After the build and before every conformance review, the engine pushes the lane branch (a plain push, never forced) and runs CI on the head. A base-sync that moves the head is verified again.
