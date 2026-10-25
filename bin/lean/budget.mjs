@@ -42,6 +42,17 @@ export const nextSize = (size) => (SIZES.includes(size) ? SIZES[Math.min(SIZES.i
 /** #4505: a `budget.exceeded` recovery lane runs at the next size's budget; any other lane keeps its size. */
 export const recoverySize = (size, recover) => (recover?.code === "budget.exceeded" ? nextSize(size) : size);
 
+/**
+ * Extra implement turns for a big L lane (#4587): +10 per distinct deliverable path above 5, capped at +2x the L base;
+ * a `budget.exceeded` recovery of an L lane adds +ceil(base/2) so it gets more than the pass that failed.
+ * 0 for S/M, an unsized lane or a disabled (0) base.
+ */
+export function scaledExtra({ size, contract = null, recover = null, base = TURN_BUDGET_DEFAULTS.L } = {}) {
+  if (size !== "L" || !(base > 0)) return 0;
+  const paths = Array.isArray(contract?.deliverables) ? new Set(contract.deliverables.map((d) => d?.path).filter((p) => typeof p === "string" && p.trim())).size : 0;
+  return Math.min(10 * Math.max(0, paths - 5), 2 * base) + (recover?.code === "budget.exceeded" ? Math.ceil(base / 2) : 0);
+}
+
 /** Turns the wrap-up call may use after the budget is spent. */
 export const wrapupGrant = (budget) => Math.max(5, Math.ceil(budget / 5));
 
@@ -52,10 +63,10 @@ export const wrapupGrant = (budget) => Math.max(5, Math.ceil(budget / 5));
  */
 export function makeTurnBudget(budgets = TURN_BUDGET_DEFAULTS) {
   const b = { ...TURN_BUDGET_DEFAULTS, ...(budgets ?? {}) };
-  let size = null, build = 0, total = 0, exceeded = false;
-  const budget = () => (size && Number.isFinite(b[size]) && b[size] > 0 ? b[size] : 0);
+  let size = null, extra = 0, build = 0, total = 0, exceeded = false;
+  const budget = () => (size && Number.isFinite(b[size]) && b[size] > 0 ? b[size] + extra : 0);
   return {
-    setSize(s) { if (SIZES.includes(s)) size = s; },
+    setSize(s, add = 0) { if (SIZES.includes(s)) { size = s; extra = Number.isFinite(add) && add > 0 ? Math.floor(add) : 0; } },
     get size() { return size; },
     budget,
     on: () => budget() > 0,
