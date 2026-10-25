@@ -323,7 +323,9 @@ export function readMergeWait(cwd = process.cwd()) {
 export function readVerify(cwd = process.cwd()) {
   try {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
-    return sec && typeof sec === "object" ? parseVerify(sec) : undefined;
+    if (!sec || typeof sec !== "object") return undefined;
+    const invariants = readInvariants(cwd);
+    return parseVerify(invariants ? { ...sec, invariants } : sec);
   } catch { return undefined; }
 }
 /** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
@@ -350,20 +352,28 @@ export function readExecution(cwd = process.cwd()) {
  * scalars only. undefined when absent, empty or unreadable.
  */
 export function readPrecheckCommands(cwd = process.cwd()) {
+  return readYamlList(cwd, "learned", "test_commands");
+}
+/** #4585: forge.yaml `verify.invariants`, a block list of repo-wide check commands; undefined when absent or empty. */
+export function readInvariants(cwd = process.cwd()) {
+  return readYamlList(cwd, "verify", "invariants");
+}
+function readYamlList(cwd, section, key) {
   let raw;
   try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { return undefined; }
   const out = [];
-  let inLearned = false, listIndent = null;
+  const head = new RegExp(`^${section}:\\s*(#.*)?$`), keyRe = new RegExp(`^\\s+${key}:\\s*(#.*)?$`);
+  let inSection = false, listIndent = null;
   for (const line of raw.split(/\r?\n/)) {
     if (/^\s*(#.*)?$/.test(line)) continue;
-    if (/^\S/.test(line)) { inLearned = /^learned:\s*(#.*)?$/.test(line); listIndent = null; continue; }
-    if (!inLearned) continue;
+    if (/^\S/.test(line)) { inSection = head.test(line); listIndent = null; continue; }
+    if (!inSection) continue;
     const indent = line.length - line.trimStart().length;
     if (listIndent === null) {
-      if (/^\s+test_commands:\s*(#.*)?$/.test(line)) listIndent = indent;
+      if (keyRe.test(line)) listIndent = indent;
       continue;
     }
-    if (indent <= listIndent) { listIndent = /^\s+test_commands:\s*(#.*)?$/.test(line) ? indent : null; continue; }
+    if (indent <= listIndent) { listIndent = keyRe.test(line) ? indent : null; continue; }
     const m = /^\s+-\s+(.*)$/.exec(line);
     if (!m) continue;
     let v = m[1].trim();
@@ -1757,7 +1767,7 @@ export async function checkFromCli(argv, deps = {}) {
   const plan = await readJson(pre.CHECK_PLAN_FILE);
   const base = o.base ?? plan?.base;
   if (!base) throw Object.assign(new Error(`check: no check plan from the engine; pass --base REF\n${usage}`), { exitCode: 2 });
-  const verify = plan ? { mode: plan.mode, precheckTotalSeconds: plan.precheckTotalSeconds, precheckTimeoutSeconds: plan.precheckTimeoutSeconds } : { ...parseVerify({}), ...(readVerify(repo) ?? {}) };
+  const verify = plan ? { mode: plan.mode, precheckTotalSeconds: plan.precheckTotalSeconds, precheckTimeoutSeconds: plan.precheckTimeoutSeconds, invariants: Array.isArray(plan.invariants) ? plan.invariants : [] } : { ...parseVerify({}), ...(readVerify(repo) ?? {}) };
   const learned = plan ? plan.learned : readPrecheckCommands(repo) ?? [];
   const maxMinutes = plan ? plan.maxMinutes : readPrecheckBudget(repo);
   // the engine's changed files (lean.mjs changedFiles: base...HEAD still differing from base), plus uncommitted work
