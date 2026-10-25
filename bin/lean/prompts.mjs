@@ -182,9 +182,9 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: an issue requirement the contract missed.
 - {"kind":"defer|post-deploy","requirement":"R#","why":""}: a contracted requirement that becomes separate work or a post-deploy check. The engine files it as a tracked follow-up. Not "type"; other kinds are rejected.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
-Never name or number migration files by hand: create every migration with the repo's own generator (\`drizzle-kit generate --custom\` for hand-written SQL); the engine rejects migrations without the generator's journal entry and snapshot.
-A new dependency between workspace packages in a package.json that no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
-If the repository has scripts/check-devdocs-freshness.sh, a behaviour change under the paths it checks must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change. Run it against the base before writing the result; the engine runs it too.
+Never name or number migration files by hand; use the generator.
+A new dependency between workspace packages that no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or drop it.
+If the repository has scripts/check-devdocs-freshness.sh, a behaviour change under its checked paths must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) with it. Run it against the base first; the engine does too.
 
 Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
 
