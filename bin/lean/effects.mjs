@@ -18,6 +18,7 @@ import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
 import { sequenceCollisions, snapshotLane, verifyRenumber, renumberLane, resolveSequenceConflicts } from "./sequence.mjs";
+import { resolveBaseConflicts } from "./conflictres.mjs";
 import { duplicateExports } from "./postmerge.mjs";
 import { scopedChecks } from "./checks.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
@@ -372,6 +373,8 @@ export function makeLeanIo({ repo }) {
     /** #4386: the deterministic renumber, sequence-only base-sync resolution, and the host sequence lease at the merge gate. */
     sequenceRenumber: ({ cwd, base, laneRef, regenerate, reserve }) => renumberLane({ git: (a) => run("git")(a, { cwd }), base, cwd, laneRef, regenerate, reserve }),
     sequenceResolve: ({ cwd, files }) => resolveSequenceConflicts({ git: (a) => run("git")(a, { cwd }), files }),
+    /** #4588: deterministic base-merge resolution of union / JSON-map / generated files (bin/lean/conflictres.mjs). */
+    conflictResolve: ({ cwd, files, cfg }) => resolveBaseConflicts({ git: (a) => run("git")(a, { cwd }), cwd, files, cfg }),
     sequenceLease: makeSequenceLeaseIo(),
     /** #4406: the lane's scoped checks after a base merge (bin/lean/checks.mjs; [] on failure), and same-app duplicate exports (bin/lean/postmerge.mjs). */
     postMergeChecks: async ({ cwd, base }) => { try { return scopedChecks({ repo: cwd, base }); } catch { return []; } },

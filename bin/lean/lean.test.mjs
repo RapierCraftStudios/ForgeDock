@@ -5184,6 +5184,31 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
       assert.match(w.comments.find((c) => c.includes("<!-- FORGE:BASE_SYNC -->")), /deterministic: base side taken[\s\S]*renumbered deterministically[\s\S]*not required \(deterministic renumber \+ base merge\)/);
     });
 
+    it("#4588: base-sync conflicts the engine resolves (union / JSON map / generated) need no builder, re-review or sequence resolver", async () => {
+      const w = dworld({ seq: [[], []], prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["src/index.ts", "i18n/status.json"] }), asked = [];
+      w.io.conflictResolve = async (x) => { asked.push(x); w.head = "eeee0000eeee0000"; w.conflictFiles = []; w.mergeInProgress = false; return { resolved: x.files, remaining: [] }; };
+      assert.equal((await run(w, { baseMerge: { unionGlobs: ["src/index.ts"], jsonGlobs: ["i18n/status.json"], generatedGlobs: [], generatedCommand: "" } })).terminalReason, "merged");
+      assert.deepEqual(asked[0].files, ["src/index.ts", "i18n/status.json"]);
+      assert.equal(asked[0].cfg.jsonGlobs[0], "i18n/status.json");
+      assert.equal(w.resolveArgs, undefined, "sequence resolver not asked");
+      assert.equal(builders(w).length, 2, "plan + implement only");
+      assert.equal(reviewers(w).length, 1, "no re-review");
+      assert.match(w.comments.find((c) => c.includes("<!-- FORGE:BASE_SYNC -->")), /deterministic: 2 union \/ JSON-map \/ generated file/);
+    });
+
+    it("#4588: files the engine cannot resolve go to the sequence resolver, and the builder when that fails; without config nothing changes", async () => {
+      const w = dworld({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["src/index.ts", "db/meta/_journal.json"], resolve: { unsupported: "x" } });
+      w.io.conflictResolve = async () => ({ resolved: ["src/index.ts"], remaining: ["db/meta/_journal.json"] });
+      assert.equal((await run(w, { baseMerge: { unionGlobs: ["src/index.ts"] } })).terminalReason, "merged");
+      assert.deepEqual(w.resolveArgs.files, ["db/meta/_journal.json"]);
+      assert.ok(builders(w).length >= 3, "the builder finishes the merge");
+      const n = dworld({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], conflictFiles: ["db/meta/_journal.json"] });
+      let called = false; n.io.conflictResolve = async () => { called = true; return { resolved: [], remaining: [] }; };
+      await run(n);
+      assert.equal(called, false, "no baseMerge config: resolver not consulted");
+      assert.deepEqual(n.resolveArgs.files, ["db/meta/_journal.json"]);
+    });
+
     it("a schema-changing migration without lean.sequence.regenerate falls back to the builder renumber and the trajectory records why", async () => {
       const w = dworld({ seq: [COLL, []], det: [{ unsupported: "schema-changing migration db/0007_usage.sql needs lean.sequence.regenerate (its snapshot cannot be cloned)" }] });
       assert.equal((await run(w, { sequenceRegenerate: null })).terminalReason, "merged");

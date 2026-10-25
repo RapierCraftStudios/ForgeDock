@@ -168,6 +168,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {string} [o.fixModel]     model of fresh fix-round sessions (#4363, forge.yaml lean.fix_model); default the reviewer model
  * @param {object} [o.builderRouting] forge.yaml lean.builder_routing/builder_mid_model (#4394): {mode: on (default)|off, midModel}
  * @param {string} [o.sequenceRegenerate] forge.yaml lean.sequence.regenerate (#4386): snapshot generator for a schema-changing renumbered migration
+ * @param {object} [o.baseMerge] forge.yaml lean.base_merge_* (#4588): {unionGlobs, jsonGlobs, generatedGlobs, generatedCommand} for deterministic base-merge conflict resolution
  * @param {number} [o.ciMaxMinutes]  remote-CI wait budget (default 360); exhaustion is NOT needs-human
  * @param {"shadow"|"enforce"} [o.conformance] conformance gate mode (default shadow)
  * @param {"needs-human"|"degraded"} [o.reviewIncomplete] shadow only: what an incomplete review after the re-ask does (default needs-human)
@@ -2197,10 +2198,20 @@ export async function runCore(o) {
       }
       let how, tests = "not required (clean merge)", rereview = "not required (conflict-free base merge)", detResolved = false;
       // #4386: conflicts only in sequence files (numbered, journal, snapshot, their index) resolve without a builder
-      const rs = !clean && io.sequenceResolve ? ((await io.sequenceResolve({ cwd: wt, files }).catch((e) => ({ unsupported: String(e?.message ?? e) }))) ?? {}) : null;
+      // #4588: union / JSON-map / generated files resolve first; only the files left go to the sequence resolver
+      const bm = o.baseMerge, cr = !clean && io.conflictResolve && bm && Object.values(bm).some((v) => v?.length) ? await io.conflictResolve({ cwd: wt, files, cfg: bm }).catch(() => null) : null;
+      let seqFiles = cr?.resolved?.length ? cr.remaining : files, crDone = false;
+      if (cr?.resolved?.length && !seqFiles.length) { try { await git(["commit", "--no-edit"]); crDone = true; } catch { /* the builder finishes the merge */ } }
+      if (cr?.note) T.decisions.push(`Base-sync ${syncs}: ${cr.note}`);
+      const rs = !clean && !crDone && seqFiles.length && io.sequenceResolve ? ((await io.sequenceResolve({ cwd: wt, files: seqFiles }).catch((e) => ({ unsupported: String(e?.message ?? e) }))) ?? {}) : null;
       if (rs?.unsupported) T.decisions.push(`Base-sync ${syncs}: no deterministic resolution (${rs.unsupported})`);
       if (clean) {
         how = "clean merge of the base into the branch";
+      } else if (crDone) {
+        detResolved = true;
+        T.decisions.push(`Base-sync ${syncs}: conflicts only in union / JSON-map / generated files (${files.join(", ")}); resolved by the engine (no builder)`);
+        how = `deterministic: ${files.length} union / JSON-map / generated file(s) resolved`;
+        tests = "not required (deterministic base-merge resolution)";
       } else if (rs?.ok) {
         detResolved = true;
         T.decisions.push(`Base-sync ${syncs}: conflicts only in sequence files (${files.join(", ")}); base side taken, lane files renumbered by the engine (no builder)`);
