@@ -229,7 +229,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    the worker budget is shared, not multiplied: k concurrent commands each get `FORGE_HOST_PARALLELISM = max(1, floor(N / k))`
    (`FORGE_HOST_PARALLELISM=1` = serial, one worker), within a round budget of
    forge.yaml `lean.precheck.max_minutes` (`engine-cli.mjs` `readPrecheckBudget`, 1..120; else
-   `verify.precheck_total_seconds`, default 600 s). Commands not started before the budget ends, or cut by it (rc 124
+   `verify.precheck_total_seconds`, default 600 s). #4585: `verify.invariants` (block list) are appended to every round unscoped (never dropped by the test map; `planPrecheck`), written to `check-plan.json`, and prompt-side `invariantsPlanNote`/`invariantsBuildRule` give the builder the registry checklist. Commands not started before the budget ends, or cut by it (rc 124
    with the remaining budget as timeout), are `deferred-to-ci` (event entries `{command, status}`, trajectory anomaly),
    never failures. `PRECHECK_COMMANDS` results carry `ms`; the event carries round `ms`, `parallelism` and the per-command `workers` share; the lane
    result `precheckMs`/`precheckDeferred` → orchestrate row `precheck_ms`/`precheck_deferred` → batch-report line
@@ -1753,6 +1753,11 @@ The dispatcher reads `<cwd>/forge.yaml` (absent is fine) and passes it as `setti
 ## Entry 2026-10-24 — Per-agent remote lane minutes (#4549)
 
 The router's `GET /sandboxes/:id/usage` forward adds `agent` (the placing agent) to the agent's `{minutes}` body; the field is optional for third-party runners. `httpTransport.usage` returns `{minutes, agent?}`, `remoteProvider` keeps `h.agent`, and `providerLanes` `withUsage` copies it to `sandbox.agent` (omitted when unknown). `orchestrate` accumulates `sandbox.by_agent {name: minutes}` per issue across attempts onto the row, and `formatSandboxSummary` appends `; by agent: a X min, b Y min` only when it exists; the table and non-pool output are unchanged. `forgedock stats --pool` (`bin/stats/pool.mjs`) aggregates `by_agent` from local batch `report.json` rows (latest row per issue); see `docs/STATS.md`.
+
+## Entry 2026-10-25 — Skipped dependents re-admitted when the blocker merges mid-batch (#4595)
+
+`orchestrate()` `watchBlockers` re-checks the blocker (`dependency #B ...` in a `skipped` row's detail) through the injected `dispatchCheck` at most every `WATCH_EVERY_MS` (60 s) while lanes run, and once before the batch would end; fail-open.
+A merged or closed blocker is recorded as `merged`/`invalid` (in-batch rows only) and its skipped dependents, transitively, go back to `pending` with one FORGE:DECISION. Skip resolution now runs to a fixpoint, so a chain's tail is skipped on its blocker instead of as `dependency cycle`.
 
 ## Entry 2026-10-25 — A check timeout is infrastructure (#4589)
 

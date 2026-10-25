@@ -2247,6 +2247,39 @@ describe("orchestrate", () => {
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.detail]), [[9, "needs-human", "ci.red"], [1, "skipped", "dependency #9 needs-human"]]);
   });
 
+  it("#4595 a dependent skipped for a needs-human blocker is re-admitted when the blocker merges meanwhile; its dependents follow", async () => {
+    const log = [];
+    let merged = false;
+    const rows = await orchestrate({ issues: [9, 1, 2], parallel: 1,
+      readBody: async (n) => ({ 1: "**Depends on**: #9", 2: "**Depends on**: #1" })[n] ?? "",
+      dispatchCheck: async (n) => (n === 9 && merged ? { outcome: "merged", pr: 90, detail: "PR #90 already merged" } : null),
+      runOne: async (n) => { log.push(n); if (n === 9) { merged = true; return { terminalReason: "needs-human", detail: "ci.red" }; } return { terminalReason: "merged", pr: 100 + n }; } });
+    assert.deepEqual(log, [9, 1, 2]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[9, "merged"], [1, "merged"], [2, "merged"]]);
+    assert.equal(rows[0].pr, 90);
+  });
+
+  it("#4595 an out-of-set parked blocker that closes re-admits the skipped issue", async () => {
+    const log = [];
+    let closed = false;
+    const rows = await orchestrate({ issues: [1], parallel: 1, readBody: async () => "",
+      issueLabels: async () => ["needs-human"],
+      dispatchCheck: async (n) => (n === 9 && closed ? { outcome: "invalid", detail: "issue closed" } : null),
+      runOne: async (n) => { log.push(n); if (log.length === 1) { closed = true; return { terminalReason: "dependency-open", dependencies: [9] }; } return { terminalReason: "merged" }; } });
+    assert.deepEqual(log, [1, 1]);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"]]);
+  });
+
+  it("#4595 an unreadable or still-open blocker leaves the dependent skipped; no dispatchCheck changes nothing", async () => {
+    for (const dispatchCheck of [async () => { throw new Error("gh down"); }, async () => null, undefined]) {
+      const log = [];
+      const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async (n) => (n === 1 ? "**Depends on**: #9" : ""), ...(dispatchCheck ? { dispatchCheck } : {}),
+        runOne: async (n) => { log.push(n); return { terminalReason: "needs-human", detail: "ci.red" }; } });
+      assert.deepEqual(log, [9]);
+      assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[9, "needs-human"], [1, "skipped"]]);
+    }
+  });
+
   it("#4124 a repeated dependency-open stops after the requeue cap", async () => {
     const h = harness({}, { 1: "dependency-open" });
     const clock = { t: 0 }, starts = [];
@@ -3990,7 +4023,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n  e2e_label: full-ci\n  e2e_checks: \"e2e (1),e2e (2)\"\n");
     const e2e = { mode: "auto", label: "full-ci", workflow: null, pathsInput: null, checks: ["e2e (1)", "e2e (2)"], paths: ["e2e/**", "**/e2e/**", "*.e2e.*", "*.e2e-spec.*", "cypress/**", "playwright/**"], blocking: "changed" };
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, e2e });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, invariants: [], e2e });
   });
 
   describe("#4387 a no-commit CI fix round reruns the failed jobs once", () => {
@@ -4443,6 +4476,25 @@ describe("local-mode CI fix rounds at merge and declared pre-PR check commands (
     assert.ok(log.findIndex((e) => e.event === "PRECHECK_COMMANDS") < log.findIndex((e) => e.event === "PR_OPENED"));
   });
 
+  it("#4585 verify.invariants run in the pre-PR round even with no learned commands, and the prompts carry the checklist", async () => {
+    const w = world(); const ran = [];
+    w.io.runCommand = async ({ command }) => { ran.push(command); return { rc: 0, output: "" }; };
+    const r = await run(w, { verify: { invariants: ["bash scripts/inv.sh"] } });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(ran, ["bash scripts/inv.sh"]);
+    const b = builders(w);
+    assert.match(b[0][4], /Repo-wide invariants[\s\S]*bash scripts\/inv\.sh/); assert.match(b[1][4], /Invariants checklist[\s\S]*bash scripts\/inv\.sh/);
+    const w2 = world(); let n = 0; w2.io.runCommand = async () => { n++; return { rc: 0, output: "" }; };
+    await run(w2); assert.equal(n, 0, "no invariants: nothing runs");
+  });
+
+  it("#4585 a failing invariant resumes the builder like a failed check command", async () => {
+    const w = world(); let n = 0;
+    w.io.runCommand = async () => (n++ ? { rc: 0, output: "" } : { rc: 1, output: "registry missing table x" });
+    await run(w, { verify: { invariants: ["bash scripts/inv.sh"] } });
+    assert.ok(n >= 2, "the invariant is rerun after the builder fix round");
+  });
+
   it("pre-PR: a passing set adds no builder turn; no commands configured runs nothing", async () => {
     const w = world(); let n = 0;
     w.io.runCommand = async () => { n++; return { rc: 0, output: "" }; };
@@ -4481,7 +4533,7 @@ describe("#4364 in-session forgedock check: plan hand-off and self-check record"
   it("writes check-plan.json beside the contract and the implement prompt asks for forgedock check", async () => {
     const w = world(); w.io.runCommand = async () => ({ rc: 0, output: "" });
     assert.equal((await run(w, { precheck: { commands: [" make lint ", ""], maxMinutes: 5 }, verify: { mode: "hybrid" } })).terminalReason, "merged");
-    assert.deepEqual(JSON.parse(w.files[`${WT}/.forge-lean/check-plan.json`]), { v: 1, base: "origin/staging", mode: "hybrid", learned: ["make lint"], maxMinutes: 5, precheckTotalSeconds: 600, precheckTimeoutSeconds: 300 });
+    assert.deepEqual(JSON.parse(w.files[`${WT}/.forge-lean/check-plan.json`]), { v: 1, base: "origin/staging", mode: "hybrid", learned: ["make lint"], invariants: [], maxMinutes: 5, precheckTotalSeconds: 600, precheckTimeoutSeconds: 300 });
     assert.match(builders(w)[1][4], /forgedock\.mjs check` in the worktree[\s\S]*report the problem as blocked/);
   });
 
