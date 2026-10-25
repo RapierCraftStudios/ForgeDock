@@ -103,7 +103,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    trusted `FORGE:DECOMPOSED:REVOKED` reopens it (`reopenRevokedDecomposition`,
    also used by the engine's `--retry`).
 6. **Implement** — same session; `result.json` with typed amendments
-   (`applyAmendments` → `FORGE:AMENDMENT`). An `add-deliverable` on a path the
+   (`applyAmendments` → `FORGE:AMENDMENT`; #4574: `type`→`kind`, `amend-requirement`/`limitation`→`defer`, an `R#` `id`→`requirement`; a rejected amendment's problem names the valid kinds or missing field and keeps 400 chars, and the one correction round shows 900). An `add-deliverable` on a path the
    contract already lists appends its why to that deliverable's `change`, so it
    can declare a package edge on an already-listed package.json (#4159).
    Builder and reviewer runs get `FORGE_DOCKER_LABELS` (`ledger.mjs`
