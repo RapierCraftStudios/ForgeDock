@@ -2272,6 +2272,18 @@ describe("orchestrate", () => {
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"]]);
   });
 
+  it("#4614 an out-of-set blocker that dispatchCheck reports merged but the lane still sees open re-admits once, then stays skipped", async () => {
+    const log = [];
+    let checks = 0;
+    const rows = await orchestrate({ issues: [20], parallel: 1, readBody: async () => "",
+      issueLabels: async () => ["needs-human"],
+      dispatchCheck: async (n) => { checks++; return n === 10 ? { outcome: "merged", pr: 77, detail: "PR #77 already merged" } : null; },
+      runOne: async (n) => { log.push(n); if (log.length > 5) throw new Error("re-admission loop"); return { terminalReason: "dependency-open", dependencies: [10] }; } });
+    assert.deepEqual(log, [20, 20], "one re-admission, no loop");
+    assert.ok(checks <= 3, `bounded dispatch checks (${checks})`);
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[20, "skipped"]]);
+  });
+
   it("#4595 an unreadable or still-open blocker leaves the dependent skipped; no dispatchCheck changes nothing", async () => {
     for (const dispatchCheck of [async () => { throw new Error("gh down"); }, async () => null, undefined]) {
       const log = [];

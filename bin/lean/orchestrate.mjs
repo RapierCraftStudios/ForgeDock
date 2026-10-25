@@ -30,7 +30,7 @@
  * join it through `addIssues` (the still-pending issues' `Depends on` are re-read first, so edges hold both ways), with one
  * batch decision and one `added` row; while it is set, lanes running with an empty queue still wake every `pollMs`.
  * `getHeld()` (#4592, `--hold`/`--release`) is read on every pass: the issues it returns are never admitted (a running lane is not stopped);
- * when only held issues (and their dependents) remain and nothing runs, the batch ends with them `held` ("held by operator"), and a `--resume` re-admits them.
+ * when only held issues (and their dependents) remain and nothing runs, the batch ends with them `held` ("held by operator"), and a `--resume <id> <issue...>` naming them (or `--release`) re-admits them.
  *
  * Maintenance budget (#4197), off unless `maintenance: {share, whenIdle}` is passed: `classify(issue)` gives each issue
  * `{maintenance, priority}` (persisted as `classes`) and admission follows `pickNext`: P0/P1 features, then a maintenance
@@ -838,6 +838,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #4595: a skipped row whose blocker (`dependency #B ...`) was finished outside the lane is re-admitted: B is re-checked
   // through `dispatchCheck` (at most every WATCH_EVERY_MS, and once before the batch would end); fail-open.
   let lastWatch = null;
+  const readmitted = new Set(); // "n:b": re-admit n on blocker b once; a lane that re-skips on b stays skipped
   const blockerOf = (n) => { const r = results.get(n); const m = r?.outcome === "skipped" ? /^dependency #(\d+) /.exec(r.detail ?? "") : null; return m ? Number(m[1]) : null; };
   const watchable = () => !!dispatchCheck && [...results.keys()].some((n) => blockerOf(n) !== null);
   const watchBlockers = async (final) => {
@@ -846,7 +847,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!final && lastWatch !== null && t0 - lastWatch < WATCH_EVERY_MS) return;
     lastWatch = t0;
     const resolved = new Set();
-    const roots = new Set([...results.keys()].map(blockerOf).filter((b) => b !== null && blockerOf(b) === null));
+    const roots = new Set([...results.keys()].filter((n) => !readmitted.has(`${n}:${blockerOf(n)}`)).map(blockerOf).filter((b) => b !== null && blockerOf(b) === null));
     for (const b of roots) {
       let g = null;
       try { g = (await dispatchCheck(b)) ?? null; } catch { g = null; }
@@ -860,11 +861,12 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       grew = false;
       for (const n of results.keys()) {
         const b = blockerOf(n);
-        if (b !== null && !back.has(n) && (resolved.has(b) || back.has(b))) { back.add(n); grew = true; }
+        if (b !== null && !back.has(n) && !readmitted.has(`${n}:${b}`) && (resolved.has(b) || back.has(b))) { back.add(n); grew = true; }
       }
     }
     for (const n of back) {
       const b = blockerOf(n);
+      readmitted.add(`${n}:${b}`);
       results.delete(n);
       pending.push(n);
       decided({ issue: n, what: `re-admitted: dependency #${b} merged or closed after this issue was skipped`, why: "the blocker was finished outside this batch lane",
