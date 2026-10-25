@@ -213,6 +213,14 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.doesNotThrow(() => assertDiskPath("/home/u/.forge/batches", mounts));
     assert.equal(isLaneAlive(process.pid, "--definitely-not-in-my-cmdline"), false);
     assert.equal(isLaneAlive(2 ** 22 + 12345, null), false);
+    // #4592: a zombie answers kill(pid, 0) but is not a live lane.
+    const proc = tmpDir("proc-"), pd = join(proc, "42");
+    mkdirSync(pd, { recursive: true });
+    writeFileSync(join(pd, "cmdline"), "node\0lane\0");
+    writeFileSync(join(pd, "stat"), "42 (node) S 1 42 42 0 -1\n");
+    assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), true);
+    writeFileSync(join(pd, "stat"), "42 (no) de) Z 1 42 42 0 -1\n");
+    assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), false);
     assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 1 }, baseSync: { enabled: true, unionGlobs: [] } });
     writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n");
     assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, globalParallel: 4, recovery: { maxAttempts: 1 }, baseSync: { enabled: true, unionGlobs: [] } });

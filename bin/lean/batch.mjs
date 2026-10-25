@@ -166,7 +166,10 @@ export function isLaneAlive(pid, marker, { kill = process.kill.bind(process), pr
   if (!existsSync(procDir)) return true;
   let cmd;
   try { cmd = readFileSync(join(procDir, String(pid), "cmdline"), "utf8"); } catch { return false; }
-  return !marker || cmd.split("\0").includes(marker);
+  if (marker && !cmd.split("\0").includes(marker)) return false;
+  // A zombie (exited, not yet reaped: PID 1 may not reap) answers `kill(pid, 0)` but is not running.
+  try { if (/^\d+ \(.*\) Z /s.test(readFileSync(join(procDir, String(pid), "stat"), "utf8"))) return false; } catch { /* no stat: treat as alive */ }
+  return true;
 }
 
 /**
