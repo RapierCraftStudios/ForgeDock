@@ -118,6 +118,8 @@ function world(o = {}) {
       if (a[0] === "write-tree") return w.salvageTrees.length ? w.salvageTrees.shift() : "";
       if (a[0] === "rev-parse" && a[1] === "HEAD^{tree}") return "0".repeat(40);
       if (a.includes("commit-tree")) return "c".repeat(40);
+      if (a[0] === "diff" && a.includes("--diff-filter=A")) return (w.added ?? []).join("\0"); // #4590: files the branch added vs the base
+      if (a[0] === "rm" && a[1] === "--cached" && w.added) w.added = w.added.filter((f) => !a.includes(f));
       if (a[0] === "diff" && a.includes("--diff-filter=U")) return w.conflictFiles.join("\n");
       if (a[0] === "diff" && a[1] === "--check") return "";
       if (a[0] === "grep") return w.markers ? "src/foo.js:3:<<<<<<< HEAD" : "";
@@ -6323,6 +6325,32 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     const w = lworld({ remote: "abc\trefs/heads/feat/issue-7-lean\n" }), dir = tmpDir("light-res-");
     await run(w, { dir, ...ON });
     assert.equal(events(dir, "LIGHT_DONE").length + events(dir, "LIGHT_UPGRADE").length, 0);
+  });
+});
+
+describe("tool state never rides the lane branch (#4590)", () => {
+  const untracks = (w) => w.calls.filter((c) => c[0] === "git" && c[1] === "rm" && c[2] === "--cached");
+  const subjects = (w) => w.calls.filter((c) => c[0] === "git" && c[1] === "commit" && c.some((x) => /untrack lane tool state/.test(x)));
+
+  it("a branch that added .forge-lean/ files and tool caches is untracked and committed before the PR push", async () => {
+    const dir = tmpDir("toolstate-");
+    const w = world({}); w.added = ["src/foo.js", ".forge-lean/result.json", "apps/worker/.eslintcache", "packages/a/tsconfig.tsbuildinfo"];
+    assert.equal((await run(w, { dir })).terminalReason, "merged");
+    const rm = untracks(w);
+    assert.ok(rm.length >= 1, "git rm --cached ran");
+    for (const f of [".forge-lean/result.json", "apps/worker/.eslintcache", "packages/a/tsconfig.tsbuildinfo"]) assert.ok(rm[0].includes(f), f);
+    assert.ok(!rm[0].includes("src/foo.js"), "product files stay");
+    assert.equal(subjects(w).length, 1, "one untrack commit; the next push finds the branch clean");
+    const firstPush = w.calls.findIndex((c) => c[0] === "git" && c[1] === "push");
+    assert.ok(w.calls.findIndex((c) => c === subjects(w)[0]) < firstPush, "committed before the push");
+    assert.ok(readLog(dir, 7).some((e) => e.event === "TOOLSTATE_UNTRACKED"));
+  });
+
+  it("a clean branch makes no untrack commit", async () => {
+    const w = world({}); w.added = ["src/foo.js"];
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(untracks(w).length, 0);
+    assert.equal(subjects(w).length, 0);
   });
 });
 

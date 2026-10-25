@@ -50,6 +50,7 @@ import { parseContextPackConfig, contextArm, contextPackFor, renderContextRecord
 import { isExternalKill } from "./hostkill.mjs";
 import { buildResumeDigest } from "./resume.mjs";
 import { lightEligibility } from "./light.mjs";
+import { untrackToolState, unstageToolState } from "./toolstate.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
 /**
@@ -577,6 +578,7 @@ export async function runCore(o) {
 
   /** git push with transient retry (#4114): 4 attempts; permission/protected-branch rejections fail at once. */
   const gitPush = async (args) => {
+    if (!args.includes("--delete")) await untrackToolState({ git, base, ev }); // #4590: never push .forge-lean/ or tool caches this branch added
     try { return await retrying(() => git(args), { transient: PUSH_TRANSIENT_RE, permanent: PUSH_PERMANENT_RE, attempts: 4, sleep: sleepFn, random }); }
     catch (e) {
       if (e?.transientExhausted) { e.deferCode = OUTCOME_CODES.PUSH_TRANSIENT; e.deferDetail = `git push kept failing transiently after 4 attempts: ${String(e?.stderr ?? e?.message ?? e).slice(0, 300)}`; }
@@ -589,7 +591,7 @@ export async function runCore(o) {
   async function checkpoint(reason) {
     try {
       const dirty = String(await git(["status", "--porcelain"])).trim();
-      if (dirty) { await git(["add", "-A"]); await git(["commit", "--no-verify", "-m", `wip(forge): checkpoint after ${reason}`]); }
+      if (dirty) { await git(["add", "-A"]); if (await unstageToolState(git)) await git(["commit", "--no-verify", "-m", `wip(forge): checkpoint after ${reason}`]); } // #4590: tool state is never staged
       const ahead = String(await git(["diff", "--name-only", `${base}...HEAD`])).trim();
       if (ahead) await gitPush(["push", "-u", "origin", branch]);
       ev({ event: "CHECKPOINT", reason, dirty: Boolean(dirty), pushed: Boolean(ahead) });
