@@ -64,8 +64,11 @@ export const noToolFlags = (caps) => (caps?.strictMcp ? ["--tools", ""]
 
 /** #4456: `--settings` registering the re-read nudge (bin/hooks/reread-nudge.mjs) as a PostToolUse hook on Read and Bash. */
 export const REREAD_HOOK = fileURLToPath(new URL("../hooks/reread-nudge.mjs", import.meta.url));
-export const rereadNudgeFlags = (node = process.execPath, hook = REREAD_HOOK) => ["--settings", JSON.stringify({ hooks: { PostToolUse: [{ matcher: "Read|Bash",
-  hooks: [{ type: "command", command: `${JSON.stringify(node)} ${JSON.stringify(hook)}` }] }] } })];
+export const rereadNudgeFlags = (node = process.execPath, hook = REREAD_HOOK) => {
+  const hooks = [{ type: "command", command: `${JSON.stringify(node)} ${JSON.stringify(hook)}` }];
+  // #4580: the same script denies a full-file Read of an unchanged path already read twice (PreToolUse)
+  return ["--settings", JSON.stringify({ hooks: { PostToolUse: [{ matcher: "Read|Bash", hooks }], PreToolUse: [{ matcher: "Read", hooks }] } })];
+};
 
 export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable } = {}) {
   return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, noTools = false, rereadNudge = false, maxTurns = null, agents = null, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null, onSpawn = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null }) => {

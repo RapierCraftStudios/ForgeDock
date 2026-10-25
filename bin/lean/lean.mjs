@@ -17,14 +17,14 @@ import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContr
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
-import { resolveLane, isDefaultLane } from "./lane.mjs";
+import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
 import { dockerLabels, LEDGER_TTL_MS } from "./ledger.mjs";
 import { repoKey } from "../runner.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
-import { runChecks, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
+import { runChecks, runWithTimeoutRetry, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
 import { retrying, ghCacheRetry, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
@@ -34,11 +34,11 @@ import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTAT
 import { postMergeCommands } from "./postmerge.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta } from "./fixround.mjs";
 import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
-import { makeTurnBudget, laneSize, recoverySize, wrapupGrant, budgetDigest } from "./budget.mjs";
+import { makeTurnBudget, TURN_BUDGET_DEFAULTS, scaledExtra, laneSize, recoverySize, wrapupGrant, budgetDigest } from "./budget.mjs";
 import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog } from "./pitfalls.mjs";
 import { unjustified } from "./enumerating.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
-import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget } from "./verify.mjs";
+import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky } from "./verify.mjs";
 import { e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
@@ -943,6 +943,17 @@ export async function runCore(o) {
       if (prs.length || remote) resumed = { pr: prs[0]?.number ?? null, base: prs[0]?.baseRefName ?? null };
     } catch { /* no resume info: start fresh */ }
     // An open PR on another base (a hand-retargeted PR, or one opened before lane resolution) is never merged (#4125).
+    // #4593: a shipped milestone lane (fully merged into staging) cannot take new work; follow the open PR's live base.
+    if (resumed?.base && resumed.base !== lane && !isDefaultLane(resumed.base, defaults)) {
+      const staging = branches.staging || DEFAULT_STAGING_BRANCH;
+      let baseOnOrigin = false;
+      try { baseOnOrigin = !!String(await io.git(["ls-remote", "--heads", "origin", `refs/heads/${resumed.base}`], { cwd })).trim(); } catch { /* fail closed */ }
+      if (baseOnOrigin && await isShippedLane({ lane, staging, io, cwd }) && !(await isShippedLane({ lane: resumed.base, staging, io, cwd }))) {
+        T.decisions.push(`Lane ${lane} has shipped (merged into ${staging}); following open PR #${resumed.pr} base ${resumed.base}`);
+        ev({ event: "LANE_FOLLOWED_PR_BASE", from: lane, to: resumed.base, pr: resumed.pr });
+        lane = resumed.base; base = `origin/${lane}`;
+      }
+    }
     if (resumed?.base && resumed.base !== lane) {
       return await needsHuman(`Open PR #${resumed.pr} targets \`${resumed.base}\`, but #${issue}'s lane is \`${lane}\`; retarget or close it before rerunning.`,
         isDefaultLane(resumed.base, defaults) ? OUTCOME_CODES.LANE_DEFAULT_BRANCH : OUTCOME_CODES.LANE_MISMATCH);
@@ -1498,7 +1509,10 @@ export async function runCore(o) {
         T.validate = lightDone ? "light lane (no plan session)" : "resumed (existing branch)";
       }
       T.plan = [`contract ${hash}${lightDone ? " (derived, light lane)" : ""}`, `${frozen.requirements.length} requirement(s)`];
-      tb.setSize(recoverySize(laneSize({ contract: frozen, labels: (iss?.labels ?? []).map((l) => l?.name ?? l) }), recover)); // #4392, #4505: next size on a budget recovery
+      { // #4392, #4505: next size on a budget recovery; #4587: a big L contract and an L recovery get extra turns
+        const sz = recoverySize(laneSize({ contract: frozen, labels: (iss?.labels ?? []).map((l) => l?.name ?? l) }), recover);
+        tb.setSize(sz, scaledExtra({ size: sz, contract: frozen, recover, base: (turnBudgets ?? {}).L ?? TURN_BUDGET_DEFAULTS.L }));
+      }
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CONTRACT_FILE}`, `${contractJson(frozen)}\n`); } catch { /* the prompt still names it */ } }
       // #4364: what `forgedock check` needs from the operator's forge.yaml (gitignored, so not in the worktree)
       if (io.fs.write) { try { await io.fs.write(`${wt}/${CHECK_PLAN_FILE}`, `${JSON.stringify({ v: 1, base, mode: vcfg.mode, learned: learnedCommands, maxMinutes: Number(o.precheck?.maxMinutes) > 0 ? Number(o.precheck.maxMinutes) : null, precheckTotalSeconds: vcfg.precheckTotalSeconds, precheckTimeoutSeconds: vcfg.precheckTimeoutSeconds })}\n`); } catch { /* the CLI falls back to forge.yaml */ } }
@@ -1743,7 +1757,7 @@ export async function runCore(o) {
         await renew();
         results = [];
         for (const command of commands) {
-          let x; try { x = await heavyStep("precheck", () => io.runCommand({ command, cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env: laneEnv() })); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+          let x; try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command, cwd: wt, timeoutMs, env: laneEnv() }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
           results.push({ command, rc: Number(x?.rc ?? 1), output: String(x?.output ?? "") });
         }
         ev({ event: "POST_MERGE_CHECKS", trigger, round, results: results.map(({ command, rc }) => ({ command, rc })) });
@@ -1767,6 +1781,7 @@ export async function runCore(o) {
     // cannot run falls back once to local validation. A head verified here lets the precheck accept validate ids left to CI.
     let ciVerifiedHead = null, ciFellBack = false, ciRounds = 0;
     const ciSeenRuns = [];
+    const ciReruns = new Map(); // #4586: head -> {rr} of the one rerun of its failed jobs, spent before any fix round
     let ciGateNames; // #4387: checks that gate CI verification, read once per lane
     /** Verifies the current head; returns {done} with a terminal result, or {fixes} (builder CI-fix rounds that moved the head). */
     async function ciVerify(trigger) {
@@ -1779,7 +1794,7 @@ export async function runCore(o) {
         const verifyArgs = { io, branch, head, changedFiles: files, verify: vcfg, ciMaxMinutes, now, sleep, random, exclude: ciSeenRuns, gate: ciGateNames,
           push: () => gitPush(["push", "-u", "origin", branch]),
           onPoll: async () => { await renew(); onProgress({ event: "phase_paused", phase: "verify", detail: `CI verification pending on ${branch}` }); } };
-        const v = await runCiVerify(verifyArgs);
+        let v = await runCiVerify(verifyArgs);
         if (v.runId != null) ciSeenRuns.push(v.runId);
         const rec = { event: "CI_VERIFY", trigger, mode: vcfg.mode, round: ciRounds, result: v.result, skipped: v.result === "skipped", run_url: v.runUrl ?? null, failures: v.failures.map((f) => f.job) };
         ev(rec); await emit({ ...rec, phase: "verify" });
@@ -1807,28 +1822,44 @@ export async function runCore(o) {
           return { fixes: fixes + 1 };
         }
         // fail
-        const jobs = v.failures.map((f) => f.job).join(", ") || "unknown job";
-        row(`CI red (${jobs})`);
-        if (ciRounds >= vcfg.maxRounds || !sessionId) {
-          return { done: await needsHuman(`CI verification failed on \`${branch}\` at \`${head.slice(0, 12)}\` after ${ciRounds} fix round(s); nothing merged:\n${v.failures.slice(0, 10).map((f) => `- ${f.job}${f.url ? ` (${f.url})` : ""}`).join("\n")}`, OUTCOME_CODES.CI_RED) };
-        }
-        ciRounds++; fixes++;
-        T.decisions.push(`CI verification red (${jobs}); builder resumed with the failed logs (round ${ciRounds}/${vcfg.maxRounds})`);
-        ev({ event: "CI_FIX_ROUND", trigger, round: ciRounds, jobs: v.failures.map((f) => f.job) });
-        await fixRound("ci", ciFailurePrompt(v.failures, vcfg.mode), [], "ci_red", failureLog(v.failures));
-        await upsertStage("implementation");
-        result = (await readResult()) ?? result;
-        if (String(await git(["rev-parse", "HEAD"])).trim() === head) {
-          // #4387: "no commit" says the failure is not the change's: rerun the failed jobs once to tell a flake from a real failure.
-          const rr = isSplit ? { ok: false, runs: [], jobs: [], detail: "refactor:split" } : await rerunFailedOnce({ io, v });
-          const v2 = rr.ok ? await runCiVerify({ ...verifyArgs, rerunOf: rerunTarget(v) }) : null;
+        // #4586: `verify.flaky` failures are reported, never block; the rest are rerun once before any round is counted.
+        let sp = splitFlaky(v.failures, vcfg.flaky);
+        const greenNow = (note) => { ciVerifiedHead = head; row(`CI green at ${head.slice(0, 12)}${note}`); return gatePassed("ci_red", "merge_ci"); };
+        const reportFlaky = () => { if (!sp.flaky.length) return; const n = sp.flaky.map((f) => f.job); T.anomalies.push(`Known-flaky CI failure(s) reported, not blocking (verify.flaky): ${n.join(", ")}`); ev({ event: "CI_FLAKY_REPORTED", trigger, head, jobs: n }); };
+        reportFlaky();
+        if (!sp.own.length) { await greenNow(" (only verify.flaky failures)"); return { fixes }; }
+        if (!isSplit && !ciReruns.has(head)) {
+          const own = new Set(sp.own.map((f) => f.job)), vOwn = { ...v, failures: sp.own, failedChecks: v.failedChecks?.filter((c) => own.has(c.name)) };
+          const rr = await rerunFailedOnce({ io, v: vOwn });
+          ciReruns.set(head, { rr });
+          const v2 = rr.ok ? await runCiVerify({ ...verifyArgs, rerunOf: rerunTarget(vOwn) }) : null;
           if (rr.detail !== "no rerun seam") ev({ event: "CI_FLAKE_RERUN", trigger, head, runs: rr.runs, jobs: rr.jobs, result: v2?.result ?? "rerun-failed", detail: v2?.detail ?? rr.detail });
           if (v2?.result === "pass") {
-            ciVerifiedHead = head; await gatePassed("ci_red", "merge_ci"); row(`CI green at ${head.slice(0, 12)} after a rerun of the failed jobs`);
-            T.decisions.push(`CI verification red (${jobs}), no fix commit; green after one rerun of the failed jobs (flake)`);
+            await greenNow(" after a rerun of the failed jobs");
+            T.decisions.push(`CI verification red (${sp.own.map((f) => f.job).join(", ")}); green after one rerun of the failed jobs (flake), no fix round spent`);
             return { fixes };
           }
           if (v2?.result === "timeout") return { done: await finish("ci-pending", `CI rerun of the failed jobs on ${branch} still pending after ${ciMaxMinutes} min; rerun resumes the branch`) };
+          if (v2?.result === "fail") {
+            v = v2; if (v.runId != null) ciSeenRuns.push(v.runId);
+            sp = splitFlaky(v.failures, vcfg.flaky); reportFlaky();
+            if (!sp.own.length) { await greenNow(" (only verify.flaky failures)"); return { fixes }; }
+          }
+        }
+        const jobs = sp.own.map((f) => f.job).join(", ") || "unknown job";
+        row(`CI red (${jobs})`);
+        if (ciRounds >= vcfg.maxRounds || !sessionId) {
+          return { done: await needsHuman(`CI verification failed on \`${branch}\` at \`${head.slice(0, 12)}\` after ${ciRounds} fix round(s); nothing merged:\n${sp.own.slice(0, 10).map((f) => `- ${f.job}${f.url ? ` (${f.url})` : ""}`).join("\n")}`, OUTCOME_CODES.CI_RED) };
+        }
+        ciRounds++; fixes++;
+        T.decisions.push(`CI verification red (${jobs}); builder resumed with the failed logs (round ${ciRounds}/${vcfg.maxRounds})`);
+        ev({ event: "CI_FIX_ROUND", trigger, round: ciRounds, jobs: sp.own.map((f) => f.job) });
+        await fixRound("ci", ciFailurePrompt(sp.own, vcfg.mode), [], "ci_red", failureLog(sp.own));
+        await upsertStage("implementation");
+        result = (await readResult()) ?? result;
+        if (String(await git(["rev-parse", "HEAD"])).trim() === head) {
+          // #4387/#4586: no commit says the failure is not the change's; the failed jobs were already rerun once on this head (before the round).
+          const rr = ciReruns.get(head)?.rr ?? { ok: false, detail: isSplit ? "refactor:split" : "no rerun seam" };
           const how = !rr.ok ? (rr.detail === "no rerun seam" ? "" : ` (rerun of the failed jobs not possible: ${rr.detail})`) : " and stayed red after one rerun of the failed jobs";
           return { done: await needsHuman(`CI verification failed on \`${branch}\` (${jobs}) and the builder made no new commit for it${how}; nothing merged.`, OUTCOME_CODES.CI_RED) };
         }
@@ -1943,7 +1974,7 @@ export async function runCore(o) {
         const r = runs.find((x) => x?.id === v.id);
         if (!r || r.exit === undefined || r.exit === 0) continue;
         let x;
-        try { x = await heavyStep("precheck", () => io.runCommand({ command: String(v.command), cwd: wt, timeoutMs: vcfg.precheckTimeoutSeconds * 1000, env })); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+        try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: String(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
         out[v.id] = { rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") };
       }
       if (Object.keys(out).length) ev({ event: "VALIDATE_RERUN", runs: Object.entries(out).map(([id, x]) => ({ id, rc: x.rc })) });
@@ -2296,7 +2327,21 @@ export async function runCore(o) {
      * Returns null to wait again, or a terminal result (rounds exhausted, no session, no new commit, review failure).
      */
     async function mergeFixRound(checks) {
+      // #4586: the failed runs are rerun once per head before a round is counted; the red check is waited out until the rerun reports (bounded).
+      const rkey = `merge:${localHead}`, rerun = ciReruns.get(rkey);
+      if (!rerun && !isSplit) {
+        const rr = await rerunFailedOnce({ io, v: { failedChecks: checks, failures: checks.map((c) => ({ job: c.name })) } });
+        ciReruns.set(rkey, { rr, urls: new Map(checks.map((c) => [c.name, c.url ?? null])), waits: 0 });
+        ev({ event: "CI_FLAKE_RERUN", trigger: "merge", head: localHead, runs: rr.runs, jobs: rr.jobs, result: rr.ok ? "rerun-started" : "rerun-failed", detail: rr.detail });
+        if (rr.ok) { await sleep(20000); return null; }
+      } else if (rerun?.rr.ok && rerun.waits < 20 && checks.every((c) => (c.url ?? null) === rerun.urls.get(c.name))) {
+        rerun.waits++; await sleep(20000); return null; // still the attempt that was rerun
+      }
+      const flakyNames = checks.filter((c) => vcfg.flaky?.includes(c.name)).map((c) => c.name);
+      if (flakyNames.length) { T.anomalies.push(`Known-flaky required check(s) reported (verify.flaky): ${flakyNames.join(", ")}`); ev({ event: "CI_FLAKY_REPORTED", trigger: "merge", head: localHead, jobs: flakyNames }); }
+      checks = checks.filter((c) => !flakyNames.includes(c.name));
       const jobs = checks.map((c) => c.name);
+      if (!checks.length) return await needsHuman(`Required check(s) ${flakyNames.join(", ")} (verify.flaky) still failed on PR #${pr} after one rerun; a required check blocks the merge whatever verify.flaky says; nothing merged.`, OUTCOME_CODES.CI_RED);
       if (ciRounds >= vcfg.maxRounds || !sessionId) {
         return await needsHuman(`Required check(s) failed on PR #${pr}: ${jobs.join(", ")}${ciRounds ? ` (after ${ciRounds} CI fix round(s))` : ""}`, OUTCOME_CODES.CI_RED);
       }
@@ -2380,7 +2425,9 @@ export async function runCore(o) {
       T.decisions.push(`e2e (${want.reason}): ${v.result} at ${localHead.slice(0, 12)}${v.detail ? ` (${v.detail})` : ""}`);
       if (v.result === "timeout") return { done: await finish("ci-pending", `PR #${pr} e2e still pending after ${ciMaxMinutes} min`, { pr }) };
       if (v.result === "unavailable") return { done: await needsHuman(`e2e verification unavailable on PR #${pr} (${v.detail}); nothing merged.`) };
-      if (own.length) { const r = await mergeFixRound(own.map((f) => ({ name: f.job, url: f.url }))); return r ? { done: r } : { again: true }; }
+      const ownReal = own.filter((f) => !vcfg.flaky?.includes(f.job));
+      if (own.length > ownReal.length) { T.anomalies.push(`Known-flaky e2e failure(s) reported, not blocking (verify.flaky): ${own.filter((f) => !ownReal.includes(f)).map((f) => f.job).join(", ")}`); }
+      if (ownReal.length) { const r = await mergeFixRound(ownReal.map((f) => ({ name: f.job, url: f.url }))); return r ? { done: r } : { again: true }; }
       if (v.result === "fail") T.anomalies.push(`Pre-existing e2e failure(s) reported, not blocking: ${v.failures.map((f) => f.job).join(", ")}`);
       e2eHead = localHead;
       return null;

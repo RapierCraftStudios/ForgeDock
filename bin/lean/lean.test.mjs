@@ -129,6 +129,7 @@ function world(o = {}) {
       if (a[0] === "diff" && a[1] === "--numstat") return w.numstat ?? "";
       if (a[0] === "ls-files") return [...new Set(["src/foo.js", "src/bar.js", "test/foo.test.js", ...w.changed])].join("\n");
       if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
+      if (a[0] === "merge-base" && a[1] === "--is-ancestor") { if ((o.shipped ?? []).includes(String(a[2]).replace(/^origin\//, ""))) return ""; throw new Error("not an ancestor"); } // #4593
       if (a[0] === "ls-remote" && String(a.at(-1)).startsWith("refs/heads/")) { const b = a.at(-1).slice("refs/heads/".length); return (o.branchesOnOrigin ?? ["staging", "main"]).includes(b) ? `abc\trefs/heads/${b}\n` : ""; }
       if (a[0] === "ls-remote") return w.remote;
       if (a[0] === "show" && w.baseFiles) { if (!(a[1] in w.baseFiles)) throw new Error(`fatal: path not in ${a[1]}`); return w.baseFiles[a[1]]; }
@@ -1618,8 +1619,8 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(facts([], { file_lines: 1000, growth_lines: 50 })).trim(), "Don't grow a file over 1000 lines by more than 50 lines. Put new code next to it.");
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
-    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths.
-    assert.ok(approxTokens(plan) <= 1850, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line).
+    assert.ok(approxTokens(plan) <= 1900, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1500);
   });
 
@@ -2103,6 +2104,9 @@ describe("prompts", () => {
     const p = reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, comments: [{ body: "please also cover bar" }, { body: "<!-- FORGE:STARTED -->\nx" }], contract: CONTRACT, result: { status: "fixed" }, files: ["src/foo.js"], diff: "x".repeat(2000) });
     for (const t of ["<issue_body>", "<issue_comments>\nplease also cover bar\n</issue_comments>", "<contract>", '"R1"', "<builder_result>", "<changed_files>\nsrc/foo.js", "<diff>"]) assert.ok(p.includes(t), t);
     assert.doesNotMatch(p, /FORGE:STARTED/);
+    const am = reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, contract: { ...CONTRACT, requirements: [{ ...CONTRACT.requirements[0], amendment: { text: "reveal once", why: "hash-only token" } }] }, diff: "" });
+    assert.ok(am.includes("reveal once") && am.includes("hash-only token"));
+    assert.match(REVIEWER_SYSTEM, /amendment\.text/);
     assert.ok(approxTokens(REVIEWER_SYSTEM) + approxTokens(reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, contract: CONTRACT, diff: "" })) <= 1800);
   });
 
@@ -3724,6 +3728,28 @@ describe("lane resolution in core work-on (#4125)", () => {
   });
 });
 
+describe("shipped lane follows the open PR base (#4593)", () => {
+  const pr = (base) => [{ number: 77, headRefOid: "aaaa1111aaaa1111", baseRefName: base }];
+  const go = (o) => run(world({ milestone: "Old", branchesOnOrigin: ["staging", "milestone/old", "milestone/new"], remote: "abc\trefs/heads/feat/issue-7-lean", ...o }), { lane: undefined });
+  it("proceeds on the PR base when the issue's lane is shipped", async () => {
+    const w = world({ milestone: "Old", branchesOnOrigin: ["staging", "milestone/old", "milestone/new"], shipped: ["milestone/old"], prList: pr("milestone/new"), remote: "abc\trefs/heads/feat/issue-7-lean" });
+    const r = await run(w, { lane: undefined });
+    assert.notEqual(r.terminalReason, "needs-human");
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c.includes("origin/milestone/new..refs/heads/feat/issue-7-lean")), "work is compared against the PR base");
+  });
+  it("stays needs-human when the lane is not shipped, the base is shipped, missing, or the default branch", async () => {
+    for (const [o, code] of [
+      [{ prList: pr("milestone/new") }, "lane.mismatch"],
+      [{ shipped: ["milestone/old", "milestone/new"], prList: pr("milestone/new") }, "lane.mismatch"],
+      [{ shipped: ["milestone/old"], prList: pr("milestone/gone") }, "lane.mismatch"],
+      [{ shipped: ["milestone/old"], prList: pr("main") }, "lane.default_branch"]]) {
+      const r = await go(o);
+      assert.deepEqual([r.terminalReason, r.code], ["needs-human", code], JSON.stringify(o));
+    }
+  });
+});
+
 describe("lane entry points (#4125)", () => {
   const quiet = async (fn) => { const l = console.log; console.log = () => {}; try { return await fn(); } finally { console.log = l; } };
   const deps = () => ({ dir: tmpDir("core-cli-"), emitTelemetry: async () => {}, leanIo: {}, io: { gh: async (a) => (a.includes("defaultBranchRef") ? "main\n" : "o/r\n") },
@@ -3964,7 +3990,7 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     assert.equal(readVerify(d), undefined);
     writeFileSync(`${d}/forge.yaml`, "verify:\n  mode: ci\n  workflow: verify.yml\n  skip_paths: \"*.md,docs/**\"\n  max_rounds: 3\n  precheck_timeout_seconds: 60\n  e2e_label: full-ci\n  e2e_checks: \"e2e (1),e2e (2)\"\n");
     const e2e = { mode: "auto", label: "full-ci", workflow: null, pathsInput: null, checks: ["e2e (1)", "e2e (2)"], paths: ["e2e/**", "**/e2e/**", "*.e2e.*", "*.e2e-spec.*", "cypress/**", "playwright/**"], blocking: "changed" };
-    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, duplicateExports: true, e2e });
+    assert.deepEqual(readVerify(d), { mode: "ci", workflow: "verify.yml", pathsInput: null, skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 60, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, e2e });
   });
 
   describe("#4387 a no-commit CI fix round reruns the failed jobs once", () => {
@@ -4002,6 +4028,31 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
       assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "ci.red");
       assert.deepEqual(w.reran, ["77"]); assert.equal(w.merges.length, 0);
       assert.deepEqual(flakeEvents(dir).map((e) => e.result), ["fail"]);
+    });
+
+    /** #4586: count the builder CI-fix prompts of a world. */
+    const fixPrompts = (w) => { const n = { n: 0 }; const inner = w.io.runner; w.io.runner = async (c) => { if (/CI failed on the pushed branch/.test(c.prompt)) n.n++; return inner(c); }; return n; };
+
+    it("#4586 a flake that goes green on the rerun spends no fix round and never resumes the builder", async () => {
+      const w = flaky("success"), n = fixPrompts(w), dir = tmpDir("core-ci-");
+      const r = await run(w, { verify: PUSH, dir });
+      assert.equal(r.terminalReason, "merged"); assert.equal(n.n, 0); assert.deepEqual(w.reran, ["77"]);
+    });
+
+    it("#4586 a failure that repeats on the same head after the rerun counts one round and reaches the builder", async () => {
+      const w = flaky("failure"), n = fixPrompts(w), dir = tmpDir("core-ci-");
+      const r = await run(w, { verify: PUSH, dir });
+      assert.equal(r.code, "ci.red"); assert.ok(n.n >= 1);
+      assert.equal(readLog(dir, 7).filter((e) => e.event === "CI_FIX_ROUND").length, 1, "one counted round");
+      assert.deepEqual(w.reran, ["77"], "one rerun per head, none after the round");
+    });
+
+    it("#4586 verify.flaky: a listed failing job is reported, never reruns, never feeds the builder, and the lane merges", async () => {
+      const w = flaky("failure"), n = fixPrompts(w), dir = tmpDir("core-ci-");
+      w.io.checkStates = async () => [{ name: "test", state: "success", url: RUN, head: w.head }];
+      const r = await run(w, { verify: { ...PUSH, flaky: ["test"] }, dir });
+      assert.equal(r.terminalReason, "merged"); assert.equal(n.n, 0); assert.deepEqual(w.reran, []);
+      assert.deepEqual(readLog(dir, 7).filter((e) => e.event === "CI_FLAKY_REPORTED").map((e) => e.jobs), [["test"]]);
     });
   });
 });
@@ -6231,5 +6282,12 @@ describe("#4450 light lane: one builder session, derived contract, upgrade to th
     const w = lworld({ remote: "abc\trefs/heads/feat/issue-7-lean\n" }), dir = tmpDir("light-res-");
     await run(w, { dir, ...ON });
     assert.equal(events(dir, "LIGHT_DONE").length + events(dir, "LIGHT_UPGRADE").length, 0);
+  });
+});
+
+describe("block rules: a check timeout is not a block (#4589)", () => {
+  it("tells the builder rc 124 is host load, never a human block", async () => {
+    const { blockCorrectionPrompt } = await import("./prompts.mjs");
+    assert.match(blockCorrectionPrompt("x"), /times out \(rc 124\) is host load, never a block/);
   });
 });
