@@ -645,3 +645,28 @@ describe("#4404 verified out of band: a requirement measured outside the lane is
     assert.deepEqual(outOfBandRequirements(tagged), [{ id: "R3", quote: LH, job: "lighthouse-nightly" }]);
   });
 });
+
+describe("#4594 amend-requirement", () => {
+  const am = { kind: "amend-requirement", requirement: "R1", text: "regenerate and reveal the feed URL once", why: "token stored hash-only" };
+  it("with text it keeps deliver, tracks nothing and records the amendment", () => {
+    const a = applyAmendments(C, [am]);
+    assert.deepEqual(a.problems, []); assert.deepEqual(a.toTrack, []);
+    const r = a.contract.requirements.find((x) => x.id === "R1");
+    assert.equal(r.disposition, "deliver"); assert.equal(r.amendment.text, am.text); assert.equal(r.amendment.why, am.why); assert.equal(r.quote, C.requirements[0].quote);
+  });
+  it("an unknown requirement is a problem; the frozen contract is untouched", () => {
+    assert.match(applyAmendments(C, [{ ...am, requirement: "R9" }]).problems[0], /unknown requirement R9/);
+    assert.equal(C.requirements[0].amendment, undefined);
+  });
+  it("decide: an amended requirement the reviewer rejects fails as 'amendment not accepted'; accepted conforms", () => {
+    const k = { ...ctx, contract: applyAmendments(C, [am]).contract };
+    assert.equal(decide(good, k).state, "conforms");
+    const d = decide({ ...row("R1", { status: "partial", note: "amendment: still never shows the URL" }), issue_coverage: good.issue_coverage.map((c) => (c.quote === Q1 ? { ...c, contract_ids: ["R1"], status: "narrowed" } : c)) }, k);
+    assert.equal(d.state, "nonconforming");
+    assert.ok(d.failures.length >= 2 && d.failures.every((f) => /amendment not accepted \(.*amended to "regenerate/.test(f.detail)));
+  });
+  it("explainFailures shows the amended text", () => {
+    const c = applyAmendments(C, [am]).contract;
+    assert.match(explainFailures([{ code: "x", detail: "R1 partial" }], c)[0].detail, /amended to "regenerate and reveal/);
+  });
+});

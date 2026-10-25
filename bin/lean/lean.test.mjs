@@ -2103,6 +2103,9 @@ describe("prompts", () => {
     const p = reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, comments: [{ body: "please also cover bar" }, { body: "<!-- FORGE:STARTED -->\nx" }], contract: CONTRACT, result: { status: "fixed" }, files: ["src/foo.js"], diff: "x".repeat(2000) });
     for (const t of ["<issue_body>", "<issue_comments>\nplease also cover bar\n</issue_comments>", "<contract>", '"R1"', "<builder_result>", "<changed_files>\nsrc/foo.js", "<diff>"]) assert.ok(p.includes(t), t);
     assert.doesNotMatch(p, /FORGE:STARTED/);
+    const am = reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, contract: { ...CONTRACT, requirements: [{ ...CONTRACT.requirements[0], amendment: { text: "reveal once", why: "hash-only token" } }] }, diff: "" });
+    assert.ok(am.includes("reveal once") && am.includes("hash-only token"));
+    assert.match(REVIEWER_SYSTEM, /amendment\.text/);
     assert.ok(approxTokens(REVIEWER_SYSTEM) + approxTokens(reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, contract: CONTRACT, diff: "" })) <= 1800);
   });
 
