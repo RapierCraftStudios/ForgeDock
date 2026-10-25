@@ -980,6 +980,31 @@ describe("run-issue core path: SIGTERM/SIGINT teardown (#4179)", () => {
   });
 });
 
+describe("readVerify invariants (#4585)", () => {
+  it("reads verify.invariants as a block list beside the scalar keys", () => {
+    const d = tmpDir("invariants-yaml-");
+    writeFileSync(join(d, "forge.yaml"), ["learned:", "  test_commands:", "    - make lint", "verify:", "  mode: ci", "  invariants: # repo-wide", '    - "pnpm check:registry"', "    - bash a.sh  # c", "  max_rounds: 1", ""].join("\n"));
+    const v = readVerify(d);
+    assert.deepEqual(v.invariants, ["pnpm check:registry", "bash a.sh"]);
+    assert.equal(v.mode, "ci"); assert.equal(v.maxRounds, 1);
+    assert.deepEqual(readPrecheckCommands(d), ["make lint"]);
+    writeFileSync(join(d, "forge.yaml"), "verify:\n  mode: ci\n");
+    assert.deepEqual(readVerify(d).invariants, []);
+  });
+});
+
+describe("readVerify flaky (#4614)", () => {
+  it("reads verify.flaky as a block list, a flow list or a comma string", () => {
+    const d = tmpDir("flaky-yaml-");
+    writeFileSync(join(d, "forge.yaml"), ["verify:", "  mode: ci", "  flaky:", "    - a-test", '    - "b test"', "  max_rounds: 1", ""].join("\n"));
+    assert.deepEqual(readVerify(d).flaky, ["a-test", "b test"]);
+    writeFileSync(join(d, "forge.yaml"), "verify:\n  flaky: [a, b]\n");
+    assert.deepEqual(readVerify(d).flaky, ["a", "b"]);
+    writeFileSync(join(d, "forge.yaml"), 'verify:\n  flaky: "a,b"\n');
+    assert.deepEqual(readVerify(d).flaky, ["a", "b"]);
+  });
+});
+
 describe("readPrecheckCommands (#4240)", () => {
   it("reads learned.test_commands as a block list; absent or empty is undefined", () => {
     const d = tmpDir("precheck-yaml-");

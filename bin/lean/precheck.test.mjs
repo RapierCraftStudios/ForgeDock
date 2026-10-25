@@ -6,7 +6,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { formatFirstPassSummary } from "./fixround.mjs";
-import { runChecks, formatPrecheckSummary, planPrecheck, selfCheck, selfCheckState, formatCheckTable, worktreeFingerprint, quietFailure } from "./precheck.mjs";
+import { runChecks, retryTimeoutMs, runWithTimeoutRetry, formatPrecheckSummary, planPrecheck, selfCheck, selfCheckState, formatCheckTable, worktreeFingerprint, quietFailure } from "./precheck.mjs";
 import { execFileSync } from "node:child_process";
 import { readPrecheckBudget } from "../engine-cli.mjs";
 import { orchestrate } from "./orchestrate.mjs";
@@ -52,9 +52,9 @@ describe("runChecks (#4331)", () => {
     assert.deepEqual(r.deferred, ["b", "c"]);
   });
 
-  it("a command's own timeout (not the budget) stays a failure; a throw is rc 127", async () => {
+  it("a command's own timeout (not the budget) stays a failure once the retry also times out; a throw is rc 127", async () => {
     const h = harness({ cost: { slow: 5000 } });
-    const r = await runChecks({ commands: ["slow", "boom", "bad"], parallelism: 2, budgetMs: 600000, perCommandMs: 2000, now: h.now,
+    const r = await runChecks({ commands: ["slow", "boom", "bad"], parallelism: 2, budgetMs: 600000, perCommandMs: 2000, now: h.now, load: () => ({ load1: 0, cores: 4 }),
       run: (a) => (a.command === "boom" ? Promise.reject(new Error("spawn failed")) : a.command === "bad" ? Promise.resolve({ rc: 2, output: "lint" }) : h.run(a)) });
     assert.deepEqual(r.results.map((x) => [x.command, x.rc]), [["slow", 124], ["boom", 127], ["bad", 2]]);
     assert.match(r.results[1].output, /spawn failed/);
@@ -145,6 +145,16 @@ describe("readPrecheckBudget: forge.yaml lean.precheck.max_minutes (#4331)", () 
 describe("forgedock check core (#4364)", () => {
   const MAP = { version: 1, entries: [{ globs: ["src/**"], command: "npm test", cwd: "." }, { globs: ["docs/**"], command: "make docs", cwd: "." }] };
 
+  it("planPrecheck #4585: invariants are appended unscoped, deduped, and kept when the map matches nothing", () => {
+    const p = planPrecheck({ testMap: MAP, files: ["README.md"], learned: ["make lint"], verify: { invariants: ["bash scripts/inv.sh", " make lint ", ""] } });
+    assert.deepEqual(p.commands.at(-1), "bash scripts/inv.sh");
+    assert.equal(p.commands.filter((c) => c === "make lint").length, 1);
+    assert.equal(p.invariants, 2);
+    const only = planPrecheck({ files: [], learned: [], verify: { invariants: ["bash scripts/inv.sh"] } });
+    assert.deepEqual(only.commands, ["bash scripts/inv.sh"]);
+    assert.deepEqual(planPrecheck({ testMap: MAP, files: ["README.md"], learned: ["make lint"] }).commands, ["make lint"], "no invariants: unchanged");
+  });
+
   it("planPrecheck: the engine's selection and budget rule (max_minutes wins, else precheck_total_seconds, else 600 s)", () => {
     const p = planPrecheck({ testMap: MAP, files: ["src/a.js"], learned: [" make lint ", "", "make docs"], verify: { precheckTotalSeconds: 120, precheckTimeoutSeconds: 30 } });
     assert.deepEqual(p.commands, ["make lint", "npm test"]); assert.deepEqual(p.dropped, ["make docs"]);
@@ -206,5 +216,54 @@ describe("forgedock check core (#4364)", () => {
     assert.equal(await fp(), dirty, "committing the checked tree does not make the check stale");
     writeFileSync(join(dir, "a.js"), "3\n");
     assert.notEqual(await fp(), dirty);
+  });
+});
+
+describe("check timeout is infrastructure (#4589)", () => {
+  const idle = () => ({ load1: 0, cores: 4 });
+  it("retryTimeoutMs doubles at least, scales with load per core, caps at 3600 s and never shrinks", () => {
+    assert.equal(retryTimeoutMs({ perMs: 300000, load1: 0, cores: 4 }), 600000);
+    assert.equal(retryTimeoutMs({ perMs: 300000, load1: 13, cores: 4 }), 1200000);
+    assert.equal(retryTimeoutMs({ perMs: 2000000, load1: 40, cores: 4 }), 3600000);
+    assert.equal(retryTimeoutMs({ perMs: 4000000, load1: 0, cores: 4 }), 4000000);
+  });
+  it("runChecks retries a command's own timeout once with a longer one and passes", async () => {
+    const h = harness({ cost: { slow: 400000 } });
+    const r = await runChecks({ commands: ["slow"], budgetMs: Infinity, perCommandMs: 300000, now: h.now, run: h.run, load: idle });
+    assert.deepEqual(h.calls, [["slow", 300000], ["slow", 600000]]);
+    assert.equal(r.results[0].rc, 0);
+    assert.deepEqual(r.deferred, []);
+  });
+  it("a repeated timeout stays rc 124 and is labelled infrastructure", async () => {
+    const h = harness({ cost: { slow: 9e9 } });
+    const r = await runChecks({ commands: ["slow"], budgetMs: Infinity, perCommandMs: 1000, now: h.now, run: h.run, load: idle });
+    assert.equal(h.calls.length, 2);
+    assert.equal(r.results[0].rc, 124);
+    assert.match(r.results[0].output, /infra timeout/);
+  });
+  it("selfCheck is ok when the retry passes", async () => {
+    const h = harness({ cost: { slow: 5000 } });
+    const r = await selfCheck({ contract: { validate: [{ id: "V1", command: "slow" }] }, plan: { commands: [], budgetMs: 0, perCommandMs: 3000 }, now: h.now, run: h.run });
+    assert.equal(r.ok, true);
+  });
+  it("a budget-cut timeout is still deferred, never retried; a non-124 failure is never retried", async () => {
+    const h = harness({ cost: { slow: 9e9 }, rc: { bad: 1 } });
+    const r = await runChecks({ commands: ["slow"], budgetMs: 2000, perCommandMs: 300000, now: h.now, run: h.run, load: idle });
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual(r.deferred, ["slow"]);
+    const h2 = harness({ rc: { bad: 1 } });
+    const r2 = await runChecks({ commands: ["bad"], budgetMs: Infinity, perCommandMs: 1000, now: h2.now, run: h2.run, load: idle });
+    assert.equal(h2.calls.length, 1);
+    assert.equal(r2.results[0].rc, 1);
+  });
+  it("a retry the budget cuts short is deferred", async () => {
+    const h = harness({ cost: { slow: 9e9 } });
+    const r = await runChecks({ commands: ["slow"], budgetMs: 1500, perCommandMs: 1000, now: h.now, run: h.run, load: idle });
+    assert.deepEqual(r.deferred, ["slow"]);
+  });
+  it("runWithTimeoutRetry reports retried", async () => {
+    let n = 0;
+    const x = await runWithTimeoutRetry(async (ms) => (++n === 1 ? { rc: 124, output: "t" } : { rc: 0, output: String(ms) }), 1000, { load: idle });
+    assert.deepEqual([x.retried, x.r.rc, x.r.output], [true, 0, "2000"]);
   });
 });

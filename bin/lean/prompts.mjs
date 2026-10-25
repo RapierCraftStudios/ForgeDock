@@ -63,6 +63,12 @@ export function duplicateExportsPrompt(findings, mode = "local") {
   return `This change exports names that another module of the same app or package already exports:\n${rows}\n\nRename the new export or reuse the existing one, and update every reference and any registry, map or test keyed by the name (same-named entries collide or leave one unprobed). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
+/** #4591: lane-added migrations the repo's generator did not produce. */
+export function migrationGeneratorPrompt(problems, mode = "local") {
+  const rows = problems.slice(0, 30).map((p) => `- ${p}`).join("\n");
+  return `These migration files were named by hand, not produced by the repo's migration generator:\n${rows}\n\nA made-up name or timestamp collides with another lane's migration. Delete each such file, then recreate it with the generator (hand-written SQL: the generator's \`--custom\` mode, e.g. \`drizzle-kit generate --custom --name=<name>\`, then put your SQL in the file it wrote), so the journal entry and snapshot come from it. Never name or number migration files by hand. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
 /** #4390: byte cap of the diff hunks a context-ceiling restart carries (the stat is always kept). */
 export const RESTART_DIFF_MAX_BYTES = 40 * 1024;
 
@@ -171,13 +177,15 @@ export function builderImplementPrompt(mode = "local", { toolchain = null, spars
 
 ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
-The contract changes only through typed amendments in ${RESULT_FILE}, each with a why, which the engine posts on the issue:
-- {"kind":"add-deliverable","path":"<file>","why":""}: a file you must change that the contract did not list.
+The contract changes only through typed amendments in ${RESULT_FILE}, each with a why:
+- {"kind":"add-deliverable","path":"<file>","why":""}: a file the contract did not list.
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: an issue requirement the contract missed.
-- {"kind":"defer|post-deploy","requirement":"R#","why":""}: a contracted requirement that becomes separate work or a post-deploy check. The engine files it as a tracked follow-up. Not "type"; other kinds are rejected.
+- {"kind":"defer|post-deploy","requirement":"R#","why":""}: a requirement that becomes separate work or a post-deploy check. Filed as a tracked follow-up. Not "type"; other kinds are rejected.
+- {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded; judged against text.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
-A new dependency between workspace packages in a package.json that no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
-If the repository has scripts/check-devdocs-freshness.sh, a behaviour change under the paths it checks must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change. Run it against the base before writing the result; the engine runs it too.
+Never name or number migration files by hand; use the generator.
+A new workspace-package dependency in a package.json no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
+If the repository has scripts/check-devdocs-freshness.sh, a behaviour change under the paths it checks must update the matching dossier (devdocs/modules/*.md, per devdocs/index.yaml) in the same change. Run it against the base first; the engine runs it too.
 
 Before writing ${RESULT_FILE}, after your last edit, run \`node ${FORGEDOCK_CLI} check\` in the worktree and fix until it passes; if it cannot pass, report the problem as blocked.
 
@@ -242,6 +250,18 @@ export function hotspotBuildRule(facts) {
 export function enumeratingPlanNote(list) {
   if (!Array.isArray(list) || !list.length) return "";
   return `\n\nEnumerating tests (found by the engine): these tests list every member of a module or directory this issue names, so a new export, table, job, action, namespace or file there must join their list or CI goes red. List each one you will touch under Affected Files in ${INVESTIGATION_FILE}, and add a validate command that runs only those tests.\n${list.slice(0, 40).map((e) => `- ${e.module} -> ${e.test}:${e.line} (${e.why})`).join("\n")}`;
+}
+
+/** #4585: the repo's verify.invariants as a checklist for the plan; "" when none. */
+export function invariantsPlanNote(list) {
+  if (!Array.isArray(list) || !list.length) return "";
+  return `\n\nRepo-wide invariants (verify.invariants): these commands run before every push whichever tests you choose, and each lists every table, export, key, namespace or file of its kind. A new one needs an entry in every such registry (e.g. registry, export, purge order, seeder, translation status, boundary or placeholder lists). Name each registry you will touch under Affected Files in ${INVESTIGATION_FILE}.\n${list.slice(0, 20).map((c) => `- \`${c}\``).join("\n")}`;
+}
+
+/** #4585: the builder rule for verify.invariants; "" when none. */
+export function invariantsBuildRule(list) {
+  if (!Array.isArray(list) || !list.length) return "";
+  return `\n\nInvariants checklist: for each new table, export, key, namespace, page or file, add its entry to every registry or coverage list that enumerates its kind (e.g. a new table needs registry, export, purge and seeder entries; a new i18n key needs every locale). Then run each command below and fix any failure before you finish.\n${list.slice(0, 20).map((c) => `- \`${c}\``).join("\n")}`;
 }
 
 const NOT_MEMBER = `or, when the symbol is not a member of that list, record {"symbol":"<name>","test":"<test path>","why":"<why it is not a member>"} in ${RESULT_FILE} "not_members"`;
@@ -311,6 +331,7 @@ const BLOCK_RULES = `"blocked" needs a typed "block" in ${RESULT_FILE}, one of:
 - {"kind":"split-required","subissues":[{"title":"","body":"","depends_on":[0],"files":["<path>"]}],"size":{"files":N,"lines":N}}: too big for one change. The engine files the sub-issues (depends_on = indexes of earlier sub-issues; files = the files or dirs each will edit, also accepted as "paths") only when every sub-issue's files are disjoint from the others' or the whole change's size estimate exceeds ${SPLIT_MIN_FILES} files or ${SPLIT_MIN_LINES} lines; otherwise keep one lane: an ordered checklist in the contract with a validate per item. In an admitted split, when siblings would edit the same hub (a barrel or index export list, a union type, a shared test fixture, an index doc), pre-stage its slots in the earliest sub-issue and make the others depend on it, or give each sibling its own per-feature file; the engine serialises sub-issues that still share a file.
 - {"kind":"human","why":"${HUMAN_BLOCK_REASONS.join("|")}"}: only an external action agents cannot take, or a product decision too critical for agents.
 "An upstream issue must land first", "needs a split" and "needs prod data that read-only monitoring can read" are never "human".
+A check that times out (rc 124) is host load, never a block or "human" product-decision: run the narrowest targeted command for your changed files and say the full one could not finish in time.
 Remote sandbox lacking a host-only capability (sops, prod_monitor, ops_credentials): name it in the summary; the host reruns the lane.`;
 
 export function blockCorrectionPrompt(problem) {
@@ -342,6 +363,7 @@ export const REVIEWER_SYSTEM = `You are an independent conformance reviewer of o
 
 You receive the GitHub issue with its comments, the frozen contract (requirements quoted from the issue, deliverables, preserve constraints, validate commands) with typed amendments, the builder's result with validation output, the changed files, the diff, and a row skeleton with one row per contract id and changed file. The engine computes the verdict from your rows; a reply without rows is rejected, so fill the skeleton rather than composing rows: fill EVERY row (set each empty status, evidence and validated_by, and each null deferral_ok; keep the ids and files as given):
 - issue_coverage: one row per requirement or acceptance criterion in the issue, quoted verbatim, saying whether the contract covers it, narrows it, or misses it. The skeleton lists the contract's quotes; add a row for any issue requirement the contract does not quote.
+- amendment: a requirement with an \`amendment\` is judged against amendment.text and its why, not the quote; its issue_coverage row is covered when the amendment follows from its why. If it does not hold, mark the row partial with note "amendment: <what to change>".
 - requirements: one row per contract requirement id: implemented|partial|missing|deferred|post-deploy|not-applicable, with evidence as a backtick-quoted repo-relative path:line copied verbatim from the changed files, including (group), [slug] and [...slug] folders (e.g. \`apps/web/app/(console)/layout.tsx:12\`, not route.ts:12) and the validate id or test that proves it (validated_by). For a defer or post-deploy requirement add deferral_ok: true only if it is genuinely separate work or only checkable after a deploy, false if it belongs in this change. For a verify out_of_band row (measured by the named job, not in this lane) set instrumented: true only when its budget test or bench is committed and that job is configured, with that path:line as evidence; false otherwise. Do not judge the measured result.
 - scope: one row per changed file, pre-filled with the engine's authorization: the deliverable id that authorizes it (deliverables may be directories or globs), "test", "incidental" (changelog, lockfile), or "none" with what it changes. Change it only if the diff shows the file does something its deliverable does not cover.
 - preserve: one row per preserve id: intact|violated|unverified, with path:line. The skeleton starts each at "unverified"; set intact only after checking it.

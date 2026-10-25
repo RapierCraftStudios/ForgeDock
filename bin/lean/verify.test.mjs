@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseVerify, matchesGlob, skipsCi, capLogs, runCiVerify, collectFailedLogs, verifyReport, DEFAULT_SKIP_PATHS, LOG_CAP, VERIFY_CHECK_NAME, VERIFY_TEXT_CAP, latestPerName, ciGate, rerunFailedOnce, rerunTarget } from "./verify.mjs";
+import { splitFlaky, parseVerify, matchesGlob, skipsCi, capLogs, runCiVerify, collectFailedLogs, verifyReport, DEFAULT_SKIP_PATHS, LOG_CAP, VERIFY_CHECK_NAME, VERIFY_TEXT_CAP, latestPerName, ciGate, rerunFailedOnce, rerunTarget } from "./verify.mjs";
 import { precheck } from "./conformance.mjs";
 import { parseE2e } from "./e2e.mjs";
 
@@ -23,9 +23,9 @@ function fake(o = {}) {
 
 describe("verify-by-CI config (#4167)", () => {
   it("parseVerify defaults to local and rejects invalid values", () => {
-    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, duplicateExports: true, e2e: parseE2e({}) });
+    assert.deepEqual(parseVerify({}), { mode: "local", workflow: null, pathsInput: null, skipPaths: [...DEFAULT_SKIP_PATHS], maxRounds: 2, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, invariants: [], e2e: parseE2e({}) });
     const v = parseVerify({ mode: "ci", workflow: ".github/workflows/verify.yml", paths_input: "changed_paths", skip_paths: "*.md, docs/** ,", max_rounds: "3" });
-    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, duplicateExports: true, e2e: parseE2e({}) });
+    assert.deepEqual(v, { mode: "ci", workflow: ".github/workflows/verify.yml", pathsInput: "changed_paths", skipPaths: ["*.md", "docs/**"], maxRounds: 3, precheckTimeoutSeconds: 300, precheckTotalSeconds: 600, checkRun: false, checks: null, postMerge: null, flaky: [], duplicateExports: true, invariants: [], e2e: parseE2e({}) });
     assert.equal(parseVerify({ mode: "remote" }).mode, "local");
     assert.equal(parseVerify({ workflow: "x; rm -rf /" }).workflow, null);
     assert.equal(parseVerify({ max_rounds: "-1" }).maxRounds, 2);
@@ -61,6 +61,14 @@ describe("verify-by-CI config (#4167)", () => {
     assert.deepEqual(kinds(result, true), []);
     assert.deepEqual(kinds({ validation: [] }, true), []);
     assert.deepEqual(kinds({ validation: [{ id: "V1", exit: 0 }, { id: "V2", exit: 1 }] }, true), ["validate_failed"]);
+  });
+});
+
+describe("verify.invariants (#4585)", () => {
+  it("parseVerify keeps a trimmed, unique, non-empty invariants list; default []", () => {
+    assert.deepEqual(parseVerify({}).invariants, []);
+    assert.deepEqual(parseVerify({ invariants: [" a ", "a", "", "b c"] }).invariants, ["a", "b c"]);
+    assert.deepEqual(parseVerify({ invariants: "a,b" }).invariants, [], "only a block list counts");
   });
 });
 
@@ -156,6 +164,24 @@ describe("CI verification gate, latest attempt and flake rerun (#4387)", () => {
     const f = fake({ runs: [[{ databaseId: 7, headSha: HEAD, status: "completed", conclusion: "failure", attempt: 1 }], [{ databaseId: 7, headSha: HEAD, status: "completed", conclusion: "success", attempt: 2 }]] });
     const r = await runCiVerify(f.args({ exclude: [7], rerunOf: rerunTarget({ runId: 7, attempt: 1 }) }));
     assert.equal(r.result, "pass"); assert.equal(r.runId, 7);
+  });
+});
+
+describe("verify.flaky (#4586)", () => {
+  it("parses an array or comma list, trimmed and deduped; default empty", () => {
+    assert.deepEqual(parseVerify({}).flaky, []);
+    assert.deepEqual(parseVerify({ flaky: " a, b ,a," }).flaky, ["a", "b"]);
+    assert.deepEqual(parseVerify({ flaky: ["x", " y"] }).flaky, ["x", "y"]);
+  });
+  it("parses a flow list scalar, quotes stripped", () => {
+    assert.deepEqual(parseVerify({ flaky: "[a, \"b c\", 'd']" }).flaky, ["a", "b c", "d"]);
+  });
+  it("splitFlaky matches by exact job name only, never log text (#4614)", () => {
+    const fs = [{ job: "memory-erasure", log: "" }, { job: "test", log: "FAIL pdf timing\nFAIL real regression" }, { job: "lint", log: "boom" }];
+    const r = splitFlaky(fs, ["memory-erasure", "pdf timing"]);
+    assert.deepEqual(r.flaky.map((f) => f.job), ["memory-erasure"]);
+    assert.deepEqual(r.own.map((f) => f.job), ["test", "lint"]);
+    assert.equal(splitFlaky(fs, []).own.length, 3);
   });
 });
 
