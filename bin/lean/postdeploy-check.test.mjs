@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseChecks, itemCheckIds, measureFollowup, CHECK_ID_RE } from "./postdeploy-check.mjs";
+import { postDeployOnly } from "./prefilter.mjs";
 import { validateContract, applyAmendments, precheck, followupItems } from "./conformance.mjs";
 import { PROBE_MARKER } from "./probe.mjs";
 
@@ -30,6 +31,9 @@ describe("post-deploy named checks (#4626)", () => {
     assert.ok(CHECK_ID_RE.test("login-smoke") && !CHECK_ID_RE.test("Bad Id"));
   });
 
+  it("postDeployOnly still matches items with and without a [check:id] token", () => {
+    assert.ok(postDeployOnly(body([item("R1", "[check:smoke] soak"), item("R2", "only in prod")])));
+  });
   it("extracts [check:id] per item; an item without one yields null", () => {
     assert.deepEqual(itemCheckIds(body([item("R1", "[check:smoke] soak"), item("R2", "only in prod")])), ["smoke", null]);
   });

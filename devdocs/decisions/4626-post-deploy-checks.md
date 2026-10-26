@@ -24,9 +24,10 @@ reads them from issue text, which bot-filed follow-ups quote from untrusted PRs 
   the record, and the parent reopens with the output; a recorded fail for the same fix is not re-run (`check-failed`, parked).
 - An item with no check id, or an id the default branch does not define, parks `awaiting-measurement` (label, one
   `FORGE:PRECONDITION` comment, report line). It never gets a lane and `needs-human` is never removed.
-- Migration: the six open follow-ups have no ids, so the next `forgedock triage` labels them `awaiting-measurement`.
-  The code change cannot edit live issues (a lane never touches GitHub); the migration is that triage run, and the fixture
-  test pins the six body shapes. Giving one a check id later means adding its entry to the checks file and a `[check:<id>]` token.
+- Migration: the six open follow-ups (#4415, #4421, #4438, #4488, #4495, #4498) are not migrated by this change. With no
+  check id they park `awaiting-measurement` through the rule above on the next pre-filter run: an operator action after
+  merge (`forgedock triage` on them), not code. Giving one a check id later means adding its entry to the checks file
+  and a `[check:<id>]` token.
 
 ## Rejected
 

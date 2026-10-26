@@ -670,3 +670,29 @@ describe("#4594 amend-requirement", () => {
     assert.match(explainFailures([{ code: "x", detail: "R1 partial" }], c)[0].detail, /amended to "regenerate and reveal/);
   });
 });
+
+describe("post-deploy check ids (#4626)", () => {
+  const pd = (extra = {}) => ({ ...C, requirements: [{ id: "R1", quote: Q1, disposition: "post-deploy", why: "needs prod", ...extra }, C.requirements[1]] });
+  it("validateContract: a post-deploy requirement needs a well-formed check id", () => {
+    assert.ok(validateContract(pd(), ISSUE).problems.some((p) => /post-deploy needs a check id/.test(p)));
+    assert.ok(validateContract(pd({ check: "Bad Id" }), ISSUE).problems.some((p) => /post-deploy needs a check id/.test(p)));
+    assert.ok(!validateContract(pd({ check: "login-smoke" }), ISSUE).problems.some((p) => /check id/.test(p)));
+  });
+  it("applyAmendments: a post-deploy amendment needs a check id", () => {
+    const bad = applyAmendments(C, [{ kind: "post-deploy", requirement: "R1", why: "w" }], ISSUE);
+    assert.ok(bad.problems.some((p) => /needs a check id/.test(p)));
+    const ok = applyAmendments(C, [{ kind: "post-deploy", requirement: "R1", why: "w", check: "login-smoke" }], ISSUE);
+    assert.equal(ok.contract.requirements[0].check, "login-smoke");
+  });
+  it("precheck: a check id on neither branch is unimplemented; null checkIds skips the rule", () => {
+    const res = { requirements: [{ id: "R1", status: "post-deploy" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    const c = pd({ check: "login-smoke" });
+    assert.ok(precheck({ contract: c, result: res, changedFiles: files, checkIds: new Set() }).failures.some((f) => f.kind === "check_unknown"));
+    assert.ok(!precheck({ contract: c, result: res, changedFiles: files, checkIds: new Set(["login-smoke"]) }).failures.some((f) => f.kind === "check_unknown"));
+    assert.ok(!precheck({ contract: c, result: res, changedFiles: files }).failures.some((f) => f.kind === "check_unknown"));
+  });
+  it("followupItems names the check in a post-deploy item", () => {
+    const [i] = followupItems([{ id: "R1", quote: Q1, disposition: "post-deploy", why: "w", check: "login-smoke" }]);
+    assert.match(i.why, /^post-deploy: \[check:login-smoke\] w$/);
+  });
+});
