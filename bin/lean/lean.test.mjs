@@ -3950,6 +3950,17 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
   const ciValidation = [{ id: "V1", command: "node --test test/foo.test.js", ci: true }];
   const events = (dir) => readLog(dir, 7).filter((e) => e.event === "CI_VERIFY");
 
+  it("untrack commit before CI verify: a tool cache the builder committed does not move HEAD under the CI lookup (#4621)", async () => {
+    const w = withCi(world({ validation: ciValidation })); w.added = ["src/foo.js", "apps/worker/.eslintcache"];
+    const inner = w.io.git;
+    w.io.git = async (a, o) => { const out = await inner(a, o); if (a[0] === "commit" && a.some((x) => /untrack lane tool state/.test(x))) w.head = `dddd${w.calls.length}`.padEnd(16, "0"); return out; };
+    const dir = tmpDir("core-ci-");
+    const r = await run(w, { verify: CI, dir });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(events(dir).map((e) => e.result), ["pass"], "CI found the run for the pushed tip");
+    assert.ok(!builders(w).some((b) => /CI (is )?unavailable|cannot run/i.test(String(b[4]))), "no ci_unavailable builder round");
+  });
+
   it("green CI: the builder is told not to run test suites, the branch is pushed and verified before review, validate left to CI passes enforce", async () => {
     const w = withCi(world({ validation: ciValidation }));
     const dir = tmpDir("core-ci-");
