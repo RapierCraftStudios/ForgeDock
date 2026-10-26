@@ -179,3 +179,23 @@ Median cost per run, wall p50, first-pass rate and needs-human rate of each rele
 A metric whose own sample is under `--min-n` (default 10) is null, and so is its verdict; verdicts are
 `regressed|improved|flat|null`, never a pass. `--post-metrics <pr>` posts (or updates) a `<!-- FORGE:METRICS v1 -->`
 comment on that release PR with the table and the snapshot as JSON; without it nothing is written to GitHub.
+
+## Live A/B experiments (`--experiment <id>`, forge#4629)
+
+Declare one experiment in forge.yaml (flat keys under `experiment:`):
+
+```yaml
+experiment:
+  id: light-vs-full
+  arms: light,full          # at least two
+  ratio: 1,1                # integer weights, default equal
+  metrics: usd_median,wall_p50_ms,first_pass_rate,needs_human_rate   # default all four
+  targets: light.usd_median<=1.2xfull,light.first_pass_rate>=0.8     # arm.metric<=|>=limit, optionally x<other arm>
+  min_n: 10
+```
+
+The lean lane assigns each issue an arm (sha1 of id and issue number over the ratio, so a re-run keeps its arm) and tags
+`experiment` and `arm` on `phase_attempt` and `run_terminal`. `forgedock stats --experiment <id>` reports the finished
+runs per arm with the metrics of `--by version`; a metric under min n is null and so is any target that needs it, never a
+pass. `targets_met` is true only when every target is met. The report, `scripts/bench-lightlane.mjs aggregate` and
+`scripts/eval-gate-scorecard.mjs` share one record: `{schema: "forge.bench.v1", source, arms, targets}`.
