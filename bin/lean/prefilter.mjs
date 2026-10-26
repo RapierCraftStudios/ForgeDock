@@ -25,7 +25,7 @@ import { PREFILTER_SYSTEM, prefilterPrompt, parsePrefilterVerdict } from "./prom
 import { isTrustedComment } from "../engine/phases.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
 import { probeResultOf } from "./probe.mjs";
-import { AWAITING_MEASUREMENT_LABEL, itemCheckIds, measureFollowup } from "./postdeploy-check.mjs";
+import { AWAITING_MEASUREMENT_LABEL, MONITORING_LABEL, itemCheckIds, measureFollowup } from "./postdeploy-check.mjs";
 
 export const DEFAULT_PREFILTER_MODEL = "claude-haiku-5-5";
 export const PREFILTER_MARKER = "FORGE:PREFILTER";
@@ -339,6 +339,8 @@ export function formatParkedLine(rows) {
   if (meas.length) out.push(`awaiting measurement: ${meas.map((r) => `#${r.issue}`).join(" ")} (no runnable default-branch check; no lane)`);
   const failed = parked.filter((r) => r.prefilter.kind === "check-failed");
   if (failed.length) out.push(`check failed: ${failed.map((r) => `#${r.issue}`).join(" ")} (parent reopened; waiting for a new fix)`);
+  const mon = parked.filter((r) => r.prefilter.kind === "monitoring"); // #4627
+  if (mon.length) out.push(`monitoring: ${mon.map((r) => `#${r.issue}`).join(" ")} (windowed post-deploy checks re-run on later releases)`);
   const pre = parked.filter((r) => r.prefilter.kind === "awaiting-precondition");
   if (pre.length) out.push(`awaiting precondition: ${pre.map((r) => `#${r.issue}`).join(" ")} (post_deploy.precondition_cmd not ready)`);
   return out.join("\n");
@@ -357,6 +359,8 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
     const labelled = names.some((l) => ["needs-human", "workflow:merged"].includes(l));
     // #4389: a post-deploy follow-up is gated even when an earlier lane escalated it (needs-human); nothing else changes.
     const gated = !!defaultBranch && !names.includes("workflow:merged") && deferredFrom(iss.body) != null && postDeployOnly(iss.body);
+    // #4627: a follow-up under windowed monitoring belongs to `sweepDue`, never to a lane or a second measurement
+    if (names.includes(MONITORING_LABEL)) return { ...out, parked: true, kind: "monitoring", detail: "windowed post-deploy checks re-run on later releases" };
     if (labelled && !gated) return { ...out, detail: "labelled, left to the lane" };
     if (io.projector) {
       let st = null;
@@ -379,6 +383,7 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
           if (!dryRun) await markParked({ issue, repo, io, had: names.includes(AWAITING_MEASUREMENT_LABEL), gate: { ...gate, state: m.state, detail: m.detail } });
           return { ...out, parked: true, kind: m.state, parent: gate.parent, lane, default: gate.default, detail: m.detail };
         }
+        if (m.state === "monitoring") return { ...out, parked: true, kind: "monitoring", parent: gate.parent, lane, default: gate.default, detail: m.detail };
         if (m.state === "pass") return { ...out, closed: !dryRun, kind: "post-deploy-check", parent: gate.parent, lane, default: gate.default, detail: m.detail };
         if (m.state === "fail" || m.state === "recorded-fail") return { ...out, parked: true, kind: "check-failed", parent: gate.parent, lane, default: gate.default, detail: m.detail };
       }

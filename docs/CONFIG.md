@@ -608,6 +608,18 @@ A post-deploy requirement carries a check id (`[check:<id>]` in the follow-up it
 
 `pass` is `exit 0` (default) or a `/regex/flags` over the output; `timeout` is seconds. When the gate reports the follow-up ready, the check runs with no model call: pass closes the follow-up with a `FORGE:PROBE` record, fail reopens the parent with the output. An item with no check id, or an id the default branch does not define, gets the `awaiting-measurement` label and never a lane. A contract's check id must be on the default branch or added by the same PR.
 
+### Windowed monitoring (#4627)
+
+A check may declare `for` (the window, `30m`/`24h`/`7d`/`2w`) and `every` (the cadence, default `6h`; needs `for`); an entry with an invalid duration, or `every` without `for`, is ignored:
+
+```json
+{ "login-smoke": { "run": "scripts/smoke.sh", "for": "7d", "every": "6h" } }
+```
+
+When every item's check is windowed, the first pass records the release (the `origin/<default>` sha) and the window end in a `FORGE:PROBE` record, labels the follow-up `post-deploy-monitoring` and leaves it open (no lane, no second measurement by the pre-filter). It re-runs, with the command read from the default branch each time, when `every` has elapsed or `origin/<default>` moved (a later release). At the window end it closes. A fail after a pass opens a regression issue (`FORGE:REGRESSION`) naming the fix commit, the last passing release and the breaking release, and closes the follow-up; the parent is not reopened. A fail on the first run behaves as above (the parent reopens). No model call.
+
+Triggers: `forgedock probe --due [--dry-run] [--repo owner/repo]` runs the due ones once; the `forgedock schedd` daemon runs them on a timer while it is up (`FORGEDOCK_SCHEDD_DUE_MS`, default 15 minutes).
+
 
 ## `events` (OPTIONAL)
 

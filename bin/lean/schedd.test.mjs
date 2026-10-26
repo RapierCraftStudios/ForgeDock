@@ -487,3 +487,31 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     assert.deepEqual(env, { NODE_OPTIONS: "x", PATH: "/c", CLAUDE_CONFIG_DIR: "/acct-b", FORGEDOCK_SCHED_DIR: "/s" });
   });
 });
+
+describe("schedd due timer (#4627)", () => {
+  const boot = async (opts) => startDaemon({ dir: tmpDir("schedd-due-"), root: tmpDir("schedd-due-b-"), runBatch: async () => ({}), resumeOnStart: false, log: () => {}, ...opts });
+
+  it("runs the due callback on its interval, never overlapped, and survives a throwing callback", async () => {
+    let calls = 0, active = 0, overlap = false;
+    const logs = [];
+    const d = await boot({ dueMs: 15, log: (m) => logs.push(m), due: async () => {
+      calls++; active++; if (active > 1) overlap = true;
+      await new Promise((r) => setTimeout(r, 40));
+      active--; if (calls === 1) throw new Error("boom");
+    } });
+    try {
+      await until(() => calls >= 3);
+      assert.equal(overlap, false);
+      assert.ok(logs.some((m) => /due run failed: boom/.test(m)));
+      assert.ok(existsSync(d.sock));
+    } finally { await d.close(); }
+    const n = calls;
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(calls, n, "the timer is cleared on close");
+  });
+
+  it("without a due callback there is no timer", async () => {
+    const d = await boot({ dueMs: 10 });
+    await d.close();
+  });
+});
