@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, chmodSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { TURN_BUDGET_DEFAULTS, parseTurnBudgets, laneSize, wrapupGrant, makeTurnBudget, budgetDigest, formatTurnSummary } from "./budget.mjs";
+import { TURN_BUDGET_DEFAULTS, parseTurnBudgets, laneSize, nextSize, recoverySize, wrapupGrant, makeTurnBudget, scaledExtra, budgetDigest, formatTurnSummary } from "./budget.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 import { OUTCOME_CODES, RECOVERABLE_CODES } from "../engine/outcome-codes.mjs";
 import { RECOVER_HOW } from "./lean.mjs";
@@ -34,6 +34,14 @@ describe("#4392 turn budget", () => {
     assert.equal(laneSize({}), null);
   });
 
+  it("#4505 a budget.exceeded recovery runs at the next size (S->M->L, L stays L); other lanes keep their size", () => {
+    assert.deepEqual(["S", "M", "L"].map(nextSize), ["M", "L", "L"]);
+    assert.equal(nextSize(null), null); assert.equal(nextSize("XL"), "XL");
+    assert.equal(recoverySize("S", { code: "budget.exceeded", attempt: 1, final: true }), "M");
+    assert.equal(recoverySize("L", { code: "budget.exceeded" }), "L");
+    assert.equal(recoverySize("S", { code: "ci.red" }), "S"); assert.equal(recoverySize("S", null), "S"); assert.equal(recoverySize(null, { code: "budget.exceeded" }), null);
+  });
+
   it("the tally: build turns spend the budget, other attempts count only in total; off or unsized is unlimited", () => {
     const tb = makeTurnBudget({ M: 60 });
     assert.equal(tb.record(), null); assert.equal(tb.remaining(), Infinity);
@@ -44,6 +52,16 @@ describe("#4392 turn budget", () => {
     const off = makeTurnBudget({ S: 0 }); off.setSize("S");
     assert.equal(off.on(), false); assert.equal(off.remaining(), Infinity);
     assert.equal(wrapupGrant(25), 5); assert.equal(wrapupGrant(100), 20); assert.equal(wrapupGrant(3), 5);
+  });
+
+  it("#4587 L budgets scale with the contract (+10/path over 5, cap +2x) and an L recovery gets more; S/M and off unchanged", () => {
+    const b = (n, size = "L", recover = null) => { const tb = makeTurnBudget(); tb.setSize(size, scaledExtra({ size, contract: contract(n), recover })); return tb.budget(); };
+    assert.equal(b(6), 110); assert.equal(b(15), 200); assert.equal(b(40), 300);
+    assert.equal(b(5, "L"), 100);
+    assert.equal(b(15, "L", { code: "budget.exceeded" }), 250); assert.ok(b(6, "L", { code: "budget.exceeded" }) > b(6));
+    assert.equal(b(15, "M"), 60); assert.equal(b(1, "S"), 25);
+    assert.equal(scaledExtra({ size: "L", contract: contract(15), base: 0 }), 0);
+    const off = makeTurnBudget({ L: 0 }); off.setSize("L", 50); assert.equal(off.on(), false);
   });
 
   it("the digest is the builder's (capped), else the diff stat and the last self-check", () => {

@@ -27,6 +27,7 @@ const INCIDENTAL_RE = /(^|\/)(CHANGELOG|CHANGES|HISTORY)(\.[a-z]+)?$|(^|\/)(pack
 export const MIN_QUOTE_CHARS = 12;
 /** A contract larger than this cannot be posted whole in one comment (the comment cap is 60k). */
 export const MAX_CONTRACT_CHARS = 40000;
+import { CHECK_ID_RE } from "./postdeploy-check.mjs";
 const C = OUTCOME_CODES;
 
 export const norm = (s) => String(s ?? "").replace(/[`*_>]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -57,11 +58,13 @@ export function scopeText(iss, trustedComments = []) {
 /** #4265: failures whose detail starts with a contract requirement id also quote that requirement, so a needs-human names what is unmet. */
 export function explainFailures(failures, contract) {
   const reqs = new Map((contract?.requirements ?? []).map((r) => [String(r?.id ?? ""), String(r?.quote ?? "")]));
+  const amended = new Map((contract?.requirements ?? []).filter((r) => r?.amendment?.text).map((r) => [String(r.id), String(r.amendment.text)]));
   return (failures ?? []).map((f) => {
     const id = /^([A-Za-z][\w-]*)\b/.exec(String(f?.detail ?? ""))?.[1];
     const q = id && reqs.get(id);
     if (!q) return f;
-    return { ...f, detail: `${f.detail} ("${q.length > 160 ? `${q.slice(0, 157)}...` : q}")` };
+    const am = amended.get(id);
+    return { ...f, detail: `${f.detail} ("${q.length > 160 ? `${q.slice(0, 157)}...` : q}"${am ? `, amended to "${am.length > 160 ? `${am.slice(0, 157)}...` : am}"` : ""})` };
   });
 }
 export const isTestPath = (p) => TEST_RE.test(String(p));
@@ -229,6 +232,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     if (!DISPOSITIONS.includes(r?.disposition)) problems.push(`${id}: disposition must be one of ${DISPOSITIONS.join("|")}`);
     if (!inIssue(r?.quote, issueText)) problems.push(`${id}: quote is not verbatim from the issue (at least ${MIN_QUOTE_CHARS} characters)`);
     if (TRACKED.includes(r?.disposition) && blank(r?.why)) problems.push(`${id}: ${r.disposition} needs a why`);
+    if (r?.disposition === "post-deploy" && !CHECK_ID_RE.test(String(r?.check ?? ""))) problems.push(`${id}: post-deploy needs a check id (\`check\`, e.g. "login-smoke") naming an entry of .forge/post-deploy-checks.json on the default branch`);
     if (r?.disposition === "not-applicable" && blank(r?.evidence)) problems.push(`${id}: not-applicable needs file:line evidence`);
     if (r?.verify != null && !VERIFY_MODES.includes(r.verify)) problems.push(`${id}: verify must be one of ${VERIFY_MODES.join("|")}`);
     if (isOutOfBand(r) && r?.disposition !== "deliver") problems.push(`${id}: verify out_of_band applies only to a deliver requirement`);
@@ -261,18 +265,52 @@ export function validateContract(c, issueText, { repro = false } = {}) {
   return { ok: problems.length === 0, problems };
 }
 
+/** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
+const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+
+const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement"];
+const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
+
+/** forge#4574: common builder slips: `type` for `kind`, amend-requirement/limitation as defer, an `R#` in `id` as the requirement. */
+function normalizeAmendment(a) {
+  if (!a || typeof a !== "object" || Array.isArray(a)) return a;
+  const n = { ...a };
+  if (blank(n.kind) && !blank(n.type)) n.kind = n.type;
+  // #4594: amend-requirement with a revised `text` is a real amendment; without one it stays the slip for defer
+  if (Object.hasOwn(AMEND_SLIPS, n.kind) && !(n.kind === "amend-requirement" && !blank(n.text))) n.kind = AMEND_SLIPS[n.kind];
+  if (TRACKED.includes(n.kind) && blank(n.requirement) && /^R\d+$/.test(String(n.id ?? ""))) n.requirement = n.id;
+  return n;
+}
+
+/** The rejection reason, naming the valid kinds or the missing field so the builder's correction round can fix it. */
+function amendmentProblem(a, tag) {
+  const kind = a?.kind;
+  const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
+    : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)" : null;
+  const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
+  return `unknown or incomplete amendment: ${why}: ${tag}`;
+}
+
 /**
  * Apply result.json amendments to the frozen contract. Kinds: add-deliverable {path}, add-requirement {requirement},
  * defer|post-deploy {requirement: id}. Every amendment needs a why. Returns {contract, applied[], toTrack[], problems[]}.
+ * `generatedPaths` (forge#4519, forge.yaml maintenance.generated_paths via scripts/hotspots.sh): an add-deliverable on a
+ * matching path is refused; the repo's generator or bot owns that file.
  */
-export function applyAmendments(frozen, amendments, issueText = null) {
+export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [] } = {}) {
   const c = structuredClone(frozen);
   c.deliverables = c.deliverables ?? [];
   const applied = [], toTrack = [], problems = [];
-  for (const a of Array.isArray(amendments) ? amendments : []) {
-    const tag = JSON.stringify(a ?? null).slice(0, 100);
+  const genRes = (Array.isArray(generatedPaths) ? generatedPaths : []).filter((g) => typeof g === "string" && g).map(shellGlobRe);
+  for (const raw of Array.isArray(amendments) ? amendments : []) {
+    const a = normalizeAmendment(raw);
+    const tag = JSON.stringify(raw ?? null).slice(0, 400);
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
+      if (genRes.some((re) => re.test(cleanPath(a.path)))) {
+        problems.push(`add-deliverable ${a.path}: generated path (forge.yaml maintenance.generated_paths) is owned by the repo's generator/bot; revert the file instead of amending it in`);
+        continue;
+      }
       const have = c.deliverables.find((d) => d.path === a.path);
       // An existing deliverable keeps its id and gains the why, so an amendment naming a package on an already-listed
       // package.json declares the edge (forge#4159); before, it was reported as applied but changed nothing.
@@ -287,11 +325,20 @@ export function applyAmendments(frozen, amendments, issueText = null) {
       if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
       c.requirements.push(r);
       if (TRACKED.includes(r.disposition)) toTrack.push(r);
+    } else if (a.kind === "amend-requirement" && !blank(a.requirement)) {
+      // #4594: the requirement stays deliver and keeps its verbatim quote; the reviewer judges it against amendment.text
+      const r = c.requirements.find((x) => x.id === a.requirement);
+      if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
+      r.amendment = { text: String(a.text).trim(), why: String(a.why).trim() }; r.amended = true;
     } else if (TRACKED.includes(a.kind) && a.requirement) {
       const r = c.requirements.find((x) => x.id === a.requirement);
       if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
-      if (!TRACKED.includes(r.disposition)) { r.disposition = a.kind; r.why = a.why; r.amended = true; toTrack.push(r); }
-    } else { problems.push(`unknown or incomplete amendment: ${tag}`); continue; }
+      if (!TRACKED.includes(r.disposition)) {
+        if (a.kind === "post-deploy" && !CHECK_ID_RE.test(String(a.check ?? r.check ?? ""))) { problems.push(`amendment post-deploy ${a.requirement} needs a check id (check)`); continue; }
+        r.disposition = a.kind; r.why = a.why; r.amended = true; toTrack.push(r);
+        if (a.kind === "post-deploy") r.check = a.check ?? r.check; // #4626
+      }
+    } else { problems.push(amendmentProblem(a, tag)); continue; }
     applied.push({ kind: a.kind, target: a.path ?? a.requirement?.id ?? a.requirement, why: String(a.why).trim() });
   }
   return { contract: c, applied, toTrack, problems };
@@ -343,9 +390,15 @@ export function repoTracks(paths) {
  * `frozen` (#4350): the contract before typed amendments. A failed scope-check validate (isScopeCheck) whose only files
  * outside `frozen` are covered by deliverables an amendment added, with no scope creep left, is superseded by the engine's
  * scope gate: listed in `superseded` [{id, files}], not a failure. Without `frozen`, `superseded` is always [].
+ * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
+ * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null }) {
-  const failures = [], superseded = [];
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null }) {
+  const failures = [], superseded = [], ciCovered = [];
+  // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
+  if (checkIds) for (const r of contract.requirements ?? []) {
+    if (r.disposition === "post-deploy" && !(r.check && checkIds.has(r.check))) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "check_unknown", detail: `${r.id} post-deploy check ${r.check ? `'${r.check}'` : "id"} is neither on the default branch nor added by this PR (.forge/post-deploy-checks.json)` });
+  }
   const outside = (k) => changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(k, f));
   const creep = outside(contract);
   const amendedOnly = frozenAmendedFiles(frozen, contract, outside, creep);
@@ -355,13 +408,13 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     const r = runs.find((x) => x?.id === v.id);
     // #4167: a head the engine verified on CI covers validate ids the builder left to CI (no result, or ci:true without an exit)
     const leftToCi = !r || (r.ci === true && r.exit === undefined);
-    if (ciVerified && leftToCi) continue;
+    if (ciVerified && leftToCi) { ciCovered.push(v.id); continue; }
     if (leftToCi) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_missing", detail: `validate ${v.id} (\`${v.command}\`) has no recorded result` });
     else if (r.exit !== 0) {
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
-      if (miss && ciVerified) continue;
+      if (miss && ciVerified) { ciCovered.push(v.id); continue; }
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)` });
       else if (amendedOnly && isScopeCheck(v.command)) superseded.push({ id: v.id, files: amendedOnly });
       else failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "validate_failed", detail: `validate ${v.id} (\`${v.command}\`) failed (exit ${r.exit})` });
@@ -382,7 +435,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
   if (repro) failures.push(...reproFailures(contract, repro));
-  return { ok: failures.length === 0, failures, superseded };
+  return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
 
 /**
@@ -419,7 +472,8 @@ export function reproFailures(contract, { base, head } = {}) {
 
 const EXEMPT_RE = /hotspot-exempt:\s*\S/i;
 /**
- * forge#4195: a changed file already over `file_lines` (not generated, vendored or glob-excluded) that grew by more
+ * forge#4195: a changed file already over `file_lines` (not generated, vendored or glob-excluded; forge#4519: a
+ * `generated` row, from linguist-generated, maintenance.generated_paths or a generated header, never counts) that grew by more
  * than `growth_lines` since the base, with no `hotspot-exempt: <reason>` in a covering deliverable's change or an
  * add-deliverable amendment's why. `hotspots` is scripts/hotspots.sh --base output; null or disabled checks nothing.
  */
@@ -431,7 +485,7 @@ export function hotspotGrowth({ contract, result, hotspots, changedFiles = [] })
   const exempt = (f) => (contract?.deliverables ?? []).some((d) => pathCovers(d.path, f) && EXEMPT_RE.test(String(d.change ?? "")))
     || amends.some((a) => a?.kind === "add-deliverable" && pathCovers(a.path, f) && EXEMPT_RE.test(String(a.why ?? "")));
   return hotspots.files
-    .filter((h) => h?.over && !h.excluded && Number(h.growth) > limit && changed.has(cleanPath(h.path)) && !exempt(h.path))
+    .filter((h) => h?.over && !h.excluded && !h.generated && Number(h.growth) > limit && changed.has(cleanPath(h.path)) && !exempt(h.path))
     .map((h) => ({ code: C.MAINTENANCE_HOTSPOT_GROWTH, kind: "hotspot_growth",
       detail: `${h.path} grew by ${h.growth} lines (now ${h.lines}, limit +${limit} over ${max}) without hotspot-exempt` }));
 }
@@ -589,14 +643,16 @@ export function decide(raw, ctx) {
   const comp = checkCompleteness(rv, ctx);
   if (!comp.complete) return { state: "review.incomplete", failures: comp.problems.map((d) => ({ code: C.REVIEW_INCOMPLETE, detail: d })), missing: comp.missing, review: rv };
   const f = [];
-  for (const c of rv.issue_coverage) if (c.status !== "covered") f.push({ code: C.CONFORMANCE_OMISSION, detail: `issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
+  const amendedOf = (ids) => (ctx.contract.requirements ?? []).find((r) => r.amendment?.text && (ids ?? []).includes(r.id));
+  const notAccepted = (r) => (r ? `amendment not accepted (${r.id} amended to "${String(r.amendment.text).slice(0, 200)}"): ` : "");
+  for (const c of rv.issue_coverage) if (c.status !== "covered") f.push({ code: C.CONFORMANCE_OMISSION, detail: `${notAccepted(amendedOf(c.contract_ids))}issue requirement ${c.status}: "${c.quote}"${c.note ? ` (${c.note})` : ""}` });
   for (const r of ctx.contract.requirements) {
     const row = rv.requirements.find((x) => x.id === r.id);
     if (r.disposition === "deliver" && isOutOfBand(r)) {
       // #4404: the measured result lives in the named job; only the instrumentation is judged here
       if (row.instrumented !== true) f.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} verified out of band${r.evidence ? ` by ${r.evidence}` : ""}: instrumentation missing${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && row.status !== "implemented") {
-      f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} ${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
+      f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     }
     if (TRACKED.includes(r.disposition) && row.deferral_ok === false) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} ${r.disposition} is not justified${row.note ? `: ${row.note}` : ""}; implement it` });
   }
@@ -699,7 +755,8 @@ export function formatShadowSummary(rows) {
 /** One line per requirement for the follow-up script: a stable key (id + quote) and a why. Tabs and newlines removed. */
 export function followupItems(reqs) {
   const flat = (s) => String(s ?? "").replace(/[\t\r\n`]+/g, " ").replace(/\s+/g, " ").trim();
-  return reqs.map((r) => ({ id: r.id, key: flat(`${r.id}: ${r.quote}`).slice(0, 240).trim(), why: flat(`${r.disposition}: ${r.why ?? ""}`).slice(0, 400).trim() }));
+  const check = (r) => (r.disposition === "post-deploy" && r.check ? `[check:${flat(r.check)}] ` : ""); // #4626: the follow-up item names its check
+  return reqs.map((r) => ({ id: r.id, key: flat(`${r.id}: ${r.quote}`).slice(0, 240).trim(), why: flat(`${r.disposition}: ${check(r)}${r.why ?? ""}`).slice(0, 400).trim() }));
 }
 
 /** #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}, matched on trimmed keys (the script trims what it echoes); unmatched items omitted. */

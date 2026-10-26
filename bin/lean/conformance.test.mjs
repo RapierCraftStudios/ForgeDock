@@ -60,9 +60,30 @@ describe("amendments", () => {
   });
 });
 
+describe("#4574 amendment slips", () => {
+  it("type for kind, amend-requirement and limitation apply as defer; an R# id fills requirement", () => {
+    const a = applyAmendments(C, [{ kind: "amend-requirement", id: "R2", why: "stored hashed" }, { id: "A1", requirement: "R1", type: "limitation", why: "plugin limit" }]);
+    assert.deepEqual(a.problems, []);
+    assert.deepEqual(a.toTrack.map((r) => r.id).sort(), ["R1", "R2"]);
+    assert.ok(a.contract.requirements.every((r) => r.disposition === "defer"));
+  });
+  it("an unknown kind names the valid kinds and shows the full amendment", () => {
+    const why = "x".repeat(300);
+    const a = applyAmendments(C, [{ kind: "rewrite", why }]);
+    assert.match(a.problems[0], /unknown kind 'rewrite'; valid kinds are add-deliverable, add-requirement, defer, post-deploy/);
+    assert.ok(a.problems[0].includes(why));
+  });
+  it("an Object.prototype key as kind is an unknown kind, not a slip", () => {
+    assert.match(applyAmendments(C, [{ kind: "constructor", why: "w" }]).problems[0], /unknown kind 'constructor'; valid kinds are add-deliverable/);
+  });
+  it("an incomplete known kind names the missing field", () => {
+    assert.match(applyAmendments(C, [{ kind: "defer", why: "w" }]).problems[0], /'defer' needs requirement/);
+  });
+});
+
 describe("precheck (deterministic, no reviewer)", () => {
   const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
-  it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [] }));
+  it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [], ciCovered: [] }));
   it("unauthorized file -> scope_creep; tests and ignored paths are always allowed", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: res, changedFiles: [...files, "src/billing.js", ".forge-lean/x", "tests/test_x.py", "pkg/foo_test.go"], ignore: [".forge-lean/"] })), ["conformance.scope_creep"]);
     for (const t of ["test/a.js", "src/a.test.ts", "tests/test_a.py", "a_test.go", "spec/a.spec.js"]) assert.ok(isTestPath(t), t);
@@ -84,6 +105,15 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 1, output: "AssertionError: 1 !== 2" } } })), ["conformance.unimplemented"]);
     const local = precheck({ contract: C, result: failed, changedFiles: files, repoHas: repoTracks(["src/leak/__init__.py"]), validateRuns: { V1: { rc: 1, output: "ModuleNotFoundError: No module named 'leak.core'" } } });
     assert.deepEqual(codes(local), ["conformance.unimplemented"], "a repo module the change did not create is a code defect");
+  });
+  it("#4527 a CI-verified head lists the validate ids it accepted without a local result; a ran-and-failed validate still fails", () => {
+    const C2 = { ...C, validate: [{ id: "V1", command: "node --test a.test.mjs" }, { id: "V2", command: "tsc" }, { id: "V3", command: "lint" }] };
+    const pc = precheck({ contract: C2, result: { ...res, validation: [{ id: "V2", ci: true }, { id: "V3", exit: 0 }] }, changedFiles: files, ciVerified: true });
+    assert.deepEqual(codes(pc), []); assert.deepEqual(pc.ciCovered, ["V1", "V2"]);
+    const local = precheck({ contract: C2, result: { ...res, validation: [{ id: "V2", ci: true }, { id: "V3", exit: 0 }] }, changedFiles: files });
+    assert.deepEqual(local.failures.map((f) => f.kind), ["validate_missing", "validate_missing"]); assert.deepEqual(local.ciCovered, []);
+    const failed = precheck({ contract: C2, result: { ...res, validation: [{ id: "V1", exit: 1 }, { id: "V2", ci: true }, { id: "V3", exit: 0 }] }, changedFiles: files, ciVerified: true });
+    assert.deepEqual(failed.failures.map((f) => f.kind), ["validate_failed"]); assert.deepEqual(failed.ciCovered, ["V2"]);
   });
   it("#4323 missingTool: commands, python and node modules; paths, relative and repo-tracked names are not the environment", () => {
     assert.deepEqual(missingTool({ rc: 127, output: "sh: 1: jq: not found" }), { tool: "jq", kind: "command" });
@@ -362,6 +392,24 @@ describe("hotspot growth precheck (forge#4195)", () => {
     assert.match(pc.failures[0].detail, /^src\/scrape\.js grew by 200 lines \(now 2600, limit \+150 over 2000\) without hotspot-exempt$/);
   });
 
+  it("#4519 generated paths: applyAmendments refuses add-deliverable on maintenance.generated_paths, hotspotGrowth skips generated rows", () => {
+    const gen = ["web/public/openapi*.json", "web/public/openapi-versions/*"];
+    const amends = [{ kind: "add-deliverable", path: "web/public/openapi-versions/3.29.2.json", why: "sync the spec archive" },
+      { kind: "add-deliverable", path: "./web/public/openapi.json", why: "sync the spec" }, { kind: "add-deliverable", path: "src/shared.js", why: "helper" }];
+    const a = applyAmendments(C, amends, null, { generatedPaths: gen });
+    assert.deepEqual(a.applied.map((x) => x.target), ["src/shared.js"]);
+    assert.equal(a.problems.length, 2);
+    assert.match(a.problems[0], /^add-deliverable web\/public\/openapi-versions\/3\.29\.2\.json: generated path \(forge\.yaml maintenance\.generated_paths\)/);
+    assert.ok(!a.contract.deliverables.some((d) => d.path.includes("openapi")), "a refused path never becomes a deliverable");
+    assert.equal(applyAmendments(C, amends).applied.length, 3, "without generatedPaths every add-deliverable applies as before");
+    assert.equal(applyAmendments(C, amends, null, { generatedPaths: ["web/public/openapi.json"] }).applied.length, 2, "a literal glob matches only that path");
+    // linguist-generated / generated_paths / header rows (hotspots.sh `generated`) never trigger hotspot_growth
+    const big = H({ path: "src/scrape.js", lines: 83974, growth: 83974 });
+    assert.equal(run(hs([big])).ok, false);
+    assert.equal(run(hs([{ ...big, generated: true }])).ok, true);
+    assert.equal(run(hs([{ ...big, generated: true, excluded: true }])).ok, true);
+  });
+
   it("within the limit, under the threshold, excluded, unchanged, disabled or no facts: no failure", () => {
     for (const h of [hs([H({ growth: 150 })]), hs([H({ over: false, lines: 1900 })]), hs([H({ excluded: true })]), hs([H({ path: "src/other.js" })]),
       hs([H()], { enabled: false }), hs([H({ growth: null })]), null, undefined, {}]) assert.equal(run(h).ok, true, JSON.stringify(h));
@@ -398,7 +446,7 @@ describe("repro_test on bug lanes (#4271)", () => {
   });
   it("red on base and green on head passes; anything else fails the precheck as conformance.unimplemented", () => {
     const k = { ...C, repro_test: RT };
-    assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [], superseded: [] });
+    assert.deepEqual(precheck({ contract: k, result: res, changedFiles: files, repro: { base: "FAILED", head: "RAN" } }), { ok: true, failures: [], superseded: [], ciCovered: [] });
     for (const repro of [{ base: "RAN", head: "RAN" }, { base: "SKIPPED", head: "FAILED" }, { base: "UNRUNNABLE", head: "RAN" }, { base: "SKIPPED", head: "RAN_NOTHING" }]) {
       const pc = precheck({ contract: k, result: res, changedFiles: files, repro });
       assert.deepEqual(pc.failures.map((f) => [f.code, f.kind]), [["conformance.unimplemented", "repro_red_green"]], JSON.stringify(repro));
@@ -595,5 +643,56 @@ describe("#4404 verified out of band: a requirement measured outside the lane is
     assert.deepEqual(sk.requirements.find((r) => r.id === "R3"), { id: "R3", status: "", evidence: "", validated_by: "", verify: "out_of_band", job: "lighthouse-nightly", instrumented: null, note: "" });
     assert.equal("instrumented" in sk.requirements[0], false);
     assert.deepEqual(outOfBandRequirements(tagged), [{ id: "R3", quote: LH, job: "lighthouse-nightly" }]);
+  });
+});
+
+describe("#4594 amend-requirement", () => {
+  const am = { kind: "amend-requirement", requirement: "R1", text: "regenerate and reveal the feed URL once", why: "token stored hash-only" };
+  it("with text it keeps deliver, tracks nothing and records the amendment", () => {
+    const a = applyAmendments(C, [am]);
+    assert.deepEqual(a.problems, []); assert.deepEqual(a.toTrack, []);
+    const r = a.contract.requirements.find((x) => x.id === "R1");
+    assert.equal(r.disposition, "deliver"); assert.equal(r.amendment.text, am.text); assert.equal(r.amendment.why, am.why); assert.equal(r.quote, C.requirements[0].quote);
+  });
+  it("an unknown requirement is a problem; the frozen contract is untouched", () => {
+    assert.match(applyAmendments(C, [{ ...am, requirement: "R9" }]).problems[0], /unknown requirement R9/);
+    assert.equal(C.requirements[0].amendment, undefined);
+  });
+  it("decide: an amended requirement the reviewer rejects fails as 'amendment not accepted'; accepted conforms", () => {
+    const k = { ...ctx, contract: applyAmendments(C, [am]).contract };
+    assert.equal(decide(good, k).state, "conforms");
+    const d = decide({ ...row("R1", { status: "partial", note: "amendment: still never shows the URL" }), issue_coverage: good.issue_coverage.map((c) => (c.quote === Q1 ? { ...c, contract_ids: ["R1"], status: "narrowed" } : c)) }, k);
+    assert.equal(d.state, "nonconforming");
+    assert.ok(d.failures.length >= 2 && d.failures.every((f) => /amendment not accepted \(.*amended to "regenerate/.test(f.detail)));
+  });
+  it("explainFailures shows the amended text", () => {
+    const c = applyAmendments(C, [am]).contract;
+    assert.match(explainFailures([{ code: "x", detail: "R1 partial" }], c)[0].detail, /amended to "regenerate and reveal/);
+  });
+});
+
+describe("post-deploy check ids (#4626)", () => {
+  const pd = (extra = {}) => ({ ...C, requirements: [{ id: "R1", quote: Q1, disposition: "post-deploy", why: "needs prod", ...extra }, C.requirements[1]] });
+  it("validateContract: a post-deploy requirement needs a well-formed check id", () => {
+    assert.ok(validateContract(pd(), ISSUE).problems.some((p) => /post-deploy needs a check id/.test(p)));
+    assert.ok(validateContract(pd({ check: "Bad Id" }), ISSUE).problems.some((p) => /post-deploy needs a check id/.test(p)));
+    assert.ok(!validateContract(pd({ check: "login-smoke" }), ISSUE).problems.some((p) => /check id/.test(p)));
+  });
+  it("applyAmendments: a post-deploy amendment needs a check id", () => {
+    const bad = applyAmendments(C, [{ kind: "post-deploy", requirement: "R1", why: "w" }], ISSUE);
+    assert.ok(bad.problems.some((p) => /needs a check id/.test(p)));
+    const ok = applyAmendments(C, [{ kind: "post-deploy", requirement: "R1", why: "w", check: "login-smoke" }], ISSUE);
+    assert.equal(ok.contract.requirements[0].check, "login-smoke");
+  });
+  it("precheck: a check id on neither branch is unimplemented; null checkIds skips the rule", () => {
+    const res = { requirements: [{ id: "R1", status: "post-deploy" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    const c = pd({ check: "login-smoke" });
+    assert.ok(precheck({ contract: c, result: res, changedFiles: files, checkIds: new Set() }).failures.some((f) => f.kind === "check_unknown"));
+    assert.ok(!precheck({ contract: c, result: res, changedFiles: files, checkIds: new Set(["login-smoke"]) }).failures.some((f) => f.kind === "check_unknown"));
+    assert.ok(!precheck({ contract: c, result: res, changedFiles: files }).failures.some((f) => f.kind === "check_unknown"));
+  });
+  it("followupItems names the check in a post-deploy item", () => {
+    const [i] = followupItems([{ id: "R1", quote: Q1, disposition: "post-deploy", why: "w", check: "login-smoke" }]);
+    assert.match(i.why, /^post-deploy: \[check:login-smoke\] w$/);
   });
 });

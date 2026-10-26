@@ -11,7 +11,9 @@
  *   <repoKey>/<eco>-<key>.tmp-<pid>   snapshot being published (atomic rename into place)
  *   stores/{pnpm-store,npm-cache,uv-cache,poetry-cache,pip-cache}   the package managers' own shared stores
  * The repo's own package manager does every install (frozen lockfile). Every effect is injected; nothing here throws:
- * a missing tool, another filesystem (EXDEV) or a failed install leaves the lane as it was before.
+ * a missing tool, another filesystem (EXDEV) or a failed install leaves the lane as it was before. A snapshot that fails
+ * to link or repair falls back to a fresh install in the lane (status materialize-fallback, #4522); failed only when that
+ * install fails too.
  */
 import * as nodeFs from "node:fs";
 import { createHash } from "node:crypto";
@@ -28,7 +30,17 @@ const TMP_RE = /^(pnpm|npm|yarn|uv|poetry)-[0-9a-f]{16}\.tmp-(\d+)$/;
 const LOCK_RE = /^(pnpm|npm|yarn|uv|poetry)-[0-9a-f]{16}\.lock$/;
 
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e?.code === "EPERM"; } };
-const msg = (e) => String(e?.stderr || e?.message || e).trim().split("\n").slice(-3).join(" ").slice(0, 300);
+/**
+ * Error text for a reason: pnpm prints its ERR_PNPM_* errors on stdout (#4522), so the first such line from either
+ * stream leads, then the last lines of stderr and stdout; the message only when both streams are empty.
+ */
+const msg = (e) => {
+  const lines = (s) => String(s ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const err = lines(e?.stderr), out = lines(e?.stdout);
+  const pm = [...err, ...out].find((l) => /\bERR_PNPM_[A-Z0-9_]+/.test(l));
+  const parts = [pm, ...err.slice(-3), ...out.slice(-3)].filter((l, i, a) => l && a.indexOf(l) === i);
+  return (parts.length ? parts.join(" ") : String(e?.message || e).trim().split("\n").slice(-3).join(" ")).slice(0, 500);
+};
 
 /** Lockfile -> ecosystem, in priority order: at most one JS and one Python ecosystem per repo. */
 function detect(fs, wt) {
@@ -215,7 +227,8 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
         return done("hit", { key });
       } catch (e) {
         rmTrees(wt, created);
-        return done(e?.code === "EXDEV" ? "skipped" : "failed", { key, reason: e?.code === "EXDEV" ? "cache is on another filesystem than the worktree (EXDEV)" : `materialize failed: ${msg(e)}` });
+        if (e?.code === "EXDEV") return done("skipped", { key, reason: "cache is on another filesystem than the worktree (EXDEV)" });
+        return { fallback: `materialize failed: ${msg(e)}` }; // installed by the caller, outside the key lock
       }
     };
     const install = async () => {
@@ -235,6 +248,13 @@ export function makeDepCache({ root = depcacheRoot(), exec, fs = nodeFs, now = (
       const why = publish(wt, d, key, ins.trees, snap);
       return done("miss-installed", { key, published: !why, reason: why });
     });
+    if (r.locked && r.value?.fallback) {
+      // #4522: a broken snapshot must not leave the lane without dependencies. Install outside the lock so other lanes on
+      // this key are not serialised behind it; never publish (the snapshot exists and is never replaced).
+      const ins = await install();
+      if (ins.failed) return { ...ins.failed, reason: `${r.value.fallback}; ${ins.failed.reason}` };
+      return done("materialize-fallback", { key, published: false, reason: r.value.fallback });
+    }
     if (r.locked) return r.value ?? done("failed", { key, reason: "snapshot manifest unreadable" });
     // The lock stayed busy past the wait: install in this lane without touching the cache.
     const ins = await install();

@@ -85,6 +85,9 @@ export function parseArgs(argv) {
   return o;
 }
 
+/** Largest diff slice substituted into a brief; a larger one is referenced by its file (#4573). */
+const INLINE_SLICE_MAX = 16000;
+
 /** Replace every `[KEY]` in one pass: a substituted value is never rescanned, so diff text cannot inject placeholders. */
 export function renderBrief(template, values) {
   return template.replace(/\[([A-Z][A-Z0-9_]*)\]/g, (m, k) => (Object.hasOwn(values, k) && values[k] != null ? String(values[k]) : m));
@@ -273,6 +276,8 @@ async function main(argv, io) {
   const agents = ctx.roster?.agents?.length ? ctx.roster.agents : ["security"];
   const launchedFile = join(sd, `${pr}_launched_review_agents`);
   io.writeFile(launchedFile, "");
+  // The head this list describes: review-prepare trusts the list as --delta proof only for this head.
+  io.writeFile(`${launchedFile}.head`, `${head}\n`);
   const briefDir = join(sd, `review-staging-${pr}`);
   io.mkdir(briefDir);
   const briefs = [];
@@ -282,6 +287,8 @@ async function main(argv, io) {
     const slice = ctx.slices?.[domain];
     let diff = "";
     try { diff = slice?.diff_file ? io.readFile(slice.diff_file) : ""; } catch { diff = ""; }
+    // #4573: the persona templates repeat [DOMAIN_DIFF_SLICE] many times, so only a small slice is inlined; a large one is a pointer to the on-disk slice file.
+    if (diff.length > INLINE_SLICE_MAX) diff = `(diff slice too large to inline: ${diff.length} chars. Read the file ${slice.diff_file} instead, e.g. grep -n or sed -n 'X,Yp' on it, never cat it whole. Files listed as OMITTED at its top are read from the head checkout.)`;
     const values = {
       PR_NUMBER: pr, REVIEW_SHA: head, REVIEW_SHA_SHORT: sha7, AGENT_DOMAIN: domain, GH_REPO: c.ghRepo,
       TITLE: ctx.pr?.title ?? "", FILE_LIST: (slice?.paths ?? ctx.full_files ?? []).join(" "), SERVICES: (ctx.classification?.services ?? []).join(" "),
@@ -405,7 +412,11 @@ async function finalize(a, io) {
   if (!/^[A-Za-z0-9._/-]+$/.test(codeBranch)) codeBranch = c.stagingBranch;
 
   const findings = readJson(io, join(outDir, "findings.json"))?.findings ?? [];
-  const confirmed = (sev) => findings.filter((f) => upper(f.confidence) === "CONFIRMED" && upper(f.severity) === sev).length;
+  // A finding whose own filed issue is already closed (file-prepare: skip-resolved, delta pass) is resolved: it never blocks (#4569).
+  const resolvedBy = new Map(worklist.items.filter((i) => i.action === "skip-resolved").map((i) => [i.id, i.dedup_of]));
+  const resolved = findings.filter((f) => resolvedBy.has(f.id) && upper(f.confidence) === "CONFIRMED" && ["CRITICAL", "HIGH"].includes(upper(f.severity)))
+    .map((f) => ({ id: f.id, severity: upper(f.severity), title: f.title ?? "", issue: resolvedBy.get(f.id) }));
+  const confirmed = (sev) => findings.filter((f) => !resolvedBy.has(f.id) && upper(f.confidence) === "CONFIRMED" && upper(f.severity) === sev).length;
   const outOfScope = Number(/out_of_scope=(\d+)/.exec(readText(io, join(outDir, "note-disposition.md")) ?? "")?.[1] ?? 0);
   const counts = {
     findings_kept: Number(x.FINDINGS_KEPT ?? 0), findings_dropped_stale: Number(x.FINDINGS_DROPPED_STALE ?? 0), findings_preexisting: Number(x.FINDINGS_PREEXISTING ?? 0),
@@ -415,7 +426,7 @@ async function finalize(a, io) {
   const items = worklist.items;
   const state = {
     pr, head, bundle, codeBranch, scopeMode, delta, testGate: { verdict: tg.verdict, reason: tg.reason }, counts, notes,
-    confirmedCritical: confirmed("CRITICAL"), confirmedHigh: confirmed("HIGH"),
+    confirmedCritical: confirmed("CRITICAL"), confirmedHigh: confirmed("HIGH"), resolved,
     toFile: items.filter((i) => i.action === "file"), skipped: items.filter((i) => String(i.action).startsWith("skip-")),
   };
   io.writeFile(join(sd, `${pr}_finalize.json`), JSON.stringify(state));
@@ -500,6 +511,7 @@ async function summary(a, io) {
     `- findings_kept: ${n.findings_kept ?? 0}; dropped_stale: ${n.findings_dropped_stale ?? 0}; pre-existing: ${n.findings_preexisting ?? 0}; notes_demoted_no_scenario: ${n.notes_demoted_no_scenario ?? 0}`,
     `- findings_filed: ${n.findings_filed ?? 0}${filed.length ? ` (${filed.join(", ")})` : ""}; out_of_scope: ${n.out_of_scope ?? 0}`,
     `- notes_fixed: 0; notes_listed: ${n.notes_listed ?? 0}; notes_dropped: ${n.notes_dropped ?? 0}; notes_capped: ${n.notes_capped ?? 0}; notes_reflag: ${n.notes_reflag ?? 0}`,
+    `- resolved (excluded from the verdict): ${(st.resolved ?? []).length ? st.resolved.map((r) => `${r.severity} ${r.id} ${r.title} (closed #${r.issue})`.replace(/\s+/g, " ")).join("; ") : "(none)"}`,
     `- deduped: ${deduped.length ? deduped.join("; ") : "(none)"}`,
     ...(st.delta?.from ? [`- delta pass: ${String(st.delta.from).slice(0, 7)}..${head.slice(0, 7)} (${(st.delta.files ?? []).length} file(s)); earlier pass at ${st.delta.from} credited (its findings re-read by extract)`] : []),
     "",

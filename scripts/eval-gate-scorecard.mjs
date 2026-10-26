@@ -30,6 +30,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { benchRecord } from "../bin/experiment.mjs";
 
 /** Fields the fresh scorecard must have (matches eval-scorecard-aggregator.mjs's output). */
 export const REQUIRED_FIELDS = [
@@ -137,6 +138,12 @@ export function evaluateGate(
     fresh_run_id: fresh.run_id ?? null,
     baseline_run_id: baseline.run_id ?? null,
     reason,
+    // #4629: the shared result record; the target is null (never a pass) when the rate assertion was skipped
+    record: benchRecord({
+      source: "eval-gate",
+      arms: { baseline: { success_rate_pct: baseline.success_rate_pct }, fresh: { n: freshIssuesRun, success_rate_pct: fresh.success_rate_pct } },
+      targets: { success_rate_within_threshold: { pass: rateAssertionSkipped ? null : pass, value: dropPp, limit: thresholdPp } },
+    }),
   };
 }
 

@@ -8,8 +8,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { sequenceCollisions, journalProblems, snapshotLane, verifyRenumber, numberOnlyChange, renumberLane, resolveSequenceConflicts } from "./sequence.mjs";
-import { sequencePrompt, sequenceSyncNote } from "./prompts.mjs";
+import { sequenceCollisions, journalProblems, snapshotLane, verifyRenumber, numberOnlyChange, headerOnlyChange, renumberLane, resolveSequenceConflicts, generatorProblems } from "./sequence.mjs";
+import { makeSequenceLeaseIo } from "./seqlease.mjs";
+import { sequencePrompt, sequenceSyncNote, migrationGeneratorPrompt, builderImplementPrompt } from "./prompts.mjs";
 
 const sh = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
 const gitIn = (cwd) => async (a) => sh(cwd, ...a);
@@ -301,6 +302,87 @@ describe("deterministic renumber (#4386)", () => {
     // both add the same numbered name in a directory without a series
     await conflict({ "src/a.ts": "1\n" }, { "src/500_error.html": "LANE\n" }, { "src/500_error.html": "BASE\n" }, "src/500_error.html");
   });
+
+  it("#4526: two lanes renumbering at once against the same base get distinct numbers (host reservation), and free them at the end", async () => {
+    const io = makeSequenceLeaseIo({ dir: tmpDir("seqlease-"), pickDir: tmpDir("seqpick-"), pollMs: 20 });
+    const reserveFor = (issue) => (x) => io.reserve({ repo: "o/r", lane: "main", issue, ...x });
+    const lanes = [drizzle(), drizzle()];
+    const rs = await Promise.all(lanes.map((d, i) => renumberLane({ git: gitIn(d), base: "main", cwd: d, uuid: () => `u${i}`, reserve: reserveFor(i + 1) })));
+    for (const r of rs) assert.ok(r.ok, r.unsupported);
+    assert.deepEqual(rs.map((r) => r.moves[0].to).sort(), ["db/0052_nclt.sql", "db/0053_nclt.sql"]);
+    for (const d of lanes) {
+      assert.deepEqual(await journalProblems({ git: gitIn(d), dirs: ["db"] }), []);
+      assert.deepEqual(await sequenceCollisions({ git: gitIn(d), base: "main" }), []);
+    }
+    await io.unreserve({ repo: "o/r", lane: "main", issue: 1 });
+    await io.unreserve({ repo: "o/r", lane: "main", issue: 2 });
+    const d = drizzle();
+    assert.deepEqual((await renumberLane({ git: gitIn(d), base: "main", cwd: d, reserve: reserveFor(3) })).moves, [{ from: "db/0049_nclt.sql", to: "db/0052_nclt.sql" }]);
+    const failing = drizzle(); // a broken reservation keeps the base-derived number (fail-open)
+    assert.deepEqual((await renumberLane({ git: gitIn(failing), base: "main", cwd: failing, reserve: async () => { throw new Error("x"); } })).moves[0].to, "db/0052_nclt.sql");
+  });
+
+  it("#4526: a renumber that changes only the header line's tag passes verifyRenumber; any other change does not", async () => {
+    const lane = (header, body = "INSERT INTO t VALUES (1);\n") => {
+      const d = repo({ "db/0047_a.sql": "a;\n", "db/0048_init.sql": "b;\n" }, { "db/0049_x.sql": "-- Migration 0049_x\nINSERT INTO t VALUES (1);\n" }, { "db/0049_a.sql": "c;\n" });
+      return { d, header, body };
+    };
+    for (const [header, body, ok] of [["-- Migration 0050_brave_hulk", undefined, true], ["-- Migration 0050_brave_hulk (edited)", undefined, false], ["-- Migration 0050_brave_hulk", "INSERT INTO t VALUES (2);\n", false]]) {
+      const { d } = lane(header);
+      const before = await snapshotLane({ git: gitIn(d), base: "main" });
+      sh(d, "merge", "--no-edit", "main");
+      sh(d, "mv", "db/0049_x.sql", "db/0050_brave_hulk.sql");
+      put(d, { "db/0050_brave_hulk.sql": `${header}\n${body ?? "INSERT INTO t VALUES (1);\n"}` });
+      commit(d, "renumber");
+      const v = await verifyRenumber({ git: gitIn(d), base: "main", before });
+      assert.equal(v.ok, ok, `${header} / ${body}: ${v.problems.join("; ")}`);
+      if (!ok) assert.match(v.problems.join("\n"), /db\/0049_x\.sql: content changed/);
+    }
+    assert.equal(headerOnlyChange("# 0029. Title\nbody\n", "# 0030. Title\nbody\n", "docs/adr/0029-title.md", "docs/adr/0030-title.md"), true);
+    assert.equal(headerOnlyChange("# 29. Title\nbody\n", "# 30. Title\nbody\n", "docs/adr/0029-title.md", "docs/adr/0030-title.md"), true);
+    assert.equal(headerOnlyChange("-- 0067_x\nSELECT 1;\n", "-- 0068_x\nSELECT 1;\n", "db/0067_x.sql", "db/0068_x.sql"), true);
+    assert.equal(headerOnlyChange("-- 0067_x\nSELECT 1;\n", "-- 0068_x\nSELECT 2;\n", "db/0067_x.sql", "db/0068_x.sql"), false);
+    assert.equal(headerOnlyChange("-- 0067_x 10067\nSELECT 1;\n", "-- 0068_x 10068\nSELECT 1;\n", "db/0067_x.sql", "db/0068_x.sql"), false, "another number containing the tag is not the tag");
+  });
+
+  it("#4526: a hand-written migration with no schema diff after a schema-changing one gets the generator's --custom snapshot and keeps its SQL byte-for-byte", async () => {
+    const FN_SQL = "-- hand-written: no schema diff\nCREATE FUNCTION f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;\n";
+    const d = repo(
+      { "db/0048_init.sql": "CREATE TABLE t (id int);\n", "db/meta/_journal.json": journal("0048_init"), "db/meta/0048_snapshot.json": snap("s48", "s47") },
+      { "db/0049_s.sql": "CREATE TABLE s (id int);\n", "db/0050_fn.sql": FN_SQL, "db/meta/_journal.json": journal("0048_init", "0049_s", "0050_fn"),
+        "db/meta/0049_snapshot.json": snap("lane49", "s48", { t: 1, s: 1 }), "db/meta/0050_snapshot.json": snap("lane50", "lane49", { t: 1, s: 1 }) },
+      {
+        "db/0049_a.sql": "a;\n", "db/0050_b.sql": "b;\n", "db/0051_c.sql": "CREATE TABLE u (id int);\n",
+        "db/meta/_journal.json": journal("0048_init", "0049_a", "0050_b", "0051_c"),
+        "db/meta/0049_snapshot.json": snap("s49", "s48"), "db/meta/0050_snapshot.json": snap("s50", "s49"), "db/meta/0051_snapshot.json": snap("s51", "s50", { t: 1, u: 1 }),
+      },
+    );
+    const before = await snapshotLane({ git: gitIn(d), base: "main" });
+    const calls = [];
+    /** A drizzle-kit stand-in: the regular run writes only the schema-changing snapshot; --custom adds an empty migration at the journal's next number. */
+    const run = async (cmd, { cwd }) => {
+      calls.push(cmd);
+      if (!cmd.endsWith("--custom")) { writeFileSync(join(cwd, "db/meta/0052_snapshot.json"), snap("gen52", "s51", { t: 1, u: 1, s: 1 })); return; }
+      assert.ok(!existsSync(join(cwd, "db/0053_fn.sql")), "the lane's SQL is withheld while the generator runs");
+      const j = JSON.parse(readFileSync(join(cwd, "db/meta/_journal.json"), "utf8"));
+      const n = String(Number(j.entries.at(-1).tag.slice(0, 4)) + 1).padStart(4, "0");
+      writeFileSync(join(cwd, `db/${n}_wise_owl.sql`), "-- Custom SQL migration file, put your code below! --\n");
+      writeFileSync(join(cwd, `db/meta/${n}_snapshot.json`), snap("custom", "gen52", { t: 1, u: 1, s: 1 }));
+      j.entries.push({ idx: j.entries.length, tag: `${n}_wise_owl`, when: 9 });
+      writeFileSync(join(cwd, "db/meta/_journal.json"), JSON.stringify(j));
+    };
+    const r = await renumberLane({ git: gitIn(d), base: "main", cwd: d, regenerate: "pnpm db:generate", run });
+    assert.ok(r.ok, r.unsupported);
+    assert.deepEqual(r.moves, [{ from: "db/0049_s.sql", to: "db/0052_s.sql" }, { from: "db/0050_fn.sql", to: "db/0053_fn.sql" }]);
+    assert.deepEqual(calls, ["pnpm db:generate", "pnpm db:generate --custom"]);
+    assert.equal(show(d, "db/0053_fn.sql"), FN_SQL, "hand-written SQL byte-identical");
+    assert.ok(!existsSync(join(d, "db/0053_wise_owl.sql")), "the generator's empty migration is dropped");
+    assert.equal(JSON.parse(show(d, "db/meta/0053_snapshot.json")).id, "custom");
+    assert.deepEqual(JSON.parse(show(d, "db/meta/_journal.json")).entries.map((e) => e.tag), ["0048_init", "0049_a", "0050_b", "0051_c", "0052_s", "0053_fn"]);
+    assert.deepEqual(await journalProblems({ git: gitIn(d), dirs: ["db"] }), []);
+    assert.equal(sh(d, "status", "--porcelain").trim(), "");
+    assert.deepEqual(await verifyRenumber({ git: gitIn(d), base: "main", before, moves: r.moves }), { ok: true, problems: [] });
+  });
 });
 
 describe("sequence-numbered documents: two siblings each add an ADR (#4385)", () => {
@@ -369,5 +451,44 @@ describe("sequence-numbered documents: two siblings each add an ADR (#4385)", ()
     const p = sequencePrompt([{ dir: "docs/adr", number: "0004", lane: "docs/adr/0004-b.md", base: ["docs/adr/0004-a.md"], next: "0005" }], "staging");
     assert.match(p, /ADR/);
     assert.match(p, /series index/);
+  });
+});
+
+describe("hand-named migrations (#4591)", () => {
+  const T1 = "20261025020000_sso_domain_verification", T2 = "20261025020100_next";
+  function base() {
+    const d = tmpDir("gen-");
+    sh(d, "init", "-q", "-b", "main");
+    put(d, { "db/meta/_journal.json": journal("20261024000000_init"), "db/meta/20261024000000_snapshot.json": "{}\n", "db/20261024000000_init.sql": "x;\n" });
+    commit(d, "init");
+    sh(d, "checkout", "-qb", "lane");
+    return d;
+  }
+  it("flags a hand-named file with no journal entry and no snapshot, naming both gaps", async () => {
+    const d = base();
+    put(d, { [`db/${T1}.sql`]: "y;\n" });
+    commit(d, "hand");
+    const p = await generatorProblems({ git: gitIn(d), base: "main" });
+    assert.equal(p.length, 1);
+    assert.match(p[0], /20261025020000_sso_domain_verification\.sql: not produced by the migration generator \(no journal entry added for it; no meta\/20261025020000_snapshot\.json added\)/);
+  });
+  it("accepts generator output (journal entry + snapshot, also --custom) and dirs without a journal", async () => {
+    const d = base();
+    put(d, { [`db/${T1}.sql`]: "y;\n", [`db/${T2}.sql`]: "z;\n", "db/meta/_journal.json": journal("20261024000000_init", T1, T2), "db/meta/20261025020000_snapshot.json": "{}\n", "db/meta/20261025020100_snapshot.json": "{}\n", "plain/0001_a.sql": "a;\n" });
+    commit(d, "generated");
+    assert.deepEqual(await generatorProblems({ git: gitIn(d), base: "main" }), []);
+  });
+  it("flags an entry without a snapshot, and accepts an engine renumber (P3)", async () => {
+    const d = base();
+    put(d, { [`db/${T1}.sql`]: "y;\n", "db/meta/_journal.json": journal("20261024000000_init", T1) });
+    commit(d, "journal only");
+    assert.match((await generatorProblems({ git: gitIn(d), base: "main" }))[0], /\(no meta\/20261025020000_snapshot\.json added\)/);
+    const f = fixture();
+    renumber(f);
+    assert.deepEqual(await generatorProblems({ git: gitIn(f), base: "main" }), []);
+  });
+  it("the fix prompt and the builder rule forbid naming migrations by hand", () => {
+    assert.match(migrationGeneratorPrompt(["db/x.sql: not produced by the migration generator (no journal entry added for it)"]), /drizzle-kit generate --custom[\s\S]*Never name or number migration files by hand/);
+    assert.match(builderImplementPrompt("local"), /Never name or number migration files by hand/);
   });
 });

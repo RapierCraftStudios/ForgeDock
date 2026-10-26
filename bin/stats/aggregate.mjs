@@ -86,7 +86,7 @@ function costSection(runs) {
     n, cacheReadMean: mean(cr), cacheReadMedian: percentile(cr, 50), perPhase,
     outputMean: n ? sum(runs.map((r) => sum(Object.values(r.phases).map((p) => p.out ?? 0)))) / n : null,
     perMergedIssue: merged ? sum(cr) / merged : null,
-    usdN: usd.length, usdMean: mean(usd), usdTotal: usd.length ? sum(usd) : null,
+    usdN: usd.length, usdMean: mean(usd), usdMedian: percentile(usd, 50), usdTotal: usd.length ? sum(usd) : null,
   };
 }
 
@@ -294,6 +294,12 @@ export function computeAlerts(lanes = [], opts = {}) {
     if (failed.length / used.length > c.depsFailedPct / 100) {
       const ex = failed.flatMap((l) => l.deps).find((d) => (d.eco ?? "unknown") === eco && d.status === "failed");
       add(`DEPS_PREPARED failed (${eco})`, failed.length, used.length, c.depsFailedPct / 100, ex?.reason ?? null);
+    }
+    // #4522: a broken snapshot falls back to a fresh install; the lane has dependencies, but the cache still needs a look.
+    const fell = used.filter((l) => l.deps.some((d) => (d.eco ?? "unknown") === eco && d.status === "materialize-fallback"));
+    if (fell.length / used.length > c.depsFailedPct / 100) {
+      const ex = fell.flatMap((l) => l.deps).find((d) => (d.eco ?? "unknown") === eco && d.status === "materialize-fallback");
+      add(`DEPS_PREPARED materialize-fallback (${eco})`, fell.length, used.length, c.depsFailedPct / 100, ex?.reason ?? null);
     }
   }
   const deferred = win.filter((l) => l.deferred.length);

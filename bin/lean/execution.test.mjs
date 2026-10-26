@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { parseExecution, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
+import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate, formatTable, formatSandboxSummary } from "./orchestrate.mjs";
@@ -42,6 +42,11 @@ const NO_BUDGET = { batchMinutes: null, batchUsd: null, dayMinutes: null, dayUsd
 const ledgerIn = (root, { pid = process.pid, host = HOST } = {}) => (n) => makeLedger({ root, batch: "bt", lane: `sandbox-${n}`, owner: "orch_test", issue: n, host, pid });
 
 describe("execution config (#4253)", () => {
+  it("pool is a known sandbox provider (#4546)", () => {
+    assert.ok(SANDBOX_PROVIDERS.includes("pool"));
+    assert.equal(parseExecution({ mode: "hybrid", max_remote: "1", provider: "pool" }).provider, "pool");
+  });
+
   it("absent, empty or invalid config is local; max_remote and secrets are validated", () => {
     assert.deepEqual(parseExecution(undefined), { mode: "local", maxRemote: 0, provider: "local", image: null, secrets: [], budget: NO_BUDGET });
     assert.deepEqual(parseExecution({ mode: "cloud", max_remote: "-1" }), { mode: "local", maxRemote: 0, provider: "local", image: null, secrets: [], budget: NO_BUDGET });
@@ -440,6 +445,19 @@ describe("execution budget and sandbox cost (#4255)", () => {
       "sandbox: 1 lane, 12.5 min, $0.25 (token cost $1.50); budget: batch 10 min, day $20; host today 12.5 min, $0.25; cap reached, 1 held");
   });
 
+  it("report: sandbox usage agent becomes per-agent minutes on the row and a by-agent summary suffix (#4549)", async () => {
+    const lines = formatSandboxSummary([
+      { issue: 1, outcome: "merged", cost_usd: 1, sandbox: { minutes: 10, cost_usd: 0, attempts: 1, by_agent: { legion: 10 } } },
+      { issue: 2, outcome: "merged", cost_usd: 1, sandbox: { minutes: 30.5, cost_usd: 0, attempts: 2, by_agent: { legion: 20.5, box2: 10 } } }]);
+    assert.match(lines, /; by agent: legion 30\.5 min, box2 10\.0 min$/);
+    assert.doesNotMatch(formatSandboxSummary([{ issue: 1, outcome: "merged", cost_usd: 1, sandbox: { minutes: 1, cost_usd: 0 } }]), /by agent/);
+    const prov = fakeProvider({ finish: () => ({ terminalReason: "merged", pr: 2 }), usage: async () => ({ minutes: 7, agent: "legion" }) });
+    const lanes = providerLanes({ provider: prov, laneArgs: () => [], ledgerFor: ledgerIn(tmpDir("exec-agent-")), pollMs: 1, now: () => 1000 });
+    const rows = await orchestrate({ issues: [5], parallel: 1, store: null, readBody: async () => "", now: () => 0, remote: { max: 1, isRemote: () => true },
+      runOne: (n, l, ctx) => lanes.runOne(n, l, ctx) });
+    assert.deepEqual(rows[0].sandbox.by_agent, { legion: 7 });
+  });
+
   it("runBatch: rows, report.json and FORGE:TELEMETRY carry each lane's sandbox usage; the host-day store records it", async () => {
     const work = tmpDir("exec-cli-cost-");
     const ledRoot = join(work, "ledger");
@@ -500,6 +518,28 @@ describe("hybrid placement (#4256)", () => {
     assert.deepEqual(await validationWeight({ cwd: repoWith({ "package.json": JSON.stringify({ scripts: { start: "node ." } }) }), precheckCommands: ["pnpm run test", "echo ok"] }),
       { heavy: true, signals: ["pnpm"] });
     assert.deepEqual(await validationWeight({ cwd: repoWith({}), precheckCommands: ["echo ok", "git diff --check"] }), { heavy: false, signals: [] });
+  });
+
+  it("validationWeight sees monorepo subdirectory markers (#4523)", async () => {
+    const repo = (files) => { const d = tmpDir("vw-mono-"); for (const [f, t] of Object.entries(files)) { mkdirSync(join(d, f, ".."), { recursive: true }); writeFileSync(join(d, f), t); } return d; };
+    const mono = repo({ "package.json": "{}", "services/x/pyproject.toml": "[project]", "web/tsconfig.json": "{}" });
+    assert.deepEqual(await validationWeight({ cwd: mono }), { heavy: true, signals: ["python", "tsc"] });
+    assert.equal((await validationWeight({ cwd: repo({ "web/package.json": JSON.stringify({ scripts: { lint: "eslint ." } }) }) })).heavy, true);
+    assert.deepEqual(await validationWeight({ cwd: repo({ "node_modules/a/tsconfig.json": "{}", ".git/x/go.mod": "m", "a/b/c/Cargo.toml": "x" }) }), { heavy: false, signals: [] });
+  });
+
+  it("execution.heavy overrides placement only (#4523)", () => {
+    const hy = (heavy) => parseExecution({ mode: "hybrid", max_remote: "2", ...(heavy === undefined ? {} : { heavy }) });
+    assert.equal(hy().heavy, undefined);
+    assert.equal(hy("TRUE").heavy, true);
+    assert.equal(hy("false").heavy, false);
+    assert.equal(hy("maybe").heavy, undefined);
+    const LIGHT = { heavy: false, signals: [] }, HEAVY = { heavy: true, signals: ["tsc"] };
+    assert.deepEqual(placeLane({ exec: hy("true"), weight: LIGHT, headroom: { ok: true } }), { where: "remote", reason: "execution.heavy: true" });
+    assert.deepEqual(placeLane({ exec: hy("false"), weight: HEAVY, headroom: { ok: true } }), { where: "local", reason: "light lane, host has headroom" });
+    assert.equal(placeLane({ exec: hy("false"), weight: HEAVY, headroom: { ok: false, detail: "mem" } }).where, "remote");
+    assert.equal(placeLane({ exec: hy("true"), verifyMode: "ci", weight: LIGHT }).where, "local");
+    assert.equal(placeLane({ exec: parseExecution({ mode: "hybrid", max_remote: "0", heavy: "true" }), weight: LIGHT }).where, "local");
   });
 
   it("hostHeadroom: memory below the admission floor plus one heavy step, or a configured load ceiling", () => {
@@ -579,5 +619,65 @@ describe("hybrid placement (#4256)", () => {
     assert.deepEqual(prov.calls.filter((c) => c[0] === "start").map((c) => c[1]), [1]);
     assert.equal(res.rows[1].detail, "--placement|local|--placement-reason|docs-only lane");
     assert.deepEqual(res.rows[0].placement, { where: "remote", reason: "heavy validation: tsc" });
+  });
+});
+
+describe("#4547: fallback_local and agent liveness", () => {
+  it("parseExecution: fallback_local is opt-in", () => {
+    assert.equal(parseExecution({ mode: "remote", max_remote: "2" }).fallbackLocal, undefined);
+    assert.equal(parseExecution({ mode: "remote", max_remote: "2", fallback_local: "true" }).fallbackLocal, true);
+    assert.equal(parseExecution({ mode: "remote", fallback_local: "yes" }).fallbackLocal, undefined);
+  });
+  it("transport capacity carries free and liveness; none valid is unknown", async () => {
+    const { httpTransport } = await import("./sandbox-remote.mjs");
+    const cap = async (data, ok = true) => httpTransport({ endpoint: "http://pool.test", token: "t", fetchFn: async () => ({ ok, status: ok ? 200 : 500, headers: new Headers(), text: async () => JSON.stringify(data) }) }).capacity();
+    assert.deepEqual(await cap({ online: 0, total: 2, agents: [] }), { online: 0, total: 2 });
+    assert.deepEqual(await cap({ free: 3 }), { free: 3 });
+    assert.equal(await cap({ online: -1 }), null);
+    assert.equal(await cap({ online: 1 }, false), null);
+  });
+});
+
+describe("host capabilities in placement (#4542)", () => {
+  it("placeLane: a need the provider does not relay is local in remote and hybrid mode, with the reason", () => {
+    assert.deepEqual(placeLane({ exec: { mode: "remote" }, needs: ["sops"] }), { where: "local", reason: "host capability: sops" });
+    assert.deepEqual(placeLane({ exec: { mode: "hybrid", maxRemote: 2, heavy: true }, needs: ["prod_monitor", "sops"] }), { where: "local", reason: "host capability: prod_monitor, sops" });
+    assert.equal(placeLane({ exec: { mode: "remote", maxRemote: 2 }, needs: ["sops"], relays: ["sops"] }).where, "remote");
+  });
+
+  it("no needs: placement is unchanged", () => {
+    assert.deepEqual(placeLane({ exec: { mode: "remote", maxRemote: 2 }, needs: [] }), { where: "remote", reason: "mode remote" });
+    assert.deepEqual(placeLane({ exec: { mode: "remote", maxRemote: 2 } }), { where: "remote", reason: "mode remote" });
+    assert.equal(placeLane({ exec: { mode: "hybrid", maxRemote: 2, heavy: true } }).where, "remote");
+  });
+
+  it("detectNeeds: built-in signals, declared names and declared patterns, zero LLM", () => {
+    assert.deepEqual(detectNeeds("Edit `.secrets/prod.enc.yaml` and run ssh ovh-monitor; see credentials.yaml"), ["ops_credentials", "prod_monitor", "sops"]);
+    assert.deepEqual(detectNeeds("plain change to src/a.js"), []);
+    const exec = parseExecution({ mode: "remote", max_remote: "2", host_capabilities: "vault, Bad Name", host_capability_patterns: "vault:vault\\s+kv, x:(" });
+    assert.deepEqual(exec.hostCapabilities, ["vault"]);
+    assert.deepEqual(exec.hostCapabilityPatterns, [{ name: "vault", pattern: "vault\\s+kv" }]);
+    assert.deepEqual(detectNeeds("run vault kv get", exec), ["vault"]);
+    assert.deepEqual(detectNeeds("needs the Vault", exec), ["vault"]);
+  });
+
+  it("hostCapabilityBlock: only declared capabilities count; a mixed or unknown need stays a human block", () => {
+    const caps = { hostCapabilities: ["sops"] };
+    assert.deepEqual(hostCapabilityBlock("this lane has no sops key", caps), ["sops"]);
+    assert.deepEqual(hostCapabilityBlock("this lane has no sops key", null), []);
+    assert.deepEqual(hostCapabilityBlock("no sops key and no ssh ovh-monitor", caps), []);
+    assert.deepEqual(hostCapabilityBlock("owner must create an account", caps), []);
+  });
+
+  it("orchestrate: a remote lane that ends env.capability_remote is relaunched locally once", async () => {
+    const calls = [];
+    const rows = await orchestrate({ issues: [5], parallel: 2, recovery: { maxAttempts: 1 }, readBody: async () => "",
+      remote: { max: 2, isRemote: () => true, place: () => ({ where: "remote", reason: "mode remote" }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 },
+      runOne: async (n, _l, ctx = {}) => {
+        calls.push({ remote: !!ctx.remote, placement: ctx.placement?.where, recover: ctx.recover?.code ?? null });
+        return ctx.recover ? { terminalReason: "merged", pr: 9 } : { terminalReason: "needs-human", code: "env.capability_remote", detail: "no sops" };
+      } });
+    assert.deepEqual(calls, [{ remote: true, placement: "remote", recover: null }, { remote: false, placement: "local", recover: "env.capability_remote" }]);
+    assert.equal(rows.find((r) => r.issue === 5).outcome, "merged");
   });
 });

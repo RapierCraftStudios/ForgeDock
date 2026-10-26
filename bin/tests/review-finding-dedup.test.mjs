@@ -16,7 +16,7 @@ const spec = readFileSync(join(root, "commands/review-pr.md"), "utf8");
 const finalize = readFileSync(join(root, "scripts/review-finalize.sh"), "utf8");
 
 test("title dedup excludes the PR's own issue", () => {
-  assert.match(finalize, /bash "\$DEDUP_SCRIPT" "\$ISSUE_TITLE" "-R \$REPO" \$\{MERGE_ISSUE:\+--exclude "\$MERGE_ISSUE"\}/);
+  assert.match(finalize, /bash "\$DEDUP_SCRIPT" "fix: \$\{F_TITLE\}" "-R \$REPO" \$\{MERGE_ISSUE:\+--exclude "\$MERGE_ISSUE"\}/);
 });
 
 test("line-range dedup skips the PR's own issue", () => {

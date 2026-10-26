@@ -13,6 +13,7 @@ import {
   renameSync,
   unlinkSync,
 } from "fs";
+import { gitignoreAdditions } from "./lean/toolstate.mjs";
 import { execSync, execFileSync, spawnSync } from "child_process";
 import { homedir } from "os";
 import https from "https";
@@ -1025,6 +1026,20 @@ async function statusScreen(c) {
  *                            Independent of FORGEDOCK_BACKEND, which controls
  *                            the separate `forgedock run` engine backend.
  */
+/** #4590: append the tool-state deny-list (.forge-lean/, tool caches) to the repo's .gitignore; append-only, idempotent. */
+function ensureToolStateIgnored(c) {
+  try {
+    const file = join(c.cwd, ".gitignore");
+    const text = existsSync(file) ? readFileSync(file, "utf-8") : "";
+    let next = false;
+    try { next = Boolean(JSON.parse(readFileSync(join(c.cwd, "package.json"), "utf-8"))?.dependencies?.next); } catch { /* no package.json */ }
+    const add = gitignoreAdditions(text, { next });
+    if (!add.length) return;
+    writeFileSync(file, `${text}${text && !text.endsWith("\n") ? "\n" : ""}# ForgeDock lane scratch and tool caches\n${add.join("\n")}\n`);
+    c.stdout.write(`  .gitignore: added ${add.join(", ")}\n`);
+  } catch { /* .gitignore is best effort */ }
+}
+
 async function initFlow(c) {
   const outputPath = join(c.cwd, "forge.yaml");
   const hasExisting = existsSync(outputPath);
@@ -1078,6 +1093,7 @@ async function initFlow(c) {
       stagingBranch: draft.branches.staging.value,
     });
     atomicWriteFile(outputPath, content);
+    ensureToolStateIgnored(c);
     celebrate(c, { written: true, todoCount: 0, isMinimal: true });
     await maybeOfferDemo(c);
     return 0;
@@ -1107,12 +1123,14 @@ async function initFlow(c) {
     if (backup) c.stdout.write(`  Backed up: forge.yaml → ${backup.backupName}\n`);
     const lowKeys = manualLowConfidenceKeys(draft, description, v);
     const { todoCount } = writeForgeYaml(v, lowKeys, outputPath);
+    ensureToolStateIgnored(c);
     celebrate(c, { written: true, todoCount });
     await maybeOfferDemo(c);
     return 0;
   }
   const { draft, description } = await setupAfterRead(c, await read(c));
   const reviewed = await review(c, draft, description);
+  if (!reviewed.aborted) ensureToolStateIgnored(c);
   celebrate(c, reviewed);
   if (!reviewed.aborted) await maybeOfferDemo(c);
   return reviewed.aborted ? 1 : 0;
@@ -1878,6 +1896,12 @@ function selfUpdateGlobalInstall(version) {
   }
 }
 
+/** #4545: after an update, push the new code + lane image to pool agents (no-op without a pool router config). */
+async function upgradePoolAgents() {
+  const { upgradeAgentsAfterUpdate } = await import("./pool/version.mjs");
+  await upgradeAgentsAfterUpdate({ warn: (m) => console.log(`  ${YELLOW}${m}${RESET}`) });
+}
+
 async function update() {
   console.log("");
   console.log(`${BOLD}ForgeDock${RESET} — Checking for updates`);
@@ -1994,6 +2018,7 @@ async function update() {
         printGitCloneChangelogSummary(before, after);
       }
       await relinkAndHint();
+      await upgradePoolAgents();
     } catch (err) {
       console.log(
         `  ${YELLOW}Cannot fast-forward — local changes exist. Skipping.${RESET}`,
@@ -2081,6 +2106,7 @@ async function update() {
     }
 
     await relinkAndHint();
+    await upgradePoolAgents();
   }
   console.log("");
 }
@@ -3289,13 +3315,14 @@ function help() {
     ["npx forgedock bootstrap <idea|docs> [--dry-run] [--spike <path>] | --plan <plan.json> [--dry-run]", "Headless /bootstrap: idea to orchestrate-ready backlog (--dry-run previews milestones, titles, DAG and estimated agent cost without GitHub writes); --plan validates and creates (or previews) a plan, and re-running resumes from GitHub"],
     ["npx forgedock run-issue <issue> [--lane <lane>] [--lane-override] [--path core|full] [--retry] [--wait-lease]", "Run the lean core work-on on one issue (default; --path full = legacy multi-phase pipeline; the lane comes from the issue: milestone → milestone/<slug>, else staging; --lane is an assertion, never the default branch) (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
     ["npx forgedock orchestrate <issue...> [--parallel K] [--lane L]", "Run core work-on on several issues with bounded concurrency and Depends-on ordering; each issue on its own lane, cross-lane dependencies reported"],
-    ["npx forgedock orchestrate --resume <id> [N...] | --set-parallel <id> K | --add <id> N... | --cancel <id>", "Reattach to a batch hosted by the schedd daemon (a finished one replays its report, an orphaned one is resumed with live lanes re-adopted), change its concurrency live, add issues to a running (or held) batch under its K and DAG, or stop one batch without stopping schedd (running lanes torn down with their work saved, the rest held for --resume)"],
+    ["npx forgedock orchestrate --resume <id> [N...] | --set-parallel <id> K | --add <id> N... | --cancel <id> | --hold <id> N... | --release <id> N...", "Reattach to a batch hosted by the schedd daemon (a finished one replays its report, an orphaned one is resumed with live lanes re-adopted), change its concurrency live, add issues to a running (or held) batch under its K and DAG, or stop one batch without stopping schedd (running lanes torn down with their work saved, the rest held for --resume), or hold/release single issues of a batch (a held issue is not admitted until released or named by --resume)"],
     ["npx forgedock triage <issue...> [--lane L] [--dry-run]", "Already-fixed pre-filter: close issues a merged PR or green CI already resolved; print the rest"],
     ["npx forgedock probe [issue...] [--dry-run]", "Run declared acceptance probes for closed issues whose fix is on the default branch; a fail reopens the issue"],
     ["npx forgedock check [--base REF] [--json]", "Run the lane's frozen validate commands and change-scoped pre-PR checks locally in this worktree, as the engine will (no GitHub, no Actions)"],
     ["npx forgedock limits show | clear <id>|--all", "Show or clear per-account usage-limit holds shared by orchestrate batches"],
     ["npx forgedock sched show | cap <N>|--clear | weight <owner/repo> <N>|--clear", "Show the host lane registry, set the host-wide lane cap shared by orchestrate batches, or set a repo's share of slots within a priority (default equal)"],
     ["npx forgedock schedd [status]", "Host scheduler daemon hosting every orchestrate batch (auto-spawned by orchestrate; run in the foreground for a systemd-user unit); status shows its pid and batches"],
+    ["npx forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>", "Built-in remote compute pool: run the router (foreground, or install it as a user service), print the one-time install command for a host, list agents, upgrade or remove them"],
     ["npx forgedock gc [--apply] [--older-than 6h] [--docker] [--worktrees] [--branches] [--tmp] [--processes] [--sandboxes]", "Report (dry-run default) and reclaim ForgeDock-owned leftovers: stale lane ledgers, forgedock-labelled containers/volumes, lean-*/agent-* worktrees, abandoned lane branches, ~/.forge/tmp scratch, orphaned lane processes, orphaned lane sandboxes; unowned resources and unpushed work are only reported"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
@@ -3876,7 +3903,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "sched", "schedd", "check", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "sched", "schedd", "pool", "check", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4138,6 +4165,17 @@ switch (command) {
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;
+    }
+    break;
+  }
+  case "pool": {
+    // #4544: the built-in remote compute pool (router, enrollment, status, upgrade, remove)
+    const { poolFromCli } = await import("./engine-cli.mjs");
+    try {
+      await poolFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = String(err.message).startsWith("usage:") ? 2 : 1;
     }
     break;
   }

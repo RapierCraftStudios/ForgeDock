@@ -33,7 +33,8 @@ const OK = ["success", "neutral", "skipped"];
  * maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, duplicateExports, e2e}. Invalid values fall back to the defaults; mode defaults to local (today's
  * behaviour); checkRun (`check_run`, #4270) is true only for the literal `true`; checks (#4387) is the optional allow-list
  * of check names that gate CI verification, or null; e2e is the e2e merge gate (#4403, e2e.mjs parseE2e). #4406: postMerge (`post_merge`) is the command run on
- * the merged tree at base-sync before the push (null: the lane's scoped typecheck); duplicateExports is false only for the literal `false`.
+ * the merged tree at base-sync before the push (null: the lane's scoped typecheck); duplicateExports is false only for the literal `false`. #4585: invariants (`invariants`, a block list read by engine-cli
+ * readVerify) are repo-wide check commands that run in every pre-PR round whichever tests were selected; [] when none.
  */
 export function parseVerify(sec = {}) {
   const s = sec && typeof sec === "object" ? sec : {};
@@ -54,8 +55,12 @@ export function parseVerify(sec = {}) {
   const names = rawChecks.map((x) => String(x ?? "").trim()).filter(Boolean);
   const checks = names.length ? [...new Set(names)] : null;
   const postMerge = str(s.post_merge) || null;
+  // a flow list (`[a, "b c"]`) arrives as one scalar from the one-level reader: strip the brackets and quotes
+  const rawFlaky = Array.isArray(s.flaky) ? s.flaky : str(s.flaky).trim().replace(/^\[(.*)\]$/s, "$1").split(",");
+  const flaky = [...new Set(rawFlaky.map((x) => String(x ?? "").trim().replace(/^(["'])(.*)\1$/s, "$2").trim()).filter(Boolean))];
   const duplicateExports = str(s.duplicate_exports).toLowerCase() !== "false";
-  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, duplicateExports, e2e: parseE2e(s) };
+  const invariants = [...new Set((Array.isArray(s.invariants) ? s.invariants : []).map((x) => String(x ?? "").trim()).filter(Boolean))];
+  return { mode, workflow, pathsInput, skipPaths, maxRounds, precheckTimeoutSeconds, precheckTotalSeconds, checkRun, checks, postMerge, flaky, duplicateExports, invariants, e2e: parseE2e(s) };
 }
 
 const globRe = (g) => new RegExp(`^${g.split("**").map((p) => p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join(".*")}$`);
@@ -90,6 +95,17 @@ export async function collectFailedLogs(io, failedChecks) {
     out.push({ job: c.name, url: c.url ?? null, log: id && !out.some((x) => runIdOf(x.url) === id) ? logs[id] : "" });
   }
   return capLogs(out);
+}
+/**
+ * #4586: split failures [{job, log}] by `verify.flaky` ids: a failure is flaky when its job name equals an id. Flaky
+ * failures are reported only; `own` is what may block or reach the builder. Never by log text: a job whose log names a
+ * flaky test can also hold a real failure, and an Actions run attaches its failed logs to its first failed check (#4614).
+ */
+export function splitFlaky(failures, flaky = []) {
+  const ids = (flaky ?? []).filter(Boolean);
+  const own = [], known = [];
+  for (const f of failures ?? []) (ids.includes(f?.job) ? known : own).push(f);
+  return { own, flaky: known };
 }
 const RANK = { failure: 2, pending: 1, success: 0 };
 /**

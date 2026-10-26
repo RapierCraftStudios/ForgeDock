@@ -37,7 +37,7 @@ With no local state at all, `forgedock stats --repo <r>` reproduces the report f
 ## Efficiency (`--efficiency`, forge#4402)
 
 ```bash
-npx forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--repo <owner/repo>] [--json]
+npx forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
 ```
 
 Per batch (`--batch`, a dir under `~/.forge/batches`, `FORGEDOCK_BATCH_DIR`) and over trailing windows (`--window`,
@@ -77,6 +77,41 @@ The code is in `bin/stats/efficiency.mjs`.
 Limits: logs written before #4362 carry no trigger, so implement attempts beyond the plan and build calls count as
 `unknown`. Logs written before #4407 sum running session totals. Lanes run outside a batch are in no window. `gh` (for
 merged issues only) is the one network call; when it fails, quality and acceptance print `n/a` with the reason.
+
+Every scope also prints, as its last line (forge#4491):
+
+- **Implement wall p50**: the median over merged lanes of the summed `duration_ms` of their implement attempts, in
+  minutes.
+- **Merge rate**: merged ÷ the cohort's issue rows.
+- **Conformance pass**: the share of rows whose lanes logged a `CONFORMANCE` verdict and whose last verdict is
+  `conforms`.
+
+`--repo` matches batch plans case-insensitively, as GitHub slugs are. Run logs are read under the plans' spelling.
+`--offline` skips the GitHub crawl, so issue quality and acceptance print `n/a`. The crawl is two `gh` calls per merged
+issue, which can take minutes over a large window.
+
+### Before/after A/B (`--compare`, forge#4491)
+
+`--compare <date|version>` compares two cohorts of the repo's batches around a deploy. The pivot is a date or ISO time,
+or a release version resolved to its exact tag time (`--release-times`, else the checkout's `v*` tags).
+
+- **post**: batches created from the pivot to now.
+- **pre**: batches created in the same span before the pivot. Both sides are equally long.
+
+It prints for each cohort turns/merge, implement wall p50, implement calls/turn p50, re-reads/merge, merge rate and
+conformance pass, and then the post − pre delta.
+
+`matched` repeats the comparison on full-shape merged lanes only, per size bucket present on both sides. Light lanes
+(#4452) cut turns on their own, so the unmatched delta mixes the lane mix into any prompt or tool change. With `--json`
+the result is under `query.efficiency.compare`. Cohorts are split by batch `plan.created`, as `--window` is; a lane run
+outside a batch is in neither.
+
+## Pool utilisation (`--pool`, forge#4549)
+
+`forgedock stats --pool [--window 7d,30d] [--json]` reads the repo's local batch `report.json` rows and prints, per window,
+remote lane minutes, lanes and share of the pool per agent (`sandbox.by_agent`). Rows without agent data print `n/a`.
+The same per-agent minutes appear in the batch report's `sandbox:` line as `by agent: <name> <min> min, ...`.
+Live capacity is `forgedock pool status`.
 
 ## Explorer A/B (`--explore-ab`, forge#4418)
 
@@ -133,3 +168,34 @@ Comments are read from the repo-wide `issues/comments?since=` endpoint (a few pa
 telemetry comment in the window get their full comment list re-read (6 in parallel, backing off when the API rate limit is
 low). A run with no `--since` and no cache still walks the whole history once. Telemetry comments are edited in place, which
 the comment window catches; if a cached item still looks stale, run with `--refresh`.
+
+## Per-release regression rule (`--by version`, forge#4628)
+
+```bash
+npx forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
+```
+
+Median cost per run, wall p50, first-pass rate and needs-human rate of each release against the previous known one.
+A metric whose own sample is under `--min-n` (default 10) is null, and so is its verdict; verdicts are
+`regressed|improved|flat|null`, never a pass. `--post-metrics <pr>` posts (or updates) a `<!-- FORGE:METRICS v1 -->`
+comment on that release PR with the table and the snapshot as JSON; without it nothing is written to GitHub.
+
+## Live A/B experiments (`--experiment <id>`, forge#4629)
+
+Declare one experiment in forge.yaml (flat keys under `experiment:`):
+
+```yaml
+experiment:
+  id: light-vs-full
+  arms: light,full          # at least two
+  ratio: 1,1                # integer weights, default equal
+  metrics: usd_median,wall_p50_ms,first_pass_rate,needs_human_rate   # default all four
+  targets: light.usd_median<=1.2xfull,light.first_pass_rate>=0.8     # arm.metric<=|>=limit, optionally x<other arm>
+  min_n: 10
+```
+
+The lean lane assigns each issue an arm (sha1 of id and issue number over the ratio, so a re-run keeps its arm) and tags
+`experiment` and `arm` on `phase_attempt` and `run_terminal`. `forgedock stats --experiment <id>` reports the finished
+runs per arm with the metrics of `--by version`; a metric under min n is null and so is any target that needs it, never a
+pass. `targets_met` is true only when every target is met. The report, `scripts/bench-lightlane.mjs aggregate` and
+`scripts/eval-gate-scorecard.mjs` share one record: `{schema: "forge.bench.v1", source, arms, targets}`.

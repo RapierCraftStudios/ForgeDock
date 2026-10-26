@@ -116,6 +116,28 @@ prep "$ROOT"; eq "garbage state normalized" .merge_health.state UNKNOWN
 setup feat/x staging "README.md" "$DIFF_PLAIN"; echo 0 > "$FIX/prior"
 prep "$ROOT"; eq "first-time contributor" .pr.first_time_contributor true
 
+# --- 2b. slices are whole-file blocks, bounded, never the full-diff fallback (#4573) ---
+BIG_LINES=$(awk 'BEGIN { for (i = 0; i < 1500; i++) print "-old line " i " of the huge generated file" }')
+DIFF_BIG="diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
++ci: 1
+diff --git a/services/api/big_scrape.py b/services/api/big_scrape.py
+$BIG_LINES
+diff --git a/services/api/auth.py b/services/api/auth.py
++def f(): jwt = 1"
+setup feat/x staging "services/api/big_scrape.py
+services/api/auth.py
+.github/workflows/ci.yml" "$DIFF_BIG"
+prep "$ROOT"
+SEC_SLICE=$(jqv '.slices.security.diff_file')
+if grep -q '^# OMITTED.*services/api/big_scrape.py' "$SEC_SLICE" && ! grep -q 'huge generated file' "$SEC_SLICE"; then ok; else bad "oversize file must be listed as omitted, not cut into the slice"; fi
+if grep -q '^+def f(): jwt = 1' "$SEC_SLICE"; then ok; else bad "small blocks stay whole next to an omitted one"; fi
+if [ "$(grep -n 'services/api/auth.py b/' "$SEC_SLICE" | head -1 | cut -d: -f1)" -lt "$(grep -n '\.github/workflows/ci.yml b/' "$SEC_SLICE" | head -1 | cut -d: -f1)" ]; then ok; else bad "security slice lists .github blocks last"; fi
+BILL_SLICE=$(jqv '.slices.billing.diff_file')
+if grep -q 'auth.py\|big_scrape' "$BILL_SLICE"; then bad "unmatched domain must not fall back to the full diff"; else ok; fi
+eq "unmatched domain has no paths" '.slices.billing.paths | length' 0
+REVIEW_SLICE_CAP=100 prep "$ROOT"
+if [ "$(wc -c < "$(jqv '.slices.security.diff_file')")" -lt 600 ]; then ok; else bad "total cap bounds the slice"; fi
+
 # --- 3. classification + scores ---
 setup feat/x staging "services/api/auth.py
 services/api/billing.py" "$DIFF_AUTH_BILL"
@@ -252,6 +274,26 @@ prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "degraded mark
 { cmt "$(agent_body "$SHA_A")"; } | comments_of
 prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "partial earlier pass (no post-guard proof) blocks" 3
 eq "partial earlier pass blocker" '.blockers | join(" ") | test("no trusted proof that the earlier panel completed")' true
+# forge#4573: an unfinalized panel is complete when every launched domain delivered findings at <from> and nothing is degraded
+export FORGE_SCRATCHPAD="$WORK/sd"; mkdir -p "$FORGE_SCRATCHPAD"
+printf 'security\n' > "$FORGE_SCRATCHPAD/7_launched_review_agents"
+printf '%s\n' "$SHA_A" > "$FORGE_SCRATCHPAD/7_launched_review_agents.head"
+{ cmt "$(agent_body "$SHA_A")"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "complete but unfinalized panel is accepted (#4573)" 0; eq "unfinalized panel mode" .delta.mode DELTA
+printf '%s\n' "$SHA_B" > "$FORGE_SCRATCHPAD/7_launched_review_agents.head"
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "a launched list written for another head is no proof" 3
+rm -f "$FORGE_SCRATCHPAD/7_launched_review_agents.head"
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "a launched list with no head sidecar is no proof" 3
+printf '%s\n' "$SHA_A" > "$FORGE_SCRATCHPAD/7_launched_review_agents.head"
+printf 'security\nauth\n' > "$FORGE_SCRATCHPAD/7_launched_review_agents"
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "a launched domain with no findings keeps the delta blocked" 3
+printf 'security\n' > "$FORGE_SCRATCHPAD/7_launched_review_agents"
+{ cmt "$(agent_body "$SHA_A")"; cmt "<!-- FORGE:REVIEW_DEGRADED -->"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "degraded unfinalized panel stays blocked" 3
+rm -f "$FORGE_SCRATCHPAD/7_launched_review_agents"
+{ cmt "$(agent_body "$SHA_A")"; } | comments_of
+prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "no launched list: unfinalized panel stays blocked" 3
+unset FORGE_SCRATCHPAD
 { cmt "$(agent_body "$SHA_A")"; cmt "$(staging_summary "$SHA_A")" NONE; } | comments_of
 prep "$WORK/root-nodelta" --no-delta --delta-from "$SHA_A"; rc_is "untrusted staging summary is no proof" 3
 { cmt "$(staging_summary "$SHA_B")"; cmt "$(agent_body "$SHA_A")"; } | comments_of
@@ -434,6 +476,17 @@ if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; th
     eq "timed-out index falls back to grep slices" .index_slices.auth "Code index not available — agent will use grep exploration"
     if grep -q "code index timed out after 1s" "$WORK/stderr"; then ok; else bad "index timeout must be reported on stderr"; fi
 fi
+
+# --- 12. oversized slices JSON (>128 KiB, argv per-argument limit) still assembles ---
+BIG_FILES=$(awk 'BEGIN{for(i=1;i<=1100;i++) printf "services/api/auth/very/long/directory/name/to/pad/the/path/out/for/the/test/module_%05d_handler.py\n", i}')
+BIG_DIFF='diff --git a/services/api/auth/x.py b/services/api/auth/x.py
++jwt = 1'
+setup feat/x staging "$BIG_FILES" "$BIG_DIFF"
+prep "$ROOT"
+rc_is "oversized slices JSON" 0
+eq "oversized slices JSON is over 128 KiB" '.slices | tojson | length > 131072' true
+eq "oversized security slice keeps every path" '.slices.security.paths | length' 1100
+eq "oversized full_files keeps every path" '.full_files | length' 1100
 
 echo "review-prepare tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

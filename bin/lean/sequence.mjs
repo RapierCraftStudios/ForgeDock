@@ -11,6 +11,9 @@
  * #4343: a leading calendar date (YYYY-MM-DD, YYYYMMDD) is not a number, and a directory only counts when it holds a
  * series on the base: a migration journal (`<dir>/meta/_journal.json`, `<dir>/_journal.json`), or >=2 distinct numbers
  * of the lane file's width that fill at least half of their min..max range (sparse issue-numbered docs are no series).
+ * #4526: renumberLane takes its numbers from a host reservation (`reserve`, seqlease.mjs) so concurrent lanes get distinct
+ * ones; verifyRenumber accepts a first-line header that only swaps the file's own tag (`headerOnlyChange`); a hand-written
+ * migration the generator writes nothing for gets the generator's `--custom` snapshot and keeps the lane's SQL.
  */
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -123,6 +126,21 @@ export function numberOnlyChange(was, now, from, to) {
   return new RegExp(`^${parts.map((p, i) => (i % 2 ? alt(p) : esc(p))).join("")}$`).test(String(now));
 }
 
+/**
+ * #4526: everything after the first line is byte-identical, and the first line of `now` is that of `was` with the old
+ * stem (`fromPath` without extension) mapped to the new one, then the old number (padded or bare, not next to another
+ * digit) to the new number: a migration's `-- Migration 0067_x` or an ADR's `# 0029. Title` header following a renumber.
+ */
+export function headerOnlyChange(was, now, fromPath, toPath) {
+  const from = numOf(fromPath), to = numOf(toPath);
+  if (!from || !to) return false;
+  const split = (t) => { const s = String(t), i = s.indexOf("\n"); return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i)]; };
+  const [h1, r1] = split(was), [h2, r2] = split(now);
+  if (r1 !== r2) return false;
+  const mapped = h1.replaceAll(stemOf(fromPath), stemOf(toPath)).replace(new RegExp(`(?<!\\d)0*${Number(from)}(?!\\d)`, "g"), (tok) => (tok.length >= to.length ? to : String(Number(to))));
+  return mapped === h2;
+}
+
 /** Lane-added numbered files with their blobs, recorded before a renumber so verifyRenumber can prove the SQL kept. */
 export const snapshotLane = ({ git, base }) => laneNumbered(git, base).catch(() => []);
 
@@ -173,7 +191,7 @@ export async function verifyRenumber({ git, base, before = [], moves = null }) {
       for (const f of peers) {
         if (kept || f.path === b.path) continue;
         const text = await g(["cat-file", "-p", f.blob]);
-        kept = numberOnlyChange(was, text, numOf(b.path), numOf(f.path)) || (rest(f.path) === rest(b.path) && text === mapped);
+        kept = numberOnlyChange(was, text, numOf(b.path), numOf(f.path)) || (rest(f.path) === rest(b.path) && text === mapped) || headerOnlyChange(was, text, b.path, f.path);
       }
       if (!kept) problems.push(`${b.path}: content changed or file gone after renumbering (keep it byte-identical, rename only)`);
     }
@@ -269,7 +287,8 @@ const writeJson = (p, o) => writeFileSync(p, `${JSON.stringify(o, null, 2)}\n`);
  * where it started. Never throws.
  * @returns {Promise<{ok:true, moves:Array<{from,to}>, commit:string|null}|{unsupported:string}>}
  */
-export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerate = null, run = null, uuid = randomUUID }) {
+export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerate = null, regenerateCustom = null, run = null, uuid = randomUUID, reserve = null }) {
+  const custom = regenerateCustom ?? (regenerate ? `${regenerate} --custom` : null);
   const g = out(git);
   const start = (await g(["rev-parse", "HEAD"])).trim();
   const written = [];
@@ -286,6 +305,16 @@ export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerat
     if (!collisions.length) return { ok: true, moves: [], commit: null };
     const odd = collisions.find((c) => !SUPPORTED_RE.test(c.lane));
     if (odd) return { unsupported: `${odd.lane}: no deterministic renumber for .${basename(odd.lane).split(".").pop()} migrations` };
+    // #4526: numbers above every other live lane's host reservation, not only above the base (fail-open: base-derived).
+    if (reserve) {
+      for (const dir of [...new Set(collisions.map((c) => c.dir))].sort()) {
+        const cs = collisions.filter((c) => c.dir === dir), width = cs[0].next.length;
+        let got = null;
+        try { got = await reserve({ dir, floor: Number(cs[0].next) - 1, count: cs.length }); } catch { /* fail-open */ }
+        const nums = Array.isArray(got?.numbers) ? got.numbers.map(Number) : [];
+        if (nums.length === cs.length && nums.every(Number.isInteger)) cs.forEach((c, i) => { c.next = String(nums[i]).padStart(width, "0"); });
+      }
+    }
     const moves = collisions.map((c) => ({ from: c.lane, to: posix.join(c.dir, c.next + basename(c.lane).slice(c.number.length)), dir: c.dir, oldNum: c.number, newNum: c.next }));
     // Plan the journals and snapshots before touching anything, so an unsupported migration leaves the branch as it was.
     const baseList = lines(await g(["-c", "core.quotepath=off", "ls-tree", "-r", "--name-only", base]));
@@ -296,12 +325,14 @@ export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerat
       if (!jp) continue;
       const meta = dirname(jp), mine = moves.filter((m) => m.dir === dir && /\.sql$/i.test(m.from));
       const snaps = [];
+      let chained = false; // #4526: after a schema-changing move, a data-only one's predecessor is not the base tip
       for (const m of mine) {
         const laneSnap = await json(g, `${lane}:${posix.join(meta, `${m.oldNum}_snapshot.json`)}`);
         if (!laneSnap) continue;
         const laneMeta = lines(await g(["-c", "core.quotepath=off", "ls-tree", "--name-only", lane, `${meta}/`])).filter((p) => SNAPSHOT_RE.test(p) && Number(numOf(p)) < Number(m.oldNum));
         const pred = laneMeta.sort((a, b) => Number(numOf(a)) - Number(numOf(b))).at(-1);
-        const dataOnly = Boolean(pred) && strip(await json(g, `${lane}:${pred}`)) === strip(laneSnap);
+        const dataOnly = !chained && Boolean(pred) && strip(await json(g, `${lane}:${pred}`)) === strip(laneSnap);
+        if (!dataOnly) chained = true;
         if (!dataOnly && !regenerate) return { unsupported: `schema-changing migration ${m.from} needs lean.sequence.regenerate (its snapshot cannot be cloned)` };
         if (!dataOnly) needRegen = true;
         snaps.push({ m, dataOnly });
@@ -339,7 +370,8 @@ export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerat
       const tags = new Set(baseEntries.map((e) => e?.tag));
       let idx = Math.max(-1, ...baseEntries.map((e) => Number(e?.idx)).filter(Number.isFinite));
       const add = (Array.isArray(lj.entries) ? lj.entries : []).filter((e) => !tags.has(e?.tag)).map((e) => ({ ...e, idx: ++idx, tag: stem.get(e.tag) ?? e.tag }));
-      writeJson(join(cwd, p.jp), { ...bj, entries: [...baseEntries, ...add] });
+      p.journal = { ...bj, entries: [...baseEntries, ...add] };
+      writeJson(join(cwd, p.jp), p.journal);
       touched.add(p.jp);
       const baseSnaps = baseList.filter((x) => dirname(x) === p.meta && SNAPSHOT_RE.test(x)).sort((a, b) => Number(numOf(a)) - Number(numOf(b)));
       let tip = baseSnaps.length ? await json(g, `${base}:${baseSnaps.at(-1)}`) : null;
@@ -360,11 +392,27 @@ export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerat
     }
     if (needRegen) {
       try { await (run ?? defaultRun)(regenerate, { cwd }); } catch (e) { return await fail(`lean.sequence.regenerate failed: ${String(e?.stderr || e?.message || e).trim().split("\n")[0]}`); }
+      const exists = (p) => { try { readFileSync(join(cwd, p)); return true; } catch { return false; } };
       for (const p of plans) {
         touched.add(p.meta);
-        for (const { m, dataOnly } of p.snaps) {
+        // #4526: a hand-written migration (no schema diff) gets nothing from the regular run: the generator's --custom
+        // writes an empty migration and its snapshot at that number (its SQL and later ones withheld), then the lane's
+        // SQL and the planned journal come back.
+        for (const { m, dataOnly } of [...p.snaps].sort((a, b) => Number(a.m.newNum) - Number(b.m.newNum))) {
           const want = posix.join(p.meta, `${m.newNum}_snapshot.json`);
-          if (!dataOnly) { try { readFileSync(join(cwd, want)); } catch { return await fail(`lean.sequence.regenerate did not write ${want}`); } }
+          if (dataOnly || exists(want)) continue;
+          if (!custom) return await fail(`lean.sequence.regenerate did not write ${want}`);
+          const held = moves.filter((w) => w.dir === p.dir && /\.sql$/i.test(w.to) && Number(w.newNum) >= Number(m.newNum));
+          const heldTags = new Set(held.map((w) => stemOf(w.to)));
+          for (const w of held) rmSync(join(cwd, w.to), { force: true });
+          writeJson(join(cwd, p.jp), { ...p.journal, entries: p.journal.entries.filter((e) => !heldTags.has(e?.tag)) });
+          try { await (run ?? defaultRun)(custom, { cwd }); } catch (e) { return await fail(`lean.sequence.regenerate --custom failed: ${String(e?.stderr || e?.message || e).trim().split("\n")[0]}`); }
+          for (const f of lines(await g(["-c", "core.quotepath=off", "ls-files", "--others", "--exclude-standard", "--", `${p.dir}/`]))) {
+            if (dirname(f) === p.dir && /\.sql$/i.test(f) && numOf(f) === m.newNum && f !== m.to) rmSync(join(cwd, f), { force: true });
+          }
+          for (const w of held) writeFileSync(join(cwd, w.to), await g(["cat-file", "blob", `${lane}:${w.from}`]));
+          writeJson(join(cwd, p.jp), p.journal);
+          if (!exists(want)) return await fail(`lean.sequence.regenerate did not write ${want}`);
         }
       }
     }
@@ -382,4 +430,30 @@ export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerat
     await git(["commit", "-q", "-m", msg]);
     return { ok: true, moves: moves.map(({ from, to }) => ({ from, to })), commit: (await g(["rev-parse", "HEAD"])).trim() || null };
   } catch (e) { return await fail(`deterministic renumber failed: ${String(e?.message ?? e).split("\n")[0]}`); }
+}
+
+/**
+ * #4591: hand-named migrations. In a drizzle-style dir (`<dir>/meta/_journal.json` at `ref`) a lane-added `<tag>.sql` the
+ * generator wrote always has a journal entry the lane added and a `<dir>/meta/<prefix>_snapshot.json` the lane added
+ * (`generate --custom` too); a file named by hand has neither, and its made-up timestamp collides with a sibling lane's.
+ * No journal dir: []. @returns {Promise<string[]>} one problem per file
+ */
+export async function generatorProblems({ git, base, ref = "HEAD" }) {
+  const g = out(git), problems = [];
+  const added = lines(await g(["-c", "core.quotepath=off", "diff", "--name-only", "--diff-filter=A", `${base}...${ref}`])).filter((f) => !SKIP_RE.test(f));
+  const tagsAt = async (r, jp) => { try { return new Set((JSON.parse(await g(["show", `${r}:${jp}`])).entries ?? []).map((e) => e?.tag)); } catch { return new Set(); } };
+  for (const dir of [...new Set(added.filter((f) => f.endsWith(".sql")).map((f) => dirname(f)))]) {
+    const jp = posix.join(dir, "meta", "_journal.json");
+    if (!(await g(["show", `${ref}:${jp}`])).trim()) continue;
+    const [was, now] = [await tagsAt(base, jp), await tagsAt(ref, jp)];
+    for (const f of added.filter((x) => dirname(x) === dir && x.endsWith(".sql"))) {
+      const tag = basename(f, ".sql"), prefix = /^(\d+)[_-]/.exec(tag)?.[1];
+      if (!prefix) continue;
+      const why = [];
+      if (!now.has(tag) || was.has(tag)) why.push("no journal entry added for it");
+      if (!added.includes(posix.join(dir, "meta", `${prefix}_snapshot.json`))) why.push(`no meta/${prefix}_snapshot.json added`);
+      if (why.length) problems.push(`${f}: not produced by the migration generator (${why.join("; ")})`);
+    }
+  }
+  return problems;
 }

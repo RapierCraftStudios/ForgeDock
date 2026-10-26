@@ -195,5 +195,13 @@ printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER; claim_json OWNER 77
 bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null 2>&1
 check "dry-run: no comment/reopen/close/edit" "! grep -qE '^issue (comment|reopen|close|edit|create)' '$GH_LOG'"
 
+# 18. #4626: a post-deploy why's [check:<id>] token is kept verbatim in the checklist line
+reset
+printf 'x\n' > "$ISSUE_BODY"
+echo '{"items":[{"number":77,"author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"; issue_json 77 open OWNER
+printf 'R3: soak\tpost-deploy: [check:login-smoke] after a day\t\n' > "$T/check.tsv"
+bash "$S" --parent 10 --repo o/r --items "$T/check.tsv" >/dev/null 2>&1
+check "check token kept in the checklist line" "grep -q 'post-deploy: \[check:login-smoke\] after a day' '$ISSUE_BODY.edited'"
+
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
