@@ -4,14 +4,18 @@
 # IS_SANDBOX=1: lanes run as root in a throwaway container; Claude Code refuses --dangerously-skip-permissions as root without it.
 FROM ubuntu:24.04
 
-ARG NODE_VERSION=22.12.0
+ARG NODE_VERSION=22.23.3  # lanes need >=22.19 (undici 8 via vitest)
 # Node 22.12 bundles corepack 0.29.4, whose npm signing keys are stale: `corepack pnpm` fails to verify
 # pnpm, so lanes get no dependencies. A current corepack carries the rotated keys.
 ARG COREPACK_VERSION=0.34.7
-ARG FORGEDOCK_VERSION=1.32.1
+# No default: the lane image is built from the installed ForgeDock version (docker build --build-arg FORGEDOCK_VERSION=...).
+ARG FORGEDOCK_VERSION
 ARG CLAUDE_CODE_VERSION=2.1.309
 ARG UV_VERSION=0.12.5
 ARG POETRY_VERSION=2.4.3
+
+LABEL org.opencontainers.image.version=$FORGEDOCK_VERSION
+RUN test -n "$FORGEDOCK_VERSION" || { echo "FORGEDOCK_VERSION build arg is required" >&2; exit 1; }
 
 ENV IS_SANDBOX=1 DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 PATH=/opt/cs/bin:/opt/node/bin:/root/.local/bin:$PATH
 

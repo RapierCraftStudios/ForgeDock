@@ -77,9 +77,10 @@ export function runsFromRecords(records) {
     const key = `${r.repo}#${r.issue}#${r.run ?? ""}`;
     const run = byRun.get(key) ?? { source: "github", repo: r.repo ?? null, version: r.forge_version ?? null, issue: r.issue, run: r.run ?? null,
       finished: false, hydrated: false, usageEvents: 0, reason: null, code: null, remediated: false, startTs: null, endTs: null, wallMs: null,
-      phases: {}, builderAttempts: [], _first: null };
+      phases: {}, builderAttempts: [], experiment: null, arm: null, _first: null };
     byRun.set(key, run);
     if (!run._first || r.ts < run._first) run._first = r.ts;
+    if (r.experiment != null && r.arm != null) { run.experiment = String(r.experiment); run.arm = String(r.arm); } // #4629
     if (r.event === "run_terminal") {
       run.finished = true; run.reason = r.reason ?? null; run.code = r.code ?? null; run.endTs = r.ts ?? null; run.wallMs = num(r.wall_ms);
       continue;

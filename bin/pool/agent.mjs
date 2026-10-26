@@ -8,7 +8,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSyn
 import { basename, join } from "node:path";
 import { cpus, hostname } from "node:os";
 import { bearerOk, call, readJson, route, sameSecret, send } from "./http.mjs";
-import { repoRoot, versionOf } from "./version.mjs";
+import { repoRoot, versionOf, laneImageTag, laneBuildArgs } from "./version.mjs";
 import { jsonStore } from "./store.mjs";
 
 const LABEL = "computeshare=1";
@@ -59,12 +59,14 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const stateDir = cfg.state_dir;
   const store = jsonStore(join(stateDir, "state.json"), { sandboxes: {} });
   const sb = () => store.data.sandboxes;
+  // Sandbox ids come from requests: read own keys only, so "__proto__" or "constructor" never resolves to an inherited member (#4566).
+  const own = (id) => (typeof id === "string" && Object.hasOwn(sb(), id) ? sb()[id] : undefined);
   const leaseTtlMs = (cfg.lease_ttl_s ?? 600) * 1000;
   const maxLifeMs = (cfg.max_lifetime_s ?? 6 * 3600) * 1000;
   const keepExitedMs = (cfg.keep_exited_s ?? 2 * 3600) * 1000;
-  const image = cfg.image ?? "computeshare-lane:1";
-
   const running = versionOf(cfg.code_root ?? repoRoot);
+  // The lane image tracks the installed ForgeDock version; only an explicit non-legacy cfg.image overrides it.
+  const image = cfg.image && cfg.image !== "computeshare-lane:1" ? cfg.image : laneImageTag(running.version);
   const upgrade = { state: "idle", error: null };
   const prepull = { error: null };
   const dindImage = cfg.dind_image ?? "docker:27.5.1-dind";
@@ -94,8 +96,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   }
 
   async function launch({ spec, cpus, mem_gb, limit = null }) {
-    if (!spec?.id || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id and spec.command are required"), { status: 400 });
-    const existing = sb()[spec.id];
+    if (typeof spec?.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(spec.id) || !Array.isArray(spec.command) || !spec.command.length) throw Object.assign(new Error("spec.id ([A-Za-z0-9._-], max 128) and spec.command are required"), { status: 400 });
+    const existing = own(spec.id);
     if (existing) { existing.lease = now(); store.save(); return { status: 200, body: view(existing) }; }
     const c = capacity();
     if (c.paused || c.cpus_free < cpus || c.mem_free_gb < mem_gb) return { status: 503, body: { error: "no capacity", capacity: c }, retryAfter: 60 };
@@ -191,7 +193,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   }
 
   async function destroy(id, why) {
-    const r = sb()[id];
+    const r = own(id);
     if (!r) return false;
     const history = r.usage?.samples ? JSON.stringify({ at: new Date(now()).toISOString(), id: r.id, issue: r.issue, docker: Boolean(r.docker), minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10, ...usageView(r) }) : null;
     await docker.remove(r.name);
@@ -229,8 +231,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
   const credCache = {};
   const CRED_TTL = { github: 120000, claude: 300000 };
   async function sandboxCred(id, kind, req) {
-    const r = sb()[id];
-    const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "");
+    const r = own(id);
+    const m = /^Bearer\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
     if (!r || r.state === "exited" || !m || !sameSecret(m[1].trim(), r.credToken)) return { status: 401, body: { error: "unauthorized" } };
     if (!CRED_TTL[kind]) return { status: 404, body: { error: "unknown credential" } };
     const c = credCache[kind];
@@ -255,7 +257,11 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       rmSync(next, { recursive: true, force: true }); mkdirSync(next, { recursive: true });
       await run("tar", ["-xzf", tgz, "-C", next]);
       const want = versionOf(next);
-      if (want.image !== running.image) { log.info?.(`rebuilding ${image} (${running.image} -> ${want.image})`); await docker.build(join(next, "pool", "image"), image); }
+      if (want.image !== running.image || want.version !== running.version) {
+        const nextImage = cfg.image && cfg.image !== "computeshare-lane:1" ? cfg.image : laneImageTag(want.version);
+        log.info?.(`rebuilding ${nextImage} (${running.version}/${running.image} -> ${want.version}/${want.image})`);
+        await docker.build(join(next, "pool", "image"), nextImage, laneBuildArgs(want.version));
+      }
       await prepullImages();
       rmSync(`${root}.old`, { recursive: true, force: true });
       await run("mv", [root, `${root}.old`]);
@@ -349,11 +355,11 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     [route("GET", "/health"), async () => ({ status: 200, body: { ok: true, ...capacity() } })],
     [route("GET", "/capacity"), async () => ({ status: 200, body: capacity() })],
     [route("POST", "/sandboxes"), async (_p, body) => launch(body ?? {})],
-    [route("GET", "/sandboxes/:id"), async ({ id }) => { const r = sb()[id]; if (!r) return { status: 404, body: { state: "gone" } }; await refresh(r); store.save(); return { status: 200, body: view(r) }; }],
-    [route("GET", "/sandboxes/:id/logs"), async ({ id }, _b, url) => { const r = sb()[id]; return r ? { status: 200, body: readLog(r, url.searchParams.get("cursor")) } : { status: 404, body: { text: "", cursor: 0 } }; }],
-    [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = sb()[id]; const x = r && readResult(r); return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }],
-    [route("GET", "/sandboxes/:id/usage"), async ({ id }) => { const r = sb()[id]; return r ? { status: 200, body: { minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10 } } : { status: 404, body: {} }; }],
-    [route("POST", "/sandboxes/:id/lease"), async ({ id }) => { const r = sb()[id]; if (!r) return { status: 404, body: { state: "gone" } }; r.lease = now(); store.save(); return { status: 200, body: { ok: true } }; }],
+    [route("GET", "/sandboxes/:id"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; await refresh(r); store.save(); return { status: 200, body: view(r) }; }],
+    [route("GET", "/sandboxes/:id/logs"), async ({ id }, _b, url) => { const r = own(id); return r ? { status: 200, body: readLog(r, url.searchParams.get("cursor")) } : { status: 404, body: { text: "", cursor: 0 } }; }],
+    [route("GET", "/sandboxes/:id/result"), async ({ id }) => { const r = own(id); const x = r && readResult(r); return x ? { status: 200, body: x } : { status: 404, body: { error: "no result" } }; }],
+    [route("GET", "/sandboxes/:id/usage"), async ({ id }) => { const r = own(id); return r ? { status: 200, body: { minutes: Math.round((((r.finishedAt ?? now()) - r.startedAt) / 60000) * 10) / 10 } } : { status: 404, body: {} }; }],
+    [route("POST", "/sandboxes/:id/lease"), async ({ id }) => { const r = own(id); if (!r) return { status: 404, body: { state: "gone" } }; r.lease = now(); store.save(); return { status: 200, body: { ok: true } }; }],
     [route("GET", "/usage-history"), async () => {
       let rows = [];
       try { rows = readFileSync(join(stateDir, "usage-history.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { /* none yet */ }
@@ -384,7 +390,14 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     }
   }
 
-  return { handle, launch, reap, destroy, capacity, refresh, store, prepullImages };
+  /** Build the lane image for the running ForgeDock version when this host does not have it yet. */
+  async function ensureImage() {
+    if (await docker.hasImage?.(image)) return;
+    log.info?.(`building ${image}`);
+    await docker.build(join(cfg.code_root ?? repoRoot, "pool", "image"), image, laneBuildArgs(running.version));
+  }
+
+  return { handle, launch, reap, destroy, capacity, refresh, store, prepullImages, ensureImage };
 }
 
 /**
@@ -414,6 +427,7 @@ export function startAgent(cfg, deps) {
   server.listen(cfg.listen.port, cfg.listen.host);
   const timer = setInterval(() => agent.reap().catch((e) => console.error("reap failed", e)), (cfg.reap_interval_s ?? 30) * 1000);
   agent.reap().catch((e) => console.error("startup reap failed", e));
+  agent.ensureImage().catch((e) => console.error("lane image build failed", e));
   wslNetworkFixup({ idle: () => agent.capacity().active === 0 })
     .catch((e) => console.error("wsl network fixup failed", e))
     .finally(() => agent.prepullImages());

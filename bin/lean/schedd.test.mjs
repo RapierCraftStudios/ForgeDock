@@ -264,6 +264,36 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await h.cleanup(); }
   });
 
+  it("#4592: --hold keeps #2 from running on a live batch; --resume <id> 2 after a cancel re-admits it", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      await withRoot(h, () => capture(async () => {
+        const first = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
+        await until(() => h.launched().length === 1 && h.lanePids().length === 1);
+        const [id] = listBatches(h.root);
+        const b = openBatch(h.root, id);
+        const held = await orchestrateFromCli(["--hold", id, "2", "x"], h.client);
+        assert.deepEqual(held.changed, [2]);
+        assert.deepEqual(b.readHeld(), [2]);
+        await assert.rejects(orchestrateFromCli(["--hold", id], h.client), /usage/);
+        await assert.rejects(orchestrateFromCli(["--release", "nope", "2"], h.client), /no batch nope/);
+        const res = await orchestrateFromCli(["--cancel", id], h.client);
+        assert.equal(res.cancelled, true);
+        const cancelled = await first;
+        assert.deepEqual(cancelled.rows.map((r) => [r.issue, r.outcome]), [[1, "held"], [2, "held"]]);
+        assert.deepEqual(b.readHeld(), [2], "the hold survives the cancel");
+        // The issue's case: a resume naming the issue re-admits it (it used to print `skipped #2 (already in batch)`).
+        const io = { gh: async (x) => (x[0] === "issue" ? JSON.stringify({ state: "OPEN" }) : "o/r\n") };
+        const resumed = orchestrateFromCli(["--resume", id, "2"], { ...h.client, io });
+        await until(() => b.readCancel() === null && b.readHeld().length === 0);
+        setTimeout(() => writeFileSync(h.release, ""), 300);
+        const done = await resumed;
+        assert.deepEqual(done.rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
+      }));
+    } finally { await h.cleanup(); }
+  });
+
   it("#4481: a batch cancelled through the daemon is not resumed by a schedd restart", async () => {
     const h = host();
     try {
@@ -481,5 +511,33 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     assert.deepEqual(kept, { PATH: "/c", CLAUDE_CONFIG_DIR: "/acct-b", FORGEDOCK_SCHED_DIR: "/s" });
     const env = mergeEnv({ PATH: "/d", ANTHROPIC_API_KEY: "daemon-key", NODE_OPTIONS: "x" }, kept);
     assert.deepEqual(env, { NODE_OPTIONS: "x", PATH: "/c", CLAUDE_CONFIG_DIR: "/acct-b", FORGEDOCK_SCHED_DIR: "/s" });
+  });
+});
+
+describe("schedd due timer (#4627)", () => {
+  const boot = async (opts) => startDaemon({ dir: tmpDir("schedd-due-"), root: tmpDir("schedd-due-b-"), runBatch: async () => ({}), resumeOnStart: false, log: () => {}, ...opts });
+
+  it("runs the due callback on its interval, never overlapped, and survives a throwing callback", async () => {
+    let calls = 0, active = 0, overlap = false;
+    const logs = [];
+    const d = await boot({ dueMs: 15, log: (m) => logs.push(m), due: async () => {
+      calls++; active++; if (active > 1) overlap = true;
+      await new Promise((r) => setTimeout(r, 40));
+      active--; if (calls === 1) throw new Error("boom");
+    } });
+    try {
+      await until(() => calls >= 3);
+      assert.equal(overlap, false);
+      assert.ok(logs.some((m) => /due run failed: boom/.test(m)));
+      assert.ok(existsSync(d.sock));
+    } finally { await d.close(); }
+    const n = calls;
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(calls, n, "the timer is cleared on close");
+  });
+
+  it("without a due callback there is no timer", async () => {
+    const d = await boot({ dueMs: 10 });
+    await d.close();
   });
 });

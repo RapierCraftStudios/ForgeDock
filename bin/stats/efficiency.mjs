@@ -49,6 +49,8 @@ const costOf = (e) => num(e.cost_usd_delta) ?? num(e.cost_usd);
 const sum = (xs) => xs.reduce((a, b) => a + (num(b) ?? 0), 0);
 const r = (x, p = 1e4) => (num(x) == null ? null : Math.round(x * p) / p);
 const per = (a, b) => (b > 0 ? a / b : null);
+/** #4491: GitHub slugs are case-insensitive (`--repo o/forgedock` matches a plan's `O/ForgeDock`). */
+export const sameRepo = (a, b) => String(a ?? "").toLowerCase() === String(b ?? "").toLowerCase();
 
 function parseLog(text) {
   const out = [];
@@ -67,13 +69,14 @@ export function issueSlices(events) {
   let cur = null;
   for (const e of Array.isArray(events) ? events : []) {
     if (!e || typeof e !== "object") continue;
-    if (e.event === "RUN_START") { cur = { startTs: e.ts ?? null, repo: e.repo ?? null, terminal: null, shape: "full", attempts: [] }; out.push(cur); continue; }
+    if (e.event === "RUN_START") { cur = { startTs: e.ts ?? null, repo: e.repo ?? null, terminal: null, shape: "full", conformance: null, attempts: [] }; out.push(cur); continue; }
     if (!cur) continue;
     if (e.event === "LIGHT_DONE") cur.shape = "light";
+    else if (e.event === "CONFORMANCE" && typeof e.state === "string") cur.conformance = e.state; // #4491: the slice's last verdict
     else if (e.event === "LIGHT_UPGRADE") cur.shape = "upgraded";
     if (e.event === "PHASE_ATTEMPT_USAGE") {
       cur.attempts.push({ phase: e.phase ?? "other", trigger: e.trigger ?? null, restart_of: e.restart_of ?? null, model: e.model ?? null,
-        turns: num(e.turns), cacheRead: num(e.usage?.cache_read_input_tokens), cost: costOf(e),
+        turns: num(e.turns), cacheRead: num(e.usage?.cache_read_input_tokens), cost: costOf(e), durationMs: num(e.duration_ms), // #4491
         ...(e.tools && typeof e.tools === "object" ? { calls: num(e.tools.calls), toolTurns: num(e.tools.turns), rereads: num(e.tools.rereads) } : {}) }); // #4410
     } else if (e.event === "RUN_TERMINAL") {
       cur.terminal = { reason: e.reason ?? null, code: e.code ?? null, ts: e.ts ?? null, size: SIZES.includes(e.turns?.size) ? e.turns.size : null };
@@ -137,10 +140,17 @@ const median = (xs) => {
   return s.length % 2 ? s[h] : r((s[h - 1] + s[h]) / 2, 100);
 };
 
+/** #4491: a lane's implement wall in minutes, the sum of its implement attempts' duration_ms; null when none carries it. */
+function laneWall(impl) {
+  const xs = impl.filter((a) => a.durationMs != null);
+  return xs.length ? r(sum(xs.map((a) => a.durationMs)) / 60000, 100) : null;
+}
+const wallP50 = (xs) => median(xs.map((x) => x.implWall).filter((w) => w != null));
+
 const group = (xs) => {
   const turns = sum(xs.map((x) => x.implTurns)), cache = sum(xs.map((x) => x.implCache));
   return { n: xs.length, cost_usd: r(sum(xs.map((x) => x.cost)), 1e6), usd_per_merge: r(per(sum(xs.map((x) => x.cost)), xs.length)),
-    turns_per_merge: r(per(turns, xs.length), 10), context_per_turn: r(per(cache, turns), 1) };
+    turns_per_merge: r(per(turns, xs.length), 10), context_per_turn: r(per(cache, turns), 1), implement_wall_p50_min: wallP50(xs) };
 };
 
 /**
@@ -149,7 +159,7 @@ const group = (xs) => {
  */
 export function efficiencyMetrics({ entries = [], logs = new Map(), issues = null, repo = null, now = 0, notes = [] } = {}) {
   const merged = [];
-  const inScope = (row, settleAt) => issueSlices(logs.get(row.issue) ?? []).filter((s) => (!repo || !s.repo || s.repo === repo) && (!settleAt || !s.startTs || s.startTs <= settleAt));
+  const inScope = (row, settleAt) => issueSlices(logs.get(row.issue) ?? []).filter((s) => (!repo || !s.repo || sameRepo(s.repo, repo)) && (!settleAt || !s.startTs || s.startTs <= settleAt));
   // #4452: light/full split and upgrade rate over every lane of every row (all outcomes); cost is the #4407 delta sum
   const shapes = Object.fromEntries(LANE_SHAPES.map((k) => [k, { n: 0, cost_usd: 0 }]));
   for (const { row, settleAt } of entries) {
@@ -169,7 +179,7 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     const term = [...slices].reverse().find((s) => s.terminal?.reason === "merged")?.terminal;
     merged.push({ issue: row.issue, slices: slices.length, cost: sum(atts.map((a) => a.cost)), implCost: sum(impl.map((a) => a.cost)),
       reviewCost: sum(atts.filter((a) => a.phase === "review").map((a) => a.cost)), implTurns: sum(impl.map((a) => a.turns)), implCache: sum(impl.map((a) => a.cacheRead)),
-      size: term?.size ?? laneSize({ labels: info?.labels ?? [] }) ?? "unknown", impl, retries, info, tools: laneTools(impl), shape: slices.at(-1)?.shape ?? null });
+      size: term?.size ?? laneSize({ labels: info?.labels ?? [] }) ?? "unknown", impl, retries, info, tools: laneTools(impl), shape: slices.at(-1)?.shape ?? null, implWall: laneWall(impl) });
   }
   const all = group(merged);
   const bySize = {};
@@ -182,6 +192,9 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     }
   }
   const retries = Object.fromEntries(RETRY_CAUSES.map((c) => [c, sum(merged.map((m) => m.retries[c]))]));
+  // #4491: merge rate over the rows, conformance pass rate over rows whose lanes logged a verdict (each row's last one)
+  const rows = entries.filter(({ row }) => Number.isSafeInteger(row?.issue));
+  const verdicts = rows.map(({ row, settleAt }) => inScope(row, settleAt).map((s) => s.conformance).filter(Boolean).at(-1)).filter(Boolean);
   const withTools = merged.filter((m) => m.tools);
   const total = sum(Object.values(retries));
   // no possible action: parked post-deploy follow-ups and promotion-blocked lanes (#4389), over all rows
@@ -209,6 +222,8 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     merged: merged.length, cost_usd: all.cost_usd, implement_usd: r(sum(merged.map((m) => m.implCost)), 1e6), review_usd: r(sum(merged.map((m) => m.reviewCost)), 1e6),
     usd_per_merge: all.usd_per_merge, turns_per_merge: all.turns_per_merge, context_per_turn: all.context_per_turn,
     implement_turns: sum(merged.map((m) => m.implTurns)), implement_cache_read: sum(merged.map((m) => m.implCache)),
+    implement_wall_p50_min: all.implement_wall_p50_min, merge_rate: r(per(merged.length, rows.length)),
+    conformance_pass_rate: r(per(verdicts.filter((v) => v === "conforms").length, verdicts.length)),
     by_size: bySize,
     by_model: Object.fromEntries(Object.entries(byModel).map(([k, g]) => [k, { merges: g.merges.size, attempts: g.attempts, turns: g.turns, cost_usd: r(g.cost, 1e6),
       usd_per_merge: r(per(g.cost, g.merges.size)), turns_per_merge: r(per(g.turns, g.merges.size), 10), context_per_turn: r(per(g.cache, g.turns), 1) }])),
@@ -219,7 +234,8 @@ export function efficiencyMetrics({ entries = [], logs = new Map(), issues = nul
     tool_calls_per_turn_p50: median(withTools.map((m) => m.tools.per_turn)), rereads_per_merge: withTools.length ? r(per(sum(withTools.map((m) => m.tools.rereads)), withTools.length), 100) : null,
     per_issue: merged.map((m) => ({ issue: m.issue, slices: m.slices, cost_usd: r(m.cost, 1e6), implement_usd: r(m.implCost, 1e6), implement_turns: m.implTurns,
       implement_cache_read: m.implCache, size: m.size, retries: m.retries, ...(m.shape ? { shape: m.shape } : {}), ...(m.info ? { quality: issueQuality(m.info.body).tag } : {}),
-      ...(m.tools ? { implement_tool_calls_per_turn: m.tools.per_turn, implement_rereads: m.tools.rereads } : {}) })),
+      ...(m.tools ? { implement_tool_calls_per_turn: m.tools.per_turn, implement_rereads: m.tools.rereads } : {}),
+      ...(m.implWall != null ? { implement_wall_min: m.implWall } : {}) })),
     notes,
   };
 }
@@ -274,24 +290,75 @@ export async function batchEfficiency({ batchDir, runsDir, repo = null, gh = nul
   return { batch: plan.id ?? null, ...(await computeScope({ entries, runsDir, repo: repo ?? plan.repo ?? null, gh, now })) };
 }
 
-/** Trailing windows: the union of the repo's batches created in each window; an issue in several batches counts once (latest row). */
-export async function windowEfficiency({ batchRoot, runsDir, repo = null, gh = null, now = Date.now(), windows = [WEEK_MS] }) {
+/** The repo's batches by creation time, and the repo slug as the plans spell it (run-log file names are case-sensitive, #4491). */
+function repoBatches(batchRoot, repo) {
   const batches = (existsSync(batchRoot) ? listBatches(batchRoot) : []).map((id) => {
     const dir = join(batchRoot, id), plan = readJson(join(dir, "plan.json")) ?? {};
     return { dir, plan, created: Date.parse(plan.created ?? "") };
-  }).filter((b) => Number.isFinite(b.created) && (!repo || b.plan.repo === repo)).sort((a, b) => a.created - b.created);
+  }).filter((b) => Number.isFinite(b.created) && (!repo || sameRepo(b.plan.repo, repo))).sort((a, b) => a.created - b.created);
+  return { batches, repo: repo ? (batches.find((b) => typeof b.plan.repo === "string")?.plan.repo ?? repo) : repo };
+}
+
+/** Rows of the batches created in [from, to]; an issue in several batches counts once (latest row). */
+function cohortEntries(batches, from, to, toInclusive = true) {
+  const inside = batches.filter((b) => b.created >= from && (toInclusive ? b.created <= to : b.created < to));
+  const latest = new Map();
+  for (const b of inside) {
+    const at = settleTimes(readLogRows(b.dir));
+    for (const row of batchRows(b.dir)) if (Number.isSafeInteger(row?.issue)) latest.set(row.issue, { row, settleAt: at.get(row.issue) ?? null });
+  }
+  return { batches: inside.length, entries: [...latest.values()] };
+}
+
+/** Trailing windows: the union of the repo's batches created in each window; an issue in several batches counts once (latest row). */
+export async function windowEfficiency({ batchRoot, runsDir, repo = null, gh = null, now = Date.now(), windows = [WEEK_MS] }) {
+  const { batches, repo: slug } = repoBatches(batchRoot, repo);
   const out = {};
   for (const w of windows) {
-    const latest = new Map();
-    for (const b of batches) {
-      if (b.created > now || now - b.created > w) continue;
-      const at = settleTimes(readLogRows(b.dir));
-      for (const row of batchRows(b.dir)) if (Number.isSafeInteger(row?.issue)) latest.set(row.issue, { row, settleAt: at.get(row.issue) ?? null });
-    }
-    out[windowLabel(w)] = { batches: batches.filter((b) => b.created <= now && now - b.created <= w).length,
-      ...(await computeScope({ entries: [...latest.values()], runsDir, repo, gh, now })) };
+    const c = cohortEntries(batches, now - w, now);
+    out[windowLabel(w)] = { batches: c.batches, ...(await computeScope({ entries: c.entries, runsDir, repo: slug, gh, now })) };
   }
   return out;
+}
+
+export const COMPARE_KEYS = Object.freeze(["turns_per_merge", "implement_wall_p50_min", "tool_calls_per_turn_p50", "rereads_per_merge", "merge_rate", "conformance_pass_rate"]);
+const delta = (a, b) => Object.fromEntries(COMPARE_KEYS.map((k) => [k, num(a?.[k]) == null || num(b?.[k]) == null ? null : r(b[k] - a[k], 100)]));
+
+/**
+ * #4491: full-shape merged lanes per size bucket present in both cohorts (light lanes, #4452, cut turns on their own).
+ * A merged row with no in-scope run log carries no shape and drops out, so its zero turns do not pull a bucket down.
+ */
+function matchedCohorts(pre, post) {
+  const full = (m) => (m.per_issue ?? []).filter((x) => x.shape === "full");
+  const bySize = (xs) => xs.reduce((o, x) => ((o[x.size] ??= []).push(x), o), {});
+  const a = bySize(full(pre)), b = bySize(full(post)), out = {};
+  const g = (xs) => {
+    const tools = xs.filter((x) => x.implement_tool_calls_per_turn != null);
+    return { n: xs.length, turns_per_merge: r(per(sum(xs.map((x) => x.implement_turns)), xs.length), 10),
+      implement_wall_p50_min: median(xs.map((x) => x.implement_wall_min).filter((w) => w != null)),
+      tool_calls_per_turn_p50: median(tools.map((x) => x.implement_tool_calls_per_turn)),
+      rereads_per_merge: tools.length ? r(per(sum(tools.map((x) => x.implement_rereads)), tools.length), 100) : null };
+  };
+  for (const size of Object.keys(a).sort()) {
+    if (!b[size]) continue;
+    const pa = g(a[size]), pb = g(b[size]);
+    out[size] = { pre: pa, post: pb, delta: delta(pa, pb) };
+  }
+  return out;
+}
+
+/**
+ * #4491: before/after A/B around a deploy `pivot` (ms): post = the repo's batches created in [pivot, min(now, pivot + span)],
+ * pre = the same span ending just before the pivot. `span` defaults to the time since the pivot, so both cohorts are equally long.
+ */
+export async function compareEfficiency({ batchRoot, runsDir, repo = null, gh = null, pivot, now = Date.now(), span = null }) {
+  if (!Number.isFinite(pivot) || pivot > now) throw new Error("compare: the pivot must be a time in the past");
+  const s = Math.max(0, Math.min(Number.isFinite(span) ? span : Infinity, now - pivot));
+  const { batches, repo: slug } = repoBatches(batchRoot, repo);
+  const a = cohortEntries(batches, pivot - s, pivot, false), b = cohortEntries(batches, pivot, pivot + s);
+  const pre = { batches: a.batches, ...(await computeScope({ entries: a.entries, runsDir, repo: slug, gh, now })) };
+  const post = { batches: b.batches, ...(await computeScope({ entries: b.entries, runsDir, repo: slug, gh, now })) };
+  return { pivot: new Date(pivot).toISOString(), span_days: r(s / 86400000, 100), pre, post, delta: delta(pre, post), matched: matchedCohorts(pre, post) };
 }
 
 export const windowLabel = (ms) => `${Math.round(ms / 86400000)}d`;
@@ -331,5 +398,24 @@ export function formatEfficiencyLines(m, label = "") {
   const ln = m.lanes; // #4452
   lines.push(ln ? `lanes: ${LANE_SHAPES.map((k) => `${k} ${ln[k]?.n ?? 0} (${usd(ln[k]?.cost_usd ?? 0)})`).join(", ")}; upgrade rate ${ln.upgrade_rate == null ? "n/a"
     : `${Math.round(ln.upgrade_rate * 100)}% (${ln.upgraded?.n ?? 0}/${(ln.light?.n ?? 0) + (ln.upgraded?.n ?? 0)})`}` : "lanes: n/a");
+  lines.push(rates(m)); // #4491
+  return lines;
+}
+
+const pct = (x) => (num(x) == null ? "n/a" : `${Math.round(x * 100)}%`);
+const rates = (m) => `implement wall p50 ${m.implement_wall_p50_min == null ? "n/a" : `${f(m.implement_wall_p50_min, 1)} min`}, merge rate ${pct(m.merge_rate)}, conformance pass ${pct(m.conformance_pass_rate)}`;
+const sign = (x, d, unit = "") => (num(x) == null ? "n/a" : `${x > 0 ? "+" : ""}${x.toFixed(d)}${unit}`);
+const deltaLine = (d, withRates = true) => `turns/merge ${sign(d.turns_per_merge, 1)}, implement wall p50 ${sign(d.implement_wall_p50_min, 1, " min")}, calls/turn p50 ${sign(d.tool_calls_per_turn_p50, 2)}, `
+  + `re-reads/merge ${sign(d.rereads_per_merge, 2)}${withRates ? `, merge rate ${sign(d.merge_rate == null ? null : d.merge_rate * 100, 0, " pts")}, conformance pass ${sign(d.conformance_pass_rate == null ? null : d.conformance_pass_rate * 100, 0, " pts")}` : ""}`;
+const cohortLine = (k, m) => `compare ${k}: n=${m.n ?? m.merged} turns/merge ${f(m.turns_per_merge, 1)}, implement wall p50 ${m.implement_wall_p50_min == null ? "n/a" : `${f(m.implement_wall_p50_min, 1)} min`}, `
+  + `calls/turn p50 ${f(m.tool_calls_per_turn_p50)}, re-reads/merge ${f(m.rereads_per_merge)}${"merge_rate" in m ? `, merge rate ${pct(m.merge_rate)}, conformance pass ${pct(m.conformance_pass_rate)}` : ""}`;
+
+/** #4491: the `--compare` report: pre/post cohorts, their delta, then the full-shape per-size matched cohorts. */
+export function formatCompareLines(c) {
+  const lines = [`compare: pivot ${c.pivot}, ${f(c.span_days, 1)} days each side (pre ${c.pre.batches} batches, post ${c.post.batches} batches)`,
+    cohortLine("pre", c.pre), cohortLine("post", c.post), `compare delta: ${deltaLine(c.delta)}`];
+  const sizes = Object.entries(c.matched ?? {});
+  if (!sizes.length) lines.push("compare matched (full lanes per size): n/a");
+  for (const [size, g] of sizes) lines.push(`compare matched ${size}: pre n=${g.pre.n} post n=${g.post.n}; delta ${deltaLine(g.delta, false)}`);
   return lines;
 }

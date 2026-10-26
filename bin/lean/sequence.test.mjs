@@ -8,9 +8,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { sequenceCollisions, journalProblems, snapshotLane, verifyRenumber, numberOnlyChange, headerOnlyChange, renumberLane, resolveSequenceConflicts } from "./sequence.mjs";
+import { sequenceCollisions, journalProblems, snapshotLane, verifyRenumber, numberOnlyChange, headerOnlyChange, renumberLane, resolveSequenceConflicts, generatorProblems } from "./sequence.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
-import { sequencePrompt, sequenceSyncNote } from "./prompts.mjs";
+import { sequencePrompt, sequenceSyncNote, migrationGeneratorPrompt, builderImplementPrompt } from "./prompts.mjs";
 
 const sh = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
 const gitIn = (cwd) => async (a) => sh(cwd, ...a);
@@ -451,5 +451,44 @@ describe("sequence-numbered documents: two siblings each add an ADR (#4385)", ()
     const p = sequencePrompt([{ dir: "docs/adr", number: "0004", lane: "docs/adr/0004-b.md", base: ["docs/adr/0004-a.md"], next: "0005" }], "staging");
     assert.match(p, /ADR/);
     assert.match(p, /series index/);
+  });
+});
+
+describe("hand-named migrations (#4591)", () => {
+  const T1 = "20261025020000_sso_domain_verification", T2 = "20261025020100_next";
+  function base() {
+    const d = tmpDir("gen-");
+    sh(d, "init", "-q", "-b", "main");
+    put(d, { "db/meta/_journal.json": journal("20261024000000_init"), "db/meta/20261024000000_snapshot.json": "{}\n", "db/20261024000000_init.sql": "x;\n" });
+    commit(d, "init");
+    sh(d, "checkout", "-qb", "lane");
+    return d;
+  }
+  it("flags a hand-named file with no journal entry and no snapshot, naming both gaps", async () => {
+    const d = base();
+    put(d, { [`db/${T1}.sql`]: "y;\n" });
+    commit(d, "hand");
+    const p = await generatorProblems({ git: gitIn(d), base: "main" });
+    assert.equal(p.length, 1);
+    assert.match(p[0], /20261025020000_sso_domain_verification\.sql: not produced by the migration generator \(no journal entry added for it; no meta\/20261025020000_snapshot\.json added\)/);
+  });
+  it("accepts generator output (journal entry + snapshot, also --custom) and dirs without a journal", async () => {
+    const d = base();
+    put(d, { [`db/${T1}.sql`]: "y;\n", [`db/${T2}.sql`]: "z;\n", "db/meta/_journal.json": journal("20261024000000_init", T1, T2), "db/meta/20261025020000_snapshot.json": "{}\n", "db/meta/20261025020100_snapshot.json": "{}\n", "plain/0001_a.sql": "a;\n" });
+    commit(d, "generated");
+    assert.deepEqual(await generatorProblems({ git: gitIn(d), base: "main" }), []);
+  });
+  it("flags an entry without a snapshot, and accepts an engine renumber (P3)", async () => {
+    const d = base();
+    put(d, { [`db/${T1}.sql`]: "y;\n", "db/meta/_journal.json": journal("20261024000000_init", T1) });
+    commit(d, "journal only");
+    assert.match((await generatorProblems({ git: gitIn(d), base: "main" }))[0], /\(no meta\/20261025020000_snapshot\.json added\)/);
+    const f = fixture();
+    renumber(f);
+    assert.deepEqual(await generatorProblems({ git: gitIn(f), base: "main" }), []);
+  });
+  it("the fix prompt and the builder rule forbid naming migrations by hand", () => {
+    assert.match(migrationGeneratorPrompt(["db/x.sql: not produced by the migration generator (no journal entry added for it)"]), /drizzle-kit generate --custom[\s\S]*Never name or number migration files by hand/);
+    assert.match(builderImplementPrompt("local"), /Never name or number migration files by hand/);
   });
 });

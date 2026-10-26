@@ -18,7 +18,7 @@ Canonical source: `docs/spec/review-protocol.md` — sync changes there first.
 
 **Rationale**: Passing the full changeset to every agent inflates per-child input cost on large PRs. A billing agent reviewing auth code produces noise, not signal. Scoped inputs reduce cost and improve focus.
 
-**Fallback rule**: If a domain's file pattern matches nothing in the PR (slice is empty), the orchestrator falls back to the full diff — ensuring no agent is launched with an empty context. This preserves review coverage on PRs where domain boundaries are blurry.
+**Empty slice rule** (forge#4573): if a domain's file pattern matches nothing in the PR, its slice is a one-line note, never a copy of the full diff (that duplicated the whole diff across domains). Slices hold whole file blocks only: a file too large for the slice is listed as `# OMITTED` at the top and read from the head checkout. A staging brief may carry a pointer to the slice file instead of the text when the slice is large; read that file with bounded `grep`/`sed -n`.
 
 **Security agent exception**: The General Security agent ALWAYS receives the full diff — security vulnerabilities are cross-cutting and cannot be safely scoped to a file-path filter.
 

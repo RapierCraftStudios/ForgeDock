@@ -287,14 +287,16 @@ gh11() {
   esac
 }
 [ "$(grep -c '^# BEGIN bundle-pr-kind$' "$PRE")" -eq 2 ] && [ "$(awk '/^# BEGIN bundle-pr-kind$/{f=1;n++} f{print > ("'"$TMP"'/kind" n ".sh")} /^# END bundle-pr-kind$/{f=0}' "$PRE"; cmp -s "$TMP/kind1.sh" "$TMP/kind2.sh" && echo same)" = same ] && ok || bad "0A and 0B.1 must carry identical bundle_pr_kind blocks"
+awk '/^# BEGIN gh-retry$/{f=1;next} /^# END gh-retry$/{f=0} f' "$PRE" > "$TMP/ghretry.sh"   # bundle_pr_kind calls gh_retry (forge#4572)
+[ -s "$TMP/ghretry.sh" ] && ok || bad "gh-retry block not found"
 awk '/^# BEGIN bundle-pr-set$/{f=1;next} /^# END bundle-pr-set$/{f=0} f' "$PRE" | sed 's/{GH_REPO}/o\/r/g' > "$TMP/prset.sh"
 [ -s "$TMP/prset.sh" ] && ok || bad "bundle-pr-set block not found in Phase 0A"
-OUT11=$( gh() { gh11 "$@"; }; GH_REPO=o/r; BUNDLE_PRS="5 6 28668 77 90"; MERGE_PRS="90"; . "$TMP/prset.sh"; echo $ALL_PR_NUMBERS "|$SKIPPED_ISSUES" )
+OUT11=$( gh() { gh11 "$@"; }; GH_REPO=o/r; BUNDLE_PRS="5 6 28668 77 90"; MERGE_PRS="90"; FORGE_GH_RETRY_SLEEP=0; . "$TMP/ghretry.sh"; . "$TMP/prset.sh"; echo $ALL_PR_NUMBERS "|$SKIPPED_ISSUES" )
 [ "$OUT11" = "5 6 77 90 | 28668" ] && ok || bad "0A must drop the confirmed issue and keep PRs, merge PRs and unclassifiable numbers (got '$OUT11')"
 awk '/^# BEGIN bundle-scope-loop$/{f=1;next} /^# END bundle-scope-loop$/{f=0} f' "$PRE" > "$TMP/loop.sh"
 [ -s "$TMP/loop.sh" ] && ok || bad "bundle-scope-loop block not found in 0B.1"
 scope11() { # $1 = ALL_PR_NUMBERS; prints "<SCOPE_MODE> <REVIEWED_PR_COUNT>" then the loop output
-  ( gh() { gh11 "$@"; }; bundle_delta_credit() { DELTA_COMMITS=""; DELTA_FULL=0; }; . "$TMP/kind1.sh"
+  ( gh() { gh11 "$@"; }; bundle_delta_credit() { DELTA_COMMITS=""; DELTA_FULL=0; }; FORGE_GH_RETRY_SLEEP=0; . "$TMP/ghretry.sh"; . "$TMP/kind1.sh"
     SCOPE_MODE=full; REVIEWED_COMMITS=""; REVIEWED_MERGES=""; REVIEWED_PR_COUNT=0; _PF="$TMP/pf11"; : > "$_PF"
     TRUSTED_SCRIPT="$TC" ALL_PR_NUMBERS="$1" PR_NUMBER=9 GH_REPO=o/r _SD="$TMP" REVIEW_DELTA_SCRIPT=""
     LOG11=$(. "$TMP/loop.sh"; echo "@@$SCOPE_MODE $REVIEWED_PR_COUNT"); echo "${LOG11##*@@}"; echo "${LOG11%@@*}" )

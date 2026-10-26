@@ -93,7 +93,7 @@ done
 if grep -qF 'marker domain' "$PERSONAS/protocols.md"; then ok; else bad "protocols.md does not define the marker domain"; fi
 
 # Test 7: the roster regexes in delta_roster must equal the per-domain file regexes of the diff slices (both in scripts/review-prepare.sh since #3841),
-# and the slice function must fall back to the full file list and full diff for a domain with no hit
+# and the slice function must NOT fall back to the full file list or full diff for a domain with no hit (#4573)
 for pair in auth:auth billing:billing concurrency:concurrency database:database infra:infra scraper:scraper frontend:frontend api:api; do
   var=${pair%%:*}; dom=${pair#*:}
   a=$(grep -E "^    slice $var " "$PREPARE" | head -n 1 | sed -n 's/.* "\([^"]*\)"$/\1/p')
@@ -101,7 +101,7 @@ for pair in auth:auth billing:billing concurrency:concurrency database:database 
   if [ -z "$a" ] || [ -z "$b" ]; then bad "could not extract $var pattern (slice='$a' delta_roster='$b')"
   elif [ "$a" = "$b" ]; then ok; else bad "$var regex drifted: slice='$a' delta_roster='$b'"; fi
 done
-if grep -qF '[ -n "$paths" ] || paths="$SLICE_FILES_SRC"' "$PREPARE" && grep -qF '[ -n "$body" ] || body="$FULL_DIFF"' "$PREPARE"; then ok; else bad "prepare slice() lacks the empty-slice fallback"; fi
+if grep -qF '[ -n "$paths" ] || paths="$SLICE_FILES_SRC"' "$PREPARE"; then bad "prepare slice() must not fall back to the full file list"; elif grep -qF '[ -n "$body" ] || body="$FULL_DIFF"' "$PREPARE"; then bad "prepare slice() must not fall back to the full diff"; elif grep -qF '[ -n "$body" ] || body="# No diff blocks' "$PREPARE"; then ok; else bad "prepare slice() lacks the empty-slice note"; fi
 
 echo "review-pr-domain-map: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

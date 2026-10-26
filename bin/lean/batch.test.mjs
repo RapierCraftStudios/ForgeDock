@@ -213,6 +213,14 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.doesNotThrow(() => assertDiskPath("/home/u/.forge/batches", mounts));
     assert.equal(isLaneAlive(process.pid, "--definitely-not-in-my-cmdline"), false);
     assert.equal(isLaneAlive(2 ** 22 + 12345, null), false);
+    // #4592: a zombie answers kill(pid, 0) but is not a live lane.
+    const proc = tmpDir("proc-"), pd = join(proc, "42");
+    mkdirSync(pd, { recursive: true });
+    writeFileSync(join(pd, "cmdline"), "node\0lane\0");
+    writeFileSync(join(pd, "stat"), "42 (node) S 1 42 42 0 -1\n");
+    assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), true);
+    writeFileSync(join(pd, "stat"), "42 (no) de) Z 1 42 42 0 -1\n");
+    assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), false);
     assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 1 }, baseSync: { enabled: true, unionGlobs: [] } });
     writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n");
     assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, globalParallel: 4, recovery: { maxAttempts: 1 }, baseSync: { enabled: true, unionGlobs: [] } });
@@ -520,6 +528,37 @@ describe("#4376: forgedock orchestrate --cancel", () => {
     assert.deepEqual(saved.deferrals, { 1: 1 });
   });
 
+  for (const stopRemote of [false, true]) {
+    it(`a cancel ${stopRemote ? "with" : "without"} stopRemote ${stopRemote ? "stops" : "leaves"} a remote lane (#4612)`, async () => {
+      let cancel = null, saved = null;
+      const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+      const started = [], stops = [];
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      const done = orchestrate({ issues: [1], parallel: 1, pollMs: 5, readBody: async () => "", store, getCancelled: () => cancel,
+        stopLane: (n, rec) => { stops.push([n, rec.remote]); release(); },
+        runOne: async (n, _lane, ctx) => {
+          started.push(n);
+          ctx.onStart?.({ remote: true, handle: { id: "sbx-1" } });
+          if (!stopRemote) setTimeout(release, 100);
+          await gate;
+          return { terminalReason: "deferred", code: "run.interrupted" };
+        } });
+      await until(() => started.includes(1));
+      cancel = { at: new Date().toISOString(), reason: "operator", ...(stopRemote ? { stopRemote: true } : {}) };
+      await done;
+      assert.deepEqual(stops, stopRemote ? [[1, true]] : []);
+    });
+  }
+
+  it("requestCancel records stopRemote only when asked (#4612)", () => {
+    const b = openBatch(tmpDir("batch-cancel-stop-"), "b1");
+    b.requestCancel({});
+    assert.equal(b.readCancel().stopRemote, undefined);
+    b.requestCancel({ stopRemote: true });
+    assert.equal(b.readCancel().stopRemote, true);
+  });
+
   it("through the CLI: --cancel during a lane holds the rest, a finished batch is left alone, unknown ids reject, --resume clears it", async () => {
     const root = tmpDir("batch-cancel-cli-");
     const leanIo = {
@@ -798,5 +837,101 @@ describe("#4540: remote admissions are capped to the provider's free capacity", 
     const { rows, bounced } = await run(() => () => null);
     assert.ok(bounced > 0);
     assert.deepEqual(rows.map((r) => r.outcome).filter((o) => o !== "merged"), []);
+  });
+});
+
+describe("#4547: opt-in local fallback in mode remote when no pool agent is online", () => {
+  const run = async (remoteExtra, online) => {
+    const c = { t: 1_000_000 };
+    const sleep = async (ms) => { await new Promise((r) => setImmediate(r)); c.t += ms; };
+    const where = new Map();
+    let remoteTries = 0;
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 3, now: () => c.t, sleep, pollMs: 1, readBody: async () => "",
+      remote: { max: 3, isRemote: () => true, capacity: () => (online === null ? null : { free: null, online, at: 1 }), ...remoteExtra },
+      runOne: async (n, _ln, ctx = {}) => {
+        where.set(n, ctx.placement?.where ?? "remote");
+        if (ctx.placement?.where !== "local") { remoteTries++; if (online === 0) return { terminalReason: "deferred", code: "sandbox.capacity", retryInSeconds: 1, detail: "HTTP 503" }; }
+        return { terminalReason: "merged", pr: 100 + n };
+      } });
+    return { rows, where, remoteTries };
+  };
+  it("every agent offline: the batch completes on the host", async () => {
+    const { rows, where, remoteTries } = await run({ offlineFallback: true }, 0);
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged", "merged"]);
+    assert.ok([...where.values()].every((w) => w === "local"));
+    assert.equal(remoteTries, 0);
+  });
+  it("an agent online, or liveness unknown, stays remote", async () => {
+    for (const online of [1, null]) {
+      const { where } = await run({ offlineFallback: true }, online);
+      assert.ok([...where.values()].every((w) => w === "remote"), String(online));
+    }
+  });
+});
+
+describe("#4592: forgedock orchestrate --hold / --release", () => {
+  it("the hold file: holdIssues / readHeld / releaseIssues merge sorted unique positive integers; invalid content reads as []", () => {
+    const b = openBatch(tmpDir("batch-hold-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    assert.deepEqual(b.readHeld(), []);
+    assert.deepEqual(b.holdIssues([5, "#3", "x", 0, 5, "7"]), [3, 5, 7]);
+    assert.deepEqual(b.holdIssues([3, 9]), [9], "already held is not newly held");
+    assert.deepEqual(b.readHeld(), [3, 5, 7, 9]);
+    assert.deepEqual(b.releaseIssues([5, 4, "#9"]), [5, 9]);
+    assert.deepEqual(b.readHeld(), [3, 7]);
+    writeFileSync(join(b.dir, "hold"), "not json");
+    assert.deepEqual(b.readHeld(), []);
+  });
+
+  it("a held issue is never admitted; the rest run, the batch ends with it held, and a release (resume) runs it", async () => {
+    let saved = null, held = [2];
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const started = [], log = [];
+    const run = (issues) => orchestrate({ issues, parallel: 2, pollMs: 5, readBody: async () => "", store, getHeld: () => held, onUpdate: (r) => log.push(r),
+      runOne: async (n) => { started.push(n); return { terminalReason: "merged" }; } });
+    const rows = await run([1, 2, 3]);
+    assert.deepEqual(started.sort(), [1, 3], "#2 is not admitted");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "held"], [3, "merged"]]);
+    assert.equal(rows[1].detail, "held by operator");
+    assert.equal(log.filter((r) => r.outcome === "hold").length, 1, "one row when the set changes");
+    held = [];
+    const resumed = await run([]);
+    assert.deepEqual(resumed.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [3, "merged"]]);
+    assert.deepEqual(started.sort(), [1, 2, 3]);
+  });
+
+  it("a release while another lane runs admits the held issue in the same batch", async () => {
+    let saved = null, held = [2], free;
+    const gate = new Promise((r) => { free = r; });
+    const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+    const started = [];
+    const done = orchestrate({ issues: [1, 2], parallel: 2, pollMs: 5, readBody: async () => "", store, getHeld: () => held,
+      runOne: async (n) => { started.push(n); if (n === 1) await gate; return { terminalReason: "merged" }; } });
+    await until(() => started.includes(1));
+    await new Promise((r) => setTimeout(r, 30));
+    assert.deepEqual(started, [1]);
+    held = [];
+    await until(() => started.includes(2));
+    free();
+    assert.deepEqual((await done).map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"]]);
+  });
+
+  it("through the CLI: --hold / --release write the hold file (usage and unknown batch reject); --resume <id> N releases N", async () => {
+    const root = tmpDir("batch-hold-cli-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: [], repo: "o/r" });
+    b.store.save({ order: [1, 2] });
+    const io = { gh: async () => JSON.stringify({ state: "OPEN" }) };
+    let res = await quiet(() => orchestrateFromCli(["--hold", "b1", "1", "2"], { batchRoot: root, io }));
+    assert.deepEqual(res.changed, [1, 2]);
+    res = await quiet(() => orchestrateFromCli(["--release", "b1", "1"], { batchRoot: root, io }));
+    assert.deepEqual(res.changed, [1]);
+    assert.deepEqual(b.readHeld(), [2]);
+    await assert.rejects(orchestrateFromCli(["--hold", "b1"], { batchRoot: root, io }), /usage/);
+    await assert.rejects(orchestrateFromCli(["--hold", "nope", "1"], { batchRoot: root, io }), /no batch nope/);
+    // A resume naming a held issue re-admits it (the plan has no issues, so the resume stops with the usage error after that step).
+    await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "2"], { batchRoot: root, io })), /usage/);
+    assert.deepEqual(b.readHeld(), []);
+    assert.deepEqual(b.readAdded(), [], "an issue already in the batch is not added again");
   });
 });

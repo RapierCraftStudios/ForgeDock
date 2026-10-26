@@ -13,6 +13,7 @@ bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 command -v jq >/dev/null 2>&1 || { echo "review-staging-pre.test.sh: jq missing, skipped"; exit 0; }
 command -v git >/dev/null 2>&1 || { echo "review-staging-pre.test.sh: git missing, skipped"; exit 0; }
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+export FORGE_GH_RETRY_SLEEP=0   # no real backoff in tests
 export FORGEDOCK_HOME="$ROOT"   # resolve helpers from this checkout, not an ambient install
 
 # (1) the blocks live only here: present in the script, absent from the spec
@@ -34,6 +35,9 @@ cat > "$TMP/bin/gh" <<'STUB'
 F="$FIX"; a="$*"
 # fail-labels / fail-issues: the degraded-label / review-finding read fails (rate limit, 5xx, expired auth)
 case "$a" in "pr view"*"--json labels"*) [ -f "$F/fail-labels" ] && exit 1 ;; "issue list"*) [ -f "$F/fail-issues" ] && exit 1 ;; esac
+# flaky-<kind>: fail the first N reads of that kind (N = file content), then succeed (transient error)
+flaky() { [ -f "$F/flaky-$1" ] || return 0; local c; c=$(cat "$F/count-$1" 2>/dev/null || echo 0); echo $((c+1)) > "$F/count-$1"; [ "$c" -lt "$(cat "$F/flaky-$1")" ] && exit 1; return 0; }
+case "$a" in "pr view"*"--json labels"*) flaky labels ;; "issue list"*) flaky issues ;; "api repos/o/r/issues/"*) case "$a" in *"/comments"*) ;; *) flaky kind ;; esac ;; esac
 case "$1 $2" in
   "pr comment") while [ $# -gt 0 ]; do [ "$1" = --body ] && { printf '%s\n@@\n' "$2" >> "$F/posted"; }; shift; done; exit 0 ;;
   "pr diff") [ -f "$F/files-$3" ] && { cat "$F/files-$3"; exit 0; }; exit 1 ;;
@@ -69,6 +73,10 @@ G add -A; G commit -qm "fix: thing (#77)"; DIRECT=$(G rev-parse HEAD); G push -q
 run() { (cd "$TMP/work" && bash "$PRE" "$@"); }
 
 # (3) bundle: the merge-subject PR is kept, the issue cited in a subject is skipped, the list is persisted
+newfix bundle; : > "$FIX/issue-77"
+newfix bundleflaky; : > "$FIX/issue-77"; echo 2 > "$FIX/flaky-kind"
+OUT=$(run bundle --repo o/r --default main --staging staging --pr 9 --sd "$TMP/sd" 2>&1); RC=$?
+case "$OUT" in *"skipped):"*"77"*) ok ;; *) bad "a transient bundle_pr_kind failure must be retried so issue #77 is still skipped (got '$OUT')" ;; esac
 newfix bundle; : > "$FIX/issue-77"
 OUT=$(run bundle --repo o/r --default main --staging staging --pr 9 --sd "$TMP/sd" 2>&1); RC=$?
 [ "$RC" -eq 0 ] && ok || bad "bundle must exit 0 (got $RC: $OUT)"
@@ -106,6 +114,16 @@ OUT=$(run gate --repo o/r --pr 9 --prs-file "$TMP/prs2" 2>&1); RC=$?
 case "$OUT" in *"RESULT: BLOCK DEPLOY"*) ok ;; *) bad "gh read failure blocks: must print RESULT: BLOCK DEPLOY (got '$OUT')" ;; esac
 ! grep -q 'FORGE:GATE_PASS' "$FIX/posted" 2>/dev/null && ok || bad "gh read failure blocks: must not post GATE_PASS"
 grep -q 'FORGE:GATE_FAILURE:TYPE=gate-read-failure' "$FIX/posted" 2>/dev/null && ok || bad "gh read failure blocks: must post TYPE=gate-read-failure"
+# forge#4572: a transient read failure is retried and does not block; a persistent one (above) still blocks.
+newfix flaky; echo 2 > "$FIX/flaky-labels"; echo 3 > "$FIX/flaky-issues"
+OUT=$(run gate --repo o/r --pr 9 --prs-file "$TMP/prs2" 2>&1); RC=$?
+[ "$RC" -eq 0 ] && grep -q 'FORGE:GATE_PASS' "$FIX/posted" 2>/dev/null && ok || bad "transient label/finding read failures must be retried, not block (rc $RC: $OUT)"
+newfix flakyfew; echo 5 > "$FIX/flaky-issues"
+run gate --repo o/r --pr 9 --prs-file "$TMP/prs2" >/dev/null 2>&1; RC=$?
+[ "$RC" -eq 0 ] && ok || bad "5 transient failures fit inside the default 6 attempts (rc $RC)"
+newfix flakymany; echo 6 > "$FIX/flaky-issues"
+run gate --repo o/r --pr 9 --prs-file "$TMP/prs" >/dev/null 2>&1; RC=$?
+[ "$RC" -eq 1 ] && ! grep -q 'FORGE:GATE_PASS' "$FIX/posted" 2>/dev/null && ok || bad "failures beyond the attempt budget must still block (rc $RC)"
 newfix issuefail; : > "$FIX/fail-issues"
 run gate --repo o/r --pr 9 --prs-file "$TMP/prs" >/dev/null 2>&1; RC=$?
 [ "$RC" -eq 1 ] && ! grep -q 'FORGE:GATE_PASS' "$FIX/posted" 2>/dev/null && ok || bad "a failed review-finding read alone must block without GATE_PASS (rc $RC)"

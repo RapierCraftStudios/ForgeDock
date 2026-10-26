@@ -85,6 +85,7 @@ function routerFixture(agentsCaps) {
     const cap = agentsCaps[name];
     let status = 200, body = {};
     if (u.pathname === "/capacity") body = cap;
+    else if (u.pathname.endsWith("/usage")) body = { minutes: 4.2 };
     else if (u.pathname === "/sandboxes" && init.method === "POST") { const p = JSON.parse(init.body); body = { id: p.spec.id, state: "running", env_has_yaml: Boolean(p.spec.env?.CS_FORGE_YAML_B64) }; status = 201; }
     return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   };
@@ -103,6 +104,15 @@ test("router places on the host with the most free CPU and injects forge.yaml", 
   assert.equal(r.body.agent, "big");
   assert.equal(r.body.env_has_yaml, true);
   assert.equal(router.store.data.sandboxes.p1.agent, "big");
+});
+
+test("router usage response names the agent that ran the sandbox (#4549)", async () => {
+  const { router } = routerFixture({ big: { cpus_free: 8, mem_free_gb: 16 } });
+  await router.launch(spec("p9"));
+  let out = null;
+  const res = { writeHead() {}, end(b) { out = JSON.parse(b); } };
+  await router.handle({ method: "GET", url: "/sandboxes/p9/usage", headers: { authorization: "Bearer fd" }, socket: { remoteAddress: "x" } }, res);
+  assert.deepEqual(out, { minutes: 4.2, agent: "big" });
 });
 
 test("router answers 503 with retry-after when no host fits", async () => {
@@ -140,6 +150,34 @@ test("one-time install code works for bootstrap until expiry and enrolls exactly
   const late = router.issueCode().code;
   advance(1_801_000);
   assert.equal(router.enroll({ token: late, name: "late", url: "http://100.1.1.4:7711" }).status, 401);
+});
+
+test("inherited object keys are never install codes, agents or sandboxes", async () => {
+  const { router } = routerFixture({});
+  const get = (url, auth) => new Promise((resolve) => {
+    router.handle({ method: "GET", url, headers: auth ? { authorization: `Bearer ${auth}` } : {}, socket: {} },
+      { writeHead(st) { this.s = st; }, setHeader() {}, end() { resolve(this.s); } });
+  });
+  for (const token of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+    assert.equal(router.enroll({ token, name: "evil", url: "http://100.1.1.9:7711" }).status, 401, token);
+    assert.equal(await get(`/bootstrap/install.ps1?token=${token}`), 401, token);
+  }
+  assert.equal(Object.prototype.used, undefined);
+  for (const name of ["constructor", "toString"]) assert.equal(await get(`/agents/${name}/usage`, "fd"), 404, name);
+});
+
+test("agent and router refuse inherited or unsafe sandbox ids (#4566)", async () => {
+  const { agent } = agentFixture();
+  for (const id of ["__proto__", "_x", "../x", ""]) {
+    await assert.rejects(agent.launch({ spec: spec(id), cpus: 1, mem_gb: 1 }), (e) => e.status === 400, id);
+  }
+  assert.equal(Object.prototype.lease, undefined);
+  const get = (url) => new Promise((resolve) => {
+    agent.handle({ method: "GET", url, headers: { authorization: "Bearer agent-token" }, socket: {} }, { writeHead(st) { this.s = st; }, setHeader() {}, end() { resolve(this.s); } });
+  });
+  for (const id of ["constructor", "toString"]) assert.equal(await get(`/sandboxes/${id}`), 404, id);
+  const { router } = routerFixture({});
+  assert.equal((await router.launch(spec("__proto__"))).status, 400);
 });
 
 test("sandbox gets a per-sandbox credential relay, never the router or agent token", async () => {
@@ -338,4 +376,43 @@ test("linux installer --dry-run resolves settings and redacts the token", () => 
 test("linux installer requires a router and token", () => {
   const env = { ...process.env }; delete env.ROUTER_URL; delete env.ENROLL_TOKEN;
   assert.notEqual(spawnSync("bash", [linuxInstaller, "--dry-run"], { env }).status, 0);
+});
+
+test("router /status exposes agent liveness: paused and unreachable agents are not online (#4547)", async () => {
+  const { router } = routerFixture({ up: { cpus_free: 4, mem_free_gb: 8 }, asleep: { cpus_free: 4, mem_free_gb: 8, paused: true } });
+  const s = await router.status();
+  assert.equal(s.total, 2);
+  assert.equal(s.online, 1);
+  assert.deepEqual(s.agents.map((a) => [a.name, a.ok, a.paused]), [["up", true, false], ["asleep", true, true]]);
+});
+
+test("lane image version equals the dispatcher version (#4545)", async () => {
+  const { laneImageTag, laneBuildArgs, versionOf, repoRoot } = await import("../pool/version.mjs");
+  const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+  assert.equal(versionOf().version, pkg.version);
+  assert.equal(laneImageTag(pkg.version), `forgedock-lane:${pkg.version}`);
+  assert.deepEqual(laneBuildArgs(pkg.version), { FORGEDOCK_VERSION: pkg.version });
+  const df = readFileSync(join(repoRoot, "pool", "image", "Dockerfile"), "utf8");
+  assert.match(df, /^ARG FORGEDOCK_VERSION$/m, "no separate version pin in the Dockerfile");
+  const dir = tmpDir("lane-image-");
+  const docker = { ...fakeDocker(), builds: [], async hasImage() { return false; }, async build(d, tag, args) { this.builds.push({ tag, args }); } };
+  const agent = createAgent({ state_dir: dir, allow_cpus: 2, allow_mem_gb: 4, router_url: "http://x" }, { docker, log: quiet });
+  await agent.ensureImage();
+  assert.deepEqual(docker.builds, [{ tag: `forgedock-lane:${pkg.version}`, args: { FORGEDOCK_VERSION: pkg.version } }]);
+});
+
+test("forgedock update upgrades pool agents only when a router is configured (#4545)", async () => {
+  const { upgradeAgentsAfterUpdate } = await import("../pool/version.mjs");
+  const dir = tmpDir("upd-hook-");
+  const configPath = join(dir, "router.json");
+  const calls = [];
+  const runPoolCli = async (argv) => { calls.push(argv); };
+  assert.equal(await upgradeAgentsAfterUpdate({ configPath, runPoolCli }), "skipped");
+  assert.equal(calls.length, 0);
+  writeFileSync(configPath, "{}");
+  assert.equal(await upgradeAgentsAfterUpdate({ configPath, runPoolCli }), "upgraded");
+  assert.deepEqual(calls, [["upgrade", "--config", configPath]]);
+  const warns = [];
+  assert.equal(await upgradeAgentsAfterUpdate({ configPath, runPoolCli: async () => { throw new Error("boom"); }, warn: (m) => warns.push(m) }), "failed");
+  assert.match(warns[0], /boom/);
 });

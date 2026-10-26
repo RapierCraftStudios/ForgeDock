@@ -60,6 +60,27 @@ describe("amendments", () => {
   });
 });
 
+describe("#4574 amendment slips", () => {
+  it("type for kind, amend-requirement and limitation apply as defer; an R# id fills requirement", () => {
+    const a = applyAmendments(C, [{ kind: "amend-requirement", id: "R2", why: "stored hashed" }, { id: "A1", requirement: "R1", type: "limitation", why: "plugin limit" }]);
+    assert.deepEqual(a.problems, []);
+    assert.deepEqual(a.toTrack.map((r) => r.id).sort(), ["R1", "R2"]);
+    assert.ok(a.contract.requirements.every((r) => r.disposition === "defer"));
+  });
+  it("an unknown kind names the valid kinds and shows the full amendment", () => {
+    const why = "x".repeat(300);
+    const a = applyAmendments(C, [{ kind: "rewrite", why }]);
+    assert.match(a.problems[0], /unknown kind 'rewrite'; valid kinds are add-deliverable, add-requirement, defer, post-deploy/);
+    assert.ok(a.problems[0].includes(why));
+  });
+  it("an Object.prototype key as kind is an unknown kind, not a slip", () => {
+    assert.match(applyAmendments(C, [{ kind: "constructor", why: "w" }]).problems[0], /unknown kind 'constructor'; valid kinds are add-deliverable/);
+  });
+  it("an incomplete known kind names the missing field", () => {
+    assert.match(applyAmendments(C, [{ kind: "defer", why: "w" }]).problems[0], /'defer' needs requirement/);
+  });
+});
+
 describe("precheck (deterministic, no reviewer)", () => {
   const res = { requirements: [{ id: "R1", status: "implemented" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
   it("passes a complete, validated, in-scope change", () => assert.deepEqual(precheck({ contract: C, result: res, changedFiles: files }), { ok: true, failures: [], superseded: [], ciCovered: [] }));
@@ -622,5 +643,56 @@ describe("#4404 verified out of band: a requirement measured outside the lane is
     assert.deepEqual(sk.requirements.find((r) => r.id === "R3"), { id: "R3", status: "", evidence: "", validated_by: "", verify: "out_of_band", job: "lighthouse-nightly", instrumented: null, note: "" });
     assert.equal("instrumented" in sk.requirements[0], false);
     assert.deepEqual(outOfBandRequirements(tagged), [{ id: "R3", quote: LH, job: "lighthouse-nightly" }]);
+  });
+});
+
+describe("#4594 amend-requirement", () => {
+  const am = { kind: "amend-requirement", requirement: "R1", text: "regenerate and reveal the feed URL once", why: "token stored hash-only" };
+  it("with text it keeps deliver, tracks nothing and records the amendment", () => {
+    const a = applyAmendments(C, [am]);
+    assert.deepEqual(a.problems, []); assert.deepEqual(a.toTrack, []);
+    const r = a.contract.requirements.find((x) => x.id === "R1");
+    assert.equal(r.disposition, "deliver"); assert.equal(r.amendment.text, am.text); assert.equal(r.amendment.why, am.why); assert.equal(r.quote, C.requirements[0].quote);
+  });
+  it("an unknown requirement is a problem; the frozen contract is untouched", () => {
+    assert.match(applyAmendments(C, [{ ...am, requirement: "R9" }]).problems[0], /unknown requirement R9/);
+    assert.equal(C.requirements[0].amendment, undefined);
+  });
+  it("decide: an amended requirement the reviewer rejects fails as 'amendment not accepted'; accepted conforms", () => {
+    const k = { ...ctx, contract: applyAmendments(C, [am]).contract };
+    assert.equal(decide(good, k).state, "conforms");
+    const d = decide({ ...row("R1", { status: "partial", note: "amendment: still never shows the URL" }), issue_coverage: good.issue_coverage.map((c) => (c.quote === Q1 ? { ...c, contract_ids: ["R1"], status: "narrowed" } : c)) }, k);
+    assert.equal(d.state, "nonconforming");
+    assert.ok(d.failures.length >= 2 && d.failures.every((f) => /amendment not accepted \(.*amended to "regenerate/.test(f.detail)));
+  });
+  it("explainFailures shows the amended text", () => {
+    const c = applyAmendments(C, [am]).contract;
+    assert.match(explainFailures([{ code: "x", detail: "R1 partial" }], c)[0].detail, /amended to "regenerate and reveal/);
+  });
+});
+
+describe("post-deploy check ids (#4626)", () => {
+  const pd = (extra = {}) => ({ ...C, requirements: [{ id: "R1", quote: Q1, disposition: "post-deploy", why: "needs prod", ...extra }, C.requirements[1]] });
+  it("validateContract: a post-deploy requirement needs a well-formed check id", () => {
+    assert.ok(validateContract(pd(), ISSUE).problems.some((p) => /post-deploy needs a check id/.test(p)));
+    assert.ok(validateContract(pd({ check: "Bad Id" }), ISSUE).problems.some((p) => /post-deploy needs a check id/.test(p)));
+    assert.ok(!validateContract(pd({ check: "login-smoke" }), ISSUE).problems.some((p) => /check id/.test(p)));
+  });
+  it("applyAmendments: a post-deploy amendment needs a check id", () => {
+    const bad = applyAmendments(C, [{ kind: "post-deploy", requirement: "R1", why: "w" }], ISSUE);
+    assert.ok(bad.problems.some((p) => /needs a check id/.test(p)));
+    const ok = applyAmendments(C, [{ kind: "post-deploy", requirement: "R1", why: "w", check: "login-smoke" }], ISSUE);
+    assert.equal(ok.contract.requirements[0].check, "login-smoke");
+  });
+  it("precheck: a check id on neither branch is unimplemented; null checkIds skips the rule", () => {
+    const res = { requirements: [{ id: "R1", status: "post-deploy" }, { id: "R2", status: "implemented" }], validation: [{ id: "V1", exit: 0 }] };
+    const c = pd({ check: "login-smoke" });
+    assert.ok(precheck({ contract: c, result: res, changedFiles: files, checkIds: new Set() }).failures.some((f) => f.kind === "check_unknown"));
+    assert.ok(!precheck({ contract: c, result: res, changedFiles: files, checkIds: new Set(["login-smoke"]) }).failures.some((f) => f.kind === "check_unknown"));
+    assert.ok(!precheck({ contract: c, result: res, changedFiles: files }).failures.some((f) => f.kind === "check_unknown"));
+  });
+  it("followupItems names the check in a post-deploy item", () => {
+    const [i] = followupItems([{ id: "R1", quote: Q1, disposition: "post-deploy", why: "w", check: "login-smoke" }]);
+    assert.match(i.why, /^post-deploy: \[check:login-smoke\] w$/);
   });
 });

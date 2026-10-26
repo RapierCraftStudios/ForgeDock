@@ -90,6 +90,7 @@ describe("review-staging flow", () => {
     assert.deepEqual(comments(w), [`<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${HEAD.slice(0, 7)} -->`]);
     assert.equal(w.files[`${SD}/staging_pr_number.rk`], "42\n");
     assert.equal(w.files[`${SD}/42_launched_review_agents`], "");
+    assert.equal(w.files[`${SD}/42_launched_review_agents.head`], `${HEAD}\n`);
     assert.deepEqual(w.scripts.map((s) => s.sub && s.script === "review-staging-pre.sh" ? s.sub : s.script), ["bundle", "gate", "scope", "review-prepare.sh"]);
     const prep = w.scripts.find((s) => s.script === "review-prepare.sh").args;
     for (const f of ["--no-delta", "--build-gate", "advisory", "--out", CTX]) assert.ok(prep.includes(f), f);
@@ -105,6 +106,15 @@ describe("review-staging flow", () => {
     assert.ok(sec.includes("SCOPE_MODE=scoped") && sec.includes("UNREVIEWED_COMMITS: c2") && sec.includes("DEPLOY_WIRING_FILES: .github/workflows/ci.yml"));
     assert.ok(sec.includes("drift in ci.yml") && sec.includes("Read-only git rule"));
     assert.ok(w.files[`${SD}/review-staging-42/brief-infra.md`].startsWith("PROTO 42\n\n---\n\nINFRA infra ctx idx churn Proj"));
+  });
+
+  it("references a large diff slice by file instead of inlining it, keeping the brief bounded (#4573)", async () => {
+    const big = "+ line of a very large diff\n".repeat(5000);
+    const w = world({ files: { "/slice-security.diff": big } });
+    assert.equal(await reviewStagingFromCli(["42"], w.io), 0, w.err.join("\n"));
+    const sec = w.files[`${SD}/review-staging-42/brief-security.md`];
+    assert.ok(sec.includes("slice=(diff slice too large to inline") && sec.includes("/slice-security.diff"));
+    assert.ok(!sec.includes("very large diff") && sec.length < 4000, `brief is ${sec.length} chars`);
   });
 
   it("resolves the open staging->main PR when none is given and carries prior findings on re-entry", async () => {
@@ -402,6 +412,27 @@ describe("review-staging --summary", () => {
       assert.match(w.out[0], /RESULT: BLOCK DEPLOY/);
     });
   }
+
+  it("a CONFIRMED HIGH whose filed issue is closed does not block; the summary lists it as resolved (#4569)", async () => {
+    const w = await finalized({
+      findings: [{ id: "INFRA-1", severity: "HIGH", confidence: "CONFIRMED", title: "DCO exemption only on staging" }],
+      items: [{ id: "INFRA-1", action: "skip-resolved", title: "dco", dedup_of: 4564 }],
+    });
+    assert.equal(await reviewStagingFromCli(["--summary"], w.io), 0, w.err.join("\n"));
+    const b = posted(w)[0];
+    assert.ok(b.startsWith("<!-- FORGE:GATE_PASS -->\n"));
+    assert.match(b, /\| Findings \| 0 CRITICAL \/ 0 HIGH/);
+    assert.match(b, /resolved \(excluded from the verdict\): HIGH INFRA-1 DCO exemption only on staging \(closed #4564\)/);
+  });
+
+  it("an open CONFIRMED HIGH still blocks next to a resolved one (#4569)", async () => {
+    const w = await finalized({
+      findings: [{ id: "A-1", severity: "HIGH", confidence: "CONFIRMED", title: "fixed" }, { id: "A-2", severity: "HIGH", confidence: "CONFIRMED", title: "open" }],
+      items: [{ id: "A-1", action: "skip-resolved", dedup_of: 4564 }, { id: "A-2", action: "skip-dedup", dedup_of: 4565 }],
+    });
+    assert.equal(await reviewStagingFromCli(["--summary"], w.io), 1);
+    assert.match(posted(w)[0], /Staging Review: NEEDS FIXES FIRST[\s\S]*1 CONFIRMED HIGH/);
+  });
 
   it("a LIKELY HIGH does not block; a deleted test-gate verdict fails closed", async () => {
     const w = await finalized({ findings: [{ severity: "HIGH", confidence: "LIKELY" }] });

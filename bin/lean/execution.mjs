@@ -32,6 +32,11 @@
  *
  * Hybrid (#4256): `placeLane` places each lane from facts (lane kind, validation weight, host headroom, verify.mode);
  * orchestrate runs a remote-placed lane locally when `max_remote` or the execution budget is exhausted.
+ *
+ * Host capabilities (#4542): a lane that needs something only the dispatching host has (the SOPS/age key, scoped ops
+ * credentials, read-only prod monitor SSH) is placed local in `remote` and `hybrid` mode, because a sandbox relays none of
+ * them (`detectNeeds`, `placeLane` `needs`). forge.yaml `execution.host_capabilities` declares which the host has; a
+ * remote lane that blocks on one of them ends `env.capability_remote` and is recovered locally (`hostCapabilityBlock`).
  */
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -52,6 +57,8 @@ import { detectPins } from "./toolchain.mjs";
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
 export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote", "pool"]);
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
+const CAPABILITY_RE = /^[a-z][a-z0-9_-]*$/;
+const safeRegExp = (src) => { try { return new RegExp(src, "i"); } catch { return null; } };
 const ENV_RE = /^[A-Z_][A-Z0-9_]*$/;
 const IMAGE_RE = /^[A-Za-z0-9][A-Za-z0-9._\/:@-]*$/;
 const readJson = (file) => { try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; } };
@@ -79,13 +86,19 @@ export function parseExecution(sec = {}) {
   const tokenEnv = ENV_RE.test(str(s.token_env)) ? str(s.token_env) : null;
   const cacheStore = str(s.cache_store) || null;
   const allowActions = str(s.allow_actions).toLowerCase() === "true";
+  const fallbackLocal = str(s.fallback_local).toLowerCase() === "true";
   const heavyRaw = str(s.heavy).toLowerCase();
   const heavy = heavyRaw === "true" ? true : heavyRaw === "false" ? false : null;
   const cap = (v) => { const t = str(v), x = Number(t); return t !== "" && Number.isFinite(x) && x >= 0 ? x : null; };
   const cpm = cap(s.cost_per_minute);
   const budget = { batchMinutes: cap(s.budget_minutes), batchUsd: cap(s.budget_usd), dayMinutes: cap(s.day_budget_minutes), dayUsd: cap(s.day_budget_usd),
     onBudget: str(s.on_budget) === "local" ? "local" : "stop", costPerMinute: cpm ?? 0 };
-  return { mode, maxRemote, provider, image, secrets, budget, ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(heavy !== null ? { heavy } : {}) };
+  const capList = (v) => (Array.isArray(v) ? v : str(v) ? str(v).split(",") : []).map((x) => str(x).toLowerCase()).filter((x) => CAPABILITY_RE.test(x));
+  const hostCapabilities = [...new Set(capList(s.host_capabilities))];
+  const patRaw = Array.isArray(s.host_capability_patterns) ? s.host_capability_patterns : str(s.host_capability_patterns) ? str(s.host_capability_patterns).split(",") : [];
+  const hostCapabilityPatterns = patRaw.map((x) => { const t = str(x), i = t.indexOf(":"); return { name: t.slice(0, i).trim().toLowerCase(), pattern: t.slice(i + 1).trim() }; })
+    .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
+  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -159,6 +172,33 @@ export function placement(exec) {
   return exec?.mode === "remote" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1 ? "remote" : "local";
 }
 
+/** Host-only capabilities and the issue-text signals that mean a lane needs them (#4542). */
+const CAPABILITY_SIGNALS = Object.freeze({
+  sops: /\.secrets\/[^\s`'")]*\.enc\.ya?ml|\bsops\b|\bage key\b|\.age\//i,
+  prod_monitor: /\bssh\s+[\w.-]*-monitor\b|\b(?:ovh|netcup)-monitor\b|\bobs-psql\b|\bprod(?:uction)? monitor/i,
+  ops_credentials: /\bcredentials\.yaml\b|\bops[ _-]credentials\b/i,
+});
+
+/**
+ * Host-only capabilities named by `text` (issue body, contract or a builder summary), zero LLM, sorted by name: the
+ * built-in signals above, a declared name written out (`prod_monitor`, `prod monitor`) and `exec.hostCapabilityPatterns`.
+ */
+export function detectNeeds(text, exec = null) {
+  const t = String(text ?? "");
+  const found = new Set();
+  for (const [name, re] of Object.entries(CAPABILITY_SIGNALS)) if (re.test(t)) found.add(name);
+  for (const name of exec?.hostCapabilities ?? []) if (new RegExp(`\\b${name.replace(/[_-]/g, "[ _-]")}\\b`, "i").test(t)) found.add(name);
+  for (const { name, pattern } of exec?.hostCapabilityPatterns ?? []) { const re = safeRegExp(pattern); if (re?.test(t)) found.add(name); }
+  return [...found].sort();
+}
+
+/** Declared host capabilities a remote lane's block summary names (#4542); empty when it names none the host has. */
+export function hostCapabilityBlock(summary, caps = null) {
+  const have = new Set(caps?.hostCapabilities ?? []);
+  const named = detectNeeds(summary, caps);
+  return named.length && named.every((n) => have.has(n)) ? named : [];
+}
+
 const DOCS_LABELS = new Set(["docs", "documentation", "type:docs"]);
 
 /**
@@ -167,10 +207,15 @@ const DOCS_LABELS = new Set(["docs", "documentation", "type:docs"]);
  * `validationWeight`, `headroom` from `hostHeadroom`. In order: a non-hybrid mode keeps `placement()`; `max_remote` 0 is
  * local; `verify.mode: ci` is local (heavy validation already runs, and is billed, on CI); a docs-only lane is local; a
  * heavy-validation lane is remote; a host without headroom sends the lane remote; anything else stays on the host.
+ * A `needs` entry (host-only capability, #4542) the provider does not `relays` is local first, in `remote` mode too.
  * Capacity (`max_remote` reached, the execution budget) is applied at admission by orchestrate, which falls back to local.
  */
-export function placeLane({ exec = null, verifyMode = "local", labels = [], weight = null, headroom = null } = {}) {
+export function placeLane({ exec = null, verifyMode = "local", labels = [], weight = null, headroom = null, needs = [], relays = [] } = {}) {
   const mode = exec?.mode;
+  if (mode === "remote" || mode === "hybrid") {
+    const missing = (Array.isArray(needs) ? needs : []).map(String).filter((n) => n && !(Array.isArray(relays) ? relays : []).includes(n));
+    if (missing.length) return { where: "local", reason: `host capability: ${missing.join(", ")}` };
+  }
   if (mode !== "hybrid") { const where = placement(exec); return { where, reason: `mode ${EXECUTION_MODES.includes(mode) ? mode : "local"}` }; }
   if (!(Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1)) return { where: "local", reason: "max_remote 0" };
   if (verifyMode === "ci") return { where: "local", reason: "verify.mode ci: validation runs on CI, not billed twice" };
@@ -409,7 +454,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     try { u = typeof provider.usage === "function" ? await provider.usage(h, { startedAt, endedAt }) : null; } catch { u = null; }
     const minutes = nonNeg(u?.minutes) ?? nonNeg(h?.minutes) ?? round1(Math.max(0, endedAt - startedAt) / 60000);
     const cost = nonNeg(u?.cost_usd) ?? minutes * cpm;
-    return { ...r, sandbox: { provider: provider.name, id: h.id, minutes: round1(minutes), cost_usd: round6(cost) } };
+    const agent = typeof u?.agent === "string" && u.agent ? u.agent : typeof h?.agent === "string" && h.agent ? h.agent : null; // #4549: the pool agent
+    return { ...r, sandbox: { provider: provider.name, id: h.id, minutes: round1(minutes), cost_usd: round6(cost), ...(agent ? { agent } : {}) } };
   };
   const tear = async (led, h) => {
     let ok = false;
@@ -434,6 +480,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
     : { terminalReason: "needs-human", code: OUTCOME_CODES.SANDBOX_START_FAILED, detail: `sandbox ${id} failed to start: ${errText(e)}` });
   return {
+    // #4612: a graceful stop of a live sandbox (the provider's checkpoint stop); false when it has none.
+    stopLane: async (n, rec) => (typeof provider.stop === "function" && rec?.handle ? (await provider.stop(rec.handle)) === true : false),
     runOne: async (n, lane, ctx = {}) => {
       const led = ledgerFor(n);
       const base = { provider: provider.name, id: provider.idFor(n), issue: n, startedAt: now() };

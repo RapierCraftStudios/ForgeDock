@@ -54,7 +54,7 @@ function fakeTransport({ launchError = null } = {}) {
 function remoteFixture(batch, { launchError = null } = {}) {
   const transport = fakeTransport({ launchError });
   const provider = remoteProvider({ batch, repo: "o/r", settings: { image: "img:1", cacheStore: "s3://cache", tokenEnv: "FD_TOKEN", secrets: ["GH_TOKEN"] }, transport,
-    env: { GH_TOKEN: SECRET, FD_TOKEN: TOKEN }, credentials: (n) => ({ GH_TOKEN: SECRET, FD_TOKEN: TOKEN })[n] ?? null });
+    env: { GH_TOKEN: SECRET, FD_TOKEN: TOKEN }, credentials: (n) => ({ GH_TOKEN: SECRET, FD_TOKEN: TOKEN })[n] ?? null, gitIdentity: () => ({}) });
   return {
     provider, transport,
     finish: (h, result) => { const b = transport.boxes.get(h.id); b.log += `lane done; token ${SECRET} and ${TOKEN}\n`; b.result = result; b.state = "exited"; b.minutes = 3.5; },
@@ -145,6 +145,23 @@ describe("remote adapter (#4254)", () => {
     const p = remoteProvider({ batch, repo: "o/r", settings: { secrets: ["GH_TOKEN"] }, transport, env: {}, credentials: (n) => (n === "GH_TOKEN" ? "from-keychain" : null) });
     await p.start({ issue: 1, args: [], env: {}, secrets: ["GH_TOKEN"] });
     assert.equal(transport.specs[0].env.GH_TOKEN, "from-keychain");
+  });
+
+  it("the sandbox commits as the dispatching host's git identity; a lane env identity wins", async () => {
+    const batch = openBatch(join(tmpDir("remote-git-"), "batches"), "bt");
+    const transport = fakeTransport();
+    const p = remoteProvider({ batch, repo: "o/r", transport, env: {}, credentials: () => null, gitIdentity: () => ({ name: "bot[bot]", email: "1+bot[bot]@users.noreply.github.com" }) });
+    await p.start({ issue: 1, args: [], env: {} });
+    const env = transport.specs[0].env;
+    for (const role of ["AUTHOR", "COMMITTER"]) {
+      assert.equal(env[`GIT_${role}_NAME`], "bot[bot]");
+      assert.equal(env[`GIT_${role}_EMAIL`], "1+bot[bot]@users.noreply.github.com");
+    }
+    await p.start({ issue: 2, args: [], env: { GIT_AUTHOR_NAME: "lane", GIT_AUTHOR_EMAIL: "lane@example.invalid" } });
+    assert.equal(transport.specs[1].env.GIT_AUTHOR_EMAIL, "lane@example.invalid");
+    const none = remoteProvider({ batch, repo: "o/r", transport, env: {}, credentials: () => null, gitIdentity: () => ({ name: "", email: "" }) });
+    await none.start({ issue: 3, args: [], env: {} });
+    assert.equal("GIT_AUTHOR_EMAIL" in transport.specs[2].env, false);
   });
 
   it("streams the lane log into the batch log, redacted; billable minutes on the handle and on the lane result", async () => {
@@ -309,5 +326,33 @@ describe("remote capacity (GET /status, #4540)", () => {
     assert.deepEqual(await p({ capacity: async () => ({ free: 1 }) }).capacity(), { free: 1 });
     assert.equal(await p({}).capacity(), null);
     assert.equal(await p({ capacity: async () => { throw new Error("x"); } }).capacity(), null);
+  });
+});
+
+describe("remote stop at the checkpoint (#4612)", () => {
+  it("httpTransport.stop: POST .../stop, 2xx true, 404/405 false, other statuses throw", async () => {
+    const calls = [];
+    const mk = (status) => httpTransport({ endpoint: "https://pool.example/v1", fetchFn: async (url, init) => { calls.push([init.method, url]); return { status, ok: status < 400, text: async () => "", headers: { get: () => null } }; } });
+    assert.equal(await mk(202).stop("a b"), true);
+    assert.deepEqual(calls[0], ["POST", "https://pool.example/v1/sandboxes/a%20b/stop"]);
+    assert.equal(await mk(404).stop("x"), false);
+    assert.equal(await mk(405).stop("x"), false);
+    await assert.rejects(mk(500).stop("x"), /stop: HTTP 500/);
+  });
+
+  it("provider.stop and providerLanes.stopLane signal the transport, never destroy; no transport stop = false", async () => {
+    const root = tmpDir("remote-stop-");
+    const batch = openBatch(root, "bt");
+    const { provider, transport } = remoteFixture(batch);
+    const stopped = [];
+    const lanes = providerLanes({ provider, laneArgs: () => [], ledgerFor: () => null });
+    assert.equal(await lanes.stopLane(1, { handle: { id: "sbx" } }), false, "the transport has no stop");
+    transport.stop = async (id) => { stopped.push(id); return true; };
+    assert.equal(await lanes.stopLane(1, { handle: { id: "sbx" } }), true);
+    assert.equal(await lanes.stopLane(1, {}), false, "no handle");
+    transport.stop = async () => { throw new Error("boom"); };
+    assert.equal(await provider.stop({ id: "sbx" }), false);
+    assert.deepEqual(stopped, ["sbx"]);
+    assert.deepEqual(transport.destroyed, []);
   });
 });
