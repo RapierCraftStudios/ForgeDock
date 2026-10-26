@@ -124,6 +124,8 @@ function world(o = {}) {
       if (a[0] === "diff" && a[1] === "--check") return "";
       if (a[0] === "grep") return w.markers ? "src/foo.js:3:<<<<<<< HEAD" : "";
       if (a[0] === "merge" && a[1] === "--abort") { w.mergeInProgress = false; return ""; }
+      if (a[0] === "rev-parse" && a.length === 2 && (o.shipped ?? []).includes(String(a[1]).replace(/^origin\//, ""))) return `tip-${a[1]}`; // #4623
+      if (a[0] === "rev-list" && a.includes("--merges")) { const l = String(a.at(-1)).slice(1).replace(/^origin\//, ""); return (o.shipped ?? []).includes(l) ? `m1 s1 tip-origin/${l}\n` : ""; }
       if (a[0] === "rev-parse" && a.length === 2 && /^origin\//.test(String(a[1]))) return w.baseHeads.length > 1 ? w.baseHeads.shift() : w.baseHeads[0]; // #4386: the base head moves only when a test says so
       if (a[0] === "rev-parse") return w.head;
       if (a[0] === "diff" && a[1] === "--name-only" && !a.some((x) => String(x).includes("..."))) return w.changed.filter((f) => !(o.equalToBase ?? []).includes(f)).join("\n");
@@ -131,7 +133,7 @@ function world(o = {}) {
       if (a[0] === "diff" && a[1] === "--numstat") return w.numstat ?? "";
       if (a[0] === "ls-files") return [...new Set(["src/foo.js", "src/bar.js", "test/foo.test.js", ...w.changed])].join("\n");
       if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
-      if (a[0] === "merge-base" && a[1] === "--is-ancestor") { if ((o.shipped ?? []).includes(String(a[2]).replace(/^origin\//, ""))) return ""; throw new Error("not an ancestor"); } // #4593
+      if (a[0] === "merge-base" && a[1] === "--is-ancestor") { if ([...(o.shipped ?? []), ...(o.unusedAncestors ?? [])].includes(String(a[2]).replace(/^origin\//, ""))) return ""; throw new Error("not an ancestor"); } // #4593
       if (a[0] === "ls-remote" && String(a.at(-1)).startsWith("refs/heads/")) { const b = a.at(-1).slice("refs/heads/".length); return (o.branchesOnOrigin ?? ["staging", "main"]).includes(b) ? `abc\trefs/heads/${b}\n` : ""; }
       if (a[0] === "ls-remote") return w.remote;
       if (a[0] === "show" && w.baseFiles) { if (!(a[1] in w.baseFiles)) throw new Error(`fatal: path not in ${a[1]}`); return w.baseFiles[a[1]]; }
@@ -3785,6 +3787,12 @@ describe("shipped lane follows the open PR base (#4593)", () => {
     assert.notEqual(r.terminalReason, "needs-human");
     assert.equal(r.terminalReason, "merged");
     assert.ok(w.calls.some((c) => c[0] === "git" && c.includes("origin/milestone/new..refs/heads/feat/issue-7-lean")), "work is compared against the PR base");
+  });
+  it("unused lane at the staging tip is not shipped (#4623)", async () => {
+    // ancestor of staging but no merge commit took it: the hand-retargeted PR must stop, not be followed
+    const w = world({ milestone: "Old", branchesOnOrigin: ["staging", "milestone/old", "milestone/new"], unusedAncestors: ["milestone/old"], prList: pr("milestone/new"), remote: "abc\trefs/heads/feat/issue-7-lean" });
+    const r = await run(w, { lane: undefined });
+    assert.deepEqual([r.terminalReason, r.code], ["needs-human", "lane.mismatch"]);
   });
   it("stays needs-human when the lane is not shipped, the base is shipped, missing, or the default branch", async () => {
     for (const [o, code] of [
