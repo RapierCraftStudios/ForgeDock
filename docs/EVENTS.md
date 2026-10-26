@@ -31,11 +31,11 @@ call, no consumer required. With no configuration the events go only to a local 
 | `pr.merged` | The run ends `merged` (`pr`, `cost_usd`, `wall_ms` set). | `milestone`, `code` |
 | `probe.passed` / `probe.failed` | A declared acceptance probe is recorded (`forgedock probe`, batch sweep). | `detail`, `fix` |
 | `release.promoted` | Reserved (schema only): a fix reached the default branch. | `fix`, `default_branch` |
-| `regression.detected` | Reserved (schema only): release monitoring found a regression. | `subject`, `metric`, `detail` |
-| `experiment.verdict` | Reserved (schema only): an experiment reached a verdict. | `experiment`, `verdict`, `detail` |
+| `regression.detected` | A windowed post-deploy check failed and filed a regression issue (`forgedock probe --due`, daemon timer; `issue` is the monitored follow-up). | `subject`, `metric`, `detail` |
+| `experiment.verdict` | `forgedock stats --experiment <id> --emit-event` found targets `met` or `missed` (`inconclusive` is not emitted; plain `stats` never emits). | `experiment`, `verdict`, `detail` |
 
-The reserved types are defined and documented now so consumers can rely on them; the parts that detect those signals call
-`emitEvent(type, data, ctx)` from `bin/engine/events.mjs` when they land. Nothing emits them yet.
+`release.promoted` is still reserved: the schema, docs and `promotedEvent` builder exist, and the part that detects promotion
+calls `emitEvent(type, data, ctx)` from `bin/engine/events.mjs` when it lands. Nothing emits it yet.
 
 ## Local sink
 

@@ -51,6 +51,25 @@ export function probeEvent(row) {
   return { type: row.outcome === "pass" ? "probe.passed" : "probe.failed", data: { detail: row.detail, fix: row.fix }, ctx: { issue: row.issue } };
 }
 
+/** Monitor sweep row ({issue, outcome, detail, regression}) -> regression.detected; null unless a fail that filed a regression issue. */
+export function regressionEvent(row) {
+  if (row?.outcome !== "fail" || !Number.isSafeInteger(row.regression) || row.regression < 1) return null;
+  return { type: "regression.detected", data: { subject: `post-deploy check of #${row.issue}`, metric: "post_deploy_check", detail: row.detail }, ctx: { issue: row.issue } };
+}
+
+/** Experiment report ({id, targets, targets_met}) -> experiment.verdict (met | missed | inconclusive); null without an id. */
+export function experimentEvent(report) {
+  if (!report || typeof report.id !== "string" || !report.id) return null;
+  const passes = Object.values(report.targets ?? {}).map((t) => t?.pass);
+  const verdict = report.targets_met === true ? "met" : passes.includes(false) ? "missed" : "inconclusive";
+  return { type: "experiment.verdict", data: { experiment: report.id, verdict, detail: `${passes.length} target(s)` }, ctx: {} };
+}
+
+/** A fix reached the default branch -> release.promoted; null without a fix. Reserved: no detection emits it yet. */
+export function promotedEvent({ fix, default_branch } = {}) {
+  return typeof fix === "string" && fix ? { type: "release.promoted", data: { fix, default_branch }, ctx: {} } : null;
+}
+
 /**
  * Pure mapping of one run-log record to {type, data, ctx} or null. `cost` is the lane's running spend, kept by the caller
  * from PHASE_ATTEMPT_USAGE (`cost_usd_delta` when present, else `cost_usd`).
