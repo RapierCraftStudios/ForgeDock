@@ -1341,3 +1341,12 @@ branches:
 #   # Local ledger path where imported cards are merged.
 #   # Default: ".forge/ledger" — must match index.cache_dir if configured.
 #   # ledger_path: ".forge/ledger"
+
+# ---------------------------------------------------------------------------
+# events: outbound lifecycle events (#4630, docs/EVENTS.md). The local JSONL
+# sink is always on (FORGE_EVENTS=off disables it); the webhook needs both keys.
+# ---------------------------------------------------------------------------
+# events:
+#   webhook_url: https://hooks.example.com/forgedock   # https, or http on localhost
+#   webhook_secret_env: FORGE_EVENTS_SECRET            # NAME of the env var holding the HMAC secret
+#   dir: ~/.forge/events                               # local JSONL directory
