@@ -127,6 +127,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    default 300; no Actions minutes). Failures go back to the builder
    (`precheckFailurePrompt`, up to `max_rounds`); no commit / rounds exhausted is
    an anomaly and the lane continues (CI stays the gate). `PRECHECK_COMMANDS` event.
+   Timeout (rc 124, #4589/#4620): retried once longer if the round budget has room; a spent budget defers the
+   command to CI, but a command that hit its own timeout with no room for a longer retry stays a failing rc 124.
    #4363 fresh fix sessions (`fixround.mjs` + `lean.mjs` `fixRound`): precheck, CI (verify and merge), docs,
    structure, enumerating and sequence rounds, and conformance/review FAILs whose failures all cite a `file:line`
    (`freshFix`/`citesFileLine`), run with `resume: null` on `fixModel` (forge.yaml `lean.fix_model`,
