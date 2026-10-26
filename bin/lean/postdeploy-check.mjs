@@ -68,7 +68,7 @@ export async function checksAt(git, refs, cwd) {
 const fenced = (s) => { const f = "`".repeat(Math.max(3, ...[...String(s).matchAll(/`+/g)].map((m) => m[0].length + 1))); return `${f}\n${String(s).trim() || "(no output)"}\n${f}`; };
 
 /** Run each distinct check id with the probe runner (minimal env, timeout, masked output): `[{id, result, exit, ms, output}]`. */
-export async function runChecks({ ids, checks, cwd, config, env, spawn }) {
+export async function runNamedChecks({ ids, checks, cwd, config, env, spawn }) {
   const rows = [];
   for (const id of [...new Set(ids)]) {
     const r = await runProbe(checks[id], { cwd, env: probeEnv(config.env, env), mask: config.env.map((k) => env[k]), timeoutS: config.timeoutS, ...(spawn ? { spawn } : {}) });
@@ -119,7 +119,7 @@ export async function measureFollowup({ iss, repo, parent, def, shas = [], cwd, 
   try { defaultSha = String(await io.git(["rev-parse", `origin/${def}`], { cwd })).trim() || null; } catch { /* recorded as null */ }
   const rows = [];
   if (prior?.result !== "pass") {
-    rows.push(...await runChecks({ ids, checks, cwd, config, env, spawn }));
+    rows.push(...await runNamedChecks({ ids, checks, cwd, config, env, spawn }));
     const ok = rows.every((r) => r.result === "pass");
     const at = now();
     const win = windowed && ok ? { at: new Date(at).toISOString(), window_until: new Date(at + Math.max(...ids.map((id) => checks[id].forMs))).toISOString(), every_ms: Math.min(...ids.map((id) => checks[id].everyMs)) } : {};

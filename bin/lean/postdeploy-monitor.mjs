@@ -8,7 +8,7 @@
  * regression issue naming the fix commit and the last-passing and breaking release, then closes the follow-up. No model call.
  */
 import { readProbeConfig, resolveDefaultBranch, PROBE_MARKER, OUTPUT_TAIL } from "./probe.mjs";
-import { MONITORING_LABEL, checksAt, itemCheckIds, monitorRecord, runChecks, CHECKS_FILE } from "./postdeploy-check.mjs";
+import { MONITORING_LABEL, checksAt, itemCheckIds, monitorRecord, runNamedChecks, CHECKS_FILE } from "./postdeploy-check.mjs";
 import { deferredFrom, isTrustedIssueComment } from "./prefilter.mjs";
 
 export const REGRESSION_MARKER = "FORGE:REGRESSION";
@@ -37,7 +37,7 @@ export async function monitorOne({ issue, repo, def, defaultSha, cwd, io, now, d
   const checks = await checksAt(io.git, [`origin/${def}`], cwd);
   if (!ids.length || ids.some((id) => !id || !checks[id])) return row("unrunnable", `no runnable check on ${def} (${CHECKS_FILE})`);
   if (dryRun) return row("due", "dry run: not run", { fix: last.fix });
-  const rows = await runChecks({ ids, checks, cwd, config, env, spawn });
+  const rows = await runNamedChecks({ ids, checks, cwd, config, env, spawn });
   const ok = rows.every((r) => r.result === "pass");
   const rec = { fix: last.fix, default_sha: defaultSha, result: ok ? "pass" : "fail", at: new Date(now).toISOString(), ...(ok ? { window_until: new Date(last.until).toISOString(), every_ms: last.everyMs } : {}) };
   const sum = rows.map((r) => ({ id: r.id, result: r.result, exit: r.exit, ms: r.ms }));
