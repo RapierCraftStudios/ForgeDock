@@ -168,3 +168,14 @@ Comments are read from the repo-wide `issues/comments?since=` endpoint (a few pa
 telemetry comment in the window get their full comment list re-read (6 in parallel, backing off when the API rate limit is
 low). A run with no `--since` and no cache still walks the whole history once. Telemetry comments are edited in place, which
 the comment window catches; if a cached item still looks stale, run with `--refresh`.
+
+## Per-release regression rule (`--by version`, forge#4628)
+
+```bash
+npx forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
+```
+
+Median cost per run, wall p50, first-pass rate and needs-human rate of each release against the previous known one.
+A metric whose own sample is under `--min-n` (default 10) is null, and so is its verdict; verdicts are
+`regressed|improved|flat|null`, never a pass. `--post-metrics <pr>` posts (or updates) a `<!-- FORGE:METRICS v1 -->`
+comment on that release PR with the table and the snapshot as JSON; without it nothing is written to GitHub.
