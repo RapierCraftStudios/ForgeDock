@@ -528,6 +528,37 @@ describe("#4376: forgedock orchestrate --cancel", () => {
     assert.deepEqual(saved.deferrals, { 1: 1 });
   });
 
+  for (const stopRemote of [false, true]) {
+    it(`a cancel ${stopRemote ? "with" : "without"} stopRemote ${stopRemote ? "stops" : "leaves"} a remote lane (#4612)`, async () => {
+      let cancel = null, saved = null;
+      const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+      const started = [], stops = [];
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      const done = orchestrate({ issues: [1], parallel: 1, pollMs: 5, readBody: async () => "", store, getCancelled: () => cancel,
+        stopLane: (n, rec) => { stops.push([n, rec.remote]); release(); },
+        runOne: async (n, _lane, ctx) => {
+          started.push(n);
+          ctx.onStart?.({ remote: true, handle: { id: "sbx-1" } });
+          if (!stopRemote) setTimeout(release, 100);
+          await gate;
+          return { terminalReason: "deferred", code: "run.interrupted" };
+        } });
+      await until(() => started.includes(1));
+      cancel = { at: new Date().toISOString(), reason: "operator", ...(stopRemote ? { stopRemote: true } : {}) };
+      await done;
+      assert.deepEqual(stops, stopRemote ? [[1, true]] : []);
+    });
+  }
+
+  it("requestCancel records stopRemote only when asked (#4612)", () => {
+    const b = openBatch(tmpDir("batch-cancel-stop-"), "b1");
+    b.requestCancel({});
+    assert.equal(b.readCancel().stopRemote, undefined);
+    b.requestCancel({ stopRemote: true });
+    assert.equal(b.readCancel().stopRemote, true);
+  });
+
   it("through the CLI: --cancel during a lane holds the rest, a finished batch is left alone, unknown ids reject, --resume clears it", async () => {
     const root = tmpDir("batch-cancel-cli-");
     const leanIo = {

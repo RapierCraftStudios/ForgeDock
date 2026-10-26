@@ -44,6 +44,7 @@ export function isActionsEndpoint(endpoint) {
  * GET /sandboxes/:id/logs?cursor=N -> {text, cursor}, GET /sandboxes/:id/result -> lane result (404 = none yet),
  * GET /sandboxes/:id/usage -> {minutes, agent?} (agent: the pool agent that ran it, #4549), DELETE /sandboxes/:id (404 = gone). `Authorization: Bearer <token>`.
  * 429/503 on launch is a retryable capacity error (`Retry-After` seconds). Error text never carries the token.
+ * Optional `POST /sandboxes/:id/stop` (#4612) asks the pool to SIGTERM the lane so its teardown checkpoints and it reports `deferred run.interrupted`; 2xx = sent, 404/405 = unsupported or gone (never a DELETE fallback).
  * Optional `GET /status -> {free: N}` is the pool's free slots (#4540); anything else (404, error, malformed) is unknown (null).
  */
 export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fetch }) {
@@ -73,6 +74,7 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     async logs(id, cursor = 0) { const r = await call("GET", `${p(id)}/logs?cursor=${encodeURIComponent(cursor)}`); return r.ok ? { text: String(r.data?.text ?? ""), cursor: r.data?.cursor ?? cursor } : { text: "", cursor }; },
     async result(id) { const r = await call("GET", `${p(id)}/result`); return r.ok && r.data && typeof r.data === "object" ? r.data : null; },
     async usage(id) { const r = await call("GET", `${p(id)}/usage`); return r.ok && Number.isFinite(Number(r.data?.minutes)) ? { minutes: Number(r.data.minutes), ...(typeof r.data.agent === "string" && r.data.agent ? { agent: r.data.agent } : {}) } : null; }, // agent: #4549, optional
+    async stop(id) { const r = await call("POST", `${p(id)}/stop`); if (r.ok) return true; if (r.status === 404 || r.status === 405) return false; throw fail("stop", r); },
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
     async capacity() {
       // `free` (#4540) and agent liveness `online`/`total` (#4547) are each optional; none valid is unknown.
@@ -166,6 +168,11 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
     },
     async capacity() {
       try { return (await transport.capacity?.()) ?? null; } catch { return null; }
+    },
+    /** #4612: a graceful stop at the lane's checkpoint; false when unsupported or failed. Never destroys the sandbox. */
+    async stop(h) {
+      if (typeof transport.stop !== "function") return false;
+      try { return (await transport.stop(h.id)) === true; } catch { return false; }
     },
     async teardown(h) {
       await minutesOf(h);

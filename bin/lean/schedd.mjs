@@ -13,7 +13,7 @@
  *   {op:"set-parallel", id, k}    → {type:"ok", parallel}
  *   {op:"add", id, issues}        → {type:"ok", added, skipped, hosted} (#4408): merged into the batch's `add` file, which a
  *                                   hosted runner reads on its next pass and an unhosted batch on its next resume
- *   {op:"cancel", id}             → {type:"ok", cancelled:true, hosted} (#4376): writes the batch's `cancel` file; that batch
+ *   {op:"cancel", id, stopRemote?}           → {type:"ok", cancelled:true, hosted} (#4376): writes the batch's `cancel` file; that batch
  *                                   admits nothing more, its running local lanes get SIGTERM (their teardown saves the work)
  *                                   and the rest end held; no other batch and not the daemon. A finished, unhosted batch:
  *                                   {type:"ok", cancelled:false, finished:true}, nothing written
@@ -153,7 +153,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       if (!hosted.has(req.id) && b.readReport()) return send({ type: "ok", cancelled: false, finished: true }, true);
-      b.requestCancel({ reason: "operator" });
+      b.requestCancel({ reason: "operator", stopRemote: req.stopRemote === true });
       return send({ type: "ok", cancelled: true, hosted: hosted.has(req.id) }, true);
     }
     const sub = (m) => send(m, m.type === "done" || m.type === "error");
