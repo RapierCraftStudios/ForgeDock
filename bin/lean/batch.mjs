@@ -6,6 +6,7 @@
  * A batch lives in `~/.forge/batches/<id>/` (or `FORGEDOCK_BATCH_DIR`): `plan.json` (the command), `state.json` (the
  * scheduler state, rewritten after every transition), `log.jsonl` (one line per lane update), `parallel` (live K),
  * `add` (issues added to the batch by `--add`, #4408: a cumulative JSON set the runner re-reads every pass),
+ * `requeue` (`--requeue`, #4550: a cumulative JSON list of `{issue, reason, by, at}` the runner applies once each, moving a terminal issue back to pending),
  * `hold` (issues held by `--hold`, #4592: a cumulative JSON set; the runner admits none of them until `--release` or a `--resume` names them),
  * `cancel` (`{at, reason}` written by `--cancel`, #4376: the runner stops admitting and stops its local lanes; a resume clears it),
  * `lanes/<issue>.{json,log}` (each lane's result and output) and `report.json` (the final rows and printed report, written
@@ -69,6 +70,16 @@ const readAdded = (file) => {
   return Array.isArray(v) ? [...new Set(v.filter((n) => Number.isSafeInteger(n) && n > 0))].sort((a, b) => a - b) : [];
 };
 
+/** `outcome`s `--requeue` may move back to pending (#4550). */
+export const REQUEUABLE = (outcome) => ["needs-human", "invalid", "skipped", "ci-pending", "budget-exceeded"].includes(outcome) || /^dependency-/.test(String(outcome));
+/** Key of one requeue entry; the runner records the applied keys in state.json `requeueApplied`. */
+export const requeueKey = (e) => `${e.issue}@${e.at}`;
+
+const readRequeueFile = (file) => {
+  const v = readJson(file);
+  return Array.isArray(v) ? v.filter((e) => e && Number.isSafeInteger(e.issue) && e.issue > 0 && typeof e.at === "string") : [];
+};
+
 /** The positive integers among `list` (numbers, `7`, `#7`). */
 const ints = (list) => (Array.isArray(list) ? list : []).map((x) => (typeof x === "number" ? x : typeof x === "string" && /^#?\d+$/.test(x.trim()) ? parseInt(x.trim().replace("#", ""), 10) : NaN)).filter((n) => Number.isSafeInteger(n) && n > 0);
 
@@ -122,6 +133,35 @@ export function openBatch(root, id) {
       if (added.length) writeAtomic(f("add"), JSON.stringify([...new Set([...readAdded(f("add")), ...added])].sort((a, b) => a - b)) + "\n");
       return { added, skipped };
     },
+    /**
+     * `--requeue` (#4550): record that each issue returns to pending. Refused: not a positive integer, not in the batch's
+     * `order`, no terminal result yet (`not terminal`), or already requeued and not yet applied. The needs-human label and
+     * closed checks need GitHub and live in the CLI. @returns {{requeued:number[], refused:Array<{issue, reason}>}}
+     */
+    requeue: (list, { reason = "operator decision", by = "operator" } = {}) => {
+      const st = readJson(f("state.json")) ?? {};
+      const order = new Set(st.order ?? []), applied = new Set(st.requeueApplied ?? []);
+      const entries = readRequeueFile(f("requeue"));
+      const pend = new Set(entries.filter((e) => !applied.has(requeueKey(e))).map((e) => e.issue));
+      const requeued = [], refused = [];
+      for (const x of Array.isArray(list) ? list : []) {
+        const n = typeof x === "number" ? x : typeof x === "string" && /^#?\d+$/.test(x.trim()) ? parseInt(x.trim().replace("#", ""), 10) : NaN;
+        if (!Number.isSafeInteger(n) || n < 1) refused.push({ issue: x, reason: "not an integer" });
+        else if (!order.has(n)) refused.push({ issue: n, reason: "not in batch" });
+        else if (pend.has(n)) refused.push({ issue: n, reason: "already requeued" });
+        else if (!REQUEUABLE(st.results?.[n]?.outcome)) refused.push({ issue: n, reason: "not terminal" });
+        else { pend.add(n); requeued.push(n); }
+      }
+      if (requeued.length) {
+        const at = new Date().toISOString();
+        writeAtomic(f("requeue"), JSON.stringify([...entries, ...requeued.map((issue) => ({ issue, reason: String(reason), by: String(by), at }))]) + "\n");
+      }
+      return { requeued, refused };
+    },
+    /** Every `--requeue` entry, in order; [] when missing or invalid. */
+    readRequeued: () => readRequeueFile(f("requeue")),
+    /** Entries the runner has not applied yet (a finished or unhosted batch with a pending requeue). */
+    unrunRequeues: () => { const done = new Set(readJson(f("state.json"))?.requeueApplied ?? []); return readRequeueFile(f("requeue")).filter((e) => !done.has(requeueKey(e))); },
     /** Issues held by `--hold` (#4592): the `hold` file, sorted unique positive integers; [] when missing or invalid. */
     readHeld: () => readAdded(f("hold")),
     /** Merge the positive integers of `list` into the `hold` file. @returns {number[]} the issues newly held */

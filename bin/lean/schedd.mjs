@@ -11,6 +11,7 @@
  *   {op:"attach", id, resume?}    → (`resume` also clears a pending cancel, #4592) log.jsonl rows replayed, then live rows/lines and done; a finished batch replays report.json
  *                                   ({type:"done", replay:true}) unless it has unrun added issues; a batch nobody hosts is resumed here
  *   {op:"set-parallel", id, k}    → {type:"ok", parallel}
+ *   {op:"requeue", id, issues, reason, by} → {type:"ok", requeued, refused, hosted, reopened} (#4550): see batch.requeue; a finished batch is hosted again
  *   {op:"add", id, issues}        → {type:"ok", added, skipped, hosted} (#4408): merged into the batch's `add` file, which a
  *                                   hosted runner reads on its next pass and an unhosted batch on its next resume
  *   {op:"cancel", id, stopRemote?}           → {type:"ok", cancelled:true, hosted} (#4376): writes the batch's `cancel` file; that batch
@@ -143,6 +144,15 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const { added, skipped } = b.addIssues(req.issues ?? []);
       return send({ type: "ok", added, skipped, hosted: hosted.has(req.id) }, true);
     }
+    if (req.op === "requeue") {
+      // #4550: the runner applies the entries on its next pass; a finished, unhosted batch is reopened (hosted as a resume).
+      const b = openBatch(root, req.id);
+      if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
+      const { requeued, refused } = b.requeue(req.issues ?? [], { reason: req.reason, by: req.by });
+      const reopen = requeued.length > 0 && !hosted.has(req.id) && !starting.has(req.id);
+      if (reopen) await host({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} });
+      return send({ type: "ok", requeued, refused, hosted: hosted.has(req.id), reopened: reopen }, true);
+    }
     if (req.op === "hold" || req.op === "release") {
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
@@ -174,7 +184,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       const rep = b.readReport();
-      if (rep && !(rep.rows ?? []).some((r) => r.outcome === "held") && !b.unrunAdds().length) {
+      if (rep && !(rep.rows ?? []).some((r) => r.outcome === "held") && !b.unrunAdds().length && !b.unrunRequeues().length) {
         return send({ type: "done", replay: true, result: { rows: rep.rows ?? [], crossLane: rep.crossLane ?? [], batch: b.id, ok: !!rep.ok }, report: rep.report ?? null }, true);
       }
       const ent = await host({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} }, sub);

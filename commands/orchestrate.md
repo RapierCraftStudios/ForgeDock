@@ -102,7 +102,10 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
   `--resume`; a batch started without the daemon still needs `forgedock orchestrate --resume <id>`. Change K of a running batch with
   `forgedock orchestrate --set-parallel <id> K`. Issues filed while a batch runs join it with
   `forgedock orchestrate --add <id> N...` (or `--resume <id> N...`), under its K and DAG; never start a second batch
-  for them. Its pre-filter still closes already-fixed ones. The runner requeues `deferred` lanes by code (host busy and a full sandbox pool after their
+  for them. After a decision (a `FORGE:DECISION` posted and `needs-human` removed), a blocked issue that already ended in the batch
+  (`needs-human`, `invalid`, `skipped`, `dependency-*`, `ci-pending`) returns to it with
+  `forgedock orchestrate --requeue <id> N... --reason "..."` (refused while it is labelled `needs-human` or closed; skipped dependents
+  return to pending with it; a finished batch is reopened); `--add` skips such an issue as `already in batch`. Its pre-filter still closes already-fixed ones. The runner requeues `deferred` lanes by code (host busy and a full sandbox pool after their
   retry-in, uncapped, a usage limit holds admissions for that account (backend identity) until the reset, across every batch on
   the host; `forgedock limits show|clear <id>|--all` lists or drops holds; transient merge/push/idle failures back off; other
   deferrals stop after `orchestration.max_deferrals`), relaunches an `engine-error` once, and stops admitting after
@@ -137,7 +140,8 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
   ran (no lease, comment or worktree). Report the code and its detail (for example a missing `milestone/<slug>`
   branch), and mark the issue's dependents skipped. Do not retry it with a different `--lane`.
 - `dependency-blocked`: its dependency is open and labelled `needs-human`. Report it as blocked by that issue,
-  do not label it `needs-human`, and mark its dependents skipped.
+  do not label it `needs-human`, and mark its dependents skipped. Once the blocker is cleared, `forgedock orchestrate --requeue <id> N...`
+  returns the issue and its skipped dependents to the batch.
 - `decomposed`: the builder split the issue and the engine filed sub-issues (listed in its output, each with
   `**Parent**` and `**Depends on**` lines). Add them to the DAG, launch them, and let the parent's dependents
   wait on the sub-issues.
@@ -159,7 +163,8 @@ When a lane finishes (agent lanes; the batch runner applies the same rules itsel
 - `needs-human` with a **human code** (`builder.blocked`: product-decision, spend, credentials, promotion, customer): an
   external action agents cannot take, or a product decision too critical for agents. It is never auto-recovered. Read
   the issue's last comment for the reason, mark its dependents skipped, and add it to the escalation list (step 4). Only
-  explicit or logical edges skip a dependent; an issue that merely overlaps the same file keeps running.
+  explicit or logical edges skip a dependent (after you decide the block in scope, clear the label and run
+  `forgedock orchestrate --requeue <id> N... --reason "..."`, never a second batch); an issue that merely overlaps the same file keeps running.
 - `needs-human` with a **terminal code** that is neither recoverable nor human (for example a `conformance.*` code, or
   `contract.invalid` without a mid-run issue edit): the runner does not recover it and it is not an escalation. The
   batch report lists it as `unrecovered: #N (<code>: <detail>)`, like a recovery that did not merge. Mark its dependents

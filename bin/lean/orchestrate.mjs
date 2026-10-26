@@ -104,6 +104,7 @@ import { recoveryEvidence } from "./render.mjs";
 import { renderAlerts } from "../stats/render.mjs";
 import { formatParkedLine, postDeployOnly } from "./prefilter.mjs";
 import { laneSize, SIZES } from "./budget.mjs";
+import { requeueKey, REQUEUABLE } from "./batch.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -234,7 +235,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
  * @returns {Promise<Array<{issue:number, outcome:string, pr:?number, cost_usd:number, minutes:number, detail?:string}>>}
  */
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
-  store = null, adopt = null, getParallel = null, getAdded = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
+  store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, getCancelled = null, getHeld = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS }) {
@@ -301,6 +302,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const recoveryMax = Number.isInteger(recovery?.maxAttempts) && recovery.maxAttempts > 0 ? recovery.maxAttempts : 0;
   const recoveries = toMap(saved?.recoveries); // issue -> recovery lanes launched (#4267)
   const recovering = toMap(saved?.recovering); // issue -> {code, attempt, detail, outcome, ...} of the recovery lane queued or running
+  const requeueApplied = new Set(saved?.requeueApplied ?? []); // #4550: `--requeue` entries already applied (batch `requeue` file)
+  const requeuedInfo = toMap(saved?.requeued); // #4550: issue -> {reason, by, at, prior: [earlier rows]}
   const relabelled = new Set(saved?.relabelled ?? []); // #4315: queued recoveries relabelled needs-human when a batch stopped
   // #4267: decisions are recorded, never awaited: a failing or slow recorder cannot block the batch.
   const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
@@ -314,6 +317,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
       ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering) } : {}),
+      ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
       ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}),
       ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}) });
   };
@@ -782,6 +786,42 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     update({ issue: null, outcome: "added", detail: list });
     return fresh.length;
   };
+  // #4550: `--requeue` entries (batch `requeue` file) not applied yet: a terminal issue and the dependents skipped behind it
+  // return to pending, the prior rows kept in history; edges stay, so a dependent still waits for the issue to merge.
+  const drainRequeues = async () => {
+    if (!getRequeued) return 0;
+    let got = [];
+    try { got = getRequeued() ?? []; } catch { got = []; }
+    const fresh = (Array.isArray(got) ? got : []).filter((e) => Number.isSafeInteger(e?.issue) && !requeueApplied.has(requeueKey(e)));
+    let n = 0;
+    for (const e of fresh) {
+      requeueApplied.add(requeueKey(e));
+      const row = results.get(e.issue);
+      if (!row || !REQUEUABLE(row.outcome) || running.has(e.issue)) continue;
+      const moved = [e.issue], priors = new Map([[e.issue, row]]);
+      results.delete(e.issue);
+      for (let i = 0; i < moved.length; i++) { // dependents skipped behind a requeued issue (fixpoint)
+        for (const [m, r] of [...results]) {
+          if (r?.outcome !== "skipped" || Number(/^dependency #(\d+)/.exec(r.detail ?? "")?.[1]) !== moved[i]) continue;
+          priors.set(m, r); results.delete(m); moved.push(m);
+        }
+      }
+      for (const m of moved) {
+        for (const x of [requeues, deferrals, engineErrors, recoveries, recovering]) x.delete(m);
+        relabelled.delete(m);
+        if (m === e.issue) requeuedInfo.set(m, { reason: e.reason, by: e.by, at: e.at, prior: [...(requeuedInfo.get(m)?.prior ?? []), priors.get(m)] });
+        if (!pending.includes(m)) requeue(m, 0);
+      }
+      save();
+      const list = moved.filter((m) => m !== e.issue).map((m) => `#${m}`);
+      decided({ issue: e.issue, what: `requeued by ${e.by ?? "operator"} (forgedock orchestrate --requeue); prior outcome ${row.outcome}${list.length ? `; dependents back to pending: ${list.join(", ")}` : ""}`,
+        why: e.reason || "operator decision", alternative: "start a second batch" });
+      update({ issue: e.issue, outcome: "requeued", detail: `${e.reason || "operator decision"} (was ${row.outcome})` });
+      n++;
+    }
+    if (fresh.length) save();
+    return n;
+  };
   // #4376: one SIGTERM per running local lane (their teardown saves the work); remote lanes run to their result unless the cancel carries `stopRemote` (#4612).
   const stopSent = new Set();
   function stop(n, rec) {
@@ -879,6 +919,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     for (;;) {
       if (signal?.aborted) throw halt();
       await drainAdds();
+      await drainRequeues();
       checkCancel();
       await watchBlockers(!pending.length && !running.size);
       if (!pending.length && !running.size) break;
@@ -970,8 +1011,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (holdUntil && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // #4446: a cleared hold (forgedock limits clear) admits on the next poll
       if ((getParallel || getHeld) && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
+      if ((getAdded || getRequeued) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
       if (getHeld && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4592: a release while only lanes run
-      if (getAdded && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408: an add while only lanes run
       if (syncParked && running.size && parkedPrs().length) wake = Math.min(wake ?? syncEveryMs, Math.max(0, syncEveryMs - (t - (lastParkedSync ?? t)))); // #4525
       if (running.size && watchable()) wake = Math.min(wake ?? WATCH_EVERY_MS, WATCH_EVERY_MS); // #4595: re-check the blockers of skipped rows
       if (tripped) wake = null;
@@ -998,7 +1039,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   if (reg) withdrawExcept(new Set());
   await relabelQueued();
   save();
-  return order.map((n) => results.get(n) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: heldDetail(n),
+  const withRequeue = (r) => (r && requeuedInfo.has(r.issue) ? { ...r, requeued: { reason: requeuedInfo.get(r.issue).reason, by: requeuedInfo.get(r.issue).by, prior: requeuedInfo.get(r.issue).prior.map((p) => ({ outcome: p.outcome, detail: p.detail ?? null, pr: p.pr ?? null })) } } : r);
+  return order.map((n) => withRequeue(results.get(n)) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: heldDetail(n),
     ...(recovering.has(n) ? { recovery: { code: recovering.get(n).code, attempts: recoveries.get(n) ?? recovering.get(n).attempt, outcome: recovering.get(n).outcome ?? "needs-human",
       ...(recovering.get(n).result_code ? { result_code: recovering.get(n).result_code } : {}), detail: firstLine(recovering.get(n).detail ?? recovering.get(n).code) } } : {}) });
 }
@@ -1027,6 +1069,8 @@ export const OUTCOME_LINE_MAX = 200;
 export function formatOutcomeLists(rows) {
   const out = [];
   const one = (x) => String(x ?? "").split("\n")[0].slice(0, OUTCOME_LINE_MAX);
+  const requeued = (rows ?? []).filter((r) => r?.requeued); // #4550: operator --requeue after a decision; the row is the latest outcome
+  if (requeued.length) out.push(`requeued: ${requeued.map((r) => `#${r.issue} (${one(r.requeued.reason)})`).join(" ")}`);
   const rec = (rows ?? []).filter((r) => r?.recovered);
   if (rec.length) out.push(`recovered: ${rec.map((r) => `#${r.issue} (${r.recovered})`).join(" ")}`);
   for (const r of rows ?? []) {
