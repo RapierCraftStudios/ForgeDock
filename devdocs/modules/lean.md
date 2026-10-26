@@ -33,7 +33,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    (`milestone/{slug}`), else `branches.staging`; never the default branch;
    fail closed with `lane.*` codes → `lane-refused`.
    An open PR on another non-default base is `needs-human`, except when the resolved lane
-   is shipped (merged into staging, `isShippedLane`) and the PR base is live: the run follows it (#4593).
+   is shipped (merged into staging by a merge commit, `isShippedLane`; an unused lane at the staging tip is not) and the PR base is live: the run follows it (#4593).
 3. **Dependencies, then lease** — open `Depends-on` → `dependency-open`
    (orchestrate requeues behind it); then the FORGE:STATE lease.
 4. **Claim + worktree** — `workflow:investigating`, `FORGE:STARTED` comment;
