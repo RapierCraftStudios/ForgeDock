@@ -794,8 +794,9 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
 
   for (const d of ["defer", "post-deploy"]) {
     it(`a contracted ${d} is filed only after the reviewer accepts it, then linked in the PR and on close`, async () => {
-      const k = two(d, { why: d === "defer" ? "separate module" : "only measurable after deploy" });
+      const k = two(d, { why: d === "defer" ? "separate module" : "only measurable after deploy", ...(d === "post-deploy" ? { check: "login-smoke" } : {}) });
       const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, { ...k, requirements: [k.requirements[0], { ...k.requirements[1], tracked: "#900" }] })] });
+      if (d === "post-deploy") w.baseFiles = { "origin/staging:.forge/post-deploy-checks.json": JSON.stringify({ "login-smoke": "true" }) };
       const r = await run(w);
       assert.equal(r.terminalReason, "merged");
       assert.equal(w.followups.length, 1); assert.equal(w.followups[0].parent, 7);
