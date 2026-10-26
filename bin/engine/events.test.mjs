@@ -3,13 +3,13 @@
 // Contract test for the outbound event stream (#4630, docs/EVENTS.md): changing a type, key or the signature is a breaking change.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
 import { EVENT_TYPES, EVENT_VERSION, buildEvent, mapRunRecord, makeEventEmitter, probeEvent, sign, webhookUrlOk, postWebhook } from "./events.mjs";
 
-const tmp = () => mkdtempSync(join(tmpdir(), "forge-events-"));
+const tmp = () => tmpDir("forge-events-");
 const fixed = () => new Date("2026-10-26T12:00:00Z");
 const lines = (dir) => readFileSync(join(dir, "o_r.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
 
