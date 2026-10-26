@@ -94,7 +94,7 @@ The staging review runs before every release. The releases of 2026-10-22 and 202
 
 ### What still goes wrong
 
-Lanes fail. What matters is how they fail. A lane that cannot finish ends with a typed outcome (`ci.red`, `base.conflict`, `budget.exceeded`, `needs-human`…). Mechanical ones are retried automatically, and the rest wait for a person with the evidence attached. Open bugs are public, for example a lane whose checkpoint push is rejected ([#4505](https://github.com/RapierCraftStudios/ForgeDock/issues/4505)) and a dependency-line regex that backtracks on long whitespace ([#4517](https://github.com/RapierCraftStudios/ForgeDock/issues/4517)). Outcome codes are documented in [OUTCOME-CODES](docs/OUTCOME-CODES.md).
+Lanes fail. What matters is how they fail. A lane that cannot finish ends with a typed outcome (`ci.red`, `base.conflict`, `budget.exceeded`, `needs-human`…). Mechanical ones are retried automatically, and the rest wait for a person with the evidence attached. Bugs are tracked in public, for example a lane whose checkpoint push was rejected ([#4505](https://github.com/RapierCraftStudios/ForgeDock/issues/4505)) and a dependency-line regex that backtracked on long whitespace ([#4517](https://github.com/RapierCraftStudios/ForgeDock/issues/4517)), both since fixed. Outcome codes are documented in [OUTCOME-CODES](docs/OUTCOME-CODES.md).
 
 ## How it works
 
@@ -120,7 +120,7 @@ Deeper: [How it works](docs/site/how-it-works.md) · [GitHub is your agents' mem
 | Forge | GitHub only (issues, PRs, labels, Actions). |
 | Branching | Lanes merge into a staging branch (or `milestone/*`); a reviewed release promotes staging to the default branch. |
 | Runtime test gate | Runs your configured integration tests before a release; it reports SKIP until you configure `verification.integration_tests`. |
-| Light lane (one-session mode for small issues) | Ships in `shadow` mode: it records what it would do. Known gaps to close before enabling are tracked in [#4502](https://github.com/RapierCraftStudios/ForgeDock/issues/4502). |
+| Light lane (one-session mode for small issues) | Ships in `shadow` mode: it records what it would do. The gaps found before enabling it ([#4502](https://github.com/RapierCraftStudios/ForgeDock/issues/4502)) are closed; `light.mode: on` is opt-in. |
 | Human decisions | Product direction, spend, credentials, customer-facing actions and releases are always escalated, never decided by an agent. |
 | Cost | Runs on your Claude account. `forgedock stats --efficiency` reports $/merge, turns/merge and retries by cause. |
 
