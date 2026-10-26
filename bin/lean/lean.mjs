@@ -1792,6 +1792,7 @@ export async function runCore(o) {
     async function ciVerify(trigger) {
       let fixes = 0;
       for (;;) {
+        await untrackToolState({ git, base, ev }); // #4621: gitPush's untrack commit would move HEAD after `head` was read; do it first so head is the pushed tip
         const head = String(await git(["rev-parse", "HEAD"])).trim();
         if (head === ciVerifiedHead || ciFellBack) return { fixes };
         files = await changedFiles();
