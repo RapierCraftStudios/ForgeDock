@@ -49,6 +49,7 @@ delta against the previous version and a low-n flag for samples under 10. Missin
 
 Per-release regression rule (forge#4628):
   --experiment <id>     arms of the forge.yaml experiment: section (arms, ratio, metrics, targets, min_n) against its targets; n/a below min n
+  --emit-event          with --experiment: emit one experiment.verdict event (met or missed; docs/EVENTS.md)
   --by version          median cost per run, wall p50, first-pass rate and needs-human rate of each release against the
                         previous one; a metric under --min-n runs is null and its verdict null, never a pass
   --post-metrics <pr>   post (or update) the <!-- FORGE:METRICS v1 --> snapshot comment on that release PR
@@ -93,7 +94,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 `;
 
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -125,6 +126,7 @@ export function parseArgs(argv) {
     }
     else if (name === "--by") { const v = take(); if (v !== "version") throw new Error("--by must be version"); o.by = v; }
     else if (name === "--experiment") { const v = take(); if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) throw new Error("--experiment must be an experiment id"); o.experiment = v; }
+    else if (name === "--emit-event") o.emitEvent = true;
     else if (name === "--post-metrics") { const v = take(); if (!/^[1-9]\d*$/.test(v)) throw new Error("--post-metrics must be a PR number"); o.postMetrics = Number(v); }
     else if (name === "--offline") o.offline = true;
     else if (name === "--min-n") { const v = take(); if (!/^\d+$/.test(v)) throw new Error("--min-n must be a non-negative integer"); o.minN = Number(v); o.minNSet = true; }
@@ -333,6 +335,7 @@ export async function runStats(argv, deps = {}) {
       process.stdout.write(`${opts.json ? renderJson(report) : renderReleaseMetrics(rm)}\n`);
       return 0;
     }
+    if (report.query?.experiment && opts.emitEvent) await (deps.emitExperiment ?? (async (r, x) => (await import("../engine-cli.mjs")).experimentEventSink(r, x)))(opts.repo, report.query.experiment);
     if (report.query?.experiment) { process.stdout.write(`${opts.json ? renderJson(report) : renderExperiment(report.query.experiment)}\n`); return 0; }
     if (report.query?.lane_profile && !opts.json) { process.stdout.write(`${renderLaneProfiles(report.query.lane_profile)}\n`); return 0; }
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }

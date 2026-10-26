@@ -78,3 +78,8 @@ test("#4629 bench-lightlane and the eval gate emit the shared record", () => {
   assert.deepEqual(Object.keys(g.record).sort(), Object.keys(benchRecord({ source: "x" })).sort());
   assert.equal(evaluateGate(sc(10, 2), sc(90, 20)).record.targets.success_rate_within_threshold.pass, null);
 });
+
+test("#4632 parseArgs: --emit-event is opt-in", () => {
+  assert.equal(parseArgs(["--experiment", "x"]).emitEvent, false);
+  assert.equal(parseArgs(["--experiment", "x", "--emit-event"]).emitEvent, true);
+});
