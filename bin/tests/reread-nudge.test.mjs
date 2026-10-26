@@ -98,6 +98,17 @@ describe("#4580 re-read guard (PreToolUse)", () => {
     assert.match(j.hookSpecificOutput.permissionDecisionReason, /already been read 2 times.*line range/);
   });
 
+  it("#4622 sampled reads do not count toward the full-read guard", () => {
+    const { dir, f, rd } = setup();
+    main(JSON.stringify(post({ ...rd(), tool_name: "Bash", tool_input: { command: `sed -n 1,40p ${f}` } })), { dir });
+    main(JSON.stringify(post(rd({ offset: 40, limit: 40 }))), { dir });
+    assert.equal(main(JSON.stringify(pre(rd())), { dir }), "", "first full Read after two samples is allowed");
+    main(JSON.stringify(post(rd())), { dir });
+    assert.equal(main(JSON.stringify(pre(rd())), { dir }), "", "second full Read allowed");
+    main(JSON.stringify(post(rd())), { dir });
+    assert.equal(JSON.parse(main(JSON.stringify(pre(rd())), { dir })).hookSpecificOutput.permissionDecision, "deny", "third full Read denied");
+  });
+
   it("allows ranged reads, Bash and a changed file; fails open on bad input", () => {
     const { dir, f, rd } = setup();
     for (let i = 0; i < 2; i++) main(JSON.stringify(post(rd())), { dir });
