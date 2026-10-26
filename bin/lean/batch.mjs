@@ -138,8 +138,8 @@ export function openBatch(root, id) {
       if (freed.length) writeAtomic(f("hold"), JSON.stringify([...have].filter((n) => !freed.includes(n)).sort((a, b) => a - b)) + "\n");
       return freed;
     },
-    /** `--cancel` (#4376): `{at, reason}` in the `cancel` file; the runner re-reads it every pass. */
-    requestCancel: ({ reason = "operator" } = {}) => writeAtomic(f("cancel"), JSON.stringify({ at: new Date().toISOString(), reason: String(reason) }) + "\n"),
+    /** `--cancel` (#4376): `{at, reason, stopRemote?}` in the `cancel` file; the runner re-reads it every pass. `stopRemote` (#4612) also asks remote lanes to stop at their checkpoint. */
+    requestCancel: ({ reason = "operator", stopRemote = false } = {}) => writeAtomic(f("cancel"), JSON.stringify({ at: new Date().toISOString(), reason: String(reason), ...(stopRemote === true ? { stopRemote: true } : {}) }) + "\n"),
     /** The cancel record, or null when missing or invalid. */
     readCancel: () => { const v = readJson(f("cancel")); return v && typeof v === "object" && !Array.isArray(v) && typeof v.at === "string" ? v : null; },
     clearCancel: () => rmSync(f("cancel"), { force: true }),

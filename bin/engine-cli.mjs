@@ -16,7 +16,7 @@ import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs } from ".
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
-import { makeEventEmitter, probeEvent } from "./engine/events.mjs";
+import { makeEventEmitter, probeEvent, regressionEvent, experimentEvent } from "./engine/events.mjs";
 import { readExperiment } from "./experiment.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
@@ -141,7 +141,14 @@ export function readEvents(cwd = process.cwd()) {
 /** The probe sweep's `onResult`: one probe.passed / probe.failed event per recorded pass or fail row. Never throws. */
 function probeEventSink(repo) {
   const events = makeEventEmitter({ repo, config: readEvents() });
-  return async (row) => { const p = probeEvent(row); if (p) await events.emitEvent(p.type, p.data, p.ctx); };
+  return async (row) => { for (const p of [probeEvent(row), regressionEvent(row)]) if (p) await events.emitEvent(p.type, p.data, p.ctx); };
+}
+/** `forgedock stats --experiment <id> --emit-event` (#4632): one experiment.verdict event for a met or missed report; inconclusive emits nothing. Never throws. */
+export async function experimentEventSink(repo, report) {
+  try {
+    const p = experimentEvent(report);
+    if (p && p.data.verdict !== "inconclusive") await makeEventEmitter({ repo, config: readEvents() }).emitEvent(p.type, p.data, p.ctx);
+  } catch { /* events never fail stats */ }
 }
 /**
  * forge.yaml context pack (#4275), flat keys under `engine` (the parser flattens one level): `context_pack`
@@ -1108,7 +1115,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
 const formatRowLine = (r) => (r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`);
 const consoleSink = () => ({ batch: () => {}, row: (r) => console.log(formatRowLine(r)), line: (t) => console.log(t) });
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...> | --cancel <id> | --hold <id> <issue...> | --release <id> <issue...>";
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...> | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...>";
 const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model"];
 const issuesOf = (argv) => {
   const issues = [];
@@ -1193,16 +1200,16 @@ async function holdBatch({ op, id, tokens, root, viaDaemon = null, print = (l) =
  * `--cancel <id>` (#4376): through the daemon (`viaDaemon`, null when none runs) or the batch's `cancel` file directly.
  * A finished batch (report written) is left alone.
  */
-async function cancelBatch({ id, root, viaDaemon = null, print = (l) => console.log(l) }) {
+async function cancelBatch({ id, root, stopRemote = false, viaDaemon = null, print = (l) => console.log(l) }) {
   if (!id || String(id).startsWith("--")) throw new Error(ORCH_USAGE);
   let res = viaDaemon ? await viaDaemon() : null;
   if (!res) {
     const b = (await import("./lean/batch.mjs")).openBatch(root, id);
     if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
     if (b.readReport()) res = { cancelled: false, finished: true };
-    else { b.requestCancel({ reason: "operator" }); res = { cancelled: true }; }
+    else { b.requestCancel({ reason: "operator", stopRemote }); res = { cancelled: true }; }
   }
-  print(res.cancelled ? `batch ${id}: cancel requested; running lanes stop through their teardown, the rest stay held (forgedock orchestrate --resume ${id} continues)`
+  print(res.cancelled ? `batch ${id}: cancel requested; running lanes stop through their teardown${stopRemote ? " (remote sandboxes too, #4612)" : ""}, the rest stay held (forgedock orchestrate --resume ${id} continues)`
     : `batch ${id}: already finished`);
   return { ok: true, batch: id, cancelled: !!res.cancelled };
 }
@@ -1246,10 +1253,10 @@ async function orchestrateClient(argv, deps = {}) {
   const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
   if (argv.includes("--cancel")) {
     const id = flag(argv, "--cancel");
-    return cancelBatch({ id, root: await batchRootOf(), viaDaemon: async () => {
+    return cancelBatch({ id, root: await batchRootOf(), stopRemote: argv.includes("--stop-remote"), viaDaemon: async () => {
       let sock = null;
       try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-      return sock ? schedd.request(sock, { op: "cancel", id }) : null;
+      return sock ? schedd.request(sock, { op: "cancel", id, stopRemote: argv.includes("--stop-remote") }) : null;
     } });
   }
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
@@ -1330,7 +1337,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     sink.line(`batch ${b.id}: parallel set to ${k}`);
     return { ok: true, batch: b.id, parallel: k };
   }
-  if (argv.includes("--cancel")) return cancelBatch({ id: flag(argv, "--cancel"), root, print: (l) => sink.line(l) });
+  if (argv.includes("--cancel")) return cancelBatch({ id: flag(argv, "--cancel"), root, stopRemote: argv.includes("--stop-remote"), print: (l) => sink.line(l) });
   for (const op of ["hold", "release"]) if (argv.includes(`--${op}`)) {
     return holdBatch({ op, id: flag(argv, `--${op}`), tokens: operandsOf(argv.slice(argv.indexOf(`--${op}`) + 2)), root, print: (l) => sink.line(l) });
   }
@@ -1437,6 +1444,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const exec = deps.execution !== undefined ? deps.execution : readExecution(cwd);
     execForNeeds = exec ?? null;
     hybrid = exec?.mode === "hybrid" && Number.isInteger(exec.maxRemote) && exec.maxRemote >= 1;
+    let remoteStop = null; // #4612: the sandbox provider's checkpoint stop, used only when the cancel asks for it
     if (exec && (execMod.placement(exec) === "remote" || hybrid)) {
       // #4253: lanes run in sandboxes, ledger-tracked per lane, admitted against max_remote instead of the host cap.
       let gitDir = null;
@@ -1447,6 +1455,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       const bud = exec.budget ?? {};
       const remoteLanes = execMod.providerLanes({ provider, laneArgs, ledgerFor, env, secrets: exec.secrets, costPerMinute: bud.costPerMinute ?? 0,
         ...(deps.now ? { now: deps.now } : {}), ...(deps.pollMs ? { pollMs: deps.pollMs } : {}) });
+      remoteStop = remoteLanes.stopLane;
       lanes = withPlacement(remoteLanes);
       {
         // #4255: once the budget refuses a remote lane, the rest run as detached host lanes. #4256: hybrid mixes both.
@@ -1492,9 +1501,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     } else {
       lanes = withPlacement(batchMod.detachedLanes({ batch, cwd, env, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs }));
     }
-    // #4376: a cancel stops detached host lanes by SIGTERM to their group (pid-reuse checked by the result path); sandboxes run on.
+    // #4376: a cancel stops detached host lanes by SIGTERM to their group (pid-reuse checked by the result path); sandboxes run on unless `--cancel --stop-remote` (#4612).
     const { killLedgerPid } = await import("./lean/effects.mjs");
-    const stopLane = deps.stopLane ?? ((n, rec) => (rec?.pid && !rec.remote && !rec.handle ? killLedgerPid(rec.pid, batch.resultFile(n)) : false));
+    const stopLane = deps.stopLane ?? ((n, rec) => (rec?.remote || rec?.handle ? remoteStop?.(n, rec) ?? false : rec?.pid ? killLedgerPid(rec.pid, batch.resultFile(n)) : false));
     lanes = { ...lanes, stopLane };
   }
   const orch = deps.orchestration ?? readOrchestration(cwd);

@@ -1458,8 +1458,7 @@ On the first pass that sees it, the runner:
   to the lane's process group, so its #4179 teardown checkpoints and reports `deferred run.interrupted`.
 
 A lane settling `deferred` or `engine-error` under a cancel is requeued with no deferral and no usage-limit hold. A lane
-the runner launched in the same instant ends `deferred` without starting. Remote lanes (sandboxes) are not stopped: their
-teardown has no checkpoint, so they run to their result. Once nothing runs, the loop ends; every unfinished issue is
+the runner launched in the same instant ends `deferred` without starting. Remote lanes (sandboxes) are not stopped by default: they run to their result (see Entry 2026-10-26). Once nothing runs, the loop ends; every unfinished issue is
 `held` with detail `cancelled by operator` (also the reason for the #4315 queued-recovery relabel) and `report.json` is
 written. `state.json` keeps `cancelled`, but the file stays the authority: an operator `--resume` clears it (`clearCancel`
 next to the breaker reset) and continues the held issues; a daemon restart (`keepBreaker`) keeps it. Cost: 0 LLM calls;
@@ -1777,7 +1776,7 @@ A command killed by its own timeout (rc 124, `timeoutMs >= perCommandMs`) is ret
 
 ## Entry 2026-10-26 — Versioned outbound lifecycle events (#4630)
 
-`lean.mjs` now also forwards `RUN_START`, `CONTRACT_FROZEN` (both sites) and `PR_OPENED` through `emit()` (they were run-log only); `telemetry-seam.mjs` ignores them. `engine-cli.mjs` composes `makeEventEmitter` (`bin/engine/events.mjs`, forge.yaml `events:`) after the telemetry seam, and passes `onResult` to `sweepProbes` (`probe.mjs`, called for every non-dry-run row) so a probe pass or fail emits `probe.passed` / `probe.failed`. Envelope, types and signature: `docs/EVENTS.md`; pinned by `bin/engine/events.test.mjs`. `release.promoted`, `regression.detected` and `experiment.verdict` are schema-only until their sources exist.
+`lean.mjs` now also forwards `RUN_START`, `CONTRACT_FROZEN` (both sites) and `PR_OPENED` through `emit()` (they were run-log only); `telemetry-seam.mjs` ignores them. `engine-cli.mjs` composes `makeEventEmitter` (`bin/engine/events.mjs`, forge.yaml `events:`) after the telemetry seam, and passes `onResult` to `sweepProbes` (`probe.mjs`, called for every non-dry-run row) so a probe pass or fail emits `probe.passed` / `probe.failed`. Envelope, types and signature: `docs/EVENTS.md`; pinned by `bin/engine/events.test.mjs`. `regression.detected` (monitor fail row with a regression issue, via `probeEventSink`) and `experiment.verdict` (`stats --experiment --emit-event`, met or missed only) are emitted (#4632); `release.promoted` is schema-only until promotion detection exists.
 
 ## Entry 2026-10-26 — Live A/B experiment arms (#4629)
 
@@ -1786,3 +1785,14 @@ forge.yaml `experiment:` (id, arms, ratio, metrics, targets, min_n; parsed by `b
 ## Entry 2026-10-26 — ciVerify untracks tool state before sampling HEAD (#4621)
 
 `lean.mjs` `ciVerify` calls `untrackToolState` before `rev-parse HEAD`. `gitPush` runs it first too, so in verify.mode ci/hybrid the untrack commit used to move HEAD after `head` was read: `commitChecks(head)` and `sameSha(run.headSha, head)` targeted an unpushed sha, CI timed out as `unavailable` and `ciFellBack` skipped CI for the lane. Now `head` is the tip `gitPush` publishes; `untrackToolState` is idempotent, so the push adds no second commit, and `verify.mjs` `runCiVerify` is unchanged. Pinned by the `untrack commit before CI verify` test.
+
+## Entry 2026-10-26 — `--cancel --stop-remote` stops sandbox lanes at their checkpoint (#4612)
+
+`forgedock orchestrate --cancel <id> --stop-remote` also asks remote lanes to stop. The flag travels in the batch `cancel`
+file as `stopRemote: true` (through the schedd `cancel` op or `requestCancel`); the file stays the authority. With it,
+`orchestrate.mjs` `stop` no longer skips `rec.remote` lanes (still once per lane), and engine-cli routes remote records to
+`providerLanes.stopLane` -> `remoteProvider.stop(handle)` -> `transport.stop(id)`. The pool contract is an optional
+`POST /sandboxes/:id/stop`: the pool SIGTERMs the lane so its #4179 teardown checkpoints and it reports `deferred
+run.interrupted`; 2xx = sent, 404/405 = unsupported or gone (false). Stop never falls back to `DELETE`: destroying a
+sandbox is not a checkpoint and would lose work; teardown still destroys only after the result. Without the flag, or on a
+pool with no stop endpoint, behaviour is as before (remote lanes run to their result). Cost: 0 LLM calls.

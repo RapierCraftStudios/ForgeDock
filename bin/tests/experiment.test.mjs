@@ -102,3 +102,8 @@ test("#4634 --require-met: exit 1 unless every target is met, opt-in only", asyn
     assert.equal(await runStats([...base, "--require-met"], deps), 1);
   } finally { process.stdout.write = realOut; process.stderr.write = realErr; }
 });
+
+test("#4632 parseArgs: --emit-event is opt-in", () => {
+  assert.equal(parseArgs(["--experiment", "x"]).emitEvent, false);
+  assert.equal(parseArgs(["--experiment", "x", "--emit-event"]).emitEvent, true);
+});

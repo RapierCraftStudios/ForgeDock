@@ -7,7 +7,7 @@ import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
-import { EVENT_TYPES, EVENT_VERSION, buildEvent, mapRunRecord, makeEventEmitter, probeEvent, sign, webhookUrlOk, postWebhook } from "./events.mjs";
+import { EVENT_TYPES, EVENT_VERSION, buildEvent, mapRunRecord, makeEventEmitter, probeEvent, regressionEvent, experimentEvent, promotedEvent, sign, webhookUrlOk, postWebhook } from "./events.mjs";
 
 const tmp = () => tmpDir("forge-events-");
 const fixed = () => new Date("2026-10-26T12:00:00Z");
@@ -54,6 +54,36 @@ describe("event contract (v1)", () => {
     assert.equal(probeEvent({ issue: 1, outcome: "awaiting-promotion" }), null);
     assert.equal(probeEvent({ issue: 1, outcome: "pass", detail: "exit 0", fix: "abc" }).type, "probe.passed");
     assert.equal(probeEvent({ issue: 1, outcome: "fail" }).type, "probe.failed");
+  });
+});
+
+describe("regression, experiment and promoted builders (#4632)", () => {
+  it("regressionEvent: only a fail row that filed a regression issue", () => {
+    assert.equal(regressionEvent({ issue: 5, outcome: "pass" }), null);
+    assert.equal(regressionEvent({ issue: 5, outcome: "fail" }), null);
+    const r = regressionEvent({ issue: 5, outcome: "fail", regression: 7, detail: "broke" });
+    assert.equal(r.type, "regression.detected"); assert.equal(r.ctx.issue, 5);
+    assert.deepEqual(r.data, { subject: "post-deploy check of #5", metric: "post_deploy_check", detail: "broke" });
+  });
+  it("experimentEvent: met, missed, inconclusive", () => {
+    const t = (...p) => Object.fromEntries(p.map((pass, i) => [`t${i}`, { pass }]));
+    assert.equal(experimentEvent({ id: "e", targets: t(true), targets_met: true }).data.verdict, "met");
+    assert.equal(experimentEvent({ id: "e", targets: t(true, false), targets_met: false }).data.verdict, "missed");
+    assert.equal(experimentEvent({ id: "e", targets: t(null), targets_met: false }).data.verdict, "inconclusive");
+    assert.equal(experimentEvent({}), null);
+  });
+  it("promotedEvent needs a fix; types and keys stay pinned", () => {
+    assert.equal(promotedEvent({}), null);
+    assert.deepEqual(promotedEvent({ fix: "abc", default_branch: "main" }).data, { fix: "abc", default_branch: "main" });
+    assert.deepEqual(EVENT_TYPES["regression.detected"], ["subject", "metric", "detail"]);
+    assert.deepEqual(EVENT_TYPES["experiment.verdict"], ["experiment", "verdict", "detail"]);
+  });
+  it("a regression row is written to the sink", async () => {
+    const dir = tmp();
+    const p = regressionEvent({ issue: 5, outcome: "fail", regression: 7, detail: "d" });
+    await makeEventEmitter({ repo: "o/r", config: { dir }, env: {} }).emitEvent(p.type, p.data, p.ctx);
+    const ev = JSON.parse(readFileSync(join(dir, "o_r.jsonl"), "utf8"));
+    assert.equal(ev.type, "regression.detected"); assert.equal(ev.issue, 5);
   });
 });
 
