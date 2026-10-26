@@ -11,9 +11,10 @@
  *   {op:"attach", id, resume?}    → (`resume` also clears a pending cancel, #4592) log.jsonl rows replayed, then live rows/lines and done; a finished batch replays report.json
  *                                   ({type:"done", replay:true}) unless it has unrun added issues; a batch nobody hosts is resumed here
  *   {op:"set-parallel", id, k}    → {type:"ok", parallel}
+ *   {op:"requeue", id, issues, reason, by} → {type:"ok", requeued, refused, hosted, reopened} (#4550): see batch.requeue; a finished batch is hosted again
  *   {op:"add", id, issues}        → {type:"ok", added, skipped, hosted} (#4408): merged into the batch's `add` file, which a
  *                                   hosted runner reads on its next pass and an unhosted batch on its next resume
- *   {op:"cancel", id}             → {type:"ok", cancelled:true, hosted} (#4376): writes the batch's `cancel` file; that batch
+ *   {op:"cancel", id, stopRemote?}           → {type:"ok", cancelled:true, hosted} (#4376): writes the batch's `cancel` file; that batch
  *                                   admits nothing more, its running local lanes get SIGTERM (their teardown saves the work)
  *                                   and the rest end held; no other batch and not the daemon. A finished, unhosted batch:
  *                                   {type:"ok", cancelled:false, finished:true}, nothing written
@@ -41,6 +42,7 @@ import { batchRoot, listBatches, openBatch } from "./batch.mjs";
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
 export const LOCK_CHECK_MS = 5 * 1000;
+export const DUE_MS = 15 * 60 * 1000; // #4627: how often the due callback (windowed post-deploy monitoring) runs while the daemon is up
 
 export function scheddPaths(dir = schedDir()) {
   return { dir, sock: join(dir, "schedd.sock"), lock: join(dir, "schedd.lock"), log: join(dir, "schedd.log") };
@@ -83,7 +85,7 @@ function takeLock(lock, pid, alive) {
  */
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
-  lockCheckMs = LOCK_CHECK_MS } = {}) {
+  lockCheckMs = LOCK_CHECK_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS } = {}) {
   const p = scheddPaths(dir);
   mkdirSync(dir, { recursive: true });
   const lock = takeLock(p.lock, pid, alive);
@@ -142,6 +144,15 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const { added, skipped } = b.addIssues(req.issues ?? []);
       return send({ type: "ok", added, skipped, hosted: hosted.has(req.id) }, true);
     }
+    if (req.op === "requeue") {
+      // #4550: the runner applies the entries on its next pass; a finished, unhosted batch is reopened (hosted as a resume).
+      const b = openBatch(root, req.id);
+      if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
+      const { requeued, refused } = b.requeue(req.issues ?? [], { reason: req.reason, by: req.by });
+      const reopen = requeued.length > 0 && !hosted.has(req.id) && !starting.has(req.id);
+      if (reopen) await host({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} });
+      return send({ type: "ok", requeued, refused, hosted: hosted.has(req.id), reopened: reopen }, true);
+    }
     if (req.op === "hold" || req.op === "release") {
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
@@ -152,7 +163,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       if (!hosted.has(req.id) && b.readReport()) return send({ type: "ok", cancelled: false, finished: true }, true);
-      b.requestCancel({ reason: "operator" });
+      b.requestCancel({ reason: "operator", stopRemote: req.stopRemote === true });
       return send({ type: "ok", cancelled: true, hosted: hosted.has(req.id) }, true);
     }
     const sub = (m) => send(m, m.type === "done" || m.type === "error");
@@ -173,7 +184,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       const rep = b.readReport();
-      if (rep && !(rep.rows ?? []).some((r) => r.outcome === "held") && !b.unrunAdds().length) {
+      if (rep && !(rep.rows ?? []).some((r) => r.outcome === "held") && !b.unrunAdds().length && !b.unrunRequeues().length) {
         return send({ type: "done", replay: true, result: { rows: rep.rows ?? [], crossLane: rep.crossLane ?? [], batch: b.id, ok: !!rep.ok }, report: rep.report ?? null }, true);
       }
       const ent = await host({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} }, sub);
@@ -212,6 +223,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     if (closing) return closing;
     clearInterval(idleTimer);
     clearInterval(lockTimer);
+    if (dueTimer) clearInterval(dueTimer);
     for (const c of conns) c.destroy();
     const stopping = [...runs.keys()];
     for (const ac of runs.values()) ac.abort();
@@ -241,6 +253,14 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     else if (!existsSync(p.sock)) { log(`schedd: lost socket ${p.sock}, exiting`); close(); }
   }, lockCheckMs);
   lockTimer.unref?.();
+  // #4627: windowed post-deploy checks. One run at a time; a failure is logged and never stops the daemon.
+  let dueRunning = false;
+  const dueTimer = due ? setInterval(async () => {
+    if (closing || dueRunning) return;
+    dueRunning = true;
+    try { await due(); } catch (e) { log(`schedd: due run failed: ${e?.message ?? e}`); } finally { dueRunning = false; }
+  }, dueMs) : null;
+  dueTimer?.unref?.();
 
   // Daemon restart: resume every daemon-hosted batch that never wrote its report; live lanes are re-adopted.
   if (resumeOnStart) {

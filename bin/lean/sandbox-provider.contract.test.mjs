@@ -328,3 +328,31 @@ describe("remote capacity (GET /status, #4540)", () => {
     assert.equal(await p({ capacity: async () => { throw new Error("x"); } }).capacity(), null);
   });
 });
+
+describe("remote stop at the checkpoint (#4612)", () => {
+  it("httpTransport.stop: POST .../stop, 2xx true, 404/405 false, other statuses throw", async () => {
+    const calls = [];
+    const mk = (status) => httpTransport({ endpoint: "https://pool.example/v1", fetchFn: async (url, init) => { calls.push([init.method, url]); return { status, ok: status < 400, text: async () => "", headers: { get: () => null } }; } });
+    assert.equal(await mk(202).stop("a b"), true);
+    assert.deepEqual(calls[0], ["POST", "https://pool.example/v1/sandboxes/a%20b/stop"]);
+    assert.equal(await mk(404).stop("x"), false);
+    assert.equal(await mk(405).stop("x"), false);
+    await assert.rejects(mk(500).stop("x"), /stop: HTTP 500/);
+  });
+
+  it("provider.stop and providerLanes.stopLane signal the transport, never destroy; no transport stop = false", async () => {
+    const root = tmpDir("remote-stop-");
+    const batch = openBatch(root, "bt");
+    const { provider, transport } = remoteFixture(batch);
+    const stopped = [];
+    const lanes = providerLanes({ provider, laneArgs: () => [], ledgerFor: () => null });
+    assert.equal(await lanes.stopLane(1, { handle: { id: "sbx" } }), false, "the transport has no stop");
+    transport.stop = async (id) => { stopped.push(id); return true; };
+    assert.equal(await lanes.stopLane(1, { handle: { id: "sbx" } }), true);
+    assert.equal(await lanes.stopLane(1, {}), false, "no handle");
+    transport.stop = async () => { throw new Error("boom"); };
+    assert.equal(await provider.stop({ id: "sbx" }), false);
+    assert.deepEqual(stopped, ["sbx"]);
+    assert.deepEqual(transport.destroyed, []);
+  });
+});

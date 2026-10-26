@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { orchestrate, deferPolicy, DEFER_BACKOFF_S } from "./orchestrate.mjs";
+import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists } from "./orchestrate.mjs";
 import { openBatch, fsTypeOf, assertDiskPath, isLaneAlive, writeAtomic, launchLane, detachedLanes } from "./batch.mjs";
 import { orchestrateFromCli, runFromCli, readOrchestration, makeRelabelNeedsHuman, makeDispatchCheck } from "../engine-cli.mjs";
 
@@ -528,6 +528,37 @@ describe("#4376: forgedock orchestrate --cancel", () => {
     assert.deepEqual(saved.deferrals, { 1: 1 });
   });
 
+  for (const stopRemote of [false, true]) {
+    it(`a cancel ${stopRemote ? "with" : "without"} stopRemote ${stopRemote ? "stops" : "leaves"} a remote lane (#4612)`, async () => {
+      let cancel = null, saved = null;
+      const store = { load: () => saved, save: (s) => { saved = s; }, log: () => {} };
+      const started = [], stops = [];
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      const done = orchestrate({ issues: [1], parallel: 1, pollMs: 5, readBody: async () => "", store, getCancelled: () => cancel,
+        stopLane: (n, rec) => { stops.push([n, rec.remote]); release(); },
+        runOne: async (n, _lane, ctx) => {
+          started.push(n);
+          ctx.onStart?.({ remote: true, handle: { id: "sbx-1" } });
+          if (!stopRemote) setTimeout(release, 100);
+          await gate;
+          return { terminalReason: "deferred", code: "run.interrupted" };
+        } });
+      await until(() => started.includes(1));
+      cancel = { at: new Date().toISOString(), reason: "operator", ...(stopRemote ? { stopRemote: true } : {}) };
+      await done;
+      assert.deepEqual(stops, stopRemote ? [[1, true]] : []);
+    });
+  }
+
+  it("requestCancel records stopRemote only when asked (#4612)", () => {
+    const b = openBatch(tmpDir("batch-cancel-stop-"), "b1");
+    b.requestCancel({});
+    assert.equal(b.readCancel().stopRemote, undefined);
+    b.requestCancel({ stopRemote: true });
+    assert.equal(b.readCancel().stopRemote, true);
+  });
+
   it("through the CLI: --cancel during a lane holds the rest, a finished batch is left alone, unknown ids reject, --resume clears it", async () => {
     const root = tmpDir("batch-cancel-cli-");
     const leanIo = {
@@ -708,6 +739,75 @@ describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => 
     assert.deepEqual(rows.map((r) => [r.issue, r.outcome]).sort((a, b) => a[0] - b[0]), [1, 2, 3, 4, 5, 6].map((n) => [n, "merged"]));
     assert.ok(!rows.some((r) => /gave up/.test(r.detail ?? "")));
     assert.ok(Math.max(...capacityDefers.values()) > 3, "an issue was deferred for capacity more than maxDeferrals times");
+  });
+});
+
+describe("#4550: forgedock orchestrate --requeue", () => {
+  const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
+  it("a needs-human issue is requeued and relaunched; its skipped dependent returns to pending and runs after it merges; one row per issue", async () => {
+    const bodies = { 1: "", 2: "Depends on #1", 3: "" };
+    let entries = [];
+    const started = [], g3 = gate(), log = [], decisions = [];
+    const done = orchestrate({ issues: [1, 2, 3], parallel: 3, pollMs: 5, readBody: async (n) => bodies[n] ?? "", getRequeued: () => entries,
+      decide: (d) => { decisions.push(d); }, onUpdate: (r) => log.push(r),
+      runOne: async (n) => {
+        started.push(n);
+        if (n === 3) { await g3.p; return { terminalReason: "merged" }; }
+        if (n === 1 && started.filter((x) => x === 1).length === 1) return { terminalReason: "needs-human", detail: "builder.blocked: product-decision" };
+        return { terminalReason: "merged" };
+      } });
+    await until(() => log.some((r) => r.issue === 2 && r.outcome === "skipped"));
+    entries = [{ issue: 1, reason: "decided in scope", by: "operator", at: "2026-10-24T00:00:00Z" }];
+    await until(() => started.filter((x) => x === 2).length === 1, 3000);
+    g3.open();
+    const rows = await done;
+    assert.deepEqual(started.filter((x) => x === 1).length, 2, "relaunched once");
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[1, "merged"], [2, "merged"], [3, "merged"]]);
+    assert.equal(rows[0].requeued.reason, "decided in scope");
+    assert.equal(rows[0].requeued.prior[0].outcome, "needs-human");
+    assert.deepEqual(formatOutcomeLists(rows), ["requeued: #1 (decided in scope)"]);
+    assert.ok(decisions.some((d) => d.issue === 1 && /requeued/.test(d.what) && d.why === "decided in scope"));
+    assert.ok(started.indexOf(2) > started.lastIndexOf(1) - 1 && started.filter((x) => x === 2).length === 1, "#2 ran once, after #1 was relaunched");
+  });
+
+  it("an entry is applied once; one for an issue that is not terminal changes nothing", async () => {
+    const entries = [{ issue: 1, reason: "r", by: "operator", at: "t1" }];
+    let runs = 0;
+    const rows = await orchestrate({ issues: [1], parallel: 1, pollMs: 5, readBody: async () => "", getRequeued: () => entries,
+      runOne: async () => { runs++; return { terminalReason: "merged" }; } });
+    assert.equal(runs, 1);
+    assert.equal(rows[0].requeued, undefined);
+  });
+
+  it("batch.requeue: terminal issues are recorded; unknown, merged and double requests are refused; --add still says already in batch", () => {
+    const b = openBatch(tmpDir("batch-requeue-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1, 2, 3, 4], results: { 1: { outcome: "needs-human" }, 2: { outcome: "merged" }, 3: { outcome: "dependency-blocked" } } });
+    const r = b.requeue([1, 2, 3, 4, 9, "x", 1], { reason: "why", by: "me" });
+    assert.deepEqual(r.requeued, [1, 3]);
+    assert.deepEqual(r.refused.map((x) => [x.issue, x.reason]), [[2, "not terminal"], [4, "not terminal"], [9, "not in batch"], ["x", "not an integer"], [1, "already requeued"]]);
+    assert.deepEqual(b.readRequeued().map((e) => [e.issue, e.reason, e.by]), [[1, "why", "me"], [3, "why", "me"]]);
+    assert.equal(b.unrunRequeues().length, 2);
+    assert.deepEqual(b.addIssues([1]).skipped, [{ issue: 1, reason: "already in batch" }]);
+  });
+
+  it("the CLI refuses a needs-human-labelled or closed issue and writes nothing; an open, cleared one is requeued (a finished batch's report is cleared)", async () => {
+    const root = tmpDir("batch-requeue-cli-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [5, 6, 7], results: { 5: { outcome: "needs-human" }, 6: { outcome: "needs-human" }, 7: { outcome: "needs-human" } } });
+    b.writeReport({ rows: [], report: "x" });
+    const io = { gh: async (a) => JSON.stringify({ state: a[2] === "6" ? "CLOSED" : "OPEN", labels: a[2] === "7" ? [{ name: "needs-human" }] : [] }) };
+    const bad = await quiet(() => orchestrateFromCli(["--requeue", "b1", "6", "7", "--reason", "r"], { batchRoot: root, io }));
+    assert.deepEqual(bad.requeued, []);
+    assert.deepEqual(bad.refused.map((x) => x.issue), [6, 7]);
+    assert.match(bad.refused[1].reason, /needs-human/);
+    assert.deepEqual(b.readRequeued(), []);
+    assert.ok(b.readReport(), "nothing changed");
+    const ok = await quiet(() => orchestrateFromCli(["--requeue", "b1", "5", "--reason", "decided"], { batchRoot: root, io }));
+    assert.deepEqual(ok.requeued, [5]);
+    assert.equal(b.readRequeued()[0].reason, "decided");
+    assert.equal(b.readReport(), null, "the finished batch is reopened for --resume");
   });
 });
 

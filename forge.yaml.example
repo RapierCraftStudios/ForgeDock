@@ -137,6 +137,15 @@ branches:
 # post_deploy:
 #   precondition_cmd: "scripts/rollout-ready.sh"
 #   min_age: "24h"
+#
+# Named checks (#4626): a post-deploy requirement names a check id, and the
+# command lives in .forge/post-deploy-checks.json on the default branch (never
+# in an issue body):
+#   { "login-smoke": { "run": "scripts/smoke.sh", "pass": "exit 0", "timeout": 120 } }
+# "pass" is "exit 0" or a /regex/flags over the output. Once the fix is on the
+# default branch the check runs with no model call: pass closes the follow-up
+# (FORGE:PROBE record), fail reopens the parent. A follow-up item with no
+# runnable check is labelled awaiting-measurement and never gets a lane.
 
 # =============================================================================
 # AGENTS (OPTIONAL)
@@ -1341,3 +1350,12 @@ branches:
 #   # Local ledger path where imported cards are merged.
 #   # Default: ".forge/ledger" — must match index.cache_dir if configured.
 #   # ledger_path: ".forge/ledger"
+
+# ---------------------------------------------------------------------------
+# events: outbound lifecycle events (#4630, docs/EVENTS.md). The local JSONL
+# sink is always on (FORGE_EVENTS=off disables it); the webhook needs both keys.
+# ---------------------------------------------------------------------------
+# events:
+#   webhook_url: https://hooks.example.com/forgedock   # https, or http on localhost
+#   webhook_secret_env: FORGE_EVENTS_SECRET            # NAME of the env var holding the HMAC secret
+#   dir: ~/.forge/events                               # local JSONL directory

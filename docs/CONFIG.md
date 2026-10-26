@@ -594,6 +594,52 @@ engine:
 
 ---
 
+## `post_deploy` (OPTIONAL)
+
+Deferred follow-ups whose items are all post-deploy checks are parked (`awaiting-promotion`, no lane) until the parent's fix is on `branches.default`. Keys: `precondition_cmd` (exit 0 ready, 1 parked) and `min_age` (soak window, e.g. `24h`).
+
+### Named checks (#4626)
+
+A post-deploy requirement carries a check id (`[check:<id>]` in the follow-up item). The command is read from `.forge/post-deploy-checks.json` on the default branch (`git show origin/<default>:...`), never from an issue body or comment:
+
+```json
+{ "login-smoke": { "run": "scripts/smoke.sh", "pass": "exit 0", "timeout": 120 } }
+```
+
+`pass` is `exit 0` (default) or a `/regex/flags` over the output; `timeout` is seconds. When the gate reports the follow-up ready, the check runs with no model call: pass closes the follow-up with a `FORGE:PROBE` record, fail reopens the parent with the output. An item with no check id, or an id the default branch does not define, gets the `awaiting-measurement` label and never a lane. A contract's check id must be on the default branch or added by the same PR.
+
+Closing an experiment follow-up (#4634): add a check that runs `forgedock stats --experiment <id> --require-met` (exit 0 only when every target of the forge.yaml `experiment:` is met; n/a below min n is not met), and put `[check:<check id>]` in the follow-up item:
+
+```json
+{ "exp-light-vs-full": { "run": "forgedock stats --experiment light-vs-full --require-met" } }
+```
+
+Met targets pass the check and close the follow-up; with `for`/`every` it is re-measured through the window. The probe env is minimal: list the GitHub token variable in the forge.yaml `acceptance_probe.env` allowlist so stats can read telemetry.
+
+### Windowed monitoring (#4627)
+
+A check may declare `for` (the window, `30m`/`24h`/`7d`/`2w`) and `every` (the cadence, default `6h`; needs `for`); an entry with an invalid duration, or `every` without `for`, is ignored:
+
+```json
+{ "login-smoke": { "run": "scripts/smoke.sh", "for": "7d", "every": "6h" } }
+```
+
+When every item's check is windowed, the first pass records the release (the `origin/<default>` sha) and the window end in a `FORGE:PROBE` record, labels the follow-up `post-deploy-monitoring` and leaves it open (no lane, no second measurement by the pre-filter). It re-runs, with the command read from the default branch each time, when `every` has elapsed or `origin/<default>` moved (a later release). At the window end it closes. A fail after a pass opens a regression issue (`FORGE:REGRESSION`) naming the fix commit, the last passing release and the breaking release, and closes the follow-up; the parent is not reopened. A fail on the first run behaves as above (the parent reopens). No model call.
+
+Triggers: `forgedock probe --due [--dry-run] [--repo owner/repo]` runs the due ones once; the `forgedock schedd` daemon runs them on a timer while it is up (`FORGEDOCK_SCHEDD_DUE_MS`, default 15 minutes).
+
+
+## `events` (OPTIONAL)
+
+Outbound lifecycle events (#4630). The local JSONL sink is always on; the webhook needs both keys. See [EVENTS.md](EVENTS.md) for the schema and signature.
+
+```yaml
+events:
+  webhook_url: https://hooks.example.com/forgedock   # https, or http on localhost; unset = no webhook
+  webhook_secret_env: FORGE_EVENTS_SECRET            # NAME of the env var holding the HMAC secret (default shown); never put the secret here
+  dir: ~/.forge/events                               # local JSONL directory
+```
+
 ## `lean` (OPTIONAL)
 
 Settings of the core work-on (`bin/lean/`) that change its contract.
@@ -708,6 +754,8 @@ verify:
 | `e2e_paths_input` | string | No | `workflow_dispatch` input of `e2e_workflow` that receives the changed spec paths (newline-separated). |
 | `e2e_paths` | string | No | Comma-separated globs of e2e specs (same glob rules as `skip_paths`). Default `e2e/**,**/e2e/**,*.e2e.*,*.e2e-spec.*,cypress/**,playwright/**`. |
 | `e2e_blocking` | string | No | `changed` (default): only failures of the lane's own specs block the merge; other e2e failures are reported as an anomaly. `all`: every e2e failure blocks. |
+
+**English-copy check (forge#4596).** At hand-off and after each base-sync merge, keys the lane added to a non-`en` JSON locale catalog (`messages/ta.json`, `locales/ta/common.json`) whose value equals the same key in the `en` counterpart go back to the builder once to translate (placeholders kept, status entries inserted in place, never re-sorted); a copy left over is an anomaly. Always on, deterministic, no cost without catalogs. The repo's own `i18n:check` is not run by the engine: list it in `lean.precheck.commands` to run it before the PR.
 
 **Flow** (`ci`/`hybrid`, `bin/lean/verify.mjs` `runCiVerify`):
 
@@ -1438,6 +1486,7 @@ These variables are read from the operator's runner environment, not from `forge
 | `FORGE_TRAIL_QG_SINCE` | `2026-10-07T03:40:12Z` | ISO-8601 UTC cutoff for the legacy `FORGE:QUALITY_GATE` grace. An issue whose trusted `FORGE:BUILDER:COMPLETE` comment was last updated before this time has `QUALITY_GATE` waived. Set to an empty string to disable the grace. A malformed or future value (including a runner clock earlier than this default) fails closed: the verifier exits 2, an infrastructure block rather than `MISSING`. |
 | `FORGEDOCK_ALLOW_API_BACKEND` | unset | Set to `1` (host owner approval) together with forge.yaml `execution.agent_backend: api` to let `--backend auto` use the paid API backend when no `claude` CLI is available. Without both, `auto` never selects `api` (#4257). |
 | `FORGE_TELEMETRY` | `on` | Set to `off` to disable gate telemetry. Gate scripts append one structured record per decision to a trusted `FORGE:TELEMETRY v1` comment; emission is best-effort and never changes a gate's output or exit code. See [TELEMETRY.md](TELEMETRY.md). |
+| `FORGE_EVENTS` | `on` | Set to `off` to disable the lifecycle event stream (local JSONL and webhook). `FORGE_EVENTS_DIR` overrides the JSONL directory; the webhook secret is read from the env var named by `events.webhook_secret_env` (default `FORGE_EVENTS_SECRET`). See [EVENTS.md](EVENTS.md). |
 
 ### Install root resolution
 

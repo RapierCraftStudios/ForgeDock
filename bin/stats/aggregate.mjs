@@ -86,7 +86,7 @@ function costSection(runs) {
     n, cacheReadMean: mean(cr), cacheReadMedian: percentile(cr, 50), perPhase,
     outputMean: n ? sum(runs.map((r) => sum(Object.values(r.phases).map((p) => p.out ?? 0)))) / n : null,
     perMergedIssue: merged ? sum(cr) / merged : null,
-    usdN: usd.length, usdMean: mean(usd), usdTotal: usd.length ? sum(usd) : null,
+    usdN: usd.length, usdMean: mean(usd), usdMedian: percentile(usd, 50), usdTotal: usd.length ? sum(usd) : null,
   };
 }
 

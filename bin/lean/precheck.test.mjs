@@ -256,10 +256,25 @@ describe("check timeout is infrastructure (#4589)", () => {
     assert.equal(h2.calls.length, 1);
     assert.equal(r2.results[0].rc, 1);
   });
-  it("a retry the budget cuts short is deferred", async () => {
+  it("an exhausted budget defers a command that hit its own timeout", async () => {
+    const h = harness({ cost: { slow: 9e9 } });
+    const r = await runChecks({ commands: ["slow"], budgetMs: 1000, perCommandMs: 1000, now: h.now, run: h.run, load: idle });
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual(r.deferred, ["slow"]);
+  });
+  it("default budget: a check hitting its own timeout is reported, not deferred (#4620)", async () => {
+    const plan = planPrecheck({ verify: {}, learned: ["npm test"] });
+    const h = harness({ cost: { "npm test": 9e9 } });
+    const r = await runChecks({ commands: plan.commands, budgetMs: plan.budgetMs, perCommandMs: plan.perCommandMs, now: h.now, run: h.run, load: idle });
+    assert.equal(r.results.length, 1);
+    assert.equal(r.results[0].rc, 124);
+    assert.deepEqual(r.deferred, []);
+  });
+  it("a budget with room left but no longer retry reports the timeout as a failure", async () => {
     const h = harness({ cost: { slow: 9e9 } });
     const r = await runChecks({ commands: ["slow"], budgetMs: 1500, perCommandMs: 1000, now: h.now, run: h.run, load: idle });
-    assert.deepEqual(r.deferred, ["slow"]);
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual([r.results.map((x) => x.rc), r.deferred], [[124], []]);
   });
   it("runWithTimeoutRetry reports retried", async () => {
     let n = 0;

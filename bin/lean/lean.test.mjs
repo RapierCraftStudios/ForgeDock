@@ -124,6 +124,8 @@ function world(o = {}) {
       if (a[0] === "diff" && a[1] === "--check") return "";
       if (a[0] === "grep") return w.markers ? "src/foo.js:3:<<<<<<< HEAD" : "";
       if (a[0] === "merge" && a[1] === "--abort") { w.mergeInProgress = false; return ""; }
+      if (a[0] === "rev-parse" && a.length === 2 && (o.shipped ?? []).includes(String(a[1]).replace(/^origin\//, ""))) return `tip-${a[1]}`; // #4623
+      if (a[0] === "rev-list" && a.includes("--merges")) { const l = String(a.at(-1)).slice(1).replace(/^origin\//, ""); return (o.shipped ?? []).includes(l) ? `m1 s1 tip-origin/${l}\n` : ""; }
       if (a[0] === "rev-parse" && a.length === 2 && /^origin\//.test(String(a[1]))) return w.baseHeads.length > 1 ? w.baseHeads.shift() : w.baseHeads[0]; // #4386: the base head moves only when a test says so
       if (a[0] === "rev-parse") return w.head;
       if (a[0] === "diff" && a[1] === "--name-only" && !a.some((x) => String(x).includes("..."))) return w.changed.filter((f) => !(o.equalToBase ?? []).includes(f)).join("\n");
@@ -131,7 +133,7 @@ function world(o = {}) {
       if (a[0] === "diff" && a[1] === "--numstat") return w.numstat ?? "";
       if (a[0] === "ls-files") return [...new Set(["src/foo.js", "src/bar.js", "test/foo.test.js", ...w.changed])].join("\n");
       if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
-      if (a[0] === "merge-base" && a[1] === "--is-ancestor") { if ((o.shipped ?? []).includes(String(a[2]).replace(/^origin\//, ""))) return ""; throw new Error("not an ancestor"); } // #4593
+      if (a[0] === "merge-base" && a[1] === "--is-ancestor") { if ([...(o.shipped ?? []), ...(o.unusedAncestors ?? [])].includes(String(a[2]).replace(/^origin\//, ""))) return ""; throw new Error("not an ancestor"); } // #4593
       if (a[0] === "ls-remote" && String(a.at(-1)).startsWith("refs/heads/")) { const b = a.at(-1).slice("refs/heads/".length); return (o.branchesOnOrigin ?? ["staging", "main"]).includes(b) ? `abc\trefs/heads/${b}\n` : ""; }
       if (a[0] === "ls-remote") return w.remote;
       if (a[0] === "show" && w.baseFiles) { if (!(a[1] in w.baseFiles)) throw new Error(`fatal: path not in ${a[1]}`); return w.baseFiles[a[1]]; }
@@ -794,8 +796,9 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
 
   for (const d of ["defer", "post-deploy"]) {
     it(`a contracted ${d} is filed only after the reviewer accepts it, then linked in the PR and on close`, async () => {
-      const k = two(d, { why: d === "defer" ? "separate module" : "only measurable after deploy" });
+      const k = two(d, { why: d === "defer" ? "separate module" : "only measurable after deploy", ...(d === "post-deploy" ? { check: "login-smoke" } : {}) });
       const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, { ...k, requirements: [k.requirements[0], { ...k.requirements[1], tracked: "#900" }] })] });
+      if (d === "post-deploy") w.baseFiles = { "origin/staging:.forge/post-deploy-checks.json": JSON.stringify({ "login-smoke": "true" }) };
       const r = await run(w);
       assert.equal(r.terminalReason, "merged");
       assert.equal(w.followups.length, 1); assert.equal(w.followups[0].parent, 7);
@@ -1623,7 +1626,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line).
     assert.ok(approxTokens(plan) <= 1900, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1550); // 1550: #4591 (never hand-name migration files, one rule line)
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1600); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -2041,7 +2044,7 @@ describe("comment templates", () => {
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
     assert.ok(approxTokens(plan) <= 1800, `plan prompt is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(impl) <= 1500, `implement prompt is ${approxTokens(impl)} tokens`);
+    assert.ok(approxTokens(impl) <= 1550, `implement prompt is ${approxTokens(impl)} tokens`); // 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
@@ -2074,6 +2077,83 @@ describe("merge_wait policy", () => {
     const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => states({ build: "pending" });
     assert.equal((await run(w2, { ciMaxMinutes: 5 })).terminalReason, "ci-pending");
   });
+  describe("#4624 merge-time rerun / wait / flaky branch of mergeFixRound", () => {
+    const RUN = (n, attempt) => `https://github.com/o/r/actions/runs/${n}/job/${attempt}`;
+    const NO_FIX = { ...parseVerify({}), maxRounds: 0 };
+    const WAIT = 20000;
+    const waits = (w) => { const n = { n: 0 }; const s = w.io.sleep; w.io.sleep = async (ms) => { if (ms === WAIT) n.n++; return s(ms); }; return n; };
+    const fixPrompts = (w) => { const p = []; const inner = w.io.runner; w.io.runner = async (c) => { if (/CI failed on the pushed branch/.test(c.prompt)) p.push(c.prompt); return inner(c); }; return p; };
+    const events = (dir, name) => readLog(dir, 7).filter((e) => e.event === name);
+    /** `build` (run 77) is red; `urlAfter` is its URL once the rerun was triggered, `stateAfter` its state then. */
+    const redBuild = (stateAfter, urlAfter) => {
+      const w = world(); w.reran = [];
+      w.io.requiredChecks = async () => ["build"];
+      w.io.rerunFailedJobs = async (id) => { w.reran.push(id); };
+      w.io.checkStates = async () => (w.reran.length ? [{ name: "build", state: stateAfter, url: urlAfter }] : [{ name: "build", state: "failure", url: RUN(77, 1) }]);
+      w.io.failedLogs = async () => "boom";
+      return w;
+    };
+
+    it("a failed required check is rerun once, waited on while its URL is unchanged, and merges when the new attempt is green without a fix round", async () => {
+      const w = redBuild("success", RUN(77, 2)); const p = fixPrompts(w), dir = tmpDir("core-");
+      // the rerun was triggered, but the check still reports the old attempt for two more polls
+      const states = w.io.checkStates; let stale = 2;
+      w.io.checkStates = async () => (w.reran.length && stale-- > 0 ? [{ name: "build", state: "failure", url: RUN(77, 1) }] : states());
+      const n = waits(w);
+      const r = await run(w, { dir });
+      assert.equal(r.terminalReason, "merged"); assert.deepEqual(w.reran, ["77"]); assert.equal(p.length, 0);
+      assert.equal(n.n, 3, "one wait after the rerun, then two while the URL is unchanged");
+      assert.deepEqual(events(dir, "CI_FLAKE_RERUN").map((e) => [e.trigger, e.result, e.runs]), [["merge", "rerun-started", ["77"]]]);
+      assert.equal(events(dir, "CI_FIX_ROUND").length, 0);
+    });
+
+    it("a rerun whose check URL never changes is waited on 20 times, then falls through to the fix round; the head is rerun only once", async () => {
+      const w = redBuild("failure", RUN(77, 1)); const n = waits(w), dir = tmpDir("core-");
+      const r = await run(w, { dir, verify: NO_FIX });
+      assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, OUTCOME_CODES.CI_RED); assert.equal(w.merges.length, 0);
+      assert.equal(n.n, 21, "the wait after the rerun plus 20 bounded waits");
+      assert.deepEqual(w.reran, ["77"]);
+      assert.equal(events(dir, "CI_FLAKE_RERUN").length, 1);
+    });
+
+    it("a rerun that reports a new attempt still red goes to the fix round and reaches the builder", async () => {
+      const w = redBuild("failure", RUN(77, 2)); const p = fixPrompts(w), n = waits(w), dir = tmpDir("core-");
+      await run(w, { dir, verify: { ...parseVerify({}), maxRounds: 1 } });
+      assert.ok(n.n >= 1); assert.equal(p.length, 1); assert.equal(w.reran[0], "77");
+      assert.deepEqual(events(dir, "CI_FIX_ROUND").map((e) => [e.trigger, e.jobs]), [["merge", ["build"]]]);
+    });
+
+    it("a rerun that cannot start is logged rerun-failed and the lane does not wait", async () => {
+      const w = redBuild("failure", RUN(77, 1)); const n = waits(w), dir = tmpDir("core-");
+      w.io.rerunFailedJobs = async () => { throw new Error("HTTP 403"); };
+      const r = await run(w, { dir, verify: NO_FIX });
+      assert.equal(r.code, OUTCOME_CODES.CI_RED); assert.equal(n.n, 0);
+      assert.deepEqual(events(dir, "CI_FLAKE_RERUN").map((e) => e.result), ["rerun-failed"]);
+    });
+
+    it("verify.flaky: a required check still red after the rerun is reported and ends needs-human; nothing merged, builder not resumed", async () => {
+      const w = redBuild("failure", RUN(77, 2)); const p = fixPrompts(w), dir = tmpDir("core-");
+      const r = await run(w, { dir, verify: { ...parseVerify({}), flaky: ["build"] } });
+      assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, OUTCOME_CODES.CI_RED);
+      assert.equal(w.merges.length, 0); assert.equal(p.length, 0); assert.deepEqual(w.reran, ["77"]);
+      assert.deepEqual(events(dir, "CI_FLAKY_REPORTED").map((e) => [e.trigger, e.jobs]), [["merge", ["build"]]]);
+      assert.ok(JSON.stringify(w.comments).includes("still failed on PR #"), "needs-human message names the rerun");
+    });
+
+    it("verify.flaky with a mix: only the non-flaky required check reaches the builder", async () => {
+      const w = world(); w.reran = [];
+      w.io.requiredChecks = async () => ["build", "lint"];
+      w.io.rerunFailedJobs = async (id) => { w.reran.push(id); };
+      w.io.checkStates = async () => [{ name: "build", state: "failure", url: RUN(77, w.reran.length + 1) }, { name: "lint", state: "failure", url: RUN(78, w.reran.length + 1) }];
+      w.io.failedLogs = async () => "boom";
+      const dir = tmpDir("core-");
+      await run(w, { dir, verify: { ...parseVerify({}), flaky: ["build"], maxRounds: 1 } });
+      assert.deepEqual(w.reran.slice(0, 2).sort(), ["77", "78"], "both red runs rerun on the first head");
+      assert.deepEqual(events(dir, "CI_FLAKY_REPORTED")[0].jobs, ["build"]);
+      assert.deepEqual(events(dir, "CI_FIX_ROUND").map((e) => e.jobs), [["lint"]]);
+    });
+  });
+
   it("all waits for every check (waitCiGreen); none merges immediately", async () => {
     const w = world({ waits: [{ rc: 2, text: "" }] }); let req = 0; w.io.requiredChecks = async () => { req++; return []; };
     assert.equal((await run(w, { mergeWait: "all" })).terminalReason, "merged");
@@ -3785,6 +3865,12 @@ describe("shipped lane follows the open PR base (#4593)", () => {
     assert.equal(r.terminalReason, "merged");
     assert.ok(w.calls.some((c) => c[0] === "git" && c.includes("origin/milestone/new..refs/heads/feat/issue-7-lean")), "work is compared against the PR base");
   });
+  it("unused lane at the staging tip is not shipped (#4623)", async () => {
+    // ancestor of staging but no merge commit took it: the hand-retargeted PR must stop, not be followed
+    const w = world({ milestone: "Old", branchesOnOrigin: ["staging", "milestone/old", "milestone/new"], unusedAncestors: ["milestone/old"], prList: pr("milestone/new"), remote: "abc\trefs/heads/feat/issue-7-lean" });
+    const r = await run(w, { lane: undefined });
+    assert.deepEqual([r.terminalReason, r.code], ["needs-human", "lane.mismatch"]);
+  });
   it("stays needs-human when the lane is not shipped, the base is shipped, missing, or the default branch", async () => {
     for (const [o, code] of [
       [{ prList: pr("milestone/new") }, "lane.mismatch"],
@@ -3948,6 +4034,17 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
   };
   const ciValidation = [{ id: "V1", command: "node --test test/foo.test.js", ci: true }];
   const events = (dir) => readLog(dir, 7).filter((e) => e.event === "CI_VERIFY");
+
+  it("untrack commit before CI verify: a tool cache the builder committed does not move HEAD under the CI lookup (#4621)", async () => {
+    const w = withCi(world({ validation: ciValidation })); w.added = ["src/foo.js", "apps/worker/.eslintcache"];
+    const inner = w.io.git;
+    w.io.git = async (a, o) => { const out = await inner(a, o); if (a[0] === "commit" && a.some((x) => /untrack lane tool state/.test(x))) w.head = `dddd${w.calls.length}`.padEnd(16, "0"); return out; };
+    const dir = tmpDir("core-ci-");
+    const r = await run(w, { verify: CI, dir });
+    assert.equal(r.terminalReason, "merged");
+    assert.deepEqual(events(dir).map((e) => e.result), ["pass"], "CI found the run for the pushed tip");
+    assert.ok(!builders(w).some((b) => /CI (is )?unavailable|cannot run/i.test(String(b[4]))), "no ci_unavailable builder round");
+  });
 
   it("green CI: the builder is told not to run test suites, the branch is pushed and verified before review, validate left to CI passes enforce", async () => {
     const w = withCi(world({ validation: ciValidation }));
@@ -5189,6 +5286,17 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.equal(w.dupArgs.cwd, WT);
   });
 
+  it("#4596 English copies in a locale catalog resume the builder once to translate; a leftover is an anomaly", async () => {
+    const w = hworld(); const c = [[{ path: "messages/ta.json", key: "calendarView.day", value: "Day view", source: "messages/en.json" }], []]; w.cpCalls = 0;
+    w.io.englishCopies = async (x) => { w.cpCalls++; w.cpArgs = x; return c.length > 1 ? c.shift() : c[0]; };
+    assert.equal((await run(w)).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3);
+    assert.match(b[2][4], /messages\/ta\.json: calendarView\.day = "Day view" \(same as messages\/en\.json\)[\s\S]*Translate each/);
+    assert.ok(w.seq.indexOf("pr") > w.seq.lastIndexOf("builder-resume"), "fixed before the PR");
+    assert.equal(w.cpArgs.cwd, WT);
+  });
+
   it("#4406 a duplicate that remains after the round is an anomaly; verify.duplicate_exports false skips the check", async () => {
     let w = hworld(); w.io.duplicateExports = async () => DUP;
     assert.equal((await run(w)).terminalReason, "merged");
@@ -5838,6 +5946,17 @@ describe("e2e merge gate (#4403)", () => {
     assert.equal(r2.terminalReason, "needs-human"); assert.equal(w2.merges.length, 0);
   });
 
+  it("#4624 verify.flaky: a flaky-listed own e2e failure is reported as an anomaly, never reaches the builder, and the lane merges; a non-listed one still does", async () => {
+    const w = withE2e(world({ changed: SPECS }), ["failure"]);
+    const fixes = []; const inner = w.io.runner; w.io.runner = async (c) => { if (/CI failed on the pushed branch/.test(c.prompt)) fixes.push(c.prompt); return inner(c); };
+    const r = await go(w, { verify: { ...cfg(), flaky: ["e2e"] } });
+    assert.equal(r.terminalReason, "merged"); assert.equal(fixes.length, 0);
+    assert.ok(traj(w).some((t) => /Known-flaky e2e failure\(s\) reported, not blocking \(verify\.flaky\): e2e/.test(t)));
+    const w2 = withE2e(world({ changed: SPECS }), ["failure"]);
+    const r2 = await go(w2, { verify: { ...cfg(), flaky: ["other"], maxRounds: 0 } });
+    assert.equal(r2.code, OUTCOME_CODES.CI_RED); assert.equal(w2.merges.length, 0);
+  });
+
   it("verify.e2e: never (or no label/workflow configured) keeps today's behaviour: no label, no e2e wait, no event", async () => {
     for (const verify of [cfg({ e2e: "never" }), parseVerify({})]) {
       const w = withE2e(world({ changed: SPECS }), ["failure"]);
@@ -6174,7 +6293,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1500 && approxTokens(builderPlanPrompt(7)) <= 1800);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1550 && approxTokens(builderPlanPrompt(7)) <= 1800);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
