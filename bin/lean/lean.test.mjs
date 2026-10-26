@@ -2075,6 +2075,83 @@ describe("merge_wait policy", () => {
     const w2 = world(); w2.io.requiredChecks = async () => ["build"]; w2.io.checkStates = async () => states({ build: "pending" });
     assert.equal((await run(w2, { ciMaxMinutes: 5 })).terminalReason, "ci-pending");
   });
+  describe("#4624 merge-time rerun / wait / flaky branch of mergeFixRound", () => {
+    const RUN = (n, attempt) => `https://github.com/o/r/actions/runs/${n}/job/${attempt}`;
+    const NO_FIX = { ...parseVerify({}), maxRounds: 0 };
+    const WAIT = 20000;
+    const waits = (w) => { const n = { n: 0 }; const s = w.io.sleep; w.io.sleep = async (ms) => { if (ms === WAIT) n.n++; return s(ms); }; return n; };
+    const fixPrompts = (w) => { const p = []; const inner = w.io.runner; w.io.runner = async (c) => { if (/CI failed on the pushed branch/.test(c.prompt)) p.push(c.prompt); return inner(c); }; return p; };
+    const events = (dir, name) => readLog(dir, 7).filter((e) => e.event === name);
+    /** `build` (run 77) is red; `urlAfter` is its URL once the rerun was triggered, `stateAfter` its state then. */
+    const redBuild = (stateAfter, urlAfter) => {
+      const w = world(); w.reran = [];
+      w.io.requiredChecks = async () => ["build"];
+      w.io.rerunFailedJobs = async (id) => { w.reran.push(id); };
+      w.io.checkStates = async () => (w.reran.length ? [{ name: "build", state: stateAfter, url: urlAfter }] : [{ name: "build", state: "failure", url: RUN(77, 1) }]);
+      w.io.failedLogs = async () => "boom";
+      return w;
+    };
+
+    it("a failed required check is rerun once, waited on while its URL is unchanged, and merges when the new attempt is green without a fix round", async () => {
+      const w = redBuild("success", RUN(77, 2)); const p = fixPrompts(w), dir = tmpDir("core-");
+      // the rerun was triggered, but the check still reports the old attempt for two more polls
+      const states = w.io.checkStates; let stale = 2;
+      w.io.checkStates = async () => (w.reran.length && stale-- > 0 ? [{ name: "build", state: "failure", url: RUN(77, 1) }] : states());
+      const n = waits(w);
+      const r = await run(w, { dir });
+      assert.equal(r.terminalReason, "merged"); assert.deepEqual(w.reran, ["77"]); assert.equal(p.length, 0);
+      assert.equal(n.n, 3, "one wait after the rerun, then two while the URL is unchanged");
+      assert.deepEqual(events(dir, "CI_FLAKE_RERUN").map((e) => [e.trigger, e.result, e.runs]), [["merge", "rerun-started", ["77"]]]);
+      assert.equal(events(dir, "CI_FIX_ROUND").length, 0);
+    });
+
+    it("a rerun whose check URL never changes is waited on 20 times, then falls through to the fix round; the head is rerun only once", async () => {
+      const w = redBuild("failure", RUN(77, 1)); const n = waits(w), dir = tmpDir("core-");
+      const r = await run(w, { dir, verify: NO_FIX });
+      assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, OUTCOME_CODES.CI_RED); assert.equal(w.merges.length, 0);
+      assert.equal(n.n, 21, "the wait after the rerun plus 20 bounded waits");
+      assert.deepEqual(w.reran, ["77"]);
+      assert.equal(events(dir, "CI_FLAKE_RERUN").length, 1);
+    });
+
+    it("a rerun that reports a new attempt still red goes to the fix round and reaches the builder", async () => {
+      const w = redBuild("failure", RUN(77, 2)); const p = fixPrompts(w), n = waits(w), dir = tmpDir("core-");
+      await run(w, { dir, verify: { ...parseVerify({}), maxRounds: 1 } });
+      assert.ok(n.n >= 1); assert.equal(p.length, 1); assert.equal(w.reran[0], "77");
+      assert.deepEqual(events(dir, "CI_FIX_ROUND").map((e) => [e.trigger, e.jobs]), [["merge", ["build"]]]);
+    });
+
+    it("a rerun that cannot start is logged rerun-failed and the lane does not wait", async () => {
+      const w = redBuild("failure", RUN(77, 1)); const n = waits(w), dir = tmpDir("core-");
+      w.io.rerunFailedJobs = async () => { throw new Error("HTTP 403"); };
+      const r = await run(w, { dir, verify: NO_FIX });
+      assert.equal(r.code, OUTCOME_CODES.CI_RED); assert.equal(n.n, 0);
+      assert.deepEqual(events(dir, "CI_FLAKE_RERUN").map((e) => e.result), ["rerun-failed"]);
+    });
+
+    it("verify.flaky: a required check still red after the rerun is reported and ends needs-human; nothing merged, builder not resumed", async () => {
+      const w = redBuild("failure", RUN(77, 2)); const p = fixPrompts(w), dir = tmpDir("core-");
+      const r = await run(w, { dir, verify: { ...parseVerify({}), flaky: ["build"] } });
+      assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, OUTCOME_CODES.CI_RED);
+      assert.equal(w.merges.length, 0); assert.equal(p.length, 0); assert.deepEqual(w.reran, ["77"]);
+      assert.deepEqual(events(dir, "CI_FLAKY_REPORTED").map((e) => [e.trigger, e.jobs]), [["merge", ["build"]]]);
+      assert.ok(JSON.stringify(w.comments).includes("still failed on PR #"), "needs-human message names the rerun");
+    });
+
+    it("verify.flaky with a mix: only the non-flaky required check reaches the builder", async () => {
+      const w = world(); w.reran = [];
+      w.io.requiredChecks = async () => ["build", "lint"];
+      w.io.rerunFailedJobs = async (id) => { w.reran.push(id); };
+      w.io.checkStates = async () => [{ name: "build", state: "failure", url: RUN(77, w.reran.length + 1) }, { name: "lint", state: "failure", url: RUN(78, w.reran.length + 1) }];
+      w.io.failedLogs = async () => "boom";
+      const dir = tmpDir("core-");
+      await run(w, { dir, verify: { ...parseVerify({}), flaky: ["build"], maxRounds: 1 } });
+      assert.deepEqual(w.reran.slice(0, 2).sort(), ["77", "78"], "both red runs rerun on the first head");
+      assert.deepEqual(events(dir, "CI_FLAKY_REPORTED")[0].jobs, ["build"]);
+      assert.deepEqual(events(dir, "CI_FIX_ROUND").map((e) => e.jobs), [["lint"]]);
+    });
+  });
+
   it("all waits for every check (waitCiGreen); none merges immediately", async () => {
     const w = world({ waits: [{ rc: 2, text: "" }] }); let req = 0; w.io.requiredChecks = async () => { req++; return []; };
     assert.equal((await run(w, { mergeWait: "all" })).terminalReason, "merged");
@@ -5848,6 +5925,17 @@ describe("e2e merge gate (#4403)", () => {
     const w2 = withE2e(world({ changed: SPECS }), ["failure"], "FAIL e2e/rosters.spec.ts > lists rosters");
     const r2 = await go(w2, { verify: { ...cfg({ e2e_blocking: "all" }), maxRounds: 0 } });
     assert.equal(r2.terminalReason, "needs-human"); assert.equal(w2.merges.length, 0);
+  });
+
+  it("#4624 verify.flaky: a flaky-listed own e2e failure is reported as an anomaly, never reaches the builder, and the lane merges; a non-listed one still does", async () => {
+    const w = withE2e(world({ changed: SPECS }), ["failure"]);
+    const fixes = []; const inner = w.io.runner; w.io.runner = async (c) => { if (/CI failed on the pushed branch/.test(c.prompt)) fixes.push(c.prompt); return inner(c); };
+    const r = await go(w, { verify: { ...cfg(), flaky: ["e2e"] } });
+    assert.equal(r.terminalReason, "merged"); assert.equal(fixes.length, 0);
+    assert.ok(traj(w).some((t) => /Known-flaky e2e failure\(s\) reported, not blocking \(verify\.flaky\): e2e/.test(t)));
+    const w2 = withE2e(world({ changed: SPECS }), ["failure"]);
+    const r2 = await go(w2, { verify: { ...cfg(), flaky: ["other"], maxRounds: 0 } });
+    assert.equal(r2.code, OUTCOME_CODES.CI_RED); assert.equal(w2.merges.length, 0);
   });
 
   it("verify.e2e: never (or no label/workflow configured) keeps today's behaviour: no label, no e2e wait, no event", async () => {
