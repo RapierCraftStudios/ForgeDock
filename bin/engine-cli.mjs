@@ -16,6 +16,7 @@ import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs } from ".
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
+import { makeEventEmitter, probeEvent } from "./engine/events.mjs";
 import { readExperiment } from "./experiment.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
@@ -124,6 +125,24 @@ export function readLaneInstructions(cwd = process.cwd()) {
 }
 const warnedContextPack = new Set();
 const stderrWarn = (m) => { if (!warnedContextPack.has(m)) { warnedContextPack.add(m); process.stderr.write(`${m}\n`); } };
+/** Run each emitter in order; one failing never blocks the next (#4630). */
+function composeEmit(...fns) { return async (rec) => { for (const f of fns) { try { await f(rec); } catch { /* telemetry and events never fail a run */ } } }; }
+/**
+ * forge.yaml `events:` (#4630): `webhook_url`, `webhook_secret_env` (the NAME of the env var holding the HMAC secret; the secret itself is
+ * never read from forge.yaml) and `dir` (local JSONL directory). Returns {webhookUrl, secretEnv, dir}; {} when none is set.
+ */
+export function readEvents(cwd = process.cwd()) {
+  try {
+    const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.events ?? {};
+    const v = (k) => String(e[k] ?? "").trim();
+    return { ...(v("webhook_url") ? { webhookUrl: v("webhook_url") } : {}), ...(/^[A-Za-z_][A-Za-z0-9_]*$/.test(v("webhook_secret_env")) ? { secretEnv: v("webhook_secret_env") } : {}), ...(v("dir") ? { dir: v("dir") } : {}) };
+  } catch { return {}; }
+}
+/** The probe sweep's `onResult`: one probe.passed / probe.failed event per recorded pass or fail row. Never throws. */
+function probeEventSink(repo) {
+  const events = makeEventEmitter({ repo, config: readEvents() });
+  return async (row) => { const p = probeEvent(row); if (p) await events.emitEvent(p.type, p.data, p.ctx); };
+}
 /**
  * forge.yaml context pack (#4275), flat keys under `engine` (the parser flattens one level): `context_pack`
  * (shadow|on|off|ab, #4444), `context_pack_sources` (comma list of graph,attempts,ledger,facts), `context_pack_bytes`,
@@ -877,7 +896,7 @@ export async function runFromCli(argv, deps = {}) {
     try {
       lres = await runCore({ issue, repo: leanRepo, ...(lane ? { lane } : {}), laneOverride, branches: readBranches(), cwd: process.cwd(), dir, io: leanIo, path: enginePath, onProgress,
       onTeardown: (fn) => { teardown = fn; }, ...(env.FORGEDOCK_BATCH_ID ? { batchId: env.FORGEDOCK_BATCH_ID } : {}), ...(placement ? { placement } : {}), ...(recover ? { recover } : {}),
-      emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo: leanRepo }),
+      emitTelemetry: deps.emitTelemetry ?? composeEmit(makeEmitTelemetry({ repo: leanRepo }), makeEventEmitter({ repo: leanRepo, config: readEvents() }).emit),
       admission: readAdmission(), heavy: readHeavy(), ...readCoreLimits(), ...readEnvConfig(), ...(readMergeWait() ? { mergeWait: readMergeWait() } : {}), ...(readConformanceMode() ? { conformance: readConformanceMode() } : {}), ...(readContextPack() ? { contextPack: readContextPack() } : {}), ...(readReviewIncomplete() ? { reviewIncomplete: readReviewIncomplete() } : {}), ...(readLaneInstructions() ? { laneInstructions: readLaneInstructions() } : {}), ...(readReproTest() ? { reproTest: readReproTest() } : {}), ...(readExplore() ? { explore: readExplore() } : {}), ...(readExperiment() ? { experiment: readExperiment() } : {}), light: readLight(), ...(readCloseParent() ? { closeParent: true } : {}), ...(readReviewTrigger() ? { reviewTrigger: readReviewTrigger() } : {}), ...(readVerify() ? { verify: readVerify() } : {}), ...readPrecheckOptions(), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model") ? { reviewerModel: readLeanSetting("reviewer_model") } : {}), ...(readFixModel() ? { fixModel: readFixModel() } : {}), ...(readBuilderRouting() ? { builderRouting: readBuilderRouting() } : {}), ...(readVerifier() ? { verifier: readVerifier() } : {}), ...(readHostCaps() ? { hostCaps: readHostCaps() } : {}) , ...(readSequenceRegenerate() ? { sequenceRegenerate: readSequenceRegenerate() } : {}), ...(readBaseMerge() ? { baseMerge: readBaseMerge() } : {}) });
     } catch (e) { if (!interrupted) report({ terminalReason: "engine-error", detail: String(e?.message ?? e).slice(0, 500) }); throw e; }
     finally { if (!interrupted) for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
@@ -1377,7 +1396,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // #4399: declared acceptance probes of closed issues whose fix reached the default branch; never fails the batch
   const sweep = deps.sweepProbes !== undefined ? deps.sweepProbes : (await import("./lean/probe.mjs")).sweepProbes;
   if (sweep && !argv.includes("--no-probes")) {
-    try { const s = (await import("./lean/probe.mjs")).formatProbeSummary(await sweep({ repo, cwd, io: leanIo })); if (s) sink.line(s); } catch (e) { sink.line(`probes: sweep failed (${String(e?.message ?? e).slice(0, 160)})`); }
+    try { const s = (await import("./lean/probe.mjs")).formatProbeSummary(await sweep({ repo, cwd, io: leanIo, onResult: probeEventSink(repo) })); if (s) sink.line(s); } catch (e) { sink.line(`probes: sweep failed (${String(e?.message ?? e).slice(0, 160)})`); }
   }
   const { makePrefilter, formatPrefilterSummary, lazyDefaultBranch } = await import("./lean/prefilter.mjs");
   const branches = readBranches(cwd);
@@ -2056,7 +2075,7 @@ export async function probeFromCli(argv, deps = {}) {
   if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit must be a positive integer");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   const { sweepProbes, formatProbeSummary } = await import("./lean/probe.mjs");
-  const rows = await sweepProbes({ repo, cwd: process.cwd(), io: leanIo, issues: [...new Set(issues)], limit, dryRun: argv.includes("--dry-run"), ...(deps.spawn ? { spawn: deps.spawn } : {}) });
+  const rows = await sweepProbes({ repo, cwd: process.cwd(), io: leanIo, issues: [...new Set(issues)], limit, dryRun: argv.includes("--dry-run"), onResult: probeEventSink(repo), ...(deps.spawn ? { spawn: deps.spawn } : {}) });
   for (const r of rows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
   console.log(formatProbeSummary(rows) || "probes: nothing to run");
   return { rows };

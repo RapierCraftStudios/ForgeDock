@@ -267,7 +267,7 @@ export async function resolveDefaultBranch({ repo, io, cwd = process.cwd() }) {
  * Probe `issues`, or (none given) the issues closed within `sweepDays` that mention `forge-probe`, capped at `limit`.
  * Sequential: probes hit production. Never throws per issue: an error is an `error` row.
  */
-export async function sweepProbes({ repo, cwd = process.cwd(), io, issues = null, limit = 50, sinceDays = null, dryRun = false, config = readProbeConfig(cwd), now = () => Date.now(), env = process.env, spawn } = {}) {
+export async function sweepProbes({ repo, cwd = process.cwd(), io, issues = null, limit = 50, sinceDays = null, dryRun = false, config = readProbeConfig(cwd), now = () => Date.now(), env = process.env, spawn, onResult = null } = {}) {
   if (!config.enabled && !issues?.length) return [];
   const defaultBranch = await resolveDefaultBranch({ repo, io, cwd });
   if (!defaultBranch) throw new Error("no default branch");
@@ -284,6 +284,7 @@ export async function sweepProbes({ repo, cwd = process.cwd(), io, issues = null
     try { rows.push(await probeIssue({ issue, repo, cwd, io, defaultBranch, dryRun, config, env, spawn })); } catch (e) {
       rows.push({ issue, outcome: "error", detail: String(e?.message ?? e).slice(0, 160) });
     }
+    try { if (!dryRun) await onResult?.(rows[rows.length - 1]); } catch { /* an event sink never fails the sweep (#4630) */ }
   }
   return rows;
 }

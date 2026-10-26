@@ -5,6 +5,8 @@ counts can be measured without re-reading comments with a model. GitHub is the s
 by code (never by a model) into a `FORGE:TELEMETRY` comment, and everything can be rebuilt from the GitHub API alone.
 Local files are only a cache.
 
+For a stable, versioned stream aimed at outside consumers (JSONL sink, signed webhook) see [EVENTS.md](EVENTS.md).
+
 ## Where records live
 
 - One `<!-- FORGE:TELEMETRY v1 -->` comment per issue, or per PR for review-side events (`review_panel`,
