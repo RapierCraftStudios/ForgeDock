@@ -23,8 +23,7 @@ reads them from issue text, which bot-filed follow-ups quote from untrusted PRs 
   runner (minimal env, timeout, masked output), no model call. All pass: a `FORGE:PROBE` record and the follow-up closes. A fail:
   the record, and the parent reopens with the output; a recorded fail for the same fix is not re-run (`check-failed`, parked).
 - An item with no check id, or an id the default branch does not define, parks `awaiting-measurement` (label, one
-  `FORGE:PRECONDITION` comment, report line). It never gets a lane and `needs-human` is never removed. A missing id is a pure
-  fact, so it parks before any git call.
+  `FORGE:PRECONDITION` comment, report line). It never gets a lane and `needs-human` is never removed.
 - Migration: the six open follow-ups have no ids, so the next `forgedock triage` labels them `awaiting-measurement`.
 
 ## Rejected

@@ -364,17 +364,13 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
       if (st?.lease && st.lease.until > Date.now() && st.lease.by !== agentId) return { ...out, detail: `leased by ${st.lease.by}` };
     }
     if (gated) {
-      // #4626: an item that names no check id can never be measured by the engine: a pure fact, no git needed
-      const unnamed = itemCheckIds(iss.body).some((id) => !id);
-      const gate = unnamed
-        ? { state: "awaiting-measurement", parent: deferredFrom(iss.body), detail: "an item names no check id ([check:<id>])" }
-        : await postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, preconditionCmd, minAge });
-      const had = names.includes(gate.state === "awaiting-measurement" ? AWAITING_MEASUREMENT_LABEL : AWAITING_PROMOTION_LABEL);
-      if (["awaiting-promotion", "awaiting-min-age", "awaiting-precondition", "awaiting-measurement"].includes(gate.state)) {
+      const gate = await postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, preconditionCmd, minAge });
+      const had = names.includes(AWAITING_PROMOTION_LABEL);
+      if (["awaiting-promotion", "awaiting-min-age", "awaiting-precondition"].includes(gate.state)) {
         if (!dryRun) await markParked({ issue, repo, io, had, gate });
         return { ...out, parked: true, kind: gate.state, parent: gate.parent, lane, default: gate.default, detail: gate.detail };
       }
-      if (gate.state === "ready" && names.includes(AWAITING_PROMOTION_LABEL) && !dryRun) {
+      if (gate.state === "ready" && had && !dryRun) {
         try { await io.gh(["issue", "edit", String(issue), "-R", repo, "--remove-label", AWAITING_PROMOTION_LABEL]); } catch { /* best effort */ }
       }
       if (gate.state === "ready") {

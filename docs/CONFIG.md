@@ -594,6 +594,20 @@ engine:
 
 ---
 
+## `post_deploy` (OPTIONAL)
+
+Deferred follow-ups whose items are all post-deploy checks are parked (`awaiting-promotion`, no lane) until the parent's fix is on `branches.default`. Keys: `precondition_cmd` (exit 0 ready, 1 parked) and `min_age` (soak window, e.g. `24h`).
+
+### Named checks (#4626)
+
+A post-deploy requirement carries a check id (`[check:<id>]` in the follow-up item). The command is read from `.forge/post-deploy-checks.json` on the default branch (`git show origin/<default>:...`), never from an issue body or comment:
+
+```json
+{ "login-smoke": { "run": "scripts/smoke.sh", "pass": "exit 0", "timeout": 120 } }
+```
+
+`pass` is `exit 0` (default) or a `/regex/flags` over the output; `timeout` is seconds. When the gate reports the follow-up ready, the check runs with no model call: pass closes the follow-up with a `FORGE:PROBE` record, fail reopens the parent with the output. An item with no check id, or an id the default branch does not define, gets the `awaiting-measurement` label and never a lane. A contract's check id must be on the default branch or added by the same PR.
+
 ## `lean` (OPTIONAL)
 
 Settings of the core work-on (`bin/lean/`) that change its contract.
