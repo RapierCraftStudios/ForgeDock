@@ -10,6 +10,7 @@
 #
 # Usage: file-deferred-followups.sh --parent N --repo OWNER/REPO [--items FILE|-] [--folded N]
 #   items TSV, one per line: <path> TAB <why> TAB <known-flaw flag: known-flaw|1|yes|true, else empty>
+#   A post-deploy why starts `post-deploy: [check:<id>] ...` (#4626); the token is kept verbatim in the checklist line.
 # Env: DRY_RUN (non-empty: no create/edit, issue number 0), FORGE_TRAIL_TRUSTED_ASSOCIATIONS (default
 #      OWNER,MEMBER,COLLABORATOR), FORGE_TRAIL_TRUSTED_LOGINS (default empty), FORGE_DEFERRED_RETRY_SLEEP (secs).
 # Stdout: `path<TAB>issue` per item, then DEFERRED_TELEMETRY deferred_items=N folded=N batched_into=#M filed=N.

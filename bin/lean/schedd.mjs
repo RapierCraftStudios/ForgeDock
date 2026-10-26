@@ -8,15 +8,17 @@
  *
  * Protocol: newline-delimited JSON, one request per connection.
  *   {op:"submit", argv, cwd, env} → {type:"batch", id, dir}, {type:"row", row}…, {type:"line", text}…, {type:"done", result, report}
- *   {op:"attach", id}             → log.jsonl rows replayed, then live rows/lines and done; a finished batch replays report.json
+ *   {op:"attach", id, resume?}    → (`resume` also clears a pending cancel, #4592) log.jsonl rows replayed, then live rows/lines and done; a finished batch replays report.json
  *                                   ({type:"done", replay:true}) unless it has unrun added issues; a batch nobody hosts is resumed here
  *   {op:"set-parallel", id, k}    → {type:"ok", parallel}
  *   {op:"add", id, issues}        → {type:"ok", added, skipped, hosted} (#4408): merged into the batch's `add` file, which a
  *                                   hosted runner reads on its next pass and an unhosted batch on its next resume
- *   {op:"cancel", id}             → {type:"ok", cancelled:true, hosted} (#4376): writes the batch's `cancel` file; that batch
+ *   {op:"cancel", id, stopRemote?}           → {type:"ok", cancelled:true, hosted} (#4376): writes the batch's `cancel` file; that batch
  *                                   admits nothing more, its running local lanes get SIGTERM (their teardown saves the work)
  *                                   and the rest end held; no other batch and not the daemon. A finished, unhosted batch:
  *                                   {type:"ok", cancelled:false, finished:true}, nothing written
+ *   {op:"hold"|"release", id, issues} → {type:"ok", changed, hosted} (#4592): merges into / removes from the batch's `hold` file; a hosted
+ *                                   runner admits no held issue from its next pass (running lanes are not stopped)
  *   {op:"status"}                 → {type:"status", pid, batches:[{id, running}]}
  * Failures answer {type:"error", message}. A client closing its connection never cancels a batch (only `cancel` stops one), and stopping the daemon
  * never stops a lane (lanes are detached sessions). On start the daemon resumes every daemon-hosted batch without a
@@ -39,6 +41,7 @@ import { batchRoot, listBatches, openBatch } from "./batch.mjs";
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
 export const LOCK_CHECK_MS = 5 * 1000;
+export const DUE_MS = 15 * 60 * 1000; // #4627: how often the due callback (windowed post-deploy monitoring) runs while the daemon is up
 
 export function scheddPaths(dir = schedDir()) {
   return { dir, sock: join(dir, "schedd.sock"), lock: join(dir, "schedd.lock"), log: join(dir, "schedd.log") };
@@ -81,7 +84,7 @@ function takeLock(lock, pid, alive) {
  */
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
-  lockCheckMs = LOCK_CHECK_MS } = {}) {
+  lockCheckMs = LOCK_CHECK_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS } = {}) {
   const p = scheddPaths(dir);
   mkdirSync(dir, { recursive: true });
   const lock = takeLock(p.lock, pid, alive);
@@ -140,11 +143,17 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const { added, skipped } = b.addIssues(req.issues ?? []);
       return send({ type: "ok", added, skipped, hosted: hosted.has(req.id) }, true);
     }
+    if (req.op === "hold" || req.op === "release") {
+      const b = openBatch(root, req.id);
+      if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
+      const changed = req.op === "hold" ? b.holdIssues(req.issues ?? []) : b.releaseIssues(req.issues ?? []);
+      return send({ type: "ok", changed, hosted: hosted.has(req.id) }, true);
+    }
     if (req.op === "cancel") {
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       if (!hosted.has(req.id) && b.readReport()) return send({ type: "ok", cancelled: false, finished: true }, true);
-      b.requestCancel({ reason: "operator" });
+      b.requestCancel({ reason: "operator", stopRemote: req.stopRemote === true });
       return send({ type: "ok", cancelled: true, hosted: hosted.has(req.id) }, true);
     }
     const sub = (m) => send(m, m.type === "done" || m.type === "error");
@@ -153,6 +162,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       return send({ type: "batch", id: ent.id, dir: ent.dir });
     }
     if (req.op === "attach") {
+      if (req.resume) { const rb = openBatch(root, req.id); if (rb.exists()) rb.clearCancel(); } // #4592: the operator's resume continues a cancelled batch the daemon still hosts
       if (!hosted.has(req.id) && starting.has(req.id)) await starting.get(req.id).catch(() => {});
       const live = hosted.get(req.id);
       if (live) {
@@ -203,6 +213,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     if (closing) return closing;
     clearInterval(idleTimer);
     clearInterval(lockTimer);
+    if (dueTimer) clearInterval(dueTimer);
     for (const c of conns) c.destroy();
     const stopping = [...runs.keys()];
     for (const ac of runs.values()) ac.abort();
@@ -232,6 +243,14 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     else if (!existsSync(p.sock)) { log(`schedd: lost socket ${p.sock}, exiting`); close(); }
   }, lockCheckMs);
   lockTimer.unref?.();
+  // #4627: windowed post-deploy checks. One run at a time; a failure is logged and never stops the daemon.
+  let dueRunning = false;
+  const dueTimer = due ? setInterval(async () => {
+    if (closing || dueRunning) return;
+    dueRunning = true;
+    try { await due(); } catch (e) { log(`schedd: due run failed: ${e?.message ?? e}`); } finally { dueRunning = false; }
+  }, dueMs) : null;
+  dueTimer?.unref?.();
 
   // Daemon restart: resume every daemon-hosted batch that never wrote its report; live lanes are re-adopted.
   if (resumeOnStart) {

@@ -145,6 +145,16 @@ describe("readPrecheckBudget: forge.yaml lean.precheck.max_minutes (#4331)", () 
 describe("forgedock check core (#4364)", () => {
   const MAP = { version: 1, entries: [{ globs: ["src/**"], command: "npm test", cwd: "." }, { globs: ["docs/**"], command: "make docs", cwd: "." }] };
 
+  it("planPrecheck #4585: invariants are appended unscoped, deduped, and kept when the map matches nothing", () => {
+    const p = planPrecheck({ testMap: MAP, files: ["README.md"], learned: ["make lint"], verify: { invariants: ["bash scripts/inv.sh", " make lint ", ""] } });
+    assert.deepEqual(p.commands.at(-1), "bash scripts/inv.sh");
+    assert.equal(p.commands.filter((c) => c === "make lint").length, 1);
+    assert.equal(p.invariants, 2);
+    const only = planPrecheck({ files: [], learned: [], verify: { invariants: ["bash scripts/inv.sh"] } });
+    assert.deepEqual(only.commands, ["bash scripts/inv.sh"]);
+    assert.deepEqual(planPrecheck({ testMap: MAP, files: ["README.md"], learned: ["make lint"] }).commands, ["make lint"], "no invariants: unchanged");
+  });
+
   it("planPrecheck: the engine's selection and budget rule (max_minutes wins, else precheck_total_seconds, else 600 s)", () => {
     const p = planPrecheck({ testMap: MAP, files: ["src/a.js"], learned: [" make lint ", "", "make docs"], verify: { precheckTotalSeconds: 120, precheckTimeoutSeconds: 30 } });
     assert.deepEqual(p.commands, ["make lint", "npm test"]); assert.deepEqual(p.dropped, ["make docs"]);
@@ -246,10 +256,25 @@ describe("check timeout is infrastructure (#4589)", () => {
     assert.equal(h2.calls.length, 1);
     assert.equal(r2.results[0].rc, 1);
   });
-  it("a retry the budget cuts short is deferred", async () => {
+  it("an exhausted budget defers a command that hit its own timeout", async () => {
+    const h = harness({ cost: { slow: 9e9 } });
+    const r = await runChecks({ commands: ["slow"], budgetMs: 1000, perCommandMs: 1000, now: h.now, run: h.run, load: idle });
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual(r.deferred, ["slow"]);
+  });
+  it("default budget: a check hitting its own timeout is reported, not deferred (#4620)", async () => {
+    const plan = planPrecheck({ verify: {}, learned: ["npm test"] });
+    const h = harness({ cost: { "npm test": 9e9 } });
+    const r = await runChecks({ commands: plan.commands, budgetMs: plan.budgetMs, perCommandMs: plan.perCommandMs, now: h.now, run: h.run, load: idle });
+    assert.equal(r.results.length, 1);
+    assert.equal(r.results[0].rc, 124);
+    assert.deepEqual(r.deferred, []);
+  });
+  it("a budget with room left but no longer retry reports the timeout as a failure", async () => {
     const h = harness({ cost: { slow: 9e9 } });
     const r = await runChecks({ commands: ["slow"], budgetMs: 1500, perCommandMs: 1000, now: h.now, run: h.run, load: idle });
-    assert.deepEqual(r.deferred, ["slow"]);
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual([r.results.map((x) => x.rc), r.deferred], [[124], []]);
   });
   it("runWithTimeoutRetry reports retried", async () => {
     let n = 0;

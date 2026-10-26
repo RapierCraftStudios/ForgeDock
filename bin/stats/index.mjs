@@ -16,6 +16,9 @@ import { parseForgeYaml } from "../forge-utils.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
 import { edgeQuery, parseEdge, verdictMix, contextPackAb, renderContextAb, builderTierReport, renderTiers, exploreAb, renderExploreAb, laneProfileReport, renderLaneProfiles } from "./query.mjs";
 import { batchEfficiency, windowEfficiency, compareEfficiency, formatEfficiencyLines, formatCompareLines, parseWindows } from "./efficiency.mjs";
+import { releaseMetrics, renderReleaseMetrics, metricsComment, postMetrics } from "./release.mjs";
+import { experimentReport, renderExperiment } from "./experiment.mjs";
+import { readExperiment } from "../experiment.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
 import { batchRoot } from "../lean/batch.mjs";
 
@@ -23,6 +26,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <owner/repo>] [--json] [--refresh]
                       [--compact] [--no-local] [--no-cache] [--min-n N] [--release-times FILE]
+       forgedock stats --experiment <id> [--min-n N] [--repo <owner/repo>] [--json]
+       forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
        forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
 
@@ -41,6 +46,13 @@ delta against the previous version and a low-n flag for samples under 10. Missin
   --min-n N             low-n threshold (default ${DEFAULT_MIN_N})
   --release-times FILE  "<version> <epoch-seconds>" lines used to estimate versions of unversioned records
                         (default: git tags v* of the ForgeDock checkout)
+
+Per-release regression rule (forge#4628):
+  --experiment <id>     arms of the forge.yaml experiment: section (arms, ratio, metrics, targets, min_n) against its targets; n/a below min n
+  --emit-event          with --experiment: emit one experiment.verdict event (met or missed; docs/EVENTS.md)
+  --by version          median cost per run, wall p50, first-pass rate and needs-human rate of each release against the
+                        previous one; a metric under --min-n runs is null and its verdict null, never a pass
+  --post-metrics <pr>   post (or update) the <!-- FORGE:METRICS v1 --> snapshot comment on that release PR
 
 ALERTS (forge#4354; local run logs only, skipped with --no-local): fail-soft rates over the last 50 lanes of the repo
 (DEPS_PREPARED failed per ecosystem, deferred-to-ci, repeated TOOLCHAIN_WARNING, outcome codes whose share doubled);
@@ -82,7 +94,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 `;
 
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -112,8 +124,12 @@ export function parseArgs(argv) {
       try { if (!v || !Object.keys(parseSince(v)).length) throw bad(); } catch { throw bad(); }
       o.compare = v;
     }
+    else if (name === "--by") { const v = take(); if (v !== "version") throw new Error("--by must be version"); o.by = v; }
+    else if (name === "--experiment") { const v = take(); if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) throw new Error("--experiment must be an experiment id"); o.experiment = v; }
+    else if (name === "--emit-event") o.emitEvent = true;
+    else if (name === "--post-metrics") { const v = take(); if (!/^[1-9]\d*$/.test(v)) throw new Error("--post-metrics must be a PR number"); o.postMetrics = Number(v); }
     else if (name === "--offline") o.offline = true;
-    else if (name === "--min-n") { const v = take(); if (!/^\d+$/.test(v)) throw new Error("--min-n must be a non-negative integer"); o.minN = Number(v); }
+    else if (name === "--min-n") { const v = take(); if (!/^\d+$/.test(v)) throw new Error("--min-n must be a non-negative integer"); o.minN = Number(v); o.minNSet = true; }
     else if (name === "--json") o.json = true;
     else if (name === "--refresh") o.refresh = true;
     else if (name === "--compact") o.compact = true;
@@ -125,6 +141,7 @@ export function parseArgs(argv) {
   if (o.batch && !o.efficiency) throw new Error("--batch and --window need --efficiency");
   if (o.windows && !o.efficiency && !o.pool) throw new Error("--batch and --window need --efficiency");
   if ((o.compare || o.offline) && !o.efficiency) throw new Error("--compare and --offline need --efficiency");
+  if (o.postMetrics && !o.by) throw new Error("--post-metrics needs --by version");
   return o;
 }
 
@@ -287,6 +304,12 @@ export async function buildReport(opts, deps = {}) {
   }
   const report = aggregate({ runs: [...model.runs, ...local], events: model.events, issues: model.issues },
     { minN: opts.minN, releaseTimes, ...parseSince(opts.since) });
+  if (opts.experiment) { // forge#4629
+    const exp = deps.experiment ?? readExperiment();
+    if (!exp || exp.id !== opts.experiment) throw new Error(`experiment ${opts.experiment} is not declared in forge.yaml (experiment: id, arms, ...)`);
+    return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache }, local: { runs: local.length } }, query: { experiment: experimentReport([...model.runs, ...local], { ...exp, minN: opts.minNSet ? opts.minN : exp.minN }) } };
+  }
+  if (opts.by) return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache }, local: { runs: local.length } }, query: { release_metrics: releaseMetrics(report.groups, { minN: opts.minN, repo }) } };
   // forge#4354: fail-soft alerts from the local run logs only (no gh call)
   const alerts = opts.local ? computeAlerts(deps.localLanes ?? readLanes(runsDir(env)), { repo, ...(deps.alertConfig ?? readAlertConfig()) }) : [];
   return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache }, local: { runs: local.length } }, ...report, alerts };
@@ -306,6 +329,14 @@ export async function runStats(argv, deps = {}) {
   }
   try {
     const report = await buildReport(opts, { onProgress: makeProgressPrinter(), ...deps });
+    if (report.query?.release_metrics) {
+      const rm = report.query.release_metrics;
+      if (opts.postMetrics) await postMetrics({ gh: deps.gh ?? defaultGh, repo: opts.repo, pr: opts.postMetrics, body: metricsComment(rm) });
+      process.stdout.write(`${opts.json ? renderJson(report) : renderReleaseMetrics(rm)}\n`);
+      return 0;
+    }
+    if (report.query?.experiment && opts.emitEvent) await (deps.emitExperiment ?? (async (r, x) => (await import("../engine-cli.mjs")).experimentEventSink(r, x)))(opts.repo, report.query.experiment);
+    if (report.query?.experiment) { process.stdout.write(`${opts.json ? renderJson(report) : renderExperiment(report.query.experiment)}\n`); return 0; }
     if (report.query?.lane_profile && !opts.json) { process.stdout.write(`${renderLaneProfiles(report.query.lane_profile)}\n`); return 0; }
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
     if (report.query?.pool && !opts.json) { process.stdout.write(`${formatPoolLines(report.query.pool).join("\n")}\n`); return 0; }

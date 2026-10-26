@@ -31,6 +31,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { detectApiShape } from "../bin/lean/apishape.mjs";
+import { benchRecord } from "../bin/experiment.mjs";
 
 export const ARMS = ["light", "full", "control"];
 export const TARGETS = Object.freeze({ cost_vs_control: 1.2, wall_vs_model: 1.3 });
@@ -225,7 +226,7 @@ export function aggregate(rows) {
     false_fix_le_control: t(L.n && C.n ? L.false_fix_rate <= C.false_fix_rate : null, L.false_fix_rate, C.false_fix_rate),
     zero_undetected_api_shape: t(L.n ? L.undetected_api_shape === 0 : null, L.undetected_api_shape, 0),
   };
-  return { arms, light_eligible: { ...le, control_cost_usd: ce.cost_usd.sum, ids: [...eligIds].sort() }, targets };
+  return { arms, light_eligible: { ...le, control_cost_usd: ce.cost_usd.sum, ids: [...eligIds].sort() }, targets, record: benchRecord({ source: "bench-lightlane", arms, targets }) }; // #4629
 }
 
 /** JSONL (or a JSON array) -> rows. */

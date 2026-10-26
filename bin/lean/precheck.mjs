@@ -11,7 +11,7 @@
  */
 import { createHash } from "node:crypto";
 import { loadavg, cpus } from "node:os";
-import { scopeChecks, selectCommands } from "./testmap.mjs";
+import { scopeChecks, selectCommands, mergeChecks } from "./testmap.mjs";
 import { LOG_CAP } from "./verify.mjs";
 
 /** #4364: the engine's check plan for `forgedock check` (written beside contract.json) and the CLI's last run record. */
@@ -42,8 +42,8 @@ export function retryTimeoutMs({ perMs, load1, cores }) {
 
 /**
  * #4589: a check timeout (rc 124) is a busy host, not a failing command: run `run(timeoutMs)`, and when it timed out on its
- * own, once more with `retryTimeoutMs`. `left` (ms still available in a round budget) caps the retry; a retry the budget cut
- * short is `cut` (left to CI). A repeated timeout keeps rc 124 and says it was infrastructure. Other rcs are never retried.
+ * own, once more with `retryTimeoutMs`. `left` (ms still available in a round budget) caps the retry; an exhausted budget, or a retry the budget cut
+ * short, is `cut` (left to CI); a budget with room for no longer retry leaves the first rc 124 a failure (#4620). A repeated timeout keeps rc 124 and says it was infrastructure. Other rcs are never retried.
  * @param {(timeoutMs:number) => Promise<{rc:number, output?:string}>} run
  * @returns {Promise<{r:{rc:number, output?:string}, retried:boolean, cut:boolean}>}
  */
@@ -52,8 +52,10 @@ export async function runWithTimeoutRetry(run, timeoutMs, { left = () => Infinit
   if (r?.rc !== TIMEOUT_RC || !(timeoutMs > 0) || !Number.isFinite(timeoutMs)) return { r, retried: false, cut: false };
   let want = timeoutMs;
   try { want = retryTimeoutMs({ perMs: timeoutMs, ...load() }); } catch { /* no load reading: the minimum factor */ want = timeoutMs * 2; }
-  const t2 = Math.min(want, left());
-  if (!(t2 > timeoutMs)) return { r, retried: false, cut: t2 < want }; // no budget left to retry in: CI runs it
+  const room = left();
+  if (!(room > 0)) return { r, retried: false, cut: true }; // the budget is spent: CI runs it
+  const t2 = Math.min(want, room);
+  if (!(t2 > timeoutMs)) return { r, retried: false, cut: false }; // #4620: no room for a longer retry; its own timeout stays a failure
   const r2 = await run(t2);
   const cut = r2?.rc === TIMEOUT_RC && t2 < want;
   if (r2?.rc === TIMEOUT_RC && !cut) return { r: { ...r2, output: `${String(r2.output ?? "")}\n(infra timeout: host load, not a code failure; retried once with ${Math.round(t2 / 1000)}s)` }, retried: true, cut };
@@ -124,15 +126,19 @@ export function formatPrecheckSummary(rows) {
 /**
  * #4364: the pre-PR commands and budget for a round: `scopeChecks` over the trimmed learned commands (a mapped learned
  * command runs only when its globs match a changed file); budget lean.precheck.max_minutes, else
- * verify.precheck_total_seconds (default 600 s); per command verify.precheck_timeout_seconds.
- * @returns {{commands:string[], source:string, added:number, dropped:string[], selected:number, budgetMs:number, perCommandMs:number}}
+ * verify.precheck_total_seconds (default 600 s); per command verify.precheck_timeout_seconds. #4585: `invariants`
+ * (verify.invariants) are appended unscoped after the selected commands, deduped; the test map never drops them.
+ * @returns {{commands:string[], source:string, added:number, dropped:string[], selected:number, invariants?:number, budgetMs:number, perCommandMs:number}}
  */
-export function planPrecheck({ testMap = null, files = [], learned = [], maxMinutes, verify = {} }) {
+export function planPrecheck({ testMap = null, files = [], learned = [], maxMinutes, verify = {}, invariants = verify?.invariants }) {
   const list = (Array.isArray(learned) ? learned : []).map((c) => String(c ?? "").trim()).filter(Boolean);
-  const m = scopeChecks(testMap, files, list);
+  const s = scopeChecks(testMap, files, list);
+  const inv = (Array.isArray(invariants) ? invariants : []).map((c) => String(c ?? "").trim()).filter(Boolean);
+  const withInv = mergeChecks(inv, s.commands);
+  const m = inv.length ? { ...s, commands: withInv.commands } : s;
   const max = Number(maxMinutes);
   const budgetMs = (max > 0 ? max * 60 : Number(verify.precheckTotalSeconds) || 600) * 1000;
-  return { ...m, selected: testMap ? selectCommands(testMap, files).length : 0, budgetMs, perCommandMs: (Number(verify.precheckTimeoutSeconds) || 300) * 1000 };
+  return { ...m, ...(inv.length ? { invariants: inv.length } : {}), selected: testMap ? selectCommands(testMap, files).length : 0, budgetMs, perCommandMs: (Number(verify.precheckTimeoutSeconds) || 300) * 1000 };
 }
 
 const lines = (out) => String(out ?? "").split("\n").map((x) => x.trim()).filter(Boolean);

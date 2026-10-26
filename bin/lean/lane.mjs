@@ -85,7 +85,7 @@ export async function resolveLane({ issue, repo, io, cwd, branches = {}, request
 }
 
 /**
- * #4593: true when `lane` is a non-staging branch fully merged into `staging` (a shipped milestone branch).
+ * #4593: true when `lane` is a non-staging branch fully merged into `staging` by a merge commit (a shipped milestone branch).
  * Fail closed: any git error (no such ref, offline) is "not shipped".
  */
 export async function isShippedLane({ lane, staging = DEFAULT_STAGING_BRANCH, io, cwd }) {
@@ -93,6 +93,9 @@ export async function isShippedLane({ lane, staging = DEFAULT_STAGING_BRANCH, io
   try {
     try { await io.git(["fetch", "origin", lane, staging], { cwd }); } catch { /* offline: use the local refs */ }
     await io.git(["merge-base", "--is-ancestor", `origin/${lane}`, `origin/${staging}`], { cwd });
-    return true;
+    // #4623: an unused lane cut from staging is trivially an ancestor; shipped also needs a merge commit that took the lane tip.
+    const tip = String(await io.git(["rev-parse", `origin/${lane}`], { cwd })).trim();
+    const merges = String(await io.git(["rev-list", "--merges", "--parents", `origin/${staging}`, `^origin/${lane}`], { cwd }));
+    return !!tip && merges.split("\n").some((l) => l.trim().split(/\s+/).slice(2).includes(tip));
   } catch { return false; }
 }
