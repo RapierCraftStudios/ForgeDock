@@ -1748,6 +1748,15 @@ export function formatReclaimed(r) {
   return `reclaimed: ${r.items} item(s), ${size} (preflight ${r.preflight}, admissions ${r.admissions})`;
 }
 
+/** #4627: the daemon's timer callback: re-run the due windowed post-deploy checks of the cwd repo. No repo, no work. */
+async function scheddDue() {
+  const io = makeIo();
+  const repo = await resolveDefaultRepo(io);
+  if (!repo) return;
+  const { sweepDue } = await import("./lean/postdeploy-monitor.mjs");
+  await sweepDue({ repo, cwd: process.cwd(), io: (await import("./lean/effects.mjs")).makeLeanIo({ repo }), onResult: probeEventSink(repo) });
+}
+
 /**
  * `forgedock schedd` (foreground; for a systemd-user unit: `ExecStart=forgedock schedd`) · `forgedock schedd status` (#4192)
  */
@@ -1762,7 +1771,7 @@ export async function scheddFromCli(argv, deps = {}) {
     return { running: true, ...st };
   }
   if (argv.length) throw new Error("usage: forgedock schedd [status]");
-  const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }) });
+  const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }) });
   if (!d.running) return d;
   // #4454: a signal stops the hosted batch loops, then releases the lock and socket, then exits 128+signo
   schedd.exitOnSignals(d, { ...(deps.processOn ? { on: deps.processOn } : {}), ...(deps.exit ? { exit: deps.exit } : {}) });
@@ -2057,13 +2066,14 @@ export async function triageFromCli(argv, deps = {}) {
 }
 
 /**
- * `forgedock probe [issue...] [--repo owner/repo] [--dry-run] [--limit N]` (#4399)
+ * `forgedock probe [issue...] [--repo owner/repo] [--dry-run] [--limit N] [--due]` (#4399; `--due` #4627: re-run due windowed post-deploy checks)
  * Runs the declared acceptance probes (`lean/probe.mjs`) of the given issues, or of the recently closed issues that
  * declare one, once their fix is on the default branch; records FORGE:PROBE and reopens on a fail. No model call.
  */
 export async function probeFromCli(argv, deps = {}) {
   const valued = ["--repo", "--limit"];
   const issues = [];
+  const due = argv.includes("--due"); // #4627
   for (let i = 0; i < argv.length; i++) {
     if (valued.includes(argv[i])) { i++; continue; }
     if (/^#?\d+$/.test(argv[i])) issues.push(parseInt(argv[i].replace("#", ""), 10));
@@ -2074,6 +2084,13 @@ export async function probeFromCli(argv, deps = {}) {
   const limit = flag(argv, "--limit") == null ? 50 : parseInt(flag(argv, "--limit"), 10);
   if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit must be a positive integer");
   const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  if (due) {
+    const { sweepDue, formatDueSummary } = await import("./lean/postdeploy-monitor.mjs");
+    const rows = await sweepDue({ repo, cwd: process.cwd(), io: leanIo, dryRun: argv.includes("--dry-run"), onResult: probeEventSink(repo), ...(deps.spawn ? { spawn: deps.spawn } : {}) });
+    for (const r of rows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
+    console.log(formatDueSummary(rows) || "monitoring: nothing due");
+    return { rows };
+  }
   const { sweepProbes, formatProbeSummary } = await import("./lean/probe.mjs");
   const rows = await sweepProbes({ repo, cwd: process.cwd(), io: leanIo, issues: [...new Set(issues)], limit, dryRun: argv.includes("--dry-run"), onResult: probeEventSink(repo), ...(deps.spawn ? { spawn: deps.spawn } : {}) });
   for (const r of rows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);

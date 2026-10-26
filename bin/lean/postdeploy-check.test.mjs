@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseChecks, itemCheckIds, measureFollowup, CHECK_ID_RE } from "./postdeploy-check.mjs";
+import { parseChecks, itemCheckIds, measureFollowup, monitorRecord, CHECK_ID_RE } from "./postdeploy-check.mjs";
 import { postDeployOnly } from "./prefilter.mjs";
 import { validateContract, applyAmendments, precheck, followupItems } from "./conformance.mjs";
 import { PROBE_MARKER } from "./probe.mjs";
@@ -104,3 +104,43 @@ describe("post-deploy named checks (#4626)", () => {
     assert.match(followupItems([{ ...c.requirements[0], check: "smoke" }])[0].why, /^post-deploy: \[check:smoke\] w/);
   });
 });
+
+describe("windowed post-deploy checks (#4627)", () => {
+  const WIN = JSON.stringify({ soak: { run: "echo ok", for: "7d", every: "6h" }, soakd: { run: "echo ok", for: "2d" }, noFor: { run: "echo ok", every: "6h" }, badFor: { run: "echo ok", for: "soon" }, zero: { run: "echo ok", for: "0" }, plain: "echo ok" });
+  const NOW = Date.parse("2026-10-26T00:00:00Z");
+  it("parses for/every; every defaults to 6h; every without for or a bad duration drops the entry", () => {
+    const c = parseChecks(WIN);
+    assert.deepEqual(Object.keys(c).sort(), ["plain", "soak", "soakd"]);
+    assert.equal(c.soak.forMs, 7 * 86400e3); assert.equal(c.soak.everyMs, 6 * 3600e3);
+    assert.equal(c.soakd.everyMs, 6 * 3600e3);
+    assert.equal(c.plain.forMs, undefined);
+  });
+  it("first pass records the release and window, labels, and keeps the follow-up open", async () => {
+    const w = world({ file: WIN });
+    const r = await run(w, body([item("R1", "[check:soak] x")]), { now: () => NOW });
+    assert.equal(r.state, "monitoring");
+    assert.ok(!w.gh.some((a) => a[1] === "close") && !w.gh.some((a) => a[1] === "reopen"));
+    assert.ok(w.gh.some((a) => a[1] === "edit" && a.includes("post-deploy-monitoring")));
+    const cm = w.gh.find((a) => a[1] === "comment");
+    const rec = monitorRecord(cm[cm.indexOf("--body") + 1]);
+    assert.equal(rec.result, "pass"); assert.equal(rec.until, NOW + 7 * 86400e3); assert.equal(rec.everyMs, 6 * 3600e3); assert.equal(rec.defaultSha, "deadbeef");
+  });
+  it("a recorded windowed pass is not re-measured by the pre-filter path", async () => {
+    const w = world({ file: WIN });
+    const rec = { body: `<!-- ${PROBE_MARKER} -->\n${JSON.stringify({ fix: "abc", result: "pass", at: new Date(NOW).toISOString(), window_until: new Date(NOW + 1e9).toISOString() })}` };
+    const b = body([item("R1", "[check:soak] x")]);
+    const r = await run(w, b, { iss: { number: 41, body: b, comments: [rec] }, isTrusted: () => true });
+    assert.equal(r.state, "monitoring"); assert.deepEqual(w.spawned, []);
+  });
+  it("a non-windowed check still closes on pass (part 1 unchanged)", async () => {
+    const w = world({ file: WIN });
+    assert.equal((await run(w, body([item("R1", "[check:plain] x")]))).state, "pass");
+    assert.ok(w.gh.some((a) => a[1] === "close"));
+  });
+  it("a first-run fail of a windowed check reopens the parent as before", async () => {
+    const w = world({ file: JSON.stringify({ soak: { run: "echo nope", for: "7d" } }), spawn: () => ({ code: 1, stdout: "boom", stderr: "" }) });
+    assert.equal((await run(w, body([item("R1", "[check:soak] x")]))).state, "fail");
+    assert.ok(w.gh.some((a) => a[1] === "reopen" && a[2] === "40"));
+  });
+});
+

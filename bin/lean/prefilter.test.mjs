@@ -408,6 +408,13 @@ describe("post-deploy precondition gate (#4389)", () => {
     assert.deepEqual(rows.map((x) => x.outcome), ["awaiting-measurement"]);
   });
 
+  it("a follow-up under windowed monitoring is parked, never a lane or a second measurement (#4627)", async () => {
+    const w = world({ issues: { 41: { body: followup(40, [item("R2", "[check:smoke] post-deploy")]), labels: [{ name: "post-deploy-monitoring" }] } }, mergedPrs: parentPr, ancestry: { [MERGE]: 0 } });
+    const r = await gated(w, 41);
+    assert.equal(r.parked, true); assert.equal(r.kind, "monitoring"); assert.equal(r.closed, false);
+    assert.deepEqual(w.edits, []); assert.deepEqual(w.comments, []); assert.equal(w.runner.length, 0);
+  });
+
   it("an unresolvable parent (no merged PR, no trajectory) or an unknown SHA falls through to the lane", async () => {
     const w = world({ issues: { 41: { body: followup(40, [item("R2", "post-deploy")]) }, 40: { comments: [] } } });
     const r = await gated(w, 41);

@@ -41,6 +41,7 @@ import { batchRoot, listBatches, openBatch } from "./batch.mjs";
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
 export const LOCK_CHECK_MS = 5 * 1000;
+export const DUE_MS = 15 * 60 * 1000; // #4627: how often the due callback (windowed post-deploy monitoring) runs while the daemon is up
 
 export function scheddPaths(dir = schedDir()) {
   return { dir, sock: join(dir, "schedd.sock"), lock: join(dir, "schedd.lock"), log: join(dir, "schedd.log") };
@@ -83,7 +84,7 @@ function takeLock(lock, pid, alive) {
  */
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
-  lockCheckMs = LOCK_CHECK_MS } = {}) {
+  lockCheckMs = LOCK_CHECK_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS } = {}) {
   const p = scheddPaths(dir);
   mkdirSync(dir, { recursive: true });
   const lock = takeLock(p.lock, pid, alive);
@@ -212,6 +213,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     if (closing) return closing;
     clearInterval(idleTimer);
     clearInterval(lockTimer);
+    if (dueTimer) clearInterval(dueTimer);
     for (const c of conns) c.destroy();
     const stopping = [...runs.keys()];
     for (const ac of runs.values()) ac.abort();
@@ -241,6 +243,14 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     else if (!existsSync(p.sock)) { log(`schedd: lost socket ${p.sock}, exiting`); close(); }
   }, lockCheckMs);
   lockTimer.unref?.();
+  // #4627: windowed post-deploy checks. One run at a time; a failure is logged and never stops the daemon.
+  let dueRunning = false;
+  const dueTimer = due ? setInterval(async () => {
+    if (closing || dueRunning) return;
+    dueRunning = true;
+    try { await due(); } catch (e) { log(`schedd: due run failed: ${e?.message ?? e}`); } finally { dueRunning = false; }
+  }, dueMs) : null;
+  dueTimer?.unref?.();
 
   // Daemon restart: resume every daemon-hosted batch that never wrote its report; live lanes are re-adopted.
   if (resumeOnStart) {
