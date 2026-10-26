@@ -1626,7 +1626,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line).
     assert.ok(approxTokens(plan) <= 1900, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1550); // 1550: #4591 (never hand-name migration files, one rule line)
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1600); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -2044,7 +2044,7 @@ describe("comment templates", () => {
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
     assert.ok(approxTokens(plan) <= 1800, `plan prompt is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(impl) <= 1500, `implement prompt is ${approxTokens(impl)} tokens`);
+    assert.ok(approxTokens(impl) <= 1550, `implement prompt is ${approxTokens(impl)} tokens`); // 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
@@ -5286,6 +5286,17 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
     assert.equal(w.dupArgs.cwd, WT);
   });
 
+  it("#4596 English copies in a locale catalog resume the builder once to translate; a leftover is an anomaly", async () => {
+    const w = hworld(); const c = [[{ path: "messages/ta.json", key: "calendarView.day", value: "Day view", source: "messages/en.json" }], []]; w.cpCalls = 0;
+    w.io.englishCopies = async (x) => { w.cpCalls++; w.cpArgs = x; return c.length > 1 ? c.shift() : c[0]; };
+    assert.equal((await run(w)).terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 3);
+    assert.match(b[2][4], /messages\/ta\.json: calendarView\.day = "Day view" \(same as messages\/en\.json\)[\s\S]*Translate each/);
+    assert.ok(w.seq.indexOf("pr") > w.seq.lastIndexOf("builder-resume"), "fixed before the PR");
+    assert.equal(w.cpArgs.cwd, WT);
+  });
+
   it("#4406 a duplicate that remains after the round is an anomaly; verify.duplicate_exports false skips the check", async () => {
     let w = hworld(); w.io.duplicateExports = async () => DUP;
     assert.equal((await run(w)).terminalReason, "merged");
@@ -6282,7 +6293,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1500 && approxTokens(builderPlanPrompt(7)) <= 1800);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1550 && approxTokens(builderPlanPrompt(7)) <= 1800);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {

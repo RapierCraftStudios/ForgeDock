@@ -63,6 +63,12 @@ export function duplicateExportsPrompt(findings, mode = "local") {
   return `This change exports names that another module of the same app or package already exports:\n${rows}\n\nRename the new export or reuse the existing one, and update every reference and any registry, map or test keyed by the name (same-named entries collide or leave one unprobed). ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
+/** #4596: new keys the lane copied from the source-locale catalog into another locale's catalog. */
+export function i18nCopiesPrompt(findings, mode = "local") {
+  const rows = findings.slice(0, 30).map((d) => `- ${d.path}: ${d.key} = ${JSON.stringify(d.value)} (same as ${d.source})`).join("\n");
+  return `This change adds keys to locale catalogs as English copies of the source locale:\n${rows}\n\nTranslate each into that catalog's language (keep placeholders), and add any translation-status entry the repo tracks as a minimal diff: insert in place, never re-sort or reformat the file. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
+}
+
 /** #4591: lane-added migrations the repo's generator did not produce. */
 export function migrationGeneratorPrompt(problems, mode = "local") {
   const rows = problems.slice(0, 30).map((p) => `- ${p}`).join("\n");
@@ -182,6 +188,7 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: an issue requirement the contract missed.
 - {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: a requirement that becomes separate work or a post-deploy check. Filed as a tracked follow-up. Not "type"; other kinds are rejected.
 - {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded; judged against text.
+New keys: translate, never copy English; status entries in place.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
 Never name or number migration files by hand; use the generator.
 A new workspace-package dependency in a package.json no deliverable names is blocked by the engine: add it through add-deliverable with a why naming the package, or do not add it.
