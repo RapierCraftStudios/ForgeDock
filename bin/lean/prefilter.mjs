@@ -15,6 +15,8 @@
  * of origin/<default>, or while forge.yaml `post_deploy.precondition_cmd` exits 1. With `post_deploy.min_age` (#4425) it also
  * stays parked (`awaiting-min-age`) until that long (or the longest window an item's why states) after the fix landed on
  * the default branch. Anything unresolvable fails open.
+ * Named checks (#4626): once ready, the items' `[check:<id>]` checks run from the default branch's checks file (no model
+ * call): pass closes the follow-up, fail reopens the parent. An item without a runnable check parks `awaiting-measurement`.
  * All effects are injected (gh, git, runner, transitionLabel, projector?, execCode?) so it is unit-testable.
  */
 import { execFile } from "node:child_process";
@@ -23,6 +25,7 @@ import { PREFILTER_SYSTEM, prefilterPrompt, parsePrefilterVerdict } from "./prom
 import { isTrustedComment } from "../engine/phases.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
 import { probeResultOf } from "./probe.mjs";
+import { AWAITING_MEASUREMENT_LABEL, itemCheckIds, measureFollowup } from "./postdeploy-check.mjs";
 
 export const DEFAULT_PREFILTER_MODEL = "claude-haiku-5-5";
 export const PREFILTER_MARKER = "FORGE:PREFILTER";
@@ -300,16 +303,20 @@ export function lazyDefaultBranch({ io, repo, cwd, configured = null }) {
 }
 /** #4389: label and explain a parked issue once (the comment only when the label was not there yet); best effort. */
 async function markParked({ issue, repo, io, had, gate }) {
-  const edit = () => io.gh(["issue", "edit", String(issue), "-R", repo, "--add-label", AWAITING_PROMOTION_LABEL]);
+  const measure = gate.state === "awaiting-measurement"; // #4626
+  const label = measure ? AWAITING_MEASUREMENT_LABEL : AWAITING_PROMOTION_LABEL;
+  const edit = () => io.gh(["issue", "edit", String(issue), "-R", repo, "--add-label", label]);
   try { await edit(); } catch {
     try {
-      await io.gh(["label", "create", AWAITING_PROMOTION_LABEL, "-R", repo, "--force", "--color", "C5DEF5", "--description", "Post-deploy follow-up parked until its parent fix reaches the default branch. Managed by ForgeDock."]);
+      await io.gh(["label", "create", label, "-R", repo, "--force", "--color", "C5DEF5", "--description", measure ? "Post-deploy follow-up with no runnable default-branch check; never given a lane. Managed by ForgeDock." : "Post-deploy follow-up parked until its parent fix reaches the default branch. Managed by ForgeDock."]);
       await edit();
     } catch { /* the comment and the report still show it */ }
   }
   if (had) return;
-  const what = gate.state === "awaiting-promotion" ? "awaiting promotion" : gate.state === "awaiting-min-age" ? "awaiting its post-deploy soak window" : "awaiting its post-deploy precondition";
-  const body = `<!-- ${PRECONDITION_MARKER} -->\n## Parked: ${what}\n${sanitizeMd(gate.detail)}.\n\nEvery item here is a post-deploy check, so no lane was started. The next orchestrate or triage run checks again and launches this issue once the precondition holds.`;
+  const what = measure ? "awaiting measurement" : gate.state === "awaiting-promotion" ? "awaiting promotion" : gate.state === "awaiting-min-age" ? "awaiting its post-deploy soak window" : "awaiting its post-deploy precondition";
+  const tail = measure ? "Every item here is a post-deploy check, and at least one names no runnable check, so no lane was started and none will be. Name each one with `[check:<id>]` and add `<id>` to the checks file on the default branch, or measure it by hand."
+    : "Every item here is a post-deploy check, so no lane was started. The next orchestrate or triage run checks again and launches this issue once the precondition holds.";
+  const body = `<!-- ${PRECONDITION_MARKER} -->\n## Parked: ${what}\n${sanitizeMd(gate.detail)}.\n\n${tail}`;
   try { await io.gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(body)]); } catch { /* the label still shows it */ }
 }
 
@@ -328,6 +335,10 @@ export function formatParkedLine(rows) {
     const defs = uniq(soak.map((r) => r.prefilter.default));
     out.push(`awaiting min age: ${soak.map((r) => `#${r.issue}`).join(" ")} (fix on ${defs.join(", ") || "the default branch"}, soak window not elapsed)`);
   }
+  const meas = parked.filter((r) => r.prefilter.kind === "awaiting-measurement"); // #4626
+  if (meas.length) out.push(`awaiting measurement: ${meas.map((r) => `#${r.issue}`).join(" ")} (no runnable default-branch check; no lane)`);
+  const failed = parked.filter((r) => r.prefilter.kind === "check-failed");
+  if (failed.length) out.push(`check failed: ${failed.map((r) => `#${r.issue}`).join(" ")} (parent reopened; waiting for a new fix)`);
   const pre = parked.filter((r) => r.prefilter.kind === "awaiting-precondition");
   if (pre.length) out.push(`awaiting precondition: ${pre.map((r) => `#${r.issue}`).join(" ")} (post_deploy.precondition_cmd not ready)`);
   return out.join("\n");
@@ -361,6 +372,15 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
       }
       if (gate.state === "ready" && had && !dryRun) {
         try { await io.gh(["issue", "edit", String(issue), "-R", repo, "--remove-label", AWAITING_PROMOTION_LABEL]); } catch { /* best effort */ }
+      }
+      if (gate.state === "ready") {
+        const m = await measureFollowup({ iss, repo, parent: gate.parent, def: gate.default, shas: gate.shas, cwd, io, dryRun, isTrusted: isTrustedIssueComment, ...(io.spawnCheck ? { spawn: io.spawnCheck } : {}) });
+        if (m.state === "awaiting-measurement") {
+          if (!dryRun) await markParked({ issue, repo, io, had: names.includes(AWAITING_MEASUREMENT_LABEL), gate: { ...gate, state: m.state, detail: m.detail } });
+          return { ...out, parked: true, kind: m.state, parent: gate.parent, lane, default: gate.default, detail: m.detail };
+        }
+        if (m.state === "pass") return { ...out, closed: !dryRun, kind: "post-deploy-check", parent: gate.parent, lane, default: gate.default, detail: m.detail };
+        if (m.state === "fail" || m.state === "recorded-fail") return { ...out, parked: true, kind: "check-failed", parent: gate.parent, lane, default: gate.default, detail: m.detail };
       }
       if (labelled) return { ...out, detail: `labelled, left to the lane (post-deploy gate: ${gate.state}${gate.detail ? `, ${gate.detail}` : ""})` };
     }

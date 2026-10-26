@@ -397,14 +397,15 @@ describe("post-deploy precondition gate (#4389)", () => {
     assert.deepEqual(w.edits, []); assert.deepEqual(w.comments, []);
   });
 
-  it("an ancestor (after promotion): not parked, the label is removed, and the issue goes on as before", async () => {
+  it("an ancestor (after promotion): the promotion label is removed; with no runnable check it parks awaiting-measurement, never a lane (#4626)", async () => {
     const w = world({ issues: { 41: { body: followup(40, [item("R2", "post-deploy")]), labels: [{ name: "awaiting-promotion" }] } }, mergedPrs: parentPr, ancestry: { [MERGE]: 0 } });
     const r = await gated(w, 41);
-    assert.ok(!r.parked); assert.equal(r.detail, "no already-fixed signal");
-    assert.deepEqual(w.edits, [[41, "--remove-label", "awaiting-promotion"]]);
+    assert.equal(r.parked, true); assert.equal(r.kind, "awaiting-measurement");
+    assert.deepEqual(w.edits, [[41, "--remove-label", "awaiting-promotion"], [41, "--add-label", "awaiting-measurement"]]);
+    assert.equal(w.runner.length, 0);
     const rows = await orchestrate({ issues: [41], readBody: async () => "", prefilter: makePrefilter({ repo: "o/r", cwd: "/repo", io: w.io, defaultBranch: "main" }),
-      runOne: async () => ({ terminalReason: "merged", pr: 7, cost_usd: 1 }) });
-    assert.deepEqual(rows.map((x) => x.outcome), ["merged"]);
+      runOne: async () => { throw new Error("no lane"); } });
+    assert.deepEqual(rows.map((x) => x.outcome), ["awaiting-measurement"]);
   });
 
   it("an unresolvable parent (no merged PR, no trajectory) or an unknown SHA falls through to the lane", async () => {
