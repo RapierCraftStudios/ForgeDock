@@ -608,6 +608,14 @@ A post-deploy requirement carries a check id (`[check:<id>]` in the follow-up it
 
 `pass` is `exit 0` (default) or a `/regex/flags` over the output; `timeout` is seconds. When the gate reports the follow-up ready, the check runs with no model call: pass closes the follow-up with a `FORGE:PROBE` record, fail reopens the parent with the output. An item with no check id, or an id the default branch does not define, gets the `awaiting-measurement` label and never a lane. A contract's check id must be on the default branch or added by the same PR.
 
+Closing an experiment follow-up (#4634): add a check that runs `forgedock stats --experiment <id> --require-met` (exit 0 only when every target of the forge.yaml `experiment:` is met; n/a below min n is not met), and put `[check:<check id>]` in the follow-up item:
+
+```json
+{ "exp-light-vs-full": { "run": "forgedock stats --experiment light-vs-full --require-met" } }
+```
+
+Met targets pass the check and close the follow-up; with `for`/`every` it is re-measured through the window. The probe env is minimal: list the GitHub token variable in the forge.yaml `acceptance_probe.env` allowlist so stats can read telemetry.
+
 ### Windowed monitoring (#4627)
 
 A check may declare `for` (the window, `30m`/`24h`/`7d`/`2w`) and `every` (the cadence, default `6h`; needs `for`); an entry with an invalid duration, or `every` without `for`, is ignored:

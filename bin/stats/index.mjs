@@ -26,7 +26,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <owner/repo>] [--json] [--refresh]
                       [--compact] [--no-local] [--no-cache] [--min-n N] [--release-times FILE]
-       forgedock stats --experiment <id> [--min-n N] [--repo <owner/repo>] [--json]
+       forgedock stats --experiment <id> [--require-met] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
        forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
@@ -48,6 +48,7 @@ delta against the previous version and a low-n flag for samples under 10. Missin
                         (default: git tags v* of the ForgeDock checkout)
 
 Per-release regression rule (forge#4628):
+  --require-met         with --experiment: exit 1 unless every target is met (#4634; for a named post-deploy check)
   --experiment <id>     arms of the forge.yaml experiment: section (arms, ratio, metrics, targets, min_n) against its targets; n/a below min n
   --by version          median cost per run, wall p50, first-pass rate and needs-human rate of each release against the
                         previous one; a metric under --min-n runs is null and its verdict null, never a pass
@@ -92,8 +93,11 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
   --issues <list>       pin the report to these issues (comma list), for a before/after on the same issue set
 `;
 
+/** #4634: 0, or 1 when --require-met and the experiment's targets are not all met (a named post-deploy check gates on it). */
+export function experimentExit(opts, report) { return opts.requireMet && report.targets_met !== true ? 1 : 0; }
+
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -126,6 +130,7 @@ export function parseArgs(argv) {
     else if (name === "--by") { const v = take(); if (v !== "version") throw new Error("--by must be version"); o.by = v; }
     else if (name === "--experiment") { const v = take(); if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(v)) throw new Error("--experiment must be an experiment id"); o.experiment = v; }
     else if (name === "--post-metrics") { const v = take(); if (!/^[1-9]\d*$/.test(v)) throw new Error("--post-metrics must be a PR number"); o.postMetrics = Number(v); }
+    else if (name === "--require-met") o.requireMet = true;
     else if (name === "--offline") o.offline = true;
     else if (name === "--min-n") { const v = take(); if (!/^\d+$/.test(v)) throw new Error("--min-n must be a non-negative integer"); o.minN = Number(v); o.minNSet = true; }
     else if (name === "--json") o.json = true;
@@ -320,6 +325,10 @@ export async function runStats(argv, deps = {}) {
     return 2;
   }
   if (opts.help) { process.stdout.write(HELP); return 0; }
+  if (opts.requireMet && !opts.experiment) {
+    process.stderr.write(`forgedock stats: --require-met needs --experiment <id>\n`);
+    return 2;
+  }
   opts.repo = resolveRepo(opts.repo);
   if (!opts.repo || !isValidRepo(opts.repo)) {
     process.stderr.write(`forgedock stats: could not resolve a valid owner/repo (pass --repo owner/repo)\n`);
@@ -333,7 +342,7 @@ export async function runStats(argv, deps = {}) {
       process.stdout.write(`${opts.json ? renderJson(report) : renderReleaseMetrics(rm)}\n`);
       return 0;
     }
-    if (report.query?.experiment) { process.stdout.write(`${opts.json ? renderJson(report) : renderExperiment(report.query.experiment)}\n`); return 0; }
+    if (report.query?.experiment) { process.stdout.write(`${opts.json ? renderJson(report) : renderExperiment(report.query.experiment)}\n`); return experimentExit(opts, report.query.experiment); }
     if (report.query?.lane_profile && !opts.json) { process.stdout.write(`${renderLaneProfiles(report.query.lane_profile)}\n`); return 0; }
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
     if (report.query?.pool && !opts.json) { process.stdout.write(`${formatPoolLines(report.query.pool).join("\n")}\n`); return 0; }
