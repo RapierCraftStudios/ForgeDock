@@ -6,7 +6,7 @@ import { parseExperiment, assignArm, benchRecord, BENCH_SCHEMA } from "../experi
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { runsFromRecords } from "../stats/github-source.mjs";
 import { experimentReport, evalTarget } from "../stats/experiment.mjs";
-import { parseArgs } from "../stats/index.mjs";
+import { parseArgs, experimentExit, runStats } from "../stats/index.mjs";
 import { aggregate as benchAggregate } from "../../scripts/bench-lightlane.mjs";
 import { evaluateGate } from "../../scripts/eval-gate-scorecard.mjs";
 
@@ -77,6 +77,30 @@ test("#4629 bench-lightlane and the eval gate emit the shared record", () => {
   assert.equal(g.record.schema, BENCH_SCHEMA);
   assert.deepEqual(Object.keys(g.record).sort(), Object.keys(benchRecord({ source: "x" })).sort());
   assert.equal(evaluateGate(sc(10, 2), sc(90, 20)).record.targets.success_rate_within_threshold.pass, null);
+});
+
+test("#4634 --require-met: exit 1 unless every target is met, opt-in only", async () => {
+  assert.equal(parseArgs(["--experiment", "ab1", "--require-met"]).requireMet, true);
+  assert.equal(parseArgs(["--experiment", "ab1"]).requireMet, false);
+  const e = parseExperiment(SEC);
+  const runs = [1, 2, 3].flatMap((i) => [mkRun("light", i, 1), mkRun("full", 10 + i, 1)]);
+  const met = experimentReport(runs, e), small = experimentReport(runs.slice(0, 4), e);
+  assert.equal(met.targets_met, true);
+  assert.equal(experimentExit({ requireMet: true }, met), 0);
+  assert.equal(experimentExit({ requireMet: true }, small), 1);
+  assert.equal(experimentExit({ requireMet: false }, small), 0);
+  const realOut = process.stdout.write, realErr = process.stderr.write;
+  let err = "";
+  process.stdout.write = () => true; process.stderr.write = (c) => { err += c; return true; };
+  try {
+    assert.equal(await runStats(["--require-met", "--repo", "o/r"]), 2);
+    assert.match(err, /--require-met needs --experiment/);
+    const gh = async () => "[]";
+    const deps = { gh, env: {}, releaseTimes: [], experiment: e };
+    const base = ["--experiment", "ab1", "--repo", "o/r", "--no-cache", "--no-local"];
+    assert.equal(await runStats(base, deps), 0);
+    assert.equal(await runStats([...base, "--require-met"], deps), 1);
+  } finally { process.stdout.write = realOut; process.stderr.write = realErr; }
 });
 
 test("#4632 parseArgs: --emit-event is opt-in", () => {

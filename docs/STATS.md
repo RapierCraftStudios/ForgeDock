@@ -197,5 +197,5 @@ experiment:
 The lean lane assigns each issue an arm (sha1 of id and issue number over the ratio, so a re-run keeps its arm) and tags
 `experiment` and `arm` on `phase_attempt` and `run_terminal`. `forgedock stats --experiment <id>` reports the finished
 runs per arm with the metrics of `--by version`; a metric under min n is null and so is any target that needs it, never a
-pass. `targets_met` is true only when every target is met. The report, `scripts/bench-lightlane.mjs aggregate` and
+pass. `targets_met` is true only when every target is met. `--require-met` (with `--experiment`) prints the same report but exits 1 unless `targets_met` is true (0 otherwise; 2 without `--experiment`), so a post-deploy check can gate on it (#4634). The report, `scripts/bench-lightlane.mjs aggregate` and
 `scripts/eval-gate-scorecard.mjs` share one record: `{schema: "forge.bench.v1", source, arms, targets}`.
