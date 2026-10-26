@@ -1775,3 +1775,7 @@ A command killed by its own timeout (rc 124, `timeoutMs >= perCommandMs`) is ret
 ## Entry 2026-10-26 — Versioned outbound lifecycle events (#4630)
 
 `lean.mjs` now also forwards `RUN_START`, `CONTRACT_FROZEN` (both sites) and `PR_OPENED` through `emit()` (they were run-log only); `telemetry-seam.mjs` ignores them. `engine-cli.mjs` composes `makeEventEmitter` (`bin/engine/events.mjs`, forge.yaml `events:`) after the telemetry seam, and passes `onResult` to `sweepProbes` (`probe.mjs`, called for every non-dry-run row) so a probe pass or fail emits `probe.passed` / `probe.failed`. Envelope, types and signature: `docs/EVENTS.md`; pinned by `bin/engine/events.test.mjs`. `release.promoted`, `regression.detected` and `experiment.verdict` are schema-only until their sources exist.
+
+## Entry 2026-10-26 — Live A/B experiment arms (#4629)
+
+forge.yaml `experiment:` (id, arms, ratio, metrics, targets, min_n; parsed by `bin/experiment.mjs`) makes `lean.mjs` assign each issue an arm once per run (`assignArm`: sha1 of id and issue over the ratio, so resumes keep the arm) and tag `experiment` and `arm` on every `PHASE_ATTEMPT_USAGE` and on `RUN_TERMINAL` (`expTag`). No declaration means no tags. `forgedock stats --experiment <id>` (`bin/stats/experiment.mjs`) reports arms against targets, null below min n. `bench-lightlane.mjs aggregate` and `eval-gate-scorecard.mjs` add a `record` key in the shared `forge.bench.v1` shape (`benchRecord`); their other output is unchanged.
