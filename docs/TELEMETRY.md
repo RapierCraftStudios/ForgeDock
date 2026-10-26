@@ -5,6 +5,8 @@ counts can be measured without re-reading comments with a model. GitHub is the s
 by code (never by a model) into a `FORGE:TELEMETRY` comment, and everything can be rebuilt from the GitHub API alone.
 Local files are only a cache.
 
+For a stable, versioned stream aimed at outside consumers (JSONL sink, signed webhook) see [EVENTS.md](EVENTS.md).
+
 ## Where records live
 
 - One `<!-- FORGE:TELEMETRY v1 -->` comment per issue, or per PR for review-side events (`review_panel`,
@@ -41,7 +43,7 @@ is dropped. Payload keys are `[A-Za-z0-9_]+` and cannot shadow the shared keys; 
 | `ci_local_check` | `scripts/ci-local.sh run`, one per scoped, widened or executed check (at most 20 per run) | `job`, `selector`, `selected`, `total`, `cache` = `hit` \| `miss` \| `dedup` \| `na`, `duration_ms`, `wait_ms` (job slot wait), `widen` (reason or `none`). A remote-CI failure at merge on a check recorded here as narrowed is a selector bug |
 | `liveness` | `scripts/remediate-liveness.sh` | `decision` = `PROCEED` \| `DEFER` \| `EXHAUSTED`, `why` |
 | `phase_attempt` | the engine (`bin/engine/telemetry-seam.mjs`, one per phase attempt; `phase` = the phase id) | `attempt`, `trigger` (#4362: why the attempt ran, one of `plan`, `build`, `block_correction`, `contract_correction`, `precheck`, `structure`, `docs`, `enumerating`, `sequence`, `ci_unavailable`, `ci_red`, `conformance`, `review`, `merge_ci`, `timeout_restart`, `recovery`; `restart_of` = the trigger a `timeout_restart` replaced), `model`, `backend` (`cli`/`api`), `turns`, `duration_ms`, `cost_usd` (the raw reported value: a running total when the attempt resumed a CLI session), `cost_usd_delta` (#4407: this attempt's cost; consumers sum it when present, else `cost_usd`), `cost_usd_session` (the CLI session's running total), `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens` (any value the runner did not report is omitted) |
-| `run_terminal` | the engine (`terminate()`, one per run segment) | `reason` (terminal reason), `code` (see `docs/OUTCOME-CODES.md`), `wall_ms` (this engine process, start to terminal) |
+| `run_terminal` | the engine (`terminate()`, one per run segment) | `experiment` and `arm` (#4629, only when forge.yaml declares an `experiment:`; also on `phase_attempt`), `reason` (terminal reason), `code` (see `docs/OUTCOME-CODES.md`), `wall_ms` (this engine process, start to terminal) |
 
 The engine records carry `run` = `r_<issue>_<start epoch seconds>` (one per `forgedock run-issue` process) so `forgedock stats`
 (`docs/STATS.md`) can group the attempts of a run and tell a finished run from an unfinished one. They are the GitHub-side

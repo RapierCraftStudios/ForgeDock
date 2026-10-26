@@ -608,6 +608,18 @@ A post-deploy requirement carries a check id (`[check:<id>]` in the follow-up it
 
 `pass` is `exit 0` (default) or a `/regex/flags` over the output; `timeout` is seconds. When the gate reports the follow-up ready, the check runs with no model call: pass closes the follow-up with a `FORGE:PROBE` record, fail reopens the parent with the output. An item with no check id, or an id the default branch does not define, gets the `awaiting-measurement` label and never a lane. A contract's check id must be on the default branch or added by the same PR.
 
+
+## `events` (OPTIONAL)
+
+Outbound lifecycle events (#4630). The local JSONL sink is always on; the webhook needs both keys. See [EVENTS.md](EVENTS.md) for the schema and signature.
+
+```yaml
+events:
+  webhook_url: https://hooks.example.com/forgedock   # https, or http on localhost; unset = no webhook
+  webhook_secret_env: FORGE_EVENTS_SECRET            # NAME of the env var holding the HMAC secret (default shown); never put the secret here
+  dir: ~/.forge/events                               # local JSONL directory
+```
+
 ## `lean` (OPTIONAL)
 
 Settings of the core work-on (`bin/lean/`) that change its contract.
@@ -1452,6 +1464,7 @@ These variables are read from the operator's runner environment, not from `forge
 | `FORGE_TRAIL_QG_SINCE` | `2026-10-07T03:40:12Z` | ISO-8601 UTC cutoff for the legacy `FORGE:QUALITY_GATE` grace. An issue whose trusted `FORGE:BUILDER:COMPLETE` comment was last updated before this time has `QUALITY_GATE` waived. Set to an empty string to disable the grace. A malformed or future value (including a runner clock earlier than this default) fails closed: the verifier exits 2, an infrastructure block rather than `MISSING`. |
 | `FORGEDOCK_ALLOW_API_BACKEND` | unset | Set to `1` (host owner approval) together with forge.yaml `execution.agent_backend: api` to let `--backend auto` use the paid API backend when no `claude` CLI is available. Without both, `auto` never selects `api` (#4257). |
 | `FORGE_TELEMETRY` | `on` | Set to `off` to disable gate telemetry. Gate scripts append one structured record per decision to a trusted `FORGE:TELEMETRY v1` comment; emission is best-effort and never changes a gate's output or exit code. See [TELEMETRY.md](TELEMETRY.md). |
+| `FORGE_EVENTS` | `on` | Set to `off` to disable the lifecycle event stream (local JSONL and webhook). `FORGE_EVENTS_DIR` overrides the JSONL directory; the webhook secret is read from the env var named by `events.webhook_secret_env` (default `FORGE_EVENTS_SECRET`). See [EVENTS.md](EVENTS.md). |
 
 ### Install root resolution
 

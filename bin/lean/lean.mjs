@@ -45,6 +45,7 @@ import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
 import { writeHeavyShims, sumWaits, isHeavyProcess } from "./heavy.mjs";
 import { priorityFromLabels } from "./sched.mjs";
+import { assignArm } from "../experiment.mjs";
 import { parseExploreConfig, explorerAgents, explorePlanRule, exploreBuildRule } from "./explore.mjs";
 import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { parseContextPackConfig, contextArm, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
@@ -222,6 +223,7 @@ export async function runCore(o) {
   let sessionId = null;
 
   const ev = (e) => appendEvent(dir, issue, e, { repo }); // #4432: the run log is keyed by repo + issue
+  const expTag = o.experiment ? { experiment: o.experiment.id, arm: assignArm(o.experiment, issue) } : {}; // #4629: same arm for the whole run
   const emit = async (rec) => { try { await emitTelemetry?.({ ...rec, issue }); } catch { /* never fails a run */ } };
   let ghCache = null; // #4507: the run's own gh HTTP cache (set once the run tmp dir exists)
   const ghc = (args) => ghCacheRetry((env) => io.gh(args, env ? { env } : undefined), ghCache);
@@ -239,7 +241,7 @@ export async function runCore(o) {
     const c = sessionCostDelta(sessionCosts, { resume, sessionId: r?.sessionId ?? null, cost: num(r?.costUsd) });
     const rec = { event: "PHASE_ATTEMPT_USAGE", phase, attempt: n, trigger, ...(restartOf ? { restart_of: restartOf } : {}), usage: r?.usage ?? null, duration_ms: num(r?.durationMs) ?? 0,
       cost_usd: num(r?.costUsd), cost_usd_delta: c.delta, cost_usd_session: c.session, model: r?.model ?? null, turns: num(r?.turns), ...(mode ? { mode } : {}),
-      ...(num(r?.baselineTokens) != null ? { baseline_tokens: num(r.baselineTokens) } : {}), ...(r?.tools ? { tools: r.tools } : {}), lane_profile: laneProfile.name }; // #4410
+      ...(num(r?.baselineTokens) != null ? { baseline_tokens: num(r.baselineTokens) } : {}), ...(r?.tools ? { tools: r.tools } : {}), lane_profile: laneProfile.name, ...expTag }; // #4410, #4629
     if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += c.delta ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); tb.note(num(r?.turns), stage === "implement"); }
     ev(rec); await emit(rec);
     modelMs += rec.duration_ms; // #4451: model time next to the lane's wall time
@@ -418,7 +420,7 @@ export async function runCore(o) {
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}),
       conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}),
-      context_pack: ctxCfg.mode, ...ctxAb, explore: exploreCfg.mode, wall_ms: now() - t0, model_ms: modelMs, light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
+      context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, model_ms: modelMs, light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
     ev(term);
     await emit(term);
@@ -911,6 +913,7 @@ export async function runCore(o) {
   }
   ghCache = io.ghCache?.(runTmp) ?? null;
   ev({ event: "RUN_START", run: `core_${issue}_${t0}`, issue, lane, path: "core", version: ENGINE_VERSION, forge_version: ENGINE_VERSION, repo });
+  await emit({ event: "RUN_START", run: `core_${issue}_${t0}`, lane, path: "core" }); // #4630: lifecycle event stream
   try {
     iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels,updatedAt"]));
   } catch (e) { return finish("engine-error", `cannot read issue: ${e.message}`); }
@@ -1427,6 +1430,7 @@ export async function runCore(o) {
           if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash });
           await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
           ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: 0, derived: "light" });
+          await emit({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: 0, derived: "light" });
           ev({ event: "LIGHT_DONE", files: lr.files.length, test_failures: lr.testFailures, repro: lr.repro, cost_usd: usage.cost_usd });
           T.decisions.push(`Light lane: one builder session, contract ${hash} derived from the diff and the test`);
           try { await post("FORGE:LITE", renderLiteReceipt({ lr, eligibility: elig, costUsd: usage.cost_usd, contractHash: hash })); } catch { /* #4452: the receipt is best effort */ }
@@ -1508,6 +1512,7 @@ export async function runCore(o) {
         await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
         const deferredN = frozen.requirements.filter((r) => TRACKED.includes(r.disposition)).length;
         ev({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
+        await emit({ event: "CONTRACT_FROZEN", hash, requirements: frozen.requirements.length, deferred: deferredN });
         T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
       } else {
         T.validate = lightDone ? "light lane (no plan session)" : "resumed (existing branch)";
@@ -2173,6 +2178,7 @@ export async function runCore(o) {
     const pr = Number(/\/pull\/(\d+)/.exec(prOut)?.[1] ?? /(\d+)\s*$/.exec(prOut)?.[1]);
     if (!Number.isInteger(pr)) return await needsHuman(`Could not parse the PR number from: ${prOut.slice(0, 200)}`);
     ev({ event: "PR_OPENED", pr });
+    await emit({ event: "PR_OPENED", pr });
     if (resumed?.pr && closing.tracked.length) { // an existing PR still has to link the tracking issues visibly
       try { await ghw(["pr", "edit", String(pr), "-R", repo, "--body", renderPrBody({ issue, investigation: await readStage(STAGES[0]), contract: effective, implementation: await readStage(STAGES[1]), result, gitFiles: files, tracked: closing.tracked })]); }
       catch (e) { e.deferCode = OUTCOME_CODES.FOLLOWUP_UNAVAILABLE; e.deferDetail = `could not link the tracking issues on PR #${pr}; nothing merged, rerun to retry`; throw e; }
