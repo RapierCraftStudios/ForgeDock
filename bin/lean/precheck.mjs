@@ -42,8 +42,8 @@ export function retryTimeoutMs({ perMs, load1, cores }) {
 
 /**
  * #4589: a check timeout (rc 124) is a busy host, not a failing command: run `run(timeoutMs)`, and when it timed out on its
- * own, once more with `retryTimeoutMs`. `left` (ms still available in a round budget) caps the retry; a retry the budget cut
- * short is `cut` (left to CI). A repeated timeout keeps rc 124 and says it was infrastructure. Other rcs are never retried.
+ * own, once more with `retryTimeoutMs`. `left` (ms still available in a round budget) caps the retry; an exhausted budget, or a retry the budget cut
+ * short, is `cut` (left to CI); a budget with room for no longer retry leaves the first rc 124 a failure (#4620). A repeated timeout keeps rc 124 and says it was infrastructure. Other rcs are never retried.
  * @param {(timeoutMs:number) => Promise<{rc:number, output?:string}>} run
  * @returns {Promise<{r:{rc:number, output?:string}, retried:boolean, cut:boolean}>}
  */
@@ -52,8 +52,10 @@ export async function runWithTimeoutRetry(run, timeoutMs, { left = () => Infinit
   if (r?.rc !== TIMEOUT_RC || !(timeoutMs > 0) || !Number.isFinite(timeoutMs)) return { r, retried: false, cut: false };
   let want = timeoutMs;
   try { want = retryTimeoutMs({ perMs: timeoutMs, ...load() }); } catch { /* no load reading: the minimum factor */ want = timeoutMs * 2; }
-  const t2 = Math.min(want, left());
-  if (!(t2 > timeoutMs)) return { r, retried: false, cut: t2 < want }; // no budget left to retry in: CI runs it
+  const room = left();
+  if (!(room > 0)) return { r, retried: false, cut: true }; // the budget is spent: CI runs it
+  const t2 = Math.min(want, room);
+  if (!(t2 > timeoutMs)) return { r, retried: false, cut: false }; // #4620: no room for a longer retry; its own timeout stays a failure
   const r2 = await run(t2);
   const cut = r2?.rc === TIMEOUT_RC && t2 < want;
   if (r2?.rc === TIMEOUT_RC && !cut) return { r: { ...r2, output: `${String(r2.output ?? "")}\n(infra timeout: host load, not a code failure; retried once with ${Math.round(t2 / 1000)}s)` }, retried: true, cut };
