@@ -1780,3 +1780,7 @@ A command killed by its own timeout (rc 124, `timeoutMs >= perCommandMs`) is ret
 ## Entry 2026-10-26 — Live A/B experiment arms (#4629)
 
 forge.yaml `experiment:` (id, arms, ratio, metrics, targets, min_n; parsed by `bin/experiment.mjs`) makes `lean.mjs` assign each issue an arm once per run (`assignArm`: sha1 of id and issue over the ratio, so resumes keep the arm) and tag `experiment` and `arm` on every `PHASE_ATTEMPT_USAGE` and on `RUN_TERMINAL` (`expTag`). No declaration means no tags. `forgedock stats --experiment <id>` (`bin/stats/experiment.mjs`) reports arms against targets, null below min n. `bench-lightlane.mjs aggregate` and `eval-gate-scorecard.mjs` add a `record` key in the shared `forge.bench.v1` shape (`benchRecord`); their other output is unchanged.
+
+## Entry 2026-10-26 — ciVerify untracks tool state before sampling HEAD (#4621)
+
+`lean.mjs` `ciVerify` calls `untrackToolState` before `rev-parse HEAD`. `gitPush` runs it first too, so in verify.mode ci/hybrid the untrack commit used to move HEAD after `head` was read: `commitChecks(head)` and `sameSha(run.headSha, head)` targeted an unpushed sha, CI timed out as `unavailable` and `ciFellBack` skipped CI for the lane. Now `head` is the tip `gitPush` publishes; `untrackToolState` is idempotent, so the push adds no second commit, and `verify.mjs` `runCiVerify` is unchanged. Pinned by the `untrack commit before CI verify` test.
