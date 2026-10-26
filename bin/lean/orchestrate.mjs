@@ -782,10 +782,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     update({ issue: null, outcome: "added", detail: list });
     return fresh.length;
   };
-  // #4376: one SIGTERM per running local lane (their teardown saves the work); remote lanes run to their result.
+  // #4376: one SIGTERM per running local lane (their teardown saves the work); remote lanes run to their result unless the cancel carries `stopRemote` (#4612).
   const stopSent = new Set();
   function stop(n, rec) {
-    if (!stopLane || rec?.remote || stopSent.has(n)) return;
+    if (!stopLane || (rec?.remote && cancelled?.stopRemote !== true) || stopSent.has(n)) return; // #4612: remote lanes only when the cancel asked for it
     stopSent.add(n);
     try { Promise.resolve(stopLane(n, rec)).catch(() => {}); } catch { /* best effort */ }
   }

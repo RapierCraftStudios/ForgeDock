@@ -480,6 +480,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
     : { terminalReason: "needs-human", code: OUTCOME_CODES.SANDBOX_START_FAILED, detail: `sandbox ${id} failed to start: ${errText(e)}` });
   return {
+    // #4612: a graceful stop of a live sandbox (the provider's checkpoint stop); false when it has none.
+    stopLane: async (n, rec) => (typeof provider.stop === "function" && rec?.handle ? (await provider.stop(rec.handle)) === true : false),
     runOne: async (n, lane, ctx = {}) => {
       const led = ledgerFor(n);
       const base = { provider: provider.name, id: provider.idFor(n), issue: n, startedAt: now() };
