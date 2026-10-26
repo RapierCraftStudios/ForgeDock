@@ -186,6 +186,7 @@ export function isLaneAlive(pid, marker, { kill = process.kill.bind(process), pr
   if (!existsSync(procDir)) return true;
   let cmd;
   try { cmd = readFileSync(join(procDir, String(pid), "cmdline"), "utf8"); } catch { return false; }
+  try { if (/^\d+ \(.*\) [ZX]/s.test(readFileSync(join(procDir, String(pid), "stat"), "utf8"))) return false; } catch { /* no stat: trust cmdline */ } // a zombie is gone
   return !marker || cmd.split("\0").includes(marker);
 }
 
