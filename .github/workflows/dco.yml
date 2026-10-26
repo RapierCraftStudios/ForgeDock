@@ -95,6 +95,9 @@ jobs:
             "28caebf788957f9ce387b19fca6273f3000b50aa"
             "5d33ee286d5276109efd57dd819e9f49b54e42c1"
             "eea994eff72fa2f701fee8dd1e43089e0a71c0b2"
+            # #4550 lane commits from a pre-#4561 sandbox run (2026-10-24), resumed into PR #4647. Owner decision on #4648, 2026-10-26.
+            "815bd3aa6d897872fa0683ba05d2f3bc2280fb37"
+            "ef4cf980e248937d87f11b59741e168c0318ebfc"
           )
 
           # Bots allowed to skip the DCO requirement.
