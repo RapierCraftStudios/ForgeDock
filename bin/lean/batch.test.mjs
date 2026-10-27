@@ -89,6 +89,21 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.deepEqual(deferPolicy({ code: "host.busy" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
   });
 
+  it("#4685 a breaker tripped by transport errors closes itself after the cooldown; any other stays tripped", async () => {
+    const run = async (detail) => {
+      let t = 0; const updates = []; const saves = [];
+      const rows = await orchestrate({ issues: [1, 2, 3, 4], parallel: 1, readBody: async () => "", now: () => t, sleep: async (ms) => { t += ms; }, maxDeferrals: 3, breaker: { errors: 3, window_min: 30 },
+        onUpdate: (r) => updates.push(r), store: { load: () => null, save: (s) => saves.push(s) },
+        runOne: async (n) => { t += 1000; return n <= 3 ? { terminalReason: "engine-error", detail } : { terminalReason: "merged", pr: 5 }; } });
+      return { rows, updates, saves };
+    };
+    const tr = await run("sandbox launch: fetch failed");
+    const trip = tr.saves.map((s) => s.breaker).find(Boolean);
+    assert.equal(trip?.transport, true);
+    const other = await run("boom");
+    assert.equal(other.saves.map((s) => s.breaker).find(Boolean)?.transport, undefined);
+  });
+
   it("gh.unavailable deferrals (forge#4157) are requeued, never relaunched as engine-error, and never trip the breaker", async () => {
     const { now, sleep } = fakeClock();
     const updates = [];

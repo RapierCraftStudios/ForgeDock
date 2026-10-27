@@ -24,7 +24,7 @@ function fakeProvider(opts = {}) {
     async start({ issue, env, secrets }) {
       p.calls.push(["start", issue]);
       p.ledgerAtStart = opts.ledger?.entries("sandbox").map((e) => e.value) ?? null;
-      if (opts.startThrows) throw new Error("boom: no capacity");
+      if (opts.startThrows) throw Object.assign(new Error("boom: no capacity"), opts.startThrows === 401 ? { status: 401 } : {});
       p.live.add(issue);
       p.env = env; p.secrets = secrets;
       if (opts.finish) { const r = opts.finish(issue); if (r !== undefined) { p.results[issue] = r; p.live.delete(issue); } }
@@ -166,6 +166,13 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
     assert.match(r.detail, /fake-7 exited without a result/);
     assert.ok(prov.calls.some((c) => c[0] === "teardown"));
     assert.equal(led.read(), null);
+  });
+
+  it("#4685 start refused with HTTP 401: deferred sandbox.auth with a long retry, never needs-human", async () => {
+    const { r } = await run({ startThrows: 401 });
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "sandbox.auth");
+    assert.equal(r.retryInSeconds, 300);
   });
 
   it("start throws: typed needs-human sandbox.start_failed row (#4254), teardown still runs", async () => {

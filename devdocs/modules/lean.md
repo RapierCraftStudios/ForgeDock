@@ -1901,6 +1901,12 @@ The only override is `{"kind":"supersedes","guard":"#X","why":"..."}` in result.
 `contract.supersedes`; the reviewer sees it on the effective contract). After the lane merges with the amendment, the engine
 comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_ms`), `guard_broken`, `supersedes_accepted`.
 
+## Entry 2026-10-27 — AlterLab engine gaps (#4685)
+- A remote lane's `credentials` block naming a missing tool/module (`missingToolBlock`, lean.mjs) ends `env.tool_missing` (recoverable), not `builder.blocked`.
+- `scripts/hotspots.sh` always excludes lockfiles (basename match at any depth) on top of `exclude_globs`.
+- Pool provider: a `token_env` credential that resolves empty falls back to the router token file; HTTP 401/403 at sandbox start defers `sandbox.auth` (300s), never needs-human.
+- Breaker: `orchestrate --clear-breaker <id>` clears it; a breaker tripped only by transport errors (`tripped.transport`) auto-closes after 5 min and is cleared on a daemon-restart resume. Submit-time env replay was already delivered by #4691.
+
 ## Entry 2026-10-27 — Validate results across a merge-time CI fix round (#4708)
 
 `mergeFixRound` reviewed the fix head before it was CI-verified, and the fix session could rewrite `result.json` without the

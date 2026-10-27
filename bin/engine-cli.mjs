@@ -1173,7 +1173,7 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
   return { ok: true, batch: id };
 }
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --clear-breaker <id> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
 const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force"];
 const issuesOf = (argv) => {
   const issues = [];
@@ -1350,6 +1350,7 @@ async function orchestrateClient(argv, deps = {}) {
   };
   const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root: await batchRootOf() });
+  if (argv.includes("--clear-breaker")) return runBatch({ argv, deps, sink: consoleSink() });
   if (argv.includes("--cancel")) {
     const id = flag(argv, "--cancel");
     return cancelBatch({ id, root: await batchRootOf(), stopRemote: argv.includes("--stop-remote"), viaDaemon: async () => {
@@ -1431,6 +1432,15 @@ async function orchestrateClient(argv, deps = {}) {
 export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: callerEnv = process.env, sink = consoleSink(), deps = {}, keepBreaker = false, daemon = false, signal = null }) {
   const batchMod = await import("./lean/batch.mjs");
   const root = deps.batchRoot ?? batchMod.batchRoot();
+  if (argv.includes("--clear-breaker")) {
+    // #4685: close a tripped breaker without editing state.json; the next --resume (or a running batch's next save) starts closed.
+    const b = batchMod.openBatch(root, flag(argv, "--clear-breaker"));
+    if (!b.exists()) throw new Error(`no batch ${flag(argv, "--clear-breaker")} in ${root}`);
+    const st = b.store.load();
+    if (st) b.store.save({ ...st, breaker: null, errorTimes: [] });
+    sink.line(`batch ${b.id}: ${st?.breaker ? "breaker cleared" : "no breaker was tripped"}`);
+    return { ok: true, batch: b.id, cleared: Boolean(st?.breaker) };
+  }
   if (argv.includes("--set-parallel")) {
     const i = argv.indexOf("--set-parallel");
     const b = batchMod.openBatch(root, argv[i + 1]);
@@ -1508,7 +1518,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   } else {
     // A resume is the operator's decision to continue: the breaker starts closed again.
     const st = batch.store.load();
-    if (st && !keepBreaker) batch.store.save({ ...st, breaker: null, errorTimes: [] });
+    if (st && (!keepBreaker || st.breaker?.transport)) batch.store.save({ ...st, breaker: null, errorTimes: [] });
     if (!keepBreaker) batch.clearCancel(); // #4376: the operator's resume continues a cancelled batch
     if (daemon && !plan.daemon) batch.writePlan({ ...plan, daemon: true }); // a daemon restart resumes it from now on
     batch.clearReport();
