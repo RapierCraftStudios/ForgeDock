@@ -26,3 +26,6 @@ Split joined requirement references into individual amendment rows before applyi
 - devdocs/modules/lean.md was not updated (not a deliverable). scripts/check-devdocs-freshness.sh reports no update required.
 
 Docs: devdocs/modules/lean.md entry for #4655 (joined refs split, scope-note rejected, host-missing => UNRUNNABLE).
+
+### Follow-up
+- host_missing now also matches the unquoted `No module named pytest` (the issue's real output); added an unquoted test case in acceptance-red-green.test.sh. V3 passes (25/25).

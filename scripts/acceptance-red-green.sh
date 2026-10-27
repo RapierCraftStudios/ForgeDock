@@ -65,7 +65,7 @@ run_in() {
 # host_missing <output_file>: true when the output names a missing third-party python module or a missing command
 host_missing() {
   local f="$1" name
-  name=$(sed -n "s/.*No module named '\([^'.]*\).*/\1/p" "$f" | head -1)
+  name=$(sed -n "s/.*No module named '\{0,1\}\([A-Za-z0-9_-]\{1,\}\).*/\1/p" "$f" | head -1)
   if [ -n "$name" ]; then
     git -C "$REPO" ls-files 2>/dev/null | tr '/' '\n' | grep -qxE "$name(\.py)?" && return 1
     return 0
