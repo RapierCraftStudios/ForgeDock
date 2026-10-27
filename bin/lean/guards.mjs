@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isTestPath } from "./enumerating.mjs";
 import { parseContractComment } from "./render.mjs";
+import { isTrustedIssueComment } from "./prefilter.mjs";
 
 export const GUARD_MARKER = "FORGE:GUARD";
 const GUARD_RE = /<!-- FORGE:GUARD (\{[\s\S]*?\}) -->/;
@@ -98,7 +99,7 @@ export async function guardIssue({ gh, git, repo, issue, pr = null, post = null,
   const iss = json(await gh(["issue", "view", String(issue), "-R", repo, "--json", "number,title,comments"]), null);
   if (!iss) return { skipped: true, reason: `#${issue}: issue not readable` };
   const bodies = (iss.comments ?? []).map((c) => c?.body ?? "");
-  const existing = bodies.map(parseGuard).find(Boolean);
+  const existing = (iss.comments ?? []).filter(isTrustedIssueComment).map((c) => parseGuard(c?.body)).find(Boolean); // #4750: only trusted authors may plant a guard
   if (existing) return { exists: true, guard: existing };
   const cb = [...bodies].reverse().find((b) => b.startsWith("<!-- FORGE:CONTRACT -->") && parseContractComment(b));
   if (!cb) return { skipped: true, reason: `no guard for #${issue}: no frozen FORGE:CONTRACT comment` };
@@ -126,7 +127,7 @@ export async function guardIssue({ gh, git, repo, issue, pr = null, post = null,
 export async function collectGuards({ gh, repo, limit = 500 }) {
   const rows = json(await gh(["issue", "list", "-R", repo, "--state", "all", "--search", `${GUARD_MARKER} in:comments`, "--limit", String(limit), "--json", "number,comments"]), []);
   const guards = [];
-  for (const r of rows) for (const c of r.comments ?? []) { const g = hasMarker(c?.body) ? parseGuard(c.body) : null; if (g) { guards.push(g); break; } }
+  for (const r of rows) for (const c of r.comments ?? []) { const g = hasMarker(c?.body) && isTrustedIssueComment(c) ? parseGuard(c.body) : null; if (g) { guards.push(g); break; } }
   return guards;
 }
 
