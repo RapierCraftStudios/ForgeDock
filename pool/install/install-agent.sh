@@ -72,6 +72,7 @@ log "building lane image (first run takes several minutes)"
 FD_VERSION="$(jq -r .version /opt/computeshare/package.json)"
 docker build -q -t "forgedock-lane:${FD_VERSION}" --build-arg "FORGEDOCK_VERSION=${FD_VERSION}" /opt/computeshare/pool/image >/dev/null
 
+. /opt/computeshare/pool/install/unit-hardening.sh
 cat > /etc/systemd/system/computeshare-agent.service <<EOF
 [Unit]
 Description=computeshare agent
@@ -80,8 +81,7 @@ Requires=docker.service
 
 [Service]
 ExecStart=/opt/node/bin/node /opt/computeshare/bin/pool/cli.mjs agent --config /etc/computeshare/agent.json
-Restart=always
-RestartSec=5
+$(unit_hardening system)
 
 [Install]
 WantedBy=multi-user.target
@@ -89,6 +89,7 @@ EOF
 systemctl daemon-reload
 systemctl enable computeshare-agent >/dev/null
 systemctl restart computeshare-agent
+unit_oom_hint forgedock-pool-agent
 
 for i in $(seq 1 20); do
   if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then

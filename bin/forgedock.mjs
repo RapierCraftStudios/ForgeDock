@@ -3277,6 +3277,19 @@ async function doctor(fix = false) {
     }
   }
 
+  // ── Check 14: Router/schedd restarts (#4673) ───────────────────────────────
+  // A restart in the last hour usually means an OOM killer or SIGTERM took the coordinator and dropped in-flight lanes. Warn only.
+  {
+    try {
+      const { restartCheck } = await import("./pool/health.mjs");
+      for (const unit of ["computeshare-router", "forgedock-schedd"]) {
+        const r = restartCheck({ unit });
+        if (r.status === "warn") warn(`Restarts: ${unit}`, r.detail);
+        else if (r.status === "pass") pass(`Restarts: ${unit}`, r.detail);
+      }
+    } catch { /* no systemd here: nothing to report */ }
+  }
+
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log("");
   if (fix && fixesApplied > 0) {

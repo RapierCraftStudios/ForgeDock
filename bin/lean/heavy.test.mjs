@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { writeFileSync, readFileSync, mkdirSync, chmodSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS, isHeavyProcess } from "./heavy.mjs";
+import { guardChain, isPassThroughWrapper, SHIM_LOOP_MAX, classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS, isHeavyProcess } from "./heavy.mjs";
 import { checkAdmission, ADMISSION_DEFAULTS } from "./admission.mjs";
 import { formatAlertLines, formatWaitSummary } from "./orchestrate.mjs";
 import { readHeavy } from "../engine-cli.mjs";
@@ -233,5 +234,65 @@ describe("heavy shims and the run wrapper (#4169)", () => {
     assert.deepEqual(formatAlertLines(undefined), []);
     assert.deepEqual(formatAlertLines([{ event: "deferred-to-ci", rate: 0.4, count: 4, sample: 10, threshold: 0.3, example: "npx tsc" }]),
       ["ALERTS", 'deferred-to-ci: 40% (4/10 lanes, threshold 30%), e.g. "npx tsc"']);
+  });
+});
+
+describe("shim re-entry through a pass-through wrapper (#4680)", () => {
+  it("shim with pass-through wrapper runs once", async () => {
+    const d = tmpDir("heavy-wrap-"), wrap = join(d, "wrap"), real = join(d, "real"), bin = join(d, "bin"), log = join(d, "log");
+    mkdirSync(wrap, { recursive: true }); mkdirSync(real, { recursive: true });
+    writeFileSync(join(wrap, "docker"), `#!/bin/sh\necho w >> ${log}\nexec "$(PATH="\${PATH#${wrap}:}" command -v docker)" "$@"\n`);
+    writeFileSync(join(real, "docker"), `#!/bin/sh\necho r >> ${log}\necho "Docker version 1"\n`);
+    for (const dir of [wrap, real]) chmodSync(join(dir, "docker"), 0o755);
+    const path = `${wrap}:${bin}:${real}`;
+    const warnings = [];
+    assert.deepEqual(await writeHeavyShims(bin, { path, warn: (m) => warnings.push(m) }), ["docker"]);
+    assert.match(readFileSync(join(bin, "docker"), "utf8"), new RegExp(`-- '${real}/docker' "\\$@"`), "wrapper skipped at write time, real binary baked");
+    assert.deepEqual(warnings, []);
+    // Force the runtime guard: bake the wrapper itself, as a shim written before the wrapper appeared would.
+    writeFileSync(join(bin, "docker"), heavyShimScript("docker", join(wrap, "docker")));
+    chmodSync(join(bin, "docker"), 0o755);
+    const r = spawnSync(join(bin, "docker"), ["--version"], { env: { ...process.env, PATH: `${bin}:${wrap}:${real}:/usr/bin:/bin`, FORGE_HEAVY_DISABLED: "1" }, encoding: "utf8", timeout: 20000 });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Docker version 1/);
+    assert.equal(readFileSync(log, "utf8"), "w\nr\n", "wrapper and real binary each ran once (two shim node processes at most)");
+  });
+
+  it("a name+cmd seen twice resolves past the shim and chain dirs; no match or depth above the cap is env.shim_loop", () => {
+    const d = tmpDir("heavy-chain-"), a = join(d, "a"), b = join(d, "b"), s = join(d, "s");
+    for (const x of [a, b, s]) { mkdirSync(x, { recursive: true }); writeFileSync(join(x, "tsc"), "#!/bin/sh\n"); chmodSync(join(x, "tsc"), 0o755); }
+    const env = { PATH: [s, a, b].join(":"), FORGE_HEAVY_SHIM_DIR: s };
+    const first = guardChain("tsc", join(a, "tsc"), env);
+    assert.equal(first.cmd, join(a, "tsc")); assert.equal(first.env.FORGE_HEAVY_CHAIN, `tsc:${join(a, "tsc")}`);
+    const again = guardChain("tsc", join(a, "tsc"), first.env);
+    assert.equal(again.cmd, join(b, "tsc"));
+    assert.equal(again.env.FORGE_HEAVY_CHAIN, `tsc:${join(a, "tsc")}|tsc:${join(b, "tsc")}`);
+    const none = guardChain("tsc", join(b, "tsc"), { ...again.env, PATH: [s, a, b].join(":") });
+    assert.match(none.error, /^env\.shim_loop: tsc .*no other tsc/);
+    const deep = guardChain("tsc", "/x/tsc", { ...env, FORGE_HEAVY_CHAIN: Array.from({ length: SHIM_LOOP_MAX }, (_, i) => `tsc:/d${i}/tsc`).join("|") });
+    assert.match(deep.error, /^env\.shim_loop: tsc re-entered .*more than 4 times.*\/d0/);
+  });
+
+  it("runWrapped refuses to spawn on a loop and records the chain otherwise", async () => {
+    const spawned = [];
+    const run = async (cmd, a, e) => { spawned.push([cmd, e.FORGE_HEAVY_CHAIN]); return { code: 0, signal: null }; };
+    const env = { FORGE_HEAVY_HELD: "1", FORGE_HEAVY_CHAIN: Array.from({ length: SHIM_LOOP_MAX }, (_, i) => `x:/d${i}/x`).join("|") };
+    assert.equal((await runWrapped(["run", "--name", "x", "--", "/r/x"], { env, run })).code, 126);
+    assert.deepEqual(spawned, []);
+    await runWrapped(["run", "--name", "x", "--", "/r/x"], { env: { FORGE_HEAVY_HELD: "1" }, run });
+    assert.deepEqual(spawned, [["/r/x", "x:/r/x"]]);
+  });
+
+  it("wrapper detection: PATH-lookup shell scripts only; a wrapper with nothing behind it is skipped with a warning", async () => {
+    assert.ok(isPassThroughWrapper('#!/bin/sh\nexec "$(command -v docker)" "$@"', "docker"));
+    assert.ok(!isPassThroughWrapper("#!/bin/sh\necho hi\n", "docker"));
+    assert.ok(!isPassThroughWrapper("\x7fELF command -v docker", "docker"));
+    const d = tmpDir("heavy-skip-"), wrap = join(d, "wrap"), bin = join(d, "bin");
+    mkdirSync(wrap, { recursive: true });
+    writeFileSync(join(wrap, "docker"), '#!/bin/sh\nexec "$(command -v docker)" "$@"\n'); chmodSync(join(wrap, "docker"), 0o755);
+    const warnings = [];
+    assert.deepEqual(await writeHeavyShims(bin, { path: `${bin}:${wrap}`, warn: (m) => warnings.push(m) }), []);
+    assert.equal(warnings.length, 1); assert.match(warnings[0], /docker .*wrapper/);
+    assert.ok(!existsSync(join(bin, "docker")));
   });
 });
