@@ -1,16 +1,20 @@
 ### Approach
-Replaced the column-1 character whitelist with a blacklist: `R<n>:` prefix still rejected, control chars rejected, whitespace values must contain `/` or end in an extension (so prose is still rejected).
-### Changes
-- scripts/file-deferred-followups.sh: new column-1 validation, header comment.
-- scripts/file-deferred-followups.test.sh: regression test for the five issue paths.
-### Acceptance Criteria Status
-- R1 ✅ scripts/file-deferred-followups.sh:78-79, test at the #4739 case
-- R2 ✅ existing 68 checks unchanged and passing
-- R3 ✅ rejection cases in section 21 still pass
-### Verification
-- V1 `bash scripts/file-deferred-followups.test.sh`: passed=69 failed=0; the new test fails without the fix (68/1).
-### Notes
-No env vars or other behaviour changes.
+Reuse `isTrustedIssueComment` (prefilter.mjs) to gate FORGE:GUARD comments in the two readers.
 
-## Docs
-Added a devdocs/modules/lean.md entry (#4739) describing the column-1 validation change, to satisfy check-devdocs-freshness.
+### Changes
+- bin/lean/guards.mjs: `guardIssue` finds an existing guard only among trusted comments; `collectGuards` skips untrusted comments (so the index, guardgate and compounding are covered).
+- bin/lean/guards.test.mjs: fixtures gain `authorAssociation: "OWNER"`; two new tests (trusted and untrusted, for guardIssue, collectGuards and the index).
+
+### Acceptance Criteria Status
+- R1 ✅ bin/lean/guards.mjs:98,129
+- R2 ✅ bin/lean/guards.test.mjs (two new tests)
+- R3 ✅ lands in this change, before the gate goes to enforce
+
+### Verification
+- V1 `node --test bin/lean/guards.test.mjs`: 17 pass. The 2 new tests fail without the fix.
+- V2 `node --test bin/lean/guardgate.test.mjs bin/lean/lean.test.mjs`: 516 pass.
+- `forgedock check`: PASS. The checks.mjs full-suite widening was skipped per host rules.
+
+### Notes
+No env vars. The FORGE:CONTRACT lookup is unchanged (out of scope).
+- Docs: added devdocs/modules/lean.md entry (#4750) for the docs freshness check.

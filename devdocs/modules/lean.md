@@ -2007,3 +2007,7 @@ Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now
 ## Entry 2026-10-27 — FORGE:GUARD marker escapes every `>` (#4741)
 
 `renderGuard` (`guards.mjs`) now writes every `<` and `>` in the embedded JSON as `<` / `>` instead of special-casing `-->`, so no HTML comment terminator variant (`-->`, `--!>`) can end the marker early and make `parseGuard` return null. The only `>` in the output is the closing `-->`. Previously posted guards still parse (the old escapes are valid JSON). Same pattern as `drift.mjs`, `lifecycle.mjs`, `integration.mjs`; also clears CodeQL `js/bad-tag-filter`.
+
+## Entry 2026-10-27 — Trusted authors only for FORGE:GUARD (#4750)
+
+`guardIssue` and `collectGuards` (`guards.mjs`) now keep a FORGE:GUARD comment only when `isTrustedIssueComment` (`prefilter.mjs`, same helper as FORGE:DECISION) accepts its `authorAssociation`; an untrusted comment is ignored, so it cannot be the idempotency `existing` guard, enter the guards index, or select a guard for the gate (`guardgate.mjs`, `stats --compounding` read through `collectGuards`). The `gh` queries are unchanged (the comments JSON already carries `authorAssociation`). Cost: 0 LLM calls.
