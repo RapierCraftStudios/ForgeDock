@@ -7,7 +7,7 @@ Escape every `<` and `>` in the embedded JSON (as `<`/`>`), the pattern already 
 
 ### Acceptance Criteria Status
 - R1 ✅ guards.mjs:84, guards.test.mjs:48
-- R2 ✅ (in lane) no `-->` regex left in guards*.mjs; CodeQL itself is out-of-band
+- R2 ✅ in lane no `-->` regex left in guards*.mjs; out-of-band CodeQL job is configured (.github/workflows/codeql.yml), instrumented: true
 - R3 ✅ guards.test.mjs:48
 
 ### Verification
