@@ -8,7 +8,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { homedir, hostname, totalmem } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
@@ -340,14 +340,14 @@ export function readHeavy(cwd = process.cwd()) {
  * #4390: `engine.context_ceiling_tokens` (default 120000 in runCore; 0 = off).
  * #4392: `engine.turn_budget_s|m|l` (implement turn budget per lane size; defaults 25/60/100, always returned; 0 = off).
  */
-export function readCoreLimits(cwd = process.cwd(), { env = process.env, totalMem = totalmem() } = {}) {
+export function readCoreLimits(cwd = process.cwd()) {
   try {
     const y = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8")) ?? {};
     const pick = (k) => { for (const sec of [y.pipeline, y.engine]) { const v = sec?.[k] ?? sec?.[`lane_limits_${k}`]; if (v !== undefined && v !== "") return String(v).trim(); } return undefined; };
-    const mem = pick("memory_max") ?? defaultLaneMemory(totalMem, env.FORGEDOCK_LANE_PARALLEL), cpu = pick("cpu_quota"), tasks = pick("tasks_max");
+    const mem = pick("memory_max"), cpu = pick("cpu_quota"), tasks = pick("tasks_max");
     const posNum = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : undefined; };
     return {
-      // #4690: lanes are capped by default (TasksMax + a K-derived MemoryMax); forge.yaml overrides, `off`/0 disables one limit
+      // #4690: lanes get TasksMax by default; MemoryMax is opt-in (a default K-derived cap killed healthy lanes, #4740); `off`/0 disables one limit
       laneLimits: { ...(mem ? { memory_max: mem } : {}), ...(cpu ? { cpu_quota: cpu } : {}), ...(tasks ? { tasks_max: tasks } : {}) },
       ...(posNum(y.engine?.cli_idle_minutes) ? { cliIdleMinutes: posNum(y.engine.cli_idle_minutes) } : {}),
       ...(posNum(y.engine?.cli_max_minutes) ? { cliMaxMinutes: posNum(y.engine.cli_max_minutes) } : {}),
@@ -355,17 +355,7 @@ export function readCoreLimits(cwd = process.cwd(), { env = process.env, totalMe
       ...(/^\d+$/.test(String(y.engine?.context_ceiling_tokens ?? "").trim()) ? { contextCeilingTokens: Number(y.engine.context_ceiling_tokens) } : {}),
       turnBudgets: parseTurnBudgets(y.engine) ?? { ...TURN_BUDGET_DEFAULTS }, // #4392: lanes are budgeted by default
     };
-  } catch { return { laneLimits: { memory_max: defaultLaneMemory(totalMem, env.FORGEDOCK_LANE_PARALLEL) }, turnBudgets: { ...TURN_BUDGET_DEFAULTS } }; }
-}
-/**
- * #4690: default per-lane `MemoryMax`: (host RAM - reserve) / K, clamped to [1 GiB, RAM - reserve]. The reserve is the larger of
- * 2 GiB and 20% of RAM. K is the batch's parallelism (`FORGEDOCK_LANE_PARALLEL`, set for lanes by orchestrate; 1 when absent).
- */
-export function defaultLaneMemory(totalMem, parallel) {
-  const k = Math.max(1, parseInt(parallel, 10) || 1), gib = 1024 ** 3;
-  const avail = totalMem - Math.max(2 * gib, totalMem * 0.2);
-  if (!(avail > 0)) return undefined;
-  return `${Math.floor(Math.min(avail, Math.max(gib, avail / k)) / 1024 ** 2)}M`;
+  } catch { return { laneLimits: {}, turnBudgets: { ...TURN_BUDGET_DEFAULTS } }; }
 }
 /** forge.yaml `engine.merge_wait` (required|all|none); undefined when absent or invalid. */
 export function readMergeWait(cwd = process.cwd()) {
