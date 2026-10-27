@@ -35,7 +35,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    An open PR on another non-default base is `needs-human`, except when the resolved lane
    is shipped (merged into staging by a merge commit, `isShippedLane`; an unused lane at the staging tip is not) and the PR base is live: the run follows it (#4593).
 3. **Dependencies, then lease** — open `Depends-on` → `dependency-open`
-   (orchestrate requeues behind it); then the FORGE:STATE lease.
+   (orchestrate requeues behind it); then the FORGE:STATE lease. An open dependency
+   whose PR (closing or referencing it) is merged into this lane, by merge-commit
+   ancestry on `origin/<lane>`, is satisfied (a stale `needs-human` on it does not
+   block either); the FORGE:DEPENDENCY comment names the PR and merge commit (#4686).
+   A merge only to another lane still blocks.
 4. **Claim + worktree** — `workflow:investigating`, `FORGE:STARTED` comment;
    resumes an open PR / remote branch. Before an existing `lean-<N>` worktree is
    removed (#4162): processes whose cwd is inside it (an orphaned runner from a
@@ -1915,3 +1919,11 @@ A post-deploy item may carry `due:YYYY-MM-DD`: `postDeployGate` (`prefilter.mjs`
 awaiting-measurement` issues, so a promoted parent or a passed date releases the wait labels within one pass.
 `measureFollowup` ticks the post-deploy items on a pass, files one `followup:engineering` issue per failing check and posts
 the typed owner ask for an item with no runnable check. The batch report adds `due date:` and `owner ask:` lines.
+
+## Entry 2026-10-27 — Post-deploy fail reopens the parent before it records (#4652)
+
+`measureFollowup` (`postdeploy-check.mjs`) used to post the `FORGE:PROBE` fail record and then reopen the parent; a failed reopen
+was swallowed and every later pass returned `recorded-fail`, so the parent stayed closed. Now the parent is reopened first; if that
+throws, no record is posted and the next pass re-runs the checks and retries. The early `monitoring` return on an existing windowed
+pass record also re-applies the idempotent `post-deploy-monitoring` label, so a label that failed on the first pass is retried
+(`sweepDue` selects by it).

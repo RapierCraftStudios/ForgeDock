@@ -137,7 +137,10 @@ export async function measureFollowup({ iss, repo, parent, def, shas = [], cwd, 
   if (prior?.result === "fail") return { state: "recorded-fail", detail: `check failed for ${fix.slice(0, 12)} (FORGE:PROBE); waiting for a new fix of #${parent}` };
   const windowed = ids.every((id) => checks[id].forMs);
   const monitored = (iss.comments ?? []).filter((c) => isTrusted(c)).map((c) => monitorRecord(c?.body)).filter(Boolean).find((p) => p.fix === fix && p.result === "pass" && p.until);
-  if (windowed && monitored) return { state: "monitoring", detail: `windowed checks ${[...new Set(ids)].join(", ")} monitored until ${new Date(monitored.until).toISOString()}` };
+  if (windowed && monitored) {
+    await addMonitoringLabel({ io, repo, issue: iss.number }); // retry a label that failed on the first pass; sweepDue selects by it
+    return { state: "monitoring", detail: `windowed checks ${[...new Set(ids)].join(", ")} monitored until ${new Date(monitored.until).toISOString()}` };
+  }
   if (dryRun) return { state: "dry-run", detail: `checks ${[...new Set(ids)].join(", ")} not run (dry run)` };
   let defaultSha = null;
   try { defaultSha = String(await io.git(["rev-parse", `origin/${def}`], { cwd })).trim() || null; } catch { /* recorded as null */ }
@@ -153,18 +156,21 @@ export async function measureFollowup({ iss, repo, parent, def, shas = [], cwd, 
       `Ran after the fix of #${parent} reached \`${def}\`; commands come from \`${CHECKS_FILE}\` on \`${def}\`.${ok ? (win.at ? ` Monitored until \`${win.window_until}\`, re-run on later releases.` : " The follow-up is closed.") : " The parent is reopened."}`,
       ...rows.filter((r) => r.result === "fail").flatMap((r) => ["", `**${r.id}** (exit ${r.exit ?? "timeout"})`, fenced(r.output)]),
     ].join("\n").slice(0, OUTPUT_TAIL * 4);
-    await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", body]);
-    if (ok && tickItems(iss.body) !== iss.body) { try { await io.gh(["issue", "edit", String(iss.number), "-R", repo, "--body", tickItems(iss.body)]); } catch { /* the PROBE record is the evidence */ } }
     if (!ok) {
       const bad = rows.filter((r) => r.result === "fail");
-      await fileFailureIssues({ bad, iss, repo, io, parent, def, fix });
-      let note = "";
-      try { await io.gh(["issue", "reopen", String(parent), "-R", repo]); } catch (e) { note = ` (reopen failed: ${String(e?.message ?? e).slice(0, 120)})`; }
+      // Reopen before recording: the FORGE:PROBE fail record parks later passes (recorded-fail), so it must only exist once the parent is open.
+      try { await io.gh(["issue", "reopen", String(parent), "-R", repo]); } catch (e) {
+        return { state: "fail", detail: `check ${bad.map((r) => r.id).join(", ")} failed; reopen of #${parent} failed, no record posted so the next pass retries (${String(e?.message ?? e).slice(0, 120)})` };
+      }
+      await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", body]);
+      await fileFailureIssues({ bad, iss, repo, io, parent, def, fix }); // #4689
       try {
         await io.gh(["issue", "comment", String(parent), "-R", repo, "--body", `Post-deploy check ${bad.map((r) => `\`${r.id}\``).join(", ")} failed for the fix on \`${def}\` (follow-up #${iss.number}); reopened.\n\n${bad.map((r) => fenced(r.output)).join("\n\n")}`.slice(0, OUTPUT_TAIL * 4)]);
       } catch { /* the follow-up comment carries the output */ }
-      return { state: "fail", detail: `check ${bad.map((r) => r.id).join(", ")} failed; #${parent} reopened${note}` };
+      return { state: "fail", detail: `check ${bad.map((r) => r.id).join(", ")} failed; #${parent} reopened` };
     }
+    await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", body]);
+    if (tickItems(iss.body) !== iss.body) { try { await io.gh(["issue", "edit", String(iss.number), "-R", repo, "--body", tickItems(iss.body)]); } catch { /* the PROBE record is the evidence */ } } // #4689
   }
   if (windowed) {
     await addMonitoringLabel({ io, repo, issue: iss.number });

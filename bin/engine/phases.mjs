@@ -355,7 +355,16 @@ export function parseDependsOn(body, issue = null) {
  * when the issue or a declared dependency cannot be read (fail closed: the caller refuses the run).
  * An empty read of the issue itself means "no body to trust" and yields `null`.
  */
-export async function openDependency(issue, io) {
+export async function openDependency(issue, io, { lane = null } = {}) {
+  const satisfied = [];
+  const prsOnLane = lane ? laneMergedPrs(lane, io) : null;
+  /** An open dependency whose change is already on `lane` is satisfied (records the merge commit). */
+  const onLane = async (n) => {
+    if (!prsOnLane) return false;
+    const hit = await dependencyOnLane(n, lane, await prsOnLane, io);
+    if (hit) satisfied.push({ issue: n, ...hit });
+    return !!hit;
+  };
   let rec;
   try { rec = await readIssueRecord(issue, io); } catch (e) {
     return { unreadable: true, detail: `issue ${issue} could not be read for its **Depends on** line: ${e?.message || e}` };
@@ -374,21 +383,52 @@ export async function openDependency(issue, io) {
     // when all close). No usable trail (none, untrusted, revoked, unreadable) keeps the parent itself open (fail closed).
     if (isDecomposedRecord(d) && (st === "open" || st === "closed")) {
       const subs = await decomposedSubissues(dep, io);
-      if (!subs) { open.push(dep); continue; }
+      if (!subs) { if (!(st === "open" && await onLane(dep))) open.push(dep); continue; }
       for (const s of subs) {
         let sr;
         try { sr = await readIssueRecord(s, io); } catch (e) {
           return { unreadable: true, detail: `sub-issue #${s} of decomposed dependency #${dep} could not be read: ${e?.message || e}` };
         }
         const ss = typeof sr?.state === "string" ? sr.state.toLowerCase() : "";
-        if (ss === "open") open.push(s);
+        if (ss === "open") { if (!(await onLane(s))) open.push(s); }
         else if (ss !== "closed") return { unreadable: true, detail: `sub-issue #${s} of decomposed dependency #${dep} has no readable state` };
       }
     }
-    else if (st === "open") open.push(dep);
+    else if (st === "open") { if (!(await onLane(dep))) open.push(dep); }
     else if (st !== "closed") return { unreadable: true, detail: `dependency #${dep} of issue ${issue} has no readable state` };
   }
-  return open.length ? { open: [...new Set(open)].filter((n) => n !== Number(issue)) } : null;
+  const still = [...new Set(open)].filter((n) => n !== Number(issue));
+  if (still.length) return { open: still, ...(satisfied.length ? { satisfied } : {}) };
+  return satisfied.length ? { satisfied } : null;
+}
+
+/** Merged PRs on base `lane` (null when the list cannot be read: fail closed, nothing is satisfied). */
+export async function laneMergedPrs(lane, io) {
+  try {
+    const out = String((await io.gh(["pr", "list", "--state", "merged", "--base", lane, "--limit", "200", "--json", "number,mergeCommit,closingIssuesReferences,title,body"])) ?? "").trim();
+    const j = out ? JSON.parse(out) : [];
+    return Array.isArray(j) ? j : null;
+  } catch { return null; }
+}
+
+/**
+ * #4686: the PR that closes or references issue `n` and whose merge commit is an ancestor of `origin/<lane>`
+ * ({ pr, sha }), else null. Judged by commit ancestry, not issue state; any lookup error is "not on the lane".
+ */
+export async function dependencyOnLane(n, lane, prs, io) {
+  if (!Array.isArray(prs)) return null;
+  const ref = new RegExp(`(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|references?|part of)[ \\t:]+(?:[\\w.-]+/[\\w.-]+)?#${n}(?!\\d)`, "i");
+  const cands = prs.filter((p) => typeof p?.mergeCommit?.oid === "string" && p.mergeCommit.oid
+    && ((p.closingIssuesReferences ?? []).some((r) => Number(r?.number) === n) || ref.test(`${p.title ?? ""}\n${p.body ?? ""}`)));
+  if (!cands.length) return null;
+  try { await io.git(["fetch", "origin", lane]); } catch { /* offline: use the local ref */ }
+  for (const p of cands) {
+    try {
+      await io.git(["merge-base", "--is-ancestor", p.mergeCommit.oid, `origin/${lane}`]);
+      return { pr: p.number, sha: p.mergeCommit.oid };
+    } catch { /* not on the lane */ }
+  }
+  return null;
 }
 
 /**

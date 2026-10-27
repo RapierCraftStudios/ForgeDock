@@ -142,6 +142,28 @@ describe("windowed post-deploy checks (#4627)", () => {
     assert.equal((await run(w, body([item("R1", "[check:soak] x")]))).state, "fail");
     assert.ok(w.gh.some((a) => a[1] === "reopen" && a[2] === "40"));
   });
+  it("a failed parent reopen posts no fail record, so the next pass re-runs and retries", async () => {
+    const w = world();
+    const gh = w.io.gh;
+    let failReopen = true;
+    w.io.gh = async (a) => { if (a[1] === "reopen" && failReopen) { w.gh.push(a); throw new Error("api down"); } return gh(a); };
+    const b = body([item("R1", "[check:bad] x")]);
+    const r = await run(w, b);
+    assert.equal(r.state, "fail"); assert.match(r.detail, /reopen of #40 failed/);
+    assert.ok(!w.gh.some((a) => a[1] === "comment"));
+    failReopen = false;
+    const r2 = await run(w, b);
+    assert.ok(w.gh.filter((a) => a[1] === "reopen").length === 2 && /#40 reopened/.test(r2.detail));
+    const order = w.gh.map((a) => a[1] === "comment" ? `c${a[2]}` : a[1]);
+    assert.ok(order.indexOf("reopen", 1) < order.indexOf("c41"));
+  });
+  it("a recorded windowed pass retries the monitoring label", async () => {
+    const w = world({ file: WIN });
+    const rec = { body: `<!-- ${PROBE_MARKER} -->\n${JSON.stringify({ fix: "abc", result: "pass", at: new Date(NOW).toISOString(), window_until: new Date(NOW + 1e9).toISOString() })}` };
+    const b = body([item("R1", "[check:soak] x")]);
+    await run(w, b, { iss: { number: 41, body: b, comments: [rec] }, isTrusted: () => true });
+    assert.ok(w.gh.some((a) => a[1] === "edit" && a.includes("post-deploy-monitoring")));
+  });
 });
 
 
