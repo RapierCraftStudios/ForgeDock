@@ -34,7 +34,7 @@ Parse from $ARGUMENTS:
 - `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}`) (required)
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`) (required)
 - `--pr {PR_NUMBER}` — merged PR number (required when `--terminal-state merged`; empty/absent for PR-less terminals)
-- `--base {PR_BASE}` — branch the PR merged into (e.g. `staging`, `milestone/modular-pipeline-architecture`). Optional — re-derived from the PR when absent
+- `--base {PR_BASE}` — branch the PR merged into (e.g. `staging`, `milestone/modular-pipeline-architecture`). Optional and advisory: the base is always re-derived from the PR as data (never substituted into shell text)
 - `--branch {BRANCH}` — feature branch name (for worktree cleanup reference)
 - `--worktree {WORKTREE_PATH}` — absolute path to the git worktree to remove (optional — skip cleanup if not provided)
 - `--terminal-state {TERMINAL_STATE}` — `merged | investigation | decomposed | invalid` (required)
@@ -43,7 +43,7 @@ Set shell variables from the parsed values (the `{X}` placeholders used througho
 
 ```bash
 NUMBER="{NUMBER}"; GH_REPO="{GH_REPO}"; GH_FLAG="{GH_FLAG}"; PR_NUMBER="{PR_NUMBER}"
-PR_BASE="{PR_BASE}"; BRANCH="{BRANCH}"; WORKTREE_PATH="{WORKTREE_PATH}"; TERMINAL_STATE="{TERMINAL_STATE}"
+BRANCH="{BRANCH}"; WORKTREE_PATH="{WORKTREE_PATH}"; TERMINAL_STATE="{TERMINAL_STATE}"
 # Any optional arg that was not supplied is the empty string (never the literal "{...}" text).
 ```
 
@@ -167,7 +167,9 @@ if [ -n "$PR_NUMBER" ]; then
   PR_STATE=$(printf '%s' "$PR_JSON" | jq -r '.state // ""' 2>/dev/null)
   PR_BASE_REF=$(printf '%s' "$PR_JSON" | jq -r '.baseRefName // ""' 2>/dev/null)
 fi
-[ -n "$PR_BASE" ] || PR_BASE="$PR_BASE_REF"
+# The base is read from the PR as data and never substituted into shell text (a ref name is attacker-chosen: git accepts `$(...)`, backticks and spaces); a caller --base is advisory and ignored here. Outside the ref charset it is dropped, not trusted.
+PR_BASE="$PR_BASE_REF"
+printf '%s\n' "$PR_BASE" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || PR_BASE=""
 
 # All agent comments (to reconstruct pipeline results) — one paginated read, reused below
 COMMENTS_JSON=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments 2>/dev/null | jq -s 'add // []' 2>/dev/null || echo '[]')
@@ -751,9 +753,11 @@ ISSUE_STATE=$(gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state')
 
 **If `REMAINING_AFTER > 0`** (multi-phase: uncompleted phases remain):
 ```bash
+# Fresh shell: re-derive the base from the PR as data (same charset guard as Phase C0); never substituted into shell text.
+PR_BASE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName // ""' 2>/dev/null || echo ""); printf '%s\n' "$PR_BASE" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || PR_BASE=""
 # Post phase-complete marker — the router's continuation rule re-reads labels and continues to the next phase
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:PHASE:COMPLETE -->
-Phase complete. PR #{PR_NUMBER} merged to \`{PR_BASE}\`. ${REMAINING_AFTER} phase item(s) remain — leaving issue open for next pipeline iteration." # allowlist:check-command-side-effects
+Phase complete. PR #{PR_NUMBER} merged to \`${PR_BASE}\`. ${REMAINING_AFTER} phase item(s) remain — leaving issue open for next pipeline iteration." # allowlist:check-command-side-effects
 
 # Reset the workflow label to investigating so the router has a signal for which phase comes next
 # (fixes: issue #1381). The transition removes every other workflow:* label (tiered transition-label dispatch).
@@ -778,7 +782,10 @@ CLOSE_RESULT:
 If state is `OPEN`:
 ```bash
 if [ "$ISSUE_STATE" = "OPEN" ]; then
-  if [ -n "$PR_NUMBER" ]; then CLOSE_COMMENT="Closed: PR #{PR_NUMBER} merged to \`{PR_BASE}\`. Closes #{NUMBER}."
+  if [ -n "$PR_NUMBER" ]; then
+    # Fresh shell: re-derive the base from the PR as data (same charset guard as Phase C0); never substituted into shell text.
+    PR_BASE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName // ""' 2>/dev/null || echo ""); printf '%s\n' "$PR_BASE" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || PR_BASE=""
+    CLOSE_COMMENT="Closed: PR #{PR_NUMBER} merged to \`${PR_BASE}\`. Closes #{NUMBER}."
   else CLOSE_COMMENT="Closed: investigation complete (no PR). Closes #{NUMBER}."; fi
   gh issue close {NUMBER} {GH_FLAG} --comment "$CLOSE_COMMENT" # allowlist:check-command-side-effects
 fi
@@ -891,7 +898,7 @@ Output to stdout (returned to calling agent):
 ## Done: #{NUMBER} — {TITLE}
 - Investigation: {VERDICT} ({CONFIDENCE})
 - Lane: {LANE_LABEL}
-- Fix: {BRANCH} → PR #{PR_NUMBER} → merged to `{PR_BASE}`
+- Fix: {BRANCH} → PR #{PR_NUMBER} → merged to `${PR_BASE}`
 - Files changed: {FILES_CHANGED}
 ```
 

@@ -32,12 +32,12 @@ if grep -E 'git merge (origin|--abort)' "$SPEC" | grep -v 'allowlist:check-comma
   grep -E 'git merge (origin|--abort)' "$SPEC" | grep -v 'allowlist:check-command-side-effects' | grep -qE '^[[:space:]]*(MERGE_OUT=|git merge|if git rev-parse)' && bad "side-effect lines annotated" || ok "side-effect lines annotated"
 else ok "side-effect lines annotated"; fi
 
-has "M3 records merged base head" 'BASESYNC_BASE_SHA=\$\(git rev-parse origin/'
+has "M3 records merged base head" 'BASESYNC_BASE_SHA=\$\(git rev-parse "origin/'
 has "re-sync rounds hard-capped" 'BASESYNC_MAX_ROUNDS'
 has "M6 distinguishes advanced base" 'Base advanced'
 has "M8 trail persists base sha" 'Base sync\*\*: ran \(base='
-has "rounds derived from pushed sync merges" 'git rev-list --first-parent --merges origin/\{PR_BASE\}\.\.origin/\{HEAD_BRANCH\}'
-has "only merges whose 2nd parent is a base ancestor count" 'git merge-base --is-ancestor "\$_q" origin/\{PR_BASE\}'
+has "rounds derived from pushed sync merges" 'git rev-list --first-parent --merges "origin/\$PR_BASE\.\.origin/\$HEAD_BRANCH"'
+has "only merges whose 2nd parent is a base ancestor count" 'git merge-base --is-ancestor "\$_q" "origin/\$PR_BASE"'
 has "unreadable round count treated as the cap" 'else BASESYNC_ROUNDS=\$BASESYNC_MAX_ROUNDS; fi'
 if grep -qF -- '--first-parent --merges --count' "$SPEC"; then bad "no raw all-merges round count"; else ok "no raw all-merges round count"; fi
 if grep -qF 'BASESYNC_RAN' "$SPEC"; then bad "no BASESYNC_RAN shell-state carrier"; else ok "no BASESYNC_RAN shell-state carrier"; fi
@@ -52,7 +52,7 @@ NCAP=$(ls "$CAPDIR" | wc -l); [ "$NCAP" -ge 4 ] && ok "cap derivation present in
 [ "$(cat "$CAPDIR"/cap* | sort | uniq -c | awk '{print $1}' | sort -u | wc -l)" -le 1 ] && [ "$(cksum < "$CAPDIR"/cap1)" = "$(for _f in "$CAPDIR"/cap*; do cksum < "$_f"; done | sort -u)" ] && ok "cap derivation copies are byte-identical" || bad "cap derivation copies are byte-identical"
 if grep -qF 'BASESYNC_ROUNDS=$(( ${BASESYNC_ROUNDS:-0}' "$SPEC"; then bad "no shell-state round counter"; else ok "no shell-state round counter"; fi
 if grep -qF '[ -n "${BASESYNC_BASE_SHA:-}" ]' "$SPEC"; then bad "freshness pass not gated on a shell var"; else ok "freshness pass not gated on a shell var"; fi
-has "freshness push rc checked" 'if git push origin HEAD:\{HEAD_BRANCH\}; then'
+has "freshness push rc checked" 'if git push origin "HEAD:\$HEAD_BRANCH"; then'
 has "freshness merge re-gated before push" 'Run the Phase M4 pre-push ancestry guard'
 if grep -qF 'do NOT sync a second time' "$SPEC"; then bad "unconditional second-sync refusal removed"; else ok "unconditional second-sync refusal removed"; fi
 
@@ -99,7 +99,7 @@ eq "advanced base: SHA differs, unchanged base same, second merge clean" "$(cat 
 # Durable derivation (forge#3517): the M3/M6 lines, run in a fresh shell against a scratch repo, recover rounds and the
 # recorded base head from the pushed branch; an unpushed merge does not count.
 DERIVE="$(cat "$CAPDIR/cap1")"
-DERIVE="${DERIVE//\{PR_BASE\}/main}"; DERIVE="${DERIVE//\{HEAD_BRANCH\}/feat}"
+PR_BASE=main; HEAD_BRANCH=feat
 (
   R="$T/derive"; mkdir "$R" && cd "$R" && git init -q -b main . && git config user.email t@t && git config user.name t
   derive() { BASESYNC_MAX_ROUNDS=2; eval "$DERIVE"; echo "$BASESYNC_ROUNDS ${_p2:-none}"; }
