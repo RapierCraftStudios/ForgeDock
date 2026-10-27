@@ -33,3 +33,6 @@ Added a dated entry to `devdocs/modules/lean.md` describing the `[type:e2e]` con
 
 ## Enumerating-test fix
 Added `isE2eCommand` and `e2eVerified` to the import list and assertions in bin/lean/conformance.test.mjs.
+
+### CI follow-up
+The CI log was not readable (no GitHub access). I reran the unit job's globs locally (`bin/tests`, `bin/engine`, `bin/lean`): 4258 pass, 4 fail. The failures are batch robustness #4690 (CLI_LANE_LIMIT scope), preflight (Platform/WSL rows), forge Act II (stale-copy cleanup) and writeInstallReceipt (platform info). They are host-specific (WSL, root user) and sit in code this change does not touch. No code change was made.
