@@ -1398,6 +1398,20 @@ describe("conformance shadow mode (the default)", () => {
     const ra = await runShadow(a);
     assert.equal(ra.code, "conformance.unimplemented"); assert.match(nhBody(a), /amendment without why/);
   });
+  it("#4737 decision records are persisted after the merge, never at gate time", async () => {
+    const dir = tmpDir("dec-"); const prev = process.env.FORGEDOCK_DECISIONS_DIR; process.env.FORGEDOCK_DECISIONS_DIR = dir;
+    try {
+      const amendments = [{ kind: "decision", why: "w", decision: { choice: "use X", anchors: ["src/db.ts"], why: "w" } }];
+      const bad = world({ validation: [], amendments });
+      assert.equal((await runShadow(bad)).code, "conformance.unimplemented");
+      assert.ok(!bad.comments.some((c) => c.includes("FORGE:DECISION")), "a lane that never merges records nothing");
+      assert.equal(readdirSync(dir).length, 0, "no index written");
+      const ok = world({ amendments });
+      assert.equal((await runShadow(ok)).terminalReason, "merged");
+      assert.ok(ok.comments.some((c) => c.includes("FORGE:DECISION")), "recorded after the merge");
+      assert.equal(readdirSync(dir).length, 1);
+    } finally { if (prev === undefined) delete process.env.FORGEDOCK_DECISIONS_DIR; else process.env.FORGEDOCK_DECISIONS_DIR = prev; }
+  });
   it("#4160 scope creep found by the precheck stays recorded-only in shadow", async () => {
     const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"], reviews: [conf({}, CONTRACT, ["src/foo.js", "src/billing.js", "test/foo.test.js"])] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
@@ -1647,7 +1661,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule).
     assert.ok(approxTokens(plan) <= 2050, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1600); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1650); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -2083,7 +2097,7 @@ describe("comment templates", () => {
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
     assert.ok(approxTokens(plan) <= 1950, `plan prompt is ${approxTokens(plan)} tokens`); // 1950: #4724 (deferred-row bucket rule)
-    assert.ok(approxTokens(impl) <= 1550, `implement prompt is ${approxTokens(impl)} tokens`); // 1550: #4596 i18n translate rule
+    assert.ok(approxTokens(impl) <= 1650, `implement prompt is ${approxTokens(impl)} tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
@@ -6496,7 +6510,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1550 && approxTokens(builderPlanPrompt(7)) <= 1950);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1650 && approxTokens(builderPlanPrompt(7)) <= 1950);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {

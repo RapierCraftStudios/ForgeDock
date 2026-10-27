@@ -8,7 +8,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { homedir, hostname, totalmem } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
@@ -340,14 +340,14 @@ export function readHeavy(cwd = process.cwd()) {
  * #4390: `engine.context_ceiling_tokens` (default 120000 in runCore; 0 = off).
  * #4392: `engine.turn_budget_s|m|l` (implement turn budget per lane size; defaults 25/60/100, always returned; 0 = off).
  */
-export function readCoreLimits(cwd = process.cwd(), { env = process.env, totalMem = totalmem() } = {}) {
+export function readCoreLimits(cwd = process.cwd()) {
   try {
     const y = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8")) ?? {};
     const pick = (k) => { for (const sec of [y.pipeline, y.engine]) { const v = sec?.[k] ?? sec?.[`lane_limits_${k}`]; if (v !== undefined && v !== "") return String(v).trim(); } return undefined; };
-    const mem = pick("memory_max") ?? defaultLaneMemory(totalMem, env.FORGEDOCK_LANE_PARALLEL), cpu = pick("cpu_quota"), tasks = pick("tasks_max");
+    const mem = pick("memory_max"), cpu = pick("cpu_quota"), tasks = pick("tasks_max");
     const posNum = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : undefined; };
     return {
-      // #4690: lanes are capped by default (TasksMax + a K-derived MemoryMax); forge.yaml overrides, `off`/0 disables one limit
+      // #4690: lanes get TasksMax by default; MemoryMax is opt-in (a default K-derived cap killed healthy lanes, #4740); `off`/0 disables one limit
       laneLimits: { ...(mem ? { memory_max: mem } : {}), ...(cpu ? { cpu_quota: cpu } : {}), ...(tasks ? { tasks_max: tasks } : {}) },
       ...(posNum(y.engine?.cli_idle_minutes) ? { cliIdleMinutes: posNum(y.engine.cli_idle_minutes) } : {}),
       ...(posNum(y.engine?.cli_max_minutes) ? { cliMaxMinutes: posNum(y.engine.cli_max_minutes) } : {}),
@@ -355,17 +355,7 @@ export function readCoreLimits(cwd = process.cwd(), { env = process.env, totalMe
       ...(/^\d+$/.test(String(y.engine?.context_ceiling_tokens ?? "").trim()) ? { contextCeilingTokens: Number(y.engine.context_ceiling_tokens) } : {}),
       turnBudgets: parseTurnBudgets(y.engine) ?? { ...TURN_BUDGET_DEFAULTS }, // #4392: lanes are budgeted by default
     };
-  } catch { return { laneLimits: { memory_max: defaultLaneMemory(totalMem, env.FORGEDOCK_LANE_PARALLEL) }, turnBudgets: { ...TURN_BUDGET_DEFAULTS } }; }
-}
-/**
- * #4690: default per-lane `MemoryMax`: (host RAM - reserve) / K, clamped to [1 GiB, RAM - reserve]. The reserve is the larger of
- * 2 GiB and 20% of RAM. K is the batch's parallelism (`FORGEDOCK_LANE_PARALLEL`, set for lanes by orchestrate; 1 when absent).
- */
-export function defaultLaneMemory(totalMem, parallel) {
-  const k = Math.max(1, parseInt(parallel, 10) || 1), gib = 1024 ** 3;
-  const avail = totalMem - Math.max(2 * gib, totalMem * 0.2);
-  if (!(avail > 0)) return undefined;
-  return `${Math.floor(Math.min(avail, Math.max(gib, avail / k)) / 1024 ** 2)}M`;
+  } catch { return { laneLimits: {}, turnBudgets: { ...TURN_BUDGET_DEFAULTS } }; }
 }
 /** forge.yaml `engine.merge_wait` (required|all|none); undefined when absent or invalid. */
 export function readMergeWait(cwd = process.cwd()) {
@@ -1392,7 +1382,10 @@ async function orchestrateClient(argv, deps = {}) {
       if (!repo) throw new Error("orchestrate needs the repo: pass --repo or run inside a checkout with a GitHub remote");
       sub = [...sub, "--repo", repo];
     }
-    msg = { op: "submit", argv: sub, cwd: process.cwd(), env: schedd.batchEnv(process.env, readPinnedEnvConfig(process.cwd())) };
+    const pinned = schedd.batchEnv(process.env, readPinnedEnvConfig(process.cwd()));
+    const dropped = schedd.droppedEnv(process.env, pinned);
+    if (dropped.length) console.log(`orchestrate: not pinned into the batch (lanes use the daemon's env or resolve them at lane start): ${dropped.join(", ")}; name them in forge.yaml orchestration.env_passthrough to pin them`);
+    msg = { op: "submit", argv: sub, cwd: process.cwd(), env: pinned };
   }
   let sock = await connect(), req = msg, reattached = false, losses = 0;
   let id = resumeId;
@@ -1787,6 +1780,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       dispatchCheck: deps.dispatchCheck !== undefined ? deps.dispatchCheck : makeDispatchCheck({ gh: (a) => leanIo.gh(a), repo }),
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
       issueLabels: labelNames,
+      // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label
+      issueState: async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason"])); return v.state === "CLOSED" && String(v.stateReason ?? "COMPLETED").toUpperCase() !== "COMPLETED" ? "CLOSED_NOT_PLANNED" : v.state; },
       // #4318: a dispatcher signal relabels the queued recoveries before it exits (the daemon resumes its batches instead)
       ...(daemon ? {} : { onExit: (fn) => { exitRelabel = fn; } }),
       // #4454: the daemon's shutdown stop; orchestrate throws batch.stopped, so no report is written and a resume adopts the lanes
@@ -1906,6 +1901,7 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
     // #4656: a mechanical park carries its code and PR on `parked:<code>` and joins the remediation queue, not the human queue.
     if (parked?.code) {
       const { parkedLabel, REMEDIATION_QUEUE_LABEL } = await import("./engine/outcome-codes.mjs");
+      try { await gh(["label", "create", parkedLabel(parked.code), "-R", repo, "--force", "--color", "C5DEF5", "--description", "Mechanical park on a terminal code. Managed by ForgeDock."]); } catch { /* exists, or no rights: the edit says */ }
       try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `${parkedLabel(parked.code)},${REMEDIATION_QUEUE_LABEL}`, "--remove-label", "needs-human"]); } catch { return "failed"; }
       try {
         const { capComment } = await import("./lean/render.mjs");
@@ -1917,10 +1913,16 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
     {
       const external = { owner: "", unblock: "" }; // the default non-parked relabel is a human-owned wait
       const { NEEDS_HUMAN_EXTERNAL_LABEL } = await import("./engine/outcome-codes.mjs");
+      // #4725: a recorded premise that already holds is not a blocker; an identical owner ask links to its entry instead of a new one.
+      const prem = await import("./lean/needs-human-premise.mjs");
+      const predicate = prem.parsePredicate(evidence);
+      if (predicate && await prem.evalPredicate(predicate, { repo, io: { gh, pkgVersion: prem.registryPkgVersion }, now: now() }) === true) return "skipped";
+      const reg = await prem.registerAsk({ repo, io: { gh }, issue, ask: String(evidence ?? "") });
+      const extra = [prem.premiseAnnotation(predicate), reg.existing ? `Same owner ask as #${reg.existing} (one ask, linked): answering it unblocks this issue too.` : ""].filter(Boolean).join("\n");
       try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `needs-human,${NEEDS_HUMAN_EXTERNAL_LABEL}`]); } catch { return "failed"; }
       try {
         const { capComment } = await import("./lean/render.mjs");
-        await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:NEEDS_HUMAN external=true -->\n## Needs human (external)\nOwner: ${external.owner || "unassigned (name an owner)"}\nUnblock condition: ${external.unblock || "unstated (name the condition that unblocks this issue)"}\n${evidence}`)]);
+        await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:NEEDS_HUMAN external=true -->\n## Needs human (external)\nOwner: ${external.owner || "unassigned (name an owner)"}\nUnblock condition: ${external.unblock || "unstated (name the condition that unblocks this issue)"}\n${extra ? `${extra}\n` : ""}${evidence}${!reg.existing && reg.entry ? `\n\n${reg.entry}` : ""}`)]);
       } catch { /* best effort */ }
       return true;
     }
@@ -1943,6 +1945,7 @@ async function scheddDue() {
   const leanIo = (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   await sweepDue({ repo, cwd: process.cwd(), io: leanIo, onResult: probeEventSink(repo) });
   await sweepParkedFollowups({ repo, io: leanIo }); // #4689: re-queue parked post-deploy follow-ups on the same pass
+  try { const prem = await import("./lean/needs-human-premise.mjs"); await prem.sweepPremises({ repo, io: { gh: (a) => leanIo.gh(a), pkgVersion: prem.registryPkgVersion } }); } catch { /* best effort (#4725) */ } // clear needs-human whose recorded premise now holds
 }
 
 /** #4689: re-evaluate the parked post-deploy follow-ups of the repo (promotion, due date, check now defined); never throws. */
@@ -2163,7 +2166,8 @@ export async function schedFromCli(argv, deps = {}) {
  * `orchestration.max_deferrals` (default 3) and `orchestration.global_parallel` (#4191: host-wide lane cap; unset = none). The parser flattens one nested level, so the breaker keys arrive as
  * `orchestration.errors|window_min` (or flat `breaker_errors|breaker_window_min`).
  * `orchestration.recovery.max_attempts` (#4267; arrives as `max_attempts`, or flat `recovery_max_attempts`): recovery lanes per
- * issue for a mechanical needs-human, default 1, 0 turns recovery off.
+ * issue for a mechanical needs-human, default 1, 0 turns recovery off. `orchestration.recovery.mechanical_max_attempts` (#4725; or
+ * `mechanical_max_attempts`): the separate budget of env.*, base.conflict and conflicting-PR rows, default 2, never below `max_attempts`.
  * `orchestration.base_sync.enabled` (#4525; default true, false opts out) and `base_sync.union_globs` (comma list of globs of
  * append-only files whose two-sided line additions a parked PR's base sync keeps both of).
  */
@@ -2175,7 +2179,7 @@ export function readOrchestration(cwd = process.cwd()) {
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
   return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), globalParallel: gp >= 1 ? gp : null,
-    recovery: { maxAttempts: recoveryMax },
+    recovery: { maxAttempts: recoveryMax, mechanicalMaxAttempts: Math.max(int(o.recovery_mechanical_max_attempts ?? o.mechanical_max_attempts, 2), recoveryMax) }, // #4725: env/base/sequence codes have their own budget
     // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).
     baseSync: { enabled: String(o.base_sync_enabled ?? o.enabled ?? "true").trim().toLowerCase() !== "false",
       unionGlobs: String(o.base_sync_union_globs ?? o.union_globs ?? "").replace(/^\[|\]$/g, "").split(",").map((x) => x.trim().replace(/^["']|["']$/g, "")).filter(Boolean) } };

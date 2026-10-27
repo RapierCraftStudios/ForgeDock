@@ -766,7 +766,9 @@ The steps are gated in two places:
   with `FORGE_HEAVY_HELD=1` (nested calls pass through) and per-holder
   `FORGE_HOST_PARALLELISM`, then releases and propagates the exit code.
   Re-entry guard (#4680): a pass-through wrapper that re-resolves the name back to the
-  shim is cut off by `FORGE_HEAVY_CHAIN` (`name:cmd|...`). A repeat resolves the next
+  shim is cut off by `FORGE_HEAVY_CHAIN` (`name:cmd|...`). A repeat of a real binary
+  (`npm run` inside an npm script, #4735) is legitimate nesting: it passes through
+  unchanged and unrecorded, so depth is not capped. A repeated wrapper resolves the next
   PATH match past `FORGE_HEAVY_SHIM_DIR` and the chain dirs; none, or more than 4 entries,
   exits 126 with `env.shim_loop` naming the dirs. `writeHeavyShims` also skips wrapper
   targets at write time (next match, else skipped with a warning).
@@ -1120,6 +1122,13 @@ queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 L
 - `scripts/review-prepare.sh` (#4571): the final context `jq` takes PR-scaled values (slices, file lists, findings, domain
   and index text) through `--slurpfile`/`--rawfile` on files under `$TMP_DIR`, never argv, so a 1,000+ file PR no longer
   dies on the 128 KiB per-argument limit. Output schema unchanged; 0 LLM calls.
+- `scripts/review-prepare.sh` + `bin/review-context.mjs` (#4666): `node bin/review-context.mjs check` compares forge.yaml
+  `review.tech_stack`/`review.context` with the manifests and the decision log (`review.decision_log`, else the first of
+  `docs/decisions.md`, `DECISIONS.md`, `docs/decision-log.md`, `devdocs/project/decisions.md`). Each stale reason becomes a
+  `REVIEW_CONTEXT_STALE:` line in `phase2.findings`; `config.context_generated_at/context_stale/context_advisory` are
+  additive. Advisory once more than `review.context_max_merged_prs` (default 50) PRs merged since
+  `review.context_generated_at` (one guarded `gh pr list`; failure = unknown). `forgedock init --refresh-context` shows a
+  diff and writes only on approval. Never blocks a review; 0 LLM calls.
 
 ## Entry 2026-10-20 — Missing host tools are an environment error, not conformance (#4323)
 
@@ -1876,6 +1885,10 @@ resolves to the next open one by due date, else forge.yaml `followups.default_mi
 
 `bin/lean/decisions.mjs` (pure apart from the index file) holds the decision record `{id, choice, why, anchors, symbols?, supersedes?, status, superseded_by?, issue}`. It is posted as `<!-- FORGE:DECISION {json} -->` (JSON on the marker line; the older prose FORGE:DECISION comments have none and are ignored), and indexed at `~/.forge/decisions/<repo>.json` (`FORGEDOCK_DECISIONS_DIR` overrides). At contract freeze (`lean.mjs`) `withDecisionRows` appends `{id:"H<n>", what, source:"decision", decision}` preserve rows for active decisions whose anchor covers a deliverable path: most specific anchor, then newest issue, at most 5 (`HISTORY_ROWS_MAX`, shared with guards #4694); one index read, nothing when none match, so the contract is unchanged. The reviewer marks them like any preserve row; a violation fails conformance (`conformance.preserve_violated`). The amendment `{kind:"decision", decision:{choice, anchors, symbols?, supersedes?}, why}` (`applyAmendments`) needs every anchor to match a base file (one `git ls-tree` only when such an amendment exists); with `supersedes` it drops that row and `recordDecisions` posts the new record plus the old one marked `superseded` (`superseded_by`) on its own issue; the latest record per id wins. `forgedock decisions list [--stale] [--refresh]` (`decisionsFromCli`) lists active decisions; `--stale` lists those with an anchor missing on the base; `--refresh` rebuilds the index from GitHub.
 
+## Entry 2026-10-27 — Decision records persist after the merge (#4737)
+
+`amend()` in `lean.mjs` no longer calls `recordDecisions` at gate time; it keeps the latest `a.decisions` and the lane records them (FORGE:DECISION, supersession of the old record, local index) right after `label("merged")`, beside the guard supersession. A rejected, needs-human or abandoned lane therefore leaves the decision index and the old decision untouched. A failed post is an anomaly, never a lane failure. Cost: 0 LLM calls.
+
 ## Entry 2026-10-27 — Default lane scope caps and env.lane_limit (#4690)
 
 Every local lane's builder CLI now runs in a `systemd-run --user --scope --unit=forgedock-lane-*` scope by default (`effects.mjs` `wrapLaneLimits`): `TasksMax` 1024 (`engine.lane_limits.tasks_max`, `0`/`off` disables) and a `MemoryMax` of `(MemTotal - reserve) / K` (`engine-cli.mjs` `defaultLaneMemory`; K reaches lanes as `FORGEDOCK_LANE_PARALLEL`). forge.yaml `memory_max`/`cpu_quota` still win. `runner.mjs` samples the scope's `pids.events` (`max`) and `memory.events` (`oom_kill`) while the child runs and throws `CLI_LANE_LIMIT`; `lean.mjs` checkpoints and ends `needs-human` `env.lane_limit` (never engine-error, so the breaker ignores it; `hostkill.mjs` no longer reads it as a host kill). Without scopes, orchestrate logs one "lanes are uncapped" line.
@@ -1892,6 +1905,14 @@ It reads FORGE:GUARD comments (`bin/lean/guards.mjs` `collectGuards`, read only)
 FORGE:TELEMETRY gate events, which #4693/#4695 must emit under exactly these names: `guard_run`, `guard_broken`,
 `supersedes_accepted`, `decision_superseded`, `decision_violation` (an unrecorded kind prints n/a). Stats-time only: no lane-path
 cost, no LLM. Usage and definitions: `docs/STATS.md`.
+
+## Entry 2026-10-27 — Batch env pin keeps provider selectors and names what it drops (#4734)
+
+`schedd.mjs` `ENV_KEEP` now also keeps the non-secret provider/endpoint/model selectors `CLAUDE_CODE_USE_*`, `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`. Secrets (`SECRET_ENV`) still never reach `plan.json`. New
+`droppedEnv(env, kept)` returns the names (never values) of `CLAUDE_*`/`ANTHROPIC_*`/`GH_*`/`GITHUB_*`/`FORGEDOCK_*` keys not pinned, minus
+session-scoped ones; `engine-cli.mjs` submit logs one line with them and a pointer to `orchestration.env_passthrough`. Release note: a
+per-shell `GH_TOKEN`/`FORGEDOCK_POOL_TOKEN` is still not pinned, so lanes use the daemon's copy unless named in `env_passthrough`.
 
 ## Entry 2026-10-27 — Pinned batch env is allowlisted and PATH-sanitised (#4691)
 
@@ -1970,5 +1991,29 @@ Guard gate added wall time (#4705, R12): `guardGate` runs beside `rerunFailedVal
 ## Entry 2026-10-27 — Joined amendment refs split; missing host module is env.repro_unrunnable (#4655)
 `applyAmendments` expands a `requirement` like `R2/R3`, `R2, R3`, `R2 and R3` or `R2–R3` (range, capped at 50) into one row per id with the same kind/why/text/check before lookup; an unknown id in the list is still a problem for the correction round. `scope-note` is not a kind: the amendment prompt says so and asks for one id per row. In `scripts/acceptance-red-green.sh`, a head run that failed only on a missing host module or command (`No module named X` with X not tracked by the repo, `foo: command not found`) is `UNRUNNABLE`, so `reproFailures` yields `env.repro_unrunnable` instead of `conformance.unimplemented`; a real failing test stays `FAILED`.
 
+## Entry 2026-10-27 — [type:e2e] requirements need a real e2e validate (#4726)
+`decide()` in `conformance.mjs` fails an `implemented` `deliver` row whose requirement quote carries `[type:e2e]` with `conformance.e2e_unverified` unless its `validated_by` V-ref resolves to a contract validate command that is a real e2e check (`isE2eCommand`: an entry of `verify.e2e_checks`, an `e2e_paths` spec file, or playwright/cypress/e2e/live-stack/wdio). `lean.mjs` passes `ctx.e2e` (`{checks, isSpec}` from the parsed verify config); `decide()` without it still works and falls back to the keyword test. Other tags, `not-applicable` and out-of-band rows are untouched. The plan/implement prompts and `REVIEW_RUBRIC` carry one line saying so (post-deploy with a follow-up otherwise). `commands/work-on/investigate.md` step 7.5 also fires for wrong/non-existent route, URL or link findings: grep the file and template siblings for every constructed URL and check each against the route table.
+
 ## Entry 2026-10-27 — Deferred rows are bucketed; post-deploy items roll up per lane (#4724)
 Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now|date:YYYY-MM-DD|owner:<action>|new-issue`, `BUCKETS`/`bucketProblems` in `conformance.mjs`); an amendment without one defaults to `post-deploy`. `followupClass` routes owner -> external, new-issue -> engineering, the rest -> post-deploy; `followupItems` tags the why with `[bucket:<kind>]` and, for dates, `due:`/`from:` (contract-time anchor). `scripts/file-deferred-followups.sh` appends post-deploy items to ONE rollup per release lane (`FORGE:POSTDEPLOY_ROLLUP`, `FORGE_RELEASE_LANE`) under `### #<root parent>`, dedups normalized text across parents, resolves DEFERRED_FROM chains to the root, never puts owner items in it, and reports per-bucket counts in DEFERRED_TELEMETRY. `postDeployGate` reads every `DEFERRED_FROM` parent (`deferredFromAll`) and re-anchors `due:` by (landed - `from:`). Single-parent follow-ups behave as before.
+
+## Entry 2026-10-27 — needs-human premises, owner-ask registry, per-class recovery budget (#4725)
+- **Class budget**: `recoveryClassOf` (`bin/engine/outcome-codes.mjs`) puts `base.conflict`, `env.tool_missing`, `env.repro_unrunnable`, `env.capability_remote` (and a conflicting `ci-pending`) in `mechanical`; everything else is `conformance`. `orchestrate` counts recovery lanes per `${issue}:${class}` (`recoveryClasses` in batch state); mechanical rows get `recovery.mechanicalMaxAttempts` (`orchestration.recovery.mechanical_max_attempts`, default 2, never below `max_attempts`; `max_attempts: 0` still turns recovery off). A mechanical row with an open PR is requeued as a recovery lane, not parked, while its class budget remains.
+- **Premises**: `bin/lean/needs-human-premise.mjs`. A blocker names its external fact as a `Premise: issue-closed:N | date-after:ISO | pkg-version:name@ver` line. `needsHuman()` (lean.mjs) re-evaluates it before labelling (holds → no label, `deferred`) and writes a `FORGE:PREMISE` annotation; `sweepPremises` runs from `scheddDue` and clears `needs-human` when the predicate holds. Unknown answers never clear.
+- **Closed edges**: the batch parking path asks `dispatchCheck` and ignores a blocker that is closed; the lane lists closed `Depends on` edges in the needs-human comment (`closedEdgeNote`).
+- **Owner asks**: `registerAsk` keys the normalized ask (`FORGE:ASK key=`) on GitHub; an identical ask links to the existing entry. Closing issues whose only content is an ask, and splitting mixed owner/agent issues, are deferred (follow-up).
+
+## Entry 2026-10-27 — Mechanical park creates its `parked:<code>` label and only counts a real relabel (#4736)
+`makeRelabelNeedsHuman` (`engine-cli.mjs`) best-effort runs `gh label create parked:<code> --force` before the park edit, since per-code labels are not in `labels.json` (same lazy-create as `prefilter.mjs`); without it the whole edit failed and returned `"failed"`. `orchestrate()` now sets `row.parkedQueued` only when the park relabel returns neither `false`, `"failed"` nor `"skipped"`, so a failed relabel stays in "unrecovered" instead of printing as remediation-queued.
+
+## Entry 2026-10-27 — Deferred follow-ups: column 1 accepts legal path characters (#4739)
+
+`scripts/file-deferred-followups.sh` no longer whitelists column-1 characters (it rejected `app/(marketing)/page.tsx`, `src/a=b.ts`, `src/#x.ts`, `src/foo:bar.ts`, and one bad row aborted the batch). It now rejects only `R<n>:` prefixes, control characters, and whitespace values with neither a `/` nor a file extension (prose such as `add a saved mapping`); `docs/My Notes.md` passes. Rejection stays exit 2 / `DEFERRED_TSV=INVALID` with nothing filed. Row format, exit codes and gh calls are unchanged.
+
+## Entry 2026-10-27 — FORGE:GUARD marker escapes every `>` (#4741)
+
+`renderGuard` (`guards.mjs`) now writes every `<` and `>` in the embedded JSON as `<` / `>` instead of special-casing `-->`, so no HTML comment terminator variant (`-->`, `--!>`) can end the marker early and make `parseGuard` return null. The only `>` in the output is the closing `-->`. Previously posted guards still parse (the old escapes are valid JSON). Same pattern as `drift.mjs`, `lifecycle.mjs`, `integration.mjs`; also clears CodeQL `js/bad-tag-filter`.
+
+## Entry 2026-10-27 — Trusted authors only for FORGE:GUARD (#4750)
+
+`guardIssue` and `collectGuards` (`guards.mjs`) now keep a FORGE:GUARD comment only when `isTrustedIssueComment` (`prefilter.mjs`, same helper as FORGE:DECISION) accepts its `authorAssociation`; an untrusted comment is ignored, so it cannot be the idempotency `existing` guard, enter the guards index, or select a guard for the gate (`guardgate.mjs`, `stats --compounding` read through `collectGuards`). The `gh` queries are unchanged (the comments JSON already carries `authorAssociation`). Cost: 0 LLM calls.

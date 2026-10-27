@@ -50,8 +50,12 @@ export function scheddPaths(dir = schedDir()) {
 }
 
 // Env keys a batch keeps for its lanes (account selectors, tool paths); persisted in plan.json (#4691). Session-scoped
-// `CLAUDE_CODE_*` / `CLAUDE_PID` and `ANTHROPIC_*` are not kept; more names come from `orchestration.env_passthrough`.
-const ENV_KEEP = /^(PATH|HOME|USER|SHELL|LANG|LC_.*|TMPDIR|CLAUDE_CONFIG_DIR|FORGEDOCK_.*|GH_.*|GITHUB_.*)$/;
+// `CLAUDE_CODE_*` / `CLAUDE_PID` and `ANTHROPIC_*` are not kept, except the non-secret provider/endpoint/model selectors
+// (`CLAUDE_CODE_USE_*`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, ...; #4734); more names come from `orchestration.env_passthrough`.
+const ENV_KEEP = /^(PATH|HOME|USER|SHELL|LANG|LC_.*|TMPDIR|CLAUDE_CONFIG_DIR|CLAUDE_CODE_USE_.*|ANTHROPIC_(BASE_URL|MODEL|SMALL_FAST_MODEL|DEFAULT_.*_MODEL)|FORGEDOCK_.*|GH_.*|GITHUB_.*)$/;
+// What the 1.36.0 pin carried (plus FORGEDOCK_*): a key of these families not pinned now is named at submit (#4734).
+const LEGACY_PIN = /^(CLAUDE_.*|ANTHROPIC_.*|GH_.*|GITHUB_.*|FORGEDOCK_.*)$/;
+const SESSION_SCOPED = /^(CLAUDE_PID|CLAUDE_CODE_(SESSION|MESSAGING|ENTRYPOINT|EXECPATH|SSE).*)$/;
 // A secret never rides the allowlist: it resolves at lane start (env, keychain) unless the operator names it as a passthrough.
 export const SECRET_ENV = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY)/i;
 const SESSION_DIR = /(^|\/)(arg0|claude[^/]*)(\/|$)/;
@@ -81,6 +85,11 @@ export function batchEnv(env = process.env, { passthrough = [], pathExclude = []
   const out = Object.fromEntries(Object.entries(env).filter(([k, v]) => typeof v === "string" && (extra.has(k) || (ENV_KEEP.test(k) && !SECRET_ENV.test(k)))));
   if (typeof out.PATH === "string") out.PATH = sanitizePath(out.PATH, { exclude: pathExclude, exists, ...(tmpRoots ? { tmpRoots } : {}) });
   return out;
+}
+
+/** Sorted names (never values) of `env` keys the pre-allowlist pin carried that `kept` does not: the lane gets the daemon's value or resolves it at lane start (#4734). */
+export function droppedEnv(env = process.env, kept = {}) {
+  return Object.keys(env).filter((k) => typeof env[k] === "string" && LEGACY_PIN.test(k) && !SESSION_SCOPED.test(k) && !(k in kept)).sort();
 }
 
 /** `env` with secret-looking values redacted (`--show-env`). */

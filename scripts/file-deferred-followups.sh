@@ -13,7 +13,7 @@
 #
 # Usage: file-deferred-followups.sh --parent N --repo OWNER/REPO [--items FILE|-] [--folded N]
 #   items TSV, one per line: <path|-> TAB <why> TAB <known-flaw flag: known-flaw|1|yes|true, else empty> [TAB <class> [TAB <label>]]
-#   Column 1 must look like a path or be `-` (a requirement-level item): requirement text or an `R<n>:` prefix there is a usage
+#   Column 1 must look like a path (any legal path characters; spaced values need a `/` or extension) or be `-` (a requirement-level item): requirement text or an `R<n>:` prefix there is a usage
 #   error (exit 2, DEFERRED_TSV=INVALID, nothing filed). The label (default: the path) is the item's identity in the checklist
 #   and in the stdout rows; repeated `R<n>: R<m>:` prefixes in it collapse to the first. Class: column 4, else the why's
 #   `post-deploy:|external:|ops:` prefix, else engineering.
@@ -75,7 +75,10 @@ while IFS= read -r line || [ -n "$line" ]; do
   # Column 1: a path or the literal `-`. Requirement text (spaces, an `R<n>:` prefix) belongs in the label column.
   if [ "$p" != "-" ]; then
     if printf '%s' "$p" | grep -qE '^R[0-9]+:'; then bad_row "column 1 starts with a requirement id (\`$p\`); put it in the label column and use \`-\` or a path"; continue; fi
-    if ! printf '%s' "$p" | grep -qE '^[][A-Za-z0-9_.@~/*{}+,-]+$'; then bad_row "column 1 is not a path (\`$p\`)"; continue; fi
+    # Legal path characters (parentheses, =, #, :, ...) pass. Reject control chars, and whitespace values that are prose:
+    # a spaced path needs a `/` or a file extension (`docs/My Notes.md`); `add a saved mapping` has neither.
+    if printf '%s' "$p" | LC_ALL=C grep -q '[[:cntrl:]]'; then bad_row "column 1 is not a path (\`$p\`)"; continue; fi
+    if [[ "$p" =~ [[:space:]] ]] && ! [[ "$p" == */* || "$p" =~ \.[A-Za-z0-9]+$ ]]; then bad_row "column 1 is not a path (\`$p\`)"; continue; fi
   fi
   # Identity: the label, else the path. Repeated `R1: R2:` prefixes collapse to the first.
   id="${lab:-$p}"

@@ -75,7 +75,7 @@ const COVERAGE = {
   "review.failed": "lean", "review.no_verdict": "lean", "merge.head_mismatch": "lean",
   "split.unsupported": "lean", "split.plan_invalid": "lean", "split.verify_failed": "lean",
   "contract.invalid": "lean", "review.incomplete": "lean", "review.inconsistent": "lean", "conformance.omission": "lean",
-  "conformance.unimplemented": "lean", "conformance.scope_creep": "lean", "conformance.untracked_deferral": "lean", "conformance.unjustified_deferral": "lean",
+  "conformance.unimplemented": "lean", "conformance.scope_creep": "lean", "conformance.untracked_deferral": "lean", "conformance.e2e_unverified": "lean", "conformance.unjustified_deferral": "lean",
   "conformance.preserve_violated": "lean", "conformance.regression": "lean", "conformance.guard_broken": "lean", "engine.validate_result_lost": "lean", "structure.undeclared_edge": "lean", "docs.stale": "lean", "maintenance.hotspot_growth": "lean", "followup.unavailable": "lean",
   "awaiting_merge": "codeForTerminalReason", "unclassified": "engine",
 };
@@ -119,7 +119,7 @@ describe("outcome-codes module", () => {
   });
   it("docs/OUTCOME-CODES.md and the enum agree in both directions, and carry the version", () => {
     const doc = readFileSync(join(__dirname, "../../docs/OUTCOME-CODES.md"), "utf8");
-    const documented = [...doc.matchAll(/^\|\s*`([a-z_.]+)`\s*\|/gm)].map((m) => m[1]);
+    const documented = [...doc.matchAll(/^\|\s*`([a-z0-9_.]+)`\s*\|/gm)].map((m) => m[1]);
     assert.deepEqual([...documented].sort(), [...ALL_OUTCOME_CODES].sort());
     assert.ok(doc.includes(`version ${OUTCOME_CODES_VERSION}`) || doc.includes(`Version: ${OUTCOME_CODES_VERSION}`));
   });

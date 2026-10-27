@@ -85,6 +85,7 @@ export const OUTCOME_CODES = Object.freeze({
   REVIEW_INCONSISTENT: "review.inconsistent",
   CONFORMANCE_OMISSION: "conformance.omission",
   CONFORMANCE_UNIMPLEMENTED: "conformance.unimplemented",
+  CONFORMANCE_E2E_UNVERIFIED: "conformance.e2e_unverified",
   CONFORMANCE_SCOPE_CREEP: "conformance.scope_creep",
   CONFORMANCE_UNTRACKED_DEFERRAL: "conformance.untracked_deferral",
   CONFORMANCE_UNJUSTIFIED_DEFERRAL: "conformance.unjustified_deferral",
@@ -222,6 +223,14 @@ function classifyNeedsHumanBase(row) {
   if (HUMAN_CODES.includes(row.code)) return "human";
   if (row.code === OUTCOME_CODES.CONTRACT_INVALID) return row.issueEdited === true ? "recoverable" : "terminal";
   return RECOVERABLE_CODES.includes(row.code) ? "recoverable" : "terminal";
+}
+
+/** forge#4725: mechanical/environment codes recover on their own budget (`recovery.mechanicalMaxAttempts`), apart from conformance failures. */
+export const MECHANICAL_CODES = Object.freeze([OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]);
+
+/** `mechanical` | `conformance`: the recovery budget class of a lane result row (a conflicting `ci-pending` is a base conflict). */
+export function recoveryClassOf(row) {
+  return MECHANICAL_CODES.includes(recoveryCodeOf(row)) ? "mechanical" : "conformance";
 }
 
 /** The code a recovery lane works on: a conflicting `ci-pending` is recovered as a base conflict. */
