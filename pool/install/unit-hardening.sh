@@ -15,7 +15,12 @@ unit_oom_score_adj() {
 
 # unit_hardening user|system: the [Service] lines (no section header), for use inside a unit heredoc.
 unit_hardening() {
-  printf 'OOMScoreAdjust=%s\nRestart=always\nRestartSec=5\nStartLimitIntervalSec=0\n' "$(unit_oom_score_adj "${1:-user}")"
+  printf 'OOMScoreAdjust=%s\nRestart=always\nRestartSec=5\n' "$(unit_oom_score_adj "${1:-user}")"
+}
+
+# unit_start_limit: the [Unit] line that disables the start rate limit. systemd honours StartLimitIntervalSec only in [Unit], never in [Service].
+unit_start_limit() {
+  printf 'StartLimitIntervalSec=0\n'
 }
 
 # unit_oom_hint <process title>: one line when a userspace OOM killer runs. Never edits any OOM config.

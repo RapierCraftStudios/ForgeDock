@@ -78,6 +78,7 @@ cat > /etc/systemd/system/computeshare-agent.service <<EOF
 Description=computeshare agent
 After=docker.service network-online.target
 Requires=docker.service
+$(unit_start_limit)
 
 [Service]
 ExecStart=/opt/node/bin/node /opt/computeshare/bin/pool/cli.mjs agent --config /etc/computeshare/agent.json

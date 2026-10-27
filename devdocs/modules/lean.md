@@ -2003,3 +2003,7 @@ Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now
 ## Entry 2026-10-27 — Deferred follow-ups: column 1 accepts legal path characters (#4739)
 
 `scripts/file-deferred-followups.sh` no longer whitelists column-1 characters (it rejected `app/(marketing)/page.tsx`, `src/a=b.ts`, `src/#x.ts`, `src/foo:bar.ts`, and one bad row aborted the batch). It now rejects only `R<n>:` prefixes, control characters, and whitespace values with neither a `/` nor a file extension (prose such as `add a saved mapping`); `docs/My Notes.md` passes. Rejection stays exit 2 / `DEFERRED_TSV=INVALID` with nothing filed. Row format, exit codes and gh calls are unchanged.
+
+## Entry 2026-10-27 — FORGE:GUARD marker escapes every `>` (#4741)
+
+`renderGuard` (`guards.mjs`) now writes every `<` and `>` in the embedded JSON as `<` / `>` instead of special-casing `-->`, so no HTML comment terminator variant (`-->`, `--!>`) can end the marker early and make `parseGuard` return null. The only `>` in the output is the closing `-->`. Previously posted guards still parse (the old escapes are valid JSON). Same pattern as `drift.mjs`, `lifecycle.mjs`, `integration.mjs`; also clears CodeQL `js/bad-tag-filter`.
