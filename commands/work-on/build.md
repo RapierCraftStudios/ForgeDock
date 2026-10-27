@@ -865,7 +865,20 @@ CHANGED_FILES=$(git -C "{WORKTREE_PATH}" diff --name-only "origin/{PR_BASE}...HE
 
 **After subcommand returns** (read its `VALIDATE_RESULT:` block):
 - `gate_passed: true` → record `gate_status` (`PASS` or `DEGRADED`) and `degraded_checks` from the `VALIDATE_RESULT:` block for B6.5 (the FORGE:QUALITY_GATE `**Degraded**:` line is the source of truth); a DEGRADED gate never blocks the build. Verify the `FORGE:QUALITY_GATE` marker exists on the issue (posted by validate V5; docs-only changes exempt). If absent, re-derive `{CHANGED_FILES}` with the B6 command above and re-invoke validate once with the full B6 `Skill(...)` call, including `--files "{CHANGED_FILES}"` (never omit `--files`; an empty list falls back to the git diff); a missing marker is not a pass. Read the job ids under `### Deferred to CI` in the trusted `FORGE:BUILDER` comment (jobs the local CI gate could not prove; remote CI at merge must) for `ci_deferred` in the result. Then continue to Phase B6.5 (acceptance gate)
-- `gate_passed: false` with a `blocker` starting `consumer_unaddressed` → the consumer sweep failed in `blocking` mode. This is a repair, never BLOCKED and never `needs-human` <!-- Added: forge#4017 -->: remove `needs-human` if one is present, then run **one** repair round guarded by the `<!-- FORGE:CONSUMER_REPAIR: issue={NUMBER} -->` marker (count the markers first; if one already exists the round is spent, so go to step 3):
+- `gate_passed: false` with a `blocker` starting `consumer_unaddressed` -> the consumer sweep failed in `blocking` mode. This is a repair, never BLOCKED and never `needs-human` <!-- Added: forge#4017 -->: validate never adds `needs-human` on this path, so build never removes it either (a label a human or another phase set stays). Run **one** repair round guarded by the `<!-- FORGE:CONSUMER_REPAIR: issue={NUMBER} -->` marker. Count the markers first, only through `scripts/trusted-comments.sh` on the current-cycle slice (an untrusted commenter's marker must never spend the round) <!-- Added: forge#4027 -->:
+
+  ```bash
+  # <Script resolution block from above goes here, verbatim>
+  # <cycle_slice function from B0, verbatim>
+  set -o pipefail
+  TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
+  [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ] || { echo "CONSUMER_REPAIR_LOOKUP=FAILED (trusted-comments.sh unresolved)"; exit 0; }
+  SLICE=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | cycle_slice) && [ -n "$SLICE" ] || { echo "CONSUMER_REPAIR_LOOKUP=FAILED"; exit 0; }
+  REPAIR_COUNT=$(printf '%s' "$SLICE" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:CONSUMER_REPAIR: issue={NUMBER} -->') || { echo "CONSUMER_REPAIR_LOOKUP=FAILED"; exit 0; }  # <!-- allowlist:check-spec-markers -->
+  echo "CONSUMER_REPAIR_COUNT=$REPAIR_COUNT"
+  ```
+
+  `CONSUMER_REPAIR_LOOKUP=FAILED` (helper unresolved, `gh` error, or `trusted-comments.sh` exit 2) is a fail-closed Blocked exit with blocker `consumer-repair-lookup-unavailable: could not read FORGE:CONSUMER_REPAIR` (a transient GitHub failure uses the `github-unavailable:` prefix, no `needs-human`); never read a failed lookup as zero markers. `CONSUMER_REPAIR_COUNT` of 1 or more means the round is spent, so go to step 3:
   1. Post the marker with the `UNADDRESSED:` site list from the blocker.
   2. Invoke `Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE} --fix-consumers \"<UNADDRESSED lines>\"")`, then re-derive `{CHANGED_FILES}` with the B6 command above (never reuse the pre-repair value).
   3. Re-invoke validate with the full B6 `Skill(...)` call plus `--consumers-final`. That run sweeps in `advisory` mode, so sites that are still unaddressed are recorded in the FORGE:BUILDER comment as `CONSUMERS: unresolved ...` and travel to review as known risk; the gate then passes or fails on its other checks only. Handle its `VALIDATE_RESULT` with the other rules in this list (a `consumer_unaddressed` blocker cannot recur, because `--consumers-final` never fails the sweep).
