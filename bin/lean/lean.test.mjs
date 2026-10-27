@@ -2141,6 +2141,21 @@ describe("merge_wait policy", () => {
       assert.equal(events(dir, "CI_FLAKE_RERUN").length, 1);
     });
 
+    it("#4708 merge-time CI fix round reviews a head with every validate recorded (the fix session dropped its rows)", async () => {
+      const w = world({ resumeValidation: [] }); w.reran = [];
+      w.io.requiredChecks = async () => ["build"];
+      w.io.rerunFailedJobs = async (id) => { w.reran.push(id); };
+      w.io.checkStates = async () => [{ name: "build", state: w.fixed ? "success" : "failure", url: RUN(77, w.reran.length + 1) }];
+      w.io.failedLogs = async () => { w.fixed = true; return "boom"; };
+      const dir = tmpDir("core-");
+      const r = await run(w, { dir, verify: { ...parseVerify({}), maxRounds: 1 } });
+      assert.equal(r.terminalReason, "merged", r.reason);
+      assert.deepEqual(events(dir, "CI_FIX_ROUND").map((e) => e.trigger), ["merge"]);
+      const written = JSON.parse(w.files[`${WT}/.forge-lean/result.json`]);
+      assert.deepEqual(written.validation.map((x) => [x.id, x.carried === true]), [["V1", true]], "the earlier result is carried forward, marked");
+      assert.ok(traj(w)[0].includes("carried forward across the CI fix round"));
+    });
+
     it("a rerun that reports a new attempt still red goes to the fix round and reaches the builder", async () => {
       const w = redBuild("failure", RUN(77, 2)); const p = fixPrompts(w), n = waits(w), dir = tmpDir("core-");
       await run(w, { dir, verify: { ...parseVerify({}), maxRounds: 1 } });
@@ -4182,6 +4197,18 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     assert.equal(new Set(w.ci.runs.map((x) => x.headSha)).size, w.ci.runs.length, "every reviewed head was verified once");
     assert.equal(w.ci.runs[0].headSha, w.head, "the retry head is CI-verified");
     assert.match(traj(w)[0], /Validate V1 verified by CI at [0-9a-f]{0,12}/);
+  });
+
+  it("#4708 remote placement: the merge-time CI fix round's head is CI-verified and reviewed with every validate recorded", async () => {
+    const w = withCi(world({ resumeValidation: [] })); w.reran = [];
+    w.io.requiredChecks = async () => ["build"];
+    w.io.rerunFailedJobs = async (id) => { w.reran.push(id); };
+    w.io.checkStates = async () => [{ name: "build", state: w.fixed ? "success" : "failure", url: `https://github.com/o/r/actions/runs/77/job/${w.reran.length + 1}` }];
+    w.io.failedLogs = async () => { w.fixed = true; return "boom"; };
+    const r = await run(w, { verify: CI });
+    assert.equal(r.terminalReason, "merged", r.reason);
+    assert.ok(w.ci.runs.some((x) => x.headSha === w.head), "the fix head is CI-verified before it is reviewed");
+    assert.equal(JSON.parse(w.files[`${WT}/.forge-lean/result.json`]).validation[0].id, "V1");
   });
 
   it("docs-only lane: no push for CI, no dispatch; the decision is recorded", async () => {

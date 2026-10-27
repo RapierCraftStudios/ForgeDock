@@ -1902,3 +1902,11 @@ comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_m
 - `scripts/hotspots.sh` always excludes lockfiles (basename match at any depth) on top of `exclude_globs`.
 - Pool provider: a `token_env` credential that resolves empty falls back to the router token file; HTTP 401/403 at sandbox start defers `sandbox.auth` (300s), never needs-human.
 - Breaker: `orchestrate --clear-breaker <id>` clears it; a breaker tripped only by transport errors (`tripped.transport`) auto-closes after 5 min and is cleared on a daemon-restart resume. Submit-time env replay was already delivered by #4691.
+
+## Entry 2026-10-27 — Validate results across a merge-time CI fix round (#4708)
+
+`mergeFixRound` reviewed the fix head before it was CI-verified, and the fix session could rewrite `result.json` without the
+earlier `validation` rows, so the review failed `conformance.unimplemented: ... has no recorded result` on a green lane. Now the
+rows recorded before the round are carried forward (marked `carried: true`, written back to `result.json` because `gate()` re-reads
+it), the fix head goes through `ciVerify("merge")` under remote verify before `doReview` (as the base-sync retry, #4527), and a
+validate id still unrecorded is `engine.validate_result_lost`, not a conformance failure.

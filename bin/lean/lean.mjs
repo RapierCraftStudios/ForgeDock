@@ -2428,12 +2428,25 @@ export async function runCore(o) {
       T.decisions.push(`Required check(s) failed on PR #${pr} (${jobs.join(", ")}); builder resumed with the failed logs (round ${ciRounds}/${vcfg.maxRounds})`);
       ev({ event: "CI_FIX_ROUND", trigger: "merge", round: ciRounds, jobs, pr });
       const before = await gitOut(["rev-parse", "HEAD"]);
+      const priorRows = Array.isArray(result?.validation) ? result.validation : [];
       await fixRound("ci", ciFailurePrompt(failures, vcfg.mode), [], "merge_ci", failureLog(failures));
       await upsertStage("implementation");
       result = (await readResult()) ?? result;
       if ((await gitOut(["rev-parse", "HEAD"])) === before) {
         return await needsHuman(`Required check(s) failed on PR #${pr} (${jobs.join(", ")}) and the builder made no new commit for it; nothing merged.`, OUTCOME_CODES.CI_RED);
       }
+      // #4708: the fix session may rewrite result.json without the validate rows recorded earlier: carry those forward (marked) onto disk, which gate() re-reads
+      const have = new Set((Array.isArray(result?.validation) ? result.validation : []).map((x) => x?.id)), carried = priorRows.filter((x) => x?.id && !have.has(x.id));
+      if (carried.length && io.fs.write) {
+        result = { ...result, validation: [...(Array.isArray(result?.validation) ? result.validation : []), ...carried.map((x) => ({ ...x, carried: true }))] };
+        try { await io.fs.write(`${wt}/${RESULT_FILE}`, `${JSON.stringify(result)}\n`); } catch { /* the gate reads what is on disk */ }
+        T.decisions.push(`Validate result(s) ${carried.map((x) => x.id).join(", ")} carried forward across the CI fix round`);
+      }
+      // #4708: the fix head is CI-verified before its review, as in the base-sync retry (#4527), so validates left to CI are covered
+      if (remoteVerify) { const v = await ciVerify("merge"); if (v.done) return v.done; }
+      const rows = Array.isArray(result?.validation) ? result.validation : [], headNow = await gitOut(["rev-parse", "HEAD"]);
+      const lost = (effective.validate ?? []).filter((v) => !rows.some((x) => x?.id === v.id) && !(remoteVerify && ciVerifiedHead === headNow)).map((v) => v.id);
+      if (lost.length) return await needsHuman(`Validate result(s) ${lost.join(", ")} missing after a CI fix round on PR #${pr}: the earlier results were lost and none could be carried forward; nothing merged.`, OUTCOME_CODES.ENGINE_VALIDATE_RESULT_LOST);
       const rv = await doReview(); // never merge an unreviewed head
       if (!rv) return await needsHuman("Reviewer returned no parseable verdict after a CI fix round.", OUTCOME_CODES.REVIEW_NO_VERDICT);
       if (rv.env) return await envNeedsHuman(rv.env);
