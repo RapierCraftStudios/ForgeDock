@@ -463,24 +463,14 @@ An issue that is `needs-human:external`, flag/legal-gated (`flag-gated`, `legal-
 
 ### Step 2: Sync milestone branch with staging
 
-Before shipping, ensure the milestone branch is up to date with `staging` (picks up any fast-lane fixes that accumulated since the milestone branch was created):
+Before shipping, bring the milestone branch up to date with `staging` (picks up fast-lane fixes that accumulated since it was cut). `forgedock milestone-sync` does it deterministically (#4663): a milestone already `shipped:*`/`deployed:default`/`closed` is refused, a branch already containing staging is a no-op, append-only registry conflicts are resolved by the lane base-merge resolver (`lean.base_merge_*`), and a protected branch (ruleset or branch protection, or a push the rules reject) is synced through the single `sync/milestone-{slug}` PR with auto-merge armed (merged directly when CLEAN). A `ship` sync is never debounced.
 
 ```bash
 cd {REPO_PATH}
-git fetch origin {STAGING_BRANCH} milestone/{slug}
-# Never mutate the main checkout: sync in a detached worktree at the milestone tip
-SYNC_WT=$(mktemp -d)
-git worktree add --detach "$SYNC_WT" origin/milestone/{slug}
-if git -C "$SYNC_WT" merge origin/{STAGING_BRANCH} --no-edit; then
-  git -C "$SYNC_WT" push origin HEAD:refs/heads/milestone/{slug}
-  git worktree remove --force "$SYNC_WT"
-else
-  # Conflicts: report to user and STOP — do not auto-resolve
-  git -C "$SYNC_WT" merge --abort 2>/dev/null || true
-  git worktree remove --force "$SYNC_WT"
-  echo "STOP: merge conflict syncing milestone/{slug} with {STAGING_BRANCH}"; exit 1
-fi
+forgedock milestone-sync {slug} --reason ship --base {STAGING_BRANCH} --repo {owner}/{repo} || { echo "STOP: milestone sync failed or conflicts"; exit 1; }
 ```
+
+If the sync went through a PR (`pr-created`/`pr-updated`), wait for it to merge before Step 2.5.
 
 ### Step 2.5: Pre-Merge Hunk-Loss Audit (MANDATORY before creating PR)
 
@@ -780,27 +770,15 @@ To deploy: merge `staging → main` via GitHub web UI when ready.
 
 ## Action: Sync Milestone Branch
 
-Syncs the milestone branch with the latest default branch to pick up fast-lane fixes. Run periodically on long-lived milestones.
+Syncs the milestone branch with the latest default branch to pick up fast-lane fixes. Sync **on demand only**: before ship, before a batch, or when a conflict is expected. Never on every base move, and never a milestone whose lifecycle is `shipped:*` (the command refuses it; a shipped milestone is also never the "active" one to sync, `isSyncable` in `bin/lean/milestonesync.mjs`).
 
 ```bash
 cd {REPO_PATH}
 DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
-git fetch origin $DEFAULT_BRANCH milestone/{slug}
-# Never mutate the main checkout: sync in a detached worktree at the milestone tip
-SYNC_WT=$(mktemp -d)
-git worktree add --detach "$SYNC_WT" origin/milestone/{slug}
-if git -C "$SYNC_WT" merge origin/$DEFAULT_BRANCH --no-edit; then
-  git -C "$SYNC_WT" push origin HEAD:refs/heads/milestone/{slug}
-  git worktree remove --force "$SYNC_WT"
-else
-  # If conflicts, report to user and STOP
-  git -C "$SYNC_WT" merge --abort 2>/dev/null || true
-  git worktree remove --force "$SYNC_WT"
-  echo "STOP: merge conflict syncing milestone/{slug} with $DEFAULT_BRANCH"; exit 1
-fi
+forgedock milestone-sync {slug} --reason manual --base "$DEFAULT_BRANCH" --repo {owner}/{repo}
 ```
 
-Report: "Synced milestone/{slug} with latest `{DEFAULT_BRANCH}`. {N} new commits incorporated."
+Protected branches get ONE sync PR (`sync/milestone-{slug}`) whose head is force-pushed in place; a base that moved again inside `milestones.sync_debounce` (default 10m) reports `debounced` and leaves the PR (and its CI) alone. Report the printed status.
 
 ---
 
@@ -839,5 +817,5 @@ This automatically makes the issue a feature-lane issue — next time `/work-on`
 
 - **Milestone already exists**: Check first with `gh api repos/{owner}/{repo}/milestones --jq '.[] | select(.title == "{TITLE}")'`
 - **Branch already exists**: Reuse it, don't recreate
-- **Merge conflicts on sync/ship**: Report to user, do NOT auto-resolve. List conflicting files.
+- **Merge conflicts on sync/ship**: append-only registry conflicts matching `lean.base_merge_*` are resolved deterministically by `milestone-sync`; any other conflict is reported with its files and the branch is left untouched. Do NOT hand-resolve.
 - **No issues in milestone**: Warn user — empty milestones are valid but unusual
