@@ -29,3 +29,6 @@ No new env vars. Advisory only; checks never block a review.
 
 ## R6 verification
 V2 self-skips without yq. Ran it with a scratch yq shim (PATH, $TMPDIR only): 208 passed, 0 failed, incl. the stale/fresh context case. No code change.
+
+### CI follow-up (Unit tests, node --test)
+The CI log was unavailable, so the failure could not be read. I ran the forgedock-*, journey, review-staging, bin/lean and related suites locally: 1765 pass, 3 fail. The 3 failures (journey platform/WSL rows, Act II and install-receipt copyFile orphan) assert a non-WSL, non-root host. This host is WSL running as root, so they are environmental. None touch files this change edits. The full suite was not run, and the CI failure is not reproduced. No code change was made.
