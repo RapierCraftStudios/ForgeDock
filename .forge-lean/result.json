@@ -1,1 +1,136 @@
-{"status":"fixed","summary":"Unpushed placeholder/unsigned commits are signed off before any lane push; a failed DCO check blocks the merge with ci.dco.","requirements":[{"id":"R1","status":"implemented","evidence":"bin/lean/signoff.mjs:ensureSignedOff; bin/lean/lean.mjs gitPush"},{"id":"R2","status":"implemented","evidence":"bin/lean/signoff.mjs range excludes origin/<branch> and origin/<lane>; bin/lean/signoff.test.mjs"},{"id":"R3","status":"implemented","evidence":"bin/lean/lean.mjs pre-merge DCO gate; bin/lean/lean.test.mjs"},{"id":"R4","status":"implemented","evidence":"bin/lean/signoff.mjs; bin/lean/lean.mjs gitPush"},{"id":"R5","status":"implemented","evidence":"bin/lean/lean.mjs DCO gate; bin/engine/outcome-codes.mjs CI_DCO"}],"validation":[{"id":"V1","command":"node --test bin/lean/signoff.test.mjs","exit":0},{"id":"V2","command":"node --test bin/lean/lean.test.mjs bin/lean/recovery.test.mjs bin/lean/sandbox-provider.contract.test.mjs","exit":0}],"tests":[{"command":"node --test --test-name-pattern='rewrites unpushed placeholder-author commits' bin/lean/signoff.test.mjs","result":"pass","fails_without_fix":true},{"command":"node --test --test-name-pattern='DCO' bin/lean/lean.test.mjs","result":"pass","fails_without_fix":true}],"self_review":[{"question":"1","answer":"yes","evidence":"R1-R5 implemented: signoff.mjs, lean.mjs gitPush + DCO gate, tests for each acceptance criterion"},{"question":"2","answer":"yes","evidence":"lean, recovery, provider-contract and outcome-code tests: 594 pass, 0 fail; the one poll-count test was adjusted because the gate reuses or reads checkStates once"},{"question":"3","answer":"yes","evidence":"D1-D6 changed as described; P1-P3 untouched; V1 and V2 exit 0"},{"question":"4","answer":"yes","evidence":"changes are the deliverable paths, tests, and docs/OUTCOME-CODES.md via amendment"}],"amendments":[{"kind":"add-deliverable","path":"docs/OUTCOME-CODES.md","why":"bin/tests/engine-outcome-codes.test.mjs requires every enum code (new ci.dco) to be documented in docs/OUTCOME-CODES.md"}],"not_members":[{"symbol":"signoff","test":"bin/lean/batch.test.mjs","why":"the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"},{"symbol":"signoff","test":"bin/lean/checks.test.mjs","why":"the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"},{"symbol":"signoff","test":"bin/lean/conformance.e2e.test.mjs","why":"the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"},{"symbol":"signoff","test":"bin/lean/conformance.test.mjs","why":"the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"},{"symbol":"signoff","test":"bin/lean/context.test.mjs","why":"the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"},{"symbol":"signoff","test":"bin/lean/execution.e2e.test.mjs","why":"the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"},{"symbol":"signoff","test":"bin/lean/execution.test.mjs","why":"the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"},{"symbol":"signoff","test":"bin/lean/fixround.test.mjs","why":"the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"},{"symbol":"signoff","test":"bin/lean/heavy.test.mjs","why":"the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"},{"symbol":"signoff","test":"bin/lean/lean.test.mjs","why":"the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"}]}
+{
+ "status": "fixed",
+ "summary": "Unpushed placeholder/unsigned commits are signed off before any lane push; a failed DCO check blocks the merge with ci.dco. (recovery: identity fallback via git var GIT_AUTHOR_IDENT)",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/lean/signoff.mjs:ensureSignedOff; bin/lean/lean.mjs gitPush"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/signoff.mjs range excludes origin/<branch> and origin/<lane>; bin/lean/signoff.test.mjs"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/lean/lean.mjs pre-merge DCO gate; bin/lean/lean.test.mjs"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/lean/signoff.mjs; bin/lean/lean.mjs gitPush"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "bin/lean/lean.mjs DCO gate; bin/engine/outcome-codes.mjs CI_DCO"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/signoff.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/lean/lean.test.mjs bin/lean/recovery.test.mjs bin/lean/sandbox-provider.contract.test.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test --test-name-pattern='rewrites unpushed placeholder-author commits' bin/lean/signoff.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  },
+  {
+   "command": "node --test --test-name-pattern='DCO' bin/lean/lean.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R1-R5 implemented: signoff.mjs, lean.mjs gitPush + DCO gate, tests for each acceptance criterion"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "lean, recovery, provider-contract and outcome-code tests: 594 pass, 0 fail; the one poll-count test was adjusted because the gate reuses or reads checkStates once"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "D1-D6 changed as described; P1-P3 untouched; V1 and V2 exit 0"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "changes are the deliverable paths, tests, and docs/OUTCOME-CODES.md via amendment"
+  }
+ ],
+ "amendments": [
+  {
+   "kind": "add-deliverable",
+   "path": "docs/OUTCOME-CODES.md",
+   "why": "bin/tests/engine-outcome-codes.test.mjs requires every enum code (new ci.dco) to be documented in docs/OUTCOME-CODES.md"
+  }
+ ],
+ "not_members": [
+  {
+   "symbol": "signoff",
+   "test": "bin/lean/batch.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"
+  },
+  {
+   "symbol": "signoff",
+   "test": "bin/lean/checks.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"
+  },
+  {
+   "symbol": "signoff",
+   "test": "bin/lean/conformance.e2e.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"
+  },
+  {
+   "symbol": "signoff",
+   "test": "bin/lean/conformance.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"
+  },
+  {
+   "symbol": "signoff",
+   "test": "bin/lean/context.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"
+  },
+  {
+   "symbol": "signoff",
+   "test": "bin/lean/execution.e2e.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"
+  },
+  {
+   "symbol": "signoff",
+   "test": "bin/lean/execution.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"
+  },
+  {
+   "symbol": "signoff",
+   "test": "bin/lean/fixround.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"
+  },
+  {
+   "symbol": "signoff",
+   "test": "bin/lean/heavy.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"
+  },
+  {
+   "symbol": "signoff",
+   "test": "bin/lean/lean.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or files (no readdir or module-name list); the flagged line is unrelated fixture/assertion code, so signoff is not a member of any list there"
+  }
+ ]
+}

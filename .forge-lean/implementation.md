@@ -29,3 +29,6 @@ Two deterministic layers, no LLM calls. `ensureSignedOff` (new `bin/lean/signoff
 
 ## Sibling-list check
 The ten flagged bin/lean tests hold no list of lean modules or files; signoff recorded in result.json not_members.
+
+### Recovery (ci.red)
+CI failed `bin/lean/conformance.e2e.test.mjs` (lane ended needs-human, ci.dco): the runner had no `GIT_AUTHOR_*` in process.env, so `ensureSignedOff` found no identity. It now falls back to `git var GIT_AUTHOR_IDENT` (bin/lean/signoff.mjs). Verified with the identity env vars unset: signoff, conformance e2e, lean, recovery and sandbox-provider tests pass (V1 and V2 exit 0). The e2e fails without this fix when the identity is unset.
