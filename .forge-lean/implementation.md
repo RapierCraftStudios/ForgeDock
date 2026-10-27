@@ -1,17 +1,18 @@
 ### Approach
-Time the guard gate beside the validate rerun; added wall time is the part not hidden behind the rerun. Emit it per gate pass and sum it per lane onto RUN_TERMINAL.
+Before `issue create`, look up an existing FORGE:REGRESSION issue for the follow-up and fix commit and reuse it, so a retry after a failed `finish()` files nothing new. Covers schedd and `probe --due` (both call `monitorOne`).
 ### Changes
-- bin/lean/lean.mjs: `added_wall_ms` on guard_run; lane total `guard_added_ms` on RUN_TERMINAL.
-- bin/engine/telemetry-seam.mjs: `guard_added_ms` in the run_terminal payload.
-- bin/engine/telemetry-seam.test.mjs: regression test.
+- bin/lean/postdeploy-monitor.mjs: `findRegression` (search, all states, exact marker/follow-up/fix match) used in `monitorOne`.
+- bin/lean/postdeploy-monitor.test.mjs: mock handles search lists; 3 regression tests.
+- devdocs/modules/lean.md: dossier note on idempotent filing (amendment add-deliverable).
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/lean.mjs (guard_run, RUN_TERMINAL), bin/engine/telemetry-seam.mjs
-- R2 post-deploy: median measured from shadow telemetry after deploy.
+- R1 ✅ postdeploy-monitor.mjs:15-23,66-68
+- R2 ✅ same lookup covers both sweepers
+- R3 ✅ tests in postdeploy-monitor.test.mjs
 ### Verification
-- V1 node --test telemetry-seam, guardgate, lean tests: 519 pass, 0 fail. New test fails without the fix (1 fail).
-- `forgedock check`: PASS. checks.mjs widened to the full suite (848 referencing files); not run per host rules. No formatter configured.
+- V1 node --test postdeploy-monitor, postdeploy-check, schedd tests: 56 pass. New tests fail without the fix (2 fail).
+- forgedock check: PASS; devdocs freshness OK. No formatter configured in repo.
 ### Notes
-Skipped-gate lanes (no guard selected) add 0 and omit the field. No new env vars.
-- Docs: devdocs/modules/lean.md describes guard_added_ms / added_wall_ms (docs freshness check).
+Search-index lag can leave a narrow duplicate window. A search failure throws (error row, retried), never files blind.
 
-Fix: guardGate now stages its guard_run event; the caller emits it after the Promise.all with added_wall_ms = max(0, total - validate rerun ms), 0 when the gate errored (error:true).
+### CI follow-up (Unit tests, node --test)
+The CI log was unavailable. Locally, bin/lean, bin/engine and bin/stats pass (1750/0 fail) and bin/tests passes except 3 environment tests (preflight Platform/WSL/Shell rows, install receipt platform capture, copyFile .tmp cleanup), none touching the changed files; they look WSL/host specific. No code change made; cause not reproduced.
