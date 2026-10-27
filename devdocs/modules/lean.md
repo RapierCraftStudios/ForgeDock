@@ -1908,3 +1908,11 @@ earlier `validation` rows, so the review failed `conformance.unimplemented: ... 
 rows recorded before the round are carried forward (marked `carried: true`, written back to `result.json` because `gate()` re-reads
 it), the fix head goes through `ciVerify("merge")` under remote verify before `doReview` (as the base-sync retry, #4527), and a
 validate id still unrecorded is `engine.validate_result_lost`, not a conformance failure.
+
+## Entry 2026-10-27 — Post-deploy fail reopens the parent before it records (#4652)
+
+`measureFollowup` (`postdeploy-check.mjs`) used to post the `FORGE:PROBE` fail record and then reopen the parent; a failed reopen
+was swallowed and every later pass returned `recorded-fail`, so the parent stayed closed. Now the parent is reopened first; if that
+throws, no record is posted and the next pass re-runs the checks and retries. The early `monitoring` return on an existing windowed
+pass record also re-applies the idempotent `post-deploy-monitoring` label, so a label that failed on the first pass is retried
+(`sweepDue` selects by it).
