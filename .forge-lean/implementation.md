@@ -32,3 +32,9 @@ V2 self-skips without yq. Ran it with a scratch yq shim (PATH, $TMPDIR only): 20
 
 ### CI follow-up (Unit tests, node --test)
 The CI log was unavailable, so the failure could not be read. I ran the forgedock-*, journey, review-staging, bin/lean and related suites locally: 1765 pass, 3 fail. The 3 failures (journey platform/WSL rows, Act II and install-receipt copyFile orphan) assert a non-WSL, non-root host. This host is WSL running as root, so they are environmental. None touch files this change edits. The full suite was not run, and the CI failure is not reproduced. No code change was made.
+
+### CI follow-up 2 (Unit tests)
+Log still unavailable. Re-ran V1 (74 pass) and 1505 tests across the suites that reference forgedock.mjs, devdocs, review-pr or review-prepare: 0 fail. Only journey.test.mjs fails (3, WSL/root host assertions, unrelated to this diff). Not reproduced; no code change.
+
+### CI follow-up 2 (Unit tests, run 40550042608)
+The CI log was unavailable. After merging staging again, I ran every bin/tests file that references forgedock.mjs, review-context or doctor: 1217 pass, 3 fail. They are the same 3 environmental failures as before (journey platform/WSL rows, Act II and install-receipt copyFile orphan), which assert a non-WSL, non-root host. The CI failure is not reproduced and I made no code change. The full suite was not run.
