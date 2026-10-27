@@ -1,5 +1,5 @@
 {
- "status": "fixed",
+ "status": "blocked",
  "summary": "Deploy PR body links the lane's post-deploy rollup via a new deterministic script; R11 stays deferred",
  "requirements": [
   {
@@ -60,5 +60,9 @@
    "path": "devdocs/decisions/4727-deploy-pr-rollup-link.md",
    "why": "check-devdocs-freshness.sh requires a new decision record or dossier for a behaviour change under scripts/"
   }
- ]
+ ],
+ "block": {
+  "kind": "baseline-validate-failure",
+  "why": "V3 (validate-spec-graph.sh) fails on a pre-existing HARD finding 'workflow:engine-error set by NO command' (and review-pr READS FORGE:CONTRACT self-check); reproduced with deploy-pr.md reverted to origin/staging. Fix lies outside the contract deliverables; R10 is implemented and V1/V2 pass."
+ }
 }
