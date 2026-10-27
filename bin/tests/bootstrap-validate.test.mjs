@@ -215,3 +215,11 @@ test("a needs-human issue without a valid gates: line is rejected with missing-g
   assert.ok(codes(r).includes("missing-gates"));
   assert.ok(isNeedsHuman({ labels: ["needs-human:external"] }));
 });
+
+test("isNeedsHuman is null-safe and validatePlan reports missing-labels without a labels array (#4660)", () => {
+  assert.equal(isNeedsHuman(undefined), false);
+  assert.equal(isNeedsHuman({}), false);
+  const plan = load("valid-nextjs");
+  delete issue(plan, "AUTH").labels;
+  assert.ok(codes(validatePlan(plan)).includes("missing-labels"));
+});

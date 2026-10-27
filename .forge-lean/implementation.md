@@ -31,3 +31,6 @@ needs-human plan issues now require a valid `gates:` line (new validation error)
 
 ## Docs freshness fix
 Added `lean-readiness` (`scripts/readiness*`) and `lean-bootstrap` (`scripts/bootstrap-*`) globs in devdocs/index.yaml and a dated entry in devdocs/modules/lean.md describing the readiness gates behaviour. check-devdocs-freshness passes; V1 and V2 still pass.
+
+## Fix: isNeedsHuman precedence (#4660)
+Parenthesised the label checks so a missing `labels` array no longer throws; validatePlan reports `missing-labels` again. Added a regression test.

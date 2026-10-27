@@ -74,7 +74,7 @@ const normHeading = (h) => h.replace(/\([^)]*\)\s*$/, "").trim().toLowerCase();
 
 /** True when the issue is a needs-human issue (credential, account or external input). */
 export function isNeedsHuman(issue) {
-  return issue?.needsHuman === true || (Array.isArray(issue?.labels) && issue.labels.includes(NEEDS_HUMAN_LABEL) || issue.labels.includes(EXTERNAL_LABEL));
+  return issue?.needsHuman === true || (Array.isArray(issue?.labels) && (issue.labels.includes(NEEDS_HUMAN_LABEL) || issue.labels.includes(EXTERNAL_LABEL)));
 }
 
 /**
