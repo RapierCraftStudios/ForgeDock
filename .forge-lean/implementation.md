@@ -34,3 +34,6 @@ Every local lane's builder CLI runs in a named `systemd-run --user --scope` by d
 
 ## CI fix
 The #4690 integration test (real systemd scope fork) is skipped here but runs on CI hosts where systemd-run exists yet scope cgroup counters may be unreadable. It now skips unless the scope path and pids.events are readable (scopeEventsReadable). No CI log was available; all local targeted tests pass.
+
+## Post-merge re-validation
+V1, V2 and V3 re-run after merging origin/staging: all exit 0 (V3 prints "OK: every behaviour change has its module dossier updated.").
