@@ -31,3 +31,6 @@ A pure module, `bin/lean/decisions.mjs`, holds the anchored decision record, the
 
 ## Sibling-list check
 `decisions` (bin/lean) is not a member of the lists in checks, conformance.e2e, context (context-pack sources), execution(.e2e), fixround (MECHANICAL_KINDS) and heavy tests; recorded under `not_members` in result.json.
+
+## Sibling-enumerating tests
+decisions (bin/lean) is not a member of the lists in checks, conformance.e2e, context, execution(.e2e), fixround and heavy tests; recorded as not_members in result.json.
