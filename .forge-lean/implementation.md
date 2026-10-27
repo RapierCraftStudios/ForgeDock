@@ -1,16 +1,22 @@
 ### Approach
-Create the dynamic parked:<code> label lazily (label create --force) before the relabel edit, and make orchestrate honour the relabel result.
-### Changes
-- bin/engine-cli.mjs: best-effort `gh label create parked:<code> --force` before the park edit.
-- bin/lean/orchestrate.mjs: parkedQueued set only if result is not false/"failed"/"skipped".
-- bin/lean/batch.test.mjs: two regression tests.
-### Acceptance Criteria Status
-- R1 ✅ engine-cli.mjs:1908, orchestrate.mjs:668, batch.test.mjs tests tagged #4736
-- R2 ✅ non-parked paths untouched
-### Verification
-- V1 node --test batch/gatewatch/lean tests: 569 pass, 0 fail. The orchestrate test fails without the orchestrate fix.
-- forgedock check: PASS. checks.mjs widened to the full suite, which I did not run per host rules.
-### Notes
-No behaviour change beyond the described fix; no formatter configured.
+`guardChain` now applies the loop logic to a repeated name:cmd only when cmd is a pass-through wrapper (`isPassThroughWrapper(read(cmd), name)`); a repeated real binary passes through unchanged and unrecorded.
 
-Docs: added devdocs/modules/lean.md entry for #4736 (docs freshness check).
+### Changes
+- bin/lean/heavy.mjs: guardChain gains injectable `read` (default `head`) and the wrapper check; doc comment updated.
+- bin/lean/heavy.test.mjs: new nested-real-binary regression test; the wrapper-chain test's fixture scripts now contain a `command -v` lookup so they count as wrappers.
+
+### Acceptance Criteria Status
+- R1 ✅ bin/lean/heavy.mjs:311-313, test in heavy.test.mjs
+- R2 ✅ wrapper cutoff test still passes; runWrapped untouched
+
+### Verification
+- V1 `node --test bin/lean/heavy.test.mjs bin/lean/lean.test.mjs`: 527 pass, 0 fail. The suite fails without the fix (heavy.mjs reverted, tests kept).
+- `forgedock check`: PASS.
+
+### Notes
+No env vars changed. Legit nested calls are no longer counted toward SHIM_LOOP_MAX. An undetectable (non-text) wrapper is no longer cut off on repeat. No formatter config in the repo, so none was run. I briefly used a pathspec `git stash` to test without the fix, applied it back and dropped it.
+
+### Docs
+- devdocs/modules/lean.md: re-entry guard paragraph now states a repeated real binary passes through unrecorded (#4735); only wrappers get the next-match / env.shim_loop cutoff.
+
+Follow-up: the repeated-real-binary check now runs before the SHIM_LOOP_MAX cap, so a 4-entry chain containing the real entry passes through. The regression test uses that 4-entry chain.

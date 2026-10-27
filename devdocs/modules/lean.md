@@ -766,7 +766,9 @@ The steps are gated in two places:
   with `FORGE_HEAVY_HELD=1` (nested calls pass through) and per-holder
   `FORGE_HOST_PARALLELISM`, then releases and propagates the exit code.
   Re-entry guard (#4680): a pass-through wrapper that re-resolves the name back to the
-  shim is cut off by `FORGE_HEAVY_CHAIN` (`name:cmd|...`). A repeat resolves the next
+  shim is cut off by `FORGE_HEAVY_CHAIN` (`name:cmd|...`). A repeat of a real binary
+  (`npm run` inside an npm script, #4735) is legitimate nesting: it passes through
+  unchanged and unrecorded, so depth is not capped. A repeated wrapper resolves the next
   PATH match past `FORGE_HEAVY_SHIM_DIR` and the chain dirs; none, or more than 4 entries,
   exits 126 with `env.shim_loop` naming the dirs. `writeHeavyShims` also skips wrapper
   targets at write time (next match, else skipped with a warning).
