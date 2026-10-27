@@ -26,7 +26,7 @@ import { prepareToolchain } from "./toolchain.mjs";
 import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, mergeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
 import { runChecks, runWithTimeoutRetry, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
-import { retrying, ghCacheRetry, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
+import { retrying, ghCacheRetry, refreshAuthOnce, runRefreshScript, GH_AUTH_RE, GH_AUTH_RETRY_SECONDS, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
@@ -235,7 +235,8 @@ export async function runCore(o) {
   const expTag = o.experiment ? { experiment: o.experiment.id, arm: assignArm(o.experiment, issue) } : {}; // #4629: same arm for the whole run
   const emit = async (rec) => { try { await emitTelemetry?.({ ...rec, issue }); } catch { /* never fails a run */ } };
   let ghCache = null; // #4507: the run's own gh HTTP cache (set once the run tmp dir exists)
-  const ghc = (args) => ghCacheRetry((env) => io.gh(args, env ? { env } : undefined), ghCache);
+  const authState = { refreshed: false }; // #4662: one token refresh at a time, shared by every gh call of the run
+  const ghc = (args) => refreshAuthOnce(() => ghCacheRetry((env) => io.gh(args, env ? { env } : undefined), ghCache), { refresh: io.refreshAuth ?? runRefreshScript, state: authState });
   const sleepFn = io.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   /** gh writes (comment, pr create, issue edit/close): retried for 5xx and secondary rate limits (#4114). */
   const ghw = (args) => retrying(() => ghc(args), { transient: GH_TRANSIENT_RE, attempts: 4, sleep: sleepFn, random });
@@ -895,7 +896,9 @@ export async function runCore(o) {
   }
   // ---- lane (#4125): worked out from the issue before any lease, comment or worktree; fail closed ----
   {
-    const r = await resolveLane({ issue, repo, io, cwd, branches, requested: requestedLane, override: laneOverride });
+    const laneIo = { ...io, gh: (a, opts) => refreshAuthOnce(() => io.gh(a, opts), { refresh: io.refreshAuth ?? runRefreshScript, state: authState }) }; // #4662
+    const r = await resolveLane({ issue, repo, io: laneIo, cwd, branches, requested: requestedLane, override: laneOverride });
+    if (!r.ok && GH_AUTH_RE.test(r.detail ?? "")) return { terminalReason: "deferred", code: OUTCOME_CODES.GH_AUTH, detail: r.detail, retryInSeconds: GH_AUTH_RETRY_SECONDS }; // #4662: a dead token is not a lane problem
     if (!r.ok) return { terminalReason: "lane-refused", code: r.code, detail: r.detail };
     lane = r.lane; base = `origin/${lane}`; defaults = r.defaults; milestone = r.milestone ?? null;
     if (r.overridden) T.decisions.push(`Lane override: ${lane} instead of the resolved ${r.expected}`);
@@ -953,7 +956,10 @@ export async function runCore(o) {
   await emit({ event: "RUN_START", run: `core_${issue}_${t0}`, lane, path: "core" }); // #4630: lifecycle event stream
   try {
     iss = JSON.parse(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,comments,labels,updatedAt"]));
-  } catch (e) { return finish("engine-error", `cannot read issue: ${e.message}`); }
+  } catch (e) {
+    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}) }, e.deferCode); // #4662
+    return finish("engine-error", `cannot read issue: ${e.message}`);
+  }
   const priorState = stateOf(iss.body); // #4400: the last run's end (the lease write keeps its terminal fields), read before this run ends
   if (String(iss.state).toUpperCase() === "CLOSED") {
     // #4337: a closed decomposed tracker is not "already done": its dependents wait on its sub-issues (the batch re-points
@@ -2720,7 +2726,7 @@ export async function runCore(o) {
       const when = e.resetAt || (Number.isFinite(e.resetAtEpochMs) ? new Date(e.resetAtEpochMs).toISOString() : "unknown");
       return finish("deferred", `usage limit hit; resets at ${when}`, { code: OUTCOME_CODES.RATE_LIMITED, resetAt: when, resetAtEpochMs: Number.isFinite(e.resetAtEpochMs) ? e.resetAtEpochMs : null, backendId: laneBackendId(process.env) }, OUTCOME_CODES.RATE_LIMITED);
     }
-    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode }, e.deferCode);
+    if (e?.deferCode) return finish("deferred", e.deferDetail ?? String(e.message), { code: e.deferCode, ...(e.retryInSeconds ? { retryInSeconds: e.retryInSeconds } : {}) }, e.deferCode);
     // #4505: a turn overrun is mechanical: a non-human end the batch recovers, needs-human only once a budget recovery failed too
     if (e?.laneCode === OUTCOME_CODES.BUDGET_EXCEEDED && !(recover?.final && recover.code === OUTCOME_CODES.BUDGET_EXCEEDED)) {
       return finish("budget-exceeded", e.message, { code: OUTCOME_CODES.BUDGET_EXCEEDED, branch, ...(recover ? { recovery: true } : {}) }, OUTCOME_CODES.BUDGET_EXCEEDED);

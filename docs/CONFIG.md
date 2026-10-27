@@ -1484,6 +1484,19 @@ SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/n
 
 ---
 
+## Bot token refresh
+
+Installation tokens expire after 1 hour. `scripts/refresh-bot-token.sh` mints a new one and records `~/.forge/bot-token.json` (`refreshedAt`, `expiresAt`; override the directory with `FORGE_HOME_DIR`). To run it on a schedule, install the systemd user timer (`OnBootSec=2min`, `OnUnitActiveSec=45min`, `Persistent=true`, so a missed run fires after a restart):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp scripts/systemd/forgedock-bot-token-refresh.{service,timer} ~/.config/systemd/user/
+# edit ExecStart in the .service to the path of refresh-bot-token.sh on this host
+systemctl --user daemon-reload && systemctl --user enable --now forgedock-bot-token-refresh.timer
+```
+
+`forgedock doctor` (Check 12) reports the remaining lifetime and the last refresh, and fails when less than 10 min remain or the last refresh is older than 50 min. Without the stamp file it stays an informational warning. A core run that gets HTTP 401 from `gh` runs the refresh script once and retries; if that does not help the run ends `deferred` with `gh.auth` (see `docs/OUTCOME-CODES.md`), and `FORGE_REFRESH_TOKEN_SCRIPT` overrides the script it runs. `scripts/wait-ci-green.sh` retries a 401 a few times, then exits 2 with an auth message.
+
 ## GitHub App Install
 
 During `npx forgedock`, the installer prompts you to install the ForgeDock GitHub App (`rapiercraft-forgedock`) on your account or org.

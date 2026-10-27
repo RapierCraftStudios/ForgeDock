@@ -86,6 +86,7 @@ import {
   CYAN,
 } from "./tui.mjs";
 import { buildMinimalForgeYaml } from "./init-detect.mjs";
+import { botTokenStatus } from "./bot-token-status.mjs";
 import {
   parseNameStatusDiff,
   classifyCommandChanges,
@@ -3243,14 +3244,20 @@ async function doctor(fix = false) {
   }
 
   // ── Check 12: GitHub App / bot token status ─────────────────────────────────
-  // Informational only — never a hard failure. Installing the ForgeDock GitHub
+  // Informational without a refresh stamp (#4662: with one, a stale or expiring token fails). Installing the ForgeDock GitHub
   // App registers it against the account/org but does not, by itself, mint a
   // bot token: that requires the app's private key, which only the app owner
   // holds. Pipeline gh calls always use whatever `gh auth` context is active
   // locally (personal token unless the operator manually configured a bot
   // token) — this check exists so that state is surfaced instead of silent.
   // See docs/CONFIG.md "GitHub App Install" and forge#1890.
-  {
+  const botTok = botTokenStatus(); // #4662: lifetime from the refresh stamp; no stamp means no refresher is installed
+  if (botTok.configured) {
+    const min = (ms) => Math.round(ms / 60000);
+    const detail = botTok.remainingMs != null ? `${min(botTok.remainingMs)} min left, refreshed ${min(botTok.ageMs)} min ago (${botTok.refreshedAt})` : botTok.reason;
+    if (botTok.ok) pass("GitHub App / bot token", detail);
+    else fail(`GitHub App / bot token: ${botTok.reason} (${detail})`, "run scripts/refresh-bot-token.sh and install the timer: docs/CONFIG.md \"Bot token refresh\"");
+  } else {
     warn(
       "GitHub App / bot token",
       "pipeline commands use your active `gh auth` (personal token, unless you've manually configured a bot token). Installing the GitHub App alone does not create one — see docs/CONFIG.md \"GitHub App Install\".",

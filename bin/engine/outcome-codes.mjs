@@ -38,6 +38,7 @@ export const OUTCOME_CODES = Object.freeze({
   RATE_LIMITED: "rate_limited",
   HOST_BUSY: "host.busy",
   GH_UNAVAILABLE: "gh.unavailable", // forge#4157: `gh` unreachable after retries during the --repo identity check; run deferred, nothing posted
+  GH_AUTH: "gh.auth", // forge#4662: gh answered HTTP 401 and one token refresh did not fix it; run deferred, a rerun resumes
   MERGE_TRANSIENT: "merge.transient",
   PUSH_TRANSIENT: "push.transient",
   CLI_IDLE: "cli.idle",

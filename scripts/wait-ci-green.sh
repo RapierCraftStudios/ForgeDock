@@ -71,11 +71,13 @@ jitter() { awk -v s="$1" -v p="$JITTER_PCT" -v r="$RANDOM" 'BEGIN{ v=s*(1-p/100+
 # classify_gh <text> -> prints one class, or nothing when the text is unrecognised:
 #   limited    real rate-limit evidence (x-ratelimit-remaining: 0, HTTP 429, "API rate limit exceeded" or GraphQL "API rate limit already exceeded", secondary rate limit,
 #              abuse detection, too many requests): a wait, bounded by the whole window
-#   auth       a bare 401/403 (bad credentials, missing scope): permanent, never waited on
+#   unauth     a bare 401 (expired token, forge#4662): the refresh timer may fix it, so a small bounded retry, then an explicit auth error
+#   auth       a bare 403 (missing scope): permanent, never waited on
 #   transient  5xx / gateway / network failures: a small bounded retry (FORGE_CI_TRANSIENT_RETRIES), never the long wait
 classify_gh() {
   if printf '%s' "$1" | grep -Eqi 'api rate limit (already )?exceeded|secondary (rate )?limit|abuse detection|x-ratelimit-remaining: *0|HTTP 429|status 429|too many requests'; then echo limited
-  elif printf '%s' "$1" | grep -Eqi 'HTTP (401|403)|status (401|403)|bad credentials|requires authentication'; then echo auth
+  elif printf '%s' "$1" | grep -Eqi 'HTTP 401|status 401|bad credentials|requires authentication'; then echo unauth
+  elif printf '%s' "$1" | grep -Eqi 'HTTP 403|status 403'; then echo auth
   elif printf '%s' "$1" | grep -Eqi 'HTTP 5[0-9][0-9]|status 5[0-9][0-9]|bad gateway|service unavailable|gateway time-?out|timed? ?out|i/o timeout|connection (reset|refused)|could not resolve host|unexpected EOF|network is unreachable|TLS handshake'; then echo transient
   fi
 }
@@ -94,6 +96,10 @@ while :; do
   START_SHA=""; _hc="$(classify_gh "$(cat "$_herr" 2>/dev/null)")"
   case "$_hc" in
     auth) emit ERROR; echo "cannot read PR #$PR head in $REPO (HTTP 401/403 without rate-limit evidence)"; exit 2 ;;
+    unauth)
+      _hfail=$((_hfail + 1))
+      if [ "$_hfail" -gt 2 ]; then emit ERROR; echo "cannot read PR #$PR head in $REPO: HTTP 401 (bot token expired or revoked?) ${_hfail} times in a row; run scripts/refresh-bot-token.sh"; exit 2; fi
+      sleep "$(jitter "$INTERVAL")" ;;
     limited)
       _hlim=$((_hlim + 1))
       if [ $(( $(date +%s) - _hstart )) -ge "$TIMEOUT" ]; then emit RATE_LIMITED; echo "PR #$PR: GitHub rate-limited for the whole ${TIMEOUT}s window reading the PR head; retry later"; exit 4; fi
@@ -117,8 +123,13 @@ while :; do
       NC_OUT="$(gh pr checks "$PR" -R "$REPO" 2>&1 || true)"
       if printf '%s' "$NC_OUT" | grep -qi 'no checks reported'; then JSON='[]'
       elif GH_CLASS="$(classify_gh "$NC_OUT")"; [ "$GH_CLASS" = auth ]; then
-        # A bare 401/403 is an auth fault that never clears: fail fast instead of waiting out the window (forge#4037).
+        # A bare 403 is an auth fault that never clears: fail fast instead of waiting out the window (forge#4037).
         emit ERROR; echo "gh pr checks refused (HTTP 401/403 without rate-limit evidence); fix the token or its scopes"; exit 2
+      elif [ "$GH_CLASS" = unauth ]; then
+        # forge#4662: an expired token is unknown state, not "no checks": back off, then fail with an explicit auth message.
+        transient=$((transient + 1))
+        if [ "$transient" -gt "$TRANSIENT_MAX" ]; then emit ERROR; echo "gh pr checks refused (HTTP 401) ${transient} times in a row; the bot token is expired or revoked, run scripts/refresh-bot-token.sh"; exit 2; fi
+        sleep "$(jitter "$INTERVAL")"; continue
       elif [ "$GH_CLASS" = transient ]; then
         # Network timeout / 5xx: a small bounded retry, never the long rate-limit wait.
         transient=$((transient + 1))
