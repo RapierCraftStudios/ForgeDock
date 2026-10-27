@@ -37,3 +37,11 @@ decisions (bin/lean) is not a member of the lists in checks, conformance.e2e, co
 
 ## Export collision fix
 Renamed decisions.mjs readIndex/writeIndex to readDecisionIndex/writeDecisionIndex (guards.mjs already exports readIndex/writeIndex); references in lean.mjs, engine-cli.mjs and decisions.test.mjs updated. V1/V2 pass (618 tests).
+
+### Verification
+- V1 `node --test bin/lean/decisions.test.mjs bin/lean/conformance.test.mjs`: exit 0 (105 pass). New tests fail without the fix (the module and `decision` kind do not exist).
+- V2 `node --test bin/lean/lean.test.mjs bin/lean/conformance.e2e.test.mjs`: exit 0 (513 pass), after merging staging (guards #4694 rows applied first, decision rows share the 5-row cap).
+- `forgedock check`: PASS.
+
+### Notes
+No env vars added except the optional `FORGEDOCK_DECISIONS_DIR` for the index location. No prompt change.
