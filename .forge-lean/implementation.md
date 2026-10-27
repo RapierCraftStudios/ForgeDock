@@ -1,32 +1,31 @@
 ### Approach
-New pure report core `compoundingReport` plus a gatherer (guards via `collectGuards`, reopen events via one paginated `gh api`, git probes), exposed as `forgedock stats --compounding`. No LLM, no lane-path work.
+At contract freeze the engine reads the local guards index once and appends up to 5 deterministic `H<n>` preserve rows for guards covering the deliverable paths. The reviewer's existing preserve skeleton picks them up unchanged.
 
 ### Changes
-- bin/stats/compounding.mjs: reintroduction (reopen after lane close, or blame of a later guarded fix's old-side lines within 90 days), reopen-after-close, guard/decision counts from gate events (n/a when never recorded), rolling/per-release/lane-age grouping, renderer, git and gh gatherers.
-- bin/stats/compounding.test.mjs: fixtures for each metric, n/a handling, buckets, git degradation, flag parsing.
-- bin/stats/index.mjs: `--compounding`, `--bucket`, `--window` allowed with it, HELP, buildReport dispatch, text rendering.
-- docs/STATS.md, devdocs/modules/lean.md: definitions, event names, baseline procedure.
+- bin/lean/guards.mjs: `historyPreserve` (pure selector: score 3 hunk file, 2 test file, 1 same directory; newest issue first; own issue skipped; cap 5), `withHistoryRows` (reads the index; returns the same contract when nothing applies; never throws), and `guardAfterMerge` now adds a posted guard to an existing local index.
+- bin/lean/lean.mjs: `historyRows` applied at the full-lane and light-lane freeze before the hash; H ids added to `structure.decisions` (Decision sources line); a trajectory decision note.
+- bin/lean/guards.test.mjs, bin/lean/lean.test.mjs: regression tests.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/stats/compounding.mjs (git, gh, telemetry only)
-- R2 ✅ bin/stats/index.mjs (--compounding dispatch/render), compounding.mjs renderCompounding
-- R3 post-deploy (baseline procedure in docs/STATS.md)
-- R4 ✅ compounding.mjs blameLineage and reopen handling in compoundingReport
-- R5 ✅ compoundingReport reopen_after_close
-- R6 ✅ summarize guard counts
-- R7 ✅ summarize decisions
-- R8 ✅ bucketLabel / by_lane_age
-- R9 ✅ rolling + by_release
-- R10 ✅ no model calls
-- R11, R12 not-applicable per contract
+- R1 ✅ bin/lean/guards.mjs:182 (withHistoryRows), bin/lean/lean.mjs freeze sites
+- R2 ✅ guards.test.mjs "deterministic under input order, capped at 5"
+- R3 ✅ lean.mjs recordStructure decisions; lean.test.mjs #4694 test asserts `K1 doc, K2 precedent, H1 guard`
+- R4 ✅ withHistoryRows returns the same object with no index or no match; the test asserts identity
+- R5 ✅ not-applicable: conformance.mjs:713 already creates a row per preserve id
+- R6 deferred (#4695 not landed)
+- R7 ✅ no LLM or prompt change
+- R8 ✅ one file read, no git or network
+- R9 ✅ cap 5, one-line rows
+- R10 post-deploy
 
 ### Verification
-- V1 `node --test bin/stats/compounding.test.mjs bin/stats/stats.test.mjs bin/stats/pool.test.mjs bin/stats/efficiency.test.mjs bin/stats/release.test.mjs bin/lean/guards.test.mjs`: 125 pass, 0 fail. The new test cannot pass without the fix (the module does not exist).
-- `forgedock check`: PASS. scripts/check-devdocs-freshness.sh: OK. No formatter configured in the repo.
-- checks.mjs widened to the full suite, which the host rules forbid, so only V1 was run.
+- V1 `node --test bin/lean/guards.test.mjs`: pass (15)
+- V2 `node --test bin/lean/lean.test.mjs bin/lean/conformance.test.mjs`: pass (582)
+- The new lean.test.mjs test fails with lean.mjs reverted to base (fail 1).
+- `forgedock check`: PASS. Devdocs freshness: OK. `checks.mjs` widened to the full suite (842 referencing files); I ran the targeted validates instead, per the host rules. No formatter is configured in package.json.
 
 ### Notes
-Event names guard_run, guard_broken, supersedes_accepted, decision_superseded, decision_violation are the contract #4693/#4695 must emit. Reopen-event fetch failure reads as 0 reopens (sources.reopens shows the count). Blame matching uses guard merge_sha equal to the blamed commit, so true merge-commit merges are not matched.
+Only the existing local index is extended after a merge; none is created from a single guard. Recency is issue number. lean.mjs grew by 2 lines net.
 
-## Sibling-list follow-up
-`compounding` (bin/stats) matched the SANDBOX_PROVIDERS list test in bin/lean/execution.test.mjs:46 by name proximity only; it is a stats mode, not a sandbox provider, so it is recorded in result.json not_members.
+## Docs freshness fix
+Added the "Engine-authored history preserve rows (#4694)" entry to devdocs/modules/lean.md.

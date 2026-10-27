@@ -1,96 +1,16 @@
-{
- "status": "fixed",
- "summary": "forgedock stats --compounding: reintroduction, reopen-after-close, guard and decision counts by window, release and lane-age bucket",
- "requirements": [
-  {
-   "id": "R1",
-   "status": "implemented",
-   "evidence": "bin/stats/compounding.mjs:1",
-   "instrumented": false
-  },
-  {
-   "id": "R2",
-   "status": "implemented",
-   "evidence": "bin/stats/index.mjs (--compounding)"
-  },
-  {
-   "id": "R4",
-   "status": "implemented",
-   "evidence": "bin/stats/compounding.mjs blameLineage"
-  },
-  {
-   "id": "R5",
-   "status": "implemented",
-   "evidence": "bin/stats/compounding.mjs summarize"
-  },
-  {
-   "id": "R6",
-   "status": "implemented",
-   "evidence": "bin/stats/compounding.mjs summarize"
-  },
-  {
-   "id": "R7",
-   "status": "implemented",
-   "evidence": "bin/stats/compounding.mjs summarize"
-  },
-  {
-   "id": "R8",
-   "status": "implemented",
-   "evidence": "bin/stats/compounding.mjs bucketLabel"
-  },
-  {
-   "id": "R9",
-   "status": "implemented",
-   "evidence": "bin/stats/compounding.mjs compoundingReport"
-  },
-  {
-   "id": "R10",
-   "status": "implemented",
-   "evidence": "bin/stats/compounding.mjs (no model calls)"
-  }
- ],
- "validation": [
-  {
-   "id": "V1",
-   "command": "node --test bin/stats/compounding.test.mjs bin/stats/stats.test.mjs bin/stats/pool.test.mjs bin/stats/efficiency.test.mjs bin/stats/release.test.mjs bin/lean/guards.test.mjs",
-   "exit": 0
-  }
- ],
- "tests": [
-  {
-   "command": "node --test bin/stats/compounding.test.mjs",
-   "result": "pass",
-   "fails_without_fix": true
-  }
- ],
- "self_review": [
-  {
-   "question": "1",
-   "answer": "yes",
-   "evidence": "every deliver requirement mapped above; R3 stays post-deploy per contract"
-  },
-  {
-   "question": "2",
-   "answer": "yes",
-   "evidence": "V1 125 pass incl. stats.test.mjs; new flags are additive in bin/stats/index.mjs"
-  },
-  {
-   "question": "3",
-   "answer": "yes",
-   "evidence": "D1-D5 changed, guards.mjs untouched, V1 exit 0, forgedock check PASS"
-  },
-  {
-   "question": "4",
-   "answer": "yes",
-   "evidence": "git diff --stat: only the five deliverable paths plus the new test"
-  }
- ],
- "amendments": [],
- "not_members": [
-  {
-   "symbol": "compounding",
-   "test": "bin/lean/execution.test.mjs",
-   "why": "the list at line 46 is SANDBOX_PROVIDERS (execution providers such as pool); compounding is a forgedock stats mode in bin/stats, not a sandbox provider"
-  }
- ]
-}
+{"status":"fixed","summary":"Freeze appends up to 5 deterministic guard-derived H preserve rows from the local guards index; listed under Decision sources.","requirements":[
+{"id":"R1","status":"implemented","evidence":"bin/lean/guards.mjs:182"},
+{"id":"R2","status":"implemented","evidence":"bin/lean/guards.test.mjs:150"},
+{"id":"R3","status":"implemented","evidence":"bin/lean/lean.mjs:2445"},
+{"id":"R4","status":"implemented","evidence":"bin/lean/guards.mjs:182"},
+{"id":"R7","status":"implemented","evidence":"bin/lean/guards.mjs:160"},
+{"id":"R8","status":"implemented","evidence":"bin/lean/guards.mjs:182"},
+{"id":"R9","status":"implemented","evidence":"bin/lean/guards.mjs:160"}],
+"validation":[{"id":"V1","command":"node --test bin/lean/guards.test.mjs","exit":0},{"id":"V2","command":"node --test bin/lean/lean.test.mjs bin/lean/conformance.test.mjs","exit":0}],
+"tests":[{"command":"node --test --test-name-pattern=4694 bin/lean/lean.test.mjs","result":"pass","fails_without_fix":true}],
+"self_review":[
+{"question":"1","answer":"yes","evidence":"R1-R4,R7-R9 delivered; R6/R10 deferred in the frozen contract"},
+{"question":"2","answer":"yes","evidence":"lean + conformance tests pass (582), guards tests pass (15)"},
+{"question":"3","answer":"yes","evidence":"all four deliverables changed; V1 and V2 exit 0; no prompt or conformance change"},
+{"question":"4","answer":"yes","evidence":"git diff --stat touches only bin/lean/{guards,lean}.mjs and their tests"}],
+"amendments":[]}
