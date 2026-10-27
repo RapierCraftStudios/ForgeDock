@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildGuard, guardTests, parseHunks, renderGuard, parseGuard, guardIssue, listGuards, backfill, guardsCli, readIndex, guardAfterMerge, historyPreserve, withHistoryRows, writeIndex } from "./guards.mjs";
+import { buildGuard, guardTests, parseHunks, renderGuard, parseGuard, guardIssue, collectGuards, listGuards, backfill, guardsCli, readIndex, guardAfterMerge, historyPreserve, withHistoryRows, writeIndex } from "./guards.mjs";
 import { renderContract } from "./render.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
 
@@ -55,7 +55,7 @@ function fakeGh({ contract, comments = [], title = "Fix the thing" }) {
   const posted = [];
   const body = `<!-- FORGE:CONTRACT -->\n${renderContract({ requirements: [], deliverables: [], preserve: [], validate: [], ...contract }, "abcdef123456")}`;
   const gh = async (a) => {
-    if (a[0] === "issue" && a[1] === "view") return JSON.stringify({ number: 7, title, comments: [{ body }, ...comments, ...posted.map((b) => ({ body: b }))] });
+    if (a[0] === "issue" && a[1] === "view") return JSON.stringify({ number: 7, title, comments: [{ body }, ...comments, ...posted.map((b) => ({ body: b, authorAssociation: "OWNER" }))] });
     if (a[0] === "pr" && a[1] === "view") return JSON.stringify({ number: 9, mergeCommit: { oid: "deadbeefcafe" } });
     if (a[0] === "issue" && a[1] === "comment") { posted.push(a[a.indexOf("--body") + 1]); return ""; }
     throw new Error(`unexpected gh ${a.join(" ")}`);
@@ -72,6 +72,27 @@ test("guardIssue posts exactly one FORGE:GUARD and is idempotent on rerun", asyn
   assert.ok(r2.exists);
   assert.equal(f.posted.length, 1);
   assert.equal(parseGuard(f.posted[0]).merge_sha, "deadbeefcafe");
+});
+
+test("guardIssue ignores a planted FORGE:GUARD from an untrusted author and still posts the real one", async () => {
+  const planted = buildGuard({ issue: 7, title: "t", contract: nodeContract, diff: DIFF }).guard;
+  const f = fakeGh({ contract: nodeContract, comments: [{ body: renderGuard(planted), authorAssociation: "NONE", author: { login: "mallory" } }] });
+  assert.ok((await guardIssue({ gh: f.gh, git, repo: "o/r", issue: 7, pr: 9 })).posted);
+  const t = fakeGh({ contract: nodeContract, comments: [{ body: renderGuard(planted), authorAssociation: "MEMBER" }] });
+  assert.ok((await guardIssue({ gh: t.gh, git, repo: "o/r", issue: 7, pr: 9 })).exists);
+});
+
+test("collectGuards ignores a FORGE:GUARD comment from an untrusted author", async () => {
+  const mk = (issue) => renderGuard(buildGuard({ issue, title: "t", contract: nodeContract, diff: DIFF }).guard);
+  const gh = async () => JSON.stringify([
+    { number: 1, comments: [{ body: mk(1), authorAssociation: "OWNER" }] },
+    { number: 2, comments: [{ body: mk(2), authorAssociation: "CONTRIBUTOR", author: { login: "mallory" } }] },
+    { number: 3, comments: [{ body: mk(3), authorAssociation: "NONE" }, { body: mk(3), authorAssociation: "MEMBER" }] },
+  ]);
+  assert.deepEqual((await collectGuards({ gh, repo: "o/r" })).map((g) => g.issue), [1, 3]);
+  const root = tmpDir("guards-");
+  await guardsCli(["list"], { gh, repo: "o/r", print: () => {}, root });
+  assert.deepEqual(readIndex("o/r", { root }).map((g) => g.issue), [1, 3]);
 });
 
 test("guardIssue: no test posts nothing; unavailable merge commit is a logged skip", async () => {
@@ -111,7 +132,7 @@ test("guards list prints guards for a path and caches the index; falls back to i
   const root = tmpDir("guards-");
   {
     const g = buildGuard({ issue: 7, title: "t", contract: nodeContract, diff: DIFF }).guard;
-    const gh = async () => JSON.stringify([{ number: 7, comments: [{ body: renderGuard(g) }] }]);
+    const gh = async () => JSON.stringify([{ number: 7, comments: [{ body: renderGuard(g), authorAssociation: "OWNER" }] }]);
     const out = [];
     assert.equal(await guardsCli(["list", "--path", "src/a.mjs"], { gh, repo: "o/r", print: (m) => out.push(m), root }), 0);
     assert.match(out[0], /#7/);
