@@ -2152,7 +2152,7 @@ export async function triageFromCli(argv, deps = {}) {
  */
 /** `forgedock integration run` (#4667): one pass of the milestone integration runs (lean/integration.mjs). Resolves the exit code. */
 export async function integrationFromCli(argv, deps = {}) {
-  const { integrationFromCli: run } = await import("./lean/integration.mjs");
+  const { runIntegrationCli: run } = await import("./lean/integration.mjs");
   return run(argv, deps);
 }
 

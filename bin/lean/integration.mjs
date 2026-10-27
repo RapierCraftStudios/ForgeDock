@@ -52,14 +52,14 @@ export function parseIntegration(sec) {
 }
 
 /** forge.yaml `ci:` of the checkout through parseIntegration; null when absent or unreadable. */
-export function readIntegration(cwd = process.cwd()) {
+export function readIntegrationConfig(cwd = process.cwd()) {
   try { return parseIntegration(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.ci); } catch { return null; }
 }
 
 export const emptyState = () => ({ v: 1, lastRun: null, lastGreen: null, redStreak: 0, mergesSince: 0, mergedPrs: [], issue: null });
 
 /** The FORGE:INTEGRATION state in a milestone description (defaults filled), or null when there is no block. */
-export function parseState(description) {
+export function parseIntegrationState(description) {
   const m = STATE_RE.exec(String(description ?? ""));
   if (!m) return null;
   try { const s = JSON.parse(m[1]); return s && typeof s === "object" && !Array.isArray(s) ? { ...emptyState(), ...s } : null; } catch { return null; }
@@ -151,7 +151,7 @@ export async function runMilestone({ io, repo, ms, cfg, pattern, nowFn = () => D
   if (!b) return { title: ms.title, ran: false, detail: "milestone gives an empty branch slug" };
   const head = await branchHead(gh, repo, b.branch);
   if (!head) return { title: ms.title, ran: false, detail: `branch ${b.branch} not found` };
-  const before = parseState(ms.description) ?? emptyState();
+  const before = parseIntegrationState(ms.description) ?? emptyState();
   const due = isDue(before, cfg, nowFn());
   if (!force && !due.due) return { title: ms.title, ran: false, detail: due.reason, state: before };
   const v = await runCiVerify({ io, branch: b.branch, head, changedFiles: [cfg.project ?? "integration"], verify: { workflow: cfg.workflow, pathsInput: cfg.project ? cfg.projectInput : null, skipPaths: [] },
@@ -208,7 +208,7 @@ export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTE
     const ms = await readMilestone({ gh: io.gh, repo, title });
     if (!ms) return;
     const full = { ...ms, title };
-    const s = parseState(ms.description) ?? emptyState();
+    const s = parseIntegrationState(ms.description) ?? emptyState();
     const pr = result.pr ?? null;
     const next = { ...s, mergesSince: (s.mergesSince ?? 0) + 1, mergedPrs: pr != null && !s.mergedPrs.includes(pr) ? [...s.mergedPrs, pr].slice(-MAX_PRS) : s.mergedPrs };
     const desc = renderState(ms.description, next);
@@ -235,7 +235,7 @@ export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTE
       return n >= cfg.blockAdmissionAfter ? `${n} consecutive red integration runs on ${l}` : null;
     },
     async prime() {
-      for (const ms of await listOpenMilestones({ gh: io.gh, repo })) note(ms, parseState(ms.description));
+      for (const ms of await listOpenMilestones({ gh: io.gh, repo })) note(ms, parseIntegrationState(ms.description));
     },
     async settle() { await chain; while (pending.size) await Promise.allSettled([...pending]); },
   };
@@ -247,22 +247,22 @@ export function makeIntegration({ repo, io, cfg, pattern = DEFAULT_FEATURE_PATTE
  * `forgedock integration status [--repo owner/repo]`: the last green full-suite run of each active milestone (those with
  * a state block, or all when `ci.workflow` is set), for /pipeline-status.
  */
-export async function integrationFromCli(argv, deps = {}) {
+export async function runIntegrationCli(argv, deps = {}) {
   const val = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : null; };
   if (argv[0] === "status") {
     const repo = val("--repo") ?? deps.repo;
     if (!repo) throw new Error("integration needs the repo: pass --repo owner/repo");
     const io = deps.io ?? (await import("./effects.mjs")).makeLeanIo({ repo });
-    const on = deps.cfg !== undefined ? !!deps.cfg : !!readIntegration(deps.cwd ?? process.cwd());
+    const on = deps.cfg !== undefined ? !!deps.cfg : !!readIntegrationConfig(deps.cwd ?? process.cwd());
     for (const ms of await listOpenMilestones({ gh: io.gh, repo })) {
-      const s = parseState(ms.description);
+      const s = parseIntegrationState(ms.description);
       if (s || on) (deps.print ?? ((t) => console.log(t)))(`  integration: ${ms.title}: last green full-suite run ${s?.lastGreen?.at ?? "never"} (red streak ${s?.redStreak ?? 0})`);
     }
     return 0;
   }
   if (argv[0] !== "run") throw new Error("usage: forgedock integration run|status [--repo owner/repo] [--milestone TITLE] [--force]");
   const cwd = deps.cwd ?? process.cwd();
-  const cfg = deps.cfg !== undefined ? deps.cfg : readIntegration(cwd);
+  const cfg = deps.cfg !== undefined ? deps.cfg : readIntegrationConfig(cwd);
   const print = deps.print ?? ((t) => console.log(t));
   if (!cfg) { print("integration: no ci.workflow configured in forge.yaml; nothing to run"); return 0; }
   const repo = val("--repo") ?? deps.repo;

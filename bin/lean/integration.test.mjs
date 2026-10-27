@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseIntegration, parseState, renderState, isDue, failingSpecs, runMilestone, runIntegration, makeIntegration, integrationFromCli, emptyState } from "./integration.mjs";
+import { parseIntegration, parseIntegrationState, renderState, isDue, failingSpecs, runMilestone, runIntegration, makeIntegration, runIntegrationCli, emptyState } from "./integration.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 
 const SHA = "a".repeat(40), SHA2 = "b".repeat(40);
@@ -46,9 +46,9 @@ describe("config and state", () => {
   it("round-trips the state block and keeps the description text", () => {
     const d = renderState("Ship it.", { ...emptyState(), redStreak: 3 });
     assert.match(d, /^Ship it\./);
-    assert.equal(parseState(d).redStreak, 3);
-    assert.equal(parseState(renderState(d, { ...emptyState(), redStreak: 1 })).redStreak, 1);
-    assert.equal(parseState("none"), null);
+    assert.equal(parseIntegrationState(d).redStreak, 3);
+    assert.equal(parseIntegrationState(renderState(d, { ...emptyState(), redStreak: 1 })).redStreak, 1);
+    assert.equal(parseIntegrationState("none"), null);
   });
   it("is due when never run, aged, or after N merges", () => {
     assert.equal(isDue(null, CFG, NOW).due, true);
@@ -66,7 +66,7 @@ describe("runIntegration", () => {
     const res = await run(io, st);
     assert.equal(res.find((r) => r.title === "No Branch").ran, false);
     assert.equal(res.find((r) => r.title === "M One").result, "pass");
-    const s = parseState(st.description);
+    const s = parseIntegrationState(st.description);
     assert.equal(s.lastGreen.sha, SHA);
     assert.equal(s.redStreak, 0);
     assert.equal(st.created.length, 0);
@@ -85,7 +85,7 @@ describe("runIntegration", () => {
     assert.equal(st.created.length, 1, "no second issue");
     assert.equal(st.edited.length, 1);
     assert.match(st.edited[0].body, /2 consecutive red runs/);
-    assert.equal(parseState(st.description).redStreak, 2);
+    assert.equal(parseIntegrationState(st.description).redStreak, 2);
   });
   it("a green run after red closes the issue, records the range start and resets the streak", async () => {
     const { st, io } = fake({ conclusion: "failure" });
@@ -93,7 +93,7 @@ describe("runIntegration", () => {
     st.conclusion = "success"; st.head = SHA2;
     await run(io, st, { force: true });
     assert.deepEqual(st.closed, ["900"]);
-    const s = parseState(st.description);
+    const s = parseIntegrationState(st.description);
     assert.equal(s.redStreak, 0);
     assert.equal(s.lastGreen.sha, SHA2);
   });
@@ -116,7 +116,7 @@ describe("runIntegration", () => {
     let t = NOW;
     const r = await runMilestone({ io, repo: "o/r", ms: { number: 3, title: "M One", description: "" }, cfg: { ...CFG, maxMinutes: 1 }, pattern: "milestone/{slug}", nowFn: () => (t += 120000), sleep: async () => {} });
     assert.equal(r.result, "timeout");
-    assert.equal(parseState(st.description), null);
+    assert.equal(parseIntegrationState(st.description), null);
   });
 });
 
@@ -133,7 +133,7 @@ describe("makeIntegration seam", () => {
     for (const pr of [11, 12]) await seam.onMerged(1, {}, { milestone: "M One", pr });
     await seam.settle();
     assert.equal(seam.holds(1, { lane: "milestone/m-one" }), null, "green run released the hold");
-    assert.equal(parseState(st.description).redStreak, 0);
+    assert.equal(parseIntegrationState(st.description).redStreak, 0);
   });
   it("records merged PRs and starts a run only at every_merges", async () => {
     const { st, io } = fake({ conclusion: "failure" });
@@ -141,7 +141,7 @@ describe("makeIntegration seam", () => {
     await seam.onMerged(1, {}, { milestone: "M One", pr: 11 });
     await seam.settle();
     assert.equal(st.created.length, 0);
-    assert.deepEqual(parseState(st.description).mergedPrs, [11]);
+    assert.deepEqual(parseIntegrationState(st.description).mergedPrs, [11]);
     await seam.onMerged(2, {}, { milestone: "M One", pr: 12 });
     await seam.settle();
     assert.equal(st.created.length, 1);
@@ -158,16 +158,16 @@ describe("makeIntegration seam", () => {
   });
 });
 
-describe("integrationFromCli", () => {
+describe("runIntegrationCli", () => {
   it("does nothing without ci.workflow", async () => {
     const out = [];
-    assert.equal(await integrationFromCli(["run"], { cfg: null, print: (t) => out.push(t) }), 0);
+    assert.equal(await runIntegrationCli(["run"], { cfg: null, print: (t) => out.push(t) }), 0);
     assert.match(out[0], /nothing to run/);
   });
   it("prints a line per milestone and exits 1 on a red run", async () => {
     const { st, io } = fake({ conclusion: "failure" });
     const out = [];
-    const code = await integrationFromCli(["run", "--repo", "o/r"], { cfg: CFG, io, pattern: "milestone/{slug}", now: () => NOW, sleep: async () => {}, print: (t) => out.push(t) });
+    const code = await runIntegrationCli(["run", "--repo", "o/r"], { cfg: CFG, io, pattern: "milestone/{slug}", now: () => NOW, sleep: async () => {}, print: (t) => out.push(t) });
     assert.equal(code, 1);
     assert.ok(out.some((l) => /M One: fail/.test(l)));
     assert.equal(st.created.length, 1);
@@ -179,11 +179,11 @@ describe("integration status", () => {
     const { st, io } = fake();
     await run(io, st);
     const out = [];
-    assert.equal(await integrationFromCli(["status", "--repo", "o/r"], { io, cfg: CFG, print: (t) => out.push(t) }), 0);
+    assert.equal(await runIntegrationCli(["status", "--repo", "o/r"], { io, cfg: CFG, print: (t) => out.push(t) }), 0);
     assert.ok(out.some((l) => /M One: last green full-suite run 2026-10-27T10:00:00\.000Z \(red streak 0\)/.test(l)));
     assert.ok(out.some((l) => /No Branch: last green full-suite run never/.test(l)));
     const off = [];
-    await integrationFromCli(["status", "--repo", "o/r"], { io, cfg: null, print: (t) => off.push(t) });
+    await runIntegrationCli(["status", "--repo", "o/r"], { io, cfg: null, print: (t) => off.push(t) });
     assert.equal(off.length, 1, "without ci.workflow only milestones with a state block");
   });
 });
