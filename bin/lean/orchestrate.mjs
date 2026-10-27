@@ -78,7 +78,7 @@
  * recoverable (needs-human `ci.red` / `base.conflict` / `builder.block_untyped`, `contract.invalid` after a mid-run issue
  * edit, `ci-pending` whose PR `conflicting(issue, pr)` says conflicts, the non-human `budget-exceeded` turn overrun of #4505,
  * recovered at the next size budget) is not final while its persisted `recoveries` stay
- * under `maxAttempts`: it is requeued as a recovery lane (`ctx.recover = {code, attempt, final}`, `final` when attempt ==
+ * under its class budget (#4725: `maxAttempts`; mechanical/env codes `mechanicalMaxAttempts`, default 2, never below `maxAttempts`): it is requeued as a recovery lane (`ctx.recover = {code, attempt, final}`, `final` when attempt ==
  * `maxAttempts`) under the same admission as any lane, so its dependents stay queued. Only a final lane relabels needs-human
  * itself; a non-final attempt that ends needs-human/ci-pending/budget-exceeded without a successor is relabelled here, once (#4302),
  * as is a first-run budget-exceeded the batch does not recover (#4505: the lane never labels it). A recovery
@@ -101,7 +101,7 @@
  * the queue order except that decomposed sub-issues go first. A settled row carries `est_minutes` (estimated vs. actual).
  */
 import { parseDependsOn } from "../engine/phases.mjs";
-import { classifyNeedsHuman, recoveryCodeOf, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { classifyNeedsHuman, recoveryCodeOf, recoveryClassOf, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { detectGateDeadlock, formatGateDeadlock } from "./gatewatch.mjs";
 import { recoveryEvidence } from "./render.mjs";
 import { renderAlerts } from "../stats/render.mjs";
@@ -240,7 +240,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, getCancelled = null, getHeld = null, getGates = null, stopLane = null,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getGates = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
@@ -305,6 +305,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const remoteCpm = Number(remote?.costPerMinute) > 0 ? Number(remote.costPerMinute) : 0;
   let budgetStop = null, budgetHit = null; // this pass's refusal under on_budget stop; the last refusal reason
   const recoveryMax = Number.isInteger(recovery?.maxAttempts) && recovery.maxAttempts > 0 ? recovery.maxAttempts : 0;
+  // #4725: mechanical/env codes recover on their own budget (>= the conformance one); 0 maxAttempts still turns recovery off.
+  const mechMax = recoveryMax && Number.isInteger(recovery?.mechanicalMaxAttempts) && recovery.mechanicalMaxAttempts > 0 ? Math.max(recovery.mechanicalMaxAttempts, recoveryMax) : recoveryMax;
+  const maxFor = (cls) => (cls === "mechanical" ? mechMax : recoveryMax);
+  const classUsed = toMap(saved?.recoveryClasses); // `${issue}:${class}` -> recovery lanes launched in that class
   const recoveries = toMap(saved?.recoveries); // issue -> recovery lanes launched (#4267)
   const recovering = toMap(saved?.recovering); // issue -> {code, attempt, detail, outcome, ...} of the recovery lane queued or running
   const requeueApplied = new Set(saved?.requeueApplied ?? []); // #4550: `--requeue` entries already applied (batch `requeue` file)
@@ -322,7 +326,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
-      ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering) } : {}),
+      ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
       ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
       ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}),
       ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}) });
@@ -553,6 +557,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       for (const d of depList) {
         if (["needs-human", "budget-exceeded"].includes(results.get(d)?.outcome)) { parked = d; break; } // #4505: an unrecovered overrun parks too
         if (set.has(d) || typeof issueLabels !== "function") continue;
+        if (typeof issueState === "function") { // #4725: a closed (completed) dependency is satisfied: its stale needs-human label is not a blocker
+          let st = "";
+          try { st = String((await issueState(d)) ?? "").toUpperCase(); } catch { st = ""; }
+          if (st === "CLOSED") continue;
+        }
         let names = [];
         try { names = (await issueLabels(d)) ?? []; } catch { names = []; }
         if (Array.isArray(names) && names.includes("needs-human")) { parked = d; break; }
@@ -642,21 +651,23 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         try { isConflicting = (await conflicting(n, row.pr)) === true; } catch { isConflicting = false; }
       }
       const facts = { ...row, issueEdited: r?.issueEdited === true, conflicting: isConflicting };
-      const used = recoveries.get(n) ?? 0;
-      if (classifyNeedsHuman(facts) === "recoverable" && used < recoveryMax) {
+      if (prior) { const pk = `${n}:${recoveryClassOf({ code: prior.code })}`; classUsed.set(pk, Math.max(classUsed.get(pk) ?? 0, prior.attempt)); } // state saved before #4725 has no class counts
+      const cls = recoveryClassOf(facts), max = maxFor(cls), used = classUsed.get(`${n}:${cls}`) ?? 0;
+      if (classifyNeedsHuman(facts) === "recoverable" && used < max) {
         const code = recoveryCodeOf(facts), attempt = used + 1;
+        classUsed.set(`${n}:${cls}`, attempt);
         // #4315: the full lane detail is kept (never firstLine) for the relabel when the batch stops before this attempt
-        recoveries.set(n, attempt); recovering.set(n, { code, attempt, cost_usd: Number(row.cost_usd) || 0, minutes: Number(row.minutes) || 0,
+        recoveries.set(n, (recoveries.get(n) ?? 0) + 1); recovering.set(n, { code, attempt, max, cost_usd: Number(row.cost_usd) || 0, minutes: Number(row.minutes) || 0,
           detail: String(row.detail ?? ""), outcome: row.outcome, ...(row.code ? { result_code: row.code } : {}), prev_attempt: prior?.attempt ?? 0 });
         requeue(n, 0); done(); save();
-        decided({ issue: n, what: `recovery lane for ${code} (attempt ${attempt}/${recoveryMax}); dependents stay queued`, why: firstLine(row.detail) || code,
+        decided({ issue: n, what: `recovery lane for ${code} (attempt ${attempt}/${max}); dependents stay queued`, why: firstLine(row.detail) || code,
           alternative: "leave needs-human for the operator and skip the dependents" });
-        update({ ...row, outcome: "recovering", detail: `recovering (${code}), attempt ${attempt}/${recoveryMax}: ${firstLine(row.detail)}` });
+        update({ ...row, outcome: "recovering", detail: `recovering (${code}), attempt ${attempt}/${max}: ${firstLine(row.detail)}` });
         return;
       }
     }
     // #4302: a non-final recovery attempt left needs-human/ci-pending unlabelled for its successor; none is launched, so relabel once.
-    if (prior && prior.attempt < recoveryMax && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome) && typeof relabelNeedsHuman === "function") {
+    if (prior && prior.attempt < (prior.max ?? recoveryMax) && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome) && typeof relabelNeedsHuman === "function") {
       try { await relabelNeedsHuman({ issue: n, evidence: evidence() }); } catch { /* best effort */ }
     }
     // #4505: a first-run turn overrun is unlabelled by its lane; no recovery follows (off or cap used), so the runner labels it once.
@@ -717,7 +728,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pf?.parked) r = { terminalReason: pf.kind, cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
-          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= recoveryMax } } : {}), onStart: (info) => {
+          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= (recovering.get(n).max ?? recoveryMax) } } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
             if (cancelled) stop(n, rec); // #4376: launched while the cancel arrived
             if (reg && slotted.has(n) && info?.pid) reg.setLanePid(keyOf(n), info.pid);

@@ -261,9 +261,9 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), true);
     writeFileSync(join(pd, "stat"), "42 (no) de) Z 1 42 42 0 -1\n");
     assert.equal(isLaneAlive(42, "lane", { kill: () => true, procDir: proc }), false);
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 1 }, baseSync: { enabled: true, unionGlobs: [] } });
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 3, window_min: 30 }, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
     writeFileSync(join(root, "forge.yaml"), "orchestration:\n  breaker:\n    errors: 5\n    window_min: 10\n  max_deferrals: 2\n  global_parallel: 4\n");
-    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, globalParallel: 4, recovery: { maxAttempts: 1 }, baseSync: { enabled: true, unionGlobs: [] } });
+    assert.deepEqual(readOrchestration(root), { breaker: { errors: 5, window_min: 10 }, maxDeferrals: 2, globalParallel: 4, recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 }, baseSync: { enabled: true, unionGlobs: [] } });
   });
 
   it("run-issue --result-file writes the lane result, also when the run throws", async () => {
@@ -340,12 +340,12 @@ describe("#4318: the batch dispatcher's signal relabel and the needs-human relab
     it("an expired lease relabels: the label first, then the comment", async () => {
       const h = hook({ state: "OPEN", body: LIVE(500) });
       assert.equal(await h.run(), true);
-      assert.deepEqual(h.calls, ["view", "edit", "comment"]);
+      assert.deepEqual(h.calls, ["view", "list", "edit", "comment"]); // #4725: the ask registry lookup
     });
     it("a failed label add posts no comment and reports failed; a failed comment keeps the label", async () => {
       const a = hook({ state: "OPEN", body: "" }, { edit: true });
       assert.equal(await a.run(), "failed");
-      assert.deepEqual(a.calls, ["view", "edit"]);
+      assert.deepEqual(a.calls, ["view", "list", "edit"]);
       const b = hook({ state: "OPEN", body: "" }, { comment: true });
       assert.equal(await b.run(), true);
     });

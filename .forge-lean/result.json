@@ -1,1 +1,161 @@
-{"status":"fixed","summary":"FORGE:GUARD comments from untrusted authors are ignored by guardIssue, collectGuards and the index","requirements":[{"id":"R1","status":"implemented","evidence":"bin/lean/guards.mjs:98,129"},{"id":"R2","status":"implemented","evidence":"bin/lean/guards.test.mjs"},{"id":"R3","status":"implemented","evidence":"bin/lean/guards.mjs:98,129"}],"validation":[{"id":"V1","command":"node --test bin/lean/guards.test.mjs","exit":0},{"id":"V2","command":"node --test bin/lean/guardgate.test.mjs bin/lean/lean.test.mjs","exit":0}],"tests":[{"command":"node --test bin/lean/guards.test.mjs","result":"pass","fails_without_fix":true}],"self_review":[{"question":"1","answer":"yes","evidence":"guards.mjs:98,129 plus tests"},{"question":"2","answer":"yes","evidence":"guardgate and lean tests pass (516)"},{"question":"3","answer":"yes","evidence":"D1, D2 done; V1 and V2 exit 0"},{"question":"4","answer":"yes","evidence":"git diff touches only guards.mjs and guards.test.mjs"}],"amendments":[]}
+{
+ "status": "fixed",
+ "summary": "needs-human premises (incl. production pkg-version resolver), ask registry, closed edges, mechanical recovery budget",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/lean/needs-human-premise.mjs:100"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/orchestrate.mjs:561"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/lean/needs-human-premise.mjs:84"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "bin/lean/orchestrate.mjs:648"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "bin/lean/needs-human-premise.mjs:registryPkgVersion; bin/engine-cli.mjs:1925,1954; bin/lean/lean.mjs:488"
+  },
+  {
+   "id": "R7",
+   "status": "implemented",
+   "evidence": "bin/lean/lean.mjs:495"
+  },
+  {
+   "id": "R8",
+   "status": "partial",
+   "evidence": "bin/lean/needs-human-premise.mjs:84"
+  },
+  {
+   "id": "R10",
+   "status": "implemented",
+   "evidence": "bin/engine/outcome-codes.mjs:229"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/needs-human-premise.test.mjs bin/lean/recovery.test.mjs bin/lean/parked-sweep.test.mjs bin/tests/engine-outcome-codes.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/batch.test.mjs bin/lean/gatewatch.test.mjs bin/lean/decompose.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V3",
+   "command": "node --check bin/lean/lean.mjs && node --check bin/engine-cli.mjs && node --check bin/lean/needs-human-premise.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/lean/needs-human-premise.test.mjs bin/lean/recovery.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "no",
+   "evidence": "R8's second half (closing issues whose only content is an existing ask) is not implemented; deferred by amendment. R4/R9 deferred in contract."
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "batch.test.mjs 55 pass after updating two call-order and one config-shape expectations; recovery.test.mjs resume test passes via state seeding (orchestrate.mjs:645)"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "every deliverable changed; preserve P1-P4 untouched (maxAttempts 0 still disables, builder.blocked stays human, #4656 labels unchanged for predicate-less asks, lean.mjs dependency resolution only gains a closedDeps note); V1-V3 exit 0"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "git diff --stat origin/staging...HEAD lists only deliverable paths and tests"
+  }
+ ],
+ "amendments": [
+  {
+   "kind": "defer",
+   "requirement": "R8",
+   "why": "Owner-ask linking is delivered (registerAsk); automatically closing issues whose only content is an existing ask needs a content-equivalence judgement and is separate work."
+  }
+ ],
+ "not_members": [
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/lean/batch.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (stub lane, worktree, shadow rows, source names, a step table, a mock gh)"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/lean/checks.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (stub lane, worktree, shadow rows, source names, a step table, a mock gh)"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/lean/conformance.e2e.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (stub lane, worktree, shadow rows, source names, a step table, a mock gh)"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/lean/conformance.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (stub lane, worktree, shadow rows, source names, a step table, a mock gh)"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/lean/context.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (stub lane, worktree, shadow rows, source names, a step table, a mock gh)"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/lean/execution.e2e.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (stub lane, worktree, shadow rows, source names, a step table, a mock gh)"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/lean/execution.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (stub lane, worktree, shadow rows, source names, a step table, a mock gh)"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/lean/fixround.test.mjs",
+   "why": "the list is MECHANICAL_KINDS (fix-round kinds), not lean modules"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/lean/heavy.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (stub lane, worktree, shadow rows, source names, a step table, a mock gh)"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/lean/lean.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (stub lane, worktree, shadow rows, source names, a step table, a mock gh)"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/engine/telemetry-seam.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (a needs-human reason string / drift fixtures)"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/lean/drift.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (a needs-human reason string / drift fixtures)"
+  }
+ ]
+}
