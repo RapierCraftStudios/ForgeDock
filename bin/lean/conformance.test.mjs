@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -725,5 +725,37 @@ describe("post-deploy check ids (#4626)", () => {
   it("followupItems names the check in a post-deploy item", () => {
     const [i] = followupItems([{ id: "R1", quote: Q1, disposition: "post-deploy", why: "w", check: "login-smoke" }]);
     assert.match(i.why, /^post-deploy: \[check:login-smoke\] w$/);
+  });
+  it("#4724 a deferred row needs exactly one valid bucket; owner actions are never post-deploy; dates are absolute", () => {
+    const contract = (r) => ({ requirements: [{ id: "R1", quote: Q1, why: "w", ...r }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] });
+    const probs = (r) => validateContract(contract(r), Q1).problems.filter((x) => /^R1: .*(bucket|never post-deploy|owner)/.test(x));
+    assert.deepEqual(BUCKETS, ["post-deploy", "verify-now", "date", "owner", "new-issue"]);
+    assert.equal(probs({ disposition: "defer" }).length, 1); // missing bucket
+    for (const bucket of ["post-deploy", "verify-now", "new-issue", "date:2026-12-01", "owner:rotate the key"]) assert.deepEqual(probs({ disposition: "defer", bucket }), [], bucket);
+    for (const bucket of ["date:5 weeks after deploy", "date:2026-02-30", "date", "owner:", "owner", "later", "post-deploy:x"]) assert.equal(probs({ disposition: "defer", bucket }).length, 1, bucket);
+    assert.match(probs({ disposition: "post-deploy", check: "a-smoke", bucket: "owner:spend" })[0], /never post-deploy/);
+    assert.equal(probs({ disposition: "deliver", bucket: "post-deploy" }).length, 1);
+    assert.deepEqual(probs({ disposition: "deliver" }), []);
+    assert.deepEqual(bucketProblems({ disposition: "defer", bucket: "owner:x", class: "post-deploy" }).length, 1);
+    assert.equal(bucketKind("date:2026-12-01"), "date"); assert.equal(bucketKind("nope"), null);
+  });
+  it("#4724 the bucket decides the follow-up class and tags the item for the script and the gate", () => {
+    const one = (r) => followupItems([{ id: "R1", quote: Q1, disposition: "defer", why: "w", ...r }], { now: Date.UTC(2026, 9, 27) })[0];
+    assert.equal(followupClass({ disposition: "defer", bucket: "owner:spend" }), "external");
+    assert.equal(followupClass({ disposition: "defer", bucket: "owner:spend", class: "ops" }), "ops");
+    assert.equal(followupClass({ disposition: "defer", bucket: "owner:x", class: "post-deploy" }), "external");
+    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "post-deploy" }), "engineering");
+    for (const bucket of ["post-deploy", "verify-now", "date:2026-12-01"]) assert.equal(followupClass({ disposition: "defer", bucket }), "post-deploy");
+    assert.equal(one({ bucket: "owner:rotate the key" }).why, "owner: rotate the key. [bucket:owner] w");
+    assert.equal(one({ bucket: "verify-now" }).why, "post-deploy: [bucket:verify-now] w");
+    assert.equal(one({ bucket: "date:2026-12-01" }).why, "post-deploy: [bucket:date] due:2026-12-01 from:2026-10-27 w");
+    assert.equal(one({ bucket: "new-issue" }).why, "defer: [bucket:new-issue] w");
+    assert.equal(one({}).why, "defer: w"); // an unbucketed (older) row is unchanged
+  });
+  it("#4724 bucketTally counts deferred items per bucket kind; an amendment may carry the bucket", () => {
+    assert.deepEqual(bucketTally([{ bucket: "date:2026-12-01" }, { bucket: "date:2026-12-02" }, { bucket: "owner:x" }, {}]), { date: 2, owner: 1, none: 1 });
+    const c = { requirements: [{ id: "R1", quote: Q1, disposition: "deliver" }], deliverables: [], preserve: [], validate: [] };
+    const r = applyAmendments(c, [{ kind: "defer", requirement: "R1", why: "w", bucket: "verify-now" }]);
+    assert.equal(r.contract.requirements[0].bucket, "verify-now"); assert.equal(r.toTrack.length, 1);
   });
 });

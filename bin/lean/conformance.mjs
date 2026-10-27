@@ -234,6 +234,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     if (TRACKED.includes(r?.disposition) && blank(r?.why)) problems.push(`${id}: ${r.disposition} needs a why`);
     if (r?.disposition === "post-deploy" && !CHECK_ID_RE.test(String(r?.check ?? ""))) problems.push(`${id}: post-deploy needs a check id (\`check\`, e.g. "login-smoke") naming an entry of .forge/post-deploy-checks.json on the default branch`);
     if (r?.disposition === "not-applicable" && blank(r?.evidence)) problems.push(`${id}: not-applicable needs file:line evidence`);
+    for (const m of bucketProblems(r)) problems.push(`${id}: ${m}`);
     if (r?.class != null && !FOLLOWUP_CLASSES.includes(r.class)) problems.push(`${id}: class must be one of ${FOLLOWUP_CLASSES.join("|")}`);
     if (r?.verify != null && !VERIFY_MODES.includes(r.verify)) problems.push(`${id}: verify must be one of ${VERIFY_MODES.join("|")}`);
     if (isOutOfBand(r) && r?.disposition !== "deliver") problems.push(`${id}: verify out_of_band applies only to a deliver requirement`);
@@ -364,7 +365,8 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       const r = c.requirements.find((x) => x.id === a.requirement);
       if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
       if (!TRACKED.includes(r.disposition)) {
-        if (a.kind === "post-deploy" && !CHECK_ID_RE.test(String(a.check ?? r.check ?? ""))) { problems.push(`amendment post-deploy ${a.requirement} needs a check id (check)`); continue; }
+        if (a.bucket != null) r.bucket = a.bucket; // #4724
+      if (a.kind === "post-deploy" && !CHECK_ID_RE.test(String(a.check ?? r.check ?? ""))) { problems.push(`amendment post-deploy ${a.requirement} needs a check id (check)`); continue; }
         r.disposition = a.kind; r.why = a.why; r.amended = true; toTrack.push(r);
         if (a.kind === "post-deploy") r.check = a.check ?? r.check; // #4626
       }
@@ -785,16 +787,54 @@ export function formatShadowSummary(rows) {
   return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}`;
 }
 
-/** #4664: follow-up classes, one issue each per parent (scripts/file-deferred-followups.sh). */
+/** #4664: follow-up classes, one issue each per parent (scripts/file-deferred-followups.sh); post-deploy is one rollup per release lane (#4724). */
 export const FOLLOWUP_CLASSES = ["engineering", "post-deploy", "external", "ops"];
-/** The follow-up class of a requirement: its optional `class`, else post-deploy for a post-deploy disposition, else engineering. */
-export const followupClass = (r) => (FOLLOWUP_CLASSES.includes(r?.class) ? r.class : r?.disposition === "post-deploy" ? "post-deploy" : "engineering");
+/** #4724: the bucket every deferred row gets at contract time. `date:<YYYY-MM-DD>` and `owner:<action>` carry a value. */
+export const BUCKETS = Object.freeze(["post-deploy", "verify-now", "date", "owner", "new-issue"]);
+const DATE_BUCKET_RE = /^date:(\d{4})-(\d{2})-(\d{2})$/;
+/** The kind of a bucket (`date:2026-12-01` -> `date`), or null when absent or unknown. */
+export const bucketKind = (b) => { const k = String(b ?? "").split(":")[0]; return BUCKETS.includes(k) ? k : null; };
+/** #4724: problems with a deferred row's bucket (a defer or post-deploy row needs exactly one; owner actions are never post-deploy). */
+export function bucketProblems(r) {
+  const b = r?.bucket;
+  if (!TRACKED.includes(r?.disposition)) return b == null ? [] : ["bucket applies only to a defer or post-deploy requirement"];
+  if (b == null || b === "") return [`${r.disposition} needs a bucket (${BUCKETS.join("|")}; \`date:<YYYY-MM-DD>\`, \`owner:<action>\`)`];
+  const k = bucketKind(b), out = [];
+  if (!k || (k !== "date" && k !== "owner" && b !== k)) out.push(`bucket '${b}' must be post-deploy, verify-now, date:<YYYY-MM-DD>, owner:<action> or new-issue`);
+  else if (k === "date") {
+    const m = DATE_BUCKET_RE.exec(String(b)), d = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+    if (!m || d.getUTCFullYear() !== +m[1] || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3]) out.push(`bucket '${b}' must be an absolute date:<YYYY-MM-DD>, not a relative wait`);
+  } else if (k === "owner" && blank(String(b).slice(6))) out.push("bucket owner needs the action: owner:<action>");
+  if (r.disposition === "post-deploy" && (k === "owner" || k === "new-issue")) out.push(`a ${k} item is never post-deploy: use disposition defer`);
+  if (k === "owner" && r.class != null && r.class !== "external" && r.class !== "ops") out.push("an owner bucket belongs in class external or ops, never post-deploy");
+  return out;
+}
+/** The follow-up class of a requirement: owner -> external, new-issue -> engineering, other buckets post-deploy; else its `class`, else post-deploy for that disposition, else engineering. */
+export function followupClass(r) {
+  const k = bucketKind(r?.bucket);
+  if (k === "owner") return r?.class === "ops" ? "ops" : "external";
+  if (k === "new-issue") return r?.class && r.class !== "post-deploy" && FOLLOWUP_CLASSES.includes(r.class) ? r.class : "engineering";
+  if (k) return "post-deploy";
+  return FOLLOWUP_CLASSES.includes(r?.class) ? r.class : r?.disposition === "post-deploy" ? "post-deploy" : "engineering";
+}
+/** #4724: deferred items per bucket kind (`none` = no bucket), for the batch telemetry line. */
+export const bucketTally = (reqs) => (reqs ?? []).reduce((t, r) => { const k = bucketKind(r?.bucket) ?? "none"; t[k] = (t[k] ?? 0) + 1; return t; }, {});
 
-/** One line per requirement for the follow-up script: a stable key (id + quote), a why and a class. Tabs and newlines removed. */
-export function followupItems(reqs) {
+/**
+ * One line per requirement for the follow-up script: a stable key (id + quote), a why and a class. Tabs and newlines removed.
+ * #4724: a bucketed row's why carries `[bucket:<kind>]` (the script counts and routes on it) and a date bucket's `due:<date>`
+ * plus `from:<date>` (the contract-time anchor, `now` ms) that the gate re-anchors when the parent ships later.
+ */
+export function followupItems(reqs, { now = Date.now() } = {}) {
   const flat = (s) => String(s ?? "").replace(/[\t\r\n`]+/g, " ").replace(/\s+/g, " ").trim();
   const check = (r) => (r.disposition === "post-deploy" && r.check ? `[check:${flat(r.check)}] ` : ""); // #4626: the follow-up item names its check
-  return reqs.map((r) => ({ id: r.id, class: followupClass(r), key: flat(`${r.id}: ${r.quote}`).slice(0, 240).trim(), why: flat(`${r.disposition}: ${check(r)}${r.why ?? ""}`).slice(0, 400).trim() }));
+  return reqs.map((r) => {
+    const k = bucketKind(r.bucket);
+    const tag = k ? `[bucket:${k}] ` : "";
+    const due = k === "date" ? `due:${String(r.bucket).slice(5)} from:${new Date(now).toISOString().slice(0, 10)} ` : "";
+    const head = k === "owner" ? `owner: ${flat(String(r.bucket).slice(6))}. ` : k && k !== "new-issue" ? "post-deploy: " : `${r.disposition}: `;
+    return { id: r.id, class: followupClass(r), key: flat(`${r.id}: ${r.quote}`).slice(0, 240).trim(), why: flat(`${head}${tag}${check(r)}${due}${r.why ?? ""}`).slice(0, 400).trim() };
+  });
 }
 
 /** #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}, matched on trimmed keys (the script trims what it echoes); unmatched items omitted. */

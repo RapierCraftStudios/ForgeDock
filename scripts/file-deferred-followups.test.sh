@@ -203,7 +203,7 @@ check "dry-run: no comment/reopen/close/edit" "! grep -qE '^issue (comment|reope
 reset
 printf 'x\n' > "$ISSUE_BODY"
 echo '{"items":[{"number":77,"author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"
-printf '{"number":77,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->\\n<!-- FORGE:DEFERRED_CLASS: post-deploy -->"}\n' > "$T/issue.77.json"
+printf '{"number":77,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:POSTDEPLOY_ROLLUP: default -->\\n<!-- FORGE:DEFERRED_FROM: #10 -->\\n### #10\\n<!-- FORGE:DEFERRED_CLASS: post-deploy -->"}\n' > "$T/issue.77.json"
 printf -- '-\tpost-deploy: [check:login-smoke] after a day\t\t\tR3: soak\n' > "$T/check.tsv"
 bash "$S" --parent 10 --repo o/r --items "$T/check.tsv" >/dev/null 2>&1
 check "check token kept in the checklist line" "grep -q 'post-deploy: \[check:login-smoke\] after a day' '$ISSUE_BODY.edited'"
@@ -269,7 +269,42 @@ check "created body: Affected Files lists only paths, checklist keeps the collap
 check "created body: DEFERRED_FROM and DEFERRED_CLASS markers" "grep -q 'FORGE:DEFERRED_FROM: #10 -->' '$T/created.901.body' && grep -q 'FORGE:DEFERRED_CLASS: engineering' '$T/created.901.body'"
 reset; printf -- '-\tpost-deploy: [check:login-smoke] soon\t\t\tR3: soak\n' > "$T/pd.tsv"
 bash "$S" --parent 10 --repo o/r --items "$T/pd.tsv" >/dev/null 2>&1
-check "post-deploy issue: only requirement-level rows -> no path, [check:] kept" "grep -q 'None (requirement-level' '$T/created.901.body' && grep -q 'post-deploy: \[check:login-smoke\] soon' '$T/created.901.body' && grep '^issue comment 10' '$GH_LOG' | grep -q 'class=post-deploy'"
+check "post-deploy rollup: created with the lane marker, [check:] kept, section for the parent" "grep -q 'FORGE:POSTDEPLOY_ROLLUP: default' '$T/created.901.body' && grep -q 'post-deploy: \[check:login-smoke\] soon' '$T/created.901.body' && grep -q '^### #10\$' '$T/created.901.body'"
+
+# 23. #4724: N lanes -> ONE rollup; sections per parent; duplicates stored once; owner items never join it
+reset
+printf -- '-\tpost-deploy: [bucket:post-deploy] [check:a-smoke] first\t\t\tR1: the login page renders\n-\towner: [bucket:owner] rotate the key. why\t\t\tR2: rotate the credential\n' > "$T/l1.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/l1.tsv"); RC=$?
+check "rollup: lane 1 creates one external follow-up (#901) and one rollup (#902)" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 2 ] && grep -q 'FORGE:POSTDEPLOY_ROLLUP: default' '$T/created.902.body' && grep -q 'FORGE:DEFERRED_CLASS: external' '$T/created.901.body'"
+check "rollup: the owner item is not in the rollup" "! grep -q 'rotate the credential' '$T/created.902.body' && grep -q 'rotate the credential' '$T/created.901.body'"
+check "rollup: telemetry has per-bucket counts" "printf '%s' \"\$OUT\" | grep -q 'buckets=owner:1,post-deploy:1'"
+cp "$T/created.902.body" "$ISSUE_BODY"; : > "$GH_LOG"
+echo '{"items":[{"number":902}]}' > "$SEARCH_JSON"
+printf '{"number":902,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:POSTDEPLOY_ROLLUP: default -->"}\n' > "$T/issue.902.json"
+printf -- '-\tpost-deploy: [bucket:post-deploy] [check:a-smoke] again\t\t\tR7: The Login page renders!\n-\tpost-deploy: [bucket:date] due:2026-12-01 from:2026-10-27 later\t\t\tR8: soak for a week\n' > "$T/l2.tsv"
+OUT=$(bash "$S" --parent 11 --repo o/r --items "$T/l2.tsv"); RC=$?
+check "rollup: lane 2 appends to #902, creates nothing" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG' && grep -q '^issue edit 902' '$GH_LOG'"
+check "rollup: own section for #11, soak item added" "grep -q '^### #11\$' '$ISSUE_BODY.edited' && grep -q 'R8: soak for a week' '$ISSUE_BODY.edited' && grep -q 'FORGE:DEFERRED_FROM: #11' '$ISSUE_BODY.edited'"
+check "rollup: duplicate text from another lane stored once" "[ \$(grep -ci 'login page' '$ISSUE_BODY.edited') -eq 1 ] && printf '%s\n' \"\$OUT\" | grep -q '^R7: The Login page renders!.902'"
+# a chain: parent 20 is itself a follow-up of #10 -> the items go under the root #10, no new issue
+reset
+cp "$T/created.902.body" "$ISSUE_BODY" 2>/dev/null || true
+echo '{"items":[{"number":901}]}' > "$SEARCH_JSON"
+printf '{"number":901,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:POSTDEPLOY_ROLLUP: default -->"}\n' > "$T/issue.901.json"
+printf '{"number":20,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}\n' > "$T/issue.20.json"
+printf -- '-\tpost-deploy: [bucket:post-deploy] [check:b-smoke] chain\t\t\tR9: a chained check\n' > "$T/l3.tsv"
+bash "$S" --parent 20 --repo o/r --items "$T/l3.tsv" >/dev/null 2>&1
+check "rollup: a follow-up of a follow-up appends under its root parent, no new issue" "! grep -q '^issue create' '$GH_LOG' && grep -q 'a chained check' '$ISSUE_BODY.edited' && ! grep -q '^### #20' '$ISSUE_BODY.edited'"
+# verify-now: its own per-parent follow-up, never the rollup
+reset
+printf -- '-\tpost-deploy: [bucket:verify-now] on default already\t\t\tR1: check it now\n' > "$T/vn.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/vn.tsv")
+check "verify-now: separate per-parent issue, class verify-now, no rollup marker" "grep -q 'FORGE:DEFERRED_CLASS: verify-now' '$T/created.901.body' && ! grep -q POSTDEPLOY_ROLLUP '$T/created.901.body' && printf '%s' \"\$OUT\" | grep -q 'buckets=verify-now:1'"
+# an owner bucket on a post-deploy class row is rerouted to external
+reset
+printf -- 'x/y.sh\towner: [bucket:owner] spend\t\tpost-deploy\n' > "$T/ow.tsv"
+bash "$S" --parent 10 --repo o/r --items "$T/ow.tsv" >/dev/null 2>&1
+check "owner bucket never lands in post-deploy, even when the row says so" "grep -q 'FORGE:DEFERRED_CLASS: external' '$T/created.901.body' && ! grep -q POSTDEPLOY_ROLLUP '$T/created.901.body'"
 
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
