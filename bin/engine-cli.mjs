@@ -2210,6 +2210,16 @@ export async function trainFromCli(argv, deps = {}) {
   });
 }
 
+/** `forgedock guards list|backfill` (#4692): fix guards from the FORGE:GUARD comments on GitHub. */
+export async function guardsFromCli(argv, deps = {}) {
+  const { guardsCli } = await import("./lean/guards.mjs");
+  const io = deps.io ?? makeIo();
+  const repo = flag(argv, "--repo") ?? (await resolveDefaultRepo(io));
+  if (!repo) throw new Error("guards needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+  const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  return guardsCli(argv.filter((a, i) => a !== "--repo" && argv[i - 1] !== "--repo"), { gh: (a) => leanIo.gh(a), git: (a) => leanIo.git(a, { cwd: process.cwd() }), repo, print: deps.print, root: deps.root });
+}
+
 /** forge.yaml `ci` (#4667): the milestone integration config, or null when no `workflow` is set (feature off). */
 export function readIntegration(cwd = process.cwd()) {
   let ci = null;
