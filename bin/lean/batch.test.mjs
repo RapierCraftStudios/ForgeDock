@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { orchestrate, deferPolicy, DEFER_BACKOFF_S, formatOutcomeLists } from "./orchestrate.mjs";
@@ -1007,5 +1007,26 @@ describe("#4592: forgedock orchestrate --hold / --release", () => {
     await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "2"], { batchRoot: root, io })), /usage/);
     assert.deepEqual(b.readHeld(), []);
     assert.deepEqual(b.readAdded(), [], "an issue already in the batch is not added again");
+  });
+});
+
+describe("#4751: batch state is private", () => {
+  it("batch state files are private", () => {
+    const root = tmpDir("batch-private");
+    const old = process.umask(0o022);
+    try {
+      mkdirSync(join(root, "b1"), { mode: 0o755 });
+      const b = openBatch(root, "b1");
+      b.writePlan({ argv: ["1"], env: { TOKEN: "s3cret" } });
+      b.store.save({ v: 1 });
+      b.store.log({ ev: "x" });
+      const mode = (p) => statSync(p).mode & 0o777;
+      assert.equal(mode(b.dir), 0o700);
+      assert.equal(mode(join(b.dir, "plan.json")), 0o600);
+      assert.equal(mode(join(b.dir, "state.json")), 0o600);
+      assert.equal(mode(join(b.dir, "log.jsonl")), 0o600);
+      writeAtomic(join(root, "plain.json"), "{}");
+      assert.equal(mode(join(root, "plain.json")), 0o644);
+    } finally { process.umask(old); }
   });
 });

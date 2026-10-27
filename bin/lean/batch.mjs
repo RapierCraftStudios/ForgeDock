@@ -15,7 +15,7 @@
  * running; a resumed dispatcher re-attaches to it by pid, checking `/proc/<pid>/cmdline` against its result path. These
  * detached lanes are the `local` execution (#4253); `execution.mjs` is the sandbox-provider seam for remote lanes.
  */
-import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, fchmodSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
@@ -54,12 +54,17 @@ export function assertDiskPath(path, mounts = readMounts()) {
   if (RAM_FS.has(type)) throw new Error(`batch state must be on disk, but ${path} is on ${type}; set FORGEDOCK_BATCH_DIR to a disk path`);
 }
 
-/** Write `data` to `file` atomically: a reader sees the old or the new content, never a truncated file. */
-export function writeAtomic(file, data) {
-  mkdirSync(dirname(file), { recursive: true });
+/**
+ * Write `data` to `file` atomically: a reader sees the old or the new content, never a truncated file.
+ * `private` creates the file 0600 and its directory 0700 (batch state can hold pinned secrets, #4751).
+ */
+export function writeAtomic(file, data, { private: priv = false } = {}) {
+  const dir = dirname(file);
+  mkdirSync(dir, priv ? { recursive: true, mode: 0o700 } : { recursive: true });
+  if (priv) chmodSync(dir, 0o700);
   const tmp = `${file}.tmp-${process.pid}`;
-  const fd = openSync(tmp, "w");
-  try { writeSync(fd, data); fsyncSync(fd); } finally { closeSync(fd); }
+  const fd = priv ? openSync(tmp, "w", 0o600) : openSync(tmp, "w");
+  try { if (priv) fchmodSync(fd, 0o600); writeSync(fd, data); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(tmp, file);
 }
 
@@ -99,21 +104,22 @@ export function openBatch(root, id) {
   if (!ID_RE.test(String(id ?? ""))) throw new Error(`invalid batch id ${JSON.stringify(id)}`);
   const dir = join(root, id);
   const f = (name) => join(dir, name);
+  const put = (file, data) => writeAtomic(file, data, { private: true });
   const self = {
     id, dir,
     exists: () => existsSync(f("plan.json")),
     readPlan: () => readJson(f("plan.json")),
-    writePlan: (plan) => writeAtomic(f("plan.json"), JSON.stringify(plan, null, 2) + "\n"),
+    writePlan: (plan) => put(f("plan.json"), JSON.stringify(plan, null, 2) + "\n"),
     store: {
       load: () => readJson(f("state.json")),
-      save: (state) => writeAtomic(f("state.json"), JSON.stringify(state) + "\n"),
-      log: (row) => { try { appendFileSync(f("log.jsonl"), JSON.stringify({ at: new Date().toISOString(), ...row }) + "\n"); } catch { /* the log is advisory */ } },
+      save: (state) => put(f("state.json"), JSON.stringify(state) + "\n"),
+      log: (row) => { try { appendFileSync(f("log.jsonl"), JSON.stringify({ at: new Date().toISOString(), ...row }) + "\n", { mode: 0o600 }); } catch { /* the log is advisory */ } },
     },
     /** Live K: the `parallel` file, read on every scheduler pass; null when missing or invalid. */
     readParallel: () => { try { const k = parseInt(readFileSync(f("parallel"), "utf8"), 10); return Number.isInteger(k) && k >= 1 ? k : null; } catch { return null; } },
     setParallel: (k) => {
       if (!Number.isInteger(k) || k < 1) throw new Error("parallel must be a positive integer");
-      writeAtomic(f("parallel"), `${k}\n`);
+      put(f("parallel"), `${k}\n`);
     },
     /** Issues added by `--add` (#4408): the `add` file, sorted unique positive integers; [] when missing or invalid. */
     readAdded: () => readAdded(f("add")),
@@ -133,7 +139,7 @@ export function openBatch(root, id) {
         if (have.has(n)) { skipped.push({ issue: n, reason: "already in batch" }); continue; }
         have.add(n); added.push(n);
       }
-      if (added.length) writeAtomic(f("add"), JSON.stringify([...new Set([...readAdded(f("add")), ...added])].sort((a, b) => a - b)) + "\n");
+      if (added.length) put(f("add"), JSON.stringify([...new Set([...readAdded(f("add")), ...added])].sort((a, b) => a - b)) + "\n");
       return { added, skipped, requeued };
     },
     /**
@@ -157,7 +163,7 @@ export function openBatch(root, id) {
       }
       if (requeued.length) {
         const at = new Date().toISOString();
-        writeAtomic(f("requeue"), JSON.stringify([...entries, ...requeued.map((issue) => ({ issue, reason: String(reason), by: String(by), at }))]) + "\n");
+        put(f("requeue"), JSON.stringify([...entries, ...requeued.map((issue) => ({ issue, reason: String(reason), by: String(by), at }))]) + "\n");
       }
       return { requeued, refused };
     },
@@ -173,18 +179,18 @@ export function openBatch(root, id) {
     holdIssues: (list) => {
       const have = new Set(readAdded(f("hold")));
       const added = [...new Set(ints(list))].filter((n) => !have.has(n)).sort((a, b) => a - b);
-      if (added.length) writeAtomic(f("hold"), JSON.stringify([...have, ...added].sort((a, b) => a - b)) + "\n");
+      if (added.length) put(f("hold"), JSON.stringify([...have, ...added].sort((a, b) => a - b)) + "\n");
       return added;
     },
     /** Remove `list` from the `hold` file. @returns {number[]} the issues that were held */
     releaseIssues: (list) => {
       const have = new Set(readAdded(f("hold")));
       const freed = [...new Set(ints(list))].filter((n) => have.has(n)).sort((a, b) => a - b);
-      if (freed.length) writeAtomic(f("hold"), JSON.stringify([...have].filter((n) => !freed.includes(n)).sort((a, b) => a - b)) + "\n");
+      if (freed.length) put(f("hold"), JSON.stringify([...have].filter((n) => !freed.includes(n)).sort((a, b) => a - b)) + "\n");
       return freed;
     },
     /** `--cancel` (#4376): `{at, reason, stopRemote?}` in the `cancel` file; the runner re-reads it every pass. `stopRemote` (#4612) also asks remote lanes to stop at their checkpoint. */
-    requestCancel: ({ reason = "operator", stopRemote = false } = {}) => writeAtomic(f("cancel"), JSON.stringify({ at: new Date().toISOString(), reason: String(reason), ...(stopRemote === true ? { stopRemote: true } : {}) }) + "\n"),
+    requestCancel: ({ reason = "operator", stopRemote = false } = {}) => put(f("cancel"), JSON.stringify({ at: new Date().toISOString(), reason: String(reason), ...(stopRemote === true ? { stopRemote: true } : {}) }) + "\n"),
     /** The cancel record, or null when missing or invalid. */
     readCancel: () => { const v = readJson(f("cancel")); return v && typeof v === "object" && !Array.isArray(v) && typeof v.at === "string" ? v : null; },
     clearCancel: () => rmSync(f("cancel"), { force: true }),
@@ -197,7 +203,7 @@ export function openBatch(root, id) {
       return text.split("\n").flatMap((l) => { try { return l ? [JSON.parse(l)] : []; } catch { return []; } });
     },
     readReport: () => readJson(f("report.json")),
-    writeReport: (report) => writeAtomic(f("report.json"), JSON.stringify(report) + "\n"),
+    writeReport: (report) => put(f("report.json"), JSON.stringify(report) + "\n"),
     clearReport: () => rmSync(f("report.json"), { force: true }),
     resultFile: (n) => f(join("lanes", `${n}.json`)),
     logFile: (n) => f(join("lanes", `${n}.log`)),
@@ -224,9 +230,9 @@ export function isLaneAlive(pid, marker, { kill = process.kill.bind(process), pr
  */
 export function launchLane({ batch, issue, args = [], bin = process.execPath, script, cwd = process.cwd(), env = process.env, spawnFn = spawn }) {
   const rf = batch.resultFile(issue);
-  mkdirSync(dirname(rf), { recursive: true });
+  mkdirSync(dirname(rf), { recursive: true, mode: 0o700 });
   rmSync(rf, { force: true });
-  const out = openSync(batch.logFile(issue), "a");
+  const out = openSync(batch.logFile(issue), "a", 0o600);
   try {
     // FORGEDOCK_BATCH_ID names the lane's resource ledger dir (~/.forge/ledger/<batch>/, #4179).
     const child = spawnFn(bin, [script, "run-issue", String(issue), ...args, "--result-file", rf], { cwd, env: { ...env, FORGEDOCK_BATCH_ID: batch.id }, detached: true, stdio: ["ignore", out, out] });
