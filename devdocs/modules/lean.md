@@ -1012,7 +1012,8 @@ a bare `**` glob. `verifyReport` gates carry `ran`; zero ran → `neutral`, "no 
 ran". A recovery lane (`recoverUnlabelled`) re-adds `needs-human` with a recovery-evidence `FORGE:NEEDS_HUMAN` only on a final
 `ci-pending` (`needsHuman()` has its own path); never on merged/invalid/decomposed/dependency-*/deferred/engine-error. The
 batch runner (`orchestrate.mjs` settle, injected `relabelNeedsHuman`, wired in `engine-cli.mjs`) relabels once for a final
-`engine-error`/`deferred` after a recovery pass (2026-10-20, SPEC-7/8, BUG-6 from #4291). Rationale: `devdocs/decisions/4297-pre-release-trust-boundaries.md`.
+`engine-error`/`deferred` after a recovery pass (2026-10-20, SPEC-7/8, BUG-6 from #4291).
+#4656: a final needs-human row on a mechanical terminal code (or a recoverable one whose recovery is spent) is parked, not escalated: `relabelNeedsHuman({parked:{code,pr}})` swaps `needs-human` for `parked:<code>` + `remediation-queue` (the `/work-on:remediate` queue); `needs-human:external` is reserved for human waits (`classifyNeedsHuman(row,{parked:true})`, `classifyLegacyNeedsHuman` defaults to external). `gatewatch.mjs` `detectGateDeadlock` runs each pass (hold list plus the `getGates` seam) and emits a `GATE_DEADLOCK` row once per (gate, issue). Rationale: `devdocs/decisions/4297-pre-release-trust-boundaries.md`.
 
 ## Entry 2026-10-20 — 1.29.0 staging-review LOW follow-ups (#4298)
 
