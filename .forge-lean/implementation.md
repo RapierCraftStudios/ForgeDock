@@ -1,39 +1,28 @@
 ### Approach
-Logic lives in a new pure script, `scripts/readiness.mjs`; the specs only call it (spec-size budget, NORTHSTAR rules 1 and 7). A prerequisite is an open `needs-human:external` issue whose body carries `gates:` and `owner:` lines. "Code milestones it still needs" are the milestones of open non-prerequisite issues that carry the same `gates:` line.
+One sourced bash snippet gives router, agent and schedd units the same hardening; entrypoints set distinctive process titles; doctor gets a warn-only restart check driven by the journal.
 
 ### Changes
-- scripts/readiness.mjs: new. Parsing, per-gate readiness report, dependency-ordered digest (cycle-safe), deployable verdict, CLI.
-- bin/tests/readiness.test.mjs: new tests.
-- commands/pipeline-status.md: Readiness section and digest.
-- commands/deploy-info.md: gate verdict line.
-- commands/issue.md, commands/bootstrap.md: the label and `gates:` rule.
-- templates/bootstrap/needs-human-issue.md: `gates:` and `owner:` lines.
-- scripts/bootstrap-validate.mjs: `missing-gates` error; `needs-human:external` counts as needs-human.
-- scripts/bootstrap-create.mjs: adds the `needs-human:external` label.
-- docs/spec/label-state-machine.md: documents `gates:` and readiness.
-- Test fixtures and test (bin/tests): needs-human bodies gained a `gates:` line; new missing-gates test.
-- docs/site/start-a-new-project.md: the worked example needs a `gates:` line to pass the validator (amendment).
+- pool/install/unit-hardening.sh: new; OOMScoreAdjust (-500 system, manager's own value for user), Restart=always, StartLimitIntervalSec=0, earlyoom/oomd hint (never edits config).
+- pool/install/install-router.sh, install-agent.sh: use the snippet and print the hint.
+- pool/install/install-schedd.sh: new schedd user unit.
+- bin/pool/cli.mjs: titles for router and agent. bin/engine-cli.mjs: schedd title.
+- bin/pool/health.mjs: restartCheck / lastExitReason. bin/forgedock.mjs: doctor Check 14.
+- bin/tests/pool-unit.test.mjs: new tests.
 
 ### Acceptance Criteria Status
-- R1 ✅ commands/issue.md, commands/bootstrap.md, scripts/bootstrap-validate.mjs, scripts/bootstrap-create.mjs
-- R2 ✅ commands/pipeline-status.md, scripts/readiness.mjs readiness()/formatReadinessReport
-- R3 ✅ scripts/readiness.mjs (feature-flag gate is red, blocksMerge false, ignored by deployable)
-- R4 ✅ scripts/readiness.mjs digest()
-- R5 ✅ commands/deploy-info.md, scripts/readiness.mjs deployable() and `--target` exit 1
+- R1 ✅ bin/pool/cli.mjs:39
+- R2 ✅ pool/install/unit-hardening.sh:11-22
+- R3 ✅ install-router.sh, install-agent.sh, bin/tests/pool-unit.test.mjs
+- R4 ✅ bin/pool/health.mjs, bin/forgedock.mjs Check 14
+- R5 ✅ install-schedd.sh, bin/engine-cli.mjs schedd title
 
 ### Verification
-- V1 node --test readiness, bootstrap-validate, bootstrap (plus bootstrap-guide): 61 pass. The missing-gates test fails without the validator change.
-- V2 check-spec-size.sh: PASS.
-- `forgedock check`: PASS.
+- V1 pool-unit/pool-cli/router tests: pass (70). V2 engine-cli + execution tests: pass (131). V3 bash -n: ok.
+- The title test fails without the fix (title not set). Not run on base explicitly.
+- checks.mjs widened to the full suite (929 refs); not run per host rules. `forgedock check` passes.
 
 ### Notes
-needs-human plan issues now require a valid `gates:` line (new validation error). No env vars. No formatter config exists in the repo.
+No formatter configured. Doctor "grew in last hour" is derived from journal restart lines. The user-unit OOMScoreAdjust is the user manager's own value, not independently tested on a real systemd.
 
-## Docs freshness fix
-Added `lean-readiness` (`scripts/readiness*`) and `lean-bootstrap` (`scripts/bootstrap-*`) globs in devdocs/index.yaml and a dated entry in devdocs/modules/lean.md describing the readiness gates behaviour. check-devdocs-freshness passes; V1 and V2 still pass.
-
-## Fix: isNeedsHuman precedence (#4660)
-Parenthesised the label checks so a missing `labels` array no longer throws; validatePlan reports `missing-labels` again. Added a regression test.
-
-## Fix: pipeline-status jq (R4)
-Milestones with no FORGE:LIFECYCLE block no longer vanish: `st` is `first(capture|.s) // null`, so a building milestone with zero open issues prints EMPTY_BUT_OPEN. Verified with jq on null/shipped/no-block descriptions.
+## Sibling-list check
+`health` (bin/pool) is not a member of the lists flagged at bin/lean/execution.test.mjs:222 (gc sandbox test) or bin/tests/router.test.mjs:29 (router CLI tests); neither enumerates bin/pool modules. Recorded in result.json not_members.
