@@ -26,3 +26,6 @@
 
 ### Notes
 No new env vars. Advisory only; checks never block a review.
+
+## R6 verification
+V2 self-skips without yq. Ran it with a scratch yq shim (PATH, $TMPDIR only): 208 passed, 0 failed, incl. the stale/fresh context case. No code change.
