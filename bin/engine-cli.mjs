@@ -2181,6 +2181,12 @@ export async function integrationFromCli(argv, deps = {}) {
   return run(argv, deps);
 }
 
+/** `forgedock milestone-sync <slug> --reason ...` (#4663): on-demand milestone branch sync (lean/milestonesync.mjs). Resolves the exit code. */
+export async function milestoneSyncFromCli(argv, deps = {}) {
+  const { runMilestoneSyncCli: run } = await import("./lean/milestonesync.mjs");
+  return run(argv, deps);
+}
+
 /** forge.yaml `ci` (#4667): the milestone integration config, or null when no `workflow` is set (feature off). */
 export function readIntegration(cwd = process.cwd()) {
   let ci = null;

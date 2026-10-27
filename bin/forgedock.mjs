@@ -3917,7 +3917,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "sched", "schedd", "pool", "check", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone-sync", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "sched", "schedd", "pool", "check", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4213,6 +4213,17 @@ switch (command) {
     const { triageFromCli } = await import("./engine-cli.mjs");
     try {
       await triageFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "milestone-sync": {
+    // On-demand milestone branch sync (#4663): PR + auto-merge under protected branches, one debounced sync PR.
+    const { milestoneSyncFromCli } = await import("./engine-cli.mjs");
+    try {
+      exitCode = await milestoneSyncFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;
