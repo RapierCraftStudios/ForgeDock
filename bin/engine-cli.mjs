@@ -1781,7 +1781,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       // #4387: an out-of-set dependency labelled needs-human is not pulled into the batch
       issueLabels: labelNames,
       // #4725: a closed (completed) dependency is satisfied even when it still carries a stale needs-human label
-      issueState: async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason"])); return v.state === "CLOSED" && String(v.stateReason ?? "COMPLETED").toUpperCase() === "COMPLETED" ? "CLOSED" : v.state; },
+      issueState: async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason"])); return v.state === "CLOSED" && String(v.stateReason ?? "COMPLETED").toUpperCase() !== "COMPLETED" ? "CLOSED_NOT_PLANNED" : v.state; },
       // #4318: a dispatcher signal relabels the queued recoveries before it exits (the daemon resumes its batches instead)
       ...(daemon ? {} : { onExit: (fn) => { exitRelabel = fn; } }),
       // #4454: the daemon's shutdown stop; orchestrate throws batch.stopped, so no report is written and a resume adopts the lanes

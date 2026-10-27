@@ -48,3 +48,6 @@ R6 ✅ pkg-version now resolves in production: `registryPkgVersion` (npm view) i
 
 ### Sibling lists
 telemetry-seam.test.mjs:24 (a phase_attempt mapRecord test) and drift.test.mjs:14 (drift fixtures) are not lists of lean modules; both are already recorded in result.json not_members. V1-V3 re-run: pass.
+
+## Fix: not-planned closed dependency
+`issueState` in bin/engine-cli.mjs now returns `CLOSED_NOT_PLANNED` for a closed issue whose stateReason is not COMPLETED, so only completed-closed dependencies are skipped in the parking path.
