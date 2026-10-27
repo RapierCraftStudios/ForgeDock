@@ -48,3 +48,6 @@ No env vars added except the optional `FORGEDOCK_DECISIONS_DIR` for the index lo
 
 ### CI follow-up (Unit tests)
 CI log was unavailable. Reran V1 (105 pass) and V2 (516 pass), plus bin/lean, bin/tests, bin/engine, bin/stats and packages/protocol locally. The only failures were 3 environment ones (WSL/platform detection, preflight, install receipt; none touch this diff) and the #4690 test, which hit the idle-kill timer under load and passes alone (6 pass). No code change was needed.
+
+### CI recovery
+`scripts/check-test-tmp-cleanup.test.sh` failed because `bin/lean/decisions.test.mjs` called `mkdtemp` directly. It now uses `tmpDir` from `bin/tests/_tmp.mjs`. V1 and V2 pass again, the cleanup script passes, and `forgedock check` passes.

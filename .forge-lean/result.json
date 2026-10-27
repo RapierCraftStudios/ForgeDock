@@ -1,12 +1,88 @@
-{"status":"fixed","summary":"Anchored decisions with supersession, H-row preserve at freeze, and decisions list --stale; all validate commands pass.","requirements":[
-{"id":"R1","status":"implemented","evidence":"bin/lean/conformance.mjs applyAmendments decision branch; bin/lean/decisions.mjs recordDecisions"},
-{"id":"R2","status":"implemented","evidence":"bin/lean/decisions.mjs:119 withDecisionRows; bin/lean/lean.mjs freeze"},
-{"id":"R3","status":"implemented","evidence":"bin/lean/decisions.mjs supersede"},
-{"id":"R4","status":"implemented","evidence":"bin/engine-cli.mjs decisionsFromCli; bin/lean/decisions.mjs staleDecisions"},
-{"id":"R5","status":"implemented","evidence":"deterministic code only; one `decision` amendment line in bin/lean/prompts.mjs (D6), offset by trimming prompt wording to stay within the token budget"},
-{"id":"R6","status":"implemented","evidence":"bin/lean/decisions.mjs:125 returns contract unchanged when no rows apply; one index read at freeze"},
-{"id":"R7","status":"implemented","evidence":"bin/lean/decisions.mjs:124 shared HISTORY_ROWS_MAX=5 cap; single ls-tree only on a decision amendment"}],
-"validation":[{"id":"V1","command":"node --test bin/lean/decisions.test.mjs bin/lean/conformance.test.mjs","exit":0},{"id":"V2","command":"node --test bin/lean/lean.test.mjs bin/lean/conformance.e2e.test.mjs","exit":0}],
-"tests":[{"command":"node --test bin/lean/decisions.test.mjs bin/lean/conformance.test.mjs","result":"pass","fails_without_fix":true},{"command":"node --test bin/lean/lean.test.mjs bin/lean/conformance.e2e.test.mjs","result":"pass","fails_without_fix":"unknown"}],
-"self_review":[{"question":"1","answer":"yes","evidence":"R1-R7 above"},{"question":"2","answer":"yes","evidence":"V2 513 pass 0 fail after merge with staging guards"},{"question":"3","answer":"yes","evidence":"V1 105 pass, V2 513 pass; prompts.mjs unchanged for token budget"},{"question":"4","answer":"yes","evidence":"only deliverables, tests, devdocs changed"}],
-"amendments":[]}
+{
+ "status": "fixed",
+ "summary": "Anchored decisions with supersession, H-row preserve at freeze, and decisions list --stale; all validate commands pass.",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/lean/conformance.mjs applyAmendments decision branch; bin/lean/decisions.mjs recordDecisions"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/decisions.mjs:119 withDecisionRows; bin/lean/lean.mjs freeze"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/lean/decisions.mjs supersede"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/engine-cli.mjs decisionsFromCli; bin/lean/decisions.mjs staleDecisions"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "deterministic code only; one `decision` amendment line in bin/lean/prompts.mjs (D6), offset by trimming prompt wording to stay within the token budget"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "bin/lean/decisions.mjs:125 returns contract unchanged when no rows apply; one index read at freeze"
+  },
+  {
+   "id": "R7",
+   "status": "implemented",
+   "evidence": "bin/lean/decisions.mjs:124 shared HISTORY_ROWS_MAX=5 cap; single ls-tree only on a decision amendment"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/decisions.test.mjs bin/lean/conformance.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/lean/lean.test.mjs bin/lean/conformance.e2e.test.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/lean/decisions.test.mjs bin/lean/conformance.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  },
+  {
+   "command": "node --test bin/lean/lean.test.mjs bin/lean/conformance.e2e.test.mjs",
+   "result": "pass",
+   "fails_without_fix": "unknown"
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R1-R7 above"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "V2 513 pass 0 fail after merge with staging guards"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "V1 105 pass, V2 513 pass; prompts.mjs unchanged for token budget"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "only deliverables, tests, devdocs changed"
+  }
+ ],
+ "amendments": []
+}
