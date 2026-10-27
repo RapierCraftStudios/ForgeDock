@@ -188,10 +188,11 @@ export function builderImplementPrompt(mode = "local", { toolchain = null, spars
 ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}${remote ? `\n\n${VERIFY_RULES[mode]}` : ""}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why:
-- {"kind":"add-deliverable","path":"<file>","why":""}: a file the contract did not list.
-- {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: an issue requirement the contract missed.
-- {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: a requirement that becomes separate work or a post-deploy check. Filed as a tracked follow-up. Not "type"; other kinds (there is no "scope-note") are rejected. One requirement id per row: write R2 and R3 as two rows, never "R2/R3".
-- {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded; judged against text.
+- {"kind":"add-deliverable","path":"<file>","why":""}: a file not listed.
+- {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: a missed issue requirement.
+- {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check. Filed as a tracked follow-up. Not "type"; unknown kinds are rejected. One requirement id per row (R2, R3 as two rows).
+- {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded.
+- {"kind":"decision","decision":{"choice":"","anchors":["<base path>"],"supersedes":"<id>"},"why":""}: supersedes changes an H-row.
 New keys: translate, never copy English; status entries in place.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
 Never name or number migration files by hand; use the generator.
