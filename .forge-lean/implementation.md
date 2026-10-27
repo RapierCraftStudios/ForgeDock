@@ -34,3 +34,6 @@ Added `lean-readiness` (`scripts/readiness*`) and `lean-bootstrap` (`scripts/boo
 
 ## Fix: isNeedsHuman precedence (#4660)
 Parenthesised the label checks so a missing `labels` array no longer throws; validatePlan reports `missing-labels` again. Added a regression test.
+
+## Fix: pipeline-status jq (R4)
+Milestones with no FORGE:LIFECYCLE block no longer vanish: `st` is `first(capture|.s) // null`, so a building milestone with zero open issues prints EMPTY_BUT_OPEN. Verified with jq on null/shipped/no-block descriptions.
