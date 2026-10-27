@@ -1855,3 +1855,12 @@ resolves to the next open one by due date, else forge.yaml `followups.default_mi
 ## Entry 2026-10-27 — Default lane scope caps and env.lane_limit (#4690)
 
 Every local lane's builder CLI now runs in a `systemd-run --user --scope --unit=forgedock-lane-*` scope by default (`effects.mjs` `wrapLaneLimits`): `TasksMax` 1024 (`engine.lane_limits.tasks_max`, `0`/`off` disables) and a `MemoryMax` of `(MemTotal - reserve) / K` (`engine-cli.mjs` `defaultLaneMemory`; K reaches lanes as `FORGEDOCK_LANE_PARALLEL`). forge.yaml `memory_max`/`cpu_quota` still win. `runner.mjs` samples the scope's `pids.events` (`max`) and `memory.events` (`oom_kill`) while the child runs and throws `CLI_LANE_LIMIT`; `lean.mjs` checkpoints and ends `needs-human` `env.lane_limit` (never engine-error, so the breaker ignores it; `hostkill.mjs` no longer reads it as a host kill). Without scopes, orchestrate logs one "lanes are uncapped" line.
+
+## Compounding metrics (#4696)
+
+`forgedock stats --compounding` (`bin/stats/compounding.mjs`) measures reintroduction (guarded fix reopened, or blamed by a later
+guarded fix within 90 days), reopen-after-close, guard activity and decision churn by rolling window, release and lane-age bucket.
+It reads FORGE:GUARD comments (`bin/lean/guards.mjs` `collectGuards`, read only), `reopened` issue events, git, and these
+FORGE:TELEMETRY gate events, which #4693/#4695 must emit under exactly these names: `guard_run`, `guard_broken`,
+`supersedes_accepted`, `decision_superseded`, `decision_violation` (an unrecorded kind prints n/a). Stats-time only: no lane-path
+cost, no LLM. Usage and definitions: `docs/STATS.md`.
