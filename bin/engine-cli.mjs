@@ -1875,6 +1875,7 @@ export async function scheddFromCli(argv, deps = {}) {
     return { running: true, ...st };
   }
   if (argv.length) throw new Error("usage: forgedock schedd [status]");
+  process.title = "forgedock-schedd"; // distinctive name for OOM-killer avoid lists and ps (#4673)
   const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }) });
   if (!d.running) return d;
   // #4454: a signal stops the hosted batch loops, then releases the lock and socket, then exits 128+signo
