@@ -553,7 +553,7 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
    Any hit here is a candidate prior fix or reintroduced defect — read the commit body (`git show {hash}`) to confirm before citing it. Feed confirmed hits into the History findings field and let them inform the verdict (e.g. a defect being reintroduced raises severity).
 6. **Determine root cause** — what's actually broken or missing?
 7. **Identify affected files** — full list of files that need changes
-7.5. **Sibling Pattern Sweep** *(conditional — when the bug is a condition, gated function call, or field presence check)*: After identifying the affected files, grep for the same pattern in sibling files within the same directory. The issue spec may name only the file where the error was first observed — but the same commit or PR that introduced the bug often applied it uniformly across related handlers.
+7.5. **Sibling Pattern Sweep** *(conditional — when the bug is a condition, gated function call, or field presence check, or a CONFIRMED wrong/non-existent route, URL or link)*: After identifying the affected files, grep for the same pattern in sibling files within the same directory. The issue spec may name only the file where the error was first observed — but the same commit or PR that introduced the bug often applied it uniformly across related handlers.
    ```bash
    # Identify the broken condition or gated function call from the issue
    # Then search sibling files in the same router/service directory
@@ -562,6 +562,8 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
    ```
    **If identical patterns are found in files NOT listed in the issue spec**, output a scope-gap warning:
    > **Scope-Gap Warning**: The issue spec lists `{PRIMARY_FILE}` but the same pattern exists in `{SIBLING_FILE}:{LINE}`. These were likely introduced together. Recommend widening scope to fix all callers in this PR, or creating follow-up issues for the other files before proceeding.
+
+   **Hard-coded route/URL/link findings**: grep the finding's file and its template siblings for every other constructed URL (`f"{base}/path"`, `href=`, `redirect(`), verify each against the route table, and either fix those found broken or list them in a follow-up. Fixing only the cited link lets its siblings ship broken.
 
    Do NOT silently exclude sibling matches. The appropriate output when sibling files have the same bug is to flag them explicitly — even if the issue spec's silence appears intentional. The fix-approach validation step (step 8) will confirm whether to widen scope or create follow-ups. <!-- Added: forge#383 -->
 7.6. **Finding Pattern Sweep** *(conditional — eligible when the issue has label `review-finding`, or its body carries a `FORGE:PATTERN` or `FORGE:PATTERN-CLASS` tag)*: Review findings are instances of a defect class. Fixing only the cited instance lets sibling instances resurface in the next review, so sweep the whole repo for the class before settling the affected-file list. For eligible issues this step replaces step 7.5; step 7.5 runs for non-eligible issues, and as the fallback when 7.6 is skipped or degrades. <!-- Added: forge#3449 -->

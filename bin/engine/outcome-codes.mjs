@@ -85,6 +85,7 @@ export const OUTCOME_CODES = Object.freeze({
   REVIEW_INCONSISTENT: "review.inconsistent",
   CONFORMANCE_OMISSION: "conformance.omission",
   CONFORMANCE_UNIMPLEMENTED: "conformance.unimplemented",
+  CONFORMANCE_E2E_UNVERIFIED: "conformance.e2e_unverified",
   CONFORMANCE_SCOPE_CREEP: "conformance.scope_creep",
   CONFORMANCE_UNTRACKED_DEFERRAL: "conformance.untracked_deferral",
   CONFORMANCE_UNJUSTIFIED_DEFERRAL: "conformance.unjustified_deferral",

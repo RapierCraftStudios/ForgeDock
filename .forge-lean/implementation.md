@@ -1,43 +1,38 @@
 ### Approach
-`bin/review-context.mjs` compares forge.yaml `review.tech_stack`/`review.context` with manifests and the decision log (no LLM). doctor, review-prepare and `init --refresh-context` use it.
+`decide()` now checks each implemented `[type:e2e]` deliver row: its `validated_by` V-ref must resolve to a contract validate command that is a real e2e check. Otherwise it emits `conformance.e2e_unverified`.
 
 ### Changes
-- bin/review-context.mjs: stale rules, age advisory, diff, refresh flow, `check` CLI
-- bin/forgedock.mjs: `--refresh-context` flag, doctor warn, help
-- scripts/review-prepare.sh: REVIEW_CONTEXT_STALE findings, config.context_* keys
-- commands/review-pr.md: generation date, advisory, warning line
-- forge.yaml.example: new keys documented
-- bin/tests/review-context.test.mjs, scripts/review-prepare.test.sh: tests
-- devdocs/modules/lean.md: dossier (freshness check requires it)
+- bin/lean/conformance.mjs: `isE2eCommand`, `e2eVerified`, and the new check in `decide`.
+- bin/engine/outcome-codes.mjs: `CONFORMANCE_E2E_UNVERIFIED`.
+- bin/lean/lean.mjs: passes `e2e` (`checks`, `isSpec`) into the conformance ctx.
+- bin/lean/prompts.mjs: one-line rule in the plan and implement prompts, plus a sentence in the rubric.
+- commands/work-on/investigate.md: step 7.5 widened to route/URL/link findings.
+- Tests: conformance.test.mjs (new regressions), lean.test.mjs (prompt token budgets raised by about 50), engine-outcome-codes.test.mjs (coverage entry; doc regex now allows digits).
+- docs/OUTCOME-CODES.md: row for the new code (amendment).
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/forgedock.mjs:1046
-- R2 ✅ bin/forgedock.mjs:2715, scripts/review-prepare.sh:235
-- R3 ✅ bin/review-context.mjs
-- R4 ✅ bin/review-context.mjs
-- R5 ✅ bin/review-context.mjs
-- R6 ✅ scripts/review-prepare.sh:246
-- R7 ✅ commands/review-pr.md:512
+- R1 ✅ bin/lean/conformance.mjs (decide, e2eVerified)
+- R2 ✅ bin/lean/prompts.mjs (plan and implement prompts)
+- R3 ✅ commands/work-on/investigate.md (step 7.5)
+- R4 ✅ the new check applies only to `[type:e2e]` rows
+- R5 ✅ bin/lean/conformance.test.mjs ("#4726" describe)
 
 ### Verification
-- V1 `node --test bin/tests/review-context.test.mjs bin/tests/init-detect.test.mjs bin/tests/init-enrich.test.mjs`: 74 pass, 0 fail. New tests fail without the module (it would not exist).
-- V2 `FORGEDOCK_HOME=$PWD bash scripts/review-prepare.test.sh`: exit 0, but the script printed "SKIP: yq not installed", so the new case did not execute on this host.
-- check-devdocs-freshness.sh: OK. forgedock check: PASS.
+- V1 (conformance, e2e, conformance.e2e tests): pass.
+- V2 (lean, verify tests): pass.
+- V3 (outcome-codes test): pass.
+- The enumerating tests (batch, checks, context, execution, fixround, heavy): pass (865 total).
+- `forgedock check`: PASS.
+- The new test fails without the fix (verified by reverting conformance.mjs).
 
 ### Notes
-No new env vars. Advisory only; checks never block a review.
+A new outcome code was added. There is no formatter config in the repo.
 
-## R6 verification
-V2 self-skips without yq. Ran it with a scratch yq shim (PATH, $TMPDIR only): 208 passed, 0 failed, incl. the stale/fresh context case. No code change.
+### Docs freshness fix
+Added a dated entry to `devdocs/modules/lean.md` describing the `[type:e2e]` conformance check, `ctx.e2e` and the prompt/investigate changes. `scripts/check-devdocs-freshness.sh` now passes. V1 re-run: 116 pass, 0 fail.
 
-### CI follow-up (Unit tests, node --test)
-The CI log was unavailable, so the failure could not be read. I ran the forgedock-*, journey, review-staging, bin/lean and related suites locally: 1765 pass, 3 fail. The 3 failures (journey platform/WSL rows, Act II and install-receipt copyFile orphan) assert a non-WSL, non-root host. This host is WSL running as root, so they are environmental. None touch files this change edits. The full suite was not run, and the CI failure is not reproduced. No code change was made.
+## Enumerating-test fix
+Added `isE2eCommand` and `e2eVerified` to the import list and assertions in bin/lean/conformance.test.mjs.
 
-### CI follow-up 2 (Unit tests)
-Log still unavailable. Re-ran V1 (74 pass) and 1505 tests across the suites that reference forgedock.mjs, devdocs, review-pr or review-prepare: 0 fail. Only journey.test.mjs fails (3, WSL/root host assertions, unrelated to this diff). Not reproduced; no code change.
-
-### CI follow-up 2 (Unit tests, run 40550042608)
-The CI log was unavailable. After merging staging again, I ran every bin/tests file that references forgedock.mjs, review-context or doctor: 1217 pass, 3 fail. They are the same 3 environmental failures as before (journey platform/WSL rows, Act II and install-receipt copyFile orphan), which assert a non-WSL, non-root host. The CI failure is not reproduced and I made no code change. The full suite was not run.
-
-### Recovery (ci.red)
-CI failed `scripts/check-test-tmp-cleanup.test.sh`: `bin/tests/review-context.test.mjs` used `mkdtemp` directly. It now uses `tmpDir` from `bin/tests/_tmp.mjs`. That script passes 18/18 and V1 passes (74 tests). V2 skips locally because yq is missing. The dossier `devdocs/modules/lean.md` is recorded as an add-deliverable amendment.
+### CI follow-up
+The CI log was not readable (no GitHub access). I reran the unit job's globs locally (`bin/tests`, `bin/engine`, `bin/lean`): 4258 pass, 4 fail. The failures are batch robustness #4690 (CLI_LANE_LIMIT scope), preflight (Platform/WSL rows), forge Act II (stale-copy cleanup) and writeInstallReceipt (platform info). They are host-specific (WSL, root user) and sit in code this change does not touch. No code change was made.
