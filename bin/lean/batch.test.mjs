@@ -349,6 +349,26 @@ describe("#4318: the batch dispatcher's signal relabel and the needs-human relab
       const b = hook({ state: "OPEN", body: "" }, { comment: true });
       assert.equal(await b.run(), true);
     });
+    it("#4736: a mechanical park creates its parked:<code> label before the edit", async () => {
+      const calls = [];
+      const gh = async (a) => { calls.push(a.slice(0, 3).join(" ")); return a[1] === "view" ? JSON.stringify({ state: "OPEN", body: "" }) : ""; };
+      assert.equal(await makeRelabelNeedsHuman({ gh, repo: "o/r", now: () => 1000 })({ issue: 7, evidence: "e", parked: { code: "ci.red", pr: 3 } }), true);
+      assert.deepEqual(calls.slice(0, 3), ["issue view 7", "label create parked:ci.red", "issue edit 7"]);
+    });
+  });
+
+  it("#4736: a parked relabel that reports failed is not reported as queued for remediation", async () => {
+    const leanIo = { gh: async (a) => (a.includes("milestone") ? JSON.stringify({ milestone: null }) : JSON.stringify({ body: "" })), git: async (a) => (a[0] === "ls-remote" ? "abc\trefs/heads/staging\n" : "") };
+    const out = [], l = console.log;
+    console.log = (...x) => out.push(x.join(" "));
+    try {
+      await orchestrateFromCli(["1", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], { dir: tmpDir("pf-"), batchRoot: tmpDir("pf-batch-"), allowTmpfs: true,
+        emitTelemetry: async () => {}, io: { gh: async () => "o/r\n" }, leanIo, sched: null, decide: () => {},
+        orchestration: { breaker: null, maxDeferrals: 3, globalParallel: null, recovery: { maxAttempts: 1 } },
+        relabelNeedsHuman: async (x) => (x.parked ? "failed" : true),
+        leanModule: { runCore: async () => ({ terminalReason: "needs-human", code: "ci.red", detail: "x", pr: 5 }) } });
+    } finally { console.log = l; }
+    assert.doesNotMatch(out.join("\n"), /remediation queue/);
   });
 });
 

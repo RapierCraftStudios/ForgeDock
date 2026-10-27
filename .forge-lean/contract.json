@@ -1,0 +1,59 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "The failure scenario above no longer reproduces at `scripts/file-deferred-followups.sh:79`, covered by a regression test that fails on the current staging head.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "No behaviour change for lanes or repos the finding does not describe.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R3",
+   "quote": "Validation should reject requirement text (`R\u003cn>:` prefixes, prose), not legal path characters.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "scripts/file-deferred-followups.sh",
+   "change": "Replace the character-whitelist grep at the column-1 check with a blacklist: keep the R\u003cn>: rejection; reject control chars; a value with whitespace must contain '/' or end in .\u003cext>, otherwise it is prose and rejected; whitespace-free values pass. Update header comment.",
+   "requirements": [
+    "R1",
+    "R3"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "scripts/file-deferred-followups.test.sh",
+   "change": "Add cases: app/(marketing)/page.tsx, 'docs/My Notes.md', src/a=b.ts, src/#x.ts, src/foo:bar.ts are accepted (rc 0, issue created, path listed); existing prose and R\u003cn>: rows stay rejected; a mixed batch with these paths files everything.",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "Rejection of `R\u003cn>:` prefixed and prose column-1 values (exit 2, DEFERRED_TSV=INVALID, nothing filed) in scripts/file-deferred-followups.test.sh section 21"
+  },
+  {
+   "id": "P2",
+   "what": "Row format, exit codes, stdout markers and gh call behaviour of scripts/file-deferred-followups.sh for already-valid paths; callers in commands/work-on/build.md"
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "bash scripts/file-deferred-followups.test.sh"
+  }
+ ]
+}

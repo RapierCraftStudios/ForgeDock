@@ -267,6 +267,10 @@ check "label row accepted, prefix collapsed in stdout" "[ $RC -eq 0 ] && printf 
 
 check "created body: Affected Files lists only paths, checklist keeps the collapsed label" "grep -q '^- \`src/q.ts\`\$' '$T/created.901.body' && ! grep -q '^- \`R1' '$T/created.901.body' && grep -q '^- \[ \] \`R1: a saved mapping\`' '$T/created.901.body' && ! grep -q 'R1: R2:' '$T/created.901.body'"
 check "created body: DEFERRED_FROM and DEFERRED_CLASS markers" "grep -q 'FORGE:DEFERRED_FROM: #10 -->' '$T/created.901.body' && grep -q 'FORGE:DEFERRED_CLASS: engineering' '$T/created.901.body'"
+# #4739: legal path characters (parentheses, space, =, #, :) are accepted; one such row no longer aborts the batch
+reset; printf 'app/(marketing)/page.tsx\twhy\t\ndocs/My Notes.md\twhy\t\nsrc/a=b.ts\twhy\t\nsrc/#x.ts\twhy\t\nsrc/foo:bar.ts\twhy\t\n' > "$T/legal.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/legal.tsv" 2>/dev/null); RC=$?
+check "legal paths with ( ) space = # : are accepted and filed" "[ $RC -eq 0 ] && ! printf '%s' \"\$OUT\" | grep -q DEFERRED_TSV=INVALID && grep -q '^issue create' '$GH_LOG' && grep -qF -- '- \`app/(marketing)/page.tsx\`' '$T/created.901.body' && grep -qF -- '- \`docs/My Notes.md\`' '$T/created.901.body' && grep -qF -- '- \`src/a=b.ts\`' '$T/created.901.body' && grep -qF -- '- \`src/#x.ts\`' '$T/created.901.body' && grep -qF -- '- \`src/foo:bar.ts\`' '$T/created.901.body'"
 reset; printf -- '-\tpost-deploy: [check:login-smoke] soon\t\t\tR3: soak\n' > "$T/pd.tsv"
 bash "$S" --parent 10 --repo o/r --items "$T/pd.tsv" >/dev/null 2>&1
 check "post-deploy rollup: created with the lane marker, [check:] kept, section for the parent" "grep -q 'FORGE:POSTDEPLOY_ROLLUP: default' '$T/created.901.body' && grep -q 'post-deploy: \[check:login-smoke\] soon' '$T/created.901.body' && grep -q '^### #10\$' '$T/created.901.body'"
