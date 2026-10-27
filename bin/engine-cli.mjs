@@ -2023,6 +2023,41 @@ export async function limitsFromCli(argv, deps = {}) {
 }
 
 /**
+ * `forgedock decisions list [--stale] [--refresh] [--repo OWNER/NAME] [--base REF]` (#4695): the anchored decisions of the
+ * local index (`~/.forge/decisions/`); `--refresh` rebuilds it from the repo's FORGE:DECISION comments first; `--stale`
+ * lists the active ones with an anchor that matches no file on the base ref (default HEAD). Read-only apart from the index.
+ */
+export async function decisionsFromCli(argv, deps = {}) {
+  const dec = await import("./lean/decisions.mjs");
+  const usage = "usage: forgedock decisions list [--stale] [--refresh] [--repo OWNER/NAME] [--base REF]";
+  const [sub, ...rest] = argv;
+  if (sub !== "list") throw new Error(usage);
+  const flag = (n) => { const i = rest.indexOf(n); return i >= 0 ? rest[i + 1] : null; };
+  const run = deps.exec ?? (async (cmd, args) => String((await pexec(cmd, args, { maxBuffer: 64 * 1024 * 1024 })).stdout));
+  const repo = flag("--repo") ?? String(await run("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])).trim();
+  if (rest.includes("--refresh")) {
+    const jq = '.[] | select(.body | startswith("<!-- FORGE:DECISION {")) | {body, user, author_association, issue_url} | tojson';
+    const lines = String(await run("gh", ["api", "--paginate", `repos/${repo}/issues/comments?per_page=100`, "--jq", jq])).split("\n").filter(Boolean);
+    const { isTrustedIssueComment } = await import("./lean/prefilter.mjs");
+    const recs = [];
+    for (const l of lines) {
+      try {
+        const c = JSON.parse(l);
+        const r = isTrustedIssueComment(c) ? dec.parseDecisionComment(c.body, { issue: Number(/(\d+)$/.exec(c.issue_url ?? "")?.[1]) || null }) : null;
+        if (r) recs.push(r);
+      } catch { /* skip a malformed comment */ }
+    }
+    dec.writeDecisionIndex(repo, recs);
+  }
+  const all = dec.foldDecisions(dec.readDecisionIndex(repo));
+  let rows = all.filter((d) => d.status !== "superseded").map((d) => ({ decision: d, dead: [] }));
+  if (rest.includes("--stale")) rows = dec.staleDecisions(all, String(await run("git", ["ls-tree", "-r", "--name-only", flag("--base") ?? "HEAD"])).split("\n").filter(Boolean));
+  for (const { decision: d, dead } of rows) console.log(`${d.id}  #${d.issue ?? "?"}  ${d.choice}  [${d.anchors.join(", ")}]${dead.length ? `  stale: ${dead.join(", ")}` : ""}${d.supersedes ? `  supersedes ${d.supersedes}` : ""}`);
+  if (!rows.length) console.log(rest.includes("--stale") ? "no stale decisions" : "no active decisions");
+  return { rows };
+}
+
+/**
  * `forgedock check [--repo DIR] [--base REF] [--json]` (#4364): runs in the lane worktree what the engine runs after the
  * builder: the frozen validate commands (.forge-lean/contract.json) and the change-scoped pre-PR checks, with the plan
  * the engine wrote (.forge-lean/check-plan.json; else this checkout's forge.yaml) and the caller's env (lane TMPDIR,
