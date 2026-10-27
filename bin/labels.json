@@ -203,5 +203,30 @@
     "name": "integration-red",
     "color": "D93F0B",
     "description": "Scheduled full-suite integration run on a milestone branch is red. Managed by ForgeDock."
+  },
+  {
+    "name": "followup:engineering",
+    "color": "BFD4F2",
+    "description": "Deferred buildable engineering work. Managed by ForgeDock."
+  },
+  {
+    "name": "followup:post-deploy",
+    "color": "BFD4F2",
+    "description": "Deferred post-deploy checks. Managed by ForgeDock."
+  },
+  {
+    "name": "followup:external",
+    "color": "BFD4F2",
+    "description": "Deferred items blocked on something outside the repo (credentials, third parties). Managed by ForgeDock."
+  },
+  {
+    "name": "followup:ops",
+    "color": "BFD4F2",
+    "description": "Deferred ops work (drills, runbooks). Managed by ForgeDock."
+  },
+  {
+    "name": "external-prerequisite",
+    "color": "E99695",
+    "description": "Follow-up that waits on an external prerequisite. Managed by ForgeDock."
   }
 ]

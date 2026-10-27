@@ -16,7 +16,8 @@ echo "$*" >> "$GH_LOG"
 case "$1 $2" in
   "api -X") [ -n "${LOOKUP_FAIL:-}" ] && exit 1; cat "$SEARCH_JSON"; exit 0 ;;
   "api --paginate") [ -n "${CLAIM_FAIL:-}" ] && exit 1; cat "$COMMENTS_JSON"; exit 0 ;;
-  "issue create") [ -n "${CREATE_FAIL:-}" ] && exit 1; echo "https://github.com/o/r/issues/901"; exit 0 ;;
+  "issue create") [ -n "${CREATE_FAIL:-}" ] && exit 1; N=$(( $(cat "$T_DIR/create.n" 2>/dev/null || echo 900) + 1 )); echo "$N" > "$T_DIR/create.n"; while [ $# -gt 0 ]; do [ "$1" = "--body-file" ] && cp "$2" "$T_DIR/created.$N.body"; shift; done; echo "https://github.com/o/r/issues/$N"; exit 0 ;;
+  "label create") exit 0 ;;
   "issue comment") [ -n "${COMMENT_FAIL:-}" ] && exit 1; exit 0 ;;
   "issue reopen") [ -n "${REOPEN_FAIL:-}" ] && exit 1; exit 0 ;;
   "issue close") [ -n "${CLOSE_FAIL:-}" ] && exit 1; exit 0 ;;
@@ -25,6 +26,8 @@ case "$1 $2" in
     while [ $# -gt 0 ]; do [ "$1" = "--body-file" ] && cp "$2" "$ISSUE_BODY.edited"; shift; done; exit 0 ;;
 esac
 if [ "$1" = api ]; then
+  case "$*" in "api repos/o/r/milestones"*) cat "$T_DIR/milestones.json"; exit 0 ;; esac
+  case "$*" in "api repos/o/r/issues/10 --jq"*) cat "$T_DIR/parent.milestone"; exit 0 ;; esac
   case "$*" in *--jq*) cat "$ISSUE_BODY"; exit 0 ;; esac
   n="${2##*/}"; [ -f "$T_DIR/issue.$n.json" ] && { cat "$T_DIR/issue.$n.json"; exit 0; }
   echo "HTTP 404: Not Found" >&2; exit 1
@@ -37,7 +40,8 @@ PASS=0; FAIL=0
 ok() { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
-reset() { : > "$GH_LOG"; rm -f "$ISSUE_BODY.edited" "$T"/issue.*.json; unset LOOKUP_FAIL CREATE_FAIL EDIT_FAIL CLAIM_FAIL COMMENT_FAIL REOPEN_FAIL CLOSE_FAIL DRY_RUN
+reset() { : > "$GH_LOG"; rm -f "$ISSUE_BODY.edited" "$T"/issue.*.json "$T/create.n"; unset LOOKUP_FAIL CREATE_FAIL EDIT_FAIL CLAIM_FAIL COMMENT_FAIL REOPEN_FAIL CLOSE_FAIL DRY_RUN FORGE_FOLLOWUP_MILESTONE FORGE_FOLLOWUPS_DEFAULT_MILESTONE FORGE_EXTERNAL_PREREQ
+  echo '[]' > "$T/milestones.json"; : > "$T/parent.milestone"
   echo '{"items":[]}' > "$SEARCH_JSON"; echo '[]' > "$COMMENTS_JSON"; }
 # issue_json NUMBER STATE ASSOCIATION [PARENT]: REST view of a follow-up carrying the DEFERRED_FROM marker
 issue_json() { printf '{"number":%s,"state":"%s","author_association":"%s","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #%s -->"}\n' "$1" "$2" "$3" "${4:-10}" > "$T/issue.$1.json"; }
@@ -198,10 +202,74 @@ check "dry-run: no comment/reopen/close/edit" "! grep -qE '^issue (comment|reope
 # 18. #4626: a post-deploy why's [check:<id>] token is kept verbatim in the checklist line
 reset
 printf 'x\n' > "$ISSUE_BODY"
-echo '{"items":[{"number":77,"author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"; issue_json 77 open OWNER
-printf 'R3: soak\tpost-deploy: [check:login-smoke] after a day\t\n' > "$T/check.tsv"
+echo '{"items":[{"number":77,"author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"
+printf '{"number":77,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->\\n<!-- FORGE:DEFERRED_CLASS: post-deploy -->"}\n' > "$T/issue.77.json"
+printf -- '-\tpost-deploy: [check:login-smoke] after a day\t\t\tR3: soak\n' > "$T/check.tsv"
 bash "$S" --parent 10 --repo o/r --items "$T/check.tsv" >/dev/null 2>&1
 check "check token kept in the checklist line" "grep -q 'post-deploy: \[check:login-smoke\] after a day' '$ISSUE_BODY.edited'"
+
+# 19. #4664: milestone inheritance
+MS='[{"title":"M1","state":"open","due_on":"2026-01-01T00:00:00Z"},{"title":"M0","state":"closed","due_on":"2025-06-01T00:00:00Z"},{"title":"M2","state":"open","due_on":"2026-06-01T00:00:00Z"},{"title":"Dflt","state":"open","due_on":null}]'
+reset; echo "$MS" > "$T/milestones.json"; export FORGE_FOLLOWUP_MILESTONE=M1
+bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null 2>&1
+check "milestone: open parent milestone inherited" "grep '^issue create' '$GH_LOG' | grep -q -- '--milestone M1'"
+reset; echo "$MS" > "$T/milestones.json"; echo M1 > "$T/parent.milestone"
+bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null 2>&1
+check "milestone: read from the parent when not passed" "grep '^issue create' '$GH_LOG' | grep -q -- '--milestone M1'"
+reset; echo "$MS" > "$T/milestones.json"; export FORGE_FOLLOWUP_MILESTONE=M0
+bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null 2>&1
+check "milestone: shipped (closed) one -> next open by due date" "grep '^issue create' '$GH_LOG' | grep -q -- '--milestone M1'"
+reset; echo '[{"title":"M0","state":"closed","due_on":"2025-06-01T00:00:00Z"},{"title":"Dflt","state":"open","due_on":null}]' > "$T/milestones.json"
+export FORGE_FOLLOWUP_MILESTONE=M0 FORGE_FOLLOWUPS_DEFAULT_MILESTONE=Dflt
+bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null 2>&1
+check "milestone: shipped, no next -> followups.default_milestone" "grep '^issue create' '$GH_LOG' | grep -q -- '--milestone Dflt'"
+reset; echo '[]' > "$T/milestones.json"
+bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null 2>&1
+check "milestone: parent without one -> none passed" "grep -q '^issue create' '$GH_LOG' && ! grep '^issue create' '$GH_LOG' | grep -q -- '--milestone'"
+
+# 20. #4664: one issue per class, class labels
+printf 'a/x.sh\twhy a\t\nb/y.sh\tpost-deploy: [check:smoke] later\t\t\nc/z.sh\texternal: needs a real credential\t\t\nd/w.sh\tops drill\t\tops\n-\tdefer: plain\t\t\tR9: plain item\n' > "$T/classes.tsv"
+reset
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/classes.tsv"); RC=$?
+check "classes: rc 0, one create per class (4)" "[ $RC -eq 0 ] && [ \$(grep -c '^issue create' '$GH_LOG') -eq 4 ]"
+for c in engineering post-deploy external ops; do check "classes: label followup:$c applied" "grep '^issue create' '$GH_LOG' | grep -q -- '--label followup:$c'"; done
+check "classes: external also labelled external-prerequisite" "grep '^issue create' '$GH_LOG' | grep -- 'followup:external' | grep -q -- '--label external-prerequisite'"
+check "classes: engineering has the old title, others carry the class" "grep '^issue create' '$GH_LOG' | grep -q 'follow-up (ops): 1 deferred' && grep '^issue create' '$GH_LOG' | grep -q 'follow-up: 2 deferred'"
+check "classes: telemetry lists every issue and class" "printf '%s' \"\$OUT\" | grep -q 'batched_into=#901,#902,#903,#904 filed=4 classes=engineering,external,ops,post-deploy'"
+check "classes: rows point at their class issue (a/x.sh and the R9 item share one)" "printf '%s\n' \"\$OUT\" | grep -q '^c/z.sh	90[0-9]\$' && [ \$(printf '%s\n' \"\$OUT\" | grep -E '^(a/x.sh|R9: plain item)	' | cut -f2 | sort -u | wc -l) -eq 1 ]"
+check "classes: claim markers carry the class" "grep '^issue comment 10' '$GH_LOG' | grep -q 'class=external'"
+# an existing engineering follow-up is not reused for another class
+reset
+printf 'x\n' > "$ISSUE_BODY"; issue_json 77 open OWNER; claim_json OWNER 77
+printf 'c/z.sh\texternal: needs a credential\t\n' > "$T/ext.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/ext.tsv"); RC=$?
+check "classes: engineering follow-up #77 not reused for an external item" "[ $RC -eq 0 ] && grep -q '^issue create' '$GH_LOG' && ! grep -q '^issue edit 77' '$GH_LOG'"
+# a labelled-class follow-up is reused for its class
+reset
+printf 'x\n' > "$ISSUE_BODY"
+printf '{"number":78,"state":"open","author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->\\n<!-- FORGE:DEFERRED_CLASS: external -->"}\n' > "$T/issue.78.json"; claim_json OWNER 78
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/ext.tsv"); RC=$?
+check "classes: external follow-up #78 reused for external items" "[ $RC -eq 0 ] && ! grep -q '^issue create' '$GH_LOG' && grep -q '^issue edit 78' '$GH_LOG'"
+
+# 21. #4664: requirement-text rows are rejected, nothing filed
+for row in 'R1: a saved mapping per entity\twhy\t' 'R1: R2: a saved mapping\twhy\t' 'add a saved mapping\twhy\t' 'a/x.sh\twhy\t\tbogus'; do
+  reset; printf "$row\n" > "$T/bad.tsv"
+  OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/bad.tsv" 2>/dev/null); RC=$?
+  check "rejected row ($(printf "$row" | cut -c1-24)): rc 2, DEFERRED_TSV=INVALID, no gh call" "[ $RC -eq 2 ] && printf '%s' \"\$OUT\" | grep -q DEFERRED_TSV=INVALID && [ ! -s '$GH_LOG' ]"
+done
+reset; printf 'a/x.sh\twhy\t\nR2: nope\twhy\t\n' > "$T/bad.tsv"
+bash "$S" --parent 10 --repo o/r --items "$T/bad.tsv" >/dev/null 2>&1
+check "one malformed row among valid ones files nothing" "[ $? -eq 2 ] && ! grep -q '^issue create' '$GH_LOG'"
+# `-` + label is a valid requirement-level row; a doubled R-prefix in the label collapses; Affected Files lists only paths
+reset; printf '%s\n' "$(printf -- '-\twhy\t\t\tR1: R2: a saved mapping')" "$(printf 'src/q.ts\twhy q\t')" > "$T/ok.tsv"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/ok.tsv"); RC=$?
+check "label row accepted, prefix collapsed in stdout" "[ $RC -eq 0 ] && printf '%s\n' \"\$OUT\" | grep -q '^R1: a saved mapping	901'"
+
+check "created body: Affected Files lists only paths, checklist keeps the collapsed label" "grep -q '^- \`src/q.ts\`\$' '$T/created.901.body' && ! grep -q '^- \`R1' '$T/created.901.body' && grep -q '^- \[ \] \`R1: a saved mapping\`' '$T/created.901.body' && ! grep -q 'R1: R2:' '$T/created.901.body'"
+check "created body: DEFERRED_FROM and DEFERRED_CLASS markers" "grep -q 'FORGE:DEFERRED_FROM: #10 -->' '$T/created.901.body' && grep -q 'FORGE:DEFERRED_CLASS: engineering' '$T/created.901.body'"
+reset; printf -- '-\tpost-deploy: [check:login-smoke] soon\t\t\tR3: soak\n' > "$T/pd.tsv"
+bash "$S" --parent 10 --repo o/r --items "$T/pd.tsv" >/dev/null 2>&1
+check "post-deploy issue: only requirement-level rows -> no path, [check:] kept" "grep -q 'None (requirement-level' '$T/created.901.body' && grep -q 'post-deploy: \[check:login-smoke\] soon' '$T/created.901.body' && grep '^issue comment 10' '$GH_LOG' | grep -q 'class=post-deploy'"
 
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
