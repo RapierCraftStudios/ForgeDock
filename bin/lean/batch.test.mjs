@@ -120,6 +120,21 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.deepEqual(deferPolicy({ code: "gh.unavailable", retryInSeconds: 60 }, { now: 0 }), { delayMs: 60000 });
   });
 
+  it("gh.auth deferrals (forge#4662) are requeued, never relaunched as engine-error, and never trip the breaker", async () => {
+    const { now, sleep } = fakeClock();
+    const updates = [];
+    let calls = 0;
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 3, breaker: { errors: 3, window_min: 30 },
+      onUpdate: (r) => updates.push(r),
+      runOne: async () => (++calls <= 3
+        ? { terminalReason: "deferred", code: "gh.auth", retryInSeconds: 120, detail: "gh auth failed (HTTP 401)" }
+        : { terminalReason: "merged", pr: 5 }) });
+    assert.equal(calls, 4);
+    assert.equal(rows[0].outcome, "merged");
+    assert.ok(!updates.some((u) => u.outcome === "breaker" || u.outcome === "engine-error"));
+    assert.equal(updates.filter((u) => /requeued in 120s: gh.auth/.test(u.detail ?? "")).length, 3);
+  });
+
   it("#4690 env.lane_limit (needs-human) is never counted by the breaker and the batch keeps admitting", async () => {
     const { now, sleep } = fakeClock();
     const updates = [], ran = [];

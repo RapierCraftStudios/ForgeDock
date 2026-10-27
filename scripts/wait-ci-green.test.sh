@@ -74,7 +74,9 @@ expect "rate limited for the whole window is RATE_LIMITED rc 4" "4|CI_GATE: RATE
 expect "more than 5 rate-limit hits are not an ERROR" "0|CI_GATE: PASS" "$(run "$(mk rlmany RATE RATE RATE RATE RATE RATE RATE "$P")" --timeout 60)"
 # forge#4037: only real rate-limit evidence is RATE_LIMITED; a bare 401/403 fails fast; timeouts/5xx are a small bounded retry.
 expect "bare 403 is a permanent error rc 2" "2|CI_GATE: ERROR" "$(run "$(mk a403 A403 "$P")" --timeout 60)"
-expect "bare 401 is a permanent error rc 2" "2|CI_GATE: ERROR" "$(run "$(mk a401 A401 "$P")" --timeout 60)"
+# forge#4662: a 401 is a refreshable token, so it is retried a bounded number of times before it is an error.
+expect "401 then pass retries (token refreshed meanwhile)" "0|CI_GATE: PASS" "$(run "$(mk a401 A401 "$P")" --timeout 60)"
+expect "persistent 401 is rc 2 after the bounded retries" "2|CI_GATE: ERROR" "$(run "$(mk a401all A401)" --timeout 60)"
 expect "HTTP 429 is RATE_LIMITED rc 4" "4|CI_GATE: RATE_LIMITED" "$(run "$(mk r429 R429)" --timeout 2)"
 expect "x-ratelimit-remaining: 0 on a 403 is RATE_LIMITED rc 4" "4|CI_GATE: RATE_LIMITED" "$(run "$(mk rhdr RHDR)" --timeout 2)"
 expect "network timeout then pass retries" "0|CI_GATE: PASS" "$(run "$(mk tmo TMO "$P")")"
