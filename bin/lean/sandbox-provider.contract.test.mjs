@@ -186,9 +186,7 @@ describe("remote adapter (#4254)", () => {
     const flaky = { ...fakeTransport(), status: async () => { throw new Error("ECONNRESET"); } };
     const q = remoteProvider({ batch, repo: "o/r", transport: flaky, env: {} });
     const h = await q.start({ issue: 6, args: [] });
-    const seen = [];
-    for (let i = 0; i < 5; i++) seen.push(await q.status(h));
-    assert.deepEqual(seen, ["running", "running", "running", "running", "gone"]);
+    await assert.rejects(() => q.status(h), /ECONNRESET/); // #4672: a transport error propagates; providerLanes retries it for the unreachable window
   });
 
   it("httpTransport: bearer token, JSON protocol, 404 = gone/destroyed, 429 retryable; the token never in errors", async () => {

@@ -23,7 +23,6 @@ import { scopedEnv } from "./execution.mjs";
 import { resolveCredential } from "./credentials.mjs";
 
 const REDACTED = "[redacted]";
-const STATUS_ERRORS = 5;
 /** Replace every value of `secrets` (4+ chars, longest first) in `text`. */
 export function redact(text, secrets = []) {
   let s = String(text ?? "");
@@ -58,6 +57,8 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
   };
   const fail = (what, r) => {
     const e = new Error(`sandbox ${what}: HTTP ${r.status}`);
+    e.status = r.status;
+    if ([502, 503, 504].includes(r.status)) e.transient = true; // #4672: a router restart or gateway blip, retried by the lane poll
     if (r.status === 429 || r.status === 503) { e.retryable = true; const n = Number(r.retryAfter); if (Number.isFinite(n) && n > 0) e.retryInSeconds = n; }
     return e;
   };
@@ -113,7 +114,6 @@ export function gitIdentityEnv(identity, laneEnv = {}) {
 export function remoteProvider({ batch, repo, settings = {}, name = "remote", transport, env = process.env, credentials = (name) => resolveCredential(name, { env }), now = () => Date.now(), gitIdentity = hostGitIdentity }) {
   if (!transport) throw new Error("remote provider needs a transport");
   const idFor = (issue) => `fdrsbx-${safeSegment(batch.id)}-${issue}`;
-  const errs = new Map(); // sandbox id -> consecutive status errors
   const known = new Set(); // secret values seen this process, for redaction
   const remember = (v) => { if (typeof v === "string" && v.length >= 4) known.add(v); };
   for (const k of settings.secrets ?? []) remember(credentials(k));
@@ -156,8 +156,8 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
     },
     async status(h) {
       let s;
-      // A transient transport error is not an exit; STATUS_ERRORS in a row is (the lane then ends without a result).
-      try { s = await transport.status(h.id); errs.delete(h.id); } catch { const k = (errs.get(h.id) ?? 0) + 1; errs.set(h.id, k); return k >= STATUS_ERRORS ? "gone" : "running"; }
+      // #4672: a transport error is not an exit; it propagates and providerLanes retries it for execution.unreachable_window_min.
+      s = await transport.status(h.id);
       await pullLogs(h);
       return s === "running" ? "running" : s === "gone" ? "gone" : "exited";
     },
