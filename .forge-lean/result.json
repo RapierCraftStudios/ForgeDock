@@ -1,88 +1,88 @@
 {
  "status": "fixed",
- "summary": "guard gate: base versions of guarding tests rerun against the lane; guard_broken blocks unless a supersedes amendment is accepted",
+ "summary": "due-date gate, parked sweep, owner asks and verification outcomes for post-deploy follow-ups",
  "requirements": [
   {
    "id": "R1",
    "status": "implemented",
-   "evidence": "bin/lean/guardgate.mjs:selectGuards"
+   "evidence": "bin/lean/prefilter.mjs:postDeployOnly"
   },
   {
    "id": "R2",
    "status": "implemented",
-   "evidence": "bin/lean/guardgate.mjs:runGuards"
+   "evidence": "bin/lean/prefilter.mjs:postDeployGate"
   },
   {
    "id": "R3",
    "status": "implemented",
-   "evidence": "bin/lean/conformance.mjs:precheck guardFailures"
+   "evidence": "bin/lean/parked-sweep.mjs:sweepParked"
   },
   {
    "id": "R4",
    "status": "implemented",
-   "evidence": "bin/lean/conformance.mjs:applyAmendments supersedes; bin/lean/lean.mjs supersession comment"
+   "evidence": "bin/lean/prefilter.mjs:prefilterIssue"
   },
   {
    "id": "R5",
    "status": "implemented",
-   "evidence": "bin/lean/guardgate.test.mjs reverts a guarded fix"
+   "evidence": "bin/engine-cli.mjs:scheddDue"
   },
   {
    "id": "R6",
    "status": "implemented",
-   "evidence": "bin/lean/guardgate.test.mjs accepted supersedes"
+   "evidence": "bin/lean/prefilter.mjs:itemDueMs"
   },
   {
    "id": "R7",
    "status": "implemented",
-   "evidence": "bin/lean/guardgate.test.mjs no guarded hunk"
+   "evidence": "bin/lean/postdeploy-check.mjs:measureFollowup"
   },
   {
    "id": "R8",
    "status": "implemented",
-   "evidence": "bin/lean/lean.mjs guardGate and CONFORMANCE_SHADOW would"
+   "evidence": "bin/lean/postdeploy-check.mjs:measureFollowup"
   },
   {
    "id": "R9",
    "status": "implemented",
-   "evidence": "bin/lean/guardgate.mjs (no LLM)"
+   "evidence": "bin/lean/postdeploy-check.mjs:tickItems"
   },
   {
    "id": "R10",
    "status": "implemented",
-   "evidence": "bin/lean/guardgate.mjs:selectGuards early return"
+   "evidence": "bin/lean/postdeploy-check.mjs:fileFailureIssues"
   },
   {
    "id": "R11",
    "status": "implemented",
-   "evidence": "bin/lean/guardgate.mjs:runGuards cap"
+   "evidence": "bin/lean/postdeploy-check.mjs:postOwnerAsk"
+  },
+  {
+   "id": "R12",
+   "status": "implemented",
+   "evidence": "bin/lean/prefilter.mjs:formatParkedLine"
   },
   {
    "id": "R13",
    "status": "implemented",
-   "evidence": "bin/lean/guardgate.mjs:guardFailures"
+   "evidence": "bin/lean/prefilter.mjs:formatParkedLine"
   }
  ],
  "validation": [
   {
    "id": "V1",
-   "command": "node --test bin/lean/guardgate.test.mjs",
+   "command": "node --test bin/lean/prefilter.test.mjs bin/lean/parked-sweep.test.mjs bin/lean/postdeploy-check.test.mjs bin/lean/postdeploy-monitor.test.mjs",
    "exit": 0
   },
   {
    "id": "V2",
-   "command": "node --test bin/lean/guards.test.mjs bin/lean/conformance.test.mjs bin/lean/lean.test.mjs bin/lean/conformance.e2e.test.mjs",
-   "exit": 0
-  },
-  {
-   "id": "V3",
-   "command": "node --test bin/stats/compounding.test.mjs",
+   "command": "node --test bin/lean/light.test.mjs bin/lean/lifecycle.test.mjs bin/lean/orchestrate.test.mjs bin/lean/schedd.test.mjs",
    "exit": 0
   }
  ],
  "tests": [
   {
-   "command": "node --test bin/lean/guardgate.test.mjs",
+   "command": "node --test bin/lean/parked-sweep.test.mjs bin/lean/postdeploy-check.test.mjs bin/lean/prefilter.test.mjs",
    "result": "pass",
    "fails_without_fix": true
   }
@@ -91,75 +91,75 @@
   {
    "question": "1",
    "answer": "yes",
-   "evidence": "every deliver requirement mapped in implementation.md; R12 is post-deploy and emits wall_ms in guard_run (bin/lean/lean.mjs guardGate)"
+   "evidence": "R1-R13 mapped above"
   },
   {
    "question": "2",
    "answer": "yes",
-   "evidence": "V2 611 pass; precheck without guardFailures unchanged (conformance.mjs precheck default null)"
+   "evidence": "forgedock check PASS incl. existing suites"
   },
   {
    "question": "3",
    "answer": "yes",
-   "evidence": "D1-D6 changed; preserve P1-P3 intact; V1-V3 exit 0; forgedock check PASS"
+   "evidence": "V1,V2 exit 0"
   },
   {
    "question": "4",
    "answer": "yes",
-   "evidence": "git diff origin/staging...HEAD touches only bin/lean/guardgate*.mjs, conformance.mjs, lean.mjs, outcome-codes.mjs, devdocs/modules/lean.md"
+   "evidence": "diff limited to deliverables, tests, devdocs"
   }
  ],
  "amendments": [],
  "not_members": [
   {
-   "symbol": "guardgate",
+   "symbol": "parked-sweep",
    "test": "bin/lean/batch.test.mjs",
-   "why": "not a member: the test names a few unrelated bin/lean file stems as incidental string literals (fixtures, kind names, cache entries); it does not enumerate the bin/lean modules, and the new guardgate module is not part of what it asserts"
+   "why": "line 29 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
   },
   {
-   "symbol": "guardgate",
+   "symbol": "parked-sweep",
    "test": "bin/lean/checks.test.mjs",
-   "why": "not a member: the test names a few unrelated bin/lean file stems as incidental string literals (fixtures, kind names, cache entries); it does not enumerate the bin/lean modules, and the new guardgate module is not part of what it asserts"
+   "why": "line 156 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
   },
   {
-   "symbol": "guardgate",
+   "symbol": "parked-sweep",
    "test": "bin/lean/conformance.e2e.test.mjs",
-   "why": "not a member: the test names a few unrelated bin/lean file stems as incidental string literals (fixtures, kind names, cache entries); it does not enumerate the bin/lean modules, and the new guardgate module is not part of what it asserts"
+   "why": "line 74 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
   },
   {
-   "symbol": "guardgate",
+   "symbol": "parked-sweep",
    "test": "bin/lean/conformance.test.mjs",
-   "why": "not a member: the test names a few unrelated bin/lean file stems as incidental string literals (fixtures, kind names, cache entries); it does not enumerate the bin/lean modules, and the new guardgate module is not part of what it asserts"
+   "why": "line 366 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
   },
   {
-   "symbol": "guardgate",
+   "symbol": "parked-sweep",
    "test": "bin/lean/context.test.mjs",
-   "why": "not a member: the test names a few unrelated bin/lean file stems as incidental string literals (fixtures, kind names, cache entries); it does not enumerate the bin/lean modules, and the new guardgate module is not part of what it asserts"
+   "why": "line 138 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
   },
   {
-   "symbol": "guardgate",
+   "symbol": "parked-sweep",
    "test": "bin/lean/execution.e2e.test.mjs",
-   "why": "not a member: the test names a few unrelated bin/lean file stems as incidental string literals (fixtures, kind names, cache entries); it does not enumerate the bin/lean modules, and the new guardgate module is not part of what it asserts"
+   "why": "line 28 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
   },
   {
-   "symbol": "guardgate",
+   "symbol": "parked-sweep",
    "test": "bin/lean/execution.test.mjs",
-   "why": "not a member: the test names a few unrelated bin/lean file stems as incidental string literals (fixtures, kind names, cache entries); it does not enumerate the bin/lean modules, and the new guardgate module is not part of what it asserts"
+   "why": "line 42 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
   },
   {
-   "symbol": "guardgate",
+   "symbol": "parked-sweep",
    "test": "bin/lean/fixround.test.mjs",
-   "why": "not a member: the test names a few unrelated bin/lean file stems as incidental string literals (fixtures, kind names, cache entries); it does not enumerate the bin/lean modules, and the new guardgate module is not part of what it asserts"
+   "why": "line 10 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
   },
   {
-   "symbol": "guardgate",
+   "symbol": "parked-sweep",
    "test": "bin/lean/heavy.test.mjs",
-   "why": "not a member: the test names a few unrelated bin/lean file stems as incidental string literals (fixtures, kind names, cache entries); it does not enumerate the bin/lean modules, and the new guardgate module is not part of what it asserts"
+   "why": "line 28 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
   },
   {
-   "symbol": "guardgate",
+   "symbol": "parked-sweep",
    "test": "bin/lean/lean.test.mjs",
-   "why": "not a member: the test names a few unrelated bin/lean file stems as incidental string literals (fixtures, kind names, cache entries); it does not enumerate the bin/lean modules, and the new guardgate module is not part of what it asserts"
+   "why": "line 87 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
   }
  ]
 }
