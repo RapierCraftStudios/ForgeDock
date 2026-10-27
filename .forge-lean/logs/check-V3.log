@@ -1,0 +1,117 @@
+Spec graph self-consistency report
+  graph: /work/repo/.claude/worktrees/lean-4727/.forgedock/graph/spec-graph.json
+
+  [HARD] broken-transition      Label workflow:engine-error is defined/referenced but set by NO command (no --add-label transition) — state-machine gap.
+  [SOFT] orphan-annotation      FORGE:ACCEPTANCE_GATE is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:ACCEPTANCE_GATE_REVIEW has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:ACCEPTANCE_REPAIR has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:AUDIT is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:AUTOPILOT_GATE is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:AUTOPILOT_IMPACT is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:BASESYNC_FAILED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:BASESYNC_REMEDIATION has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:BATCHABLE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:BATCH_ID has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:BATCH_MAX_GENERATION has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:BATCH_MEMBERS has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:BENCH_SCORECARD is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:BLAST_RADIUS has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:BODY has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:BOOTSTRAP_PLAN has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:BUILD_BLOCKED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:CALIBRATION_CHECK has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:CARD is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:CI_REMEDIATION has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:CLASS has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:CONSUMER_REPAIR has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:COORD_ISSUE is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:CRITIQUE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:CYCLE is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:DECISION has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:DECISION_RECORD is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:DECOMPOSED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:DECOMPOSE_BLOCKED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:DEFERRED_FROM has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:DEFERRED_ISSUE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:DEGRADED_REREVIEW is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:DESIGN_ has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:DESIGN_CANDIDATES has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:DESIGN_CONTEXT has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:DESIGN_RATIONALE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:DESIGN_SHIPPED has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:DESIGN_SPEC has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:DIFF_SIZE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:DOSSIER_UPDATED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:EDGE_CASES has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:ENGINE_FALLBACK has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:FIX_CI is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:GATE_FAILURE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:GATE_PASS has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:INPR_FIX is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:INPR_FIX_WAIVED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:INPR_REMEDIATION has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:INVESTIGATION has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:LEARNED is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:LEARNED_RULES has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:LIFECYCLE is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:MAINT has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:MEMORY_INDEX is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:MEMORY_INDEXED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:MODEL_TIER_NOTE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:NOTE_DISPOSITION has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:OPENCODE_BLOCKED has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:ORPHAN_ESCALATED has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:ORPHAN_RECOVERED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:PATTERN is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:PHASE_TRAIL_OVERRIDE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:PHASE_TRAIL_OVERRIDE_APPLIED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:PHASE_TRAIL_RELEASED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:PLAN_DAG is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:PLAN_DAG_STALLED has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:PRIOR_DECISIONS has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:PROTOCOL_SOURCE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:PUSH_BLOCKED_EMPTY_BRANCH has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:QUALITY_GATE is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:RECALL_PRIOR has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:RECOVERY_CLAIM is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:REMEDIATION_DEFERRED has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:REMEDIATION_DISPATCH has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:REMEDIATION_HELD has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:REREVIEW_DISPATCHED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:REREVIEW_RELEASED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:REREVIEW_SKIPPED has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:REVIEW is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:REVIEWER is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:REVIEW_BLOCKED has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:REVIEW_ROUTE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:REVIEW_TIER has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:SECURITY_AUDIT is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:SELFREVIEW has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:SELFREVIEW_REPAIR has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:SIGNAL_RESOLVED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:SIGNAL_UNRESOLVED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:SIZE_OVERRIDE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:SPAWN_POLICY has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:SPEC_DOCTOR_COMPLETE is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:SPEC_LOADED has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:STALE_REREVIEW is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:STATE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:SUMMARY has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:TEST_GATE is READ but never WRITTEN by any spec.
+  [SOFT] orphan-annotation      FORGE:TRAIN_CANDIDATE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [SOFT] orphan-annotation      FORGE:UNBLOCKED is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:USER_FEEDBACK is WRITTEN but never READ by any spec.
+  [SOFT] orphan-annotation      FORGE:VALIDATE has neither a WRITES nor a READS edge and is not an allowlisted scaffolding marker — triage or add to the allowlist.
+  [INFO] scaffold-annotation    FORGE:ANCESTRY_FAILED is an inline doc-scaffolding marker (no WRITES/READS edge — expected).
+  [INFO] scaffold-annotation    FORGE:DISPATCHER is an inline doc-scaffolding marker (no WRITES/READS edge — expected).
+  [INFO] scaffold-annotation    FORGE:GATE_FAILED is an inline doc-scaffolding marker (no WRITES/READS edge — expected).
+  [INFO] scaffold-annotation    FORGE:JSONL_PARSER_UTIL is an inline doc-scaffolding marker (no WRITES/READS edge — expected).
+  [INFO] scaffold-annotation    FORGE:MILESTONE_INDEX is an inline doc-scaffolding marker (no WRITES/READS edge — expected).
+  [INFO] scaffold-annotation    FORGE:PHASE is an inline doc-scaffolding marker (no WRITES/READS edge — expected).
+  [INFO] scaffold-annotation    FORGE:PRIOR_GIST is an inline doc-scaffolding marker (no WRITES/READS edge — expected).
+  [INFO] scaffold-annotation    FORGE:PUSH_BLOCKED is an inline doc-scaffolding marker (no WRITES/READS edge — expected).
+  [INFO] scaffold-annotation    FORGE:PUSH_FAILED is an inline doc-scaffolding marker (no WRITES/READS edge — expected).
+  [INFO] scaffold-annotation    FORGE:REVIEW_STARTED is an inline doc-scaffolding marker (no WRITES/READS edge — expected).
+  [INFO] scaffold-annotation    FORGE:TYPE is an inline doc-scaffolding marker (no WRITES/READS edge — expected).
+
+Summary: 1 hard, 100 soft, 11 info

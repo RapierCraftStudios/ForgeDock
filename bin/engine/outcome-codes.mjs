@@ -225,6 +225,14 @@ function classifyNeedsHumanBase(row) {
   return RECOVERABLE_CODES.includes(row.code) ? "recoverable" : "terminal";
 }
 
+/** forge#4725: mechanical/environment codes recover on their own budget (`recovery.mechanicalMaxAttempts`), apart from conformance failures. */
+export const MECHANICAL_CODES = Object.freeze([OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]);
+
+/** `mechanical` | `conformance`: the recovery budget class of a lane result row (a conflicting `ci-pending` is a base conflict). */
+export function recoveryClassOf(row) {
+  return MECHANICAL_CODES.includes(recoveryCodeOf(row)) ? "mechanical" : "conformance";
+}
+
 /** The code a recovery lane works on: a conflicting `ci-pending` is recovered as a base conflict. */
 export function recoveryCodeOf(row) {
   return (row?.outcome ?? row?.terminalReason) === "ci-pending" ? OUTCOME_CODES.BASE_CONFLICT : normalizeCode(row?.code);

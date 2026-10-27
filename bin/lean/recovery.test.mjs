@@ -33,6 +33,20 @@ describe("in-batch recovery of mechanical needs-human (#4267)", () => {
   const NH = (code, detail = `ended ${code}`, more = {}) => ({ terminalReason: "needs-human", code, detail, ...more });
   const byIssue = (rows) => Object.fromEntries(rows.map((r) => [r.issue, r]));
 
+  it("#4725: mechanical codes get their own budget (2), apart from the conformance one; an open-PR base conflict is not parked while it remains", async () => {
+    const { rows, calls } = await batch({ 1: [NH("base.conflict", "conflicts", { pr: 50 }), NH("base.conflict", "conflicts", { pr: 50 }), { terminalReason: "merged", pr: 50 }] },
+      {}, { recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 } });
+    assert.equal(byIssue(rows)[1].outcome, "merged");
+    assert.deepEqual(calls.map((c) => c.recover?.attempt ?? 0), [0, 1, 2]);
+    assert.equal(calls[1].recover.final, false); assert.equal(calls[2].recover.final, true);
+    // conformance codes stay at maxAttempts: ci.red gets one recovery only
+    const c = await batch({ 2: [NH("ci.red", "red", { pr: 51 })] }, {}, { recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 } });
+    assert.equal(c.calls.length, 2);
+    // a mechanical recovery does not spend the conformance budget
+    const m = await batch({ 3: [NH("ci.red", "red"), NH("env.tool_missing", "no tool"), { terminalReason: "merged" }] }, {}, { recovery: { maxAttempts: 1, mechanicalMaxAttempts: 2 } });
+    assert.equal(byIssue(m.rows)[3].outcome, "merged");
+  });
+
   it("ci.red: one recovery lane on the PR; green re-queues the issue and its dependent in the same batch, no operator action", async () => {
     const { rows, calls, decisions } = await batch({ 1: [NH("ci.red", "Required check(s) failed on PR #101: test"), { terminalReason: "merged", pr: 101 }], 2: [{ terminalReason: "merged", pr: 102 }] }, { 2: "**Depends on**: #1" });
     const r = byIssue(rows);

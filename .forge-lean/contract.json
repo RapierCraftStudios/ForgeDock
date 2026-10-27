@@ -2,19 +2,19 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "A `FORGE:GUARD` comment from an untrusted author is ignored by `collectGuards`, `guardIssue` and the guard index.",
+   "quote": "The failure scenario above no longer reproduces at `scripts/file-deferred-followups.sh:79`, covered by a regression test that fails on the current staging head.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "A test covers both a trusted and an untrusted guard.",
+   "quote": "No behaviour change for lanes or repos the finding does not describe.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "Must land before #4693's guard gate moves from shadow to enforce.",
+   "quote": "Validation should reject requirement text (`R\u003cn>:` prefixes, prose), not legal path characters.",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -22,8 +22,8 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/lean/guards.mjs",
-   "change": "import isTrustedIssueComment from ./prefilter.mjs; in guardIssue compute the `existing` guard only from trusted comments; in collectGuards skip comments that are not trusted before parseGuard. The index and guardgate use collectGuards, so they are covered.",
+   "path": "scripts/file-deferred-followups.sh",
+   "change": "Replace the character-whitelist grep at the column-1 check with a blacklist: keep the R\u003cn>: rejection; reject control chars; a value with whitespace must contain '/' or end in .\u003cext>, otherwise it is prose and rejected; whitespace-free values pass. Update header comment.",
    "requirements": [
     "R1",
     "R3"
@@ -31,49 +31,29 @@
   },
   {
    "id": "D2",
-   "path": "bin/lean/guards.test.mjs",
-   "change": "add authorAssociation OWNER to existing guard comment fixtures; add tests: collectGuards keeps a trusted guard and drops an untrusted (CONTRIBUTOR/NONE) one; guardIssue ignores an untrusted planted guard and still posts the real one; the guards list index excludes the untrusted guard.",
+   "path": "scripts/file-deferred-followups.test.sh",
+   "change": "Add cases: app/(marketing)/page.tsx, 'docs/My Notes.md', src/a=b.ts, src/#x.ts, src/foo:bar.ts are accepted (rc 0, issue created, path listed); existing prose and R\u003cn>: rows stay rejected; a mixed batch with these paths files everything.",
    "requirements": [
     "R1",
-    "R2"
+    "R2",
+    "R3"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "guardIssue stays idempotent for a trusted existing guard and posts exactly one guard (bin/lean/guards.mjs:96)"
+   "what": "Rejection of `R\u003cn>:` prefixed and prose column-1 values (exit 2, DEFERRED_TSV=INVALID, nothing filed) in scripts/file-deferred-followups.test.sh section 21"
   },
   {
    "id": "P2",
-   "what": "collectGuards signature and return shape, consumed by bin/lean/guardgate.mjs:30 and bin/stats/compounding.mjs:150"
-  },
-  {
-   "id": "P3",
-   "what": "The FORGE:CONTRACT lookup in guardIssue is unchanged (out of scope)"
+   "what": "Row format, exit codes, stdout markers and gh call behaviour of scripts/file-deferred-followups.sh for already-valid paths; callers in commands/work-on/build.md"
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test bin/lean/guards.test.mjs"
-  },
-  {
-   "id": "V2",
-   "command": "node --test bin/lean/guardgate.test.mjs bin/lean/lean.test.mjs"
+   "command": "bash scripts/file-deferred-followups.test.sh"
   }
- ],
- "decisions": [
-  {
-   "id": "K1",
-   "choice": "Reuse isTrustedIssueComment from prefilter.mjs rather than a new predicate; no change to the gh query because gh's comments JSON already includes author and authorAssociation",
-   "justification": "bin/lean/prefilter.mjs:54-58,199 and the same use in bin/engine-cli.mjs:2033, bin/lean/postdeploy-monitor.mjs:32",
-   "source": "precedent"
-  }
- ],
- "repro_test": {
-  "path": "bin/lean/guards.test.mjs",
-  "id": "collectGuards ignores a FORGE:GUARD comment from an untrusted author",
-  "command": "node --test bin/lean/guards.test.mjs --test-name-pattern=\"collectGuards ignores a FORGE:GUARD comment from an untrusted author\""
- }
+ ]
 }
