@@ -1906,6 +1906,7 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
     // #4656: a mechanical park carries its code and PR on `parked:<code>` and joins the remediation queue, not the human queue.
     if (parked?.code) {
       const { parkedLabel, REMEDIATION_QUEUE_LABEL } = await import("./engine/outcome-codes.mjs");
+      try { await gh(["label", "create", parkedLabel(parked.code), "-R", repo, "--force", "--color", "C5DEF5", "--description", "Mechanical park on a terminal code. Managed by ForgeDock."]); } catch { /* exists, or no rights: the edit says */ }
       try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `${parkedLabel(parked.code)},${REMEDIATION_QUEUE_LABEL}`, "--remove-label", "needs-human"]); } catch { return "failed"; }
       try {
         const { capComment } = await import("./lean/render.mjs");
