@@ -290,7 +290,7 @@ export function missingEntriesPrompt(missing, mode = "local") {
   return `These tests enumerate the siblings of symbols or files this change adds, but do not name them (CI will fail on the stale list):\n${missing.slice(0, 30).map((m) => `- ${m.symbol} (${m.module}) -> ${m.test}:${m.line}`).join("\n")}\n\nFor each, add the symbol to that test's list, ${NOT_MEMBER}. ${rerun(mode)}, commit, and update ${IMPLEMENTATION_FILE} and ${RESULT_FILE}. Do not push or touch GitHub.`;
 }
 
-const RENUMBER_RULE = "Renumber the lane's files, never the base's: rename each with git mv to its new number, keep the SQL (or other migration source) byte-identical except a first-line header naming its own number/tag, which follows the new one, change a numbered document (e.g. an ADR) only in its own number (its title), regenerate the snapshot and journal with the repo's own migration generator (never hand- or text-merge the journal), keep journal entries strictly ordered, and update every reference to the old name, including the series index (e.g. docs/adr/README.md) so it lists both the base's entry and yours.";
+const RENUMBER_RULE = "Renumber the lane's files, never the base's: rename each with git mv to its new number, keep the SQL (or other migration source) byte-identical except that its own old number/name (first-line header, self-references, a `_rollback` pointer) is replaced by the new one, change a numbered document (e.g. an ADR) only in its own number (its title), regenerate the snapshot and journal with the repo's own migration generator (never hand- or text-merge the journal), keep journal entries strictly ordered, and update every reference to the old name, including the series index (e.g. docs/adr/README.md) so it lists both the base's entry and yours.";
 
 /** #4322: lane-added sequence-numbered files whose number the base already uses, at hand-off or after a base-sync. */
 export function sequencePrompt(collisions, lane, mode = "local") {
@@ -302,6 +302,11 @@ export function sequencePrompt(collisions, lane, mode = "local") {
 export function sequenceSyncNote(files) {
   const hit = (files ?? []).some((f) => seqNumber(f) || /(?:^|\/)_journal\.json$/.test(String(f)));
   return hit ? ` A numbered migration or its journal conflicts: do not text-merge it. ${RENUMBER_RULE}` : "";
+}
+
+/** #4732: base-sync before a deterministic renumber: only the non-sequence conflicts are the builder's. */
+export function sequenceSyncPrompt(base, files, mode = "local") {
+  return `Merging ${base} into this branch conflicts in: ${files.join(", ")}. Resolve only these conflicts preserving both this fix's intent and the base's changes, ${syncChecks(mode)}, and commit the merge. The sequence-numbered files are already resolved: do not renumber anything. Do not push.`;
 }
 
 export function contractCorrectionPrompt(problems) {

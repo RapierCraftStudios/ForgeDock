@@ -5619,6 +5619,22 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
       assert.match(traj(w).at(-1), /renumbered deterministically \(no builder\): db\/0007_usage\.sql → db\/0008_usage\.sql/);
     });
 
+    it("#4732: a collision plus an unrelated text conflict is base-synced (builder resolves only that file) and then renumbered by the engine; open-lane numbers reach the renumber", async () => {
+      const NON = "non-sequence conflict: .env.example";
+      const w = dworld({ seq: [COLL, []], mergeResults: ["conflict"], conflictFiles: [".env.example"], det: [{ unsupported: NON, nonSequence: [".env.example"] }, { ok: true, moves: MOVES, commit: "d".repeat(40) }], resolve: { remaining: [".env.example"] } });
+      w.io.sequenceOpenNumbers = async (x) => { w.openArgs = x; return [9]; };
+      const r = await run(w);
+      assert.equal(r.terminalReason, "merged");
+      assert.equal(w.renumbers.length, 2, "renumber, sync, renumber again");
+      assert.ok(w.renumbers[1].laneRef, "second renumber reads the pre-merge lane head");
+      assert.deepEqual(await w.renumbers[0].openNumbers({ dir: "db" }), [9]);
+      assert.equal(w.openArgs.dir, "db");
+      assert.equal(builders(w).length, 3, "plan + implement + the conflict resolution; no builder renumber");
+      assert.match(builders(w)[2][4], /conflicts in: \.env\.example[\s\S]*do not renumber/);
+      assert.deepEqual(w.resolveArgs.files, [".env.example"]);
+      assert.equal(w.resolveArgs.partial, true);
+    });
+
     it("#4526: the renumber gets a reserve hook bound to (repo, lane, issue), and the run's reservations are dropped at finish", async () => {
       const w = dworld({ seq: [COLL, []] }), reserved = [], unreserved = [];
       w.io.sequenceLease.reserve = async (x) => { reserved.push(x); return { numbers: [9] }; };
