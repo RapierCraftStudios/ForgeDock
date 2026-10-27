@@ -41,6 +41,7 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `run.interrupted` | A core run got SIGTERM/SIGINT; the lane tore down from its resource ledger (unpushed work checkpointed to the lane branch, worktree removed, lease released) and ended `deferred`, so a batch requeues it | lean | `bin/engine-cli.mjs` |
 | `host.busy` | Core run deferred at admission: free memory, free tmp space or load per core outside `engine.admission` limits; no lease taken, nothing posted | lean | `bin/lean/admission.mjs` |
 | `gh.unavailable` | `run-issue --repo` could not verify the cwd repo because `gh repo view` kept failing after 3 attempts with backoff (typically a timeout under host load); the core or full run is `deferred` (exit 75, retry in 60s) before any lease, nothing posted | engine CLI | `bin/engine-cli.mjs` |
+| `gh.auth` | A `gh` call in a core run answered HTTP 401 (expired or revoked bot token) and one run of `scripts/refresh-bot-token.sh` plus a retry did not fix it; the run is `deferred` (retry in 120s), never `engine-error`. See `docs/CONFIG.md` "Bot token refresh" | lean | `bin/lean/retry.mjs` |
 | `rate_limited` | Session or usage limit outlasted the pause budget | engine | `err.usageLimit` / `err.resetAtEpochMs` |
 | `engine.error` | Engine or tool failure (missing key/SDK, CLI crash, max turns, unresolved args, runner threw every attempt) | engine | `err.code` |
 | `infra.disk_quota` | Disk full or quota exhausted (EDQUOT/ENOSPC, errno -28/-122); retryable infra failure, never `needs-human` | engine | Runner error text |

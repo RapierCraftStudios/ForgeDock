@@ -20,7 +20,7 @@ import { readLog as readRepoLog } from "../engine/runlog.mjs";
 // #4432: the run log is keyed by repo + issue; every lane in this file runs in repo o/r.
 const readLog = (dir, issue, repo = "o/r") => readRepoLog(dir, issue, { repo });
 import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
-import { retrying, ghCacheRetry, PUSH_TRANSIENT_RE } from "./retry.mjs";
+import { retrying, ghCacheRetry, refreshAuthOnce, GH_AUTH_RE, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
@@ -3437,6 +3437,35 @@ describe("batch robustness (#4112-#4115)", () => {
     const other = new Error("HTTP 404: Not Found");
     await assert.rejects(ghCacheRetry(async () => { n++; throw other; }, cache), (e) => e === other);
     assert.equal(n, 1);
+  });
+
+  it("gh.auth (#4662) a 401 runs one token refresh and the retry succeeds, so the lane merges", async () => {
+    const w = world();
+    const gh = w.io.gh; let n = 0, refreshes = 0;
+    w.io.gh = async (a, opts) => { if (n++ === 0) throw new Error("gh: Bad credentials (HTTP 401)"); return gh(a, opts); };
+    w.io.refreshAuth = async () => { refreshes++; };
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(refreshes, 1);
+  });
+
+  it("gh.auth (#4662) a 401 that outlives the refresh ends deferred gh.auth, never engine-error, and refreshes once", async () => {
+    const w = world();
+    let refreshes = 0;
+    w.io.gh = async () => { throw new Error("gh: Bad credentials (HTTP 401)"); };
+    w.io.refreshAuth = async () => { refreshes++; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, OUTCOME_CODES.GH_AUTH);
+    assert.ok(r.retryInSeconds > 0);
+    assert.equal(refreshes, 1);
+  });
+
+  it("gh.auth (#4662) refreshAuthOnce leaves non-auth errors alone and GH_AUTH_RE ignores 403 and 5xx", async () => {
+    assert.ok(GH_AUTH_RE.test("HTTP 401: Bad credentials") && !GH_AUTH_RE.test("HTTP 403: Resource not accessible") && !GH_AUTH_RE.test("HTTP 502: Bad Gateway"));
+    let refreshes = 0;
+    const other = new Error("HTTP 404: Not Found");
+    await assert.rejects(refreshAuthOnce(async () => { throw other; }, { refresh: async () => { refreshes++; } }), (e) => e === other);
+    assert.equal(refreshes, 0);
   });
 
   it("#4507 makeGhCache: a per-root cache dir, reset swaps in a fresh dir, the no-root fallback is disposed", () => {

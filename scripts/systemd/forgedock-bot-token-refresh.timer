@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the ForgeDock bot token every 45 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=45min
+# Run a missed refresh right after the host wakes or the user manager restarts.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

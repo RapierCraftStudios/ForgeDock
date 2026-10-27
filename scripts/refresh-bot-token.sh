@@ -106,6 +106,15 @@ if [[ ! -f "$STAGE/hosts.yml" ]]; then
 fi
 mv -f "$STAGE/hosts.yml" "$GH_CFG/hosts.yml"
 
+# #4662: record the refresh so `forgedock doctor` can report the token's lifetime (installation tokens last 1h).
+STAMP_DIR="${FORGE_HOME_DIR:-$HOME/.forge}"
+if mkdir -p "$STAMP_DIR" 2>/dev/null; then
+  _now=$(date +%s)
+  printf '{"refreshedAt":"%s","expiresAt":"%s"}\n' "$(date -u -d "@$_now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$_now" +%Y-%m-%dT%H:%M:%SZ)" \
+    "$(date -u -d "@$((_now + 3600))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$((_now + 3600))" +%Y-%m-%dT%H:%M:%SZ)" > "$STAMP_DIR/.bot-token.json.$$" \
+    && mv -f "$STAMP_DIR/.bot-token.json.$$" "$STAMP_DIR/bot-token.json" || rm -f "$STAMP_DIR/.bot-token.json.$$"
+fi
+
 if [[ "$INSTALLATION_ID" == "$ORG_INSTALLATION_ID" ]]; then
   echo "rapiercraft-forgedock[bot] token refreshed — org (RapierCraftStudios) ~1h"
 else
