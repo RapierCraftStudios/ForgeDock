@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# file-deferred-followups.sh — file ALL deferred out-of-scope items of one build as ONE follow-up issue.
+# file-deferred-followups.sh — file the deferred out-of-scope items of one build as ONE follow-up issue per class.
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
@@ -7,14 +7,23 @@
 # that stay deferred: trusted lookup (claim marker <!-- FORGE:DEFERRED_ISSUE: #M --> on the parent, then a state-all search) of a follow-up carrying
 # <!-- FORGE:DEFERRED_FROM: #N -->, append the missing items (exact path match; a closed one is reopened), or create ONE issue
 # with a checklist, claim it on the parent and re-check once for a concurrent lower-numbered duplicate.
+# Items are grouped by class (engineering | post-deploy | external | ops, #4664): one follow-up per class per parent, each
+# labelled `followup:<class>`, carrying `<!-- FORGE:DEFERRED_CLASS: <class> -->` (absent = engineering, for older issues) and the
+# parent's milestone (a shipped/closed one: the next open milestone by due date, else FORGE_FOLLOWUPS_DEFAULT_MILESTONE).
 #
 # Usage: file-deferred-followups.sh --parent N --repo OWNER/REPO [--items FILE|-] [--folded N]
-#   items TSV, one per line: <path> TAB <why> TAB <known-flaw flag: known-flaw|1|yes|true, else empty>
+#   items TSV, one per line: <path|-> TAB <why> TAB <known-flaw flag: known-flaw|1|yes|true, else empty> [TAB <class> [TAB <label>]]
+#   Column 1 must look like a path or be `-` (a requirement-level item): requirement text or an `R<n>:` prefix there is a usage
+#   error (exit 2, DEFERRED_TSV=INVALID, nothing filed). The label (default: the path) is the item's identity in the checklist
+#   and in the stdout rows; repeated `R<n>: R<m>:` prefixes in it collapse to the first. Class: column 4, else the why's
+#   `post-deploy:|external:|ops:` prefix, else engineering.
 #   A post-deploy why starts `post-deploy: [check:<id>] ...` (#4626); the token is kept verbatim in the checklist line.
 # Env: DRY_RUN (non-empty: no create/edit, issue number 0), FORGE_TRAIL_TRUSTED_ASSOCIATIONS (default
-#      OWNER,MEMBER,COLLABORATOR), FORGE_TRAIL_TRUSTED_LOGINS (default empty), FORGE_DEFERRED_RETRY_SLEEP (secs).
-# Stdout: `path<TAB>issue` per item, then DEFERRED_TELEMETRY deferred_items=N folded=N batched_into=#M filed=N.
-# Exit: 0 ok | 2 usage | 3 lookup failed (DEFERRED_LOOKUP=FAILED) | 4 create/append failed (DEFERRED_FILE=FAILED).
+#      OWNER,MEMBER,COLLABORATOR), FORGE_TRAIL_TRUSTED_LOGINS (default empty), FORGE_DEFERRED_RETRY_SLEEP (secs),
+#      FORGE_FOLLOWUP_MILESTONE (the parent's milestone title; default: read from the parent), FORGE_FOLLOWUPS_DEFAULT_MILESTONE
+#      (forge.yaml followups.default_milestone), FORGE_EXTERNAL_PREREQ (issue number an external follow-up links to).
+# Stdout: `identity<TAB>issue` per item, then DEFERRED_TELEMETRY deferred_items=N folded=N batched_into=#M[,#M2] filed=N classes=a,b.
+# Exit: 0 ok | 2 usage or malformed TSV row | 3 lookup failed (DEFERRED_LOOKUP=FAILED) | 4 create/append failed (DEFERRED_FILE=FAILED).
 # A failed lookup is never "none found". bash 3.2 portable.
 
 set -uo pipefail
@@ -38,37 +47,62 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/deferred-followups.XXXXXX") || exit 2
 trap 'rm -rf "$TMP"' EXIT
 if [ "$ITEMS" = "-" ]; then cat > "$TMP/items.raw"; else cat "$ITEMS" > "$TMP/items.raw"; fi
 
-# Normalise: drop blank lines and duplicate paths (first wins), strip backticks from the path.
+# Normalise: validate each row, drop blank lines and duplicate identities (first wins), strip backticks.
 # Internal file uses a non-whitespace separator (US, \x1f): a tab IFS collapses an empty `why` and drops the known-flaw flag.
+# Fields: identity, why, flag, path (`-` when none), class.
 SEP=$(printf '\037')
+CLASSES="engineering post-deploy external ops"
 : > "$TMP/items"
+BAD=0; ROW=0
+bad_row() { BAD=$((BAD+1)); echo "file-deferred-followups: row $ROW: $1" >&2; }
 while IFS= read -r line || [ -n "$line" ]; do
-  # Split on TAB by hand: `IFS=$'\t' read` would collapse an empty why field and shift the flag into it.
-  p="${line%%$'\t'*}"; rest=""; w=""; k=""
-  case "$line" in *$'\t'*) rest="${line#*$'\t'}"; w="${rest%%$'\t'*}"; case "$rest" in *$'\t'*) k="${rest#*$'\t'}" ;; esac ;; esac
-  p=$(printf '%s' "${p:-}" | tr -d '`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-  [ -n "$p" ] || continue
-  if cut -d "$SEP" -f1 "$TMP/items" | grep -qxF -- "$p"; then continue; fi
+  ROW=$((ROW+1))
+  # Split on TAB by hand: `IFS=$'\t' read` would collapse an empty field and shift the flag into it.
+  f=(); rest="$line"; i=0
+  while [ $i -lt 5 ]; do
+    case "$rest" in *$'\t'*) f[$i]="${rest%%$'\t'*}"; rest="${rest#*$'\t'}" ;; *) f[$i]="$rest"; rest="" ;; esac
+    i=$((i+1))
+  done
+  trim() { printf '%s' "${1:-}" | tr -d '`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'; }
+  p=$(trim "${f[0]}"); w="${f[1]}"; k="${f[2]}"; c=$(trim "${f[3]}"); lab=$(trim "${f[4]}")
+  [ -n "$p" ] || [ -n "$lab" ] || continue
+  # Column 1: a path or the literal `-`. Requirement text (spaces, an `R<n>:` prefix) belongs in the label column.
+  if [ "$p" != "-" ]; then
+    if printf '%s' "$p" | grep -qE '^R[0-9]+:'; then bad_row "column 1 starts with a requirement id (\`$p\`); put it in the label column and use \`-\` or a path"; continue; fi
+    if ! printf '%s' "$p" | grep -qE '^[][A-Za-z0-9_.@~/*{}+,-]+$'; then bad_row "column 1 is not a path (\`$p\`)"; continue; fi
+  fi
+  # Identity: the label, else the path. Repeated `R1: R2:` prefixes collapse to the first.
+  id="${lab:-$p}"
+  while [[ "$id" =~ ^(R[0-9]+:)[[:space:]]*R[0-9]+:[[:space:]]*(.*)$ ]]; do id="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"; done
+  if [ "$id" = "-" ]; then bad_row "no path and no label"; continue; fi
+  w=$(printf '%s' "$w" | tr '\r\n' '  ')
+  if [ -z "$c" ]; then
+    case "$w" in post-deploy:*) c="post-deploy" ;; external:*) c="external" ;; ops:*) c="ops" ;; *) c="engineering" ;; esac
+  fi
+  case " $CLASSES " in *" $c "*) ;; *) bad_row "unknown class \`$c\` (engineering|post-deploy|external|ops)"; continue ;; esac
+  if cut -d "$SEP" -f1 "$TMP/items" | grep -qxF -- "$id"; then continue; fi
   case "${k:-}" in known-flaw|1|yes|true) k="known-flaw" ;; *) k="" ;; esac
-  w=$(printf '%s' "${w:-}" | tr '\r\n' '  ')
-  printf '%s%s%s%s%s\n' "$p" "$SEP" "$w" "$SEP" "$k" >> "$TMP/items"
+  printf '%s%s%s%s%s%s%s%s%s\n' "$id" "$SEP" "$w" "$SEP" "$k" "$SEP" "${p:--}" "$SEP" "$c" >> "$TMP/items"
 done < "$TMP/items.raw"
+if [ "$BAD" -gt 0 ]; then echo "DEFERRED_TSV=INVALID"; exit 2; fi
 TOTAL=$(wc -l < "$TMP/items" | tr -d ' ')
 
 MARKER="<!-- FORGE:DEFERRED_FROM: #${PARENT} -->"
 TRUSTED_ASSOC="${FORGE_TRAIL_TRUSTED_ASSOCIATIONS-OWNER,MEMBER,COLLABORATOR}"
 TRUSTED_LOGINS="${FORGE_TRAIL_TRUSTED_LOGINS-}"
 
-finish() { # $1 = batched_into number or empty, $2 = filed count
-  local into="none"; [ -n "$1" ] && into="#$1"
-  local line="DEFERRED_TELEMETRY deferred_items=${TOTAL} folded=${FOLDED} batched_into=${into} filed=$2"
+finish() { # $1 = batched_into numbers (space separated) or empty, $2 = filed count
+  local into="none" bare="none"
+  if [ -n "$1" ]; then into=$(printf '%s\n' $1 | sed 's/^/#/' | paste -sd, -); bare=$(printf '%s\n' $1 | paste -sd, -); fi
+  local cls; cls=$(cut -d "$SEP" -f5 "$TMP/items" | sort -u | paste -sd, -)
+  local line="DEFERRED_TELEMETRY deferred_items=${TOTAL} folded=${FOLDED} batched_into=${into} filed=$2 classes=${cls:-none}"
   echo "$line"
   # #3834 emitter (scripts/lib/telemetry.sh): optional, never blocks, never changes stdout or the exit code.
   local d; d=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
   if [ -f "$d/lib/telemetry.sh" ]; then
     FORGE_ISSUE="${FORGE_ISSUE:-$PARENT}" FORGE_REPO="${FORGE_REPO:-$REPO}" \
       bash "$d/lib/telemetry.sh" deferred_followups deferred_items="$TOTAL" folded="$FOLDED" \
-      batched_into="${1:-none}" filed="$2" >/dev/null 2>&1 </dev/null || true
+      batched_into="$bare" filed="$2" classes="${cls:-none}" >/dev/null 2>&1 </dev/null || true
   fi
 }
 
@@ -80,7 +114,7 @@ JQ_PRE='def lst: split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length >
   def trusted: ((.author_association // "") as $x | ($assoc | lst) | index($x) != null)
     or ((.user.type // "") == "Bot")
     or ((.user.login // "") as $x | ($logins | lst) | index($x) != null);'
-CLAIM_RE='^\s*<!-- FORGE:DEFERRED_ISSUE: #(?<n>[0-9]+) -->'
+CLAIM_RE='^\s*<!-- FORGE:DEFERRED_ISSUE: #(?<n>[0-9]+)(?: class=[a-z-]+)? -->'
 claim_nums() {
   gh api --paginate "repos/${REPO}/issues/${PARENT}/comments" 2>/dev/null \
   | jq -s -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg re "$CLAIM_RE" "$JQ_PRE"'
@@ -92,12 +126,13 @@ search_nums() {
   | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg m "$MARKER" "$JQ_PRE"'
       [.items[] | select(trusted) | select((.body // "") | contains($m)) | .number] | sort | .[]' 2>/dev/null
 }
-verify_num() { # number -> `number<TAB>state` when a trusted, non-PR issue carries the marker; empty when not (a 404 is "not it")
+verify_num() { # number -> `number<TAB>state` when a trusted, non-PR issue of class $CLS carries the marker; empty when not (a 404 is "not it")
   local out rc
   out=$(gh api "repos/${REPO}/issues/$1" 2>"$TMP/verr"); rc=$?
   if [ "$rc" -ne 0 ]; then grep -qE '404|Not Found|410' "$TMP/verr" 2>/dev/null && return 0; return 1; fi
-  printf '%s' "$out" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg m "$MARKER" "$JQ_PRE"'
+  printf '%s' "$out" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg m "$MARKER" --arg cls "$CLS" "$JQ_PRE"'
       select(.pull_request == null) | select(trusted) | select((.body // "") | contains($m))
+      | select((((.body // "") | capture("FORGE:DEFERRED_CLASS: (?<c>[a-z-]+)") | .c) // "engineering") == $cls)
       | "\(.number)\t\(.state)"' 2>/dev/null
 }
 CANON=""; CSTATE=""
@@ -121,15 +156,22 @@ find_canonical() {
   pick_verified $cands || return 1
   return 0
 }
-LOOKUP_OK=""
-for attempt in 1 2; do
-  if find_canonical; then LOOKUP_OK=1; break; fi
-  [ "$attempt" = 1 ] && sleep "${FORGE_DEFERRED_RETRY_SLEEP:-2}"
+CLS_LIST=$(cut -d "$SEP" -f5 "$TMP/items" | sort -u)
+CLS=""
+# Phase 1: look up the canonical follow-up of every class before filing anything (a failed lookup files nothing).
+for CLS in $CLS_LIST; do
+  LOOKUP_OK=""
+  for attempt in 1 2; do
+    if find_canonical; then LOOKUP_OK=1; break; fi
+    [ "$attempt" = 1 ] && sleep "${FORGE_DEFERRED_RETRY_SLEEP:-2}"
+  done
+  if [ -z "$LOOKUP_OK" ]; then
+    echo "DEFERRED_LOOKUP=FAILED"
+    exit 3
+  fi
+  printf '%s\t%s\n' "$CANON" "$CSTATE" > "$TMP/canon.$CLS"
+  awk -F"$SEP" -v c="$CLS" '$5 == c' "$TMP/items" > "$TMP/items.$CLS"
 done
-if [ -z "$LOOKUP_OK" ]; then
-  echo "DEFERRED_LOOKUP=FAILED"
-  exit 3
-fi
 
 # Checklist line for one item. Path always backticked so review-pr 6B.5 `contains` verification holds.
 entry() { # path why flag
@@ -149,9 +191,9 @@ append_items() { # number state ; non-zero = failure
   # Re-read the body immediately before editing (parallel builds of the same parent), then append what is missing.
   gh api "repos/${REPO}/issues/${num}" --jq '.body // ""' > "$TMP/body" 2>/dev/null || return 1
   : > "$TMP/add"
-  while IFS="$SEP" read -r p w k; do
+  while IFS="$SEP" read -r p w k fp cl; do
     has_entry "$TMP/body" "$p" || entry "$p" "$w" "$k" >> "$TMP/add"
-  done < "$TMP/items"
+  done < "$ITEMS_F"
   [ "$state" = "closed" ] && note=" (follow-up was closed; reopened)"
   if [ -s "$TMP/add" ]; then
     { cat "$TMP/body"; printf '\n### Added by a later build of #%s%s\n\n' "$PARENT" "$note"; cat "$TMP/add"; } > "$TMP/newbody"
@@ -168,54 +210,99 @@ append_items() { # number state ; non-zero = failure
   return 0
 }
 
-if [ -n "$CANON" ]; then
-  append_items "$CANON" "$CSTATE" || { echo "DEFERRED_FILE=FAILED"; exit 4; }
-  while IFS="$SEP" read -r p w k; do printf '%s\t%s\n' "$p" "$CANON"; done < "$TMP/items"
-  finish "$CANON" 0
-  exit 0
-fi
+MS_DONE=""; MS_TITLE=""
+resolve_milestone() { # sets MS_TITLE (empty = none): the parent's milestone, or for a shipped one the next open milestone, else the configured default
+  [ -n "$MS_DONE" ] && return 0
+  MS_DONE=1; MS_TITLE=""
+  local t="${FORGE_FOLLOWUP_MILESTONE:-}" all
+  if [ -z "$t" ]; then t=$(gh api "repos/${REPO}/issues/${PARENT}" --jq '.milestone.title // ""' 2>/dev/null) || t=""; fi
+  [ -n "$t" ] || return 0
+  all=$(gh api "repos/${REPO}/milestones?state=all&per_page=100" 2>/dev/null) || { MS_TITLE="$t"; return 0; }
+  MS_TITLE=$(printf '%s' "$all" | jq -r --arg t "$t" --arg d "${FORGE_FOLLOWUPS_DEFAULT_MILESTONE:-}" '
+    . as $all | ($all | map(select(.title == $t)) | first // null) as $cur
+    | if $cur == null or $cur.state == "open" then $t
+      else (($all | map(select(.state == "open" and .due_on != null and ($cur.due_on == null or .due_on > $cur.due_on))) | sort_by(.due_on) | (first // {}) | .title // "") as $next
+            | if $next != "" then $next elif ($d != "" and ($all | map(select(.title == $d and .state == "open")) | length) > 0) then $d else "" end) end' 2>/dev/null) || MS_TITLE="$t"
+}
+
+# File one class ($CLS, items in $ITEMS_F): append to its canonical follow-up, or create one. Sets FILED_N, FILED_NEW.
+file_class() {
+  local n_items; n_items=$(wc -l < "$ITEMS_F" | tr -d ' ')
+  FILED_N=""; FILED_NEW=0
+  CANON=$(cut -f1 "$TMP/canon.$CLS"); CSTATE=$(cut -f2 "$TMP/canon.$CLS")
+  if [ -n "$CANON" ]; then
+    append_items "$CANON" "$CSTATE" || { echo "DEFERRED_FILE=FAILED"; exit 4; }
+    FILED_N="$CANON"; return 0
+  fi
+  local claim="<!-- FORGE:DEFERRED_ISSUE: #%s -->" title="follow-up: ${n_items} deferred item(s) (deferred from #${PARENT})"
+  if [ "$CLS" != "engineering" ]; then claim="<!-- FORGE:DEFERRED_ISSUE: #%s class=${CLS} -->"; title="follow-up (${CLS}): ${n_items} deferred item(s) (deferred from #${PARENT})"; fi
+  local paths; paths=$(awk -F"$SEP" '$4 != "-" { print $4 }' "$ITEMS_F" | awk '!seen[$0]++')
+  {
+    printf '## Problem\n\n'
+    printf 'Deferred from #%s: the items below were declared out of scope in its contract and are tracked here, in one issue per class (%s), instead of surfacing later as review findings.\n\n' "$PARENT" "$CLS"
+    if [ "$CLS" = "external" ]; then
+      printf 'External prerequisite of #%s: these items wait on something outside the repo (credentials, an account, a third party).' "$PARENT"
+      [ -n "${FORGE_EXTERNAL_PREREQ:-}" ] && printf ' Linked prerequisite: #%s.' "${FORGE_EXTERNAL_PREREQ#\#}"
+      printf '\n\n'
+    fi
+    printf '## Affected Files\n\n'
+    if [ -n "$paths" ]; then printf '%s\n' "$paths" | while IFS= read -r fp; do printf -- '- `%s`\n' "$fp"; done
+    else printf -- '- None (requirement-level items, see the checklist)\n'; fi
+    printf '\n## Acceptance Criteria\n\n'
+    while IFS="$SEP" read -r p w k fp cl; do entry "$p" "$w" "$k"; done < "$ITEMS_F"
+    printf '\n%s\n<!-- FORGE:DEFERRED_CLASS: %s -->\n' "$MARKER" "$CLS"
+  } > "$TMP/newissue"
+  local NUM
+  if [ -n "${DRY_RUN:-}" ]; then
+    echo "DRY_RUN: gh issue create (follow-up ${CLS}: ${n_items} deferred item(s) from #${PARENT})" >&2
+    NUM=0
+  else
+    resolve_milestone
+    local lbl="followup:${CLS}" args=() URL
+    gh label create "$lbl" -R "$REPO" --force --color BFD4F2 --description "Deferred follow-up (${CLS}). Managed by ForgeDock." >/dev/null 2>&1 || true
+    args=(--label "$lbl")
+    if [ "$CLS" = "external" ]; then
+      gh label create external-prerequisite -R "$REPO" --force --color E99695 --description "External prerequisite. Managed by ForgeDock." >/dev/null 2>&1 || true
+      args+=(--label external-prerequisite)
+    fi
+    [ -n "$MS_TITLE" ] && args+=(--milestone "$MS_TITLE")
+    URL=$(gh issue create -R "$REPO" --title "$title" --body-file "$TMP/newissue" "${args[@]}" 2>/dev/null) || URL=""
+    NUM=$(printf '%s' "$URL" | grep -oE '[0-9]+$' | tail -n 1)
+    [ -n "$NUM" ] || { echo "DEFERRED_FILE=FAILED"; exit 4; }
+  fi
+  if [ -z "${DRY_RUN:-}" ]; then
+    # Claim the follow-up on the parent (REST comments are read-after-write consistent; best effort, the search still finds it).
+    # shellcheck disable=SC2059
+    gh issue comment "$PARENT" -R "$REPO" --body "$(printf "$claim" "$NUM")" >/dev/null 2>&1 \
+      || echo "file-deferred-followups: warning: could not post claim marker for #${NUM} on #${PARENT}" >&2
+    # Post-create re-check: a concurrent build may have filed first. The lowest trusted number is canonical; the newer one is closed.
+    if find_canonical; then
+      if [ -n "$CANON" ] && [ "$CANON" -lt "$NUM" ]; then
+        if append_items "$CANON" "$CSTATE"; then
+          gh issue close "$NUM" -R "$REPO" --reason "not planned" --comment "Duplicate of #${CANON}: deferred items of #${PARENT} are tracked there." >/dev/null 2>&1 \
+            || echo "file-deferred-followups: warning: could not close duplicate #${NUM}" >&2
+          NUM="$CANON"
+        else
+          echo "file-deferred-followups: warning: could not move items to #${CANON}; keeping #${NUM}" >&2
+        fi
+      fi
+    else
+      echo "file-deferred-followups: warning: post-create re-check failed; keeping #${NUM}" >&2
+    fi
+  fi
+  FILED_N="$NUM"; FILED_NEW=1
+}
 
 [ "$TOTAL" -gt 0 ] || { finish "" 0; exit 0; }
 
-# --- Create ONE issue with a checklist for every item ---------------------------------------------------------
-{
-  printf '## Problem\n\n'
-  printf 'Deferred from #%s: the items below were declared out of scope in its contract and are tracked here, in one issue, instead of surfacing later as review findings.\n\n' "$PARENT"
-  printf '## Affected Files\n\n'
-  while IFS="$SEP" read -r p w k; do printf -- '- `%s`\n' "$p"; done < "$TMP/items"
-  printf '\n## Acceptance Criteria\n\n'
-  while IFS="$SEP" read -r p w k; do entry "$p" "$w" "$k"; done < "$TMP/items"
-  printf '\n%s\n' "$MARKER"
-} > "$TMP/newissue"
-
-if [ -n "${DRY_RUN:-}" ]; then
-  echo "DRY_RUN: gh issue create (follow-up: ${TOTAL} deferred item(s) from #${PARENT})" >&2
-  NUM=0
-else
-  URL=$(gh issue create -R "$REPO" --title "follow-up: ${TOTAL} deferred item(s) (deferred from #${PARENT})" \
-    --body-file "$TMP/newissue" 2>/dev/null) || URL=""
-  NUM=$(printf '%s' "$URL" | grep -oE '[0-9]+$' | tail -n 1)
-  [ -n "$NUM" ] || { echo "DEFERRED_FILE=FAILED"; exit 4; }
-fi
-if [ -z "${DRY_RUN:-}" ]; then
-  # Claim the follow-up on the parent (REST comments are read-after-write consistent; best effort, the search still finds it).
-  gh issue comment "$PARENT" -R "$REPO" --body "<!-- FORGE:DEFERRED_ISSUE: #${NUM} -->" >/dev/null 2>&1 \
-    || echo "file-deferred-followups: warning: could not post claim marker for #${NUM} on #${PARENT}" >&2
-  # Post-create re-check: a concurrent build may have filed first. The lowest trusted number is canonical; the newer one is closed.
-  if find_canonical; then
-    if [ -n "$CANON" ] && [ "$CANON" -lt "$NUM" ]; then
-      if append_items "$CANON" "$CSTATE"; then
-        gh issue close "$NUM" -R "$REPO" --reason "not planned" --comment "Duplicate of #${CANON}: deferred items of #${PARENT} are tracked there." >/dev/null 2>&1 \
-          || echo "file-deferred-followups: warning: could not close duplicate #${NUM}" >&2
-        NUM="$CANON"
-      else
-        echo "file-deferred-followups: warning: could not move items to #${CANON}; keeping #${NUM}" >&2
-      fi
-    fi
-  else
-    echo "file-deferred-followups: warning: post-create re-check failed; keeping #${NUM}" >&2
-  fi
-fi
-while IFS="$SEP" read -r p w k; do printf '%s\t%s\n' "$p" "$NUM"; done < "$TMP/items"
-finish "$NUM" 1
+# Phase 2: one issue per class.
+INTO=""; FILED=0
+for CLS in $CLS_LIST; do
+  ITEMS_F="$TMP/items.$CLS"
+  file_class
+  case " $INTO " in *" $FILED_N "*) ;; *) INTO="${INTO:+$INTO }$FILED_N" ;; esac
+  FILED=$((FILED + FILED_NEW))
+  while IFS="$SEP" read -r p w k fp cl; do printf '%s\t%s\n' "$p" "$FILED_N"; done < "$ITEMS_F"
+done
+finish "$INTO" "$FILED"
 exit 0
