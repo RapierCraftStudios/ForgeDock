@@ -80,6 +80,10 @@ describe("engine telemetry seam", () => {
     assert.deepEqual(p2, { reason: "merged", wall_ms: 0, milestone: "M", conformance_mode: "shadow", shadow_would: "conforms" });
     assert.equal(mapRecord({ event: "RUN_TERMINAL", reason: "merged", pr: 0 }, 1).pr, undefined, "no pr 0 in ctx");
   });
+  it("#4705: RUN_TERMINAL carries the guard gate's added wall time beside wall_ms", () => {
+    const m = mapRecord({ event: "RUN_TERMINAL", reason: "merged", wall_ms: 1000, guard_added_ms: 40 }, 1);
+    assert.equal(m.payload.guard_added_ms, 40);
+  });
   it("forge#4255: SANDBOX_USAGE maps to sandbox_usage with provider, minutes and cost", async () => {
     const { calls, emit } = harness();
     await emit({ event: "SANDBOX_USAGE", issue: 7, provider: "container", sandbox_id: "fdsbx-b-7", minutes: 12.5, cost_usd: 0.1234567891, batch: "b1" });

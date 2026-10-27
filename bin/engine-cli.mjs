@@ -16,7 +16,7 @@ import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs } from ".
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
-import { makeEventEmitter, probeEvent, regressionEvent, experimentEvent } from "./engine/events.mjs";
+import { makeEventEmitter, probeSweepEvents, experimentEvent } from "./engine/events.mjs";
 import { readExperiment } from "./experiment.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
@@ -141,7 +141,7 @@ export function readEvents(cwd = process.cwd()) {
 /** The probe sweep's `onResult`: one probe.passed / probe.failed event per recorded pass or fail row. Never throws. */
 function probeEventSink(repo) {
   const events = makeEventEmitter({ repo, config: readEvents() });
-  return async (row) => { for (const p of [probeEvent(row), regressionEvent(row)]) if (p) await events.emitEvent(p.type, p.data, p.ctx); };
+  return async (row) => { for (const p of probeSweepEvents(row)) await events.emitEvent(p.type, p.data, p.ctx); };
 }
 /** `forgedock stats --experiment <id> --emit-event` (#4632): one experiment.verdict event for a met or missed report; inconclusive emits nothing. Never throws. */
 export async function experimentEventSink(repo, report) {
@@ -1132,7 +1132,7 @@ export async function orchestrateFromCli(argv, deps = {}) {
   return orchestrateClient(argv, deps);
 }
 
-const formatRowLine = (r) => (r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`);
+const formatRowLine = (r) => (r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.waiting && /^dependency #(\d+) /.test(r.detail ?? "") ? `waiting on #${/^dependency #(\d+) /.exec(r.detail)[1]}` : r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`);
 const consoleSink = () => ({ batch: () => {}, row: (r) => console.log(formatRowLine(r)), line: (t) => console.log(t) });
 
 /** forge.yaml `orchestration.env_passthrough` / `path_exclude` (comma-separated) and `execution.token_env` (#4691): what the pinned env keeps beyond the allowlist. */
@@ -1224,10 +1224,13 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
     if (st === "OPEN") open.push(n);
     else if (!skipped.some((x) => x.issue === n)) skipped.push({ issue: n, reason: st ? "closed" : "unreadable" });
   }
-  let res = { added: [], skipped: [] };
-  if (open.length) res = (viaDaemon ? await viaDaemon(open) : null) ?? b.addIssues(open);
-  const out = { ok: true, batch: id, added: res.added ?? [], skipped: [...(res.skipped ?? []), ...skipped] };
-  print(`batch ${id}: added ${out.added.map((n) => `#${n}`).join(" ") || "(none)"}${out.skipped.length ? `; skipped ${out.skipped.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
+  let res = { added: [], skipped: [], requeued: [] };
+  if (open.length) {
+    res = (viaDaemon ? await viaDaemon(open) : null) ?? b.addIssues(open);
+    if (res.reopened === undefined && res.requeued?.length && b.readReport()) b.clearReport(); // #4687: no daemon: the next --resume reruns it
+  }
+  const out = { ok: true, batch: id, added: res.added ?? [], requeued: res.requeued ?? [], skipped: [...(res.skipped ?? []), ...skipped] };
+  print(`batch ${id}: added ${out.added.map((n) => `#${n}`).join(" ") || (out.requeued.length ? "" : "(none)")}${out.requeued.length ? `${out.added.length ? " " : ""}${out.requeued.map((n) => `requeued #${n}`).join(" ")}` : ""}${out.skipped.length ? `; skipped ${out.skipped.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
   return out;
 }
 
@@ -1870,8 +1873,9 @@ export function makeDispatchCheck({ gh, repo }) {
     } catch { return null; }
   };
   return async (n) => {
-    const iss = await json(["issue", "view", String(n), "-R", repo, "--json", "state"]);
+    const iss = await json(["issue", "view", String(n), "-R", repo, "--json", "state,stateReason"]);
     const state = typeof iss?.state === "string" ? iss.state.toUpperCase() : null;
+    const notPlanned = String(iss?.stateReason ?? "").toUpperCase().replace(/\s/g, "_") === "NOT_PLANNED";
     const prs = await json(["pr", "list", "-R", repo, "--head", `feat/issue-${n}-lean`, "--state", "merged", "--json", "number,mergedAt", "--limit", "1"]);
     const pr = Array.isArray(prs) && Number.isInteger(prs[0]?.number) ? prs[0].number : null;
     if (pr !== null && state === "OPEN") {
@@ -1880,7 +1884,7 @@ export function makeDispatchCheck({ gh, repo }) {
       if (reopened === null || !Number.isFinite(mergedAt) || reopened > mergedAt) return null;
     }
     if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
-    if (state === "CLOSED") return { outcome: "invalid", detail: "issue closed" };
+    if (state === "CLOSED") return notPlanned ? { outcome: "invalid", detail: "issue closed (not planned)", final: true } : { outcome: "invalid", detail: "issue closed" }; // #4687: final = its dependents stay skipped
     return null;
   };
 }
