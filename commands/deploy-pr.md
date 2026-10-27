@@ -293,6 +293,18 @@ ${ISSUE_REFS:-None}
 ${CLOSES_LINE}
 **Source**: \`${SOURCE}\`
 **Target**: \`${PR_TARGET}\`"
+
+  # #4727: a staging -> default deploy PR links the release lane's post-deploy rollup (deterministic; empty = no link, never blocks)
+  if [ "$SOURCE" = "$STAGING_BRANCH" ] && [ "$PR_TARGET" = "$DEFAULT_BRANCH" ]; then
+    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+    ROLLUP_LINK=""
+    for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
+      case "$_c" in /*) [ -z "$ROLLUP_LINK" ] && [ -f "$_c/scripts/postdeploy-rollup-link.sh" ] && ROLLUP_LINK=$(bash "$_c/scripts/postdeploy-rollup-link.sh" --repo "$GH_REPO" 2>/dev/null || true) ;; esac
+    done
+    [ -n "$ROLLUP_LINK" ] && PR_BODY="${PR_BODY}
+
+${ROLLUP_LINK}"
+  fi
 fi
 ```
 
