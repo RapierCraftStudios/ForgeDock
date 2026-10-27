@@ -115,6 +115,11 @@ describe("precheck (deterministic, no reviewer)", () => {
     const failed = precheck({ contract: C2, result: { ...res, validation: [{ id: "V1", exit: 1 }, { id: "V2", ci: true }, { id: "V3", exit: 0 }] }, changedFiles: files, ciVerified: true });
     assert.deepEqual(failed.failures.map((f) => f.kind), ["validate_failed"]); assert.deepEqual(failed.ciCovered, ["V2"]);
   });
+  it("#4708 a validate row carried forward across a CI fix round counts as recorded; a row absent outside a CI-verified head still fails", () => {
+    const carried = precheck({ contract: C, result: { ...res, validation: [{ id: "V1", exit: 0, carried: true }] }, changedFiles: files });
+    assert.deepEqual(codes(carried), []);
+    assert.deepEqual(precheck({ contract: C, result: { ...res, validation: [] }, changedFiles: files }).failures.map((f) => f.kind), ["validate_missing"]);
+  });
   it("#4323 missingTool: commands, python and node modules; paths, relative and repo-tracked names are not the environment", () => {
     assert.deepEqual(missingTool({ rc: 127, output: "sh: 1: jq: not found" }), { tool: "jq", kind: "command" });
     assert.deepEqual(missingTool({ rc: 127, output: "" }, { command: "uv run pytest -q" }), { tool: "uv", kind: "command" });
