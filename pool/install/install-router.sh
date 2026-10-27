@@ -10,6 +10,7 @@ PORT="${ROUTER_PORT:-7710}"
 TS_IP="$(tailscale ip -4 | head -1)"
 [[ "$TS_IP" == 100.* ]] || { echo "no Tailscale IPv4 found" >&2; exit 1; }
 NODE="$(command -v node)"
+. "$REPO_ROOT/pool/install/unit-hardening.sh"
 
 mkdir -p "$CONF_DIR" && chmod 700 "$CONF_DIR"
 umask 077
@@ -40,8 +41,7 @@ After=network-online.target tailscaled.service
 
 [Service]
 ExecStart=$NODE $REPO_ROOT/bin/pool/cli.mjs router --config $CONF_DIR/router.json
-Restart=always
-RestartSec=5
+$(unit_hardening user)
 
 [Install]
 WantedBy=default.target
@@ -49,6 +49,7 @@ EOF
 systemctl --user daemon-reload
 systemctl --user enable --now computeshare-router >/dev/null
 systemctl --user restart computeshare-router
+unit_oom_hint forgedock-pool-router
 loginctl enable-linger "$USER" 2>/dev/null || true
 
 # ForgeDock reads execution.token_env from the env, then the OS keychain (service forgedock, account = the name).

@@ -42,12 +42,14 @@ export async function runPoolCli(argv, deps = {}) {
         if (r.status !== 0) throw new Error(`install-router.sh exited ${r.status}`);
         break;
       }
+      process.title = "forgedock-pool-router"; // distinctive name for OOM-killer avoid lists and ps (#4673)
       const cfg = routerConfig();
       (deps.startRouter ?? startRouter)(cfg);
       console.log(`computeshare router on ${cfg.listen.host}:${cfg.listen.port} (public ${cfg.public_url})`);
       break;
     }
     case "agent": {
+      process.title = "forgedock-pool-agent";
       const cfg = agentConfig();
       startAgent(cfg, { docker: dockerCli });
       console.log(`computeshare agent ${cfg.name} on ${cfg.listen.host}:${cfg.listen.port}: ${cfg.allow_cpus} cpus, ${cfg.allow_mem_gb} GB reserved for lanes`);
