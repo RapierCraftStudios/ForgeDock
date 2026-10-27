@@ -18,19 +18,20 @@ BOOT_TPL="$(forge_root)/templates/bootstrap"; VALIDATE=$(forge_resolve bootstrap
 ```
 
 1. **Read the input.** Use the free text, or read each doc at the given path(s).
-2. **Interview** from `interview.md`. Cover every aspect it lists, briefly and conversationally. Skip what the input already answers.
-3. **Fill the blanks.** Give every unanswered aspect a sensible default with a one-line rationale tied to what the user said, using the closest `stack-profiles.md` preset. Show them all in ONE editable "Here's what I assumed" list and apply the user's edits.
-4. **Ask only genuine doubts** (they change architecture or cost: native vs PWA, data residency, self-host vs managed DB, product name, repo owner). Ask with AskUserQuestion, at most 4 multiple-choice questions per batch, each with a recommended option. Everything else stays a default. Headless (no AskUserQuestion, e.g. `npx forgedock bootstrap`): take each recommended option and list it under "Here's what I assumed".
+2. **Interview** from `interview.md`. Cover each aspect briefly; skip what the input answers.
+3. **Fill the blanks.** Default every unanswered aspect with a one-line rationale, using the closest `stack-profiles.md` preset. Show them in ONE editable "Here's what I assumed" list and apply the user's edits.
+4. **Ask only genuine doubts** (architecture or cost: native vs PWA, data residency, self-host vs managed DB, product name, repo owner). Ask with AskUserQuestion, at most 4 multiple-choice questions per batch, each with a recommended option. Everything else stays a default. Headless (no AskUserQuestion, e.g. `npx forgedock bootstrap`): take each recommended option and list it under "Here's what I assumed".
 5. **Spike doc.** Write `technical-spike.md` to `--spike` (default `docs/engineering/technical-spike.md`); set the plan's `spikeDoc` to that path. Fill every section and give each decision an ADR-style `**Rationale**:` line.
 6. **Plan JSON** in `$TMPDIR` (shape: header of `bootstrap-validate.mjs` and `bootstrap-create.mjs`):
-   - Milestones in build order, foundation first.
+   - Milestones as dependency layers, foundation first: each depends only on earlier ones (#4659).
+   - A thin deployable slice (CI deploy workflow, staging env, seed) in milestone 1 or 2, never last.
    - A `SPIKE` parent issue.
    - Sub-issues from `issue-body.md` with planned paths, `[type:*]` tags, `priority` and `component`.
    - `"ui": true` issues carry the full design spec. `"hero": true` issues route to `/design`.
-   - One `needs-human-issue.md` issue per credential, account or external input, with `gates:` (#4660). Code issues reference it as `#{{KEY}}` but never depend on it, and name the mock that keeps dev and CI green.
+   - One `needs-human-issue.md` issue per credential, account or external input, with `gates:` (#4660). Code issues reference it as `#{{KEY}}`, never depend on it, and name the mock that keeps dev and CI green.
    - Sub-issues point at the spike via `**Parent**` only, never `Depends on`.
    - `guardrails` and `domainRules` from the interview.
-7. **Validate.** Run `node "$VALIDATE" <plan>`. Fix the plan until it exits 0. Never create from an invalid plan.
-8. **Create.** Run `node "$CREATE" <plan>`, adding `--dry-run` when the input has it (preview only, GitHub untouched). The script reuses existing issues by title and parent, so on an error re-run the same command to resume.
-9. **Hand off.** Print the script's hand-off verbatim: what was created (links), what needs a human (links), and the `/orchestrate` command per milestone, in order.
+7. **Validate.** Run `node "$VALIDATE" <plan>`. Fix the plan until it exits 0. Heed `deploy-last` warnings. Never create from an invalid plan.
+8. **Create.** Run `node "$CREATE" <plan>`, adding `--dry-run` when the input has it (preview only, GitHub untouched). It reuses existing issues, so on an error re-run it to resume.
+9. **Hand off.** Print the script's hand-off verbatim: created (links), needs a human (links), and the `/orchestrate` command per milestone, in order.
 10. Later: `npx forgedock plan validate --live` (#4659).
