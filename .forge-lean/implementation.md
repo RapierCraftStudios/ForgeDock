@@ -29,3 +29,6 @@ The eight bin/lean tests flagged as enumerating siblings of `train` (batch, chec
 
 ## CI follow-up (Unit tests)
 CI log was unavailable. Reran bin/lean, bin/engine, bin/stats, bin/tests, packages/protocol locally: all train/lifecycle/lane/batch tests pass (V1: 81/0). The only failures are 3 pre-existing, environment-dependent tests unrelated to this diff (WSL/platform detection in preflight, a root-user copyFile permission test, writeInstallReceipt platform capture). No code change made.
+
+### CI fix
+CI job "Unit tests (node --test)" runs `scripts/check-test-tmp-cleanup.sh` before the tests. It flagged `bin/lean/train.test.mjs` for using `mkdtemp` directly. The test now uses `tmpDir` from `bin/tests/_tmp.mjs`. The lint and its own test pass; V1 still passes (81 tests). A targeted run of the CI globs (bin/tests, bin/lean, bin/engine, bin/stats, packages/protocol) shows only the 3 journey failures that also fail on the base in this WSL host.
