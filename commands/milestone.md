@@ -96,6 +96,8 @@ Parse `$ARGUMENTS` to determine which action to take:
 | `drift <slug>` | → **Milestone Drift** |
 | `close <slug>` | → **Close Milestone** |
 
+Unattended multi-milestone runs use the CLI, not this spec: `forgedock milestone train <slug...> [--parallel-milestones N]` (resume with `--resume <id>`, add a milestone with `--insert <id> <slug>`). It keeps one state file, reuses the lifecycle above and never edits `forge.yaml`. See `devdocs/decisions/4658-milestone-train.md`.
+
 ---
 
 ## Action: Create Milestone
