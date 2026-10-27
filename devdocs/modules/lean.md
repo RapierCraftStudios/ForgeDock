@@ -1900,6 +1900,14 @@ FORGE:TELEMETRY gate events, which #4693/#4695 must emit under exactly these nam
 `supersedes_accepted`, `decision_superseded`, `decision_violation` (an unrecorded kind prints n/a). Stats-time only: no lane-path
 cost, no LLM. Usage and definitions: `docs/STATS.md`.
 
+## Entry 2026-10-27 — Batch env pin keeps provider selectors and names what it drops (#4734)
+
+`schedd.mjs` `ENV_KEEP` now also keeps the non-secret provider/endpoint/model selectors `CLAUDE_CODE_USE_*`, `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`. Secrets (`SECRET_ENV`) still never reach `plan.json`. New
+`droppedEnv(env, kept)` returns the names (never values) of `CLAUDE_*`/`ANTHROPIC_*`/`GH_*`/`GITHUB_*`/`FORGEDOCK_*` keys not pinned, minus
+session-scoped ones; `engine-cli.mjs` submit logs one line with them and a pointer to `orchestration.env_passthrough`. Release note: a
+per-shell `GH_TOKEN`/`FORGEDOCK_POOL_TOKEN` is still not pinned, so lanes use the daemon's copy unless named in `env_passthrough`.
+
 ## Entry 2026-10-27 — Pinned batch env is allowlisted and PATH-sanitised (#4691)
 
 `schedd.mjs` `batchEnv` no longer pins the launching session's whole env into `plan.json`. It keeps `PATH`, `HOME`, `USER`, `SHELL`,

@@ -324,9 +324,12 @@ orchestration:
 
   # Extra env var names (comma-separated) a batch pins for its lanes in plan.json,
   # beyond the built-in allowlist (PATH, HOME, USER, SHELL, LANG, LC_*, TMPDIR,
-  # CLAUDE_CONFIG_DIR, FORGEDOCK_*, GH_*, GITHUB_*; secret-looking names and the
-  # launching session's CLAUDE_CODE_*, CLAUDE_PID, ANTHROPIC_* are never pinned
-  # unless listed here; the configured execution.token_env name is also kept).
+  # CLAUDE_CONFIG_DIR, CLAUDE_CODE_USE_*, ANTHROPIC_BASE_URL, ANTHROPIC_MODEL,
+  # ANTHROPIC_SMALL_FAST_MODEL, ANTHROPIC_DEFAULT_*_MODEL, FORGEDOCK_*, GH_*, GITHUB_*;
+  # secret-looking names and the launching session's other CLAUDE_CODE_*, CLAUDE_PID,
+  # ANTHROPIC_* are never pinned unless listed here; the configured execution.token_env
+  # name is also kept). Submit prints one line naming the CLAUDE_*/ANTHROPIC_*/GH_*/
+  # GITHUB_*/FORGEDOCK_* keys left out (names only).
   # Inspect or edit the pinned env with `forgedock orchestrate --show-env <id>`,
   # `--set-env <id> KEY=VAL`, `--unset-env <id> KEY` (applies to newly launched lanes).
   env_passthrough: ANTHROPIC_BASE_URL
