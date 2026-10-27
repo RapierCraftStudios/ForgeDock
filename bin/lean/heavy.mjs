@@ -308,9 +308,10 @@ export function guardChain(name, cmd, env, read = head) {
   const chain = String(env.FORGE_HEAVY_CHAIN ?? "").split("|").filter(Boolean);
   const dirs = chain.map((e) => dirname(e.slice(e.indexOf(":") + 1)));
   const loop = (why) => ({ error: `env.shim_loop: ${name} ${why} (PATH dirs: ${[env.FORGE_HEAVY_SHIM_DIR, ...dirs].filter(Boolean).join(", ") || "none"})` });
+  const repeat = chain.includes(`${name}:${cmd}`);
+  if (repeat && !isPassThroughWrapper(read(cmd), name)) return { cmd, env };
   if (chain.length >= SHIM_LOOP_MAX) return loop(`re-entered the heavy shim more than ${SHIM_LOOP_MAX} times`);
-  if (chain.includes(`${name}:${cmd}`)) {
-    if (!isPassThroughWrapper(read(cmd), name)) return { cmd, env };
+  if (repeat) {
     const next = which(name, env.PATH ?? "", [env.FORGE_HEAVY_SHIM_DIR, ...dirs].filter(Boolean));
     if (!next) return loop(`re-entered via ${cmd} and no other ${name} is on PATH`);
     cmd = next;

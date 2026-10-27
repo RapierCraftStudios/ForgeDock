@@ -277,11 +277,12 @@ describe("shim re-entry through a pass-through wrapper (#4680)", () => {
     const real = "/home/u/.nvm/bin/npm", spawned = [];
     const run = async (cmd, a, e) => { spawned.push([cmd, e.FORGE_HEAVY_CHAIN]); return { code: 0, signal: null }; };
     const chain = Array.from({ length: SHIM_LOOP_MAX - 1 }, (_, i) => `npm:/d${i}/npm`).concat(`npm:${real}`).join("|");
-    for (const FORGE_HEAVY_CHAIN of [`npm:${real}`, chain.split("|").slice(-1)[0]]) {
+    for (const FORGE_HEAVY_CHAIN of [`npm:${real}`, chain]) {
       const env = { PATH: "/shim:/home/u/.nvm/bin", FORGE_HEAVY_CHAIN, FORGE_HEAVY_HELD: "1" };
       assert.equal((await runWrapped(["run", "--name", "npm", "--", real, "run", "build"], { env, run })).code, 0);
     }
-    assert.deepEqual(spawned, [[real, `npm:${real}`], [real, `npm:${real}`]]);
+    assert.equal(chain.split("|").length, SHIM_LOOP_MAX);
+    assert.deepEqual(spawned, [[real, `npm:${real}`], [real, chain]]);
   });
 
   it("runWrapped refuses to spawn on a loop and records the chain otherwise", async () => {

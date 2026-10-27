@@ -18,3 +18,5 @@ No env vars changed. Legit nested calls are no longer counted toward SHIM_LOOP_M
 
 ### Docs
 - devdocs/modules/lean.md: re-entry guard paragraph now states a repeated real binary passes through unrecorded (#4735); only wrappers get the next-match / env.shim_loop cutoff.
+
+Follow-up: the repeated-real-binary check now runs before the SHIM_LOOP_MAX cap, so a 4-entry chain containing the real entry passes through. The regression test uses that 4-entry chain.
