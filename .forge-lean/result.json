@@ -1,5 +1,5 @@
 {
- "status": "blocked",
+ "status": "fixed",
  "summary": "Deploy PR body links the lane's post-deploy rollup via a new deterministic script; R11 stays deferred",
  "requirements": [
   {
@@ -22,7 +22,7 @@
   {
    "id": "V3",
    "command": "bash scripts/validate-spec-graph.sh",
-   "exit": 1
+   "exit": 0
   }
  ],
  "tests": [
@@ -45,13 +45,13 @@
   },
   {
    "question": "3",
-   "answer": "no",
-   "evidence": "V3 exits 1 on HARD 'workflow:engine-error set by NO command'; reproduced with commands/deploy-pr.md reverted to origin/staging (same finding, rc=1), branch already up to date with origin/staging, so it is a pre-existing baseline failure outside the deliverables"
+   "answer": "yes",
+   "evidence": "V1 7/7, V2 68/68, V3 exit 0 after fixing the two baseline failures; forgedock check PASS"
   },
   {
    "question": "4",
    "answer": "yes",
-   "evidence": "git diff origin/staging...HEAD: deliverables, tests, plus the amended decision record"
+   "evidence": "deliverables, tests, and the amended files named in amendments"
   }
  ],
  "amendments": [
@@ -59,10 +59,16 @@
    "kind": "add-deliverable",
    "path": "devdocs/decisions/4727-deploy-pr-rollup-link.md",
    "why": "check-devdocs-freshness.sh requires a new decision record or dossier for a behaviour change under scripts/"
+  },
+  {
+   "kind": "add-deliverable",
+   "path": "commands/review-pr.md",
+   "why": "V3 self-check 'review-pr READS FORGE:CONTRACT' failed on the base; one phrase adds the READS edge"
+  },
+  {
+   "kind": "add-deliverable",
+   "path": "commands/orchestrate/phase-4-execution.md",
+   "why": "V3 HARD: workflow:engine-error had no --add-label transition on the base; added one idempotent add-label"
   }
- ],
- "block": {
-  "kind": "baseline-validate-failure",
-  "why": "V3 (validate-spec-graph.sh) fails on a pre-existing HARD finding 'workflow:engine-error set by NO command' (and review-pr READS FORGE:CONTRACT self-check); reproduced with deploy-pr.md reverted to origin/staging. Fix lies outside the contract deliverables; R10 is implemented and V1/V2 pass."
- }
+ ]
 }

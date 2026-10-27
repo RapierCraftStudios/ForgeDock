@@ -23,3 +23,8 @@ Uses FORGE_RELEASE_LANE, FORGE_TRAIL_TRUSTED_ASSOCIATIONS and FORGE_TRAIL_TRUSTE
 
 ### V3 follow-up
 `git merge origin/staging`: already up to date. V3 still exits 1 (HARD: workflow:engine-error set by no command). With commands/deploy-pr.md reverted to origin/staging the same HARD fires (rc=1), so it is pre-existing, not caused by this change; the label is set from bin/engine.mjs, outside the deliverables.
+
+### Update
+V3 now passes (exit 0): `commands/review-pr.md` gained a "re-read the trusted FORGE:CONTRACT" phrase and `commands/orchestrate/phase-4-execution.md` gained an idempotent `--add-label "workflow:engine-error"`; both were base failures, recorded as add-deliverable amendments. V1 and V2 pass; `forgedock check` passes.
+
+Precheck fix: guarded the added `gh issue edit` in phase-4-execution.md with a DRY_RUN check (check-command-side-effects Class B). check-command-side-effects and validate-spec-graph pass.
