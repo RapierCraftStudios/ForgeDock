@@ -240,7 +240,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, getCancelled = null, getHeld = null, getGates = null, stopLane = null,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getGates = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
@@ -557,10 +557,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       for (const d of depList) {
         if (["needs-human", "budget-exceeded"].includes(results.get(d)?.outcome)) { parked = d; break; } // #4505: an unrecovered overrun parks too
         if (set.has(d) || typeof issueLabels !== "function") continue;
-        if (dispatchCheck) { // #4725: a closed (completed) dependency is satisfied: its stale needs-human label is not a blocker
-          let g = null;
-          try { g = (await dispatchCheck(d)) ?? null; } catch { g = null; }
-          if (g && SATISFIED.has(g.outcome)) continue;
+        if (typeof issueState === "function") { // #4725: a closed (completed) dependency is satisfied: its stale needs-human label is not a blocker
+          let st = "";
+          try { st = String((await issueState(d)) ?? "").toUpperCase(); } catch { st = ""; }
+          if (st === "CLOSED") continue;
         }
         let names = [];
         try { names = (await issueLabels(d)) ?? []; } catch { names = []; }

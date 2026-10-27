@@ -50,7 +50,7 @@ describe("closed dependency edges (#4725)", () => {
   });
   it("batch: a dependent is not skipped behind a closed dependency still labelled needs-human", async () => {
     const rows = await orchestrate({ issues: [2], parallel: 1, readBody: async () => "**Depends on**: #1", issueLabels: async () => ["needs-human"],
-      dispatchCheck: async (n) => (n === 1 ? { outcome: "invalid" } : null),
+      issueState: async (n) => (n === 1 ? "CLOSED" : "OPEN"), dispatchCheck: async () => null,
       runOne: async () => ({ terminalReason: "dependency-open", dependencies: [1], detail: "depends on #1" }) });
     assert.notEqual(rows.find((r) => r.issue === 2)?.detail, "dependency #1 needs-human");
   });
