@@ -23,3 +23,5 @@ Additive `warnings` channel in the bootstrap validator for `deploy-last`; bootst
 Docs: devdocs/modules/lean.md entry for #4665 (freshness check).
 
 `validatePlan` result gains `warnings`; `ok` and exit codes unchanged. No env vars.
+
+## Fix: deploy-last now also warns when no deploy-class issue sits in milestones 1-2 (e.g. only milestone 3 of 4); test added.
