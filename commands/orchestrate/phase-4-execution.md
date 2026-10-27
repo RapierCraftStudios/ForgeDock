@@ -1581,6 +1581,8 @@ The merged-trail hold on #${N} was released by a human (needs-human cleared or t
   return 0
 }
 
+# gh failures are unknown, not state (forge#4662): in every hold/settle/ship read, a failed gh call (HTTP 401, 5xx, timeout) is never
+# "not closed" or "no PR". Keep the previous classification, back off, and after 5 consecutive failures post one alert and stop that loop.
 # classify_predecessor_state <issue> (forge#3168): the helpers hold_merged_trail, resolve_orch_login,
 # trail_escalation_state and release_merged_trail above MUST be declared in the SAME shell before this function runs
 # (reverify_merged_trail is nested below). It has exactly ONE guarded write (the DRY_RUN-guarded hold_merged_trail

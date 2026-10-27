@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh the ForgeDock GitHub App installation token (1h lifetime)
+
+[Service]
+Type=oneshot
+# Edit the path to your ForgeDock checkout (or the persisted ~/.forge copy), then see docs/CONFIG.md "Bot token refresh".
+ExecStart=%h/.forge/scripts/refresh-bot-token.sh
