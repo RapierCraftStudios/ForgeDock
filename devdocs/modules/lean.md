@@ -178,11 +178,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    final `budget.exceeded` recovery overruns again (the lane labels it), or no recovery runs (orchestrate relabels once
    and parks dependents). Plan/corrections and fix rounds are not
    budgeted. The lane result and `RUN_TERMINAL` carry `turns: {size, budget, build, total, exceeded}`; orchestrate copies it
+   to the row and the batch report adds `formatTurnSummary` (`turns by size: S n= p50 max/budget; … over budget: #N`).
    Owner step + remainder (#4730): a `human` block may carry `remainder:[{title,body}]`; `endBlocked` files each as its own
    issue (`Parent: #N`, marker `FORGE:REMAINDER of=#N key=<hash>` makes a rerun reuse it, no needs-human) and only the owner
    step keeps needs-human. An issue whose entire content equals an already-registered owner ask (strict normalized match,
    `onlyAsk`) is closed not-planned and linked to the existing ask; any extra content only links.
-   to the row and the batch report adds `formatTurnSummary` (`turns by size: S n= p50 max/budget; … over budget: #N`).
    **Lane profile** (#4395, `lean.mjs` section 2a + `callRunner`): every LLM session runs with
    `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (profile `memory-off`). With forge.yaml `engine.lane_instructions`
    (`engine-cli.mjs` `readLaneInstructions` → runCore `laneInstructions`) naming a repo-relative file in the lane
