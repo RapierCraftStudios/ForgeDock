@@ -28,6 +28,7 @@ export const MIN_QUOTE_CHARS = 12;
 /** A contract larger than this cannot be posted whole in one comment (the comment cap is 60k). */
 export const MAX_CONTRACT_CHARS = 40000;
 import { CHECK_ID_RE } from "./postdeploy-check.mjs";
+import { normaliseDecision, deadAnchors } from "./decisions.mjs";
 const C = OUTCOME_CODES;
 
 export const norm = (s) => String(s ?? "").replace(/[`*_>]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -269,7 +270,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
 /** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
-const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement"];
+const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "decision"];
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
 
 /** forge#4574: common builder slips: `type` for `kind`, amend-requirement/limitation as defer, an `R#` in `id` as the requirement. */
@@ -287,7 +288,8 @@ function normalizeAmendment(a) {
 function amendmentProblem(a, tag) {
   const kind = a?.kind;
   const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
-    : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)" : null;
+    : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
+      : kind === "decision" ? "needs decision {choice, anchors: [paths or globs], symbols?, supersedes?: decision id}" : null;
   const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
   return `unknown or incomplete amendment: ${why}: ${tag}`;
 }
@@ -297,11 +299,14 @@ function amendmentProblem(a, tag) {
  * defer|post-deploy {requirement: id}. Every amendment needs a why. Returns {contract, applied[], toTrack[], problems[]}.
  * `generatedPaths` (forge#4519, forge.yaml maintenance.generated_paths via scripts/hotspots.sh): an add-deliverable on a
  * matching path is refused; the repo's generator or bot owns that file.
+ * `decision` {decision:{choice, anchors, symbols?, supersedes?}} (#4695): every anchor must match a file of `baseFiles` (the
+ * base tree; null skips the check); `supersedes` names the decision whose engine-authored preserve row it replaces and
+ * drops that row; returns the records in `decisions`.
  */
-export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [] } = {}) {
+export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [], baseFiles = null } = {}) {
   const c = structuredClone(frozen);
   c.deliverables = c.deliverables ?? [];
-  const applied = [], toTrack = [], problems = [];
+  const applied = [], toTrack = [], problems = [], decisions = [];
   const genRes = (Array.isArray(generatedPaths) ? generatedPaths : []).filter((g) => typeof g === "string" && g).map(shellGlobRe);
   for (const raw of Array.isArray(amendments) ? amendments : []) {
     const a = normalizeAmendment(raw);
@@ -339,10 +344,19 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
         r.disposition = a.kind; r.why = a.why; r.amended = true; toTrack.push(r);
         if (a.kind === "post-deploy") r.check = a.check ?? r.check; // #4626
       }
+    } else if (a.kind === "decision") {
+      const d = normaliseDecision({ ...a.decision, why: a.decision?.why ?? a.why });
+      if (!d) { problems.push(amendmentProblem(a, tag)); continue; }
+      const dead = Array.isArray(baseFiles) ? deadAnchors(d.anchors, baseFiles) : [];
+      if (dead.length) { problems.push(`decision anchor(s) ${dead.join(", ")} match no file on the base; anchor a path that exists there`); continue; }
+      if (!blank(a.decision?.supersedes)) c.preserve = (c.preserve ?? []).filter((p) => p.decision !== a.decision.supersedes && p.id !== a.decision.supersedes);
+      decisions.push(a.decision?.supersedes ? { ...d, supersedes: String(a.decision.supersedes) } : d);
+      applied.push({ kind: a.kind, target: d.choice.slice(0, 60), why: String(a.why).trim() });
+      continue;
     } else { problems.push(amendmentProblem(a, tag)); continue; }
     applied.push({ kind: a.kind, target: a.path ?? a.requirement?.id ?? a.requirement, why: String(a.why).trim() });
   }
-  return { contract: c, applied, toTrack, problems };
+  return { contract: c, applied, toTrack, problems, decisions };
 }
 
 const PY_MISSING_RE = /ModuleNotFoundError: No module named '([^']+)'|ImportError: No module named '?([\w.]+)'?/;

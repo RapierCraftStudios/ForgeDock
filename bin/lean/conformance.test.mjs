@@ -707,3 +707,26 @@ describe("post-deploy check ids (#4626)", () => {
     assert.match(i.why, /^post-deploy: \[check:login-smoke\] w$/);
   });
 });
+
+describe("decision amendments (#4695)", () => {
+  const withRow = { ...C, preserve: [...C.preserve, { id: "H1", what: "use A", source: "decision", decision: "d9-1" }] };
+  const amend = (extra, opts = { baseFiles: ["src/scrape.js", "src/search.js"] }) => applyAmendments(withRow, [{ kind: "decision", why: "w", decision: { choice: "use B", anchors: ["src/**"], ...extra } }], null, opts);
+  it("applies a decision whose anchors exist on the base and returns the record", () => {
+    const a = amend({});
+    assert.deepEqual(a.problems, []);
+    assert.equal(a.decisions[0].choice, "use B");
+    assert.ok(a.contract.preserve.some((p) => p.id === "H1"));
+  });
+  it("rejects an anchor that matches no base file", () => {
+    const a = amend({ anchors: ["nope/**"] });
+    assert.match(a.problems[0], /match no file on the base/);
+    assert.equal(a.decisions.length, 0);
+  });
+  it("supersedes drops the engine-authored preserve row; without it the row stays", () => {
+    assert.ok(!amend({ supersedes: "d9-1" }).contract.preserve.some((p) => p.id === "H1"));
+    assert.ok(amend({}).contract.preserve.some((p) => p.id === "H1"));
+  });
+  it("a decision without choice or anchors is an incomplete amendment", () => {
+    assert.match(amend({ choice: "" }).problems[0], /needs decision/);
+  });
+});
