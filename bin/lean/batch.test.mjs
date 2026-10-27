@@ -105,6 +105,16 @@ await orchestrateFromCli(["1", "2", "3", "--parallel", "2", "--repo", "o/r", "--
     assert.deepEqual(deferPolicy({ code: "gh.unavailable", retryInSeconds: 60 }, { now: 0 }), { delayMs: 60000 });
   });
 
+  it("#4690 env.lane_limit (needs-human) is never counted by the breaker and the batch keeps admitting", async () => {
+    const { now, sleep } = fakeClock();
+    const updates = [], ran = [];
+    const rows = await orchestrate({ issues: [1, 2, 3], parallel: 1, readBody: async () => "", now, sleep, breaker: { errors: 1, window_min: 30 }, onUpdate: (r) => updates.push(r),
+      runOne: async (n) => { ran.push(n); return n === 1 ? { terminalReason: "needs-human", code: "env.lane_limit", detail: "TasksMax" } : { terminalReason: "merged", pr: n }; } });
+    assert.deepEqual(ran, [1, 2, 3]);
+    assert.ok(!updates.some((u) => u.outcome === "breaker" || u.outcome === "engine-error"));
+    assert.deepEqual(rows.map((r) => r.outcome), ["needs-human", "merged", "merged"]);
+  });
+
   it("a usage limit holds every admission until its reset; a deferred issue's dependents wait instead of being skipped", async () => {
     const { now, sleep, c } = fakeClock();
     const t0 = c.t, starts = {};

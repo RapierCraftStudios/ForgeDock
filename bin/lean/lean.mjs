@@ -669,6 +669,13 @@ export async function runCore(o) {
           p = restart() + await contextRestartNote(); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "context_restart";
           continue;
         }
+        if (e?.code === "CLI_LANE_LIMIT") { // #4690: the lane hit its own scope limit: a rerun hits it again, so typed needs-human (env.lane_limit), never engine-error
+          ev({ event: "CLI_LANE_LIMIT", limit: e.limit ?? null, unit: e.unit ?? null });
+          await checkpoint(`scope ${e.limit} limit`);
+          e.laneCode = OUTCOME_CODES.ENV_LANE_LIMIT;
+          e.message = `The lane hit its own ${e.limit === "memory" ? "MemoryMax (memory)" : "TasksMax (process count)"} scope limit and was stopped; work checkpointed to ${branch}. Raise engine.lane_limits.${e.limit === "memory" ? "memory_max" : "tasks_max"} in forge.yaml if the work is legitimate, or find the runaway step.`;
+          throw e;
+        }
         const hostKilled = isExternalKill(e); // #4518: SIGTERM/143 we did not send restarts like a timeout, and never ends engine-error
         if (!(hostKilled || e?.code === "CLI_IDLE" || e?.code === "CLI_TIMEOUT")) throw e;
         const idle = e.code === "CLI_IDLE";
