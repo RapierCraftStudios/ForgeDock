@@ -17,12 +17,18 @@
 #   error (exit 2, DEFERRED_TSV=INVALID, nothing filed). The label (default: the path) is the item's identity in the checklist
 #   and in the stdout rows; repeated `R<n>: R<m>:` prefixes in it collapse to the first. Class: column 4, else the why's
 #   `post-deploy:|external:|ops:` prefix, else engineering.
+#   #4724 buckets: a why carrying `[bucket:<kind>]` is routed by it: `owner` is always class external (never the rollup),
+#   `new-issue` engineering, `verify-now` (the parent is already on the default branch) its own per-parent follow-up class
+#   `verify-now` that the gate releases at once, and `post-deploy`/`date` go to the ONE open rollup of the release lane.
+#   The rollup (class post-deploy) is found by `<!-- FORGE:POSTDEPLOY_ROLLUP: <lane> -->`, not by parent: every lane appends
+#   its items under a `### #<root parent>` heading (a follow-up of a follow-up is filed under the root parent), deduplicated
+#   on normalized text across parents. Env: FORGE_RELEASE_LANE (the deploy lane, default `default`), FORGE_RELEASE_SHA (informational).
 #   A post-deploy why starts `post-deploy: [check:<id>] ...` (#4626); the token is kept verbatim in the checklist line.
 # Env: DRY_RUN (non-empty: no create/edit, issue number 0), FORGE_TRAIL_TRUSTED_ASSOCIATIONS (default
 #      OWNER,MEMBER,COLLABORATOR), FORGE_TRAIL_TRUSTED_LOGINS (default empty), FORGE_DEFERRED_RETRY_SLEEP (secs),
 #      FORGE_FOLLOWUP_MILESTONE (the parent's milestone title; default: read from the parent), FORGE_FOLLOWUPS_DEFAULT_MILESTONE
 #      (forge.yaml followups.default_milestone), FORGE_EXTERNAL_PREREQ (issue number an external follow-up links to).
-# Stdout: `identity<TAB>issue` per item, then DEFERRED_TELEMETRY deferred_items=N folded=N batched_into=#M[,#M2] filed=N classes=a,b.
+# Stdout: `identity<TAB>issue` per item, then DEFERRED_TELEMETRY deferred_items=N folded=N batched_into=#M[,#M2] filed=N classes=a,b buckets=kind:N,...
 # Exit: 0 ok | 2 usage or malformed TSV row | 3 lookup failed (DEFERRED_LOOKUP=FAILED) | 4 create/append failed (DEFERRED_FILE=FAILED).
 # A failed lookup is never "none found". bash 3.2 portable.
 
@@ -51,7 +57,7 @@ if [ "$ITEMS" = "-" ]; then cat > "$TMP/items.raw"; else cat "$ITEMS" > "$TMP/it
 # Internal file uses a non-whitespace separator (US, \x1f): a tab IFS collapses an empty `why` and drops the known-flaw flag.
 # Fields: identity, why, flag, path (`-` when none), class.
 SEP=$(printf '\037')
-CLASSES="engineering post-deploy external ops"
+CLASSES="engineering post-deploy external ops verify-now"
 : > "$TMP/items"
 BAD=0; ROW=0
 bad_row() { BAD=$((BAD+1)); echo "file-deferred-followups: row $ROW: $1" >&2; }
@@ -80,6 +86,12 @@ while IFS= read -r line || [ -n "$line" ]; do
     case "$w" in post-deploy:*) c="post-deploy" ;; external:*) c="external" ;; ops:*) c="ops" ;; *) c="engineering" ;; esac
   fi
   case " $CLASSES " in *" $c "*) ;; *) bad_row "unknown class \`$c\` (engineering|post-deploy|external|ops)"; continue ;; esac
+  # #4724: the bucket token decides the class: owner actions never join the post-deploy rollup, verify-now needs no release.
+  case "$w" in
+    *"[bucket:owner]"*) [ "$c" = "ops" ] || c="external" ;;
+    *"[bucket:new-issue]"*) [ "$c" = "post-deploy" ] && c="engineering" ;;
+    *"[bucket:verify-now]"*) [ "$c" = "post-deploy" ] && c="verify-now" ;;
+  esac
   if cut -d "$SEP" -f1 "$TMP/items" | grep -qxF -- "$id"; then continue; fi
   case "${k:-}" in known-flaw|1|yes|true) k="known-flaw" ;; *) k="" ;; esac
   printf '%s%s%s%s%s%s%s%s%s\n' "$id" "$SEP" "$w" "$SEP" "$k" "$SEP" "${p:--}" "$SEP" "$c" >> "$TMP/items"
@@ -95,14 +107,15 @@ finish() { # $1 = batched_into numbers (space separated) or empty, $2 = filed co
   local into="none" bare="none"
   if [ -n "$1" ]; then into=$(printf '%s\n' $1 | sed 's/^/#/' | paste -sd, -); bare=$(printf '%s\n' $1 | paste -sd, -); fi
   local cls; cls=$(cut -d "$SEP" -f5 "$TMP/items" | sort -u | paste -sd, -)
-  local line="DEFERRED_TELEMETRY deferred_items=${TOTAL} folded=${FOLDED} batched_into=${into} filed=$2 classes=${cls:-none}"
+  local bks; bks=$(awk -F"$SEP" '{ b = "none"; if (match($2, /\[bucket:[a-z-]+\]/)) b = substr($2, RSTART + 8, RLENGTH - 9); n[b]++ } END { for (b in n) printf "%s:%d\n", b, n[b] }' "$TMP/items" | sort | paste -sd, -)
+  local line="DEFERRED_TELEMETRY deferred_items=${TOTAL} folded=${FOLDED} batched_into=${into} filed=$2 classes=${cls:-none} buckets=${bks:-none}"
   echo "$line"
   # #3834 emitter (scripts/lib/telemetry.sh): optional, never blocks, never changes stdout or the exit code.
   local d; d=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
   if [ -f "$d/lib/telemetry.sh" ]; then
     FORGE_ISSUE="${FORGE_ISSUE:-$PARENT}" FORGE_REPO="${FORGE_REPO:-$REPO}" \
       bash "$d/lib/telemetry.sh" deferred_followups deferred_items="$TOTAL" folded="$FOLDED" \
-      batched_into="$bare" filed="$2" classes="${cls:-none}" >/dev/null 2>&1 </dev/null || true
+      batched_into="$bare" filed="$2" classes="${cls:-none}" buckets="${bks:-none}" >/dev/null 2>&1 </dev/null || true
   fi
 }
 
@@ -156,13 +169,118 @@ find_canonical() {
   pick_verified $cands || return 1
   return 0
 }
+# --- #4724: the post-deploy rollup: ONE open issue per release lane, found by marker (not by parent) ------------------
+RELEASE_LANE="${FORGE_RELEASE_LANE:-default}"
+ROLLUP_MARKER="<!-- FORGE:POSTDEPLOY_ROLLUP: ${RELEASE_LANE} -->"
+verify_rollup() { # number -> `number<TAB>open` when a trusted, open, non-PR issue carries the rollup marker
+  local out rc
+  out=$(gh api "repos/${REPO}/issues/$1" 2>"$TMP/verr"); rc=$?
+  if [ "$rc" -ne 0 ]; then grep -qE '404|Not Found|410' "$TMP/verr" 2>/dev/null && return 0; return 1; fi
+  printf '%s' "$out" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg m "$ROLLUP_MARKER" "$JQ_PRE"'
+      select(.pull_request == null) | select(trusted) | select(.state == "open") | select((.body // "") | contains($m))
+      | "\(.number)\t\(.state)"' 2>/dev/null
+}
+find_rollup() { # sets CANON/CSTATE to the lowest open rollup of the lane; non-zero only when a lookup failed
+  local cands n r
+  CANON=""; CSTATE=""
+  cands=$(gh api -X GET search/issues -f per_page=50 -f q="\"FORGE:POSTDEPLOY_ROLLUP: ${RELEASE_LANE}\" in:body repo:${REPO} is:issue is:open" 2>/dev/null \
+    | jq -r '[.items[].number] | sort | .[]' 2>/dev/null) || return 1
+  for n in $cands; do
+    r=$(verify_rollup "$n") || return 1
+    if [ -n "$r" ]; then CANON="${r%%$'\t'*}"; CSTATE="${r#*$'\t'}"; return 0; fi
+  done
+  return 0
+}
+# The root parent: a parent that is itself a follow-up (or the rollup) files its items under the parent it came from.
+ROOT="$PARENT"
+resolve_root() {
+  local pb first
+  pb=$(gh api "repos/${REPO}/issues/${PARENT}" 2>/dev/null | jq -r '.body // ""' 2>/dev/null) || return 0
+  first=$(printf '%s' "$pb" | grep -oE 'FORGE:DEFERRED_FROM: #[0-9]+' | head -n 1 | grep -oE '[0-9]+$')
+  [ -n "$first" ] && ROOT="$first"
+  return 0
+}
+norm() { # normalized item text: no `R<n>:` prefix, lower case, punctuation and spacing collapsed (dedup across lanes)
+  printf '%s' "$1" | sed -E 's/^R[0-9]+:[[:space:]]*//' | tr 'A-Z' 'a-z' | tr -c 'a-z0-9\n' ' ' | tr -s ' ' | sed -E 's/^ //; s/ $//'
+}
+# Keep only the items of $1 whose normalized text is not yet in $2 (a body); the kept ones are appended to "$TMP/add".
+rollup_missing() { # items-file body-file
+  local p w k fp cl n
+  : > "$TMP/add"; : > "$TMP/have"
+  grep -E '^- \[[ xX]\] `' "$2" 2>/dev/null | sed -E 's/^- \[[ xX]\] `([^`]*)`.*/\1/' | while IFS= read -r l; do norm "$l"; echo; done > "$TMP/have"
+  while IFS="$SEP" read -r p w k fp cl; do
+    n=$(norm "$p")
+    grep -qxF -- "$n" "$TMP/have" && continue
+    entry "$p" "$w" "$k" >> "$TMP/add"; printf '%s\n' "$n" >> "$TMP/have"
+  done < "$1"
+}
+rollup_append() { # number ; non-zero = failure
+  local num="$1"
+  gh api "repos/${REPO}/issues/${num}" --jq '.body // ""' > "$TMP/body" 2>/dev/null || return 1
+  rollup_missing "$ITEMS_F" "$TMP/body"
+  [ -s "$TMP/add" ] || return 0
+  awk -v h="### #${ROOT}" -v root="$ROOT" -v addf="$TMP/add" '
+    BEGIN { while ((getline l < addf) > 0) add = add l "\n" }
+    { if (insec && $0 ~ /^### /) { printf "%s\n", add; insec = 0; done = 1 } if ($0 == h) insec = 1; print }
+    END { if (insec) printf "%s", add; else if (!done) printf "\n%s\n<!-- FORGE:DEFERRED_FROM: #%s -->\n\n%s", h, root, add }' "$TMP/body" > "$TMP/newbody"
+  if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: gh issue edit $num (append $(wc -l < "$TMP/add" | tr -d ' ') item(s) under #${ROOT})" >&2
+  else gh issue edit "$num" -R "$REPO" --body-file "$TMP/newbody" >/dev/null 2>&1 || return 1; fi
+  return 0
+}
+file_rollup() { # items in $ITEMS_F; sets FILED_N, FILED_NEW
+  local n_items; n_items=$(wc -l < "$ITEMS_F" | tr -d ' ')
+  FILED_N=""; FILED_NEW=0
+  resolve_root
+  CANON=$(cut -f1 "$TMP/canon.$CLS")
+  if [ -n "$CANON" ]; then
+    rollup_append "$CANON" || { echo "DEFERRED_FILE=FAILED"; exit 4; }
+    FILED_N="$CANON"; return 0
+  fi
+  : > "$TMP/body"; rollup_missing "$ITEMS_F" "$TMP/body"
+  {
+    printf '## Problem\n\nPost-deploy checklist of release lane `%s`%s. Every merged lane appends its post-deploy items under a `### #<parent>` heading (deduplicated), so one read-only verification works through this one issue per release.\n\n' "$RELEASE_LANE" "${FORGE_RELEASE_SHA:+ (deploy target at $FORGE_RELEASE_SHA)}"
+    printf '## Acceptance Criteria\n\n### #%s\n<!-- FORGE:DEFERRED_FROM: #%s -->\n\n' "$ROOT" "$ROOT"
+    cat "$TMP/add"
+    printf '\n%s\n<!-- FORGE:DEFERRED_CLASS: post-deploy -->\n' "$ROLLUP_MARKER"
+  } > "$TMP/newissue"
+  local NUM
+  if [ -n "${DRY_RUN:-}" ]; then
+    echo "DRY_RUN: gh issue create (post-deploy rollup ${RELEASE_LANE}: ${n_items} item(s) from #${PARENT})" >&2
+    NUM=0
+  else
+    resolve_milestone
+    local args=() URL
+    gh label create "followup:post-deploy" -R "$REPO" --force --color BFD4F2 --description "Deferred post-deploy checks. Managed by ForgeDock." >/dev/null 2>&1 || true
+    args=(--label "followup:post-deploy")
+    [ -n "$MS_TITLE" ] && args+=(--milestone "$MS_TITLE")
+    URL=$(gh issue create -R "$REPO" --title "post-deploy: release checklist (${RELEASE_LANE})" --body-file "$TMP/newissue" "${args[@]}" 2>/dev/null) || URL=""
+    NUM=$(printf '%s' "$URL" | grep -oE '[0-9]+$' | tail -n 1)
+    [ -n "$NUM" ] || { echo "DEFERRED_FILE=FAILED"; exit 4; }
+    # Post-create re-check: a concurrent lane may have filed first. The lowest open rollup is canonical; the newer one is closed.
+    if find_rollup; then
+      if [ -n "$CANON" ] && [ "$CANON" -lt "$NUM" ]; then
+        if rollup_append "$CANON"; then
+          gh issue close "$NUM" -R "$REPO" --reason "not planned" --comment "Duplicate of #${CANON}: the post-deploy items of lane ${RELEASE_LANE} are tracked there." >/dev/null 2>&1 \
+            || echo "file-deferred-followups: warning: could not close duplicate #${NUM}" >&2
+          NUM="$CANON"
+        else
+          echo "file-deferred-followups: warning: could not move items to #${CANON}; keeping #${NUM}" >&2
+        fi
+      fi
+    else
+      echo "file-deferred-followups: warning: post-create re-check failed; keeping #${NUM}" >&2
+    fi
+  fi
+  FILED_N="$NUM"; FILED_NEW=1
+}
+
 CLS_LIST=$(cut -d "$SEP" -f5 "$TMP/items" | sort -u)
 CLS=""
 # Phase 1: look up the canonical follow-up of every class before filing anything (a failed lookup files nothing).
 for CLS in $CLS_LIST; do
   LOOKUP_OK=""
   for attempt in 1 2; do
-    if find_canonical; then LOOKUP_OK=1; break; fi
+    if { [ "$CLS" = "post-deploy" ] && find_rollup; } || { [ "$CLS" != "post-deploy" ] && find_canonical; }; then LOOKUP_OK=1; break; fi
     [ "$attempt" = 1 ] && sleep "${FORGE_DEFERRED_RETRY_SLEEP:-2}"
   done
   if [ -z "$LOOKUP_OK" ]; then
@@ -299,7 +417,7 @@ file_class() {
 INTO=""; FILED=0
 for CLS in $CLS_LIST; do
   ITEMS_F="$TMP/items.$CLS"
-  file_class
+  if [ "$CLS" = "post-deploy" ]; then file_rollup; else file_class; fi
   case " $INTO " in *" $FILED_N "*) ;; *) INTO="${INTO:+$INTO }$FILED_N" ;; esac
   FILED=$((FILED + FILED_NEW))
   while IFS="$SEP" read -r p w k fp cl; do printf '%s\t%s\n' "$p" "$FILED_N"; done < "$ITEMS_F"

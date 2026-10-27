@@ -11,7 +11,7 @@ const facts = (validation, files = ["src/a.ts"]) => `<!-- ${FACTS_MARKER} -->\n$
 const CONTRACT = {
   requirements: [
     { id: "R1", quote: "Retries keep the session.", disposition: "deliver" },
-    { id: "R2", quote: "Measure it after deploy.", disposition: "post-deploy", why: "prod" },
+    { id: "R2", quote: "Measure it after deploy.", disposition: "post-deploy", why: "prod", bucket: "post-deploy" },
     { id: "R3", quote: "Log the retry count.", disposition: "deliver" },
   ],
   validate: [{ id: "V1", command: "npm test -- a.test.ts" }, { id: "V2", command: "npm run lint" }],

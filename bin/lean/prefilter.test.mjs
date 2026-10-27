@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, isTrustedIssueComment, DEFAULT_PREFILTER_MODEL, parseMinAge, itemWindowsMs, landedAt, itemDueMs, hasDecisionItem } from "./prefilter.mjs";
+import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, isTrustedIssueComment, DEFAULT_PREFILTER_MODEL, parseMinAge, itemWindowsMs, landedAt, itemDueMs, hasDecisionItem, deferredFromAll, itemDueAnchors } from "./prefilter.mjs";
 import { writeFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { execFileSync } from "node:child_process";
@@ -514,6 +514,36 @@ describe("post_deploy.min_age soak window (#4425)", () => {
     assert.equal(parseMinAge("30m"), 30 * 60e3); assert.equal(parseMinAge("0"), 0); assert.equal(parseMinAge(90), 90 * 60e3);
     assert.equal(parseMinAge("soon"), null); assert.equal(parseMinAge(null), null);
     assert.deepEqual(itemWindowsMs(followup([item("R1", "after 24h of traffic, then 7 days of retention"), item("R2", "only in prod")])), [7 * 24 * H * 1000, null]);
+  });
+
+  describe("post-deploy rollup with several parents (#4724)", () => {
+    const M2 = "f".repeat(40);
+    const prs = [...parentPr, { number: 91, title: "fix(y): other (#50)", body: "", mergeCommit: { oid: M2 } }];
+    const rollup = (items) => `## Acceptance Criteria\n\n### #40\n<!-- FORGE:DEFERRED_FROM: #40 -->\n${items[0]}\n### #50\n<!-- FORGE:DEFERRED_FROM: #50 -->\n${items[1] ?? items[0]}\n`;
+    it("deferredFromAll lists every section parent once, in order", () => {
+      assert.deepEqual(deferredFromAll(rollup([item("R1", "x")])), [40, 50]);
+      assert.deepEqual(deferredFromAll("no marker"), []);
+      assert.equal(deferredFrom(rollup([item("R1", "x")])), 40);
+    });
+    it("the rollup waits while ANY parent is off the default branch, and names them all", async () => {
+      const w = soakWorld({ mergedPrs: prs, ancestry: { [MERGE]: 0, [M2]: 1 } });
+      const g = await gate(w, rollup([item("R1", "x")]));
+      assert.equal(g.state, "awaiting-promotion"); assert.match(g.detail, /#40, #50/); assert.deepEqual(g.shas, [MERGE, M2]);
+    });
+    it("is ready once every parent is on the default branch; a parent without a merge SHA is unresolved", async () => {
+      assert.equal((await gate(soakWorld({ mergedPrs: prs, ancestry: { [MERGE]: 0, [M2]: 0 } }), rollup([item("R1", "x")]))).state, "ready");
+      const g = await gate(soakWorld({ mergedPrs: parentPr, ancestry: { [MERGE]: 0 } }), rollup([item("R1", "x")]));
+      assert.equal(g.state, "unresolved"); assert.match(g.detail, /#50/);
+    });
+    it("a date item is re-anchored to when its fix landed: due + (landed - from)", async () => {
+      const it1 = item("R1", "[bucket:date] due:2027-02-01 from:2027-01-01 later");
+      assert.deepEqual(itemDueAnchors(followup([it1])), [{ dueMs: Date.UTC(2027, 1, 1), fromMs: Date.UTC(2027, 0, 1) }]);
+      const w = soakWorld({ mergedPrs: parentPr, ancestry: { [MERGE]: 0 } });
+      const g = await gate(w, followup([it1]), { now: Date.UTC(2027, 1, 10) }); // past the contract-time date, before the shifted one
+      assert.equal(g.state, "awaiting-due");
+      assert.equal(g.eligibleAt, new Date(Date.UTC(2027, 1, 1) + LANDED * 1000 - Date.UTC(2027, 0, 1)).toISOString());
+      assert.equal((await gate(soakWorld({ mergedPrs: parentPr, ancestry: { [MERGE]: 0 } }), followup([it1]), { now: Date.UTC(2027, 2, 1) })).state, "ready");
+    });
   });
 
   it("landedAt: the promotion merge time, or the SHA's own time when it is on the mainline", async () => {
