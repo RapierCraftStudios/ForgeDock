@@ -510,6 +510,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     const kept = batchEnv({ PATH: "/", CLAUDE_CONFIG_DIR: "/acct-b", SECRET_X: "no", FORGEDOCK_SCHED_DIR: "/s", LC_CTYPE: "C" });
     assert.deepEqual(kept, { PATH: "/", CLAUDE_CONFIG_DIR: "/acct-b", FORGEDOCK_SCHED_DIR: "/s", LC_CTYPE: "C" });
     const env = mergeEnv({ PATH: "/d", ANTHROPIC_API_KEY: "daemon-key", NODE_OPTIONS: "x" }, kept);
+    assert.equal(mergeEnv({ GH_TOKEN: "d" }, kept).GH_TOKEN, "d", "a secret-named daemon key (never pinned) stays for the lane");
     assert.deepEqual(env, { NODE_OPTIONS: "x", ANTHROPIC_API_KEY: "daemon-key", PATH: "/", CLAUDE_CONFIG_DIR: "/acct-b", FORGEDOCK_SCHED_DIR: "/s", LC_CTYPE: "C" });
   });
 

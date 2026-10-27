@@ -88,9 +88,9 @@ export function redactEnv(env) {
   return Object.fromEntries(Object.entries(env ?? {}).map(([k, v]) => [k, SECRET_ENV.test(k) ? "<redacted>" : v]));
 }
 
-/** `base` without its allowlisted keys, plus `kept`: an account selector the client did not set never leaks in from the daemon. */
+/** `base` without its allowlisted non-secret keys (secret-named ones, e.g. GH_TOKEN, stay from the daemon: never pinned), plus `kept`: an account selector the client did not set never leaks in from the daemon. */
 export function mergeEnv(base, kept) {
-  const out = Object.fromEntries(Object.entries(base).filter(([k]) => !ENV_KEEP.test(k)));
+  const out = Object.fromEntries(Object.entries(base).filter(([k]) => k in kept || !ENV_KEEP.test(k) || SECRET_ENV.test(k)));
   return { ...out, ...kept };
 }
 
