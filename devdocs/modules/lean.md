@@ -1879,3 +1879,20 @@ non-existent dirs, per-session temp `arg0`/`claude*` dirs under a temp root, and
 `forgedock orchestrate --show-env <id>` prints the pinned env redacted; `--set-env <id> KEY=VAL` / `--unset-env <id> KEY` edit `plan.json`
 (`envBatch`), and `runBatch`'s `laneSpawn` re-reads `plan.env` for each newly launched lane (running lanes keep theirs). Pre-#4192 batches
 with no `plan.env` still use the daemon env. Config: `docs/CONFIG.md`.
+
+## Guard gate (#4693)
+
+`bin/lean/guardgate.mjs`, called from `gate()` in `bin/lean/lean.mjs` beside the validate rerun. Deterministic, no LLM call.
+It loads the guards (#4692) from the local index (`~/.forge/guards/<repo>.json`, rebuilt from FORGE:GUARD comments when absent or
+older than 6 h). A guard is selected when the lane's diff changes lines whose `git blame` at the merge base names the guard's
+merge commit (or a later commit; line drift tolerance 10), or when the lane edits or deletes one of its test files. A lane touching
+no guarded file does no git work. Each selected test file is exported from the merge base to a sibling path
+`<name>__guardbase.<ext>` (so relative imports resolve against the lane's tree), run with the contract's own validate command with
+that path substituted (else `node --test` / `python -m pytest -q`), then removed. At most `FORGE_HOST_PARALLELISM` (default 2) run at
+once under one 120 s cap; a timeout, missing base copy or unknown runner is a trajectory note, never a block.
+
+A failing base test is `conformance.guard_broken` (guard issue, its why, test, output tail), a precheck failure: enforce resumes the
+builder once; shadow records it in `CONFORMANCE_SHADOW` `would` (it is not in `SHADOW_PRE_BLOCKS`), which is the would-block count.
+The only override is `{"kind":"supersedes","guard":"#X","why":"..."}` in result.json amendments (`applyAmendments` records
+`contract.supersedes`; the reviewer sees it on the effective contract). After the lane merges with the amendment, the engine
+comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_ms`), `guard_broken`, `supersedes_accepted`.
