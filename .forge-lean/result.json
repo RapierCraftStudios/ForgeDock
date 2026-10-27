@@ -50,6 +50,11 @@
    "command": "node --test bin/lean/guards.test.mjs",
    "result": "pass",
    "fails_without_fix": true
+  },
+  {
+   "command": "bash scripts/check-test-tmp-cleanup.sh",
+   "result": "pass",
+   "fails_without_fix": true
   }
  ],
  "self_review": [
