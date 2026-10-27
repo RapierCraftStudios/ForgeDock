@@ -1836,6 +1836,18 @@ pool with no stop endpoint, behaviour is as before (remote lanes run to their re
 
 `scripts/readiness.mjs` (pure module + CLI) reads `needs-human:external` issues, parses `gates:` (`preview|staging-deploy|prod-deploy|feature-flag:<name>`) and `owner:` from the body, and reports per gate the open prerequisites (owner, age) and open code milestones; malformed gates are ignored. `--digest` orders unblocked human actions by `Depends on #N` (topological, cycle-safe). `deployable(target)` is false while the mapped gate (preview, staging, prod) has open prerequisites; a `feature-flag` gate stays red but never blocks merge. `bootstrap-validate.mjs` treats `needs-human:external` as needs-human and rejects a missing/invalid `gates:` with `missing-gates`; `bootstrap-create.mjs` applies the label. Merge and lane code unchanged. Cost: 0 LLM calls.
 
+## Entry 2026-10-27 — Deferred follow-ups: one issue per class, milestone, TSV validation (#4664)
+
+`scripts/file-deferred-followups.sh` groups items by class (`engineering|post-deploy|external|ops`; TSV column 4, else the
+why's `post-deploy:|external:|ops:` prefix, else engineering; `followupItems` sets it from the requirement's optional `class`)
+and files one follow-up per class per parent: label `followup:<class>`, a `FORGE:DEFERRED_CLASS` marker next to the unchanged
+`FORGE:DEFERRED_FROM` marker (absent = engineering, so older issues and claims still match), a `class=` suffix on the claim
+marker, and the parent's milestone (`FORGE_FOLLOWUP_MILESTONE` from `lean.mjs`, else read from the parent). A closed milestone
+resolves to the next open one by due date, else forge.yaml `followups.default_milestone` (`readFollowupsDefaultMilestone`,
+`o.followupsDefaultMilestone`). TSV column 1 is a path or `-`; the engine sends `-` and puts the requirement text in column 5
+(the item's identity in the checklist and the stdout rows). Requirement text or an `R<n>:` prefix in column 1 exits 2
+(`DEFERRED_TSV=INVALID`) before any gh call. Lookups for all classes run before anything is filed.
+
 ## Entry 2026-10-27 — settle scope freeze and deploy-last warning (#4665)
 
 `scripts/settle-scope.mjs` (pure module, no I/O) freezes the milestone's issue set when settle begins (`freezeScope`). `classifyNew` sorts later issues: a child of a frozen decomposed issue is a `decomposition-child` and stays in the milestone; a `FORGE:DEFERRED_FROM` issue is a `deferred-followup` routed to the next milestone or backlog (`file-deferred-followups.sh` already files without a milestone); anything else is `review-finding` or `other` (growth only). `convergence` measures the frozen set plus decomposition children (transitively); `formatStopReport` states the growth and per-source issue numbers. `commands/orchestrate.md` §3b specifies it; no settle loop exists in the repo. `bootstrap-validate.mjs` adds a `warnings` array (`ok` and exit code 0 unchanged) with `deploy-last`: warned once when deploy-class issues (deploy workflow, staging environment) sit only in the last of >= 3 milestones; `formatWarnings` is exported and main() prints `warning:` lines to stderr. `commands/bootstrap.md` asks for dependency-layer milestones and a deployable slice in milestone 1 or 2. Cost: 0 LLM calls.

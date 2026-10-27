@@ -30,9 +30,9 @@ import { detectApiShape } from "./apishape.mjs";
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
 /** Argv-only child with stdin input; resolves stdout, rejects on a non-zero exit with stderr attached. */
-export function runWithInput(bin, args, input, timeout = 120000) {
+export function runWithInput(bin, args, input, timeout = 120000, env = undefined) {
   return new Promise((res, rej) => {
-    const child = execFile(bin, args, { timeout, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    const child = execFile(bin, args, { timeout, maxBuffer: 10 * 1024 * 1024, ...(env ? { env } : {}) }, (err, stdout, stderr) => {
       if (err) { err.stdout = stdout; err.stderr = stderr; rej(err); } else res(String(stdout));
     });
     // A child that exits before reading stdin closes the pipe: EPIPE must reject via the exit callback, never crash the lane.
@@ -339,11 +339,14 @@ export function makeLeanIo({ repo }) {
     async transitionLabel(issue, state) { await pexec("bash", [script("transition-label.sh"), String(issue), "-R", repo, state], { timeout: 60000 }); },
     /**
      * File (or append to) the parent's ONE batched follow-up issue (scripts/file-deferred-followups.sh: trusted lookup,
-     * append, create, claim marker, duplicate re-check). items: [{key, why}]. Returns {key: issueNumber}; throws on exit 3/4.
+     * append, create, claim marker, duplicate re-check; one issue per class, #4664). items: [{key, why, class?}]; the key is the
+     * item's identity (column 5, column 1 is `-`). milestone / defaultMilestone: the parent's and forge.yaml followups.default_milestone.
+     * Returns {key: issueNumber}; throws on exit 2/3/4.
      */
-    async fileFollowups({ parent, items }) {
-      const tsv = items.map((i) => `${i.key}\t${i.why}\t`).join("\n") + "\n";
-      const out = await runWithInput("bash", [script("file-deferred-followups.sh"), "--parent", String(parent), "--repo", repo], tsv, 180000);
+    async fileFollowups({ parent, items, milestone = null, defaultMilestone = null }) {
+      const tsv = items.map((i) => `-\t${i.why}\t\t${i.class ?? ""}\t${i.key}`).join("\n") + "\n";
+      const env = { ...process.env, ...(milestone ? { FORGE_FOLLOWUP_MILESTONE: String(milestone) } : {}), ...(defaultMilestone ? { FORGE_FOLLOWUPS_DEFAULT_MILESTONE: String(defaultMilestone) } : {}) };
+      const out = await runWithInput("bash", [script("file-deferred-followups.sh"), "--parent", String(parent), "--repo", repo], tsv, 180000, env);
       return followupMap(out, items);
     },
     /**
