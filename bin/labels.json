@@ -70,6 +70,21 @@
     "description": "Pipeline stalled — requires human intervention. Managed by ForgeDock."
   },
   {
+    "name": "needs-human:external",
+    "color": "E4E669",
+    "description": "Waiting on an external prerequisite (credential, account, sign-off). Comment names the owner and unblock condition. Managed by ForgeDock."
+  },
+  {
+    "name": "parked",
+    "color": "FBCA04",
+    "description": "Mechanical park on a terminal code; per-code labels are parked:<code>. Managed by ForgeDock."
+  },
+  {
+    "name": "remediation-queue",
+    "color": "FBCA04",
+    "description": "Parked issue awaiting /work-on:remediate. Managed by ForgeDock."
+  },
+  {
     "name": "workflow:engine-error",
     "color": "B60205",
     "description": "Pipeline stalled — engine/tool failure (not a genuine human-judgment block). Managed by ForgeDock."

@@ -100,6 +100,7 @@
  */
 import { parseDependsOn } from "../engine/phases.mjs";
 import { classifyNeedsHuman, recoveryCodeOf, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { detectGateDeadlock, formatGateDeadlock } from "./gatewatch.mjs";
 import { recoveryEvidence } from "./render.mjs";
 import { renderAlerts } from "../stats/render.mjs";
 import { formatParkedLine, postDeployOnly } from "./prefilter.mjs";
@@ -237,7 +238,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, getCancelled = null, getHeld = null, stopLane = null,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, getCancelled = null, getHeld = null, getGates = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
@@ -304,6 +305,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const recovering = toMap(saved?.recovering); // issue -> {code, attempt, detail, outcome, ...} of the recovery lane queued or running
   const requeueApplied = new Set(saved?.requeueApplied ?? []); // #4550: `--requeue` entries already applied (batch `requeue` file)
   const requeuedInfo = toMap(saved?.requeued); // #4550: issue -> {reason, by, at, prior: [earlier rows]}
+  const everRelabelled = new Set(saved?.relabelled ?? []); // #4656: issues the runner already relabelled; never parked on top
   const relabelled = new Set(saved?.relabelled ?? []); // #4315: queued recoveries relabelled needs-human when a batch stopped
   // #4267: decisions are recorded, never awaited: a failing or slow recorder cannot block the batch.
   const decided = (d) => { try { Promise.resolve(decide?.(d)).catch(() => {}); } catch { /* best effort */ } };
@@ -648,6 +650,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!prior && row.outcome === "budget-exceeded" && typeof relabelNeedsHuman === "function") {
       try { await relabelNeedsHuman({ issue: n, evidence: `Implement turn budget overrun (\`budget.exceeded\`) not recovered in this batch:\n${String(row.detail ?? "")}` }); } catch { /* best effort */ }
     }
+    // #4656: a mechanical terminal park (recovery spent or none applies) moves to the remediation queue, not the human queue.
+    if (row.outcome === "needs-human" && !row.parkedQueued && !everRelabelled.has(n) && typeof relabelNeedsHuman === "function" && (cls => cls === "parked" || (cls === "recoverable" && prior))(classifyNeedsHuman({ ...row, issueEdited: r?.issueEdited === true }, { parked: true }))) { // a recoverable row with a finished recovery has used its attempts
+      try { await relabelNeedsHuman({ issue: n, parked: { code: row.code, pr: Number.isInteger(row.pr) ? row.pr : null }, evidence: `Mechanical park \`${row.code}\`${Number.isInteger(row.pr) ? ` (PR #${row.pr})` : ""}:\n${String(row.detail ?? "")}` }); row.parkedQueued = true; } catch { /* best effort */ }
+    }
     results.set(n, row);
     if (row.outcome === "merged" && drift?.onMerged && r?.structure && String(rec?.lane ?? r?.lane ?? "").startsWith("milestone/")) {
       save(); update(row);
@@ -759,7 +765,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         queued: q.attempt, cause: why, recoveryMax });
       let res;
       try { res = await relabelNeedsHuman({ issue: n, evidence }); } catch { res = "failed"; }
-      if (res !== false && res !== "failed") relabelled.add(n); // a failed label add is retried by a resume
+      if (res !== false && res !== "failed") { relabelled.add(n); everRelabelled.add(n); } // a failed label add is retried by a resume
     }
     save();
   })());
@@ -845,6 +851,22 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (freed.length) {
       decided({ issue: null, what: `released ${fmt(freed)} (forgedock orchestrate --release)`, why: "operator request", alternative: "resume the batch" });
       update({ issue: null, outcome: "release", detail: fmt(freed) });
+    }
+  };
+  // #4656: a gate (hold list, settle, ship pre-flight) waiting on an issue the scheduler will not admit: one decision and row per (gate, issue).
+  const gateSeen = new Map(), gateReported = new Set();
+  const checkGates = () => {
+    const gates = [];
+    if (opHeld.size) gates.push({ name: "hold", waitsOn: [...opHeld] });
+    if (getGates) { try { gates.push(...(getGates() ?? [])); } catch { /* best effort */ } }
+    if (!gates.length) return;
+    const unadmittable = (n) => { const x = results.get(n); return !(x && (x.outcome === "needs-human" || x.parkedQueued)); };
+    for (const d of detectGateDeadlock({ gates, admissible: unadmittable, now: now(), firstSeen: gateSeen })) {
+      const key = `${d.gate}#${d.issue}`;
+      if (gateReported.has(key)) continue;
+      gateReported.add(key);
+      decided({ issue: d.issue, what: formatGateDeadlock(d), why: "the gate waits on a parked issue the scheduler will not admit", alternative: "/work-on:remediate the parked issue or release the gate" });
+      update({ issue: d.issue, outcome: "GATE_DEADLOCK", detail: formatGateDeadlock(d) });
     }
   };
   const checkCancel = () => {
@@ -939,6 +961,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       driftHeld.clear();
       opHeldHit.clear();
       refreshHeld();
+      checkGates();
       const isReady = (n) => {
         if (opHeld.has(n)) { opHeldHit.add(n); return false; }
         if (!((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome)))) return false;
@@ -1076,9 +1099,12 @@ export function formatOutcomeLists(rows) {
   for (const r of rows ?? []) {
     if (!r || r.recovered) continue;
     const human = r.outcome === "needs-human" && classifyNeedsHuman(r) === "human";
+    if (r.parkedQueued && r.outcome === "needs-human") continue; // #4656: listed on the remediation line below, not as unrecovered
     if (!human && (r.outcome === "needs-human" || r.outcome === "budget-exceeded" || r.recovery)) out.push(`unrecovered: #${r.issue} (${r.code ?? r.recovery?.code ?? "unclassified"}: ${one(r.recovery ? `recovery ${r.recovery.code} ended ${r.recovery.outcome}: ${r.recovery.detail}` : r.detail)})`);
   }
   const esc = (rows ?? []).filter((r) => r?.outcome === "needs-human" && classifyNeedsHuman(r) === "human");
+  const rq = (rows ?? []).filter((r) => r?.outcome === "needs-human" && r.parkedQueued); // #4656: parked past recovery: the single remediation queue, not escalation
+  if (rq.length) out.push(`remediation queue (/work-on:remediate): ${rq.map((r) => `#${r.issue} (parked:${r.code}${r.pr ? ` PR #${r.pr}` : ""})`).join(" ")}`);
   const parked = formatParkedLine(rows); // #4389: one line for every parked post-deploy follow-up, never an escalation
   if (parked) out.push(parked);
   if (esc.length) out.push(["escalations (human decisions, asked once):", ...esc.map((r) => `- #${r.issue} (${r.code}): ${one(r.detail)}`)].join("\n"));

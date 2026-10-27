@@ -164,6 +164,8 @@ export function openBatch(root, id) {
     unrunRequeues: () => { const done = new Set(readJson(f("state.json"))?.requeueApplied ?? []); return readRequeueFile(f("requeue")).filter((e) => !done.has(requeueKey(e))); },
     /** Issues held by `--hold` (#4592): the `hold` file, sorted unique positive integers; [] when missing or invalid. */
     readHeld: () => readAdded(f("hold")),
+    /** #4656: gates waiting on issues (`gates` file: [{ name, waitsOn: [n...], since? }], written by the ship/settle pre-flight); [] when missing or invalid. */
+    readGates: () => { const v = readJson(f("gates")); return Array.isArray(v) ? v.filter((g) => g && typeof g.name === "string" && Array.isArray(g.waitsOn)) : []; },
     /** Merge the positive integers of `list` into the `hold` file. @returns {number[]} the issues newly held */
     holdIssues: (list) => {
       const have = new Set(readAdded(f("hold")));
