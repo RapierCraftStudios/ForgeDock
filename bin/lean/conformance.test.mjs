@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, isE2eCommand, e2eVerified } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -745,6 +745,13 @@ describe("#4726 a [type:e2e] requirement needs a real end-to-end validate", () =
     assert.equal(run("npx playwright test e2e/signup.spec.ts").state, "conforms");
     assert.equal(run("make smoke-live", Q, {}, { checks: ["make smoke-live"] }).state, "conforms");
     assert.equal(run("node --test tests/signup.js", Q, {}, { isSpec: (f) => f === "tests/signup.js" }).state, "conforms");
+  });
+  it("isE2eCommand and e2eVerified resolve a V-ref to its contract command", () => {
+    assert.equal(isE2eCommand("npx playwright test"), true);
+    assert.equal(isE2eCommand("pytest tests/test_x.py"), false);
+    const contract = { validate: [{ id: "V1", command: "pytest tests/a.py" }, { id: "V2", command: "npx cypress run" }] };
+    assert.equal(e2eVerified({ validated_by: "V1" }, contract), false);
+    assert.equal(e2eVerified({ validated_by: "V1, V2" }, contract), true);
   });
   it("[type:unit] and [type:api] requirements keep their evidence rules; not-applicable is untouched", () => {
     assert.equal(run("pytest tests/test_x.py", "Users can sign up with an emailed code [type:unit]").state, "conforms");

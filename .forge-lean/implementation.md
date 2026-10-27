@@ -1,14 +1,35 @@
 ### Approach
-Merged origin/staging (conflicts resolved keeping both sides); the merge had replaced the result files with another lane's, so both were rewritten. Re-ran every validate command.
+`decide()` now checks each implemented `[type:e2e]` deliver row: its `validated_by` V-ref must resolve to a contract validate command that is a real e2e check. Otherwise it emits `conformance.e2e_unverified`.
+
 ### Changes
-Timer/service templates, refresh stamp, bin/bot-token-status.mjs, doctor Check 12, retry.mjs refreshAuthOnce/GH_AUTH_RE, lean.mjs wiring, gh.auth outcome code and docs, wait-ci-green 'unauth' class, spec rule, CONFIG.md, devdocs, tests.
+- bin/lean/conformance.mjs: `isE2eCommand`, `e2eVerified`, and the new check in `decide`.
+- bin/engine/outcome-codes.mjs: `CONFORMANCE_E2E_UNVERIFIED`.
+- bin/lean/lean.mjs: passes `e2e` (`checks`, `isSpec`) into the conformance ctx.
+- bin/lean/prompts.mjs: one-line rule in the plan and implement prompts, plus a sentence in the rubric.
+- commands/work-on/investigate.md: step 7.5 widened to route/URL/link findings.
+- Tests: conformance.test.mjs (new regressions), lean.test.mjs (prompt token budgets raised by about 50), engine-outcome-codes.test.mjs (coverage entry; doc regex now allows digits).
+- docs/OUTCOME-CODES.md: row for the new code (amendment).
+
 ### Acceptance Criteria Status
-- R1 ✅ scripts/systemd/forgedock-bot-token-refresh.timer:5
-- R2 ✅ bin/bot-token-status.mjs:13
-- R3 ✅ bin/lean/retry.mjs:48
-- R4 ✅ bin/lean/retry.mjs:63, bin/lean/lean.mjs:230
+- R1 ✅ bin/lean/conformance.mjs (decide, e2eVerified)
+- R2 ✅ bin/lean/prompts.mjs (plan and implement prompts)
+- R3 ✅ commands/work-on/investigate.md (step 7.5)
+- R4 ✅ the new check applies only to `[type:e2e]` rows
+- R5 ✅ bin/lean/conformance.test.mjs ("#4726" describe)
+
 ### Verification
-- V1 pass (34/34). V2 pass (17/17). V3 pass (2 shell tests). V4 pass.
-- New tests not run without the fix (unknown).
+- V1 (conformance, e2e, conformance.e2e tests): pass.
+- V2 (lean, verify tests): pass.
+- V3 (outcome-codes test): pass.
+- The enumerating tests (batch, checks, context, execution, fixround, heavy): pass (865 total).
+- `forgedock check`: PASS.
+- The new test fails without the fix (verified by reverting conformance.mjs).
+
 ### Notes
-Env: FORGE_REFRESH_TOKEN_SCRIPT, FORGE_CI_TRANSIENT_RETRIES.
+A new outcome code was added. There is no formatter config in the repo.
+
+### Docs freshness fix
+Added a dated entry to `devdocs/modules/lean.md` describing the `[type:e2e]` conformance check, `ctx.e2e` and the prompt/investigate changes. `scripts/check-devdocs-freshness.sh` now passes. V1 re-run: 116 pass, 0 fail.
+
+## Enumerating-test fix
+Added `isE2eCommand` and `e2eVerified` to the import list and assertions in bin/lean/conformance.test.mjs.
