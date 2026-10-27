@@ -317,6 +317,8 @@ INVESTIGATING=$(gh issue list $GH_FLAG --state open --label "workflow:investigat
 BUILDING=$(gh issue list $GH_FLAG --state open --label "workflow:building" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
 IN_REVIEW=$(gh issue list $GH_FLAG --state open --label "workflow:in-review" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
 BLOCKED=$(gh issue list $GH_FLAG --state open --label "needs-human" --limit 100 --json number,labels --jq '[.[] | select(.labels | map(.name) | index("workflow:decomposed") | not)] | length' 2>/dev/null || echo 0)  # workflow:decomposed trackers are excluded from work counts
+PARKED=$(gh issue list $GH_FLAG --state open --label "remediation-queue" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)  # forge#4656: mechanical parks (parked:<code>) wait for /work-on:remediate, not a human
+EXTERNAL=$(gh issue list $GH_FLAG --state open --label "needs-human:external" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
 READY=$(gh issue list $GH_FLAG --state open --label "workflow:ready-to-build" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
 
 TOTAL_INFLIGHT=$((INVESTIGATING + BUILDING + IN_REVIEW + READY))
@@ -326,8 +328,17 @@ echo "  ready-to-build : $READY"
 echo "  building       : $BUILDING"
 echo "  in-review      : $IN_REVIEW"
 echo "  needs-human    : $BLOCKED  $([ "$BLOCKED" -gt 0 ] && echo '← ACTION REQUIRED' || true)"
+echo "  needs-human:external : $EXTERNAL"
+echo "  parked (remediation-queue) : $PARKED"
 echo ""
 echo "  Total in-flight: $TOTAL_INFLIGHT"
+
+# forge#4656: GATE_DEADLOCK - a ship gate / hold / settle waiting on an issue the scheduler will not admit. Never poll silently.
+if [ "$PARKED" -gt 0 ]; then
+    gh issue list $GH_FLAG --state open --label "remediation-queue" --limit 20 --json number,labels \
+        --jq '.[] | "  GATE_DEADLOCK candidate: #\(.number) \([.labels[].name | select(startswith("parked:"))] | join(","))"' 2>/dev/null || true
+    echo "  (a gate waiting on these emits GATE_DEADLOCK issue=#N gate=G age=Nm in the batch report; run /work-on:remediate)"
+fi
 
 if [ "$BLOCKED" -gt 0 ]; then
     echo ""

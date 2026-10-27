@@ -196,7 +196,17 @@ export const HUMAN_CODES = Object.freeze([OUTCOME_CODES.BUILDER_BLOCKED]);
  * edit (`issueEdited`), `ci-pending` on a conflicting PR (`conflicting`), and the non-human `budget-exceeded` turn-overrun end (forge#4505). Human: `builder.blocked`. Anything else
  * (another code, or not a needs-human/ci-pending row) is terminal. Pure, never throws.
  */
-export function classifyNeedsHuman(row) {
+export function classifyNeedsHuman(row, { parked = false } = {}) {
+  const cls = classifyNeedsHumanBase(row);
+  // forge#4656: opt-in `parked` class: a needs-human row ended on a mechanical terminal code (not a human block, not recoverable).
+  return parked && cls === "terminal" && isTerminalCodeRow(row) ? "parked" : cls;
+}
+
+function isTerminalCodeRow(row) {
+  return (row.outcome ?? row.terminalReason) === "needs-human" && typeof row.code === "string" && row.code !== "" && row.code !== UNCLASSIFIED;
+}
+
+function classifyNeedsHumanBase(row) {
   if (!row || typeof row !== "object") return "terminal";
   const outcome = row.outcome ?? row.terminalReason;
   if (outcome === "ci-pending") return row.conflicting === true ? "recoverable" : "terminal";
@@ -210,4 +220,24 @@ export function classifyNeedsHuman(row) {
 /** The code a recovery lane works on: a conflicting `ci-pending` is recovered as a base conflict. */
 export function recoveryCodeOf(row) {
   return (row?.outcome ?? row?.terminalReason) === "ci-pending" ? OUTCOME_CODES.BASE_CONFLICT : normalizeCode(row?.code);
+}
+
+/** forge#4656: the label of a human-owned wait (an owner and an unblock condition are required in its comment). */
+export const NEEDS_HUMAN_EXTERNAL_LABEL = "needs-human:external";
+/** forge#4656: the single remediation queue (`/work-on:remediate`) a parked issue moves to once recovery attempts run out. */
+export const REMEDIATION_QUEUE_LABEL = "remediation-queue";
+/** forge#4656: `parked:<terminal-code>` label of a mechanical park. */
+export function parkedLabel(code) {
+  return `parked:${String(code ?? UNCLASSIFIED).trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 40) || UNCLASSIFIED}`;
+}
+
+/**
+ * forge#4656 migration: classify a legacy bare `needs-human` issue from its last FORGE terminal annotation text.
+ * `{ kind: "parked", code }` when the text names a mechanical terminal code, else `{ kind: "external" }` (the default).
+ */
+export function classifyLegacyNeedsHuman(annotation) {
+  const text = String(annotation ?? "");
+  const m = /\b(ci\.red|ci\.timeout|base\.conflict|review_incomplete|builder\.block_untyped|conformance\.[a-z_]+|contract\.invalid|env\.[a-z_]+)\b/i.exec(text);
+  if (m) return { kind: "parked", code: m[1].toLowerCase() };
+  return { kind: "external" };
 }

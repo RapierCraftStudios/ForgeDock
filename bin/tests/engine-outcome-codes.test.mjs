@@ -15,7 +15,7 @@ import { PHASES } from "../engine/phases.mjs";
 import { parseState } from "../engine/state.mjs";
 import {
   OUTCOME_CODES, OUTCOME_CODES_VERSION, ALL_OUTCOME_CODES, UNCLASSIFIED,
-  isOutcomeCode, normalizeCode, codeForRunnerError, codeForTerminalReason } from "../engine/outcome-codes.mjs";
+  isOutcomeCode, normalizeCode, codeForRunnerError, codeForTerminalReason, classifyNeedsHuman, classifyLegacyNeedsHuman, parkedLabel } from "../engine/outcome-codes.mjs";
 import { SEP, trusted, jsonLines, asComments, inv, builder, remediation, remediationBody } from "./helpers/comments.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -312,5 +312,14 @@ describe("classifyNeedsHuman (forge#4267)", async () => {
     assert.equal(classifyNeedsHuman({ outcome: "ci-pending" }), "terminal");
     assert.equal(classifyNeedsHuman({ outcome: "merged", code: "ci.red" }), "terminal");
     assert.equal(classifyNeedsHuman(null), "terminal");
+  });
+});
+
+describe("forge#4656: parked class", () => {
+  it("is opt-in, keeps terminal by default, and the legacy classifier defaults to external", () => {
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.omission" }), "terminal");
+    assert.equal(classifyNeedsHuman({ outcome: "needs-human", code: "conformance.omission" }, { parked: true }), "parked");
+    assert.equal(parkedLabel("conformance.omission"), "parked:conformance.omission");
+    assert.deepEqual(classifyLegacyNeedsHuman("needs the legal sign-off"), { kind: "external" });
   });
 });
