@@ -1,1 +1,12 @@
-{"status":"blocked","summary":"Depends on #4725/PR #4731, which introduces registerAsk and the owner-step block protocol; not on staging yet.","evidence":["bin/lean/prefilter.mjs:346 (no registry on staging)","git grep registerAsk origin/staging: empty"],"block":{"kind":"dependency","issues":[4725]}}
+{"status":"fixed","summary":"human block remainder is re-queued as its own issue (only the owner step keeps needs-human); issues whose only content is an existing owner ask are closed and linked","requirements":[
+{"id":"R1","status":"implemented","evidence":"bin/lean/lean.mjs endBlocked human branch; bin/lean/needs-human-premise.mjs fileRemainder"},
+{"id":"R2","status":"implemented","evidence":"bin/lean/lean.mjs duplicateAskIssue; bin/lean/needs-human-premise.mjs onlyAsk"},
+{"id":"R3","status":"implemented","evidence":"bin/lean/lean.mjs endBlocked human branch"}],
+"validation":[{"id":"V1","command":"node --test bin/lean/needs-human-premise.test.mjs bin/lean/lean.test.mjs bin/lean/decompose.test.mjs","exit":0},{"id":"V2","command":"node --test bin/tests/engine-cli.test.mjs","exit":0}],
+"tests":[{"command":"node --test --test-name-pattern=4730 bin/lean/lean.test.mjs","result":"pass","fails_without_fix":true}],
+"self_review":[
+{"question":"1","answer":"yes","evidence":"R1-R3 delivered in bin/lean/lean.mjs and needs-human-premise.mjs; tests in lean.test.mjs (4730)"},
+{"question":"2","answer":"yes","evidence":"V1 533 pass, V2 pass, forgedock check PASS; registerAsk unchanged; human blocks without remainder covered by a test"},
+{"question":"3","answer":"yes","evidence":"D1-D6 changed; P1-P4 intact; V1 and V2 exit 0"},
+{"question":"4","answer":"yes","evidence":"git diff origin/staging...HEAD changes only deliverable paths, tests and .forge-lean artifacts"}],
+"amendments":[]}
