@@ -2,43 +2,13 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "`forgedock init --refresh-context` regenerates `review.context` and `tech_stack` from current manifests and the decision log, and shows a diff for approval.",
+   "quote": "The failure scenario above no longer reproduces at `bin/lean/heavy.mjs:310`, covered by a regression test that fails on the current staging head.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "Staleness check in `doctor` and in review-prepare:",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R3",
-   "quote": "`tech_stack` names frameworks absent from every manifest;",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R4",
-   "quote": "the context cites decision IDs marked superseded in the decision log;",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R5",
-   "quote": "the context contains \"docs-only\" / \"no code\" phrasing while source manifests exist.",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R6",
-   "quote": "Any of these emits `REVIEW_CONTEXT_STALE` and a one-line warning in review output.",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R7",
-   "quote": "Review agents get the context's generation date, and treat context older than N merged PRs as advisory.",
+   "quote": "No behaviour change for lanes or repos the finding does not describe.",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -46,121 +16,48 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/review-context.mjs",
-   "change": "New module. collectManifestFacts(cwd), detectStale({techStack,context,manifests,decisionLogText}) returning reasons tech_stack_absent|superseded_decision|docs_only_phrasing, contextAge() advisory logic (default N=50), proposeRefresh()+diff, and a `check --config \u003cfile> --json` CLI. Zero LLM calls for checks; regeneration may use enrich() from bin/init-enrich.mjs.",
+   "path": "bin/lean/heavy.mjs",
+   "change": "guardChain(name, cmd, env, read=head): on a repeated name:cmd, only apply the next-PATH-match / shim_loop logic when isPassThroughWrapper(read(cmd), name); for a non-wrapper real binary return {cmd, env} unchanged without appending a chain entry (so nesting depth is not capped). Update the doc comments.",
    "requirements": [
     "R1",
-    "R3",
-    "R4",
-    "R5",
-    "R7"
+    "R2"
    ]
   },
   {
    "id": "D2",
-   "path": "bin/forgedock.mjs",
-   "change": "Add --refresh-context to FLAGS and initFlow (handled before the existing-forge.yaml non-TTY abort): show diff, confirm, back up, update only review.context/tech_stack/context_generated_at/context_generated_pr_count; non-interactive prints diff and exits 1 without writing. Add an advisory doctor warn() emitting REVIEW_CONTEXT_STALE with reasons. Add the flag to help text.",
+   "path": "bin/lean/heavy.test.mjs",
+   "change": "Regression test: runWrapped with PATH=/shim:/home/u/.nvm/bin, env FORGE_HEAVY_CHAIN=npm:\u003creal> and FORGE_HEAVY_HELD=1, injected run: spawns the real npm (not 126), also at depth >= SHIM_LOOP_MAX of repeated real entries. Keep the existing wrapper-loop assertions passing (give the wrapper cases a wrapper-text read injection or real wrapper file).",
    "requirements": [
     "R1",
-    "R2",
-    "R6"
-   ]
-  },
-  {
-   "id": "D3",
-   "path": "scripts/review-prepare.sh",
-   "change": "After cfg .review.context, run `node bin/review-context.mjs check`; on stale append `REVIEW_CONTEXT_STALE: \u003creason>` via p2(); count merged PRs since generation date via one guarded gh call (failure = unknown, not stale); add config.context_generated_at, config.context_stale, config.context_advisory to the output JSON.",
-   "requirements": [
-    "R2",
-    "R6",
-    "R7"
-   ]
-  },
-  {
-   "id": "D4",
-   "path": "commands/review-pr.md",
-   "change": "Inject the context generation date next to [PROJECT_CONTEXT]; when config.context_advisory is true instruct agents to treat it as advisory and verify against code; print a one-line warning in the review output when phase2.findings has REVIEW_CONTEXT_STALE.",
-   "requirements": [
-    "R6",
-    "R7"
-   ]
-  },
-  {
-   "id": "D5",
-   "path": "forge.yaml.example",
-   "change": "Document review.context_generated_at, review.context_generated_pr_count, review.context_max_merged_prs, review.decision_log.",
-   "requirements": [
-    "R1",
-    "R7"
-   ]
-  },
-  {
-   "id": "D6",
-   "path": "bin/tests/review-context.test.mjs",
-   "change": "Tests for each stale rule (positive and negative), age advisory, missing decision log, missing date, diff generation.",
-   "requirements": [
-    "R1",
-    "R3",
-    "R4",
-    "R5",
-    "R7"
-   ]
-  },
-  {
-   "id": "D7",
-   "path": "scripts/review-prepare.test.sh",
-   "change": "Add a case: forge.yaml with docs-only context plus a package.json yields REVIEW_CONTEXT_STALE in phase2.findings and config.context_stale=true; fresh context yields neither.",
-   "requirements": [
-    "R2",
-    "R6"
+    "R2"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "review-prepare.sh JSON schema_version 1: existing keys (config.project_context, phase2.findings, exit codes 0/3/2) unchanged; new keys are additive (scripts/review-prepare.sh:660-690)."
+   "what": "Wrapper re-entry cutoff from #4680: a pass-through wrapper resolving back to the shim still gets the next PATH match or env.shim_loop (bin/lean/heavy.mjs guardChain, heavy.test.mjs:262-273)"
   },
   {
    "id": "P2",
-   "what": "A forge.yaml without the new keys or without a decision log must not be flagged stale by itself and must not break review-prepare; check failures never block a review."
+   "what": "runWrapped's FORGE_HEAVY_HELD / DISABLED / llm pass-through and the 126 exit on a real loop (bin/lean/heavy.mjs:331-334)"
   },
   {
    "id": "P3",
-   "what": "initFlow default, --minimal and --manual behaviour, including the non-TTY abort and the overwrite confirmation (bin/forgedock.mjs:1043-1068), is unchanged when --refresh-context is absent."
-  },
-  {
-   "id": "P4",
-   "what": "doctor staleness result is advisory (warn), not fail, matching the placeholder checks near bin/forgedock.mjs:2680."
+   "what": "writeHeavyShims and heavyShimScript output (bin/lean/heavy.mjs:268)"
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test bin/tests/review-context.test.mjs bin/tests/init-detect.test.mjs bin/tests/init-enrich.test.mjs"
-  },
-  {
-   "id": "V2",
-   "command": "FORGEDOCK_HOME=$PWD bash scripts/review-prepare.test.sh"
+   "command": "node --test bin/lean/heavy.test.mjs bin/lean/lean.test.mjs"
   }
  ],
  "decisions": [
   {
    "id": "K1",
-   "choice": "Do the staleness checks in a deterministic node module with no LLM; only regeneration reuses enrich().",
-   "justification": "NORTHSTAR.md non-negotiables 1 and 2: facts come from scripts, new checks cost no LLM calls.",
-   "source": "doc"
-  },
-  {
-   "id": "K2",
-   "choice": "No decision-log convention exists, so add an optional review.decision_log key with default candidate paths; a missing log skips the superseded rule.",
-   "justification": "git grep finds no decision log in the repo; the target repo's own truth is authoritative (NORTHSTAR non-negotiable 6).",
-   "source": "doc"
-  },
-  {
-   "id": "K3",
-   "choice": "doctor reports staleness as warn, not fail.",
-   "justification": "Matches the advisory placeholder/TODO checks at bin/forgedock.mjs:2680-2700.",
+   "choice": "Distinguish wrapper loops from legit nesting via the existing isPassThroughWrapper on the resolved cmd, rather than a new env marker",
+   "justification": "heavy.mjs:256 already detects wrappers for #4680, deterministic and no new state; a wrapper loop and nested real call are otherwise indistinguishable by chain",
    "source": "precedent"
   }
  ]
