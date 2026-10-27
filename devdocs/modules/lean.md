@@ -749,6 +749,11 @@ The steps are gated in two places:
   `node heavy.mjs run --name <n> -- <real>`, which acquires a slot, runs the command
   with `FORGE_HEAVY_HELD=1` (nested calls pass through) and per-holder
   `FORGE_HOST_PARALLELISM`, then releases and propagates the exit code.
+  Re-entry guard (#4680): a pass-through wrapper that re-resolves the name back to the
+  shim is cut off by `FORGE_HEAVY_CHAIN` (`name:cmd|...`). A repeat resolves the next
+  PATH match past `FORGE_HEAVY_SHIM_DIR` and the chain dirs; none, or more than 4 entries,
+  exits 126 with `env.shim_loop` naming the dirs. `writeHeavyShims` also skips wrapper
+  targets at write time (next match, else skipped with a warning).
 - **Engine-side steps:** `env.setup`, precheck commands and the split tests go
   through `io.heavy` (`effects.mjs` `makeHeavyIo`). The split grouper's LLM call
   hands its slot back while it runs.

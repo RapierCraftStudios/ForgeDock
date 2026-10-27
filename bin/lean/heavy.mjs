@@ -14,12 +14,13 @@
  * host whose memory is used by something else. Fail-open: an unreadable registry or a lock timeout grants.
  *
  * Builder-run commands are gated by per-run PATH shims (`writeHeavyShims`) that call this file as a CLI:
- * `heavy.mjs run --name <n> -- <abs-real-bin> args...` (nested calls pass through via FORGE_HEAVY_HELD).
+ * `heavy.mjs run --name <n> -- <abs-real-bin> args...` (nested calls pass through via FORGE_HEAVY_HELD). A wrapper that
+ * re-resolves the name back to the shim is cut off by FORGE_HEAVY_CHAIN (`name:cmd|...`, see `runWrapped`, #4680).
  */
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync, appendFileSync, writeFileSync, chmodSync } from "node:fs";
 import { cpus, freemem } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { writeAtomic } from "./batch.mjs";
 import { schedDir, pidAlive, DEFAULT_PRIORITY } from "./sched.mjs";
@@ -249,15 +250,34 @@ const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
 /** Shim script for one command: exec node heavy.mjs run --name <n> -- <real> "$@". */
 export function heavyShimScript(name, real, { node = process.execPath, script = fileURLToPath(import.meta.url) } = {}) {
-  return `${SHIM_HEADER}exec ${q(node)} ${q(script)} run --name ${q(name)} -- ${q(real)} "$@"\n`;
+  return `${SHIM_HEADER}export FORGE_HEAVY_SHIM_DIR="$(cd "$(dirname "$0")" && pwd)"\nexec ${q(node)} ${q(script)} run --name ${q(name)} -- ${q(real)} "$@"\n`;
 }
+
+/** True when `text` is a shell-style script that looks `name` up on PATH itself (a pass-through wrapper, #4680). */
+export function isPassThroughWrapper(text, name) {
+  const t = String(text ?? "");
+  return t.startsWith("#!") && t.includes(name) && /\b(command\s+-v|which|type\s+-p)\b/.test(t);
+}
+const head = (p) => { try { return readFileSync(p, "utf8").slice(0, 4096); } catch { return ""; } };
 
 /**
  * Write 0755 shims into `binDir` for every HEAVY_BINS name found on `path` (binDir excluded, real path resolved now, so
- * a shim never calls itself). Returns the names written.
+ * a shim never calls itself). A target that is a pass-through wrapper is skipped for the next match past its dir, or the
+ * shim is skipped with a `warn` line when none is left (#4680). Returns the names written.
  */
-export async function writeHeavyShims(binDir, { path = process.env.PATH ?? "", find = which, node, script, mkdirp = (d) => mkdirSync(d, { recursive: true }), writeShim = (p, t) => { writeFileSync(p, t); chmodSync(p, 0o755); } } = {}) {
-  const found = HEAVY_BINS.map((n) => [n, find(n, path, [binDir])]).filter(([, r]) => r);
+export async function writeHeavyShims(binDir, { path = process.env.PATH ?? "", find = which, read = head, warn = (m) => process.stderr.write(`${m}\n`), node, script, mkdirp = (d) => mkdirSync(d, { recursive: true }), writeShim = (p, t) => { writeFileSync(p, t); chmodSync(p, 0o755); } } = {}) {
+  const found = [];
+  for (const n of HEAVY_BINS) {
+    const skip = [binDir];
+    let real = find(n, path, skip);
+    while (real && isPassThroughWrapper(read(real), n)) {
+      skip.push(dirname(real));
+      const next = find(n, path, skip);
+      if (!next) warn(`forgedock heavy: ${n} at ${real} is a PATH pass-through wrapper with no real binary behind it; shim skipped`);
+      real = next;
+    }
+    if (real) found.push([n, real]);
+  }
   if (!found.length) return [];
   await mkdirp(binDir);
   for (const [n, real] of found) await writeShim(join(binDir, n), heavyShimScript(n, real, { ...(node ? { node } : {}), ...(script ? { script } : {}) }));
@@ -277,17 +297,40 @@ export function sumWaits(text, waits = {}) {
   return { waits, queueMax };
 }
 
+export const SHIM_LOOP_MAX = 4;
+/**
+ * Re-entry guard (#4680): FORGE_HEAVY_CHAIN lists `name:cmd` per shim run. A repeat of the same name+cmd means a wrapper
+ * sent the call back to the shim, so resolve the next PATH match past the shim dir and every chain dir; none, or more
+ * than SHIM_LOOP_MAX entries, is a typed `env.shim_loop` error and nothing is spawned. Returns {cmd, env} or {error}.
+ */
+export function guardChain(name, cmd, env) {
+  const chain = String(env.FORGE_HEAVY_CHAIN ?? "").split("|").filter(Boolean);
+  const dirs = chain.map((e) => dirname(e.slice(e.indexOf(":") + 1)));
+  const loop = (why) => ({ error: `env.shim_loop: ${name} ${why} (PATH dirs: ${[env.FORGE_HEAVY_SHIM_DIR, ...dirs].filter(Boolean).join(", ") || "none"})` });
+  if (chain.length >= SHIM_LOOP_MAX) return loop(`re-entered the heavy shim more than ${SHIM_LOOP_MAX} times`);
+  if (chain.includes(`${name}:${cmd}`)) {
+    const next = which(name, env.PATH ?? "", [env.FORGE_HEAVY_SHIM_DIR, ...dirs].filter(Boolean));
+    if (!next) return loop(`re-entered via ${cmd} and no other ${name} is on PATH`);
+    cmd = next;
+  }
+  return { cmd, env: { ...env, FORGE_HEAVY_CHAIN: [...chain, `${name}:${cmd}`].join("|") } };
+}
+
 /**
  * CLI body: `run --name <n> -- <real> args...`. Pass-through when FORGE_HEAVY_HELD is set or the step is llm; else
  * acquire, run with FORGE_HEAVY_HELD=1 and FORGE_HOST_PARALLELISM from live holders, release, propagate the exit.
  */
-export async function runWrapped(argv, { env = process.env, open = openHeavy, run = spawnInherit, host } = {}) {
+export async function runWrapped(argv, { env: env0 = process.env, open = openHeavy, run = spawnInherit, host } = {}) {
+  let env = env0;
   const sep = argv.indexOf("--");
   if (argv[0] !== "run" || sep < 0 || !argv[sep + 1]) throw new Error("usage: heavy.mjs run --name <name> -- <command> [args...]");
   const ni = argv.indexOf("--name");
   const name = ni >= 0 && ni < sep ? argv[ni + 1] : argv[sep + 1];
-  const [cmd, ...args] = argv.slice(sep + 1);
+  let [cmd, ...args] = argv.slice(sep + 1);
   const c = heavyConfig({}, env);
+  const g0 = guardChain(name, cmd, env);
+  if (g0.error) { process.stderr.write(`${g0.error}\n`); return { code: 126, signal: null }; }
+  cmd = g0.cmd; env = g0.env;
   if (env.FORGE_HEAVY_HELD || env.FORGE_HEAVY_DISABLED === "1" || classifyStep(name, args) === "llm") return run(cmd, args, env);
   const hostP = host ?? defaultHost();
   const h = open(env.FORGEDOCK_SCHED_DIR || schedDir(env), { env, host: hostP });
