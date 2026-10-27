@@ -39,7 +39,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    whose PR (closing or referencing it) is merged into this lane, by merge-commit
    ancestry on `origin/<lane>`, is satisfied (a stale `needs-human` on it does not
    block either); the FORGE:DEPENDENCY comment names the PR and merge commit (#4686).
-   A merge only to another lane still blocks.
+   A merge only to another lane still blocks. A merged lane run also records
+   `mergedTo: {lane, pr, sha}` on its terminal FORGE:STATE (#4711); a dependency whose
+   trusted body carries it for this lane is satisfied when that PR reads MERGED with
+   that merge commit and the commit is an ancestor of `origin/<lane>` (`phases.mjs`
+   `mergedToByState`), checked before the PR-list search.
 4. **Claim + worktree** — `workflow:investigating`, `FORGE:STARTED` comment;
    resumes an open PR / remote branch. Before an existing `lean-<N>` worktree is
    removed (#4162): processes whose cwd is inside it (an orphaned runner from a

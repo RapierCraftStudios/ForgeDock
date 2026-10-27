@@ -5300,6 +5300,18 @@ describe("context pack modes (forge#4275)", () => {
     assert.deepEqual([m.leaseWrites.at(-1).terminalCode, m.leaseWrites.at(-1).failureClasses], [OUTCOME_CODES.COMPLETED, []]);
   });
 
+  it("#4711 a merged lane run records mergedTo {lane, pr, sha} on the terminal FORGE:STATE", async () => {
+    const w = world(); w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } };
+    const gh = w.io.gh;
+    w.io.gh = async (a, o) => (a[0] === "pr" && a[1] === "view" && a.includes("mergeCommit") ? JSON.stringify({ mergeCommit: { oid: "feedface00112233" } }) : gh(a, o));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    const last = w.leaseWrites.at(-1);
+    assert.ok(last.mergedTo?.lane && Number.isInteger(last.mergedTo.pr), JSON.stringify(last.mergedTo));
+    assert.equal(last.mergedTo.sha, "feedface00112233");
+    assert.ok(!w.leaseWrites.slice(0, -1).some((x) => x.mergedTo), "only the terminal write carries it");
+  });
+
   it("#4444 ab: the lane runs its issue's arm, logs it as context_pack and tags context_ab", async () => {
     const { contextArm } = await import("./context.mjs");
     const arm = contextArm({ mode: "ab", repo: "o/r", issue: 7 }).mode;
