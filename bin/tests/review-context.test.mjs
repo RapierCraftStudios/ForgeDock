@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  readReviewFields, writeReviewFields, collectManifestFacts, detectStale, supersededIds, contextAge,
+  readReviewFields, writeReviewFields, collectManifestFacts, detectStale, supersededDecisionIds, contextAge,
   checkContext, proposeRefresh, refreshContextFlow, countMergedSince,
 } from "../review-context.mjs";
 
@@ -64,7 +64,7 @@ describe("detectStale", () => {
   });
   it("flags cited decision IDs the log marks superseded; skips without a log", () => {
     const log = "## D-12 Use Hugo\nStatus: superseded by D-15\n\n## D-15 Use Next\nStatus: accepted\n- ADR-3 supersedes ADR-1\n";
-    assert.deepEqual([...supersededIds(log)].sort(), ["ADR-1", "D-12"]);
+    assert.deepEqual([...supersededDecisionIds(log)].sort(), ["ADR-1", "D-12"]);
     const r = detectStale({ context: "Per D-12 and D-15 we ship docs", decisionLogText: log });
     assert.equal(r[0].code, "superseded_decision");
     assert.match(r[0].detail, /D-12/);

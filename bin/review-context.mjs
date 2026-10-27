@@ -149,7 +149,7 @@ export function findDecisionLog(root, configured) {
 const ID_RE = /\b(?:[A-Z]{1,5}-?\d{1,4})\b/g;
 
 /** IDs the decision log marks superseded: "D-12 ... superseded", "Status: superseded" under a "## D-12" heading, "D-15 supersedes D-12". */
-export function supersededIds(logText) {
+export function supersededDecisionIds(logText) {
   const out = new Set();
   let lastId = [];
   for (const line of logText.split(/\r?\n/)) {
@@ -181,7 +181,7 @@ export function detectStale({ techStack = "", context = "", manifests, decisionL
     }
   }
   if (decisionLogText && context) {
-    const cited = [...supersededIds(decisionLogText)].filter((id) => wordRe(id, "").test(context));
+    const cited = [...supersededDecisionIds(decisionLogText)].filter((id) => wordRe(id, "").test(context));
     if (cited.length) reasons.push({ code: "superseded_decision", detail: `context cites superseded decision(s) ${cited.join(", ")}` });
   }
   return reasons;
@@ -241,7 +241,7 @@ export async function proposeRefresh({ yamlText, root, now = new Date(), enrichF
   const stack = techStackFromManifests(manifests) || cur.tech_stack || "";
   const fields = {
     tech_stack: stack,
-    context: pruneContext(cur.context || "", { hasSourceManifest: manifests.hasSourceManifest, superseded: supersededIds(log) }),
+    context: pruneContext(cur.context || "", { hasSourceManifest: manifests.hasSourceManifest, superseded: supersededDecisionIds(log) }),
   };
   if (!fields.context && names.length) fields.context = `Source manifests: ${names.join(", ")}.`;
   if (enrichFn) {

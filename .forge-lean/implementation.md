@@ -18,3 +18,6 @@ Locally bin/tests has 3 failures (journey Platform/WSL row, bootstrap orphaned .
 
 ## CI follow-up (Unit tests)
 CI log not available; failure not reproduced. V1/V2 pass and about 60 targeted suites show 0 failures. The only 3 local failures (journey.test.mjs: WSL/platform, root chmod) are in untouched code and environmental. No code change; needs the CI log to go further.
+
+## Export collision follow-up
+bin/review-context.mjs `supersededIds` collided with bin/lean/guardgate.mjs `supersededIds`; renamed to `supersededDecisionIds` (module and its test). V1 passes (74); V2 skips here (yq not installed).
