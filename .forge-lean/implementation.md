@@ -13,3 +13,5 @@ Time the guard gate beside the validate rerun; added wall time is the part not h
 ### Notes
 Skipped-gate lanes (no guard selected) add 0 and omit the field. No new env vars.
 - Docs: devdocs/modules/lean.md describes guard_added_ms / added_wall_ms (docs freshness check).
+
+Fix: guardGate now stages its guard_run event; the caller emits it after the Promise.all with added_wall_ms = max(0, total - validate rerun ms), 0 when the gate errored (error:true).

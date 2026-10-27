@@ -2037,19 +2037,19 @@ export async function runCore(o) {
       return out;
     }
     /** #4693: select the guards this diff intersects and rerun their base test files; zero cost when none is selected. Best effort: an error skips the gate. */
-    let guardSel = [], guardNoted = ""; let guardRunMs = null; // #4705: this gate pass's added wall time
+    let guardSel = [], guardNoted = ""; let guardEv = null; // #4705: this pass's guard_run event, emitted by the caller once the added wall time is known
     async function guardGate(files) {
-      let sel = [], r = null;
+      let sel = [], r = null; guardEv = null;
       try {
         const guards = await (o.loadGuards ?? loadGuards)({ repo, gh: (a) => io.gh(a) });
         const picked = guards.length ? await selectGuards({ guards, files, git: (a) => git(a), base }) : { selected: [], mergeBase: null };
         sel = picked.selected; guardSel = sel;
         if (!sel.length) return [];
         r = await runGuards({ selected: sel, mergeBase: picked.mergeBase, contract: effective, git: (a) => git(a), runCommand: (a) => io.runCommand(a), cwd: wt, env: laneEnv(), parallelism: Number(process.env.FORGE_HOST_PARALLELISM) || 2 });
-      } catch (e) { T.anomalies.push(`Guard gate skipped: ${String(e?.message ?? e).split("\n")[0].slice(0, 160)}`); return []; }
+      } catch (e) { T.anomalies.push(`Guard gate skipped: ${String(e?.message ?? e).split("\n")[0].slice(0, 160)}`); guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), ran: 0, broken: 0, skipped: 0, wall_ms: 0, error: true }; return []; }
       const note = `Guard gate selected ${sel.map((x) => `#${x.guard.issue} (${x.reason})`).join("; ")}${r.skipped.length ? `; skipped: ${r.skipped.join("; ")}` : ""}${r.failures.length && shadow ? "; shadow: would block" : ""}`;
       if (note !== guardNoted) { guardNoted = note; T.decisions.push(note); }
-      ev({ event: "guard_run", selected: sel.map((x) => x.guard.issue), ran: r.runs.length, broken: r.failures.length, skipped: r.skipped.length, wall_ms: r.ms, added_wall_ms: guardRunMs ?? r.ms });
+      guardEv = { event: "guard_run", selected: sel.map((x) => x.guard.issue), ran: r.runs.length, broken: r.failures.length, skipped: r.skipped.length, wall_ms: r.ms };
       for (const f of r.failures) ev({ event: "guard_broken", guard: f.guard, test: f.test });
       return r.failures;
     }
@@ -2072,7 +2072,10 @@ export async function runCore(o) {
       const hotspots = await hotspotsOf({ base, paths: files }); // #4502
       const gateT0 = now(); let validateMs = 0;
       const [validateRuns, guardFailures] = await Promise.all([rerunFailedValidates(effective).finally(() => { validateMs = now() - gateT0; }), guardGate(files)]); // #4693: guards run beside the validate rerun
-      guardRunMs = Math.max(0, now() - gateT0 - validateMs); guardAddedMs += guardSel.length ? guardRunMs : 0; // #4705: only the part not hidden behind the validate rerun
+      // #4705: only the part not hidden behind the validate rerun; 0 when the gate errored or skipped
+      const guardRunMs = guardEv && !guardEv.error ? Math.max(0, now() - gateT0 - validateMs) : 0;
+      guardAddedMs += guardRunMs;
+      if (guardEv) ev({ ...guardEv, added_wall_ms: guardRunMs });
       const repoHas = validateRuns && Object.keys(validateRuns).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
       // #4626: post-deploy check ids resolve against the lane base's checks file or this PR's
       const checkIds = effective.requirements?.some((r) => r.disposition === "post-deploy") ? new Set(Object.keys(await checksAt(git, [base, "HEAD"], wt))) : null;
