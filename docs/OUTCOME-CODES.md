@@ -32,6 +32,7 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `remediate.inpr_requested` | Re-gate approved but requested one further in-PR fix round; the run continues, never `needs-human` | remediate | `**Re-gate outcome**: INPR-FIX-REQUESTED` |
 | `ci.red` | CI failed | reserved | `REVIEW_RESULT` carries no CI field yet |
 | `ci.timeout` | CI timed out | reserved | `REVIEW_RESULT` carries no CI field yet |
+| `ci.dco` | Core work-on (forge#4651): a check named DCO failed on the PR head (required on the lane branch or not), or the lane's unpushed commits lack a sign-off and the worktree has no usable git identity to rewrite them. Not recoverable: a new commit cannot fix author/sign-off history | lean | needs-human; nothing merged |
 | `base.conflict` | Base-branch conflict blocked the PR | reserved | `REVIEW_RESULT` carries no conflict field yet |
 | `path.switch_conflict` | The full path was started on an issue that has an open core-path PR (`feat/issue-<n>-lean`); refused to avoid a second implementation. Rerun on the default path (base-sync) or close that PR first | engine | `bin/engine.mjs` admission |
 | `merge.transient` | `gh pr merge` kept failing with a transient error (`Base branch was modified`, GraphQL or 5xx) after the retry budget; the run is `deferred` and a rerun resumes at the merge | lean | `bin/lean/lean.mjs` |

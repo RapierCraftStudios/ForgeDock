@@ -1,34 +1,34 @@
 ### Approach
-Built on #4595's blocker re-check. Dependency skips are marked `waiting` while a re-check can still re-admit them; `--add` of a skipped issue goes through the #4550 requeue path; a not-planned close is `final`; log rows carry `trigger`.
+Two deterministic layers, no LLM calls. `ensureSignedOff` (new `bin/lean/signoff.mjs`) runs inside `gitPush` and before `ciVerify` reads the head. It lists commits reachable from HEAD but not from `origin/<branch>` or `origin/<lane>`, picks those authored or committed `*@localhost` or lacking a `Signed-off-by` that names their author, and rewrites only those with `git filter-branch` over that range, using the lane identity (`GIT_AUTHOR_*`, else `git config`) plus a sign-off. Commits on either remote ref are never in the range. A DCO gate before `gh pr merge` ends needs-human `ci.dco` when a check named DCO failed on the current head, regardless of `merge_wait` or required checks.
 
 ### Changes
-- bin/lean/batch.mjs: addIssues re-queues an issue whose result is `skipped` (returns `requeued`); openBatch returns `self`.
-- bin/lean/orchestrate.mjs: skip() sets `waiting` and logs `trigger`; watchBlockers honours `final` (settled blockers), logs `readmitted` rows with trigger; requeued dependents logged; waiting cleared at batch end; formatTable shows `waiting on #X`.
-- bin/engine-cli.mjs: makeDispatchCheck reads stateReason (not planned => final); addToBatch reports requeued, clears a finished report; formatRowLine shows waiting.
-- bin/lean/schedd.mjs: add op reopens a finished unhosted batch when it re-queued issues.
-- commands/orchestrate.md: documents the above.
-- tests: lean.test.mjs, batch.test.mjs.
+- bin/lean/signoff.mjs: new helper (`ensureSignedOff`, `needsSignoff`, `offendersOf`).
+- bin/lean/lean.mjs: `signOffUnpushed` called from `gitPush` and `ciVerify`; pre-merge DCO gate reusing the last poll's states; `git` wrapper forwards opts (env).
+- bin/engine/outcome-codes.mjs: `CI_DCO: "ci.dco"` (not recoverable).
+- bin/lean/signoff.test.mjs: real-git fixtures (bare origin + clone).
+- bin/lean/lean.test.mjs: DCO gate tests; one existing poll-count test no longer counts `checkStates`.
+- bin/tests/engine-outcome-codes.test.mjs, docs/OUTCOME-CODES.md: register `ci.dco` (amendment).
+- devdocs/modules/lean.md: documents both layers.
 
 ### Acceptance Criteria Status
-- R1 ✅ orchestrate.mjs watchBlockers (readmit + log), lean.test.mjs "#4687 a dependency skip waits"
-- R2 ✅ batch.mjs addIssues, batch.test.mjs "#4687 --add re-queues"
-- R3 ✅ engine-cli.mjs makeDispatchCheck `final`, orchestrate.mjs watchBlockers, lean.test.mjs not-planned test
-- R4 ✅ orchestrate.mjs skip/readmitted/requeued update rows with `trigger` (log.jsonl via store.log)
-- R5 ✅ orchestrate.mjs formatTable, engine-cli.mjs formatRowLine
-- R6 ✅ waiting flag + per-pass re-check (#4595 loop)
+- R1 ✅ bin/lean/signoff.mjs:ensureSignedOff, bin/lean/lean.mjs gitPush; test signoff.test.mjs "rewrites unpushed placeholder-author commits…"
+- R2 ✅ range excludes origin/<branch> and origin/<lane> (signoff.mjs); tests "never rewrites commits already on origin/<lane>" and the merge-commit case
+- R3 ✅ lean.mjs pre-merge DCO gate; lean.test.mjs "a failed DCO check blocks the merge with ci.dco" (merge_wait required and none)
+- R4 ✅ signoff.mjs + lean.mjs gitPush
+- R5 ✅ lean.mjs DCO gate, outcome-codes.mjs CI_DCO
 
 ### Verification
-- V1 lean.test.mjs: 500 pass, 0 fail. V2 batch.test.mjs: 54 pass. V3 schedd.test.mjs: 21 pass. bin/tests/engine-cli.test.mjs run too. `forgedock check`: PASS.
-- New tests (batch #4, lean #15, #16) fail with the source files reverted to HEAD.
-- checks.mjs widened to the full suite (889 referrers), not run per host rules.
+- V1 `node --test bin/lean/signoff.test.mjs`: pass (6 tests); fails without the fix (module absent).
+- V2 `node --test bin/lean/lean.test.mjs bin/lean/recovery.test.mjs bin/lean/sandbox-provider.contract.test.mjs`: pass. With bin/tests/engine-outcome-codes.test.mjs: 594 pass, 0 fail. The DCO-gate test fails with lean.mjs and outcome-codes.mjs reverted.
+- scripts/check-devdocs-freshness.sh: OK. `forgedock check`: PASS. checks.mjs widened to the full suite (fan-out cap), so only the targeted files above were run.
 
 ### Notes
-- The dispatch check now requests `--json state,stateReason`; existing test stub updated.
-- A resumed batch loses the display-only `waiting` flag for rows skipped before the resume.
-- Dependents of an in-batch lane ending `invalid` still run (SATISFIED unchanged).
+- Behaviour: pushes may now rewrite the lane's own unpushed commits (new SHAs, never pushed before). No usable identity or a failed rewrite ends `ci.dco`.
+- `git filter-branch` runs with FILTER_BRANCH_SQUELCH_WARNING=1 via env; refs/original is deleted afterwards.
+- No new env vars; no formatter is configured in the repo.
 
-## Docs
-Added a #4687 entry to devdocs/modules/lean.md (waiting state, trigger log, final not-planned, --add requeue) to satisfy the devdocs freshness check.
+## Sibling-list check
+The ten flagged bin/lean tests hold no list of lean modules or files; signoff recorded in result.json not_members.
 
-### CI follow-up (Unit tests job, no log available)
-Reproduced locally the 35 test files referencing the changed modules plus bin/lean and bin/engine tests: only 3 failures remain, all environment-dependent and unrelated to this diff (WSL/platform rows in preflight, a copyFile tmp-orphan test, writeInstallReceipt platform capture; this host is WSL). `scripts/check-spec-size.sh` passes. No code change made; the failing CI job could not be identified without its log.
+### Recovery (ci.red)
+CI failed `bin/lean/conformance.e2e.test.mjs` (lane ended needs-human, ci.dco): the runner had no `GIT_AUTHOR_*` in process.env, so `ensureSignedOff` found no identity. It now falls back to `git var GIT_AUTHOR_IDENT` (bin/lean/signoff.mjs). Verified with the identity env vars unset: signoff, conformance e2e, lean, recovery and sandbox-provider tests pass (V1 and V2 exit 0). The e2e fails without this fix when the identity is unset.
