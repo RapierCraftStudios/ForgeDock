@@ -223,3 +223,28 @@ test("isNeedsHuman is null-safe and validatePlan reports missing-labels without 
   delete issue(plan, "AUTH").labels;
   assert.ok(codes(validatePlan(plan)).includes("missing-labels"));
 });
+
+// #4665: deploy-last warns (never fails) when deploy workflows only sit in the last of >= 3 milestones.
+const deployPlan = (deployMilestone) => {
+  const plan = structuredClone(load("valid-nextjs"));
+  plan.milestones = [{ key: "A", title: "A" }, { key: "B", title: "B" }, { key: "C", title: "C" }];
+  plan.issues.forEach((it, i) => { it.milestone = i === 0 ? "A" : "B"; it.deps = []; it.body = it.body.replace(/^.*Depends on.*$/gim, ""); });
+  const d = structuredClone(plan.issues[0]);
+  Object.assign(d, { key: "DEPLOY", title: "CI deploy workflow", milestone: deployMilestone, deps: [], body: plan.issues[0].body.replace(/^.*Depends on.*$/gim, "") + "\nAdds `.github/workflows/deploy.yml`." });
+  plan.issues.push(d);
+  return plan;
+};
+
+test("deploy-last: deploy workflow only in the last milestone warns, exit stays 0", () => {
+  const plan = deployPlan("C");
+  const r = validatePlan(plan);
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(r.warnings.map((w) => w.code), ["deploy-last"]);
+  const run = cli(["-"], JSON.stringify(plan));
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stderr, /warning: DEPLOY: \[deploy-last\]/);
+});
+
+test("deploy-last: a deployable slice in milestone 1 or 2 does not warn", () => {
+  for (const m of ["A", "B"]) assert.deepEqual(validatePlan(deployPlan(m)).warnings, []);
+});

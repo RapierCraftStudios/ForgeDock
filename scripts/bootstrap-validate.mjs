@@ -19,6 +19,8 @@
  * missing-section, missing-type-tag, missing-parent, missing-labels, unknown-label, code-depends-on-needs-human,
  * missing-design-spec (a `ui` issue lacks a design-spec item), hero-not-routed (a `hero` issue never names `/design`),
  * missing-needs-human-section (a needs-human issue lacks setup steps, env var names or secret handling) (#4176).
+ * Warns (never fails; exit stays 0): deploy-last (#4665: every milestone holding deploy workflows comes after the feature
+ * milestones, so nothing can be previewed or deployed until they all ship).
  * `Depends on` lines are read with the engine's own parser (bin/engine/phases.mjs parseDependsOn) after placeholder
  * resolution, so the plan and engine admission agree on what blocks what.
  *
@@ -67,6 +69,10 @@ const NEEDS_HUMAN_PARTS = [
   ["secret handling heading", /^#{2,6}[ \t]+.*\bsecrets?\b/im],
   ["env var name (e.g. `API_KEY`)", /`[A-Z][A-Z0-9]*_[A-Z0-9_]+`/],
 ];
+
+// #4665: an issue holds deploy work when its title or body names a deploy workflow or a staging environment definition.
+const DEPLOY_RE = /\.github\/workflows\/[^\s`'")]*deploy|\bdeploy(?:ment)? workflow\b|\bstaging environment\b/i;
+const isDeployIssue = (it) => DEPLOY_RE.test(`${it?.title ?? ""}\n${it?.body ?? ""}`);
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isNonEmptyString = (v) => typeof v === "string" && v.trim() !== "";
@@ -177,7 +183,7 @@ function findCycles(issues, byKey) {
 
 /**
  * Validate a backlog plan. Never throws on bad input; structural problems come back as `invalid-plan` errors.
- * @returns {{ ok: boolean, errors: Array<{ issue: string|null, code: string, message: string }> }}
+ * @returns {{ ok: boolean, errors: Array<{ issue: string|null, code: string, message: string }>, warnings?: Array<{ issue: string|null, code: string, message: string }> }}
  */
 export function validatePlan(plan) {
   const structural = checkStructure(plan);
@@ -282,10 +288,26 @@ export function validatePlan(plan) {
       }
     }
   }
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, warnings: deployWarnings(issues, milestones) };
+}
+
+/** #4665: `deploy-last` when deploy work exists but none of it sits in the first or second milestone (it is last, after >= 2 feature milestones). */
+function deployWarnings(issues, milestones) {
+  const index = new Map(milestones.map((m, i) => [m.key, i]));
+  const deploy = issues.filter(isDeployIssue);
+  if (!deploy.length || milestones.length < 3) return [];
+  const at = deploy.map((it) => index.get(it.milestone));
+  if (at.some((i) => i <= 1)) return [];
+  const last = milestones.length - 1;
+  if (!at.every((i) => i === last)) return [];
+  return [{
+    issue: deploy[0].key, code: "deploy-last",
+    message: `deploy workflows are only in the last milestone ${milestones[last].key}; put a thin deployable slice (CI deploy workflow, staging environment, seed) in the first or second milestone`,
+  }];
 }
 
 /** One `<KEY>: [code] message` line per error; plan-level errors use `(plan)`. */
+export const formatWarnings = (warnings) => formatErrors(warnings);
 export function formatErrors(errors) {
   return errors.map((e) => `${e.issue ?? "(plan)"}: [${e.code}] ${e.message}`).join("\n");
 }
@@ -310,7 +332,8 @@ function main(argv) {
     process.stderr.write(`bootstrap-validate: invalid JSON: ${e.message}\n`);
     return 2;
   }
-  const { ok, errors } = validatePlan(plan);
+  const { ok, errors, warnings = [] } = validatePlan(plan);
+  if (warnings.length) process.stderr.write(formatErrors(warnings).replace(/^/gm, "warning: ") + "\n");
   if (!ok) {
     process.stderr.write(formatErrors(errors) + "\n");
     process.stderr.write(`bootstrap-validate: ${errors.length} error(s)\n`);
