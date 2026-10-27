@@ -46,7 +46,7 @@ import { pendingPitfall, pitfallRecord, foldPitfalls, selectPitfalls, failureLog
 import { unjustified } from "./enumerating.mjs";
 import { addLaneWorktree, DEFAULT_SPARSE_MAX_KB } from "./worktree.mjs";
 import { parseVerify, runCiVerify, collectFailedLogs, capLogs, VERIFY_MODES, VERIFY_CHECK_NAME, verifyReport, ciGate, rerunFailedOnce, rerunTarget, splitFlaky } from "./verify.mjs";
-import { e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
+import { e2eSpecs, e2eWanted, ownFailures, runE2eGate, NO_TRIGGER } from "./e2e.mjs";
 import { laneBackendId } from "./limits.mjs";
 import { SPLIT_LABEL } from "./refactor.mjs";
 import { writeHeavyShims, sumWaits, isHeavyProcess } from "./heavy.mjs";
@@ -1968,7 +1968,7 @@ export async function runCore(o) {
       const diff = String(await git(["diff", `${base}...HEAD`]));
       const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
       const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
-      const ctx = { contract: effective, changedFiles: files, issueText, pathExists: (x) => listed.has(x), repoFiles: listed, ignore: IGNORE };
+      const ctx = { contract: effective, changedFiles: files, issueText, pathExists: (x) => listed.has(x), repoFiles: listed, ignore: IGNORE, e2e: { checks: vcfg.e2e?.checks ?? [], isSpec: (x) => e2eSpecs([x], vcfg.e2e).length > 0 } };
       let d = null, first = null;
       for (let t = 0; t < 3; t++) {
         // #4327: a third run only when the repaired reply is incomplete solely by evidence paths that did not resolve.

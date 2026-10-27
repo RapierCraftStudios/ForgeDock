@@ -727,3 +727,31 @@ describe("post-deploy check ids (#4626)", () => {
     assert.match(i.why, /^post-deploy: \[check:login-smoke\] w$/);
   });
 });
+
+describe("#4726 a [type:e2e] requirement needs a real end-to-end validate", () => {
+  const Q = "Users can sign up and sign in with an emailed code alone [type:e2e]";
+  const mk = (cmd, quote = Q, extra = {}) => {
+    const contract = { ...C, requirements: [{ id: "R1", quote, disposition: "deliver", ...extra }, C.requirements[1]], validate: [{ id: "V1", command: cmd }] };
+    return { contract, ctx: { ...ctx, contract } };
+  };
+  const rv = (contract) => ({ ...good, issue_coverage: [{ quote: contract.requirements[0].quote, status: "covered" }, ...good.issue_coverage.slice(1)] });
+  const run = (cmd, quote, extra, e2e) => { const m = mk(cmd, quote, extra); return decide(rv(m.contract), { ...m.ctx, issueText: `${ISSUE}\n${m.contract.requirements[0].quote}`, e2e }); };
+  it("e2e requirement verified only by a unit test fails conformance (the #36414 shape)", () => {
+    const d = run("pytest tests/test_email_code_auth.py");
+    assert.equal(d.state, "nonconforming");
+    assert.deepEqual(codes(d), ["conformance.e2e_unverified"]);
+  });
+  it("a Playwright, configured e2e check or e2e spec file validate passes", () => {
+    assert.equal(run("npx playwright test e2e/signup.spec.ts").state, "conforms");
+    assert.equal(run("make smoke-live", Q, {}, { checks: ["make smoke-live"] }).state, "conforms");
+    assert.equal(run("node --test tests/signup.js", Q, {}, { isSpec: (f) => f === "tests/signup.js" }).state, "conforms");
+  });
+  it("[type:unit] and [type:api] requirements keep their evidence rules; not-applicable is untouched", () => {
+    assert.equal(run("pytest tests/test_x.py", "Users can sign up with an emailed code [type:unit]").state, "conforms");
+    assert.equal(run("pytest tests/test_x.py", "Users can sign up with an emailed code [type:api]").state, "conforms");
+    const na = { ...C.requirements[0], quote: Q, disposition: "not-applicable", evidence: "src/a.js:1" };
+    const contract = { ...C, requirements: [na, C.requirements[1]] };
+    const r = { ...good, issue_coverage: [{ quote: Q, status: "covered" }, ...good.issue_coverage.slice(1)], requirements: [{ id: "R1", status: "not-applicable" }, good.requirements[1]] };
+    assert.notEqual(decide(r, { ...ctx, contract, issueText: `${ISSUE}\n${Q}` }).failures.some((f) => f.code === "conformance.e2e_unverified"), true);
+  });
+});
