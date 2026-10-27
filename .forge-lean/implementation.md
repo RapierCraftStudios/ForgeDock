@@ -44,4 +44,4 @@ Renamed decisions.mjs readIndex/writeIndex to readDecisionIndex/writeDecisionInd
 - `forgedock check`: PASS.
 
 ### Notes
-No env vars added except the optional `FORGEDOCK_DECISIONS_DIR` for the index location. No prompt change.
+No env vars added except the optional `FORGEDOCK_DECISIONS_DIR` for the index location. One amendment-list line added to the implement prompt (D6); other wording trimmed to keep it within the 1550-token budget.
