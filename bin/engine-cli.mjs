@@ -8,7 +8,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { homedir, hostname } from "node:os";
+import { homedir, hostname, totalmem } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
@@ -331,26 +331,37 @@ export function readHeavy(cwd = process.cwd()) {
 /**
  * forge.yaml lane caps and CLI timeouts for the core path (#4115, #4112). The parser flattens one nested level, so
  * `pipeline:`/`engine:` then `lane_limits:` with `memory_max`/`cpu_quota` arrives as `memory_max`/`cpu_quota` (or flat
- * `lane_limits_memory_max`/`lane_limits_cpu_quota`). `engine.cli_idle_minutes` (default 15) and `engine.cli_max_minutes` (default 180).
+ * `lane_limits_memory_max`/`lane_limits_cpu_quota`), plus `tasks_max` (#4690, default 1024). `engine.cli_idle_minutes` (default 15) and `engine.cli_max_minutes` (default 180).
  * `engine.cli_busy_minutes` (default 45, #4405): extra silence allowed while the builder has a live heavy step or heavy-queue entry.
  * #4390: `engine.context_ceiling_tokens` (default 120000 in runCore; 0 = off).
  * #4392: `engine.turn_budget_s|m|l` (implement turn budget per lane size; defaults 25/60/100, always returned; 0 = off).
  */
-export function readCoreLimits(cwd = process.cwd()) {
+export function readCoreLimits(cwd = process.cwd(), { env = process.env, totalMem = totalmem() } = {}) {
   try {
     const y = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8")) ?? {};
     const pick = (k) => { for (const sec of [y.pipeline, y.engine]) { const v = sec?.[k] ?? sec?.[`lane_limits_${k}`]; if (v !== undefined && v !== "") return String(v).trim(); } return undefined; };
-    const mem = pick("memory_max"), cpu = pick("cpu_quota");
+    const mem = pick("memory_max") ?? defaultLaneMemory(totalMem, env.FORGEDOCK_LANE_PARALLEL), cpu = pick("cpu_quota"), tasks = pick("tasks_max");
     const posNum = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : undefined; };
     return {
-      ...(mem || cpu ? { laneLimits: { ...(mem ? { memory_max: mem } : {}), ...(cpu ? { cpu_quota: cpu } : {}) } } : {}),
+      // #4690: lanes are capped by default (TasksMax + a K-derived MemoryMax); forge.yaml overrides, `off`/0 disables one limit
+      laneLimits: { ...(mem ? { memory_max: mem } : {}), ...(cpu ? { cpu_quota: cpu } : {}), ...(tasks ? { tasks_max: tasks } : {}) },
       ...(posNum(y.engine?.cli_idle_minutes) ? { cliIdleMinutes: posNum(y.engine.cli_idle_minutes) } : {}),
       ...(posNum(y.engine?.cli_max_minutes) ? { cliMaxMinutes: posNum(y.engine.cli_max_minutes) } : {}),
       ...(posNum(y.engine?.cli_busy_minutes) ? { cliBusyMinutes: posNum(y.engine.cli_busy_minutes) } : {}),
       ...(/^\d+$/.test(String(y.engine?.context_ceiling_tokens ?? "").trim()) ? { contextCeilingTokens: Number(y.engine.context_ceiling_tokens) } : {}),
       turnBudgets: parseTurnBudgets(y.engine) ?? { ...TURN_BUDGET_DEFAULTS }, // #4392: lanes are budgeted by default
     };
-  } catch { return { turnBudgets: { ...TURN_BUDGET_DEFAULTS } }; }
+  } catch { return { laneLimits: { memory_max: defaultLaneMemory(totalMem, env.FORGEDOCK_LANE_PARALLEL) }, turnBudgets: { ...TURN_BUDGET_DEFAULTS } }; }
+}
+/**
+ * #4690: default per-lane `MemoryMax`: (host RAM - reserve) / K, clamped to [1 GiB, RAM - reserve]. The reserve is the larger of
+ * 2 GiB and 20% of RAM. K is the batch's parallelism (`FORGEDOCK_LANE_PARALLEL`, set for lanes by orchestrate; 1 when absent).
+ */
+export function defaultLaneMemory(totalMem, parallel) {
+  const k = Math.max(1, parseInt(parallel, 10) || 1), gib = 1024 ** 3;
+  const avail = totalMem - Math.max(2 * gib, totalMem * 0.2);
+  if (!(avail > 0)) return undefined;
+  return `${Math.floor(Math.min(avail, Math.max(gib, avail / k)) / 1024 ** 2)}M`;
 }
 /** forge.yaml `engine.merge_wait` (required|all|none); undefined when absent or invalid. */
 export function readMergeWait(cwd = process.cwd()) {
@@ -1496,6 +1507,11 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       admission: readAdmission(cwd), heavy: readHeavy(cwd), ...readCoreLimits(cwd), ...readEnvConfig(cwd), ...(readMergeWait(cwd) ? { mergeWait: readMergeWait(cwd) } : {}), ...(readConformanceMode(cwd) ? { conformance: readConformanceMode(cwd) } : {}), ...(readContextPack(cwd) ? { contextPack: readContextPack(cwd) } : {}), ...(readReviewIncomplete(cwd) ? { reviewIncomplete: readReviewIncomplete(cwd) } : {}), ...(readLaneInstructions(cwd) ? { laneInstructions: readLaneInstructions(cwd) } : {}), ...(readReproTest(cwd) ? { reproTest: readReproTest(cwd) } : {}), ...(readExplore(cwd) ? { explore: readExplore(cwd) } : {}), ...(readExperiment(cwd) ? { experiment: readExperiment(cwd) } : {}), light: readLight(cwd), ...(readCloseParent(cwd) ? { closeParent: true } : {}), ...(readReviewTrigger(cwd) ? { reviewTrigger: readReviewTrigger(cwd) } : {}), ...(readVerify(cwd) ? { verify: readVerify(cwd) } : {}), ...readPrecheckOptions(cwd), ...(model ? { builderModel: model } : {}), ...(readLeanSetting("reviewer_model", cwd) ? { reviewerModel: readLeanSetting("reviewer_model", cwd) } : {}), ...(readFixModel(cwd) ? { fixModel: readFixModel(cwd) } : {}), ...(readBuilderRouting(cwd) ? { builderRouting: readBuilderRouting(cwd) } : {}), ...(readVerifier(cwd) ? { verifier: readVerifier(cwd) } : {}), ...(readHostCaps(cwd) ? { hostCaps: readHostCaps(cwd) } : {}), ...(readSequenceRegenerate(cwd) ? { sequenceRegenerate: readSequenceRegenerate(cwd) } : {}), ...(readBaseMerge(cwd) ? { baseMerge: readBaseMerge(cwd) } : {}) }) };
   } else {
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
+    // #4690: lanes learn K (the default MemoryMax is derived from it); one line says so when no scope caps them.
+    const laneEnv = { ...env, FORGEDOCK_LANE_PARALLEL: String(parallel) };
+    const effects = await import("./lean/effects.mjs");
+    const uncapped = effects.laneCapNotice(deps.laneCapProbe ?? effects.systemdRunAvailable);
+    if (uncapped) (deps.out ?? ((l) => console.log(l)))(uncapped);
     // #4256: the placement orchestrate decided for a lane (ctx.placement) reaches it as --placement/--placement-reason.
     // #4267: a recovery lane (ctx.recover) reaches it as --recover/--recover-attempt.
     const placementOf = new Map(), recoverOf = new Map();
@@ -1526,7 +1542,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       lanes = withPlacement(remoteLanes);
       {
         // #4255: once the budget refuses a remote lane, the rest run as detached host lanes. #4256: hybrid mixes both.
-        const local = batchMod.detachedLanes({ batch, cwd, env, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs });
+        const local = batchMod.detachedLanes({ batch, cwd, env: laneEnv, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs });
         lanes = withPlacement({
           runOne: (n, ln, ctx = {}) => (ctx.remote ? remoteLanes : local).runOne(n, ln, ctx),
           adopt: (n, rec, ctx) => (rec?.remote || rec?.handle ? remoteLanes : local).adopt(n, rec, ctx),
@@ -1566,7 +1582,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       };
       sink.line(`execution: ${hybrid ? "hybrid" : "remote"} via ${provider.name}, max_remote ${exec.maxRemote}`);
     } else {
-      lanes = withPlacement(batchMod.detachedLanes({ batch, cwd, env, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs }));
+      lanes = withPlacement(batchMod.detachedLanes({ batch, cwd, env: laneEnv, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs }));
     }
     // #4376: a cancel stops detached host lanes by SIGTERM to their group (pid-reuse checked by the result path); sandboxes run on unless `--cancel --stop-remote` (#4612).
     const { killLedgerPid } = await import("./lean/effects.mjs");
