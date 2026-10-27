@@ -38,3 +38,6 @@ Log still unavailable. Re-ran V1 (74 pass) and 1505 tests across the suites that
 
 ### CI follow-up 2 (Unit tests, run 40550042608)
 The CI log was unavailable. After merging staging again, I ran every bin/tests file that references forgedock.mjs, review-context or doctor: 1217 pass, 3 fail. They are the same 3 environmental failures as before (journey platform/WSL rows, Act II and install-receipt copyFile orphan), which assert a non-WSL, non-root host. The CI failure is not reproduced and I made no code change. The full suite was not run.
+
+### Recovery (ci.red)
+CI failed `scripts/check-test-tmp-cleanup.test.sh`: `bin/tests/review-context.test.mjs` used `mkdtemp` directly. It now uses `tmpDir` from `bin/tests/_tmp.mjs`. That script passes 18/18 and V1 passes (74 tests). V2 skips locally because yq is missing. The dossier `devdocs/modules/lean.md` is recorded as an add-deliverable amendment.
