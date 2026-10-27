@@ -550,7 +550,7 @@ summary is written. `/milestone drift <slug>` prints the script's text report.
 `sandbox-remote.mjs` (remote sandbox provider + HTTP transport, #4254), `credentials.mjs` (env → OS keychain, #4254),
 `prefilter.mjs` (cheap pre-run close of already-fixed issues, `FORGE:PREFILTER`; the CI-green close is skipped for flaky/intermittent issues, reopens after a pre-filter close and same-SHA fail+pass, #4305; an issue whose latest pipeline `FORGE:PROBE` is a fail is never closed as already-fixed, reason `probe-failed`, #4399; post-deploy precondition gate parks `awaiting-promotion` follow-ups, #4389; opt-in `post_deploy.min_age` soak window parks `awaiting-min-age`, #4425),
 `probe.mjs` (outcome-based acceptance, #4399; see "Acceptance probes" below),
-`postdeploy-monitor.mjs` (windowed post-deploy checks, #4627: `sweepDue` re-runs open `post-deploy-monitoring` follow-ups on cadence or a new release, files a regression issue on pass-then-fail; run by `forgedock probe --due` and the schedd timer; ADR `devdocs/decisions/4627-post-deploy-monitoring.md`),
+`postdeploy-monitor.mjs` (windowed post-deploy checks, #4627: `sweepDue` re-runs open `post-deploy-monitoring` follow-ups on cadence or a new release, files a regression issue on pass-then-fail (idempotent: an existing `FORGE:REGRESSION` issue for the follow-up and fix commit is reused, #4653); run by `forgedock probe --due` and the schedd timer; ADR `devdocs/decisions/4627-post-deploy-monitoring.md`),
 `prompts.mjs` (builder/reviewer/grouping prompts, `.forge-lean/` file names),
 `refactor.mjs` (`refactor:split` step, #4211),
 `light.mjs` (light-lane eligibility and upgrade triggers, forge.yaml `lean.light`, #4448; see its entry below),

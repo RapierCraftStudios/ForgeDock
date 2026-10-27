@@ -1,34 +1,21 @@
 ### Approach
-Two deterministic layers, no LLM calls. `ensureSignedOff` (new `bin/lean/signoff.mjs`) runs inside `gitPush` and before `ciVerify` reads the head. It lists commits reachable from HEAD but not from `origin/<branch>` or `origin/<lane>`, picks those authored or committed `*@localhost` or lacking a `Signed-off-by` that names their author, and rewrites only those with `git filter-branch` over that range, using the lane identity (`GIT_AUTHOR_*`, else `git config`) plus a sign-off. Commits on either remote ref are never in the range. A DCO gate before `gh pr merge` ends needs-human `ci.dco` when a check named DCO failed on the current head, regardless of `merge_wait` or required checks.
-
+Before `issue create`, look up an existing FORGE:REGRESSION issue for the follow-up and fix commit and reuse it, so a retry after a failed `finish()` files nothing new. Covers schedd and `probe --due` (both call `monitorOne`).
 ### Changes
-- bin/lean/signoff.mjs: new helper (`ensureSignedOff`, `needsSignoff`, `offendersOf`).
-- bin/lean/lean.mjs: `signOffUnpushed` called from `gitPush` and `ciVerify`; pre-merge DCO gate reusing the last poll's states; `git` wrapper forwards opts (env).
-- bin/engine/outcome-codes.mjs: `CI_DCO: "ci.dco"` (not recoverable).
-- bin/lean/signoff.test.mjs: real-git fixtures (bare origin + clone).
-- bin/lean/lean.test.mjs: DCO gate tests; one existing poll-count test no longer counts `checkStates`.
-- bin/tests/engine-outcome-codes.test.mjs, docs/OUTCOME-CODES.md: register `ci.dco` (amendment).
-- devdocs/modules/lean.md: documents both layers.
-
+- bin/lean/postdeploy-monitor.mjs: `findRegression` (search, all states, exact marker/follow-up/fix match) used in `monitorOne`.
+- bin/lean/postdeploy-monitor.test.mjs: mock handles search lists; 3 regression tests.
+- devdocs/modules/lean.md: dossier note on idempotent filing (amendment add-deliverable).
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/signoff.mjs:ensureSignedOff, bin/lean/lean.mjs gitPush; test signoff.test.mjs "rewrites unpushed placeholder-author commits…"
-- R2 ✅ range excludes origin/<branch> and origin/<lane> (signoff.mjs); tests "never rewrites commits already on origin/<lane>" and the merge-commit case
-- R3 ✅ lean.mjs pre-merge DCO gate; lean.test.mjs "a failed DCO check blocks the merge with ci.dco" (merge_wait required and none)
-- R4 ✅ signoff.mjs + lean.mjs gitPush
-- R5 ✅ lean.mjs DCO gate, outcome-codes.mjs CI_DCO
-
+- R1 ✅ postdeploy-monitor.mjs:15-23,66-68
+- R2 ✅ same lookup covers both sweepers
+- R3 ✅ tests in postdeploy-monitor.test.mjs
 ### Verification
-- V1 `node --test bin/lean/signoff.test.mjs`: pass (6 tests); fails without the fix (module absent).
-- V2 `node --test bin/lean/lean.test.mjs bin/lean/recovery.test.mjs bin/lean/sandbox-provider.contract.test.mjs`: pass. With bin/tests/engine-outcome-codes.test.mjs: 594 pass, 0 fail. The DCO-gate test fails with lean.mjs and outcome-codes.mjs reverted.
-- scripts/check-devdocs-freshness.sh: OK. `forgedock check`: PASS. checks.mjs widened to the full suite (fan-out cap), so only the targeted files above were run.
-
+- V1 node --test postdeploy-monitor, postdeploy-check, schedd tests: 56 pass. New tests fail without the fix (2 fail).
+- forgedock check: PASS; devdocs freshness OK. No formatter configured in repo.
 ### Notes
-- Behaviour: pushes may now rewrite the lane's own unpushed commits (new SHAs, never pushed before). No usable identity or a failed rewrite ends `ci.dco`.
-- `git filter-branch` runs with FILTER_BRANCH_SQUELCH_WARNING=1 via env; refs/original is deleted afterwards.
-- No new env vars; no formatter is configured in the repo.
+Search-index lag can leave a narrow duplicate window. A search failure throws (error row, retried), never files blind.
 
-## Sibling-list check
-The ten flagged bin/lean tests hold no list of lean modules or files; signoff recorded in result.json not_members.
+### CI follow-up (Unit tests, node --test)
+The CI log was unavailable. Locally, bin/lean, bin/engine and bin/stats pass (1750/0 fail) and bin/tests passes except 3 environment tests (preflight Platform/WSL/Shell rows, install receipt platform capture, copyFile .tmp cleanup), none touching the changed files; they look WSL/host specific. No code change made; cause not reproduced.
 
-### Recovery (ci.red)
-CI failed `bin/lean/conformance.e2e.test.mjs` (lane ended needs-human, ci.dco): the runner had no `GIT_AUTHOR_*` in process.env, so `ensureSignedOff` found no identity. It now falls back to `git var GIT_AUTHOR_IDENT` (bin/lean/signoff.mjs). Verified with the identity env vars unset: signoff, conformance e2e, lean, recovery and sandbox-provider tests pass (V1 and V2 exit 0). The e2e fails without this fix when the identity is unset.
+### CI recovery
+The red CI check was `bin/lean/schedd.test.mjs` "#4691 plan.json holds none of..." (--unset-env assertion). That file and the code it covers are untouched by this branch; it passes locally (21/21 with the V1 command), so it is a flaky/environmental failure unrelated to #4653. No code change was needed.

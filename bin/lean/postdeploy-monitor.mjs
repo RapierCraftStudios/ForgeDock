@@ -13,6 +13,15 @@ import { deferredFrom, isTrustedIssueComment } from "./prefilter.mjs";
 
 export const REGRESSION_MARKER = "FORGE:REGRESSION";
 const fenced = (s) => { const f = "`".repeat(Math.max(3, ...[...String(s).matchAll(/`+/g)].map((m) => m[0].length + 1))); return `${f}\n${String(s).trim() || "(no output)"}\n${f}`; };
+/** An existing regression issue (any state) for this follow-up and fix commit, so a retry after a failed finish() reuses it (#4653). */
+export async function findRegression(io, repo, issue, fix) {
+  const found = JSON.parse(String(await io.gh(["issue", "list", "-R", repo, "--state", "all", "--search", `"${REGRESSION_MARKER}" "Monitored follow-up: #${issue}" in:body`, "--limit", "30", "--json", "number,body"])));
+  const hit = (Array.isArray(found) ? found : []).find((i) => {
+    const b = String(i?.body ?? "");
+    return b.includes(`<!-- ${REGRESSION_MARKER} -->`) && new RegExp(`Monitored follow-up: #${issue}(?!\\d)`).test(b) && b.includes(`Fix commit: \`${fix}\``);
+  });
+  return hit ? String(hit.number) : null;
+}
 const short = (s) => String(s ?? "unknown").slice(0, 12);
 
 /** One monitored follow-up. Outcomes: skipped | unrunnable | not-due | due (dry run) | pass | window-ended | fail. */
@@ -53,8 +62,9 @@ export async function monitorOne({ issue, repo, def, defaultSha, cwd, io, now, d
     `- Fix commit: \`${last.fix}\``, `- Last passing release (\`${def}\`): \`${last.defaultSha ?? "unknown"}\``, `- Breaking release (\`${def}\`): \`${defaultSha ?? "unknown"}\``,
     `- Monitored follow-up: #${issue}${parent ? `; parent: #${parent}` : ""}`, "", ...bad.flatMap((r) => [`**${r.id}** (exit ${r.exit ?? "timeout"})`, fenced(r.output), ""]),
   ].join("\n").slice(0, OUTPUT_TAIL * 4);
-  const created = String(await io.gh(["issue", "create", "-R", repo, "--title", title, "--body", body]));
-  const num = /\/issues\/(\d+)/.exec(created)?.[1] ?? null;
+  const existing = await findRegression(io, repo, issue, last.fix);
+  const created = existing ? "" : String(await io.gh(["issue", "create", "-R", repo, "--title", title, "--body", body]));
+  const num = existing ?? /\/issues\/(\d+)/.exec(created)?.[1] ?? null;
   await finish(`<!-- ${PROBE_MARKER} -->\n## Post-deploy check: fail\n${JSON.stringify({ ...rec, regression: num ? Number(num) : null, checks: sum })}\n\nRegression issue ${num ? `#${num}` : "filed"}; monitoring stops.`);
   return row("fail", `regression ${num ? `#${num}` : "filed"}: ${bad.map((r) => r.id).join(", ")} broke at ${short(defaultSha)} (fix ${short(last.fix)})`, { fix: last.fix, regression: num });
 }
