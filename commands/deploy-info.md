@@ -325,6 +325,7 @@ else
   # Step 3: Count commits queued (commits in staging not yet in main)
   QUEUED_COMMITS=$(git rev-list --count origin/{DEFAULT_BRANCH}..origin/{STAGING_BRANCH} 2>/dev/null || echo "?")
 fi
+INTEGRATION_RED=$(gh issue list {GH_FLAG} --label integration-red --json number,title --jq '.[]|"#\(.number) \(.title)"') # forge#4667
 ```
 
 Train state is included in the Phase 5 output summary.
@@ -343,6 +344,7 @@ Train state is included in the Phase 5 output summary.
 **Status**: {TRAIN_STATUS}
 {If HELD: "**Held by**: {count} open finding(s) — fix and push to unblock:\n{HELD_BY}"}
 {If CLEAR: "**Ready to merge**: no open findings on the train PR"}
+{If INTEGRATION_RED: "**Ship-gate risk**: red integration run:\n{INTEGRATION_RED}"}
 {If NO_TRAIN: "No open staging→main PR — run /review-pr-staging to open one"}
 **Queued commits**: {QUEUED_COMMITS} (commits in staging not yet in main)
 

@@ -198,5 +198,10 @@
     "name": "performance",
     "color": "F9D0C4",
     "description": "Performance optimization or regression. Managed by ForgeDock."
+  },
+  {
+    "name": "integration-red",
+    "color": "D93F0B",
+    "description": "Scheduled full-suite integration run on a milestone branch is red. Managed by ForgeDock."
   }
 ]

@@ -4206,6 +4206,17 @@ switch (command) {
     }
     break;
   }
+  case "integration": {
+    // Milestone integration runs (#4667): `forgedock integration run` for cron or a scheduled workflow.
+    const { integrationFromCli } = await import("./engine-cli.mjs");
+    try {
+      exitCode = await integrationFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
   case "probe": {
     const { probeFromCli } = await import("./engine-cli.mjs");
     try {

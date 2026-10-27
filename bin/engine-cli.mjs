@@ -1610,6 +1610,14 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     drift = makeDrift({ repo, cwd, io: leanIo, config: readDrift(cwd), stagingBranch: branches.staging ?? "staging", affectedFiles,
       onEvent: (e) => console.log(`#${e.issue} → ${e.detail}`) });
   }
+  // forge#4667: milestone integration runs (every N lane merges) and the red-streak admission hold; off without forge.yaml ci.workflow.
+  let integration = deps.integration;
+  if (integration === undefined) {
+    const { makeIntegration } = await import("./lean/integration.mjs");
+    integration = makeIntegration({ repo, io: leanIo, cfg: await readIntegration(cwd), pattern: branches.featurePattern ?? undefined,
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)), onEvent: (e) => console.log(`#${e.issue} → ${e.detail}`) });
+    try { await integration?.prime(); } catch { /* streaks unknown: nothing is held */ }
+  }
   const crossLane = [];
   // #4183: owned-resource GC in preflight and before an admission when the host is near the ceiling (forge.yaml hygiene).
   const gcMod = await import("./gc.mjs");
@@ -1672,7 +1680,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(estimate ? { estimate } : {}),
       beforeAdmit,
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, ...lanes,
-      breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
+      breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null, exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
@@ -1716,6 +1724,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       onUpdate: (r) => sink.row(r),
     });
   } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
+  try { await integration?.settle?.(); } catch { /* best effort: the state block is the record */ }
   const report = ["\n" + formatTable(rows), ...formatOutcomeLists(rows)];
   const pfLine = formatPrefilterSummary(rows);
   if (pfLine) report.push(pfLine);
@@ -2155,6 +2164,19 @@ export async function triageFromCli(argv, deps = {}) {
  * Runs the declared acceptance probes (`lean/probe.mjs`) of the given issues, or of the recently closed issues that
  * declare one, once their fix is on the default branch; records FORGE:PROBE and reopens on a fail. No model call.
  */
+/** `forgedock integration run` (#4667): one pass of the milestone integration runs (lean/integration.mjs). Resolves the exit code. */
+export async function integrationFromCli(argv, deps = {}) {
+  const { runIntegrationCli: run } = await import("./lean/integration.mjs");
+  return run(argv, deps);
+}
+
+/** forge.yaml `ci` (#4667): the milestone integration config, or null when no `workflow` is set (feature off). */
+export function readIntegration(cwd = process.cwd()) {
+  let ci = null;
+  try { ci = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.ci ?? null; } catch { ci = null; }
+  return import("./lean/integration.mjs").then((m) => m.parseIntegration(ci));
+}
+
 export async function probeFromCli(argv, deps = {}) {
   const valued = ["--repo", "--limit"];
   const issues = [];
