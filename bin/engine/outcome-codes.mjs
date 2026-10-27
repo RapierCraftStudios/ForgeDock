@@ -51,6 +51,7 @@ export const OUTCOME_CODES = Object.freeze({
   ENV_SETUP_FAILED: "env.setup_failed", // forge#4163: forge.yaml env.setup failed before the builder; an environment error, not a build failure
   ENV_TOOL_MISSING: "env.tool_missing", // forge#4323: a validate command could not run because a host tool or module is missing; an environment error, not a conformance failure
   ENV_REPRO_UNRUNNABLE: "env.repro_unrunnable", // forge#4334: the repro harness could not run the repro test on head; an environment error, not a conformance failure
+  ENV_LANE_LIMIT: "env.lane_limit", // forge#4690: the lane hit its own scope limit (TasksMax or MemoryMax) and was stopped; an environment error, never an engine-error, so the breaker ignores it
   ENV_CAPABILITY_REMOTE: "env.capability_remote", // forge#4542: a remote sandbox lane blocked only on a host-only capability (SOPS key, ops credentials, prod monitor SSH) the dispatching host has; recovered locally
   SANDBOX_START_FAILED: "sandbox.start_failed", // forge#4254: a lane sandbox could not start; needs-human, not relaunched
   SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff

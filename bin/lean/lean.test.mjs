@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { laneBackendId } from "./limits.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
+import { execFileSync } from "node:child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
@@ -20,13 +21,14 @@ import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
 // #4432: the run log is keyed by repo + issue; every lane in this file runs in repo o/r.
 const readLog = (dir, issue, repo = "o/r") => readRepoLog(dir, issue, { repo });
-import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
+import { makeRunTmp, wrapLaneLimits, laneCapNotice, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
 import { retrying, ghCacheRetry, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
+import { isExternalKill } from "./hostkill.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS, readMaintenance } from "../engine-cli.mjs";
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("lean-sched-");
@@ -3236,22 +3238,53 @@ describe("batch robustness (#4112-#4115)", () => {
     }
   });
 
-  it("#4115b lane limits wrap the spawn in systemd-run; unset or invalid limits do not", () => {
-    const w = wrapLaneLimits("claude", ["--print", "x"], { memory_max: "3G", cpu_quota: "150%" });
-    assert.deepEqual(w, { bin: "systemd-run", args: ["--user", "--scope", "-q", "-p", "MemoryMax=3G", "-p", "CPUQuota=150%", "--", "claude", "--print", "x"] });
-    assert.deepEqual(wrapLaneLimits("claude", ["a"], null), { bin: "claude", args: ["a"] });
-    assert.deepEqual(wrapLaneLimits("claude", ["a"], { memory_max: "lots; rm -rf /", cpu_quota: "x" }), { bin: "claude", args: ["a"] });
+  it("#4115b lane limits wrap the spawn in systemd-run; unset or invalid limits get only the default TasksMax (#4690)", () => {
+    const w = wrapLaneLimits("claude", ["--print", "x"], { memory_max: "3G", cpu_quota: "150%" }, "u1");
+    assert.deepEqual(w, { bin: "systemd-run", unit: "u1", args: ["--user", "--scope", "-q", "--unit=u1", "-p", "TasksMax=1024", "-p", "MemoryMax=3G", "-p", "CPUQuota=150%", "--", "claude", "--print", "x"] });
+    assert.deepEqual(wrapLaneLimits("claude", ["a"], null, "u2").args.slice(0, 6), ["--user", "--scope", "-q", "--unit=u2", "-p", "TasksMax=1024"]);
+    assert.deepEqual(wrapLaneLimits("claude", ["a"], { memory_max: "lots; rm -rf /", cpu_quota: "x" }, "u3").args, ["--user", "--scope", "-q", "--unit=u3", "-p", "TasksMax=1024", "--", "claude", "a"]);
     assert.equal(wrapLaneLimits("claude", ["a"], { memory_max: "1G" }).args.includes("CPUQuota=150%"), false);
   });
 
-  it("#4115b the runner wraps only when limits are set AND systemd-run probes available (clean fallback)", async () => {
+  it("#4690 tasks_max is configurable; 0 or off disables it and, with nothing else set, leaves the spawn unchanged", () => {
+    assert.ok(wrapLaneLimits("c", [], { tasks_max: "64" }, "u").args.includes("TasksMax=64"));
+    for (const off of ["0", "off", 0]) assert.deepEqual(wrapLaneLimits("c", ["a"], { tasks_max: off }), { bin: "c", args: ["a"] });
+    assert.equal(wrapLaneLimits("c", [], { tasks_max: "off", memory_max: "1G" }, "u").args.some((x) => x.startsWith("TasksMax")), false);
+  });
+
+  it("#4115b the runner wraps by default when systemd-run probes available, never when it does not (clean fallback, #4690)", async () => {
     const seen = [];
     const runCli = async (o) => { seen.push(o.wrap ? o.wrap("claude", ["a"]).bin : null); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
     const base = { role: "builder", issue: 1, cwd: process.cwd(), prompt: "p", system: "" };
     await makeLeanRunner({ runCli, probe: () => true })({ ...base, laneLimits: { memory_max: "3G" } });
     await makeLeanRunner({ runCli, probe: () => false })({ ...base, laneLimits: { memory_max: "3G" } });
     await makeLeanRunner({ runCli, probe: () => true })({ ...base });
-    assert.deepEqual(seen, ["systemd-run", null, null]);
+    assert.deepEqual(seen, ["systemd-run", null, "systemd-run"]);
+    assert.match(laneCapNotice(() => false), /lanes are uncapped/);
+    assert.equal(laneCapNotice(() => true), null);
+  });
+
+  it("#4690 a scope whose events show a limit stops the lane with CLI_LANE_LIMIT naming it; a scope-less spawn never reads events", async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const d = tmpDir("core-limit-");
+    writeFileSync(`${d}/fake-claude`, "#!/bin/sh\nsleep 30\n"); chmodSync(`${d}/fake-claude`, 0o755);
+    const go = (wrap, ev) => runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, idleMs: 200, maxMs: 20000, wrap, limitProbe: () => ev });
+    const fake = (b, a) => ({ bin: b, args: a, unit: "forgedock-lane-x" });
+    for (const [ev, limit] of [[{ tasks: 3, memory: 0 }, "tasks"], [{ tasks: 0, memory: 1 }, "memory"]]) {
+      await assert.rejects(go(fake, ev), (e) => e.code === "CLI_LANE_LIMIT" && e.limit === limit);
+    }
+    await assert.rejects(go((b, a) => ({ bin: b, args: a }), { tasks: 9, memory: 9 }), (e) => e.code === "CLI_IDLE");
+  });
+
+  it("#4690 a CLI_LANE_LIMIT ends needs-human env.lane_limit naming the limit: no retry, never engine-error or host kill", async () => {
+    const lim = () => Object.assign(new Error("claude CLI lane hit its scope tasks limit"), { code: "CLI_LANE_LIMIT", limit: "tasks", unit: "u" });
+    assert.equal(isExternalKill(lim()), false);
+    const w = world({ dirty: true }); let builders = 0;
+    w.io.runner = async (c) => { if (c.role === "builder") { builders++; throw lim(); } return { text: "" }; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "env.lane_limit");
+    assert.match(r.detail, /TasksMax/); assert.equal(builders, 1);
   });
 
   it("#4115b integration: a lane under systemd-run --scope really runs in a capped scope (skipped without systemd-run)", { skip: !systemdRunAvailable() }, async () => {
@@ -3261,6 +3294,37 @@ describe("batch robustness (#4112-#4115)", () => {
     writeFileSync(`${d}/fake-claude`, '#!/bin/sh\nprintf \'{"result":"%s"}\\n\' "$(cat /proc/self/cgroup | tr -d \'\\n\' | tr / :)"\n'); chmodSync(`${d}/fake-claude`, 0o755);
     const r = await runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, wrap: (b, a) => wrapLaneLimits(b, a, { memory_max: "512M", cpu_quota: "100%" }) });
     assert.match(r.text, /\.scope/);
+  });
+
+  it("#4690 a fixture lane really forking past its task cap is stopped with CLI_LANE_LIMIT (no systemd needed: the probe counts real descendants)", async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackendAsync, listDescendants } = await import("../runner.mjs");
+    const d = tmpDir("core-forkfix-");
+    writeFileSync(`${d}/fake-claude`, "#!/bin/sh\ni=0\nwhile [ $i -lt 40 ]; do sleep 20 & i=$((i+1)); done\nsleep 20\n"); chmodSync(`${d}/fake-claude`, 0o755);
+    const cap = 10;
+    const limitProbe = (pid) => ({ tasks: listDescendants(pid).length > cap ? 1 : 0, memory: 0 });
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, maxMs: 15000, limitProbe,
+      wrap: (b, a) => ({ bin: b, args: a, unit: "forgedock-lane-fixture" }) }), (e) => e.code === "CLI_LANE_LIMIT" && e.limit === "tasks");
+  });
+
+  // The scope's cgroup counters must be readable (cgroup v2, delegated user scope); plain systemd-run availability is not enough on CI.
+  const scopeEventsReadable = () => {
+    if (!systemdRunAvailable()) return false;
+    try {
+      const w = wrapLaneLimits("sh", ["-c", "cat /proc/self/cgroup"], { tasks_max: 50 });
+      const out = execFileSync(w.bin, w.args, { encoding: "utf8", timeout: 8000 });
+      const path = (out.split("\n").find((l) => l.startsWith("0::")) ?? "").slice(3).trim();
+      return path.endsWith(".scope") && existsSync(`/sys/fs/cgroup${path}/pids.events`);
+    } catch { return false; }
+  };
+  it("#4690 integration: a step forking past TasksMax in a real scope ends CLI_LANE_LIMIT (skipped without systemd-run)", { skip: !scopeEventsReadable() }, async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const d = tmpDir("core-fork-");
+    // node (not sh): a refused fork must not end the fixture before the sampler sees the scope's pids.events
+    writeFileSync(`${d}/fake-claude`, `#!${process.execPath}\nconst { spawn } = require("node:child_process");\nfor (let i = 0; i < 200; i++) { try { spawn("sleep", ["20"], { stdio: "ignore" }).on("error", () => {}); } catch {} }\nsetTimeout(() => {}, 20000);\n`); chmodSync(`${d}/fake-claude`, 0o755);
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, maxMs: 15000, wrap: (b, a) => wrapLaneLimits(b, a, { tasks_max: 20 }) }),
+      (e) => e.code === "CLI_LANE_LIMIT" && e.limit === "tasks");
   });
 
   const hostFor = (state) => ({ memAvailableMb: () => 99999, freeMb: async () => 99999, tmpPaths: () => ["/t"], loadAvg1: () => state.load(), cores: () => 2 });

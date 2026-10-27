@@ -2002,6 +2002,17 @@ export function listDescendants(pid, { psFn = null, maxCmd = 200 } = {}) {
 const TOOL_USES_MAX = 5000;
 
 /**
+ * #4690: limit events of the systemd scope the process `pid` runs in: `tasks` (pids.events `max`: forks refused at TasksMax)
+ * and `memory` (memory.events `oom_kill`). null when its cgroup or the counters are unreadable (no cgroup v2, no scope).
+ */
+export function readScopeLimitEvents(pid, { procRoot = "/proc", cgroupRoot = "/sys/fs/cgroup" } = {}) {
+  const line = readFileSync(join(procRoot, String(pid), "cgroup"), "utf8").split("\n").find((l) => l.startsWith("0::"));
+  const path = line?.slice(3).trim();
+  if (!path || !path.endsWith(".scope")) return null;
+  const count = (file, key) => { try { return Number((readFileSync(join(cgroupRoot, path, file), "utf8").match(new RegExp(`^${key} (\\d+)`, "m")) ?? [])[1]) || 0; } catch { return 0; } };
+  return { tasks: count("pids.events", "max"), memory: count("memory.events", "oom_kill") };
+}
+/**
  * Async twin of runCliBackend (core work-on live comments): the CLI runs under child_process.spawn so the caller's event
  * loop keeps turning while the session runs. It returns the SAME envelope (and throws the same errors) because the
  * argv/env building and the envelope parsing are the sync function itself: pass 1 captures the spawn arguments, the
@@ -2024,7 +2035,7 @@ const TOOL_USES_MAX = 5000;
  * (deduped by tool_use id, capped at TOOL_USES_MAX), for bin/lean/toolstats.mjs; absent on the non-stream path.
  */
 export async function runCliBackendAsync(opts) {
-  const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, ...rest } = opts;
+  const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, contextMax = 0, turnMax = 0, busy = null, busyMs = 0, onIdleExtend = null, limitProbe = readScopeLimitEvents, ...rest } = opts;
   let captured = null;
   try {
     runCliBackend({ ...rest, spawnFn: (bin, args, o) => {
@@ -2047,7 +2058,9 @@ export async function runCliBackendAsync(opts) {
     const j = args.indexOf("--output-format");
     if (j >= 0) { args[j + 1] = "stream-json"; if (!args.includes("--verbose")) args.splice(j + 2, 0, "--verbose"); }
   }
-  if (typeof wrap === "function") ({ bin, args } = wrap(bin, args));
+  let scopeUnit = null; // #4690: set when `wrap` put the child in a limited systemd scope
+  if (typeof wrap === "function") { const w = wrap(bin, args); ({ bin, args } = w); scopeUnit = w.unit ?? null; }
+  let limitInfo = null;
   const ceiling = maxMs > 0 ? maxMs : o.timeout;
   let collected, idleInfo = null, ctxInfo = null, turnInfo = null;
   const msgUsage = new Map(); // #4390: assistant message id -> its usage (a message spans several stream lines)
@@ -2099,7 +2112,12 @@ export async function runCliBackendAsync(opts) {
           }
         }
         // #4405: a separate check, so the absolute ceiling still applies while the idle kill is extended (busy) or settling.
-        if (!timedOut && !idleInfo && !ctxInfo && !turnInfo && now - startedAt - pausedTotal - (paused ? now - pausedAt : 0) >= ceiling) { timedOut = true; kill(); }
+        // #4690: the scope's pids/memory events say the lane hit its own limit (the scope cgroup is gone once the child exits, so sample live)
+        if (scopeUnit && !limitInfo && !timedOut && !idleInfo && !ctxInfo && !turnInfo) {
+          let ev = null; try { ev = limitProbe(child.pid); } catch { ev = null; }
+          if (ev && (ev.tasks > 0 || ev.memory > 0)) { limitInfo = { limit: ev.tasks > 0 ? "tasks" : "memory", unit: scopeUnit, events: ev }; kill(); }
+        }
+        if (!timedOut && !idleInfo && !ctxInfo && !turnInfo && !limitInfo && now - startedAt - pausedTotal - (paused ? now - pausedAt : 0) >= ceiling) { timedOut = true; kill(); }
       }, tick);
       timer.unref?.();
       const noteLine = (line) => {
@@ -2143,6 +2161,11 @@ export async function runCliBackendAsync(opts) {
   } finally { if (sysDir) rmSync(sysDir, { recursive: true, force: true }); }
   const sum = (k) => [...msgUsage.values()].reduce((a, u) => a + toFiniteUsageNumber(u[k]), 0);
   const streamUsage = () => (msgUsage.size ? { input_tokens: sum("input_tokens"), output_tokens: sum("output_tokens"), cache_creation_input_tokens: sum("cache_creation_input_tokens"), cache_read_input_tokens: sum("cache_read_input_tokens") } : null);
+  if (limitInfo) {
+    const err = new Error(`claude CLI lane hit its scope ${limitInfo.limit} limit (${limitInfo.unit}) and was stopped`);
+    err.code = "CLI_LANE_LIMIT"; err.limit = limitInfo.limit; err.unit = limitInfo.unit; err.events = limitInfo.events; err.toolUses = [...toolUses.values()];
+    throw err;
+  }
   if (turnInfo) {
     const err = new Error(`claude CLI session reached its turn budget (${turnMax} turns) and was stopped`);
     err.code = "CLI_TURNS"; err.turns = msgUsage.size; err.turnMax = turnMax; err.lastTool = turnInfo.lastTool; err.usage = streamUsage(); err.toolUses = [...toolUses.values()];

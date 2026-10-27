@@ -1197,6 +1197,16 @@ describe("forgedock check (#4364)", () => {
     assert.deepEqual(Object.keys(saved.commands[0]).sort(), ["command", "ms", "rc"], "self-check record shape unchanged");
   });
 
+  it("#4690: readCoreLimits caps lanes by default (TasksMax, K-derived MemoryMax); forge.yaml overrides", async () => {
+    const { readCoreLimits, defaultLaneMemory } = await import("../engine-cli.mjs");
+    const d = tmpDir("core-limits-"), gib = 1024 ** 3;
+    const opts = (k) => ({ env: k ? { FORGEDOCK_LANE_PARALLEL: String(k) } : {}, totalMem: 32 * gib });
+    assert.deepEqual(readCoreLimits(d, opts(4)).laneLimits, { memory_max: `${Math.floor((32 * gib - 6.4 * gib) / 4 / 1048576)}M` });
+    assert.equal(defaultLaneMemory(32 * gib, 100), "1024M");
+    assert.equal(defaultLaneMemory(32 * gib, 1), `${Math.floor((32 * gib - 6.4 * gib) / 1048576)}M`);
+    writeFileSync(join(d, "forge.yaml"), "engine:\n  lane_limits:\n    tasks_max: 64\n    memory_max: 3G\n"); assert.deepEqual(readCoreLimits(d, opts(4)).laneLimits, { memory_max: "3G", tasks_max: "64" });
+  });
+
   it("#4390: readCoreLimits reads engine.context_ceiling_tokens (0 allowed, junk ignored)", async () => {
     const { readCoreLimits } = await import("../engine-cli.mjs");
     const d = tmpDir("fd-ctx-");
