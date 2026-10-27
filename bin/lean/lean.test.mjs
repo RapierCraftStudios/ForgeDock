@@ -661,6 +661,10 @@ describe("core work-on", () => {
     const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["sops"] } };
     assert.equal(await rb("this lane has no sops/age key", remote), "env.capability_remote");
     assert.equal(await rb("owner must create a third-party account", remote), "builder.blocked");
+    // #4685: a missing tool is never a credential block on a remote lane; local lanes and real credential needs stay human.
+    assert.equal(await rb("validate V1 needs promtool via docker; no docker daemon in this sandbox", remote), "env.tool_missing");
+    assert.equal(await rb("ModuleNotFoundError: No module named 'yaml'", remote), "env.tool_missing");
+    assert.equal(await rb("promtool: command not found", { ...remote, placement: { where: "local", reason: "x" } }), "builder.blocked");
     assert.equal(await rb("this lane has no sops/age key", { ...remote, hostCaps: undefined }), "builder.blocked");
     assert.equal(await rb("this lane has no sops/age key", { ...remote, placement: { where: "local", reason: "x" } }), "builder.blocked");
     assert.equal(await code(world({ changed: [] })), "builder.no_commit");

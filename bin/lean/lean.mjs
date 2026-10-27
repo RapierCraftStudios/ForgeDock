@@ -31,6 +31,10 @@ import { renderInvestigation, renderImplementation, renderReview, renderPrBody, 
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
 import { hostCapabilityBlock } from "./execution.mjs";
+
+const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
+/** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
+export function missingToolBlock(summary) { return MISSING_TOOL_RE.test(String(summary ?? "")); }
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
 import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
@@ -822,6 +826,10 @@ export async function runCore(o) {
       // #4542: the sandbox relays none of the host's capabilities; a block naming only declared ones is an environment error the host recovers.
       const caps = hostCapabilityBlock(s, o.hostCaps);
       if (caps.length) return await needsHuman(`Remote sandbox lacks host capability ${caps.join(", ")} (Builder is blocked (credentials)): ${s}\n\nThe dispatching host has it; the lane is recovered locally.`, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
+    }
+    if (b.kind === "human" && b.why === "credentials" && o.placement?.where === "remote" && missingToolBlock(s)) {
+      // #4685: a tool the sandbox lacks (docker, promtool, a Python module) is an environment gap the host recovers, never a credential.
+      return await needsHuman(`Remote sandbox lacks a validate tool (Builder is blocked (credentials)): ${s}\n\nNot a credential: the lane is recovered where the tool exists.`, OUTCOME_CODES.ENV_TOOL_MISSING);
     }
     if (b.kind === "human") return await needsHuman(`Builder is blocked (${b.why}): ${s}`, OUTCOME_CODES.BUILDER_BLOCKED);
     if (b.kind === "unreadable") return await finish("dependency-unreadable", b.detail);

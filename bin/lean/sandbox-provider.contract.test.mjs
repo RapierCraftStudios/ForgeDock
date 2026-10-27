@@ -301,6 +301,13 @@ describe("pool provider (#4546)", () => {
     assert.equal(Buffer.from(spec.env.CS_FORGE_YAML_B64, "base64").toString(), "verify:\n  mode: ci\n");
   });
 
+  it("#4685 a configured token_env that resolves empty falls back to the router token", async () => {
+    const { cfg } = setupPool();
+    const batch = openBatch(tmpDir("pool-b3-"), "bt");
+    const c = await launchOnce(() => providerByName("pool", { batch, repo: "o/r", cwd: tmpDir("pool-cwd3-"), exec: parseExecution({ mode: "remote", provider: "pool", token_env: "NO_SUCH_TOKEN_4685" }), env: {}, poolConfigPath: cfg }));
+    assert.equal(c.init.headers.authorization, "Bearer pool-token-789");
+  });
+
   it("an explicit endpoint wins; no forge.yaml adds no env; a missing router config is misconfigured", async () => {
     const { dir } = setupPool();
     const batch = openBatch(tmpDir("pool-b2-"), "bt");
