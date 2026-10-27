@@ -291,18 +291,17 @@ export function validatePlan(plan) {
   return { ok: errors.length === 0, errors, warnings: deployWarnings(issues, milestones) };
 }
 
-/** #4665: `deploy-last` when deploy work exists but none of it sits in the first or second milestone (it is last, after >= 2 feature milestones). */
+/** #4665: `deploy-last` when deploy work exists but none of it sits in milestones 1-2 (needs >= 3 milestones). */
 function deployWarnings(issues, milestones) {
   const index = new Map(milestones.map((m, i) => [m.key, i]));
   const deploy = issues.filter(isDeployIssue);
   if (!deploy.length || milestones.length < 3) return [];
   const at = deploy.map((it) => index.get(it.milestone));
   if (at.some((i) => i <= 1)) return [];
-  const last = milestones.length - 1;
-  if (!at.every((i) => i === last)) return [];
+  const where = [...new Set(at.map((i) => milestones[i]?.key).filter(Boolean))].join(", ");
   return [{
     issue: deploy[0].key, code: "deploy-last",
-    message: `deploy workflows are only in the last milestone ${milestones[last].key}; put a thin deployable slice (CI deploy workflow, staging environment, seed) in the first or second milestone`,
+    message: `deploy workflows are only in ${where ? `milestone ${where}` : "later milestones"}, none in the first two; put a thin deployable slice (CI deploy workflow, staging environment, seed) in the first or second milestone`,
   }];
 }
 

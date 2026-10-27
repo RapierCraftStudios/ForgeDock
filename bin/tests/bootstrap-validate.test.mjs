@@ -248,3 +248,9 @@ test("deploy-last: deploy workflow only in the last milestone warns, exit stays 
 test("deploy-last: a deployable slice in milestone 1 or 2 does not warn", () => {
   for (const m of ["A", "B"]) assert.deepEqual(validatePlan(deployPlan(m)).warnings, []);
 });
+
+test("deploy-last: warns for deploy only in a middle milestone of 4", () => {
+  const plan = deployPlan("C");
+  plan.milestones.push({ key: "D", title: "D" });
+  assert.deepEqual(validatePlan(plan).warnings.map((w) => w.code), ["deploy-last"]);
+});
