@@ -29,3 +29,6 @@ The script groups normalised TSV rows by class and runs the existing lookup/appe
 - Env: FORGE_FOLLOWUP_MILESTONE, FORGE_FOLLOWUPS_DEFAULT_MILESTONE, FORGE_EXTERNAL_PREREQ. forge.yaml: `followups.default_milestone`.
 - Engineering follow-ups keep the old title; others are `follow-up (<class>): ...`. Existing issues without a class marker count as engineering. A parent without a milestone gets none.
 - Telemetry line gains `classes=` and `batched_into` may list several issues.
+
+## Stale-list fix
+Added FOLLOWUP_CLASSES and followupClass to the import list and the #4664 case in bin/lean/conformance.test.mjs.
