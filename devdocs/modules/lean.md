@@ -1896,3 +1896,11 @@ builder once; shadow records it in `CONFORMANCE_SHADOW` `would` (it is not in `S
 The only override is `{"kind":"supersedes","guard":"#X","why":"..."}` in result.json amendments (`applyAmendments` records
 `contract.supersedes`; the reviewer sees it on the effective contract). After the lane merges with the amendment, the engine
 comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_ms`), `guard_broken`, `supersedes_accepted`.
+
+## Entry 2026-10-27 — Validate results across a merge-time CI fix round (#4708)
+
+`mergeFixRound` reviewed the fix head before it was CI-verified, and the fix session could rewrite `result.json` without the
+earlier `validation` rows, so the review failed `conformance.unimplemented: ... has no recorded result` on a green lane. Now the
+rows recorded before the round are carried forward (marked `carried: true`, written back to `result.json` because `gate()` re-reads
+it), the fix head goes through `ciVerify("merge")` under remote verify before `doReview` (as the base-sync retry, #4527), and a
+validate id still unrecorded is `engine.validate_result_lost`, not a conformance failure.
