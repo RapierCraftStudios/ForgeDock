@@ -19,6 +19,8 @@
  * missing-section, missing-type-tag, missing-parent, missing-labels, unknown-label, code-depends-on-needs-human,
  * missing-design-spec (a `ui` issue lacks a design-spec item), hero-not-routed (a `hero` issue never names `/design`),
  * missing-needs-human-section (a needs-human issue lacks setup steps, env var names or secret handling) (#4176).
+ * Warns (never fails; exit stays 0): deploy-last (#4665: every milestone holding deploy workflows comes after the feature
+ * milestones, so nothing can be previewed or deployed until they all ship).
  * `Depends on` lines are read with the engine's own parser (bin/engine/phases.mjs parseDependsOn) after placeholder
  * resolution, so the plan and engine admission agree on what blocks what.
  *
@@ -35,8 +37,10 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseDependsOn } from "../bin/engine/phases.mjs";
+import { parseGates } from "./readiness.mjs";
 
 const NEEDS_HUMAN_LABEL = "needs-human";
+const EXTERNAL_LABEL = "needs-human:external"; // #4660: external prerequisite; its `gates:` line names what it blocks
 const TYPE_TAG_RE = /\[type:(?:api|unit|e2e|manual)\]/;
 const CHECKBOX_RE = /^[ \t]*[-*+][ \t]+\[[ xX]\]/;
 const PLACEHOLDER_RE = /#\{\{([^{}]*)\}\}/g;
@@ -66,13 +70,17 @@ const NEEDS_HUMAN_PARTS = [
   ["env var name (e.g. `API_KEY`)", /`[A-Z][A-Z0-9]*_[A-Z0-9_]+`/],
 ];
 
+// #4665: an issue holds deploy work when its title or body names a deploy workflow or a staging environment definition.
+const DEPLOY_RE = /\.github\/workflows\/[^\s`'")]*deploy|\bdeploy(?:ment)? workflow\b|\bstaging environment\b/i;
+const isDeployIssue = (it) => DEPLOY_RE.test(`${it?.title ?? ""}\n${it?.body ?? ""}`);
+
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isNonEmptyString = (v) => typeof v === "string" && v.trim() !== "";
 const normHeading = (h) => h.replace(/\([^)]*\)\s*$/, "").trim().toLowerCase();
 
 /** True when the issue is a needs-human issue (credential, account or external input). */
 export function isNeedsHuman(issue) {
-  return issue?.needsHuman === true || (Array.isArray(issue?.labels) && issue.labels.includes(NEEDS_HUMAN_LABEL));
+  return issue?.needsHuman === true || (Array.isArray(issue?.labels) && (issue.labels.includes(NEEDS_HUMAN_LABEL) || issue.labels.includes(EXTERNAL_LABEL)));
 }
 
 /**
@@ -175,7 +183,7 @@ function findCycles(issues, byKey) {
 
 /**
  * Validate a backlog plan. Never throws on bad input; structural problems come back as `invalid-plan` errors.
- * @returns {{ ok: boolean, errors: Array<{ issue: string|null, code: string, message: string }> }}
+ * @returns {{ ok: boolean, errors: Array<{ issue: string|null, code: string, message: string }>, warnings?: Array<{ issue: string|null, code: string, message: string }> }}
  */
 export function validatePlan(plan) {
   const structural = checkStructure(plan);
@@ -275,12 +283,30 @@ export function validatePlan(plan) {
     if (isNeedsHuman(it)) {
       const lacking = NEEDS_HUMAN_PARTS.filter(([, re]) => !re.test(it.body)).map(([name]) => name);
       if (lacking.length) err(it.key, "missing-needs-human-section", `needs-human issue lacks: ${lacking.join(", ")}`);
+      if (!parseGates(it.body).length) {
+        err(it.key, "missing-gates", "needs-human issue has no valid `gates:` line (preview|staging-deploy|prod-deploy|feature-flag:<name>)");
+      }
     }
   }
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, warnings: deployWarnings(issues, milestones) };
+}
+
+/** #4665: `deploy-last` when deploy work exists but none of it sits in milestones 1-2 (needs >= 3 milestones). */
+function deployWarnings(issues, milestones) {
+  const index = new Map(milestones.map((m, i) => [m.key, i]));
+  const deploy = issues.filter(isDeployIssue);
+  if (!deploy.length || milestones.length < 3) return [];
+  const at = deploy.map((it) => index.get(it.milestone));
+  if (at.some((i) => i <= 1)) return [];
+  const where = [...new Set(at.map((i) => milestones[i]?.key).filter(Boolean))].join(", ");
+  return [{
+    issue: deploy[0].key, code: "deploy-last",
+    message: `deploy workflows are only in ${where ? `milestone ${where}` : "later milestones"}, none in the first two; put a thin deployable slice (CI deploy workflow, staging environment, seed) in the first or second milestone`,
+  }];
 }
 
 /** One `<KEY>: [code] message` line per error; plan-level errors use `(plan)`. */
+export const formatWarnings = (warnings) => formatErrors(warnings);
 export function formatErrors(errors) {
   return errors.map((e) => `${e.issue ?? "(plan)"}: [${e.code}] ${e.message}`).join("\n");
 }
@@ -305,7 +331,8 @@ function main(argv) {
     process.stderr.write(`bootstrap-validate: invalid JSON: ${e.message}\n`);
     return 2;
   }
-  const { ok, errors } = validatePlan(plan);
+  const { ok, errors, warnings = [] } = validatePlan(plan);
+  if (warnings.length) process.stderr.write(formatErrors(warnings).replace(/^/gm, "warning: ") + "\n");
   if (!ok) {
     process.stderr.write(formatErrors(errors) + "\n");
     process.stderr.write(`bootstrap-validate: ${errors.length} error(s)\n`);

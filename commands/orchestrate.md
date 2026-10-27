@@ -105,7 +105,7 @@ remaining maintenance once no feature is pending; otherwise the rest ends `held 
   for them. After a decision (a `FORGE:DECISION` posted and `needs-human` removed), a blocked issue that already ended in the batch
   (`needs-human`, `invalid`, `skipped`, `dependency-*`, `ci-pending`) returns to it with
   `forgedock orchestrate --requeue <id> N... --reason "..."` (refused while it is labelled `needs-human` or closed; skipped dependents
-  return to pending with it; a finished batch is reopened); `--add` skips such an issue as `already in batch`. Its pre-filter still closes already-fixed ones. The runner requeues `deferred` lanes by code (host busy and a full sandbox pool after their
+  return to pending with it; a finished batch is reopened); `--add` on a `skipped` issue re-queues it (other ended issues still report `already in batch`). A dependency-skipped issue shows as `waiting on #X` while the batch runs (the blocker is re-checked each pass; merged or closed re-admits it, closed as not planned keeps it skipped) and ends `skipped` only if the blocker never resolved. Its pre-filter still closes already-fixed ones. The runner requeues `deferred` lanes by code (host busy and a full sandbox pool after their
   retry-in, uncapped, a usage limit holds admissions for that account (backend identity) until the reset, across every batch on
   the host; `forgedock limits show|clear <id>|--all` lists or drops holds; transient merge/push/idle failures back off; other
   deferrals stop after `orchestration.max_deferrals`), relaunches an `engine-error` once, and stops admitting after
@@ -192,6 +192,13 @@ Escalate only these:
 
 Collect escalations into one question list and ask it once, at the end of the batch. Never ask per issue, and keep every
 other lane running meanwhile.
+
+## 3b. Settle scope (#4665)
+
+When settle begins, freeze the milestone's issue set (`scripts/settle-scope.mjs` `freezeScope`). Issues filed later are
+classified by `classifyNew`: decomposition children of a frozen issue stay in the milestone and join the measured set;
+deferred follow-ups go to the next milestone or the backlog; review findings and others count as growth only.
+`convergence` measures the frozen set plus those children; a STOP prints `formatStopReport` (growth and sources).
 
 ## 4. Report
 

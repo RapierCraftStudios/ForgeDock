@@ -62,6 +62,16 @@ const safeRegExp = (src) => { try { return new RegExp(src, "i"); } catch { retur
 const ENV_RE = /^[A-Z_][A-Z0-9_]*$/;
 const IMAGE_RE = /^[A-Za-z0-9][A-Za-z0-9._\/:@-]*$/;
 const readJson = (file) => { try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; } };
+const TRANSPORT_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "EPIPE", "ENOTFOUND", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
+/** #4672: a failure of the link to the provider (connection refused/reset, `fetch failed`, timeout, 502/503/504), not of the lane. */
+export function isTransportError(e) {
+  if (!e || e.unreachable) return false;
+  if (e.transient === true || [502, 503, 504].includes(e.status)) return true;
+  const code = e.code ?? e.cause?.code;
+  if (TRANSPORT_CODES.has(code)) return true;
+  if (e.name === "AbortError" || e.name === "TimeoutError") return true;
+  return /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|network error|timed? ?out/i.test(String(e.message ?? ""));
+}
 const errText = (e) => String(e?.stderr || e?.message || e).split("\n")[0].slice(0, 300);
 
 /**
@@ -98,7 +108,9 @@ export function parseExecution(sec = {}) {
   const patRaw = Array.isArray(s.host_capability_patterns) ? s.host_capability_patterns : str(s.host_capability_patterns) ? str(s.host_capability_patterns).split(",") : [];
   const hostCapabilityPatterns = patRaw.map((x) => { const t = str(x), i = t.indexOf(":"); return { name: t.slice(0, i).trim().toLowerCase(), pattern: t.slice(i + 1).trim() }; })
     .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
-  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}) };
+  const uw = Number(str(s.unreachable_window_min));
+  const unreachableWindowMin = str(s.unreachable_window_min) !== "" && Number.isFinite(uw) && uw >= 0 ? uw : null; // unset: providerLanes defaults to 5
+  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -429,7 +441,8 @@ export function providerByName(name, opts) {
     try { forgeYaml = opts?.cwd ? readFileSync(join(opts.cwd, "forge.yaml"), "utf8") : null; } catch { forgeYaml = null; }
     // The router's token is resolved under a fixed name so remoteProvider redacts it like any `token_env` credential.
     const tokenEnv = exec.tokenEnv ?? (router?.token ? "FORGEDOCK_POOL_TOKEN" : undefined);
-    const credentials = (n) => (n === "FORGEDOCK_POOL_TOKEN" && !exec.tokenEnv ? router?.token ?? null : resolveCredential(n, { env }));
+    // #4685: an empty env/keychain lookup of a configured token_env falls back to the router's token file.
+    const credentials = (n) => (n === "FORGEDOCK_POOL_TOKEN" && !exec.tokenEnv ? router?.token ?? null : resolveCredential(n, { env }) ?? router?.token ?? null);
     const settings = { ...exec, ...(exec.endpoint ? {} : router ? { endpoint: router.endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}) };
     return remoteProvider({ batch: opts.batch, repo: opts.repo, settings, name: "pool", env, credentials, transport: remoteTransportFor(settings, { transport: opts?.transport, env, credentials }), ...(opts?.now ? { now: opts.now } : {}) });
   }
@@ -443,7 +456,7 @@ export function providerByName(name, opts) {
  * returns that sandbox's ledger (ledger.mjs `makeLedger`).
  */
 export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env, secrets = [], pollMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-  costPerMinute = 0, now = () => Date.now() }) {
+  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000 }) {
   const cpm = nonNeg(Number(costPerMinute)) ?? 0;
   // #4255: the sandbox's usage: the provider's `usage()`, else the billable minutes it put on the handle (#4254), else wall
   // clock since the handle's startedAt; cost is the provider's, else minutes x cost_per_minute.
@@ -463,20 +476,38 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     if (ok) { try { led?.release("sandbox", h.id); led?.remove(); } catch { /* the reaper retries */ } }
     return ok;
   };
-  const wait = async (h) => {
+  // #4672: a transport failure (router restart, refused/reset connection, 502/503/504) is retried with backoff until the lane has
+  // waited `unreachableWindowMs` in a row without one successful poll; then it ends sandbox.unreachable with the sandbox kept.
+  const guard = (st) => async (fn) => {
     for (;;) {
-      const r = await provider.fetchResult(h);
+      try { const v = await fn(); st.waited = 0; st.tries = 0; return v; } catch (e) {
+        if (!isTransportError(e)) throw e;
+        if (st.waited >= unreachableWindowMs) throw Object.assign(new Error(`unreachable for ${Math.round(st.waited / 1000)}s: ${errText(e)}`), { unreachable: true });
+        const d = Math.min(pollMs * 2 ** Math.min(st.tries++, 10), 30000, Math.max(1, unreachableWindowMs - st.waited));
+        st.waited += d;
+        await sleep(d);
+      }
+    }
+  };
+  const unreachable = (h, e) => ({ terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_UNREACHABLE, retryInSeconds: 60,
+    detail: `sandbox ${h.id} ${errText(e)}; kept for adopt on resume` });
+  const wait = async (h, g = guard({ waited: 0, tries: 0 })) => {
+    for (;;) {
+      const r = await g(() => provider.fetchResult(h));
       if (r) return r;
-      const st = await provider.status(h);
+      const st = await g(() => provider.status(h));
       if (st !== "running") {
-        const last = await provider.fetchResult(h); // it may have written the result just before exiting
+        const last = await g(() => provider.fetchResult(h)); // it may have written the result just before exiting
         return last ?? { terminalReason: "engine-error", detail: `sandbox ${h.id} ${st} without a result` };
       }
       await sleep(pollMs);
     }
   };
   // A start failure repeats on a relaunch: typed, never engine-error (#4254). Retryable (capacity) defers with backoff.
-  const startFailed = (id, e) => (e?.retryable === true
+  // #4685: a refused or missing credential defers with its own code (a fixed token is picked up on the retry), never needs-human.
+  const startFailed = (id, e) => ([401, 403].includes(e?.status)
+    ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_AUTH, retryInSeconds: 300, detail: `sandbox ${id} could not start (auth): ${errText(e)}; check the pool token (COMPUTESHARE_TOKEN or ~/.config/computeshare/forgedock.token)` }
+    : e?.retryable === true
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
     : { terminalReason: "needs-human", code: OUTCOME_CODES.SANDBOX_START_FAILED, detail: `sandbox ${id} failed to start: ${errText(e)}` });
   return {
@@ -486,8 +517,12 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       const led = ledgerFor(n);
       const base = { provider: provider.name, id: provider.idFor(n), issue: n, startedAt: now() };
       // A sandbox an earlier attempt left behind (same id) goes first, or the new one could not start.
-      if ((led?.entries("sandbox") ?? []).some((e) => e.value === base.id) && !(await tear(led, base))) {
-        return { terminalReason: "engine-error", detail: `sandbox ${base.id} from an earlier attempt could not be torn down` };
+      const left = (led?.entries("sandbox") ?? []).find((e) => e.value === base.id);
+      if (left) {
+        // #4672: a sandbox kept as unreachable is adopted when the provider answers again; it is torn down only when it is gone.
+        const kept = await adoptLeft(n, left, ctx);
+        if (kept) return kept;
+        if (!(await tear(led, base))) return { terminalReason: "engine-error", detail: `sandbox ${base.id} from an earlier attempt could not be torn down` };
       }
       led?.register("sandbox", base.id, { provider: provider.name, handle: base }); // before it exists
       let h = base, r, started = false;
@@ -498,12 +533,15 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         ctx.onStart?.({ ...(Number.isInteger(h.pid) ? { pid: h.pid } : {}), handle: h, remote: true });
         r = await wait(h);
       } catch (e) {
+        if (started && e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: no tear, the ledger keeps it
         r = started ? { terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` } : startFailed(base.id, e);
       }
       await tear(led, h); // every path, after the result is in (tear never throws)
       return started ? withUsage(r, h) : r; // a sandbox that never started used nothing
     },
-    adopt: async (n, rec, ctx = {}) => {
+    adopt: (n, rec, ctx = {}) => adoptSaved(n, rec, ctx),
+  };
+  async function adoptSaved(n, rec, ctx = {}) {
       const saved = rec?.handle;
       if (!saved?.id || saved.provider !== provider.name) return null;
       // Usage runs from the sandbox's real start (persisted on the handle), not from this adopt.
@@ -511,15 +549,21 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       const led = ledgerFor(n);
       led?.register("sandbox", h.id, { provider: provider.name, handle: { provider: h.provider, id: h.id, issue: h.issue, ...(Number.isFinite(h.startedAt) ? { startedAt: h.startedAt } : {}) } }); // now owned by this dispatcher
       let r;
+      const g = guard({ waited: 0, tries: 0 });
       try {
-        const ended = await provider.fetchResult(h);
-        if (!ended && (await provider.status(h)) !== "running") r = null; // relaunched
-        else { if (!ended) ctx.onLive?.(); r = await wait(h); } // #4504: a live sandbox is awaited in the background
+        const ended = await g(() => provider.fetchResult(h));
+        if (!ended && (await g(() => provider.status(h))) !== "running") r = null; // relaunched
+        else { if (!ended) ctx.onLive?.(); r = await wait(h, g); } // #4504: a live sandbox is awaited in the background
       } catch (e) {
+        if (e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: same tolerance; no tear, left for the next adopt
         r = { terminalReason: "engine-error", detail: `sandbox ${h.id}: ${errText(e)}` };
       }
       await tear(led, h);
       return withUsage(r, h);
-    },
-  };
+  }
+  // A leftover ledger entry of this lane's sandbox: its result if it can still be had, else null (torn down by the caller).
+  async function adoptLeft(n, left, ctx) {
+    const r = await adoptSaved(n, { handle: left.handle }, ctx).catch(() => null);
+    return r ?? null;
+  }
 }

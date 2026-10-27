@@ -1341,6 +1341,68 @@ describe("pickPhase", () => {
     it("a trusted exact **Depends on** line whose dependency is OPEN is reported", async () => {
       assert.deepEqual(await openDependency(42, io({ 42: rec({ body: dep }), 7: rec({ state: "open" }) })), { open: [7] });
     });
+    describe("lane-merged satisfaction (#4686)", () => {
+      const sha = "abc1234567890def";
+      const laneIo = (prs, { ancestor = true, listFails = false } = {}, calls = []) => {
+        const base = io({ 42: rec({ body: dep }), 7: rec({ state: "open" }) });
+        return {
+          gh: async (a) => {
+            if (a[0] === "pr" && a[1] === "list") { calls.push(a.join(" ")); if (listFails) throw new Error("boom"); return JSON.stringify(prs); }
+            return base.gh(a);
+          },
+          git: async (a) => { calls.push(a.join(" ")); if (a[0] === "merge-base" && !ancestor) throw new Error("exit 1"); return ""; },
+        };
+      };
+      const pr = { number: 99, mergeCommit: { oid: sha }, closingIssuesReferences: [{ number: 7 }], title: "t", body: "" };
+      it("an open dependency whose PR is merged into the lane is satisfied and names the merge commit", async () => {
+        const calls = [];
+        const r = await openDependency(42, laneIo([pr], {}, calls), { lane: "staging" });
+        assert.deepEqual(r, { satisfied: [{ issue: 7, pr: 99, sha }] });
+        assert.ok(calls.some((c) => c === `merge-base --is-ancestor ${sha} origin/staging`), calls.join("|"));
+        assert.ok(calls.some((c) => c.includes("--base staging")));
+      });
+      it("a body reference counts; an unrelated PR does not", async () => {
+        const ref = { number: 5, mergeCommit: { oid: sha }, closingIssuesReferences: [], title: "x", body: "Refs #7" };
+        assert.deepEqual((await openDependency(42, laneIo([ref]), { lane: "staging" })).satisfied?.[0]?.pr, 5);
+        const other = { ...ref, body: "Refs #70 and see #7" };
+        assert.deepEqual(await openDependency(42, laneIo([other]), { lane: "staging" }), { open: [7] });
+      });
+      it("a dependency merged only to a different lane still blocks (the list is per base lane; ancestry on this lane fails)", async () => {
+        const calls = [];
+        assert.deepEqual(await openDependency(42, laneIo([pr], { ancestor: false }, calls), { lane: "milestone/x" }), { open: [7] });
+        assert.ok(calls.some((c) => c.includes("--base milestone/x")));
+      });
+      describe("FORGE:STATE mergedTo (#4711)", () => {
+        const state = (m) => `body\n\n<!-- FORGE:STATE\n${JSON.stringify({ v: 1, issue: 7, terminal: true, terminalReason: "merged", ...(m ? { mergedTo: m } : {}) })}\n-->`;
+        const stateIo = (m, { prState = "MERGED", oid = sha, ancestor = true, trusted = true } = {}) => {
+          const base = io({ 42: rec({ body: dep }), 7: rec({ state: "open", body: state(m), ...(trusted ? {} : { author_association: "NONE", user: { type: "User", login: "x" } }) }) });
+          return {
+            gh: async (a) => {
+              if (a[0] === "pr" && a[1] === "list") return "[]"; // no PR the text search could match
+              if (a[0] === "pr" && a[1] === "view") return JSON.stringify({ state: prState, mergeCommit: { oid }, baseRefName: "staging" });
+              return base.gh(a);
+            },
+            git: async (a) => { if (a[0] === "merge-base" && !ancestor) throw new Error("exit 1"); return ""; },
+          };
+        };
+        const m = { lane: "staging", pr: 99, sha };
+        it("a trusted mergedTo on this lane satisfies the dependency with no matching PR in the list", async () => {
+          assert.deepEqual(await openDependency(42, stateIo(m), { lane: "staging" }), { satisfied: [{ issue: 7, pr: 99, sha }] });
+        });
+        it("another lane, no field, a non-ancestor sha, a PR that is not that merge, or an untrusted body keeps it open", async () => {
+          assert.deepEqual(await openDependency(42, stateIo({ ...m, lane: "milestone/x" }), { lane: "staging" }), { open: [7] });
+          assert.deepEqual(await openDependency(42, stateIo(null), { lane: "staging" }), { open: [7] });
+          assert.deepEqual(await openDependency(42, stateIo(m, { ancestor: false }), { lane: "staging" }), { open: [7] });
+          assert.deepEqual(await openDependency(42, stateIo(m, { oid: "other00000000" }), { lane: "staging" }), { open: [7] });
+          assert.deepEqual(await openDependency(42, stateIo(m, { prState: "OPEN" }), { lane: "staging" }), { open: [7] });
+          assert.deepEqual(await openDependency(42, stateIo(m, { trusted: false }), { lane: "staging" }), { open: [7] });
+        });
+      });
+      it("no lane argument, or a failing lookup, keeps the dependency open", async () => {
+        assert.deepEqual(await openDependency(42, laneIo([pr])), { open: [7] });
+        assert.deepEqual(await openDependency(42, laneIo([pr], { listFails: true }), { lane: "staging" }), { open: [7] });
+      });
+    });
     it("a closed dependency, no declaration or an empty read blocks nothing", async () => {
       assert.equal(await openDependency(42, io({ 42: rec({ body: dep }), 7: rec({ state: "closed" }) })), null);
       assert.equal(await openDependency(42, io({ 42: rec({ body: "nothing" }) })), null);

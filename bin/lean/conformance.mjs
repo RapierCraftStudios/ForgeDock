@@ -234,6 +234,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     if (TRACKED.includes(r?.disposition) && blank(r?.why)) problems.push(`${id}: ${r.disposition} needs a why`);
     if (r?.disposition === "post-deploy" && !CHECK_ID_RE.test(String(r?.check ?? ""))) problems.push(`${id}: post-deploy needs a check id (\`check\`, e.g. "login-smoke") naming an entry of .forge/post-deploy-checks.json on the default branch`);
     if (r?.disposition === "not-applicable" && blank(r?.evidence)) problems.push(`${id}: not-applicable needs file:line evidence`);
+    if (r?.class != null && !FOLLOWUP_CLASSES.includes(r.class)) problems.push(`${id}: class must be one of ${FOLLOWUP_CLASSES.join("|")}`);
     if (r?.verify != null && !VERIFY_MODES.includes(r.verify)) problems.push(`${id}: verify must be one of ${VERIFY_MODES.join("|")}`);
     if (isOutOfBand(r) && r?.disposition !== "deliver") problems.push(`${id}: verify out_of_band applies only to a deliver requirement`);
     else if (isOutOfBand(r) && blank(r?.evidence)) problems.push(`${id}: verify out_of_band needs evidence naming the job or workflow that measures it (or set verify "in_lane" if this change can check it)`);
@@ -268,7 +269,8 @@ export function validateContract(c, issueText, { repro = false } = {}) {
 /** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
-const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement"];
+const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes"];
+const GUARD_ID_RE = /^#?\d+$/;
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
 
 /** forge#4574: common builder slips: `type` for `kind`, amend-requirement/limitation as defer, an `R#` in `id` as the requirement. */
@@ -282,11 +284,25 @@ function normalizeAmendment(a) {
   return n;
 }
 
+const REF_SEP_RE = /\s*(?:[/,;&+]|\band\b)\s*/i, REF_RANGE_RE = /^R(\d+)\s*[-\u2013\u2014]\s*R?(\d+)$/i, REF_MAX = 50;
+
+/** forge#4655: a slash/comma-joined or ranged requirement reference (`R2/R3`, `R2, R3`, `R2–R3`) as its individual ids; a single id or anything else is returned as is. */
+function splitRequirementRefs(ref) {
+  if (typeof ref !== "string") return [ref];
+  const ids = [];
+  for (const part of ref.trim().split(REF_SEP_RE)) {
+    const m = REF_RANGE_RE.exec(part);
+    if (m && +m[1] <= +m[2] && +m[2] - +m[1] < REF_MAX) for (let i = +m[1]; i <= +m[2]; i++) ids.push(`R${i}`);
+    else ids.push(part);
+  }
+  return ids.length > 1 ? ids : [ref];
+}
+
 /** The rejection reason, naming the valid kinds or the missing field so the builder's correction round can fix it. */
 function amendmentProblem(a, tag) {
   const kind = a?.kind;
   const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
-    : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)" : null;
+    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)" : null;
   const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
   return `unknown or incomplete amendment: ${why}: ${tag}`;
 }
@@ -302,8 +318,16 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
   c.deliverables = c.deliverables ?? [];
   const applied = [], toTrack = [], problems = [];
   const genRes = (Array.isArray(generatedPaths) ? generatedPaths : []).filter((g) => typeof g === "string" && g).map(shellGlobRe);
+  const rows = [];
   for (const raw of Array.isArray(amendments) ? amendments : []) {
-    const a = normalizeAmendment(raw);
+    const n = normalizeAmendment(raw);
+    if (n && (TRACKED.includes(n.kind) || n.kind === "amend-requirement") && typeof n.requirement === "string") {
+      const ids = splitRequirementRefs(n.requirement);
+      if (ids.length > 1) { for (const id of ids) rows.push({ a: { ...n, requirement: id }, raw }); continue; }
+    }
+    rows.push({ a: n, raw });
+  }
+  for (const { a, raw } of rows) {
     const tag = JSON.stringify(raw ?? null).slice(0, 400);
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
@@ -325,6 +349,12 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
       c.requirements.push(r);
       if (TRACKED.includes(r.disposition)) toTrack.push(r);
+    } else if (a.kind === "supersedes" && GUARD_ID_RE.test(String(a.guard ?? "").trim())) {
+      // #4693: retires one guard's guard_broken for this lane; the reviewer judges it, the engine tells the guarded issue after merge
+      const guard = `#${String(a.guard).trim().replace(/^#/, "")}`;
+      c.supersedes = [...(c.supersedes ?? []).filter((s) => s.guard !== guard), { guard, why: String(a.why).trim() }];
+      applied.push({ kind: a.kind, target: guard, why: String(a.why).trim() });
+      continue;
     } else if (a.kind === "amend-requirement" && !blank(a.requirement)) {
       // #4594: the requirement stays deliver and keeps its verbatim quote; the reviewer judges it against amendment.text
       const r = c.requirements.find((x) => x.id === a.requirement);
@@ -393,7 +423,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -435,6 +465,9 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
   if (repro) failures.push(...reproFailures(contract, repro));
+  // #4693: a broken guard fails unless the contract carries a supersedes amendment for it
+  const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
+  for (const f of guardFailures ?? []) if (!retired.has(f.guard)) failures.push(f);
   return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
 
@@ -752,11 +785,16 @@ export function formatShadowSummary(rows) {
   return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}`;
 }
 
-/** One line per requirement for the follow-up script: a stable key (id + quote) and a why. Tabs and newlines removed. */
+/** #4664: follow-up classes, one issue each per parent (scripts/file-deferred-followups.sh). */
+export const FOLLOWUP_CLASSES = ["engineering", "post-deploy", "external", "ops"];
+/** The follow-up class of a requirement: its optional `class`, else post-deploy for a post-deploy disposition, else engineering. */
+export const followupClass = (r) => (FOLLOWUP_CLASSES.includes(r?.class) ? r.class : r?.disposition === "post-deploy" ? "post-deploy" : "engineering");
+
+/** One line per requirement for the follow-up script: a stable key (id + quote), a why and a class. Tabs and newlines removed. */
 export function followupItems(reqs) {
   const flat = (s) => String(s ?? "").replace(/[\t\r\n`]+/g, " ").replace(/\s+/g, " ").trim();
   const check = (r) => (r.disposition === "post-deploy" && r.check ? `[check:${flat(r.check)}] ` : ""); // #4626: the follow-up item names its check
-  return reqs.map((r) => ({ id: r.id, key: flat(`${r.id}: ${r.quote}`).slice(0, 240).trim(), why: flat(`${r.disposition}: ${check(r)}${r.why ?? ""}`).slice(0, 400).trim() }));
+  return reqs.map((r) => ({ id: r.id, class: followupClass(r), key: flat(`${r.id}: ${r.quote}`).slice(0, 240).trim(), why: flat(`${r.disposition}: ${check(r)}${r.why ?? ""}`).slice(0, 400).trim() }));
 }
 
 /** #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}, matched on trimmed keys (the script trims what it echoes); unmatched items omitted. */

@@ -125,7 +125,7 @@ describe("probe (#4399)", () => {
     const w = world({ comments: [], prs: [{ number: 3, title: "x", body: "mentions #7 only", mergeCommit: { oid: "1111111" }, mergedAt: "2026-10-02" },
       { number: 4, title: "fix", body: "Closes #7", mergeCommit: { oid: "2222222" }, mergedAt: "2026-10-01" }] });
     const r = await run(w);
-    assert.equal(r.outcome, "pass"); assert.equal(r.fix, "2222222");
+    assert.equal(r.outcome, "pass"); assert.equal(r.fix, "2222222"); assert.ok(r.defaultBranch);
   });
 
   it("pass: records FORGE:PROBE with the result JSON, no reopen", async () => {

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -60,6 +60,21 @@ describe("amendments", () => {
   });
 });
 
+describe("#4655 multi-requirement amendment references", () => {
+  it("R1/R2, 'R1, R2' and an en-dash range split into one applied row per id", () => {
+    for (const requirement of ["R1/R2", "R1, R2", "R1\u2013R2", "R1 and R2"]) {
+      const a = applyAmendments(C, [{ kind: "defer", requirement, why: "w" }]);
+      assert.deepEqual(a.problems, [], requirement);
+      assert.deepEqual(a.toTrack.map((r) => r.id).sort(), ["R1", "R2"], requirement);
+      assert.deepEqual(a.applied.map((x) => x.target), ["R1", "R2"], requirement);
+    }
+  });
+  it("an unknown id inside a list is still a problem; scope-note stays an unknown kind", () => {
+    assert.match(applyAmendments(C, [{ kind: "defer", requirement: "R1/R9", why: "w" }]).problems[0], /unknown requirement R9/);
+    assert.match(applyAmendments(C, [{ kind: "scope-note", requirement: "R1", why: "w" }]).problems[0], /unknown kind 'scope-note'; valid kinds are/);
+  });
+});
+
 describe("#4574 amendment slips", () => {
   it("type for kind, amend-requirement and limitation apply as defer; an R# id fills requirement", () => {
     const a = applyAmendments(C, [{ kind: "amend-requirement", id: "R2", why: "stored hashed" }, { id: "A1", requirement: "R1", type: "limitation", why: "plugin limit" }]);
@@ -114,6 +129,11 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.deepEqual(local.failures.map((f) => f.kind), ["validate_missing", "validate_missing"]); assert.deepEqual(local.ciCovered, []);
     const failed = precheck({ contract: C2, result: { ...res, validation: [{ id: "V1", exit: 1 }, { id: "V2", ci: true }, { id: "V3", exit: 0 }] }, changedFiles: files, ciVerified: true });
     assert.deepEqual(failed.failures.map((f) => f.kind), ["validate_failed"]); assert.deepEqual(failed.ciCovered, ["V2"]);
+  });
+  it("#4708 a validate row carried forward across a CI fix round counts as recorded; a row absent outside a CI-verified head still fails", () => {
+    const carried = precheck({ contract: C, result: { ...res, validation: [{ id: "V1", exit: 0, carried: true }] }, changedFiles: files });
+    assert.deepEqual(codes(carried), []);
+    assert.deepEqual(precheck({ contract: C, result: { ...res, validation: [] }, changedFiles: files }).failures.map((f) => f.kind), ["validate_missing"]);
   });
   it("#4323 missingTool: commands, python and node modules; paths, relative and repo-tracked names are not the environment", () => {
     assert.deepEqual(missingTool({ rc: 127, output: "sh: 1: jq: not found" }), { tool: "jq", kind: "command" });
@@ -690,6 +710,17 @@ describe("post-deploy check ids (#4626)", () => {
     assert.ok(precheck({ contract: c, result: res, changedFiles: files, checkIds: new Set() }).failures.some((f) => f.kind === "check_unknown"));
     assert.ok(!precheck({ contract: c, result: res, changedFiles: files, checkIds: new Set(["login-smoke"]) }).failures.some((f) => f.kind === "check_unknown"));
     assert.ok(!precheck({ contract: c, result: res, changedFiles: files }).failures.some((f) => f.kind === "check_unknown"));
+  });
+  it("#4664 followupItems carries the follow-up class; validateContract rejects an unknown class", () => {
+    const cls = (r) => followupItems([{ id: "R1", quote: Q1, why: "w", ...r }])[0].class;
+    assert.equal(cls({ disposition: "defer" }), "engineering");
+    assert.equal(cls({ disposition: "post-deploy", check: "x" }), "post-deploy");
+    assert.equal(cls({ disposition: "defer", class: "external" }), "external");
+    assert.equal(cls({ disposition: "defer", class: "bogus" }), "engineering");
+    assert.deepEqual(FOLLOWUP_CLASSES, ["engineering", "post-deploy", "external", "ops"]);
+    assert.equal(followupClass({ disposition: "post-deploy" }), "post-deploy"); assert.equal(followupClass({ class: "ops" }), "ops");
+    const v = validateContract({ requirements: [{ id: "R1", quote: Q1, disposition: "defer", why: "w", class: "bogus" }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] }, Q1);
+    assert.ok(v.problems.some((x) => /R1: class must be one of/.test(x)), v.problems.join(";"));
   });
   it("followupItems names the check in a post-deploy item", () => {
     const [i] = followupItems([{ id: "R1", quote: Q1, disposition: "post-deploy", why: "w", check: "login-smoke" }]);
