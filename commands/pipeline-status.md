@@ -339,6 +339,9 @@ if [ "$PARKED" -gt 0 ]; then
     echo "  (a gate waiting on these emits GATE_DEADLOCK issue=#N gate=G age=Nm in the batch report; run /work-on:remediate)"
 fi
 
+# forge#4660: Readiness - open external prerequisites per gate, plus the dependency-ordered digest.
+for A in "" --digest; do node "${FORGEDOCK_HOME:-${CLAUDE_PLUGIN_ROOT}}/scripts/readiness.mjs" $GH_FLAG $A 2>/dev/null; done
+
 if [ "$BLOCKED" -gt 0 ]; then
     echo ""
     echo "  ⚠  $BLOCKED issue(s) need human attention:"
