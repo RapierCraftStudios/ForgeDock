@@ -1,32 +1,39 @@
 ### Approach
-New pure report core `compoundingReport` plus a gatherer (guards via `collectGuards`, reopen events via one paginated `gh api`, git probes), exposed as `forgedock stats --compounding`. No LLM, no lane-path work.
+A deterministic guard gate in a new module `bin/lean/guardgate.mjs`, called from `gate()` in parallel with the validate rerun. It selects guards by blame of the lane's touched old-side lines (or by edits to a guard's test files), reruns each selected test file as it exists on the merge base against the lane tree, and reports `conformance.guard_broken` through the pure `precheck`. A `supersedes` amendment retires it. No LLM call, no new phase or turn.
 
 ### Changes
-- bin/stats/compounding.mjs: reintroduction (reopen after lane close, or blame of a later guarded fix's old-side lines within 90 days), reopen-after-close, guard/decision counts from gate events (n/a when never recorded), rolling/per-release/lane-age grouping, renderer, git and gh gatherers.
-- bin/stats/compounding.test.mjs: fixtures for each metric, n/a handling, buckets, git degradation, flag parsing.
-- bin/stats/index.mjs: `--compounding`, `--bucket`, `--window` allowed with it, HELP, buildReport dispatch, text rendering.
-- docs/STATS.md, devdocs/modules/lean.md: definitions, event names, baseline procedure.
+- bin/lean/guardgate.mjs: index loader, `oldRanges`, `selectGuards`, `commandFor`, `runGuards` (pool, 120 s cap, skip-not-block), `guardFailures`, supersession helpers.
+- bin/lean/guardgate.test.mjs: git-fixture tests (revert plus weakened test, supersedes, no-guard no-git, deleted test, cap/no-runner skip, pytest command, parsing, stale index).
+- bin/lean/conformance.mjs: `supersedes` amendment kind (`contract.supersedes`); `precheck` takes `guardFailures` and drops retired guards.
+- bin/engine/outcome-codes.mjs: `CONFORMANCE_GUARD_BROKEN`.
+- bin/lean/lean.mjs: `guardGate()`, run beside `rerunFailedValidates`, trajectory note, events `guard_run`/`guard_broken`/`supersedes_accepted`, supersession comment on the guarded issue after merge.
+- devdocs/modules/lean.md: dossier section.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/stats/compounding.mjs (git, gh, telemetry only)
-- R2 ✅ bin/stats/index.mjs (--compounding dispatch/render), compounding.mjs renderCompounding
-- R3 post-deploy (baseline procedure in docs/STATS.md)
-- R4 ✅ compounding.mjs blameLineage and reopen handling in compoundingReport
-- R5 ✅ compoundingReport reopen_after_close
-- R6 ✅ summarize guard counts
-- R7 ✅ summarize decisions
-- R8 ✅ bucketLabel / by_lane_age
-- R9 ✅ rolling + by_release
-- R10 ✅ no model calls
-- R11, R12 not-applicable per contract
+- R1 ✅ bin/lean/guardgate.mjs selectGuards
+- R2 ✅ bin/lean/guardgate.mjs runGuards, commandFor
+- R3 ✅ guardFailures; conformance.mjs precheck; resume via the existing conformance fixRound (lean.mjs gate)
+- R4 ✅ conformance.mjs applyAmendments, lean.mjs supersession comment
+- R5 ✅ guardgate.test.mjs "reverts a guarded fix"
+- R6 ✅ guardgate.test.mjs "accepted supersedes" (precheck pass, comment text); the comment post is in lean.mjs at merge
+- R7 ✅ guardgate.test.mjs "no guarded hunk" (zero git calls); selection in T.decisions
+- R8 ✅ shadow records `would` in CONFORMANCE_SHADOW; enforce blocks
+- R9 ✅ no LLM or prompt change
+- R10 ✅ candidates filtered by changed files before any git call
+- R11 ✅ runGuards cap, pool; run in parallel with validate rerun
+- R12 post-deploy: `guard_run` carries `wall_ms`
+- R13 ✅ failure detail is why + test + output tail only
 
 ### Verification
-- V1 `node --test bin/stats/compounding.test.mjs bin/stats/stats.test.mjs bin/stats/pool.test.mjs bin/stats/efficiency.test.mjs bin/stats/release.test.mjs bin/lean/guards.test.mjs`: 125 pass, 0 fail. The new test cannot pass without the fix (the module does not exist).
-- `forgedock check`: PASS. scripts/check-devdocs-freshness.sh: OK. No formatter configured in the repo.
-- checks.mjs widened to the full suite, which the host rules forbid, so only V1 was run.
+- V1 `node --test bin/lean/guardgate.test.mjs`: 9 pass. The test imports the new module, so it fails without the change.
+- V2 guards/conformance/lean/conformance.e2e tests: 611 pass.
+- V3 `node --test bin/stats/compounding.test.mjs`: 7 pass.
+- `forgedock check`: PASS. Devdocs freshness: OK.
 
 ### Notes
-Event names guard_run, guard_broken, supersedes_accepted, decision_superseded, decision_violation are the contract #4693/#4695 must emit. Reopen-event fetch failure reads as 0 reopens (sources.reopens shows the count). Blame matching uses guard merge_sha equal to the blamed commit, so true merge-commit merges are not matched.
+- Base test copies are written beside the original as `<name>__guardbase.<ext>` (so relative imports resolve) and removed afterwards, not in a separate temp dir.
+- "Reviewer accepts" means the lane reaches CONFORMS with the amendment on the effective contract; no separate reviewer row.
+- `FORGE_HOST_PARALLELISM` caps guard test concurrency (default 2). No formatter is configured in the repo.
 
-## Sibling-list follow-up
-`compounding` (bin/stats) matched the SANDBOX_PROVIDERS list test in bin/lean/execution.test.mjs:46 by name proximity only; it is a stats mode, not a sandbox provider, so it is recorded in result.json not_members.
+## Enumerating-test follow-up
+The ten flagged tests only mention a few bin/lean file stems incidentally; recorded `guardgate` as not_members for each in result.json.
