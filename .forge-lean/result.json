@@ -1,18 +1,96 @@
-{"status":"fixed","summary":"forgedock stats --compounding: reintroduction, reopen-after-close, guard and decision counts by window, release and lane-age bucket","requirements":[
-{"id":"R1","status":"implemented","evidence":"bin/stats/compounding.mjs:1","instrumented":false},
-{"id":"R2","status":"implemented","evidence":"bin/stats/index.mjs (--compounding)"},
-{"id":"R4","status":"implemented","evidence":"bin/stats/compounding.mjs blameLineage"},
-{"id":"R5","status":"implemented","evidence":"bin/stats/compounding.mjs summarize"},
-{"id":"R6","status":"implemented","evidence":"bin/stats/compounding.mjs summarize"},
-{"id":"R7","status":"implemented","evidence":"bin/stats/compounding.mjs summarize"},
-{"id":"R8","status":"implemented","evidence":"bin/stats/compounding.mjs bucketLabel"},
-{"id":"R9","status":"implemented","evidence":"bin/stats/compounding.mjs compoundingReport"},
-{"id":"R10","status":"implemented","evidence":"bin/stats/compounding.mjs (no model calls)"}],
-"validation":[{"id":"V1","command":"node --test bin/stats/compounding.test.mjs bin/stats/stats.test.mjs bin/stats/pool.test.mjs bin/stats/efficiency.test.mjs bin/stats/release.test.mjs bin/lean/guards.test.mjs","exit":0}],
-"tests":[{"command":"node --test bin/stats/compounding.test.mjs","result":"pass","fails_without_fix":true}],
-"self_review":[
-{"question":"1","answer":"yes","evidence":"every deliver requirement mapped above; R3 stays post-deploy per contract"},
-{"question":"2","answer":"yes","evidence":"V1 125 pass incl. stats.test.mjs; new flags are additive in bin/stats/index.mjs"},
-{"question":"3","answer":"yes","evidence":"D1-D5 changed, guards.mjs untouched, V1 exit 0, forgedock check PASS"},
-{"question":"4","answer":"yes","evidence":"git diff --stat: only the five deliverable paths plus the new test"}],
-"amendments":[]}
+{
+ "status": "fixed",
+ "summary": "forgedock stats --compounding: reintroduction, reopen-after-close, guard and decision counts by window, release and lane-age bucket",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/stats/compounding.mjs:1",
+   "instrumented": false
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/stats/index.mjs (--compounding)"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/stats/compounding.mjs blameLineage"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "bin/stats/compounding.mjs summarize"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "bin/stats/compounding.mjs summarize"
+  },
+  {
+   "id": "R7",
+   "status": "implemented",
+   "evidence": "bin/stats/compounding.mjs summarize"
+  },
+  {
+   "id": "R8",
+   "status": "implemented",
+   "evidence": "bin/stats/compounding.mjs bucketLabel"
+  },
+  {
+   "id": "R9",
+   "status": "implemented",
+   "evidence": "bin/stats/compounding.mjs compoundingReport"
+  },
+  {
+   "id": "R10",
+   "status": "implemented",
+   "evidence": "bin/stats/compounding.mjs (no model calls)"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test bin/stats/compounding.test.mjs bin/stats/stats.test.mjs bin/stats/pool.test.mjs bin/stats/efficiency.test.mjs bin/stats/release.test.mjs bin/lean/guards.test.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/stats/compounding.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "every deliver requirement mapped above; R3 stays post-deploy per contract"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "V1 125 pass incl. stats.test.mjs; new flags are additive in bin/stats/index.mjs"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "D1-D5 changed, guards.mjs untouched, V1 exit 0, forgedock check PASS"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "git diff --stat: only the five deliverable paths plus the new test"
+  }
+ ],
+ "amendments": [],
+ "not_members": [
+  {
+   "symbol": "compounding",
+   "test": "bin/lean/execution.test.mjs",
+   "why": "the list at line 46 is SANDBOX_PROVIDERS (execution providers such as pool); compounding is a forgedock stats mode in bin/stats, not a sandbox provider"
+  }
+ ]
+}

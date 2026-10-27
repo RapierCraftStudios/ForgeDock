@@ -27,3 +27,6 @@ New pure report core `compoundingReport` plus a gatherer (guards via `collectGua
 
 ### Notes
 Event names guard_run, guard_broken, supersedes_accepted, decision_superseded, decision_violation are the contract #4693/#4695 must emit. Reopen-event fetch failure reads as 0 reopens (sources.reopens shows the count). Blame matching uses guard merge_sha equal to the blamed commit, so true merge-commit merges are not matched.
+
+## Sibling-list follow-up
+`compounding` (bin/stats) matched the SANDBOX_PROVIDERS list test in bin/lean/execution.test.mjs:46 by name proximity only; it is a stats mode, not a sandbox provider, so it is recorded in result.json not_members.
