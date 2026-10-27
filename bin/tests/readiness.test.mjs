@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readiness, deployable, parseGates, parseOwner, formatReport, formatDigest } from "../../scripts/readiness.mjs";
+import { readiness, deployable, parseGates, parseOwner, formatReadinessReport, formatReadinessDigest } from "../../scripts/readiness.mjs";
 
 const NOW = Date.parse("2026-10-27T00:00:00Z");
 const pre = (number, gates, extra = {}) => ({
@@ -22,7 +22,7 @@ test("readiness groups open prerequisites per gate with owner, age and code mile
   assert.equal(r.gates["staging-deploy"].prerequisites[0].ageDays, 10);
   assert.deepEqual(r.gates["staging-deploy"].milestones, ["M3"]);
   assert.equal(r.gates["prod-deploy"].prerequisites.length, 1);
-  assert.match(formatReport(r), /staging-deploy: RED/);
+  assert.match(formatReadinessReport(r), /staging-deploy: RED/);
 });
 
 test("deployable is false while the target gate has open prerequisites, true otherwise", () => {
@@ -45,7 +45,7 @@ test("digest lists DNS before hosting before CI env, and survives a cycle", () =
   assert.deepEqual(r.digest.map((d) => d.number), [10, 11, 12]);
   assert.equal(r.digest[0].unblocked, true);
   assert.equal(r.digest[2].unblocked, false);
-  assert.match(formatDigest(r), /after #11/);
+  assert.match(formatReadinessDigest(r), /after #11/);
   const a = pre(20, "preview", { deps: "#21" }), b = pre(21, "preview", { deps: "#20" });
   assert.equal(readiness([a, b], NOW).digest.length, 2);
 });

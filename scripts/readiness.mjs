@@ -96,7 +96,7 @@ export function deployable(report, target) {
 
 const who = (p) => `#${p.number} ${p.title.slice(0, 60)} (owner: ${p.owner ?? "unassigned"}, age: ${p.ageDays ?? "?"}d)`;
 
-export function formatReport(report) {
+export function formatReadinessReport(report) {
   const names = Object.keys(report.gates).sort();
   if (!names.length) return "Readiness: no open external prerequisites";
   const lines = ["Readiness (open external prerequisites per gate):"];
@@ -109,7 +109,7 @@ export function formatReport(report) {
   return lines.join("\n");
 }
 
-export function formatDigest(report) {
+export function formatReadinessDigest(report) {
   if (!report.digest.length) return "Digest: no open human actions";
   return ["Digest (human actions, dependency order):", ...report.digest.map((d, i) =>
     `  ${i + 1}. #${d.number} ${d.title.slice(0, 60)} [${d.gates.join(",") || "no gates"}] owner: ${d.owner ?? "unassigned"}${d.unblocked ? " - unblocked" : ` - after ${d.after.map((n) => `#${n}`).join(", ")}`}`)].join("\n");
@@ -134,7 +134,7 @@ function main(argv) {
     console.log(d.deployable ? `DEPLOYABLE ${target}` : [`NOT DEPLOYABLE ${target}: ${TARGET_GATE[target]} gate has ${d.openPrerequisites.length} open prerequisite(s)`, ...d.openPrerequisites.map((p) => `  - ${who(p)}`)].join("\n"));
     return d.deployable ? 0 : 1;
   }
-  console.log(argv.includes("--digest") ? formatDigest(report) : formatReport(report));
+  console.log(argv.includes("--digest") ? formatReadinessDigest(report) : formatReadinessReport(report));
   return 0;
 }
 

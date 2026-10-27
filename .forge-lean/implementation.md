@@ -16,7 +16,7 @@ Logic lives in a new pure script, `scripts/readiness.mjs`; the specs only call i
 
 ### Acceptance Criteria Status
 - R1 ✅ commands/issue.md, commands/bootstrap.md, scripts/bootstrap-validate.mjs, scripts/bootstrap-create.mjs
-- R2 ✅ commands/pipeline-status.md, scripts/readiness.mjs readiness()/formatReport
+- R2 ✅ commands/pipeline-status.md, scripts/readiness.mjs readiness()/formatReadinessReport
 - R3 ✅ scripts/readiness.mjs (feature-flag gate is red, blocksMerge false, ignored by deployable)
 - R4 ✅ scripts/readiness.mjs digest()
 - R5 ✅ commands/deploy-info.md, scripts/readiness.mjs deployable() and `--target` exit 1
