@@ -1,22 +1,22 @@
 ### Approach
-`guardChain` now applies the loop logic to a repeated name:cmd only when cmd is a pass-through wrapper (`isPassThroughWrapper(read(cmd), name)`); a repeated real binary passes through unchanged and unrecorded.
+Escape every `<` and `>` in the embedded JSON (as `<`/`>`), the pattern already used in drift.mjs, lifecycle.mjs and integration.mjs. No comment terminator variant can then appear.
 
 ### Changes
-- bin/lean/heavy.mjs: guardChain gains injectable `read` (default `head`) and the wrapper check; doc comment updated.
-- bin/lean/heavy.test.mjs: new nested-real-binary regression test; the wrapper-chain test's fixture scripts now contain a `command -v` lookup so they count as wrappers.
+- bin/lean/guards.mjs:84: renderGuard escapes all `>` instead of only `-->`.
+- bin/lean/guards.test.mjs:48: round-trip test with `-->`, `--!>`, `<x>` in why and test fields; asserts no `>` before the closing ` -->` via slice/includes (no regex).
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/heavy.mjs:311-313, test in heavy.test.mjs
-- R2 ✅ wrapper cutoff test still passes; runWrapped untouched
+- R1 ✅ guards.mjs:84, guards.test.mjs:48
+- R2 ✅ (in lane) no `-->` regex left in guards*.mjs; CodeQL itself is out-of-band
+- R3 ✅ guards.test.mjs:48
 
 ### Verification
-- V1 `node --test bin/lean/heavy.test.mjs bin/lean/lean.test.mjs`: 527 pass, 0 fail. The suite fails without the fix (heavy.mjs reverted, tests kept).
-- `forgedock check`: PASS.
+- V1 `node --test bin/lean/guards.test.mjs`: pass 15/0; the new test fails without the fix (14 pass, 1 fail).
+- V2 `node --test bin/lean/lean.test.mjs bin/lean/train.test.mjs`: pass 516/0.
+- forgedock check: PASS. devdocs freshness: OK.
 
 ### Notes
-No env vars changed. Legit nested calls are no longer counted toward SHIM_LOOP_MAX. An undetectable (non-text) wrapper is no longer cut off on repeat. No formatter config in the repo, so none was run. I briefly used a pathspec `git stash` to test without the fix, applied it back and dropped it.
+Old posted guards (`-->` escapes) still parse. checks.mjs widened to the full suite, so it was not run.
 
-### Docs
-- devdocs/modules/lean.md: re-entry guard paragraph now states a repeated real binary passes through unrecorded (#4735); only wrappers get the next-match / env.shim_loop cutoff.
-
-Follow-up: the repeated-real-binary check now runs before the SHIM_LOOP_MAX cap, so a 4-entry chain containing the real entry passes through. The regression test uses that 4-entry chain.
+### Docs follow-up
+Freshness check failed on guards.mjs; added a dated entry to `devdocs/modules/lean.md` (#4741). V1/V2 re-run: pass.
