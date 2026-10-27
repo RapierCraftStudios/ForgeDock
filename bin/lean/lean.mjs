@@ -57,6 +57,7 @@ import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { parseContextPackConfig, contextArm, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
 import { isExternalKill } from "./hostkill.mjs";
 import { buildResumeDigest } from "./resume.mjs";
+import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, closedEdgeNote } from "./needs-human-premise.mjs";
 import { lightEligibility } from "./light.mjs";
 import { untrackToolState, unstageToolState } from "./toolstate.mjs";
 import { ensureSignedOff } from "./signoff.mjs";
@@ -479,9 +480,22 @@ export async function runCore(o) {
   }
   /** #4297/#4316: a recovery lane that ended unmerged keeps needs-human with this evidence (shared text in render.mjs). */
   const laneRecoveryEvidence = (reason, code, detail) => recoveryEvidence({ code: recover.code, attempt: recover.attempt, outcome: reason, resultCode: code, detail });
+  let closedDeps = []; // #4725: `Depends on` edges the live check found closed: satisfied, flagged in the needs-human comment
   async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR, extra = {}) {
+    // #4725: a recorded premise (`Premise: <kind>:<arg>`) that already holds is no blocker: no label, the lane runs again.
+    const predicate = parsePredicate(why);
+    if (predicate && (!recover || recover.final) && await evalPredicate(predicate, { repo, io: { gh: ghc, pkgVersion: io.pkgVersion } }) === true) {
+      try { await post("FORGE:DECISION", `## Decision: no needs-human\n**What**: the recorded premise \`${predicate.kind}:${predicate.arg}\` already holds, so the label was not applied.\n**Why**: the blocker named an external fact that has since changed.\n**Alternative**: label needs-human and wait for the sweep to clear it.`); } catch { /* best effort */ }
+      return finish("deferred", `premise ${predicate.kind}:${predicate.arg} holds; re-queued instead of needs-human`, { retryInSeconds: 30 });
+    }
     if (!recover || recover.final) try {
-      await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\n_${usageLine()}_`);
+      let link = "";
+      if (code === OUTCOME_CODES.BUILDER_BLOCKED) { // #4725: one owner ask, linked across issues
+        const reg = await registerAsk({ repo, io: { gh: ghc }, issue, ask: why });
+        link = reg.existing ? `Same owner ask as #${reg.existing} (one ask, linked): answering it unblocks this issue too.` : reg.entry ?? "";
+      }
+      const notes = [premiseAnnotation(predicate), closedEdgeNote(closedDeps), link].filter(Boolean).join("\n");
+      await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${notes ? `\n\n${notes}` : ""}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\n_${usageLine()}_`);
       await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
     } catch { /* best effort */ }
     return finish("needs-human", why, { code, ...extra, ...(recover ? { recovery: true } : {}) }, code);
@@ -811,7 +825,7 @@ export async function runCore(o) {
       // #4153 / #4337: a decomposed parent, open or closed, resolves to its open sub-issues; it is satisfied once they all
       // close. Without a usable trail the parent itself is the dependency, even when closed (fail closed).
       const decomposed = isDecomposedRecord(v) && ["OPEN", "CLOSED"].includes(String(v?.state).toUpperCase());
-      if (!decomposed && String(v?.state).toUpperCase() !== "OPEN") continue;
+      if (!decomposed && String(v?.state).toUpperCase() !== "OPEN") { if (String(v?.state).toUpperCase() === "CLOSED" && !closedDeps.includes(d)) closedDeps.push(d); continue; }
       const subs = decomposed ? await decomposedSubissues(d, io) : null;
       const recs = [];
       if (!subs) recs.push([d, { ...v, state: "OPEN" }]);

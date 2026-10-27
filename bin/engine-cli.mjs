@@ -1917,10 +1917,16 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
     {
       const external = { owner: "", unblock: "" }; // the default non-parked relabel is a human-owned wait
       const { NEEDS_HUMAN_EXTERNAL_LABEL } = await import("./engine/outcome-codes.mjs");
+      // #4725: a recorded premise that already holds is not a blocker; an identical owner ask links to its entry instead of a new one.
+      const prem = await import("./lean/needs-human-premise.mjs");
+      const predicate = prem.parsePredicate(evidence);
+      if (predicate && await prem.evalPredicate(predicate, { repo, io: { gh }, now: now() }) === true) return "skipped";
+      const reg = await prem.registerAsk({ repo, io: { gh }, issue, ask: String(evidence ?? "") });
+      const extra = [prem.premiseAnnotation(predicate), reg.existing ? `Same owner ask as #${reg.existing} (one ask, linked): answering it unblocks this issue too.` : ""].filter(Boolean).join("\n");
       try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `needs-human,${NEEDS_HUMAN_EXTERNAL_LABEL}`]); } catch { return "failed"; }
       try {
         const { capComment } = await import("./lean/render.mjs");
-        await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:NEEDS_HUMAN external=true -->\n## Needs human (external)\nOwner: ${external.owner || "unassigned (name an owner)"}\nUnblock condition: ${external.unblock || "unstated (name the condition that unblocks this issue)"}\n${evidence}`)]);
+        await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:NEEDS_HUMAN external=true -->\n## Needs human (external)\nOwner: ${external.owner || "unassigned (name an owner)"}\nUnblock condition: ${external.unblock || "unstated (name the condition that unblocks this issue)"}\n${extra ? `${extra}\n` : ""}${evidence}${!reg.existing && reg.entry ? `\n\n${reg.entry}` : ""}`)]);
       } catch { /* best effort */ }
       return true;
     }
@@ -1943,6 +1949,7 @@ async function scheddDue() {
   const leanIo = (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   await sweepDue({ repo, cwd: process.cwd(), io: leanIo, onResult: probeEventSink(repo) });
   await sweepParkedFollowups({ repo, io: leanIo }); // #4689: re-queue parked post-deploy follow-ups on the same pass
+  try { await (await import("./lean/needs-human-premise.mjs")).sweepPremises({ repo, io: leanIo }); } catch { /* best effort (#4725) */ } // clear needs-human whose recorded premise now holds
 }
 
 /** #4689: re-evaluate the parked post-deploy follow-ups of the repo (promotion, due date, check now defined); never throws. */
@@ -2128,7 +2135,8 @@ export async function schedFromCli(argv, deps = {}) {
  * `orchestration.max_deferrals` (default 3) and `orchestration.global_parallel` (#4191: host-wide lane cap; unset = none). The parser flattens one nested level, so the breaker keys arrive as
  * `orchestration.errors|window_min` (or flat `breaker_errors|breaker_window_min`).
  * `orchestration.recovery.max_attempts` (#4267; arrives as `max_attempts`, or flat `recovery_max_attempts`): recovery lanes per
- * issue for a mechanical needs-human, default 1, 0 turns recovery off.
+ * issue for a mechanical needs-human, default 1, 0 turns recovery off. `orchestration.recovery.mechanical_max_attempts` (#4725; or
+ * `mechanical_max_attempts`): the separate budget of env.*, base.conflict and conflicting-PR rows, default 2, never below `max_attempts`.
  * `orchestration.base_sync.enabled` (#4525; default true, false opts out) and `base_sync.union_globs` (comma list of globs of
  * append-only files whose two-sided line additions a parked PR's base sync keeps both of).
  */
@@ -2140,7 +2148,7 @@ export function readOrchestration(cwd = process.cwd()) {
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
   return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), globalParallel: gp >= 1 ? gp : null,
-    recovery: { maxAttempts: recoveryMax },
+    recovery: { maxAttempts: recoveryMax, mechanicalMaxAttempts: Math.max(int(o.recovery_mechanical_max_attempts ?? o.mechanical_max_attempts, 2), recoveryMax) }, // #4725: env/base/sequence codes have their own budget
     // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).
     baseSync: { enabled: String(o.base_sync_enabled ?? o.enabled ?? "true").trim().toLowerCase() !== "false",
       unionGlobs: String(o.base_sync_union_globs ?? o.union_globs ?? "").replace(/^\[|\]$/g, "").split(",").map((x) => x.trim().replace(/^["']|["']$/g, "")).filter(Boolean) } };
