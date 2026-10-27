@@ -2269,6 +2269,7 @@ done
        echo "#{NUMBER}: engine fallback claim lost or could not be verified — no duplicate Agent dispatch."
      fi
    else
+     [ "${DRY_RUN:-}" = "true" ] || gh issue edit "{NUMBER}" -R {GH_REPO} --add-label "workflow:engine-error" 2>/dev/null || true  # idempotent: keep the partial-work run visible to doctor I10
      echo "#{NUMBER}: engine-error with non-empty committed state (partial work exists) — NOT auto-falling back. Resume from the last committed phase with: forgedock run-issue {NUMBER} --retry --lane {PR_BASE} (a session-limit hit during a phase ends here; --retry reopens only engine-error runs)."
    fi
    ```
