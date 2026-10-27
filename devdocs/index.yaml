@@ -156,6 +156,12 @@ modules:
     authority: required
     token_cost: 900
 
+  - name: lean-settle-scope
+    glob: "scripts/settle-scope*"
+    path: modules/lean.md
+    authority: required
+    token_cost: 900
+
 # ---------------------------------------------------------------------------
 # Always Load
 # Loaded for EVERY task regardless of domain label match.
