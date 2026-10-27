@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseLifecycle, renderLifecycle, advanceState, parseCloseOn, closeDue, classifyCarryOver, preflightCarryOver, shippedWithOpen, emptyButOpen, advanceMilestone, makeLifecycle } from "./lifecycle.mjs";
+import { orchestrate } from "./orchestrate.mjs";
 import { renderSummary, parseSummary } from "./drift.mjs";
 
 const fakeGh = (ms, openIssues = []) => {
@@ -93,5 +94,25 @@ describe("forge#4657 advanceMilestone", () => {
     const ms2 = { description: renderLifecycle("", { state: "shipped:staging", sha: "abc" }) }, g2 = fakeGh(ms2);
     const lc2 = makeLifecycle({ gh: g2.gh, git: async () => { throw new Error("not ancestor"); }, repo: "o/r" });
     assert.equal((await lc2.onBatchEnd(["M"]))[0].state, "shipped:staging");
+  });
+  it("the seam records shipped:staging for a building milestone and closes it when close_on=staging", async () => {
+    const ms = { description: "" }, { gh } = fakeGh(ms);
+    const out = await makeLifecycle({ gh, repo: "o/r", closeOn: "staging" }).onBatchEnd(["M"]);
+    assert.deepEqual(out, [{ title: "M", state: "closed", closed: true }]);
+    const ms2 = { description: "" }, g2 = fakeGh(ms2);
+    assert.deepEqual(await makeLifecycle({ gh: g2.gh, repo: "o/r" }).onBatchEnd(["M"]), [{ title: "M", state: "shipped:staging", closed: false }]);
+    assert.equal(parseLifecycle(ms2.description).state, "shipped:staging");
+  });
+  it("orchestrate calls lifecycle.onBatchEnd with the merged milestone, reports errors as a row, and is unchanged without the seam", async () => {
+    const runOne = async () => ({ terminalReason: "merged", pr: 5, milestone: "M", lane: "milestone/m" });
+    const calls = [], rows = [];
+    const res = await orchestrate({ issues: [1], parallel: 1, runOne, readBody: async () => "", onUpdate: (r) => rows.push(r), lifecycle: { onBatchEnd: async (t) => { calls.push(t); } } });
+    assert.deepEqual(calls, [["M"]]);
+    assert.equal(res[0].outcome, "merged");
+    const rows2 = [];
+    const res2 = await orchestrate({ issues: [1], parallel: 1, runOne, readBody: async () => "", onUpdate: (r) => rows2.push(r), lifecycle: { onBatchEnd: async () => { throw new Error("boom"); } } });
+    assert.equal(res2[0].outcome, "merged");
+    assert.ok(rows2.some((r) => r.outcome === "lifecycle" && /boom/.test(r.detail)));
+    assert.equal((await orchestrate({ issues: [1], parallel: 1, runOne, readBody: async () => "" }))[0].outcome, "merged");
   });
 });

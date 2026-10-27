@@ -109,7 +109,7 @@ export async function advanceMilestone({ gh, repo, title, to = null, sha = null,
 }
 
 /**
- * The orchestrate `lifecycle` seam: `onBatchEnd(titles)` re-evaluates each milestone the batch merged into, so an
+ * The orchestrate `lifecycle` seam: `onBatchEnd(titles)` records `shipped:staging` for each milestone the batch merged into once it has no open issue, so an
  * orchestrate-driven milestone closes once `close_on` is reached. Errors are the caller's to report.
  */
 export function makeLifecycle({ gh, git = null, repo, closeOn = "default", defaultBranch = "main" }) {
@@ -117,7 +117,12 @@ export function makeLifecycle({ gh, git = null, repo, closeOn = "default", defau
   return {
     async onBatchEnd(titles) {
       const out = [];
-      for (const title of titles) { const r = await advanceMilestone({ gh, repo, title, closeOn, deployed }); if (r) out.push({ title, ...r }); }
+      for (const title of titles) {
+        // D3: only a milestone with no open issue left is shipped by the batch; otherwise it is re-evaluated as is.
+        const open = JSON.parse(String(await gh(["issue", "list", "-R", repo, "--milestone", title, "--state", "open", "--limit", "1", "--json", "number"])) || "[]");
+        const r = await advanceMilestone({ gh, repo, title, to: arr(open).length ? null : "shipped:staging", closeOn, deployed });
+        if (r) out.push({ title, ...r });
+      }
       return out;
     },
   };
