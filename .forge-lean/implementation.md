@@ -1,34 +1,31 @@
 ### Approach
-A deterministic train scheduler in `bin/lean/train.mjs` (0 LLM calls). It runs one orchestrate batch per milestone and keeps state in a single atomic file. Lanes already resolve their base from the milestone (`lane.mjs`), so the train never touches `branches.staging` or `forge.yaml`. The #4657 lifecycle seam handles ship and close.
+A deterministic `bin/lean/guards.mjs` (0 LLM calls, git and gh injected). It reads a merged issue's FORGE:CONTRACT comment, the merged PR and the merge commit, builds one guard and posts it as `<!-- FORGE:GUARD {json} -->` on the issue. The lane hook, `guards list` and `guards backfill` all share `guardIssue`.
 
 ### Changes
-- bin/lean/train.mjs: state file, createTrain, insertMilestone, resolveCaps, runTrain, stopOf, trainCli.
-- bin/lean/train.test.mjs: 10 tests.
-- bin/engine-cli.mjs: `trainFromCli` wiring (29 lines).
-- bin/forgedock.mjs: `milestone train` command, known-commands list, help.
-- forge.yaml.example, commands/milestone.md, devdocs/decisions/4658-milestone-train.md: docs.
+- bin/lean/guards.mjs: buildGuard, guardTests, parseHunks, render/parseGuard, guardIssue (idempotent), collectGuards, writeIndex/readIndex, listGuards, backfill, guardAfterMerge, guardsCli.
+- bin/lean/guards.test.mjs: 10 tests, including node --test and pytest fixtures.
+- bin/lean/lean.mjs: best-effort `guardAfterMerge` call after `label("merged")` (+3 lines).
+- bin/engine-cli.mjs: `guardsFromCli`.
+- bin/forgedock.mjs: `guards` case, known-commands entry, help row.
+- devdocs/decisions/4692-fix-guards.md: decision record.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/train.mjs:createTrain/runTrain/trainCli; bin/forgedock.mjs `case "milestone"`
-- R2 ✅ train.mjs never writes forge.yaml; test "forge.yaml is byte-identical" in train.test.mjs
-- R3 ✅ train.mjs:resolveCaps (warn and ignore); test "conflicting --parallel"
-- R4 ✅ train.mjs:insertMilestone/validateOrder; test "insertMilestone re-validates"
-- R5 ✅ train.mjs:STOP_REASONS/stopOf, `--resume`; test "typed STOP"
+- R1 ✅ guards.mjs guardIssue (existing-guard check), lean.mjs hook; test "guardIssue posts exactly one FORGE:GUARD and is idempotent"
+- R2 ✅ guards.mjs guardsCli/listGuards, forgedock.mjs `case "guards"`; test "guards list prints guards for a path"
+- R3 ✅ guards.mjs backfill; test "backfill guards merged lanes and logs why"
+- R4 ✅ guards.test.mjs node --test fixture and pytest fixture
+- R5 ✅ guards.mjs renderGuard, collectGuards/writeIndex (index rebuilt from comments)
+- R6 ✅ guards.mjs guardTests/idsOf (no language parser; ids: [] is file granularity)
 
 ### Verification
-- V1 `node --test bin/lean/train.test.mjs lifecycle.test.mjs lane.test.mjs batch.test.mjs`: 81 pass, 0 fail. The new tests fail without the fix because the module does not exist.
-- `forgedock check`: PASS. The checks script widened to the full suite because forge.yaml.example changed; per host rules I did not run it in full.
-- bin/tests/journey.test.mjs has 3 failures (preflight, forge Act II, writeInstallReceipt) that are identical on the base without my changes.
-- No formatter is configured in the repo.
+- V1 `node --test bin/lean/guards.test.mjs`: pass. It fails without the change because the module does not exist.
+- V2 `node --test bin/lean/lean.test.mjs bin/lean/train.test.mjs`: pass.
+- `forgedock check`: PASS. checks.mjs widened to the full suite (931 files reference the change); per host rules I did not run it.
+- check-devdocs-freshness.sh: OK.
 
 ### Notes
-New command `forgedock milestone train`. State lives under `<batchRoot>/trains/<id>/`. Cap source is `orchestration.global_parallel` (default 3). Batch id of a running milestone is only recorded after its batch returns, because orchestrate gives no early callback.
-
-## Sibling-list check
-The eight bin/lean tests flagged as enumerating siblings of `train` (batch, checks, conformance, context, execution.e2e, execution, fixround, heavy) do not list bin/lean modules or train symbols at the cited lines. Recorded as `not_members` in result.json; no test edits.
-
-## CI follow-up (Unit tests)
-CI log was unavailable. Reran bin/lean, bin/engine, bin/stats, bin/tests, packages/protocol locally: all train/lifecycle/lane/batch tests pass (V1: 81/0). The only failures are 3 pre-existing, environment-dependent tests unrelated to this diff (WSL/platform detection in preflight, a root-user copyFile permission test, writeInstallReceipt platform capture). No code change made.
-
-### CI fix
-CI job "Unit tests (node --test)" runs `scripts/check-test-tmp-cleanup.sh` before the tests. It flagged `bin/lean/train.test.mjs` for using `mkdtemp` directly. The test now uses `tmpDir` from `bin/tests/_tmp.mjs`. The lint and its own test pass; V1 still passes (81 tests). A targeted run of the CI globs (bin/tests, bin/lean, bin/engine, bin/stats, packages/protocol) shows only the 3 journey failures that also fail on the base in this WSL host.
+- Guards need the merge commit locally. The hook fetches the base first; backfill reports a skip with the reason when the commit is missing.
+- A deletion-only hunk is anchored at the line after the deletion in the post-image.
+- No formatter config exists in the repo, so none was run.
+- No env vars added.
+- Stale-list check: the nine flagged tests (batch, checks, conformance, conformance.e2e, context, execution, execution.e2e, fixround, heavy) do not enumerate lean modules or guards-like symbols; recorded as not_members in result.json.

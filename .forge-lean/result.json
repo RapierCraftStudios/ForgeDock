@@ -1,0 +1,125 @@
+{
+ "status": "fixed",
+ "summary": "FORGE:GUARD per merged lane with a test, plus guards list/backfill and two-ecosystem fixture tests",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/lean/guards.mjs:guardIssue, bin/lean/lean.mjs hook after label(\"merged\")"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/guards.mjs:guardsCli, bin/forgedock.mjs case \"guards\""
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/lean/guards.mjs:backfill"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/lean/guards.test.mjs (node --test and pytest fixtures)"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "bin/lean/guards.mjs:renderGuard,collectGuards,writeIndex"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "bin/lean/guards.mjs:guardTests,idsOf"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/guards.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/lean/lean.test.mjs bin/lean/train.test.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/lean/guards.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R1-R6 each map to code and a test in guards.test.mjs"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "lean.test.mjs and train.test.mjs pass (510 pass, 0 fail); the hook is wrapped in try/catch at lean.mjs after label(\"merged\")"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "D1-D6 changed as described; P1 try/catch, P2 render.mjs untouched, P3 only additive case in forgedock.mjs; V1, V2 pass"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "git diff --name-only: guards.mjs, guards.test.mjs, lean.mjs, engine-cli.mjs, forgedock.mjs, 4692-fix-guards.md"
+  }
+ ],
+ "amendments": [],
+ "not_members": [
+  {
+   "symbol": "guards",
+   "test": "bin/lean/batch.test.mjs",
+   "why": "stubs a lane subprocess for the orchestrate batch runner; no list of lean modules"
+  },
+  {
+   "symbol": "guards",
+   "test": "bin/lean/checks.test.mjs",
+   "why": "asserts cache hydration of the checks cache; no list of lean modules"
+  },
+  {
+   "symbol": "guards",
+   "test": "bin/lean/conformance.e2e.test.mjs",
+   "why": "builds a fake lane io and git helpers; no list of lean modules"
+  },
+  {
+   "symbol": "guards",
+   "test": "bin/lean/conformance.test.mjs",
+   "why": "asserts formatShadowSummary output over conformance rows; not a module list"
+  },
+  {
+   "symbol": "guards",
+   "test": "bin/lean/context.test.mjs",
+   "why": "asserts context-pack source switches; not a module list"
+  },
+  {
+   "symbol": "guards",
+   "test": "bin/lean/execution.e2e.test.mjs",
+   "why": "stub lane for execution modes; no list of lean modules"
+  },
+  {
+   "symbol": "guards",
+   "test": "bin/lean/execution.test.mjs",
+   "why": "asserts sandbox provider config parsing; not a module list"
+  },
+  {
+   "symbol": "guards",
+   "test": "bin/lean/fixround.test.mjs",
+   "why": "asserts which fix-round kinds are fresh; not a module list"
+  },
+  {
+   "symbol": "guards",
+   "test": "bin/lean/heavy.test.mjs",
+   "why": "asserts classifyStep heavy/llm commands; not a module list"
+  }
+ ]
+}
