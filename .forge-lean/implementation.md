@@ -1,28 +1,27 @@
 ### Approach
-One sourced bash snippet gives router, agent and schedd units the same hardening; entrypoints set distinctive process titles; doctor gets a warn-only restart check driven by the journal.
+Additive `warnings` channel in the bootstrap validator for `deploy-last`; bootstrap spec rules; a pure `settle-scope` module (freeze, classify, convergence, STOP report) with spec wiring in orchestrate.md. The settle loop itself is not code in this repo, so wiring is spec-level.
 
 ### Changes
-- pool/install/unit-hardening.sh: new; OOMScoreAdjust (-500 system, manager's own value for user), Restart=always, StartLimitIntervalSec=0, earlyoom/oomd hint (never edits config).
-- pool/install/install-router.sh, install-agent.sh: use the snippet and print the hint.
-- pool/install/install-schedd.sh: new schedd user unit.
-- bin/pool/cli.mjs: titles for router and agent. bin/engine-cli.mjs: schedd title.
-- bin/pool/health.mjs: restartCheck / lastExitReason. bin/forgedock.mjs: doctor Check 14.
-- bin/tests/pool-unit.test.mjs: new tests.
+- scripts/bootstrap-validate.mjs: `warnings` + `deploy-last`, `formatWarnings`, CLI prints warnings on stderr, exit stays 0.
+- bin/tests/bootstrap-validate.test.mjs: deploy-last warns / does not warn tests.
+- commands/bootstrap.md: layering and deployable-slice rules (trimmed to stay under the 4096-byte spec budget).
+- scripts/settle-scope.mjs, bin/tests/settle-scope.test.mjs: new module and tests.
+- commands/orchestrate.md: section 3b, settle scope.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/pool/cli.mjs:39
-- R2 ✅ pool/install/unit-hardening.sh:11-22
-- R3 ✅ install-router.sh, install-agent.sh, bin/tests/pool-unit.test.mjs
-- R4 ✅ bin/pool/health.mjs, bin/forgedock.mjs Check 14
-- R5 ✅ install-schedd.sh, bin/engine-cli.mjs schedd title
+- R1 ✅ scripts/settle-scope.mjs classifyNew (targets); follow-up script unchanged (no milestone, scripts/file-deferred-followups.sh:195)
+- R2 ✅ scripts/settle-scope.mjs convergence / formatStopReport; commands/orchestrate.md section 3b
+- R3 ✅ commands/bootstrap.md plan rules, step 7
+- R4 ✅ scripts/bootstrap-validate.mjs deployWarnings
 
 ### Verification
-- V1 pool-unit/pool-cli/router tests: pass (70). V2 engine-cli + execution tests: pass (131). V3 bash -n: ok.
-- The title test fails without the fix (title not set). Not run on base explicitly.
-- checks.mjs widened to the full suite (929 refs); not run per host rules. `forgedock check` passes.
+- V1 node --test (4 files): 63 pass, 0 fail. New tests fail without the fix (functions and warnings absent).
+- V2 bash scripts/file-deferred-followups.test.sh: 33 passed.
+- `forgedock check`: PASS. checks.mjs widened to the full suite, which host rules forbid; not run. No formatter configured in package.json; none run.
 
 ### Notes
-No formatter configured. Doctor "grew in last hour" is derived from journal restart lines. The user-unit OOMScoreAdjust is the user manager's own value, not independently tested on a real systemd.
+Docs: devdocs/modules/lean.md entry for #4665 (freshness check).
 
-## Sibling-list check
-`health` (bin/pool) is not a member of the lists flagged at bin/lean/execution.test.mjs:222 (gc sandbox test) or bin/tests/router.test.mjs:29 (router CLI tests); neither enumerates bin/pool modules. Recorded in result.json not_members.
+`validatePlan` result gains `warnings`; `ok` and exit codes unchanged. No env vars.
+
+## Fix: deploy-last now also warns when no deploy-class issue sits in milestones 1-2 (e.g. only milestone 3 of 4); test added.

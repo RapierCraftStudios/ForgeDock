@@ -193,6 +193,13 @@ Escalate only these:
 Collect escalations into one question list and ask it once, at the end of the batch. Never ask per issue, and keep every
 other lane running meanwhile.
 
+## 3b. Settle scope (#4665)
+
+When settle begins, freeze the milestone's issue set (`scripts/settle-scope.mjs` `freezeScope`). Issues filed later are
+classified by `classifyNew`: decomposition children of a frozen issue stay in the milestone and join the measured set;
+deferred follow-ups go to the next milestone or the backlog; review findings and others count as growth only.
+`convergence` measures the frozen set plus those children; a STOP prints `formatStopReport` (growth and sources).
+
 ## 4. Report
 
 When all lanes have finished, print one table: issue, outcome, PR, minutes (issues the pre-filter closed
