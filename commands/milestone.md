@@ -448,15 +448,16 @@ git fetch origin milestone/{slug}
 OPEN_COUNT=$(gh issue list --milestone "{TITLE}" --state open --json number --jq '. | length')
 ```
 
-If there are open issues, warn the user:
-```
-⚠ Milestone "{TITLE}" still has {OPEN_COUNT} open issues:
-{list them}
+If there are open issues, this is a hard gate (interactive and unattended; unattended runs fail instead of asking). Every open issue must be **carried over** with a target milestone *and* a class (`engineering|external|post-deploy|wont-do`), or closed first. The class comes from labels (`carry:<class>`, `needs-human:external`, `awaiting-promotion|awaiting-precondition|awaiting-measurement`, `wont-do`; else `engineering`); the target is a `carry-to:<milestone title>` label or the user's answer. Run the check with `preflightCarryOver` (`bin/lean/lifecycle.mjs`):
 
-Ship anyway? Open issues will remain assigned to the milestone.
+```
+⚠ Milestone "{TITLE}" still has {OPEN_COUNT} open issues without a carry-over target:
+{list them with their class}
+
+Name a target milestone for each (or close it). Ship is blocked until every open issue has one.
 ```
 
-Wait for confirmation.
+An issue that is `needs-human:external`, flag/legal-gated (`flag-gated`, `legal-gated`) or depends on an issue that is not on the target base is **never** demoted to fast lane: it is carried to its target milestone.
 
 ### Step 2: Sync milestone branch with staging
 
@@ -734,24 +735,28 @@ Run /milestone ship {slug} again when the milestone is ready for another shippin
 ```bash
 gh pr merge {PR_NUMBER} --merge
 
-# Step 6A: Promote remaining open issues to fast lane
-# Query open issues still on this milestone (per_page=100 to avoid silent truncation beyond default 30)
-OPEN_ISSUES=$(gh api "repos/{owner}/{repo}/issues?milestone={MS_NUMBER}&state=open&per_page=100" \
-  --jq '.[].number')
+# Step 6A: Carry over remaining open issues (forge#4657). Never clear the milestone: every open issue moves to its
+# target milestone (Step 1 gate) and keeps its class label. Only an issue whose preflightCarryOver entry has demote=true
+# and whose target is "fast lane" may lose its milestone; external, gated and off-base-dependent issues are never demoted.
+OPEN_ISSUES=$(gh api "repos/{owner}/{repo}/issues?milestone={MS_NUMBER}&state=open&per_page=100" --jq '.[].number')
 OPEN_COUNT=$(echo "$OPEN_ISSUES" | grep -c '[0-9]' 2>/dev/null || echo 0)
+for ISSUE_NUM in $OPEN_ISSUES; do
+  gh issue edit "$ISSUE_NUM" --milestone "{TARGET_TITLE_OF_ISSUE}" --add-label "carry:{CLASS_OF_ISSUE}"  # <!-- allowlist:check-command-side-effects -->
+  echo "  Carried #$ISSUE_NUM -> {TARGET_TITLE_OF_ISSUE} ({CLASS_OF_ISSUE})"
+done
 
-if [ "$OPEN_COUNT" -gt 0 ]; then
-  echo "Promoting $OPEN_COUNT open issue(s) to fast lane (removing milestone assignment)..."
-  for ISSUE_NUM in $OPEN_ISSUES; do
-    gh api "repos/{owner}/{repo}/issues/$ISSUE_NUM" -X PATCH --field milestone=null
-    echo "  Demoted #$ISSUE_NUM → fast lane"
-  done
-else
-  echo "No open issues remain on the milestone — nothing to demote."
-fi
-
-# Step 6B: Close the milestone
-gh api repos/{owner}/{repo}/milestones/{MILESTONE_NUMBER} --method PATCH --field state="closed"
+# Step 6B: Record the lifecycle. The merge is on staging, not yet on the default branch: write
+# a FORGE:LIFECYCLE record ({"v":1,"state":"shipped:staging","sha":"<merge commit>"}) in the milestone description and
+# close the milestone only when forge.yaml `milestones.close_on` (default `default`) is reached. With close_on=default the
+# milestone stays open until the staging -> default merge is observed (deployed:default), then it closes.
+MERGE_SHA=$(gh pr view {PR_NUMBER} --json mergeCommit --jq '.mergeCommit.oid')
+DESC=$(gh api repos/{owner}/{repo}/milestones/{MILESTONE_NUMBER} --jq '.description // ""')
+TAG="FORGE:LIFECYCLE"
+BLOCK="<!-- $TAG {\"v\":1,\"state\":\"shipped:staging\",\"sha\":\"$MERGE_SHA\"} -->"
+gh api repos/{owner}/{repo}/milestones/{MILESTONE_NUMBER} --method PATCH --field description="$(printf '%s\n\n%s' "$(printf '%s' "$DESC" | sed "/$TAG/d")" "$BLOCK")"
+# close_on=staging only (and only when no issue is left open on the milestone):
+# gh api repos/{owner}/{repo}/milestones/{MILESTONE_NUMBER} --method PATCH --field state="closed"
+# Orchestrate-driven runners get the same transition from bin/lean/lifecycle.mjs advanceMilestone at batch end.
 
 # Step 6C: Delete the milestone branch
 git push origin --delete milestone/{slug}
@@ -762,8 +767,8 @@ Report:
 ```
 ## Shipped: {MILESTONE_TITLE}
 
-Merged to staging. Milestone branch deleted.
-{If OPEN_COUNT > 0: "{OPEN_COUNT} open issue(s) moved to fast lane: #{list}. They will target staging on next /work-on run."}
+Merged to staging (lifecycle: shipped:staging). Milestone branch deleted. Milestone closes at `milestones.close_on` ({close_on}).
+{If OPEN_COUNT > 0: "{OPEN_COUNT} open issue(s) carried over: #{list} -> {target} ({class}). None were demoted to fast lane."}
 {If OPEN_COUNT == 0: "No open issues remaining — clean close."}
 
 To deploy: merge `staging → main` via GitHub web UI when ready.

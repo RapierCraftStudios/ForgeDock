@@ -37,6 +37,8 @@
  * issue while maintenance starts stay within `share` of all lane starts (`dispatch: {started, maint}`, persisted), then
  * P2+ features, then (`whenIdle`) maintenance once no feature is pending. Maintenance the budget never admits ends `held`.
  *
+ * Milestone lifecycle (#4657), off unless `lifecycle` is passed (`bin/lean/lifecycle.mjs` makeLifecycle): at batch end
+ * `lifecycle.onBatchEnd(titles)` advances/closes each milestone a `merged` row's result named. Errors never change an outcome.
  * Milestone drift (#4161), off unless `drift` is passed (`bin/lean/drift.mjs` makeDrift): a `merged` milestone-lane run
  * whose result carries `structure` awaits `drift.onMerged(issue, row, result)` before its slot frees. A drift error is
  * reported as a `drift` row and never changes the outcome. With `drift.holds(issue, {body, lane})` (block_dispatch), a
@@ -239,7 +241,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
   recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, getCancelled = null, getHeld = null, getGates = null, stopLane = null,
-  estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS }) {
+  estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
   const set = new Set(order);
@@ -274,6 +276,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const parkedBase = new Map(); // #4525: issue -> base sha its parked PR was last synced (or reported conflicting) against
   let lastParkedSync = null;
   const bodies = new Map(); // issue -> body, kept in memory for drift.holds only
+  const lifecycleTitles = new Set(); // #4657: milestones this batch merged into, re-evaluated at batch end
   const driftHeld = new Map(); // issue -> flagged package dir holding it this pass
   const integHeld = new Map(); // issue -> reason (red integration streak on its milestone lane, #4667) holding it this pass
   const reg = sched?.registry ?? null;
@@ -656,6 +659,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       try { await relabelNeedsHuman({ issue: n, parked: { code: row.code, pr: Number.isInteger(row.pr) ? row.pr : null }, evidence: `Mechanical park \`${row.code}\`${Number.isInteger(row.pr) ? ` (PR #${row.pr})` : ""}:\n${String(row.detail ?? "")}` }); row.parkedQueued = true; } catch { /* best effort */ }
     }
     results.set(n, row);
+    if (row.outcome === "merged" && lifecycle && r?.milestone) lifecycleTitles.add(String(r.milestone)); // #4657
     if (row.outcome === "merged" && integration?.onMerged && String(rec?.lane ?? r?.lane ?? "").startsWith("milestone/")) {
       // #4667: counts the merge toward the milestone's integration run; an error is a row, never the outcome.
       try { await integration.onMerged(n, { ...row, lane: rec?.lane ?? r?.lane }, r); } catch (e) { update({ issue: n, outcome: "integration", detail: `integration check failed: ${String(e?.message ?? e).slice(0, 300)}` }); }
@@ -1072,6 +1076,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   }
   if (reg) withdrawExcept(new Set());
   await relabelQueued();
+  // #4657: a milestone whose `close_on` state is reached closes here; a failure is a row, never an outcome change.
+  if (lifecycle?.onBatchEnd && lifecycleTitles.size && !halted) {
+    try { await lifecycle.onBatchEnd([...lifecycleTitles]); } catch (e) { onUpdate({ issue: 0, outcome: "lifecycle", detail: `lifecycle check failed: ${String(e?.message ?? e).slice(0, 300)}` }); }
+  }
   save();
   const withRequeue = (r) => (r && requeuedInfo.has(r.issue) ? { ...r, requeued: { reason: requeuedInfo.get(r.issue).reason, by: requeuedInfo.get(r.issue).by, prior: requeuedInfo.get(r.issue).prior.map((p) => ({ outcome: p.outcome, detail: p.detail ?? null, pr: p.pr ?? null })) } } : r);
   return order.map((n) => withRequeue(results.get(n)) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: heldDetail(n),
