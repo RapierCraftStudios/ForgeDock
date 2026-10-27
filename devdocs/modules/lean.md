@@ -380,6 +380,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `meta/<prefix>_snapshot.json` was not made by the generator; one builder round
    (`migrationGeneratorPrompt`, stage `sequence`: regenerate, `--custom` for hand SQL), else an
    anomaly. `builderImplementPrompt` also says never to name migrations by hand.
+   **Journal `when` order** (#4661, `journalOrderProblems`, same gate): a journal entry the lane adds
+   whose `when` is not above the base journal's max (parallel milestone branches interleave stamps;
+   newest-only migrators such as drizzle `migrate()` skip it on a persistent DB, CI migrates a fresh one)
+   is reported with the hand-named problems; the one builder round re-stamps it, else an anomaly.
+   Repos get `templates/github-actions/migration-journal-guard.test.mjs` (strictly increasing `when`, none
+   older than the base max). An optional repo-side upgrade test (migrate a DB to the base head, apply the
+   branch, assert every new migration was recorded) is not engine-run.
    **Sequence numbers** (#4322, `sequence.mjs`): before review and the first push,
    and after every base-sync merge (clean or not), lane-added `<NNN>_*` files whose
    number the fetched lane already uses → builder renumbers (`sequencePrompt`; a

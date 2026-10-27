@@ -18,7 +18,7 @@ import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
 import { resolveBaseConflicts } from "./conflictres.mjs";
-import { sequenceCollisions, snapshotLane, verifyRenumber, renumberLane, resolveSequenceConflicts, generatorProblems } from "./sequence.mjs";
+import { sequenceCollisions, snapshotLane, verifyRenumber, renumberLane, resolveSequenceConflicts, generatorProblems, journalOrderProblems } from "./sequence.mjs";
 import { duplicateExports } from "./postmerge.mjs";
 import { englishCopies } from "./i18n.mjs";
 import { scopedChecks } from "./checks.mjs";
@@ -381,7 +381,8 @@ export function makeLeanIo({ repo }) {
     conflictResolve: ({ cwd, files, cfg }) => resolveBaseConflicts({ git: (a) => run("git")(a, { cwd }), cwd, files, cfg }),
     sequenceLease: makeSequenceLeaseIo(),
     /** #4591: lane-added migrations the repo's generator did not produce (no journal entry or snapshot); [] on failure. */
-    migrationGenerator: ({ cwd, base }) => generatorProblems({ git: (a) => run("git")(a, { cwd }), base }),
+    /** #4661: plus journal `when` stamps not above the base max (newest-only migrators skip them). */
+    migrationGenerator: async ({ cwd, base }) => { const git = (a) => run("git")(a, { cwd }); return [...await generatorProblems({ git, base }), ...await journalOrderProblems({ git, base })]; },
     /** #4406: the lane's scoped checks after a base merge (bin/lean/checks.mjs; [] on failure), and same-app duplicate exports (bin/lean/postmerge.mjs). */
     postMergeChecks: async ({ cwd, base }) => { try { return scopedChecks({ repo: cwd, base }); } catch { return []; } },
     duplicateExports: ({ cwd, base }) => duplicateExports({ git: (a) => run("git")(a, { cwd }), cwd, base }),

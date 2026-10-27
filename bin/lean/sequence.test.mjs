@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { sequenceCollisions, journalProblems, snapshotLane, verifyRenumber, numberOnlyChange, headerOnlyChange, renumberLane, resolveSequenceConflicts, generatorProblems } from "./sequence.mjs";
+import { sequenceCollisions, journalProblems, snapshotLane, verifyRenumber, numberOnlyChange, headerOnlyChange, renumberLane, resolveSequenceConflicts, generatorProblems, journalOrderProblems } from "./sequence.mjs";
 import { makeSequenceLeaseIo } from "./seqlease.mjs";
 import { sequencePrompt, sequenceSyncNote, migrationGeneratorPrompt, builderImplementPrompt } from "./prompts.mjs";
 
@@ -490,5 +490,35 @@ describe("hand-named migrations (#4591)", () => {
   it("the fix prompt and the builder rule forbid naming migrations by hand", () => {
     assert.match(migrationGeneratorPrompt(["db/x.sql: not produced by the migration generator (no journal entry added for it)"]), /drizzle-kit generate --custom[\s\S]*Never name or number migration files by hand/);
     assert.match(builderImplementPrompt("local"), /Never name or number migration files by hand/);
+  });
+});
+
+describe("journal when ordering across parallel milestone branches (#4661)", () => {
+  const J = (...es) => `${JSON.stringify({ version: "7", entries: es.map(([tag, when], idx) => ({ idx, tag, when })) }, null, 2)}\n`;
+  function repo(laneEntries) {
+    const d = tmpDir("when-");
+    sh(d, "init", "-q", "-b", "main");
+    put(d, { "db/meta/_journal.json": J(["0_a", 5000], ["1_b", 9000]) });
+    commit(d, "init");
+    sh(d, "checkout", "-qb", "lane");
+    if (laneEntries) { put(d, { "db/meta/_journal.json": J(["0_a", 5000], ["1_b", 9000], ...laneEntries) }); commit(d, "lane"); }
+    return d;
+  }
+  it("flags an added entry stamped at or below the base max when", async () => {
+    const p = await journalOrderProblems({ git: gitIn(repo([["2_c", 7000]])), base: "main" });
+    assert.equal(p.length, 1);
+    assert.match(p[0], /db\/meta\/_journal\.json: 2_c when 7000 is not above the base max when 9000/);
+  });
+  it("passes entries above the base max, an unchanged journal, and no journal", async () => {
+    assert.deepEqual(await journalOrderProblems({ git: gitIn(repo([["2_c", 9001]])), base: "main" }), []);
+    assert.deepEqual(await journalOrderProblems({ git: gitIn(repo(null)), base: "main" }), []);
+    const d = tmpDir("when-none-");
+    sh(d, "init", "-q", "-b", "main"); put(d, { "x.txt": "x" }); commit(d, "i"); sh(d, "checkout", "-qb", "lane");
+    assert.deepEqual(await journalOrderProblems({ git: gitIn(d), base: "main" }), []);
+  });
+  it("flags non-increasing when inside the lane's added entries; the prompt asks for a re-stamp", async () => {
+    const p = await journalOrderProblems({ git: gitIn(repo([["2_c", 9100], ["3_d", 9050]])), base: "main" });
+    assert.match(p[0], /3_d when 9050 is not after 2_c/);
+    assert.match(migrationGeneratorPrompt(p), /re-stamp/);
   });
 });
