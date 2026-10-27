@@ -1933,3 +1933,5 @@ was swallowed and every later pass returned `recorded-fail`, so the parent staye
 throws, no record is posted and the next pass re-runs the checks and retries. The early `monitoring` return on an existing windowed
 pass record also re-applies the idempotent `post-deploy-monitoring` label, so a label that failed on the first pass is retried
 (`sweepDue` selects by it).
+
+Guard gate added wall time (#4705, R12): `guardGate` runs beside `rerunFailedValidates` in one `Promise.all`, so the gate's raw `wall_ms` overstates the lane delay. `lean.mjs` times both; `added_wall_ms = max(0, total - validate rerun time)` rides on the `guard_run` event (0 when the gate errors or skips), and the sum over gate passes that selected a guard is carried as `guard_added_ms` on `RUN_TERMINAL` (omitted when 0; `telemetry-seam.mjs` passes it through on `run_terminal` beside `wall_ms`). Telemetry only, no verdict change. The enforce rule (median added wall < 5% of lane wall) is judged post-deploy from shadow telemetry.
