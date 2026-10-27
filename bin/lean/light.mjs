@@ -54,7 +54,7 @@ const REPRO_RE = /steps to reproduce|\brepro(duction|duce)?\b|\bexpected[ _-]+(b
 const FENCE_RE = /^\s*(```|~~~)/m;
 const DECISION_LABEL_RE = /^(type[:/]\s*)?(decision|needs-decision|product-decision|rfc|adr)$/i;
 const DECISION_TITLE_RE = /^\s*(decision|rfc|adr)[(:]/i;
-const POST_DEPLOY_LABELS = new Set(["post-deploy", "awaiting-promotion"]);
+const POST_DEPLOY_LABELS = new Set(["post-deploy", "awaiting-promotion", "awaiting-due"]);
 
 /** Risk details for `files`: a built-in risk word or a declared review.risk_paths glob. */
 function riskDetails(files, riskPaths) {

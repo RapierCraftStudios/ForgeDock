@@ -501,12 +501,16 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
 
   const skip = (n, detail) => { results.set(n, { issue: n, outcome: "skipped", pr: null, cost_usd: 0, minutes: 0, detail }); update(results.get(n)); };
   const requeue = (n, delayMs) => { pending.push(n); enqueued.set(n, now()); if (delayMs > 0) notBefore.set(n, now() + delayMs); else notBefore.delete(n); };
-  const noteEngineError = () => {
+  const TRANSPORT_TEXT = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|HTTP 50[234]/i;
+  const TRANSPORT_COOLDOWN_MS = 5 * 60000;
+  let transportErrors = 0; // #4685: engine-errors in the current window that were link failures
+  const noteEngineError = (detail = "") => {
     if (!breaker) return;
     const t = now(), windowMs = breaker.window_min * 60000;
     errorTimes = [...errorTimes.filter((x) => t - x < windowMs), t];
+    transportErrors = TRANSPORT_TEXT.test(String(detail)) ? Math.min(transportErrors + 1, errorTimes.length) : 0;
     if (!tripped && errorTimes.length >= breaker.errors) {
-      tripped = { at: t, detail: `circuit breaker: ${errorTimes.length} engine-errors within ${breaker.window_min} min; admissions stopped` };
+      tripped = { at: t, ...(transportErrors >= errorTimes.length ? { transport: true } : {}), detail: `circuit breaker: ${errorTimes.length} engine-errors within ${breaker.window_min} min; admissions stopped` };
       update({ issue: null, outcome: "breaker", detail: tripped.detail });
     }
   };
@@ -594,7 +598,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       row.detail = `gave up after ${deferrals.get(n) ?? 0} deferrals: ${r?.detail ?? r?.code ?? ""}`;
     }
     if (row.outcome === "engine-error") {
-      noteEngineError();
+      noteEngineError(r?.detail);
       if ((engineErrors.get(n) ?? 0) < ENGINE_ERROR_RELAUNCHES) {
         engineErrors.set(n, (engineErrors.get(n) ?? 0) + 1);
         requeue(n, 0); done(); save();
@@ -1025,6 +1029,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         }
       }
       if (reg) withdrawExcept(wanted);
+      // #4685: a breaker tripped only by link failures (a router restart) closes itself after a cooldown
+      if (tripped?.transport && now() - tripped.at >= TRANSPORT_COOLDOWN_MS) { tripped = null; errorTimes = []; transportErrors = 0; save(); }
       if (tripped && !running.size) { await drainAdds(); break; } // breaker: let running lanes finish, keep the rest pending for a resume
       if (cancelled && !running.size) { await drainAdds(); break; } // #4376: cancel: the rest end held for a resume
       if (budgetStop && !running.size) { await drainAdds(); break; } // execution budget (stop): the same, the rest end held

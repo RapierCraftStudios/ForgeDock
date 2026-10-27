@@ -1909,6 +1909,12 @@ The only override is `{"kind":"supersedes","guard":"#X","why":"..."}` in result.
 `contract.supersedes`; the reviewer sees it on the effective contract). After the lane merges with the amendment, the engine
 comments on #X and logs `supersedes_accepted`. Events: `guard_run` (with `wall_ms`), `guard_broken`, `supersedes_accepted`.
 
+## Entry 2026-10-27 — AlterLab engine gaps (#4685)
+- A remote lane's `credentials` block naming a missing tool/module (`missingToolBlock`, lean.mjs) ends `env.tool_missing` (recoverable), not `builder.blocked`.
+- `scripts/hotspots.sh` always excludes lockfiles (basename match at any depth) on top of `exclude_globs`.
+- Pool provider: a `token_env` credential that resolves empty falls back to the router token file; HTTP 401/403 at sandbox start defers `sandbox.auth` (300s), never needs-human.
+- Breaker: `orchestrate --clear-breaker <id>` clears it; a breaker tripped only by transport errors (`tripped.transport`) auto-closes after 5 min and is cleared on a daemon-restart resume. Submit-time env replay was already delivered by #4691.
+
 ## Entry 2026-10-27 — Validate results across a merge-time CI fix round (#4708)
 
 `mergeFixRound` reviewed the fix head before it was CI-verified, and the fix session could rewrite `result.json` without the
@@ -1916,6 +1922,17 @@ earlier `validation` rows, so the review failed `conformance.unimplemented: ... 
 rows recorded before the round are carried forward (marked `carried: true`, written back to `result.json` because `gate()` re-reads
 it), the fix head goes through `ciVerify("merge")` under remote verify before `doReview` (as the base-sync retry, #4527), and a
 validate id still unrecorded is `engine.validate_result_lost`, not a conformance failure.
+
+## Entry 2026-10-27 — Due-date gate, parked sweep and owner asks for post-deploy follow-ups (#4689)
+
+A post-deploy item may carry `due:YYYY-MM-DD`: `postDeployGate` (`prefilter.mjs`) parks it `awaiting-due` (labels
+`awaiting-due` and `due:<date>`, UTC midnight, after the promotion check and before `min_age`). A `decision:` item
+(`postDeployOnly` accepts it) parks `owner-ask` with one `FORGE:OWNER_ASK` comment and no lane. `parked-sweep.mjs`
+(`sweepParked`) runs from the schedd timer next to `sweepDue` and from `forgedock probe --due`: it re-runs the gate with
+`prefilterIssue({gateOnly})` (no model call, no already-fixed path) for the `awaiting-promotion|awaiting-due|
+awaiting-measurement` issues, so a promoted parent or a passed date releases the wait labels within one pass.
+`measureFollowup` ticks the post-deploy items on a pass, files one `followup:engineering` issue per failing check and posts
+the typed owner ask for an item with no runnable check. The batch report adds `due date:` and `owner ask:` lines.
 
 ## Entry 2026-10-27 — Post-deploy fail reopens the parent before it records (#4652)
 

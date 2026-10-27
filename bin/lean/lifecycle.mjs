@@ -9,7 +9,7 @@ export const LIFECYCLE_MARKER = "FORGE:LIFECYCLE";
 export const LIFECYCLE_STATES = ["building", "shipped:staging", "deployed:default", "closed"];
 export const CARRY_CLASSES = ["engineering", "external", "post-deploy", "wont-do"];
 const BLOCK_RE = new RegExp(`<!--\\s*${LIFECYCLE_MARKER}\\s+(\\{[\\s\\S]*?\\})\\s*-->`);
-const POST_DEPLOY_LABELS = ["awaiting-promotion", "awaiting-precondition", "awaiting-measurement"];
+const POST_DEPLOY_LABELS = ["awaiting-promotion", "awaiting-due", "awaiting-precondition", "awaiting-measurement"];
 const GATED_LABELS = ["flag-gated", "legal-gated", "legal-hold"];
 const arr = (x) => (Array.isArray(x) ? x : []);
 const names = (labels) => arr(labels).map((l) => String(l?.name ?? l));
