@@ -2181,6 +2181,35 @@ export async function integrationFromCli(argv, deps = {}) {
   return run(argv, deps);
 }
 
+/**
+ * `forgedock milestone train` (#4658): lean/train.mjs over `orchestrateFromCli` (one batch per milestone) and the #4657 lifecycle.
+ * The train reads forge.yaml (`orchestration.global_parallel`, `milestones.close_on`) and never writes it.
+ */
+export async function trainFromCli(argv, deps = {}) {
+  const { trainCli } = await import("./lean/train.mjs");
+  const batchMod = await import("./lean/batch.mjs");
+  const cwd = process.cwd();
+  const io = deps.io ?? makeIo();
+  const repo = flag(argv, "--repo") ?? (await resolveDefaultRepo(io));
+  if (!repo) throw new Error("milestone train needs the repo: pass --repo or run inside a checkout with a GitHub remote");
+  const leanIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  const { makeLifecycle } = await import("./lean/lifecycle.mjs");
+  const { readLive } = await import("../scripts/plan-validate-live.mjs");
+  const orchestrate = deps.orchestrate ?? orchestrateFromCli;
+  return trainCli(argv, {
+    root: deps.batchRoot ?? batchMod.batchRoot(), repo, id: deps.id, print: deps.print,
+    globalParallel: readOrchestration(cwd).globalParallel,
+    readLive: deps.readLive ?? (() => readLive({ gh: io.gh, repo })),
+    onBatchEnd: (titles) => (deps.lifecycle ?? makeLifecycle({ gh: leanIo.gh, git: (a) => leanIo.git(a, { cwd }), repo, closeOn: readMilestoneCloseOn(cwd), defaultBranch: readBranches(cwd).default ?? "main" })).onBatchEnd(titles),
+    runMilestone: async (title, { parallel, resume }) => {
+      if (resume) return orchestrate(["--resume", resume, "--repo", repo]);
+      const open = JSON.parse(String(await io.gh(["issue", "list", "-R", repo, "--milestone", title, "--state", "open", "--limit", "200", "--json", "number"])) || "[]");
+      if (!open.length) return { ok: true, rows: [] };
+      return orchestrate([...open.map((i) => String(i.number)), "--parallel", String(parallel), "--repo", repo]);
+    },
+  });
+}
+
 /** forge.yaml `ci` (#4667): the milestone integration config, or null when no `workflow` is set (feature off). */
 export function readIntegration(cwd = process.cwd()) {
   let ci = null;

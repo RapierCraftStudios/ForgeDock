@@ -1,27 +1,34 @@
 ### Approach
-Additive `warnings` channel in the bootstrap validator for `deploy-last`; bootstrap spec rules; a pure `settle-scope` module (freeze, classify, convergence, STOP report) with spec wiring in orchestrate.md. The settle loop itself is not code in this repo, so wiring is spec-level.
+A deterministic train scheduler in `bin/lean/train.mjs` (0 LLM calls). It runs one orchestrate batch per milestone and keeps state in a single atomic file. Lanes already resolve their base from the milestone (`lane.mjs`), so the train never touches `branches.staging` or `forge.yaml`. The #4657 lifecycle seam handles ship and close.
 
 ### Changes
-- scripts/bootstrap-validate.mjs: `warnings` + `deploy-last`, `formatWarnings`, CLI prints warnings on stderr, exit stays 0.
-- bin/tests/bootstrap-validate.test.mjs: deploy-last warns / does not warn tests.
-- commands/bootstrap.md: layering and deployable-slice rules (trimmed to stay under the 4096-byte spec budget).
-- scripts/settle-scope.mjs, bin/tests/settle-scope.test.mjs: new module and tests.
-- commands/orchestrate.md: section 3b, settle scope.
+- bin/lean/train.mjs: state file, createTrain, insertMilestone, resolveCaps, runTrain, stopOf, trainCli.
+- bin/lean/train.test.mjs: 10 tests.
+- bin/engine-cli.mjs: `trainFromCli` wiring (29 lines).
+- bin/forgedock.mjs: `milestone train` command, known-commands list, help.
+- forge.yaml.example, commands/milestone.md, devdocs/decisions/4658-milestone-train.md: docs.
 
 ### Acceptance Criteria Status
-- R1 ✅ scripts/settle-scope.mjs classifyNew (targets); follow-up script unchanged (no milestone, scripts/file-deferred-followups.sh:195)
-- R2 ✅ scripts/settle-scope.mjs convergence / formatStopReport; commands/orchestrate.md section 3b
-- R3 ✅ commands/bootstrap.md plan rules, step 7
-- R4 ✅ scripts/bootstrap-validate.mjs deployWarnings
+- R1 ✅ bin/lean/train.mjs:createTrain/runTrain/trainCli; bin/forgedock.mjs `case "milestone"`
+- R2 ✅ train.mjs never writes forge.yaml; test "forge.yaml is byte-identical" in train.test.mjs
+- R3 ✅ train.mjs:resolveCaps (warn and ignore); test "conflicting --parallel"
+- R4 ✅ train.mjs:insertMilestone/validateOrder; test "insertMilestone re-validates"
+- R5 ✅ train.mjs:STOP_REASONS/stopOf, `--resume`; test "typed STOP"
 
 ### Verification
-- V1 node --test (4 files): 63 pass, 0 fail. New tests fail without the fix (functions and warnings absent).
-- V2 bash scripts/file-deferred-followups.test.sh: 33 passed.
-- `forgedock check`: PASS. checks.mjs widened to the full suite, which host rules forbid; not run. No formatter configured in package.json; none run.
+- V1 `node --test bin/lean/train.test.mjs lifecycle.test.mjs lane.test.mjs batch.test.mjs`: 81 pass, 0 fail. The new tests fail without the fix because the module does not exist.
+- `forgedock check`: PASS. The checks script widened to the full suite because forge.yaml.example changed; per host rules I did not run it in full.
+- bin/tests/journey.test.mjs has 3 failures (preflight, forge Act II, writeInstallReceipt) that are identical on the base without my changes.
+- No formatter is configured in the repo.
 
 ### Notes
-Docs: devdocs/modules/lean.md entry for #4665 (freshness check).
+New command `forgedock milestone train`. State lives under `<batchRoot>/trains/<id>/`. Cap source is `orchestration.global_parallel` (default 3). Batch id of a running milestone is only recorded after its batch returns, because orchestrate gives no early callback.
 
-`validatePlan` result gains `warnings`; `ok` and exit codes unchanged. No env vars.
+## Sibling-list check
+The eight bin/lean tests flagged as enumerating siblings of `train` (batch, checks, conformance, context, execution.e2e, execution, fixround, heavy) do not list bin/lean modules or train symbols at the cited lines. Recorded as `not_members` in result.json; no test edits.
 
-## Fix: deploy-last now also warns when no deploy-class issue sits in milestones 1-2 (e.g. only milestone 3 of 4); test added.
+## CI follow-up (Unit tests)
+CI log was unavailable. Reran bin/lean, bin/engine, bin/stats, bin/tests, packages/protocol locally: all train/lifecycle/lane/batch tests pass (V1: 81/0). The only failures are 3 pre-existing, environment-dependent tests unrelated to this diff (WSL/platform detection in preflight, a root-user copyFile permission test, writeInstallReceipt platform capture). No code change made.
+
+### CI fix
+CI job "Unit tests (node --test)" runs `scripts/check-test-tmp-cleanup.sh` before the tests. It flagged `bin/lean/train.test.mjs` for using `mkdtemp` directly. The test now uses `tmpDir` from `bin/tests/_tmp.mjs`. The lint and its own test pass; V1 still passes (81 tests). A targeted run of the CI globs (bin/tests, bin/lean, bin/engine, bin/stats, packages/protocol) shows only the 3 journey failures that also fail on the base in this WSL host.
