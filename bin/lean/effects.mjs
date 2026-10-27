@@ -18,7 +18,7 @@ import { gatherContextFacts } from "./context.mjs";
 import { makePitfallStore } from "./pitfalls.mjs";
 import { enumeratingTests, missingEntries } from "./enumerating.mjs";
 import { resolveBaseConflicts } from "./conflictres.mjs";
-import { sequenceCollisions, snapshotLane, verifyRenumber, renumberLane, resolveSequenceConflicts, generatorProblems, journalOrderProblems } from "./sequence.mjs";
+import { seqNumber, sequenceCollisions, snapshotLane, verifyRenumber, renumberLane, resolveSequenceConflicts, generatorProblems, journalOrderProblems } from "./sequence.mjs";
 import { duplicateExports } from "./postmerge.mjs";
 import { englishCopies } from "./i18n.mjs";
 import { scopedChecks } from "./checks.mjs";
@@ -389,8 +389,16 @@ export function makeLeanIo({ repo }) {
     sequenceSnapshot: ({ cwd, base }) => snapshotLane({ git: (a) => run("git")(a, { cwd }), base }),
     sequenceVerify: ({ cwd, base, before, moves }) => verifyRenumber({ git: (a) => run("git")(a, { cwd }), base, before, moves }),
     /** #4386: the deterministic renumber, sequence-only base-sync resolution, and the host sequence lease at the merge gate. */
-    sequenceRenumber: ({ cwd, base, laneRef, regenerate, reserve }) => renumberLane({ git: (a) => run("git")(a, { cwd }), base, cwd, laneRef, regenerate, reserve }),
-    sequenceResolve: ({ cwd, files }) => resolveSequenceConflicts({ git: (a) => run("git")(a, { cwd }), files }),
+    sequenceRenumber: ({ cwd, base, laneRef, regenerate, reserve, openNumbers }) => renumberLane({ git: (a) => run("git")(a, { cwd }), base, cwd, laneRef, regenerate, reserve, openNumbers }),
+    sequenceResolve: ({ cwd, files, partial }) => resolveSequenceConflicts({ git: (a) => run("git")(a, { cwd }), files, partial }),
+    /** #4732: numbers the other open PRs on `lane` already carry in `dir` (gh only, no fetch); [] on any failure. */
+    async sequenceOpenNumbers({ cwd, lane, dir }) {
+      try {
+        const me = String(await run("git")(["rev-parse", "--abbrev-ref", "HEAD"], { cwd })).trim();
+        const prs = JSON.parse(await run("gh")(["pr", "list", "--state", "open", "--base", lane, "--limit", "100", "--json", "headRefName,files"], { cwd }));
+        return prs.filter((p) => p?.headRefName !== me).flatMap((p) => (p?.files ?? []).map((f) => String(f?.path ?? ""))).filter((f) => dirname(f) === dir).map((f) => Number(seqNumber(f))).filter(Number.isFinite);
+      } catch { return []; }
+    },
     /** #4588: deterministic base-merge resolution of union / JSON-map / generated files (bin/lean/conflictres.mjs). */
     conflictResolve: ({ cwd, files, cfg }) => resolveBaseConflicts({ git: (a) => run("git")(a, { cwd }), cwd, files, cfg }),
     sequenceLease: makeSequenceLeaseIo(),

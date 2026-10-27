@@ -417,7 +417,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    new `id`/`prevId`, else `lean.sequence.regenerate`; `SEQUENCE_RENUMBERED`), and only an
    `unsupported` result goes to the builder (`SEQUENCE_RENUMBER_FALLBACK`, reason in the
    trajectory). `verifyRenumber` also accepts a file equal after mapping each move's old stem
-   and its own heading number. A base-sync whose conflicts are all sequence files
+   and its own heading number. #4732: that one substitution (`renumberText`) also covers a
+   moved SQL's first line and every lane SQL naming the old stem (its `_rollback` pointer and
+   a lane-added `<stem>_rollback.*` in another dir, which moves to the same number), written
+   by the engine and compared by `verifyRenumber`; the number floor also counts open PRs on the
+   lane (`sequenceOpenNumbers`, gh), and a non-sequence conflict base-syncs first (sequence files
+   take the base side, the builder resolves the rest, `SEQUENCE_SYNC_FIRST`), then the engine
+   renumbers. A base-sync whose conflicts are all sequence files
    (`resolveSequenceConflicts`: base side, journal union, index union) needs no builder, and
    an engine-only delta needs no re-review. A numbered file counts as a sequence file there
    only when renumberLane can restore the lane's side (#4465): an add/add conflict (no

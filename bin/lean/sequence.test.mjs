@@ -522,3 +522,74 @@ describe("journal when ordering across parallel milestone branches (#4661)", () 
     assert.match(migrationGeneratorPrompt(p), /re-stamp/);
   });
 });
+
+describe("renumber rewrites the migration's own references (#4732)", () => {
+  const MIG = (n) => `-- ${n}_nclt.sql\n-- Rollback: rollbacks/${n}_nclt_rollback.sql\nINSERT INTO adapters (name) VALUES ('nclt');\n`;
+  const RB = (n) => `-- Rollback of ${n}_nclt.sql\nDELETE FROM adapters WHERE name = 'nclt';\n`;
+  const repo = (rollbackBase = {}) => {
+    const d = tmpDir("seq4732-");
+    sh(d, "init", "-q", "-b", "main");
+    put(d, { "db/0048_init.sql": "a;\n", "db/0049_a.sql": "b;\n", "rollbacks/0048_init_rollback.sql": "x;\n", "rollbacks/0049_a_rollback.sql": "y;\n", ...rollbackBase });
+    commit(d, "base");
+    sh(d, "checkout", "-qb", "lane");
+    put(d, { "db/0049_nclt.sql": MIG("0049"), "rollbacks/0049_nclt_rollback.sql": RB("0049"), "docs/migrations.md": "See db/0049_nclt.sql\n" });
+    commit(d, "lane");
+    return d;
+  };
+  const show = (d, p) => sh(d, "show", `HEAD:${p}`);
+
+  it("renumberLane rewrites the header, rollback pointer, rollback file and index docs, and verifyRenumber accepts it", async () => {
+    const d = repo();
+    const before = await snapshotLane({ git: gitIn(d), base: "main" });
+    const r = await renumberLane({ git: gitIn(d), base: "main", cwd: d });
+    assert.deepEqual(r.moves, [
+      { from: "db/0049_nclt.sql", to: "db/0050_nclt.sql" },
+      { from: "rollbacks/0049_nclt_rollback.sql", to: "rollbacks/0050_nclt_rollback.sql" },
+    ]);
+    assert.equal(show(d, "db/0050_nclt.sql"), MIG("0050"));
+    assert.equal(show(d, "rollbacks/0050_nclt_rollback.sql"), RB("0050"));
+    assert.equal(show(d, "docs/migrations.md"), "See db/0050_nclt.sql\n");
+    const v = await verifyRenumber({ git: gitIn(d), base: "main", before, moves: r.moves });
+    assert.equal(v.ok, true, v.problems.join("; "));
+  });
+
+  it("a rollback in another directory follows its migration's number when the base does not use it there", async () => {
+    const d = repo({ "rollbacks/0050_other_rollback.sql": "z;\n", "rollbacks/0051_more_rollback.sql": "w;\n" });
+    const r = await renumberLane({ git: gitIn(d), base: "main", cwd: d });
+    assert.ok(r.moves, JSON.stringify(r));
+    assert.equal(show(d, "db/0050_nclt.sql"), MIG("0050").replace("0050_nclt_rollback", "0052_nclt_rollback"), "the pointer names the rollback's own new path");
+  });
+
+  it("a builder that only swaps the old number for the new one in the migration and its rollback is accepted; any other edit is not", async () => {
+    for (const [extra, ok] of [["", true], ["-- and more\n", false]]) {
+      const d = repo();
+      const before = await snapshotLane({ git: gitIn(d), base: "main" });
+      sh(d, "mv", "db/0049_nclt.sql", "db/0050_nclt.sql");
+      sh(d, "mv", "rollbacks/0049_nclt_rollback.sql", "rollbacks/0050_nclt_rollback.sql");
+      put(d, { "db/0050_nclt.sql": MIG("0050") + extra, "rollbacks/0050_nclt_rollback.sql": RB("0050"), "docs/migrations.md": "See db/0050_nclt.sql\n" });
+      commit(d, "builder renumber");
+      const v = await verifyRenumber({ git: gitIn(d), base: "main", before });
+      assert.equal(v.ok, ok, v.problems.join("; "));
+    }
+  });
+
+  it("openNumbers lifts the new number above numbers other open PRs already carry", async () => {
+    const d = repo();
+    const r = await renumberLane({ git: gitIn(d), base: "main", cwd: d, openNumbers: async ({ dir }) => (dir === "db" ? [50, 51] : []) });
+    assert.ok(r.moves.some((m) => m.to === "db/0052_nclt.sql"), JSON.stringify(r));
+    assert.equal(show(d, "db/0052_nclt.sql"), MIG("0052"));
+  });
+
+  it("a non-sequence conflict is reported as nonSequence, and partial resolution takes the base side only for sequence files", async () => {
+    const d = repo();
+    put(d, { ".env.example": "A=lane\n" }); commit(d, "env lane");
+    sh(d, "checkout", "-q", "main"); put(d, { ".env.example": "A=base\n", "db/0050_b.sql": "c;\n" }); commit(d, "base env");
+    sh(d, "checkout", "-q", "lane");
+    const r = await renumberLane({ git: gitIn(d), base: "main", cwd: d });
+    assert.deepEqual(r.nonSequence, [".env.example"]);
+    assert.equal(sh(d, "status", "--porcelain").trim(), "", "the branch is back where it started");
+    try { sh(d, "merge", "--no-edit", "main"); } catch { /* conflicts expected */ }
+    const rs = await resolveSequenceConflicts({ git: gitIn(d), files: [".env.example"], partial: true });
+    assert.deepEqual(rs.remaining, [".env.example"]);
+  });
+});
