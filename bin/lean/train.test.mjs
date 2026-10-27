@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { openTrain, createTrain, insertMilestone, resolveCaps, runTrain, stopOf, trainCli, STOP_REASONS } from "./train.mjs";
 
 const live = { issues: [
@@ -12,7 +12,7 @@ const live = { issues: [
   { number: 2, milestone: "m2", state: "OPEN", body: "Depends on #1" },
   { number: 3, milestone: "m3", state: "OPEN", body: "" },
 ] };
-const tmp = () => mkdtempSync(join(tmpdir(), "train-"));
+const tmp = () => tmpDir("train-");
 const okRun = (calls) => async (slug, o) => { calls.push([slug, o]); return { ok: true, batch: `b-${slug}`, rows: [] }; };
 const life = async (titles) => titles.map((title) => ({ title, state: "shipped:staging" }));
 
