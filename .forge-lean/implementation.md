@@ -42,3 +42,9 @@ A pure module (`needs-human-premise.mjs`) holds predicates, closed-edge helpers 
 
 ### Rerun fix
 R6 ✅ pkg-version now resolves in production: `registryPkgVersion` (npm view) is passed as `io.pkgVersion` in engine-cli.mjs (relabel + sweep) and as a fallback in lean.mjs:488. V1-V3 re-run: exit 0.
+
+### Sibling-list check (2)
+- telemetry-seam.test.mjs and drift.test.mjs enumerate no lean modules (only needs-human reason strings / drift fixtures); recorded as `not_members`, no test edits.
+
+### Sibling lists
+telemetry-seam.test.mjs:24 (a phase_attempt mapRecord test) and drift.test.mjs:14 (drift fixtures) are not lists of lean modules; both are already recorded in result.json not_members. V1-V3 re-run: pass.

@@ -146,6 +146,16 @@
    "symbol": "needs-human-premise",
    "test": "bin/lean/lean.test.mjs",
    "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (stub lane, worktree, shadow rows, source names, a step table, a mock gh)"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/engine/telemetry-seam.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (a needs-human reason string / drift fixtures)"
+  },
+  {
+   "symbol": "needs-human-premise",
+   "test": "bin/lean/drift.test.mjs",
+   "why": "the test does not enumerate bin/lean modules or sibling files; the cited line only matches an unrelated word (a needs-human reason string / drift fixtures)"
   }
  ]
 }
