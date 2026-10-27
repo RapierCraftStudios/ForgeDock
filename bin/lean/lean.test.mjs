@@ -1398,6 +1398,20 @@ describe("conformance shadow mode (the default)", () => {
     const ra = await runShadow(a);
     assert.equal(ra.code, "conformance.unimplemented"); assert.match(nhBody(a), /amendment without why/);
   });
+  it("#4737 decision records are persisted after the merge, never at gate time", async () => {
+    const dir = tmpDir("dec-"); const prev = process.env.FORGEDOCK_DECISIONS_DIR; process.env.FORGEDOCK_DECISIONS_DIR = dir;
+    try {
+      const amendments = [{ kind: "decision", why: "w", decision: { choice: "use X", anchors: ["src/db.ts"], why: "w" } }];
+      const bad = world({ validation: [], amendments });
+      assert.equal((await runShadow(bad)).code, "conformance.unimplemented");
+      assert.ok(!bad.comments.some((c) => c.includes("FORGE:DECISION")), "a lane that never merges records nothing");
+      assert.equal(readdirSync(dir).length, 0, "no index written");
+      const ok = world({ amendments });
+      assert.equal((await runShadow(ok)).terminalReason, "merged");
+      assert.ok(ok.comments.some((c) => c.includes("FORGE:DECISION")), "recorded after the merge");
+      assert.equal(readdirSync(dir).length, 1);
+    } finally { if (prev === undefined) delete process.env.FORGEDOCK_DECISIONS_DIR; else process.env.FORGEDOCK_DECISIONS_DIR = prev; }
+  });
   it("#4160 scope creep found by the precheck stays recorded-only in shadow", async () => {
     const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"], reviews: [conf({}, CONTRACT, ["src/foo.js", "src/billing.js", "test/foo.test.js"])] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
