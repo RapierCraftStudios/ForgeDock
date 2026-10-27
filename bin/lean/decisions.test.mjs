@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { normaliseDecision, renderDecision, parseDecisionComment, foldDecisions, anchorMatches, deadAnchors, staleDecisions, historyRows, withDecisionRows, supersede, readDecisionIndex, recordDecisions, HISTORY_ROWS_MAX } from "./decisions.mjs";
 
 const D = (o) => normaliseDecision({ choice: "use A not B", why: "B leaks", anchors: ["src/a/**"], ...o }, { issue: 10, n: 1 });
@@ -59,7 +57,7 @@ describe("decisions (#4695)", () => {
     assert.deepEqual(s.map((x) => [x.decision.id, x.dead]), [["b", ["old/x.js"]]]);
   });
   it("recordDecisions posts the new and the superseded old record and updates the index", async () => {
-    process.env.FORGEDOCK_DECISIONS_DIR = mkdtempSync(join(tmpdir(), "dec-"));
+    process.env.FORGEDOCK_DECISIONS_DIR = tmpDir("dec-");
     const posts = [], post = async (marker, body, on) => { posts.push({ marker, on }); };
     const first = await recordDecisions([{ choice: "use A", anchors: ["src/**"], why: "w" }], { issue: 10, repo: "o/r", post });
     assert.equal(first[0].id, "d10-1");
