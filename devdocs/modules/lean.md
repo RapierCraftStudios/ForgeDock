@@ -495,6 +495,17 @@ share`). `scripts/maintenance-scan.sh` is the deterministic producer
 (hotspots, package cycles via `structure-delta.sh`, dead-code tools, oversized
 docs), deduplicated by a `FORGE:MAINT:<kind>:<key>` marker.
 
+Milestone integration (#4667, no LLM; `integration.mjs`, off without forge.yaml
+`ci.workflow`): dispatches the workflow on each active `milestone/*` branch
+every `interval_hours` or `every_merges` lane merges (`onMerged` counts, the
+run is started in the background and settled after the batch; `forgedock
+integration run` is the cron entry). State is a `FORGE:INTEGRATION` block in
+the milestone description (lastRun, lastGreen, redStreak, mergedPrs, issue). A
+red run files or updates ONE `integration-red` issue (marker
+`FORGE:INTEGRATION:<slug>`: failing specs, merge range); green closes it.
+`block_admission_after` makes `holds` refuse new lanes of the milestone
+(`integHeld` in `orchestrate.mjs`) until a green run.
+
 Milestone drift (#4161, no LLM): a merged lane's result carries `structure`
 (the merge-time STRUCTURE_DELTA record), `milestone` and `lane`.
 `orchestrate.mjs` awaits `drift.onMerged` for merged `milestone/*` lanes
