@@ -1120,6 +1120,13 @@ queued (human or terminal code, `ci-pending` on a non-conflicting PR). Cost: 0 L
 - `scripts/review-prepare.sh` (#4571): the final context `jq` takes PR-scaled values (slices, file lists, findings, domain
   and index text) through `--slurpfile`/`--rawfile` on files under `$TMP_DIR`, never argv, so a 1,000+ file PR no longer
   dies on the 128 KiB per-argument limit. Output schema unchanged; 0 LLM calls.
+- `scripts/review-prepare.sh` + `bin/review-context.mjs` (#4666): `node bin/review-context.mjs check` compares forge.yaml
+  `review.tech_stack`/`review.context` with the manifests and the decision log (`review.decision_log`, else the first of
+  `docs/decisions.md`, `DECISIONS.md`, `docs/decision-log.md`, `devdocs/project/decisions.md`). Each stale reason becomes a
+  `REVIEW_CONTEXT_STALE:` line in `phase2.findings`; `config.context_generated_at/context_stale/context_advisory` are
+  additive. Advisory once more than `review.context_max_merged_prs` (default 50) PRs merged since
+  `review.context_generated_at` (one guarded `gh pr list`; failure = unknown). `forgedock init --refresh-context` shows a
+  diff and writes only on approval. Never blocks a review; 0 LLM calls.
 
 ## Entry 2026-10-20 — Missing host tools are an environment error, not conformance (#4323)
 

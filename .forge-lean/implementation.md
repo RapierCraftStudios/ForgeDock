@@ -1,56 +1,43 @@
 ### Approach
-A pure module, `bin/lean/decisions.mjs`, holds the anchored decision record, the `<!-- FORGE:DECISION {json} -->` render and parse, a local index, anchor matching, staleness, supersession and the capped H-rows. The engine appends the rows at contract freeze, so the reviewer's existing preserve check enforces them. A `decision` amendment validates anchors against the base tree, posts the records and drops the superseded row. No LLM call and no prompt change.
+`bin/review-context.mjs` compares forge.yaml `review.tech_stack`/`review.context` with manifests and the decision log (no LLM). doctor, review-prepare and `init --refresh-context` use it.
 
 ### Changes
-- bin/lean/decisions.mjs (new): record, marker, parse, fold (latest record per id wins), anchor glob match, `staleDecisions`, `historyRows` (cap 5, deterministic), `withDecisionRows`, `supersede`, index read/write, `recordDecisions`.
-- bin/lean/conformance.mjs: `decision` amendment kind with anchor-exists validation (`baseFiles`); `supersedes` drops the preserve row; returns `decisions`.
-- bin/lean/lean.mjs: `post` takes a target issue; freeze appends H-rows from the index; `amend()` posts decision records (one `git ls-tree` only when a decision amendment exists).
-- bin/engine-cli.mjs, bin/forgedock.mjs: `forgedock decisions list [--stale] [--refresh]`.
-- Tests: bin/lean/decisions.test.mjs (new), bin/lean/conformance.test.mjs.
-- devdocs/modules/lean.md, devdocs/decisions/4695-anchored-decisions.md.
-- bin/lean/prompts.mjs (D6) is intentionally unchanged: the implement prompt is at its token budget (lean.test.mjs fails with +1 line). The H-row text itself tells the builder how to amend, which fits "nothing added to the builder prompt beyond the contract rows".
+- bin/review-context.mjs: stale rules, age advisory, diff, refresh flow, `check` CLI
+- bin/forgedock.mjs: `--refresh-context` flag, doctor warn, help
+- scripts/review-prepare.sh: REVIEW_CONTEXT_STALE findings, config.context_* keys
+- commands/review-pr.md: generation date, advisory, warning line
+- forge.yaml.example: new keys documented
+- bin/tests/review-context.test.mjs, scripts/review-prepare.test.sh: tests
+- devdocs/modules/lean.md: dossier (freshness check requires it)
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/conformance.mjs (decision branch of applyAmendments), bin/lean/lean.mjs (amend(): recordDecisions), bin/lean/decisions.mjs (recordDecisions)
-- R2 ✅ bin/lean/decisions.mjs (withDecisionRows), bin/lean/lean.mjs (freeze); a violation without supersedes remains the existing preserve_violated (conformance.mjs decide())
-- R3 ✅ bin/lean/decisions.mjs (supersede, recordDecisions); test "recordDecisions posts…"
-- R4 ✅ bin/engine-cli.mjs (decisionsFromCli --stale), bin/lean/decisions.mjs (staleDecisions)
-- R5 ✅ no LLM, phase or prompt change
-- R6 ✅ one index file read at freeze; contract object returned unchanged when no rows apply (test)
-- R7 ✅ HISTORY_ROWS_MAX = 5 shared cap; anchors checked against a single ls-tree only when a decision amendment exists
+- R1 ✅ bin/forgedock.mjs:1046
+- R2 ✅ bin/forgedock.mjs:2715, scripts/review-prepare.sh:235
+- R3 ✅ bin/review-context.mjs
+- R4 ✅ bin/review-context.mjs
+- R5 ✅ bin/review-context.mjs
+- R6 ✅ scripts/review-prepare.sh:246
+- R7 ✅ commands/review-pr.md:512
 
 ### Verification
-- V1 `node --test bin/lean/decisions.test.mjs bin/lean/conformance.test.mjs`: pass. The new tests fail without the fix (the module and amendment kind do not exist).
-- V2 `node --test bin/lean/lean.test.mjs bin/lean/conformance.e2e.test.mjs`: pass.
-- `forgedock check`: PASS. bin/tests/engine-cli.test.mjs: pass. No repo formatter is configured.
+- V1 `node --test bin/tests/review-context.test.mjs bin/tests/init-detect.test.mjs bin/tests/init-enrich.test.mjs`: 74 pass, 0 fail. New tests fail without the module (it would not exist).
+- V2 `FORGEDOCK_HOME=$PWD bash scripts/review-prepare.test.sh`: exit 0, but the script printed "SKIP: yq not installed", so the new case did not execute on this host.
+- check-devdocs-freshness.sh: OK. forgedock check: PASS.
 
 ### Notes
-- The index lives at ~/.forge/decisions/<repo>.json (env FORGEDOCK_DECISIONS_DIR overrides). Decisions posted from another host appear after `forgedock decisions list --refresh`; no gh call is made at freeze.
-- Light lanes do not get H-rows (their contract is derived from the diff).
-- #4694 (guards) can reuse `historyRows` and the cap.
+No new env vars. Advisory only; checks never block a review.
 
-## Sibling-list check
-`decisions` (bin/lean) is not a member of the lists in checks, conformance.e2e, context (context-pack sources), execution(.e2e), fixround (MECHANICAL_KINDS) and heavy tests; recorded under `not_members` in result.json.
+## R6 verification
+V2 self-skips without yq. Ran it with a scratch yq shim (PATH, $TMPDIR only): 208 passed, 0 failed, incl. the stale/fresh context case. No code change.
 
-## Sibling-enumerating tests
-decisions (bin/lean) is not a member of the lists in checks, conformance.e2e, context, execution(.e2e), fixround and heavy tests; recorded as not_members in result.json.
+### CI follow-up (Unit tests, node --test)
+The CI log was unavailable, so the failure could not be read. I ran the forgedock-*, journey, review-staging, bin/lean and related suites locally: 1765 pass, 3 fail. The 3 failures (journey platform/WSL rows, Act II and install-receipt copyFile orphan) assert a non-WSL, non-root host. This host is WSL running as root, so they are environmental. None touch files this change edits. The full suite was not run, and the CI failure is not reproduced. No code change was made.
 
-## Export collision fix
-Renamed decisions.mjs readIndex/writeIndex to readDecisionIndex/writeDecisionIndex (guards.mjs already exports readIndex/writeIndex); references in lean.mjs, engine-cli.mjs and decisions.test.mjs updated. V1/V2 pass (618 tests).
+### CI follow-up 2 (Unit tests)
+Log still unavailable. Re-ran V1 (74 pass) and 1505 tests across the suites that reference forgedock.mjs, devdocs, review-pr or review-prepare: 0 fail. Only journey.test.mjs fails (3, WSL/root host assertions, unrelated to this diff). Not reproduced; no code change.
 
-### Verification
-- V1 `node --test bin/lean/decisions.test.mjs bin/lean/conformance.test.mjs`: exit 0 (105 pass). New tests fail without the fix (the module and `decision` kind do not exist).
-- V2 `node --test bin/lean/lean.test.mjs bin/lean/conformance.e2e.test.mjs`: exit 0 (513 pass), after merging staging (guards #4694 rows applied first, decision rows share the 5-row cap).
-- `forgedock check`: PASS.
+### CI follow-up 2 (Unit tests, run 40550042608)
+The CI log was unavailable. After merging staging again, I ran every bin/tests file that references forgedock.mjs, review-context or doctor: 1217 pass, 3 fail. They are the same 3 environmental failures as before (journey platform/WSL rows, Act II and install-receipt copyFile orphan), which assert a non-WSL, non-root host. The CI failure is not reproduced and I made no code change. The full suite was not run.
 
-### Notes
-No env vars added except the optional `FORGEDOCK_DECISIONS_DIR` for the index location. One amendment-list line added to the implement prompt (D6); other wording trimmed to keep it within the 1550-token budget.
-
-### CI follow-up (Unit tests)
-CI log was unavailable. Reran V1 (105 pass) and V2 (516 pass), plus bin/lean, bin/tests, bin/engine, bin/stats and packages/protocol locally. The only failures were 3 environment ones (WSL/platform detection, preflight, install receipt; none touch this diff) and the #4690 test, which hit the idle-kill timer under load and passes alone (6 pass). No code change was needed.
-
-### CI recovery
-`scripts/check-test-tmp-cleanup.test.sh` failed because `bin/lean/decisions.test.mjs` called `mkdtemp` directly. It now uses `tmpDir` from `bin/tests/_tmp.mjs`. V1 and V2 pass again, the cleanup script passes, and `forgedock check` passes.
-
-### Sibling-list check
-The seven tests flagged for `decisions` (checks, conformance.e2e, context, execution.e2e, execution, fixround, heavy) were read at the flagged lines; none lists lean modules, so each is recorded under `not_members` in result.json with the reason. No test changes.
+### Recovery (ci.red)
+CI failed `scripts/check-test-tmp-cleanup.test.sh`: `bin/tests/review-context.test.mjs` used `mkdtemp` directly. It now uses `tmpDir` from `bin/tests/_tmp.mjs`. That script passes 18/18 and V1 passes (74 tests). V2 skips locally because yq is missing. The dossier `devdocs/modules/lean.md` is recorded as an add-deliverable amendment.
