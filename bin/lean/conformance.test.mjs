@@ -691,6 +691,15 @@ describe("post-deploy check ids (#4626)", () => {
     assert.ok(!precheck({ contract: c, result: res, changedFiles: files, checkIds: new Set(["login-smoke"]) }).failures.some((f) => f.kind === "check_unknown"));
     assert.ok(!precheck({ contract: c, result: res, changedFiles: files }).failures.some((f) => f.kind === "check_unknown"));
   });
+  it("#4664 followupItems carries the follow-up class; validateContract rejects an unknown class", () => {
+    const cls = (r) => followupItems([{ id: "R1", quote: Q1, why: "w", ...r }])[0].class;
+    assert.equal(cls({ disposition: "defer" }), "engineering");
+    assert.equal(cls({ disposition: "post-deploy", check: "x" }), "post-deploy");
+    assert.equal(cls({ disposition: "defer", class: "external" }), "external");
+    assert.equal(cls({ disposition: "defer", class: "bogus" }), "engineering");
+    const v = validateContract({ requirements: [{ id: "R1", quote: Q1, disposition: "defer", why: "w", class: "bogus" }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] }, Q1);
+    assert.ok(v.problems.some((x) => /R1: class must be one of/.test(x)), v.problems.join(";"));
+  });
   it("followupItems names the check in a post-deploy item", () => {
     const [i] = followupItems([{ id: "R1", quote: Q1, disposition: "post-deploy", why: "w", check: "login-smoke" }]);
     assert.match(i.why, /^post-deploy: \[check:login-smoke\] w$/);

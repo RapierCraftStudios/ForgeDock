@@ -594,6 +594,15 @@ engine:
 
 ---
 
+## `followups` (OPTIONAL)
+
+Deferred follow-ups (`scripts/file-deferred-followups.sh`) are filed as one issue per class per parent: `engineering`, `post-deploy`, `external` and `ops`. Each carries the label `followup:<class>` (`external` also `external-prerequisite`, and states the parent it is a prerequisite of) and inherits the parent's milestone. A requirement may set an optional `class` in the contract; otherwise `post-deploy` items are `post-deploy` and the rest `engineering`. A parent milestone that has shipped (closed) is replaced by the next open milestone by due date, else `followups.default_milestone`.
+
+```yaml
+followups:
+  default_milestone: "Backlog"   # optional: milestone title used when the parent's milestone has shipped and no later one is open
+```
+
 ## `post_deploy` (OPTIONAL)
 
 Deferred follow-ups whose items are all post-deploy checks are parked (`awaiting-promotion`, no lane) until the parent's fix is on `branches.default`. Keys: `precondition_cmd` (exit 0 ready, 1 parked) and `min_age` (soak window, e.g. `24h`).
