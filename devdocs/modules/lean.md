@@ -791,7 +791,7 @@ inside still runs `run-issue`, so results, leases and annotations go through Git
 result (engine-error row), thrown error and adopt. A dispatcher killed mid-lane
 leaves the entry under its dead pid: `--resume` adopts from the persisted handle,
 `forgedock gc --apply` (scope `sandboxes`) tears it down through the provider.
-`countLiveLanes` skips sandbox-only lane files. `orchestrate.mjs` seam
+A transport failure while polling or adopting (refused/reset, `fetch failed`, timeout, 502/503/504, `isTransportError`) is retried with backoff for `execution.unreachable_window_min` (default 5); past it the lane ends `deferred` `sandbox.unreachable` (not breaker-counted) and the sandbox is kept, then adopted by the next attempt or `--resume` (#4672). `countLiveLanes` skips sandbox-only lane files. `orchestrate.mjs` seam
 `remote: {max, isRemote}` admits remote lanes against `max_remote` without a host
 registry slot (batch K still applies). Rationale:
 `devdocs/decisions/4253-execution-sandbox-provider.md`.
