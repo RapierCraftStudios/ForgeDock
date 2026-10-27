@@ -4,7 +4,7 @@
  * `forgedock resume-stalled [--dry-run] [--lane <lane>]` enumerates all in-flight
  * issues, calls scanStalls, and re-dispatches each stalled issue via run-issue.
  */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -1135,7 +1135,45 @@ export async function orchestrateFromCli(argv, deps = {}) {
 const formatRowLine = (r) => (r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`);
 const consoleSink = () => ({ batch: () => {}, row: (r) => console.log(formatRowLine(r)), line: (t) => console.log(t) });
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...>";
+/** forge.yaml `orchestration.env_passthrough` / `path_exclude` (comma-separated) and `execution.token_env` (#4691): what the pinned env keeps beyond the allowlist. */
+function readPinnedEnvConfig(cwd) {
+  try {
+    const y = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"));
+    const list = (v) => String(v ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+    const tok = String(y?.execution?.token_env ?? "").trim();
+    return { passthrough: [...list(y?.orchestration?.env_passthrough), ...(/^[A-Za-z_][A-Za-z0-9_]*$/.test(tok) ? [tok] : [])], pathExclude: list(y?.orchestration?.path_exclude) };
+  } catch { return { passthrough: [], pathExclude: [] }; }
+}
+
+/** `--show-env <id>` (secrets redacted), `--set-env <id> KEY=VAL`, `--unset-env <id> KEY` (#4691): edits the batch's pinned env in plan.json; newly launched lanes read it. */
+async function envBatch({ argv, root, print = (l) => console.log(l) }) {
+  const op = ["--show-env", "--set-env", "--unset-env"].find((f) => argv.includes(f));
+  const i = argv.indexOf(op), id = argv[i + 1], arg = argv[i + 2];
+  if (!id || id.startsWith("--") || (op !== "--show-env" && !arg)) throw new Error(ORCH_USAGE);
+  const batchMod = await import("./lean/batch.mjs"), { redactEnv } = await import("./lean/schedd.mjs");
+  const b = batchMod.openBatch(root, id);
+  const plan = b.readPlan();
+  if (!plan) throw new Error(`no batch ${id} in ${root}`);
+  if (op === "--show-env") {
+    const env = redactEnv(plan.env);
+    print(plan.env ? Object.entries(env).sort(([a], [c]) => (a < c ? -1 : 1)).map(([k, v]) => `${k}=${v}`).join("\n") : `batch ${id}: pins no env (its lanes use the daemon's)`);
+    return { ok: true, batch: id, env };
+  }
+  const env = { ...(plan.env ?? {}) };
+  if (op === "--set-env") {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(arg);
+    if (!m) throw new Error("--set-env needs KEY=VAL");
+    env[m[1]] = m[2];
+    print(`batch ${id}: set ${m[1]} (applies to newly launched lanes)`);
+  } else {
+    delete env[arg];
+    print(`batch ${id}: unset ${arg} (applies to newly launched lanes)`);
+  }
+  b.writePlan({ ...plan, env });
+  return { ok: true, batch: id };
+}
+
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...> | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY";
 const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force"];
 const issuesOf = (argv) => {
   const issues = [];
@@ -1311,6 +1349,7 @@ async function orchestrateClient(argv, deps = {}) {
     return sock ? schedd.request(sock, { op, id, issues }) : null;
   };
   const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
+  if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root: await batchRootOf() });
   if (argv.includes("--cancel")) {
     const id = flag(argv, "--cancel");
     return cancelBatch({ id, root: await batchRootOf(), stopRemote: argv.includes("--stop-remote"), viaDaemon: async () => {
@@ -1349,7 +1388,7 @@ async function orchestrateClient(argv, deps = {}) {
       if (!repo) throw new Error("orchestrate needs the repo: pass --repo or run inside a checkout with a GitHub remote");
       sub = [...sub, "--repo", repo];
     }
-    msg = { op: "submit", argv: sub, cwd: process.cwd(), env: schedd.batchEnv(process.env) };
+    msg = { op: "submit", argv: sub, cwd: process.cwd(), env: schedd.batchEnv(process.env, readPinnedEnvConfig(process.cwd())) };
   }
   let sock = await connect(), req = msg, reattached = false, losses = 0;
   let id = resumeId;
@@ -1401,6 +1440,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     sink.line(`batch ${b.id}: parallel set to ${k}`);
     return { ok: true, batch: b.id, parallel: k };
   }
+  if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root, print: (l) => sink.line(l) });
   if (argv.includes("--cancel")) return cancelBatch({ id: flag(argv, "--cancel"), root, stopRemote: argv.includes("--stop-remote"), print: (l) => sink.line(l) });
   if (argv.includes("--requeue")) {
     const i = argv.indexOf("--requeue");
@@ -1432,8 +1472,10 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   const parallel = parallelOf(argv);
   // The lanes' env: a resumed daemon batch uses the env its plan kept, over the daemon's own.
   // A pre-#4192 batch resumed by the daemon kept no env: its lanes use the daemon's.
-  const kept = plan?.env ?? (resumeId ? null : daemon || callerEnv !== process.env ? callerEnv : null);
-  const env = kept ? (await import("./lean/schedd.mjs")).mergeEnv(process.env, kept) : process.env;
+  // #4691: a fresh pin is allowlisted and PATH-sanitised again here (idempotent for a client that already did it).
+  const scheddMod = await import("./lean/schedd.mjs");
+  const kept = plan?.env ?? (resumeId ? null : daemon || callerEnv !== process.env ? scheddMod.batchEnv(callerEnv, readPinnedEnvConfig(plan?.cwd ?? callerCwd)) : null);
+  const env = kept ? scheddMod.mergeEnv(process.env, kept) : process.env;
   const lane = flag(argv, "--lane");
   const laneOverride = argv.includes("--lane-override");
   const model = flag(argv, "--model");
@@ -1513,6 +1555,12 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     const laneScript = deps.laneScript ?? fileURLToPath(new URL("./forgedock.mjs", import.meta.url));
     // #4690: lanes learn K (the default MemoryMax is derived from it); one line says so when no scope caps them.
     const laneEnv = { ...env, FORGEDOCK_LANE_PARALLEL: String(parallel) };
+    // #4691: --set-env / --unset-env edit plan.json while the batch runs; each newly launched lane re-reads the pinned env.
+    const laneSpawn = (bin, args, o) => {
+      const p = batch.readPlan();
+      const fresh = p?.env ? { ...scheddMod.mergeEnv(process.env, p.env), FORGEDOCK_LANE_PARALLEL: String(parallel) } : null;
+      return (deps.spawnFn ?? spawn)(bin, args, fresh ? { ...o, env: { ...fresh, FORGEDOCK_BATCH_ID: o.env?.FORGEDOCK_BATCH_ID } } : o);
+    };
     const effects = await import("./lean/effects.mjs");
     const uncapped = effects.laneCapNotice(deps.laneCapProbe ?? effects.systemdRunAvailable);
     if (uncapped) (deps.out ?? ((l) => console.log(l)))(uncapped);
@@ -1546,7 +1594,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       lanes = withPlacement(remoteLanes);
       {
         // #4255: once the budget refuses a remote lane, the rest run as detached host lanes. #4256: hybrid mixes both.
-        const local = batchMod.detachedLanes({ batch, cwd, env: laneEnv, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs });
+        const local = batchMod.detachedLanes({ batch, cwd, env: laneEnv, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs, spawnFn: laneSpawn });
         lanes = withPlacement({
           runOne: (n, ln, ctx = {}) => (ctx.remote ? remoteLanes : local).runOne(n, ln, ctx),
           adopt: (n, rec, ctx) => (rec?.remote || rec?.handle ? remoteLanes : local).adopt(n, rec, ctx),
@@ -1586,7 +1634,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       };
       sink.line(`execution: ${hybrid ? "hybrid" : "remote"} via ${provider.name}, max_remote ${exec.maxRemote}`);
     } else {
-      lanes = withPlacement(batchMod.detachedLanes({ batch, cwd, env: laneEnv, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs }));
+      lanes = withPlacement(batchMod.detachedLanes({ batch, cwd, env: laneEnv, script: laneScript, bin: deps.laneBin, pollMs: deps.pollMs, laneArgs, spawnFn: laneSpawn }));
     }
     // #4376: a cancel stops detached host lanes by SIGTERM to their group (pid-reuse checked by the result path); sandboxes run on unless `--cancel --stop-remote` (#4612).
     const { killLedgerPid } = await import("./lean/effects.mjs");
