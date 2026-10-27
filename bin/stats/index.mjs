@@ -19,6 +19,7 @@ import { batchEfficiency, windowEfficiency, compareEfficiency, formatEfficiencyL
 import { releaseMetrics, renderReleaseMetrics, metricsComment, postMetrics } from "./release.mjs";
 import { experimentReport, renderExperiment } from "./experiment.mjs";
 import { readExperiment } from "../experiment.mjs";
+import { compoundingReport, gatherCompounding, renderCompounding, DEFAULT_BUCKETS, DEFAULT_WINDOW_MS } from "./compounding.mjs";
 import { poolUtilisation, formatPoolLines } from "./pool.mjs";
 import { batchRoot } from "../lean/batch.mjs";
 
@@ -29,6 +30,7 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
        forgedock stats --experiment <id> [--require-met] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --by version [--post-metrics <pr>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --pool [--window 7d,30d] [--repo <owner/repo>] [--json]
+       forgedock stats --compounding [--window 30d] [--bucket 100,500] [--since <date>] [--min-n N] [--repo <owner/repo>] [--json]
        forgedock stats --efficiency [--batch <id>] [--window 7d,30d] [--compare <date|version>] [--offline] [--repo <owner/repo>] [--json]
 
 Version-over-version report: Cost, Time, Flow, Review funnel, Gates and Issue flow per (version, repo), with a
@@ -84,6 +86,13 @@ Efficiency (forge#4402; local batch dirs and run logs, gh only for merged issues
                         their delta and full-lane cohorts matched per size (forge#4491)
   --offline             skip the GitHub crawl for merged issues (issue quality and acceptance print n/a)
 
+Compounding (forge#4696; GitHub + git of the current clone, no model):
+  --compounding         reintroduction rate (guarded fix reopened, or its lines blamed by a later guarded fix within 90 days),
+                        reopen-after-close rate, guard activity (guard_run, guard_broken, supersedes_accepted) and decision
+                        churn (decision_superseded, decision_violation), as a rolling window, per release and per lane-age
+                        bucket; n/a where no data is recorded. Pair with --efficiency --compare for $/merge and turns/merge
+  --bucket <list>       lane-age bucket upper bounds (default 100,500: lanes 1-100, 101-500, 501+)
+
 Builder model tiers (forge#4394; local run logs only, no GitHub crawl):
   --tiers               merge, conformance and post-merge-rework rates, first-pass yield and cost per builder tier
                         (mid, mid->top escalated, top) and routing class; --json for JSON
@@ -98,7 +107,7 @@ Lane profile baseline (forge#4436; local run logs only, every run of each issue,
 export function experimentExit(opts, report) { return opts.requireMet && report.targets_met !== true ? 1 : 0; }
 
 export function parseArgs(argv) {
-  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
+  const o = { since: null, repo: null, edge: null, milestone: null, contextAb: false, exploreAb: false, tiers: false, compounding: false, bucket: null, laneProfile: false, issues: null, efficiency: false, pool: false, batch: null, windows: null, compare: null, by: null, experiment: null, emitEvent: false, requireMet: false, postMetrics: null, offline: false, json: false, refresh: false, compact: false, local: true, cache: true, minN: DEFAULT_MIN_N, releaseTimes: null, help: false };
   const val = (i, name) => {
     const v = argv[i + 1];
     if (v == null || v.startsWith("--")) throw new Error(`${name} needs a value`);
@@ -117,6 +126,8 @@ export function parseArgs(argv) {
     else if (name === "--context-ab") o.contextAb = true;
     else if (name === "--explore-ab") o.exploreAb = true;
     else if (name === "--tiers") o.tiers = true;
+    else if (name === "--compounding") o.compounding = true;
+    else if (name === "--bucket") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--bucket must be a comma list of lane counts"); const b = v.split(",").map(Number); if (b.some((x, i) => i && x <= b[i - 1])) throw new Error("--bucket must be increasing"); o.bucket = b; }
     else if (name === "--lane-profile") o.laneProfile = true;
     else if (name === "--issues") { const v = take(); if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(v)) throw new Error("--issues must be a comma list of issue numbers"); o.issues = v.split(",").map(Number); }
     else if (name === "--efficiency") o.efficiency = true;
@@ -144,7 +155,8 @@ export function parseArgs(argv) {
     else throw new Error(`unknown argument: ${a}`);
   }
   if (o.batch && !o.efficiency) throw new Error("--batch and --window need --efficiency");
-  if (o.windows && !o.efficiency && !o.pool) throw new Error("--batch and --window need --efficiency");
+  if (o.windows && !o.efficiency && !o.pool && !o.compounding) throw new Error("--batch and --window need --efficiency");
+  if (o.bucket && !o.compounding) throw new Error("--bucket needs --compounding");
   if ((o.compare || o.offline) && !o.efficiency) throw new Error("--compare and --offline need --efficiency");
   if (o.postMetrics && !o.by) throw new Error("--post-metrics needs --by version");
   return o;
@@ -302,6 +314,12 @@ export async function buildReport(opts, deps = {}) {
     return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query };
   }
   const model = toModel(repo, gh);
+  if (opts.compounding) { // forge#4696: GitHub records + guards + git, no model
+    const inputs = await (deps.gatherCompounding ?? gatherCompounding)({ repo, gh: deps.gh ?? defaultGh });
+    const query = { compounding: compoundingReport({ ...inputs, runs: model.runs, events: model.events, windowMs: opts.windows?.[0] ?? DEFAULT_WINDOW_MS,
+      buckets: opts.bucket ?? DEFAULT_BUCKETS, now: deps.now?.() ?? Date.now(), minN: opts.minN }) };
+    return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache } }, query };
+  }
   const ghKeys = new Set(model.runs.map((r) => `${r.repo}#${r.issue}`));
   let local = [];
   if (opts.local) {
@@ -348,6 +366,7 @@ export async function runStats(argv, deps = {}) {
     if (report.query?.experiment) { process.stdout.write(`${opts.json ? renderJson(report) : renderExperiment(report.query.experiment)}\n`); return experimentExit(opts, report.query.experiment); }
     if (report.query?.lane_profile && !opts.json) { process.stdout.write(`${renderLaneProfiles(report.query.lane_profile)}\n`); return 0; }
     if (report.query?.tiers && !opts.json) { process.stdout.write(`${renderTiers(report.query.tiers)}\n`); return 0; }
+    if (report.query?.compounding && !opts.json) { process.stdout.write(`${renderCompounding(report.query.compounding)}\n`); return 0; }
     if (report.query?.pool && !opts.json) { process.stdout.write(`${formatPoolLines(report.query.pool).join("\n")}\n`); return 0; }
     if (report.query?.efficiency && !opts.json) {
       const e = report.query.efficiency;

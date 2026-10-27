@@ -1855,3 +1855,12 @@ resolves to the next open one by due date, else forge.yaml `followups.default_mi
 ## Entry 2026-10-27 — Engine-authored history preserve rows (#4694)
 
 At contract freeze (full and light lanes) `lean.mjs` calls `withHistoryRows` (`guards.mjs`), which reads the local guards index (`readIndex`, no GitHub call) and appends `{id:"H<n>", what:"<why> (#X, PR #Y)", source:"guard"}` rows to `preserve` before `contractHash`. `historyPreserve` is pure and deterministic: skips the lane's own issue; score 3 = a guarded hunk file is a deliverable, 2 = a guarding test file is, 1 = either sits under a deliverable's directory; ties go to the newest issue (issue number, not merge time); capped at 5; earlier H guard rows are dropped first. No index or no match returns the same contract object, so hashes of unguarded lanes are unchanged. `guardAfterMerge` merges a freshly posted guard into an existing local index. The trajectory's Decision sources line lists the H rows (`recordStructure`); the split-lane contract gets none. Decision-sourced rows wait for #4695. Cost: 0 LLM calls, one file read.
+
+## Compounding metrics (#4696)
+
+`forgedock stats --compounding` (`bin/stats/compounding.mjs`) measures reintroduction (guarded fix reopened, or blamed by a later
+guarded fix within 90 days), reopen-after-close, guard activity and decision churn by rolling window, release and lane-age bucket.
+It reads FORGE:GUARD comments (`bin/lean/guards.mjs` `collectGuards`, read only), `reopened` issue events, git, and these
+FORGE:TELEMETRY gate events, which #4693/#4695 must emit under exactly these names: `guard_run`, `guard_broken`,
+`supersedes_accepted`, `decision_superseded`, `decision_violation` (an unrecorded kind prints n/a). Stats-time only: no lane-path
+cost, no LLM. Usage and definitions: `docs/STATS.md`.
