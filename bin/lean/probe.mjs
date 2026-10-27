@@ -244,14 +244,14 @@ export async function probeIssue({ issue, repo, cwd = process.cwd(), io, default
   try { defaultSha = String(await io.git(["rev-parse", `origin/${defaultBranch}`], { cwd })).trim() || null; } catch { /* recorded as null */ }
   const r = await runProbe(d.probe, { cwd, env: probeEnv(config.env, env), mask: config.env.map((k) => env[k]), timeoutS: config.timeoutS, ...(spawn ? { spawn } : {}) });
   const detail = `exit ${r.exit ?? "timeout"} in ${r.ms}ms`;
-  if (dryRun) return row(r.result, `${detail} (dry run: not recorded)`, { fix, output: r.output });
+  if (dryRun) return row(r.result, `${detail} (dry run: not recorded)`, { fix, defaultBranch, output: r.output });
   const body = renderProbeComment({ probe: d.probe, fix, defaultBranch, defaultSha, r });
   let note = "";
   if (r.result === "fail") {
     try { await io.gh(["issue", "reopen", String(issue), "-R", repo]); } catch (e) { note = `; reopen failed: ${String(e?.message ?? e).slice(0, 120)}`; }
   }
   await io.gh(["issue", "comment", String(issue), "-R", repo, "--body", body]);
-  return row(r.result, detail + note, { fix });
+  return row(r.result, detail + note, { fix, defaultBranch });
 }
 
 /** The default branch: forge.yaml `branches.default`, else GitHub's. */

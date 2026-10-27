@@ -441,7 +441,8 @@ export function providerByName(name, opts) {
     try { forgeYaml = opts?.cwd ? readFileSync(join(opts.cwd, "forge.yaml"), "utf8") : null; } catch { forgeYaml = null; }
     // The router's token is resolved under a fixed name so remoteProvider redacts it like any `token_env` credential.
     const tokenEnv = exec.tokenEnv ?? (router?.token ? "FORGEDOCK_POOL_TOKEN" : undefined);
-    const credentials = (n) => (n === "FORGEDOCK_POOL_TOKEN" && !exec.tokenEnv ? router?.token ?? null : resolveCredential(n, { env }));
+    // #4685: an empty env/keychain lookup of a configured token_env falls back to the router's token file.
+    const credentials = (n) => (n === "FORGEDOCK_POOL_TOKEN" && !exec.tokenEnv ? router?.token ?? null : resolveCredential(n, { env }) ?? router?.token ?? null);
     const settings = { ...exec, ...(exec.endpoint ? {} : router ? { endpoint: router.endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}) };
     return remoteProvider({ batch: opts.batch, repo: opts.repo, settings, name: "pool", env, credentials, transport: remoteTransportFor(settings, { transport: opts?.transport, env, credentials }), ...(opts?.now ? { now: opts.now } : {}) });
   }
@@ -503,7 +504,10 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     }
   };
   // A start failure repeats on a relaunch: typed, never engine-error (#4254). Retryable (capacity) defers with backoff.
-  const startFailed = (id, e) => (e?.retryable === true
+  // #4685: a refused or missing credential defers with its own code (a fixed token is picked up on the retry), never needs-human.
+  const startFailed = (id, e) => ([401, 403].includes(e?.status)
+    ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_AUTH, retryInSeconds: 300, detail: `sandbox ${id} could not start (auth): ${errText(e)}; check the pool token (COMPUTESHARE_TOKEN or ~/.config/computeshare/forgedock.token)` }
+    : e?.retryable === true
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
     : { terminalReason: "needs-human", code: OUTCOME_CODES.SANDBOX_START_FAILED, detail: `sandbox ${id} failed to start: ${errText(e)}` });
   return {

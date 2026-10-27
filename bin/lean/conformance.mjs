@@ -270,7 +270,8 @@ export function validateContract(c, issueText, { repro = false } = {}) {
 /** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
-const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "decision"];
+const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision"];
+const GUARD_ID_RE = /^#?\d+$/;
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
 
 /** forge#4574: common builder slips: `type` for `kind`, amend-requirement/limitation as defer, an `R#` in `id` as the requirement. */
@@ -284,11 +285,25 @@ function normalizeAmendment(a) {
   return n;
 }
 
+const REF_SEP_RE = /\s*(?:[/,;&+]|\band\b)\s*/i, REF_RANGE_RE = /^R(\d+)\s*[-\u2013\u2014]\s*R?(\d+)$/i, REF_MAX = 50;
+
+/** forge#4655: a slash/comma-joined or ranged requirement reference (`R2/R3`, `R2, R3`, `R2–R3`) as its individual ids; a single id or anything else is returned as is. */
+function splitRequirementRefs(ref) {
+  if (typeof ref !== "string") return [ref];
+  const ids = [];
+  for (const part of ref.trim().split(REF_SEP_RE)) {
+    const m = REF_RANGE_RE.exec(part);
+    if (m && +m[1] <= +m[2] && +m[2] - +m[1] < REF_MAX) for (let i = +m[1]; i <= +m[2]; i++) ids.push(`R${i}`);
+    else ids.push(part);
+  }
+  return ids.length > 1 ? ids : [ref];
+}
+
 /** The rejection reason, naming the valid kinds or the missing field so the builder's correction round can fix it. */
 function amendmentProblem(a, tag) {
   const kind = a?.kind;
   const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
-    : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
+    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
       : kind === "decision" ? "needs decision {choice, anchors: [paths or globs], symbols?, supersedes?: decision id}" : null;
   const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
   return `unknown or incomplete amendment: ${why}: ${tag}`;
@@ -308,8 +323,16 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
   c.deliverables = c.deliverables ?? [];
   const applied = [], toTrack = [], problems = [], decisions = [];
   const genRes = (Array.isArray(generatedPaths) ? generatedPaths : []).filter((g) => typeof g === "string" && g).map(shellGlobRe);
+  const rows = [];
   for (const raw of Array.isArray(amendments) ? amendments : []) {
-    const a = normalizeAmendment(raw);
+    const n = normalizeAmendment(raw);
+    if (n && (TRACKED.includes(n.kind) || n.kind === "amend-requirement") && typeof n.requirement === "string") {
+      const ids = splitRequirementRefs(n.requirement);
+      if (ids.length > 1) { for (const id of ids) rows.push({ a: { ...n, requirement: id }, raw }); continue; }
+    }
+    rows.push({ a: n, raw });
+  }
+  for (const { a, raw } of rows) {
     const tag = JSON.stringify(raw ?? null).slice(0, 400);
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
@@ -331,6 +354,12 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
       c.requirements.push(r);
       if (TRACKED.includes(r.disposition)) toTrack.push(r);
+    } else if (a.kind === "supersedes" && GUARD_ID_RE.test(String(a.guard ?? "").trim())) {
+      // #4693: retires one guard's guard_broken for this lane; the reviewer judges it, the engine tells the guarded issue after merge
+      const guard = `#${String(a.guard).trim().replace(/^#/, "")}`;
+      c.supersedes = [...(c.supersedes ?? []).filter((s) => s.guard !== guard), { guard, why: String(a.why).trim() }];
+      applied.push({ kind: a.kind, target: guard, why: String(a.why).trim() });
+      continue;
     } else if (a.kind === "amend-requirement" && !blank(a.requirement)) {
       // #4594: the requirement stays deliver and keeps its verbatim quote; the reviewer judges it against amendment.text
       const r = c.requirements.find((x) => x.id === a.requirement);
@@ -408,7 +437,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -450,6 +479,9 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
   if (repro) failures.push(...reproFailures(contract, repro));
+  // #4693: a broken guard fails unless the contract carries a supersedes amendment for it
+  const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
+  for (const f of guardFailures ?? []) if (!retired.has(f.guard)) failures.push(f);
   return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
 

@@ -3,12 +3,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches } from "./batch.mjs";
-import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv, exitOnSignals } from "./schedd.mjs";
+import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
 import { orchestrateFromCli } from "../engine-cli.mjs";
@@ -507,10 +507,71 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
   });
 
   it("lane env: allowlisted keys come from the client only, the rest from the daemon", () => {
-    const kept = batchEnv({ PATH: "/c", CLAUDE_CONFIG_DIR: "/acct-b", SECRET_X: "no", FORGEDOCK_SCHED_DIR: "/s" });
-    assert.deepEqual(kept, { PATH: "/c", CLAUDE_CONFIG_DIR: "/acct-b", FORGEDOCK_SCHED_DIR: "/s" });
+    const kept = batchEnv({ PATH: "/", CLAUDE_CONFIG_DIR: "/acct-b", SECRET_X: "no", FORGEDOCK_SCHED_DIR: "/s", LC_CTYPE: "C" });
+    assert.deepEqual(kept, { PATH: "/", CLAUDE_CONFIG_DIR: "/acct-b", FORGEDOCK_SCHED_DIR: "/s", LC_CTYPE: "C" });
     const env = mergeEnv({ PATH: "/d", ANTHROPIC_API_KEY: "daemon-key", NODE_OPTIONS: "x" }, kept);
-    assert.deepEqual(env, { NODE_OPTIONS: "x", PATH: "/c", CLAUDE_CONFIG_DIR: "/acct-b", FORGEDOCK_SCHED_DIR: "/s" });
+    assert.equal(mergeEnv({ GH_TOKEN: "d" }, kept).GH_TOKEN, "d", "a secret-named daemon key (never pinned) stays for the lane");
+    assert.deepEqual(env, { NODE_OPTIONS: "x", ANTHROPIC_API_KEY: "daemon-key", PATH: "/", CLAUDE_CONFIG_DIR: "/acct-b", FORGEDOCK_SCHED_DIR: "/s", LC_CTYPE: "C" });
+  });
+
+  it("#4691: the pinned env drops session tokens and ids, session temp PATH dirs and path_exclude dirs", () => {
+    const work = tmpDir("schedd-env-");
+    const keep = join(work, "bin"), session = join(work, "claude-1", "arg0"), wrapper = join(work, "wrap", "shims");
+    for (const d of [keep, session, wrapper]) mkdirSync(d, { recursive: true });
+    const session_env = { PATH: [keep, session, wrapper, join(work, "gone")].join(":"), HOME: "/h", CLAUDE_CODE_MESSAGING_TOKEN: "tok", CLAUDE_CODE_SESSION_ID: "s", CLAUDE_PID: "1",
+      CLAUDE_CODE_SESSION_ATTENDED: "1", ANTHROPIC_API_KEY: "k", FORGEDOCK_SANDBOX_TOKEN: "t", MY_FLAG: "1", MY_SECRET_PASS: "p", GH_HOST: "h" };
+    const pin = batchEnv(session_env, { passthrough: ["MY_FLAG", "MY_SECRET_PASS"], pathExclude: [`${work}/wrap/*`], tmpRoots: [work] });
+    assert.equal(pin.PATH, keep, "only the live, non-session, non-excluded dir stays");
+    assert.deepEqual(Object.keys(pin).sort(), ["GH_HOST", "HOME", "MY_FLAG", "MY_SECRET_PASS", "PATH"]);
+    assert.equal(sanitizePath(`${session}:${keep}`, { tmpRoots: [work] }), keep);
+    assert.equal(sanitizePath(`${session}:${keep}`, { tmpRoots: ["/nowhere"] }), `${session}:${keep}`, "an arg0 dir outside a temp root is not session-scoped");
+    assert.deepEqual(redactEnv({ A: "1", GH_TOKEN: "x" }), { A: "1", GH_TOKEN: "<redacted>" });
+  });
+
+  it("#4691: plan.json holds none of the session token, temp PATH dir or excluded wrapper dir; --show/--set/--unset-env edit it", async () => {
+    const h = host();
+    const work = tmpDir("schedd-pin-");
+    const keep = join(work, "bin"), session = join(work, "claude-9", "arg0"), wrapper = join(work, "wrap", "shims");
+    for (const d of [keep, session, wrapper]) mkdirSync(d, { recursive: true });
+    writeFileSync(join(work, "forge.yaml"), `orchestration:\n  path_exclude: ${work}/wrap/*\n`);
+    const saved = { cwd: process.cwd(), path: process.env.PATH, tmp: process.env.TMPDIR };
+    let a;
+    try {
+      await h.daemon();
+      process.chdir(work);
+      process.env.PATH = [keep, session, wrapper].join(":");
+      process.env.TMPDIR = work;
+      process.env.CLAUDE_CODE_MESSAGING_TOKEN = "msg-token";
+      process.env.CLAUDE_CODE_SESSION_ID = "sess";
+      await withRoot(h, async () => {
+        a = capture(() => orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...h.client, reconnectMs: 0 })).catch((e) => e);
+        await until(() => h.stubPids().length === 1 && h.lanePids().length === 1);
+      });
+      const [id] = listBatches(h.root);
+      const raw = readFileSync(join(h.root, id, "plan.json"), "utf8");
+      const env = JSON.parse(raw).env;
+      assert.equal(env.PATH, keep);
+      for (const bad of ["msg-token", "sess", "CLAUDE_CODE_", session, wrapper]) assert.equal(raw.includes(bad), false, `${bad} not pinned`);
+      await withRoot(h, async () => {
+        await capture(() => orchestrateFromCli(["--set-env", id, "MY_VAR=1"], h.client));
+        await capture(() => orchestrateFromCli(["--set-env", id, "GH_TOKEN=abc"], h.client));
+        assert.equal(openBatch(h.root, id).readPlan().env.MY_VAR, "1");
+        const { lines } = await capture(() => orchestrateFromCli(["--show-env", id], h.client));
+        assert.match(lines.join("\n"), /^GH_TOKEN=<redacted>$/m);
+        assert.match(lines.join("\n"), /^MY_VAR=1$/m);
+        assert.equal(lines.join("\n").includes("abc"), false);
+        await capture(() => orchestrateFromCli(["--unset-env", id, "MY_VAR"], h.client));
+        assert.equal("MY_VAR" in openBatch(h.root, id).readPlan().env, false);
+        await assert.rejects(() => orchestrateFromCli(["--set-env", id, "NOEQUALS"], h.client), /KEY=VAL/);
+      });
+      writeFileSync(h.release, "");
+    } finally {
+      process.chdir(saved.cwd); process.env.PATH = saved.path;
+      if (saved.tmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = saved.tmp;
+      delete process.env.CLAUDE_CODE_MESSAGING_TOKEN; delete process.env.CLAUDE_CODE_SESSION_ID;
+      await h.cleanup();
+    }
+    await a;
   });
 });
 

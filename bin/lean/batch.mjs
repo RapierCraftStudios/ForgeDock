@@ -99,7 +99,7 @@ export function openBatch(root, id) {
   if (!ID_RE.test(String(id ?? ""))) throw new Error(`invalid batch id ${JSON.stringify(id)}`);
   const dir = join(root, id);
   const f = (name) => join(dir, name);
-  return {
+  const self = {
     id, dir,
     exists: () => existsSync(f("plan.json")),
     readPlan: () => readJson(f("plan.json")),
@@ -122,16 +122,19 @@ export function openBatch(root, id) {
      * `order`, in the file or earlier in `list`: skipped `already in batch`. @returns {{added:number[], skipped:Array<{issue, reason}>}}
      */
     addIssues: (list) => {
-      const have = new Set([...(readJson(f("state.json"))?.order ?? []), ...readAdded(f("add"))]);
-      const added = [], skipped = [];
+      const st = readJson(f("state.json")) ?? {};
+      const have = new Set([...(st.order ?? []), ...readAdded(f("add"))]);
+      const added = [], skipped = [], requeued = [];
       for (const x of Array.isArray(list) ? list : []) {
         const n = typeof x === "number" ? x : typeof x === "string" && /^#?\d+$/.test(x.trim()) ? parseInt(x.trim().replace("#", ""), 10) : NaN;
         if (!Number.isSafeInteger(n) || n < 1) { skipped.push({ issue: x, reason: "not an integer" }); continue; }
+        // #4687: an issue skipped in the batch (a dependency ended) is re-queued, not refused; any other row is "already in batch"
+        if (have.has(n) && st.results?.[n]?.outcome === "skipped" && !requeued.includes(n) && self.requeue([n], { reason: "--add", by: "operator" }).requeued.length) { requeued.push(n); continue; }
         if (have.has(n)) { skipped.push({ issue: n, reason: "already in batch" }); continue; }
         have.add(n); added.push(n);
       }
       if (added.length) writeAtomic(f("add"), JSON.stringify([...new Set([...readAdded(f("add")), ...added])].sort((a, b) => a - b)) + "\n");
-      return { added, skipped };
+      return { added, skipped, requeued };
     },
     /**
      * `--requeue` (#4550): record that each issue returns to pending. Refused: not a positive integer, not in the batch's
@@ -199,6 +202,7 @@ export function openBatch(root, id) {
     resultFile: (n) => f(join("lanes", `${n}.json`)),
     logFile: (n) => f(join("lanes", `${n}.log`)),
   };
+  return self;
 }
 
 /** True when `pid` is alive and (where /proc exists) its command line names `marker`, so a reused pid is not adopted. */
