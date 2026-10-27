@@ -1,17 +1,31 @@
 ### Approach
-Time the guard gate beside the validate rerun; added wall time is the part not hidden behind the rerun. Emit it per gate pass and sum it per lane onto RUN_TERMINAL.
-### Changes
-- bin/lean/lean.mjs: `added_wall_ms` on guard_run; lane total `guard_added_ms` on RUN_TERMINAL.
-- bin/engine/telemetry-seam.mjs: `guard_added_ms` in the run_terminal payload.
-- bin/engine/telemetry-seam.test.mjs: regression test.
-### Acceptance Criteria Status
-- R1 ✅ bin/lean/lean.mjs (guard_run, RUN_TERMINAL), bin/engine/telemetry-seam.mjs
-- R2 post-deploy: median measured from shadow telemetry after deploy.
-### Verification
-- V1 node --test telemetry-seam, guardgate, lean tests: 519 pass, 0 fail. New test fails without the fix (1 fail).
-- `forgedock check`: PASS. checks.mjs widened to the full suite (848 referencing files); not run per host rules. No formatter configured.
-### Notes
-Skipped-gate lanes (no guard selected) add 0 and omit the field. No new env vars.
-- Docs: devdocs/modules/lean.md describes guard_added_ms / added_wall_ms (docs freshness check).
+Split joined requirement references into individual amendment rows before applying them. Tell the builder the valid kinds and one id per row. Make the repro harness report UNRUNNABLE when head fails only on a missing host module or command.
 
-Fix: guardGate now stages its guard_run event; the caller emits it after the Promise.all with added_wall_ms = max(0, total - validate rerun ms), 0 when the gate errored (error:true).
+### Changes
+- bin/lean/conformance.mjs: `splitRequirementRefs` and row expansion in `applyAmendments`. Handles `/ , ; & + and` separators and `R2-R3` / `R2–R3` ranges. Applies to defer, post-deploy and amend-requirement.
+- bin/lean/prompts.mjs: no `scope-note` kind; one requirement id per row.
+- scripts/acceptance-red-green.sh: head run failed on `No module named <third-party>` or `X: command not found` is UNRUNNABLE. A module the repo tracks stays FAILED. The change is in `run_in`, not the shared classifier, so validate callers are unaffected (D6 seam, D3 unchanged).
+- bin/lean/conformance.test.mjs, scripts/acceptance-red-green.test.sh: regression tests.
+
+### Acceptance Criteria Status
+- R1 ✅ bin/lean/conformance.mjs (splitRequirementRefs, applyAmendments)
+- R2 ✅ bin/lean/conformance.mjs, bin/lean/prompts.mjs:194
+- R3 ✅ scope-note stays invalid (test) and the prompt forbids it
+- R4 ✅ scripts/acceptance-red-green.sh (run_in, host_missing)
+
+### Verification
+- node --test bin/lean/conformance.test.mjs: pass (94). The new tests fail without the fix (2 fail).
+- bash scripts/classify-test-run.test.sh: pass
+- bash scripts/acceptance-red-green.test.sh: pass. The new case fails without the fix.
+- node --test bin/lean/lean.test.mjs bin/lean/light.test.mjs: pass
+- forgedock check: PASS. The scoped checks.mjs asked for the full suite (widened), which I did not run per host rules.
+
+### Notes
+- D3 and D5 (classify-test-run.sh) were deliberately not changed. The fix lives in run_in (D6) to avoid altering the classifier used by commands/work-on/build/validate.md.
+- Head-only: base missing-module failures remain legitimate red proof.
+- devdocs/modules/lean.md was not updated (not a deliverable). scripts/check-devdocs-freshness.sh reports no update required.
+
+Docs: devdocs/modules/lean.md entry for #4655 (joined refs split, scope-note rejected, host-missing => UNRUNNABLE).
+
+### Follow-up
+- host_missing now also matches the unquoted `No module named pytest` (the issue's real output); added an unquoted test case in acceptance-red-green.test.sh. V3 passes (25/25).

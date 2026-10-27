@@ -189,7 +189,7 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file the contract did not list.
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: an issue requirement the contract missed.
-- {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: a requirement that becomes separate work or a post-deploy check. Filed as a tracked follow-up. Not "type"; other kinds are rejected.
+- {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: a requirement that becomes separate work or a post-deploy check. Filed as a tracked follow-up. Not "type"; other kinds (there is no "scope-note") are rejected. One requirement id per row: write R2 and R3 as two rows, never "R2/R3".
 - {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded; judged against text.
 New keys: translate, never copy English; status entries in place.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
