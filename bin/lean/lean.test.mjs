@@ -3302,7 +3302,8 @@ describe("batch robustness (#4112-#4115)", () => {
     const { writeFileSync, chmodSync } = await import("node:fs");
     const { runCliBackendAsync } = await import("../runner.mjs");
     const d = tmpDir("core-fork-");
-    writeFileSync(`${d}/fake-claude`, "#!/bin/sh\ni=0\nwhile [ $i -lt 200 ]; do sleep 20 & i=$((i+1)); done 2>/dev/null\nsleep 20\n"); chmodSync(`${d}/fake-claude`, 0o755);
+    // node (not sh): a refused fork must not end the fixture before the sampler sees the scope's pids.events
+    writeFileSync(`${d}/fake-claude`, `#!${process.execPath}\nconst { spawn } = require("node:child_process");\nfor (let i = 0; i < 200; i++) { try { spawn("sleep", ["20"], { stdio: "ignore" }).on("error", () => {}); } catch {} }\nsetTimeout(() => {}, 20000);\n`); chmodSync(`${d}/fake-claude`, 0o755);
     await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, maxMs: 15000, wrap: (b, a) => wrapLaneLimits(b, a, { tasks_max: 20 }) }),
       (e) => e.code === "CLI_LANE_LIMIT" && e.limit === "tasks");
   });

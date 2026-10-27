@@ -43,3 +43,6 @@ No CI log was available and the job does not reproduce locally (1880 targeted te
 
 ## R4 fixture without systemd
 Added "#4690 a fixture lane really forking past its task cap" (bin/lean/lean.test.mjs): a real shell fixture forks 40 children, a probe counting its real descendants reports the cap, and runCliBackendAsync stops it with CLI_LANE_LIMIT/tasks. It runs on every host; the real-scope variant still skips where systemd-run --user is unavailable. V1-V3 exit 0.
+
+## CI follow-up 2 (Unit tests job)
+Still no CI log; not reproducible locally (no systemd-run here). Likely cause: the real-scope integration test used an sh fixture that exits when a fork is refused at TasksMax, so the child ended before the 1s sampler read pids.events and no CLI_LANE_LIMIT was thrown. The fixture is now a node script that tolerates refused forks and stays alive (bin/lean/lean.test.mjs). Targeted #4690 tests pass.
