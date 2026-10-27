@@ -58,7 +58,7 @@ import { readDecisionIndex, withDecisionRows, recordDecisions } from "./decision
 import { parseContextPackConfig, contextArm, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
 import { isExternalKill } from "./hostkill.mjs";
 import { buildResumeDigest } from "./resume.mjs";
-import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registryPkgVersion, closedEdgeNote } from "./needs-human-premise.mjs";
+import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registryPkgVersion, closedEdgeNote, onlyAsk, fileRemainder } from "./needs-human-premise.mjs";
 import { lightEligibility } from "./light.mjs";
 import { untrackToolState, unstageToolState } from "./toolstate.mjs";
 import { ensureSignedOff } from "./signoff.mjs";
@@ -150,7 +150,8 @@ export function classifyBlock(result, issue) {
     return { kind: "split", rationale: gate.rationale, subissues, serialized: serializeShared(subissues) };
   }
   if (b.kind === "human") {
-    return HUMAN_BLOCK_REASONS.includes(b.why) ? { kind: "human", why: b.why }
+    const remainder = (Array.isArray(b.remainder) ? b.remainder : []).filter((x) => x && typeof x.title === "string" && x.title.trim() && typeof x.body === "string").slice(0, MAX_SUBISSUES).map((x) => ({ title: x.title.trim(), body: x.body })); // #4730
+    return HUMAN_BLOCK_REASONS.includes(b.why) ? { kind: "human", why: b.why, ...(remainder.length ? { remainder } : {}) }
       : { kind: "untyped", problem: `"${String(b.why ?? "").slice(0, 80)}" is not a human-only reason (${HUMAN_BLOCK_REASONS.join(", ")})` };
   }
   return { kind: "untyped", problem: `block kind "${String(b.kind ?? "").slice(0, 40)}" is unknown` };
@@ -482,7 +483,18 @@ export async function runCore(o) {
   /** #4297/#4316: a recovery lane that ended unmerged keeps needs-human with this evidence (shared text in render.mjs). */
   const laneRecoveryEvidence = (reason, code, detail) => recoveryEvidence({ code: recover.code, attempt: recover.attempt, outcome: reason, resultCode: code, detail });
   let closedDeps = []; // #4725: `Depends on` edges the live check found closed: satisfied, flagged in the needs-human comment
-  async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR, extra = {}) {
+  /** #4730: an issue whose only content is an ask already registered on #existing is closed as a duplicate, linked; any extra content keeps it open. */
+  async function duplicateAskIssue(existing, asks) {
+    try {
+      const v = JSON.parse(String(await ghc(["issue", "view", String(issue), "-R", repo, "--json", "title,body"])));
+      if (!asks.some((a) => a && onlyAsk(v.title, v.body, a))) return false;
+      await ghw(["issue", "close", String(issue), "-R", repo, "--reason", "not planned", "--comment", `Duplicate owner ask: its only content is the ask already recorded on #${existing}. Answering #${existing} covers this issue.`]);
+      await label("invalid");
+      T.decisions.push(`Closed as a duplicate of the owner ask on #${existing}`);
+      return true;
+    } catch { return false; }
+  }
+  async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR, { ask: askText, note: askNote = "", ...extra } = {}) {
     // #4725: a recorded premise (`Premise: <kind>:<arg>`) that already holds is no blocker: no label, the lane runs again.
     const predicate = parsePredicate(why);
     if (predicate && (!recover || recover.final) && await evalPredicate(predicate, { repo, io: { gh: ghc, pkgVersion: io.pkgVersion ?? registryPkgVersion } }) === true) {
@@ -493,9 +505,10 @@ export async function runCore(o) {
       let link = "";
       if (code === OUTCOME_CODES.BUILDER_BLOCKED) { // #4725: one owner ask, linked across issues
         const reg = await registerAsk({ repo, io: { gh: ghc }, issue, ask: why });
+        if (reg.existing && (!recover || recover.final) && await duplicateAskIssue(reg.existing, [why, askText])) return finish("invalid", `only content is the owner ask of #${reg.existing}; closed as a duplicate`); // #4730
         link = reg.existing ? `Same owner ask as #${reg.existing} (one ask, linked): answering it unblocks this issue too.` : reg.entry ?? "";
       }
-      const notes = [premiseAnnotation(predicate), closedEdgeNote(closedDeps), link].filter(Boolean).join("\n");
+      const notes = [premiseAnnotation(predicate), closedEdgeNote(closedDeps), link, askNote].filter(Boolean).join("\n");
       await post("FORGE:NEEDS_HUMAN", `## Needs human\n${why}${notes ? `\n\n${notes}` : ""}${recoverUnlabelled ? `\n\n${laneRecoveryEvidence("needs-human", code, "")}` : ""}\n\n_${usageLine()}_`);
       await ghc(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]);
     } catch { /* best effort */ }
@@ -860,7 +873,18 @@ export async function runCore(o) {
       // #4685: a tool the sandbox lacks (docker, promtool, a Python module) is an environment gap the host recovers, never a credential.
       return await needsHuman(`Remote sandbox lacks a validate tool (Builder is blocked (credentials)): ${s}\n\nNot a credential: the lane is recovered where the tool exists.`, OUTCOME_CODES.ENV_TOOL_MISSING);
     }
-    if (b.kind === "human") return await needsHuman(`Builder is blocked (${b.why}): ${s}`, OUTCOME_CODES.BUILDER_BLOCKED);
+    if (b.kind === "human") {
+      // #4730: the agent-doable remainder is re-queued as its own lane; only the owner step keeps needs-human.
+      let note = "";
+      if (b.remainder?.length) {
+        try {
+          const filed = await fileRemainder({ repo, io: { gh: ghc, create: ghw }, issue, items: b.remainder, milestone });
+          T.decisions.push(`Builder block: remainder re-queued as ${refs(filed)}; #${issue} keeps only the owner step`);
+          note = `The agent-doable remainder was re-queued as ${refs(filed)}; this issue keeps only the owner step.`;
+        } catch (e) { return await finish("engine-error", `filing the remainder issues failed: ${e?.message ?? e}`); }
+      }
+      return await needsHuman(`Builder is blocked (${b.why}): ${s}`, OUTCOME_CODES.BUILDER_BLOCKED, { ask: s, note });
+    }
     if (b.kind === "unreadable") return await finish("dependency-unreadable", b.detail);
     if (b.kind === "dependency") {
       const blocked = b.blockers.length > 0;

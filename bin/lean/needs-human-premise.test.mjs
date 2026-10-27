@@ -3,7 +3,7 @@
 // #4725: needs-human premises, closed edges, owner-ask registry, and the batch parking path.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parsePredicate, evalPredicate, closedEdges, closedEdgeNote, normalizeAsk, askKey, registerAsk, sweepPremises, comparePremiseVersions, premiseAnnotation } from "./needs-human-premise.mjs";
+import { parsePredicate, evalPredicate, closedEdges, closedEdgeNote, normalizeAsk, askKey, registerAsk, onlyAsk, fileRemainder, sweepPremises, comparePremiseVersions, premiseAnnotation } from "./needs-human-premise.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 
 const fakeGh = (handlers) => { const calls = []; return { calls, gh: async (a) => { calls.push(a); for (const [re, f] of handlers) if (re.test(a.join(" "))) return f(a); return ""; } }; };
@@ -85,4 +85,22 @@ describe("owner-ask registry (#4725)", () => {
 import { registryPkgVersion } from "./needs-human-premise.mjs";
 it("registryPkgVersion rejects unsafe package names without spawning", async () => {
   assert.equal(await registryPkgVersion("x; rm -rf /"), null);
+});
+
+it("#4730 onlyAsk: strict normalized equality, markers and Parent lines ignored", () => {
+  assert.equal(onlyAsk("t", "Sign off the price (#5).\n**Parent**: #9\n<!-- x -->", "sign off the price"), true);
+  assert.equal(onlyAsk("sign off the price", "", "Sign off the price"), true);
+  assert.equal(onlyAsk("t", "Sign off the price and rework the importer", "Sign off the price"), false);
+  assert.equal(onlyAsk("t", "x", ""), false);
+});
+
+it("#4730 fileRemainder files once and reuses an existing marker", async () => {
+  const created = [];
+  const io = { gh: async () => "[]", create: async (a) => { created.push(a); return `https://github.com/o/r/issues/${90 + created.length}\n`; } };
+  assert.deepEqual(await fileRemainder({ repo: "o/r", io, issue: 7, items: [{ title: "a", body: "b" }], milestone: "M1" }), [91]);
+  assert.ok(created[0].includes("--milestone") && created[0].includes("M1"));
+  const key = askKey("a");
+  const io2 = { ...io, gh: async () => JSON.stringify([{ number: 5, body: `<!-- FORGE:REMAINDER of=#7 key=${key} -->` }]) };
+  assert.deepEqual(await fileRemainder({ repo: "o/r", io: io2, issue: 7, items: [{ title: "a", body: "b" }] }), [5]);
+  assert.equal(created.length, 1);
 });

@@ -140,3 +140,35 @@ export async function sweepPremises({ repo, io, now = Date.now(), dryRun = false
 
 /** The marker line a needs-human comment carries so the sweep can re-read the predicate. */
 export const premiseAnnotation = (p) => (p ? `<!-- ${PREMISE_MARKER} ${p.kind}:${p.arg} -->` : "");
+
+const strip = (t) => String(t ?? "").replace(/<!--[\s\S]*?-->/g, " ").replace(/^\s*\**(parent|depends on)\**\s*:.*$/gim, " ");
+/** #4730: true when an issue's content (markers and Parent/Depends lines ignored) is nothing beyond `ask`: strict normalized equality of the body, or of the title when the body is empty. */
+export function onlyAsk(title, body, ask) {
+  const a = normalizeAsk(ask), b = normalizeAsk(strip(body));
+  return Boolean(a) && (b ? b === a : normalizeAsk(title) === a);
+}
+
+export const REMAINDER_MARKER = "FORGE:REMAINDER";
+/**
+ * #4730: files the agent-doable remainder of an owner-blocked lane as its own issues (no needs-human, `Parent: #N`). Idempotent: an
+ * item whose `FORGE:REMAINDER of=#N key=<hash>` marker already exists on an issue is reused. Returns the issue numbers, in item order.
+ */
+export async function fileRemainder({ repo, io, issue, items, milestone = null }) {
+  const out = [];
+  for (const it of items ?? []) {
+    const key = askKey(it.title), mark = `<!-- ${REMAINDER_MARKER} of=#${issue} key=${key} -->`;
+    let n = null;
+    try {
+      const list = JSON.parse(String(await io.gh(["issue", "list", "-R", repo, "--state", "all", "--limit", "20", "--search", `"${REMAINDER_MARKER} of=#${issue} key=${key}" in:body`, "--json", "number,body"])));
+      n = (Array.isArray(list) ? list : []).find((i) => String(i?.body ?? "").includes(mark))?.number ?? null;
+    } catch { /* fail-open: file it */ }
+    if (n == null) {
+      const body = `${it.body.trim()}\n\n**Parent**: #${issue}\n${mark}`;
+      const res = String(await io.create(["issue", "create", "-R", repo, "--title", it.title, "--body", body, ...(milestone ? ["--milestone", milestone] : [])]));
+      n = Number(/\/issues\/(\d+)/.exec(res)?.[1]);
+      if (!Number.isSafeInteger(n)) throw new Error(`cannot parse the remainder issue number from: ${res.slice(0, 200)}`);
+    }
+    out.push(n);
+  }
+  return out;
+}
