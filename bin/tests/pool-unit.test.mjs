@@ -19,14 +19,26 @@ describe("pool unit hardening (#4673)", () => {
   it("schedd sets its title", () => {
     assert.match(read("bin/engine-cli.mjs"), /process\.title = "forgedock-schedd"/);
   });
-  it("generated units carry OOMScoreAdjust= and StartLimitIntervalSec=0 from the shared snippet", () => {
+  it("generated units carry OOMScoreAdjust= from the shared snippet and StartLimitIntervalSec=0 in [Unit] only", () => {
     const out = (mode) => spawnSync("bash", ["-c", `. ${root}pool/install/unit-hardening.sh; unit_hardening ${mode}`], { encoding: "utf8" }).stdout;
     for (const mode of ["user", "system"]) {
       assert.match(out(mode), /^OOMScoreAdjust=-?\d+$/m);
-      assert.match(out(mode), /^StartLimitIntervalSec=0$/m);
       assert.match(out(mode), /^Restart=always$/m);
+      assert.doesNotMatch(out(mode), /StartLimitIntervalSec/);
     }
     for (const f of ["install-router.sh", "install-agent.sh", "install-schedd.sh"]) assert.match(read(`pool/install/${f}`), /unit-hardening\.sh/);
+  });
+  it("StartLimitIntervalSec=0 lands in [Unit], not [Service], of every generated unit", () => {
+    for (const [f, mode] of [["install-router.sh", "user"], ["install-agent.sh", "system"], ["install-schedd.sh", "user"]]) {
+      const heredoc = read(`pool/install/${f}`).match(/<<-?\s*\\?'?(\w+)'?\n(\[Unit\][\s\S]*?)\n\1\n/)[2];
+      const script = `. ${root}pool/install/unit-hardening.sh; cat <<EOF\n${heredoc}\nEOF`;
+      const unit = spawnSync("bash", ["-c", script], { encoding: "utf8" }).stdout;
+      const sections = {};
+      let cur;
+      for (const line of unit.split("\n")) { const m = line.match(/^\[(\w+)\]$/); if (m) cur = sections[m[1]] = []; else if (cur) cur.push(line); }
+      assert.ok(sections.Unit.includes("StartLimitIntervalSec=0"), `${f}: missing in [Unit] (${mode})`);
+      assert.ok(!sections.Service.some((l) => l.startsWith("StartLimitIntervalSec")), `${f}: present in [Service]`);
+    }
   });
   it("restartCheck warns with the last exit reason, passes when quiet, skips absent units", () => {
     const run = (journal) => (cmd) => cmd === "systemctl" ? "NRestarts=8\nLoadState=loaded\n" : journal;

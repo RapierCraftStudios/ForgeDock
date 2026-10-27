@@ -11,6 +11,7 @@ mkdir -p "$HOME/.config/systemd/user"
 cat > "$HOME/.config/systemd/user/forgedock-schedd.service" <<UNIT
 [Unit]
 Description=forgedock schedd
+$(unit_start_limit)
 
 [Service]
 ExecStart=$NODE $REPO_ROOT/bin/forgedock.mjs schedd

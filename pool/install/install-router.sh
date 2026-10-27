@@ -38,6 +38,7 @@ cat > "$HOME/.config/systemd/user/computeshare-router.service" <<EOF
 [Unit]
 Description=computeshare router
 After=network-online.target tailscaled.service
+$(unit_start_limit)
 
 [Service]
 ExecStart=$NODE $REPO_ROOT/bin/pool/cli.mjs router --config $CONF_DIR/router.json

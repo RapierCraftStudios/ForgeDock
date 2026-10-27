@@ -681,6 +681,26 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
   return { complete: p.length === 0, problems: p, missing: [...ids] };
 }
 
+
+/** #4726: a requirement quote that carries a `[type:e2e]` criterion. */
+const wantsE2e = (r) => /\[type:e2e\]/i.test(String(r?.quote ?? ""));
+const E2E_CMD_RE = /\b(?:playwright|cypress|e2e|live[- ]stack|wdio)\b/i;
+/**
+ * #4726: whether a validate command runs a real end-to-end check: an entry of `verify.e2e_checks`, a file of the e2e spec set
+ * (`e2e.isSpec`), or Playwright/Cypress/e2e/live-stack. A unit test file with stubbed I/O is not one.
+ */
+export function isE2eCommand(command, e2e = null) {
+  const cmd = String(command ?? "");
+  if ((e2e?.checks ?? []).some((c) => c && cmd.includes(c))) return true;
+  if (typeof e2e?.isSpec === "function" && cmd.split(/\s+/).some((t) => t && e2e.isSpec(t.replace(/^["']+|["']+$/g, "")))) return true;
+  return E2E_CMD_RE.test(cmd);
+}
+/** #4726: true when a V-ref named in the row's `validated_by` resolves to a contract validate command that is a real e2e check. */
+export function e2eVerified(row, contract, e2e = null) {
+  const by = String(row?.validated_by ?? "");
+  const refs = (contract?.validate ?? []).filter((v) => v?.id && new RegExp(`(?:^|[^A-Za-z0-9_])${v.id}(?![A-Za-z0-9_])`).test(by));
+  return refs.some((v) => isE2eCommand(v.command, e2e)) || (!refs.length && isE2eCommand(by, e2e));
+}
 /**
  * The engine's decision from the reviewer's rows. state: conforms | nonconforming | review.unparseable | review.incomplete
  * | review.inconsistent. failures[] are {code, detail}; `inconsistent` marks a CONFORMS verdict whose rows fail;
@@ -702,6 +722,8 @@ export function decide(raw, ctx) {
       if (row.instrumented !== true) f.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} verified out of band${r.evidence ? ` by ${r.evidence}` : ""}: instrumentation missing${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && row.status !== "implemented") {
       f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
+    } else if (r.disposition === "deliver" && wantsE2e(r) && !e2eVerified(row, ctx.contract, ctx.e2e)) {
+      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, detail: `${r.id} is a [type:e2e] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack); run one, or mark ${r.id} post-deploy with a tracked follow-up` });
     }
     if (TRACKED.includes(r.disposition) && row.deferral_ok === false) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} ${r.disposition} is not justified${row.note ? `: ${row.note}` : ""}; implement it` });
   }

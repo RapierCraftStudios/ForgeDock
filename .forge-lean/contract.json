@@ -1,0 +1,79 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "A `FORGE:GUARD` comment from an untrusted author is ignored by `collectGuards`, `guardIssue` and the guard index.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "A test covers both a trusted and an untrusted guard.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R3",
+   "quote": "Must land before #4693's guard gate moves from shadow to enforce.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/guards.mjs",
+   "change": "import isTrustedIssueComment from ./prefilter.mjs; in guardIssue compute the `existing` guard only from trusted comments; in collectGuards skip comments that are not trusted before parseGuard. The index and guardgate use collectGuards, so they are covered.",
+   "requirements": [
+    "R1",
+    "R3"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/guards.test.mjs",
+   "change": "add authorAssociation OWNER to existing guard comment fixtures; add tests: collectGuards keeps a trusted guard and drops an untrusted (CONTRIBUTOR/NONE) one; guardIssue ignores an untrusted planted guard and still posts the real one; the guards list index excludes the untrusted guard.",
+   "requirements": [
+    "R1",
+    "R2"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "guardIssue stays idempotent for a trusted existing guard and posts exactly one guard (bin/lean/guards.mjs:96)"
+  },
+  {
+   "id": "P2",
+   "what": "collectGuards signature and return shape, consumed by bin/lean/guardgate.mjs:30 and bin/stats/compounding.mjs:150"
+  },
+  {
+   "id": "P3",
+   "what": "The FORGE:CONTRACT lookup in guardIssue is unchanged (out of scope)"
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/guards.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/lean/guardgate.test.mjs bin/lean/lean.test.mjs"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Reuse isTrustedIssueComment from prefilter.mjs rather than a new predicate; no change to the gh query because gh's comments JSON already includes author and authorAssociation",
+   "justification": "bin/lean/prefilter.mjs:54-58,199 and the same use in bin/engine-cli.mjs:2033, bin/lean/postdeploy-monitor.mjs:32",
+   "source": "precedent"
+  }
+ ],
+ "repro_test": {
+  "path": "bin/lean/guards.test.mjs",
+  "id": "collectGuards ignores a FORGE:GUARD comment from an untrusted author",
+  "command": "node --test bin/lean/guards.test.mjs --test-name-pattern=\"collectGuards ignores a FORGE:GUARD comment from an untrusted author\""
+ }
+}
