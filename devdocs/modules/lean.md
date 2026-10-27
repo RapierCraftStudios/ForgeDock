@@ -35,7 +35,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    An open PR on another non-default base is `needs-human`, except when the resolved lane
    is shipped (merged into staging by a merge commit, `isShippedLane`; an unused lane at the staging tip is not) and the PR base is live: the run follows it (#4593).
 3. **Dependencies, then lease** — open `Depends-on` → `dependency-open`
-   (orchestrate requeues behind it); then the FORGE:STATE lease.
+   (orchestrate requeues behind it); then the FORGE:STATE lease. An open dependency
+   whose PR (closing or referencing it) is merged into this lane, by merge-commit
+   ancestry on `origin/<lane>`, is satisfied (a stale `needs-human` on it does not
+   block either); the FORGE:DEPENDENCY comment names the PR and merge commit (#4686).
+   A merge only to another lane still blocks.
 4. **Claim + worktree** — `workflow:investigating`, `FORGE:STARTED` comment;
    resumes an open PR / remote branch. Before an existing `lean-<N>` worktree is
    removed (#4162): processes whose cwd is inside it (an orphaned runner from a
