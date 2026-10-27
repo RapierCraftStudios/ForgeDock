@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { laneBackendId } from "./limits.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
+import { execFileSync } from "node:child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
@@ -3276,7 +3277,17 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.match(r.text, /\.scope/);
   });
 
-  it("#4690 integration: a step forking past TasksMax in a real scope ends CLI_LANE_LIMIT (skipped without systemd-run)", { skip: !systemdRunAvailable() }, async () => {
+  // The scope's cgroup counters must be readable (cgroup v2, delegated user scope); plain systemd-run availability is not enough on CI.
+  const scopeEventsReadable = () => {
+    if (!systemdRunAvailable()) return false;
+    try {
+      const w = wrapLaneLimits("sh", ["-c", "cat /proc/self/cgroup"], { tasks_max: 50 });
+      const out = execFileSync(w.bin, w.args, { encoding: "utf8", timeout: 8000 });
+      const path = (out.split("\n").find((l) => l.startsWith("0::")) ?? "").slice(3).trim();
+      return path.endsWith(".scope") && existsSync(`/sys/fs/cgroup${path}/pids.events`);
+    } catch { return false; }
+  };
+  it("#4690 integration: a step forking past TasksMax in a real scope ends CLI_LANE_LIMIT (skipped without systemd-run)", { skip: !scopeEventsReadable() }, async () => {
     const { writeFileSync, chmodSync } = await import("node:fs");
     const { runCliBackendAsync } = await import("../runner.mjs");
     const d = tmpDir("core-fork-");
