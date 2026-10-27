@@ -38,7 +38,7 @@ export function classifyEdges({ order, issues }) {
   return { ok: !edges.some((e) => e.state === "invalid"), edges };
 }
 
-export function formatReport({ edges }) {
+export function formatLiveReport({ edges }) {
   if (!edges.length) return "plan validate --live: no cross-milestone edges";
   const lines = edges.map((e) => `${e.state}: #${e.from} (${e.fromMilestone}) depends on #${e.to} (${e.toMilestone})`);
   const n = (s) => edges.filter((e) => e.state === s).length;
@@ -102,7 +102,7 @@ export async function runLive(argv, { gh = ghExec, out = (t) => process.stdout.w
   const repo = i >= 0 ? argv[i + 1] : "";
   let report;
   try { report = classifyEdges(await readLive({ gh, repo })); } catch (e) { err(`plan validate --live: ${e.message}`); return 2; }
-  out(argv.includes("--json") ? JSON.stringify(report) : formatReport(report));
+  out(argv.includes("--json") ? JSON.stringify(report) : formatLiveReport(report));
   return report.ok ? 0 : 1;
 }
 
