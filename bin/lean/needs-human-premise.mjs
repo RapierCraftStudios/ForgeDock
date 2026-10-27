@@ -32,7 +32,7 @@ export function parsePredicate(text) {
 export const formatPredicate = (p) => (p ? `Premise: ${p.kind}:${p.arg}` : "");
 
 /** Numeric dotted-version compare (pre-release tails are ignored): -1 | 0 | 1. */
-export function compareVersions(a, b) {
+export function comparePremiseVersions(a, b) {
   const pa = String(a).split(/[.-]/).map((x) => parseInt(x, 10) || 0), pb = String(b).split(/[.-]/).map((x) => parseInt(x, 10) || 0);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] ?? 0) - (pb[i] ?? 0); if (d) return d < 0 ? -1 : 1; }
   return 0;
@@ -52,7 +52,7 @@ export async function evalPredicate(p, { repo, io, now = Date.now() } = {}) {
       if (typeof io?.pkgVersion !== "function") return null;
       const at = p.arg.lastIndexOf("@");
       const cur = await io.pkgVersion(p.arg.slice(0, at));
-      return typeof cur === "string" && cur ? compareVersions(cur, p.arg.slice(at + 1)) >= 0 : null;
+      return typeof cur === "string" && cur ? comparePremiseVersions(cur, p.arg.slice(at + 1)) >= 0 : null;
     }
   } catch { /* unknown */ }
   return null;

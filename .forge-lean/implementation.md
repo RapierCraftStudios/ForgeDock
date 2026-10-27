@@ -36,3 +36,6 @@ A pure module (`needs-human-premise.mjs`) holds predicates, closed-edge helpers 
 
 ### Sibling-list check
 - The 10 flagged tests (batch, checks, conformance, conformance.e2e, context, execution, execution.e2e, fixround, heavy, lean) enumerate no lean modules; recorded as `not_members` in result.json, no test edits.
+
+### Export collision
+- `compareVersions` in needs-human-premise.mjs collided with bin/registry.mjs; renamed to `comparePremiseVersions` (module + its test). V1-V3 pass.

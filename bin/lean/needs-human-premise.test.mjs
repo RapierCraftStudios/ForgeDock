@@ -3,7 +3,7 @@
 // #4725: needs-human premises, closed edges, owner-ask registry, and the batch parking path.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parsePredicate, evalPredicate, closedEdges, closedEdgeNote, normalizeAsk, askKey, registerAsk, sweepPremises, compareVersions, premiseAnnotation } from "./needs-human-premise.mjs";
+import { parsePredicate, evalPredicate, closedEdges, closedEdgeNote, normalizeAsk, askKey, registerAsk, sweepPremises, comparePremiseVersions, premiseAnnotation } from "./needs-human-premise.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 
 const fakeGh = (handlers) => { const calls = []; return { calls, gh: async (a) => { calls.push(a); for (const [re, f] of handlers) if (re.test(a.join(" "))) return f(a); return ""; } }; };
@@ -22,7 +22,7 @@ describe("predicates (#4725)", () => {
     assert.equal(await evalPredicate({ kind: "issue-closed", arg: "8" }, { repo: "o/r", io: { gh } }), false);
     assert.equal(await evalPredicate({ kind: "pkg-version", arg: "x@1.2.0" }, { io: { pkgVersion: async () => "1.10.0" } }), true);
     assert.equal(await evalPredicate({ kind: "pkg-version", arg: "x@1.2.0" }, { io: {} }), null);
-    assert.equal(compareVersions("1.2", "1.2.0"), 0);
+    assert.equal(comparePremiseVersions("1.2", "1.2.0"), 0);
   });
 });
 
