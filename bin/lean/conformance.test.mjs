@@ -60,6 +60,21 @@ describe("amendments", () => {
   });
 });
 
+describe("#4655 multi-requirement amendment references", () => {
+  it("R1/R2, 'R1, R2' and an en-dash range split into one applied row per id", () => {
+    for (const requirement of ["R1/R2", "R1, R2", "R1\u2013R2", "R1 and R2"]) {
+      const a = applyAmendments(C, [{ kind: "defer", requirement, why: "w" }]);
+      assert.deepEqual(a.problems, [], requirement);
+      assert.deepEqual(a.toTrack.map((r) => r.id).sort(), ["R1", "R2"], requirement);
+      assert.deepEqual(a.applied.map((x) => x.target), ["R1", "R2"], requirement);
+    }
+  });
+  it("an unknown id inside a list is still a problem; scope-note stays an unknown kind", () => {
+    assert.match(applyAmendments(C, [{ kind: "defer", requirement: "R1/R9", why: "w" }]).problems[0], /unknown requirement R9/);
+    assert.match(applyAmendments(C, [{ kind: "scope-note", requirement: "R1", why: "w" }]).problems[0], /unknown kind 'scope-note'; valid kinds are/);
+  });
+});
+
 describe("#4574 amendment slips", () => {
   it("type for kind, amend-requirement and limitation apply as defer; an R# id fills requirement", () => {
     const a = applyAmendments(C, [{ kind: "amend-requirement", id: "R2", why: "stored hashed" }, { id: "A1", requirement: "R1", type: "limitation", why: "plugin limit" }]);
