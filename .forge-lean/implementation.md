@@ -26,3 +26,6 @@ New command `forgedock milestone train`. State lives under `<batchRoot>/trains/<
 
 ## Sibling-list check
 The eight bin/lean tests flagged as enumerating siblings of `train` (batch, checks, conformance, context, execution.e2e, execution, fixround, heavy) do not list bin/lean modules or train symbols at the cited lines. Recorded as `not_members` in result.json; no test edits.
+
+## CI follow-up (Unit tests)
+CI log was unavailable. Reran bin/lean, bin/engine, bin/stats, bin/tests, packages/protocol locally: all train/lifecycle/lane/batch tests pass (V1: 81/0). The only failures are 3 pre-existing, environment-dependent tests unrelated to this diff (WSL/platform detection in preflight, a root-user copyFile permission test, writeInstallReceipt platform capture). No code change made.
