@@ -340,6 +340,7 @@ Train state is included in the Phase 5 output summary.
 **Commits**: {N} | **PRs**: {N} | **Issues closed**: {N} | **Files changed**: {N}
 
 ### Deploy Train State
+**Gate**: `node ${FORGEDOCK_HOME:-${CLAUDE_PLUGIN_ROOT}}/scripts/readiness.mjs --target {preview|staging|prod}`; NOT DEPLOYABLE (open prerequisites) means never call the target deployable (#4660).
 **Train PR**: #{TRAIN_PR_NUMBER} (SHA: {TRAIN_PR_SHA}, opened: {TRAIN_PR_CREATED})
 **Status**: {TRAIN_STATUS}
 {If HELD: "**Held by**: {count} open finding(s) — fix and push to unblock:\n{HELD_BY}"}

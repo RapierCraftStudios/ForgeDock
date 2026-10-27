@@ -35,8 +35,10 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseDependsOn } from "../bin/engine/phases.mjs";
+import { parseGates } from "./readiness.mjs";
 
 const NEEDS_HUMAN_LABEL = "needs-human";
+const EXTERNAL_LABEL = "needs-human:external"; // #4660: external prerequisite; its `gates:` line names what it blocks
 const TYPE_TAG_RE = /\[type:(?:api|unit|e2e|manual)\]/;
 const CHECKBOX_RE = /^[ \t]*[-*+][ \t]+\[[ xX]\]/;
 const PLACEHOLDER_RE = /#\{\{([^{}]*)\}\}/g;
@@ -72,7 +74,7 @@ const normHeading = (h) => h.replace(/\([^)]*\)\s*$/, "").trim().toLowerCase();
 
 /** True when the issue is a needs-human issue (credential, account or external input). */
 export function isNeedsHuman(issue) {
-  return issue?.needsHuman === true || (Array.isArray(issue?.labels) && issue.labels.includes(NEEDS_HUMAN_LABEL));
+  return issue?.needsHuman === true || (Array.isArray(issue?.labels) && (issue.labels.includes(NEEDS_HUMAN_LABEL) || issue.labels.includes(EXTERNAL_LABEL)));
 }
 
 /**
@@ -275,6 +277,9 @@ export function validatePlan(plan) {
     if (isNeedsHuman(it)) {
       const lacking = NEEDS_HUMAN_PARTS.filter(([, re]) => !re.test(it.body)).map(([name]) => name);
       if (lacking.length) err(it.key, "missing-needs-human-section", `needs-human issue lacks: ${lacking.join(", ")}`);
+      if (!parseGates(it.body).length) {
+        err(it.key, "missing-gates", "needs-human issue has no valid `gates:` line (preview|staging-deploy|prod-deploy|feature-flag:<name>)");
+      }
     }
   }
   return { ok: errors.length === 0, errors };

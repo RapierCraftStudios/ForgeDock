@@ -1826,3 +1826,7 @@ file as `stopRemote: true` (through the schedd `cancel` op or `requestCancel`); 
 run.interrupted`; 2xx = sent, 404/405 = unsupported or gone (false). Stop never falls back to `DELETE`: destroying a
 sandbox is not a checkpoint and would lose work; teardown still destroys only after the result. Without the flag, or on a
 pool with no stop endpoint, behaviour is as before (remote lanes run to their result). Cost: 0 LLM calls.
+
+## Entry 2026-10-27 — external prerequisites are preview/deploy gates (#4660)
+
+`scripts/readiness.mjs` (pure module + CLI) reads `needs-human:external` issues, parses `gates:` (`preview|staging-deploy|prod-deploy|feature-flag:<name>`) and `owner:` from the body, and reports per gate the open prerequisites (owner, age) and open code milestones; malformed gates are ignored. `--digest` orders unblocked human actions by `Depends on #N` (topological, cycle-safe). `deployable(target)` is false while the mapped gate (preview, staging, prod) has open prerequisites; a `feature-flag` gate stays red but never blocks merge. `bootstrap-validate.mjs` treats `needs-human:external` as needs-human and rejects a missing/invalid `gates:` with `missing-gates`; `bootstrap-create.mjs` applies the label. Merge and lane code unchanged. Cost: 0 LLM calls.

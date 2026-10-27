@@ -218,7 +218,8 @@ export function createBacklog(plan, { io, repo, config = {}, base }) {
 
   // Labels: create only the missing ones (never overwrite an existing label's colour or description).
   const haveLabels = new Set((json(["label", "list", "-R", repo, "--limit", "1000", "--json", "name"]) ?? []).map((l) => l.name));
-  const wanted = new Set(plan.issues.flatMap((it) => [...(it.labels ?? []), priorityLabel(it)]).filter(Boolean));
+  const issueLabels = (it) => [...(it.labels ?? []), priorityLabel(it), ...(isNeedsHuman(it) ? ["needs-human:external"] : [])].filter(Boolean); // #4660
+  const wanted = new Set(plan.issues.flatMap(issueLabels));
   for (const l of wanted) if (!haveLabels.has(l)) gh(["label", "create", l, "-R", repo]);
 
   // Milestones in build order, each with its lane branch.
@@ -253,7 +254,7 @@ export function createBacklog(plan, { io, repo, config = {}, base }) {
       return;
     }
     const args = ["issue", "create", "-R", repo, "--title", it.title, "--body-file", "-", "--milestone", milestoneTitle.get(it.milestone)];
-    for (const l of [...(it.labels ?? []), priorityLabel(it)].filter(Boolean)) args.push("--label", l);
+    for (const l of new Set(issueLabels(it))) args.push("--label", l);
     const body = finalBody(it);
     const out = gh(args, body);
     const number = parseIssueNumber(out);
