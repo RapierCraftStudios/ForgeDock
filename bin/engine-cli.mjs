@@ -16,7 +16,7 @@ import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs } from ".
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
-import { makeEventEmitter, probeEvent, regressionEvent, experimentEvent } from "./engine/events.mjs";
+import { makeEventEmitter, probeSweepEvents, experimentEvent } from "./engine/events.mjs";
 import { readExperiment } from "./experiment.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
@@ -141,7 +141,7 @@ export function readEvents(cwd = process.cwd()) {
 /** The probe sweep's `onResult`: one probe.passed / probe.failed event per recorded pass or fail row. Never throws. */
 function probeEventSink(repo) {
   const events = makeEventEmitter({ repo, config: readEvents() });
-  return async (row) => { for (const p of [probeEvent(row), regressionEvent(row)]) if (p) await events.emitEvent(p.type, p.data, p.ctx); };
+  return async (row) => { for (const p of probeSweepEvents(row)) await events.emitEvent(p.type, p.data, p.ctx); };
 }
 /** `forgedock stats --experiment <id> --emit-event` (#4632): one experiment.verdict event for a met or missed report; inconclusive emits nothing. Never throws. */
 export async function experimentEventSink(repo, report) {

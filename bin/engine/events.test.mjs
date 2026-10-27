@@ -7,7 +7,7 @@ import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { createHmac } from "node:crypto";
-import { EVENT_TYPES, EVENT_VERSION, buildEvent, mapRunRecord, makeEventEmitter, probeEvent, regressionEvent, experimentEvent, promotedEvent, sign, webhookUrlOk, postWebhook } from "./events.mjs";
+import { EVENT_TYPES, EVENT_VERSION, buildEvent, mapRunRecord, makeEventEmitter, probeEvent, probeSweepEvents, regressionEvent, experimentEvent, promotedEvent, sign, webhookUrlOk, postWebhook } from "./events.mjs";
 
 const tmp = () => tmpDir("forge-events-");
 const fixed = () => new Date("2026-10-26T12:00:00Z");
@@ -54,6 +54,20 @@ describe("event contract (v1)", () => {
     assert.equal(probeEvent({ issue: 1, outcome: "awaiting-promotion" }), null);
     assert.equal(probeEvent({ issue: 1, outcome: "pass", detail: "exit 0", fix: "abc" }).type, "probe.passed");
     assert.equal(probeEvent({ issue: 1, outcome: "fail" }).type, "probe.failed");
+  });
+});
+
+describe("probeSweepEvents emits release.promoted (#4644)", () => {
+  it("probe pass/fail rows with defaultBranch add release.promoted", () => {
+    const ev = probeSweepEvents({ issue: 3, outcome: "pass", fix: "abc", defaultBranch: "main", detail: "ok" });
+    assert.deepEqual(ev.map((e) => e.type), ["probe.passed", "release.promoted"]);
+    assert.deepEqual(ev[1].data, { fix: "abc", default_branch: "main" }); assert.equal(ev[1].ctx.issue, 3);
+    assert.equal(probeSweepEvents({ issue: 3, outcome: "fail", fix: "abc", defaultBranch: "main" }).length, 2);
+  });
+  it("monitor rows, awaiting-promotion and errors do not", () => {
+    assert.deepEqual(probeSweepEvents({ issue: 3, outcome: "pass", fix: "abc" }).map((e) => e.type), ["probe.passed"]);
+    assert.deepEqual(probeSweepEvents({ issue: 3, outcome: "awaiting-promotion", fix: "abc", defaultBranch: "main" }), []);
+    assert.deepEqual(probeSweepEvents({ issue: 3, outcome: "error" }), []);
   });
 });
 
