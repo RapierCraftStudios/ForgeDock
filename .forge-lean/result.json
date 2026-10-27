@@ -5,7 +5,7 @@
   {
    "id": "R1",
    "status": "implemented",
-   "evidence": "bin/lean/guards.mjs:guardIssue, bin/lean/lean.mjs hook after label(\"merged\")"
+   "evidence": "bin/lean/guards.mjs:guardIssue, bin/lean/lean.mjs hook after label(\"merged\"); hook fetches bare lane branch and merge sha (conformance fix)"
   },
   {
    "id": "R2",
