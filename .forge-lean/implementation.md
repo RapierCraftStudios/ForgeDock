@@ -1,20 +1,31 @@
 ### Approach
-Extend the #4389/#4626 post-deploy gate: due-date state, decision items as owner asks, a deterministic parked sweep on the schedd timer, and outcome handling (tick, file issues, owner ask) in measureFollowup. No lane or model call is involved.
-### Changes
-- bin/lean/prefilter.mjs: `due:` token, `awaiting-due` gate state, decision-only items, owner-ask, `gateOnly`, report lines.
-- bin/lean/parked-sweep.mjs: new `sweepParked`.
-- bin/lean/postdeploy-check.mjs: tick items on pass, one engineering issue per failing check, typed owner ask.
-- bin/engine-cli.mjs: sweep on schedd due pass and `probe --due`.
-- bin/lean/lifecycle.mjs, light.mjs, bin/labels.json: `awaiting-due` label.
-- Tests, devdocs/modules/lean.md, decision ADR, docs/CONFIG.md.
-### Acceptance Criteria Status
-- R1-R6: ✅ bin/lean/prefilter.mjs (postDeployGate, prefilterIssue), bin/lean/parked-sweep.mjs
-- R7-R11: ✅ bin/lean/postdeploy-check.mjs (measureFollowup, tickItems, fileFailureIssues, postOwnerAsk)
-- R12-R13: ✅ bin/lean/prefilter.mjs (formatParkedLine)
-### Verification
-- V1, V2 (`forgedock check`): pass. The new tests exercise code that did not exist before the change, so they fail without it.
-### Notes
-No new env vars. New labels `awaiting-due` and `due:<date>`.
+Built on #4595's blocker re-check. Dependency skips are marked `waiting` while a re-check can still re-admit them; `--add` of a skipped issue goes through the #4550 requeue path; a not-planned close is `final`; log rows carry `trigger`.
 
-## Stale-list fix
-The ten flagged tests (batch, checks, conformance(.e2e), context, execution(.e2e), fixround, heavy, lean) enumerate unrelated things (fixtures, fix-round kinds, heavy binaries), not lean modules. `parked-sweep` is recorded in result.json `not_members` for each.
+### Changes
+- bin/lean/batch.mjs: addIssues re-queues an issue whose result is `skipped` (returns `requeued`); openBatch returns `self`.
+- bin/lean/orchestrate.mjs: skip() sets `waiting` and logs `trigger`; watchBlockers honours `final` (settled blockers), logs `readmitted` rows with trigger; requeued dependents logged; waiting cleared at batch end; formatTable shows `waiting on #X`.
+- bin/engine-cli.mjs: makeDispatchCheck reads stateReason (not planned => final); addToBatch reports requeued, clears a finished report; formatRowLine shows waiting.
+- bin/lean/schedd.mjs: add op reopens a finished unhosted batch when it re-queued issues.
+- commands/orchestrate.md: documents the above.
+- tests: lean.test.mjs, batch.test.mjs.
+
+### Acceptance Criteria Status
+- R1 ✅ orchestrate.mjs watchBlockers (readmit + log), lean.test.mjs "#4687 a dependency skip waits"
+- R2 ✅ batch.mjs addIssues, batch.test.mjs "#4687 --add re-queues"
+- R3 ✅ engine-cli.mjs makeDispatchCheck `final`, orchestrate.mjs watchBlockers, lean.test.mjs not-planned test
+- R4 ✅ orchestrate.mjs skip/readmitted/requeued update rows with `trigger` (log.jsonl via store.log)
+- R5 ✅ orchestrate.mjs formatTable, engine-cli.mjs formatRowLine
+- R6 ✅ waiting flag + per-pass re-check (#4595 loop)
+
+### Verification
+- V1 lean.test.mjs: 500 pass, 0 fail. V2 batch.test.mjs: 54 pass. V3 schedd.test.mjs: 21 pass. bin/tests/engine-cli.test.mjs run too. `forgedock check`: PASS.
+- New tests (batch #4, lean #15, #16) fail with the source files reverted to HEAD.
+- checks.mjs widened to the full suite (889 referrers), not run per host rules.
+
+### Notes
+- The dispatch check now requests `--json state,stateReason`; existing test stub updated.
+- A resumed batch loses the display-only `waiting` flag for rows skipped before the resume.
+- Dependents of an in-batch lane ending `invalid` still run (SATISFIED unchanged).
+
+## Docs
+Added a #4687 entry to devdocs/modules/lean.md (waiting state, trigger log, final not-planned, --add requeue) to satisfy the devdocs freshness check.

@@ -1933,3 +1933,14 @@ was swallowed and every later pass returned `recorded-fail`, so the parent staye
 throws, no record is posted and the next pass re-runs the checks and retries. The early `monitoring` return on an existing windowed
 pass record also re-applies the idempotent `post-deploy-monitoring` label, so a label that failed on the first pass is retried
 (`sweepDue` selects by it).
+
+## Entry 2026-10-27 — Dependency-skipped issues wait and re-queue in the same batch (#4687)
+
+A dependency skip (`dependency #X ended <outcome>`) keeps outcome `skipped` but carries a display-only `waiting` flag while
+`dispatchCheck` can still re-admit it (cleared when the batch ends, so the report ends `skipped` only if X never resolved). The
+table and console show `waiting on #X`. The #4595 blocker re-check re-admits the dependent when X merges or closes; each skip,
+re-admit and requeue row carries `trigger:<issue>` in the `decide` log. `makeDispatchCheck` returns `final: true` for an issue
+closed as NOT_PLANNED: `watchBlockers` stops re-checking it and its dependents stay `skipped`. `batch.addIssues` now re-queues an
+in-batch issue whose result is `skipped` through the `--requeue` file (returned as `requeued`); merged/needs-human/other rows still
+report `already in batch`. The schedd `add` op reopens a finished, unhosted batch like `requeue`; without a daemon `addToBatch`
+clears the report so the next `--resume` reruns it. Cost: 0 LLM calls; one extra `dispatchCheck` per blocker per watch interval.

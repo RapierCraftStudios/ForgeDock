@@ -1,165 +1,19 @@
-{
- "status": "fixed",
- "summary": "due-date gate, parked sweep, owner asks and verification outcomes for post-deploy follow-ups",
- "requirements": [
-  {
-   "id": "R1",
-   "status": "implemented",
-   "evidence": "bin/lean/prefilter.mjs:postDeployOnly"
-  },
-  {
-   "id": "R2",
-   "status": "implemented",
-   "evidence": "bin/lean/prefilter.mjs:postDeployGate"
-  },
-  {
-   "id": "R3",
-   "status": "implemented",
-   "evidence": "bin/lean/parked-sweep.mjs:sweepParked"
-  },
-  {
-   "id": "R4",
-   "status": "implemented",
-   "evidence": "bin/lean/prefilter.mjs:prefilterIssue"
-  },
-  {
-   "id": "R5",
-   "status": "implemented",
-   "evidence": "bin/engine-cli.mjs:scheddDue"
-  },
-  {
-   "id": "R6",
-   "status": "implemented",
-   "evidence": "bin/lean/prefilter.mjs:itemDueMs"
-  },
-  {
-   "id": "R7",
-   "status": "implemented",
-   "evidence": "bin/lean/postdeploy-check.mjs:measureFollowup"
-  },
-  {
-   "id": "R8",
-   "status": "implemented",
-   "evidence": "bin/lean/postdeploy-check.mjs:measureFollowup"
-  },
-  {
-   "id": "R9",
-   "status": "implemented",
-   "evidence": "bin/lean/postdeploy-check.mjs:tickItems"
-  },
-  {
-   "id": "R10",
-   "status": "implemented",
-   "evidence": "bin/lean/postdeploy-check.mjs:fileFailureIssues"
-  },
-  {
-   "id": "R11",
-   "status": "implemented",
-   "evidence": "bin/lean/postdeploy-check.mjs:postOwnerAsk"
-  },
-  {
-   "id": "R12",
-   "status": "implemented",
-   "evidence": "bin/lean/prefilter.mjs:formatParkedLine"
-  },
-  {
-   "id": "R13",
-   "status": "implemented",
-   "evidence": "bin/lean/prefilter.mjs:formatParkedLine"
-  }
- ],
- "validation": [
-  {
-   "id": "V1",
-   "command": "node --test bin/lean/prefilter.test.mjs bin/lean/parked-sweep.test.mjs bin/lean/postdeploy-check.test.mjs bin/lean/postdeploy-monitor.test.mjs",
-   "exit": 0
-  },
-  {
-   "id": "V2",
-   "command": "node --test bin/lean/light.test.mjs bin/lean/lifecycle.test.mjs bin/lean/orchestrate.test.mjs bin/lean/schedd.test.mjs",
-   "exit": 0
-  }
- ],
- "tests": [
-  {
-   "command": "node --test bin/lean/parked-sweep.test.mjs bin/lean/postdeploy-check.test.mjs bin/lean/prefilter.test.mjs",
-   "result": "pass",
-   "fails_without_fix": true
-  }
- ],
- "self_review": [
-  {
-   "question": "1",
-   "answer": "yes",
-   "evidence": "R1-R13 mapped above"
-  },
-  {
-   "question": "2",
-   "answer": "yes",
-   "evidence": "forgedock check PASS incl. existing suites"
-  },
-  {
-   "question": "3",
-   "answer": "yes",
-   "evidence": "V1,V2 exit 0"
-  },
-  {
-   "question": "4",
-   "answer": "yes",
-   "evidence": "diff limited to deliverables, tests, devdocs"
-  }
- ],
- "amendments": [],
- "not_members": [
-  {
-   "symbol": "parked-sweep",
-   "test": "bin/lean/batch.test.mjs",
-   "why": "line 29 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
-  },
-  {
-   "symbol": "parked-sweep",
-   "test": "bin/lean/checks.test.mjs",
-   "why": "line 156 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
-  },
-  {
-   "symbol": "parked-sweep",
-   "test": "bin/lean/conformance.e2e.test.mjs",
-   "why": "line 74 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
-  },
-  {
-   "symbol": "parked-sweep",
-   "test": "bin/lean/conformance.test.mjs",
-   "why": "line 366 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
-  },
-  {
-   "symbol": "parked-sweep",
-   "test": "bin/lean/context.test.mjs",
-   "why": "line 138 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
-  },
-  {
-   "symbol": "parked-sweep",
-   "test": "bin/lean/execution.e2e.test.mjs",
-   "why": "line 28 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
-  },
-  {
-   "symbol": "parked-sweep",
-   "test": "bin/lean/execution.test.mjs",
-   "why": "line 42 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
-  },
-  {
-   "symbol": "parked-sweep",
-   "test": "bin/lean/fixround.test.mjs",
-   "why": "line 10 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
-  },
-  {
-   "symbol": "parked-sweep",
-   "test": "bin/lean/heavy.test.mjs",
-   "why": "line 28 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
-  },
-  {
-   "symbol": "parked-sweep",
-   "test": "bin/lean/lean.test.mjs",
-   "why": "line 87 is not a list of lean modules or parked-state labels (stub lanes, fixtures, kinds or binaries); parked-sweep is not a member"
-  }
- ]
-}
+{"status":"fixed","summary":"Dependency-skipped issues show as waiting, re-queue via --add or blocker recovery, stay skipped for not-planned blockers, and log their trigger.",
+"requirements":[
+{"id":"R1","status":"implemented","evidence":"bin/lean/orchestrate.mjs watchBlockers"},
+{"id":"R2","status":"implemented","evidence":"bin/lean/batch.mjs addIssues"},
+{"id":"R3","status":"implemented","evidence":"bin/engine-cli.mjs makeDispatchCheck final; orchestrate.mjs watchBlockers"},
+{"id":"R4","status":"implemented","evidence":"bin/lean/orchestrate.mjs skip/readmitted rows with trigger"},
+{"id":"R5","status":"implemented","evidence":"bin/lean/orchestrate.mjs formatTable; bin/engine-cli.mjs formatRowLine"},
+{"id":"R6","status":"implemented","evidence":"bin/lean/orchestrate.mjs skip waiting flag"}],
+"validation":[
+{"id":"V1","command":"node --test bin/lean/lean.test.mjs","exit":0},
+{"id":"V2","command":"node --test bin/lean/batch.test.mjs","exit":0},
+{"id":"V3","command":"node --test bin/lean/schedd.test.mjs","exit":0}],
+"tests":[{"command":"node --test bin/lean/lean.test.mjs bin/lean/batch.test.mjs","result":"pass","fails_without_fix":true}],
+"self_review":[
+{"question":"1","answer":"yes","evidence":"R1-R6 implemented, see implementation.md"},
+{"question":"2","answer":"yes","evidence":"lean/batch/schedd/engine-cli tests pass; stub args updated in batch.test.mjs"},
+{"question":"3","answer":"yes","evidence":"D1-D5 changed, D6-D7 tests; D8 needed no change (schedd tests pass); preserve tests pass"},
+{"question":"4","answer":"yes","evidence":"git diff touches only deliverables and tests"}],
+"amendments":[]}
