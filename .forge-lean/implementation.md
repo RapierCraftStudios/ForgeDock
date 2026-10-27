@@ -1,27 +1,30 @@
 ### Approach
-Additive `warnings` channel in the bootstrap validator for `deploy-last`; bootstrap spec rules; a pure `settle-scope` module (freeze, classify, convergence, STOP report) with spec wiring in orchestrate.md. The settle loop itself is not code in this repo, so wiring is spec-level.
+One deterministic module, `bin/lean/milestonesync.mjs`, plus a `forgedock milestone-sync` command; the spec now calls it instead of raw merge+push. No LLM calls.
 
 ### Changes
-- scripts/bootstrap-validate.mjs: `warnings` + `deploy-last`, `formatWarnings`, CLI prints warnings on stderr, exit stays 0.
-- bin/tests/bootstrap-validate.test.mjs: deploy-last warns / does not warn tests.
-- commands/bootstrap.md: layering and deployable-slice rules (trimmed to stay under the 4096-byte spec budget).
-- scripts/settle-scope.mjs, bin/tests/settle-scope.test.mjs: new module and tests.
-- commands/orchestrate.md: section 3b, settle scope.
+- bin/lean/milestonesync.mjs: `syncMilestone`, `isSyncable`, `isProtectedBranch`, `readSyncDebounce`, `runMilestoneSyncCli`.
+- bin/lean/milestonesync.test.mjs: bare-origin git fixture with stub gh (10 tests).
+- bin/engine-cli.mjs: thin `milestoneSyncFromCli` export.
+- bin/forgedock.mjs: `milestone-sync` dispatch and known-command entry (added by amendment).
+- commands/milestone.md: ship Step 2 and Sync action call the command; on-demand and shipped-never rules; conflict note.
+- docs/CONFIG.md: `milestones.sync_debounce`; `lean.base_merge_*` also applies to milestone sync.
+- devdocs/decisions/4663-milestone-sync.md: ADR.
 
 ### Acceptance Criteria Status
-- R1 ✅ scripts/settle-scope.mjs classifyNew (targets); follow-up script unchanged (no milestone, scripts/file-deferred-followups.sh:195)
-- R2 ✅ scripts/settle-scope.mjs convergence / formatStopReport; commands/orchestrate.md section 3b
-- R3 ✅ commands/bootstrap.md plan rules, step 7
-- R4 ✅ scripts/bootstrap-validate.mjs deployWarnings
+- R1 ✅ bin/lean/milestonesync.mjs (protection probe, PR + `--auto`, CLEAN fallback); test "protected branch" and "CLEAN PR".
+- R2 ✅ same file (marker, debounce, force-with-lease, `pr edit`); test "fast-moving base".
+- R3 ✅ `isSyncable` + refusal in `syncMilestone`; test "never syncs a shipped...". No active-milestone picker exists in this repo, so "never pick as active" is delivered as the exported guard plus the spec rule; external pickers must call it.
+- R4 ✅ `reason` required (refused otherwise); spec says on demand only.
+- R5 ✅ `resolveBaseConflicts` with `readBaseMerge`; test "append-only registry".
+- R6 ✅ bin/lean/milestonesync.test.mjs.
 
 ### Verification
-- V1 node --test (4 files): 63 pass, 0 fail. New tests fail without the fix (functions and warnings absent).
-- V2 bash scripts/file-deferred-followups.test.sh: 33 passed.
-- `forgedock check`: PASS. checks.mjs widened to the full suite, which host rules forbid; not run. No formatter configured in package.json; none run.
+- V1 `node --test bin/lean/milestonesync.test.mjs bin/lean/basesync.test.mjs bin/lean/lifecycle.test.mjs`: pass (36). The new tests cover a new module, so they cannot run without the fix.
+- V2 `bash scripts/publish-staging-sync.test.sh && bash scripts/check-spec-markers.sh`: pass.
+- `forgedock check`: PASS; `bin/tests/engine-cli.test.mjs`: pass (77).
 
 ### Notes
-Docs: devdocs/modules/lean.md entry for #4665 (freshness check).
+New command `forgedock milestone-sync <slug> --reason ship|batch|conflict-risk|manual --repo o/r [--base B]`. New forge.yaml key `milestones.sync_debounce` (default 10m). No formatter is configured in the repo.
 
-`validatePlan` result gains `warnings`; `ok` and exit codes unchanged. No env vars.
-
-## Fix: deploy-last now also warns when no deploy-class issue sits in milestones 1-2 (e.g. only milestone 3 of 4); test added.
+## Enumeration follow-up
+The ten flagged bin/lean tests (batch, checks, conformance, conformance.e2e, context, execution, execution.e2e, fixround, heavy, lean) hold no list naming sibling modules (conflictres, basesync, lifecycle are absent); recorded `milestonesync` as not_members in result.json.
