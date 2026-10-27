@@ -506,12 +506,14 @@ export async function runIssue(opts) {
   // declaration or an untrusted body proceeds. An unreadable body/dependency fails closed.
   {
     let dep = null;
-    try { dep = await openDependency(issue, io); } catch (e) {
+    try { dep = await openDependency(issue, io, { lane }); } catch (e) {
       dep = { unreadable: true, detail: `issue ${issue} **Depends on** check failed: ${e?.message || e}` };
     }
     if (dep?.unreadable) {
       return { terminalReason: "dependency-unreadable", code: OUTCOME_CODES.DEPENDENCY_UNREADABLE, detail: dep.detail };
     }
+    // #4686: an open dependency whose PR is already on this lane is satisfied; name the merge commit.
+    for (const x of dep?.satisfied ?? []) emitProgress({ event: "dependency_satisfied", detail: `#${x.issue} merged into ${lane} by PR #${x.pr} (merge commit ${x.sha.slice(0, 12)})` });
     if (dep?.open?.length) {
       return {
         terminalReason: "dependency-open",
