@@ -419,6 +419,54 @@ describe("core work-on", () => {
     assert.ok(!w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN")));
   };
 
+  // #4730: owner step + agent-doable remainder, and duplicate owner asks
+  const ownerWorld = (block, o = {}, existing = null) => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "sign the contract", block }, ...o }, {});
+    const gh = w.io.gh;
+    w.io.gh = async (a) => {
+      if (a[0] === "issue" && a[1] === "list" && existing && a.some((x) => String(x).includes("FORGE:ASK"))) return JSON.stringify([existing]);
+      if (a[0] === "issue" && a[1] === "list") return JSON.stringify(w.listed ?? []);
+      return gh(a);
+    };
+    return w;
+  };
+  it("#4730 a human block with a remainder re-queues it as its own issue; only the owner step keeps needs-human", async () => {
+    const w = ownerWorld({ kind: "human", why: "credentials", remainder: [{ title: "wire the client", body: "do the code part" }, { title: "", body: "dropped" }] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(w.created.length, 1);
+    const body = w.created[0][w.created[0].indexOf("--body") + 1];
+    assert.match(body, /\*\*Parent\*\*: #7/); assert.match(body, /FORGE:REMAINDER of=#7/);
+    assert.ok(!w.created[0].includes("needs-human"));
+    assert.ok(w.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")));
+    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes("re-queued as #201")));
+  });
+  it("#4730 a rerun reuses the remainder issue it already filed", async () => {
+    const w = ownerWorld({ kind: "human", why: "credentials", remainder: [{ title: "wire the client", body: "x" }] });
+    const key = (await import("./needs-human-premise.mjs")).askKey("wire the client");
+    w.listed = [{ number: 150, body: `x\n<!-- FORGE:REMAINDER of=#7 key=${key} -->` }];
+    await run(w);
+    assert.equal(w.created.length, 0);
+    assert.ok(w.comments.some((c) => c.includes("re-queued as #150")));
+  });
+  it("#4730 a human block without a remainder files nothing", async () => {
+    const w = ownerWorld({ kind: "human", why: "credentials" });
+    assert.equal((await run(w)).terminalReason, "needs-human");
+    assert.equal(w.created.length, 0);
+  });
+  it("#4730 an issue whose only content is an existing owner ask is closed as a duplicate; extra content only links", async () => {
+    const { askKey } = await import("./needs-human-premise.mjs");
+    const existing = { number: 40, comments: [{ body: `<!-- FORGE:ASK key=${askKey("Builder is blocked (credentials): sign the contract")} -->\n## Owner ask\n{}` }] };
+    const dup = ownerWorld({ kind: "human", why: "credentials" }, { body: "sign the contract" }, existing);
+    const r = await run(dup);
+    assert.equal(r.terminalReason, "invalid");
+    assert.ok(dup.closed.some((c) => c.includes("not planned") && c.join(" ").includes("#40")));
+    noNeedsHuman(dup);
+    const more = ownerWorld({ kind: "human", why: "credentials" }, { body: "sign the contract and then also rework the importer" }, existing);
+    assert.equal((await run(more)).terminalReason, "needs-human");
+    assert.equal(more.closed.length, 0);
+  });
+
   it("#4124 a builder block naming an open issue ends dependency-open with dependencies, not needs-human", async () => {
     const w = depWorld({ changed: [], result: { status: "blocked", summary: "needs #34927 first", block: { kind: "dependency", issues: ["#3", 7] } } },
       { 3: { state: "OPEN", labels: [] } });
@@ -1660,7 +1708,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule).
-    assert.ok(approxTokens(plan) <= 2050, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(plan) <= 2100, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1650); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
@@ -2096,7 +2144,7 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 1950, `plan prompt is ${approxTokens(plan)} tokens`); // 1950: #4724 (deferred-row bucket rule)
+    assert.ok(approxTokens(plan) <= 2000, `plan prompt is ${approxTokens(plan)} tokens`); // 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
     assert.ok(approxTokens(impl) <= 1650, `implement prompt is ${approxTokens(impl)} tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
@@ -6526,7 +6574,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1650 && approxTokens(builderPlanPrompt(7)) <= 1950);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1650 && approxTokens(builderPlanPrompt(7)) <= 2000);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {

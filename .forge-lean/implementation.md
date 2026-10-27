@@ -1,30 +1,25 @@
 ### Approach
-Deterministic lookup in a script (same marker, search and trust rule as `find_rollup` in the filer); deploy-pr.md appends its one-line output to the staging→default PR body.
+The `human` builder block gets an optional `remainder` list. When the lane ends on an owner step, each remainder item is filed as its own issue (no needs-human); only the owner-step issue keeps the label. Duplicate owner asks that are the issue's entire content are closed and linked, by strict normalized equality (no LLM).
 
 ### Changes
-- scripts/postdeploy-rollup-link.sh: new; prints `Post-deploy checklist: #N`, empty and exit 0 on none or lookup failure.
-- scripts/postdeploy-rollup-link.test.sh: new stubbed-gh tests (7 checks).
-- commands/deploy-pr.md: 2B appends the link for staging→default deploys.
-- devdocs/decisions/4724-postdeploy-rollup.md: note on the link and the deferred R11.
-- devdocs/decisions/4727-deploy-pr-rollup-link.md: new decision record (needed by check-devdocs-freshness; amendment add-deliverable).
+- bin/lean/lean.mjs: classifyBlock keeps a validated `remainder` (cap MAX_SUBISSUES). endBlocked files the remainder before needsHuman. needsHuman takes `ask` and `note` options, and calls the new `duplicateAskIssue` when registerAsk finds an existing entry. origin/staging was merged first.
+- bin/lean/needs-human-premise.mjs: `onlyAsk` and `fileRemainder`, which is idempotent via a `FORGE:REMAINDER of=#N key=` marker.
+- bin/lean/prompts.mjs: one line in BLOCK_RULES.
+- bin/lean/lean.test.mjs, bin/lean/needs-human-premise.test.mjs: regression tests. The plan-prompt token caps went up by 50 (hotspot case 2050 to 2100) or 50 (1950 to 2000) for the added line.
+- devdocs/modules/lean.md: documents the remainder block and the duplicate-ask closure.
 
 ### Acceptance Criteria Status
-- R10 ✅ commands/deploy-pr.md:297-308, scripts/postdeploy-rollup-link.sh:30-40
-- R11 deferred per contract (separate orchestration lane)
+- R1 ✅ bin/lean/lean.mjs endBlocked human branch (fileRemainder call), bin/lean/needs-human-premise.mjs:fileRemainder
+- R2 ✅ bin/lean/lean.mjs duplicateAskIssue, bin/lean/needs-human-premise.mjs:onlyAsk
+- R3 ✅ bin/lean/lean.mjs endBlocked: the owner step still goes to needsHuman, the remainder issue is created without a label
 
 ### Verification
-- V1 `bash scripts/postdeploy-rollup-link.test.sh`: pass (7/7); the test fails without the script (it does not exist).
-- V2 `bash scripts/file-deferred-followups.test.sh`: pass (68/68).
-- V3 `bash scripts/validate-spec-graph.sh`: exit 1 on 1 HARD, `workflow:engine-error` set by no command. Unrelated to this diff (no engine-error reference in it) and pre-existing.
-- check-devdocs-freshness against origin/staging: OK. testmap and deploy-ci-verify tests: pass.
+- V1 `node --test bin/lean/needs-human-premise.test.mjs bin/lean/lean.test.mjs bin/lean/decompose.test.mjs`: 533 pass, 0 fail. The new tests fail without the fix, because the helpers and the behaviour do not exist.
+- V2 `node --test bin/tests/engine-cli.test.mjs`: pass.
+- `forgedock check`: PASS. No repo formatter is configured. check-devdocs-freshness.sh: OK.
 
 ### Notes
-Uses FORGE_RELEASE_LANE, FORGE_TRAIL_TRUSTED_ASSOCIATIONS and FORGE_TRAIL_TRUSTED_LOGINS like the filer. `forgedock check` fails only on V3's pre-existing hard finding.
+- Closure compares the issue content with the builder summary or the full needs-human reason. Any extra content keeps the issue open and only links it.
+- A failure to file the remainder ends the lane as engine-error, without the needs-human label.
 
-### V3 follow-up
-`git merge origin/staging`: already up to date. V3 still exits 1 (HARD: workflow:engine-error set by no command). With commands/deploy-pr.md reverted to origin/staging the same HARD fires (rc=1), so it is pre-existing, not caused by this change; the label is set from bin/engine.mjs, outside the deliverables.
-
-### Update
-V3 now passes (exit 0): `commands/review-pr.md` gained a "re-read the trusted FORGE:CONTRACT" phrase and `commands/orchestrate/phase-4-execution.md` gained an idempotent `--add-label "workflow:engine-error"`; both were base failures, recorded as add-deliverable amendments. V1 and V2 pass; `forgedock check` passes.
-
-Precheck fix: guarded the added `gh issue edit` in phase-4-execution.md with a DRY_RUN check (check-command-side-effects Class B). check-command-side-effects and validate-spec-graph pass.
+Fix: moved the #4730 paragraph in devdocs/modules/lean.md after the completed turn-budget sentence (docs-only; no code changed).
