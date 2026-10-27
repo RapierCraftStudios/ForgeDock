@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { buildGuard, guardTests, parseHunks, renderGuard, parseGuard, guardIssue, listGuards, backfill, guardsCli, readIndex } from "./guards.mjs";
 import { renderContract } from "./render.mjs";
+import { tmpDir } from "../tests/_tmp.mjs";
 
 const DIFF = `diff --git a/src/a.mjs b/src/a.mjs
 --- a/src/a.mjs
@@ -108,8 +106,8 @@ test("backfill guards merged lanes and logs why a lane without a test yields non
 });
 
 test("guards list prints guards for a path and caches the index; falls back to it offline", async () => {
-  const root = mkdtempSync(join(tmpdir(), "guards-"));
-  try {
+  const root = tmpDir("guards-");
+  {
     const g = buildGuard({ issue: 7, title: "t", contract: nodeContract, diff: DIFF }).guard;
     const gh = async () => JSON.stringify([{ number: 7, comments: [{ body: renderGuard(g) }] }]);
     const out = [];
@@ -119,7 +117,7 @@ test("guards list prints guards for a path and caches the index; falls back to i
     const off = [];
     await guardsCli(["list", "--path", "test/a.test.mjs"], { gh: async () => { throw new Error("offline"); }, repo: "o/r", print: (m) => off.push(m), root });
     assert.match(off[0], /#7/);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  }
 });
 test("parseHunks ignores deleted files", () => {
   assert.deepEqual(parseHunks("--- a/x.js\n+++ /dev/null\n@@ -1,2 +0,0 @@\n"), []);
