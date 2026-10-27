@@ -1,38 +1,32 @@
 ### Approach
-A deterministic `bin/lean/guards.mjs` (0 LLM calls, git and gh injected). It reads a merged issue's FORGE:CONTRACT comment, the merged PR and the merge commit, builds one guard and posts it as `<!-- FORGE:GUARD {json} -->` on the issue. The lane hook, `guards list` and `guards backfill` all share `guardIssue`.
+New pure report core `compoundingReport` plus a gatherer (guards via `collectGuards`, reopen events via one paginated `gh api`, git probes), exposed as `forgedock stats --compounding`. No LLM, no lane-path work.
 
 ### Changes
-- bin/lean/guards.mjs: buildGuard, guardTests, parseHunks, render/parseGuard, guardIssue (idempotent), collectGuards, writeIndex/readIndex, listGuards, backfill, guardAfterMerge, guardsCli.
-- bin/lean/guards.test.mjs: 10 tests, including node --test and pytest fixtures.
-- bin/lean/lean.mjs: best-effort `guardAfterMerge` call after `label("merged")` (+3 lines).
-- bin/engine-cli.mjs: `guardsFromCli`.
-- bin/forgedock.mjs: `guards` case, known-commands entry, help row.
-- devdocs/decisions/4692-fix-guards.md: decision record.
+- bin/stats/compounding.mjs: reintroduction (reopen after lane close, or blame of a later guarded fix's old-side lines within 90 days), reopen-after-close, guard/decision counts from gate events (n/a when never recorded), rolling/per-release/lane-age grouping, renderer, git and gh gatherers.
+- bin/stats/compounding.test.mjs: fixtures for each metric, n/a handling, buckets, git degradation, flag parsing.
+- bin/stats/index.mjs: `--compounding`, `--bucket`, `--window` allowed with it, HELP, buildReport dispatch, text rendering.
+- docs/STATS.md, devdocs/modules/lean.md: definitions, event names, baseline procedure.
 
 ### Acceptance Criteria Status
-- R1 ✅ guards.mjs guardIssue (existing-guard check), lean.mjs hook; test "guardIssue posts exactly one FORGE:GUARD and is idempotent"
-- R2 ✅ guards.mjs guardsCli/listGuards, forgedock.mjs `case "guards"`; test "guards list prints guards for a path"
-- R3 ✅ guards.mjs backfill; test "backfill guards merged lanes and logs why"
-- R4 ✅ guards.test.mjs node --test fixture and pytest fixture
-- R5 ✅ guards.mjs renderGuard, collectGuards/writeIndex (index rebuilt from comments)
-- R6 ✅ guards.mjs guardTests/idsOf (no language parser; ids: [] is file granularity)
+- R1 ✅ bin/stats/compounding.mjs (git, gh, telemetry only)
+- R2 ✅ bin/stats/index.mjs (--compounding dispatch/render), compounding.mjs renderCompounding
+- R3 post-deploy (baseline procedure in docs/STATS.md)
+- R4 ✅ compounding.mjs blameLineage and reopen handling in compoundingReport
+- R5 ✅ compoundingReport reopen_after_close
+- R6 ✅ summarize guard counts
+- R7 ✅ summarize decisions
+- R8 ✅ bucketLabel / by_lane_age
+- R9 ✅ rolling + by_release
+- R10 ✅ no model calls
+- R11, R12 not-applicable per contract
 
 ### Verification
-- V1 `node --test bin/lean/guards.test.mjs`: pass. It fails without the change because the module does not exist.
-- V2 `node --test bin/lean/lean.test.mjs bin/lean/train.test.mjs`: pass.
-- `forgedock check`: PASS. checks.mjs widened to the full suite (931 files reference the change); per host rules I did not run it.
-- check-devdocs-freshness.sh: OK.
+- V1 `node --test bin/stats/compounding.test.mjs bin/stats/stats.test.mjs bin/stats/pool.test.mjs bin/stats/efficiency.test.mjs bin/stats/release.test.mjs bin/lean/guards.test.mjs`: 125 pass, 0 fail. The new test cannot pass without the fix (the module does not exist).
+- `forgedock check`: PASS. scripts/check-devdocs-freshness.sh: OK. No formatter configured in the repo.
+- checks.mjs widened to the full suite, which the host rules forbid, so only V1 was run.
 
 ### Notes
-- Guards need the merge commit locally. The hook fetches the base first; backfill reports a skip with the reason when the commit is missing.
-- A deletion-only hunk is anchored at the line after the deletion in the post-image.
-- No formatter config exists in the repo, so none was run.
-- No env vars added.
-- Stale-list check: the nine flagged tests (batch, checks, conformance, conformance.e2e, context, execution, execution.e2e, fixround, heavy) do not enumerate lean modules or guards-like symbols; recorded as not_members in result.json.
+Event names guard_run, guard_broken, supersedes_accepted, decision_superseded, decision_violation are the contract #4693/#4695 must emit. Reopen-event fetch failure reads as 0 reopens (sources.reopens shows the count). Blame matching uses guard merge_sha equal to the blamed commit, so true merge-commit merges are not matched.
 
-### CI fix
-- The CI step `bash scripts/check-test-tmp-cleanup.sh` failed on `bin/lean/guards.test.mjs`: it used `mkdtempSync` without importing `bin/tests/_tmp.mjs`. The test now uses `tmpDir` from that helper. The lint and its own test (`check-test-tmp-cleanup.test.sh`, 18 pass) are clean.
-- The CI log was not readable, so I found this by running the workflow's lint step locally. I also ran all of bin/lean (1453 pass) and bin/engine, bin/stats, bin/tests and packages/protocol (2951 pass, 3 fail). The 3 failures (preflight, forge Act II, writeInstallReceipt) are WSL/platform-detection tests in this host and are unrelated to this change; I did not confirm they pass on the base.
-
-## Conformance fix (R1 hook)
-guardAfterMerge now strips `origin/` from the lane base before `git fetch origin <branch>`, and guardIssue falls back to `git fetch origin <merge_sha>` when the diff cannot be read locally. Merge SHA still comes from `gh pr view --json mergeCommit` (explicit PR from the lane). Added a test with a git mock that fails on invalid refspecs.
+## Sibling-list follow-up
+`compounding` (bin/stats) matched the SANDBOX_PROVIDERS list test in bin/lean/execution.test.mjs:46 by name proximity only; it is a stats mode, not a sandbox provider, so it is recorded in result.json not_members.
