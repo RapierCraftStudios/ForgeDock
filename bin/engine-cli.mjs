@@ -1810,13 +1810,6 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
       } catch { /* best effort */ }
       return true;
     }
-    try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]); } catch { return "failed"; }
-    try {
-      // #4315: the evidence carries the full lane reason; capped so it never exceeds GitHub's comment limit
-      const { capComment } = await import("./lean/render.mjs");
-      await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\n${evidence}`)]);
-    } catch { /* best effort: the label is on, the batch row keeps the evidence */ }
-    return true;
   };
 }
 
