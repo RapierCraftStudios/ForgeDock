@@ -340,12 +340,12 @@ export function makeLeanIo({ repo }) {
     /**
      * File (or append to) the parent's ONE batched follow-up issue (scripts/file-deferred-followups.sh: trusted lookup,
      * append, create, claim marker, duplicate re-check; one issue per class, #4664). items: [{key, why, class?}]; the key is the
-     * item's identity (column 5, column 1 is `-`). milestone / defaultMilestone: the parent's and forge.yaml followups.default_milestone.
+     * item's identity (column 5, column 1 is `-`). milestone / defaultMilestone: the parent's and forge.yaml followups.default_milestone; lane: the release lane of the post-deploy rollup (#4724).
      * Returns {key: issueNumber}; throws on exit 2/3/4.
      */
-    async fileFollowups({ parent, items, milestone = null, defaultMilestone = null }) {
+    async fileFollowups({ parent, items, milestone = null, defaultMilestone = null, lane = null }) {
       const tsv = items.map((i) => `-\t${i.why}\t\t${i.class ?? ""}\t${i.key}`).join("\n") + "\n";
-      const env = { ...process.env, ...(milestone ? { FORGE_FOLLOWUP_MILESTONE: String(milestone) } : {}), ...(defaultMilestone ? { FORGE_FOLLOWUPS_DEFAULT_MILESTONE: String(defaultMilestone) } : {}) };
+      const env = { ...process.env, ...(milestone ? { FORGE_FOLLOWUP_MILESTONE: String(milestone) } : {}), ...(defaultMilestone ? { FORGE_FOLLOWUPS_DEFAULT_MILESTONE: String(defaultMilestone) } : {}), ...(lane ? { FORGE_RELEASE_LANE: String(lane) } : {}) }; // #4724: the post-deploy rollup is one per release lane
       const out = await runWithInput("bash", [script("file-deferred-followups.sh"), "--parent", String(parent), "--repo", repo], tsv, 180000, env);
       return followupMap(out, items);
     },

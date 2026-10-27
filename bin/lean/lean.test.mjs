@@ -357,7 +357,7 @@ describe("core work-on", () => {
   });
 
   it("a reviewer that judges a deferral unjustified gets the builder resumed to implement it; nothing is filed for it", async () => {
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "later" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "later", bucket: "new-issue" }] };
     const rej = conf({ requirements: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3", validated_by: "V1" }, { id: "R2", status: "deferred", deferral_ok: false, note: "one line in bar.js; do it now" }] }, k);
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [rej, rej] });
     const r = await run(w);
@@ -740,7 +740,7 @@ describe("core work-on", () => {
 
 describe("conformance gate (frozen contract, precheck, structured review)", () => {
   const Q2 = "Existing callers of foo keep working.";
-  const two = (d2 = "deliver", extra = {}) => ({ ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: Q2, disposition: d2, ...extra }],
+  const two = (d2 = "deliver", extra = {}) => ({ ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: Q2, disposition: d2, ...(d2 === "defer" || d2 === "post-deploy" ? { bucket: "post-deploy" } : {}), ...extra }],
     deliverables: [...CONTRACT.deliverables, ...(d2 === "deliver" ? [{ id: "D2", path: "src/bar.js", change: "keep callers", requirements: ["R2"] }] : [])] });
   const files2 = ["src/foo.js", "src/bar.js", "test/foo.test.js"];
   const events = (dir) => readLog(dir, 7).map((e) => e.event);
@@ -806,7 +806,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.equal(r.terminalReason, "merged");
     assert.equal(w.followups.length, 1);
     assert.deepEqual(w.followups[0].items.map((i) => i.key), ["R2: Existing callers of foo keep working."]);
-    assert.match(w.followups[0].items[0].why, /^defer: callers live in another module/);
+    assert.match(w.followups[0].items[0].why, /^post-deploy: \[bucket:post-deploy\] callers live in another module/);
     const body = w.prs[0][w.prs[0].indexOf("--body") + 1];
     assert.match(body, /## Remaining work tracked\n- #900\n\nCloses #7$/);
     assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:TRACKED -->") && c.includes("#900")));
@@ -1410,7 +1410,7 @@ describe("conformance shadow mode (the default)", () => {
   });
 
   it("#4160 shadow files accepted deferrals with track(), the same as enforce, and the PR links them", async () => {
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
     assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^R2: /);
@@ -1444,7 +1444,7 @@ describe("conformance shadow mode (the default)", () => {
   });
 
   it("#4398 an investigation whose question is deferred closes partial (not planned), carried forward in the tracking issue", async () => {
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
     const w = world({ title: "investigate(stealth): which signal is rejected", contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     const r = await runShadow(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(r.close, "partial");
@@ -1468,7 +1468,7 @@ describe("conformance shadow mode (the default)", () => {
     const ra = await runShadow(a);
     assert.equal(ra.terminalReason, "merged"); assert.equal(ra.close, undefined);
     assert.deepEqual(a.closed.map((x) => x[x.indexOf("--reason") + 1]), ["completed"]);
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
     const b = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     await runShadow(b);
     assert.deepEqual(b.closed.map((x) => x[x.indexOf("--reason") + 1]), ["completed"]);
@@ -1645,8 +1645,8 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(facts([], { file_lines: 1000, growth_lines: 50 })).trim(), "Don't grow a file over 1000 lines by more than 50 lines. Put new code next to it.");
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
-    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line).
-    assert.ok(approxTokens(plan) <= 1900, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule).
+    assert.ok(approxTokens(plan) <= 2050, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1600); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each
   });
 
@@ -2082,7 +2082,7 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 1800, `plan prompt is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(plan) <= 1950, `plan prompt is ${approxTokens(plan)} tokens`); // 1950: #4724 (deferred-row bucket rule)
     assert.ok(approxTokens(impl) <= 1550, `implement prompt is ${approxTokens(impl)} tokens`); // 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
@@ -6496,7 +6496,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1550 && approxTokens(builderPlanPrompt(7)) <= 1800);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1550 && approxTokens(builderPlanPrompt(7)) <= 1950);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {
