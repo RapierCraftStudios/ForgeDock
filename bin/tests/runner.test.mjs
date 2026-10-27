@@ -77,6 +77,7 @@ import {
   parseSessionLimitResetEpochMs,
   detectUsageLimit,
   VALID_BACKENDS,
+  readScopeLimitEvents,
 } from "../runner.mjs";
 
 // ---------------------------------------------------------------------------
@@ -4320,5 +4321,22 @@ describe("minimal phase session flags (forge#4065)", () => {
         assert.ok(!/mcp__/.test(readFileSync(f, "utf-8")), `${f} references mcp__`);
       }
     });
+  });
+});
+
+describe("readScopeLimitEvents (forge#4690)", () => {
+  it("reads pids.events max and memory.events oom_kill of the pid's scope; null outside a scope", () => {
+    const root = tmpDir("forgedock-scope-");
+    try {
+      mkdirSync(join(root, "proc", "7"), { recursive: true });
+      mkdirSync(join(root, "cg", "a.scope"), { recursive: true });
+      writeFileSync(join(root, "proc", "7", "cgroup"), "0::/a.scope\n");
+      writeFileSync(join(root, "cg", "a.scope", "pids.events"), "max 3\n");
+      writeFileSync(join(root, "cg", "a.scope", "memory.events"), "low 0\noom_kill 1\n");
+      const o = { procRoot: join(root, "proc"), cgroupRoot: join(root, "cg") };
+      assert.deepEqual(readScopeLimitEvents(7, o), { tasks: 3, memory: 1 });
+      writeFileSync(join(root, "proc", "7", "cgroup"), "0::/user.slice/x.service\n");
+      assert.equal(readScopeLimitEvents(7, o), null);
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, isTrustedIssueComment, DEFAULT_PREFILTER_MODEL, parseMinAge, itemWindowsMs, landedAt } from "./prefilter.mjs";
+import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, isTrustedIssueComment, DEFAULT_PREFILTER_MODEL, parseMinAge, itemWindowsMs, landedAt, itemDueMs, hasDecisionItem, deferredFromAll, itemDueAnchors } from "./prefilter.mjs";
 import { writeFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { execFileSync } from "node:child_process";
@@ -516,6 +516,36 @@ describe("post_deploy.min_age soak window (#4425)", () => {
     assert.deepEqual(itemWindowsMs(followup([item("R1", "after 24h of traffic, then 7 days of retention"), item("R2", "only in prod")])), [7 * 24 * H * 1000, null]);
   });
 
+  describe("post-deploy rollup with several parents (#4724)", () => {
+    const M2 = "f".repeat(40);
+    const prs = [...parentPr, { number: 91, title: "fix(y): other (#50)", body: "", mergeCommit: { oid: M2 } }];
+    const rollup = (items) => `## Acceptance Criteria\n\n### #40\n<!-- FORGE:DEFERRED_FROM: #40 -->\n${items[0]}\n### #50\n<!-- FORGE:DEFERRED_FROM: #50 -->\n${items[1] ?? items[0]}\n`;
+    it("deferredFromAll lists every section parent once, in order", () => {
+      assert.deepEqual(deferredFromAll(rollup([item("R1", "x")])), [40, 50]);
+      assert.deepEqual(deferredFromAll("no marker"), []);
+      assert.equal(deferredFrom(rollup([item("R1", "x")])), 40);
+    });
+    it("the rollup waits while ANY parent is off the default branch, and names them all", async () => {
+      const w = soakWorld({ mergedPrs: prs, ancestry: { [MERGE]: 0, [M2]: 1 } });
+      const g = await gate(w, rollup([item("R1", "x")]));
+      assert.equal(g.state, "awaiting-promotion"); assert.match(g.detail, /#40, #50/); assert.deepEqual(g.shas, [MERGE, M2]);
+    });
+    it("is ready once every parent is on the default branch; a parent without a merge SHA is unresolved", async () => {
+      assert.equal((await gate(soakWorld({ mergedPrs: prs, ancestry: { [MERGE]: 0, [M2]: 0 } }), rollup([item("R1", "x")]))).state, "ready");
+      const g = await gate(soakWorld({ mergedPrs: parentPr, ancestry: { [MERGE]: 0 } }), rollup([item("R1", "x")]));
+      assert.equal(g.state, "unresolved"); assert.match(g.detail, /#50/);
+    });
+    it("a date item is re-anchored to when its fix landed: due + (landed - from)", async () => {
+      const it1 = item("R1", "[bucket:date] due:2027-02-01 from:2027-01-01 later");
+      assert.deepEqual(itemDueAnchors(followup([it1])), [{ dueMs: Date.UTC(2027, 1, 1), fromMs: Date.UTC(2027, 0, 1) }]);
+      const w = soakWorld({ mergedPrs: parentPr, ancestry: { [MERGE]: 0 } });
+      const g = await gate(w, followup([it1]), { now: Date.UTC(2027, 1, 10) }); // past the contract-time date, before the shifted one
+      assert.equal(g.state, "awaiting-due");
+      assert.equal(g.eligibleAt, new Date(Date.UTC(2027, 1, 1) + LANDED * 1000 - Date.UTC(2027, 0, 1)).toISOString());
+      assert.equal((await gate(soakWorld({ mergedPrs: parentPr, ancestry: { [MERGE]: 0 } }), followup([it1]), { now: Date.UTC(2027, 2, 1) })).state, "ready");
+    });
+  });
+
   it("landedAt: the promotion merge time, or the SHA's own time when it is on the mainline", async () => {
     const w = soakWorld();
     assert.equal(await landedAt({ sha: MERGE, def: "main", io: w.io, cwd: "/repo" }), LANDED);
@@ -600,5 +630,47 @@ describe("#4467: isTrustedIssueComment", () => {
     assert.equal(isTrustedIssueComment({ author: { login: "owner" }, authorAssociation: "OWNER" }), true);
     assert.equal(isTrustedIssueComment({ author: { login: "someone" }, authorAssociation: "CONTRIBUTOR" }), false);
     assert.equal(isTrustedIssueComment(null), false);
+  });
+});
+
+describe("due-date and decision follow-ups (#4689)", () => {
+  const MERGE = "a".repeat(40);
+  const dueItem = (date) => `- [ ] \`R2: the 7-day window shows a health row\` — post-deploy: due:${date} only checkable after the window`;
+  const decision = "- [ ] `R3: pick the retention` — decision: owner chooses 30 or 90 days";
+  const body = (items) => `## Problem\n\n${items.join("\n")}\n\n<!-- FORGE:DEFERRED_FROM: #40 -->\n`;
+  const parentPr = [{ number: 90, title: "fix(x): health row (#40)", body: "", mergeCommit: { oid: MERGE } }];
+  const at = (iso) => Date.parse(iso);
+
+  it("parses the due token (latest wins) and decision items; a decision-only body counts as verification-only", () => {
+    assert.equal(itemDueMs(body([dueItem("2026-11-03"), dueItem("2026-11-10")])), Date.UTC(2026, 10, 10));
+    assert.equal(itemDueMs(body(["- [ ] `R2: x` — post-deploy: no date"])), null);
+    assert.ok(postDeployOnly(body([decision]))); assert.ok(hasDecisionItem(body([decision])));
+    assert.ok(!hasDecisionItem(body([dueItem("2026-11-03")])));
+  });
+
+  it("before the due date the follow-up parks awaiting-due with a due:<date> label, no lane; after it, the labels are removed", async () => {
+    const w = world({ issues: { 41: { body: body([dueItem("2026-11-03")]) } }, mergedPrs: parentPr, ancestry: { [MERGE]: 0 } });
+    w.io.now = () => at("2026-11-01T00:00:00Z");
+    const r = await pf(w, 41, { defaultBranch: "main" });
+    assert.equal(r.parked, true); assert.equal(r.kind, "awaiting-due"); assert.equal(r.eligibleAt, "2026-11-03T00:00:00.000Z");
+    assert.deepEqual(w.edits, [[41, "--add-label", "awaiting-due,due:2026-11-03"]]);
+    assert.equal(w.runner.length, 0);
+    assert.match(formatParkedLine([{ issue: 41, prefilter: r }]), /^due date: #41 \(2026-11-03\)/);
+    const w2 = world({ issues: { 41: { body: body([dueItem("2026-11-03")]), labels: [{ name: "awaiting-due" }, { name: "due:2026-11-03" }] } }, mergedPrs: parentPr, ancestry: { [MERGE]: 0 } });
+    w2.io.now = () => at("2026-11-03T00:00:01Z");
+    const r2 = await pf(w2, 41, { defaultBranch: "main", gateOnly: true });
+    assert.equal(r2.kind, "awaiting-measurement"); // released from the date; with no check on main it waits on its owner, never a lane
+    assert.deepEqual(w2.edits[0], [41, "--remove-label", "awaiting-due,due:2026-11-03"]);
+    assert.ok(w2.comments.some(([, b]) => /FORGE:OWNER_ASK/.test(b)));
+    assert.equal(w2.runner.length, 0);
+  });
+
+  it("a decision item is parked as one typed owner ask (posted once), never a lane, never needs-human", async () => {
+    const w = world({ issues: { 42: { body: body([decision]) } }, mergedPrs: parentPr, ancestry: { [MERGE]: 1 } });
+    const r = await pf(w, 42, { defaultBranch: "main" });
+    assert.equal(r.parked, true); assert.equal(r.kind, "owner-ask"); assert.equal(w.runner.length, 0);
+    assert.equal(w.comments.length, 1); assert.match(w.comments[0][1], /FORGE:OWNER_ASK/);
+    assert.match(formatParkedLine([{ issue: 42, prefilter: r }]), /^owner ask: #42/);
+    assert.deepEqual(w.edits, []);
   });
 });

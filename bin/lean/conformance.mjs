@@ -28,6 +28,7 @@ export const MIN_QUOTE_CHARS = 12;
 /** A contract larger than this cannot be posted whole in one comment (the comment cap is 60k). */
 export const MAX_CONTRACT_CHARS = 40000;
 import { CHECK_ID_RE } from "./postdeploy-check.mjs";
+import { normaliseDecision, deadAnchors } from "./decisions.mjs";
 const C = OUTCOME_CODES;
 
 export const norm = (s) => String(s ?? "").replace(/[`*_>]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -234,6 +235,8 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     if (TRACKED.includes(r?.disposition) && blank(r?.why)) problems.push(`${id}: ${r.disposition} needs a why`);
     if (r?.disposition === "post-deploy" && !CHECK_ID_RE.test(String(r?.check ?? ""))) problems.push(`${id}: post-deploy needs a check id (\`check\`, e.g. "login-smoke") naming an entry of .forge/post-deploy-checks.json on the default branch`);
     if (r?.disposition === "not-applicable" && blank(r?.evidence)) problems.push(`${id}: not-applicable needs file:line evidence`);
+    for (const m of bucketProblems(r)) problems.push(`${id}: ${m}`);
+    if (r?.class != null && !FOLLOWUP_CLASSES.includes(r.class)) problems.push(`${id}: class must be one of ${FOLLOWUP_CLASSES.join("|")}`);
     if (r?.verify != null && !VERIFY_MODES.includes(r.verify)) problems.push(`${id}: verify must be one of ${VERIFY_MODES.join("|")}`);
     if (isOutOfBand(r) && r?.disposition !== "deliver") problems.push(`${id}: verify out_of_band applies only to a deliver requirement`);
     else if (isOutOfBand(r) && blank(r?.evidence)) problems.push(`${id}: verify out_of_band needs evidence naming the job or workflow that measures it (or set verify "in_lane" if this change can check it)`);
@@ -268,7 +271,8 @@ export function validateContract(c, issueText, { repro = false } = {}) {
 /** forge#4519: a shell pattern as in scripts/hotspots.sh `case` (`*` crosses `/`, `?` one character), anchored. */
 const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 
-const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement"];
+const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision"];
+const GUARD_ID_RE = /^#?\d+$/;
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
 
 /** forge#4574: common builder slips: `type` for `kind`, amend-requirement/limitation as defer, an `R#` in `id` as the requirement. */
@@ -282,11 +286,26 @@ function normalizeAmendment(a) {
   return n;
 }
 
+const REF_SEP_RE = /\s*(?:[/,;&+]|\band\b)\s*/i, REF_RANGE_RE = /^R(\d+)\s*[-\u2013\u2014]\s*R?(\d+)$/i, REF_MAX = 50;
+
+/** forge#4655: a slash/comma-joined or ranged requirement reference (`R2/R3`, `R2, R3`, `R2–R3`) as its individual ids; a single id or anything else is returned as is. */
+function splitRequirementRefs(ref) {
+  if (typeof ref !== "string") return [ref];
+  const ids = [];
+  for (const part of ref.trim().split(REF_SEP_RE)) {
+    const m = REF_RANGE_RE.exec(part);
+    if (m && +m[1] <= +m[2] && +m[2] - +m[1] < REF_MAX) for (let i = +m[1]; i <= +m[2]; i++) ids.push(`R${i}`);
+    else ids.push(part);
+  }
+  return ids.length > 1 ? ids : [ref];
+}
+
 /** The rejection reason, naming the valid kinds or the missing field so the builder's correction round can fix it. */
 function amendmentProblem(a, tag) {
   const kind = a?.kind;
   const need = kind === "add-deliverable" ? "needs a path" : kind === "add-requirement" ? "needs requirement {id, quote}"
-    : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)" : null;
+    : kind === "supersedes" ? "needs guard: \"#N\" (the guarded issue)" : TRACKED.includes(kind) ? "needs requirement: \"R#\"" : kind === "amend-requirement" ? "needs requirement: \"R#\" and text (the revised wording)"
+      : kind === "decision" ? "needs decision {choice, anchors: [paths or globs], symbols?, supersedes?: decision id}" : null;
   const why = need ? `amendment kind '${kind}' ${need}` : `unknown kind '${kind ?? ""}'; valid kinds are ${AMEND_KINDS.join(", ")}`;
   return `unknown or incomplete amendment: ${why}: ${tag}`;
 }
@@ -296,14 +315,25 @@ function amendmentProblem(a, tag) {
  * defer|post-deploy {requirement: id}. Every amendment needs a why. Returns {contract, applied[], toTrack[], problems[]}.
  * `generatedPaths` (forge#4519, forge.yaml maintenance.generated_paths via scripts/hotspots.sh): an add-deliverable on a
  * matching path is refused; the repo's generator or bot owns that file.
+ * `decision` {decision:{choice, anchors, symbols?, supersedes?}} (#4695): every anchor must match a file of `baseFiles` (the
+ * base tree; null skips the check); `supersedes` names the decision whose engine-authored preserve row it replaces and
+ * drops that row; returns the records in `decisions`.
  */
-export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [] } = {}) {
+export function applyAmendments(frozen, amendments, issueText = null, { generatedPaths = [], baseFiles = null } = {}) {
   const c = structuredClone(frozen);
   c.deliverables = c.deliverables ?? [];
-  const applied = [], toTrack = [], problems = [];
+  const applied = [], toTrack = [], problems = [], decisions = [];
   const genRes = (Array.isArray(generatedPaths) ? generatedPaths : []).filter((g) => typeof g === "string" && g).map(shellGlobRe);
+  const rows = [];
   for (const raw of Array.isArray(amendments) ? amendments : []) {
-    const a = normalizeAmendment(raw);
+    const n = normalizeAmendment(raw);
+    if (n && (TRACKED.includes(n.kind) || n.kind === "amend-requirement") && typeof n.requirement === "string") {
+      const ids = splitRequirementRefs(n.requirement);
+      if (ids.length > 1) { for (const id of ids) rows.push({ a: { ...n, requirement: id }, raw }); continue; }
+    }
+    rows.push({ a: n, raw });
+  }
+  for (const { a, raw } of rows) {
     const tag = JSON.stringify(raw ?? null).slice(0, 400);
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {
@@ -325,6 +355,12 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       if (tagsOutOfBand(r)) r.verify = "out_of_band"; // #4404: same freeze-time tag as the planned requirements
       c.requirements.push(r);
       if (TRACKED.includes(r.disposition)) toTrack.push(r);
+    } else if (a.kind === "supersedes" && GUARD_ID_RE.test(String(a.guard ?? "").trim())) {
+      // #4693: retires one guard's guard_broken for this lane; the reviewer judges it, the engine tells the guarded issue after merge
+      const guard = `#${String(a.guard).trim().replace(/^#/, "")}`;
+      c.supersedes = [...(c.supersedes ?? []).filter((s) => s.guard !== guard), { guard, why: String(a.why).trim() }];
+      applied.push({ kind: a.kind, target: guard, why: String(a.why).trim() });
+      continue;
     } else if (a.kind === "amend-requirement" && !blank(a.requirement)) {
       // #4594: the requirement stays deliver and keeps its verbatim quote; the reviewer judges it against amendment.text
       const r = c.requirements.find((x) => x.id === a.requirement);
@@ -334,14 +370,24 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       const r = c.requirements.find((x) => x.id === a.requirement);
       if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
       if (!TRACKED.includes(r.disposition)) {
+        if (a.bucket != null) r.bucket = a.bucket; // #4724
         if (a.kind === "post-deploy" && !CHECK_ID_RE.test(String(a.check ?? r.check ?? ""))) { problems.push(`amendment post-deploy ${a.requirement} needs a check id (check)`); continue; }
-        r.disposition = a.kind; r.why = a.why; r.amended = true; toTrack.push(r);
+        r.disposition = a.kind; r.why = a.why; r.amended = true; r.bucket ??= "post-deploy"; toTrack.push(r); // #4724: an amendment without a bucket defaults to post-deploy
         if (a.kind === "post-deploy") r.check = a.check ?? r.check; // #4626
       }
+    } else if (a.kind === "decision") {
+      const d = normaliseDecision({ ...a.decision, why: a.decision?.why ?? a.why });
+      if (!d) { problems.push(amendmentProblem(a, tag)); continue; }
+      const dead = Array.isArray(baseFiles) ? deadAnchors(d.anchors, baseFiles) : [];
+      if (dead.length) { problems.push(`decision anchor(s) ${dead.join(", ")} match no file on the base; anchor a path that exists there`); continue; }
+      if (!blank(a.decision?.supersedes)) c.preserve = (c.preserve ?? []).filter((p) => p.decision !== a.decision.supersedes && p.id !== a.decision.supersedes);
+      decisions.push(a.decision?.supersedes ? { ...d, supersedes: String(a.decision.supersedes) } : d);
+      applied.push({ kind: a.kind, target: d.choice.slice(0, 60), why: String(a.why).trim() });
+      continue;
     } else { problems.push(amendmentProblem(a, tag)); continue; }
     applied.push({ kind: a.kind, target: a.path ?? a.requirement?.id ?? a.requirement, why: String(a.why).trim() });
   }
-  return { contract: c, applied, toTrack, problems };
+  return { contract: c, applied, toTrack, problems, decisions };
 }
 
 const PY_MISSING_RE = /ModuleNotFoundError: No module named '([^']+)'|ImportError: No module named '?([\w.]+)'?/;
@@ -393,7 +439,7 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
@@ -435,6 +481,9 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
   }
   failures.push(...hotspotGrowth({ contract, result, hotspots, changedFiles }));
   if (repro) failures.push(...reproFailures(contract, repro));
+  // #4693: a broken guard fails unless the contract carries a supersedes amendment for it
+  const retired = new Set((contract.supersedes ?? []).map((s) => s.guard));
+  for (const f of guardFailures ?? []) if (!retired.has(f.guard)) failures.push(f);
   return { ok: failures.length === 0, failures, superseded, ciCovered };
 }
 
@@ -632,6 +681,26 @@ export function checkCompleteness(rv, { contract, changedFiles, issueText, pathE
   return { complete: p.length === 0, problems: p, missing: [...ids] };
 }
 
+
+/** #4726: a requirement quote that carries a `[type:e2e]` criterion. */
+const wantsE2e = (r) => /\[type:e2e\]/i.test(String(r?.quote ?? ""));
+const E2E_CMD_RE = /\b(?:playwright|cypress|e2e|live[- ]stack|wdio)\b/i;
+/**
+ * #4726: whether a validate command runs a real end-to-end check: an entry of `verify.e2e_checks`, a file of the e2e spec set
+ * (`e2e.isSpec`), or Playwright/Cypress/e2e/live-stack. A unit test file with stubbed I/O is not one.
+ */
+export function isE2eCommand(command, e2e = null) {
+  const cmd = String(command ?? "");
+  if ((e2e?.checks ?? []).some((c) => c && cmd.includes(c))) return true;
+  if (typeof e2e?.isSpec === "function" && cmd.split(/\s+/).some((t) => t && e2e.isSpec(t.replace(/^["']+|["']+$/g, "")))) return true;
+  return E2E_CMD_RE.test(cmd);
+}
+/** #4726: true when a V-ref named in the row's `validated_by` resolves to a contract validate command that is a real e2e check. */
+export function e2eVerified(row, contract, e2e = null) {
+  const by = String(row?.validated_by ?? "");
+  const refs = (contract?.validate ?? []).filter((v) => v?.id && new RegExp(`(?:^|[^A-Za-z0-9_])${v.id}(?![A-Za-z0-9_])`).test(by));
+  return refs.some((v) => isE2eCommand(v.command, e2e)) || (!refs.length && isE2eCommand(by, e2e));
+}
 /**
  * The engine's decision from the reviewer's rows. state: conforms | nonconforming | review.unparseable | review.incomplete
  * | review.inconsistent. failures[] are {code, detail}; `inconsistent` marks a CONFORMS verdict whose rows fail;
@@ -653,6 +722,8 @@ export function decide(raw, ctx) {
       if (row.instrumented !== true) f.push({ code: C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.id} verified out of band${r.evidence ? ` by ${r.evidence}` : ""}: instrumentation missing${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
     } else if (r.disposition === "deliver" && row.status !== "implemented") {
       f.push({ code: ["deferred", "post-deploy"].includes(row.status) ? C.CONFORMANCE_UNTRACKED_DEFERRAL : C.CONFORMANCE_UNIMPLEMENTED, detail: `${r.amendment?.text ? `${r.id} amendment not accepted (amended to "${String(r.amendment.text).slice(0, 200)}"): ` : `${r.id} `}${row.status}${row.note ? `: ${row.note}` : ""}${row.evidence ? ` (${row.evidence})` : ""}` });
+    } else if (r.disposition === "deliver" && wantsE2e(r) && !e2eVerified(row, ctx.contract, ctx.e2e)) {
+      f.push({ code: C.CONFORMANCE_E2E_UNVERIFIED, detail: `${r.id} is a [type:e2e] criterion but ${row.validated_by || "its validated_by"} is not a real end-to-end check (the repo's e2e set, Playwright/browser/live stack); run one, or mark ${r.id} post-deploy with a tracked follow-up` });
     }
     if (TRACKED.includes(r.disposition) && row.deferral_ok === false) f.push({ code: C.CONFORMANCE_UNJUSTIFIED_DEFERRAL, detail: `${r.id} ${r.disposition} is not justified${row.note ? `: ${row.note}` : ""}; implement it` });
   }
@@ -752,11 +823,54 @@ export function formatShadowSummary(rows) {
   return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}`;
 }
 
-/** One line per requirement for the follow-up script: a stable key (id + quote) and a why. Tabs and newlines removed. */
-export function followupItems(reqs) {
+/** #4664: follow-up classes, one issue each per parent (scripts/file-deferred-followups.sh); post-deploy is one rollup per release lane (#4724). */
+export const FOLLOWUP_CLASSES = ["engineering", "post-deploy", "external", "ops"];
+/** #4724: the bucket every deferred row gets at contract time. `date:<YYYY-MM-DD>` and `owner:<action>` carry a value. */
+export const BUCKETS = Object.freeze(["post-deploy", "verify-now", "date", "owner", "new-issue"]);
+const DATE_BUCKET_RE = /^date:(\d{4})-(\d{2})-(\d{2})$/;
+/** The kind of a bucket (`date:2026-12-01` -> `date`), or null when absent or unknown. */
+export const bucketKind = (b) => { const k = String(b ?? "").split(":")[0]; return BUCKETS.includes(k) ? k : null; };
+/** #4724: problems with a deferred row's bucket (a defer or post-deploy row needs exactly one; owner actions are never post-deploy). */
+export function bucketProblems(r) {
+  const b = r?.bucket;
+  if (!TRACKED.includes(r?.disposition)) return b == null ? [] : ["bucket applies only to a defer or post-deploy requirement"];
+  if (b == null || b === "") return [`${r.disposition} needs a bucket (${BUCKETS.join("|")}; \`date:<YYYY-MM-DD>\`, \`owner:<action>\`)`];
+  const k = bucketKind(b), out = [];
+  if (!k || (k !== "date" && k !== "owner" && b !== k)) out.push(`bucket '${b}' must be post-deploy, verify-now, date:<YYYY-MM-DD>, owner:<action> or new-issue`);
+  else if (k === "date") {
+    const m = DATE_BUCKET_RE.exec(String(b)), d = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+    if (!m || d.getUTCFullYear() !== +m[1] || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3]) out.push(`bucket '${b}' must be an absolute date:<YYYY-MM-DD>, not a relative wait`);
+  } else if (k === "owner" && blank(String(b).slice(6))) out.push("bucket owner needs the action: owner:<action>");
+  if (r.disposition === "post-deploy" && (k === "owner" || k === "new-issue")) out.push(`a ${k} item is never post-deploy: use disposition defer`);
+  if (k === "owner" && r.class != null && r.class !== "external" && r.class !== "ops") out.push("an owner bucket belongs in class external or ops, never post-deploy");
+  return out;
+}
+/** The follow-up class of a requirement: owner -> external, new-issue -> engineering, other buckets post-deploy; else its `class`, else post-deploy for that disposition, else engineering. */
+export function followupClass(r) {
+  const k = bucketKind(r?.bucket);
+  if (k === "owner") return r?.class === "ops" ? "ops" : "external";
+  if (k === "new-issue") return r?.class && r.class !== "post-deploy" && FOLLOWUP_CLASSES.includes(r.class) ? r.class : "engineering";
+  if (k) return "post-deploy";
+  return FOLLOWUP_CLASSES.includes(r?.class) ? r.class : r?.disposition === "post-deploy" ? "post-deploy" : "engineering";
+}
+/** #4724: deferred items per bucket kind (`none` = no bucket), for the batch telemetry line. */
+export const bucketTally = (reqs) => (reqs ?? []).reduce((t, r) => { const k = bucketKind(r?.bucket) ?? "none"; t[k] = (t[k] ?? 0) + 1; return t; }, {});
+
+/**
+ * One line per requirement for the follow-up script: a stable key (id + quote), a why and a class. Tabs and newlines removed.
+ * #4724: a bucketed row's why carries `[bucket:<kind>]` (the script counts and routes on it) and a date bucket's `due:<date>`
+ * plus `from:<date>` (the contract-time anchor, `now` ms) that the gate re-anchors when the parent ships later.
+ */
+export function followupItems(reqs, { now = Date.now() } = {}) {
   const flat = (s) => String(s ?? "").replace(/[\t\r\n`]+/g, " ").replace(/\s+/g, " ").trim();
   const check = (r) => (r.disposition === "post-deploy" && r.check ? `[check:${flat(r.check)}] ` : ""); // #4626: the follow-up item names its check
-  return reqs.map((r) => ({ id: r.id, key: flat(`${r.id}: ${r.quote}`).slice(0, 240).trim(), why: flat(`${r.disposition}: ${check(r)}${r.why ?? ""}`).slice(0, 400).trim() }));
+  return reqs.map((r) => {
+    const k = bucketKind(r.bucket);
+    const tag = k ? `[bucket:${k}] ` : "";
+    const due = k === "date" ? `due:${String(r.bucket).slice(5)} from:${new Date(now).toISOString().slice(0, 10)} ` : "";
+    const head = k === "owner" ? `owner: ${flat(String(r.bucket).slice(6))}. ` : k && k !== "new-issue" ? "post-deploy: " : `${r.disposition}: `;
+    return { id: r.id, class: followupClass(r), key: flat(`${r.id}: ${r.quote}`).slice(0, 240).trim(), why: flat(`${head}${tag}${check(r)}${due}${r.why ?? ""}`).slice(0, 400).trim() };
+  });
 }
 
 /** #4388: the follow-up script's `key\tissue` lines as {[item.key]: issue}, matched on trimmed keys (the script trims what it echoes); unmatched items omitted. */

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
+import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, isTransportError, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate, formatTable, formatSandboxSummary } from "./orchestrate.mjs";
@@ -24,7 +24,7 @@ function fakeProvider(opts = {}) {
     async start({ issue, env, secrets }) {
       p.calls.push(["start", issue]);
       p.ledgerAtStart = opts.ledger?.entries("sandbox").map((e) => e.value) ?? null;
-      if (opts.startThrows) throw new Error("boom: no capacity");
+      if (opts.startThrows) throw Object.assign(new Error("boom: no capacity"), opts.startThrows === 401 ? { status: 401 } : {});
       p.live.add(issue);
       p.env = env; p.secrets = secrets;
       if (opts.finish) { const r = opts.finish(issue); if (r !== undefined) { p.results[issue] = r; p.live.delete(issue); } }
@@ -81,6 +81,56 @@ describe("execution config (#4253)", () => {
   });
 });
 
+describe("providerLanes: an unreachable provider is retried, then deferred without teardown (#4672)", () => {
+  const flaky = (failPolls) => {
+    const prov = fakeProvider(); let polls = 0;
+    prov.live.add(7);
+    const gate = () => { if (polls++ < failPolls) throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }); };
+    prov.fetchResult = async (h) => { gate(); return prov.results[h.issue] ?? null; };
+    prov.status = async (h) => { gate(); prov.calls.push(["status", h.issue]); return prov.live.has(h.issue) ? "running" : "exited"; };
+    return prov;
+  };
+  const lanes = (prov, extra = {}) => { const root = tmpDir("exec-unreach-"); const ledgerFor = ledgerIn(root); const slept = [];
+    return { slept, ledgerFor, l: providerLanes({ provider: prov, laneArgs: () => [], ledgerFor, pollMs: 1000, now: () => 1000, sleep: async (ms) => { slept.push(ms); if (slept.length === 6) { prov.results[7] = { terminalReason: "merged", pr: 9 }; prov.live.delete(7); } }, ...extra }) }; };
+
+  it("unreachable: N failed polls then recovery yields the real result", async () => {
+    const prov = flaky(3); prov.start = async () => ({ provider: "fake", id: "fake-7", issue: 7 });
+    const { l, slept } = lanes(prov);
+    const r = await l.runOne(7, "staging");
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(slept.length >= 3 && slept[1] > slept[0]); // backoff
+    assert.equal(prov.calls.filter((c) => c[0] === "teardown").length, 1); // only after the result
+  });
+
+  it("unreachable: down past the window yields sandbox.unreachable, no teardown, ledger kept", async () => {
+    const prov = flaky(1e9); prov.start = async () => ({ provider: "fake", id: "fake-7", issue: 7 });
+    const { l, ledgerFor } = lanes(prov, { unreachableWindowMs: 5000 });
+    const r = await l.runOne(7, "staging");
+    assert.deepEqual([r.terminalReason, r.code], ["deferred", "sandbox.unreachable"]);
+    assert.equal(prov.calls.some((c) => c[0] === "teardown"), false);
+    assert.deepEqual(ledgerFor(7).entries("sandbox").map((e) => e.value), ["fake-7"]);
+  });
+
+  it("unreachable: adopt applies the same tolerance, and a non-transport error is still engine-error", async () => {
+    const down = flaky(1e9);
+    const { l } = lanes(down, { unreachableWindowMs: 3000 });
+    const r = await l.adopt(7, { handle: { provider: "fake", id: "fake-7", issue: 7 } });
+    assert.equal(r.code, "sandbox.unreachable");
+    assert.equal(down.calls.some((c) => c[0] === "teardown"), false);
+    const ok = flaky(2); ok.results[7] = { terminalReason: "merged", pr: 1 };
+    assert.equal((await lanes(ok).l.adopt(7, { handle: { provider: "fake", id: "fake-7", issue: 7 } })).terminalReason, "merged");
+    const bad = fakeProvider(); bad.fetchResult = async () => { throw new Error("boom"); };
+    assert.equal((await lanes(bad).l.adopt(7, { handle: { provider: "fake", id: "fake-7", issue: 7 } })).terminalReason, "engine-error");
+  });
+
+  it("unreachable: classifies transport errors and parses the window key", () => {
+    for (const e of [new TypeError("fetch failed"), Object.assign(new Error("x"), { code: "ECONNRESET" }), Object.assign(new Error("x"), { status: 502 }), Object.assign(new Error("x"), { name: "AbortError" })]) assert.equal(isTransportError(e), true);
+    for (const e of [new Error("boom"), Object.assign(new Error("HTTP 404"), { status: 404 })]) assert.equal(isTransportError(e), false);
+    assert.equal(parseExecution({}).unreachableWindowMin, undefined); // providerLanes defaults it to 5 min
+    assert.equal(parseExecution({ unreachable_window_min: "2" }).unreachableWindowMin, 2);
+  });
+});
+
 describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)", () => {
   const run = async ({ finish, startThrows, teardownOk, pollMs = 1 } = {}) => {
     const root = tmpDir("exec-ledger-");
@@ -116,6 +166,13 @@ describe("providerLanes: sandbox ledger and teardown on every exit path (#4253)"
     assert.match(r.detail, /fake-7 exited without a result/);
     assert.ok(prov.calls.some((c) => c[0] === "teardown"));
     assert.equal(led.read(), null);
+  });
+
+  it("#4685 start refused with HTTP 401: deferred sandbox.auth with a long retry, never needs-human", async () => {
+    const { r } = await run({ startThrows: 401 });
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "sandbox.auth");
+    assert.equal(r.retryInSeconds, 300);
   });
 
   it("start throws: typed needs-human sandbox.start_failed row (#4254), teardown still runs", async () => {

@@ -322,6 +322,22 @@ orchestration:
   # (stalled, needs a human) instead of IN_PROGRESS. Default: 48.
   in_progress_max_hours: 48
 
+  # Extra env var names (comma-separated) a batch pins for its lanes in plan.json,
+  # beyond the built-in allowlist (PATH, HOME, USER, SHELL, LANG, LC_*, TMPDIR,
+  # CLAUDE_CONFIG_DIR, CLAUDE_CODE_USE_*, ANTHROPIC_BASE_URL, ANTHROPIC_MODEL,
+  # ANTHROPIC_SMALL_FAST_MODEL, ANTHROPIC_DEFAULT_*_MODEL, FORGEDOCK_*, GH_*, GITHUB_*;
+  # secret-looking names and the launching session's other CLAUDE_CODE_*, CLAUDE_PID,
+  # ANTHROPIC_* are never pinned unless listed here; the configured execution.token_env
+  # name is also kept). Submit prints one line naming the CLAUDE_*/ANTHROPIC_*/GH_*/
+  # GITHUB_*/FORGEDOCK_* keys left out (names only).
+  # Inspect or edit the pinned env with `forgedock orchestrate --show-env <id>`,
+  # `--set-env <id> KEY=VAL`, `--unset-env <id> KEY` (applies to newly launched lanes).
+  env_passthrough: ANTHROPIC_BASE_URL
+
+  # Globs (comma-separated) of PATH directories removed from the pinned PATH. Non-existent
+  # dirs and per-session temp dirs (an arg0 or claude* dir under a temp root) are always dropped.
+  path_exclude: /opt/wrappers/*
+
   cascade:
     # Named preset expanding to the granular keys below. Any granular key set
     # explicitly overrides just that field — the preset supplies defaults, not
@@ -568,7 +584,7 @@ engine:
 | `cli_busy_minutes` | number | No | Extended idle window for a core builder (#4405). When the idle timeout is reached but the session has a live heavy step (a heavy-shim step, test runner, linter or type checker child) or a queued or running heavy-queue entry of its own processes, the kill waits until `cli_idle_minutes` + this many minutes of silence. The run log records `CLI_IDLE_EXTENDED` once per silent stretch, and a later `CLI_IDLE_KILL` carries `heavyQueue` ({queued, running}) and `extended: true`. A silent session with no such child is still killed at `cli_idle_minutes`. Default 45 (the heavy queue's 30-minute maximum wait plus the 15-minute idle default). |
 | `cli_max_minutes` | number | No | Absolute ceiling for a core builder session (code `cli.timeout`), replacing the fixed 60-minute kill. A session that keeps making progress is never idle-killed. Default 180. On either kill, uncommitted work is committed as `wip(forge): checkpoint after <reason>` and the lane branch is pushed (with the push retry), the builder retries once from the checkpoint, and a second kill ends `deferred`; a rerun resumes from the branch. |
 | `turn_budget_s` / `turn_budget_m` / `turn_budget_l` | number | No | Core implement turn budget per lane size (#4392). Size comes from a `size:S|M|L` issue label, else the frozen contract's distinct deliverable paths (S ≤ 2, M ≤ 5, else L). The build call and its context/timeout restarts share the budget; at the limit the session is stopped, checkpointed, and one fresh wrap-up session of max(5, budget/5) turns either finishes or writes `status: budget-exceeded` with a digest. A stop or overrun ends with the non-human `budget-exceeded` reason and code `budget.exceeded` (no `needs-human` label, forge#4505), which `forgedock orchestrate` recovers once (continue from the checkpoint or split); a batch that does not recover it labels it `needs-human` once. Lane results carry `turns: {size, budget, build, total, exceeded}`, and the batch report prints `turns by size`. Defaults 25 / 60 / 100; 0 disables that size. An L lane's budget scales with the contract: +10 turns per distinct deliverable path above 5 (capped at +2x `turn_budget_l`), and a `budget.exceeded` recovery of an L lane gets a further +50% of `turn_budget_l` (#4587). |
-| `lane_limits` | map | No | Cap each core lane's whole process tree (#4115), under `pipeline:` or `engine:`: `memory_max` (for example `3G`) and `cpu_quota` (for example `150%`). When set and `systemd-run --user --scope` works (probed once), the builder CLI is spawned as `systemd-run --user --scope -q -p MemoryMax=... -p CPUQuota=... -- claude ...`; elsewhere the caps are ignored. Write it nested or flat (`lane_limits_memory_max`, `lane_limits_cpu_quota`). While a builder runs the engine polls host load and memory every 15 s against the `admission` thresholds: over them it SIGSTOPs the lane's process group, under them SIGCONT, and never pauses longer than 10 minutes. |
+| `lane_limits` | map | No | Cap each core lane's whole process tree (#4115, #4690), under `pipeline:` or `engine:`: `tasks_max` (default `1024`; `0`/`off` disables), `memory_max` (for example `3G`) and `cpu_quota` (for example `150%`). Where `systemd-run --user --scope` works (probed once) every lane's builder CLI is spawned as `systemd-run --user --scope -q --unit=forgedock-lane-... -p TasksMax=... -p MemoryMax=... -p CPUQuota=... -- claude ...` by default. `memory_max` has no default: lanes get no `MemoryMax` unless it is set (`off` also disables; #4740). A lane that hits `TasksMax` or `MemoryMax` is stopped and ends `needs-human` with `env.lane_limit` (not an engine-error, so the breaker ignores it). Where scopes are unavailable the run logs one line saying lanes are uncapped and the limits are ignored. Write it nested or flat (`lane_limits_tasks_max`, `lane_limits_memory_max`, `lane_limits_cpu_quota`). While a builder runs the engine polls host load and memory every 15 s against the `admission` thresholds: over them it SIGSTOPs the lane's process group, under them SIGCONT, and never pauses longer than 10 minutes. |
 | `admission` | map | No | Host-resource admission for the core work-on (#4105), checked before the lease, worktree or any GitHub call. When a check fails the run ends `deferred` (code `host.busy`, exit 75) with a last line such as `issue #N → deferred (host busy: mem 1.2G < 2G; retry in 60s)`; no lease is taken and nothing is posted. Keys: `enabled` (default `true`; `false` disables admission), `min_free_mem_mb` (default 2048; `MemAvailable` from `/proc/meminfo`, else `os.freemem()`), `min_free_tmp_mb` (default 1024; free space of the run TMPDIR filesystem, `~/.forge/tmp`, and of `/tmp`, via `statfs`), `max_load_per_core` (default 4; 1-minute load average divided by cores). Write it nested (`engine:` then `admission:` with the keys indented) or flat as `admission_enabled`, `admission_min_free_mem_mb`, `admission_min_free_tmp_mb`, `admission_max_load_per_core`; the parser reads one nested level into `engine`. `/orchestrate` requeues a host-busy lane and lowers K by 1 for 5 minutes. |
 | `merge_wait` | string | No | Core work-on merge gate. `required` (default): wait only for the status checks the base branch requires: the union of classic branch protection (`gh api repos/{o}/{r}/branches/{base}/protection/required_status_checks`, contexts and checks) and repository rulesets (`gh api repos/{o}/{r}/rules/branches/{base}`, `required_status_checks` rules); with neither (404 or empty) merge right after review PASS. A merge rejected by base branch policy (PR `MERGEABLE` but `BLOCKED`) is waited on and retried within the CI budget, then left `ci-pending`; it is never base-synced and never `base.conflict`. A failing required check is `needs-human`; a pending one is polled with backoff and never `needs-human`. `all`: wait for every check (`scripts/wait-ci-green.sh`). `none`: merge right after review. Always `--match-head-commit` at the reviewed head. The policy used is recorded in the `FORGE:WORK-ON` comment. |
 | `context_pack` | string | No | Context pack (#4275). Before the plan call the core compiles the issue's GitHub/git neighbourhood into a small, budgeted pack: linked issues and PRs (parent, `Depends on`, body links, same-repo cross-references, siblings), prior attempts, merged PRs on the issue's files that were reverted or whose decisions/findings name a symbol from the issue, structured `FORGE:FACTS` records of earlier lanes on the issue's files (rejected approaches with why, hot spots, decisions, conventions, baselines; #4401), and repo-fact file pointers (found in the lane worktree or, for untracked caches, the main checkout; #4400). `shadow` (default): the pack is compiled, posted on the issue as a collapsed `FORGE:CONTEXT` comment and logged as a `CONTEXT_PACK` event; the builder prompt is unchanged. `on`: it is also appended to the plan prompt as hints. `off`: nothing is gathered, posted or logged. `ab` (#4444): the A/B experiment. Each issue gets a stable arm, `on` or `shadow`, from a hash of `repo#issue`, logged as that mode with `context_ab: true`; the default stays `shadow`. The pack never enters the text contract quotes are checked against. Values read from linked issues' `FORGE:STATE` are kept only when they are outcome codes. Compare with `forgedock stats --context-ab` (per lane type and mode: first-pass yield, turns and cache-read per merge, rework rate, and recovery lanes' implement attempt against the first run on the same issue). Unless `off`, a resumed or recovery lane also gets a bounded resume digest of its last run in the builder prompt (end reason, validate results per command, deliver requirements, files changed; logged as `RESUME_DIGEST`; #4400), whatever the mode. |
@@ -594,9 +610,20 @@ engine:
 
 ---
 
+## `followups` (OPTIONAL)
+
+Deferred follow-ups (`scripts/file-deferred-followups.sh`) are filed as one issue per class per parent: `engineering`, `post-deploy`, `external` and `ops`. Each carries the label `followup:<class>` (`external` also `external-prerequisite`, and states the parent it is a prerequisite of) and inherits the parent's milestone. A requirement may set an optional `class` in the contract; otherwise `post-deploy` items are `post-deploy` and the rest `engineering`. A parent milestone that has shipped (closed) is replaced by the next open milestone by due date, else `followups.default_milestone`.
+
+```yaml
+followups:
+  default_milestone: "Backlog"   # optional: milestone title used when the parent's milestone has shipped and no later one is open
+```
+
 ## `post_deploy` (OPTIONAL)
 
 Deferred follow-ups whose items are all post-deploy checks are parked (`awaiting-promotion`, no lane) until the parent's fix is on `branches.default`. Keys: `precondition_cmd` (exit 0 ready, 1 parked) and `min_age` (soak window, e.g. `24h`).
+
+A post-deploy item may carry `due:YYYY-MM-DD` (`- [ ] \`R2: …\` — post-deploy: [check:id] due:2026-11-03 why`): it parks `awaiting-due` (with a `due:<date>` label) until that UTC date. A `decision:` item parks with one typed `FORGE:OWNER_ASK` comment and no lane. The daemon timer (and `forgedock probe --due`) re-evaluates parked follow-ups (`awaiting-promotion`, `awaiting-due`, `awaiting-measurement`) and removes the wait labels when the parent's fix is on the default branch, the date has passed or the check is defined. The only production access a check has is the checks file's command and the `acceptance_probe.env` allowlist; a pass ticks the items, a fail files one `followup:engineering` issue per failing check, and an item with no runnable check gets the owner ask. The batch report lists `due date:` and `owner ask:` apart from failures.
 
 ### Named checks (#4626)
 
@@ -675,7 +702,8 @@ lean:
 | `light.max_lines` | number | No | Upgrade trigger (#4448): a light lane whose non-test diff (added + deleted lines) exceeds this moves to the full lane. Default 40. The other triggers: more than `max_files` non-test changed files, a repro that is not red on the base, two failed test runs, a touched risk path, or a public-API-shape change (#4449). Flat `lean.light_max_lines` wins. |
 | `light.max_files` | number | No | Max predicted non-test files for eligibility and max changed non-test files before an upgrade (#4448). Default 2. Flat `lean.light_max_files` wins. |
 | `sequence.regenerate` | string | No | Command run in the lane worktree (`sh -c`) after the engine renumbers a schema-changing sequence-numbered migration (#4386), to regenerate its snapshot, e.g. `pnpm --filter @x/db db:generate`. The flat form `lean.sequence_regenerate` also works and wins. When a lane-added numbered file (`NNNN_*.sql`, a drizzle `meta/_journal.json` + `meta/NNNN_snapshot.json`, a numbered ADR) shares its number with the base, the engine renumbers it without a builder session: `git mv` to max(base)+1…, the document's own number in its heading, references to the old name repo-wide, the base journal plus the lane's entries, and a data-only migration's snapshot cloned from the base tip with a new `id`/`prevId`. A schema-changing migration without this command, or a migration in another language (`.py`, `.ts`), falls back to the builder renumber, and the trajectory records why. When the generator writes no snapshot for a hand-written migration (no schema diff), the engine reruns it with ` --custom` appended (drizzle-kit's empty migration), keeps its snapshot and restores the lane's SQL byte-identical, so the command must forward trailing args (a pnpm/yarn script, or `npm run x --`). A base-sync whose conflicts are only in such files is resolved the same way, with no re-review. At the merge gate a lane with numbered files holds a host sequence lease per (repo, lane branch, directory) from its last renumber check through the merge, so only one numbered-file PR is in the renumber→CI→merge window at a time. |
-| `base_merge_union_globs` / `base_merge_json_globs` / `base_merge_generated_globs` / `base_merge_generated_command` | string | No | Deterministic resolution of sibling-lane conflicts when the lane merges its base (#4588, `bin/lean/conflictres.mjs`; flat keys only). Comma-separated globs (`*` within a segment, `**` across; no `/` matches the file name anywhere). `union_globs`: hunks where both sides only added lines keep both. `json_globs`: a 3-way key union of a JSON object (a key both sides changed differently is refused). `generated_globs` + `generated_command`: the base side is taken, then the command runs once in the lane worktree (`sh -c`) and the files are re-added. A file that cannot be fully resolved, and every sequence/migration file, goes on as before (sequence resolver, then the builder). Default: none, so nothing changes. |
+| `base_merge_union_globs` / `base_merge_json_globs` / `base_merge_generated_globs` / `base_merge_generated_command` | string | No | Deterministic resolution of sibling-lane conflicts when the lane merges its base (#4588, `bin/lean/conflictres.mjs`; flat keys only). Comma-separated globs (`*` within a segment, `**` across; no `/` matches the file name anywhere). `union_globs`: hunks where both sides only added lines keep both. `json_globs`: a 3-way key union of a JSON object (a key both sides changed differently is refused). `generated_globs` + `generated_command`: the base side is taken, then the command runs once in the lane worktree (`sh -c`) and the files are re-added. A file that cannot be fully resolved, and every sequence/migration file, goes on as before (sequence resolver, then the builder). Default: none, so nothing changes. The same keys apply to milestone branch syncs (`forgedock milestone-sync`, #4663). |
+| `milestones.sync_debounce` | string | No | Debounce window of the milestone sync PR (#4663, `bin/lean/milestonesync.mjs`): on a protected milestone branch `forgedock milestone-sync` keeps ONE `sync/milestone-{slug}` PR and force-pushes its head in place; a base that moved again inside the window reports `debounced` (a `ship` sync ignores the window). `10m`, `1h`, `1d`. Default: `10m`. |
 
 ## `stats` (OPTIONAL)
 
@@ -784,6 +812,33 @@ Each run emits an `E2E_VERIFY` run-log/telemetry event (`pr`, `head`, `reason`, 
 
 **Commands that use this section**: core work-on (`forgedock run-issue`, `forgedock orchestrate`; `bin/engine-cli.mjs` `readVerify`)
 
+## `ci` (OPTIONAL)
+
+Scheduled full-suite integration runs on active milestone branches (forge#4667), report-only. Under the fast-lane/heavy-ship-gate model the whole e2e suite otherwise runs only at the ship PR. Write it as a block-style section; the parser flattens the keys of `milestone_integration:` under `ci`. Off unless `workflow` is set.
+
+```yaml
+ci:
+  milestone_integration:
+    workflow: e2e.yml            # workflow_dispatch workflow that runs the full suite
+    # project: web-e2e           # optional project passed to the workflow
+    # project_input: project     # its input name (default project)
+    interval_hours: 24           # run when this old (default 24, nightly)
+    every_merges: 10             # optional: also run after N lane merges into the milestone
+    block_admission_after: 2     # optional: hold new lanes after N consecutive red runs, until green
+    max_minutes: 360             # optional wait budget per run (default 360)
+```
+
+| Key | Type | Required | Description |
+|---|---|---|---|
+| `workflow` | string | Yes | Workflow file dispatched on `milestone/<slug>` (needs `on: workflow_dispatch`). |
+| `project` / `project_input` | string | No | Value and input name passed to the workflow. |
+| `interval_hours` | number | No | Hours between runs of a milestone. Default 24. |
+| `every_merges` | integer | No | Also run once this many lane merges happened since the last run (checked by `forgedock orchestrate`). |
+| `block_admission_after` | integer | No | After this many consecutive red runs, `forgedock orchestrate` admits no new lane of that milestone (ends `held`) until a run is green. |
+| `max_minutes` | integer | No | Wait budget of one run. Default 360. |
+
+State lives in a `FORGE:INTEGRATION` block in the milestone description. A red run files or updates one `integration-red` issue on the milestone (failing specs, merge range); the next green run closes it. `/deploy-info` shows open ones as a ship-gate risk and `/pipeline-status` shows each milestone's last green run. Schedule it with cron or a scheduled workflow: `forgedock integration run [--repo owner/repo] [--milestone TITLE] [--force]` (exit 1 when a run is red; `forgedock integration status` prints each last green run); `forgedock orchestrate` also runs it every `every_merges` merges.
+
 ## `execution` (OPTIONAL)
 
 Where `forgedock orchestrate` runs its lanes (forge#4253). Block style only.
@@ -826,6 +881,7 @@ execution:
 | `budget_minutes`, `budget_usd` | number | No | The `execution.budget` per batch: once the batch's sandbox minutes / estimated USD (settled lanes plus the running ones' elapsed time) reach the cap, no new remote lane is admitted. Missing, non-numeric or negative means no cap. |
 | `day_budget_minutes`, `day_budget_usd` | number | No | The same cap per host UTC day, summed over every batch on the host from the host-day store (`execution-budget.json` in `~/.forge/sched/`, or `FORGEDOCK_EXECUTION_BUDGET_FILE`). A corrupt or unreadable store refuses remote lanes while a day cap is set; remove the file to reset it. |
 | `fallback_local` | boolean | No | `true`: a remote-placed lane runs on the host while the provider reports no agent online (`GET {endpoint}/status -> {"online": N}`, the built-in router answers it with `online`, `total` and per-agent `ok`/`paused`), so a batch completes locally with every pool agent offline or asleep (forge#4547). Default `false`: such lanes defer (`sandbox.capacity`). A missing or failing `/status` is unknown and never triggers it. |
+| `unreachable_window_min` | number | No | Remote providers: how long a lane keeps polling (with backoff, up to 30s) after the provider's transport fails (connection refused/reset, `fetch failed`, timeout, 502/503/504) before it ends `deferred` with `sandbox.unreachable` (forge#4672). Inside the window the lane never ends and the sandbox is never torn down; after it the sandbox is kept and adopted on the next attempt or `--resume`; the engine-error breaker does not count it. `adopt` applies the same window. Default: 5 |
 | `on_budget` | string | No | `stop` (default): running lanes finish and the rest end `held` (`execution budget: ...`) for a later `--resume`. `local`: the rest run as detached host lanes. |
 | `host_capabilities` | list | No | Host-only capabilities the dispatching host has and a sandbox does not relay (forge#4542): names such as `sops`, `prod_monitor`, `ops_credentials`. A lane whose issue text names one (built-in signals: `.secrets/*.enc.yaml`, `sops`, `ssh *-monitor`, `obs-psql`, `credentials.yaml`; a declared name written out; `host_capability_patterns`) is placed `local` in `remote` and `hybrid` mode with the reason `host capability: <name>`, since remote providers (computeshare included) relay none of them. A remote lane that still blocks as `credentials` naming only a declared capability ends `env.capability_remote` (recoverable) and is rerun locally once. |
 | `host_capability_patterns` | list | No | `name:regex` entries (case-insensitive) that also mean the lane needs capability `name`, e.g. `vault:vault\s+kv`. An invalid entry is ignored. |
@@ -1430,6 +1486,19 @@ SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/n
 ```
 
 ---
+
+## Bot token refresh
+
+Installation tokens expire after 1 hour. `scripts/refresh-bot-token.sh` mints a new one and records `~/.forge/bot-token.json` (`refreshedAt`, `expiresAt`; override the directory with `FORGE_HOME_DIR`). To run it on a schedule, install the systemd user timer (`OnBootSec=2min`, `OnUnitActiveSec=45min`, `Persistent=true`, so a missed run fires after a restart):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp scripts/systemd/forgedock-bot-token-refresh.{service,timer} ~/.config/systemd/user/
+# edit ExecStart in the .service to the path of refresh-bot-token.sh on this host
+systemctl --user daemon-reload && systemctl --user enable --now forgedock-bot-token-refresh.timer
+```
+
+`forgedock doctor` (Check 12) reports the remaining lifetime and the last refresh, and fails when less than 10 min remain or the last refresh is older than 50 min. Without the stamp file it stays an informational warning. A core run that gets HTTP 401 from `gh` runs the refresh script once and retries; if that does not help the run ends `deferred` with `gh.auth` (see `docs/OUTCOME-CODES.md`), and `FORGE_REFRESH_TOKEN_SCRIPT` overrides the script it runs. `scripts/wait-ci-green.sh` retries a 401 a few times, then exits 2 with an auth message.
 
 ## GitHub App Install
 

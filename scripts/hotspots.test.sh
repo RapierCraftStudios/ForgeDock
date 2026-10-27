@@ -116,5 +116,14 @@ if grep -q '"rev-list"' "$TMP/trace.json"; then ok; else bad "git trace not capt
 if grep -qE '"(cat-file|show)"' "$TMP/trace.json"; then bad "blob read without --base"; else ok; fi
 if [ -e "$TMP/net.log" ]; then bad "network tool invoked: $(tr '\n' ' ' < "$TMP/net.log")"; else ok; fi
 
+# ---- #4685: lockfiles are excluded by default, with no forge.yaml; ordinary files are not ----
+new_repo
+lines web.lock 10; mkdir -p web; lines web/package-lock.json 10; lines app.py 10; commit base
+git checkout -q -b feat2
+lines more 900; cat more >> web/package-lock.json; cat more >> app.py; commit grow
+OUT="$(bash "$S" --base main -- web/package-lock.json app.py)"
+eq "lockfile excluded" "$(q '.files[0] | [.excluded,.growth]')" '[true,900]'
+eq "ordinary file not excluded" "$(q '.files[1].excluded')" 'false'
+
 echo "hotspots.test.sh: $PASS passed, $FAILN failed"
 [ "$FAILN" -eq 0 ]

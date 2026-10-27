@@ -35,6 +35,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schedDir, pidAlive } from "./sched.mjs";
 import { batchRoot, listBatches, openBatch } from "./batch.mjs";
@@ -48,17 +49,57 @@ export function scheddPaths(dir = schedDir()) {
   return { dir, sock: join(dir, "schedd.sock"), lock: join(dir, "schedd.lock"), log: join(dir, "schedd.log") };
 }
 
-// Env keys a batch keeps for its lanes (account and backend selectors, tool paths); persisted in plan.json.
-const ENV_KEEP = /^(PATH|HOME|USER|SHELL|LANG|LC_ALL|TMPDIR|FORGEDOCK_.*|CLAUDE_.*|ANTHROPIC_.*|GH_.*|GITHUB_.*)$/;
+// Env keys a batch keeps for its lanes (account selectors, tool paths); persisted in plan.json (#4691). Session-scoped
+// `CLAUDE_CODE_*` / `CLAUDE_PID` and `ANTHROPIC_*` are not kept, except the non-secret provider/endpoint/model selectors
+// (`CLAUDE_CODE_USE_*`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, ...; #4734); more names come from `orchestration.env_passthrough`.
+const ENV_KEEP = /^(PATH|HOME|USER|SHELL|LANG|LC_.*|TMPDIR|CLAUDE_CONFIG_DIR|CLAUDE_CODE_USE_.*|ANTHROPIC_(BASE_URL|MODEL|SMALL_FAST_MODEL|DEFAULT_.*_MODEL)|FORGEDOCK_.*|GH_.*|GITHUB_.*)$/;
+// What the 1.36.0 pin carried (plus FORGEDOCK_*): a key of these families not pinned now is named at submit (#4734).
+const LEGACY_PIN = /^(CLAUDE_.*|ANTHROPIC_.*|GH_.*|GITHUB_.*|FORGEDOCK_.*)$/;
+const SESSION_SCOPED = /^(CLAUDE_PID|CLAUDE_CODE_(SESSION|MESSAGING|ENTRYPOINT|EXECPATH|SSE).*)$/;
+// A secret never rides the allowlist: it resolves at lane start (env, keychain) unless the operator names it as a passthrough.
+export const SECRET_ENV = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY)/i;
+const SESSION_DIR = /(^|\/)(arg0|claude[^/]*)(\/|$)/;
 
-/** The allowlisted part of `env`. */
-export function batchEnv(env = process.env) {
-  return Object.fromEntries(Object.entries(env).filter(([k, v]) => ENV_KEEP.test(k) && typeof v === "string"));
+/** A forge.yaml glob (`*` within a segment, `**` across segments, `?`) as an anchored RegExp. */
+export function globToRegExp(glob) {
+  const re = String(glob).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*").replace(/\?/g, "[^/]");
+  return new RegExp(`^${re}$`);
 }
 
-/** `base` without its allowlisted keys, plus `kept`: an account selector the client did not set never leaks in from the daemon. */
+/** `path` without non-existent dirs, per-session temp dirs (an `arg0`/`claude*` dir under a temp root) and `exclude` glob matches. */
+export function sanitizePath(path, { exclude = [], exists = existsSync, tmpRoots = ["/tmp", "/var/tmp", tmpdir(), process.env.TMPDIR] } = {}) {
+  const globs = exclude.map(globToRegExp);
+  const roots = tmpRoots.filter(Boolean).map((r) => r.replace(/\/+$/, ""));
+  const keep = (d) => d && exists(d) && !globs.some((g) => g.test(d.replace(/\/+$/, "")))
+    && !(roots.some((r) => d === r || d.startsWith(`${r}/`)) && SESSION_DIR.test(d));
+  const seen = new Set();
+  return String(path).split(":").filter((d) => keep(d) && !seen.has(d) && seen.add(d)).join(":");
+}
+
+/**
+ * The allowlisted part of `env`, with PATH sanitised. `passthrough` names extra keys to keep (`orchestration.env_passthrough`,
+ * the configured `execution.token_env`); `pathExclude` is `orchestration.path_exclude`. Secret-looking names are dropped unless named.
+ */
+export function batchEnv(env = process.env, { passthrough = [], pathExclude = [], exists = existsSync, tmpRoots } = {}) {
+  const extra = new Set(passthrough);
+  const out = Object.fromEntries(Object.entries(env).filter(([k, v]) => typeof v === "string" && (extra.has(k) || (ENV_KEEP.test(k) && !SECRET_ENV.test(k)))));
+  if (typeof out.PATH === "string") out.PATH = sanitizePath(out.PATH, { exclude: pathExclude, exists, ...(tmpRoots ? { tmpRoots } : {}) });
+  return out;
+}
+
+/** Sorted names (never values) of `env` keys the pre-allowlist pin carried that `kept` does not: the lane gets the daemon's value or resolves it at lane start (#4734). */
+export function droppedEnv(env = process.env, kept = {}) {
+  return Object.keys(env).filter((k) => typeof env[k] === "string" && LEGACY_PIN.test(k) && !SESSION_SCOPED.test(k) && !(k in kept)).sort();
+}
+
+/** `env` with secret-looking values redacted (`--show-env`). */
+export function redactEnv(env) {
+  return Object.fromEntries(Object.entries(env ?? {}).map(([k, v]) => [k, SECRET_ENV.test(k) ? "<redacted>" : v]));
+}
+
+/** `base` without its allowlisted non-secret keys (secret-named ones, e.g. GH_TOKEN, stay from the daemon: never pinned), plus `kept`: an account selector the client did not set never leaks in from the daemon. */
 export function mergeEnv(base, kept) {
-  const out = Object.fromEntries(Object.entries(base).filter(([k]) => !ENV_KEEP.test(k)));
+  const out = Object.fromEntries(Object.entries(base).filter(([k]) => k in kept || !ENV_KEEP.test(k) || SECRET_ENV.test(k)));
   return { ...out, ...kept };
 }
 
@@ -141,8 +182,11 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     if (req.op === "add") {
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
-      const { added, skipped } = b.addIssues(req.issues ?? []);
-      return send({ type: "ok", added, skipped, hosted: hosted.has(req.id) }, true);
+      const { added, skipped, requeued = [] } = b.addIssues(req.issues ?? []);
+      // #4687: a re-queued skipped issue reopens a finished, unhosted batch like --requeue does
+      const reopen = requeued.length > 0 && !hosted.has(req.id) && !starting.has(req.id);
+      if (reopen) await host({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} });
+      return send({ type: "ok", added, skipped, requeued, hosted: hosted.has(req.id), reopened: reopen }, true);
     }
     if (req.op === "requeue") {
       // #4550: the runner applies the entries on its next pass; a finished, unhosted batch is reopened (hosted as a resume).

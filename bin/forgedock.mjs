@@ -86,6 +86,8 @@ import {
   CYAN,
 } from "./tui.mjs";
 import { buildMinimalForgeYaml } from "./init-detect.mjs";
+import { checkContext, refreshContextFlow } from "./review-context.mjs";
+import { botTokenStatus } from "./bot-token-status.mjs";
 import {
   parseNameStatusDiff,
   classifyCommandChanges,
@@ -234,7 +236,7 @@ const SCRIPTS_DIR = join(FORGE_HOME, "scripts");
 // --minimal is init-only. Subcommands with their own flag parsing (run,
 // run-issue, demo) receive restArgs — everything after the command token.
 const rawArgs = process.argv.slice(2);
-const FLAGS = new Set(["--fast", "--manual", "--verbose", "--minimal", "--extras"]);
+const FLAGS = new Set(["--fast", "--manual", "--verbose", "--minimal", "--extras", "--refresh-context"]);
 const flags = rawArgs.filter((a) => FLAGS.has(a));
 // --global is stripped from positionals/restArgs for backward compatibility
 // with existing invocations, but is otherwise a no-op — see the install-mode
@@ -1042,6 +1044,13 @@ function ensureToolStateIgnored(c) {
 
 async function initFlow(c) {
   const outputPath = join(c.cwd, "forge.yaml");
+  if (flags.includes("--refresh-context")) {
+    return refreshContextFlow({
+      cwd: c.cwd,
+      out: c.stdout,
+      deps: { interactive: process.stdin.isTTY === true, confirm, backup: backupExisting, write: atomicWriteFile },
+    });
+  }
   const hasExisting = existsSync(outputPath);
   if (hasExisting && process.stdin.isTTY !== true) {
     const dim = (s) => (c.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
@@ -2704,6 +2713,15 @@ async function doctor(fix = false) {
             );
           }
 
+          try {
+            const ctxCheck = checkContext({ configPath: forgeYamlPath, root: process.cwd(), repo: forgeOwner && forgeRepo ? `${forgeOwner}/${forgeRepo}` : "" });
+            if (ctxCheck.stale) {
+              warn("review context", `REVIEW_CONTEXT_STALE: ${ctxCheck.reasons.map((r) => r.detail).join("; ")}. Run: npx forgedock init --refresh-context`);
+            } else if (ctxCheck.advisory) {
+              warn("review context", `REVIEW_CONTEXT_STALE: generated ${ctxCheck.generated_at}, ${ctxCheck.merged_since} PRs merged since (limit ${ctxCheck.max_merged_prs}). Run: npx forgedock init --refresh-context`);
+            }
+          } catch { /* advisory check: never fail doctor */ }
+
           const defaultMatch = content.match(/^\s+default:\s+"([^"]*)"/m);
           const stagingMatch = content.match(/^\s+staging:\s+"([^"]*)"/m);
           if (
@@ -3243,14 +3261,20 @@ async function doctor(fix = false) {
   }
 
   // ── Check 12: GitHub App / bot token status ─────────────────────────────────
-  // Informational only — never a hard failure. Installing the ForgeDock GitHub
+  // Informational without a refresh stamp (#4662: with one, a stale or expiring token fails). Installing the ForgeDock GitHub
   // App registers it against the account/org but does not, by itself, mint a
   // bot token: that requires the app's private key, which only the app owner
   // holds. Pipeline gh calls always use whatever `gh auth` context is active
   // locally (personal token unless the operator manually configured a bot
   // token) — this check exists so that state is surfaced instead of silent.
   // See docs/CONFIG.md "GitHub App Install" and forge#1890.
-  {
+  const botTok = botTokenStatus(); // #4662: lifetime from the refresh stamp; no stamp means no refresher is installed
+  if (botTok.configured) {
+    const min = (ms) => Math.round(ms / 60000);
+    const detail = botTok.remainingMs != null ? `${min(botTok.remainingMs)} min left, refreshed ${min(botTok.ageMs)} min ago (${botTok.refreshedAt})` : botTok.reason;
+    if (botTok.ok) pass("GitHub App / bot token", detail);
+    else fail(`GitHub App / bot token: ${botTok.reason} (${detail})`, "run scripts/refresh-bot-token.sh and install the timer: docs/CONFIG.md \"Bot token refresh\"");
+  } else {
     warn(
       "GitHub App / bot token",
       "pipeline commands use your active `gh auth` (personal token, unless you've manually configured a bot token). Installing the GitHub App alone does not create one — see docs/CONFIG.md \"GitHub App Install\".",
@@ -3275,6 +3299,19 @@ async function doctor(fix = false) {
     } catch (e) {
       warn("Resource hygiene", `could not inspect ForgeDock leftovers: ${String(e?.message ?? e).slice(0, 200)}`);
     }
+  }
+
+  // ── Check 14: Router/schedd restarts (#4673) ───────────────────────────────
+  // A restart in the last hour usually means an OOM killer or SIGTERM took the coordinator and dropped in-flight lanes. Warn only.
+  {
+    try {
+      const { restartCheck } = await import("./pool/health.mjs");
+      for (const unit of ["computeshare-router", "forgedock-schedd"]) {
+        const r = restartCheck({ unit });
+        if (r.status === "warn") warn(`Restarts: ${unit}`, r.detail);
+        else if (r.status === "pass") pass(`Restarts: ${unit}`, r.detail);
+      }
+    } catch { /* no systemd here: nothing to report */ }
   }
 
   // ── Summary ────────────────────────────────────────────────────────────────
@@ -3314,12 +3351,16 @@ function help() {
     ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
     ["npx forgedock bootstrap <idea|docs> [--dry-run] [--spike <path>] | --plan <plan.json> [--dry-run]", "Headless /bootstrap: idea to orchestrate-ready backlog (--dry-run previews milestones, titles, DAG and estimated agent cost without GitHub writes); --plan validates and creates (or previews) a plan, and re-running resumes from GitHub"],
     ["npx forgedock run-issue <issue> [--lane <lane>] [--lane-override] [--path core|full] [--retry] [--wait-lease]", "Run the lean core work-on on one issue (default; --path full = legacy multi-phase pipeline; the lane comes from the issue: milestone → milestone/<slug>, else staging; --lane is an assertion, never the default branch) (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
+    ["npx forgedock plan validate --live [--repo owner/repo] [--json]", "Re-run the bootstrap dependency-order rules on live GitHub state: each cross-milestone Depends-on edge is ok, held or invalid (exit 1 on invalid)"],
     ["npx forgedock orchestrate <issue...> [--parallel K] [--lane L]", "Run core work-on on several issues with bounded concurrency and Depends-on ordering; each issue on its own lane, cross-lane dependencies reported"],
-    ["npx forgedock orchestrate --resume <id> [N...] | --set-parallel <id> K | --add <id> N... | --requeue <id> N... [--reason \"...\"] | --cancel <id> | --hold <id> N... | --release <id> N...", "Reattach to a batch hosted by the schedd daemon (a finished one replays its report, an orphaned one is resumed with live lanes re-adopted), change its concurrency live, add issues to a running (or held) batch under its K and DAG, requeue a terminal issue (and the dependents skipped behind it) after an operator decision (refused while it is labelled needs-human or closed; a finished batch is reopened), or stop one batch without stopping schedd (running lanes torn down with their work saved, the rest held for --resume), or hold/release single issues of a batch (a held issue is not admitted until released or named by --resume)"],
+    ["npx forgedock orchestrate --resume <id> [N...] | --set-parallel <id> K | --add <id> N... | --requeue <id> N... [--reason \"...\"] | --cancel <id> | --hold <id> N... | --release <id> N... | --show-env <id> | --set-env <id> KEY=VAL | --unset-env <id> KEY", "Reattach to a batch hosted by the schedd daemon (a finished one replays its report, an orphaned one is resumed with live lanes re-adopted), change its concurrency live, add issues to a running (or held) batch under its K and DAG, requeue a terminal issue (and the dependents skipped behind it) after an operator decision (refused while it is labelled needs-human or closed; a finished batch is reopened), or stop one batch without stopping schedd (running lanes torn down with their work saved, the rest held for --resume), or hold/release single issues of a batch (a held issue is not admitted until released or named by --resume), or print (secrets redacted), set or unset a batch's pinned lane env (applies to newly launched lanes)"],
     ["npx forgedock triage <issue...> [--lane L] [--dry-run]", "Already-fixed pre-filter: close issues a merged PR or green CI already resolved; print the rest"],
     ["npx forgedock probe [issue...] [--dry-run]", "Run declared acceptance probes for closed issues whose fix is on the default branch; a fail reopens the issue"],
     ["npx forgedock check [--base REF] [--json]", "Run the lane's frozen validate commands and change-scoped pre-PR checks locally in this worktree, as the engine will (no GitHub, no Actions)"],
+    ["npx forgedock milestone train <slug...> [--parallel-milestones N] | --resume <id> | --insert <id> <slug> [--before s|--after s] | --show <id>", "Unattended multi-milestone train: one durable state file (order, active set, lifecycle), typed STOP reasons, resumable; never edits forge.yaml"],
+    ["npx forgedock guards list [--path p] [--json] | backfill --since <date> [--dry-run]", "Fix guards: list the FORGE:GUARD records (test files + protected hunks of merged fixes) covering a path, or build them for already-merged lean lanes"],
     ["npx forgedock limits show | clear <id>|--all", "Show or clear per-account usage-limit holds shared by orchestrate batches"],
+    ["npx forgedock decisions list [--stale] [--refresh]", "List anchored decisions (FORGE:DECISION); --stale shows those with an anchor missing on the base"],
     ["npx forgedock sched show | cap <N>|--clear | weight <owner/repo> <N>|--clear", "Show the host lane registry, set the host-wide lane cap shared by orchestrate batches, or set a repo's share of slots within a priority (default equal)"],
     ["npx forgedock schedd [status]", "Host scheduler daemon hosting every orchestrate batch (auto-spawned by orchestrate; run in the foreground for a systemd-user unit); status shows its pid and batches"],
     ["npx forgedock pool router [install] | enroll [--cpus N --mem GB] | status | upgrade [agent] | remove <agent>", "Built-in remote compute pool: run the router (foreground, or install it as a user service), print the one-time install command for a host, list agents, upgrade or remove them"],
@@ -3350,6 +3391,7 @@ function help() {
     ["--manual", "Plain text prompts instead of the review screen (init)"],
     ["--verbose", "Show detection sources for every field (init)"],
     ["--minimal", "Generate a minimal forge.yaml with required sections only (init)"],
+    ["--refresh-context", "Regenerate review.context/tech_stack from manifests and show a diff for approval (init)"],
     ["--version, -v", "Print the installed version and check for updates"],
   ];
 
@@ -3903,7 +3945,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "sched", "schedd", "pool", "check", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "guards", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4060,6 +4102,12 @@ switch (command) {
   case "run":
     await run();
     break;
+  case "plan": {
+    // #4659: bootstrap-validate's dependency rules on live GitHub state
+    const { runLive } = await import("../scripts/plan-validate-live.mjs");
+    exitCode = await runLive(restArgs);
+    break;
+  }
   case "bootstrap": {
     // #4177: headless /bootstrap; --plan runs scripts/bootstrap-create.mjs directly (no LLM), a re-run resumes.
     const { runBootstrap } = await import("./bootstrap.mjs");
@@ -4136,6 +4184,17 @@ switch (command) {
     }
     break;
   }
+  case "decisions": {
+    // #4695: anchored decisions of the local index
+    const { decisionsFromCli } = await import("./engine-cli.mjs");
+    try {
+      await decisionsFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
   case "check": {
     // #4364: the builder's in-session run of the engine's validate and pre-PR checks; local only
     const { checkFromCli } = await import("./engine-cli.mjs");
@@ -4193,6 +4252,50 @@ switch (command) {
     const { triageFromCli } = await import("./engine-cli.mjs");
     try {
       await triageFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "milestone-sync": {
+    // On-demand milestone branch sync (#4663): PR + auto-merge under protected branches, one debounced sync PR.
+    const { milestoneSyncFromCli } = await import("./engine-cli.mjs");
+    try {
+      exitCode = await milestoneSyncFromCli(restArgs);
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "milestone": {
+    // Native unattended milestone train (#4658): `forgedock milestone train <slug...>`.
+    const { trainFromCli } = await import("./engine-cli.mjs");
+    try {
+      if (restArgs[0] !== "train") throw new Error("usage: forgedock milestone train <slug...> [--parallel-milestones N] | --resume <id> | --insert <id> <slug> | --show <id>");
+      const result = await trainFromCli(restArgs.slice(1));
+      if (result && !result.ok) exitCode = 1;
+    } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "guards": {
+    // Fix guards (#4692): `forgedock guards list [--path p]` | `guards backfill --since <date>`.
+    const { guardsFromCli } = await import("./engine-cli.mjs");
+    try { exitCode = await guardsFromCli(restArgs); } catch (err) {
+      process.stderr.write(`${RED}${err.message}${RESET}\n`);
+      exitCode = 1;
+    }
+    break;
+  }
+  case "integration": {
+    // Milestone integration runs (#4667): `forgedock integration run` for cron or a scheduled workflow.
+    const { integrationFromCli } = await import("./engine-cli.mjs");
+    try {
+      exitCode = await integrationFromCli(restArgs);
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;

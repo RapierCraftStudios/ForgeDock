@@ -256,7 +256,7 @@ Two milestones, a spike, four build issues and one needs-human issue. `INVITES` 
       ],
       "deps": [],
       "needsHuman": true,
-      "body": "## Problem\n\nCreate the Resend API key that #{{INVITES}} uses to send email.\n\n### Setup steps\n\n1. Create an API key at https://resend.com/api-keys with sending access only.\n2. Store it as the `RESEND_API_KEY` deploy secret.\n\n### Environment variables\n\n- `RESEND_API_KEY` — Resend sending key\n\n### Secret handling\n\nNever commit the key or paste it into issues. Until it exists, dev and CI use the mock mailer.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/setup/resend.md` — new\n\n## Acceptance Criteria\n\n- [ ] Key stored as a deploy secret [type:manual]\n- [ ] The real mailer replaces the mock in staging [type:manual]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nNone.\n"
+      "body": "## Problem\n\ngates: preview\nowner: maintainer\n\nCreate the Resend API key that #{{INVITES}} uses to send email.\n\n### Setup steps\n\n1. Create an API key at https://resend.com/api-keys with sending access only.\n2. Store it as the `RESEND_API_KEY` deploy secret.\n\n### Environment variables\n\n- `RESEND_API_KEY` — Resend sending key\n\n### Secret handling\n\nNever commit the key or paste it into issues. Until it exists, dev and CI use the mock mailer.\n\n## Root Cause (if known)\n\nGreenfield: not built yet.\n\n## Affected Files\n\n1. `docs/setup/resend.md` — new\n\n## Acceptance Criteria\n\n- [ ] Key stored as a deploy secret [type:manual]\n- [ ] The real mailer replaces the mock in staging [type:manual]\n\n## Context\n\n**Parent**: #{{SPIKE}}\n\n## Dependencies\n\nNone.\n"
     }
   ]
 }

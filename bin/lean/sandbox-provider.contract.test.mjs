@@ -186,9 +186,7 @@ describe("remote adapter (#4254)", () => {
     const flaky = { ...fakeTransport(), status: async () => { throw new Error("ECONNRESET"); } };
     const q = remoteProvider({ batch, repo: "o/r", transport: flaky, env: {} });
     const h = await q.start({ issue: 6, args: [] });
-    const seen = [];
-    for (let i = 0; i < 5; i++) seen.push(await q.status(h));
-    assert.deepEqual(seen, ["running", "running", "running", "running", "gone"]);
+    await assert.rejects(() => q.status(h), /ECONNRESET/); // #4672: a transport error propagates; providerLanes retries it for the unreachable window
   });
 
   it("httpTransport: bearer token, JSON protocol, 404 = gone/destroyed, 429 retryable; the token never in errors", async () => {
@@ -301,6 +299,13 @@ describe("pool provider (#4546)", () => {
     assert.equal(c.init.headers.authorization, "Bearer pool-token-789");
     const spec = JSON.parse(c.init.body);
     assert.equal(Buffer.from(spec.env.CS_FORGE_YAML_B64, "base64").toString(), "verify:\n  mode: ci\n");
+  });
+
+  it("#4685 a configured token_env that resolves empty falls back to the router token", async () => {
+    const { cfg } = setupPool();
+    const batch = openBatch(tmpDir("pool-b3-"), "bt");
+    const c = await launchOnce(() => providerByName("pool", { batch, repo: "o/r", cwd: tmpDir("pool-cwd3-"), exec: parseExecution({ mode: "remote", provider: "pool", token_env: "NO_SUCH_TOKEN_4685" }), env: {}, poolConfigPath: cfg }));
+    assert.equal(c.init.headers.authorization, "Bearer pool-token-789");
   });
 
   it("an explicit endpoint wins; no forge.yaml adds no env; a missing router config is misconfigured", async () => {

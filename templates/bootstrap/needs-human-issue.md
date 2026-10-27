@@ -1,9 +1,12 @@
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <!-- /bootstrap needs-human issue: one per credential, account or external input (OAuth client, cloud or DNS account,
-payment keys, API keys, legal review). Label it needs-human and set "needsHuman": true in the plan. Code issues
+payment keys, API keys, legal review). Label it needs-human and needs-human:external (the script adds the latter), give it a `gates:` line (preview|staging-deploy|prod-deploy|feature-flag:<name>) and an `owner:` line, and set "needsHuman": true in the plan. Code issues
 reference it (#{{KEY}}) but never list it under Dependencies; their mocks keep dev and CI green. Copy from "## Problem" down. -->
 ## Problem
+
+gates: preview
+owner: maintainer
 
 {which credential, account or external input is needed, and which issues use it}
 

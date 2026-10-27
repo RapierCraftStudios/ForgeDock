@@ -113,6 +113,26 @@ remote lane minutes, lanes and share of the pool per agent (`sandbox.by_agent`).
 The same per-agent minutes appear in the batch report's `sandbox:` line as `by agent: <name> <min> min, ...`.
 Live capacity is `forgedock pool status`.
 
+## Compounding (`--compounding`, forge#4696)
+
+`forgedock stats --compounding [--window 30d] [--bucket 100,500] [--since <date>] [--min-n N] [--json]` answers "does the repo
+get safer the longer ForgeDock works on it". No model: FORGE:GUARD comments (#4692, `forgedock guards list`), `reopened` issue
+events (one paginated `gh api repos/<repo>/issues/events`), `git blame` and `git diff` of the current clone, and the repo's
+FORGE:TELEMETRY gate events. Output: a rolling window (default 30d), per release and per lane-age bucket (merge order of the
+repo's lanes: 1-100, 101-500, 501+, `unranked` for guards without a merged run).
+
+- **reintroduction**: guarded fixes whose issue was reopened after the lane closed it, or whose merge commit is the blame of the
+  old-side lines of a later guarded fix within 90 days (the guard's `merge_sha` is the commit, as for squash and rebase merges).
+  Rate = reintroduced / guarded. A guard whose sha is not in the clone is counted under `blame_unresolved`, never as 0.
+- **reopen-after-close**: merged (lane-closed) issues reopened afterwards / merged lanes.
+- **guard activity**: counts of `guard_run`, `guard_broken` (pre-merge saves) and `supersedes_accepted` events (#4693).
+- **decision churn**: `decision_superseded` vs `decision_violation` events (#4695).
+- Event kinds a repo has never recorded print `n/a`, not 0. Groups under `--min-n` lanes are flagged `low n`.
+
+Efficiency next to quality: run `forgedock stats --efficiency --compare <date|version>` around each child's deploy for
+$/merge, turns/merge and wall p50. Baseline before #4693 enforces: run `forgedock stats --compounding --json --since <date>` in
+a full clone of this repo and one other and keep the output with the #4697 tracker.
+
 ## Explorer A/B (`--explore-ab`, forge#4418)
 
 Compares lanes run with forge.yaml `lean.explore: on` against `off` (#4391), from the local run logs only (no GitHub

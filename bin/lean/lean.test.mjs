@@ -4,11 +4,13 @@ import { describe, it } from "node:test";
 import { laneBackendId } from "./limits.mjs";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
+import { execFileSync } from "node:child_process";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, symlinkSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
 import { parseFactsComment, normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { makeLedger } from "./ledger.mjs";
+import { writeIndex } from "./guards.mjs";
 import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
@@ -19,13 +21,14 @@ import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
 // #4432: the run log is keyed by repo + issue; every lane in this file runs in repo o/r.
 const readLog = (dir, issue, repo = "o/r") => readRepoLog(dir, issue, { repo });
-import { makeRunTmp, wrapLaneLimits, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
-import { retrying, ghCacheRetry, PUSH_TRANSIENT_RE } from "./retry.mjs";
+import { makeRunTmp, wrapLaneLimits, laneCapNotice, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
+import { retrying, ghCacheRetry, refreshAuthOnce, GH_AUTH_RE, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
 import { OUTCOME_CODES, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
+import { isExternalKill } from "./hostkill.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS, readMaintenance } from "../engine-cli.mjs";
 // orchestrateFromCli opens the host lane registry (#4191): keep it in a temp dir.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("lean-sched-");
@@ -354,7 +357,7 @@ describe("core work-on", () => {
   });
 
   it("a reviewer that judges a deferral unjustified gets the builder resumed to implement it; nothing is filed for it", async () => {
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "later" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "later", bucket: "new-issue" }] };
     const rej = conf({ requirements: [{ id: "R1", status: "implemented", evidence: "src/foo.js:3", validated_by: "V1" }, { id: "R2", status: "deferred", deferral_ok: false, note: "one line in bar.js; do it now" }] }, k);
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [rej, rej] });
     const r = await run(w);
@@ -439,6 +442,20 @@ describe("core work-on", () => {
     assert.equal(r.code, "dependency.blocked");
     assert.deepEqual(r.blockers, [3]);
     noNeedsHuman(w);
+  });
+
+  it("#4686 a needs-human dependency whose PR is already on the lane is not dependency-blocked", async () => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "upstream", block: { kind: "dependency", issues: [3] } } },
+      { 3: { state: "OPEN", labels: [{ name: "needs-human" }] } });
+    const gh = w.io.gh, git = w.io.git, seen = [];
+    w.io.gh = async (a) => (a[0] === "pr" && a[1] === "list" && a.includes("merged")
+      ? JSON.stringify([{ number: 88, mergeCommit: { oid: "deadbeefcafe0000" }, closingIssuesReferences: [{ number: 3 }], title: "", body: "" }])
+      : gh(a));
+    w.io.git = async (a, o) => { if (a[0] === "merge-base" && a[2] === "deadbeefcafe0000") { seen.push(a.join(" ")); return ""; } return git(a, o); };
+    const r = await run(w);
+    assert.notEqual(r.terminalReason, "dependency-blocked");
+    assert.notEqual(r.terminalReason, "dependency-open");
+    assert.ok(seen.some((c) => c.includes("deadbeefcafe0000") && c.includes("origin/")), seen.join("|"));
   });
 
   it("#4124 split-required files sub-issues with Parent / Depends-on lines and ends decomposed", async () => {
@@ -658,6 +675,10 @@ describe("core work-on", () => {
     const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["sops"] } };
     assert.equal(await rb("this lane has no sops/age key", remote), "env.capability_remote");
     assert.equal(await rb("owner must create a third-party account", remote), "builder.blocked");
+    // #4685: a missing tool is never a credential block on a remote lane; local lanes and real credential needs stay human.
+    assert.equal(await rb("validate V1 needs promtool via docker; no docker daemon in this sandbox", remote), "env.tool_missing");
+    assert.equal(await rb("ModuleNotFoundError: No module named 'yaml'", remote), "env.tool_missing");
+    assert.equal(await rb("promtool: command not found", { ...remote, placement: { where: "local", reason: "x" } }), "builder.blocked");
     assert.equal(await rb("this lane has no sops/age key", { ...remote, hostCaps: undefined }), "builder.blocked");
     assert.equal(await rb("this lane has no sops/age key", { ...remote, placement: { where: "local", reason: "x" } }), "builder.blocked");
     assert.equal(await code(world({ changed: [] })), "builder.no_commit");
@@ -719,7 +740,7 @@ describe("core work-on", () => {
 
 describe("conformance gate (frozen contract, precheck, structured review)", () => {
   const Q2 = "Existing callers of foo keep working.";
-  const two = (d2 = "deliver", extra = {}) => ({ ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: Q2, disposition: d2, ...extra }],
+  const two = (d2 = "deliver", extra = {}) => ({ ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: Q2, disposition: d2, ...(d2 === "defer" || d2 === "post-deploy" ? { bucket: "post-deploy" } : {}), ...extra }],
     deliverables: [...CONTRACT.deliverables, ...(d2 === "deliver" ? [{ id: "D2", path: "src/bar.js", change: "keep callers", requirements: ["R2"] }] : [])] });
   const files2 = ["src/foo.js", "src/bar.js", "test/foo.test.js"];
   const events = (dir) => readLog(dir, 7).map((e) => e.event);
@@ -785,7 +806,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     assert.equal(r.terminalReason, "merged");
     assert.equal(w.followups.length, 1);
     assert.deepEqual(w.followups[0].items.map((i) => i.key), ["R2: Existing callers of foo keep working."]);
-    assert.match(w.followups[0].items[0].why, /^defer: callers live in another module/);
+    assert.match(w.followups[0].items[0].why, /^post-deploy: \[bucket:post-deploy\] callers live in another module/);
     const body = w.prs[0][w.prs[0].indexOf("--body") + 1];
     assert.match(body, /## Remaining work tracked\n- #900\n\nCloses #7$/);
     assert.ok(w.comments.some((c) => c.includes("<!-- FORGE:TRACKED -->") && c.includes("#900")));
@@ -1377,6 +1398,20 @@ describe("conformance shadow mode (the default)", () => {
     const ra = await runShadow(a);
     assert.equal(ra.code, "conformance.unimplemented"); assert.match(nhBody(a), /amendment without why/);
   });
+  it("#4737 decision records are persisted after the merge, never at gate time", async () => {
+    const dir = tmpDir("dec-"); const prev = process.env.FORGEDOCK_DECISIONS_DIR; process.env.FORGEDOCK_DECISIONS_DIR = dir;
+    try {
+      const amendments = [{ kind: "decision", why: "w", decision: { choice: "use X", anchors: ["src/db.ts"], why: "w" } }];
+      const bad = world({ validation: [], amendments });
+      assert.equal((await runShadow(bad)).code, "conformance.unimplemented");
+      assert.ok(!bad.comments.some((c) => c.includes("FORGE:DECISION")), "a lane that never merges records nothing");
+      assert.equal(readdirSync(dir).length, 0, "no index written");
+      const ok = world({ amendments });
+      assert.equal((await runShadow(ok)).terminalReason, "merged");
+      assert.ok(ok.comments.some((c) => c.includes("FORGE:DECISION")), "recorded after the merge");
+      assert.equal(readdirSync(dir).length, 1);
+    } finally { if (prev === undefined) delete process.env.FORGEDOCK_DECISIONS_DIR; else process.env.FORGEDOCK_DECISIONS_DIR = prev; }
+  });
   it("#4160 scope creep found by the precheck stays recorded-only in shadow", async () => {
     const w = world({ changed: ["src/foo.js", "src/billing.js", "test/foo.test.js"], reviews: [conf({}, CONTRACT, ["src/foo.js", "src/billing.js", "test/foo.test.js"])] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
@@ -1389,7 +1424,7 @@ describe("conformance shadow mode (the default)", () => {
   });
 
   it("#4160 shadow files accepted deferrals with track(), the same as enforce, and the PR links them", async () => {
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
     const w = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     assert.equal((await runShadow(w)).terminalReason, "merged");
     assert.equal(w.followups.length, 1); assert.match(w.followups[0].items[0].key, /^R2: /);
@@ -1423,7 +1458,7 @@ describe("conformance shadow mode (the default)", () => {
   });
 
   it("#4398 an investigation whose question is deferred closes partial (not planned), carried forward in the tracking issue", async () => {
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
     const w = world({ title: "investigate(stealth): which signal is rejected", contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     const r = await runShadow(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(r.close, "partial");
@@ -1447,7 +1482,7 @@ describe("conformance shadow mode (the default)", () => {
     const ra = await runShadow(a);
     assert.equal(ra.terminalReason, "merged"); assert.equal(ra.close, undefined);
     assert.deepEqual(a.closed.map((x) => x[x.indexOf("--reason") + 1]), ["completed"]);
-    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w" }] };
+    const k = { ...CONTRACT, preserve: [], requirements: [CONTRACT.requirements[0], { id: "R2", quote: "Existing callers of foo keep working.", disposition: "defer", why: "w", bucket: "new-issue" }] };
     const b = world({ contract: k, claims: [{ id: "R1", status: "implemented" }], reviews: [conf({}, k)] });
     await runShadow(b);
     assert.deepEqual(b.closed.map((x) => x[x.indexOf("--reason") + 1]), ["completed"]);
@@ -1624,9 +1659,9 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(facts([], { file_lines: 1000, growth_lines: 50 })).trim(), "Don't grow a file over 1000 lines by more than 50 lines. Put new code next to it.");
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
-    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line).
-    assert.ok(approxTokens(plan) <= 1900, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1600); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each
+    // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule).
+    assert.ok(approxTokens(plan) <= 2050, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1650); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
   it("#4519 generated_paths: both prompts name the globs (even with the gate off), and an amendment adding one blocks", async () => {
@@ -1800,6 +1835,24 @@ describe("structure delta and decision provenance at merge (forge#4165)", () => 
     w.numstat = "120\t3\tsrc/foo.js\n4\t0\ttest/foo.test.js\n-\t-\tlogo.png\n9\t0\t.forge-lean/result.json\n300\t1\tapps/web/big.ts\n";
     return w;
   };
+
+  it("#4694 a guarded deliverable freezes H preserve rows listed under Decision sources; an unguarded lane gets none", async () => {
+    const home = tmpDir("hist-home-"), prev = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const plain = await run(mworld(), { dir: tmpDir("hist-a-") });
+      assert.equal(plain.terminalReason, "merged");
+      const guard = { v: 1, issue: 3, pr: 30, merge_sha: "s", tests: [{ path: "test/foo.test.js", ids: [] }], hunks: [{ file: "src/foo.js", start: 1, end: 3, symbol: null }], why: "keep foo stable" };
+      writeIndex("o/r", [guard]);
+      const withH = { ...contract, preserve: [...(contract.preserve ?? []), { id: "H1", what: "x" }] };
+      const w = mworld({ reviews: [conf({}, withH, ["src/foo.js", "test/foo.test.js", "packages/db/package.json"])] });
+      const r = await run(w, { dir: tmpDir("hist-b-") });
+      assert.equal(r.terminalReason, "merged");
+      const frozen = w.comments.filter((c) => c.includes("FORGE:CONTRACT")).map((c) => parseContractComment(c)).find(Boolean).contract;
+      assert.deepEqual(frozen.preserve.filter((p) => p.source === "guard"), [{ id: "H1", what: "keep foo stable (#3, PR #30)", source: "guard" }]);
+      assert.match(w.comments.find((c) => c.includes("FORGE:TRAJECTORY")), /\| Decision sources \| K1 doc, K2 precedent, H1 guard \|/);
+    } finally { if (prev === undefined) delete process.env.HOME; else process.env.HOME = prev; }
+  });
 
   it("a merged run writes one STRUCTURE_DELTA with edges, growth, provenance and the PR; the trajectory shows it; no extra gh call", async () => {
     const dir = tmpDir("struct-merge-");
@@ -2043,8 +2096,8 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 1800, `plan prompt is ${approxTokens(plan)} tokens`);
-    assert.ok(approxTokens(impl) <= 1550, `implement prompt is ${approxTokens(impl)} tokens`); // 1550: #4596 i18n translate rule
+    assert.ok(approxTokens(plan) <= 1950, `plan prompt is ${approxTokens(plan)} tokens`); // 1950: #4724 (deferred-row bucket rule)
+    assert.ok(approxTokens(impl) <= 1650, `implement prompt is ${approxTokens(impl)} tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
     for (const h of ["### Approach", "### Changes", "### Acceptance Criteria Status", "### Verification", "### Notes", "implementation.md", "result.json",
@@ -2056,11 +2109,22 @@ describe("merge_wait policy", () => {
   const states = (o) => Object.entries(o).map(([name, state]) => ({ name, state }));
   it("required with no protection (empty) merges immediately without polling", async () => {
     const w = world(); let polled = 0;
-    w.io.requiredChecks = async () => []; w.io.checkStates = async () => { polled++; return []; };
+    w.io.requiredChecks = async () => []; w.io.checkStates = async () => []; // #4651: read once by the DCO gate, never polled
     w.io.waitCiGreen = async () => { polled++; return { rc: 2, text: "" }; };
     const r = await run(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(polled, 0);
     assert.match(traj(w)[0], /\| Merge \| required \(no required checks: merged right after review\) \|/);
+  });
+  it("a failed DCO check blocks the merge with ci.dco even when no check is required (#4651)", async () => {
+    for (const mergeWait of ["required", "none"]) {
+      const w = world(); w.io.requiredChecks = async () => []; w.io.checkStates = async () => [{ name: "DCO Sign-Off Verification", state: "failure", head: w.head }, { name: "build", state: "success" }];
+      const r = await run(w, { mergeWait });
+      assert.equal(r.terminalReason, "needs-human", mergeWait); assert.equal(r.code, "ci.dco", mergeWait); assert.equal(w.merges.length, 0, mergeWait);
+    }
+  });
+  it("a passing or stale-head DCO check does not block the merge (#4651)", async () => {
+    const w = world(); w.io.requiredChecks = async () => []; w.io.checkStates = async () => [{ name: "DCO Sign-Off Verification", state: "failure", head: "ffff0000" }, { name: "dco", state: "success", head: w.head }];
+    assert.equal((await run(w)).terminalReason, "merged");
   });
   it("required with a pending required check waits (backoff) then merges", async () => {
     const w = world(); const seqs = [states({ build: "pending" }), states({ build: "pending" }), states({ build: "success", other: "failure" })]; let sleeps = 0;
@@ -2114,6 +2178,21 @@ describe("merge_wait policy", () => {
       assert.equal(n.n, 21, "the wait after the rerun plus 20 bounded waits");
       assert.deepEqual(w.reran, ["77"]);
       assert.equal(events(dir, "CI_FLAKE_RERUN").length, 1);
+    });
+
+    it("#4708 merge-time CI fix round reviews a head with every validate recorded (the fix session dropped its rows)", async () => {
+      const w = world({ resumeValidation: [] }); w.reran = [];
+      w.io.requiredChecks = async () => ["build"];
+      w.io.rerunFailedJobs = async (id) => { w.reran.push(id); };
+      w.io.checkStates = async () => [{ name: "build", state: w.fixed ? "success" : "failure", url: RUN(77, w.reran.length + 1) }];
+      w.io.failedLogs = async () => { w.fixed = true; return "boom"; };
+      const dir = tmpDir("core-");
+      const r = await run(w, { dir, verify: { ...parseVerify({}), maxRounds: 1 } });
+      assert.equal(r.terminalReason, "merged", r.reason);
+      assert.deepEqual(events(dir, "CI_FIX_ROUND").map((e) => e.trigger), ["merge"]);
+      const written = JSON.parse(w.files[`${WT}/.forge-lean/result.json`]);
+      assert.deepEqual(written.validation.map((x) => [x.id, x.carried === true]), [["V1", true]], "the earlier result is carried forward, marked");
+      assert.ok(traj(w)[0].includes("carried forward across the CI fix round"));
     });
 
     it("a rerun that reports a new attempt still red goes to the fix round and reaches the builder", async () => {
@@ -2372,6 +2451,29 @@ describe("orchestrate", () => {
       assert.deepEqual(log, [9]);
       assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[9, "needs-human"], [1, "skipped"]]);
     }
+  });
+
+  it("#4687 a dependency skip waits (logged with its trigger) until the blocker merges; the re-admission is logged too", async () => {
+    const rowsSeen = [];
+    let merged = false;
+    const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async (n) => (n === 1 ? "**Depends on**: #9" : ""),
+      onUpdate: (r) => rowsSeen.push(r),
+      dispatchCheck: async (n) => (n === 9 && merged ? { outcome: "merged", pr: 90, detail: "PR #90 already merged" } : null),
+      runOne: async (n) => { if (n === 9) { merged = true; return { terminalReason: "needs-human", detail: "ci.red" }; } return { terminalReason: "merged", pr: 101 }; } });
+    const skipRow = rowsSeen.find((r) => r.issue === 1 && r.outcome === "skipped");
+    assert.equal(skipRow.waiting, true);
+    assert.equal(skipRow.trigger, 9);
+    assert.ok(rowsSeen.some((r) => r.issue === 1 && r.outcome === "readmitted" && r.trigger === 9));
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.waiting]), [[9, "merged", undefined], [1, "merged", undefined]]);
+  });
+
+  it("#4687 a blocker that closed as not planned leaves its dependents skipped, no longer waiting", async () => {
+    let checks = 0, ran = false;
+    const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async (n) => (n === 1 ? "**Depends on**: #9" : ""),
+      dispatchCheck: async (n) => { if (n === 9 && ran) { checks++; return { outcome: "invalid", detail: "issue closed (not planned)", final: true }; } return null; },
+      runOne: async () => { ran = true; return { terminalReason: "needs-human", detail: "ci.red" }; } });
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.waiting]), [[9, "needs-human", undefined], [1, "skipped", undefined]]);
+    assert.equal(checks, 1, "a final blocker is not re-checked");
   });
 
   it("#4124 a repeated dependency-open stops after the requeue cap", async () => {
@@ -3217,22 +3319,53 @@ describe("batch robustness (#4112-#4115)", () => {
     }
   });
 
-  it("#4115b lane limits wrap the spawn in systemd-run; unset or invalid limits do not", () => {
-    const w = wrapLaneLimits("claude", ["--print", "x"], { memory_max: "3G", cpu_quota: "150%" });
-    assert.deepEqual(w, { bin: "systemd-run", args: ["--user", "--scope", "-q", "-p", "MemoryMax=3G", "-p", "CPUQuota=150%", "--", "claude", "--print", "x"] });
-    assert.deepEqual(wrapLaneLimits("claude", ["a"], null), { bin: "claude", args: ["a"] });
-    assert.deepEqual(wrapLaneLimits("claude", ["a"], { memory_max: "lots; rm -rf /", cpu_quota: "x" }), { bin: "claude", args: ["a"] });
+  it("#4115b lane limits wrap the spawn in systemd-run; unset or invalid limits get only the default TasksMax (#4690)", () => {
+    const w = wrapLaneLimits("claude", ["--print", "x"], { memory_max: "3G", cpu_quota: "150%" }, "u1");
+    assert.deepEqual(w, { bin: "systemd-run", unit: "u1", args: ["--user", "--scope", "-q", "--unit=u1", "-p", "TasksMax=1024", "-p", "MemoryMax=3G", "-p", "CPUQuota=150%", "--", "claude", "--print", "x"] });
+    assert.deepEqual(wrapLaneLimits("claude", ["a"], null, "u2").args.slice(0, 6), ["--user", "--scope", "-q", "--unit=u2", "-p", "TasksMax=1024"]);
+    assert.deepEqual(wrapLaneLimits("claude", ["a"], { memory_max: "lots; rm -rf /", cpu_quota: "x" }, "u3").args, ["--user", "--scope", "-q", "--unit=u3", "-p", "TasksMax=1024", "--", "claude", "a"]);
     assert.equal(wrapLaneLimits("claude", ["a"], { memory_max: "1G" }).args.includes("CPUQuota=150%"), false);
   });
 
-  it("#4115b the runner wraps only when limits are set AND systemd-run probes available (clean fallback)", async () => {
+  it("#4690 tasks_max is configurable; 0 or off disables it and, with nothing else set, leaves the spawn unchanged", () => {
+    assert.ok(wrapLaneLimits("c", [], { tasks_max: "64" }, "u").args.includes("TasksMax=64"));
+    for (const off of ["0", "off", 0]) assert.deepEqual(wrapLaneLimits("c", ["a"], { tasks_max: off }), { bin: "c", args: ["a"] });
+    assert.equal(wrapLaneLimits("c", [], { tasks_max: "off", memory_max: "1G" }, "u").args.some((x) => x.startsWith("TasksMax")), false);
+  });
+
+  it("#4115b the runner wraps by default when systemd-run probes available, never when it does not (clean fallback, #4690)", async () => {
     const seen = [];
     const runCli = async (o) => { seen.push(o.wrap ? o.wrap("claude", ["a"]).bin : null); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
     const base = { role: "builder", issue: 1, cwd: process.cwd(), prompt: "p", system: "" };
     await makeLeanRunner({ runCli, probe: () => true })({ ...base, laneLimits: { memory_max: "3G" } });
     await makeLeanRunner({ runCli, probe: () => false })({ ...base, laneLimits: { memory_max: "3G" } });
     await makeLeanRunner({ runCli, probe: () => true })({ ...base });
-    assert.deepEqual(seen, ["systemd-run", null, null]);
+    assert.deepEqual(seen, ["systemd-run", null, "systemd-run"]);
+    assert.match(laneCapNotice(() => false), /lanes are uncapped/);
+    assert.equal(laneCapNotice(() => true), null);
+  });
+
+  it("#4690 a scope whose events show a limit stops the lane with CLI_LANE_LIMIT naming it; a scope-less spawn never reads events", async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const d = tmpDir("core-limit-");
+    writeFileSync(`${d}/fake-claude`, "#!/bin/sh\nsleep 30\n"); chmodSync(`${d}/fake-claude`, 0o755);
+    const go = (wrap, ev) => runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, idleMs: 200, maxMs: 20000, wrap, limitProbe: () => ev });
+    const fake = (b, a) => ({ bin: b, args: a, unit: "forgedock-lane-x" });
+    for (const [ev, limit] of [[{ tasks: 3, memory: 0 }, "tasks"], [{ tasks: 0, memory: 1 }, "memory"]]) {
+      await assert.rejects(go(fake, ev), (e) => e.code === "CLI_LANE_LIMIT" && e.limit === limit);
+    }
+    await assert.rejects(go((b, a) => ({ bin: b, args: a }), { tasks: 9, memory: 9 }), (e) => e.code === "CLI_IDLE");
+  });
+
+  it("#4690 a CLI_LANE_LIMIT ends needs-human env.lane_limit naming the limit: no retry, never engine-error or host kill", async () => {
+    const lim = () => Object.assign(new Error("claude CLI lane hit its scope tasks limit"), { code: "CLI_LANE_LIMIT", limit: "tasks", unit: "u" });
+    assert.equal(isExternalKill(lim()), false);
+    const w = world({ dirty: true }); let builders = 0;
+    w.io.runner = async (c) => { if (c.role === "builder") { builders++; throw lim(); } return { text: "" }; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "env.lane_limit");
+    assert.match(r.detail, /TasksMax/); assert.equal(builders, 1);
   });
 
   it("#4115b integration: a lane under systemd-run --scope really runs in a capped scope (skipped without systemd-run)", { skip: !systemdRunAvailable() }, async () => {
@@ -3242,6 +3375,37 @@ describe("batch robustness (#4112-#4115)", () => {
     writeFileSync(`${d}/fake-claude`, '#!/bin/sh\nprintf \'{"result":"%s"}\\n\' "$(cat /proc/self/cgroup | tr -d \'\\n\' | tr / :)"\n'); chmodSync(`${d}/fake-claude`, 0o755);
     const r = await runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, wrap: (b, a) => wrapLaneLimits(b, a, { memory_max: "512M", cpu_quota: "100%" }) });
     assert.match(r.text, /\.scope/);
+  });
+
+  it("#4690 a fixture lane really forking past its task cap is stopped with CLI_LANE_LIMIT (no systemd needed: the probe counts real descendants)", async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackendAsync, listDescendants } = await import("../runner.mjs");
+    const d = tmpDir("core-forkfix-");
+    writeFileSync(`${d}/fake-claude`, "#!/bin/sh\ni=0\nwhile [ $i -lt 40 ]; do sleep 20 & i=$((i+1)); done\nsleep 20\n"); chmodSync(`${d}/fake-claude`, 0o755);
+    const cap = 10;
+    const limitProbe = (pid) => ({ tasks: listDescendants(pid).length > cap ? 1 : 0, memory: 0 });
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, maxMs: 15000, limitProbe,
+      wrap: (b, a) => ({ bin: b, args: a, unit: "forgedock-lane-fixture" }) }), (e) => e.code === "CLI_LANE_LIMIT" && e.limit === "tasks");
+  });
+
+  // The scope's cgroup counters must be readable (cgroup v2, delegated user scope); plain systemd-run availability is not enough on CI.
+  const scopeEventsReadable = () => {
+    if (!systemdRunAvailable()) return false;
+    try {
+      const w = wrapLaneLimits("sh", ["-c", "cat /proc/self/cgroup"], { tasks_max: 50 });
+      const out = execFileSync(w.bin, w.args, { encoding: "utf8", timeout: 8000 });
+      const path = (out.split("\n").find((l) => l.startsWith("0::")) ?? "").slice(3).trim();
+      return path.endsWith(".scope") && existsSync(`/sys/fs/cgroup${path}/pids.events`);
+    } catch { return false; }
+  };
+  it("#4690 integration: a step forking past TasksMax in a real scope ends CLI_LANE_LIMIT (skipped without systemd-run)", { skip: !scopeEventsReadable() }, async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackendAsync } = await import("../runner.mjs");
+    const d = tmpDir("core-fork-");
+    // node (not sh): a refused fork must not end the fixture before the sampler sees the scope's pids.events
+    writeFileSync(`${d}/fake-claude`, `#!${process.execPath}\nconst { spawn } = require("node:child_process");\nfor (let i = 0; i < 200; i++) { try { spawn("sleep", ["20"], { stdio: "ignore" }).on("error", () => {}); } catch {} }\nsetTimeout(() => {}, 20000);\n`); chmodSync(`${d}/fake-claude`, 0o755);
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, maxMs: 15000, wrap: (b, a) => wrapLaneLimits(b, a, { tasks_max: 20 }) }),
+      (e) => e.code === "CLI_LANE_LIMIT" && e.limit === "tasks");
   });
 
   const hostFor = (state) => ({ memAvailableMb: () => 99999, freeMb: async () => 99999, tmpPaths: () => ["/t"], loadAvg1: () => state.load(), cores: () => 2 });
@@ -3437,6 +3601,35 @@ describe("batch robustness (#4112-#4115)", () => {
     const other = new Error("HTTP 404: Not Found");
     await assert.rejects(ghCacheRetry(async () => { n++; throw other; }, cache), (e) => e === other);
     assert.equal(n, 1);
+  });
+
+  it("gh.auth (#4662) a 401 runs one token refresh and the retry succeeds, so the lane merges", async () => {
+    const w = world();
+    const gh = w.io.gh; let n = 0, refreshes = 0;
+    w.io.gh = async (a, opts) => { if (n++ === 0) throw new Error("gh: Bad credentials (HTTP 401)"); return gh(a, opts); };
+    w.io.refreshAuth = async () => { refreshes++; };
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(refreshes, 1);
+  });
+
+  it("gh.auth (#4662) a 401 that outlives the refresh ends deferred gh.auth, never engine-error, and refreshes once", async () => {
+    const w = world();
+    let refreshes = 0;
+    w.io.gh = async () => { throw new Error("gh: Bad credentials (HTTP 401)"); };
+    w.io.refreshAuth = async () => { refreshes++; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, OUTCOME_CODES.GH_AUTH);
+    assert.ok(r.retryInSeconds > 0);
+    assert.equal(refreshes, 1);
+  });
+
+  it("gh.auth (#4662) refreshAuthOnce leaves non-auth errors alone and GH_AUTH_RE ignores 403 and 5xx", async () => {
+    assert.ok(GH_AUTH_RE.test("HTTP 401: Bad credentials") && !GH_AUTH_RE.test("HTTP 403: Resource not accessible") && !GH_AUTH_RE.test("HTTP 502: Bad Gateway"));
+    let refreshes = 0;
+    const other = new Error("HTTP 404: Not Found");
+    await assert.rejects(refreshAuthOnce(async () => { throw other; }, { refresh: async () => { refreshes++; } }), (e) => e === other);
+    assert.equal(refreshes, 0);
   });
 
   it("#4507 makeGhCache: a per-root cache dir, reset swaps in a fresh dir, the no-root fallback is disposed", () => {
@@ -4095,6 +4288,18 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     assert.equal(new Set(w.ci.runs.map((x) => x.headSha)).size, w.ci.runs.length, "every reviewed head was verified once");
     assert.equal(w.ci.runs[0].headSha, w.head, "the retry head is CI-verified");
     assert.match(traj(w)[0], /Validate V1 verified by CI at [0-9a-f]{0,12}/);
+  });
+
+  it("#4708 remote placement: the merge-time CI fix round's head is CI-verified and reviewed with every validate recorded", async () => {
+    const w = withCi(world({ resumeValidation: [] })); w.reran = [];
+    w.io.requiredChecks = async () => ["build"];
+    w.io.rerunFailedJobs = async (id) => { w.reran.push(id); };
+    w.io.checkStates = async () => [{ name: "build", state: w.fixed ? "success" : "failure", url: `https://github.com/o/r/actions/runs/77/job/${w.reran.length + 1}` }];
+    w.io.failedLogs = async () => { w.fixed = true; return "boom"; };
+    const r = await run(w, { verify: CI });
+    assert.equal(r.terminalReason, "merged", r.reason);
+    assert.ok(w.ci.runs.some((x) => x.headSha === w.head), "the fix head is CI-verified before it is reviewed");
+    assert.equal(JSON.parse(w.files[`${WT}/.forge-lean/result.json`]).validation[0].id, "V1");
   });
 
   it("docs-only lane: no push for CI, no dispatch; the decision is recorded", async () => {
@@ -5170,6 +5375,18 @@ describe("context pack modes (forge#4275)", () => {
     const m = world(); m.leaseWrites = []; m.io.projector = { readState: async () => null, writeState: async (_i, st) => { m.leaseWrites.push(st); } };
     await run(m);
     assert.deepEqual([m.leaseWrites.at(-1).terminalCode, m.leaseWrites.at(-1).failureClasses], [OUTCOME_CODES.COMPLETED, []]);
+  });
+
+  it("#4711 a merged lane run records mergedTo {lane, pr, sha} on the terminal FORGE:STATE", async () => {
+    const w = world(); w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } };
+    const gh = w.io.gh;
+    w.io.gh = async (a, o) => (a[0] === "pr" && a[1] === "view" && a.includes("mergeCommit") ? JSON.stringify({ mergeCommit: { oid: "feedface00112233" } }) : gh(a, o));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    const last = w.leaseWrites.at(-1);
+    assert.ok(last.mergedTo?.lane && Number.isInteger(last.mergedTo.pr), JSON.stringify(last.mergedTo));
+    assert.equal(last.mergedTo.sha, "feedface00112233");
+    assert.ok(!w.leaseWrites.slice(0, -1).some((x) => x.mergedTo), "only the terminal write carries it");
   });
 
   it("#4444 ab: the lane runs its issue's arm, logs it as context_pack and tags context_ab", async () => {
@@ -6293,7 +6510,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1550 && approxTokens(builderPlanPrompt(7)) <= 1800);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1650 && approxTokens(builderPlanPrompt(7)) <= 1950);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {

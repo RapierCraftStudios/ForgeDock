@@ -25,7 +25,7 @@ import { PREFILTER_SYSTEM, prefilterPrompt, parsePrefilterVerdict } from "./prom
 import { isTrustedComment } from "../engine/phases.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
 import { probeResultOf } from "./probe.mjs";
-import { AWAITING_MEASUREMENT_LABEL, MONITORING_LABEL, itemCheckIds, measureFollowup } from "./postdeploy-check.mjs";
+import { AWAITING_MEASUREMENT_LABEL, MONITORING_LABEL, OWNER_ASK_MARKER, itemCheckIds, measureFollowup } from "./postdeploy-check.mjs";
 
 export const DEFAULT_PREFILTER_MODEL = "claude-haiku-5-5";
 export const PREFILTER_MARKER = "FORGE:PREFILTER";
@@ -157,17 +157,38 @@ export async function collectSignals({ iss, repo, lane, io, cwd, selfLogins = nu
 // post-deploy checks cannot be done before its parent's fix is on the default branch: a git fact, so no lane learns it.
 export const PRECONDITION_MARKER = "FORGE:PRECONDITION";
 export const AWAITING_PROMOTION_LABEL = "awaiting-promotion";
+export const AWAITING_DUE_LABEL = "awaiting-due"; // #4689
 const DEFERRED_FROM_RE = /<!--\s*FORGE:DEFERRED_FROM:\s*#(\d+)\s*-->/;
 /** The parent #P of a deferred follow-up (`<!-- FORGE:DEFERRED_FROM: #P -->`), or null. */
 export function deferredFrom(body) {
   const m = DEFERRED_FROM_RE.exec(String(body ?? ""));
   return m ? Number(m[1]) : null;
 }
+const DEFERRED_FROM_ALL_RE = new RegExp(DEFERRED_FROM_RE.source, "g");
+/** #4724: every parent #P of a post-deploy rollup (one `<!-- FORGE:DEFERRED_FROM: #P -->` per `### #P` section), in order, unique; [] when none. */
+export const deferredFromAll = (body) => [...new Set([...String(body ?? "").matchAll(DEFERRED_FROM_ALL_RE)].map((m) => Number(m[1])))];
 const CHECK_RE = /^\s*[-*]\s+\[[ xX]\]\s+(.*)$/;
-/** True when the body has checklist items and every one is a ``- [ ] `R#: …` — post-deploy: why`` line (conformance followupItems). */
+const checkItems = (body) => noComments(String(body ?? ""), " ").split("\n").map((l) => CHECK_RE.exec(l)?.[1]).filter((x) => x != null);
+const DECISION_ITEM_RE = /^`[^`]*`\s+[—-]+\s*decision:/; // #4689: an item only its owner can decide
+/** True when the body has checklist items and every one is a ``- [ ] `R#: …` — post-deploy: why`` line (conformance followupItems), or a `decision:` item (#4689). */
 export function postDeployOnly(body) {
-  const items = noComments(String(body ?? ""), " ").split("\n").map((l) => CHECK_RE.exec(l)?.[1]).filter((x) => x != null);
-  return items.length > 0 && items.every((t) => /^`[^`]*`\s+(?:\*\*known-flaw\*\*\s+)?[—-]+\s*post-deploy:/.test(t));
+  const items = checkItems(body);
+  return items.length > 0 && items.every((t) => /^`[^`]*`\s+(?:\*\*known-flaw\*\*\s+)?[—-]+\s*post-deploy:/.test(t) || DECISION_ITEM_RE.test(t));
+}
+/** #4689: true when a checklist item is a `decision:` item (owner ask, never a lane). */
+export const hasDecisionItem = (body) => checkItems(body).some((t) => DECISION_ITEM_RE.test(t));
+const DUE_RE = /\bdue:(\d{4})-(\d{2})-(\d{2})\b/;
+/** #4689: the latest `due:YYYY-MM-DD` of the post-deploy items (ms, UTC midnight), or null when none states one. */
+export function itemDueMs(body) {
+  const ds = checkItems(body).map((t) => POST_DEPLOY_ITEM_RE.exec(t)?.[1]).filter((t) => t != null).map((t) => DUE_RE.exec(t)).filter(Boolean)
+    .map((m) => Date.UTC(+m[1], +m[2] - 1, +m[3])).filter(Number.isFinite);
+  return ds.length ? Math.max(...ds) : null;
+}
+const ANCHOR_RE = /\bfrom:(\d{4})-(\d{2})-(\d{2})\b/;
+/** #4724: the items' `due:` dates with their contract-time `from:` anchor (ms, UTC midnight; null when absent). */
+export function itemDueAnchors(body) {
+  return checkItems(body).map((t) => POST_DEPLOY_ITEM_RE.exec(t)?.[1]).filter((t) => t != null).map((t) => [DUE_RE.exec(t), ANCHOR_RE.exec(t)]).filter(([d]) => d)
+    .map(([d, a]) => ({ dueMs: Date.UTC(+d[1], +d[2] - 1, +d[3]), fromMs: a ? Date.UTC(+a[1], +a[2] - 1, +a[3]) : null })).filter((x) => Number.isFinite(x.dueMs));
 }
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
 /**
@@ -243,18 +264,23 @@ const fmtAge = (ms) => (ms % UNIT_MS.d === 0 && ms ? `${ms / UNIT_MS.d}d` : ms %
 /**
  * #4389: never throws, no model call. `defaultBranch` is a name or an (async) function resolving it (and fetching it).
  * #4425: `minAge` (ms, opt-in) parks `awaiting-min-age` until max(item window ?? minAge) after the fix landed on <default>.
- * @returns {Promise<{state:"not-applicable"|"unresolved"|"awaiting-promotion"|"awaiting-min-age"|"awaiting-precondition"|"ready", parent:?number, shas:string[], default?:string, eligibleAt?:string, detail:string}>}
+ * @returns {Promise<{state:"not-applicable"|"unresolved"|"awaiting-promotion"|"awaiting-due"|"awaiting-min-age"|"awaiting-precondition"|"ready", parent:?number, shas:string[], default?:string, eligibleAt?:string, detail:string}>}
  * Fail-open: no merge SHA, a git answer other than yes/no, an unknown default branch or a hook error give "unresolved".
  */
 export async function postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, preconditionCmd = null, minAge = null, now = null }) {
-  const parent = deferredFrom(iss?.body);
+  const parents = deferredFromAll(iss?.body), parent = parents[0] ?? null; // #4724: a rollup has one parent per section
+  const ps = parents.map((p) => `#${p}`).join(", ");
   const res = (state, detail, extra = {}) => ({ state, parent, shas: [], detail, ...extra });
   if (!parent || !postDeployOnly(iss.body)) return res("not-applicable", "");
   try {
     const def = typeof defaultBranch === "function" ? await defaultBranch() : defaultBranch;
     if (!def) return res("unresolved", "default branch unknown");
-    const shas = await parentMergeShas({ parent, repo, io });
-    if (!shas.length) return res("unresolved", `no merge SHA found for #${parent}`);
+    const shas = [];
+    for (const p of parents) {
+      const found = await parentMergeShas({ parent: p, repo, io });
+      if (!found.length) return res("unresolved", `no merge SHA found for #${p}`);
+      shas.push(...found);
+    }
     const off = [];
     for (const sha of shas) {
       let on;
@@ -262,7 +288,22 @@ export async function postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, 
       if (on === null) return res("unresolved", `${sha.slice(0, 12)} unknown to git`, { shas, default: def });
       if (!on) off.push(sha);
     }
-    if (off.length) return res("awaiting-promotion", `fix ${off.map((s) => s.slice(0, 12)).join(", ")} of #${parent} is not on ${def}${lane ? ` (lane ${lane})` : ""}`, { shas, default: def });
+    if (off.length) return res("awaiting-promotion", `fix ${off.map((s) => s.slice(0, 12)).join(", ")} of ${ps} is not on ${def}${lane ? ` (lane ${lane})` : ""}`, { shas, default: def });
+    let dueMs = itemDueMs(iss.body); // #4689: an explicit due date (UTC midnight)
+    if (dueMs != null) {
+      // #4724: re-anchor a date item to when its fix actually landed on <def>: due + (landed - the contract-time anchor)
+      let landedMs = null;
+      for (const a of itemDueAnchors(iss.body)) {
+        if (a.fromMs == null) continue;
+        if (landedMs == null) { landedMs = 0; for (const sha of shas) landedMs = Math.max(landedMs, ((await landedAt({ sha, def, io, cwd })) ?? 0) * 1000); }
+        if (landedMs > a.fromMs) dueMs = Math.max(dueMs, a.dueMs + (landedMs - a.fromMs));
+      }
+      const at = now ?? io.now?.() ?? Date.now();
+      if (at < dueMs) {
+        const eligibleAt = new Date(dueMs).toISOString();
+        return res("awaiting-due", `fix of ${ps} is on ${def}; the checks are due ${eligibleAt.slice(0, 10)}`, { shas, default: def, eligibleAt });
+      }
+    }
     if (minAge != null) {
       const required = Math.max(0, ...itemWindowsMs(iss.body).map((w) => w ?? minAge));
       let landed = 0;
@@ -274,16 +315,16 @@ export async function postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, 
       const at = now ?? io.now?.() ?? Date.now(), until = landed * 1000 + required;
       if (at < until) {
         const eligibleAt = new Date(until).toISOString();
-        return res("awaiting-min-age", `fix of #${parent} on ${def} since ${new Date(landed * 1000).toISOString()}; min age ${fmtAge(required)} until ${eligibleAt}`, { shas, default: def, eligibleAt });
+        return res("awaiting-min-age", `fix of ${ps} on ${def} since ${new Date(landed * 1000).toISOString()}; min age ${fmtAge(required)} until ${eligibleAt}`, { shas, default: def, eligibleAt });
       }
     }
     if (preconditionCmd) {
       const code = await (io.execCode ?? execCode)("sh", ["-c", preconditionCmd, "precondition", String(iss.number)],
         { cwd, timeout: 60000, env: { ...process.env, FORGE_ISSUE: String(iss.number) } });
-      if (code === 1) return res("awaiting-precondition", `fix of #${parent} is on ${def}; post_deploy.precondition_cmd says not ready`, { shas, default: def });
+      if (code === 1) return res("awaiting-precondition", `fix of ${ps} is on ${def}; post_deploy.precondition_cmd says not ready`, { shas, default: def });
       if (code !== 0) return res("unresolved", `post_deploy.precondition_cmd exited ${code}`, { shas, default: def });
     }
-    return res("ready", `fix of #${parent} is on ${def}`, { shas, default: def });
+    return res("ready", `fix of ${ps} is on ${def}`, { shas, default: def });
   } catch (e) {
     return res("unresolved", `gate error (${String(e?.message ?? e).slice(0, 120)})`);
   }
@@ -301,21 +342,29 @@ export function lazyDefaultBranch({ io, repo, cwd, configured = null }) {
     return name;
   })());
 }
+/** #4689: one typed `FORGE:OWNER_ASK` comment for the `decision:` items of a follow-up, posted once; best effort. */
+async function ownerAsk({ iss, repo, io, dryRun }) {
+  if (dryRun || (iss.comments ?? []).some((c) => String(c?.body ?? "").includes(OWNER_ASK_MARKER) && isTrustedIssueComment(c))) return;
+  const asks = checkItems(iss.body).filter((t) => DECISION_ITEM_RE.test(t)).map((t) => `- ${sanitizeMd(t).slice(0, 300)}`);
+  try { await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", capComment(`<!-- ${OWNER_ASK_MARKER} -->\n## Owner ask\nNo lane was started: these items need a decision from the owner.\n\n${asks.join("\n")}`)]); } catch { /* the report still shows it */ }
+}
 /** #4389: label and explain a parked issue once (the comment only when the label was not there yet); best effort. */
 async function markParked({ issue, repo, io, had, gate }) {
   const measure = gate.state === "awaiting-measurement"; // #4626
-  const label = measure ? AWAITING_MEASUREMENT_LABEL : AWAITING_PROMOTION_LABEL;
-  const edit = () => io.gh(["issue", "edit", String(issue), "-R", repo, "--add-label", label]);
+  const due = gate.state === "awaiting-due"; // #4689
+  const label = measure ? AWAITING_MEASUREMENT_LABEL : due ? AWAITING_DUE_LABEL : AWAITING_PROMOTION_LABEL;
+  const labels = due && gate.eligibleAt ? [label, `due:${gate.eligibleAt.slice(0, 10)}`] : [label];
+  const edit = () => io.gh(["issue", "edit", String(issue), "-R", repo, "--add-label", labels.join(",")]);
   try { await edit(); } catch {
     try {
-      await io.gh(["label", "create", label, "-R", repo, "--force", "--color", "C5DEF5", "--description", measure ? "Post-deploy follow-up with no runnable default-branch check; never given a lane. Managed by ForgeDock." : "Post-deploy follow-up parked until its parent fix reaches the default branch. Managed by ForgeDock."]);
+      for (const l of labels) await io.gh(["label", "create", l, "-R", repo, "--force", "--color", "C5DEF5", "--description", measure ? "Post-deploy follow-up with no runnable default-branch check; never given a lane. Managed by ForgeDock." : due ? "Post-deploy follow-up parked until its due date; re-queued by the engine. Managed by ForgeDock." : "Post-deploy follow-up parked until its parent fix reaches the default branch. Managed by ForgeDock."]);
       await edit();
     } catch { /* the comment and the report still show it */ }
   }
   if (had) return;
-  const what = measure ? "awaiting measurement" : gate.state === "awaiting-promotion" ? "awaiting promotion" : gate.state === "awaiting-min-age" ? "awaiting its post-deploy soak window" : "awaiting its post-deploy precondition";
+  const what = measure ? "awaiting measurement" : gate.state === "awaiting-promotion" ? "awaiting promotion" : due ? "awaiting its due date" : gate.state === "awaiting-min-age" ? "awaiting its post-deploy soak window" : "awaiting its post-deploy precondition";
   const tail = measure ? "Every item here is a post-deploy check, and at least one names no runnable check, so no lane was started and none will be. Name each one with `[check:<id>]` and add `<id>` to the checks file on the default branch, or measure it by hand."
-    : "Every item here is a post-deploy check, so no lane was started. The next orchestrate or triage run checks again and launches this issue once the precondition holds.";
+    : "Every item here is a post-deploy check, so no lane was started. The next orchestrate or triage run, or the daemon's parked sweep, checks again and releases this issue once the precondition holds.";
   const body = `<!-- ${PRECONDITION_MARKER} -->\n## Parked: ${what}\n${sanitizeMd(gate.detail)}.\n\n${tail}`;
   try { await io.gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(body)]); } catch { /* the label still shows it */ }
 }
@@ -335,6 +384,10 @@ export function formatParkedLine(rows) {
     const defs = uniq(soak.map((r) => r.prefilter.default));
     out.push(`awaiting min age: ${soak.map((r) => `#${r.issue}`).join(" ")} (fix on ${defs.join(", ") || "the default branch"}, soak window not elapsed)`);
   }
+  const due = parked.filter((r) => r.prefilter.kind === "awaiting-due"); // #4689
+  if (due.length) out.push(`due date: ${due.map((r) => `#${r.issue}${r.prefilter.eligibleAt ? ` (${r.prefilter.eligibleAt.slice(0, 10)})` : ""}`).join(" ")} (re-queued on or after the date)`);
+  const ask = parked.filter((r) => r.prefilter.kind === "owner-ask");
+  if (ask.length) out.push(`owner ask: ${ask.map((r) => `#${r.issue}`).join(" ")} (a decision or measurement only the owner can give; no lane)`);
   const meas = parked.filter((r) => r.prefilter.kind === "awaiting-measurement"); // #4626
   if (meas.length) out.push(`awaiting measurement: ${meas.map((r) => `#${r.issue}`).join(" ")} (no runnable default-branch check; no lane)`);
   const failed = parked.filter((r) => r.prefilter.kind === "check-failed");
@@ -350,7 +403,7 @@ export function formatParkedLine(rows) {
  * Pre-filter one issue. Never throws.
  * @returns {Promise<{issue:number, closed:boolean, kind:?string, candidate:boolean, verdict:?string, cost_usd:number, detail:string}>}
  */
-export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAULT_PREFILTER_MODEL, dryRun = false, agentId = null, maxMinutes = 5, selfLogins = null, defaultBranch = null, preconditionCmd = null, minAge = null }) {
+export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAULT_PREFILTER_MODEL, dryRun = false, agentId = null, maxMinutes = 5, selfLogins = null, defaultBranch = null, preconditionCmd = null, minAge = null, gateOnly = false }) {
   const out = { issue, closed: false, kind: null, candidate: false, verdict: null, cost_usd: 0, detail: "" };
   try {
     const iss = JSON.parse(String(await io.gh(["issue", "view", String(issue), "-R", repo, "--json", "number,title,body,state,labels,comments"])));
@@ -367,15 +420,20 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
       try { st = await io.projector.readState(issue); } catch { /* unreadable: proceed */ }
       if (st?.lease && st.lease.until > Date.now() && st.lease.by !== agentId) return { ...out, detail: `leased by ${st.lease.by}` };
     }
+    if (gated && hasDecisionItem(iss.body)) { // #4689: a decision item is the owner's: parked, one typed ask, no lane
+      await ownerAsk({ iss, repo, io, dryRun });
+      return { ...out, parked: true, kind: "owner-ask", parent: deferredFrom(iss.body), lane, detail: "a decision item needs the owner" };
+    }
     if (gated) {
       const gate = await postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, preconditionCmd, minAge });
       const had = names.includes(AWAITING_PROMOTION_LABEL);
-      if (["awaiting-promotion", "awaiting-min-age", "awaiting-precondition"].includes(gate.state)) {
-        if (!dryRun) await markParked({ issue, repo, io, had, gate });
-        return { ...out, parked: true, kind: gate.state, parent: gate.parent, lane, default: gate.default, detail: gate.detail };
+      if (["awaiting-promotion", "awaiting-due", "awaiting-min-age", "awaiting-precondition"].includes(gate.state)) {
+        if (!dryRun) await markParked({ issue, repo, io, had: had || (gate.state === "awaiting-due" && names.includes(AWAITING_DUE_LABEL)), gate });
+        return { ...out, parked: true, kind: gate.state, parent: gate.parent, lane, default: gate.default, ...(gate.eligibleAt ? { eligibleAt: gate.eligibleAt } : {}), detail: gate.detail };
       }
-      if (gate.state === "ready" && had && !dryRun) {
-        try { await io.gh(["issue", "edit", String(issue), "-R", repo, "--remove-label", AWAITING_PROMOTION_LABEL]); } catch { /* best effort */ }
+      const stale = names.filter((l) => l === AWAITING_PROMOTION_LABEL || l === AWAITING_DUE_LABEL || /^due:/.test(l)); // #4689: released: every wait label goes
+      if (gate.state === "ready" && stale.length && !dryRun) {
+        try { await io.gh(["issue", "edit", String(issue), "-R", repo, "--remove-label", stale.join(",")]); } catch { /* best effort */ }
       }
       if (gate.state === "ready") {
         const m = await measureFollowup({ iss, repo, parent: gate.parent, def: gate.default, shas: gate.shas, cwd, io, dryRun, isTrusted: isTrustedIssueComment, ...(io.spawnCheck ? { spawn: io.spawnCheck } : {}) });
@@ -387,8 +445,10 @@ export async function prefilterIssue({ issue, repo, lane, cwd, io, model = DEFAU
         if (m.state === "pass") return { ...out, closed: !dryRun, kind: "post-deploy-check", parent: gate.parent, lane, default: gate.default, detail: m.detail };
         if (m.state === "fail" || m.state === "recorded-fail") return { ...out, parked: true, kind: "check-failed", parent: gate.parent, lane, default: gate.default, detail: m.detail };
       }
+      if (gateOnly) return { ...out, detail: `released (post-deploy gate: ${gate.state})` }; // #4689: the sweep never runs the already-fixed path
       if (labelled) return { ...out, detail: `labelled, left to the lane (post-deploy gate: ${gate.state}${gate.detail ? `, ${gate.detail}` : ""})` };
     }
+    if (gateOnly) return { ...out, detail: "not a gated follow-up" };
     // #4399: an issue reopened by a failed acceptance probe goes to a lane, never back to an already-fixed close
     if ((iss.comments ?? []).some((c) => probeResultOf(c?.body)?.result === "fail")
       && flakyReason({ comments: iss.comments }, await ownFor(iss, selfResolver(selfLogins, io.gh)))?.reason === "probe-failed") {

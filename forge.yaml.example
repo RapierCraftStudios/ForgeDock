@@ -134,6 +134,16 @@ branches:
 # Commands: orchestrate, triage
 # =============================================================================
 
+# MILESTONE LIFECYCLE (OPTIONAL, forge#4657)
+# A milestone moves building -> shipped:staging -> deployed:default -> closed
+# (FORGE:LIFECYCLE block in its description). close_on picks where it closes:
+# `default` (default) closes once the shipped commit is on the default branch,
+# `staging` closes right after the staging merge. A milestone with open issues
+# never closes; ship carries them over instead of demoting them to fast lane.
+# Commands: milestone, orchestrate, pipeline-status
+# milestones:
+#   close_on: default
+#
 # post_deploy:
 #   precondition_cmd: "scripts/rollout-ready.sh"
 #   min_age: "24h"
@@ -378,6 +388,12 @@ branches:
 # =============================================================================
 
 # orchestration:
+#   # Host-wide lane cap (#4191). `forgedock milestone train` (#4658) takes its lane cap ONLY
+#   # from here (split across active milestones); a conflicting --parallel is warned and ignored.
+#   # The train never writes this file and never rewrites branches.staging: lanes resolve their
+#   # base from the issue's milestone.
+#   global_parallel: 12
+#
 #   # Maximum number of /work-on sub-agents dispatched concurrently. Guards
 #   # against saturating the Anthropic API rate limit in one burst on a large
 #   # ready set. Default: 12.
@@ -738,6 +754,16 @@ branches:
 #   # Tech stack description — injected into review agent prompts
 #   # Be specific: framework versions, DB engines, hosting environment
 #   tech_stack: "Next.js 15 App Router, FastAPI, PostgreSQL 16, Docker, Traefik"
+#
+#   # Written by `npx forgedock init --refresh-context` (regenerates tech_stack/context from manifests and the
+#   # decision log, shows a diff for approval). doctor and review-prepare emit REVIEW_CONTEXT_STALE when the
+#   # tech_stack names frameworks no manifest lists, the context cites superseded decisions, or it says
+#   # "docs-only"/"no code" while source manifests exist.
+#   context_generated_at: "2026-01-15"       # reviewers see this date
+#   context_generated_pr_count: "120"        # merged PRs at generation time (informational)
+#   context_max_merged_prs: 50               # context older than this many merged PRs is advisory (default 50)
+#   decision_log: docs/decisions.md          # superseded-decision check; default: first of docs/decisions.md,
+#                                            # DECISIONS.md, docs/decision-log.md, devdocs/project/decisions.md
 #
 #   # Additional context for reviewers
 #   # What makes this codebase unusual? What pitfalls exist?
@@ -1359,3 +1385,12 @@ branches:
 #   webhook_url: https://hooks.example.com/forgedock   # https, or http on localhost
 #   webhook_secret_env: FORGE_EVENTS_SECRET            # NAME of the env var holding the HMAC secret
 #   dir: ~/.forge/events                               # local JSONL directory
+
+# ---------------------------------------------------------------------------
+# ci (forge#4667): scheduled full-suite runs on active milestone branches, report-only
+# ci:
+#   milestone_integration:
+#     workflow: e2e.yml          # workflow_dispatch workflow running the full suite
+#     interval_hours: 24
+#     every_merges: 10           # optional
+#     block_admission_after: 2   # optional: hold new lanes after N red runs

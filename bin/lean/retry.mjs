@@ -43,3 +43,31 @@ export async function ghCacheRetry(call, cache) {
     return await call(cache?.env?.());
   }
 }
+
+/** #4662: an expired or revoked token (HTTP 401). 403 is a missing scope or a rate limit, which a refresh does not fix. */
+export const GH_AUTH_RE = /HTTP 401|\b401\b[^\n]{0,40}(?:unauthorized|bad credentials)|bad credentials|requires authentication|authentication required|gh auth login|try authenticating/i;
+export const GH_AUTH_RETRY_SECONDS = 120;
+
+/** Runs scripts/refresh-bot-token.sh (or $FORGE_REFRESH_TOKEN_SCRIPT); resolves on exit 0, rejects otherwise. */
+export async function runRefreshScript(env = process.env) {
+  const { execFile } = await import("node:child_process");
+  const script = env.FORGE_REFRESH_TOKEN_SCRIPT || new URL("../../scripts/refresh-bot-token.sh", import.meta.url).pathname;
+  return new Promise((res, rej) => execFile("bash", [script], { env, timeout: 60000 }, (err, _out, stderr) => (err ? rej(Object.assign(err, { stderr })) : res())));
+}
+
+/**
+ * #4662: one refresh-and-retry for an auth failure. `refresh` runs once per `state` (shared across calls, so a dead token
+ * does not spawn a refresh per gh call); when the call still fails with an auth error the error carries
+ * `deferCode: "gh.auth"` so the lane ends `deferred` (requeued in `retryInSeconds`), never `engine-error`.
+ */
+export async function refreshAuthOnce(call, { refresh, state = { refreshed: false } }) {
+  try { return await call(); } catch (e) {
+    if (!GH_AUTH_RE.test(errText(e))) throw e;
+    if (!state.refreshed) {
+      state.refreshed = true;
+      try { await refresh(); state.ok = true; } catch { state.ok = false; }
+      if (state.ok) { try { const r = await call(); state.refreshed = false; return r; } catch (e2) { if (!GH_AUTH_RE.test(errText(e2))) throw e2; e = e2; } }
+    }
+    throw Object.assign(e, { deferCode: "gh.auth", deferDetail: `gh auth failed (HTTP 401) after a token refresh: ${errText(e).trim().split("\n")[0].slice(0, 200)}`, retryInSeconds: GH_AUTH_RETRY_SECONDS });
+  }
+}

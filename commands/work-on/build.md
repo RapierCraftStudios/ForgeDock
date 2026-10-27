@@ -376,13 +376,15 @@ Every item in the contract's `### Out of Scope` section must carry exactly one d
 - **Known-flaw rule**: a contract that keeps a known-flawed design (a design the investigation or architect plan identified as flawed, a fail-open caller, an unsound threshold) must state the flaw and list it as a `deferred → #N` item with a linked follow-up. It may not hide behind `accepted-risk` or free text.
 - Free-text exclusions without a disposition are invalid. `->` is accepted for `→`.
 
-**Fold, then batch** <!-- Added: forge#3843 -->: before filing anything, fold small siblings into scope. A candidate deferred item that is the same mechanical change at a sibling path and fits the remaining scope budget (a small fraction of the plan's own estimate: at most 20% of the current `ESTIMATED_DIFF_LINES`, or 200 lines when no estimate exists) goes into the contract's Deliverables, not Out of Scope; count it as `folded`. Defer only genuinely separate work (different module, design or owner). All remaining deferred items of this build go into ONE follow-up issue with a checklist; `scripts/file-deferred-followups.sh` appends to an existing trusted follow-up for the same parent (exact path match; a closed one is reopened) or creates one, then records a `<!-- FORGE:DEFERRED_ISSUE: #M -->` claim marker on the parent.
+**Fold, then batch** <!-- Added: forge#3843 -->: before filing anything, fold small siblings into scope. A candidate deferred item that is the same mechanical change at a sibling path and fits the remaining scope budget (a small fraction of the plan's own estimate: at most 20% of the current `ESTIMATED_DIFF_LINES`, or 200 lines when no estimate exists) goes into the contract's Deliverables, not Out of Scope; count it as `folded`. Defer only genuinely separate work (different module, design or owner). All remaining deferred items of this build go into ONE follow-up issue per class (engineering | post-deploy | external | ops, each labelled `followup:<class>` and carrying the parent's milestone, #4664) with a checklist; `scripts/file-deferred-followups.sh` appends to an existing trusted follow-up for the same parent (exact path match; a closed one is reopened) or creates one, then records a `<!-- FORGE:DEFERRED_ISSUE: #M -->` claim marker on the parent.
 
 **File the `deferred` follow-ups** (skip the filing on resume when the contract already exists):
 
 ```bash
 # <Script resolution block from work-on/build.md, verbatim>
-# DEFERRED_TSV: one line per remaining deferred item: path<TAB>one-line why<TAB>known-flaw (or empty)
+# DEFERRED_TSV: one line per remaining deferred item: path-or-`-`<TAB>one-line why<TAB>known-flaw (or empty)[<TAB>class<TAB>label]
+# Column 1 must be a path or `-` (never requirement text or an `R<n>:` prefix: that exits 2, nothing filed); a requirement-level item
+# is `-` with its text in the label column. class: engineering|post-deploy|external|ops (default: the why's `post-deploy:`/`external:`/`ops:` prefix, else engineering).
 SCRIPT_REF=$(resolve_script 'file-deferred-followups')
 case "$SCRIPT_REF" in
   prose:*) echo "DEFERRED_SCRIPT=PROSE" ;;   # file ONE issue by hand: marker + checklist of every path (see below)

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE } from "./conformance.mjs";
+import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -60,6 +60,21 @@ describe("amendments", () => {
   });
 });
 
+describe("#4655 multi-requirement amendment references", () => {
+  it("R1/R2, 'R1, R2' and an en-dash range split into one applied row per id", () => {
+    for (const requirement of ["R1/R2", "R1, R2", "R1\u2013R2", "R1 and R2"]) {
+      const a = applyAmendments(C, [{ kind: "defer", requirement, why: "w" }]);
+      assert.deepEqual(a.problems, [], requirement);
+      assert.deepEqual(a.toTrack.map((r) => r.id).sort(), ["R1", "R2"], requirement);
+      assert.deepEqual(a.applied.map((x) => x.target), ["R1", "R2"], requirement);
+    }
+  });
+  it("an unknown id inside a list is still a problem; scope-note stays an unknown kind", () => {
+    assert.match(applyAmendments(C, [{ kind: "defer", requirement: "R1/R9", why: "w" }]).problems[0], /unknown requirement R9/);
+    assert.match(applyAmendments(C, [{ kind: "scope-note", requirement: "R1", why: "w" }]).problems[0], /unknown kind 'scope-note'; valid kinds are/);
+  });
+});
+
 describe("#4574 amendment slips", () => {
   it("type for kind, amend-requirement and limitation apply as defer; an R# id fills requirement", () => {
     const a = applyAmendments(C, [{ kind: "amend-requirement", id: "R2", why: "stored hashed" }, { id: "A1", requirement: "R1", type: "limitation", why: "plugin limit" }]);
@@ -114,6 +129,11 @@ describe("precheck (deterministic, no reviewer)", () => {
     assert.deepEqual(local.failures.map((f) => f.kind), ["validate_missing", "validate_missing"]); assert.deepEqual(local.ciCovered, []);
     const failed = precheck({ contract: C2, result: { ...res, validation: [{ id: "V1", exit: 1 }, { id: "V2", ci: true }, { id: "V3", exit: 0 }] }, changedFiles: files, ciVerified: true });
     assert.deepEqual(failed.failures.map((f) => f.kind), ["validate_failed"]); assert.deepEqual(failed.ciCovered, ["V2"]);
+  });
+  it("#4708 a validate row carried forward across a CI fix round counts as recorded; a row absent outside a CI-verified head still fails", () => {
+    const carried = precheck({ contract: C, result: { ...res, validation: [{ id: "V1", exit: 0, carried: true }] }, changedFiles: files });
+    assert.deepEqual(codes(carried), []);
+    assert.deepEqual(precheck({ contract: C, result: { ...res, validation: [] }, changedFiles: files }).failures.map((f) => f.kind), ["validate_missing"]);
   });
   it("#4323 missingTool: commands, python and node modules; paths, relative and repo-tracked names are not the environment", () => {
     assert.deepEqual(missingTool({ rc: 127, output: "sh: 1: jq: not found" }), { tool: "jq", kind: "command" });
@@ -691,8 +711,109 @@ describe("post-deploy check ids (#4626)", () => {
     assert.ok(!precheck({ contract: c, result: res, changedFiles: files, checkIds: new Set(["login-smoke"]) }).failures.some((f) => f.kind === "check_unknown"));
     assert.ok(!precheck({ contract: c, result: res, changedFiles: files }).failures.some((f) => f.kind === "check_unknown"));
   });
+  it("#4664 followupItems carries the follow-up class; validateContract rejects an unknown class", () => {
+    const cls = (r) => followupItems([{ id: "R1", quote: Q1, why: "w", ...r }])[0].class;
+    assert.equal(cls({ disposition: "defer" }), "engineering");
+    assert.equal(cls({ disposition: "post-deploy", check: "x" }), "post-deploy");
+    assert.equal(cls({ disposition: "defer", class: "external" }), "external");
+    assert.equal(cls({ disposition: "defer", class: "bogus" }), "engineering");
+    assert.deepEqual(FOLLOWUP_CLASSES, ["engineering", "post-deploy", "external", "ops"]);
+    assert.equal(followupClass({ disposition: "post-deploy" }), "post-deploy"); assert.equal(followupClass({ class: "ops" }), "ops");
+    const v = validateContract({ requirements: [{ id: "R1", quote: Q1, disposition: "defer", why: "w", class: "bogus" }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] }, Q1);
+    assert.ok(v.problems.some((x) => /R1: class must be one of/.test(x)), v.problems.join(";"));
+  });
   it("followupItems names the check in a post-deploy item", () => {
     const [i] = followupItems([{ id: "R1", quote: Q1, disposition: "post-deploy", why: "w", check: "login-smoke" }]);
     assert.match(i.why, /^post-deploy: \[check:login-smoke\] w$/);
+  });
+  it("#4724 a deferred row needs exactly one valid bucket; owner actions are never post-deploy; dates are absolute", () => {
+    const contract = (r) => ({ requirements: [{ id: "R1", quote: Q1, why: "w", ...r }], deliverables: [], preserve: [], validate: [{ id: "V1", command: "true" }] });
+    const probs = (r) => validateContract(contract(r), Q1).problems.filter((x) => /^R1: .*(bucket|never post-deploy|owner)/.test(x));
+    assert.deepEqual(BUCKETS, ["post-deploy", "verify-now", "date", "owner", "new-issue"]);
+    assert.equal(probs({ disposition: "defer" }).length, 1); // missing bucket
+    for (const bucket of ["post-deploy", "verify-now", "new-issue", "date:2026-12-01", "owner:rotate the key"]) assert.deepEqual(probs({ disposition: "defer", bucket }), [], bucket);
+    for (const bucket of ["date:5 weeks after deploy", "date:2026-02-30", "date", "owner:", "owner", "later", "post-deploy:x"]) assert.equal(probs({ disposition: "defer", bucket }).length, 1, bucket);
+    assert.match(probs({ disposition: "post-deploy", check: "a-smoke", bucket: "owner:spend" })[0], /never post-deploy/);
+    assert.equal(probs({ disposition: "deliver", bucket: "post-deploy" }).length, 1);
+    assert.deepEqual(probs({ disposition: "deliver" }), []);
+    assert.deepEqual(bucketProblems({ disposition: "defer", bucket: "owner:x", class: "post-deploy" }).length, 1);
+    assert.equal(bucketKind("date:2026-12-01"), "date"); assert.equal(bucketKind("nope"), null);
+  });
+  it("#4724 the bucket decides the follow-up class and tags the item for the script and the gate", () => {
+    const one = (r) => followupItems([{ id: "R1", quote: Q1, disposition: "defer", why: "w", ...r }], { now: Date.UTC(2026, 9, 27) })[0];
+    assert.equal(followupClass({ disposition: "defer", bucket: "owner:spend" }), "external");
+    assert.equal(followupClass({ disposition: "defer", bucket: "owner:spend", class: "ops" }), "ops");
+    assert.equal(followupClass({ disposition: "defer", bucket: "owner:x", class: "post-deploy" }), "external");
+    assert.equal(followupClass({ disposition: "defer", bucket: "new-issue", class: "post-deploy" }), "engineering");
+    for (const bucket of ["post-deploy", "verify-now", "date:2026-12-01"]) assert.equal(followupClass({ disposition: "defer", bucket }), "post-deploy");
+    assert.equal(one({ bucket: "owner:rotate the key" }).why, "owner: rotate the key. [bucket:owner] w");
+    assert.equal(one({ bucket: "verify-now" }).why, "post-deploy: [bucket:verify-now] w");
+    assert.equal(one({ bucket: "date:2026-12-01" }).why, "post-deploy: [bucket:date] due:2026-12-01 from:2026-10-27 w");
+    assert.equal(one({ bucket: "new-issue" }).why, "defer: [bucket:new-issue] w");
+    assert.equal(one({}).why, "defer: w"); // an unbucketed (older) row is unchanged
+  });
+  it("#4724 bucketTally counts deferred items per bucket kind; an amendment may carry the bucket", () => {
+    assert.deepEqual(bucketTally([{ bucket: "date:2026-12-01" }, { bucket: "date:2026-12-02" }, { bucket: "owner:x" }, {}]), { date: 2, owner: 1, none: 1 });
+    const c = { requirements: [{ id: "R1", quote: Q1, disposition: "deliver" }], deliverables: [], preserve: [], validate: [] };
+    const r = applyAmendments(c, [{ kind: "defer", requirement: "R1", why: "w", bucket: "verify-now" }]);
+    assert.equal(r.contract.requirements[0].bucket, "verify-now"); assert.equal(r.toTrack.length, 1);
+  });
+});
+
+describe("#4726 a [type:e2e] requirement needs a real end-to-end validate", () => {
+  const Q = "Users can sign up and sign in with an emailed code alone [type:e2e]";
+  const mk = (cmd, quote = Q, extra = {}) => {
+    const contract = { ...C, requirements: [{ id: "R1", quote, disposition: "deliver", ...extra }, C.requirements[1]], validate: [{ id: "V1", command: cmd }] };
+    return { contract, ctx: { ...ctx, contract } };
+  };
+  const rv = (contract) => ({ ...good, issue_coverage: [{ quote: contract.requirements[0].quote, status: "covered" }, ...good.issue_coverage.slice(1)] });
+  const run = (cmd, quote, extra, e2e) => { const m = mk(cmd, quote, extra); return decide(rv(m.contract), { ...m.ctx, issueText: `${ISSUE}\n${m.contract.requirements[0].quote}`, e2e }); };
+  it("e2e requirement verified only by a unit test fails conformance (the #36414 shape)", () => {
+    const d = run("pytest tests/test_email_code_auth.py");
+    assert.equal(d.state, "nonconforming");
+    assert.deepEqual(codes(d), ["conformance.e2e_unverified"]);
+  });
+  it("a Playwright, configured e2e check or e2e spec file validate passes", () => {
+    assert.equal(run("npx playwright test e2e/signup.spec.ts").state, "conforms");
+    assert.equal(run("make smoke-live", Q, {}, { checks: ["make smoke-live"] }).state, "conforms");
+    assert.equal(run("node --test tests/signup.js", Q, {}, { isSpec: (f) => f === "tests/signup.js" }).state, "conforms");
+  });
+  it("isE2eCommand and e2eVerified resolve a V-ref to its contract command", () => {
+    assert.equal(isE2eCommand("npx playwright test"), true);
+    assert.equal(isE2eCommand("pytest tests/test_x.py"), false);
+    const contract = { validate: [{ id: "V1", command: "pytest tests/a.py" }, { id: "V2", command: "npx cypress run" }] };
+    assert.equal(e2eVerified({ validated_by: "V1" }, contract), false);
+    assert.equal(e2eVerified({ validated_by: "V1, V2" }, contract), true);
+  });
+  it("[type:unit] and [type:api] requirements keep their evidence rules; not-applicable is untouched", () => {
+    assert.equal(run("pytest tests/test_x.py", "Users can sign up with an emailed code [type:unit]").state, "conforms");
+    assert.equal(run("pytest tests/test_x.py", "Users can sign up with an emailed code [type:api]").state, "conforms");
+    const na = { ...C.requirements[0], quote: Q, disposition: "not-applicable", evidence: "src/a.js:1" };
+    const contract = { ...C, requirements: [na, C.requirements[1]] };
+    const r = { ...good, issue_coverage: [{ quote: Q, status: "covered" }, ...good.issue_coverage.slice(1)], requirements: [{ id: "R1", status: "not-applicable" }, good.requirements[1]] };
+    assert.notEqual(decide(r, { ...ctx, contract, issueText: `${ISSUE}\n${Q}` }).failures.some((f) => f.code === "conformance.e2e_unverified"), true);
+  });
+});
+
+describe("decision amendments (#4695)", () => {
+  const withRow = { ...C, preserve: [...C.preserve, { id: "H1", what: "use A", source: "decision", decision: "d9-1" }] };
+  const amend = (extra, opts = { baseFiles: ["src/scrape.js", "src/search.js"] }) => applyAmendments(withRow, [{ kind: "decision", why: "w", decision: { choice: "use B", anchors: ["src/**"], ...extra } }], null, opts);
+  it("applies a decision whose anchors exist on the base and returns the record", () => {
+    const a = amend({});
+    assert.deepEqual(a.problems, []);
+    assert.equal(a.decisions[0].choice, "use B");
+    assert.ok(a.contract.preserve.some((p) => p.id === "H1"));
+  });
+  it("rejects an anchor that matches no base file", () => {
+    const a = amend({ anchors: ["nope/**"] });
+    assert.match(a.problems[0], /match no file on the base/);
+    assert.equal(a.decisions.length, 0);
+  });
+  it("supersedes drops the engine-authored preserve row; without it the row stays", () => {
+    assert.ok(!amend({ supersedes: "d9-1" }).contract.preserve.some((p) => p.id === "H1"));
+    assert.ok(amend({}).contract.preserve.some((p) => p.id === "H1"));
+  });
+  it("a decision without choice or anchors is an incomplete amendment", () => {
+    assert.match(amend({ choice: "" }).problems[0], /needs decision/);
   });
 });
