@@ -24,3 +24,5 @@ Narrow the pinned-env allowlist in `bin/lean/schedd.mjs`, sanitise PATH at pin t
 - Docs freshness: added a #4691 entry to devdocs/modules/lean.md.
 - Behaviour change: client `ANTHROPIC_*` and `CLAUDE_CODE_*` are no longer pinned; lanes use the daemon's `ANTHROPIC_*`. List names in `orchestration.env_passthrough` to pin them.
 - `--set-env` edits plan.json directly (no daemon); running lanes keep their env, new lanes pick it up.
+
+- mergeEnv keeps secret-named daemon keys (GH_TOKEN etc.) since batchEnv never pins them; lanes keep gh auth.
