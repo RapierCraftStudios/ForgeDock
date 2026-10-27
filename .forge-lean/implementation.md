@@ -1,31 +1,34 @@
 ### Approach
-Split joined requirement references into individual amendment rows before applying them. Tell the builder the valid kinds and one id per row. Make the repro harness report UNRUNNABLE when head fails only on a missing host module or command.
+Built on #4595's blocker re-check. Dependency skips are marked `waiting` while a re-check can still re-admit them; `--add` of a skipped issue goes through the #4550 requeue path; a not-planned close is `final`; log rows carry `trigger`.
 
 ### Changes
-- bin/lean/conformance.mjs: `splitRequirementRefs` and row expansion in `applyAmendments`. Handles `/ , ; & + and` separators and `R2-R3` / `R2–R3` ranges. Applies to defer, post-deploy and amend-requirement.
-- bin/lean/prompts.mjs: no `scope-note` kind; one requirement id per row.
-- scripts/acceptance-red-green.sh: head run failed on `No module named <third-party>` or `X: command not found` is UNRUNNABLE. A module the repo tracks stays FAILED. The change is in `run_in`, not the shared classifier, so validate callers are unaffected (D6 seam, D3 unchanged).
-- bin/lean/conformance.test.mjs, scripts/acceptance-red-green.test.sh: regression tests.
+- bin/lean/batch.mjs: addIssues re-queues an issue whose result is `skipped` (returns `requeued`); openBatch returns `self`.
+- bin/lean/orchestrate.mjs: skip() sets `waiting` and logs `trigger`; watchBlockers honours `final` (settled blockers), logs `readmitted` rows with trigger; requeued dependents logged; waiting cleared at batch end; formatTable shows `waiting on #X`.
+- bin/engine-cli.mjs: makeDispatchCheck reads stateReason (not planned => final); addToBatch reports requeued, clears a finished report; formatRowLine shows waiting.
+- bin/lean/schedd.mjs: add op reopens a finished unhosted batch when it re-queued issues.
+- commands/orchestrate.md: documents the above.
+- tests: lean.test.mjs, batch.test.mjs.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/conformance.mjs (splitRequirementRefs, applyAmendments)
-- R2 ✅ bin/lean/conformance.mjs, bin/lean/prompts.mjs:194
-- R3 ✅ scope-note stays invalid (test) and the prompt forbids it
-- R4 ✅ scripts/acceptance-red-green.sh (run_in, host_missing)
+- R1 ✅ orchestrate.mjs watchBlockers (readmit + log), lean.test.mjs "#4687 a dependency skip waits"
+- R2 ✅ batch.mjs addIssues, batch.test.mjs "#4687 --add re-queues"
+- R3 ✅ engine-cli.mjs makeDispatchCheck `final`, orchestrate.mjs watchBlockers, lean.test.mjs not-planned test
+- R4 ✅ orchestrate.mjs skip/readmitted/requeued update rows with `trigger` (log.jsonl via store.log)
+- R5 ✅ orchestrate.mjs formatTable, engine-cli.mjs formatRowLine
+- R6 ✅ waiting flag + per-pass re-check (#4595 loop)
 
 ### Verification
-- node --test bin/lean/conformance.test.mjs: pass (94). The new tests fail without the fix (2 fail).
-- bash scripts/classify-test-run.test.sh: pass
-- bash scripts/acceptance-red-green.test.sh: pass. The new case fails without the fix.
-- node --test bin/lean/lean.test.mjs bin/lean/light.test.mjs: pass
-- forgedock check: PASS. The scoped checks.mjs asked for the full suite (widened), which I did not run per host rules.
+- V1 lean.test.mjs: 500 pass, 0 fail. V2 batch.test.mjs: 54 pass. V3 schedd.test.mjs: 21 pass. bin/tests/engine-cli.test.mjs run too. `forgedock check`: PASS.
+- New tests (batch #4, lean #15, #16) fail with the source files reverted to HEAD.
+- checks.mjs widened to the full suite (889 referrers), not run per host rules.
 
 ### Notes
-- D3 and D5 (classify-test-run.sh) were deliberately not changed. The fix lives in run_in (D6) to avoid altering the classifier used by commands/work-on/build/validate.md.
-- Head-only: base missing-module failures remain legitimate red proof.
-- devdocs/modules/lean.md was not updated (not a deliverable). scripts/check-devdocs-freshness.sh reports no update required.
+- The dispatch check now requests `--json state,stateReason`; existing test stub updated.
+- A resumed batch loses the display-only `waiting` flag for rows skipped before the resume.
+- Dependents of an in-batch lane ending `invalid` still run (SATISFIED unchanged).
 
-Docs: devdocs/modules/lean.md entry for #4655 (joined refs split, scope-note rejected, host-missing => UNRUNNABLE).
+## Docs
+Added a #4687 entry to devdocs/modules/lean.md (waiting state, trigger log, final not-planned, --add requeue) to satisfy the devdocs freshness check.
 
-### Follow-up
-- host_missing now also matches the unquoted `No module named pytest` (the issue's real output); added an unquoted test case in acceptance-red-green.test.sh. V3 passes (25/25).
+### CI follow-up (Unit tests job, no log available)
+Reproduced locally the 35 test files referencing the changed modules plus bin/lean and bin/engine tests: only 3 failures remain, all environment-dependent and unrelated to this diff (WSL/platform rows in preflight, a copyFile tmp-orphan test, writeInstallReceipt platform capture; this host is WSL). `scripts/check-spec-size.sh` passes. No code change made; the failing CI job could not be identified without its log.

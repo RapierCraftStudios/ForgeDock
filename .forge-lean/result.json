@@ -1,1 +1,83 @@
-{"status":"fixed","summary":"Split joined amendment requirement refs; missing host module on head is UNRUNNABLE (env.repro_unrunnable)","requirements":[{"id":"R1","status":"implemented","evidence":"bin/lean/conformance.mjs splitRequirementRefs","instrumented":""},{"id":"R2","status":"implemented","evidence":"bin/lean/conformance.mjs applyAmendments; bin/lean/prompts.mjs:194","instrumented":""},{"id":"R3","status":"implemented","evidence":"bin/lean/prompts.mjs:194; conformance.test.mjs #4655","instrumented":""},{"id":"R4","status":"implemented","evidence":"scripts/acceptance-red-green.sh run_in/host_missing","instrumented":""}],"validation":[{"id":"V1","command":"node --test bin/lean/conformance.test.mjs","exit":0},{"id":"V2","command":"bash scripts/classify-test-run.test.sh","exit":0},{"id":"V3","command":"bash scripts/acceptance-red-green.test.sh","exit":0},{"id":"V4","command":"node --test bin/lean/lean.test.mjs bin/lean/light.test.mjs","exit":0}],"tests":[{"command":"node --test bin/lean/conformance.test.mjs; bash scripts/acceptance-red-green.test.sh","result":"pass","fails_without_fix":true}],"self_review":[{"question":"1","answer":"yes","evidence":"R1-R4 implemented, see implementation.md"},{"question":"2","answer":"yes","evidence":"all four validate commands pass; classifier untouched"},{"question":"3","answer":"yes","evidence":"D3/D5 intentionally unchanged: the contract allows the run_in seam in D6; preserve items P1-P3 pass"},{"question":"4","answer":"yes","evidence":"git diff touches only bin/lean/{conformance,prompts}.mjs, tests, scripts/acceptance-red-green.sh"}],"amendments":[]}
+{
+ "status": "fixed",
+ "summary": "Dependency-skipped issues show as waiting, re-queue via --add or blocker recovery, stay skipped for not-planned blockers, and log their trigger. CI follow-up: no cause reproducible locally; only WSL/env-dependent unrelated tests fail here.",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/lean/orchestrate.mjs watchBlockers"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/batch.mjs addIssues"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/engine-cli.mjs makeDispatchCheck final; orchestrate.mjs watchBlockers"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/lean/orchestrate.mjs skip/readmitted rows with trigger"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "bin/lean/orchestrate.mjs formatTable; bin/engine-cli.mjs formatRowLine"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "bin/lean/orchestrate.mjs skip waiting flag"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/lean.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/lean/batch.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V3",
+   "command": "node --test bin/lean/schedd.test.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/lean/lean.test.mjs bin/lean/batch.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R1-R6 implemented, see implementation.md"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "lean/batch/schedd/engine-cli tests pass; stub args updated in batch.test.mjs"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "D1-D5 changed, D6-D7 tests; D8 needed no change (schedd tests pass); preserve tests pass"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "git diff touches only deliverables and tests"
+  }
+ ],
+ "amendments": []
+}

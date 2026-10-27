@@ -1938,6 +1938,17 @@ throws, no record is posted and the next pass re-runs the checks and retries. Th
 pass record also re-applies the idempotent `post-deploy-monitoring` label, so a label that failed on the first pass is retried
 (`sweepDue` selects by it).
 
+## Entry 2026-10-27 — Dependency-skipped issues wait and re-queue in the same batch (#4687)
+
+A dependency skip (`dependency #X ended <outcome>`) keeps outcome `skipped` but carries a display-only `waiting` flag while
+`dispatchCheck` can still re-admit it (cleared when the batch ends, so the report ends `skipped` only if X never resolved). The
+table and console show `waiting on #X`. The #4595 blocker re-check re-admits the dependent when X merges or closes; each skip,
+re-admit and requeue row carries `trigger:<issue>` in the `decide` log. `makeDispatchCheck` returns `final: true` for an issue
+closed as NOT_PLANNED: `watchBlockers` stops re-checking it and its dependents stay `skipped`. `batch.addIssues` now re-queues an
+in-batch issue whose result is `skipped` through the `--requeue` file (returned as `requeued`); merged/needs-human/other rows still
+report `already in batch`. The schedd `add` op reopens a finished, unhosted batch like `requeue`; without a daemon `addToBatch`
+clears the report so the next `--resume` reruns it. Cost: 0 LLM calls; one extra `dispatchCheck` per blocker per watch interval.
+
 Guard gate added wall time (#4705, R12): `guardGate` runs beside `rerunFailedValidates` in one `Promise.all`, so the gate's raw `wall_ms` overstates the lane delay. `lean.mjs` times both; `added_wall_ms = max(0, total - validate rerun time)` rides on the `guard_run` event (0 when the gate errors or skips), and the sum over gate passes that selected a guard is carried as `guard_added_ms` on `RUN_TERMINAL` (omitted when 0; `telemetry-seam.mjs` passes it through on `run_terminal` beside `wall_ms`). Telemetry only, no verdict change. The enforce rule (median added wall < 5% of lane wall) is judged post-deploy from shadow telemetry.
 
 ## Entry 2026-10-27 — Joined amendment refs split; missing host module is env.repro_unrunnable (#4655)
