@@ -1999,3 +1999,7 @@ Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now
 
 ## Entry 2026-10-27 — Mechanical park creates its `parked:<code>` label and only counts a real relabel (#4736)
 `makeRelabelNeedsHuman` (`engine-cli.mjs`) best-effort runs `gh label create parked:<code> --force` before the park edit, since per-code labels are not in `labels.json` (same lazy-create as `prefilter.mjs`); without it the whole edit failed and returned `"failed"`. `orchestrate()` now sets `row.parkedQueued` only when the park relabel returns neither `false`, `"failed"` nor `"skipped"`, so a failed relabel stays in "unrecovered" instead of printing as remediation-queued.
+
+## Entry 2026-10-27 — FORGE:GUARD marker escapes every `>` (#4741)
+
+`renderGuard` (`guards.mjs`) now writes every `<` and `>` in the embedded JSON as `<` / `>` instead of special-casing `-->`, so no HTML comment terminator variant (`-->`, `--!>`) can end the marker early and make `parseGuard` return null. The only `>` in the output is the closing `-->`. Previously posted guards still parse (the old escapes are valid JSON). Same pattern as `drift.mjs`, `lifecycle.mjs`, `integration.mjs`; also clears CodeQL `js/bad-tag-filter`.

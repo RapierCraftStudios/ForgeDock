@@ -81,7 +81,7 @@ export function buildGuard({ issue, title = "", pr = null, mergeSha = null, cont
   return { guard: { v: 1, issue, pr, merge_sha: mergeSha, tests, hunks: parseHunks(diff), why: String(title).replace(/\s+/g, " ").trim().slice(0, 200) } };
 }
 
-export const renderGuard = (g) => `<!-- ${GUARD_MARKER} ${JSON.stringify(g).replace(/</g, "\\u003c").replace(/-->/g, "--\\u003e")} -->`;
+export const renderGuard = (g) => `<!-- ${GUARD_MARKER} ${JSON.stringify(g).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")} -->`;
 export function parseGuard(body) {
   const m = GUARD_RE.exec(String(body ?? ""));
   if (!m) return null;

@@ -42,10 +42,12 @@ test("a contract without a test yields no guard and says why", () => {
   assert.match(buildGuard({ issue: 1, contract: { validate: [] } }).reason, /names no test/);
 });
 
-test("render/parse round trip survives '-->' in a field", () => {
-  const g = { v: 1, issue: 3, why: "a --> b <x>", tests: [], hunks: [] };
+test("render/parse round trip survives '-->', '--!>' and '<x>' in a field", () => {
+  const g = { v: 1, issue: 3, why: "a --> b --!> c <x>", tests: [{ path: "t --!> <y>", ids: ["--!>"] }], hunks: [] };
   const body = renderGuard(g);
-  assert.equal(body.match(/-->/g).length, 1);
+  const inner = body.slice(0, -" -->".length);
+  assert.ok(body.endsWith(" -->"));
+  assert.equal(inner.includes(">"), false); // no terminator variant can appear before the closing -->
   assert.deepEqual(parseGuard(body), g);
 });
 
