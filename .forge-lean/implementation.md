@@ -37,3 +37,6 @@ The #4690 integration test (real systemd scope fork) is skipped here but runs on
 
 ## Post-merge re-validation
 V1, V2 and V3 re-run after merging origin/staging: all exit 0 (V3 prints "OK: every behaviour change has its module dossier updated.").
+
+## CI follow-up (Unit tests job)
+No CI log was available and the job does not reproduce locally (1880 targeted tests pass; the real-scope tests skip here). Hardened the real-scope fork test so the idle timer cannot race the limit sample (idleMs removed). V1-V3 re-run: exit 0.

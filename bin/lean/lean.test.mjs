@@ -3292,7 +3292,7 @@ describe("batch robustness (#4112-#4115)", () => {
     const { runCliBackendAsync } = await import("../runner.mjs");
     const d = tmpDir("core-fork-");
     writeFileSync(`${d}/fake-claude`, "#!/bin/sh\ni=0\nwhile [ $i -lt 200 ]; do sleep 20 & i=$((i+1)); done 2>/dev/null\nsleep 20\n"); chmodSync(`${d}/fake-claude`, 0o755);
-    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, idleMs: 400, maxMs: 15000, wrap: (b, a) => wrapLaneLimits(b, a, { tasks_max: 20 }) }),
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, maxMs: 15000, wrap: (b, a) => wrapLaneLimits(b, a, { tasks_max: 20 }) }),
       (e) => e.code === "CLI_LANE_LIMIT" && e.limit === "tasks");
   });
 
