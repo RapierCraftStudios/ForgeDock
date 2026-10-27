@@ -457,3 +457,27 @@ export async function generatorProblems({ git, base, ref = "HEAD" }) {
   }
   return problems;
 }
+
+/**
+ * #4661: journal `when` ordering. Newest-only migrators (drizzle `migrate()`) skip an entry stamped older than one already
+ * applied, so every entry the lane adds to a drizzle-style journal (`<dir>/meta/_journal.json`) must have `when` above the
+ * base journal's max, and `when` must increase within the lane journal. No journal or base journal: []. @returns {Promise<string[]>}
+ */
+export async function journalOrderProblems({ git, base, ref = "HEAD" }) {
+  const g = out(git), problems = [];
+  const changed = lines(await g(["-c", "core.quotepath=off", "diff", "--name-only", `${base}...${ref}`])).filter((f) => /(?:^|\/)meta\/_journal\.json$/.test(f) && !SKIP_RE.test(f));
+  const entriesAt = async (r, jp) => { try { const e = JSON.parse(await g(["show", `${r}:${jp}`])).entries; return Array.isArray(e) ? e : null; } catch { return null; } };
+  for (const jp of changed) {
+    const now = await entriesAt(ref, jp);
+    if (!now) continue;
+    const was = (await entriesAt(base, jp)) ?? [], wasTags = new Set(was.map((e) => e?.tag));
+    const max = Math.max(-Infinity, ...was.map((e) => Number(e?.when)).filter(Number.isFinite));
+    for (let i = 0; i < now.length; i++) {
+      const e = now[i] ?? {}, w = Number(e.when);
+      if (wasTags.has(e.tag)) continue;
+      if (Number.isFinite(max) && !(w > max)) problems.push(`${jp}: ${e.tag} when ${e.when} is not above the base max when ${max} (stale stamp: a newest-only migrator skips it on a persistent database)`);
+      else if (i > 0 && Number.isFinite(Number(now[i - 1]?.when)) && !(w > Number(now[i - 1].when))) problems.push(`${jp}: ${e.tag} when ${e.when} is not after ${now[i - 1].tag} (${now[i - 1].when})`);
+    }
+  }
+  return problems;
+}
