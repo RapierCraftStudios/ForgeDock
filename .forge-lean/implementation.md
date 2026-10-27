@@ -15,3 +15,6 @@ Locally bin/tests has 3 failures (journey Platform/WSL row, bootstrap orphaned .
 
 ## Enumerating-test follow-up
 - bin/lean/lean.test.mjs is not a list of bin/ siblings (only incidental engine/gc/runner tokens); recorded review-context under not_members in result.json. No code change.
+
+## CI follow-up (Unit tests)
+CI log not available; failure not reproduced. V1/V2 pass and about 60 targeted suites show 0 failures. The only 3 local failures (journey.test.mjs: WSL/platform, root chmod) are in untouched code and environmental. No code change; needs the CI log to go further.
