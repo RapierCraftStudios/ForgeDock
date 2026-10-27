@@ -204,3 +204,45 @@ describe("verification outcome (#4689)", () => {
     assert.equal(w2.gh.filter((a) => a[1] === "comment").length, 0);
   });
 });
+
+describe("post-deploy rollup is verified per item (#4755)", () => {
+  const rollup = (items) => `## Acceptance Criteria\n\n### #40\n<!-- FORGE:DEFERRED_FROM: #40 -->\n${items.join("\n")}\n\n<!-- FORGE:POSTDEPLOY_ROLLUP: default -->\n`;
+  const files = JSON.stringify({ bad: "echo nope", smoke: "echo ok", other: "echo ok" });
+  it("ticks the passing item, files one issue for the failure, one owner ask for the check-less item, stays open", async () => {
+    const w = world({ file: files });
+    const r = await run(w, rollup([item("R1", "[check:smoke] x"), item("R2", "[check:bad] x"), item("R3", "[check:gone] x")]));
+    assert.equal(r.state, "awaiting-measurement");
+    const edit = w.gh.find((a) => a[1] === "edit" && a.includes("--body"));
+    const text = edit[edit.indexOf("--body") + 1];
+    assert.match(text, /- \[x\] `R1:/);
+    assert.match(text, /- \[ \] `R2:/);
+    assert.match(text, /- \[ \] `R3:/);
+    assert.equal(w.gh.filter((a) => a[1] === "create").length, 1);
+    assert.equal(w.gh.filter((a) => a[1] === "comment" && /FORGE:OWNER_ASK/.test(a[a.indexOf("--body") + 1])).length, 1);
+    assert.ok(!w.gh.some((a) => a[1] === "close" || a[1] === "reopen"));
+    const probe = w.gh.find((a) => a[1] === "comment" && /FORGE:PROBE/.test(a[a.indexOf("--body") + 1]));
+    assert.match(probe[probe.indexOf("--body") + 1], /"id":"smoke","result":"pass"/);
+  });
+  it("a failing check does not block the passing items, and is not re-run for the same fix", async () => {
+    const w = world({ file: files });
+    const b = rollup([item("R1", "[check:smoke] x"), item("R2", "[check:bad] x")]);
+    assert.equal((await run(w, b)).state, "fail");
+    const probe = w.gh.find((a) => a[1] === "comment" && /FORGE:PROBE/.test(a[a.indexOf("--body") + 1]));
+    const ticked = w.gh.find((a) => a[1] === "edit")[w.gh.find((a) => a[1] === "edit").indexOf("--body") + 1];
+    const w2 = world({ file: files });
+    const r = await run(w2, ticked, { iss: { number: 41, body: ticked, comments: [{ body: probe[probe.indexOf("--body") + 1] }] }, isTrusted: () => true });
+    assert.equal(r.state, "recorded-fail");
+    assert.deepEqual(w2.spawned, []);
+    assert.equal(w2.gh.filter((a) => a[1] === "create").length, 0);
+  });
+  it("closes only when every item is ticked", async () => {
+    const w = world({ file: files });
+    assert.equal((await run(w, rollup([item("R1", "[check:smoke] x"), item("R2", "[check:other] x")]))).state, "pass");
+    assert.ok(w.gh.some((a) => a[1] === "close"));
+    assert.ok(!w.gh.some((a) => a[1] === "create"));
+  });
+  it("tickItems with an id set ticks only those items", () => {
+    const b = [item("R1", "[check:a] x"), item("R2", "[check:b] x")].join("\n");
+    assert.equal(tickItems(b, new Set(["b"])), `${item("R1", "[check:a] x")}\n${item("R2", "[check:b] x")}`.replace("- [ ] `R2", "- [x] `R2"));
+  });
+});
