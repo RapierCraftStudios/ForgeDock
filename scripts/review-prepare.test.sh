@@ -488,5 +488,22 @@ eq "oversized slices JSON is over 128 KiB" '.slices | tojson | length > 131072' 
 eq "oversized security slice keeps every path" '.slices.security.paths | length' 1100
 eq "oversized full_files keeps every path" '.full_files | length' 1100
 
+# --- 13. stale review.context (#4666): REVIEW_CONTEXT_STALE finding + config flags; a fresh context emits neither ---
+printf '{"name":"app","dependencies":{"react":"18"}}\n' > "$REPO_DIR/package.json"
+STALE_CFG="$WORK/stale.yaml"
+printf 'project:\n  name: Demo\nreview:\n  tech_stack: "Next.js 15, React"\n  context: "Repo is docs-only; no code yet."\n  context_generated_at: "2026-01-01"\n' > "$STALE_CFG"
+setup feat/x staging "services/api/auth.py" "+x = 1"
+CFG_OVERRIDE="$STALE_CFG" prep "$ROOT"
+rc_is "stale context does not block" 0
+eq "stale context flagged in config" '.config.context_stale' true
+eq "stale context carries its generation date" '.config.context_generated_at' 2026-01-01
+eq "stale context emits REVIEW_CONTEXT_STALE (docs-only)" '[.phase2.findings[] | select(startswith("REVIEW_CONTEXT_STALE:") and contains("docs-only"))] | length' 1
+eq "stale context emits REVIEW_CONTEXT_STALE (tech_stack)" '[.phase2.findings[] | select(startswith("REVIEW_CONTEXT_STALE:") and contains("Next.js"))] | length' 1
+printf 'project:\n  name: Demo\nreview:\n  tech_stack: "React"\n  context: "A React app."\n' > "$STALE_CFG"
+CFG_OVERRIDE="$STALE_CFG" prep "$ROOT"
+eq "fresh context is not stale" '.config.context_stale' false
+eq "fresh context emits no REVIEW_CONTEXT_STALE" '[.phase2.findings[] | select(startswith("REVIEW_CONTEXT_STALE:"))] | length' 0
+rm -f "$REPO_DIR/package.json"
+
 echo "review-prepare tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

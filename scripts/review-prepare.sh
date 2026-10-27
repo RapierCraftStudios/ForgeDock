@@ -232,6 +232,21 @@ dom_f API_DESIGN "router|routes"
 # --- Phase 2: read-only checks + the trusted full-build config gate ---
 P2_FINDINGS=""
 p2() { P2_FINDINGS="${P2_FINDINGS}${1}"$'\n'; }
+# --- review.context staleness (#4666): advisory, never blocks. Unreadable config/checker/gh = unknown, not stale ---
+CTX_GENERATED_AT=""; CTX_STALE="false"; CTX_ADVISORY="false"
+_rc=""; if type forge_root >/dev/null 2>&1; then _rc="$(forge_root 2>/dev/null)/bin/review-context.mjs"; fi
+if [ "$CONFIG_READABLE" = "true" ] && [ -f "$_rc" ] && command -v node >/dev/null 2>&1; then
+    _rcj=$(node "$_rc" check --config "$CONFIG_FILE" --root "${TOP:-$(dirname "$CONFIG_FILE")}" --repo "$REPO" --json 2>/dev/null || true)
+    if printf '%s' "$_rcj" | jq -e . >/dev/null 2>&1; then
+        CTX_GENERATED_AT=$(printf '%s' "$_rcj" | jq -r '.generated_at // ""')
+        [ "$(printf '%s' "$_rcj" | jq -r '.stale')" = "true" ] && CTX_STALE="true"
+        [ "$(printf '%s' "$_rcj" | jq -r '.advisory')" = "true" ] && CTX_ADVISORY="true"
+        while IFS= read -r _l; do [ -n "$_l" ] && p2 "REVIEW_CONTEXT_STALE: $_l"; done <<EOFRC
+$(printf '%s' "$_rcj" | jq -r '.reasons[]?.detail')
+EOFRC
+        [ "$CTX_ADVISORY" = "true" ] && p2 "REVIEW_CONTEXT_STALE: context generated ${CTX_GENERATED_AT}, $(printf '%s' "$_rcj" | jq -r '.merged_since') PRs merged since (limit $(printf '%s' "$_rcj" | jq -r '.max_merged_prs')): advisory"
+    fi
+fi
 HAS_TS=$(printf '%s\n' "$FILES" | grep -E '\.(tsx?|jsx?)$' | head -1)
 HAS_PY=$(printf '%s\n' "$FILES" | grep -E '\.py$' | head -1)
 TS_BUILD=$(cfg .verification.commands.typescript.build); PY_FORMAT=$(cfg .verification.commands.python.format)
@@ -664,6 +679,7 @@ CTX=$(jq -n \
     --argjson sa "$SCORE_AUTH" --argjson sb "$SCORE_BILLING" --argjson sc "$SCORE_CONCURRENCY" --argjson sd "$SCORE_DATABASE" --argjson si "$SCORE_INFRA" \
     --argjson ss "$SCORE_SECURITY" --argjson ssc "$SCORE_SCRAPING" --argjson sf "$SCORE_FRONTEND" --argjson sap "$SCORE_API" \
     --arg cissue "$ISSUE_NUM" --arg cflags "$CONTRACT_RISK_FLAGS" \
+    --arg cgen "$CTX_GENERATED_AT" --arg cstale "$CTX_STALE" --arg cadv "$CTX_ADVISORY" \
     --arg rdepth "$REVIEW_DEPTH" --arg rweight "$REVIEW_WEIGHT" --arg rtier "$ROSTER_TIER" --arg rreason "$ROSTER_REASON" --argjson agents "$(j_words "$SELECTED_AGENTS")" \
     --arg dmode "$REVIEW_MODE" --arg dfrom "$DELTA_FROM" --arg dcarried "$CARRIED_FROM" --argjson drounds "$FULL_ROUNDS" --slurpfile dfiles "$TMP_DIR/dfiles.json" \
     --arg pname "$PROJECT_NAME" --rawfile pctx "$TMP_DIR/pctx.txt" --arg scraping_on "$SCRAPING_ON" --arg rpath "$REPO_PATH" \
@@ -684,7 +700,7 @@ CTX=$(jq -n \
      contract: {issue: ($cissue | tonumber? // null), flags: $cflags},
      roster: {tier: $rtier, review_depth: $rdepth, review_weight: $rweight, reason: $rreason, agents: $agents},
      delta: {mode: $dmode, from: $dfrom, carried_from: $dcarried, full_rounds: $drounds, files: $dfiles[0]},
-     config: {project_name: $pname, project_context: $pctx, scraping_configured: ($scraping_on == "true"), repo_path: $rpath,
+     config: {project_name: $pname, project_context: $pctx, context_generated_at: $cgen, context_stale: ($cstale == "true"), context_advisory: ($cadv == "true"), scraping_configured: ($scraping_on == "true"), repo_path: $rpath,
               domains: {auth: $d_auth, billing: $d_billing, concurrency: $d_conc, infra: $d_infra, database: $d_db, frontend: $d_fe, security: $d_sec, api: $d_api, scraping: $d_scr}},
      templates: {source: $tsrc, base: $tbase, monolithic_catalog: $tmono},
      index_slices: {auth: $i_auth, billing: $i_billing, database: $i_db, api: $i_api, frontend: $i_fe, infrastructure: $i_infra},
