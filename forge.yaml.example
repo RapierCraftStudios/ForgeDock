@@ -1369,3 +1369,12 @@ branches:
 #   webhook_url: https://hooks.example.com/forgedock   # https, or http on localhost
 #   webhook_secret_env: FORGE_EVENTS_SECRET            # NAME of the env var holding the HMAC secret
 #   dir: ~/.forge/events                               # local JSONL directory
+
+# ---------------------------------------------------------------------------
+# ci (forge#4667): scheduled full-suite runs on active milestone branches, report-only
+# ci:
+#   milestone_integration:
+#     workflow: e2e.yml          # workflow_dispatch workflow running the full suite
+#     interval_hours: 24
+#     every_merges: 10           # optional
+#     block_admission_after: 2   # optional: hold new lanes after N red runs

@@ -297,6 +297,7 @@ else
     echo "$MILESTONES" | while IFS= read -r line; do
         echo "  $line"
     done
+    forgedock integration status --repo "$GH_REPO" 2>/dev/null || true # last green full-suite run (forge#4667)
 fi
 
 # forge#4657: lifecycle (FORGE:LIFECYCLE in the milestone description, bin/lean/lifecycle.mjs).

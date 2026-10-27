@@ -784,6 +784,33 @@ Each run emits an `E2E_VERIFY` run-log/telemetry event (`pr`, `head`, `reason`, 
 
 **Commands that use this section**: core work-on (`forgedock run-issue`, `forgedock orchestrate`; `bin/engine-cli.mjs` `readVerify`)
 
+## `ci` (OPTIONAL)
+
+Scheduled full-suite integration runs on active milestone branches (forge#4667), report-only. Under the fast-lane/heavy-ship-gate model the whole e2e suite otherwise runs only at the ship PR. Write it as a block-style section; the parser flattens the keys of `milestone_integration:` under `ci`. Off unless `workflow` is set.
+
+```yaml
+ci:
+  milestone_integration:
+    workflow: e2e.yml            # workflow_dispatch workflow that runs the full suite
+    # project: web-e2e           # optional project passed to the workflow
+    # project_input: project     # its input name (default project)
+    interval_hours: 24           # run when this old (default 24, nightly)
+    every_merges: 10             # optional: also run after N lane merges into the milestone
+    block_admission_after: 2     # optional: hold new lanes after N consecutive red runs, until green
+    max_minutes: 360             # optional wait budget per run (default 360)
+```
+
+| Key | Type | Required | Description |
+|---|---|---|---|
+| `workflow` | string | Yes | Workflow file dispatched on `milestone/<slug>` (needs `on: workflow_dispatch`). |
+| `project` / `project_input` | string | No | Value and input name passed to the workflow. |
+| `interval_hours` | number | No | Hours between runs of a milestone. Default 24. |
+| `every_merges` | integer | No | Also run once this many lane merges happened since the last run (checked by `forgedock orchestrate`). |
+| `block_admission_after` | integer | No | After this many consecutive red runs, `forgedock orchestrate` admits no new lane of that milestone (ends `held`) until a run is green. |
+| `max_minutes` | integer | No | Wait budget of one run. Default 360. |
+
+State lives in a `FORGE:INTEGRATION` block in the milestone description. A red run files or updates one `integration-red` issue on the milestone (failing specs, merge range); the next green run closes it. `/deploy-info` shows open ones as a ship-gate risk and `/pipeline-status` shows each milestone's last green run. Schedule it with cron or a scheduled workflow: `forgedock integration run [--repo owner/repo] [--milestone TITLE] [--force]` (exit 1 when a run is red; `forgedock integration status` prints each last green run); `forgedock orchestrate` also runs it every `every_merges` merges.
+
 ## `execution` (OPTIONAL)
 
 Where `forgedock orchestrate` runs its lanes (forge#4253). Block style only.
