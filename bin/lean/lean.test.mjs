@@ -444,6 +444,20 @@ describe("core work-on", () => {
     noNeedsHuman(w);
   });
 
+  it("#4686 a needs-human dependency whose PR is already on the lane is not dependency-blocked", async () => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "upstream", block: { kind: "dependency", issues: [3] } } },
+      { 3: { state: "OPEN", labels: [{ name: "needs-human" }] } });
+    const gh = w.io.gh, git = w.io.git, seen = [];
+    w.io.gh = async (a) => (a[0] === "pr" && a[1] === "list" && a.includes("merged")
+      ? JSON.stringify([{ number: 88, mergeCommit: { oid: "deadbeefcafe0000" }, closingIssuesReferences: [{ number: 3 }], title: "", body: "" }])
+      : gh(a));
+    w.io.git = async (a, o) => { if (a[0] === "merge-base" && a[2] === "deadbeefcafe0000") { seen.push(a.join(" ")); return ""; } return git(a, o); };
+    const r = await run(w);
+    assert.notEqual(r.terminalReason, "dependency-blocked");
+    assert.notEqual(r.terminalReason, "dependency-open");
+    assert.ok(seen.some((c) => c.includes("deadbeefcafe0000") && c.includes("origin/")), seen.join("|"));
+  });
+
   it("#4124 split-required files sub-issues with Parent / Depends-on lines and ends decomposed", async () => {
     const w = depWorld({ changed: [], result: { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [
       { title: "part A", body: "do A", paths: ["src/a"] }, { title: "part B", body: "do B", paths: ["src/b"], depends_on: [0] }] } } }, {});

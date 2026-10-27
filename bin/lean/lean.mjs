@@ -11,7 +11,7 @@ import { appendEvent } from "../engine/runlog.mjs";
 import { readSelfReview, compareSelfReview } from "./selfreview.mjs";
 import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
-import { openDependency, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
+import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
 import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
@@ -788,6 +788,7 @@ export async function runCore(o) {
     const b = classifyBlock(r, issue);
     if (b.kind !== "dependency") return b;
     const open = [], blockers = [];
+    const lanePrs = lane ? laneMergedPrs(lane, io) : null;
     for (const d of b.issues) {
       let v;
       try { v = JSON.parse(String(await ghc(["issue", "view", String(d), "-R", repo, "--json", "state,labels"]))); } catch (e) {
@@ -807,6 +808,7 @@ export async function runCore(o) {
       }
       for (const [n, rec] of recs) {
         if (String(rec?.state).toUpperCase() !== "OPEN" || n === Number(issue) || open.includes(n)) continue;
+        if (lanePrs && await dependencyOnLane(n, lane, await lanePrs, io)) continue; // #4686: its change is on the lane: neither open nor a needs-human blocker
         open.push(n);
         if ((rec.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) blockers.push(n);
       }
@@ -886,8 +888,13 @@ export async function runCore(o) {
   // ---- admission: Depends-on refusal, then lease ----
   {
     let dep = null;
-    try { dep = await openDependency(issue, io); } catch (e) { dep = { unreadable: true, detail: `issue ${issue} **Depends on** check failed: ${e?.message || e}` }; }
+    try { dep = await openDependency(issue, io, { lane }); } catch (e) { dep = { unreadable: true, detail: `issue ${issue} **Depends on** check failed: ${e?.message || e}` }; }
     if (dep?.unreadable) return { terminalReason: "dependency-unreadable", code: OUTCOME_CODES.DEPENDENCY_UNREADABLE, detail: dep.detail };
+    if (dep?.satisfied?.length) { // #4686: open on GitHub, but its PR is already on this lane
+      const names = dep.satisfied.map((x) => `#${x.issue} (PR #${x.pr}, merge commit ${x.sha.slice(0, 12)} on origin/${lane})`).join(", ");
+      T.decisions.push(`Dependency satisfied by lane merge: ${names}`);
+      try { await post("FORGE:DEPENDENCY", `## Dependency satisfied\n${names} merged into ${lane}; the issue stays open until promotion, so the **Depends on** edge is met.`); } catch { /* best effort */ }
+    }
     if (dep?.open?.length) {
       return { terminalReason: "dependency-open", code: OUTCOME_CODES.DEPENDENCY_OPEN, dependencies: dep.open,
         detail: `issue ${issue} **Depends on** ${dep.open.map((n) => `#${n}`).join(", ")} which is still open; re-run once it is closed` };
