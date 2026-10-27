@@ -12,7 +12,8 @@
 #   FAILED      the run executed and failed
 #   RAN         the run executed and passed
 #   RAN_NOTHING the runner exercised nothing
-#   UNRUNNABLE  could not execute (timeout 124, not executable 126/127, worktree/overlay/classifier failure)
+#   UNRUNNABLE  could not execute (timeout 124, not executable 126/127, worktree/overlay/classifier failure, or head failed
+#               only on a missing host module/command such as `No module named pytest`; forge#4655)
 #   SKIPPED     base was not run because head did not PASS (never a missing file: head's new test files are overlaid)
 # Never prints a verdict on success of cleanup: the base worktree is removed on every exit path (trap + explicit remove).
 # Callers map: HEAD=RAN BASE=FAILED -> proof; BASE=RAN -> passes on base (gate FAIL); anything else that is not a proof -> DEGRADED/FAIL.
@@ -54,7 +55,23 @@ run_in() {
   else ( cd "$dir" && bash -c "$CMD" ) >"$out" 2>&1; rc=$?; fi
   case "$rc" in 124|126|127) echo UNRUNNABLE; return ;; esac
   cls=$(bash "$CLS" "$rc" "$out" 2>/dev/null)
-  case "$cls" in FAILED|RAN|RAN_NOTHING) echo "$cls" ;; *) echo UNRUNNABLE ;; esac
+  case "$cls" in FAILED|RAN|RAN_NOTHING) ;; *) echo UNRUNNABLE; return ;; esac
+  # forge#4655: a head run that failed only because the host lacks an interpreter module or command (No module named
+  # pytest, X: command not found) is the environment, not the change: UNRUNNABLE. A module the repo itself tracks stays FAILED.
+  if [ "$cls" = "FAILED" ] && [ "$dir" = "$REPO" ] && host_missing "$out"; then echo UNRUNNABLE; return; fi
+  echo "$cls"
+}
+
+# host_missing <output_file>: true when the output names a missing third-party python module or a missing command
+host_missing() {
+  local f="$1" name
+  name=$(sed -n "s/.*No module named '\([^'.]*\).*/\1/p" "$f" | head -1)
+  if [ -n "$name" ]; then
+    git -C "$REPO" ls-files 2>/dev/null | tr '/' '\n' | grep -qxE "$name(\.py)?" && return 1
+    return 0
+  fi
+  name=$(sed -n 's/.*[ :]\([A-Za-z0-9_.-][A-Za-z0-9_.-]*\): command not found.*/\1/p' "$f" | head -1)
+  [ -n "$name" ]
 }
 
 HEAD_RES=$(run_in "$REPO")
