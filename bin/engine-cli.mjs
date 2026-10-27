@@ -1922,7 +1922,7 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
       // #4725: a recorded premise that already holds is not a blocker; an identical owner ask links to its entry instead of a new one.
       const prem = await import("./lean/needs-human-premise.mjs");
       const predicate = prem.parsePredicate(evidence);
-      if (predicate && await prem.evalPredicate(predicate, { repo, io: { gh }, now: now() }) === true) return "skipped";
+      if (predicate && await prem.evalPredicate(predicate, { repo, io: { gh, pkgVersion: prem.registryPkgVersion }, now: now() }) === true) return "skipped";
       const reg = await prem.registerAsk({ repo, io: { gh }, issue, ask: String(evidence ?? "") });
       const extra = [prem.premiseAnnotation(predicate), reg.existing ? `Same owner ask as #${reg.existing} (one ask, linked): answering it unblocks this issue too.` : ""].filter(Boolean).join("\n");
       try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `needs-human,${NEEDS_HUMAN_EXTERNAL_LABEL}`]); } catch { return "failed"; }
@@ -1951,7 +1951,7 @@ async function scheddDue() {
   const leanIo = (await import("./lean/effects.mjs")).makeLeanIo({ repo });
   await sweepDue({ repo, cwd: process.cwd(), io: leanIo, onResult: probeEventSink(repo) });
   await sweepParkedFollowups({ repo, io: leanIo }); // #4689: re-queue parked post-deploy follow-ups on the same pass
-  try { await (await import("./lean/needs-human-premise.mjs")).sweepPremises({ repo, io: leanIo }); } catch { /* best effort (#4725) */ } // clear needs-human whose recorded premise now holds
+  try { const prem = await import("./lean/needs-human-premise.mjs"); await prem.sweepPremises({ repo, io: { gh: (a) => leanIo.gh(a), pkgVersion: prem.registryPkgVersion } }); } catch { /* best effort (#4725) */ } // clear needs-human whose recorded premise now holds
 }
 
 /** #4689: re-evaluate the parked post-deploy follow-ups of the repo (promotion, due date, check now defined); never throws. */

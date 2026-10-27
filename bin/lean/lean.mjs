@@ -58,7 +58,7 @@ import { readDecisionIndex, withDecisionRows, recordDecisions } from "./decision
 import { parseContextPackConfig, contextArm, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
 import { isExternalKill } from "./hostkill.mjs";
 import { buildResumeDigest } from "./resume.mjs";
-import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, closedEdgeNote } from "./needs-human-premise.mjs";
+import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registryPkgVersion, closedEdgeNote } from "./needs-human-premise.mjs";
 import { lightEligibility } from "./light.mjs";
 import { untrackToolState, unstageToolState } from "./toolstate.mjs";
 import { ensureSignedOff } from "./signoff.mjs";
@@ -485,7 +485,7 @@ export async function runCore(o) {
   async function needsHuman(why, code = OUTCOME_CODES.ENGINE_ERROR, extra = {}) {
     // #4725: a recorded premise (`Premise: <kind>:<arg>`) that already holds is no blocker: no label, the lane runs again.
     const predicate = parsePredicate(why);
-    if (predicate && (!recover || recover.final) && await evalPredicate(predicate, { repo, io: { gh: ghc, pkgVersion: io.pkgVersion } }) === true) {
+    if (predicate && (!recover || recover.final) && await evalPredicate(predicate, { repo, io: { gh: ghc, pkgVersion: io.pkgVersion ?? registryPkgVersion } }) === true) {
       try { await post("FORGE:DECISION", `## Decision: no needs-human\n**What**: the recorded premise \`${predicate.kind}:${predicate.arg}\` already holds, so the label was not applied.\n**Why**: the blocker named an external fact that has since changed.\n**Alternative**: label needs-human and wait for the sweep to clear it.`); } catch { /* best effort */ }
       return finish("deferred", `premise ${predicate.kind}:${predicate.arg} holds; re-queued instead of needs-human`, { retryInSeconds: 30 });
     }

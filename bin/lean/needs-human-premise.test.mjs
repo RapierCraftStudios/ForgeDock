@@ -81,3 +81,8 @@ describe("owner-ask registry (#4725)", () => {
     assert.match(fresh.entry, /FORGE:ASK key=/);
   });
 });
+
+import { registryPkgVersion } from "./needs-human-premise.mjs";
+it("registryPkgVersion rejects unsafe package names without spawning", async () => {
+  assert.equal(await registryPkgVersion("x; rm -rf /"), null);
+});

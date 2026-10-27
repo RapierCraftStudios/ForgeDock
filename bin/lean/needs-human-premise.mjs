@@ -14,6 +14,7 @@
  * with the same normalized ask links to the existing entry. GitHub is the register: nothing here is a local cache. Pure apart from `io`.
  */
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 
 export const PREMISE_MARKER = "FORGE:PREMISE";
 export const ASK_MARKER = "FORGE:ASK";
@@ -36,6 +37,14 @@ export function comparePremiseVersions(a, b) {
   const pa = String(a).split(/[.-]/).map((x) => parseInt(x, 10) || 0), pb = String(b).split(/[.-]/).map((x) => parseInt(x, 10) || 0);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] ?? 0) - (pb[i] ?? 0); if (d) return d < 0 ? -1 : 1; }
   return 0;
+}
+
+/** Production `io.pkgVersion`: the npm registry's latest version of `name`, or null when unreachable. */
+export function registryPkgVersion(name) {
+  return new Promise((resolve) => {
+    if (!/^(@[\w.-]+\/)?[\w.-]+$/.test(String(name))) return resolve(null);
+    execFile("npm", ["view", String(name), "version"], { timeout: 15000 }, (err, out) => resolve(err ? null : String(out).trim() || null));
+  });
 }
 
 /** true | false | null (unknown). Never throws. */
