@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { runCore, contractHash, isProtectedLaneBranch, classifyBlock } from "./lean.mjs";
 import { parseFactsComment, normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
 import { makeLedger } from "./ledger.mjs";
+import { writeIndex } from "./guards.mjs";
 import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
@@ -1802,6 +1803,24 @@ describe("structure delta and decision provenance at merge (forge#4165)", () => 
     w.numstat = "120\t3\tsrc/foo.js\n4\t0\ttest/foo.test.js\n-\t-\tlogo.png\n9\t0\t.forge-lean/result.json\n300\t1\tapps/web/big.ts\n";
     return w;
   };
+
+  it("#4694 a guarded deliverable freezes H preserve rows listed under Decision sources; an unguarded lane gets none", async () => {
+    const home = tmpDir("hist-home-"), prev = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const plain = await run(mworld(), { dir: tmpDir("hist-a-") });
+      assert.equal(plain.terminalReason, "merged");
+      const guard = { v: 1, issue: 3, pr: 30, merge_sha: "s", tests: [{ path: "test/foo.test.js", ids: [] }], hunks: [{ file: "src/foo.js", start: 1, end: 3, symbol: null }], why: "keep foo stable" };
+      writeIndex("o/r", [guard]);
+      const withH = { ...contract, preserve: [...(contract.preserve ?? []), { id: "H1", what: "x" }] };
+      const w = mworld({ reviews: [conf({}, withH, ["src/foo.js", "test/foo.test.js", "packages/db/package.json"])] });
+      const r = await run(w, { dir: tmpDir("hist-b-") });
+      assert.equal(r.terminalReason, "merged");
+      const frozen = w.comments.filter((c) => c.includes("FORGE:CONTRACT")).map((c) => parseContractComment(c)).find(Boolean).contract;
+      assert.deepEqual(frozen.preserve.filter((p) => p.source === "guard"), [{ id: "H1", what: "keep foo stable (#3, PR #30)", source: "guard" }]);
+      assert.match(w.comments.find((c) => c.includes("FORGE:TRAJECTORY")), /\| Decision sources \| K1 doc, K2 precedent, H1 guard \|/);
+    } finally { if (prev === undefined) delete process.env.HOME; else process.env.HOME = prev; }
+  });
 
   it("a merged run writes one STRUCTURE_DELTA with edges, growth, provenance and the PR; the trajectory shows it; no extra gh call", async () => {
     const dir = tmpDir("struct-merge-");

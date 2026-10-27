@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildGuard, guardTests, parseHunks, renderGuard, parseGuard, guardIssue, listGuards, backfill, guardsCli, readIndex, guardAfterMerge } from "./guards.mjs";
+import { buildGuard, guardTests, parseHunks, renderGuard, parseGuard, guardIssue, listGuards, backfill, guardsCli, readIndex, guardAfterMerge, historyPreserve, withHistoryRows, writeIndex } from "./guards.mjs";
 import { renderContract } from "./render.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
 
@@ -134,4 +134,42 @@ test("guardAfterMerge fetches the bare branch (not origin/<lane>) and the merge 
   assert.ok(calls.includes("fetch origin staging"));
   assert.ok(!calls.some((c) => c.includes("origin/staging")));
   assert.ok(r.posted, JSON.stringify(r));
+});
+
+const G = (issue, file, over = {}) => ({ v: 1, issue, pr: issue + 100, merge_sha: "s", tests: [{ path: "test/x.test.mjs", ids: [] }], hunks: [{ file, start: 1, end: 2, symbol: null }], why: `fix ${issue}`, ...over });
+test("historyPreserve: guarded deliverable yields rows, unguarded none, own issue skipped", () => {
+  const guards = [G(5, "src/a.mjs"), G(6, "lib/other.mjs"), G(7, "src/a.mjs")];
+  const rows = historyPreserve({ guards, deliverables: [{ path: "src/a.mjs" }], issue: 7 });
+  assert.deepEqual(rows, [{ id: "H1", what: "fix 5 (#5, PR #105)", source: "guard" }]);
+  assert.deepEqual(historyPreserve({ guards, deliverables: [{ path: "src/zzz/q.mjs" }], issue: 1 }), []);
+});
+test("historyPreserve: deterministic under input order, capped at 5, proximity then recency", () => {
+  const guards = [G(1, "lib/z.mjs"), G(2, "src/a.mjs"), G(3, "src/b.mjs"), G(4, "src/c.mjs"), G(5, "src/d.mjs"), G(6, "src/e.mjs"), G(8, "x/y.mjs", { tests: [{ path: "src/a.mjs", ids: [] }] }), G(9, "src/a.mjs")];
+  const d = [{ path: "src/a.mjs" }];
+  const a = historyPreserve({ guards, deliverables: d, issue: 99 });
+  const b = historyPreserve({ guards: [...guards].reverse(), deliverables: d, issue: 99 });
+  assert.deepEqual(a, b);
+  assert.equal(a.length, 5);
+  assert.deepEqual(a.map((r) => r.what.match(/#(\d+),/)[1]), ["9", "2", "8", "6", "5"], "hunk match first, then test match, then same directory by recency");
+  assert.deepEqual(a.map((r) => r.id), ["H1", "H2", "H3", "H4", "H5"]);
+});
+test("withHistoryRows reads the local index; no index or no match returns the same contract", () => {
+  const root = tmpDir("guards-hist-");
+  const c = { requirements: [], deliverables: [{ id: "D1", path: "src/a.mjs" }], preserve: [{ id: "P1", what: "keep" }, { id: "H9", what: "old", source: "guard" }], validate: [] };
+  assert.equal(withHistoryRows(c, { repo: "o/r", issue: 1, root }), c, "no index");
+  writeIndex("o/r", [G(5, "src/a.mjs")], { root });
+  const w = withHistoryRows(c, { repo: "o/r", issue: 1, root });
+  assert.deepEqual(w.preserve.map((p) => p.id), ["P1", "H1"]);
+  const none = { ...c, deliverables: [{ id: "D1", path: "docs/q.md" }] };
+  assert.equal(withHistoryRows(none, { repo: "o/r", issue: 1, root }), none);
+});
+test("guardAfterMerge adds the posted guard to an existing local index only", async () => {
+  const root = tmpDir("guards-idx-");
+  const body = `<!-- FORGE:CONTRACT -->\n${renderContract({ requirements: [], deliverables: [], preserve: [], ...nodeContract }, "abcdef123456")}`;
+  const io = { gh: async (a) => a[0] === "issue" ? JSON.stringify({ number: 9, title: "t", comments: [{ body }] }) : a[0] === "pr" ? JSON.stringify({ number: 3, mergeCommit: { oid: "abc123" } }) : "", git: async (a) => (a[0] === "diff" ? DIFF : "") };
+  assert.ok((await guardAfterMerge({ io, repo: "o/r", issue: 9, pr: 3, cwd: "/x", root })).posted);
+  assert.equal(readIndex("o/r", { root }), null, "no index is not created from one guard");
+  writeIndex("o/r", [G(5, "src/a.mjs")], { root });
+  await guardAfterMerge({ io, repo: "o/r", issue: 9, pr: 3, cwd: "/x", root });
+  assert.deepEqual(readIndex("o/r", { root }).map((g) => g.issue), [5, 9]);
 });

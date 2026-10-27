@@ -149,6 +149,46 @@ export function listGuards(guards, { path = null } = {}) {
   return guards.filter((g) => (g.hunks ?? []).some((h) => hit(h.file)) || (g.tests ?? []).some((t) => hit(t.path)));
 }
 
+const H_ROW = /^H\d+$/;
+const dirOf = (f) => String(f).split("/").slice(0, -1).join("/");
+
+/**
+ * History preserve rows (#4694): at most `cap` `{id:"H<n>", what, source:"guard"}` rows for the guards covering the deliverable
+ * paths. Pure and deterministic: score 3 = a protected hunk file is a deliverable, 2 = a guarding test file is, 1 = either sits
+ * under a deliverable's directory; ties go to the newest issue. The lane's own issue is skipped.
+ */
+export function historyPreserve({ guards, deliverables, issue = null, cap = 5 }) {
+  const paths = [...new Set((deliverables ?? []).map((d) => String(d?.path ?? d ?? "").replace(/^\.\//, "")).filter(Boolean))];
+  if (!paths.length || !Array.isArray(guards) || !guards.length) return [];
+  const dirs = paths.map(dirOf).filter(Boolean);
+  const under = (f) => dirs.some((d) => f.startsWith(`${d}/`));
+  const scored = [];
+  for (const g of guards) {
+    if (!g || g.issue == null || String(g.issue) === String(issue)) continue;
+    const hunks = (g.hunks ?? []).map((h) => String(h.file)), tests = (g.tests ?? []).map((t) => String(t.path));
+    const score = hunks.some((f) => paths.includes(f)) ? 3 : tests.some((f) => paths.includes(f)) ? 2 : [...hunks, ...tests].some(under) ? 1 : 0;
+    if (score) scored.push({ g, score });
+  }
+  scored.sort((a, b) => b.score - a.score || Number(b.g.issue) - Number(a.g.issue) || (Number(a.g.pr) || 0) - (Number(b.g.pr) || 0));
+  const seen = new Set();
+  return scored.filter(({ g }) => !seen.has(String(g.issue)) && seen.add(String(g.issue))).slice(0, cap).map(({ g }, i) => ({
+    id: `H${i + 1}`,
+    what: `${String(g.why ?? "").replace(/\s+/g, " ").trim().slice(0, 160) || "guarded fix"} (#${g.issue}${g.pr ? `, PR #${g.pr}` : ""})`,
+    source: "guard",
+  }));
+}
+
+/** The contract with H-rows from the local guards index appended to preserve; the same object when nothing applies. Never throws. */
+export function withHistoryRows(contract, { repo, issue, root, fs = nodeFs } = {}) {
+  try {
+    const guards = readIndex(repo, { root, fs });
+    if (!guards?.length) return contract;
+    const rows = historyPreserve({ guards, deliverables: contract?.deliverables, issue });
+    if (!rows.length) return contract;
+    return { ...contract, preserve: [...(contract.preserve ?? []).filter((p) => !(H_ROW.test(p?.id) && p?.source === "guard")), ...rows] };
+  } catch { return contract; }
+}
+
 /**
  * Backfill guards for issues closed since `since` (ISO date) that ran through the lean lane (a FORGE:CONTRACT comment and a
  * merged PR). Lanes without a test yield no guard; the reason is reported in `logs`. Idempotent.
@@ -166,11 +206,15 @@ export async function backfill({ gh, git, repo, since, dryRun = false, log = () 
 }
 
 /** Lane hook: after a merge, fetch the base so the merge commit is local, then guard the issue. Best effort: never throws. */
-export async function guardAfterMerge({ io, repo, issue, pr, cwd, base = null }) {
+export async function guardAfterMerge({ io, repo, issue, pr, cwd, base = null, root }) {
   try {
     const branch = base ? String(base).replace(/^(?:refs\/remotes\/)?origin\//, "") : null; // lean.mjs passes `origin/<lane>`
     if (branch) { try { await io.git(["fetch", "origin", branch], { cwd }); } catch { /* offline: use the local ref */ } }
-    return await guardIssue({ gh: (a) => io.gh(a), git: (a) => io.git(a, { cwd }), repo, issue, pr });
+    const r = await guardIssue({ gh: (a) => io.gh(a), git: (a) => io.git(a, { cwd }), repo, issue, pr });
+    if (r.posted) { // #4694: keep the local cache current so the next lane's freeze sees this guard; only extend an existing index
+      try { const cur = readIndex(repo, { root }); if (cur) writeIndex(repo, [...cur.filter((g) => g.issue !== r.guard.issue), r.guard], { root }); } catch { /* cache only */ }
+    }
+    return r;
   } catch (e) { return { skipped: true, reason: `guard failed: ${String(e?.message ?? e).split("\n")[0].slice(0, 160)}` }; }
 }
 
