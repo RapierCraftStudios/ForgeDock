@@ -2,20 +2,19 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "`renderGuard` output contains no `>` other than the closing `-->`. The round trip survives `-->`, `--!>` and `\u003cx>` in any string field.",
+   "quote": "The failure scenario above no longer reproduces at `scripts/file-deferred-followups.sh:79`, covered by a regression test that fails on the current staging head.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "CodeQL reports no `js/bad-tag-filter` alert on `bin/lean/guards*.mjs`.",
+   "quote": "No behaviour change for lanes or repos the finding does not describe.",
    "disposition": "deliver",
-   "verify": "out_of_band",
-   "evidence": "CodeQL check on release PR #4733 (code-scanning workflow); in lane, no `-->` regex remains in guards.mjs or guards.test.mjs"
+   "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "`bin/lean/guards.test.mjs:48`: assert the round trip with `--!>` and `-->` in a field, without a regex the scanner flags.",
+   "quote": "Validation should reject requirement text (`R\u003cn>:` prefixes, prose), not legal path characters.",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -23,19 +22,20 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/lean/guards.mjs",
-   "change": "renderGuard: escape every `\u003c` and `>` in the JSON as \\u003c / \\u003e (replace(/\u003c/g) and replace(/>/g)); drop the `-->` regex replace",
+   "path": "scripts/file-deferred-followups.sh",
+   "change": "Replace the character-whitelist grep at the column-1 check with a blacklist: keep the R\u003cn>: rejection; reject control chars; a value with whitespace must contain '/' or end in .\u003cext>, otherwise it is prose and rejected; whitespace-free values pass. Update header comment.",
    "requirements": [
     "R1",
-    "R2"
+    "R3"
    ]
   },
   {
    "id": "D2",
-   "path": "bin/lean/guards.test.mjs",
-   "change": "Round-trip test with a field containing `-->`, `--!>` and `\u003cx>`; assert no `>` in the body except the closing `-->` using slice/indexOf/includes, no regex matching `-->`",
+   "path": "scripts/file-deferred-followups.test.sh",
+   "change": "Add cases: app/(marketing)/page.tsx, 'docs/My Notes.md', src/a=b.ts, src/#x.ts, src/foo:bar.ts are accepted (rc 0, issue created, path listed); existing prose and R\u003cn>: rows stay rejected; a mixed batch with these paths files everything.",
    "requirements": [
     "R1",
+    "R2",
     "R3"
    ]
   }
@@ -43,34 +43,17 @@
  "preserve": [
   {
    "id": "P1",
-   "what": "parseGuard/GUARD_RE in bin/lean/guards.mjs still parse previously posted guards (old escapes `\\u003c`, `--\\u003e` are valid JSON)"
+   "what": "Rejection of `R\u003cn>:` prefixed and prose column-1 values (exit 2, DEFERRED_TSV=INVALID, nothing filed) in scripts/file-deferred-followups.test.sh section 21"
   },
   {
    "id": "P2",
-   "what": "guardIssue idempotency and other guards.test.mjs tests, and bin/lean/lean.test.mjs/train.test.mjs consumers of renderGuard/parseGuard"
+   "what": "Row format, exit codes, stdout markers and gh call behaviour of scripts/file-deferred-followups.sh for already-valid paths; callers in commands/work-on/build.md"
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test bin/lean/guards.test.mjs"
-  },
-  {
-   "id": "V2",
-   "command": "node --test bin/lean/lean.test.mjs bin/lean/train.test.mjs"
+   "command": "bash scripts/file-deferred-followups.test.sh"
   }
- ],
- "decisions": [
-  {
-   "id": "K1",
-   "choice": "Escape all `>` as \\u003e instead of adding a `--!>` case",
-   "justification": "Same pattern already at bin/lean/drift.mjs:70, lifecycle.mjs:27, integration.mjs:71; covers every terminator variant",
-   "source": "precedent"
-  }
- ],
- "repro_test": {
-  "path": "bin/lean/guards.test.mjs",
-  "id": "render/parse round trip survives '-->' in a field",
-  "command": "node --test --test-name-pattern=\"round trip survives\" bin/lean/guards.test.mjs"
- }
+ ]
 }

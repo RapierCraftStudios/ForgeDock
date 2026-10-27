@@ -1,22 +1,16 @@
 ### Approach
-Escape every `<` and `>` in the embedded JSON (as `<`/`>`), the pattern already used in drift.mjs, lifecycle.mjs and integration.mjs. No comment terminator variant can then appear.
-
+Replaced the column-1 character whitelist with a blacklist: `R<n>:` prefix still rejected, control chars rejected, whitespace values must contain `/` or end in an extension (so prose is still rejected).
 ### Changes
-- bin/lean/guards.mjs:84: renderGuard escapes all `>` instead of only `-->`.
-- bin/lean/guards.test.mjs:48: round-trip test with `-->`, `--!>`, `<x>` in why and test fields; asserts no `>` before the closing ` -->` via slice/includes (no regex).
-
+- scripts/file-deferred-followups.sh: new column-1 validation, header comment.
+- scripts/file-deferred-followups.test.sh: regression test for the five issue paths.
 ### Acceptance Criteria Status
-- R1 ✅ guards.mjs:84, guards.test.mjs:48
-- R2 ✅ in lane no `-->` regex left in guards*.mjs; out-of-band CodeQL job is configured (.github/workflows/codeql.yml), instrumented: true
-- R3 ✅ guards.test.mjs:48
-
+- R1 ✅ scripts/file-deferred-followups.sh:78-79, test at the #4739 case
+- R2 ✅ existing 68 checks unchanged and passing
+- R3 ✅ rejection cases in section 21 still pass
 ### Verification
-- V1 `node --test bin/lean/guards.test.mjs`: pass 15/0; the new test fails without the fix (14 pass, 1 fail).
-- V2 `node --test bin/lean/lean.test.mjs bin/lean/train.test.mjs`: pass 516/0.
-- forgedock check: PASS. devdocs freshness: OK.
-
+- V1 `bash scripts/file-deferred-followups.test.sh`: passed=69 failed=0; the new test fails without the fix (68/1).
 ### Notes
-Old posted guards (`-->` escapes) still parse. checks.mjs widened to the full suite, so it was not run.
+No env vars or other behaviour changes.
 
-### Docs follow-up
-Freshness check failed on guards.mjs; added a dated entry to `devdocs/modules/lean.md` (#4741). V1/V2 re-run: pass.
+## Docs
+Added a devdocs/modules/lean.md entry (#4739) describing the column-1 validation change, to satisfy check-devdocs-freshness.
