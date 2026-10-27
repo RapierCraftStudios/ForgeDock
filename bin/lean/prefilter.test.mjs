@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, isTrustedIssueComment, DEFAULT_PREFILTER_MODEL, parseMinAge, itemWindowsMs, landedAt } from "./prefilter.mjs";
+import { prefilterIssue, flakyReason, makePrefilter, postDeployGate, postDeployOnly, deferredFrom, formatParkedLine, lazyDefaultBranch, ownLogins, resolveOwnLogins, formatPrefilterSummary, claimsFix, ciFailureRun, namedPaths, isTrustedIssueComment, DEFAULT_PREFILTER_MODEL, parseMinAge, itemWindowsMs, landedAt, itemDueMs, hasDecisionItem } from "./prefilter.mjs";
 import { writeFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { execFileSync } from "node:child_process";
@@ -600,5 +600,47 @@ describe("#4467: isTrustedIssueComment", () => {
     assert.equal(isTrustedIssueComment({ author: { login: "owner" }, authorAssociation: "OWNER" }), true);
     assert.equal(isTrustedIssueComment({ author: { login: "someone" }, authorAssociation: "CONTRIBUTOR" }), false);
     assert.equal(isTrustedIssueComment(null), false);
+  });
+});
+
+describe("due-date and decision follow-ups (#4689)", () => {
+  const MERGE = "a".repeat(40);
+  const dueItem = (date) => `- [ ] \`R2: the 7-day window shows a health row\` — post-deploy: due:${date} only checkable after the window`;
+  const decision = "- [ ] `R3: pick the retention` — decision: owner chooses 30 or 90 days";
+  const body = (items) => `## Problem\n\n${items.join("\n")}\n\n<!-- FORGE:DEFERRED_FROM: #40 -->\n`;
+  const parentPr = [{ number: 90, title: "fix(x): health row (#40)", body: "", mergeCommit: { oid: MERGE } }];
+  const at = (iso) => Date.parse(iso);
+
+  it("parses the due token (latest wins) and decision items; a decision-only body counts as verification-only", () => {
+    assert.equal(itemDueMs(body([dueItem("2026-11-03"), dueItem("2026-11-10")])), Date.UTC(2026, 10, 10));
+    assert.equal(itemDueMs(body(["- [ ] `R2: x` — post-deploy: no date"])), null);
+    assert.ok(postDeployOnly(body([decision]))); assert.ok(hasDecisionItem(body([decision])));
+    assert.ok(!hasDecisionItem(body([dueItem("2026-11-03")])));
+  });
+
+  it("before the due date the follow-up parks awaiting-due with a due:<date> label, no lane; after it, the labels are removed", async () => {
+    const w = world({ issues: { 41: { body: body([dueItem("2026-11-03")]) } }, mergedPrs: parentPr, ancestry: { [MERGE]: 0 } });
+    w.io.now = () => at("2026-11-01T00:00:00Z");
+    const r = await pf(w, 41, { defaultBranch: "main" });
+    assert.equal(r.parked, true); assert.equal(r.kind, "awaiting-due"); assert.equal(r.eligibleAt, "2026-11-03T00:00:00.000Z");
+    assert.deepEqual(w.edits, [[41, "--add-label", "awaiting-due,due:2026-11-03"]]);
+    assert.equal(w.runner.length, 0);
+    assert.match(formatParkedLine([{ issue: 41, prefilter: r }]), /^due date: #41 \(2026-11-03\)/);
+    const w2 = world({ issues: { 41: { body: body([dueItem("2026-11-03")]), labels: [{ name: "awaiting-due" }, { name: "due:2026-11-03" }] } }, mergedPrs: parentPr, ancestry: { [MERGE]: 0 } });
+    w2.io.now = () => at("2026-11-03T00:00:01Z");
+    const r2 = await pf(w2, 41, { defaultBranch: "main", gateOnly: true });
+    assert.equal(r2.kind, "awaiting-measurement"); // released from the date; with no check on main it waits on its owner, never a lane
+    assert.deepEqual(w2.edits[0], [41, "--remove-label", "awaiting-due,due:2026-11-03"]);
+    assert.ok(w2.comments.some(([, b]) => /FORGE:OWNER_ASK/.test(b)));
+    assert.equal(w2.runner.length, 0);
+  });
+
+  it("a decision item is parked as one typed owner ask (posted once), never a lane, never needs-human", async () => {
+    const w = world({ issues: { 42: { body: body([decision]) } }, mergedPrs: parentPr, ancestry: { [MERGE]: 1 } });
+    const r = await pf(w, 42, { defaultBranch: "main" });
+    assert.equal(r.parked, true); assert.equal(r.kind, "owner-ask"); assert.equal(w.runner.length, 0);
+    assert.equal(w.comments.length, 1); assert.match(w.comments[0][1], /FORGE:OWNER_ASK/);
+    assert.match(formatParkedLine([{ issue: 42, prefilter: r }]), /^owner ask: #42/);
+    assert.deepEqual(w.edits, []);
   });
 });

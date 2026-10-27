@@ -1936,7 +1936,18 @@ async function scheddDue() {
   const repo = await resolveDefaultRepo(io);
   if (!repo) return;
   const { sweepDue } = await import("./lean/postdeploy-monitor.mjs");
-  await sweepDue({ repo, cwd: process.cwd(), io: (await import("./lean/effects.mjs")).makeLeanIo({ repo }), onResult: probeEventSink(repo) });
+  const leanIo = (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+  await sweepDue({ repo, cwd: process.cwd(), io: leanIo, onResult: probeEventSink(repo) });
+  await sweepParkedFollowups({ repo, io: leanIo }); // #4689: re-queue parked post-deploy follow-ups on the same pass
+}
+
+/** #4689: re-evaluate the parked post-deploy follow-ups of the repo (promotion, due date, check now defined); never throws. */
+async function sweepParkedFollowups({ repo, io, dryRun = false }) {
+  try {
+    const { sweepParked } = await import("./lean/parked-sweep.mjs");
+    const branches = readBranches();
+    return await sweepParked({ repo, cwd: process.cwd(), io, dryRun, defaultBranch: (await import("./lean/prefilter.mjs")).lazyDefaultBranch({ io, repo, cwd: process.cwd(), configured: branches.default }), preconditionCmd: readPreconditionCmd(), minAge: await readPostDeployMinAge() });
+  } catch { return []; }
 }
 
 /**
@@ -2330,7 +2341,11 @@ export async function probeFromCli(argv, deps = {}) {
     const rows = await sweepDue({ repo, cwd: process.cwd(), io: leanIo, dryRun: argv.includes("--dry-run"), onResult: probeEventSink(repo), ...(deps.spawn ? { spawn: deps.spawn } : {}) });
     for (const r of rows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
     console.log(formatDueSummary(rows) || "monitoring: nothing due");
-    return { rows };
+    const parkedRows = await sweepParkedFollowups({ repo, io: leanIo, dryRun: argv.includes("--dry-run") }); // #4689
+    for (const r of parkedRows) console.log(`#${r.issue} → ${r.outcome}${r.detail ? ` (${r.detail})` : ""}`);
+    const { formatParkedSweepSummary } = await import("./lean/parked-sweep.mjs");
+    console.log(formatParkedSweepSummary(parkedRows) || "parked: nothing released");
+    return { rows, parkedRows };
   }
   const { sweepProbes, formatProbeSummary } = await import("./lean/probe.mjs");
   const rows = await sweepProbes({ repo, cwd: process.cwd(), io: leanIo, issues: [...new Set(issues)], limit, dryRun: argv.includes("--dry-run"), onResult: probeEventSink(repo), ...(deps.spawn ? { spawn: deps.spawn } : {}) });

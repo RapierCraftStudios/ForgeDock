@@ -620,6 +620,8 @@ followups:
 
 Deferred follow-ups whose items are all post-deploy checks are parked (`awaiting-promotion`, no lane) until the parent's fix is on `branches.default`. Keys: `precondition_cmd` (exit 0 ready, 1 parked) and `min_age` (soak window, e.g. `24h`).
 
+A post-deploy item may carry `due:YYYY-MM-DD` (`- [ ] \`R2: …\` — post-deploy: [check:id] due:2026-11-03 why`): it parks `awaiting-due` (with a `due:<date>` label) until that UTC date. A `decision:` item parks with one typed `FORGE:OWNER_ASK` comment and no lane. The daemon timer (and `forgedock probe --due`) re-evaluates parked follow-ups (`awaiting-promotion`, `awaiting-due`, `awaiting-measurement`) and removes the wait labels when the parent's fix is on the default branch, the date has passed or the check is defined. The only production access a check has is the checks file's command and the `acceptance_probe.env` allowlist; a pass ticks the items, a fail files one `followup:engineering` issue per failing check, and an item with no runnable check gets the owner ask. The batch report lists `due date:` and `owner ask:` apart from failures.
+
 ### Named checks (#4626)
 
 A post-deploy requirement carries a check id (`[check:<id>]` in the follow-up item). The command is read from `.forge/post-deploy-checks.json` on the default branch (`git show origin/<default>:...`), never from an issue body or comment:

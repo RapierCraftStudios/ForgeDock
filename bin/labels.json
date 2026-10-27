@@ -90,6 +90,11 @@
     "description": "Pipeline stalled — engine/tool failure (not a genuine human-judgment block). Managed by ForgeDock."
   },
   {
+    "name": "awaiting-due",
+    "color": "C5DEF5",
+    "description": "Post-deploy follow-up parked until its due date; re-queued by the engine. Managed by ForgeDock."
+  },
+  {
     "name": "awaiting-promotion",
     "color": "C5DEF5",
     "description": "Post-deploy follow-up parked until its parent fix reaches the default branch. Managed by ForgeDock."

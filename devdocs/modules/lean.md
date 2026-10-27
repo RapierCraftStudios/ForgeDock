@@ -1915,6 +1915,17 @@ rows recorded before the round are carried forward (marked `carried: true`, writ
 it), the fix head goes through `ciVerify("merge")` under remote verify before `doReview` (as the base-sync retry, #4527), and a
 validate id still unrecorded is `engine.validate_result_lost`, not a conformance failure.
 
+## Entry 2026-10-27 — Due-date gate, parked sweep and owner asks for post-deploy follow-ups (#4689)
+
+A post-deploy item may carry `due:YYYY-MM-DD`: `postDeployGate` (`prefilter.mjs`) parks it `awaiting-due` (labels
+`awaiting-due` and `due:<date>`, UTC midnight, after the promotion check and before `min_age`). A `decision:` item
+(`postDeployOnly` accepts it) parks `owner-ask` with one `FORGE:OWNER_ASK` comment and no lane. `parked-sweep.mjs`
+(`sweepParked`) runs from the schedd timer next to `sweepDue` and from `forgedock probe --due`: it re-runs the gate with
+`prefilterIssue({gateOnly})` (no model call, no already-fixed path) for the `awaiting-promotion|awaiting-due|
+awaiting-measurement` issues, so a promoted parent or a passed date releases the wait labels within one pass.
+`measureFollowup` ticks the post-deploy items on a pass, files one `followup:engineering` issue per failing check and posts
+the typed owner ask for an item with no runnable check. The batch report adds `due date:` and `owner ask:` lines.
+
 ## Entry 2026-10-27 — Post-deploy fail reopens the parent before it records (#4652)
 
 `measureFollowup` (`postdeploy-check.mjs`) used to post the `FORGE:PROBE` fail record and then reopen the parent; a failed reopen
