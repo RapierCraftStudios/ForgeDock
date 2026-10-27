@@ -39,3 +39,6 @@ A pure module (`needs-human-premise.mjs`) holds predicates, closed-edge helpers 
 
 ### Export collision
 - `compareVersions` in needs-human-premise.mjs collided with bin/registry.mjs; renamed to `comparePremiseVersions` (module + its test). V1-V3 pass.
+
+### Rerun fix
+R6 ✅ pkg-version now resolves in production: `registryPkgVersion` (npm view) is passed as `io.pkgVersion` in engine-cli.mjs (relabel + sweep) and as a fallback in lean.mjs:488. V1-V3 re-run: exit 0.

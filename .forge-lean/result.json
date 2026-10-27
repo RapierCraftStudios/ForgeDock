@@ -1,6 +1,6 @@
 {
  "status": "fixed",
- "summary": "needs-human premises + sweep, closed-edge guard, ask linking, per-class mechanical recovery budget",
+ "summary": "needs-human premises (incl. production pkg-version resolver), ask registry, closed edges, mechanical recovery budget",
  "requirements": [
   {
    "id": "R1",
@@ -25,7 +25,7 @@
   {
    "id": "R6",
    "status": "implemented",
-   "evidence": "bin/lean/lean.mjs:485"
+   "evidence": "bin/lean/needs-human-premise.mjs:registryPkgVersion; bin/engine-cli.mjs:1925,1954; bin/lean/lean.mjs:488"
   },
   {
    "id": "R7",
