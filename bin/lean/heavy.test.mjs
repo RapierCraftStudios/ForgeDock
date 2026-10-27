@@ -260,7 +260,7 @@ describe("shim re-entry through a pass-through wrapper (#4680)", () => {
 
   it("a name+cmd seen twice resolves past the shim and chain dirs; no match or depth above the cap is env.shim_loop", () => {
     const d = tmpDir("heavy-chain-"), a = join(d, "a"), b = join(d, "b"), s = join(d, "s");
-    for (const x of [a, b, s]) { mkdirSync(x, { recursive: true }); writeFileSync(join(x, "tsc"), "#!/bin/sh\n"); chmodSync(join(x, "tsc"), 0o755); }
+    for (const x of [a, b, s]) { mkdirSync(x, { recursive: true }); writeFileSync(join(x, "tsc"), '#!/bin/sh\nexec "$(command -v tsc)" "$@"\n'); chmodSync(join(x, "tsc"), 0o755); }
     const env = { PATH: [s, a, b].join(":"), FORGE_HEAVY_SHIM_DIR: s };
     const first = guardChain("tsc", join(a, "tsc"), env);
     assert.equal(first.cmd, join(a, "tsc")); assert.equal(first.env.FORGE_HEAVY_CHAIN, `tsc:${join(a, "tsc")}`);
@@ -271,6 +271,17 @@ describe("shim re-entry through a pass-through wrapper (#4680)", () => {
     assert.match(none.error, /^env\.shim_loop: tsc .*no other tsc/);
     const deep = guardChain("tsc", "/x/tsc", { ...env, FORGE_HEAVY_CHAIN: Array.from({ length: SHIM_LOOP_MAX }, (_, i) => `tsc:/d${i}/tsc`).join("|") });
     assert.match(deep.error, /^env\.shim_loop: tsc re-entered .*more than 4 times.*\/d0/);
+  });
+
+  it("a nested call to the same real binary (not a wrapper) passes through at any depth, unrecorded", async () => {
+    const real = "/home/u/.nvm/bin/npm", spawned = [];
+    const run = async (cmd, a, e) => { spawned.push([cmd, e.FORGE_HEAVY_CHAIN]); return { code: 0, signal: null }; };
+    const chain = Array.from({ length: SHIM_LOOP_MAX - 1 }, (_, i) => `npm:/d${i}/npm`).concat(`npm:${real}`).join("|");
+    for (const FORGE_HEAVY_CHAIN of [`npm:${real}`, chain.split("|").slice(-1)[0]]) {
+      const env = { PATH: "/shim:/home/u/.nvm/bin", FORGE_HEAVY_CHAIN, FORGE_HEAVY_HELD: "1" };
+      assert.equal((await runWrapped(["run", "--name", "npm", "--", real, "run", "build"], { env, run })).code, 0);
+    }
+    assert.deepEqual(spawned, [[real, `npm:${real}`], [real, `npm:${real}`]]);
   });
 
   it("runWrapped refuses to spawn on a loop and records the chain otherwise", async () => {
