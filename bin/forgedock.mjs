@@ -3314,6 +3314,7 @@ function help() {
     ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
     ["npx forgedock bootstrap <idea|docs> [--dry-run] [--spike <path>] | --plan <plan.json> [--dry-run]", "Headless /bootstrap: idea to orchestrate-ready backlog (--dry-run previews milestones, titles, DAG and estimated agent cost without GitHub writes); --plan validates and creates (or previews) a plan, and re-running resumes from GitHub"],
     ["npx forgedock run-issue <issue> [--lane <lane>] [--lane-override] [--path core|full] [--retry] [--wait-lease]", "Run the lean core work-on on one issue (default; --path full = legacy multi-phase pipeline; the lane comes from the issue: milestone → milestone/<slug>, else staging; --lane is an assertion, never the default branch) (--retry reopens an engine-error run, or a needs-human run once the label is cleared; --wait-lease waits for a held lease; exit 75 = deferred, lease held)"],
+    ["npx forgedock plan validate --live [--repo owner/repo] [--json]", "Re-run the bootstrap dependency-order rules on live GitHub state: each cross-milestone Depends-on edge is ok, held or invalid (exit 1 on invalid)"],
     ["npx forgedock orchestrate <issue...> [--parallel K] [--lane L]", "Run core work-on on several issues with bounded concurrency and Depends-on ordering; each issue on its own lane, cross-lane dependencies reported"],
     ["npx forgedock orchestrate --resume <id> [N...] | --set-parallel <id> K | --add <id> N... | --requeue <id> N... [--reason \"...\"] | --cancel <id> | --hold <id> N... | --release <id> N...", "Reattach to a batch hosted by the schedd daemon (a finished one replays its report, an orphaned one is resumed with live lanes re-adopted), change its concurrency live, add issues to a running (or held) batch under its K and DAG, requeue a terminal issue (and the dependents skipped behind it) after an operator decision (refused while it is labelled needs-human or closed; a finished batch is reopened), or stop one batch without stopping schedd (running lanes torn down with their work saved, the rest held for --resume), or hold/release single issues of a batch (a held issue is not admitted until released or named by --resume)"],
     ["npx forgedock triage <issue...> [--lane L] [--dry-run]", "Already-fixed pre-filter: close issues a merged PR or green CI already resolved; print the rest"],
@@ -4060,6 +4061,12 @@ switch (command) {
   case "run":
     await run();
     break;
+  case "plan": {
+    // #4659: bootstrap-validate's dependency rules on live GitHub state
+    const { runLive } = await import("../scripts/plan-validate-live.mjs");
+    exitCode = await runLive(restArgs);
+    break;
+  }
   case "bootstrap": {
     // #4177: headless /bootstrap; --plan runs scripts/bootstrap-create.mjs directly (no LLM), a re-run resumes.
     const { runBootstrap } = await import("./bootstrap.mjs");

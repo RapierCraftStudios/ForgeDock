@@ -1116,8 +1116,8 @@ export async function orchestrateFromCli(argv, deps = {}) {
 const formatRowLine = (r) => (r.issue == null ? `${r.outcome}: ${r.detail}` : `#${r.issue} → ${r.outcome}${r.detail && r.outcome !== "merged" ? ` (${r.detail})` : ""}`);
 const consoleSink = () => ({ batch: () => {}, row: (r) => console.log(formatRowLine(r)), line: (t) => console.log(t) });
 
-const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...>";
-const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason"];
+const ORCH_USAGE = "usage: forgedock orchestrate <issue...> [--parallel K] [--lane L] [--lane-override] [--force <reason>] [--repo owner/repo] | --resume <id> [issue...] | --set-parallel <id> <K> | --add <id> <issue...> | --requeue <id> <issue...> [--reason <text>] | --cancel <id> [--stop-remote] | --hold <id> <issue...> | --release <id> <issue...>";
+const ORCH_VALUED = ["--parallel", "--lane", "--repo", "--model", "--prefilter-model", "--reason", "--force"];
 const issuesOf = (argv) => {
   const issues = [];
   for (let i = 0; i < argv.length; i++) {
@@ -1425,10 +1425,23 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   await assertLaneNotDefault(io, lane, repo, cwd);
   if (!deps.allowTmpfs && process.env.FORGEDOCK_BATCH_ALLOW_TMPFS !== "1") batchMod.assertDiskPath(root);
   if (!batch) {
+    // #4659: a milestone start is refused unless every dependency of its issues is merged into its lane, or --force <reason>
+    const force = flag(argv, "--force");
+    if (argv.includes("--force") && (!force || force.startsWith("--"))) throw new Error("--force requires a reason: --force \"<why the unmet dependencies are acceptable>\"");
+    if (!force) {
+      const { unmetDependencies } = await import("../scripts/plan-validate-live.mjs");
+      const gateBranches = readBranches(cwd);
+      const gateIo = deps.leanIo ?? (await import("./lean/effects.mjs")).makeLeanIo({ repo });
+      const unmet = await unmetDependencies({ issues, repo, gh: io.gh, baseOf: async (n) => {
+        const r = await resolveLane({ issue: n, repo, io: gateIo, cwd, branches: gateBranches, requested: lane, override: laneOverride });
+        return r.ok ? r.lane : null;
+      } });
+      if (unmet.length) throw new Error(`parallel milestone start refused: ${unmet.map((u) => `#${u.issue} depends on #${u.dep} (${u.why}; base ${u.base})`).join("; ")}. Merge the dependencies first, or pass --force "<reason>".`);
+    }
     const base = deps.batchId ?? batchMod.newBatchId();
     batch = batchMod.openBatch(root, base);
     for (let i = 2; batch.exists(); i++) batch = batchMod.openBatch(root, `${base}.${i}`); // never resume by accident
-    plan = { v: 1, id: batch.id, argv: [...argv], repo, cwd, created: new Date().toISOString(), ...(daemon ? { daemon: true, env: kept } : {}) };
+    plan = { v: 1, id: batch.id, argv: [...argv], repo, cwd, created: new Date().toISOString(), ...(force ? { forced: force } : {}), ...(daemon ? { daemon: true, env: kept } : {}) };
     batch.writePlan(plan);
     batch.setParallel(parallel);
   } else {

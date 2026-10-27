@@ -33,3 +33,4 @@ BOOT_TPL="$(forge_root)/templates/bootstrap"; VALIDATE=$(forge_resolve bootstrap
 7. **Validate.** Run `node "$VALIDATE" <plan>`. Fix the plan until it exits 0. Never create from an invalid plan.
 8. **Create.** Run `node "$CREATE" <plan>`, adding `--dry-run` when the input has it (preview only, GitHub untouched). The script reuses existing issues by title and parent, so on an error re-run the same command to resume.
 9. **Hand off.** Print the script's hand-off verbatim: what was created (links), what needs a human (links), and the `/orchestrate` command per milestone, in order.
+10. Later: `npx forgedock plan validate --live` (#4659).
