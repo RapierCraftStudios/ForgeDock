@@ -366,8 +366,8 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
       if (!r) { problems.push(`amendment names unknown requirement ${a.requirement}`); continue; }
       if (!TRACKED.includes(r.disposition)) {
         if (a.bucket != null) r.bucket = a.bucket; // #4724
-      if (a.kind === "post-deploy" && !CHECK_ID_RE.test(String(a.check ?? r.check ?? ""))) { problems.push(`amendment post-deploy ${a.requirement} needs a check id (check)`); continue; }
-        r.disposition = a.kind; r.why = a.why; r.amended = true; toTrack.push(r);
+        if (a.kind === "post-deploy" && !CHECK_ID_RE.test(String(a.check ?? r.check ?? ""))) { problems.push(`amendment post-deploy ${a.requirement} needs a check id (check)`); continue; }
+        r.disposition = a.kind; r.why = a.why; r.amended = true; r.bucket ??= "post-deploy"; toTrack.push(r); // #4724: an amendment without a bucket defaults to post-deploy
         if (a.kind === "post-deploy") r.check = a.check ?? r.check; // #4626
       }
     } else { problems.push(amendmentProblem(a, tag)); continue; }
