@@ -1944,3 +1944,5 @@ closed as NOT_PLANNED: `watchBlockers` stops re-checking it and its dependents s
 in-batch issue whose result is `skipped` through the `--requeue` file (returned as `requeued`); merged/needs-human/other rows still
 report `already in batch`. The schedd `add` op reopens a finished, unhosted batch like `requeue`; without a daemon `addToBatch`
 clears the report so the next `--resume` reruns it. Cost: 0 LLM calls; one extra `dispatchCheck` per blocker per watch interval.
+
+Guard gate added wall time (#4705, R12): `guardGate` runs beside `rerunFailedValidates` in one `Promise.all`, so the gate's raw `wall_ms` overstates the lane delay. `lean.mjs` times both; `added_wall_ms = max(0, total - validate rerun time)` rides on the `guard_run` event (0 when the gate errors or skips), and the sum over gate passes that selected a guard is carried as `guard_added_ms` on `RUN_TERMINAL` (omitted when 0; `telemetry-seam.mjs` passes it through on `run_terminal` beside `wall_ms`). Telemetry only, no verdict change. The enforce rule (median added wall < 5% of lane wall) is judged post-deploy from shadow telemetry.
