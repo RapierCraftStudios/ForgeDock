@@ -50,7 +50,11 @@ export async function ensureSignedOff({ git, lane, branch, env = process.env }) 
   const bad = offendersOf(log);
   if (!bad.length) return { rewritten: 0 };
   // the lane identity: GIT_AUTHOR_* (what the sandbox sets and what a commit would use), else the worktree config
-  const name = env.GIT_AUTHOR_NAME || await ok(["config", "user.name"]), email = env.GIT_AUTHOR_EMAIL || await ok(["config", "user.email"]);
+  let name = env.GIT_AUTHOR_NAME || await ok(["config", "user.name"]), email = env.GIT_AUTHOR_EMAIL || await ok(["config", "user.email"]);
+  if (!name || !email) { // the runner's own git env (what a commit here would use), e.g. GIT_AUTHOR_* set only on the git runner
+    const m = /^(.*?)\s*<([^>]*)>/.exec(await ok(["var", "GIT_AUTHOR_IDENT"]));
+    if (m) { name ||= m[1]; email ||= m[2]; }
+  }
   if (!name || !email || PLACEHOLDER_RE.test(email)) {
     throw Object.assign(new Error(`${bad.length} unpushed commit(s) fail DCO (placeholder author or no sign-off: ${bad.slice(0, 5).map((c) => c.sha.slice(0, 8)).join(", ")}) and the worktree has no usable git identity to rewrite them`), { noIdentity: true });
   }
