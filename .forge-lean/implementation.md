@@ -1,34 +1,33 @@
 ### Approach
-The script groups normalised TSV rows by class and runs the existing lookup/append/create flow once per class. Requirement text moves out of column 1 into a new label column 5, which is the item's identity, so the checklist line, `DEFERRED_FROM` marker and `identity<TAB>issue` rows stay byte-compatible for review-finalize.sh, prefilter.mjs and followupMap. Milestone and default milestone are passed in by the engine.
+A pure module, `bin/lean/decisions.mjs`, holds the anchored decision record, the `<!-- FORGE:DECISION {json} -->` render and parse, a local index, anchor matching, staleness, supersession and the capped H-rows. The engine appends the rows at contract freeze, so the reviewer's existing preserve check enforces them. A `decision` amendment validates anchors against the base tree, posts the records and drops the superseded row. No LLM call and no prompt change.
 
 ### Changes
-- scripts/file-deferred-followups.sh: 5-column TSV with validation (exit 2, `DEFERRED_TSV=INVALID`), class derivation, per-class lookup (all before filing) and filing, `FORGE:DEFERRED_CLASS` marker, class-aware claim marker and verify, `followup:<class>` labels (+ `external-prerequisite`), milestone resolution (parent, next open by due date, default), telemetry with all issues and classes.
-- scripts/file-deferred-followups.test.sh: mock extended; cases for milestone inheritance, class labels/issues, class reuse, rejected rows, label rows, body contents (59 checks).
-- bin/lean/conformance.mjs: `FOLLOWUP_CLASSES`, `followupClass`, `class` on followup items, optional requirement `class` validated.
-- bin/lean/conformance.test.mjs: class test.
-- bin/lean/effects.mjs: `fileFollowups` sends `-` + class + label columns and the milestone env; `runWithInput` takes an env.
-- bin/lean/lean.mjs: `track()` passes `milestone` and `o.followupsDefaultMilestone`.
-- bin/engine-cli.mjs: `readFollowupsDefaultMilestone` (forge.yaml `followups.default_milestone`) wired into both option spreads (amendment).
-- bin/labels.json: five labels. docs/CONFIG.md: `followups` section. commands/work-on/build.md: TSV/class docs.
-- devdocs/modules/lean.md, devdocs/decisions/4664-followup-classes.md: freshness (amendments).
+- bin/lean/decisions.mjs (new): record, marker, parse, fold (latest record per id wins), anchor glob match, `staleDecisions`, `historyRows` (cap 5, deterministic), `withDecisionRows`, `supersede`, index read/write, `recordDecisions`.
+- bin/lean/conformance.mjs: `decision` amendment kind with anchor-exists validation (`baseFiles`); `supersedes` drops the preserve row; returns `decisions`.
+- bin/lean/lean.mjs: `post` takes a target issue; freeze appends H-rows from the index; `amend()` posts decision records (one `git ls-tree` only when a decision amendment exists).
+- bin/engine-cli.mjs, bin/forgedock.mjs: `forgedock decisions list [--stale] [--refresh]`.
+- Tests: bin/lean/decisions.test.mjs (new), bin/lean/conformance.test.mjs.
+- devdocs/modules/lean.md, devdocs/decisions/4695-anchored-decisions.md.
+- bin/lean/prompts.mjs (D6) is intentionally unchanged: the implement prompt is at its token budget (lean.test.mjs fails with +1 line). The H-row text itself tells the builder how to amend, which fits "nothing added to the builder prompt beyond the contract rows".
 
 ### Acceptance Criteria Status
-- R1 ✅ scripts/file-deferred-followups.sh:214 (resolve_milestone), bin/engine-cli.mjs readFollowupsDefaultMilestone, bin/lean/lean.mjs track()
-- R2 ✅ scripts/file-deferred-followups.sh:229 (file_class labels), bin/lean/conformance.mjs:759
-- R3 ✅ file_class external body/labels + FORGE_EXTERNAL_PREREQ link; `[check:]` kept (test 18, "post-deploy issue" test)
-- R4 ✅ scripts/file-deferred-followups.sh:57-87
-- R5 ✅ scripts/file-deferred-followups.sh:161,298
-- R6 ✅ scripts/file-deferred-followups.test.sh (sections 19-21)
+- R1 ✅ bin/lean/conformance.mjs (decision branch of applyAmendments), bin/lean/lean.mjs (amend(): recordDecisions), bin/lean/decisions.mjs (recordDecisions)
+- R2 ✅ bin/lean/decisions.mjs (withDecisionRows), bin/lean/lean.mjs (freeze); a violation without supersedes remains the existing preserve_violated (conformance.mjs decide())
+- R3 ✅ bin/lean/decisions.mjs (supersede, recordDecisions); test "recordDecisions posts…"
+- R4 ✅ bin/engine-cli.mjs (decisionsFromCli --stale), bin/lean/decisions.mjs (staleDecisions)
+- R5 ✅ no LLM, phase or prompt change
+- R6 ✅ one index file read at freeze; contract object returned unchanged when no rows apply (test)
+- R7 ✅ HISTORY_ROWS_MAX = 5 shared cap; anchors checked against a single ls-tree only when a decision amendment exists
 
 ### Verification
-- V1 `bash scripts/file-deferred-followups.test.sh`: passed=59 failed=0 (also under /bin/bash). Against the base script, 23 checks fail, so the new tests fail without the fix.
-- V2 `node --test` postdeploy-check, prefilter, conformance.e2e, lean tests: pass. V3 conformance.test.mjs: pass (combined run 648 pass, 0 fail).
-- `forgedock check`: PASS. check-devdocs-freshness.sh origin/staging: OK. No formatter is configured in the repo. checks.mjs widened to the full suite, which the host rules forbid, so only the targeted tests were run.
+- V1 `node --test bin/lean/decisions.test.mjs bin/lean/conformance.test.mjs`: pass. The new tests fail without the fix (the module and amendment kind do not exist).
+- V2 `node --test bin/lean/lean.test.mjs bin/lean/conformance.e2e.test.mjs`: pass.
+- `forgedock check`: PASS. bin/tests/engine-cli.test.mjs: pass. No repo formatter is configured.
 
 ### Notes
-- Env: FORGE_FOLLOWUP_MILESTONE, FORGE_FOLLOWUPS_DEFAULT_MILESTONE, FORGE_EXTERNAL_PREREQ. forge.yaml: `followups.default_milestone`.
-- Engineering follow-ups keep the old title; others are `follow-up (<class>): ...`. Existing issues without a class marker count as engineering. A parent without a milestone gets none.
-- Telemetry line gains `classes=` and `batched_into` may list several issues.
+- The index lives at ~/.forge/decisions/<repo>.json (env FORGEDOCK_DECISIONS_DIR overrides). Decisions posted from another host appear after `forgedock decisions list --refresh`; no gh call is made at freeze.
+- Light lanes do not get H-rows (their contract is derived from the diff).
+- #4694 (guards) can reuse `historyRows` and the cap.
 
-## Stale-list fix
-Added FOLLOWUP_CLASSES and followupClass to the import list and the #4664 case in bin/lean/conformance.test.mjs.
+## Sibling-list check
+`decisions` (bin/lean) is not a member of the lists in checks, conformance.e2e, context (context-pack sources), execution(.e2e), fixround (MECHANICAL_KINDS) and heavy tests; recorded under `not_members` in result.json.
