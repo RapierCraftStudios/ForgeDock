@@ -164,6 +164,9 @@ export function deferredFrom(body) {
   const m = DEFERRED_FROM_RE.exec(String(body ?? ""));
   return m ? Number(m[1]) : null;
 }
+const DEFERRED_FROM_ALL_RE = new RegExp(DEFERRED_FROM_RE.source, "g");
+/** #4724: every parent #P of a post-deploy rollup (one `<!-- FORGE:DEFERRED_FROM: #P -->` per `### #P` section), in order, unique; [] when none. */
+export const deferredFromAll = (body) => [...new Set([...String(body ?? "").matchAll(DEFERRED_FROM_ALL_RE)].map((m) => Number(m[1])))];
 const CHECK_RE = /^\s*[-*]\s+\[[ xX]\]\s+(.*)$/;
 const checkItems = (body) => noComments(String(body ?? ""), " ").split("\n").map((l) => CHECK_RE.exec(l)?.[1]).filter((x) => x != null);
 const DECISION_ITEM_RE = /^`[^`]*`\s+[—-]+\s*decision:/; // #4689: an item only its owner can decide
@@ -180,6 +183,12 @@ export function itemDueMs(body) {
   const ds = checkItems(body).map((t) => POST_DEPLOY_ITEM_RE.exec(t)?.[1]).filter((t) => t != null).map((t) => DUE_RE.exec(t)).filter(Boolean)
     .map((m) => Date.UTC(+m[1], +m[2] - 1, +m[3])).filter(Number.isFinite);
   return ds.length ? Math.max(...ds) : null;
+}
+const ANCHOR_RE = /\bfrom:(\d{4})-(\d{2})-(\d{2})\b/;
+/** #4724: the items' `due:` dates with their contract-time `from:` anchor (ms, UTC midnight; null when absent). */
+export function itemDueAnchors(body) {
+  return checkItems(body).map((t) => POST_DEPLOY_ITEM_RE.exec(t)?.[1]).filter((t) => t != null).map((t) => [DUE_RE.exec(t), ANCHOR_RE.exec(t)]).filter(([d]) => d)
+    .map(([d, a]) => ({ dueMs: Date.UTC(+d[1], +d[2] - 1, +d[3]), fromMs: a ? Date.UTC(+a[1], +a[2] - 1, +a[3]) : null })).filter((x) => Number.isFinite(x.dueMs));
 }
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
 /**
@@ -259,14 +268,19 @@ const fmtAge = (ms) => (ms % UNIT_MS.d === 0 && ms ? `${ms / UNIT_MS.d}d` : ms %
  * Fail-open: no merge SHA, a git answer other than yes/no, an unknown default branch or a hook error give "unresolved".
  */
 export async function postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, preconditionCmd = null, minAge = null, now = null }) {
-  const parent = deferredFrom(iss?.body);
+  const parents = deferredFromAll(iss?.body), parent = parents[0] ?? null; // #4724: a rollup has one parent per section
+  const ps = parents.map((p) => `#${p}`).join(", ");
   const res = (state, detail, extra = {}) => ({ state, parent, shas: [], detail, ...extra });
   if (!parent || !postDeployOnly(iss.body)) return res("not-applicable", "");
   try {
     const def = typeof defaultBranch === "function" ? await defaultBranch() : defaultBranch;
     if (!def) return res("unresolved", "default branch unknown");
-    const shas = await parentMergeShas({ parent, repo, io });
-    if (!shas.length) return res("unresolved", `no merge SHA found for #${parent}`);
+    const shas = [];
+    for (const p of parents) {
+      const found = await parentMergeShas({ parent: p, repo, io });
+      if (!found.length) return res("unresolved", `no merge SHA found for #${p}`);
+      shas.push(...found);
+    }
     const off = [];
     for (const sha of shas) {
       let on;
@@ -274,13 +288,20 @@ export async function postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, 
       if (on === null) return res("unresolved", `${sha.slice(0, 12)} unknown to git`, { shas, default: def });
       if (!on) off.push(sha);
     }
-    if (off.length) return res("awaiting-promotion", `fix ${off.map((s) => s.slice(0, 12)).join(", ")} of #${parent} is not on ${def}${lane ? ` (lane ${lane})` : ""}`, { shas, default: def });
-    const dueMs = itemDueMs(iss.body); // #4689: an explicit due date (UTC midnight)
+    if (off.length) return res("awaiting-promotion", `fix ${off.map((s) => s.slice(0, 12)).join(", ")} of ${ps} is not on ${def}${lane ? ` (lane ${lane})` : ""}`, { shas, default: def });
+    let dueMs = itemDueMs(iss.body); // #4689: an explicit due date (UTC midnight)
     if (dueMs != null) {
+      // #4724: re-anchor a date item to when its fix actually landed on <def>: due + (landed - the contract-time anchor)
+      let landedMs = null;
+      for (const a of itemDueAnchors(iss.body)) {
+        if (a.fromMs == null) continue;
+        if (landedMs == null) { landedMs = 0; for (const sha of shas) landedMs = Math.max(landedMs, ((await landedAt({ sha, def, io, cwd })) ?? 0) * 1000); }
+        if (landedMs > a.fromMs) dueMs = Math.max(dueMs, a.dueMs + (landedMs - a.fromMs));
+      }
       const at = now ?? io.now?.() ?? Date.now();
       if (at < dueMs) {
         const eligibleAt = new Date(dueMs).toISOString();
-        return res("awaiting-due", `fix of #${parent} is on ${def}; the checks are due ${eligibleAt.slice(0, 10)}`, { shas, default: def, eligibleAt });
+        return res("awaiting-due", `fix of ${ps} is on ${def}; the checks are due ${eligibleAt.slice(0, 10)}`, { shas, default: def, eligibleAt });
       }
     }
     if (minAge != null) {
@@ -294,16 +315,16 @@ export async function postDeployGate({ iss, repo, lane, defaultBranch, cwd, io, 
       const at = now ?? io.now?.() ?? Date.now(), until = landed * 1000 + required;
       if (at < until) {
         const eligibleAt = new Date(until).toISOString();
-        return res("awaiting-min-age", `fix of #${parent} on ${def} since ${new Date(landed * 1000).toISOString()}; min age ${fmtAge(required)} until ${eligibleAt}`, { shas, default: def, eligibleAt });
+        return res("awaiting-min-age", `fix of ${ps} on ${def} since ${new Date(landed * 1000).toISOString()}; min age ${fmtAge(required)} until ${eligibleAt}`, { shas, default: def, eligibleAt });
       }
     }
     if (preconditionCmd) {
       const code = await (io.execCode ?? execCode)("sh", ["-c", preconditionCmd, "precondition", String(iss.number)],
         { cwd, timeout: 60000, env: { ...process.env, FORGE_ISSUE: String(iss.number) } });
-      if (code === 1) return res("awaiting-precondition", `fix of #${parent} is on ${def}; post_deploy.precondition_cmd says not ready`, { shas, default: def });
+      if (code === 1) return res("awaiting-precondition", `fix of ${ps} is on ${def}; post_deploy.precondition_cmd says not ready`, { shas, default: def });
       if (code !== 0) return res("unresolved", `post_deploy.precondition_cmd exited ${code}`, { shas, default: def });
     }
-    return res("ready", `fix of #${parent} is on ${def}`, { shas, default: def });
+    return res("ready", `fix of ${ps} is on ${def}`, { shas, default: def });
   } catch (e) {
     return res("unresolved", `gate error (${String(e?.message ?? e).slice(0, 120)})`);
   }

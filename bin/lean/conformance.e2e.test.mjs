@@ -56,7 +56,7 @@ const contract = (reqs) => ({ requirements: reqs, deliverables: reqs.filter((r) 
   preserve: [{ id: "P1", what: `${Q.AC3} (src/billing.js price())` }, { id: "P2", what: `${Q.AC2} (test/routes.test.js)` }], validate: [{ id: "V1", command: V1 }] });
 const FULL = () => contract([req("R1"), req("R2"), req("R3"), req("R4"), req("R5")]);
 const OMIT = () => contract([req("R1"), req("R2"), req("R4"), req("R5")]);
-const DEFER = () => contract([req("R1"), req("R2"), req("R3", "defer", { why: "export.js ships on the data-export module's own release train" }), req("R4"), req("R5")]);
+const DEFER = () => contract([req("R1"), req("R2"), req("R3", "defer", { bucket: "new-issue", why: "export.js ships on the data-export module's own release train" }), req("R4"), req("R5")]);
 
 // ---- world ----
 function makeWorld(dir, script) {
