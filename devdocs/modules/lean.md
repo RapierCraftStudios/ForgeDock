@@ -1814,3 +1814,7 @@ file as `stopRemote: true` (through the schedd `cancel` op or `requestCancel`); 
 run.interrupted`; 2xx = sent, 404/405 = unsupported or gone (false). Stop never falls back to `DELETE`: destroying a
 sandbox is not a checkpoint and would lose work; teardown still destroys only after the result. Without the flag, or on a
 pool with no stop endpoint, behaviour is as before (remote lanes run to their result). Cost: 0 LLM calls.
+
+## Entry 2026-10-27 — Bot token refresh and gh.auth (#4662)
+
+`scripts/systemd/forgedock-bot-token-refresh.{service,timer}` run `scripts/refresh-bot-token.sh` every 45 min (`Persistent=true`); the script writes `~/.forge/bot-token.json` (`FORGE_HOME_DIR` overrides the dir), which `bin/bot-token-status.mjs` turns into the doctor Check 12 lifetime report (fails under 10 min left or over 50 min since refresh; no stamp stays a warning). In `bin/lean/retry.mjs`, `refreshAuthOnce` wraps `ghc` and the lane-resolution gh calls: on HTTP 401 (`GH_AUTH_RE`) it runs the refresh script once per run (`io.refreshAuth` or `FORGE_REFRESH_TOKEN_SCRIPT`), retries once, then throws with `deferCode: "gh.auth"`. The lane ends `deferred` (`retryInSeconds` 120) and the batch requeues it like `gh.unavailable`. `scripts/wait-ci-green.sh` retries a 401 a bounded number of times and then fails with an auth message; 403 still fails fast.
