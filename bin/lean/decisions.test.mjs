@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { normaliseDecision, renderDecision, parseDecisionComment, foldDecisions, anchorMatches, deadAnchors, staleDecisions, historyRows, withDecisionRows, supersede, readIndex, recordDecisions, HISTORY_ROWS_MAX } from "./decisions.mjs";
+import { normaliseDecision, renderDecision, parseDecisionComment, foldDecisions, anchorMatches, deadAnchors, staleDecisions, historyRows, withDecisionRows, supersede, readDecisionIndex, recordDecisions, HISTORY_ROWS_MAX } from "./decisions.mjs";
 
 const D = (o) => normaliseDecision({ choice: "use A not B", why: "B leaks", anchors: ["src/a/**"], ...o }, { issue: 10, n: 1 });
 
@@ -66,7 +66,7 @@ describe("decisions (#4695)", () => {
     const second = await recordDecisions([{ choice: "use B", anchors: ["src/**"], why: "w2", supersedes: "d10-1" }], { issue: 11, repo: "o/r", post });
     assert.equal(second[0].supersedes, "d10-1");
     assert.deepEqual(posts.map((p) => p.on), [10, 11, 10]);
-    const idx = foldDecisions(readIndex("o/r"));
+    const idx = foldDecisions(readDecisionIndex("o/r"));
     assert.equal(idx.find((d) => d.id === "d10-1").status, "superseded");
     assert.equal(idx.find((d) => d.id === "d11-1").supersedes, "d10-1");
   });

@@ -34,3 +34,6 @@ A pure module, `bin/lean/decisions.mjs`, holds the anchored decision record, the
 
 ## Sibling-enumerating tests
 decisions (bin/lean) is not a member of the lists in checks, conformance.e2e, context, execution(.e2e), fixround and heavy tests; recorded as not_members in result.json.
+
+## Export collision fix
+Renamed decisions.mjs readIndex/writeIndex to readDecisionIndex/writeDecisionIndex (guards.mjs already exports readIndex/writeIndex); references in lean.mjs, engine-cli.mjs and decisions.test.mjs updated. V1/V2 pass (618 tests).

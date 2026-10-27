@@ -54,7 +54,7 @@ import { priorityFromLabels } from "./sched.mjs";
 import { assignArm } from "../experiment.mjs";
 import { parseExploreConfig, explorerAgents, explorePlanRule, exploreBuildRule } from "./explore.mjs";
 import { normaliseFacts, renderFactsRecord, FACTS_MARKER } from "./facts.mjs";
-import { readIndex, withDecisionRows, recordDecisions } from "./decisions.mjs";
+import { readDecisionIndex, withDecisionRows, recordDecisions } from "./decisions.mjs";
 import { parseContextPackConfig, contextArm, contextPackFor, renderContextRecord, laneType, priorAttempts, linkStateStamp, stateOf } from "./context.mjs";
 import { isExternalKill } from "./hostkill.mjs";
 import { buildResumeDigest } from "./resume.mjs";
@@ -1545,7 +1545,7 @@ export async function runCore(o) {
         await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
         if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, issueEdited ? { issueEdited: true } : {});
         frozen = historyRows(contract); // #4694 guards
-        frozen = withDecisionRows(frozen, readIndex(repo)); // #4695: anchored decisions on the deliverable paths; one index read
+        frozen = withDecisionRows(frozen, readDecisionIndex(repo)); // #4695: anchored decisions on the deliverable paths; one index read
         const hRows = (frozen.preserve ?? []).filter((p) => p.source === "decision");
         if (hRows.length) T.decisions.push(`Anchored decisions bind this lane: ${hRows.map((p) => `${p.id} (${p.decision})`).join(", ")}`);
         hash = contractHash(contractJson(frozen));

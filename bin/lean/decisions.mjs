@@ -134,7 +134,7 @@ export const decisionsDir = () => process.env.FORGEDOCK_DECISIONS_DIR || join(ho
 export const indexFile = (repo) => join(decisionsDir(), `${String(repo ?? "repo").replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 
 /** The indexed records (posting order); [] when the index is absent or unreadable. One file read. */
-export function readIndex(repo, { fs = nodeFs } = {}) {
+export function readDecisionIndex(repo, { fs = nodeFs } = {}) {
   try {
     const j = JSON.parse(fs.readFileSync(indexFile(repo), "utf8"));
     return (Array.isArray(j?.records) ? j.records : []).map((r) => normaliseDecision(r)).filter(Boolean);
@@ -142,7 +142,7 @@ export function readIndex(repo, { fs = nodeFs } = {}) {
 }
 
 /** Replaces the index (written atomically); best effort, the register of record is GitHub. */
-export function writeIndex(repo, records, { fs = nodeFs } = {}) {
+export function writeDecisionIndex(repo, records, { fs = nodeFs } = {}) {
   try {
     const file = indexFile(repo);
     fs.mkdirSync(decisionsDir(), { recursive: true });
@@ -158,7 +158,7 @@ export function writeIndex(repo, records, { fs = nodeFs } = {}) {
  * comment. Returns the records posted. Best effort per record: a failed post is skipped, never fails the lane.
  */
 export async function recordDecisions(list, { issue, repo, post, fs = nodeFs }) {
-  const index = foldDecisions(readIndex(repo, { fs })), out = [];
+  const index = foldDecisions(readDecisionIndex(repo, { fs })), out = [];
   let n = 0;
   for (const raw of list ?? []) {
     n++;
@@ -176,6 +176,6 @@ export async function recordDecisions(list, { issue, repo, post, fs = nodeFs }) 
     index.push(...[oldRec, next].filter(Boolean));
     out.push(next);
   }
-  if (out.length) writeIndex(repo, index, { fs });
+  if (out.length) writeDecisionIndex(repo, index, { fs });
   return out;
 }

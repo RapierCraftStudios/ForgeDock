@@ -2040,9 +2040,9 @@ export async function decisionsFromCli(argv, deps = {}) {
         if (r) recs.push(r);
       } catch { /* skip a malformed comment */ }
     }
-    dec.writeIndex(repo, recs);
+    dec.writeDecisionIndex(repo, recs);
   }
-  const all = dec.foldDecisions(dec.readIndex(repo));
+  const all = dec.foldDecisions(dec.readDecisionIndex(repo));
   let rows = all.filter((d) => d.status !== "superseded").map((d) => ({ decision: d, dead: [] }));
   if (rest.includes("--stale")) rows = dec.staleDecisions(all, String(await run("git", ["ls-tree", "-r", "--name-only", flag("--base") ?? "HEAD"])).split("\n").filter(Boolean));
   for (const { decision: d, dead } of rows) console.log(`${d.id}  #${d.issue ?? "?"}  ${d.choice}  [${d.anchors.join(", ")}]${dead.length ? `  stale: ${dead.join(", ")}` : ""}${d.supersedes ? `  supersedes ${d.supersedes}` : ""}`);
