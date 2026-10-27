@@ -12,13 +12,15 @@ const CHECKS = JSON.stringify({ soak: { run: "echo ok", for: "7d", every: "6h" }
 const BODY = "## Acceptance Criteria\n\n- [ ] `R1: health row exists` — post-deploy: [check:soak] soak\n\n<!-- FORGE:DEFERRED_FROM: #40 -->\n";
 const rec = (o) => ({ authorAssociation: "OWNER", author: { login: "bot" }, body: `<!-- ${PROBE_MARKER} -->\n${JSON.stringify({ fix: "fix1234567890", default_sha: "rel1", result: "pass", at: new Date(T0).toISOString(), window_until: new Date(T0 + 7 * 24 * H).toISOString(), every_ms: 6 * H, ...o })}` });
 
-function world({ comments = [rec({})], head = "rel1", file = CHECKS, code = 0, state = "OPEN" } = {}) {
+function world({ comments = [rec({})], head = "rel1", file = CHECKS, code = 0, state = "OPEN", regressions = [], failClose = false } = {}) {
   const w = { gh: [], git: [], spawned: [] };
   w.io = {
     gh: async (a) => {
       w.gh.push(a);
       const k = a.slice(0, 2).join(" ");
       if (k === "repo view") return "main\n";
+      if (k === "issue list" && a.includes("--search")) return JSON.stringify(regressions);
+      if (failClose && k === "issue close") throw new Error("rate limit");
       if (k === "issue list") return JSON.stringify([{ number: 41 }]);
       if (k === "issue view") return JSON.stringify({ number: 41, state, title: "", body: BODY, labels: [{ name: "post-deploy-monitoring" }], comments });
       if (k === "issue create") return "https://github.com/o/r/issues/77\n";
@@ -78,6 +80,30 @@ describe("post-deploy windowed monitoring (#4627)", () => {
     assert.ok(!w.gh.some((a) => a[1] === "reopen"));
     const cm = calls(w, "issue comment")[0];
     assert.match(cm[cm.indexOf("--body") + 1], /"result":"fail".*"regression":77/s);
+  });
+
+  const reg = (n, o = {}) => ({ number: n, body: `<!-- FORGE:REGRESSION -->\n- Fix commit: \`${o.fix ?? "fix1234567890"}\`\n- Monitored follow-up: #${o.issue ?? 41}\n` });
+
+  it("#4653: a regression already filed for this follow-up and fix is reused, not duplicated", async () => {
+    const w = world({ head: "rel2", code: 1, regressions: [reg(90)] });
+    const rows = await sweep(w);
+    assert.equal(rows[0].outcome, "fail"); assert.equal(rows[0].regression, "90");
+    assert.equal(calls(w, "issue create").length, 0); assert.equal(calls(w, "issue close").length, 1);
+    const cm = calls(w, "issue comment")[0];
+    assert.match(cm[cm.indexOf("--body") + 1], /"regression":90/);
+  });
+
+  it("#4653: finish() failing after create does not file a second regression on the next sweep", async () => {
+    const w = world({ head: "rel2", code: 1, failClose: true });
+    assert.equal((await sweep(w))[0].outcome, "error"); assert.equal(calls(w, "issue create").length, 1);
+    const w2 = world({ head: "rel2", code: 1, regressions: [reg(77)] });
+    assert.equal((await sweep(w2))[0].regression, "77"); assert.equal(calls(w2, "issue create").length, 0);
+  });
+
+  it("#4653: a regression for another follow-up, fix commit or issue number prefix is not reused", async () => {
+    const w = world({ head: "rel2", code: 1, regressions: [reg(5, { issue: 4 }), reg(6, { issue: 410 }), reg(7, { fix: "other" })] });
+    const rows = await sweep(w);
+    assert.equal(rows[0].regression, "77"); assert.equal(calls(w, "issue create").length, 1);
   });
 
   it("a follow-up whose latest record is a fail is never re-run or re-filed", async () => {
