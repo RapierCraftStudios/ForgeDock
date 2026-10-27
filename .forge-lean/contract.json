@@ -2,19 +2,25 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "The failure scenario above no longer reproduces at `scripts/file-deferred-followups.sh:79`, covered by a regression test that fails on the current staging head.",
+   "quote": "`plan.json`, `state.json` and their temp files are created 0600, and the batch dir 0700 (test asserts mode).",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "No behaviour change for lanes or repos the finding does not describe.",
+   "quote": "`npm pack --dry-run` lists `scripts/refresh-bot-token.sh`, or the refresh path resolves to a shipped file (test).",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "Validation should reject requirement text (`R\u003cn>:` prefixes, prose), not legal path characters.",
+   "quote": "`bin/lean/batch.mjs:58`: write batch state files 0600 and the batch dir 0700.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "`package.json:46`: ship `scripts/refresh-bot-token.sh`, or point `retry.mjs` at an installed path.",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -22,8 +28,8 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "scripts/file-deferred-followups.sh",
-   "change": "Replace the character-whitelist grep at the column-1 check with a blacklist: keep the R\u003cn>: rejection; reject control chars; a value with whitespace must contain '/' or end in .\u003cext>, otherwise it is prose and rejected; whitespace-free values pass. Update header comment.",
+   "path": "bin/lean/batch.mjs",
+   "change": "writeAtomic gets an opts {private} arg: mkdir mode 0700 + chmod existing dir 0700, tmp file opened 0600; openBatch uses it for every batch-dir write; log.jsonl and lanes/N.log created 0600, lane dir 0700. Other writeAtomic callers unchanged.",
    "requirements": [
     "R1",
     "R3"
@@ -31,29 +37,67 @@
   },
   {
    "id": "D2",
-   "path": "scripts/file-deferred-followups.test.sh",
-   "change": "Add cases: app/(marketing)/page.tsx, 'docs/My Notes.md', src/a=b.ts, src/#x.ts, src/foo:bar.ts are accepted (rc 0, issue created, path listed); existing prose and R\u003cn>: rows stay rejected; a mixed batch with these paths files everything.",
+   "path": "package.json",
+   "change": "remove the \"!scripts/refresh-bot-token.sh\" files entry",
    "requirements": [
-    "R1",
     "R2",
-    "R3"
+    "R4"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/batch.test.mjs",
+   "change": "test: after writePlan/store.save the plan.json/state.json are 0600, tmp-free, batch dir 0700 (even with a permissive umask 022 and a pre-existing 0755 dir)",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/tests/package-files.test.mjs",
+   "change": "new test: package.json files includes scripts/ and no negation of scripts/refresh-bot-token.sh; the file exists",
+   "requirements": [
+    "R2"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "Rejection of `R\u003cn>:` prefixed and prose column-1 values (exit 2, DEFERRED_TSV=INVALID, nothing filed) in scripts/file-deferred-followups.test.sh section 21"
+   "what": "writeAtomic default behaviour for sched.mjs, limits.mjs, train.mjs, execution.mjs callers (bin/lean/*.mjs) and its atomic rename semantics"
   },
   {
    "id": "P2",
-   "what": "Row format, exit codes, stdout markers and gh call behaviour of scripts/file-deferred-followups.sh for already-valid paths; callers in commands/work-on/build.md"
+   "what": "retry.mjs runRefreshScript path resolution and gh.auth defer behaviour (bin/lean/retry.mjs:54-70)"
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "bash scripts/file-deferred-followups.test.sh"
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/batch.test.mjs bin/tests/package-files.test.mjs bin/tests/bot-token-timer.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/sched.test.mjs bin/lean/limits.test.mjs bin/lean/retry.test.mjs"
   }
- ]
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Ship the refresh script rather than repoint retry.mjs",
+   "justification": "retry.mjs:54-58 already resolves the in-package path and fails cleanly (defer gh.auth) without a PEM; forgedock.mjs:3276 already directs installed users to it",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "Opt-in private mode on writeAtomic instead of changing defaults",
+   "justification": "writeAtomic is shared by sched/limits/train/execution (grep), which are outside the issue",
+   "source": "precedent"
+  }
+ ],
+ "repro_test": {
+  "path": "bin/lean/batch.test.mjs",
+  "id": "batch state files are private",
+  "command": "node --test --test-name-pattern='batch state files are private' bin/lean/batch.test.mjs"
+ }
 }
