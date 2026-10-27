@@ -356,6 +356,10 @@ else
 fi
 ```
 
+### Step 6C: Re-validate dependency order
+
+After a milestone is added, the train order changes or an issue is decomposed, run `npx forgedock plan validate --live` (#4659). Fix every `invalid` edge (a dependency in a later milestone) before continuing; `held` edges are reported only.
+
 ### Step 7: Report
 
 ```
