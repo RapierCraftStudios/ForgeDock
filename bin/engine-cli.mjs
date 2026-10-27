@@ -2181,6 +2181,12 @@ export async function integrationFromCli(argv, deps = {}) {
   return run(argv, deps);
 }
 
+/** `forgedock milestone-sync <slug> --reason ...` (#4663): on-demand milestone branch sync (lean/milestonesync.mjs). Resolves the exit code. */
+export async function milestoneSyncFromCli(argv, deps = {}) {
+  const { runMilestoneSyncCli: run } = await import("./lean/milestonesync.mjs");
+  return run(argv, deps);
+}
+
 /**
  * `forgedock milestone train` (#4658): lean/train.mjs over `orchestrateFromCli` (one batch per milestone) and the #4657 lifecycle.
  * The train reads forge.yaml (`orchestration.global_parallel`, `milestones.close_on`) and never writes it.

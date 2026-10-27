@@ -1,34 +1,30 @@
 ### Approach
-A deterministic train scheduler in `bin/lean/train.mjs` (0 LLM calls). It runs one orchestrate batch per milestone and keeps state in a single atomic file. Lanes already resolve their base from the milestone (`lane.mjs`), so the train never touches `branches.staging` or `forge.yaml`. The #4657 lifecycle seam handles ship and close.
+One deterministic module, `bin/lean/milestonesync.mjs`, plus a `forgedock milestone-sync` command; the spec now calls it instead of raw merge+push. No LLM calls.
 
 ### Changes
-- bin/lean/train.mjs: state file, createTrain, insertMilestone, resolveCaps, runTrain, stopOf, trainCli.
-- bin/lean/train.test.mjs: 10 tests.
-- bin/engine-cli.mjs: `trainFromCli` wiring (29 lines).
-- bin/forgedock.mjs: `milestone train` command, known-commands list, help.
-- forge.yaml.example, commands/milestone.md, devdocs/decisions/4658-milestone-train.md: docs.
+- bin/lean/milestonesync.mjs: `syncMilestone`, `isSyncable`, `isProtectedBranch`, `readSyncDebounce`, `runMilestoneSyncCli`.
+- bin/lean/milestonesync.test.mjs: bare-origin git fixture with stub gh (10 tests).
+- bin/engine-cli.mjs: thin `milestoneSyncFromCli` export.
+- bin/forgedock.mjs: `milestone-sync` dispatch and known-command entry (added by amendment).
+- commands/milestone.md: ship Step 2 and Sync action call the command; on-demand and shipped-never rules; conflict note.
+- docs/CONFIG.md: `milestones.sync_debounce`; `lean.base_merge_*` also applies to milestone sync.
+- devdocs/decisions/4663-milestone-sync.md: ADR.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/train.mjs:createTrain/runTrain/trainCli; bin/forgedock.mjs `case "milestone"`
-- R2 ✅ train.mjs never writes forge.yaml; test "forge.yaml is byte-identical" in train.test.mjs
-- R3 ✅ train.mjs:resolveCaps (warn and ignore); test "conflicting --parallel"
-- R4 ✅ train.mjs:insertMilestone/validateOrder; test "insertMilestone re-validates"
-- R5 ✅ train.mjs:STOP_REASONS/stopOf, `--resume`; test "typed STOP"
+- R1 ✅ bin/lean/milestonesync.mjs (protection probe, PR + `--auto`, CLEAN fallback); test "protected branch" and "CLEAN PR".
+- R2 ✅ same file (marker, debounce, force-with-lease, `pr edit`); test "fast-moving base".
+- R3 ✅ `isSyncable` + refusal in `syncMilestone`; test "never syncs a shipped...". No active-milestone picker exists in this repo, so "never pick as active" is delivered as the exported guard plus the spec rule; external pickers must call it.
+- R4 ✅ `reason` required (refused otherwise); spec says on demand only.
+- R5 ✅ `resolveBaseConflicts` with `readBaseMerge`; test "append-only registry".
+- R6 ✅ bin/lean/milestonesync.test.mjs.
 
 ### Verification
-- V1 `node --test bin/lean/train.test.mjs lifecycle.test.mjs lane.test.mjs batch.test.mjs`: 81 pass, 0 fail. The new tests fail without the fix because the module does not exist.
-- `forgedock check`: PASS. The checks script widened to the full suite because forge.yaml.example changed; per host rules I did not run it in full.
-- bin/tests/journey.test.mjs has 3 failures (preflight, forge Act II, writeInstallReceipt) that are identical on the base without my changes.
-- No formatter is configured in the repo.
+- V1 `node --test bin/lean/milestonesync.test.mjs bin/lean/basesync.test.mjs bin/lean/lifecycle.test.mjs`: pass (36). The new tests cover a new module, so they cannot run without the fix.
+- V2 `bash scripts/publish-staging-sync.test.sh && bash scripts/check-spec-markers.sh`: pass.
+- `forgedock check`: PASS; `bin/tests/engine-cli.test.mjs`: pass (77).
 
 ### Notes
-New command `forgedock milestone train`. State lives under `<batchRoot>/trains/<id>/`. Cap source is `orchestration.global_parallel` (default 3). Batch id of a running milestone is only recorded after its batch returns, because orchestrate gives no early callback.
+New command `forgedock milestone-sync <slug> --reason ship|batch|conflict-risk|manual --repo o/r [--base B]`. New forge.yaml key `milestones.sync_debounce` (default 10m). No formatter is configured in the repo.
 
-## Sibling-list check
-The eight bin/lean tests flagged as enumerating siblings of `train` (batch, checks, conformance, context, execution.e2e, execution, fixround, heavy) do not list bin/lean modules or train symbols at the cited lines. Recorded as `not_members` in result.json; no test edits.
-
-## CI follow-up (Unit tests)
-CI log was unavailable. Reran bin/lean, bin/engine, bin/stats, bin/tests, packages/protocol locally: all train/lifecycle/lane/batch tests pass (V1: 81/0). The only failures are 3 pre-existing, environment-dependent tests unrelated to this diff (WSL/platform detection in preflight, a root-user copyFile permission test, writeInstallReceipt platform capture). No code change made.
-
-### CI fix
-CI job "Unit tests (node --test)" runs `scripts/check-test-tmp-cleanup.sh` before the tests. It flagged `bin/lean/train.test.mjs` for using `mkdtemp` directly. The test now uses `tmpDir` from `bin/tests/_tmp.mjs`. The lint and its own test pass; V1 still passes (81 tests). A targeted run of the CI globs (bin/tests, bin/lean, bin/engine, bin/stats, packages/protocol) shows only the 3 journey failures that also fail on the base in this WSL host.
+## Enumeration follow-up
+The ten flagged bin/lean tests (batch, checks, conformance, conformance.e2e, context, execution, execution.e2e, fixround, heavy, lean) hold no list naming sibling modules (conflictres, basesync, lifecycle are absent); recorded `milestonesync` as not_members in result.json.
