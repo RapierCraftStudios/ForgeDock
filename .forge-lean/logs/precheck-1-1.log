@@ -1,0 +1,6 @@
+Class B: Checking changed spec files for unguarded side-effect verbs:
+commands/orchestrate/phase-4-execution.md
+commands/review-pr.md
+
+HIGH | commands/orchestrate/phase-4-execution.md | line 2272 | Class B: side-effect 'gh issue edit' added in section 'Step 4B: Monitor completions and dispatch newly ready issues' with no DRY_RUN/governor guard in the same code block — add a guard inside this code block or wrap the effect in a DRY_RUN check
+check-command-side-effects: 1 violation(s) found. See stderr for details.

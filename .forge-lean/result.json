@@ -1,5 +1,74 @@
-{"status":"fixed","summary":"Batch state files 0600/dir 0700; refresh-bot-token.sh shipped in npm package","requirements":[{"id":"R1","status":"implemented","evidence":"bin/lean/batch.mjs:58"},{"id":"R2","status":"implemented","evidence":"package.json:46"},{"id":"R3","status":"implemented","evidence":"bin/lean/batch.mjs:58"},{"id":"R4","status":"implemented","evidence":"package.json:46"}],
-"validation":[{"id":"V1","command":"node --test bin/lean/batch.test.mjs bin/tests/package-files.test.mjs bin/tests/bot-token-timer.test.mjs","exit":0},{"id":"V2","command":"node --test bin/lean/sched.test.mjs bin/lean/limits.test.mjs bin/lean/retry.test.mjs","exit":0}],
-"tests":[{"command":"node --test --test-name-pattern='batch state files are private' bin/lean/batch.test.mjs","result":"pass","fails_without_fix":true}],
-"self_review":[{"question":"1","answer":"yes","evidence":"batch.mjs:58-68, package.json"},{"question":"2","answer":"yes","evidence":"V1/V2 pass; other writeAtomic callers unchanged"},{"question":"3","answer":"yes","evidence":"all deliverables changed, V1/V2 exit 0"},{"question":"4","answer":"yes","evidence":"git diff touches batch.mjs, package.json, tests only"}],
-"amendments":[]}
+{
+ "status": "fixed",
+ "summary": "Deploy PR body links the lane's post-deploy rollup via a new deterministic script; R11 stays deferred",
+ "requirements": [
+  {
+   "id": "R10",
+   "status": "implemented",
+   "evidence": "commands/deploy-pr.md:297"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "bash scripts/postdeploy-rollup-link.test.sh",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "bash scripts/file-deferred-followups.test.sh",
+   "exit": 0
+  },
+  {
+   "id": "V3",
+   "command": "bash scripts/validate-spec-graph.sh",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "bash scripts/postdeploy-rollup-link.test.sh",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R10 delivered at commands/deploy-pr.md:297; R11 deferred in contract"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "file-deferred-followups.test.sh 68/68; deploy-pr block only appends, failures swallowed"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "V1 7/7, V2 68/68, V3 exit 0 after fixing the two baseline failures; forgedock check PASS"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "deliverables, tests, and the amended files named in amendments"
+  }
+ ],
+ "amendments": [
+  {
+   "kind": "add-deliverable",
+   "path": "devdocs/decisions/4727-deploy-pr-rollup-link.md",
+   "why": "check-devdocs-freshness.sh requires a new decision record or dossier for a behaviour change under scripts/"
+  },
+  {
+   "kind": "add-deliverable",
+   "path": "commands/review-pr.md",
+   "why": "V3 self-check 'review-pr READS FORGE:CONTRACT' failed on the base; one phrase adds the READS edge"
+  },
+  {
+   "kind": "add-deliverable",
+   "path": "commands/orchestrate/phase-4-execution.md",
+   "why": "V3 HARD: workflow:engine-error had no --add-label transition on the base; added one idempotent add-label"
+  }
+ ]
+}
