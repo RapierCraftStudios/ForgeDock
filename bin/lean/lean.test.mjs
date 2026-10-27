@@ -2091,11 +2091,22 @@ describe("merge_wait policy", () => {
   const states = (o) => Object.entries(o).map(([name, state]) => ({ name, state }));
   it("required with no protection (empty) merges immediately without polling", async () => {
     const w = world(); let polled = 0;
-    w.io.requiredChecks = async () => []; w.io.checkStates = async () => { polled++; return []; };
+    w.io.requiredChecks = async () => []; w.io.checkStates = async () => []; // #4651: read once by the DCO gate, never polled
     w.io.waitCiGreen = async () => { polled++; return { rc: 2, text: "" }; };
     const r = await run(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(polled, 0);
     assert.match(traj(w)[0], /\| Merge \| required \(no required checks: merged right after review\) \|/);
+  });
+  it("a failed DCO check blocks the merge with ci.dco even when no check is required (#4651)", async () => {
+    for (const mergeWait of ["required", "none"]) {
+      const w = world(); w.io.requiredChecks = async () => []; w.io.checkStates = async () => [{ name: "DCO Sign-Off Verification", state: "failure", head: w.head }, { name: "build", state: "success" }];
+      const r = await run(w, { mergeWait });
+      assert.equal(r.terminalReason, "needs-human", mergeWait); assert.equal(r.code, "ci.dco", mergeWait); assert.equal(w.merges.length, 0, mergeWait);
+    }
+  });
+  it("a passing or stale-head DCO check does not block the merge (#4651)", async () => {
+    const w = world(); w.io.requiredChecks = async () => []; w.io.checkStates = async () => [{ name: "DCO Sign-Off Verification", state: "failure", head: "ffff0000" }, { name: "dco", state: "success", head: w.head }];
+    assert.equal((await run(w)).terminalReason, "merged");
   });
   it("required with a pending required check waits (backoff) then merges", async () => {
     const w = world(); const seqs = [states({ build: "pending" }), states({ build: "pending" }), states({ build: "success", other: "failure" })]; let sleeps = 0;

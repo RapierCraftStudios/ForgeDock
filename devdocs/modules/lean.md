@@ -371,6 +371,14 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    logs (`collectFailedLogs`, `ciFailurePrompt`), re-reviews and pushes the fix,
    and waits again; `ci.red` only after `max_rounds` (shared with `ciVerify`) or a
    round with no new commit. Rollups of another head count as pending. `CI_FIX_ROUND`.
+   **DCO sign-off** (#4651, `signoff.mjs`): `gitPush` (and `ciVerify` before it reads the head)
+   first runs `ensureSignedOff`: commits reachable from HEAD but not from `origin/<branch>` nor
+   `origin/<lane>` that are authored/committed `*@localhost` or lack a `Signed-off-by` naming their
+   author are rewritten (`git filter-branch` over that range only) with the lane identity
+   (`GIT_AUTHOR_*`, else `git config`) and a sign-off; pushed commits are never in the range. No usable
+   identity or a failed rewrite ends `ci.dco`. Before `gh pr merge`, a failed check named DCO on the
+   current head (read from `checkStates`, required or not, any `merge_wait`) ends needs-human `ci.dco`
+   (not recoverable: a new commit cannot fix history). `DCO_SIGNOFF_REWRITE` event.
    **e2e merge gate** (#4403, `e2e.mjs`, forge.yaml `verify.e2e*`): before `gh pr merge`,
    once per reviewed head, a lane whose diff touches `e2e_paths` or whose contract
    quotes `[type:e2e]` runs `runE2eGate` (label the PR and wait on `e2e_checks`, a

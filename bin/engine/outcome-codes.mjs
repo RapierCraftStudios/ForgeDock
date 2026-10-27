@@ -32,6 +32,7 @@ export const OUTCOME_CODES = Object.freeze({
   REMEDIATE_UNFIXABLE: "remediate.unfixable",
   REMEDIATE_INPR_REQUESTED: "remediate.inpr_requested",
   CI_RED: "ci.red",
+  CI_DCO: "ci.dco", // forge#4651: a failed DCO check (or no identity to sign off the lane's commits); never recoverable: a new commit cannot fix history
   CI_TIMEOUT: "ci.timeout",
   BASE_CONFLICT: "base.conflict",
   RATE_LIMITED: "rate_limited",
