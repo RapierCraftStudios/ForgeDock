@@ -156,3 +156,15 @@ always_load: []
 # Add entries here only when a doc must be read for ALL tasks unconditionally.
 # NORTHSTAR.md (repo root) is always loaded through the first line of CLAUDE.md
 # and AGENTS.md, not here: always_load paths resolve under devdocs/.
+
+  - name: lean-readiness
+    glob: "scripts/readiness*"
+    path: modules/lean.md
+    authority: required
+    token_cost: 900
+
+  - name: lean-bootstrap
+    glob: "scripts/bootstrap-*"
+    path: modules/lean.md
+    authority: required
+    token_cost: 900
