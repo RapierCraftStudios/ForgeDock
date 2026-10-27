@@ -299,6 +299,11 @@ else
     done
 fi
 
+# forge#4657: lifecycle (FORGE:LIFECYCLE in the milestone description, bin/lean/lifecycle.mjs).
+gh api "repos/$GH_REPO/milestones?state=open&per_page=100" \
+    --jq '.[] | {t: .title, open: .open_issues, st: ((.description // "") | capture("FORGE:LIFECYCLE[^{]*\\{[^}]*\"state\":\"(?<s>[^\"]+)\""; "g") | .s)?} |
+        if (.st == "shipped:staging" or .st == "deployed:default") and .open > 0 then "  SHIPPED_WITH_OPEN \(.t) state=\(.st) open=\(.open)"
+        elif .open == 0 then "  EMPTY_BUT_OPEN \(.t) state=\(.st // "building")" else empty end' 2>/dev/null || true
 echo ""
 ```
 

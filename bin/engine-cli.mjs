@@ -276,6 +276,10 @@ export async function readPostDeployMinAge(cwd = process.cwd()) {
     return parseMinAge(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.post_deploy?.min_age);
   } catch { return null; }
 }
+/** forge.yaml `milestones.close_on` (#4657): `staging` or `default` (the default). */
+export function readMilestoneCloseOn(cwd = process.cwd()) {
+  try { return String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.milestones?.close_on ?? "").trim().toLowerCase() === "staging" ? "staging" : "default"; } catch { return "default"; }
+}
 /** forge.yaml `lean.explore` (on|off) and `lean.explore_model` (#4391): the builder's explorer subagent; undefined when neither is set or valid. */
 export function readExplore(cwd = process.cwd()) {
   try {
@@ -1610,6 +1614,11 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     drift = makeDrift({ repo, cwd, io: leanIo, config: readDrift(cwd), stagingBranch: branches.staging ?? "staging", affectedFiles,
       onEvent: (e) => console.log(`#${e.issue} → ${e.detail}`) });
   }
+  let lifecycle = deps.lifecycle; // forge#4657: milestone lifecycle; closes at `milestones.close_on`
+  if (lifecycle === undefined) {
+    const { makeLifecycle } = await import("./lean/lifecycle.mjs");
+    lifecycle = makeLifecycle({ gh: leanIo.gh, git: (a) => leanIo.git(a, { cwd }), repo, closeOn: readMilestoneCloseOn(cwd), defaultBranch: branches.default ?? "main" });
+  }
   const crossLane = [];
   // #4183: owned-resource GC in preflight and before an admission when the host is near the ceiling (forge.yaml hygiene).
   const gcMod = await import("./gc.mjs");
@@ -1672,7 +1681,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       ...(estimate ? { estimate } : {}),
       beforeAdmit,
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, ...lanes,
-      breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift,
+      breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift, lifecycle,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null, exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.

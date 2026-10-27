@@ -134,6 +134,16 @@ branches:
 # Commands: orchestrate, triage
 # =============================================================================
 
+# MILESTONE LIFECYCLE (OPTIONAL, forge#4657)
+# A milestone moves building -> shipped:staging -> deployed:default -> closed
+# (FORGE:LIFECYCLE block in its description). close_on picks where it closes:
+# `default` (default) closes once the shipped commit is on the default branch,
+# `staging` closes right after the staging merge. A milestone with open issues
+# never closes; ship carries them over instead of demoting them to fast lane.
+# Commands: milestone, orchestrate, pipeline-status
+# milestones:
+#   close_on: default
+#
 # post_deploy:
 #   precondition_cmd: "scripts/rollout-ready.sh"
 #   min_age: "24h"
