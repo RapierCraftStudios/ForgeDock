@@ -29,3 +29,6 @@ Built on #4595's blocker re-check. Dependency skips are marked `waiting` while a
 
 ## Docs
 Added a #4687 entry to devdocs/modules/lean.md (waiting state, trigger log, final not-planned, --add requeue) to satisfy the devdocs freshness check.
+
+### CI follow-up (Unit tests job, no log available)
+Reproduced locally the 35 test files referencing the changed modules plus bin/lean and bin/engine tests: only 3 failures remain, all environment-dependent and unrelated to this diff (WSL/platform rows in preflight, a copyFile tmp-orphan test, writeInstallReceipt platform capture; this host is WSL). `scripts/check-spec-size.sh` passes. No code change made; the failing CI job could not be identified without its log.
