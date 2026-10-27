@@ -1099,9 +1099,12 @@ export function formatOutcomeLists(rows) {
   for (const r of rows ?? []) {
     if (!r || r.recovered) continue;
     const human = r.outcome === "needs-human" && classifyNeedsHuman(r) === "human";
+    if (r.parkedQueued && r.outcome === "needs-human") continue; // #4656: listed on the remediation line below, not as unrecovered
     if (!human && (r.outcome === "needs-human" || r.outcome === "budget-exceeded" || r.recovery)) out.push(`unrecovered: #${r.issue} (${r.code ?? r.recovery?.code ?? "unclassified"}: ${one(r.recovery ? `recovery ${r.recovery.code} ended ${r.recovery.outcome}: ${r.recovery.detail}` : r.detail)})`);
   }
   const esc = (rows ?? []).filter((r) => r?.outcome === "needs-human" && classifyNeedsHuman(r) === "human");
+  const rq = (rows ?? []).filter((r) => r?.outcome === "needs-human" && r.parkedQueued); // #4656: parked past recovery: the single remediation queue, not escalation
+  if (rq.length) out.push(`remediation queue (/work-on:remediate): ${rq.map((r) => `#${r.issue} (parked:${r.code}${r.pr ? ` PR #${r.pr}` : ""})`).join(" ")}`);
   const parked = formatParkedLine(rows); // #4389: one line for every parked post-deploy follow-up, never an escalation
   if (parked) out.push(parked);
   if (esc.length) out.push(["escalations (human decisions, asked once):", ...esc.map((r) => `- #${r.issue} (${r.code}): ${one(r.detail)}`)].join("\n"));

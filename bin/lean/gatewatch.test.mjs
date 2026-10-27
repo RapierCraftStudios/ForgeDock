@@ -49,3 +49,11 @@ describe("#4656 parked class and migration", () => {
     assert.equal(parkedLabel("ci.red"), "parked:ci.red");
   });
 });
+
+describe("#4656 report routing", () => {
+  it("a parked row past recovery is listed on the remediation queue line, not unrecovered or escalations", async () => {
+    const { formatOutcomeLists } = await import("./orchestrate.mjs");
+    const lines = formatOutcomeLists([{ issue: 1, outcome: "needs-human", code: "conformance.unimplemented", pr: 9, parkedQueued: true }]);
+    assert.deepEqual(lines, ["remediation queue (/work-on:remediate): #1 (parked:conformance.unimplemented PR #9)"]);
+  });
+});
