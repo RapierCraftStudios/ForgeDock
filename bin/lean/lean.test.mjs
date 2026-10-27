@@ -3277,6 +3277,17 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.match(r.text, /\.scope/);
   });
 
+  it("#4690 a fixture lane really forking past its task cap is stopped with CLI_LANE_LIMIT (no systemd needed: the probe counts real descendants)", async () => {
+    const { writeFileSync, chmodSync } = await import("node:fs");
+    const { runCliBackendAsync, listDescendants } = await import("../runner.mjs");
+    const d = tmpDir("core-forkfix-");
+    writeFileSync(`${d}/fake-claude`, "#!/bin/sh\ni=0\nwhile [ $i -lt 40 ]; do sleep 20 & i=$((i+1)); done\nsleep 20\n"); chmodSync(`${d}/fake-claude`, 0o755);
+    const cap = 10;
+    const limitProbe = (pid) => ({ tasks: listDescendants(pid).length > cap ? 1 : 0, memory: 0 });
+    await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/fake-claude`, logger: { log() {} }, maxMs: 15000, limitProbe,
+      wrap: (b, a) => ({ bin: b, args: a, unit: "forgedock-lane-fixture" }) }), (e) => e.code === "CLI_LANE_LIMIT" && e.limit === "tasks");
+  });
+
   // The scope's cgroup counters must be readable (cgroup v2, delegated user scope); plain systemd-run availability is not enough on CI.
   const scopeEventsReadable = () => {
     if (!systemdRunAvailable()) return false;

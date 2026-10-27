@@ -40,3 +40,6 @@ V1, V2 and V3 re-run after merging origin/staging: all exit 0 (V3 prints "OK: ev
 
 ## CI follow-up (Unit tests job)
 No CI log was available and the job does not reproduce locally (1880 targeted tests pass; the real-scope tests skip here). Hardened the real-scope fork test so the idle timer cannot race the limit sample (idleMs removed). V1-V3 re-run: exit 0.
+
+## R4 fixture without systemd
+Added "#4690 a fixture lane really forking past its task cap" (bin/lean/lean.test.mjs): a real shell fixture forks 40 children, a probe counting its real descendants reports the cap, and runCliBackendAsync stops it with CLI_LANE_LIMIT/tasks. It runs on every host; the real-scope variant still skips where systemd-run --user is unavailable. V1-V3 exit 0.
