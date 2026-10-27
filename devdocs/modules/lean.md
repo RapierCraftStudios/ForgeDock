@@ -1933,3 +1933,6 @@ was swallowed and every later pass returned `recorded-fail`, so the parent staye
 throws, no record is posted and the next pass re-runs the checks and retries. The early `monitoring` return on an existing windowed
 pass record also re-applies the idempotent `post-deploy-monitoring` label, so a label that failed on the first pass is retried
 (`sweepDue` selects by it).
+
+## Entry 2026-10-27 — Joined amendment refs split; missing host module is env.repro_unrunnable (#4655)
+`applyAmendments` expands a `requirement` like `R2/R3`, `R2, R3`, `R2 and R3` or `R2–R3` (range, capped at 50) into one row per id with the same kind/why/text/check before lookup; an unknown id in the list is still a problem for the correction round. `scope-note` is not a kind: the amendment prompt says so and asks for one id per row. In `scripts/acceptance-red-green.sh`, a head run that failed only on a missing host module or command (`No module named X` with X not tracked by the repo, `foo: command not found`) is `UNRUNNABLE`, so `reproFailures` yields `env.repro_unrunnable` instead of `conformance.unimplemented`; a real failing test stays `FAILED`.
