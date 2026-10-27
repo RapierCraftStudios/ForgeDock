@@ -8,7 +8,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches } from "./batch.mjs";
-import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
+import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
 import { orchestrateFromCli } from "../engine-cli.mjs";
@@ -512,6 +512,17 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     const env = mergeEnv({ PATH: "/d", ANTHROPIC_API_KEY: "daemon-key", NODE_OPTIONS: "x" }, kept);
     assert.equal(mergeEnv({ GH_TOKEN: "d" }, kept).GH_TOKEN, "d", "a secret-named daemon key (never pinned) stays for the lane");
     assert.deepEqual(env, { NODE_OPTIONS: "x", ANTHROPIC_API_KEY: "daemon-key", PATH: "/", CLAUDE_CONFIG_DIR: "/acct-b", FORGEDOCK_SCHED_DIR: "/s", LC_CTYPE: "C" });
+  });
+
+  it("#4734: the pin keeps non-secret provider selectors, drops secrets and session ids, and droppedEnv names what was left out", () => {
+    const client = { PATH: "/", GH_TOKEN: "fresh", CLAUDE_CODE_USE_BEDROCK: "1", ANTHROPIC_BASE_URL: "http://proxy", ANTHROPIC_MODEL: "m", ANTHROPIC_API_KEY: "k",
+      FORGEDOCK_POOL_TOKEN: "p", CLAUDE_CONFIG_DIR: "/acct", CLAUDE_CODE_SESSION_ID: "s", CLAUDE_PID: "1" };
+    const kept = batchEnv(client);
+    assert.deepEqual(Object.keys(kept).sort(), ["ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CONFIG_DIR", "PATH"]);
+    assert.deepEqual(droppedEnv(client, kept), ["ANTHROPIC_API_KEY", "FORGEDOCK_POOL_TOKEN", "GH_TOKEN"]);
+    assert.deepEqual(droppedEnv(client, batchEnv(client, { passthrough: ["GH_TOKEN"] })), ["ANTHROPIC_API_KEY", "FORGEDOCK_POOL_TOKEN"]);
+    assert.deepEqual(droppedEnv({ PATH: "/", CLAUDE_CODE_SESSION_ID: "s" }, {}), [], "nothing to name: no warning");
+    assert.equal(mergeEnv({ ANTHROPIC_BASE_URL: "daemon", GH_TOKEN: "d" }, kept).ANTHROPIC_BASE_URL, "http://proxy");
   });
 
   it("#4691: the pinned env drops session tokens and ids, session temp PATH dirs and path_exclude dirs", () => {

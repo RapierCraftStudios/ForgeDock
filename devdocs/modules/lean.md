@@ -1902,6 +1902,14 @@ FORGE:TELEMETRY gate events, which #4693/#4695 must emit under exactly these nam
 `supersedes_accepted`, `decision_superseded`, `decision_violation` (an unrecorded kind prints n/a). Stats-time only: no lane-path
 cost, no LLM. Usage and definitions: `docs/STATS.md`.
 
+## Entry 2026-10-27 — Batch env pin keeps provider selectors and names what it drops (#4734)
+
+`schedd.mjs` `ENV_KEEP` now also keeps the non-secret provider/endpoint/model selectors `CLAUDE_CODE_USE_*`, `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`. Secrets (`SECRET_ENV`) still never reach `plan.json`. New
+`droppedEnv(env, kept)` returns the names (never values) of `CLAUDE_*`/`ANTHROPIC_*`/`GH_*`/`GITHUB_*`/`FORGEDOCK_*` keys not pinned, minus
+session-scoped ones; `engine-cli.mjs` submit logs one line with them and a pointer to `orchestration.env_passthrough`. Release note: a
+per-shell `GH_TOKEN`/`FORGEDOCK_POOL_TOKEN` is still not pinned, so lanes use the daemon's copy unless named in `env_passthrough`.
+
 ## Entry 2026-10-27 — Pinned batch env is allowlisted and PATH-sanitised (#4691)
 
 `schedd.mjs` `batchEnv` no longer pins the launching session's whole env into `plan.json`. It keeps `PATH`, `HOME`, `USER`, `SHELL`,
@@ -1984,3 +1992,6 @@ Guard gate added wall time (#4705, R12): `guardGate` runs beside `rerunFailedVal
 
 ## Entry 2026-10-27 — Deferred rows are bucketed; post-deploy items roll up per lane (#4724)
 Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now|date:YYYY-MM-DD|owner:<action>|new-issue`, `BUCKETS`/`bucketProblems` in `conformance.mjs`); an amendment without one defaults to `post-deploy`. `followupClass` routes owner -> external, new-issue -> engineering, the rest -> post-deploy; `followupItems` tags the why with `[bucket:<kind>]` and, for dates, `due:`/`from:` (contract-time anchor). `scripts/file-deferred-followups.sh` appends post-deploy items to ONE rollup per release lane (`FORGE:POSTDEPLOY_ROLLUP`, `FORGE_RELEASE_LANE`) under `### #<root parent>`, dedups normalized text across parents, resolves DEFERRED_FROM chains to the root, never puts owner items in it, and reports per-bucket counts in DEFERRED_TELEMETRY. `postDeployGate` reads every `DEFERRED_FROM` parent (`deferredFromAll`) and re-anchors `due:` by (landed - `from:`). Single-parent follow-ups behave as before.
+
+## Entry 2026-10-27 — Mechanical park creates its `parked:<code>` label and only counts a real relabel (#4736)
+`makeRelabelNeedsHuman` (`engine-cli.mjs`) best-effort runs `gh label create parked:<code> --force` before the park edit, since per-code labels are not in `labels.json` (same lazy-create as `prefilter.mjs`); without it the whole edit failed and returned `"failed"`. `orchestrate()` now sets `row.parkedQueued` only when the park relabel returns neither `false`, `"failed"` nor `"skipped"`, so a failed relabel stays in "unrecovered" instead of printing as remediation-queued.

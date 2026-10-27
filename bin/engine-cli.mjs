@@ -1392,7 +1392,10 @@ async function orchestrateClient(argv, deps = {}) {
       if (!repo) throw new Error("orchestrate needs the repo: pass --repo or run inside a checkout with a GitHub remote");
       sub = [...sub, "--repo", repo];
     }
-    msg = { op: "submit", argv: sub, cwd: process.cwd(), env: schedd.batchEnv(process.env, readPinnedEnvConfig(process.cwd())) };
+    const pinned = schedd.batchEnv(process.env, readPinnedEnvConfig(process.cwd()));
+    const dropped = schedd.droppedEnv(process.env, pinned);
+    if (dropped.length) console.log(`orchestrate: not pinned into the batch (lanes use the daemon's env or resolve them at lane start): ${dropped.join(", ")}; name them in forge.yaml orchestration.env_passthrough to pin them`);
+    msg = { op: "submit", argv: sub, cwd: process.cwd(), env: pinned };
   }
   let sock = await connect(), req = msg, reattached = false, losses = 0;
   let id = resumeId;
@@ -1906,6 +1909,7 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
     // #4656: a mechanical park carries its code and PR on `parked:<code>` and joins the remediation queue, not the human queue.
     if (parked?.code) {
       const { parkedLabel, REMEDIATION_QUEUE_LABEL } = await import("./engine/outcome-codes.mjs");
+      try { await gh(["label", "create", parkedLabel(parked.code), "-R", repo, "--force", "--color", "C5DEF5", "--description", "Mechanical park on a terminal code. Managed by ForgeDock."]); } catch { /* exists, or no rights: the edit says */ }
       try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `${parkedLabel(parked.code)},${REMEDIATION_QUEUE_LABEL}`, "--remove-label", "needs-human"]); } catch { return "failed"; }
       try {
         const { capComment } = await import("./lean/render.mjs");
