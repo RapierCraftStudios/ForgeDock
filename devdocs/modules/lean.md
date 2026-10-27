@@ -495,6 +495,17 @@ share`). `scripts/maintenance-scan.sh` is the deterministic producer
 (hotspots, package cycles via `structure-delta.sh`, dead-code tools, oversized
 docs), deduplicated by a `FORGE:MAINT:<kind>:<key>` marker.
 
+Milestone integration (#4667, no LLM; `integration.mjs`, off without forge.yaml
+`ci.workflow`): dispatches the workflow on each active `milestone/*` branch
+every `interval_hours` or `every_merges` lane merges (`onMerged` counts, the
+run is started in the background and settled after the batch; `forgedock
+integration run` is the cron entry). State is a `FORGE:INTEGRATION` block in
+the milestone description (lastRun, lastGreen, redStreak, mergedPrs, issue). A
+red run files or updates ONE `integration-red` issue (marker
+`FORGE:INTEGRATION:<slug>`: failing specs, merge range); green closes it.
+`block_admission_after` makes `holds` refuse new lanes of the milestone
+(`integHeld` in `orchestrate.mjs`) until a green run.
+
 Milestone drift (#4161, no LLM): a merged lane's result carries `structure`
 (the merge-time STRUCTURE_DELTA record), `milestone` and `lane`.
 `orchestrate.mjs` awaits `drift.onMerged` for merged `milestone/*` lanes
@@ -738,6 +749,11 @@ The steps are gated in two places:
   `node heavy.mjs run --name <n> -- <real>`, which acquires a slot, runs the command
   with `FORGE_HEAVY_HELD=1` (nested calls pass through) and per-holder
   `FORGE_HOST_PARALLELISM`, then releases and propagates the exit code.
+  Re-entry guard (#4680): a pass-through wrapper that re-resolves the name back to the
+  shim is cut off by `FORGE_HEAVY_CHAIN` (`name:cmd|...`). A repeat resolves the next
+  PATH match past `FORGE_HEAVY_SHIM_DIR` and the chain dirs; none, or more than 4 entries,
+  exits 126 with `env.shim_loop` naming the dirs. `writeHeavyShims` also skips wrapper
+  targets at write time (next match, else skipped with a warning).
 - **Engine-side steps:** `env.setup`, precheck commands and the split tests go
   through `io.heavy` (`effects.mjs` `makeHeavyIo`). The split grouper's LLM call
   hands its slot back while it runs.
@@ -780,7 +796,7 @@ inside still runs `run-issue`, so results, leases and annotations go through Git
 result (engine-error row), thrown error and adopt. A dispatcher killed mid-lane
 leaves the entry under its dead pid: `--resume` adopts from the persisted handle,
 `forgedock gc --apply` (scope `sandboxes`) tears it down through the provider.
-`countLiveLanes` skips sandbox-only lane files. `orchestrate.mjs` seam
+A transport failure while polling or adopting (refused/reset, `fetch failed`, timeout, 502/503/504, `isTransportError`) is retried with backoff for `execution.unreachable_window_min` (default 5); past it the lane ends `deferred` `sandbox.unreachable` (not breaker-counted) and the sandbox is kept, then adopted by the next attempt or `--resume` (#4672). `countLiveLanes` skips sandbox-only lane files. `orchestrate.mjs` seam
 `remote: {max, isRemote}` admits remote lanes against `max_remote` without a host
 registry slot (batch K still applies). Rationale:
 `devdocs/decisions/4253-execution-sandbox-provider.md`.
@@ -1019,7 +1035,8 @@ a bare `**` glob. `verifyReport` gates carry `ran`; zero ran → `neutral`, "no 
 ran". A recovery lane (`recoverUnlabelled`) re-adds `needs-human` with a recovery-evidence `FORGE:NEEDS_HUMAN` only on a final
 `ci-pending` (`needsHuman()` has its own path); never on merged/invalid/decomposed/dependency-*/deferred/engine-error. The
 batch runner (`orchestrate.mjs` settle, injected `relabelNeedsHuman`, wired in `engine-cli.mjs`) relabels once for a final
-`engine-error`/`deferred` after a recovery pass (2026-10-20, SPEC-7/8, BUG-6 from #4291). Rationale: `devdocs/decisions/4297-pre-release-trust-boundaries.md`.
+`engine-error`/`deferred` after a recovery pass (2026-10-20, SPEC-7/8, BUG-6 from #4291).
+#4656: a final needs-human row on a mechanical terminal code (or a recoverable one whose recovery is spent) is parked, not escalated: `relabelNeedsHuman({parked:{code,pr}})` swaps `needs-human` for `parked:<code>` + `remediation-queue` (the `/work-on:remediate` queue); `needs-human:external` is reserved for human waits (`classifyNeedsHuman(row,{parked:true})`, `classifyLegacyNeedsHuman` defaults to external). `gatewatch.mjs` `detectGateDeadlock` runs each pass (hold list plus the `getGates` seam) and emits a `GATE_DEADLOCK` row once per (gate, issue). Rationale: `devdocs/decisions/4297-pre-release-trust-boundaries.md`.
 
 ## Entry 2026-10-20 — 1.29.0 staging-review LOW follow-ups (#4298)
 
@@ -1821,3 +1838,40 @@ file as `stopRemote: true` (through the schedd `cancel` op or `requestCancel`); 
 run.interrupted`; 2xx = sent, 404/405 = unsupported or gone (false). Stop never falls back to `DELETE`: destroying a
 sandbox is not a checkpoint and would lose work; teardown still destroys only after the result. Without the flag, or on a
 pool with no stop endpoint, behaviour is as before (remote lanes run to their result). Cost: 0 LLM calls.
+
+## Entry 2026-10-27 — external prerequisites are preview/deploy gates (#4660)
+
+`scripts/readiness.mjs` (pure module + CLI) reads `needs-human:external` issues, parses `gates:` (`preview|staging-deploy|prod-deploy|feature-flag:<name>`) and `owner:` from the body, and reports per gate the open prerequisites (owner, age) and open code milestones; malformed gates are ignored. `--digest` orders unblocked human actions by `Depends on #N` (topological, cycle-safe). `deployable(target)` is false while the mapped gate (preview, staging, prod) has open prerequisites; a `feature-flag` gate stays red but never blocks merge. `bootstrap-validate.mjs` treats `needs-human:external` as needs-human and rejects a missing/invalid `gates:` with `missing-gates`; `bootstrap-create.mjs` applies the label. Merge and lane code unchanged. Cost: 0 LLM calls.
+
+## Entry 2026-10-27 — Deferred follow-ups: one issue per class, milestone, TSV validation (#4664)
+
+`scripts/file-deferred-followups.sh` groups items by class (`engineering|post-deploy|external|ops`; TSV column 4, else the
+why's `post-deploy:|external:|ops:` prefix, else engineering; `followupItems` sets it from the requirement's optional `class`)
+and files one follow-up per class per parent: label `followup:<class>`, a `FORGE:DEFERRED_CLASS` marker next to the unchanged
+`FORGE:DEFERRED_FROM` marker (absent = engineering, so older issues and claims still match), a `class=` suffix on the claim
+marker, and the parent's milestone (`FORGE_FOLLOWUP_MILESTONE` from `lean.mjs`, else read from the parent). A closed milestone
+resolves to the next open one by due date, else forge.yaml `followups.default_milestone` (`readFollowupsDefaultMilestone`,
+`o.followupsDefaultMilestone`). TSV column 1 is a path or `-`; the engine sends `-` and puts the requirement text in column 5
+(the item's identity in the checklist and the stdout rows). Requirement text or an `R<n>:` prefix in column 1 exits 2
+(`DEFERRED_TSV=INVALID`) before any gh call. Lookups for all classes run before anything is filed.
+
+## Entry 2026-10-27 — settle scope freeze and deploy-last warning (#4665)
+
+`scripts/settle-scope.mjs` (pure module, no I/O) freezes the milestone's issue set when settle begins (`freezeScope`). `classifyNew` sorts later issues: a child of a frozen decomposed issue is a `decomposition-child` and stays in the milestone; a `FORGE:DEFERRED_FROM` issue is a `deferred-followup` routed to the next milestone or backlog (`file-deferred-followups.sh` already files without a milestone); anything else is `review-finding` or `other` (growth only). `convergence` measures the frozen set plus decomposition children (transitively); `formatStopReport` states the growth and per-source issue numbers. `commands/orchestrate.md` §3b specifies it; no settle loop exists in the repo. `bootstrap-validate.mjs` adds a `warnings` array (`ok` and exit code 0 unchanged) with `deploy-last`: warned once when deploy-class issues (deploy workflow, staging environment) sit only in the last of >= 3 milestones; `formatWarnings` is exported and main() prints `warning:` lines to stderr. `commands/bootstrap.md` asks for dependency-layer milestones and a deployable slice in milestone 1 or 2. Cost: 0 LLM calls.
+
+## Entry 2026-10-27 — Default lane scope caps and env.lane_limit (#4690)
+
+Every local lane's builder CLI now runs in a `systemd-run --user --scope --unit=forgedock-lane-*` scope by default (`effects.mjs` `wrapLaneLimits`): `TasksMax` 1024 (`engine.lane_limits.tasks_max`, `0`/`off` disables) and a `MemoryMax` of `(MemTotal - reserve) / K` (`engine-cli.mjs` `defaultLaneMemory`; K reaches lanes as `FORGEDOCK_LANE_PARALLEL`). forge.yaml `memory_max`/`cpu_quota` still win. `runner.mjs` samples the scope's `pids.events` (`max`) and `memory.events` (`oom_kill`) while the child runs and throws `CLI_LANE_LIMIT`; `lean.mjs` checkpoints and ends `needs-human` `env.lane_limit` (never engine-error, so the breaker ignores it; `hostkill.mjs` no longer reads it as a host kill). Without scopes, orchestrate logs one "lanes are uncapped" line.
+
+## Entry 2026-10-27 — Engine-authored history preserve rows (#4694)
+
+At contract freeze (full and light lanes) `lean.mjs` calls `withHistoryRows` (`guards.mjs`), which reads the local guards index (`readIndex`, no GitHub call) and appends `{id:"H<n>", what:"<why> (#X, PR #Y)", source:"guard"}` rows to `preserve` before `contractHash`. `historyPreserve` is pure and deterministic: skips the lane's own issue; score 3 = a guarded hunk file is a deliverable, 2 = a guarding test file is, 1 = either sits under a deliverable's directory; ties go to the newest issue (issue number, not merge time); capped at 5; earlier H guard rows are dropped first. No index or no match returns the same contract object, so hashes of unguarded lanes are unchanged. `guardAfterMerge` merges a freshly posted guard into an existing local index. The trajectory's Decision sources line lists the H rows (`recordStructure`); the split-lane contract gets none. Decision-sourced rows wait for #4695. Cost: 0 LLM calls, one file read.
+
+## Compounding metrics (#4696)
+
+`forgedock stats --compounding` (`bin/stats/compounding.mjs`) measures reintroduction (guarded fix reopened, or blamed by a later
+guarded fix within 90 days), reopen-after-close, guard activity and decision churn by rolling window, release and lane-age bucket.
+It reads FORGE:GUARD comments (`bin/lean/guards.mjs` `collectGuards`, read only), `reopened` issue events, git, and these
+FORGE:TELEMETRY gate events, which #4693/#4695 must emit under exactly these names: `guard_run`, `guard_broken`,
+`supersedes_accepted`, `decision_superseded`, `decision_violation` (an unrecorded kind prints n/a). Stats-time only: no lane-path
+cost, no LLM. Usage and definitions: `docs/STATS.md`.

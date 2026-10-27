@@ -30,9 +30,9 @@ import { detectApiShape } from "./apishape.mjs";
 const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
 /** Argv-only child with stdin input; resolves stdout, rejects on a non-zero exit with stderr attached. */
-export function runWithInput(bin, args, input, timeout = 120000) {
+export function runWithInput(bin, args, input, timeout = 120000, env = undefined) {
   return new Promise((res, rej) => {
-    const child = execFile(bin, args, { timeout, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    const child = execFile(bin, args, { timeout, maxBuffer: 10 * 1024 * 1024, ...(env ? { env } : {}) }, (err, stdout, stderr) => {
       if (err) { err.stdout = stdout; err.stderr = stderr; rej(err); } else res(String(stdout));
     });
     // A child that exits before reading stdin closes the pipe: EPIPE must reject via the exit callback, never crash the lane.
@@ -50,14 +50,25 @@ export function systemdRunAvailable() {
   }
   return systemdProbe;
 }
-const MEM_RE = /^\d+(\.\d+)?[KMGT]?$/i, CPU_RE = /^\d+%$/;
-/** Cap the whole lane process tree: spawn under `systemd-run --user --scope -p MemoryMax=.. -p CPUQuota=..`. Unset or invalid limits leave the spawn unchanged. */
-export function wrapLaneLimits(bin, args, limits) {
+const MEM_RE = /^\d+(\.\d+)?[KMGT]?$/i, CPU_RE = /^\d+%$/, TASKS_RE = /^\d+$/;
+/** #4690: default `TasksMax` of a lane scope; `tasks_max: 0|off` (or any non-count) turns the cap off. */
+export const DEFAULT_LANE_TASKS_MAX = 1024;
+let scopeSeq = 0;
+/**
+ * Cap the whole lane process tree: spawn under `systemd-run --user --scope --unit=.. -p TasksMax=.. [-p MemoryMax=..] [-p CPUQuota=..]`.
+ * #4690: `TasksMax` is on by default (one runaway lane cannot fork-bomb the host); unset limits use the default, invalid ones are dropped.
+ * Returns `unit` (the scope name) when wrapped, so the runner can read the scope's limit events.
+ */
+export function wrapLaneLimits(bin, args, limits, unit = `forgedock-lane-${process.pid}-${++scopeSeq}`) {
   const mem = limits?.memory_max && MEM_RE.test(String(limits.memory_max)) ? String(limits.memory_max) : null;
   const cpu = limits?.cpu_quota && CPU_RE.test(String(limits.cpu_quota)) ? String(limits.cpu_quota) : null;
-  if (!mem && !cpu) return { bin, args };
-  return { bin: "systemd-run", args: ["--user", "--scope", "-q", ...(mem ? ["-p", `MemoryMax=${mem}`] : []), ...(cpu ? ["-p", `CPUQuota=${cpu}`] : []), "--", bin, ...args] };
+  const raw = limits?.tasks_max === undefined || limits?.tasks_max === null || limits?.tasks_max === "" ? DEFAULT_LANE_TASKS_MAX : String(limits.tasks_max).trim();
+  const tasks = TASKS_RE.test(raw) && Number(raw) > 0 ? Number(raw) : null;
+  if (!mem && !cpu && !tasks) return { bin, args };
+  return { bin: "systemd-run", unit, args: ["--user", "--scope", "-q", `--unit=${unit}`, ...(tasks ? ["-p", `TasksMax=${tasks}`] : []), ...(mem ? ["-p", `MemoryMax=${mem}`] : []), ...(cpu ? ["-p", `CPUQuota=${cpu}`] : []), "--", bin, ...args] };
 }
+/** #4690: the one line a run logs when lanes get no scope (systemd-run --user --scope unavailable); null when they are capped. */
+export const laneCapNotice = (probe = systemdRunAvailable) => (probe() ? null : "lanes are uncapped: `systemd-run --user --scope` is unavailable here, so no TasksMax/MemoryMax/CPUQuota applies to lane process trees");
 
 /** #4211: a judgment call over data in the prompt only (the refactor:split grouping call): no tool can read a file. */
 export const noToolFlags = (caps) => (caps?.strictMcp ? ["--tools", ""]
@@ -81,7 +92,7 @@ export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRun
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
       args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
       logger: { log() {} },
-      idleMs, maxMs, stream: idleMs > 0, control, onSpawn, busy, busyMs, onIdleExtend, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}), wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
+      idleMs, maxMs, stream: idleMs > 0, control, onSpawn, busy, busyMs, onIdleExtend, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}), wrap: probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     // #4395: a resumed session's first turn carries the prior history, so only a fresh session reports a baseline.
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default",
       baselineTokens: resume ? null : (r.baselineTokens ?? null), tools: toolStats(r.toolUses) }; // #4410: tool calls per turn, re-reads
@@ -328,11 +339,14 @@ export function makeLeanIo({ repo }) {
     async transitionLabel(issue, state) { await pexec("bash", [script("transition-label.sh"), String(issue), "-R", repo, state], { timeout: 60000 }); },
     /**
      * File (or append to) the parent's ONE batched follow-up issue (scripts/file-deferred-followups.sh: trusted lookup,
-     * append, create, claim marker, duplicate re-check). items: [{key, why}]. Returns {key: issueNumber}; throws on exit 3/4.
+     * append, create, claim marker, duplicate re-check; one issue per class, #4664). items: [{key, why, class?}]; the key is the
+     * item's identity (column 5, column 1 is `-`). milestone / defaultMilestone: the parent's and forge.yaml followups.default_milestone.
+     * Returns {key: issueNumber}; throws on exit 2/3/4.
      */
-    async fileFollowups({ parent, items }) {
-      const tsv = items.map((i) => `${i.key}\t${i.why}\t`).join("\n") + "\n";
-      const out = await runWithInput("bash", [script("file-deferred-followups.sh"), "--parent", String(parent), "--repo", repo], tsv, 180000);
+    async fileFollowups({ parent, items, milestone = null, defaultMilestone = null }) {
+      const tsv = items.map((i) => `-\t${i.why}\t\t${i.class ?? ""}\t${i.key}`).join("\n") + "\n";
+      const env = { ...process.env, ...(milestone ? { FORGE_FOLLOWUP_MILESTONE: String(milestone) } : {}), ...(defaultMilestone ? { FORGE_FOLLOWUPS_DEFAULT_MILESTONE: String(defaultMilestone) } : {}) };
+      const out = await runWithInput("bash", [script("file-deferred-followups.sh"), "--parent", String(parent), "--repo", repo], tsv, 180000, env);
       return followupMap(out, items);
     },
     /**

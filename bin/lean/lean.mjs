@@ -33,6 +33,7 @@ import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mj
 import { hostCapabilityBlock } from "./execution.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
+import { guardAfterMerge, withHistoryRows } from "./guards.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta } from "./fixround.mjs";
 import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
 import { makeTurnBudget, TURN_BUDGET_DEFAULTS, scaledExtra, laneSize, recoverySize, wrapupGrant, budgetDigest } from "./budget.mjs";
@@ -170,6 +171,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {string} [o.reviewerModel] default claude-sonnet-5-5
  * @param {string} [o.fixModel]     model of fresh fix-round sessions (#4363, forge.yaml lean.fix_model); default the reviewer model
  * @param {object} [o.builderRouting] forge.yaml lean.builder_routing/builder_mid_model (#4394): {mode: on (default)|off, midModel}
+ * @param {string} [o.followupsDefaultMilestone] forge.yaml followups.default_milestone (#4664): milestone of deferred follow-ups whose parent's milestone has shipped and has no next one
  * @param {string} [o.sequenceRegenerate] forge.yaml lean.sequence.regenerate (#4386): snapshot generator for a schema-changing renumbered migration
  * @param {object} [o.baseMerge] forge.yaml lean.base_merge_* (#4588): {unionGlobs, jsonGlobs, generatedGlobs, generatedCommand} for deterministic base-merge conflict resolution
  * @param {number} [o.ciMaxMinutes]  remote-CI wait budget (default 360); exhaustion is NOT needs-human
@@ -665,6 +667,13 @@ export async function runCore(o) {
           T.decisions.push(`Builder session reached ${e.context ?? "?"} context tokens (ceiling ${contextCeilingTokens}): checkpointed, restarted fresh from the contract, diff and last validate result`);
           p = restart() + await contextRestartNote(); resume = null; opts.restartOf ??= opts.trigger ?? null; opts.trigger = "context_restart";
           continue;
+        }
+        if (e?.code === "CLI_LANE_LIMIT") { // #4690: the lane hit its own scope limit: a rerun hits it again, so typed needs-human (env.lane_limit), never engine-error
+          ev({ event: "CLI_LANE_LIMIT", limit: e.limit ?? null, unit: e.unit ?? null });
+          await checkpoint(`scope ${e.limit} limit`);
+          e.laneCode = OUTCOME_CODES.ENV_LANE_LIMIT;
+          e.message = `The lane hit its own ${e.limit === "memory" ? "MemoryMax (memory)" : "TasksMax (process count)"} scope limit and was stopped; work checkpointed to ${branch}. Raise engine.lane_limits.${e.limit === "memory" ? "memory_max" : "tasks_max"} in forge.yaml if the work is legitimate, or find the runaway step.`;
+          throw e;
         }
         const hostKilled = isExternalKill(e); // #4518: SIGTERM/143 we did not send restarts like a timeout, and never ends engine-error
         if (!(hostKilled || e?.code === "CLI_IDLE" || e?.code === "CLI_TIMEOUT")) throw e;
@@ -1211,7 +1220,7 @@ export async function runCore(o) {
       if (!io.fileFollowups) throw fail("no follow-up filing effect is configured");
       const items = followupItems(reqs);
       let filed;
-      try { filed = await io.fileFollowups({ parent: issue, repo, items }); } catch (e) { throw fail(`filing the follow-up issue failed: ${String(e?.message ?? e).slice(0, 200)}`); }
+      try { filed = await io.fileFollowups({ parent: issue, repo, items, milestone, defaultMilestone: o.followupsDefaultMilestone ?? null }); } catch (e) { throw fail(`filing the follow-up issue failed: ${String(e?.message ?? e).slice(0, 200)}`); }
       for (const [i, r] of reqs.entries()) {
         const n = Number(filed?.[items[i].key]);
         if (!Number.isSafeInteger(n) || n <= 0) throw fail(`no tracking issue was returned for ${r.id}`);
@@ -1329,6 +1338,8 @@ export async function runCore(o) {
       sessionId = null;
       return { ...r, contract };
     }
+    /** #4694: the engine appends guard-derived H preserve rows from the local index (one file read; the same contract when none apply). */
+    const historyRows = (c) => { const w = withHistoryRows(c, { repo, issue }); const n = (w.preserve ?? []).length - (c.preserve ?? []).length; if (w !== c && n > 0) T.decisions.push(`History preserve rows: ${w.preserve.filter((p) => p.source === "guard").map((p) => p.id).join(", ")} from guards (#4694)`); return w; };
     let frozen = null, hash = null, planned = false, files = [], split = null;
     const pendingPits = []; // #4375: rework rounds whose gate has not passed again yet
     async function notePitfall(trigger, text) {
@@ -1425,7 +1436,7 @@ export async function runCore(o) {
           apiShape: () => (io.apiShape ? io.apiShape({ cwd: wt, base }).catch(() => null) : null) });
         stage = "plan"; liveKeys = ["investigation"]; result = (await readResult()) ?? result;
         if (!lr.upgrade) {
-          lightDone = true; light = true; frozen = lr.contract; hash = contractHash(contractJson(frozen));
+          lightDone = true; light = true; frozen = historyRows(lr.contract); hash = contractHash(contractJson(frozen));
           let body = renderContract(frozen, hash, { scope: scopeHash });
           if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash });
           await post(["FORGE:CONTRACT", "FORGE:PLAN"], body);
@@ -1505,7 +1516,7 @@ export async function runCore(o) {
         }
         await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
         if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, issueEdited ? { issueEdited: true } : {});
-        frozen = contract;
+        frozen = historyRows(contract);
         hash = contractHash(contractJson(frozen));
         let body = renderContract(frozen, hash, { scope: scopeHash });
         if (body.length > MAX_COMMENT_CHARS - 500) body = renderContract(frozen, hash, { compact: true, scope: scopeHash }); // the JSON must survive the comment cap
@@ -2438,7 +2449,7 @@ export async function runCore(o) {
         new_edges: pairs.filter((x) => x?.files_added > 0).map((x) => ({ ...edge(x), file: Array.isArray(x.files) ? x.files[0] ?? null : null, files: x.files_added })),
         removed_edges: pairs.filter((x) => x?.files_removed > 0).map((x) => ({ ...edge(x), files: x.files_removed })),
         top_growth,
-        decisions: (Array.isArray(effective?.decisions) ? effective.decisions : []).filter((k) => k?.id).map((k) => ({ id: k.id, source: k.source ?? null })),
+        decisions: (Array.isArray(effective?.decisions) ? effective.decisions : []).filter((k) => k?.id).map((k) => ({ id: k.id, source: k.source ?? null })).concat((effective?.preserve ?? []).filter((p) => /^H\d+$/.test(p?.id) && p.source === "guard").map((p) => ({ id: p.id, source: p.source }))),
       };
       T.structure = s;
       const rec = { event: "STRUCTURE_DELTA", phase: "merge", pr, ...(milestone ? { milestone } : {}), ...s,
@@ -2617,6 +2628,7 @@ export async function runCore(o) {
       } catch (e) { T.anomalies.push(`refactor:split chain issue not filed (the maintenance scan re-files the hotspot): ${String(e?.message ?? e).slice(0, 200)}`); }
     }
     await label("merged");
+    try { const g = await (o.guardAfterMerge ?? guardAfterMerge)({ io, repo, issue, pr, cwd: wt, base }); if (g?.posted) T.decisions.push(`FORGE:GUARD posted: ${g.guard.tests.length} test file(s), ${g.guard.hunks.length} hunk(s)`); else if (g?.skipped) ev({ event: "GUARD_SKIPPED", reason: g.reason }); } catch { /* the guard is best effort */ }
     // forge#4161: the merge-time structure record and the milestone ride on the lane result for orchestrate's drift fold.
     await gatePassed("merge_ci", "ci_red"); // #4375: merged means the required checks are green after a CI fix round
     return await finish("merged", `PR #${pr}`, { pr, ...(partial ? { close: "partial" } : {}), structure: T.structure ?? null, ...(milestone ? { milestone } : {}), ...(lane ? { lane } : {}) });

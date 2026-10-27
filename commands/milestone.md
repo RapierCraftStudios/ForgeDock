@@ -96,6 +96,8 @@ Parse `$ARGUMENTS` to determine which action to take:
 | `drift <slug>` | → **Milestone Drift** |
 | `close <slug>` | → **Close Milestone** |
 
+Unattended multi-milestone runs use the CLI, not this spec: `forgedock milestone train <slug...> [--parallel-milestones N]` (resume with `--resume <id>`, add a milestone with `--insert <id> <slug>`). It keeps one state file, reuses the lifecycle above and never edits `forge.yaml`. See `devdocs/decisions/4658-milestone-train.md`.
+
 ---
 
 ## Action: Create Milestone
@@ -448,36 +450,27 @@ git fetch origin milestone/{slug}
 OPEN_COUNT=$(gh issue list --milestone "{TITLE}" --state open --json number --jq '. | length')
 ```
 
-If there are open issues, warn the user:
-```
-⚠ Milestone "{TITLE}" still has {OPEN_COUNT} open issues:
-{list them}
+If there are open issues, this is a hard gate (interactive and unattended; unattended runs fail instead of asking). Every open issue must be **carried over** with a target milestone *and* a class (`engineering|external|post-deploy|wont-do`), or closed first. The class comes from labels (`carry:<class>`, `needs-human:external`, `awaiting-promotion|awaiting-precondition|awaiting-measurement`, `wont-do`; else `engineering`); the target is a `carry-to:<milestone title>` label or the user's answer. Run the check with `preflightCarryOver` (`bin/lean/lifecycle.mjs`):
 
-Ship anyway? Open issues will remain assigned to the milestone.
+```
+⚠ Milestone "{TITLE}" still has {OPEN_COUNT} open issues without a carry-over target:
+{list them with their class}
+
+Name a target milestone for each (or close it). Ship is blocked until every open issue has one.
 ```
 
-Wait for confirmation.
+An issue that is `needs-human:external`, flag/legal-gated (`flag-gated`, `legal-gated`) or depends on an issue that is not on the target base is **never** demoted to fast lane: it is carried to its target milestone.
 
 ### Step 2: Sync milestone branch with staging
 
-Before shipping, ensure the milestone branch is up to date with `staging` (picks up any fast-lane fixes that accumulated since the milestone branch was created):
+Before shipping, bring the milestone branch up to date with `staging` (picks up fast-lane fixes that accumulated since it was cut). `forgedock milestone-sync` does it deterministically (#4663): a milestone already `shipped:*`/`deployed:default`/`closed` is refused, a branch already containing staging is a no-op, append-only registry conflicts are resolved by the lane base-merge resolver (`lean.base_merge_*`), and a protected branch (ruleset or branch protection, or a push the rules reject) is synced through the single `sync/milestone-{slug}` PR with auto-merge armed (merged directly when CLEAN). A `ship` sync is never debounced.
 
 ```bash
 cd {REPO_PATH}
-git fetch origin {STAGING_BRANCH} milestone/{slug}
-# Never mutate the main checkout: sync in a detached worktree at the milestone tip
-SYNC_WT=$(mktemp -d)
-git worktree add --detach "$SYNC_WT" origin/milestone/{slug}
-if git -C "$SYNC_WT" merge origin/{STAGING_BRANCH} --no-edit; then
-  git -C "$SYNC_WT" push origin HEAD:refs/heads/milestone/{slug}
-  git worktree remove --force "$SYNC_WT"
-else
-  # Conflicts: report to user and STOP — do not auto-resolve
-  git -C "$SYNC_WT" merge --abort 2>/dev/null || true
-  git worktree remove --force "$SYNC_WT"
-  echo "STOP: merge conflict syncing milestone/{slug} with {STAGING_BRANCH}"; exit 1
-fi
+forgedock milestone-sync {slug} --reason ship --base {STAGING_BRANCH} --repo {owner}/{repo} || { echo "STOP: milestone sync failed or conflicts"; exit 1; }
 ```
+
+If the sync went through a PR (`pr-created`/`pr-updated`), wait for it to merge before Step 2.5.
 
 ### Step 2.5: Pre-Merge Hunk-Loss Audit (MANDATORY before creating PR)
 
@@ -734,24 +727,28 @@ Run /milestone ship {slug} again when the milestone is ready for another shippin
 ```bash
 gh pr merge {PR_NUMBER} --merge
 
-# Step 6A: Promote remaining open issues to fast lane
-# Query open issues still on this milestone (per_page=100 to avoid silent truncation beyond default 30)
-OPEN_ISSUES=$(gh api "repos/{owner}/{repo}/issues?milestone={MS_NUMBER}&state=open&per_page=100" \
-  --jq '.[].number')
+# Step 6A: Carry over remaining open issues (forge#4657). Never clear the milestone: every open issue moves to its
+# target milestone (Step 1 gate) and keeps its class label. Only an issue whose preflightCarryOver entry has demote=true
+# and whose target is "fast lane" may lose its milestone; external, gated and off-base-dependent issues are never demoted.
+OPEN_ISSUES=$(gh api "repos/{owner}/{repo}/issues?milestone={MS_NUMBER}&state=open&per_page=100" --jq '.[].number')
 OPEN_COUNT=$(echo "$OPEN_ISSUES" | grep -c '[0-9]' 2>/dev/null || echo 0)
+for ISSUE_NUM in $OPEN_ISSUES; do
+  gh issue edit "$ISSUE_NUM" --milestone "{TARGET_TITLE_OF_ISSUE}" --add-label "carry:{CLASS_OF_ISSUE}"  # <!-- allowlist:check-command-side-effects -->
+  echo "  Carried #$ISSUE_NUM -> {TARGET_TITLE_OF_ISSUE} ({CLASS_OF_ISSUE})"
+done
 
-if [ "$OPEN_COUNT" -gt 0 ]; then
-  echo "Promoting $OPEN_COUNT open issue(s) to fast lane (removing milestone assignment)..."
-  for ISSUE_NUM in $OPEN_ISSUES; do
-    gh api "repos/{owner}/{repo}/issues/$ISSUE_NUM" -X PATCH --field milestone=null
-    echo "  Demoted #$ISSUE_NUM → fast lane"
-  done
-else
-  echo "No open issues remain on the milestone — nothing to demote."
-fi
-
-# Step 6B: Close the milestone
-gh api repos/{owner}/{repo}/milestones/{MILESTONE_NUMBER} --method PATCH --field state="closed"
+# Step 6B: Record the lifecycle. The merge is on staging, not yet on the default branch: write
+# a FORGE:LIFECYCLE record ({"v":1,"state":"shipped:staging","sha":"<merge commit>"}) in the milestone description and
+# close the milestone only when forge.yaml `milestones.close_on` (default `default`) is reached. With close_on=default the
+# milestone stays open until the staging -> default merge is observed (deployed:default), then it closes.
+MERGE_SHA=$(gh pr view {PR_NUMBER} --json mergeCommit --jq '.mergeCommit.oid')
+DESC=$(gh api repos/{owner}/{repo}/milestones/{MILESTONE_NUMBER} --jq '.description // ""')
+TAG="FORGE:LIFECYCLE"
+BLOCK="<!-- $TAG {\"v\":1,\"state\":\"shipped:staging\",\"sha\":\"$MERGE_SHA\"} -->"
+gh api repos/{owner}/{repo}/milestones/{MILESTONE_NUMBER} --method PATCH --field description="$(printf '%s\n\n%s' "$(printf '%s' "$DESC" | sed "/$TAG/d")" "$BLOCK")"
+# close_on=staging only (and only when no issue is left open on the milestone):
+# gh api repos/{owner}/{repo}/milestones/{MILESTONE_NUMBER} --method PATCH --field state="closed"
+# Orchestrate-driven runners get the same transition from bin/lean/lifecycle.mjs advanceMilestone at batch end.
 
 # Step 6C: Delete the milestone branch
 git push origin --delete milestone/{slug}
@@ -762,8 +759,8 @@ Report:
 ```
 ## Shipped: {MILESTONE_TITLE}
 
-Merged to staging. Milestone branch deleted.
-{If OPEN_COUNT > 0: "{OPEN_COUNT} open issue(s) moved to fast lane: #{list}. They will target staging on next /work-on run."}
+Merged to staging (lifecycle: shipped:staging). Milestone branch deleted. Milestone closes at `milestones.close_on` ({close_on}).
+{If OPEN_COUNT > 0: "{OPEN_COUNT} open issue(s) carried over: #{list} -> {target} ({class}). None were demoted to fast lane."}
 {If OPEN_COUNT == 0: "No open issues remaining — clean close."}
 
 To deploy: merge `staging → main` via GitHub web UI when ready.
@@ -773,27 +770,15 @@ To deploy: merge `staging → main` via GitHub web UI when ready.
 
 ## Action: Sync Milestone Branch
 
-Syncs the milestone branch with the latest default branch to pick up fast-lane fixes. Run periodically on long-lived milestones.
+Syncs the milestone branch with the latest default branch to pick up fast-lane fixes. Sync **on demand only**: before ship, before a batch, or when a conflict is expected. Never on every base move, and never a milestone whose lifecycle is `shipped:*` (the command refuses it; a shipped milestone is also never the "active" one to sync, `isSyncable` in `bin/lean/milestonesync.mjs`).
 
 ```bash
 cd {REPO_PATH}
 DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
-git fetch origin $DEFAULT_BRANCH milestone/{slug}
-# Never mutate the main checkout: sync in a detached worktree at the milestone tip
-SYNC_WT=$(mktemp -d)
-git worktree add --detach "$SYNC_WT" origin/milestone/{slug}
-if git -C "$SYNC_WT" merge origin/$DEFAULT_BRANCH --no-edit; then
-  git -C "$SYNC_WT" push origin HEAD:refs/heads/milestone/{slug}
-  git worktree remove --force "$SYNC_WT"
-else
-  # If conflicts, report to user and STOP
-  git -C "$SYNC_WT" merge --abort 2>/dev/null || true
-  git worktree remove --force "$SYNC_WT"
-  echo "STOP: merge conflict syncing milestone/{slug} with $DEFAULT_BRANCH"; exit 1
-fi
+forgedock milestone-sync {slug} --reason manual --base "$DEFAULT_BRANCH" --repo {owner}/{repo}
 ```
 
-Report: "Synced milestone/{slug} with latest `{DEFAULT_BRANCH}`. {N} new commits incorporated."
+Protected branches get ONE sync PR (`sync/milestone-{slug}`) whose head is force-pushed in place; a base that moved again inside `milestones.sync_debounce` (default 10m) reports `debounced` and leaves the PR (and its CI) alone. Report the printed status.
 
 ---
 
@@ -832,5 +817,5 @@ This automatically makes the issue a feature-lane issue — next time `/work-on`
 
 - **Milestone already exists**: Check first with `gh api repos/{owner}/{repo}/milestones --jq '.[] | select(.title == "{TITLE}")'`
 - **Branch already exists**: Reuse it, don't recreate
-- **Merge conflicts on sync/ship**: Report to user, do NOT auto-resolve. List conflicting files.
+- **Merge conflicts on sync/ship**: append-only registry conflicts matching `lean.base_merge_*` are resolved deterministically by `milestone-sync`; any other conflict is reported with its files and the branch is left untouched. Do NOT hand-resolve.
 - **No issues in milestone**: Warn user — empty milestones are valid but unusual

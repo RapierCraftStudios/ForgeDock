@@ -70,6 +70,21 @@
     "description": "Pipeline stalled — requires human intervention. Managed by ForgeDock."
   },
   {
+    "name": "needs-human:external",
+    "color": "E4E669",
+    "description": "Waiting on an external prerequisite (credential, account, sign-off). Comment names the owner and unblock condition. Managed by ForgeDock."
+  },
+  {
+    "name": "parked",
+    "color": "FBCA04",
+    "description": "Mechanical park on a terminal code; per-code labels are parked:<code>. Managed by ForgeDock."
+  },
+  {
+    "name": "remediation-queue",
+    "color": "FBCA04",
+    "description": "Parked issue awaiting /work-on:remediate. Managed by ForgeDock."
+  },
+  {
     "name": "workflow:engine-error",
     "color": "B60205",
     "description": "Pipeline stalled — engine/tool failure (not a genuine human-judgment block). Managed by ForgeDock."
@@ -183,5 +198,35 @@
     "name": "performance",
     "color": "F9D0C4",
     "description": "Performance optimization or regression. Managed by ForgeDock."
+  },
+  {
+    "name": "integration-red",
+    "color": "D93F0B",
+    "description": "Scheduled full-suite integration run on a milestone branch is red. Managed by ForgeDock."
+  },
+  {
+    "name": "followup:engineering",
+    "color": "BFD4F2",
+    "description": "Deferred buildable engineering work. Managed by ForgeDock."
+  },
+  {
+    "name": "followup:post-deploy",
+    "color": "BFD4F2",
+    "description": "Deferred post-deploy checks. Managed by ForgeDock."
+  },
+  {
+    "name": "followup:external",
+    "color": "BFD4F2",
+    "description": "Deferred items blocked on something outside the repo (credentials, third parties). Managed by ForgeDock."
+  },
+  {
+    "name": "followup:ops",
+    "color": "BFD4F2",
+    "description": "Deferred ops work (drills, runbooks). Managed by ForgeDock."
+  },
+  {
+    "name": "external-prerequisite",
+    "color": "E99695",
+    "description": "Follow-up that waits on an external prerequisite. Managed by ForgeDock."
   }
 ]

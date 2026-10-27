@@ -51,9 +51,11 @@ export const OUTCOME_CODES = Object.freeze({
   ENV_SETUP_FAILED: "env.setup_failed", // forge#4163: forge.yaml env.setup failed before the builder; an environment error, not a build failure
   ENV_TOOL_MISSING: "env.tool_missing", // forge#4323: a validate command could not run because a host tool or module is missing; an environment error, not a conformance failure
   ENV_REPRO_UNRUNNABLE: "env.repro_unrunnable", // forge#4334: the repro harness could not run the repro test on head; an environment error, not a conformance failure
+  ENV_LANE_LIMIT: "env.lane_limit", // forge#4690: the lane hit its own scope limit (TasksMax or MemoryMax) and was stopped; an environment error, never an engine-error, so the breaker ignores it
   ENV_CAPABILITY_REMOTE: "env.capability_remote", // forge#4542: a remote sandbox lane blocked only on a host-only capability (SOPS key, ops credentials, prod monitor SSH) the dispatching host has; recovered locally
   SANDBOX_START_FAILED: "sandbox.start_failed", // forge#4254: a lane sandbox could not start; needs-human, not relaunched
   SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff
+  SANDBOX_UNREACHABLE: "sandbox.unreachable", // forge#4672: the sandbox provider stayed unreachable past execution.unreachable_window_min; deferred, the sandbox is kept for adopt
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
@@ -196,7 +198,17 @@ export const HUMAN_CODES = Object.freeze([OUTCOME_CODES.BUILDER_BLOCKED]);
  * edit (`issueEdited`), `ci-pending` on a conflicting PR (`conflicting`), and the non-human `budget-exceeded` turn-overrun end (forge#4505). Human: `builder.blocked`. Anything else
  * (another code, or not a needs-human/ci-pending row) is terminal. Pure, never throws.
  */
-export function classifyNeedsHuman(row) {
+export function classifyNeedsHuman(row, { parked = false } = {}) {
+  const cls = classifyNeedsHumanBase(row);
+  // forge#4656: opt-in `parked` class: a needs-human row ended on a mechanical terminal code (not a human block, not recoverable).
+  return parked && cls === "terminal" && isTerminalCodeRow(row) ? "parked" : cls;
+}
+
+function isTerminalCodeRow(row) {
+  return (row.outcome ?? row.terminalReason) === "needs-human" && typeof row.code === "string" && row.code !== "" && row.code !== UNCLASSIFIED;
+}
+
+function classifyNeedsHumanBase(row) {
   if (!row || typeof row !== "object") return "terminal";
   const outcome = row.outcome ?? row.terminalReason;
   if (outcome === "ci-pending") return row.conflicting === true ? "recoverable" : "terminal";
@@ -210,4 +222,24 @@ export function classifyNeedsHuman(row) {
 /** The code a recovery lane works on: a conflicting `ci-pending` is recovered as a base conflict. */
 export function recoveryCodeOf(row) {
   return (row?.outcome ?? row?.terminalReason) === "ci-pending" ? OUTCOME_CODES.BASE_CONFLICT : normalizeCode(row?.code);
+}
+
+/** forge#4656: the label of a human-owned wait (an owner and an unblock condition are required in its comment). */
+export const NEEDS_HUMAN_EXTERNAL_LABEL = "needs-human:external";
+/** forge#4656: the single remediation queue (`/work-on:remediate`) a parked issue moves to once recovery attempts run out. */
+export const REMEDIATION_QUEUE_LABEL = "remediation-queue";
+/** forge#4656: `parked:<terminal-code>` label of a mechanical park. */
+export function parkedLabel(code) {
+  return `parked:${String(code ?? UNCLASSIFIED).trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 40) || UNCLASSIFIED}`;
+}
+
+/**
+ * forge#4656 migration: classify a legacy bare `needs-human` issue from its last FORGE terminal annotation text.
+ * `{ kind: "parked", code }` when the text names a mechanical terminal code, else `{ kind: "external" }` (the default).
+ */
+export function classifyLegacyNeedsHuman(annotation) {
+  const text = String(annotation ?? "");
+  const m = /\b(ci\.red|ci\.timeout|base\.conflict|review_incomplete|builder\.block_untyped|conformance\.[a-z_]+|contract\.invalid|env\.[a-z_]+)\b/i.exec(text);
+  if (m) return { kind: "parked", code: m[1].toLowerCase() };
+  return { kind: "external" };
 }
