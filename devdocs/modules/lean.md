@@ -1869,6 +1869,17 @@ FORGE:TELEMETRY gate events, which #4693/#4695 must emit under exactly these nam
 `supersedes_accepted`, `decision_superseded`, `decision_violation` (an unrecorded kind prints n/a). Stats-time only: no lane-path
 cost, no LLM. Usage and definitions: `docs/STATS.md`.
 
+## Entry 2026-10-27 — Pinned batch env is allowlisted and PATH-sanitised (#4691)
+
+`schedd.mjs` `batchEnv` no longer pins the launching session's whole env into `plan.json`. It keeps `PATH`, `HOME`, `USER`, `SHELL`,
+`LANG`/`LC_*`, `TMPDIR`, `CLAUDE_CONFIG_DIR`, `FORGEDOCK_*`, `GH_*`/`GITHUB_*`, plus names from forge.yaml `orchestration.env_passthrough`
+and `execution.token_env` (comma-separated, read by `engine-cli.mjs` `readPinnedEnvConfig`). Session-scoped `CLAUDE_CODE_*`, `CLAUDE_PID`,
+`ANTHROPIC_*` and secret-looking names (`SECRET_ENV`) are dropped unless named; secrets resolve at lane start. `sanitizePath` drops
+non-existent dirs, per-session temp `arg0`/`claude*` dirs under a temp root, and `orchestration.path_exclude` globs. `redactEnv` masks secrets.
+`forgedock orchestrate --show-env <id>` prints the pinned env redacted; `--set-env <id> KEY=VAL` / `--unset-env <id> KEY` edit `plan.json`
+(`envBatch`), and `runBatch`'s `laneSpawn` re-reads `plan.env` for each newly launched lane (running lanes keep theirs). Pre-#4192 batches
+with no `plan.env` still use the daemon env. Config: `docs/CONFIG.md`.
+
 ## Guard gate (#4693)
 
 `bin/lean/guardgate.mjs`, called from `gate()` in `bin/lean/lean.mjs` beside the validate rerun. Deterministic, no LLM call.

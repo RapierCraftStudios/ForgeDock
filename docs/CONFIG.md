@@ -322,6 +322,19 @@ orchestration:
   # (stalled, needs a human) instead of IN_PROGRESS. Default: 48.
   in_progress_max_hours: 48
 
+  # Extra env var names (comma-separated) a batch pins for its lanes in plan.json,
+  # beyond the built-in allowlist (PATH, HOME, USER, SHELL, LANG, LC_*, TMPDIR,
+  # CLAUDE_CONFIG_DIR, FORGEDOCK_*, GH_*, GITHUB_*; secret-looking names and the
+  # launching session's CLAUDE_CODE_*, CLAUDE_PID, ANTHROPIC_* are never pinned
+  # unless listed here; the configured execution.token_env name is also kept).
+  # Inspect or edit the pinned env with `forgedock orchestrate --show-env <id>`,
+  # `--set-env <id> KEY=VAL`, `--unset-env <id> KEY` (applies to newly launched lanes).
+  env_passthrough: ANTHROPIC_BASE_URL
+
+  # Globs (comma-separated) of PATH directories removed from the pinned PATH. Non-existent
+  # dirs and per-session temp dirs (an arg0 or claude* dir under a temp root) are always dropped.
+  path_exclude: /opt/wrappers/*
+
   cascade:
     # Named preset expanding to the granular keys below. Any granular key set
     # explicitly overrides just that field — the preset supplies defaults, not
