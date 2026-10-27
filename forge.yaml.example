@@ -739,6 +739,16 @@ branches:
 #   # Be specific: framework versions, DB engines, hosting environment
 #   tech_stack: "Next.js 15 App Router, FastAPI, PostgreSQL 16, Docker, Traefik"
 #
+#   # Written by `npx forgedock init --refresh-context` (regenerates tech_stack/context from manifests and the
+#   # decision log, shows a diff for approval). doctor and review-prepare emit REVIEW_CONTEXT_STALE when the
+#   # tech_stack names frameworks no manifest lists, the context cites superseded decisions, or it says
+#   # "docs-only"/"no code" while source manifests exist.
+#   context_generated_at: "2026-01-15"       # reviewers see this date
+#   context_generated_pr_count: "120"        # merged PRs at generation time (informational)
+#   context_max_merged_prs: 50               # context older than this many merged PRs is advisory (default 50)
+#   decision_log: docs/decisions.md          # superseded-decision check; default: first of docs/decisions.md,
+#                                            # DECISIONS.md, docs/decision-log.md, devdocs/project/decisions.md
+#
 #   # Additional context for reviewers
 #   # What makes this codebase unusual? What pitfalls exist?
 #   context: |

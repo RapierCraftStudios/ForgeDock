@@ -86,6 +86,7 @@ import {
   CYAN,
 } from "./tui.mjs";
 import { buildMinimalForgeYaml } from "./init-detect.mjs";
+import { checkContext, refreshContextFlow } from "./review-context.mjs";
 import {
   parseNameStatusDiff,
   classifyCommandChanges,
@@ -234,7 +235,7 @@ const SCRIPTS_DIR = join(FORGE_HOME, "scripts");
 // --minimal is init-only. Subcommands with their own flag parsing (run,
 // run-issue, demo) receive restArgs — everything after the command token.
 const rawArgs = process.argv.slice(2);
-const FLAGS = new Set(["--fast", "--manual", "--verbose", "--minimal", "--extras"]);
+const FLAGS = new Set(["--fast", "--manual", "--verbose", "--minimal", "--extras", "--refresh-context"]);
 const flags = rawArgs.filter((a) => FLAGS.has(a));
 // --global is stripped from positionals/restArgs for backward compatibility
 // with existing invocations, but is otherwise a no-op — see the install-mode
@@ -1042,6 +1043,13 @@ function ensureToolStateIgnored(c) {
 
 async function initFlow(c) {
   const outputPath = join(c.cwd, "forge.yaml");
+  if (flags.includes("--refresh-context")) {
+    return refreshContextFlow({
+      cwd: c.cwd,
+      out: c.stdout,
+      deps: { interactive: process.stdin.isTTY === true, confirm, backup: backupExisting, write: atomicWriteFile },
+    });
+  }
   const hasExisting = existsSync(outputPath);
   if (hasExisting && process.stdin.isTTY !== true) {
     const dim = (s) => (c.mode === "none" ? s : `\x1b[2m${s}\x1b[22m`);
@@ -2704,6 +2712,15 @@ async function doctor(fix = false) {
             );
           }
 
+          try {
+            const ctxCheck = checkContext({ configPath: forgeYamlPath, root: process.cwd(), repo: forgeOwner && forgeRepo ? `${forgeOwner}/${forgeRepo}` : "" });
+            if (ctxCheck.stale) {
+              warn("review context", `REVIEW_CONTEXT_STALE: ${ctxCheck.reasons.map((r) => r.detail).join("; ")}. Run: npx forgedock init --refresh-context`);
+            } else if (ctxCheck.advisory) {
+              warn("review context", `REVIEW_CONTEXT_STALE: generated ${ctxCheck.generated_at}, ${ctxCheck.merged_since} PRs merged since (limit ${ctxCheck.max_merged_prs}). Run: npx forgedock init --refresh-context`);
+            }
+          } catch { /* advisory check: never fail doctor */ }
+
           const defaultMatch = content.match(/^\s+default:\s+"([^"]*)"/m);
           const stagingMatch = content.match(/^\s+staging:\s+"([^"]*)"/m);
           if (
@@ -3351,6 +3368,7 @@ function help() {
     ["--manual", "Plain text prompts instead of the review screen (init)"],
     ["--verbose", "Show detection sources for every field (init)"],
     ["--minimal", "Generate a minimal forge.yaml with required sections only (init)"],
+    ["--refresh-context", "Regenerate review.context/tech_stack from manifests and show a diff for approval (init)"],
     ["--version, -v", "Print the installed version and check for updates"],
   ];
 
