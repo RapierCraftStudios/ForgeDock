@@ -33,6 +33,7 @@ import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mj
 import { hostCapabilityBlock } from "./execution.mjs";
 import { REVIEWER_SYSTEM, LEAN_DIR, RESULT_FILE, INVESTIGATION_FILE, IMPLEMENTATION_FILE, CONTRACT_FILE, builderPlanPrompt, builderImplementPrompt, contractCorrectionPrompt, conformanceResumePrompt, reviewerPrompt, reviewerRepairPrompt, REVIEW_DIFF_MAX_BYTES, blockCorrectionPrompt, HUMAN_BLOCK_REASONS, structurePrompt, hotspotPlanNote, hotspotBuildRule, reproPlanNote, contextPackNote, docsPrompt, ciFailurePrompt, ciUnavailablePrompt, precheckFailurePrompt, contextRestartPrompt, turnBudgetWrapupPrompt, syncChecks, GROUPING_SYSTEM, enumeratingPlanNote, enumeratingBuildRule, invariantsPlanNote, invariantsBuildRule, missingEntriesPrompt, sequencePrompt, sequenceSyncNote, fixSessionPrompt, postMergeFailurePrompt, duplicateExportsPrompt, migrationGeneratorPrompt, i18nCopiesPrompt } from "./prompts.mjs";
 import { postMergeCommands } from "./postmerge.mjs";
+import { guardAfterMerge } from "./guards.mjs";
 import { freshFix, issueSummary, firstPassOf, sessionCostDelta } from "./fixround.mjs";
 import { parseBuilderRouting, routeBuilder, shouldEscalate } from "./routing.mjs";
 import { makeTurnBudget, TURN_BUDGET_DEFAULTS, scaledExtra, laneSize, recoverySize, wrapupGrant, budgetDigest } from "./budget.mjs";
@@ -2618,6 +2619,7 @@ export async function runCore(o) {
       } catch (e) { T.anomalies.push(`refactor:split chain issue not filed (the maintenance scan re-files the hotspot): ${String(e?.message ?? e).slice(0, 200)}`); }
     }
     await label("merged");
+    try { const g = await (o.guardAfterMerge ?? guardAfterMerge)({ io, repo, issue, pr, cwd: wt, base }); if (g?.posted) T.decisions.push(`FORGE:GUARD posted: ${g.guard.tests.length} test file(s), ${g.guard.hunks.length} hunk(s)`); else if (g?.skipped) ev({ event: "GUARD_SKIPPED", reason: g.reason }); } catch { /* the guard is best effort */ }
     // forge#4161: the merge-time structure record and the milestone ride on the lane result for orchestrate's drift fold.
     await gatePassed("merge_ci", "ci_red"); // #4375: merged means the required checks are green after a CI fix round
     return await finish("merged", `PR #${pr}`, { pr, ...(partial ? { close: "partial" } : {}), structure: T.structure ?? null, ...(milestone ? { milestone } : {}), ...(lane ? { lane } : {}) });

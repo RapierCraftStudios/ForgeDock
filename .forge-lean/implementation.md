@@ -1,34 +1,38 @@
 ### Approach
-The script groups normalised TSV rows by class and runs the existing lookup/append/create flow once per class. Requirement text moves out of column 1 into a new label column 5, which is the item's identity, so the checklist line, `DEFERRED_FROM` marker and `identity<TAB>issue` rows stay byte-compatible for review-finalize.sh, prefilter.mjs and followupMap. Milestone and default milestone are passed in by the engine.
+A deterministic `bin/lean/guards.mjs` (0 LLM calls, git and gh injected). It reads a merged issue's FORGE:CONTRACT comment, the merged PR and the merge commit, builds one guard and posts it as `<!-- FORGE:GUARD {json} -->` on the issue. The lane hook, `guards list` and `guards backfill` all share `guardIssue`.
 
 ### Changes
-- scripts/file-deferred-followups.sh: 5-column TSV with validation (exit 2, `DEFERRED_TSV=INVALID`), class derivation, per-class lookup (all before filing) and filing, `FORGE:DEFERRED_CLASS` marker, class-aware claim marker and verify, `followup:<class>` labels (+ `external-prerequisite`), milestone resolution (parent, next open by due date, default), telemetry with all issues and classes.
-- scripts/file-deferred-followups.test.sh: mock extended; cases for milestone inheritance, class labels/issues, class reuse, rejected rows, label rows, body contents (59 checks).
-- bin/lean/conformance.mjs: `FOLLOWUP_CLASSES`, `followupClass`, `class` on followup items, optional requirement `class` validated.
-- bin/lean/conformance.test.mjs: class test.
-- bin/lean/effects.mjs: `fileFollowups` sends `-` + class + label columns and the milestone env; `runWithInput` takes an env.
-- bin/lean/lean.mjs: `track()` passes `milestone` and `o.followupsDefaultMilestone`.
-- bin/engine-cli.mjs: `readFollowupsDefaultMilestone` (forge.yaml `followups.default_milestone`) wired into both option spreads (amendment).
-- bin/labels.json: five labels. docs/CONFIG.md: `followups` section. commands/work-on/build.md: TSV/class docs.
-- devdocs/modules/lean.md, devdocs/decisions/4664-followup-classes.md: freshness (amendments).
+- bin/lean/guards.mjs: buildGuard, guardTests, parseHunks, render/parseGuard, guardIssue (idempotent), collectGuards, writeIndex/readIndex, listGuards, backfill, guardAfterMerge, guardsCli.
+- bin/lean/guards.test.mjs: 10 tests, including node --test and pytest fixtures.
+- bin/lean/lean.mjs: best-effort `guardAfterMerge` call after `label("merged")` (+3 lines).
+- bin/engine-cli.mjs: `guardsFromCli`.
+- bin/forgedock.mjs: `guards` case, known-commands entry, help row.
+- devdocs/decisions/4692-fix-guards.md: decision record.
 
 ### Acceptance Criteria Status
-- R1 ✅ scripts/file-deferred-followups.sh:214 (resolve_milestone), bin/engine-cli.mjs readFollowupsDefaultMilestone, bin/lean/lean.mjs track()
-- R2 ✅ scripts/file-deferred-followups.sh:229 (file_class labels), bin/lean/conformance.mjs:759
-- R3 ✅ file_class external body/labels + FORGE_EXTERNAL_PREREQ link; `[check:]` kept (test 18, "post-deploy issue" test)
-- R4 ✅ scripts/file-deferred-followups.sh:57-87
-- R5 ✅ scripts/file-deferred-followups.sh:161,298
-- R6 ✅ scripts/file-deferred-followups.test.sh (sections 19-21)
+- R1 ✅ guards.mjs guardIssue (existing-guard check), lean.mjs hook; test "guardIssue posts exactly one FORGE:GUARD and is idempotent"
+- R2 ✅ guards.mjs guardsCli/listGuards, forgedock.mjs `case "guards"`; test "guards list prints guards for a path"
+- R3 ✅ guards.mjs backfill; test "backfill guards merged lanes and logs why"
+- R4 ✅ guards.test.mjs node --test fixture and pytest fixture
+- R5 ✅ guards.mjs renderGuard, collectGuards/writeIndex (index rebuilt from comments)
+- R6 ✅ guards.mjs guardTests/idsOf (no language parser; ids: [] is file granularity)
 
 ### Verification
-- V1 `bash scripts/file-deferred-followups.test.sh`: passed=59 failed=0 (also under /bin/bash). Against the base script, 23 checks fail, so the new tests fail without the fix.
-- V2 `node --test` postdeploy-check, prefilter, conformance.e2e, lean tests: pass. V3 conformance.test.mjs: pass (combined run 648 pass, 0 fail).
-- `forgedock check`: PASS. check-devdocs-freshness.sh origin/staging: OK. No formatter is configured in the repo. checks.mjs widened to the full suite, which the host rules forbid, so only the targeted tests were run.
+- V1 `node --test bin/lean/guards.test.mjs`: pass. It fails without the change because the module does not exist.
+- V2 `node --test bin/lean/lean.test.mjs bin/lean/train.test.mjs`: pass.
+- `forgedock check`: PASS. checks.mjs widened to the full suite (931 files reference the change); per host rules I did not run it.
+- check-devdocs-freshness.sh: OK.
 
 ### Notes
-- Env: FORGE_FOLLOWUP_MILESTONE, FORGE_FOLLOWUPS_DEFAULT_MILESTONE, FORGE_EXTERNAL_PREREQ. forge.yaml: `followups.default_milestone`.
-- Engineering follow-ups keep the old title; others are `follow-up (<class>): ...`. Existing issues without a class marker count as engineering. A parent without a milestone gets none.
-- Telemetry line gains `classes=` and `batched_into` may list several issues.
+- Guards need the merge commit locally. The hook fetches the base first; backfill reports a skip with the reason when the commit is missing.
+- A deletion-only hunk is anchored at the line after the deletion in the post-image.
+- No formatter config exists in the repo, so none was run.
+- No env vars added.
+- Stale-list check: the nine flagged tests (batch, checks, conformance, conformance.e2e, context, execution, execution.e2e, fixround, heavy) do not enumerate lean modules or guards-like symbols; recorded as not_members in result.json.
 
-## Stale-list fix
-Added FOLLOWUP_CLASSES and followupClass to the import list and the #4664 case in bin/lean/conformance.test.mjs.
+### CI fix
+- The CI step `bash scripts/check-test-tmp-cleanup.sh` failed on `bin/lean/guards.test.mjs`: it used `mkdtempSync` without importing `bin/tests/_tmp.mjs`. The test now uses `tmpDir` from that helper. The lint and its own test (`check-test-tmp-cleanup.test.sh`, 18 pass) are clean.
+- The CI log was not readable, so I found this by running the workflow's lint step locally. I also ran all of bin/lean (1453 pass) and bin/engine, bin/stats, bin/tests and packages/protocol (2951 pass, 3 fail). The 3 failures (preflight, forge Act II, writeInstallReceipt) are WSL/platform-detection tests in this host and are unrelated to this change; I did not confirm they pass on the base.
+
+## Conformance fix (R1 hook)
+guardAfterMerge now strips `origin/` from the lane base before `git fetch origin <branch>`, and guardIssue falls back to `git fetch origin <merge_sha>` when the diff cannot be read locally. Merge SHA still comes from `gh pr view --json mergeCommit` (explicit PR from the lane). Added a test with a git mock that fails on invalid refspecs.
