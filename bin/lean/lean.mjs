@@ -303,6 +303,7 @@ export async function runCore(o) {
   let ctxLane = null; // forge#4275: rerun | child | first, set once the issue is read
   let pitMatched = null; // #4375: pitfalls in the pack that match the issue's files; null when no pack was compiled
   let factsSeen = []; // #4401: trusted comment bodies on the issue, so an identical FORGE:FACTS is never posted twice
+  let guardAddedMs = 0; // #4705 (R12): wall time the guard gate added, summed over the lane, carried on RUN_TERMINAL
   let shadowWould = null; // forge#4165: the shadow gate's verdict, carried on RUN_TERMINAL (no telemetry write of its own)
   let riskEnforced = null, gateRan = false; // #4398: declared risk paths that made a shadow lane enforce (sticky); the gate ran
   let done = null, finishing = null, wtCreated = false, salvagedRef = null;
@@ -427,7 +428,7 @@ export async function runCore(o) {
     // forge#4165: pr, milestone and the conformance verdict ride on the existing RUN_TERMINAL write (verdict-mix queries).
     const term = { event: "RUN_TERMINAL", reason, code, ...(extra.pr ? { pr: extra.pr } : {}), ...(milestone ? { milestone } : {}),
       conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}),
-      context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, model_ms: modelMs, light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
+      context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
     ev(term);
     await emit(term);
@@ -2036,7 +2037,7 @@ export async function runCore(o) {
       return out;
     }
     /** #4693: select the guards this diff intersects and rerun their base test files; zero cost when none is selected. Best effort: an error skips the gate. */
-    let guardSel = [], guardNoted = "";
+    let guardSel = [], guardNoted = ""; let guardRunMs = null; // #4705: this gate pass's added wall time
     async function guardGate(files) {
       let sel = [], r = null;
       try {
@@ -2048,7 +2049,7 @@ export async function runCore(o) {
       } catch (e) { T.anomalies.push(`Guard gate skipped: ${String(e?.message ?? e).split("\n")[0].slice(0, 160)}`); return []; }
       const note = `Guard gate selected ${sel.map((x) => `#${x.guard.issue} (${x.reason})`).join("; ")}${r.skipped.length ? `; skipped: ${r.skipped.join("; ")}` : ""}${r.failures.length && shadow ? "; shadow: would block" : ""}`;
       if (note !== guardNoted) { guardNoted = note; T.decisions.push(note); }
-      ev({ event: "guard_run", selected: sel.map((x) => x.guard.issue), ran: r.runs.length, broken: r.failures.length, skipped: r.skipped.length, wall_ms: r.ms });
+      ev({ event: "guard_run", selected: sel.map((x) => x.guard.issue), ran: r.runs.length, broken: r.failures.length, skipped: r.skipped.length, wall_ms: r.ms, added_wall_ms: guardRunMs ?? r.ms });
       for (const f of r.failures) ev({ event: "guard_broken", guard: f.guard, test: f.test });
       return r.failures;
     }
@@ -2069,7 +2070,9 @@ export async function runCore(o) {
       const gateHead = String(await git(["rev-parse", "HEAD"])).trim();
       const ciVerified = remoteVerify && ciVerifiedHead !== null && ciVerifiedHead === gateHead;
       const hotspots = await hotspotsOf({ base, paths: files }); // #4502
-      const [validateRuns, guardFailures] = await Promise.all([rerunFailedValidates(effective), guardGate(files)]); // #4693: guards run beside the validate rerun
+      const gateT0 = now(); let validateMs = 0;
+      const [validateRuns, guardFailures] = await Promise.all([rerunFailedValidates(effective).finally(() => { validateMs = now() - gateT0; }), guardGate(files)]); // #4693: guards run beside the validate rerun
+      guardRunMs = Math.max(0, now() - gateT0 - validateMs); guardAddedMs += guardSel.length ? guardRunMs : 0; // #4705: only the part not hidden behind the validate rerun
       const repoHas = validateRuns && Object.keys(validateRuns).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
       // #4626: post-deploy check ids resolve against the lane base's checks file or this PR's
       const checkIds = effective.requirements?.some((r) => r.disposition === "post-deploy") ? new Set(Object.keys(await checksAt(git, [base, "HEAD"], wt))) : null;
