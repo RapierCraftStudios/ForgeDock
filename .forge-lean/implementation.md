@@ -1,39 +1,28 @@
 ### Approach
-Logic lives in a new pure script, `scripts/readiness.mjs`; the specs only call it (spec-size budget, NORTHSTAR rules 1 and 7). A prerequisite is an open `needs-human:external` issue whose body carries `gates:` and `owner:` lines. "Code milestones it still needs" are the milestones of open non-prerequisite issues that carry the same `gates:` line.
+A deterministic train scheduler in `bin/lean/train.mjs` (0 LLM calls). It runs one orchestrate batch per milestone and keeps state in a single atomic file. Lanes already resolve their base from the milestone (`lane.mjs`), so the train never touches `branches.staging` or `forge.yaml`. The #4657 lifecycle seam handles ship and close.
 
 ### Changes
-- scripts/readiness.mjs: new. Parsing, per-gate readiness report, dependency-ordered digest (cycle-safe), deployable verdict, CLI.
-- bin/tests/readiness.test.mjs: new tests.
-- commands/pipeline-status.md: Readiness section and digest.
-- commands/deploy-info.md: gate verdict line.
-- commands/issue.md, commands/bootstrap.md: the label and `gates:` rule.
-- templates/bootstrap/needs-human-issue.md: `gates:` and `owner:` lines.
-- scripts/bootstrap-validate.mjs: `missing-gates` error; `needs-human:external` counts as needs-human.
-- scripts/bootstrap-create.mjs: adds the `needs-human:external` label.
-- docs/spec/label-state-machine.md: documents `gates:` and readiness.
-- Test fixtures and test (bin/tests): needs-human bodies gained a `gates:` line; new missing-gates test.
-- docs/site/start-a-new-project.md: the worked example needs a `gates:` line to pass the validator (amendment).
+- bin/lean/train.mjs: state file, createTrain, insertMilestone, resolveCaps, runTrain, stopOf, trainCli.
+- bin/lean/train.test.mjs: 10 tests.
+- bin/engine-cli.mjs: `trainFromCli` wiring (29 lines).
+- bin/forgedock.mjs: `milestone train` command, known-commands list, help.
+- forge.yaml.example, commands/milestone.md, devdocs/decisions/4658-milestone-train.md: docs.
 
 ### Acceptance Criteria Status
-- R1 ✅ commands/issue.md, commands/bootstrap.md, scripts/bootstrap-validate.mjs, scripts/bootstrap-create.mjs
-- R2 ✅ commands/pipeline-status.md, scripts/readiness.mjs readiness()/formatReadinessReport
-- R3 ✅ scripts/readiness.mjs (feature-flag gate is red, blocksMerge false, ignored by deployable)
-- R4 ✅ scripts/readiness.mjs digest()
-- R5 ✅ commands/deploy-info.md, scripts/readiness.mjs deployable() and `--target` exit 1
+- R1 ✅ bin/lean/train.mjs:createTrain/runTrain/trainCli; bin/forgedock.mjs `case "milestone"`
+- R2 ✅ train.mjs never writes forge.yaml; test "forge.yaml is byte-identical" in train.test.mjs
+- R3 ✅ train.mjs:resolveCaps (warn and ignore); test "conflicting --parallel"
+- R4 ✅ train.mjs:insertMilestone/validateOrder; test "insertMilestone re-validates"
+- R5 ✅ train.mjs:STOP_REASONS/stopOf, `--resume`; test "typed STOP"
 
 ### Verification
-- V1 node --test readiness, bootstrap-validate, bootstrap (plus bootstrap-guide): 61 pass. The missing-gates test fails without the validator change.
-- V2 check-spec-size.sh: PASS.
-- `forgedock check`: PASS.
+- V1 `node --test bin/lean/train.test.mjs lifecycle.test.mjs lane.test.mjs batch.test.mjs`: 81 pass, 0 fail. The new tests fail without the fix because the module does not exist.
+- `forgedock check`: PASS. The checks script widened to the full suite because forge.yaml.example changed; per host rules I did not run it in full.
+- bin/tests/journey.test.mjs has 3 failures (preflight, forge Act II, writeInstallReceipt) that are identical on the base without my changes.
+- No formatter is configured in the repo.
 
 ### Notes
-needs-human plan issues now require a valid `gates:` line (new validation error). No env vars. No formatter config exists in the repo.
+New command `forgedock milestone train`. State lives under `<batchRoot>/trains/<id>/`. Cap source is `orchestration.global_parallel` (default 3). Batch id of a running milestone is only recorded after its batch returns, because orchestrate gives no early callback.
 
-## Docs freshness fix
-Added `lean-readiness` (`scripts/readiness*`) and `lean-bootstrap` (`scripts/bootstrap-*`) globs in devdocs/index.yaml and a dated entry in devdocs/modules/lean.md describing the readiness gates behaviour. check-devdocs-freshness passes; V1 and V2 still pass.
-
-## Fix: isNeedsHuman precedence (#4660)
-Parenthesised the label checks so a missing `labels` array no longer throws; validatePlan reports `missing-labels` again. Added a regression test.
-
-## Fix: pipeline-status jq (R4)
-Milestones with no FORGE:LIFECYCLE block no longer vanish: `st` is `first(capture|.s) // null`, so a building milestone with zero open issues prints EMPTY_BUT_OPEN. Verified with jq on null/shipped/no-block descriptions.
+## Sibling-list check
+The eight bin/lean tests flagged as enumerating siblings of `train` (batch, checks, conformance, context, execution.e2e, execution, fixround, heavy) do not list bin/lean modules or train symbols at the cited lines. Recorded as `not_members` in result.json; no test edits.
