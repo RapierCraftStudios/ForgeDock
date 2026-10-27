@@ -84,5 +84,42 @@
    "evidence": "only deliverables, tests, devdocs changed"
   }
  ],
- "amendments": []
+ "amendments": [],
+ "not_members": [
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/checks.test.mjs",
+   "why": "exercises the checks cache (cacheEntry/hydrate); no list of lean modules; decisions (bin/lean/decisions.mjs) is not a member of the list at line 156"
+  },
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/conformance.e2e.test.mjs",
+   "why": "drives a stubbed lane end to end; its lists are tool helpers, not modules; decisions (bin/lean/decisions.mjs) is not a member of the list at line 74"
+  },
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/context.test.mjs",
+   "why": "enumerates context-pack sources (graph, attempts, pitfalls, ledger, facts); decisions are not a pack source; decisions (bin/lean/decisions.mjs) is not a member of the list at line 138"
+  },
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/execution.e2e.test.mjs",
+   "why": "covers sandbox providers and the ledger; no module list; decisions (bin/lean/decisions.mjs) is not a member of the list at line 28"
+  },
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/execution.test.mjs",
+   "why": "covers execution config and orchestrate; no module list; decisions (bin/lean/decisions.mjs) is not a member of the list at line 42"
+  },
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/fixround.test.mjs",
+   "why": "lists mechanical fix-round kinds, not modules; decisions (bin/lean/decisions.mjs) is not a member of the list at line 10"
+  },
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/heavy.test.mjs",
+   "why": "lists heavy/llm step commands, not modules; decisions (bin/lean/decisions.mjs) is not a member of the list at line 28"
+  }
+ ]
 }

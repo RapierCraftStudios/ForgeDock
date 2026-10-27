@@ -51,3 +51,6 @@ CI log was unavailable. Reran V1 (105 pass) and V2 (516 pass), plus bin/lean, bi
 
 ### CI recovery
 `scripts/check-test-tmp-cleanup.test.sh` failed because `bin/lean/decisions.test.mjs` called `mkdtemp` directly. It now uses `tmpDir` from `bin/tests/_tmp.mjs`. V1 and V2 pass again, the cleanup script passes, and `forgedock check` passes.
+
+### Sibling-list check
+The seven tests flagged for `decisions` (checks, conformance.e2e, context, execution.e2e, execution, fixround, heavy) were read at the flagged lines; none lists lean modules, so each is recorded under `not_members` in result.json with the reason. No test changes.
