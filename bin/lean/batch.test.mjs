@@ -453,6 +453,19 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     assert.deepEqual(plain.map((r) => r.issue), [1]);
   });
 
+  it("#4687 --add re-queues an issue that is skipped in the batch; any other ended issue stays 'already in batch'", () => {
+    const root = tmpDir("batch-add-skipped-");
+    const b = openBatch(root, "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1, 2, 3], results: { 1: { outcome: "needs-human" }, 2: { outcome: "skipped", detail: "dependency #1 ended needs-human" }, 3: { outcome: "merged" } } });
+    const r = b.addIssues([2, 3, 1]);
+    assert.deepEqual(r.requeued, [2]);
+    assert.deepEqual(r.added, []);
+    assert.deepEqual(r.skipped.map((x) => [x.issue, x.reason]), [[3, "already in batch"], [1, "already in batch"]]);
+    assert.deepEqual(b.readRequeued().map((e) => e.issue), [2]);
+    assert.deepEqual(b.readAdded(), []);
+  });
+
   it("the add file: integers only, no issue twice, cumulative; --add through the CLI skips closed and unreadable issues", async () => {
     const root = tmpDir("batch-add-");
     const b = openBatch(root, "b1");
@@ -684,7 +697,7 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
 
   it("makeDispatchCheck: merged head-branch PR, closed issue, open issue, unreadable answers fail open", async () => {
     const mk = (issue, prs, events = "") => makeDispatchCheck({ repo: "o/r", gh: async (a) => {
-      if (a[0] === "issue") { assert.deepEqual(a, ["issue", "view", "9", "-R", "o/r", "--json", "state"]); if (issue instanceof Error) throw issue; return issue; }
+      if (a[0] === "issue") { assert.deepEqual(a, ["issue", "view", "9", "-R", "o/r", "--json", "state,stateReason"]); if (issue instanceof Error) throw issue; return issue; }
       if (a[0] === "api") { assert.equal(a[1], "repos/o/r/issues/9/events"); if (events instanceof Error) throw events; return events; }
       assert.deepEqual(a.slice(0, 6), ["pr", "list", "-R", "o/r", "--head", "feat/issue-9-lean"]);
       if (prs instanceof Error) throw prs;
@@ -698,6 +711,7 @@ describe("#4481: a closed issue or a merged lane PR is skipped at dispatch", () 
     assert.equal(await mk('{"state":"OPEN"}', '[{"number":12}]')(9), null, "no mergedAt: the lane runs");
     assert.deepEqual(await mk('{"state":"CLOSED"}', merged, new Error("not read"))(9), { outcome: "merged", pr: 12, detail: "PR #12 already merged" }, "closed: no reopen lookup");
     assert.deepEqual(await mk('{"state":"CLOSED"}', "[]")(9), { outcome: "invalid", detail: "issue closed" });
+    assert.deepEqual(await mk('{"state":"CLOSED","stateReason":"NOT_PLANNED"}', "[]")(9), { outcome: "invalid", detail: "issue closed (not planned)", final: true }, "#4687: not planned is final");
     assert.equal(await mk('{"state":"OPEN"}', "[]")(9), null);
     assert.equal(await mk('{"body":"","labels":[]}', '{"body":""}')(9), null, "a stub without state or a list: run");
     assert.equal(await mk(new Error("x"), new Error("y"))(9), null);
