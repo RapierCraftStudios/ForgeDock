@@ -1,30 +1,33 @@
 ### Approach
-One deterministic module, `bin/lean/milestonesync.mjs`, plus a `forgedock milestone-sync` command; the spec now calls it instead of raw merge+push. No LLM calls.
+Every local lane's builder CLI runs in a named `systemd-run --user --scope` by default, with `TasksMax` and a K-derived `MemoryMax`. The runner samples the scope's cgroup events while the child runs. A limit stop becomes `CLI_LANE_LIMIT`, which ends the lane `needs-human` with `env.lane_limit`. The breaker counts only engine-error rows, so it ignores that outcome.
 
 ### Changes
-- bin/lean/milestonesync.mjs: `syncMilestone`, `isSyncable`, `isProtectedBranch`, `readSyncDebounce`, `runMilestoneSyncCli`.
-- bin/lean/milestonesync.test.mjs: bare-origin git fixture with stub gh (10 tests).
-- bin/engine-cli.mjs: thin `milestoneSyncFromCli` export.
-- bin/forgedock.mjs: `milestone-sync` dispatch and known-command entry (added by amendment).
-- commands/milestone.md: ship Step 2 and Sync action call the command; on-demand and shipped-never rules; conflict note.
-- docs/CONFIG.md: `milestones.sync_debounce`; `lean.base_merge_*` also applies to milestone sync.
-- devdocs/decisions/4663-milestone-sync.md: ADR.
+- bin/lean/effects.mjs: `wrapLaneLimits` adds `--unit` and default `TasksMax=1024` (`tasks_max` override, 0/off disables). The runner wraps whenever systemd probes available. New `laneCapNotice` and `DEFAULT_LANE_TASKS_MAX`.
+- bin/runner.mjs: `readScopeLimitEvents` reads `pids.events` max and `memory.events` oom_kill. A live sample on the tick stops the lane and throws `CLI_LANE_LIMIT` (`limit` tasks|memory).
+- bin/lean/hostkill.mjs: documents that a limit stop is never a host kill.
+- bin/lean/lean.mjs: `CLI_LANE_LIMIT` checkpoints, then ends needs-human `env.lane_limit` with no retry.
+- bin/engine/outcome-codes.mjs: `ENV_LANE_LIMIT`.
+- bin/engine-cli.mjs: `readCoreLimits` always returns `laneLimits` (`tasks_max`, K-derived `memory_max` via `defaultLaneMemory`). Orchestrate passes `FORGEDOCK_LANE_PARALLEL` to lanes and logs one uncapped line.
+- docs/CONFIG.md, docs/OUTCOME-CODES.md, devdocs/modules/lean.md: docs.
+- Tests: bin/lean/lean.test.mjs, bin/lean/batch.test.mjs, bin/tests/engine-cli.test.mjs, bin/tests/engine-outcome-codes.test.mjs.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/milestonesync.mjs (protection probe, PR + `--auto`, CLEAN fallback); test "protected branch" and "CLEAN PR".
-- R2 ✅ same file (marker, debounce, force-with-lease, `pr edit`); test "fast-moving base".
-- R3 ✅ `isSyncable` + refusal in `syncMilestone`; test "never syncs a shipped...". No active-milestone picker exists in this repo, so "never pick as active" is delivered as the exported guard plus the spec rule; external pickers must call it.
-- R4 ✅ `reason` required (refused otherwise); spec says on demand only.
-- R5 ✅ `resolveBaseConflicts` with `readBaseMerge`; test "append-only registry".
-- R6 ✅ bin/lean/milestonesync.test.mjs.
+- R1 ✅ bin/lean/effects.mjs (wrapLaneLimits, makeLeanRunner wrap); bin/engine-cli.mjs readCoreLimits/defaultLaneMemory
+- R2 ✅ bin/runner.mjs (limitInfo, readScopeLimitEvents); bin/lean/lean.mjs (CLI_LANE_LIMIT branch); bin/engine/outcome-codes.mjs
+- R3 ✅ bin/engine-cli.mjs (laneCapNotice call in orchestrate); bin/lean/effects.mjs laneCapNotice
+- R4 ✅ bin/lean/lean.test.mjs (#4115b, #4690 tests); bin/lean/batch.test.mjs (#4690 keeps admitting)
 
 ### Verification
-- V1 `node --test bin/lean/milestonesync.test.mjs bin/lean/basesync.test.mjs bin/lean/lifecycle.test.mjs`: pass (36). The new tests cover a new module, so they cannot run without the fix.
-- V2 `bash scripts/publish-staging-sync.test.sh && bash scripts/check-spec-markers.sh`: pass.
-- `forgedock check`: PASS; `bin/tests/engine-cli.test.mjs`: pass (77).
+- V1 `node --test --test-name-pattern='4115|lane.limit|host.kill|4518' bin/lean/lean.test.mjs`: pass. The full lean.test.mjs also passes (493).
+- V2 `node --test bin/tests/engine-outcome-codes.test.mjs`: pass.
+- V3 `bash scripts/check-devdocs-freshness.sh origin/staging`: pass.
+- `forgedock check`: PASS. The new tests reference symbols or behaviour that did not exist, so they fail without the fix.
+- The real-systemd fork-past-TasksMax fixture is skipped on this host (no `systemd-run --user`), so it did not run here. The classification path is covered by an injected `limitProbe`.
 
 ### Notes
-New command `forgedock milestone-sync <slug> --reason ship|batch|conflict-risk|manual --repo o/r [--base B]`. New forge.yaml key `milestones.sync_debounce` (default 10m). No formatter is configured in the repo.
+- Behaviour change: lanes are scoped by default where systemd is available. A single refused fork at TasksMax stops the lane.
+- New env var `FORGEDOCK_LANE_PARALLEL`, set by orchestrate for its lanes.
+- New forge.yaml key `engine.lane_limits.tasks_max`.
+- No formatter is configured in this repo.
 
-## Enumeration follow-up
-The ten flagged bin/lean tests (batch, checks, conformance, conformance.e2e, context, execution, execution.e2e, fixround, heavy, lean) hold no list naming sibling modules (conflictres, basesync, lifecycle are absent); recorded `milestonesync` as not_members in result.json.
+- Added readScopeLimitEvents to bin/tests/runner.test.mjs import list with a unit test (sibling-enumeration fix).
