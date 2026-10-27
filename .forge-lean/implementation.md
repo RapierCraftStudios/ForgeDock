@@ -31,3 +31,6 @@ Every local lane's builder CLI runs in a named `systemd-run --user --scope` by d
 - No formatter is configured in this repo.
 
 - Added readScopeLimitEvents to bin/tests/runner.test.mjs import list with a unit test (sibling-enumeration fix).
+
+## CI fix
+The #4690 integration test (real systemd scope fork) is skipped here but runs on CI hosts where systemd-run exists yet scope cgroup counters may be unreadable. It now skips unless the scope path and pids.events are readable (scopeEventsReadable). No CI log was available; all local targeted tests pass.
