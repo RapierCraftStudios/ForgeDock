@@ -1781,7 +1781,7 @@ export function makeDispatchCheck({ gh, repo }) {
  * resume retries); then the capped FORGE:NEEDS_HUMAN comment, whose failure keeps the label → true.
  */
 export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
-  return async ({ issue, evidence }) => {
+  return async ({ issue, evidence, parked = null }) => {
     const { stateOf } = await import("./lean/context.mjs");
     try {
       const v = JSON.parse(await gh(["issue", "view", String(issue), "-R", repo, "--json", "state,body"]));
@@ -1789,6 +1789,16 @@ export function makeRelabelNeedsHuman({ gh, repo, now = () => Date.now() }) {
       const lease = stateOf(v?.body)?.lease;
       if (lease && Number(lease.until) > now()) return "skipped";
     } catch { /* unreadable: relabel as before */ }
+    // #4656: a mechanical park carries its code and PR on `parked:<code>` and joins the remediation queue, not the human queue.
+    if (parked?.code) {
+      const { parkedLabel, REMEDIATION_QUEUE_LABEL } = await import("./engine/outcome-codes.mjs");
+      try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", `${parkedLabel(parked.code)},${REMEDIATION_QUEUE_LABEL}`, "--remove-label", "needs-human"]); } catch { return "failed"; }
+      try {
+        const { capComment } = await import("./lean/render.mjs");
+        await gh(["issue", "comment", String(issue), "-R", repo, "--body", capComment(`<!-- FORGE:PARKED code=${parked.code}${parked.pr ? ` pr=${parked.pr}` : ""} -->\n## Parked (\`${parked.code}\`)\nCode: \`${parked.code}\`\nPR: ${parked.pr ? `#${parked.pr}` : "none"}\nQueue: \`${REMEDIATION_QUEUE_LABEL}\` (\`/work-on:remediate\`)\n${evidence}`)]);
+      } catch { /* best effort */ }
+      return true;
+    }
     try { await gh(["issue", "edit", String(issue), "-R", repo, "--add-label", "needs-human"]); } catch { return "failed"; }
     try {
       // #4315: the evidence carries the full lane reason; capped so it never exceeds GitHub's comment limit
