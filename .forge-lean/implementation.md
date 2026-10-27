@@ -21,3 +21,5 @@ The `human` builder block gets an optional `remainder` list. When the lane ends 
 ### Notes
 - Closure compares the issue content with the builder summary or the full needs-human reason. Any extra content keeps the issue open and only links it.
 - A failure to file the remainder ends the lane as engine-error, without the needs-human label.
+
+Fix: moved the #4730 paragraph in devdocs/modules/lean.md after the completed turn-budget sentence (docs-only; no code changed).
