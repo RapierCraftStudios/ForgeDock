@@ -162,6 +162,12 @@ modules:
     authority: required
     token_cost: 900
 
+  - name: lean-acceptance-red-green
+    glob: "scripts/acceptance-red-green*"
+    path: modules/lean.md
+    authority: required
+    token_cost: 900
+
 # ---------------------------------------------------------------------------
 # Always Load
 # Loaded for EVERY task regardless of domain label match.

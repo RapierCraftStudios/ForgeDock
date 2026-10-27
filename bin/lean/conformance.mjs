@@ -284,6 +284,20 @@ function normalizeAmendment(a) {
   return n;
 }
 
+const REF_SEP_RE = /\s*(?:[/,;&+]|\band\b)\s*/i, REF_RANGE_RE = /^R(\d+)\s*[-\u2013\u2014]\s*R?(\d+)$/i, REF_MAX = 50;
+
+/** forge#4655: a slash/comma-joined or ranged requirement reference (`R2/R3`, `R2, R3`, `R2–R3`) as its individual ids; a single id or anything else is returned as is. */
+function splitRequirementRefs(ref) {
+  if (typeof ref !== "string") return [ref];
+  const ids = [];
+  for (const part of ref.trim().split(REF_SEP_RE)) {
+    const m = REF_RANGE_RE.exec(part);
+    if (m && +m[1] <= +m[2] && +m[2] - +m[1] < REF_MAX) for (let i = +m[1]; i <= +m[2]; i++) ids.push(`R${i}`);
+    else ids.push(part);
+  }
+  return ids.length > 1 ? ids : [ref];
+}
+
 /** The rejection reason, naming the valid kinds or the missing field so the builder's correction round can fix it. */
 function amendmentProblem(a, tag) {
   const kind = a?.kind;
@@ -304,8 +318,16 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
   c.deliverables = c.deliverables ?? [];
   const applied = [], toTrack = [], problems = [];
   const genRes = (Array.isArray(generatedPaths) ? generatedPaths : []).filter((g) => typeof g === "string" && g).map(shellGlobRe);
+  const rows = [];
   for (const raw of Array.isArray(amendments) ? amendments : []) {
-    const a = normalizeAmendment(raw);
+    const n = normalizeAmendment(raw);
+    if (n && (TRACKED.includes(n.kind) || n.kind === "amend-requirement") && typeof n.requirement === "string") {
+      const ids = splitRequirementRefs(n.requirement);
+      if (ids.length > 1) { for (const id of ids) rows.push({ a: { ...n, requirement: id }, raw }); continue; }
+    }
+    rows.push({ a: n, raw });
+  }
+  for (const { a, raw } of rows) {
     const tag = JSON.stringify(raw ?? null).slice(0, 400);
     if (blank(a?.why)) { problems.push(`amendment without why: ${tag}`); continue; }
     if (a.kind === "add-deliverable" && !blank(a.path)) {

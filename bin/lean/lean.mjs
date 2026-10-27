@@ -281,12 +281,12 @@ export async function runCore(o) {
   let leaseState = null, leaseTimer = null;
   const writeLease = (lease, extra = {}) => io.projector.writeState(issue, { ...leaseState, ...extra, lease });
   const renew = async () => { if (io.projector && leaseState && !finishing) { /* never re-take a lease a finish (or signal) released */ try { await writeLease(leaseObj()); } catch { /* best effort */ } } };
-  async function releaseLease(reason, code = null) {
+  async function releaseLease(reason, code = null, mergedTo = null) {
     if (leaseTimer) { clearInterval(leaseTimer); leaseTimer = null; }
     if (!io.projector || !leaseState) return;
     const terminal = ["merged", "invalid", "needs-human", "engine-error"].includes(reason);
     // forge#4275: the typed outcome code and failure classes ride on FORGE:STATE, so the next run's context pack reads them typed.
-    const typed = terminal ? { terminalCode: code ?? null, failureClasses: [...failureClasses].sort() } : {};
+    const typed = terminal ? { terminalCode: code ?? null, failureClasses: [...failureClasses].sort(), ...(reason === "merged" && mergedTo ? { mergedTo } : {}) } : {}; // #4711: where the change landed
     try { await writeLease(null, terminal ? { terminal: true, terminalReason: reason, ...typed } : {}); } catch { /* best effort */ }
   }
 
@@ -453,7 +453,7 @@ export async function runCore(o) {
       else { T.close = ["left open", "label needs-human"]; T.anomalies.push(`needs-human: ${String(detail).split("\n")[0].slice(0, 300)}`); }
       try { await post(["FORGE:TRAJECTORY", REGISTER_MARKER], renderTrajectory({ ...T, usage: usageLine() })); } catch { /* best effort */ }
     }
-    await releaseLease(reason, code);
+    await releaseLease(reason, code, extra.mergedTo ?? null);
     done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs,
       light, ...(lightVerdict ? { light_eligibility: lightVerdict } : {}), ...(lightUpgrade ? { light_upgrade: lightUpgrade } : {}), // #4453
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
@@ -813,7 +813,9 @@ export async function runCore(o) {
       }
       for (const [n, rec] of recs) {
         if (String(rec?.state).toUpperCase() !== "OPEN" || n === Number(issue) || open.includes(n)) continue;
-        if (lanePrs && await dependencyOnLane(n, lane, await lanePrs, io)) continue; // #4686: its change is on the lane: neither open nor a needs-human blocker
+        let full = null; // #4711: the REST record carries the body (FORGE:STATE mergedTo) and the author association
+        if (lane) try { full = JSON.parse(String(await io.gh(["api", `repos/{owner}/{repo}/issues/${n}`])) || "null"); } catch { /* the PR-ancestry rule still applies */ }
+        if (lane && await dependencyOnLane(n, lane, lanePrs ? await lanePrs : null, io, full)) continue; // #4686: its change is on the lane: neither open nor a needs-human blocker
         open.push(n);
         if ((rec.labels ?? []).some((l) => (l?.name ?? l) === "needs-human")) blockers.push(n);
       }
@@ -2686,7 +2688,9 @@ export async function runCore(o) {
     try { const g = await (o.guardAfterMerge ?? guardAfterMerge)({ io, repo, issue, pr, cwd: wt, base }); if (g?.posted) T.decisions.push(`FORGE:GUARD posted: ${g.guard.tests.length} test file(s), ${g.guard.hunks.length} hunk(s)`); else if (g?.skipped) ev({ event: "GUARD_SKIPPED", reason: g.reason }); } catch { /* the guard is best effort */ }
     // forge#4161: the merge-time structure record and the milestone ride on the lane result for orchestrate's drift fold.
     await gatePassed("merge_ci", "ci_red"); // #4375: merged means the required checks are green after a CI fix round
-    return await finish("merged", `PR #${pr}`, { pr, ...(partial ? { close: "partial" } : {}), structure: T.structure ?? null, ...(milestone ? { milestone } : {}), ...(lane ? { lane } : {}) });
+    let mergedTo = null; // #4711: FORGE:STATE records the lane and merge commit, so a dependent's check needs no PR search
+    if (lane) try { const sha = JSON.parse(String(await ghc(["pr", "view", String(pr), "-R", repo, "--json", "mergeCommit"])) || "{}").mergeCommit?.oid; if (typeof sha === "string" && sha) mergedTo = { lane, pr, sha }; } catch { /* the PR-ancestry rule still applies */ }
+    return await finish("merged", `PR #${pr}`, { pr, ...(mergedTo ? { mergedTo } : {}), ...(partial ? { close: "partial" } : {}), structure: T.structure ?? null, ...(milestone ? { milestone } : {}), ...(lane ? { lane } : {}) });
   } catch (e) {
     if (e?.deferUsageLimit) {
       const when = e.resetAt || (Number.isFinite(e.resetAtEpochMs) ? new Date(e.resetAtEpochMs).toISOString() : "unknown");
