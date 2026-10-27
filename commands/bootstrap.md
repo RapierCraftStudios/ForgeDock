@@ -27,7 +27,7 @@ BOOT_TPL="$(forge_root)/templates/bootstrap"; VALIDATE=$(forge_resolve bootstrap
    - A `SPIKE` parent issue.
    - Sub-issues from `issue-body.md` with planned paths, `[type:*]` tags, `priority` and `component`.
    - `"ui": true` issues carry the full design spec. `"hero": true` issues route to `/design`.
-   - One `needs-human-issue.md` issue per credential, account or external input. Code issues reference it as `#{{KEY}}` but never depend on it, and name the mock that keeps dev and CI green.
+   - One `needs-human-issue.md` issue per credential, account or external input, with `gates:` (#4660). Code issues reference it as `#{{KEY}}` but never depend on it, and name the mock that keeps dev and CI green.
    - Sub-issues point at the spike via `**Parent**` only, never `Depends on`.
    - `guardrails` and `domainRules` from the interview.
 7. **Validate.** Run `node "$VALIDATE" <plan>`. Fix the plan until it exits 0. Never create from an invalid plan.

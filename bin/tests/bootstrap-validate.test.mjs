@@ -206,3 +206,20 @@ test("non-boolean ui / hero flags are invalid-plan", () => {
   issue(p, "SYNC").ui = "yes";
   assert.deepEqual(codes(validatePlan(p)), ["invalid-plan"]);
 });
+
+test("a needs-human issue without a valid gates: line is rejected with missing-gates (#4660)", () => {
+  const plan = load("valid-nextjs");
+  const nh = plan.issues.find((i) => isNeedsHuman(i));
+  nh.body = nh.body.replace(/^gates:.*\n/m, "gates: nowhere\n");
+  const r = validatePlan(plan);
+  assert.ok(codes(r).includes("missing-gates"));
+  assert.ok(isNeedsHuman({ labels: ["needs-human:external"] }));
+});
+
+test("isNeedsHuman is null-safe and validatePlan reports missing-labels without a labels array (#4660)", () => {
+  assert.equal(isNeedsHuman(undefined), false);
+  assert.equal(isNeedsHuman({}), false);
+  const plan = load("valid-nextjs");
+  delete issue(plan, "AUTH").labels;
+  assert.ok(codes(validatePlan(plan)).includes("missing-labels"));
+});

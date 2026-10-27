@@ -85,6 +85,8 @@ Duplicates: the script's token-overlap dedup is authoritative. Before drafting, 
 
 ### 3. Draft
 
+**External prerequisite** (credential, account, sign-off): label `needs-human:external` and put `gates: preview|staging-deploy|prod-deploy|feature-flag:<name>` and `owner:` in the body (#4660).
+
 **Title**: `{prefix}({scope}): {specific description}`, max 80 characters, no vague verbs ("improve", "update", "handle") without specifics.
 
 **Body** (pipeline template; `## Problem`, `## Affected Files` and `## Acceptance Criteria` are mandatory, the rest optional; in greenfield mode Affected Files may list *planned* paths inside the spike's declared repo layout):
