@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseChecks, itemCheckIds, measureFollowup, monitorRecord, CHECK_ID_RE } from "./postdeploy-check.mjs";
+import { parseChecks, itemCheckIds, measureFollowup, monitorRecord, CHECK_ID_RE, tickItems } from "./postdeploy-check.mjs";
 import { postDeployOnly } from "./prefilter.mjs";
 import { validateContract, applyAmendments, precheck, followupItems } from "./conformance.mjs";
 import { PROBE_MARKER } from "./probe.mjs";
@@ -63,7 +63,7 @@ describe("post-deploy named checks (#4626)", () => {
     for (const [file, b] of [[CHECKS, body([item("R1", "[check:ghost] x")])], [null, body([item("R1", "[check:smoke] x")])], [CHECKS, body([item("R1", "x"), item("R2", "[check:smoke] y")])]]) {
       const w = world({ file });
       assert.equal((await run(w, b)).state, "awaiting-measurement");
-      assert.deepEqual(w.spawned, []); assert.deepEqual(w.gh, []);
+      assert.deepEqual(w.spawned, []); assert.ok(w.gh.every((a) => a[1] === "comment" && /FORGE:OWNER_ASK/.test(a[a.indexOf("--body") + 1])), "only the typed owner ask (#4689)");
     }
   });
 
@@ -144,3 +144,41 @@ describe("windowed post-deploy checks (#4627)", () => {
   });
 });
 
+
+describe("verification outcome (#4689)", () => {
+  it("a pass ticks the post-deploy items with the evidence in the PROBE record, and writes no code", async () => {
+    const w = world();
+    const r = await run(w, body([item("R1", "[check:smoke] x")]));
+    assert.equal(r.state, "pass");
+    const edit = w.gh.find((a) => a[0] === "issue" && a[1] === "edit");
+    const text = edit[edit.indexOf("--body") + 1];
+    assert.match(text, /- \[x\] `R1: some quote here`/);
+    assert.equal(tickItems("- [ ] `R9: other` — defer: code"), "- [ ] `R9: other` — defer: code");
+    const probe = w.gh.find((a) => a[1] === "comment" && /FORGE:PROBE/.test(a[a.indexOf("--body") + 1]));
+    assert.match(probe[probe.indexOf("--body") + 1], /"id":"smoke","result":"pass"/);
+    assert.ok(w.git.every((a) => ["show", "rev-parse"].includes(a[0])), "no git write: " + JSON.stringify(w.git));
+    assert.equal(tickItems("no items"), "no items");
+  });
+
+  it("a fail files one engineering issue per failing check and ticks nothing", async () => {
+    const w = world({ file: JSON.stringify({ bad: "echo nope", worse: "echo nope", smoke: "echo ok" }) });
+    const r = await run(w, body([item("R1", "[check:bad] x"), item("R2", "[check:worse] x"), item("R3", "[check:smoke] x")]));
+    assert.equal(r.state, "fail");
+    const created = w.gh.filter((a) => a[0] === "issue" && a[1] === "create");
+    assert.equal(created.length, 2);
+    assert.ok(created.every((a) => a.includes("followup:engineering")));
+    assert.ok(created[0][created[0].indexOf("--title") + 1].includes("bad"));
+    assert.ok(!w.gh.some((a) => a[1] === "edit" && a.includes("--body")));
+  });
+
+  it("an item with no runnable check posts one typed owner ask, once", async () => {
+    const w = world({ file: null });
+    assert.equal((await run(w, body([item("R1", "[check:smoke] x")]))).state, "awaiting-measurement");
+    const asks = w.gh.filter((a) => a[1] === "comment" && /FORGE:OWNER_ASK/.test(a[a.indexOf("--body") + 1]));
+    assert.equal(asks.length, 1);
+    const seen = { number: 41, body: body([item("R1", "[check:smoke] x")]), comments: [{ body: "<!-- FORGE:OWNER_ASK -->\nask", author: { login: "rapiercraft-forgedock" }, authorAssociation: "CONTRIBUTOR" }] };
+    const w2 = world({ file: null });
+    await run(w2, seen.body, { iss: seen, isTrusted: () => true });
+    assert.equal(w2.gh.filter((a) => a[1] === "comment").length, 0);
+  });
+});
