@@ -1851,3 +1851,12 @@ resolves to the next open one by due date, else forge.yaml `followups.default_mi
 ## Entry 2026-10-27 — settle scope freeze and deploy-last warning (#4665)
 
 `scripts/settle-scope.mjs` (pure module, no I/O) freezes the milestone's issue set when settle begins (`freezeScope`). `classifyNew` sorts later issues: a child of a frozen decomposed issue is a `decomposition-child` and stays in the milestone; a `FORGE:DEFERRED_FROM` issue is a `deferred-followup` routed to the next milestone or backlog (`file-deferred-followups.sh` already files without a milestone); anything else is `review-finding` or `other` (growth only). `convergence` measures the frozen set plus decomposition children (transitively); `formatStopReport` states the growth and per-source issue numbers. `commands/orchestrate.md` §3b specifies it; no settle loop exists in the repo. `bootstrap-validate.mjs` adds a `warnings` array (`ok` and exit code 0 unchanged) with `deploy-last`: warned once when deploy-class issues (deploy workflow, staging environment) sit only in the last of >= 3 milestones; `formatWarnings` is exported and main() prints `warning:` lines to stderr. `commands/bootstrap.md` asks for dependency-layer milestones and a deployable slice in milestone 1 or 2. Cost: 0 LLM calls.
+
+## Compounding metrics (#4696)
+
+`forgedock stats --compounding` (`bin/stats/compounding.mjs`) measures reintroduction (guarded fix reopened, or blamed by a later
+guarded fix within 90 days), reopen-after-close, guard activity and decision churn by rolling window, release and lane-age bucket.
+It reads FORGE:GUARD comments (`bin/lean/guards.mjs` `collectGuards`, read only), `reopened` issue events, git, and these
+FORGE:TELEMETRY gate events, which #4693/#4695 must emit under exactly these names: `guard_run`, `guard_broken`,
+`supersedes_accepted`, `decision_superseded`, `decision_violation` (an unrecorded kind prints n/a). Stats-time only: no lane-path
+cost, no LLM. Usage and definitions: `docs/STATS.md`.
