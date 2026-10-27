@@ -322,6 +322,19 @@ orchestration:
   # (stalled, needs a human) instead of IN_PROGRESS. Default: 48.
   in_progress_max_hours: 48
 
+  # Extra env var names (comma-separated) a batch pins for its lanes in plan.json,
+  # beyond the built-in allowlist (PATH, HOME, USER, SHELL, LANG, LC_*, TMPDIR,
+  # CLAUDE_CONFIG_DIR, FORGEDOCK_*, GH_*, GITHUB_*; secret-looking names and the
+  # launching session's CLAUDE_CODE_*, CLAUDE_PID, ANTHROPIC_* are never pinned
+  # unless listed here; the configured execution.token_env name is also kept).
+  # Inspect or edit the pinned env with `forgedock orchestrate --show-env <id>`,
+  # `--set-env <id> KEY=VAL`, `--unset-env <id> KEY` (applies to newly launched lanes).
+  env_passthrough: ANTHROPIC_BASE_URL
+
+  # Globs (comma-separated) of PATH directories removed from the pinned PATH. Non-existent
+  # dirs and per-session temp dirs (an arg0 or claude* dir under a temp root) are always dropped.
+  path_exclude: /opt/wrappers/*
+
   cascade:
     # Named preset expanding to the granular keys below. Any granular key set
     # explicitly overrides just that field — the preset supplies defaults, not
@@ -606,6 +619,8 @@ followups:
 ## `post_deploy` (OPTIONAL)
 
 Deferred follow-ups whose items are all post-deploy checks are parked (`awaiting-promotion`, no lane) until the parent's fix is on `branches.default`. Keys: `precondition_cmd` (exit 0 ready, 1 parked) and `min_age` (soak window, e.g. `24h`).
+
+A post-deploy item may carry `due:YYYY-MM-DD` (`- [ ] \`R2: …\` — post-deploy: [check:id] due:2026-11-03 why`): it parks `awaiting-due` (with a `due:<date>` label) until that UTC date. A `decision:` item parks with one typed `FORGE:OWNER_ASK` comment and no lane. The daemon timer (and `forgedock probe --due`) re-evaluates parked follow-ups (`awaiting-promotion`, `awaiting-due`, `awaiting-measurement`) and removes the wait labels when the parent's fix is on the default branch, the date has passed or the check is defined. The only production access a check has is the checks file's command and the `acceptance_probe.env` allowlist; a pass ticks the items, a fail files one `followup:engineering` issue per failing check, and an item with no runnable check gets the owner ask. The batch report lists `due date:` and `owner ask:` apart from failures.
 
 ### Named checks (#4626)
 

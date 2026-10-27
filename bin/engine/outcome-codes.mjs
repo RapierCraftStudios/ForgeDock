@@ -32,6 +32,7 @@ export const OUTCOME_CODES = Object.freeze({
   REMEDIATE_UNFIXABLE: "remediate.unfixable",
   REMEDIATE_INPR_REQUESTED: "remediate.inpr_requested",
   CI_RED: "ci.red",
+  CI_DCO: "ci.dco", // forge#4651: a failed DCO check (or no identity to sign off the lane's commits); never recoverable: a new commit cannot fix history
   CI_TIMEOUT: "ci.timeout",
   BASE_CONFLICT: "base.conflict",
   RATE_LIMITED: "rate_limited",
@@ -43,6 +44,7 @@ export const OUTCOME_CODES = Object.freeze({
   RUN_INTERRUPTED: "run.interrupted", // forge#4179: SIGTERM/SIGINT on a core run; teardown ran from the ledger, lane requeued
   PATH_SWITCH_CONFLICT: "path.switch_conflict",
   ENGINE_ERROR: "engine.error",
+  ENGINE_VALIDATE_RESULT_LOST: "engine.validate_result_lost", // forge#4708: a validate result recorded before a CI fix round is missing after it and could not be carried forward
   INFRA_DISK_QUOTA: "infra.disk_quota",
   INFRA_CLI_SPAWN_TRANSIENT: "infra.cli_spawn_transient",
   CLI_TIMEOUT: "cli.timeout",
@@ -55,6 +57,7 @@ export const OUTCOME_CODES = Object.freeze({
   ENV_CAPABILITY_REMOTE: "env.capability_remote", // forge#4542: a remote sandbox lane blocked only on a host-only capability (SOPS key, ops credentials, prod monitor SSH) the dispatching host has; recovered locally
   SANDBOX_START_FAILED: "sandbox.start_failed", // forge#4254: a lane sandbox could not start; needs-human, not relaunched
   SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff
+  SANDBOX_AUTH: "sandbox.auth", // forge#4685: the sandbox provider refused or lacked the credential (HTTP 401/403, no token); deferred, never needs-human
   SANDBOX_UNREACHABLE: "sandbox.unreachable", // forge#4672: the sandbox provider stayed unreachable past execution.unreachable_window_min; deferred, the sandbox is kept for adopt
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",

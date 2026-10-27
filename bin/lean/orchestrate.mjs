@@ -499,14 +499,23 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     return true;
   };
 
-  const skip = (n, detail) => { results.set(n, { issue: n, outcome: "skipped", pr: null, cost_usd: 0, minutes: 0, detail }); update(results.get(n)); };
+  // #4687: a dependency skip is a waiting state while a blocker re-check can still re-admit it (`waiting`, cleared when the batch ends);
+  // the log row names the triggering issue.
+  const skip = (n, detail, trigger = null) => {
+    results.set(n, { issue: n, outcome: "skipped", pr: null, cost_usd: 0, minutes: 0, detail, ...(trigger !== null && dispatchCheck ? { waiting: true } : {}) });
+    update({ ...results.get(n), ...(trigger !== null ? { trigger } : {}) });
+  };
   const requeue = (n, delayMs) => { pending.push(n); enqueued.set(n, now()); if (delayMs > 0) notBefore.set(n, now() + delayMs); else notBefore.delete(n); };
-  const noteEngineError = () => {
+  const TRANSPORT_TEXT = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|HTTP 50[234]/i;
+  const TRANSPORT_COOLDOWN_MS = 5 * 60000;
+  let transportErrors = 0; // #4685: engine-errors in the current window that were link failures
+  const noteEngineError = (detail = "") => {
     if (!breaker) return;
     const t = now(), windowMs = breaker.window_min * 60000;
     errorTimes = [...errorTimes.filter((x) => t - x < windowMs), t];
+    transportErrors = TRANSPORT_TEXT.test(String(detail)) ? Math.min(transportErrors + 1, errorTimes.length) : 0;
     if (!tripped && errorTimes.length >= breaker.errors) {
-      tripped = { at: t, detail: `circuit breaker: ${errorTimes.length} engine-errors within ${breaker.window_min} min; admissions stopped` };
+      tripped = { at: t, ...(transportErrors >= errorTimes.length ? { transport: true } : {}), detail: `circuit breaker: ${errorTimes.length} engine-errors within ${breaker.window_min} min; admissions stopped` };
       update({ issue: null, outcome: "breaker", detail: tripped.detail });
     }
   };
@@ -550,11 +559,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
       if (parked !== undefined) {
         done();
-        const final = { ...row, outcome: "skipped", detail: `dependency #${parked} needs-human` };
+        const final = { ...row, outcome: "skipped", detail: `dependency #${parked} needs-human`, ...(dispatchCheck ? { waiting: true } : {}) };
         results.set(n, final); save();
         decided({ issue: n, what: `skipped: dependency #${parked} needs-human (not pulled into the batch)`, why: firstLine(row.detail) || "the lane reported an open dependency",
           alternative: `pull #${parked} in and run it again` });
-        update(final);
+        update({ ...final, trigger: parked });
         return;
       }
     }
@@ -594,7 +603,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       row.detail = `gave up after ${deferrals.get(n) ?? 0} deferrals: ${r?.detail ?? r?.code ?? ""}`;
     }
     if (row.outcome === "engine-error") {
-      noteEngineError();
+      noteEngineError(r?.detail);
       if ((engineErrors.get(n) ?? 0) < ENGINE_ERROR_RELAUNCHES) {
         engineErrors.set(n, (engineErrors.get(n) ?? 0) + 1);
         requeue(n, 0); done(); save();
@@ -832,6 +841,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       decided({ issue: e.issue, what: `requeued by ${e.by ?? "operator"} (forgedock orchestrate --requeue); prior outcome ${row.outcome}${list.length ? `; dependents back to pending: ${list.join(", ")}` : ""}`,
         why: e.reason || "operator decision", alternative: "start a second batch" });
       update({ issue: e.issue, outcome: "requeued", detail: `${e.reason || "operator decision"} (was ${row.outcome})` });
+      for (const m of moved) if (m !== e.issue) update({ issue: m, outcome: "requeued", detail: `dependency #${e.issue} requeued`, trigger: e.issue }); // #4687
       n++;
     }
     if (fresh.length) save();
@@ -909,6 +919,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // #4595: a skipped row whose blocker (`dependency #B ...`) was finished outside the lane is re-admitted: B is re-checked
   // through `dispatchCheck` (at most every WATCH_EVERY_MS, and once before the batch would end); fail-open.
   let lastWatch = null;
+  const settled = new Set(); // #4687: blockers whose close is final (not planned): their dependents stay skipped, no more re-checks
   const readmitted = new Set(); // "n:b": re-admit n on blocker b once; a lane that re-skips on b stays skipped
   const blockerOf = (n) => { const r = results.get(n); const m = r?.outcome === "skipped" ? /^dependency #(\d+) /.exec(r.detail ?? "") : null; return m ? Number(m[1]) : null; };
   const watchable = () => !!dispatchCheck && [...results.keys()].some((n) => blockerOf(n) !== null);
@@ -918,10 +929,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (!final && lastWatch !== null && t0 - lastWatch < WATCH_EVERY_MS) return;
     lastWatch = t0;
     const resolved = new Set();
-    const roots = new Set([...results.keys()].filter((n) => !readmitted.has(`${n}:${blockerOf(n)}`)).map(blockerOf).filter((b) => b !== null && blockerOf(b) === null));
+    const roots = new Set([...results.keys()].filter((n) => !readmitted.has(`${n}:${blockerOf(n)}`)).map(blockerOf).filter((b) => b !== null && blockerOf(b) === null && !settled.has(b)));
     for (const b of roots) {
       let g = null;
       try { g = (await dispatchCheck(b)) ?? null; } catch { g = null; }
+      if (g?.final) { // #4687: closed as not planned: terminal for its dependents
+        settled.add(b);
+        for (const n of results.keys()) {
+          const r = results.get(n);
+          if (blockerOf(n) === b && r.waiting) { const { waiting, ...rest } = r; results.set(n, rest); update({ ...rest, trigger: b }); }
+        }
+        continue;
+      }
       if (!g || !SATISFIED.has(g.outcome)) continue;
       resolved.add(b);
       const row = results.get(b);
@@ -940,6 +959,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       readmitted.add(`${n}:${b}`);
       results.delete(n);
       pending.push(n);
+      update({ issue: n, outcome: "readmitted", detail: `dependency #${b} merged or closed`, trigger: b }); // #4687
       decided({ issue: n, what: `re-admitted: dependency #${b} merged or closed after this issue was skipped`, why: "the blocker was finished outside this batch lane",
         alternative: "leave it skipped until the next batch" });
     }
@@ -961,7 +981,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           const n = pending[i];
           if (results.has(n)) { pending.splice(i, 1); continue; }
           const bad = edges(n).find((d) => results.has(d) && !SATISFIED.has(results.get(d).outcome));
-          if (bad !== undefined) { pending.splice(i, 1); skip(n, `dependency #${bad} ended ${results.get(bad).outcome}`); again = true; }
+          if (bad !== undefined) { pending.splice(i, 1); skip(n, `dependency #${bad} ended ${results.get(bad).outcome}`, bad); again = true; }
         }
       }
       const t = now();
@@ -1025,6 +1045,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         }
       }
       if (reg) withdrawExcept(wanted);
+      // #4685: a breaker tripped only by link failures (a router restart) closes itself after a cooldown
+      if (tripped?.transport && now() - tripped.at >= TRANSPORT_COOLDOWN_MS) { tripped = null; errorTimes = []; transportErrors = 0; save(); }
       if (tripped && !running.size) { await drainAdds(); break; } // breaker: let running lanes finish, keep the rest pending for a resume
       if (cancelled && !running.size) { await drainAdds(); break; } // #4376: cancel: the rest end held for a resume
       if (budgetStop && !running.size) { await drainAdds(); break; } // execution budget (stop): the same, the rest end held
@@ -1080,6 +1102,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   if (lifecycle?.onBatchEnd && lifecycleTitles.size && !halted) {
     try { await lifecycle.onBatchEnd([...lifecycleTitles]); } catch (e) { onUpdate({ issue: 0, outcome: "lifecycle", detail: `lifecycle check failed: ${String(e?.message ?? e).slice(0, 300)}` }); }
   }
+  for (const [n, r] of results) if (r?.waiting) { const { waiting, ...rest } = r; results.set(n, rest); } // #4687: the batch ended: skipped for good
   save();
   const withRequeue = (r) => (r && requeuedInfo.has(r.issue) ? { ...r, requeued: { reason: requeuedInfo.get(r.issue).reason, by: requeuedInfo.get(r.issue).by, prior: requeuedInfo.get(r.issue).prior.map((p) => ({ outcome: p.outcome, detail: p.detail ?? null, pr: p.pr ?? null })) } } : r);
   return order.map((n) => withRequeue(results.get(n)) ?? { issue: n, outcome: "held", pr: null, cost_usd: 0, minutes: 0, detail: heldDetail(n),
@@ -1134,7 +1157,7 @@ export function formatTable(rows) {
   // #4255: sandbox minutes and cost next to the token cost, only when some lane ran in a sandbox.
   const sbx = rows.some((r) => r?.sandbox);
   const head = ["issue", "outcome", "PR", "cost", ...(sbx ? ["sbx-min", "sbx-$"] : []), "min"];
-  const body = rows.map((r) => [`#${r.issue}`, r.outcome + (["skipped", "held"].includes(r.outcome) && r.detail ? ` (${r.detail})` : r.prefilter?.closed || r.prefilter?.parked ? " (pre-filter)" : ""), r.pr ? `#${r.pr}` : "-", `$${(r.cost_usd ?? 0).toFixed(2)}`,
+  const body = rows.map((r) => [`#${r.issue}`, (r.waiting && /^dependency #(\d+) /.test(r.detail ?? "") ? `waiting on #${/^dependency #(\d+) /.exec(r.detail)[1]}` : r.outcome) + (["skipped", "held"].includes(r.outcome) && r.detail ? ` (${r.detail})` : r.prefilter?.closed || r.prefilter?.parked ? " (pre-filter)" : ""), r.pr ? `#${r.pr}` : "-", `$${(r.cost_usd ?? 0).toFixed(2)}`,
     ...(sbx ? (r.sandbox ? [(Number(r.sandbox.minutes) || 0).toFixed(1), `$${(Number(r.sandbox.cost_usd) || 0).toFixed(2)}`] : ["-", "-"]) : []), String(r.minutes ?? 0)]);
   const w = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)));
   const line = (c) => c.map((x, i) => x.padEnd(w[i])).join("  ").trimEnd();

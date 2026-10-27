@@ -17,6 +17,7 @@ export const CHECKS_FILE = ".forge/post-deploy-checks.json";
 export const CHECK_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const AWAITING_MEASUREMENT_LABEL = "awaiting-measurement";
 export const MONITORING_LABEL = "post-deploy-monitoring";
+export const OWNER_ASK_MARKER = "FORGE:OWNER_ASK"; // #4689
 export const DEFAULT_EVERY_MS = 6 * 3600e3;
 const ITEM_RE = /^\s*[-*]\s+\[[ xX]\]\s+(.*)$/;
 const CHECK_TOKEN_RE = /^`[^`]*`\s+(?:\*\*known-flaw\*\*\s+)?[—-]+\s*post-deploy:\s*\[check:\s*([^\]\s]*)\s*\]/;
@@ -97,6 +98,26 @@ export async function addMonitoringLabel({ io, repo, issue }) {
   }
 }
 
+/** #4689: tick every unticked post-deploy checklist item of a follow-up body (the evidence is in the FORGE:PROBE comment). */
+export const tickItems = (body) => String(body ?? "").replace(/^(\s*[-*]\s+)\[ \](\s+`[^`]*`\s+(?:\*\*known-flaw\*\*\s+)?[—-]+\s*post-deploy:)/gm, "$1[x]$2");
+
+/** #4689: one typed `FORGE:OWNER_ASK` comment for the items with no runnable check, posted once; best effort, nothing in a dry run. */
+async function postOwnerAsk({ iss, repo, io, dryRun, isTrusted, ids, missing, def }) {
+  if (dryRun || (iss.comments ?? []).some((c) => isTrusted(c) && String(c?.body ?? "").includes(OWNER_ASK_MARKER))) return;
+  const what = ids.length ? missing.map((m) => (m ? `add \`${m}\` to ${CHECKS_FILE} on ${def}` : "name an item's check with `[check:<id>]`")).join("; ") : "name each item's check with `[check:<id>]` and add it to the checks file";
+  try { await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", `<!-- ${OWNER_ASK_MARKER} -->\n## Owner ask\nNo lane was started and none will be. Needed from the owner: ${what}, or measure the item by hand.`]); } catch { /* the label still shows it */ }
+}
+
+/** #4689: one engineering issue per failing check (never a lane): the output, the fix and the follow-up. Best effort. */
+async function fileFailureIssues({ bad, iss, repo, io, parent, def, fix }) {
+  for (const r of bad) {
+    const title = `Post-deploy check ${r.id} fails on ${def}${parent ? ` (fix of #${parent})` : ""}`;
+    const body = `Post-deploy check \`${r.id}\` failed (exit ${r.exit ?? "timeout"}) for fix \`${fix.slice(0, 12)}\` on \`${def}\`. Follow-up: #${iss.number}.\n\n${fenced(r.output)}`.slice(0, OUTPUT_TAIL * 2);
+    const create = (extra) => io.gh(["issue", "create", "-R", repo, "--title", title, "--body", body, ...extra]);
+    try { await create(["--label", "followup:engineering"]); } catch { try { await create([]); } catch { /* the follow-up comment carries the output */ } }
+  }
+}
+
 /**
  * Measure a ready post-deploy follow-up. Never runs a command that is not in the default branch's checks file.
  * @returns {Promise<{state:"awaiting-measurement"|"pass"|"fail"|"recorded-fail"|"dry-run"|"monitoring", detail:string}>}
@@ -107,13 +128,19 @@ export async function measureFollowup({ iss, repo, parent, def, shas = [], cwd, 
   const ids = itemCheckIds(iss.body);
   const checks = await checksAt(io.git, [`origin/${def}`], cwd);
   const missing = ids.filter((id) => !id || !checks[id]);
-  if (!ids.length || missing.length) return { state: "awaiting-measurement", detail: `no runnable check on ${def} for ${ids.length ? `${missing.map((m) => m ?? "an item without a check id").join(", ")}` : "any item"} (${CHECKS_FILE})` };
+  if (!ids.length || missing.length) {
+    await postOwnerAsk({ iss, repo, io, dryRun, isTrusted, ids, missing, def });
+    return { state: "awaiting-measurement", detail: `no runnable check on ${def} for ${ids.length ? `${missing.map((m) => m ?? "an item without a check id").join(", ")}` : "any item"} (${CHECKS_FILE})` };
+  }
   const fix = [...shas].sort().join(",");
   const prior = (iss.comments ?? []).filter((c) => isTrusted(c)).map((c) => probeResultOf(c?.body)).filter(Boolean).reverse().find((p) => p.fix === fix);
   if (prior?.result === "fail") return { state: "recorded-fail", detail: `check failed for ${fix.slice(0, 12)} (FORGE:PROBE); waiting for a new fix of #${parent}` };
   const windowed = ids.every((id) => checks[id].forMs);
   const monitored = (iss.comments ?? []).filter((c) => isTrusted(c)).map((c) => monitorRecord(c?.body)).filter(Boolean).find((p) => p.fix === fix && p.result === "pass" && p.until);
-  if (windowed && monitored) return { state: "monitoring", detail: `windowed checks ${[...new Set(ids)].join(", ")} monitored until ${new Date(monitored.until).toISOString()}` };
+  if (windowed && monitored) {
+    await addMonitoringLabel({ io, repo, issue: iss.number }); // retry a label that failed on the first pass; sweepDue selects by it
+    return { state: "monitoring", detail: `windowed checks ${[...new Set(ids)].join(", ")} monitored until ${new Date(monitored.until).toISOString()}` };
+  }
   if (dryRun) return { state: "dry-run", detail: `checks ${[...new Set(ids)].join(", ")} not run (dry run)` };
   let defaultSha = null;
   try { defaultSha = String(await io.git(["rev-parse", `origin/${def}`], { cwd })).trim() || null; } catch { /* recorded as null */ }
@@ -129,16 +156,21 @@ export async function measureFollowup({ iss, repo, parent, def, shas = [], cwd, 
       `Ran after the fix of #${parent} reached \`${def}\`; commands come from \`${CHECKS_FILE}\` on \`${def}\`.${ok ? (win.at ? ` Monitored until \`${win.window_until}\`, re-run on later releases.` : " The follow-up is closed.") : " The parent is reopened."}`,
       ...rows.filter((r) => r.result === "fail").flatMap((r) => ["", `**${r.id}** (exit ${r.exit ?? "timeout"})`, fenced(r.output)]),
     ].join("\n").slice(0, OUTPUT_TAIL * 4);
-    await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", body]);
     if (!ok) {
       const bad = rows.filter((r) => r.result === "fail");
-      let note = "";
-      try { await io.gh(["issue", "reopen", String(parent), "-R", repo]); } catch (e) { note = ` (reopen failed: ${String(e?.message ?? e).slice(0, 120)})`; }
+      // Reopen before recording: the FORGE:PROBE fail record parks later passes (recorded-fail), so it must only exist once the parent is open.
+      try { await io.gh(["issue", "reopen", String(parent), "-R", repo]); } catch (e) {
+        return { state: "fail", detail: `check ${bad.map((r) => r.id).join(", ")} failed; reopen of #${parent} failed, no record posted so the next pass retries (${String(e?.message ?? e).slice(0, 120)})` };
+      }
+      await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", body]);
+      await fileFailureIssues({ bad, iss, repo, io, parent, def, fix }); // #4689
       try {
         await io.gh(["issue", "comment", String(parent), "-R", repo, "--body", `Post-deploy check ${bad.map((r) => `\`${r.id}\``).join(", ")} failed for the fix on \`${def}\` (follow-up #${iss.number}); reopened.\n\n${bad.map((r) => fenced(r.output)).join("\n\n")}`.slice(0, OUTPUT_TAIL * 4)]);
       } catch { /* the follow-up comment carries the output */ }
-      return { state: "fail", detail: `check ${bad.map((r) => r.id).join(", ")} failed; #${parent} reopened${note}` };
+      return { state: "fail", detail: `check ${bad.map((r) => r.id).join(", ")} failed; #${parent} reopened` };
     }
+    await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", body]);
+    if (tickItems(iss.body) !== iss.body) { try { await io.gh(["issue", "edit", String(iss.number), "-R", repo, "--body", tickItems(iss.body)]); } catch { /* the PROBE record is the evidence */ } } // #4689
   }
   if (windowed) {
     await addMonitoringLabel({ io, repo, issue: iss.number });

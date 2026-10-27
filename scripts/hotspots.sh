@@ -6,7 +6,7 @@
 # yq (optional) only to read forge.yaml. Run from the repo root.
 #
 # Usage: hotspots.sh [--base <ref>] [--] <path>...
-# Config: forge.yaml maintenance.hotspot {enabled, file_lines, growth_lines, exclude_globs}; defaults true/2000/150/[]
+# Config: forge.yaml maintenance.hotspot {enabled, file_lines, growth_lines, exclude_globs}; defaults true/2000/150/[] (lockfiles are always excluded)
 #   (also when forge.yaml or yq is missing); maintenance.generated_paths (forge#4519): shell globs of generated,
 #   bot-owned files, default [].
 # Output (stdout, one JSON object):
@@ -57,7 +57,28 @@ if [ -n "$BASE" ]; then
   MB=$(git merge-base "$BASE" HEAD) || die "no merge base for $BASE and HEAD"
 fi
 HAS_HEAD=0; git rev-parse --verify -q "HEAD^{commit}" >/dev/null && HAS_HEAD=1
-GLOBS=$(printf '%s' "$CFG" | jq -r '.exclude_globs[]')
+# #4685: lockfiles are never hotspots (one dependency adds hundreds of lines); configured globs come on top
+LOCKFILE_GLOBS='package-lock.json
+*/package-lock.json
+yarn.lock
+*/yarn.lock
+pnpm-lock.yaml
+*/pnpm-lock.yaml
+bun.lockb
+*/bun.lockb
+Cargo.lock
+*/Cargo.lock
+poetry.lock
+*/poetry.lock
+uv.lock
+*/uv.lock
+go.sum
+*/go.sum
+Gemfile.lock
+*/Gemfile.lock
+composer.lock
+*/composer.lock'
+GLOBS=$(printf '%s\n%s' "$LOCKFILE_GLOBS" "$(printf '%s' "$CFG" | jq -r '.exclude_globs[]')")
 GEN_GLOBS=$(printf '%s' "$GEN_CFG" | jq -r '.[]')
 # 0 when $1 matches a newline-separated list of shell patterns in $2 (`*` crosses `/`)
 glob_hit() {

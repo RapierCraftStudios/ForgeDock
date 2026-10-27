@@ -444,6 +444,20 @@ describe("core work-on", () => {
     noNeedsHuman(w);
   });
 
+  it("#4686 a needs-human dependency whose PR is already on the lane is not dependency-blocked", async () => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "upstream", block: { kind: "dependency", issues: [3] } } },
+      { 3: { state: "OPEN", labels: [{ name: "needs-human" }] } });
+    const gh = w.io.gh, git = w.io.git, seen = [];
+    w.io.gh = async (a) => (a[0] === "pr" && a[1] === "list" && a.includes("merged")
+      ? JSON.stringify([{ number: 88, mergeCommit: { oid: "deadbeefcafe0000" }, closingIssuesReferences: [{ number: 3 }], title: "", body: "" }])
+      : gh(a));
+    w.io.git = async (a, o) => { if (a[0] === "merge-base" && a[2] === "deadbeefcafe0000") { seen.push(a.join(" ")); return ""; } return git(a, o); };
+    const r = await run(w);
+    assert.notEqual(r.terminalReason, "dependency-blocked");
+    assert.notEqual(r.terminalReason, "dependency-open");
+    assert.ok(seen.some((c) => c.includes("deadbeefcafe0000") && c.includes("origin/")), seen.join("|"));
+  });
+
   it("#4124 split-required files sub-issues with Parent / Depends-on lines and ends decomposed", async () => {
     const w = depWorld({ changed: [], result: { status: "blocked", summary: "epic", block: { kind: "split-required", subissues: [
       { title: "part A", body: "do A", paths: ["src/a"] }, { title: "part B", body: "do B", paths: ["src/b"], depends_on: [0] }] } } }, {});
@@ -661,6 +675,10 @@ describe("core work-on", () => {
     const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["sops"] } };
     assert.equal(await rb("this lane has no sops/age key", remote), "env.capability_remote");
     assert.equal(await rb("owner must create a third-party account", remote), "builder.blocked");
+    // #4685: a missing tool is never a credential block on a remote lane; local lanes and real credential needs stay human.
+    assert.equal(await rb("validate V1 needs promtool via docker; no docker daemon in this sandbox", remote), "env.tool_missing");
+    assert.equal(await rb("ModuleNotFoundError: No module named 'yaml'", remote), "env.tool_missing");
+    assert.equal(await rb("promtool: command not found", { ...remote, placement: { where: "local", reason: "x" } }), "builder.blocked");
     assert.equal(await rb("this lane has no sops/age key", { ...remote, hostCaps: undefined }), "builder.blocked");
     assert.equal(await rb("this lane has no sops/age key", { ...remote, placement: { where: "local", reason: "x" } }), "builder.blocked");
     assert.equal(await code(world({ changed: [] })), "builder.no_commit");
@@ -2077,11 +2095,22 @@ describe("merge_wait policy", () => {
   const states = (o) => Object.entries(o).map(([name, state]) => ({ name, state }));
   it("required with no protection (empty) merges immediately without polling", async () => {
     const w = world(); let polled = 0;
-    w.io.requiredChecks = async () => []; w.io.checkStates = async () => { polled++; return []; };
+    w.io.requiredChecks = async () => []; w.io.checkStates = async () => []; // #4651: read once by the DCO gate, never polled
     w.io.waitCiGreen = async () => { polled++; return { rc: 2, text: "" }; };
     const r = await run(w);
     assert.equal(r.terminalReason, "merged"); assert.equal(polled, 0);
     assert.match(traj(w)[0], /\| Merge \| required \(no required checks: merged right after review\) \|/);
+  });
+  it("a failed DCO check blocks the merge with ci.dco even when no check is required (#4651)", async () => {
+    for (const mergeWait of ["required", "none"]) {
+      const w = world(); w.io.requiredChecks = async () => []; w.io.checkStates = async () => [{ name: "DCO Sign-Off Verification", state: "failure", head: w.head }, { name: "build", state: "success" }];
+      const r = await run(w, { mergeWait });
+      assert.equal(r.terminalReason, "needs-human", mergeWait); assert.equal(r.code, "ci.dco", mergeWait); assert.equal(w.merges.length, 0, mergeWait);
+    }
+  });
+  it("a passing or stale-head DCO check does not block the merge (#4651)", async () => {
+    const w = world(); w.io.requiredChecks = async () => []; w.io.checkStates = async () => [{ name: "DCO Sign-Off Verification", state: "failure", head: "ffff0000" }, { name: "dco", state: "success", head: w.head }];
+    assert.equal((await run(w)).terminalReason, "merged");
   });
   it("required with a pending required check waits (backoff) then merges", async () => {
     const w = world(); const seqs = [states({ build: "pending" }), states({ build: "pending" }), states({ build: "success", other: "failure" })]; let sleeps = 0;
@@ -2135,6 +2164,21 @@ describe("merge_wait policy", () => {
       assert.equal(n.n, 21, "the wait after the rerun plus 20 bounded waits");
       assert.deepEqual(w.reran, ["77"]);
       assert.equal(events(dir, "CI_FLAKE_RERUN").length, 1);
+    });
+
+    it("#4708 merge-time CI fix round reviews a head with every validate recorded (the fix session dropped its rows)", async () => {
+      const w = world({ resumeValidation: [] }); w.reran = [];
+      w.io.requiredChecks = async () => ["build"];
+      w.io.rerunFailedJobs = async (id) => { w.reran.push(id); };
+      w.io.checkStates = async () => [{ name: "build", state: w.fixed ? "success" : "failure", url: RUN(77, w.reran.length + 1) }];
+      w.io.failedLogs = async () => { w.fixed = true; return "boom"; };
+      const dir = tmpDir("core-");
+      const r = await run(w, { dir, verify: { ...parseVerify({}), maxRounds: 1 } });
+      assert.equal(r.terminalReason, "merged", r.reason);
+      assert.deepEqual(events(dir, "CI_FIX_ROUND").map((e) => e.trigger), ["merge"]);
+      const written = JSON.parse(w.files[`${WT}/.forge-lean/result.json`]);
+      assert.deepEqual(written.validation.map((x) => [x.id, x.carried === true]), [["V1", true]], "the earlier result is carried forward, marked");
+      assert.ok(traj(w)[0].includes("carried forward across the CI fix round"));
     });
 
     it("a rerun that reports a new attempt still red goes to the fix round and reaches the builder", async () => {
@@ -2393,6 +2437,29 @@ describe("orchestrate", () => {
       assert.deepEqual(log, [9]);
       assert.deepEqual(rows.map((r) => [r.issue, r.outcome]), [[9, "needs-human"], [1, "skipped"]]);
     }
+  });
+
+  it("#4687 a dependency skip waits (logged with its trigger) until the blocker merges; the re-admission is logged too", async () => {
+    const rowsSeen = [];
+    let merged = false;
+    const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async (n) => (n === 1 ? "**Depends on**: #9" : ""),
+      onUpdate: (r) => rowsSeen.push(r),
+      dispatchCheck: async (n) => (n === 9 && merged ? { outcome: "merged", pr: 90, detail: "PR #90 already merged" } : null),
+      runOne: async (n) => { if (n === 9) { merged = true; return { terminalReason: "needs-human", detail: "ci.red" }; } return { terminalReason: "merged", pr: 101 }; } });
+    const skipRow = rowsSeen.find((r) => r.issue === 1 && r.outcome === "skipped");
+    assert.equal(skipRow.waiting, true);
+    assert.equal(skipRow.trigger, 9);
+    assert.ok(rowsSeen.some((r) => r.issue === 1 && r.outcome === "readmitted" && r.trigger === 9));
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.waiting]), [[9, "merged", undefined], [1, "merged", undefined]]);
+  });
+
+  it("#4687 a blocker that closed as not planned leaves its dependents skipped, no longer waiting", async () => {
+    let checks = 0, ran = false;
+    const rows = await orchestrate({ issues: [9, 1], parallel: 1, readBody: async (n) => (n === 1 ? "**Depends on**: #9" : ""),
+      dispatchCheck: async (n) => { if (n === 9 && ran) { checks++; return { outcome: "invalid", detail: "issue closed (not planned)", final: true }; } return null; },
+      runOne: async () => { ran = true; return { terminalReason: "needs-human", detail: "ci.red" }; } });
+    assert.deepEqual(rows.map((r) => [r.issue, r.outcome, r.waiting]), [[9, "needs-human", undefined], [1, "skipped", undefined]]);
+    assert.equal(checks, 1, "a final blocker is not re-checked");
   });
 
   it("#4124 a repeated dependency-open stops after the requeue cap", async () => {
@@ -4180,6 +4247,18 @@ describe("verify-by-CI (#4167): ci mode runs the heavy checks on CI and feeds fa
     assert.match(traj(w)[0], /Validate V1 verified by CI at [0-9a-f]{0,12}/);
   });
 
+  it("#4708 remote placement: the merge-time CI fix round's head is CI-verified and reviewed with every validate recorded", async () => {
+    const w = withCi(world({ resumeValidation: [] })); w.reran = [];
+    w.io.requiredChecks = async () => ["build"];
+    w.io.rerunFailedJobs = async (id) => { w.reran.push(id); };
+    w.io.checkStates = async () => [{ name: "build", state: w.fixed ? "success" : "failure", url: `https://github.com/o/r/actions/runs/77/job/${w.reran.length + 1}` }];
+    w.io.failedLogs = async () => { w.fixed = true; return "boom"; };
+    const r = await run(w, { verify: CI });
+    assert.equal(r.terminalReason, "merged", r.reason);
+    assert.ok(w.ci.runs.some((x) => x.headSha === w.head), "the fix head is CI-verified before it is reviewed");
+    assert.equal(JSON.parse(w.files[`${WT}/.forge-lean/result.json`]).validation[0].id, "V1");
+  });
+
   it("docs-only lane: no push for CI, no dispatch; the decision is recorded", async () => {
     const w = withCi(world({ changed: ["README.md", "docs/guide.md"], validation: ciValidation }));
     const r = await run(w, { verify: CI, conformance: "shadow" });
@@ -5253,6 +5332,18 @@ describe("context pack modes (forge#4275)", () => {
     const m = world(); m.leaseWrites = []; m.io.projector = { readState: async () => null, writeState: async (_i, st) => { m.leaseWrites.push(st); } };
     await run(m);
     assert.deepEqual([m.leaseWrites.at(-1).terminalCode, m.leaseWrites.at(-1).failureClasses], [OUTCOME_CODES.COMPLETED, []]);
+  });
+
+  it("#4711 a merged lane run records mergedTo {lane, pr, sha} on the terminal FORGE:STATE", async () => {
+    const w = world(); w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } };
+    const gh = w.io.gh;
+    w.io.gh = async (a, o) => (a[0] === "pr" && a[1] === "view" && a.includes("mergeCommit") ? JSON.stringify({ mergeCommit: { oid: "feedface00112233" } }) : gh(a, o));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    const last = w.leaseWrites.at(-1);
+    assert.ok(last.mergedTo?.lane && Number.isInteger(last.mergedTo.pr), JSON.stringify(last.mergedTo));
+    assert.equal(last.mergedTo.sha, "feedface00112233");
+    assert.ok(!w.leaseWrites.slice(0, -1).some((x) => x.mergedTo), "only the terminal write carries it");
   });
 
   it("#4444 ab: the lane runs its issue's arm, logs it as context_pack and tags context_ab", async () => {

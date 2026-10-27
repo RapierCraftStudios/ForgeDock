@@ -65,9 +65,18 @@ export function experimentEvent(report) {
   return { type: "experiment.verdict", data: { experiment: report.id, verdict, detail: `${passes.length} target(s)` }, ctx: {} };
 }
 
-/** A fix reached the default branch -> release.promoted; null without a fix. Reserved: no detection emits it yet. */
+/** A fix reached the default branch -> release.promoted; null without a fix. Emitted by the probe sweep (probeSweepEvents). */
 export function promotedEvent({ fix, default_branch } = {}) {
   return typeof fix === "string" && fix ? { type: "release.promoted", data: { fix, default_branch }, ctx: {} } : null;
+}
+
+/**
+ * Events for one probe-sweep row. A probe pass/fail row proves the fix is on the default branch (probeIssue gates on onDefault) and is
+ * recorded once per fix, so it also yields release.promoted. Monitor rows carry no defaultBranch and never do (they repeat per window).
+ */
+export function probeSweepEvents(row) {
+  const promoted = row?.defaultBranch && (row.outcome === "pass" || row.outcome === "fail") ? promotedEvent({ fix: row.fix, default_branch: row.defaultBranch }) : null;
+  return [probeEvent(row), regressionEvent(row), promoted && { ...promoted, ctx: { issue: row.issue } }].filter(Boolean);
 }
 
 /**

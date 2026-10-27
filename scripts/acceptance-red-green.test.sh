@@ -38,6 +38,8 @@ mkdir -p "$R2/tests"; printf 'echo "1 passed"\n' > "$R2/tests/t.sh"; git -C "$R2
 check "passes on base" "BASE=RAN HEAD=RAN" "$R2" "bash tests/t.sh"
 
 # 3. head fails: base is not run
+check "head missing host module is UNRUNNABLE, not a failure (#4655)" "BASE=SKIPPED HEAD=UNRUNNABLE" "$R1" "echo \"/usr/bin/python3: No module named 'pytest_nonexistent_x'\" >&2; exit 1"
+check "head unquoted No module named pytest is UNRUNNABLE (#4655)" "BASE=SKIPPED HEAD=UNRUNNABLE" "$R1" "echo '/usr/bin/python3: No module named pytest' >&2; exit 1"
 check "head failure skips base" "BASE=SKIPPED HEAD=FAILED" "$R1" "bash app.sh; exit 1"
 
 # 4. RAN_NOTHING on head
