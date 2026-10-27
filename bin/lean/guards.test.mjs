@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildGuard, guardTests, parseHunks, renderGuard, parseGuard, guardIssue, listGuards, backfill, guardsCli, readIndex } from "./guards.mjs";
+import { buildGuard, guardTests, parseHunks, renderGuard, parseGuard, guardIssue, listGuards, backfill, guardsCli, readIndex, guardAfterMerge } from "./guards.mjs";
 import { renderContract } from "./render.mjs";
 import { tmpDir } from "../tests/_tmp.mjs";
 
@@ -121,4 +121,17 @@ test("guards list prints guards for a path and caches the index; falls back to i
 });
 test("parseHunks ignores deleted files", () => {
   assert.deepEqual(parseHunks("--- a/x.js\n+++ /dev/null\n@@ -1,2 +0,0 @@\n"), []);
+});
+test("guardAfterMerge fetches the bare branch (not origin/<lane>) and the merge sha when absent locally", async () => {
+  const calls = [];
+  let have = false;
+  const body = `<!-- FORGE:CONTRACT -->\n${renderContract({ requirements: [], deliverables: [], preserve: [], ...nodeContract }, "abcdef123456")}`;
+  const io = {
+    gh: async (a) => a[0] === "issue" ? JSON.stringify({ number: 9, title: "t", comments: [{ body }] }) : a[0] === "pr" ? JSON.stringify({ number: 3, mergeCommit: { oid: "abc123" } }) : "",
+    git: async (a) => { calls.push(a.join(" ")); if (a[0] === "diff") { if (!have) throw new Error("bad object"); return DIFF; } if (a.join(" ") === "fetch origin abc123") have = true; return ""; },
+  };
+  const r = await guardAfterMerge({ io, repo: "o/r", issue: 9, pr: 3, cwd: "/x", base: "origin/staging" });
+  assert.ok(calls.includes("fetch origin staging"));
+  assert.ok(!calls.some((c) => c.includes("origin/staging")));
+  assert.ok(r.posted, JSON.stringify(r));
 });

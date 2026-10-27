@@ -33,3 +33,6 @@ A deterministic `bin/lean/guards.mjs` (0 LLM calls, git and gh injected). It rea
 ### CI fix
 - The CI step `bash scripts/check-test-tmp-cleanup.sh` failed on `bin/lean/guards.test.mjs`: it used `mkdtempSync` without importing `bin/tests/_tmp.mjs`. The test now uses `tmpDir` from that helper. The lint and its own test (`check-test-tmp-cleanup.test.sh`, 18 pass) are clean.
 - The CI log was not readable, so I found this by running the workflow's lint step locally. I also ran all of bin/lean (1453 pass) and bin/engine, bin/stats, bin/tests and packages/protocol (2951 pass, 3 fail). The 3 failures (preflight, forge Act II, writeInstallReceipt) are WSL/platform-detection tests in this host and are unrelated to this change; I did not confirm they pass on the base.
+
+## Conformance fix (R1 hook)
+guardAfterMerge now strips `origin/` from the lane base before `git fetch origin <branch>`, and guardIssue falls back to `git fetch origin <merge_sha>` when the diff cannot be read locally. Merge SHA still comes from `gh pr view --json mergeCommit` (explicit PR from the lane). Added a test with a git mock that fails on invalid refspecs.

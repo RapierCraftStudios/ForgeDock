@@ -110,7 +110,10 @@ export async function guardIssue({ gh, git, repo, issue, pr = null, post = null,
   if (view) { prn = view.number ?? prn; sha = view.mergeCommit?.oid ?? null; }
   if (!sha) return { skipped: true, reason: `no guard for #${issue}: no merged PR with a merge commit` };
   let diff = "";
-  try { diff = String(await git(["diff", "-U0", "--no-color", "--no-renames", `${sha}^1`, sha])); } catch (e) {
+  const getDiff = async () => String(await git(["diff", "-U0", "--no-color", "--no-renames", `${sha}^1`, sha]));
+  try {
+    try { diff = await getDiff(); } catch { await git(["fetch", "origin", sha]); diff = await getDiff(); } // merge commit not local yet: fetch it by sha
+  } catch (e) {
     return { skipped: true, reason: `no guard for #${issue}: merge commit ${sha.slice(0, 10)} not available locally (${String(e?.message ?? e).split("\n")[0].slice(0, 100)})` };
   }
   const built = buildGuard({ issue, title: iss.title, pr: prn, mergeSha: sha, contract, diff });
@@ -165,7 +168,8 @@ export async function backfill({ gh, git, repo, since, dryRun = false, log = () 
 /** Lane hook: after a merge, fetch the base so the merge commit is local, then guard the issue. Best effort: never throws. */
 export async function guardAfterMerge({ io, repo, issue, pr, cwd, base = null }) {
   try {
-    if (base) { try { await io.git(["fetch", "origin", base], { cwd }); } catch { /* offline: use the local ref */ } }
+    const branch = base ? String(base).replace(/^(?:refs\/remotes\/)?origin\//, "") : null; // lean.mjs passes `origin/<lane>`
+    if (branch) { try { await io.git(["fetch", "origin", branch], { cwd }); } catch { /* offline: use the local ref */ } }
     return await guardIssue({ gh: (a) => io.gh(a), git: (a) => io.git(a, { cwd }), repo, issue, pr });
   } catch (e) { return { skipped: true, reason: `guard failed: ${String(e?.message ?? e).split("\n")[0].slice(0, 160)}` }; }
 }
