@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpDir } from "./_tmp.mjs";
 import { join } from "node:path";
 import {
   readReviewFields, writeReviewFields, collectManifestFacts, detectStale, supersededDecisionIds, contextAge,
   checkContext, proposeRefresh, refreshContextFlow, countMergedSince,
 } from "../review-context.mjs";
 
-const tmp = () => mkdtempSync(join(process.env.TMPDIR || tmpdir(), "revctx-"));
+const tmp = () => tmpDir("revctx-");
 const pkg = (deps) => JSON.stringify({ name: "x", dependencies: deps });
 const YAML = `project:\n  name: Demo\nreview:\n  tech_stack: "Next.js 15, FastAPI, Docker"\n  context: |\n    Repo is docs-only; no product code exists until D-12 lands.\n    Reviewers must check auth.\n  domains:\n    auth: "jwt"\nbranches:\n  default: main\n`;
 
