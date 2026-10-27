@@ -1,1 +1,125 @@
-{"status":"fixed","summary":"Scheduled bot token refresh timer, doctor lifetime check, gh.auth refresh-and-retry","requirements":[{"id":"R1","status":"implemented","evidence":"scripts/systemd/forgedock-bot-token-refresh.timer:5"},{"id":"R2","status":"implemented","evidence":"bin/bot-token-status.mjs:13"},{"id":"R3","status":"implemented","evidence":"bin/lean/retry.mjs:48"},{"id":"R4","status":"implemented","evidence":"bin/lean/retry.mjs:63; bin/lean/lean.mjs:230"}],"validation":[{"id":"V1","command":"node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/tests/bot-token-timer.test.mjs bin/tests/engine-outcome-codes.test.mjs","exit":0},{"id":"V2","command":"node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} --test-name-pattern='gh.auth|gh.unavailable|#4507|#4113|gh pr merge' bin/lean/lean.test.mjs bin/lean/batch.test.mjs bin/lean/recovery.test.mjs","exit":0},{"id":"V3","command":"bash scripts/run-shell-tests.sh scripts/refresh-bot-token.test.sh scripts/wait-ci-green.test.sh","exit":0},{"id":"V4","command":"node --check bin/forgedock.mjs && node --check bin/lean/lean.mjs && node --check bin/lean/retry.mjs && bash -n scripts/refresh-bot-token.sh && bash -n scripts/wait-ci-green.sh && bash scripts/check-spec-size.sh","exit":0}],"tests":[{"command":"V1-V3","result":"pass","fails_without_fix":"unknown"}],"self_review":[{"question":"1","answer":"yes","evidence":"R1-R4 present, V1-V4 pass"},{"question":"2","answer":"yes","evidence":"existing tests pass after merge"},{"question":"3","answer":"yes","evidence":"V1-V4 exit 0"},{"question":"4","answer":"yes","evidence":"diff limited to deliverables, tests, devdocs"}],"not_members":[{"symbol":"bot-token-status","test":"bin/lean/lean.test.mjs","why":"lean.test.mjs:63 is the in-memory world() fixture, not a module list; covered by bin/tests/bot-token-timer.test.mjs"}],"amendments":[]}
+{
+ "status": "fixed",
+ "summary": "Anchored decisions with supersession, H-row preserve at freeze, and decisions list --stale; all validate commands pass.",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/lean/conformance.mjs applyAmendments decision branch; bin/lean/decisions.mjs recordDecisions"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/decisions.mjs:119 withDecisionRows; bin/lean/lean.mjs freeze"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/lean/decisions.mjs supersede"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/engine-cli.mjs decisionsFromCli; bin/lean/decisions.mjs staleDecisions"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "deterministic code only; one `decision` amendment line in bin/lean/prompts.mjs (D6), offset by trimming prompt wording to stay within the token budget"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "bin/lean/decisions.mjs:125 returns contract unchanged when no rows apply; one index read at freeze"
+  },
+  {
+   "id": "R7",
+   "status": "implemented",
+   "evidence": "bin/lean/decisions.mjs:124 shared HISTORY_ROWS_MAX=5 cap; single ls-tree only on a decision amendment"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/decisions.test.mjs bin/lean/conformance.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/lean/lean.test.mjs bin/lean/conformance.e2e.test.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/lean/decisions.test.mjs bin/lean/conformance.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  },
+  {
+   "command": "node --test bin/lean/lean.test.mjs bin/lean/conformance.e2e.test.mjs",
+   "result": "pass",
+   "fails_without_fix": "unknown"
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R1-R7 above"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "V2 513 pass 0 fail after merge with staging guards"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "V1 105 pass, V2 513 pass; prompts.mjs unchanged for token budget"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "only deliverables, tests, devdocs changed"
+  }
+ ],
+ "amendments": [],
+ "not_members": [
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/checks.test.mjs",
+   "why": "exercises the checks cache (cacheEntry/hydrate); no list of lean modules; decisions (bin/lean/decisions.mjs) is not a member of the list at line 156"
+  },
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/conformance.e2e.test.mjs",
+   "why": "drives a stubbed lane end to end; its lists are tool helpers, not modules; decisions (bin/lean/decisions.mjs) is not a member of the list at line 74"
+  },
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/context.test.mjs",
+   "why": "enumerates context-pack sources (graph, attempts, pitfalls, ledger, facts); decisions are not a pack source; decisions (bin/lean/decisions.mjs) is not a member of the list at line 138"
+  },
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/execution.e2e.test.mjs",
+   "why": "covers sandbox providers and the ledger; no module list; decisions (bin/lean/decisions.mjs) is not a member of the list at line 28"
+  },
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/execution.test.mjs",
+   "why": "covers execution config and orchestrate; no module list; decisions (bin/lean/decisions.mjs) is not a member of the list at line 42"
+  },
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/fixround.test.mjs",
+   "why": "lists mechanical fix-round kinds, not modules; decisions (bin/lean/decisions.mjs) is not a member of the list at line 10"
+  },
+  {
+   "symbol": "decisions",
+   "test": "bin/lean/heavy.test.mjs",
+   "why": "lists heavy/llm step commands, not modules; decisions (bin/lean/decisions.mjs) is not a member of the list at line 28"
+  }
+ ]
+}
