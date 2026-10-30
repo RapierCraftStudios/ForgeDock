@@ -1,1 +1,34 @@
-{"status": "fixed", "summary": "sandbox.unreachable no longer capped; online derived from /agents; one pool-offline event after N min of zero live agents", "requirements": [{"id": "R1", "status": "implemented", "evidence": "bin/lean/orchestrate.mjs:124"}, {"id": "R2", "status": "implemented", "evidence": "bin/lean/orchestrate.mjs:484-491"}, {"id": "R3", "status": "implemented", "evidence": "bin/lean/orchestrate.mjs:484-491 (report-only when fallback_local unset)"}, {"id": "R4", "status": "implemented", "evidence": "bin/lean/sandbox-remote.mjs:80-98"}], "validation": [{"id": "V1", "command": "node --test bin/lean/batch.test.mjs bin/lean/sandbox-provider.contract.test.mjs bin/lean/execution.test.mjs", "exit": 0}], "tests": [{"command": "node --test bin/lean/batch.test.mjs bin/lean/sandbox-provider.contract.test.mjs", "result": "pass", "fails_without_fix": true}], "self_review": [{"question": "1", "answer": "yes", "evidence": "R1-R4 implemented; tests in batch.test.mjs and sandbox-provider.contract.test.mjs"}, {"question": "2", "answer": "yes", "evidence": "145 tests pass; forgedock check: PASS"}, {"question": "3", "answer": "yes", "evidence": "D1-D4 changed; P1-P3 untouched paths; V1 exit 0"}, {"question": "4", "answer": "yes", "evidence": "git diff --stat: only the four bin/lean files"}], "amendments": [{"kind": "add-deliverable", "path": "devdocs/modules/lean.md", "why": "scripts/check-devdocs-freshness.sh requires the module dossier to move with the bin/lean behaviour change (uncapped sandbox.unreachable, /agents liveness, pool-offline event)"}]}
+{"status":"fixed","summary":"Read-only capability relay for sandbox lanes: host-side allowlist gate, router queue, agent forwarding, cs-relay shims, dispatch-time pre-fetch (#4778)",
+"requirements":[
+{"id":"R1","status":"implemented","evidence":"bin/lean/sandbox-remote.mjs:143"},
+{"id":"R2","status":"implemented","evidence":"bin/lean/relay.mjs:44, bin/lean/relay.mjs:128, bin/pool/router.mjs:36, bin/pool/agent.mjs:247"},
+{"id":"R3","status":"implemented","evidence":"bin/lean/relay.mjs:60, bin/lean/sandbox-remote.mjs:187"},
+{"id":"R4","status":"implemented","evidence":"bin/lean/relay.mjs:102, bin/lean/sandbox-remote.mjs:165, pool/image/cs-relay:15"},
+{"id":"R5","status":"implemented","evidence":"bin/tests/relay.e2e.test.mjs:45"}],
+"validation":[
+{"id":"V1","command":"node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/relay.test.mjs bin/tests/relay.e2e.test.mjs","exit":0},
+{"id":"V2","command":"node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/tests/computeshare.test.mjs bin/lean/sandbox-provider.contract.test.mjs bin/lean/execution.test.mjs","exit":0},
+{"id":"V3","command":"node --test --test-name-pattern='capabilit|relay' bin/lean/lean.test.mjs bin/tests/engine-outcome-codes.test.mjs","exit":0},
+{"id":"V4","command":"bash -n pool/image/cs-relay && bash -n pool/image/entrypoint.sh","exit":0},
+{"id":"V5","command":"node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/fixround.test.mjs bin/lean/execution.e2e.test.mjs bin/lean/conformance.e2e.test.mjs bin/tests/router.test.mjs","exit":0}],
+"tests":[
+{"command":"node --test bin/lean/relay.test.mjs bin/tests/relay.e2e.test.mjs","result":"pass","fails_without_fix":true},
+{"command":"node --test --test-name-pattern='relay' bin/lean/lean.test.mjs","result":"pass","fails_without_fix":true}],
+"self_review":[
+{"question":"1","answer":"yes","evidence":"R1-R5 delivered: sandbox-remote.mjs:143 relays, relay.mjs:44/128 host gate+service, router.mjs:36 queue, agent.mjs:247 forward, relay.mjs:102 + sandbox-remote.mjs:165 pre-fetch; relay.e2e.test.mjs:45 runs a real router+agent+dispatcher round trip with a refused command"},
+{"question":"2","answer":"yes","evidence":"V2/V3/V5 pass (computeshare, execution, router, lean capability tests); placeLane unchanged; parseExecution emits no new key without relay_commands"},
+{"question":"3","answer":"yes","evidence":"D1-D13 present in git diff origin/staging...HEAD; P1-P7/H1/H2 intact (hostCapabilityBlock untouched, creds route unchanged, status() swallows relay errors at sandbox-remote.mjs:205); V1-V5 exit 0"},
+{"question":"4","answer":"yes","evidence":"git diff --stat origin/staging...HEAD lists only D1-D13 paths plus test files"}],
+"amendments":[],
+"not_members":[
+{"symbol":"bin/lean/relay.mjs","test":"bin/engine/telemetry-seam.test.mjs","why":"line 24 is a telemetry mapping assertion, not a module list"},
+{"symbol":"bin/lean/relay.mjs","test":"bin/lean/batch.test.mjs","why":"line 29 is a stub-lane setup, not a sibling list"},
+{"symbol":"bin/lean/relay.mjs","test":"bin/lean/checks.test.mjs","why":"line 156 is a worktree cache test, no module list"},
+{"symbol":"bin/lean/relay.mjs","test":"bin/lean/conformance.e2e.test.mjs","why":"line 74 is a fixture helper, no module list"},
+{"symbol":"bin/lean/relay.mjs","test":"bin/lean/conformance.test.mjs","why":"line 381 asserts formatShadowSummary, no module list"},
+{"symbol":"bin/lean/relay.mjs","test":"bin/lean/context.test.mjs","why":"line 138 is a gather() fake, no module list"},
+{"symbol":"bin/lean/relay.mjs","test":"bin/lean/drift.test.mjs","why":"line 14 is a drift fixture, no module list"},
+{"symbol":"bin/lean/relay.mjs","test":"bin/lean/execution.e2e.test.mjs","why":"line 28 is a stub-lane setup, no module list"},
+{"symbol":"bin/lean/relay.mjs","test":"bin/lean/execution.test.mjs","why":"lines 43/230/674 are fixtures (NO_BUDGET, docker fake, hybrid orchestrate), not export lists; relay exports are tested in bin/lean/relay.test.mjs"},
+{"symbol":"bin/lean/relay.mjs","test":"bin/lean/fixround.test.mjs","why":"line 10 enumerates MECHANICAL_KINDS, unrelated to relay"},
+{"symbol":"relay routes","test":"bin/tests/router.test.mjs","why":"line 29 is the router backend-check describe, not a route list; relay routes are covered in bin/tests/relay.e2e.test.mjs"}]}
