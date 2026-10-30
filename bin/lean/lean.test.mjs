@@ -391,6 +391,21 @@ describe("core work-on", () => {
     assert.doesNotMatch(p, /complete what is missing/);
   });
 
+  it("#4786: a remote lane branch holding only .forge-lean scratch plans fresh and drops the scratch", async () => {
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", changed: [".forge-lean/contract.json", ".forge-lean/checkpoint.json"] });
+    await run(w);
+    assert.doesNotMatch(builders(w)[0][4], /This is a rerun/);
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "rm" && c.includes(".forge-lean")), "scratch removed from the branch");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && c.join(" ").includes("drop stale .forge-lean scratch")));
+  });
+
+  it("#4786: a remote lane branch with a code change besides scratch still resumes", async () => {
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", changed: [".forge-lean/contract.json", "src/foo.js"] });
+    await run(w);
+    assert.match(builders(w)[0][4], /This is a rerun/);
+    assert.ok(!w.calls.some((c) => c[0] === "git" && c[1] === "rm" && c.includes(".forge-lean")));
+  });
+
   it("a reviewer that returns no JSON twice ends review.no_verdict", async () => {
     const w = world({ reviews: ["no json", "still none"] });
     const r = await run(w);
