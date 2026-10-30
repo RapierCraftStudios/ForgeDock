@@ -68,3 +68,10 @@ Records contain ids, counts and codes only: never comment bodies, issue text, fi
 are restricted to `A-Za-z0-9 _.:/#@+=,-` (anything else becomes `_`) and truncated to 200 characters, so a value
 cannot carry markup, backticks or newlines into the comment. Treat the comment as public to anyone who can read the
 issue or PR.
+
+## `decision_engine` (#4766)
+
+One record per escalation the north-star decision engine handled (`bin/lean/decision-engine.mjs`): `decided`, `escalated`,
+`vetoed`, `reversed` (counts, 0 or 1 per issue), `mode` (`shadow` or `live`), and `needs_human_before` / `needs_human_after`
+(the repo's open needs-human count around a sweep). A reversal rate (`reversed` over `decided`) above `decisions.reversal_max`
+turns the engine back to shadow. See [DECISIONS.md](DECISIONS.md).
