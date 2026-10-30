@@ -670,6 +670,18 @@ followups:
   default_milestone: "Backlog"   # optional: milestone title used when the parent's milestone has shipped and no later one is open
 ```
 
+## `rollouts` (OPTIONAL)
+
+```yaml
+rollouts:
+  files: "config/rollouts.json,src/flags.py"   # comma-separated rollout registry / env flag list paths
+  dormant_days: 14                            # dormancy report threshold (default 14)
+```
+
+A diff that adds a key to one of these files with a default of `false`, `0`, `off` or `null` (#4769) must be covered by an activation row in the contract: a `defer` requirement with bucket `owner:promote:<flag>` (a trailing `*` matches a prefix) or a `deliver` row whose why names the flag. Without one conformance fails with `activation_missing`, and an acceptance criterion naming `shadow`, `cohort` or `treated` fails with `mode_unreachable`. Without `rollouts` nothing changes.
+
+A post-deploy check whose output has a line `BLOCKED: <flag> = off ...` is not a failure: it posts one `FORGE:ROLLOUT_ASK` owner ask per flag on the rollup and parks `awaiting-measurement`; the ask is posted again only when the output (the evidence) changes. `dormancyReport` (`bin/lean/activation.mjs`) lists introduced flags still `off` after `dormant_days`, with days dormant and the parent issue, through an injected read-only `flagState(flag)` hook; a `keep-off` decision for a flag (or `PREFIX*`) silences it.
+
 ## `post_deploy` (OPTIONAL)
 
 Deferred follow-ups whose items are all post-deploy checks are parked (`awaiting-promotion`, no lane) until the parent's fix is on `branches.default`. Keys: `precondition_cmd` (exit 0 ready, 1 parked) and `min_age` (soak window, e.g. `24h`).

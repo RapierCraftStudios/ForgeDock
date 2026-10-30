@@ -47,15 +47,16 @@ export async function defaultBranches({ repo, io, branches = {} }) {
  */
 export async function resolveLane({ issue, repo, io, cwd, branches = {}, requested = null, override = false }) {
   const refuse = (code, detail) => ({ ok: false, code, detail });
+  const transient = (detail) => ({ ...refuse(OUTCOME_CODES.LANE_UNRESOLVED, detail), transient: true }); // #4791: a gh/git command failed; retry
   const staging = branches.staging || DEFAULT_STAGING_BRANCH;
   const pattern = branches.featurePattern || DEFAULT_FEATURE_PATTERN;
   if (!pattern.includes("{slug}")) return refuse(OUTCOME_CODES.LANE_UNRESOLVED, `forge.yaml branches.feature_pattern "${pattern}" has no {slug}`);
   let milestone = null, defaults;
   try {
     milestone = JSON.parse(String(await io.gh(["issue", "view", String(issue), "-R", repo, "--json", "milestone"])))?.milestone?.title || null;
-  } catch (e) { return refuse(OUTCOME_CODES.LANE_UNRESOLVED, `cannot read the milestone of #${issue}: ${String(e?.message ?? e).slice(0, 200)}`); }
+  } catch (e) { return transient(`cannot read the milestone of #${issue}: ${String(e?.message ?? e).slice(0, 200)}`); }
   try { defaults = await defaultBranches({ repo, io, branches }); } catch (e) {
-    return refuse(OUTCOME_CODES.LANE_UNRESOLVED, `cannot read the default branch of ${repo}: ${String(e?.message ?? e).slice(0, 200)}`);
+    return transient(`cannot read the default branch of ${repo}: ${String(e?.message ?? e).slice(0, 200)}`);
   }
   let expected = staging;
   if (milestone) {
@@ -78,7 +79,7 @@ export async function resolveLane({ issue, repo, io, cwd, branches = {}, request
   if (!LANE_RE.test(lane) || lane.includes("..")) return refuse(OUTCOME_CODES.LANE_UNRESOLVED, `invalid lane ${JSON.stringify(lane)}`);
   let out;
   try { out = String(await io.git(["ls-remote", "--heads", "origin", `refs/heads/${lane}`], { cwd })); } catch (e) {
-    return refuse(OUTCOME_CODES.LANE_UNRESOLVED, `cannot check origin for ${lane}: ${String(e?.message ?? e).slice(0, 200)}`);
+    return transient(`cannot check origin for ${lane}: ${String(e?.message ?? e).slice(0, 200)}`);
   }
   if (!out.trim()) return refuse(OUTCOME_CODES.LANE_BRANCH_MISSING, `lane branch ${lane} (${why}) does not exist on origin; create it first (e.g. /milestone start) or fix the milestone title`);
   return { ok: true, lane, expected, milestone, overridden, defaults };
