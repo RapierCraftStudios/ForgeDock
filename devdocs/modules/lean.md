@@ -28,7 +28,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 1. **Host admission** — `admission.mjs` `checkAdmission` (free mem/tmp; load
    average only when `max_load_per_core` is configured, #4169);
    busy host → `deferred` / `host.busy`, before any lease or GitHub call.
-   Heavy steps are gated separately by the host heavy-step semaphore (`heavy.mjs`).
+   Heavy steps are gated separately by the host heavy-step semaphore (`heavy.mjs`); #4777: that covers pytest,
+   promtool check/test, `poetry|uv|pipenv|pdm|hatch run <heavy>` / install / sync / build, pip install, ruff/black/
+   flake8/pylint, make/cmake/ninja and `python -m pytest|mypy|tox|unittest` (python shim).
+   Local lane cap (#4777): `admission.mjs` `localLaneCap` = max(1, min(floor(cores / `lane_cpu_reservation`, default 1),
+   floor((MemAvailable − `min_free_mem_mb`) / `lane_mem_mb`, default 2048))), forge.yaml `engine.lane_cpu_reservation|
+   lane_mem_mb`. `engine-cli.mjs` `liveLaneCap` passes it (min `global_parallel`) as `sched.cap` function, which
+   `orchestrate.mjs` evaluates at every registry admission: over-cap lanes queue, running lanes are never revoked.
 2. **Lane** — `lane.mjs` `resolveLane`: milestone → `branches.feature_pattern`
    (`milestone/{slug}`), else `branches.staging`; never the default branch;
    fail closed with `lane.*` codes → `lane-refused`.
@@ -2043,3 +2049,8 @@ Cite: #4785.
 
 `activation.mjs`: `readRollouts` (forge.yaml `rollouts.files`), `detectNewOffKeys` (new off/false/0 keys in the PR diff of those files, wired in `lean.mjs` `newOffKeysOf` into `precheck`'s `newOffKeys`), `activationFailures` (`activation_missing`, `mode_unreachable` for shadow/cohort/treated ACs) and `dormancyReport` (injected read-only `flagState`, keep-off decisions silence). `postdeploy-check.mjs` `measureItems`: a check printing `BLOCKED: <flag> = off` posts one `FORGE:ROLLOUT_ASK` per flag (re-posted only when the evidence hash changes) and parks `awaiting-measurement` instead of filing a failure.
 Cite: #4769.
+
+## Entry 2026-10-30 — North-star decision engine (#4766)
+
+`decision-engine.mjs`: `loadPolicy` (forge.yaml `decisions:`, policy file NORTHSTAR.md > CLAUDE.md > AGENTS.md, authority matrix `human_only`), `splitEscalation` (deterministic: recovery | evidence | post-deploy | external | decision | mixed), `settle` (one injected `judge` call per decision part; one-way, low-confidence or clause-less answers escalate; shadow posts `FORGE:DECISION (shadow)`, live records via `recordDecisions`, clears needs-human and requeues; idempotent on the escalation id), `isVetoed`/`revertVeto`, `effectiveMode` (reversal rate above `reversal_max` forces shadow). Nothing calls it yet: the issue-watch stage (#4765) will. Telemetry `decision_engine`; the batch report lists rows with `decided` (orchestrate.mjs `formatOutcomeLists`). Docs: `docs/DECISIONS.md`.
+Cite: #4766.
