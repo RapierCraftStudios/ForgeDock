@@ -31,6 +31,14 @@ describe("contract", () => {
     assert.ok(!inIssue("scrape should free money", ISSUE));
     assert.ok(!inIssue("429.", ISSUE), "too short to identify a requirement");
   });
+  it("#4789: unicode punctuation and markdown markup do not break the verbatim check; a miss shows the nearest span", () => {
+    const issue = "## Problem\nThe \u201cscrape\u201d route \u2014 see [the spec](http://x.y) \u2014 must release the spend reservation\u2026 on 429.\n\nUnrelated line about billing.";
+    assert.ok(inIssue('The "scrape" route - see the spec - must release the spend reservation... on 429.', issue));
+    assert.ok(inIssue("The \u201cscrape\u201d route \\- see the spec", issue.replace("\u2014", "-")));
+    assert.ok(!inIssue("the scrape route must hold the reservation forever", issue));
+    const v = validateContract({ ...C, requirements: [{ ...C.requirements[0], quote: "the scrape route must hold the spend reservation on 429" }] }, issue);
+    assert.match(v.problems[0], /R1: quote is not verbatim from the issue.*nearest issue text: "The \u201cscrape\u201d route/);
+  });
   it("rejects paraphrases, a defer without why, not-applicable without evidence, missing validate, duplicate ids", () => {
     const v = validateContract({ ...C, validate: [], requirements: [
       { id: "R1", quote: "make scrape better", disposition: "deliver" }, { id: "R2", quote: Q2, disposition: "defer" },
