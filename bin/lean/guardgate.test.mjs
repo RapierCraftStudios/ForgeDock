@@ -126,6 +126,24 @@ test("a base test that cannot run in the cap, or has no known runner, is skipped
   assert.equal(existsSync(join(d, basePathOf("src/a.test.mjs"))), false);
 });
 
+test("a verify.guard_command template wins over the contract and the fallbacks (#4792)", async () => {
+  const gc = { ".py": "scripts/pytest {path}" };
+  assert.equal(commandFor("tests/test_a__guardbase.py", {}, gc), "scripts/pytest tests/test_a__guardbase.py");
+  assert.equal(commandFor("tests/test_a__guardbase.py", { validate: [{ command: "pytest -q tests/test_a.py" }] }, gc), "scripts/pytest tests/test_a__guardbase.py");
+  assert.equal(commandFor("tests/test_a__guardbase.py", {}, { ".py": "uv run pytest -q" }), "uv run pytest -q tests/test_a__guardbase.py");
+  assert.equal(commandFor("src/a.test__guardbase.mjs", {}, gc), "node --test src/a.test__guardbase.mjs");
+  const { d, guard } = fixture();
+  put(d, "src/a.mjs", "export function price() {\n  return 1;\n}\n");
+  commit(d, "revert");
+  const git = gitIn(d);
+  const { selected, mergeBase } = await selectGuards({ guards: [guard], files: files(d), git, base: "origin/main" });
+  const seen = [];
+  const r = await runGuards({ selected, mergeBase, contract: {}, guardCommand: { ".mjs": "run-it {path}" }, git, runCommand: async (a) => { seen.push(a); return { rc: 0, output: "" }; }, cwd: d, env: {} });
+  assert.equal(r.runs.length, 1);
+  assert.equal(seen[0].command, "run-it src/a.test__guardbase.mjs");
+  assert.equal(seen[0].cwd, d);
+});
+
 test("pytest-style guards run through the contract's own validate command with the path substituted", () => {
   assert.equal(commandFor("tests/test_a__guardbase.py", { validate: [{ command: "pytest -q tests/test_a.py" }] }), "pytest -q tests/test_a__guardbase.py");
   assert.equal(commandFor("tests/test_a__guardbase.py", {}), "python -m pytest -q tests/test_a__guardbase.py");

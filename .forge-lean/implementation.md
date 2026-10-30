@@ -1,33 +1,22 @@
 ### Approach
-A standalone, io-injected module (`bin/lean/decision-engine.mjs`) with deterministic policy loading and escalation splitting, one injected `judge` seam, shadow/live settling, veto and a reversal-rate gate. The issue-watch stage (#4765) is not in the repo, so the watcher wiring is deferred (contract R7-R12).
-
+Add `verify.guard_command` (extension -> command template). `commandFor` consults it first; the config reaches it through `parseVerify` -> `vcfg.guardCommand` -> `runGuards`. forge.yaml's one-level parser cannot read the nested map, so `readVerify` loads it with a new block-map reader.
 ### Changes
-- bin/lean/decision-engine.mjs: loadPolicy, splitEscalation, admissible, settle, classify, isVetoed, revertVeto, effectiveMode, tally.
-- bin/lean/decision-engine.test.mjs: regression tests, including the six AlterLab fixtures.
-- bin/engine/telemetry-seam.mjs: `DECISION_ENGINE` mapped to the `decision_engine` event.
-- bin/lean/orchestrate.mjs: batch report lists rows with `decided`.
-- docs/DECISIONS.md, docs/NORTHSTAR-TEMPLATE.md, docs/CONFIG.md, docs/TELEMETRY.md, devdocs/modules/lean.md.
-
+- bin/lean/guardgate.mjs: `commandFor(path, contract, guardCommand)` and `runGuards({guardCommand})`; template wins, `{path}` substituted or appended.
+- bin/lean/lean.mjs: passes `vcfg.guardCommand` to `runGuards`.
+- bin/lean/verify.mjs: `parseVerify` returns normalised `guardCommand` (default `{}`).
+- bin/engine-cli.mjs: `readYamlMap` plus the `readVerify` wiring.
+- docs/CONFIG.md: key documented.
+- Tests: guardgate.test.mjs, verify.test.mjs, engine-cli.test.mjs, lean.test.mjs (default-shape deepEqual).
 ### Acceptance Criteria Status
-- R1 ✅ decision-engine.mjs loadPolicy
-- R2 ✅ decision-engine.mjs splitEscalation; test "six AlterLab fixtures"
-- R3 ✅ settle (shadow/live), isVetoed/revertVeto
-- R4 ✅ settle calls recordDecisions
-- R5 ✅ telemetry-seam.mjs, orchestrate.mjs formatOutcomeLists
-- R6 ✅ docs/DECISIONS.md, docs/NORTHSTAR-TEMPLATE.md
-- R7-R12 deferred per contract (#4765 watcher, monitor execution, release checklist)
-- R13 ✅ admissible/settle escalate
-- R14 ✅ isVetoed/revertVeto
-- R15 ✅ formatOutcomeLists `decided` section
-- R16 ✅ effectiveMode
-
+- R1 ✅ bin/lean/guardgate.mjs commandFor, verify.mjs parseVerify, engine-cli.mjs readYamlMap
+- R2 ✅ guardgate.mjs runGuards runs the command with `cwd` = worktree and the repo-relative guardbase path (test asserts it)
 ### Verification
-- V1 `node --test bin/lean/decision-engine.test.mjs`: pass; the test fails without the fix (the module does not exist on the base).
-- V2 `node --test bin/lean/decisions.test.mjs bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs`: pass (88 tests with V1).
-- `forgedock check`: PASS. checks.mjs widened to the full suite (fan-out), which the host rules forbid, so only the targeted tests were run. The devdocs freshness script reports OK.
-
+- V1 guardgate.test.mjs + verify.test.mjs: pass (42). The new guardgate test fails without the guardgate.mjs change.
+- V2 name-filtered engine-cli.test.mjs + lean.test.mjs: pass (47).
+- scripts/check-devdocs-freshness.sh: OK. The repo has no formatter script. checks.mjs widened to the full suite (package.json change), which I did not run per host rules.
 ### Notes
-Nothing calls the engine by default, so there is no behaviour change until #4765 wires it. New forge.yaml `decisions:` keys are documented in docs/CONFIG.md. The reversal-rate gate needs at least 5 decisions.
+No behaviour change without the key. No new env vars.
+- `forgedock check` ran the scoped shell checks in parallel: 3 (classify-finding, verify-phase-trail, lint-dispatch-prompt) hit their 300s timeout under host load; none touches a changed file (no scripts/ change in the diff). lint-dispatch-prompt.test.sh rerun alone: pass=132 fail=0 in 101s. The other two were not rerun.
+- verify-phase-trail.test.sh rerun alone: passed=160 failed=0 in 119s (exit 0); the earlier exit 124 was the 300s timeout under host load, unrelated to this diff. No code change needed.
 
-## Stale-list follow-up
-Checked the 10 tests flagged as enumerating siblings of decision-engine: none holds a list of lean modules or files, so each is recorded in result.json not_members.
+Docs freshness: added a devdocs/modules/lean.md entry describing verify.guard_command (#4792).

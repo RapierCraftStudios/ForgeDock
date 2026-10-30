@@ -385,8 +385,8 @@ export function readVerify(cwd = process.cwd()) {
   try {
     const sec = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.verify;
     if (!sec || typeof sec !== "object") return undefined;
-    const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky");
-    return parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}) });
+    const invariants = readInvariants(cwd), flaky = readYamlList(cwd, "verify", "flaky"), guard_command = readYamlMap(cwd, "verify", "guard_command");
+    return parseVerify({ ...sec, ...(invariants ? { invariants } : {}), ...(flaky ? { flaky } : {}), ...(guard_command ? { guard_command } : {}) });
   } catch { return undefined; }
 }
 /** #4542: forge.yaml `execution.host_capabilities` (+ patterns) for a lane's remote-block mapping; undefined when none are declared. */
@@ -418,6 +418,30 @@ export function readPrecheckCommands(cwd = process.cwd()) {
 /** #4585: forge.yaml `verify.invariants`, a block list of repo-wide check commands; undefined when absent or empty. */
 export function readInvariants(cwd = process.cwd()) {
   return readYamlList(cwd, "verify", "invariants");
+}
+/** #4792: a block map under `section.key` (`    ".py": "cmd"` or `    py: cmd`); the one-level parser drops these lines. undefined when absent or empty. */
+export function readYamlMap(cwd, section, key) {
+  let raw;
+  try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { return undefined; }
+  const out = {};
+  const head = new RegExp(`^${section}:\\s*(#.*)?$`), keyRe = new RegExp(`^\\s+${key}:\\s*(#.*)?$`);
+  let inSection = false, mapIndent = null;
+  for (const line of raw.split(/\r?\n/)) {
+    if (/^\s*(#.*)?$/.test(line)) continue;
+    if (/^\S/.test(line)) { inSection = head.test(line); mapIndent = null; continue; }
+    if (!inSection) continue;
+    const indent = line.length - line.trimStart().length;
+    if (mapIndent === null) { if (keyRe.test(line)) mapIndent = indent; continue; }
+    if (indent <= mapIndent) { mapIndent = keyRe.test(line) ? indent : null; continue; }
+    const m = /^\s+(?:"([^"]+)"|'([^']+)'|([^\s:#"']+))\s*:\s+(.*)$/.exec(line);
+    if (!m) continue;
+    let v = m[4].trim();
+    const q = /^"((?:[^"\\]|\\.)*)"\s*(#.*)?$/.exec(v) ?? /^'((?:[^']|'')*)'\s*(#.*)?$/.exec(v);
+    if (q) v = v.startsWith('"') ? q[1].replace(/\\(["\\])/g, "$1") : q[1].replace(/''/g, "'");
+    else v = v.replace(/\s+#.*$/, "").trim();
+    if (v) out[m[1] ?? m[2] ?? m[3]] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 function readYamlList(cwd, section, key) {
   let raw;
