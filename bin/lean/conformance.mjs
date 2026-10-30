@@ -32,7 +32,33 @@ import { CHECK_ID_RE } from "./postdeploy-check.mjs";
 import { normaliseDecision, deadAnchors } from "./decisions.mjs";
 const C = OUTCOME_CODES;
 
-export const norm = (s) => String(s ?? "").replace(/[`*_>]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+/** #4789: folds what a builder retyping a quote changes: unicode punctuation, markdown links/markup, escapes, invisible chars. */
+export const norm = (s) => String(s ?? "")
+  .normalize("NFKC")
+  .replace(/[\u200b-\u200d\u2060\ufeff\u00ad]/g, "")
+  .replace(/[\u2018\u2019\u201a\u201b\u2032]/g, "'").replace(/[\u201c\u201d\u201e\u201f\u2033]/g, '"')
+  .replace(/[\u2010-\u2015\u2212]/g, "-").replace(/\u2026/g, "...")
+  .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+  .replace(/\\([^A-Za-z0-9\s])/g, "$1")
+  .replace(/[`*_>~#]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+const WORD_RE = /[a-z0-9]{3,}/g;
+/** The issue line sharing the most words with a quote that missed (for the correction prompt); "" when none shares any. */
+export function nearestSpan(quote, issueText) {
+  const qw = new Set(norm(quote).match(WORD_RE) ?? []);
+  let best = "", bestN = 0;
+  for (const l of String(issueText ?? "").split("\n")) {
+    const n = norm(l);
+    if (!n) continue;
+    let hit = 0;
+    for (const w of new Set(n.match(WORD_RE) ?? [])) if (qw.has(w)) hit++;
+    if (hit > bestN) { bestN = hit; best = l.trim(); }
+  }
+  return bestN >= 2 ? best.slice(0, 120) : "";
+}
+const quoteMiss = (id, quote, issueText) => {
+  const near = nearestSpan(quote, issueText);
+  return `${id}: quote is not verbatim from the issue (at least ${MIN_QUOTE_CHARS} characters)${near ? `; nearest issue text: "${near}"` : ""}`;
+};
 const ITEM_PREFIX_RE = /^\s*(?:[-*+]\s+)?(?:\[[ xX]\]\s+)?(?:\d+[.)]\s+)?/;
 /**
  * A quote must be verbatim (whitespace and markdown emphasis aside) from the issue text: a substring of at least
@@ -232,7 +258,7 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     if (!id || ids.has(id)) problems.push(`requirement id missing or duplicated: ${id}`);
     ids.add(id);
     if (!DISPOSITIONS.includes(r?.disposition)) problems.push(`${id}: disposition must be one of ${DISPOSITIONS.join("|")}`);
-    if (!inIssue(r?.quote, issueText)) problems.push(`${id}: quote is not verbatim from the issue (at least ${MIN_QUOTE_CHARS} characters)`);
+    if (!inIssue(r?.quote, issueText)) problems.push(quoteMiss(id, r?.quote, issueText));
     if (TRACKED.includes(r?.disposition) && blank(r?.why)) problems.push(`${id}: ${r.disposition} needs a why`);
     if (r?.disposition === "post-deploy" && !CHECK_ID_RE.test(String(r?.check ?? ""))) problems.push(`${id}: post-deploy needs a check id (\`check\`, e.g. "login-smoke") naming an entry of .forge/post-deploy-checks.json on the default branch`);
     if (r?.disposition === "not-applicable" && blank(r?.evidence)) problems.push(`${id}: not-applicable needs file:line evidence`);
