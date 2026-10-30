@@ -32,3 +32,6 @@ Checked the 10 flagged tests: none enumerates bin/lean modules; recorded issuewa
 
 ## Export collision
 Renamed issuewatch.mjs export `classify` to `classifyIssue` (decision-engine.mjs already exports `classify`); updated the test and result.json. issuewatch tests pass (17/17).
+
+## CI unit-test fix (run 41100351102)
+Log unavailable. The `classify` collision was already fixed in 15796c8. Could not reproduce a failure: `node --test "bin/lean/**/*.test.mjs"` via with-run-tmpdir passes (1626/0). Fixed a real defect found meanwhile: the #4765 dossier entry had been inserted mid-entry in devdocs/modules/lean.md, splitting the #4785/#4788 entry; moved it to the end.
