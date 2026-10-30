@@ -97,6 +97,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    current one (legacy comments without it: no trusted human comment after it
    and every `deliver` quote still in the issue); otherwise `CONTRACT_STALE`,
    decision "frozen contract H is stale", and it re-plans and freezes a new one.
+   An operator `<!-- FORGE:DECISION -->` comment posted after the contract (#4783; not the engine's own
+   `## Decision: ...` / `## Decision (batch ...` posts, not a #4695 JSON record) also makes it stale, and the
+   re-plan prompt carries those decisions (newest first, 2 KB, `operatorDecision`/`decisionsNote` in lean.mjs),
+   so `--requeue` after a decision no longer resumes the old contract. Never part of the quotable issue text.
    Conformance needs-human lines and the "Not conforming" decision append the
    quote of the requirement a failure names (`explainFailures`), and a failed
    validate names its command. Typed blocks (`classifyBlock`):

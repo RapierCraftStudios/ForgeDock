@@ -1,89 +1,13 @@
-{
- "status": "fixed",
- "summary": "quote check normalizes unicode/markup, shows nearest span, quote-only contract.invalid is recoverable (forgedock check failed only on host-load timeouts)",
- "requirements": [
-  {
-   "id": "R1",
-   "status": "implemented",
-   "evidence": "bin/lean/conformance.mjs:34"
-  },
-  {
-   "id": "R2",
-   "status": "implemented",
-   "evidence": "bin/lean/conformance.mjs nearestSpan/quoteMiss"
-  },
-  {
-   "id": "R3",
-   "status": "implemented",
-   "evidence": "bin/engine/outcome-codes.mjs:224; bin/lean/lean.mjs:1591; bin/lean/orchestrate.mjs:654"
-  }
- ],
- "validation": [
-  {
-   "id": "V1",
-   "command": "node --test bin/lean/conformance.test.mjs",
-   "exit": 0
-  },
-  {
-   "id": "V2",
-   "command": "node --test bin/tests/engine-outcome-codes.test.mjs bin/lean/recovery.test.mjs",
-   "exit": 0
-  },
-  {
-   "id": "V3",
-   "command": "node --test bin/lean/lean.test.mjs",
-   "exit": 0
-  }
- ],
- "tests": [
-  {
-   "command": "node --test bin/lean/conformance.test.mjs bin/tests/engine-outcome-codes.test.mjs",
-   "result": "pass",
-   "fails_without_fix": "unknown"
-  }
- ],
- "self_review": [
-  {
-   "question": "1",
-   "answer": "yes",
-   "evidence": "R1-R3 implemented, see requirements"
-  },
-  {
-   "question": "2",
-   "answer": "yes",
-   "evidence": "lean/recovery/orchestrate/engine-cli tests pass; only load-sensitive timing tests flake under load 117 and pass alone"
-  },
-  {
-   "question": "3",
-   "answer": "no",
-   "evidence": "V1-V3 pass on a quiet run but forgedock check failed (V3 flaky under host load, verify-phase-trail.test.sh timed out at 300s); orchestrate.mjs was added via amendment"
-  },
-  {
-   "question": "4",
-   "answer": "yes",
-   "evidence": "git diff origin/staging...HEAD: contract deliverables + orchestrate.mjs (amended) + tests"
-  }
- ],
- "amendments": [
-  {
-   "kind": "add-deliverable",
-   "path": "bin/lean/orchestrate.mjs",
-   "why": "classifier reads row facts built at orchestrate.mjs:654 from the lane result; quoteMismatch must be passed there or the recoverable classification never fires"
-  }
- ],
- "facts": {
-  "hotspots": [
-   {
-    "at": "bin/lean/orchestrate.mjs:654",
-    "why": "recovery facts only carry issueEdited/conflicting from the lane result"
-   }
-  ]
- },
- "not_members": [
-  {
-   "symbol": "nearestSpan",
-   "test": "bin/lean/conformance.test.mjs",
-   "why": "the test at :146 enumerates missingTool detection cases (commands, python/node modules); nearestSpan is a quote-hint helper, not a tool-detection case, and is covered by the #4789 test at :34"
-  }
- ]
-}
+{"status":"fixed","summary":"an operator FORGE:DECISION after the frozen contract makes it stale and is given to the re-plan prompt","requirements":[
+{"id":"R1","status":"implemented","evidence":"bin/lean/lean.mjs readFrozenContract + plan prompt (decisionNote)"},
+{"id":"R2","status":"implemented","evidence":"bin/lean/lean.mjs decisionsNote appended to plan/implement prompts"},
+{"id":"R3","status":"implemented","evidence":"bin/lean/lean.mjs decisionAfter -> stale reason"},
+{"id":"R4","status":"implemented","evidence":"devdocs/modules/lean.md:90"}],
+"validation":[{"id":"V1","command":"node --test bin/lean/lean.test.mjs","exit":0},{"id":"V2","command":"node --test bin/lean/decisions.test.mjs bin/lean/context.test.mjs","exit":0}],
+"tests":[{"command":"node --test bin/lean/lean.test.mjs","result":"pass in 2 of 4 runs; the other runs failed only the unrelated #4690 lane-limit test (claude CLI idle-killed under host load); it passes alone","fails_without_fix":true,"note":"scoped-contract regression added; decisionAfter now checked before scope"}],
+"self_review":[
+{"question":"1","answer":"yes","evidence":"lean.mjs readFrozenContract/decisionsNote; new test in lean.test.mjs"},
+{"question":"2","answer":"yes","evidence":"engine/anchored decision and plain-contract-reuse cases covered in the new test; base tests pass"},
+{"question":"3","answer":"no","evidence":"V1 is flaky under host load (#4690 test) and forgedock check reported V1 failing on 3 runs; passes alone and in 2 of 4 plain runs"},
+{"question":"4","answer":"yes","evidence":"git diff origin/staging...HEAD: lean.mjs, lean.test.mjs, devdocs/modules/lean.md"}],
+"amendments":[]}
