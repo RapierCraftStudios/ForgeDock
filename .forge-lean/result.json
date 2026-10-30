@@ -1,89 +1,17 @@
-{
- "status": "fixed",
- "summary": "quote check normalizes unicode/markup, shows nearest span, quote-only contract.invalid is recoverable (forgedock check failed only on host-load timeouts)",
- "requirements": [
-  {
-   "id": "R1",
-   "status": "implemented",
-   "evidence": "bin/lean/conformance.mjs:34"
-  },
-  {
-   "id": "R2",
-   "status": "implemented",
-   "evidence": "bin/lean/conformance.mjs nearestSpan/quoteMiss"
-  },
-  {
-   "id": "R3",
-   "status": "implemented",
-   "evidence": "bin/engine/outcome-codes.mjs:224; bin/lean/lean.mjs:1591; bin/lean/orchestrate.mjs:654"
-  }
- ],
- "validation": [
-  {
-   "id": "V1",
-   "command": "node --test bin/lean/conformance.test.mjs",
-   "exit": 0
-  },
-  {
-   "id": "V2",
-   "command": "node --test bin/tests/engine-outcome-codes.test.mjs bin/lean/recovery.test.mjs",
-   "exit": 0
-  },
-  {
-   "id": "V3",
-   "command": "node --test bin/lean/lean.test.mjs",
-   "exit": 0
-  }
- ],
- "tests": [
-  {
-   "command": "node --test bin/lean/conformance.test.mjs bin/tests/engine-outcome-codes.test.mjs",
-   "result": "pass",
-   "fails_without_fix": "unknown"
-  }
- ],
- "self_review": [
-  {
-   "question": "1",
-   "answer": "yes",
-   "evidence": "R1-R3 implemented, see requirements"
-  },
-  {
-   "question": "2",
-   "answer": "yes",
-   "evidence": "lean/recovery/orchestrate/engine-cli tests pass; only load-sensitive timing tests flake under load 117 and pass alone"
-  },
-  {
-   "question": "3",
-   "answer": "no",
-   "evidence": "V1-V3 pass on a quiet run but forgedock check failed (V3 flaky under host load, verify-phase-trail.test.sh timed out at 300s); orchestrate.mjs was added via amendment"
-  },
-  {
-   "question": "4",
-   "answer": "yes",
-   "evidence": "git diff origin/staging...HEAD: contract deliverables + orchestrate.mjs (amended) + tests"
-  }
- ],
- "amendments": [
-  {
-   "kind": "add-deliverable",
-   "path": "bin/lean/orchestrate.mjs",
-   "why": "classifier reads row facts built at orchestrate.mjs:654 from the lane result; quoteMismatch must be passed there or the recoverable classification never fires"
-  }
- ],
- "facts": {
-  "hotspots": [
-   {
-    "at": "bin/lean/orchestrate.mjs:654",
-    "why": "recovery facts only carry issueEdited/conflicting from the lane result"
-   }
-  ]
- },
- "not_members": [
-  {
-   "symbol": "nearestSpan",
-   "test": "bin/lean/conformance.test.mjs",
-   "why": "the test at :146 enumerates missingTool detection cases (commands, python/node modules); nearestSpan is a quote-hint helper, not a tool-detection case, and is covered by the #4789 test at :34"
-  }
- ]
-}
+{"status":"fixed","summary":"trusted Blocked by edges, configurable blocked label and --add edge report in the batch scheduler","requirements":[
+{"id":"R1","status":"implemented","evidence":"bin/lean/orchestrate.mjs declared; bin/engine-cli.mjs addedEdges"},
+{"id":"R2","status":"implemented","evidence":"bin/engine-cli.mjs addedEdges OPEN-only"},
+{"id":"R3","status":"implemented","evidence":"bin/lean/orchestrate.mjs refreshBlocked/isReady"},
+{"id":"R4","status":"implemented","evidence":"bin/engine-cli.mjs addToBatch edges line"},
+{"id":"R5","status":"implemented","evidence":"bin/lean/orchestrate-blocked.test.mjs:11"},
+{"id":"R6","status":"implemented","evidence":"bin/lean/orchestrate-blocked.test.mjs:21"}],
+"validation":[
+{"id":"V1","command":"node --test bin/lean/orchestrate-blocked.test.mjs bin/tests/orchestrate-add-edges.test.mjs","exit":0},
+{"id":"V2","command":"node --test bin/lean/batch.test.mjs bin/tests/orchestrate-preflight.test.mjs bin/tests/orchestrate-runtime-paths.test.mjs","exit":0}],
+"tests":[{"command":"node --test bin/lean/orchestrate-blocked.test.mjs bin/tests/orchestrate-add-edges.test.mjs","result":"pass","fails_without_fix":true}],
+"self_review":[
+{"question":"1","answer":"yes","evidence":"R1-R6 mapped above; tests pass"},
+{"question":"2","answer":"yes","evidence":"batch.test.mjs updated for readOrchestration shape and passes; forgedock check PASS"},
+{"question":"3","answer":"yes","evidence":"D1-D6 changed; forgedock check PASS"},
+{"question":"4","answer":"yes","evidence":"only deliverables, tests and required dossiers changed; check-devdocs-freshness OK"}],
+"amendments":[]}

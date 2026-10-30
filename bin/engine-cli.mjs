@@ -14,6 +14,7 @@ import { memAvailableMb } from "./lean/heavy.mjs";
 import { join, resolve as resolvePath } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
+import { isTrustedActor, parseDependsOn } from "./engine/phases.mjs";
 import { readLog, readLogFile, deriveState, runLogPath, migrateRunLogs } from "./engine/runlog.mjs";
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
 import { parseForgeYaml } from "./forge-utils.mjs";
@@ -1202,6 +1203,27 @@ const parallelOf = (argv) => {
 };
 
 /**
+ * #4773: the `Blocked by` / `Depends on` edges the added issues imply: declaration lines of a trusted body whose target is still open
+ * (a closed or unreadable target is a no-op, the scheduler skips it too). @returns {{from:number,to:number}[]}
+ */
+async function addedEdges({ added, records, io, repo }) {
+  const edges = [], seen = new Map();
+  for (const n of added) {
+    const rec = records.get(n);
+    if (!rec || !bodyTrusted(rec)) continue;
+    for (const d of parseDependsOn(rec.body, n)) {
+      if (!seen.has(d)) {
+        let st = null;
+        try { st = JSON.parse(await io.gh(["issue", "view", String(d), ...(repo ? ["-R", repo] : []), "--json", "state"]))?.state ?? null; } catch { st = null; }
+        seen.set(d, st);
+      }
+      if (seen.get(d) === "OPEN") edges.push({ from: n, to: d });
+    }
+  }
+  return edges;
+}
+
+/**
  * #4408: add `tokens` to batch `id`. Not a plain integer: skipped; not OPEN on the batch's repo (`gh issue view --json
  * state`): skipped `closed` (`unreadable` when the read fails); the rest go to the batch's `add` file, through the daemon
  * when `viaDaemon(issues)` answers (non-null), else written here (batch.mjs `addIssues` skips issues already in the batch).
@@ -1211,15 +1233,16 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
   const b = batchMod.openBatch(root, id);
   if (!b.exists()) throw new Error(`no batch ${id} in ${root}`);
   const repo = b.readPlan()?.repo ?? null;
-  const skipped = [], ints = [], state = new Map();
+  const skipped = [], ints = [], state = new Map(), records = new Map();
   for (const t of tokens) {
     if (/^#?\d+$/.test(String(t))) ints.push(parseInt(String(t).replace("#", ""), 10));
     else skipped.push({ issue: t, reason: "not an integer" });
   }
   for (const n of new Set(ints)) {
     let st = null;
-    try { st = JSON.parse(await io.gh(["issue", "view", String(n), ...(repo ? ["-R", repo] : []), "--json", "state"]))?.state ?? null; } catch { st = null; }
-    state.set(n, st);
+    let v = null;
+    try { v = JSON.parse(await io.gh(["issue", "view", String(n), ...(repo ? ["-R", repo] : []), "--json", "state,body,author,authorAssociation"])); st = v?.state ?? null; } catch { st = null; }
+    state.set(n, st); records.set(n, v);
   }
   const open = [];
   for (const n of ints) {
@@ -1233,7 +1256,9 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
     if (res.reopened === undefined && res.requeued?.length && b.readReport()) b.clearReport(); // #4687: no daemon: the next --resume reruns it
   }
   const out = { ok: true, batch: id, added: res.added ?? [], requeued: res.requeued ?? [], skipped: [...(res.skipped ?? []), ...skipped] };
+  out.edges = await addedEdges({ added: out.added, records, io, repo }); // #4773
   print(`batch ${id}: added ${out.added.map((n) => `#${n}`).join(" ") || (out.requeued.length ? "" : "(none)")}${out.requeued.length ? `${out.added.length ? " " : ""}${out.requeued.map((n) => `requeued #${n}`).join(" ")}` : ""}${out.skipped.length ? `; skipped ${out.skipped.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
+  if (out.edges.length) print(`batch ${id}: edges ${out.edges.map((e) => `#${e.from} blocked by #${e.to}`).join(", ")}`);
   return out;
 }
 
@@ -1562,6 +1587,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   // Lanes: in-process `runCore` when a lean module is injected (tests), otherwise detached `run-issue` processes, or
   // sandboxes when forge.yaml `execution` places them remote (#4253).
   const labelsOf = new Map(); // issue -> label names, filled by readBody (one gh call per issue)
+  const trustedOf = new Map(); // #4773: issue -> its body author is trusted (a `Blocked by` line is an edge only then), filled by readBody
   const needsOf = new Map(); // issue -> host-only capabilities its body names (#4542), filled by readBody
   let execForNeeds = null;
   let lanes, remote = null, execBudget = null, execConf = null, hybrid = false;
@@ -1777,6 +1803,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
     rows = await orchestrate({
       ...(estimate ? { estimate } : {}),
       beforeAdmit,
+      ...(orch.blockedLabel ? { getBlocked: async () => JSON.parse(await leanIo.gh(["issue", "list", "-R", repo, "--label", orch.blockedLabel, "--state", "open", "--limit", "200", "--json", "number"])).map((x) => x.number) } : {}), // #4773
+      trusted: (n) => trustedOf.get(n) === true,
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift, lifecycle, integration,
       ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
@@ -1819,8 +1847,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
       },
       readBody: maint || registry || hybrid
-        ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels,comments"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); return v.body; }
-        : async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,comments"])); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
+        ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels,comments,author,authorAssociation"])); trustedOf.set(n, bodyTrusted(v)); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); return v.body; }
+        : async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,comments,author,authorAssociation"])); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
       onUpdate: (r) => sink.row(r),
     });
   } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
@@ -2175,6 +2203,9 @@ export async function schedFromCli(argv, deps = {}) {
   throw new Error(usage);
 }
 
+/** #4773: is the author of a `gh issue view --json author,authorAssociation` record trusted (the engine admission's `isTrustedActor`)? */
+const bodyTrusted = (v) => isTrustedActor({ association: v?.authorAssociation, type: v?.author?.is_bot ? "Bot" : "User", login: v?.author?.login });
+
 /**
  * forge.yaml `orchestration.breaker` ({errors, window_min}; default 3 engine-errors in 30 min; errors 0 turns it off),
  * `orchestration.max_deferrals` (default 3) and `orchestration.global_parallel` (#4191: host-wide lane cap; unset = none). The parser flattens one nested level, so the breaker keys arrive as
@@ -2184,6 +2215,7 @@ export async function schedFromCli(argv, deps = {}) {
  * `mechanical_max_attempts`): the separate budget of env.*, base.conflict and conflicting-PR rows, default 2, never below `max_attempts`.
  * `orchestration.base_sync.enabled` (#4525; default true, false opts out) and `base_sync.union_globs` (comma list of globs of
  * append-only files whose two-sided line additions a parked PR's base sync keeps both of).
+ * `orchestration.blocked_label` (#4773; default `blocked`, empty turns it off): an open issue carrying it is admitted but not dispatched.
  */
 export function readOrchestration(cwd = process.cwd()) {
   let o = {};
@@ -2192,7 +2224,7 @@ export function readOrchestration(cwd = process.cwd()) {
   const errors = int(o.breaker_errors ?? o.errors, 3), windowMin = int(o.breaker_window_min ?? o.window_min, 30);
   const gp = int(o.global_parallel, null);
   const recoveryMax = int(o.recovery_max_attempts ?? o.max_attempts, 1);
-  return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), globalParallel: gp >= 1 ? gp : null,
+  return { breaker: errors > 0 && windowMin > 0 ? { errors, window_min: windowMin } : null, maxDeferrals: int(o.max_deferrals, 3), blockedLabel: String(o.blocked_label ?? "blocked").trim(), globalParallel: gp >= 1 ? gp : null,
     recovery: { maxAttempts: recoveryMax, mechanicalMaxAttempts: Math.max(int(o.recovery_mechanical_max_attempts ?? o.mechanical_max_attempts, 2), recoveryMax) }, // #4725: env/base/sequence codes have their own budget
     // #4525: parked-PR base sync. The parser flattens one level, so `base_sync.enabled|union_globs` arrive as `enabled|union_globs` (or flat `base_sync_*`).
     baseSync: { enabled: String(o.base_sync_enabled ?? o.enabled ?? "true").trim().toLowerCase() !== "false",

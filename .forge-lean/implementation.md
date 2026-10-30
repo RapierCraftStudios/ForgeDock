@@ -1,29 +1,20 @@
 ### Approach
-Fix the shared verbatim-quote normalization (`norm`), show the nearest issue line when a quote misses, and let a contract that is still invalid only because of unmatched quotes end `contract.invalid` as recoverable.
-
+Scheduler gains issue-level readiness: `trusted(n)` gates `Blocked by`/`Depends on` edges to trusted authors, `getBlocked()` withholds dispatch of labelled issues and polls so removing the label releases them. `--add` reports the edges it creates.
 ### Changes
-- bin/lean/conformance.mjs: `norm` folds unicode punctuation, zero-width chars, markdown links, `~`, `#`, backslash escapes; new `nearestSpan`; the quote problem carries the nearest issue text.
-- bin/lean/lean.mjs: `contract.invalid` result sets `quoteMismatch` when all problems are quote misses; RECOVER_HOW wording updated.
-- bin/engine/outcome-codes.mjs: `classifyNeedsHuman` treats `contract.invalid` with `quoteMismatch` as recoverable.
-- bin/lean/orchestrate.mjs: passes `quoteMismatch` from the lane result into the recovery facts (not in the contract; amendment added).
-- devdocs/modules/lean.md: entry and classification text.
-- Tests: conformance.test.mjs, engine-outcome-codes.test.mjs, lean.test.mjs.
-
+- bin/lean/orchestrate.mjs: `trusted`, `getBlocked`, `declared`, `refreshBlocked`, isReady/wake handling.
+- bin/engine-cli.mjs: readBody fetches author, `getBlocked` wiring, `blocked_label` in readOrchestration, `addedEdges` + edge report in addToBatch.
+- docs/CONFIG.md, commands/orchestrate.md, devdocs/modules/{lean,orchestrate}.md: docs.
+- bin/lean/orchestrate-blocked.test.mjs, bin/tests/orchestrate-add-edges.test.mjs (new), bin/lean/batch.test.mjs (readOrchestration shape).
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/conformance.mjs:34
-- R2 ✅ bin/lean/conformance.mjs (nearestSpan, quoteMiss)
-- R3 ✅ bin/engine/outcome-codes.mjs:224, bin/lean/lean.mjs:1591, bin/lean/orchestrate.mjs:654
-
+- R1 ✅ orchestrate.mjs declared(); engine-cli.mjs addedEdges
+- R2 ✅ engine-cli.mjs addedEdges (OPEN only), trusted gate
+- R3 ✅ orchestrate.mjs refreshBlocked/isReady
+- R4 ✅ engine-cli.mjs addToBatch edges line
+- R5 ✅ orchestrate-blocked.test.mjs first test
+- R6 ✅ orchestrate-blocked.test.mjs second test
 ### Verification
-- V1 `node --test bin/lean/conformance.test.mjs`: pass (106).
-- V2 `node --test bin/tests/engine-outcome-codes.test.mjs bin/lean/recovery.test.mjs`: pass (64).
-- V3 `node --test bin/lean/lean.test.mjs`: 513 pass when run on a quiet moment. Under host load (load average ~117) 1-3 load-governor/timing tests fail (#4690 CLI_LANE_LIMIT, #4115c, batch robustness); they pass when run alone with a name filter (51 pass).
-- Also passing: orchestrate*.test.mjs and engine-cli.test.mjs (78).
-- New tests were not run against the pre-fix code; the norm test cannot pass with the old `norm` (it has no unicode folding).
-- `forgedock check` FAILED: V3 (load flakiness above) and `scripts/verify-phase-trail.test.sh` timed out at 300s; cmd5/cmd8/cmd10 earlier timed out the same way. These are host-load timeouts, not assertions about this change.
-
+`forgedock check` PASS: V1 (new tests) and V2 (batch/preflight/runtime-paths) exit 0, plus all repo scripts. New tests fail without the fix (seams/edges absent).
 ### Notes
-No env vars. Behaviour change: a quote-only invalid contract is now recoverable instead of terminal.
-
-### Follow-up
-`nearestSpan` is not a member of the missingTool test list at conformance.test.mjs:146; recorded in result.json not_members.
+New forge.yaml key `orchestration.blocked_label` (default `blocked`, empty disables).
+### CI fix
+`bin/lean/lean.test.mjs`: the CLI orchestrate fixtures predate the trust gate. The cross-lane test's issue body now carries `authorAssociation: "OWNER"`, so its `Depends on` line is still an edge. The maintenance test's "no extra `issue list`" assertion now allows the per-tick `--label blocked` read. Production code is unchanged.
