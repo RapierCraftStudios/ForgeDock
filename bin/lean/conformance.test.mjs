@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified } from "./conformance.mjs";
+import { vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -115,6 +115,21 @@ describe("precheck (deterministic, no reviewer)", () => {
   it("failed or missing validation -> unimplemented", () => {
     assert.deepEqual(codes(precheck({ contract: C, result: { ...res, validation: [{ id: "V1", exit: 1 }] }, changedFiles: files })), ["conformance.unimplemented"]);
     assert.deepEqual(codes(precheck({ contract: C, result: { ...res, validation: [] }, changedFiles: files })), ["conformance.unimplemented"]);
+  });
+  it("#4761 vitest -q is a contract problem; a runner usage error is contract.invalid_command, not conformance", () => {
+    const bad = { ...C, validate: [{ id: "V1", command: "pnpm --filter x exec vitest run a.test.ts -q" }] };
+    assert.ok(validateContract(bad, ISSUE).problems.some((p) => /V1: vitest 3 rejects -q/.test(p)));
+    assert.ok(!validateContract({ ...bad, validate: [{ id: "V1", command: "pnpm exec vitest run a.test.ts --reporter=dot" }] }, ISSUE).problems.some((p) => /vitest/.test(p)));
+    assert.equal(vitestQuietFlag("pytest -q"), null);
+    assert.equal(normalizeRunnerCommand("vitest run a -q && pytest -q"), "vitest run a --reporter=dot && pytest -q");
+    assert.ok(cliUsageError({ rc: 1, output: "CACError: Unknown option `-q`" }));
+    assert.ok(cliUsageError({ rc: 1, output: "Unrecognized CLI Parameter: --foo" }));
+    assert.ok(!cliUsageError({ rc: 1, output: "AssertionError: 1 !== 2" }));
+    assert.ok(!cliUsageError({ rc: 0, output: "Unknown option" }));
+    const failed = { ...res, validation: [{ id: "V1", exit: 1 }] };
+    const pc = precheck({ contract: C, result: failed, changedFiles: files, validateRuns: { V1: { rc: 1, output: "CACError: Unknown option `-q`" } } });
+    assert.deepEqual(codes(pc), ["contract.invalid_command"]);
+    assert.equal(pc.failures[0].kind, "validate_command_invalid");
   });
   it("#4323 a failed validate whose rerun could not find a host tool or module is env.tool_missing naming it, not conformance", () => {
     const failed = { ...res, validation: [{ id: "V1", exit: 1 }] };
