@@ -305,6 +305,7 @@ git worktree add --detach "$REVIEW_WT" "$REVIEW_SHA" 2>/dev/null
 CFG="${FORGE_CONFIG:-$MAIN_ROOT/forge.yaml}"
 vcmd() { yq ".verification.commands.${1}.${2} // \"\"" "$CFG" 2>/dev/null || echo ''; }
 CHANGED=$(jq -r '.full_files[]?' "$CTX" 2>/dev/null); [ -n "$CHANGED" ] || CHANGED=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)   # Phase 1 list survives an API 406 (forge#4154)
+export FORGE_CHANGED_FILES=$(printf '%s\n' "$CHANGED" | while IFS= read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done)   # existing changed files, newline-separated, for *_changed commands (env var, never spliced into the eval'd string)
 [ -d "$MAIN_ROOT/node_modules" ] && [ ! -e node_modules ] && ln -s "$MAIN_ROOT/node_modules" node_modules
 run_step() { # run_step <lang> <step> <tail-lines>: prints the exit code; empty command = SKIPPED
   local c; c=$(vcmd "${1}" "${2}")
@@ -320,24 +321,25 @@ if printf '%s\n' "$CHANGED" | grep -qE '\.(tsx?|jsx?)$'; then
   if [ ! -d node_modules ]; then
     echo "SKIPPED — deps unavailable in per-PR worktree (no node_modules in main checkout); typecheck/build not run, not a type-error finding"
   else
-    run_step typescript lint 30; run_step typescript typecheck 50; TSC_RC=$?
+    run_step typescript lint 30; run_step typescript typecheck 50; TSC_RC=$?; run_step typescript typecheck_changed 50
     if [ "$REQUIRES_FULL_BUILD" = "true" ] || [ "$TSC_RC" -eq 0 ]; then run_step typescript build 30; fi
   fi
 fi
 CLASSIFIER=$(forge_resolve flaky-quarantine.sh)   # install roots only: the PR under review is author-controlled
-for L in python typescript go rust; do
-  TEST_CMD=$(vcmd "$L" test); [ -n "$TEST_CMD" ] || continue
-  echo "=== Running tests (${L}): ${TEST_CMD} ==="; eval "$TEST_CMD" 2>&1 | tail -30; TEST_EXIT=${PIPESTATUS[0]}
+for L in python typescript go rust; do for T in test test_changed; do
+  TEST_CMD=$(vcmd "$L" "$T"); [ -n "$TEST_CMD" ] || continue
+  echo "=== Running tests (${L}.${T}): ${TEST_CMD} ==="; eval "$TEST_CMD" 2>&1 | tail -30; TEST_EXIT=${PIPESTATUS[0]}; echo "EXIT ${L}.${T}=${TEST_EXIT}"
   [ "$TEST_EXIT" -eq 0 ] && continue
   if [ -n "$CLASSIFIER" ]; then
     CL_RESULT=$(bash "$CLASSIFIER" --test "$TEST_CMD" --base "$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null | sed 's|origin/||' || echo main)" --retries 3 2>&1); echo "$CL_RESULT"
     CL=$(printf '%s\n' "$CL_RESULT" | sed -n 's/^CLASSIFICATION:[[:space:]]*\([A-Z_]*\).*/\1/p' | head -n 1)
   else CL=""; fi
-  case "$CL" in PRE_BROKEN|FLAKY) echo "ADVISORY (not blocking): ${L} tests classified ${CL}, quarantined" ;; *) echo "BLOCKING: ${L} tests failed (exit ${TEST_EXIT}), classified REAL" ;; esac
-done
-if [ -z "$(vcmd python test)" ] && [ -z "$(vcmd typescript test)" ]; then echo "SKIPPED — no test commands configured in verification.commands"; fi
+  case "$CL" in PRE_BROKEN|FLAKY) echo "ADVISORY (not blocking): ${L} tests (${T}) classified ${CL}, quarantined" ;; *) echo "BLOCKING: ${L} tests (${T}) failed (exit ${TEST_EXIT}), classified REAL" ;; esac
+done; done
+if [ -z "$(vcmd python test)$(vcmd typescript test)$(vcmd python test_changed)$(vcmd typescript test_changed)" ]; then echo "SKIPPED — no test commands configured in verification.commands"; fi
 ```
 
+- Optional changed-file steps `typescript.typecheck_changed`, `typescript.test_changed`, `python.test_changed` read `$FORGE_CHANGED_FILES` and count as Phase 2 evidence like their full-repo twins (a non-zero `EXIT typescript.typecheck_changed` blocks; `test_changed` follows the REAL/ADVISORY rule below); they keep a large repo from SKIPPED.
 - `EXIT typescript.typecheck` / `EXIT typescript.build` non-zero is **CONFIRMED blocking** (typecheck alone misses SSG/prerender failures, so Phase 1 blocks a full-build lane with no `typescript.build`). `BLOCKING: ... REAL` tests and `EXIT python.format` non-zero on a full-build lane block; `ADVISORY` (pre-broken or flaky per `.forgedock/quarantine.jsonl`) never does; other lint/format output is judged per finding.
 - **2G**: when `pyproject.toml` or `package.json` is in the file list, read the added dependency lines in the PR diff and flag new, unpinned or unexpected ones. **2J** (informational): when `CONTRACT_ISSUE` is set, compare the file list with the Deliverables of its trusted FORGE:CONTRACT (`scripts/check-contract-scope.sh list`); flag 5 or more unexplained uncontracted non-doc files in the summary.
 
