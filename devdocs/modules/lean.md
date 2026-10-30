@@ -2066,6 +2066,11 @@ sharing most words) to the problem, which the correction prompt shows. A contrac
 invalid with only quote problems ends `contract.invalid` with `quoteMismatch`, which
 `classifyNeedsHuman` treats as recoverable (relaunch with a fresh plan).
 
+## Entry 2026-10-30 — Activation rows, rollout owner asks, dormancy report (#4769)
+
+`activation.mjs`: `readRollouts` (forge.yaml `rollouts.files`), `detectNewOffKeys` (new off/false/0 keys in the PR diff of those files, wired in `lean.mjs` `newOffKeysOf` into `precheck`'s `newOffKeys`), `activationFailures` (`activation_missing`, `mode_unreachable` for shadow/cohort/treated ACs) and `dormancyReport` (injected read-only `flagState`, keep-off decisions silence). `postdeploy-check.mjs` `measureItems`: a check printing `BLOCKED: <flag> = off` posts one `FORGE:ROLLOUT_ASK` per flag (re-posted only when the evidence hash changes) and parks `awaiting-measurement` instead of filing a failure.
+Cite: #4769.
+
 ## Entry 2026-10-30 — Batch plan.json never holds secrets (#4787)
 
 `batch.mjs` `writePlan` drops secret-named `plan.env` keys (`SECRET_ENV`, now defined in `batch.mjs`, imported by `schedd.mjs` (not re-exported), also matching a bare `*_KEY`) and records only their names in `plan.envSecrets`; state files stay 0600. On `--resume` the lanes re-read the value from the daemon/client environment (`mergeEnv`) or the keychain (`execution.token_env`). `batch.scrubPlan()` rewrites a pre-fix plan.json (secrets removed, chmod 0600); it runs on every `--resume` and for each batch at schedd start. `--set-env` refuses secret-named keys.
