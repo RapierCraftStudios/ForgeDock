@@ -29,3 +29,6 @@ Release mode LLM fallback shells out to `claude --print`; without an answer issu
 
 ### Stale-list follow-up
 Checked the 10 flagged tests: none enumerates lean modules or mentions issuewatch/gatewatch/decision-engine; recorded each as not_members in result.json. No test edits needed.
+
+### Export collision follow-up
+Renamed `decide` in issuewatch-release.mjs to `decideRelease` (conformance.mjs already exports `decide`); updated its caller and test import/uses. V1 passes (33).

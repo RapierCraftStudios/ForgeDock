@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { loadWatches, validateWatch, issueWatchFromCli, runWatch, formatStatus, claimIssue, repoDir } from "./issuewatch.mjs";
-import { priorityOf, poolScore, triggers, classifyTheme, classifyPool, releasePriorities, closure, decide, formatDryRun, releaseTick } from "./issuewatch-release.mjs";
+import { priorityOf, poolScore, triggers, classifyTheme, classifyPool, releasePriorities, closure, decideRelease, formatDryRun, releaseTick } from "./issuewatch-release.mjs";
 
 const NOW = Date.parse("2026-10-30T00:00:00Z");
 const iss = (n, o = {}) => ({ number: n, title: `t${n}`, body: "", labels: [], milestone: null, authorAssociation: "OWNER", author: { login: "me" }, createdAt: "2026-10-29T00:00:00Z", ...o });
@@ -78,20 +78,20 @@ const themesOf = (pool, w) => Object.fromEntries(pool.map((i) => [i.number, clas
 test("decide picks the top-scoring theme; NORTHSTAR order breaks ties; nothing is cut below threshold", () => {
   const w = W();
   const { pool, openByNum } = pooled({ labels: lbl("billing") }, { labels: lbl("billing") }, { labels: lbl("security") });
-  const d = decide({ pool, openByNum, themes: themesOf(pool, w), watch: w, now: NOW });
+  const d = decideRelease({ pool, openByNum, themes: themesOf(pool, w), watch: w, now: NOW });
   assert.equal(d.theme, "billing"); assert.deepEqual(d.release.set.map((i) => i.number), [1, 2]);
   assert.match(d.below[0], /security pool 1 < threshold/);
   const tie = pooled({ labels: lbl("billing") }, { labels: lbl("security") }, { labels: lbl("security") }, { labels: lbl("billing") });
-  assert.equal(decide({ pool: tie.pool, openByNum: tie.openByNum, themes: themesOf(tie.pool, w), watch: w, now: NOW, priorities: ["security"] }).theme, "security");
+  assert.equal(decideRelease({ pool: tie.pool, openByNum: tie.openByNum, themes: themesOf(tie.pool, w), watch: w, now: NOW, priorities: ["security"] }).theme, "security");
   const few = pooled({ labels: lbl("billing") });
-  const d2 = decide({ pool: few.pool, openByNum: few.openByNum, themes: themesOf(few.pool, w), watch: w, now: NOW });
+  const d2 = decideRelease({ pool: few.pool, openByNum: few.openByNum, themes: themesOf(few.pool, w), watch: w, now: NOW });
   assert.equal(d2.release, null);
 });
 
 test("immediate security issue below threshold cuts a security release alone, without other themes", () => {
   const w = W({ threshold: { min_issues: 5 }, immediate: ["label:security"] });
   const { pool, openByNum } = pooled({ labels: lbl("billing") }, { labels: lbl("security") }, { labels: lbl("billing", "P0") }, { labels: lbl("security") });
-  const d = decide({ pool, openByNum, themes: themesOf(pool, w), watch: w, now: NOW });
+  const d = decideRelease({ pool, openByNum, themes: themesOf(pool, w), watch: w, now: NOW });
   assert.equal(d.forced, true); assert.equal(d.theme, "security");
   assert.deepEqual(d.release.set.map((i) => i.number).sort(), [2, 4]);
   assert.ok(d.release.excluded.some((e) => e.number === 1 && /theme billing/.test(e.reason)));
@@ -107,11 +107,11 @@ test("release set pulls the Depends on closure (cross-theme, marked), skips clos
   const pool = [a, b, c], all = [a, b, c, dep, deep];
   const openByNum = new Map(all.map((i) => [i.number, i]));
   assert.deepEqual(closure(a, openByNum).map((i) => i.number).sort((x, y) => x - y), [1, 9, 10]);
-  const d = decide({ pool, openByNum, themes: themesOf(pool, w), watch: w, now: NOW });
+  const d = decideRelease({ pool, openByNum, themes: themesOf(pool, w), watch: w, now: NOW });
   assert.deepEqual(d.release.set.map((i) => i.number).sort((x, y) => x - y), [1, 9, 10]); // cap 3 filled by #1's closure
   assert.deepEqual(d.release.pulled.map((p) => [p.number, p.theme, p.for]), [[9, "billing", 1], [10, "billing", 1]]);
   assert.deepEqual(d.release.excluded.map((e) => e.number).sort(), [2, 3]); // roll over, still pooled
-  const wide = decide({ pool, openByNum, themes: themesOf(pool, w), watch: W({ max_release_issues: 10 }), now: NOW });
+  const wide = decideRelease({ pool, openByNum, themes: themesOf(pool, w), watch: W({ max_release_issues: 10 }), now: NOW });
   assert.equal(wide.release.set.length, 5);
 });
 
@@ -119,7 +119,7 @@ test("dry run prints would cut, theme scores and per-issue themes", () => {
   const w = W();
   const { pool, openByNum } = pooled({ labels: lbl("billing") }, { labels: lbl("billing") }, { labels: lbl("billing") }, { labels: lbl("security") });
   const themes = themesOf(pool, w);
-  const out = formatDryRun(decide({ pool, openByNum, themes, watch: w, now: NOW }), pool, themes);
+  const out = formatDryRun(decideRelease({ pool, openByNum, themes, watch: w, now: NOW }), pool, themes);
   assert.match(out, /would cut: billing \(3 issues, score \d+; security pool 1 < threshold\)/);
   assert.match(out, /theme scores: billing=\d+ \(3\), security=\d+ \(1\)/);
   assert.match(out, /#4 security \[label:security\] \(stays pooled\)/);

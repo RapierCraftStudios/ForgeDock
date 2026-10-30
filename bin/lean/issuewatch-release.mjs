@@ -141,7 +141,7 @@ export function pickRelease(theme, pool, themes, openByNum, watch, now) {
  * The decision for a pool: `{fired, ranking, theme, release, forced, below}`. `release` is null (nothing cut) when no trigger fires.
  * An immediate trigger forces the theme of its highest-priority issue and ships only that theme (plus its prerequisites).
  */
-export function decide({ pool, openByNum, themes, watch, now, priorities = [] }) {
+export function decideRelease({ pool, openByNum, themes, watch, now, priorities = [] }) {
   const fired = triggers(pool, watch, now), ranking = pool.length ? scoreThemes(pool, themes, now, priorities) : [];
   const below = ranking.filter((r) => r.count < (watch.threshold?.min_issues ?? Infinity)).map((r) => `${r.theme} pool ${r.count} < threshold`);
   if (!fired.length) return { fired, ranking, theme: null, release: null, forced: false, below };
@@ -210,7 +210,7 @@ export async function releaseTick({ watch, repo, io, state, defaults = [], listO
   const open = await listOpen(), openByNum = new Map(open.map((i) => [i.number, i]));
   const pool = open.filter(eligible).sort((a, b) => a.number - b.number);
   const { themes, llm } = await classifyPool(pool, watch, { classify: io.classify, cache: state.themes });
-  const decision = decide({ pool, openByNum, themes, watch, now, priorities: releasePriorities(policy.text) });
+  const decision = decideRelease({ pool, openByNum, themes, watch, now, priorities: releasePriorities(policy.text) });
   if (dryRun) return { state, decision, pool, themes };
   state.llm = (state.llm ?? 0) + llm;
   state.themes = { ...(state.themes ?? {}), ...Object.fromEntries(Object.entries(themes).filter(([, v]) => v.via === "llm").map(([n, v]) => [n, v])) };

@@ -152,5 +152,6 @@
    "test": "bin/lean/fixround.test.mjs",
    "why": "the test has no list of lean modules or files at the flagged line (no module-name enumeration; it exercises unrelated behaviour), so a new issue-watch module is not a member"
   }
- ]
+ ],
+ "notes": "Renamed export decide to decideRelease to avoid collision with conformance.mjs."
 }
