@@ -19,6 +19,7 @@ import { milestoneSlug, readBranches, isDefaultLane, defaultBranches, DEFAULT_ST
 import { postDeployOnly } from "./prefilter.mjs";
 import { releaseTick, formatDryRun } from "./issuewatch-release.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
+import { APP_SLUG } from "../init-repo.mjs";
 
 const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker"];
 const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -128,7 +129,9 @@ const CHECK_RE = /^\s*[-*]\s+\[ \]\s+(.*)$/;
 /** True when the body has an unchecked `— defer` checklist item. */
 export const hasUnresolvedDefer = (body) => String(body ?? "").replace(/<!--[\s\S]*?-->/g, "").split("\n").some((l) => { const t = CHECK_RE.exec(l)?.[1]; return t != null && /\s[—-]+\s*defer\b/.test(t); });
 
-const isBot = (i) => /\[bot\]$|^app\//i.test(i.author?.login ?? "") || i.author?.is_bot === true || /<!--\s*FORGE:DEFERRED/.test(i.body ?? "");
+// Bot authorship comes from the author only, never the body: a `FORGE:DEFERRED` marker in an outsider's issue is not
+// the App. `gh` reports the ForgeDock App as a bare login with no `[bot]` suffix (#4467), so it is matched by slug.
+const isBot = (i) => { const l = String(i.author?.login ?? ""); return /\[bot\]$|^app\//i.test(l) || i.author?.is_bot === true || l.toLowerCase().replace(/^app\//, "").replace(/\[bot\]$/, "") === APP_SLUG; };
 const isFollowup = (i) => /^follow-up\b/i.test(i.title ?? "");
 
 /** `claim` (a lane/batch takes it), `fold` (post-deploy-only follow-up for the rollup), or null (not for this watch). */
@@ -182,7 +185,11 @@ export function acquireLock(dir, { pid = process.pid, host = hostname(), alive =
   return () => { const now = readJson(f); if (now?.pid === pid) { try { writeAtomic(f, "{}\n"); } catch { /* best effort */ } } };
 }
 
-/** Claim `issue` for `name` in the repo-wide registry; false when another watch (or this one) already has it. Serialised across processes by a mkdir lock. */
+/**
+ * Claim `issue` for `name` in the repo-wide registry; false when another watch already has it. Serialised across processes by a
+ * mkdir lock. Idempotent for the holder: the registry is written before the watch saves its own state or launches, so after a
+ * crash or a throwing launch the same watch re-claims its issue on the next pass instead of losing it (release #4820 BUG-1).
+ */
 export function claimIssue(rdir, issue, name) {
   const lock = join(rdir, "claims.lock");
   mkdirSync(rdir, { recursive: true });
@@ -192,7 +199,7 @@ export function claimIssue(rdir, issue, name) {
   try {
     const f = join(rdir, "claims.json");
     const claims = readJson(f) ?? {};
-    if (claims[issue]) return false;
+    if (claims[issue]) return claims[issue] === name;
     claims[issue] = name;
     writeAtomic(f, JSON.stringify(claims) + "\n");
     return true;
