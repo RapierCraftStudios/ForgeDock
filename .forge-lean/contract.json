@@ -2,43 +2,25 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "`forgedock orchestrate 1 2` on Windows starts schedd and streams rows",
+   "quote": "A lane whose prompt is 40 KB runs on Windows",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "`--resume \u003cid>` reattaches over the pipe",
+   "quote": "The unit test for the argv/stdin decision covers win32",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "schedd tests cover the win32 path selection",
+   "quote": "Make the threshold platform-aware: on `win32` use stdin for any prompt above a conservative limit (e.g. 16 KiB), or always use stdin on Windows since `claude --print` reads it when no prompt argument is given.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R4",
-   "quote": "On `process.platform === \"win32\"`, derive the socket from the sched dir as a named pipe",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R7",
-   "quote": "for both `listen` and `createConnection`, and skip the stale-socket unlink for pipes.",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R5",
-   "quote": "Publish a release containing the `fileURLToPath` fix.",
-   "disposition": "post-deploy",
-   "why": "npm release publishing is a maintainer action outside the lane; the code fix (fileURLToPath in defaultSpawn) is delivered here as part of R6"
-  },
-  {
-   "id": "R6",
-   "quote": "Main uses `fileURLToPath`, which is correct.",
+   "quote": "Count the full command line (system-prompt file path, flags), not only the prompt.",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -46,56 +28,59 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/lean/schedd.mjs",
-   "change": "scheddPaths(dir, platform=process.platform): on win32 sock is \\\\.\\pipe\\forgedock-schedd-\u003csha1(resolve(dir)).slice(0,12)>; skip rmSync(p.sock) (startup and close) and the existsSync(p.sock) lost-socket watchdog on win32; scheddExists on win32 checks the lock file; defaultSpawn script default uses fileURLToPath(new URL(...)).",
+   "path": "bin/runner.mjs",
+   "change": "Add CLI_ARGV_PROMPT_MAX_BYTES_WIN32 (16 KiB) and a small pure helper promptGoesViaStdin(prompt, otherArgs, platform) choosing limit by platform and counting prompt bytes plus other argv bytes; use it at the promptViaStdin decision (~:1597), computing the non-prompt args first. Net growth under 150 lines; stdin delivery (:1653) unchanged.",
    "requirements": [
     "R1",
-    "R2",
-    "R4",
-    "R6",
-    "R7"
+    "R3",
+    "R4"
    ]
   },
   {
    "id": "D2",
-   "path": "bin/lean/schedd.test.mjs",
-   "change": "Add tests: scheddPaths(dir,'win32') returns a \\\\.\\pipe\\forgedock-schedd- name, stable per dir and distinct across dirs; linux/darwin keep join(dir,'schedd.sock'); defaultSpawn default script is a valid filesystem path (no leading '/C:').",
+   "path": "bin/lean/lean.test.mjs",
+   "change": "Extend the #4129 argv/stdin test (~:4238) with win32 cases: 40 KB prompt goes to stdin, 10 KB stays argv, long other args tip a borderline prompt to stdin; linux behaviour unchanged.",
    "requirements": [
-    "R3",
-    "R4",
-    "R6",
-    "R7"
+    "R2",
+    "R1",
+    "R4"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "POSIX behaviour: sock stays \u003cdir>/schedd.sock, with stale-socket unlink and lost-socket watchdog (bin/lean/schedd.mjs:139,281,296; tests schedd.test.mjs:72,327,368,457,610)"
+   "what": "Linux/macOS behaviour: prompts \u003c=64 KiB stay in argv, larger go over stdin (bin/runner.mjs runCliBackend, runCliBackendAsync)."
   },
   {
    "id": "P2",
-   "what": "scheddPaths return shape {dir,sock,lock,log} and connectDaemon/request signatures used by orchestrate (bin/lean/schedd.mjs:48,349,380)"
+   "what": "Existing export list tested at bin/tests/runner.test.mjs:7 and CLI_ARGV_PROMPT_MAX_BYTES export used by bin/lean/lean.test.mjs:4239."
+  },
+  {
+   "id": "P3",
+   "what": "DETERMINISTIC_SPAWN_ERRNOS and stdin delivery via spawn input (bin/runner.mjs:1541,1653)."
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/schedd.test.mjs bin/lean/batch.test.mjs"
+   "command": "node --test --test-concurrency=1 --test-name-pattern='4129|argv|stdin' bin/lean/lean.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test --test-concurrency=1 bin/tests/runner.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "node --check bin/runner.mjs"
   }
  ],
  "decisions": [
   {
    "id": "K1",
-   "choice": "Keep helper inside schedd.mjs with no new module; hash the resolved sched dir so distinct HOME/dirs get distinct pipes",
-   "justification": "Precedent: helpers stay in schedd.mjs next to batchEnv (#4734, PR #4743); tests already use per-test sched dirs (schedd.test.mjs:72)",
+   "choice": "Keep the helper in bin/runner.mjs rather than a new file",
+   "justification": "A new file under bin would join the enumerated file list at bin/lean/lean.test.mjs:66; the helper is ~10 lines, far below the 150-line hotspot growth limit.",
    "source": "precedent"
-  },
-  {
-   "id": "K2",
-   "choice": "On win32 skip the existsSync lost-socket watchdog rather than probing the pipe",
-   "justification": "Named pipes are not filesystem entries and vanish with their server; the lock-file watchdog (schedd.mjs:289-295) still covers takeover",
-   "source": "spec"
   }
  ]
 }

@@ -1,27 +1,20 @@
 ### Approach
-`scheddPaths` picks the socket by platform: on win32 a named pipe `\\.\pipe\forgedock-schedd-<sha1(resolved dir)[0:12]>`, elsewhere `<dir>/schedd.sock`. `listen` and `createConnection` already take `sock` from it, so both use the pipe. Filesystem-only socket handling is skipped on win32.
+Platform-aware pure helper in bin/runner.mjs deciding argv vs stdin; win32 bound 16 KiB counting the whole argv.
 
 ### Changes
-- bin/lean/schedd.mjs: platform-aware `scheddPaths`; skip stale-socket unlink (startup, close) and the existsSync lost-socket watchdog on win32; `scheddExists` checks the lock on win32; new `SCHEDD_SCRIPT` (fileURLToPath) as `defaultSpawn` default.
-- bin/lean/schedd.test.mjs: win32 path-selection test and spawn-script test.
+- bin/runner.mjs: add CLI_ARGV_PROMPT_MAX_BYTES_WIN32, promptGoesViaStdin(); runCliBackend uses it with the other args counted.
+- bin/lean/lean.test.mjs: #4763 test (win32 40 KB -> stdin, small -> argv, args counted, linux unchanged, runCliBackend under win32).
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/schedd.mjs:49 (pipe used for listen; not runnable on Windows in-lane)
-- R2 ✅ bin/lean/schedd.mjs:351 (connectDaemon uses same pipe)
-- R3 ✅ bin/lean/schedd.test.mjs (describe "#4762 win32 socket path")
-- R4 ✅ bin/lean/schedd.mjs:49
-- R5 post-deploy (npm release)
-- R6 ✅ bin/lean/schedd.mjs SCHEDD_SCRIPT
-- R7 ✅ listen/connect share `sock`; unlink skipped on win32
+- R1 ✅ bin/runner.mjs:1611 (40 KB on win32 goes via stdin)
+- R2 ✅ bin/lean/lean.test.mjs (#4763 test)
+- R3 ✅ bin/runner.mjs:1544-1547
+- R4 ✅ bin/runner.mjs:1611-1614
 
 ### Verification
-- V1 `node --test --test-concurrency=1 bin/lean/schedd.test.mjs bin/lean/batch.test.mjs`: 89 pass, 0 fail. New tests fail without the fix (scheddPaths ignores platform; SCHEDD_SCRIPT undefined).
-- `forgedock check`: PASS. devdocs freshness: not required.
+- V1 node --test ... --test-name-pattern='4129|argv|stdin|4763' bin/lean/lean.test.mjs: pass (6); new test fails without the fix (helper undefined, win32 40 KB stays in argv).
+- V2 bin/tests/runner.test.mjs: pass (252).
+- V3 node --check bin/runner.mjs: ok. forgedock check: PASS.
 
 ### Notes
-No env vars. POSIX behaviour unchanged. No formatter is configured in the repo.
-
-## Docs freshness fix
-Added entry "schedd listens on a named pipe on Windows (#4762)" to devdocs/modules/lean.md (dossier for bin/lean/*). V1 re-run: 89 pass, 0 fail.
-
-- Amendment: add-deliverable devdocs/modules/lean.md (dossier entry for the schedd named-pipe change, commit 3e5bdc08d).
+No env vars. Linux/macOS behaviour unchanged. No formatter configured in repo.
