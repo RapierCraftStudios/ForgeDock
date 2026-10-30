@@ -1032,7 +1032,7 @@ narrows them. Rationale: `devdocs/decisions/4199-incremental-not-restructure.md`
 
 `outcome-codes.mjs` `classifyNeedsHuman(row)` sorts a lane row into `recoverable`
 (needs-human `ci.red` / `base.conflict` / `builder.block_untyped`, `contract.invalid`
-with `issueEdited`, `ci-pending` on a conflicting PR → `base.conflict`), `human`
+with `issueEdited` or `quoteMismatch` (#4789: every contract problem was an unmatched quote), `ci-pending` on a conflicting PR → `base.conflict`), `human`
 (`builder.blocked`: credentials, spend, promotion, customer, product-decision) or
 `terminal`. `orchestrate()` option `recovery: {maxAttempts}` (forge.yaml
 `orchestration.recovery.max_attempts`, default 1, 0 = off; absent = old behaviour;
@@ -2038,3 +2038,12 @@ Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now
 
 Placement needs (`needsOf` in engine-cli `readBody`) now come from `placementText({body, comments})` (`execution.mjs`): the issue body, every `<!-- FORGE:DECISION` comment and the validate commands of the last parseable FORGE:CONTRACT comment, fetched in the same single `gh issue view` call. A rerun of an issue whose frozen contract runs `promtool` (declared in `execution.host_capabilities`), or whose decision says `ssh ovh-monitor obs-psql`, is placed local. On a first remote run, `runCore` checks the frozen contract right after the freeze: when `contractHostNeeds` finds a declared capability in a validate command and the lane is remote and not a recovery, it ends `env.capability_remote` before any implementation turn, and the host resumes it with the frozen contract. `orchestrate` `placeOf` now also relaunches `env.tool_missing` recoveries local (reason `host capability: recovering env.tool_missing`), so a sandbox that lacked the tool is not chosen again.
 Cite: #4785.
+
+## Entry 2026-10-30 — Quote check normalizes unicode and markup (#4789)
+
+`conformance.mjs` `norm` now folds curly quotes, dashes, ellipsis, zero-width
+characters, markdown links, `~`, `#` and backslash escapes on both sides of the
+verbatim check, so retyped quotes match. A miss appends `nearestSpan` (the issue line
+sharing most words) to the problem, which the correction prompt shows. A contract still
+invalid with only quote problems ends `contract.invalid` with `quoteMismatch`, which
+`classifyNeedsHuman` treats as recoverable (relaunch with a fresh plan).
