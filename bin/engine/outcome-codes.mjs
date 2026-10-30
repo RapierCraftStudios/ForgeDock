@@ -202,7 +202,7 @@ export const HUMAN_CODES = Object.freeze([OUTCOME_CODES.BUILDER_BLOCKED]);
 /**
  * `recoverable` | `human` | `terminal` for a lane result row ({outcome|terminalReason, code, issueEdited?, conflicting?}).
  * Recoverable: needs-human `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `env.capability_remote`, `budget.exceeded`, `contract.invalid` after a mid-run issue
- * edit (`issueEdited`), `ci-pending` on a conflicting PR (`conflicting`), and the non-human `budget-exceeded` turn-overrun end (forge#4505). Human: `builder.blocked`. Anything else
+ * edit (`issueEdited`) or when every problem was an unmatched quote (`quoteMismatch`), `ci-pending` on a conflicting PR (`conflicting`), and the non-human `budget-exceeded` turn-overrun end (forge#4505). Human: `builder.blocked`. Anything else
  * (another code, or not a needs-human/ci-pending row) is terminal. Pure, never throws.
  */
 export function classifyNeedsHuman(row, { parked = false } = {}) {
@@ -222,7 +222,7 @@ function classifyNeedsHumanBase(row) {
   if (outcome === "budget-exceeded") return "recoverable";
   if (outcome !== "needs-human") return "terminal";
   if (HUMAN_CODES.includes(row.code)) return "human";
-  if (row.code === OUTCOME_CODES.CONTRACT_INVALID) return row.issueEdited === true ? "recoverable" : "terminal";
+  if (row.code === OUTCOME_CODES.CONTRACT_INVALID) return row.issueEdited === true || row.quoteMismatch === true ? "recoverable" : "terminal";
   return RECOVERABLE_CODES.includes(row.code) ? "recoverable" : "terminal";
 }
 
