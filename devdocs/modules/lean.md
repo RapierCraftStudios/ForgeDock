@@ -52,6 +52,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    is saved to `refs/forge/salvage/<N>/<ms>` (`WORKTREE_SALVAGED`) and the
    implement prompt names the ref. This covers runs that died hard (no
    teardown); a run that exits normally checkpoints its work in teardown (#4179).
+   #4786: a PR-less remote/local lane branch whose diff vs the base is only tool state (`.forge-lean/`, `isToolState`)
+   holds no work: it is not resumed (no stale contract). The worktree is still built from the branch (pushes stay
+   fast-forward), the scratch is removed in a normal commit, and `SCRATCH_BRANCH_DROPPED` is emitted. Any real change
+   or an open PR resumes as before; `changedFiles()` ignores tool-state paths.
    **Sparse worktree** (#4221, `worktree.mjs` `addLaneWorktree`): tracked blobs
    >= forge.yaml `env.sparse_max_kb` (default 1024; 0 = off) stay out of the
    checkout (non-cone patterns in the worktree's own `info/sparse-checkout`;

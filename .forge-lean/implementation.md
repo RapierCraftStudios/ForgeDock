@@ -14,7 +14,7 @@ A remote lane branch with no open PR whose diff against the base holds only tool
 - V1 `node --test bin/lean/lean.test.mjs`: pass (515 pass). One earlier run had a failure in the unrelated #4690 scope-limit test; it passed on three reruns (timing flake).
 - V2 `node --test bin/lean/toolstate.test.mjs`: pass (8).
 - The new scratch-only test fails without the fix (the rerun note appears and no `git rm` happens); not run separately against the reverted code.
-- checks.mjs widened to the full suite (fan-out); not run, per host rules. No formatter configured in package.json. Devdocs freshness: not required.
+- checks.mjs widened to the full suite (fan-out); not run, per host rules. No formatter configured in package.json. Devdocs: devdocs/modules/lean.md updated (flow step 4).
 
 ### Notes
 No env vars. A scratch-only branch is kept as a ref; the scratch is deleted by a commit, no force-push.
