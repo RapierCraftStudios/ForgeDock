@@ -15,7 +15,8 @@ The main session's model is owned by `--model`. Subagents were not owned. An ope
 
 - **One `--settings` per lean session** (`leanSettingsFlags`, built in `makeLeanRunner`). Its `env` has two entries:
   - `CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "0"`, so a ForgeDock-defined agent's own `model` wins.
-  - `CLAUDE_CODE_SUBAGENT_MODEL` set to forge.yaml `agents.subagent_model` (sanitized), the default for agents without a model. When unset it is `""`, which gives Claude's own default.
+  - `CLAUDE_CODE_SUBAGENT_MODEL` set to forge.yaml `agents.subagent_model` (sanitized), the default for agents without a model. It is set only when configured. Unset leaves the operator's own default alone, because blanking it would silently change their cost (#4849, #4850).
+- **The owned `--settings` rides `extraArgs`**, not `sessionFlags`, so `FORGEDOCK_FULL_SESSION=1` (which drops session flags) keeps it. The re-read hooks still follow the session flags (#4848 BUG-1).
 - Verified by probe: with FORCE=0 set through `--settings`, the explorer ran on Haiku while an agent without a model ran on the configured default.
 - **The re-read hooks (#4456) are merged into the same object**, not a second `--settings`.
 - **`makeLeanIo` reads the config once**, through `readSubagentModel()` at the process cwd like every other engine-cli reader. So all 11 call sites (lanes, prefilter, gates) are covered without plumbing.

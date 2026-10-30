@@ -87,10 +87,13 @@ export const rereadNudgeFlags = (node = process.execPath, hook = REREAD_HOOK) =>
  * #4843: ForgeDock owns the subagent model of the sessions it launches. An operator settings.json `env` such as
  * CLAUDE_CODE_SUBAGENT_MODEL=sonnet + _FORCE=1 would otherwise override every subagent, the #4391 Haiku explorer
  * included, and a child env var cannot undo it (settings env wins); a `--settings` flag does. FORCE=0 lets a
- * ForgeDock-defined agent's own `model` win; CLAUDE_CODE_SUBAGENT_MODEL is forge.yaml `agents.subagent_model`
- * (the default for agents without one), or empty for Claude's own default.
+ * ForgeDock-defined agent's own `model` win. CLAUDE_CODE_SUBAGENT_MODEL (the default for agents without one) is
+ * set only from forge.yaml `agents.subagent_model`; unset leaves the operator's own default alone (#4849).
  */
-export const ownedModelEnv = (subagentModel = null) => ({ CLAUDE_CODE_SUBAGENT_MODEL: sanitizeCliModel(subagentModel) ?? "", CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "0" });
+export const ownedModelEnv = (subagentModel = null) => {
+  const m = sanitizeCliModel(subagentModel);
+  return { ...(m ? { CLAUDE_CODE_SUBAGENT_MODEL: m } : {}), CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "0" };
+};
 /** The one `--settings` of a lean session: the owned model env, plus the re-read hooks for builder sessions (#4456). */
 export const leanSettingsFlags = ({ subagentModel = null, reread = false } = {}) =>
   ["--settings", JSON.stringify({ env: ownedModelEnv(subagentModel), ...(reread ? { hooks: rereadHooks() } : {}) })];
@@ -100,10 +103,12 @@ export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRun
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
     // #4391: custom subagents (the explorer) for the builder session; null leaves argv unchanged
-    const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : []), ...(agents ? ["--agents", JSON.stringify(agents)] : []),
-      ...leanSettingsFlags({ subagentModel, reread: rereadNudge && !readOnly && !noTools })]; // #4843 owned models; #4456 re-read hooks: builder sessions only
+    const flags = [...buildLeanSessionFlags(caps), ...(noTools ? noToolFlags(caps) : readOnly ? buildReadOnlyToolFlags(caps) : []), ...(agents ? ["--agents", JSON.stringify(agents)] : [])];
+    // #4843 owned models, in extraArgs so FORGEDOCK_FULL_SESSION=1 (which drops sessionFlags) keeps them (#4848 BUG-1);
+    // #4456 re-read hooks: builder sessions only, and like the other session flags not in a full session
+    const settings = leanSettingsFlags({ subagentModel, reread: rereadNudge && !readOnly && !noTools && process.env.FORGEDOCK_FULL_SESSION !== "1" });
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
-      args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
+      args: [String(issue)], cwd, bin, model, maxTurns: caps?.maxTurns ? maxTurns : null, env, sessionFlags: flags, extraArgs: [...(resume ? ["--resume", resume] : []), ...settings],
       logger: { log() {} },
       idleMs, maxMs, stream: idleMs > 0, control, onSpawn, busy, busyMs, onIdleExtend, ...(contextMax > 0 ? { contextMax } : {}), ...(turnMax > 0 ? { turnMax } : {}), wrap: probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     // #4395: a resumed session's first turn carries the prior history, so only a fresh session reports a baseline.
