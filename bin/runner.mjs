@@ -2075,7 +2075,7 @@ export async function runCliBackendAsync(opts) {
       const finish = (r) => { if (settled) return; settled = true; clearInterval(timer); resolveP(r); };
       let child;
       const input = typeof o.input === "string" ? o.input : null; // forge#4129: large prompt over stdin
-      try { child = spawn(bin, args, { cwd: o.cwd, env: o.env, stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"], detached: true }); }
+      try { child = spawn(bin, args, { cwd: o.cwd, env: o.env, stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"], detached: true, windowsHide: true }); }
       catch (error) { return finish({ status: null, signal: null, pid: 0, error, stdout: "", stderr: "" }); }
       if (input !== null) { child.stdin.on("error", () => { /* child exited before reading: surfaced by close */ }); child.stdin.end(input); }
       const signalGroup = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };

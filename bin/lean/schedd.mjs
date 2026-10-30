@@ -365,7 +365,7 @@ export function defaultSpawn({ dir = schedDir(), script = new URL("../forgedock.
   mkdirSync(dir, { recursive: true });
   const out = openSync(scheddPaths(dir).log, "a");
   try {
-    const child = spawn(process.execPath, [script, "schedd"], { env, detached: true, stdio: ["ignore", out, out] });
+    const child = spawn(process.execPath, [script, "schedd"], { env, detached: true, windowsHide: true, stdio: ["ignore", out, out] });
     child.on?.("error", () => { /* the connect retry reports it */ });
     child.unref?.();
   } finally { closeSync(out); }

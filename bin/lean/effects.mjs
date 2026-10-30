@@ -236,7 +236,7 @@ export function runCheckCommand({ command, cwd, timeoutMs = 300000, env = null }
   return new Promise((done) => {
     let out = "", timedOut = false, child;
     const add = (b) => { out += String(b); if (out.length > 2 * CHECK_OUTPUT_CAP) out = out.slice(-CHECK_OUTPUT_CAP); };
-    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env: { ...process.env, ...env } } : {}) }); }
+    try { child = spawn("bash", ["-c", String(command)], { cwd, detached: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env: { ...process.env, ...env } } : {}) }); }
     catch (e) { done({ rc: 127, output: String(e?.message ?? e) }); return; }
     const kill = () => { try { process.kill(-child.pid, "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* gone */ } } };
     const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);

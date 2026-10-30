@@ -286,6 +286,7 @@ describe("lane launch env (#4179)", () => {
       spawnFn: (bin, argv, opts) => { spawned.push({ bin, argv, opts }); return { pid: 99, unref() {}, on() {} }; } });
     assert.equal(pid, 99);
     assert.equal(spawned[0].opts.env.FORGEDOCK_BATCH_ID, batch.id);
+    assert.equal(spawned[0].opts.windowsHide, true);
     assert.equal(spawned[0].opts.env.KEEP, "1");
     assert.deepEqual(spawned[0].argv, ["/x/forgedock.mjs", "run-issue", "7", "--repo", "o/r", "--result-file", batch.resultFile(7)]);
   });

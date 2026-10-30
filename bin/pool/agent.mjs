@@ -344,7 +344,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       // systemd services lack WSL_INTEROP; point it at a live interop socket so wsl.exe can run.
       const sock = (() => { try { return readdirSync("/run/WSL").filter((f) => f.endsWith("_interop")).map((f) => join("/run/WSL", f)).sort().pop(); } catch { return null; } })();
       setTimeout(() => {
-        const child = spawn("/mnt/c/Windows/System32/wsl.exe", ["--shutdown"], { detached: true, stdio: "ignore", env: { ...process.env, ...(sock ? { WSL_INTEROP: sock } : {}) } });
+        const child = spawn("/mnt/c/Windows/System32/wsl.exe", ["--shutdown"], { detached: true, windowsHide: true, stdio: "ignore", env: { ...process.env, ...(sock ? { WSL_INTEROP: sock } : {}) } });
         child.unref();
       }, 1500);
     }
