@@ -2,61 +2,43 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "Each trigger type fires correctly, including an immediate security trigger below threshold (tests).",
+   "quote": "Adapter contract (command → normalised JSON) plus the memo, alertmanager, sql and prometheus adapters, read-only enforced except a declared close command.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "Deterministic theme classification from labels, scope and paths; the LLM fallback only for unclassified issues, and counted.",
+   "quote": "`bin/lean/prodwatch-sources.mjs` exports the normalised signal shape `{id, source, title, severity, owner, first_seen, last_seen, body, query?}`, plus `parseSources(cfg)` for `prod_watch.sources` entries (`list`/`read`/`close`/`run`/`queries`), `runAdapter(source, io)`, and per-kind normalisers (memo dir, Alertmanager v2 alerts JSON, SQL rows, Prometheus vector with threshold).",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "The release set includes its `Depends on` closure and respects the cap; the remainder rolls over with age kept.",
+   "quote": "Read-only enforcement: adapters execute only the declared `list`/`read`/`run` commands through `io.exec`.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R4",
-   "quote": "`FORGE:RELEASE_PLAN` record plus a milestone or label tag; one batch per release; a deploy PR is opened and never merged by the watch.",
+   "quote": "`close` is reachable only through a separate `closeSignal()` that requires an audit record.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R5",
-   "quote": "Dry run shows the theme scores and the would-cut set.",
+   "quote": "No other write path. Tests use injected exec fixtures.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R6",
-   "quote": "Let a watch (#4765) **accumulate** eligible issues for a target (a milestone branch or the no-milestone/staging group) until a configurable threshold is crossed.",
+   "quote": "Repo is PUBLIC: no raw customer data in fixtures.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R7",
-   "quote": "A watch with `mode: release` claims nothing immediately.",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R8",
-   "quote": "Score each theme from its issue priorities, age and the target repo's `NORTHSTAR.md` priorities and tie-break order (#4766).",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R9",
-   "quote": "**Promotion stays human-only.** The watch never merges to the default branch.",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R10",
-   "quote": "`issue-watch --dry-run` prints `would cut: stealth (14 issues, score 46; security pool 1 \u003c threshold)` along with the per-issue theme classification.",
+   "quote": "Rules: pure functions with an injected `io` (exec/gh/llm/now) like bin/lean/issuewatch.mjs; read-only by contract; deterministic first; core stays repo-agnostic (#1347).",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -64,126 +46,80 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/lean/issuewatch-release.mjs",
-   "change": "New module: priority score (P0=8,P1=4,P2=2,P3=1; labels P0 or priority:P0), triggers (min_issues, min_score, max_age_days, immediate classes label:/priority:), theme classification from theme_map rules (label:, path: globs matched against paths named in the body, title conventional-commit scope as theme name), injected LLM fallback for unclassified with counter, theme scoring with NORTHSTAR tie-break order, Depends-on closure (cross-theme deps pulled in and marked) trimmed to max_release_issues, FORGE:RELEASE_PLAN comment text, releaseTick (pool, decide, claim via claimIssue, tag via milestone/label, start one batch, on report open deploy PR once, never merge), dryRun report.",
+   "path": "bin/lean/prodwatch-sources.mjs",
+   "change": "New pure ESM module exporting normalizeSignal, parseSources, runAdapter, closeSignal and per-kind normalisers (memo, alertmanager, sql, prometheus). Only list/read/run are exec'd by runAdapter; closeSignal writes the audit record first and is the sole close path; placeholder values ({id},{issue},{reason}) validated/shell-quoted. No LLM, no fs/network except via io.",
    "requirements": [
     "R1",
     "R2",
     "R3",
     "R4",
     "R5",
-    "R6",
-    "R7",
-    "R8",
-    "R9",
-    "R10"
+    "R7"
    ]
   },
   {
    "id": "D2",
-   "path": "bin/lean/issuewatch.mjs",
-   "change": "Add keys threshold, immediate, max_release_issues, theme_map (and optional tracker) to WATCH_KEYS; accept mode release with validation; extend parseWatches for flow maps and a nested theme_map block; dispatch release mode to releaseTick in runWatch/CLI; add --dry-run flag; extend status for pool/release.",
-   "requirements": [
-    "R4",
-    "R5",
-    "R7",
-    "R10"
-   ]
-  },
-  {
-   "id": "D3",
-   "path": "bin/lean/issuewatch-release.test.mjs",
-   "change": "Tests for each trigger incl. immediate security below threshold, theme classification and counted LLM fallback, closure + cap + rollover age, plan/tag/batch/deploy-PR once and no merge call, dry-run output, nothing claimed before a trigger.",
+   "path": "bin/lean/prodwatch-sources.test.mjs",
+   "change": "node:test with injected io.exec fixtures: each adapter's normalisation, Prometheus threshold crossing, parseSources validation errors, an exec-spy proving runAdapter never runs close, closeSignal refusing without audit/close command and auditing before exec, placeholder injection rejected. Synthetic data only.",
    "requirements": [
     "R1",
     "R2",
     "R3",
     "R4",
     "R5",
-    "R7",
-    "R9"
-   ]
-  },
-  {
-   "id": "D4",
-   "path": "bin/lean/issuewatch.test.mjs",
-   "change": "Add parse/validate cases for mode release, flow-map threshold, theme_map block, bad values.",
-   "requirements": [
     "R6"
    ]
   },
   {
-   "id": "D5",
-   "path": "bin/forgedock.mjs",
-   "change": "Update the issue-watch usage line (~:3362) with --dry-run and mode release.",
+   "id": "D3",
+   "path": "devdocs/modules/lean.md",
+   "change": "Add one sentence beside the issuewatch paragraph describing prodwatch-sources.mjs (signal adapters, read-only, closeSignal audit) so check-devdocs-freshness passes.",
    "requirements": [
-    "R5"
-   ]
-  },
-  {
-   "id": "D6",
-   "path": "docs/ISSUE-WATCH.md",
-   "change": "Document release mode: triggers, themes, closure, plan, tag, deploy PR, rollover, dry run.",
-   "requirements": [
-    "R6"
-   ]
-  },
-  {
-   "id": "D7",
-   "path": "docs/CONFIG.md",
-   "change": "Add threshold, immediate, max_release_issues, theme_map keys and mode release to the issue_watch table.",
-   "requirements": [
-    "R6"
+    "R7"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "per-issue and batch modes, claimIssue cross-watch single-claim, laneFor default-branch refusal in bin/lean/issuewatch.mjs; all existing exports and bin/lean/issuewatch.test.mjs cases"
+   "what": "bin/lean/issuewatch.mjs and bin/lean/issuewatch-release.mjs exports and behaviour (no edits; their tests stay green)"
   },
   {
    "id": "P2",
-   "what": "Existing flat forge.yaml watch parsing (scalars, [a,b] lists) from parseWatches"
-  },
-  {
-   "id": "P3",
-   "what": "bin/lean/decision-engine.mjs API (loadPolicy/settle) is read, not modified"
+   "what": "Enumerating tests under bin/lean and bin/engine (telemetry-seam, batch, checks, conformance, context, drift, execution, fixround) list unrelated sibling names; no change needed, none touched"
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test bin/lean/issuewatch.test.mjs bin/lean/issuewatch-release.test.mjs"
+   "command": "node --test bin/lean/prodwatch-sources.test.mjs"
   },
   {
    "id": "V2",
-   "command": "node --test bin/lean/decision-engine.test.mjs bin/lean/gatewatch.test.mjs"
+   "command": "node --check bin/lean/prodwatch-sources.mjs && node --test bin/lean/issuewatch.test.mjs bin/lean/issuewatch-release.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "bash scripts/check-devdocs-freshness.sh origin/staging"
   }
  ],
  "decisions": [
   {
    "id": "K1",
-   "choice": "New file bin/lean/issuewatch-release.mjs instead of growing issuewatch.mjs",
-   "justification": "issuewatch.mjs is a 320-line wiring file whose header states pure-function split; precedent decision-engine.mjs/gatewatch.mjs as sibling modules (NORTHSTAR: specs/files stay small)",
+   "choice": "Do not reuse issuewatch.mjs parseWatches/scalar for sources; parseSources takes an already-parsed cfg object",
+   "justification": "scalar (bin/lean/issuewatch.mjs:27-33) splits flow maps on commas and would break ssh commands containing commas; forge.yaml loading belongs to the runner (#4838)",
    "source": "precedent"
   },
   {
    "id": "K2",
-   "choice": "LLM fallback and all gh/clock/batch side effects go through injected io (io.classify), mirroring the existing io seam",
-   "justification": "bin/lean/issuewatch.mjs:181 documents injected io; NORTHSTAR non-negotiable 1 (deterministic first)",
+   "choice": "New standalone module with no dependencies; injected io.exec returning {code, stdout}",
+   "justification": "Matches issuewatch injected-io pattern (bin/lean/issuewatch.mjs:1-12) and NORTHSTAR non-negotiable 1 (deterministic first)",
    "source": "doc"
   },
   {
    "id": "K3",
-   "choice": "Deploy PR is opened with gh pr create only (base = default branch, head = release lane), recorded in state.deployPr; no merge call exists in the module and a test asserts it",
-   "justification": "Issue: promotion stays human-only; laneFor refuses default lanes at bin/lean/issuewatch.mjs:124",
-   "source": "spec"
-  },
-  {
-   "id": "K4",
-   "choice": "NORTHSTAR priorities read as an optional ordered `Release priorities:` list in the policy text from loadPolicy; absent means score then theme name",
-   "justification": "Issue says #4766 supplies tie-breaks, but decision-engine.mjs:47 exposes only raw policyText",
+   "choice": "closeSignal appends the audit record before exec and refuses if the append fails",
+   "justification": "Issue requires close to need an audit record; auditing first guarantees no unaudited write",
    "source": "spec"
   }
  ]
