@@ -916,6 +916,8 @@ branches:
 #   #     lint: "ruff check ."
 #   #     typecheck: "mypy src/ --ignore-missing-imports"
 #   #     test: "pytest tests/ -x -q --tb=short"
+#   #     # Changed-file scoped (/review-pr Phase 2): $FORGE_CHANGED_FILES = changed files, newline-separated.
+#   #     test_changed: "pytest -q $(printf '%s\n' $FORGE_CHANGED_FILES | grep 'test_.*\.py$')"
 #   #     build: ""   # omit or leave empty to skip
 #   #
 #   #   # TypeScript project using tsc + vitest
@@ -926,6 +928,9 @@ branches:
 #   #     lint: "eslint src/"
 #   #     typecheck: "tsc --noEmit"
 #   #     test: "vitest run"
+#   #     # Changed-file scoped (/review-pr Phase 2) for repos where full tsc or the full suite is too slow:
+#   #     test_changed: "vitest related $FORGE_CHANGED_FILES --run"
+#   #     typecheck_changed: "tsc --noEmit -p tsconfig.json 2>&1 | grep -F \"$FORGE_CHANGED_FILES\" && exit 1 || exit 0"
 #   #     build: "npm run build"
 #   #
 #   #   # Go project
