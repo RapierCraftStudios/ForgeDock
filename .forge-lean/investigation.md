@@ -1,42 +1,41 @@
 **Verdict**: CONFIRMED
 **Confidence**: high
-**Severity**: medium (missing building block for the prod-watch epic #4768; no existing behaviour broken)
-**Task Type**: feature
+**Severity**: medium (a large read-only relay answer is never delivered: the host re-runs the prod query on every lane status poll, the lane gets a misleading rc 125 timeout, and the stuck entry eats one of 8 pending slots)
+**Task Type**: bug
 
 ### What Was Claimed
-Add `bin/lean/prodwatch-sources.mjs`: a normalised signal shape `{id, source, title, severity, owner, first_seen, last_seen, body, query?}`, `parseSources(cfg)` for `prod_watch.sources`, `runAdapter(source, io)`, and memo/alertmanager/sql/prometheus normalisers. Adapters run only declared `list`/`read`/`run` through `io.exec`; `close` is reachable only via a separate `closeSignal()` that needs an audit record. Tests use injected exec fixtures.
+`servicePending` (bin/lean/relay.mjs:138) posts the full relay answer; when its JSON body exceeds the router's 1 MiB body limit the router answers 413, `relayAnswer` throws, the catch swallows it as "retried on the next poll", the request stays pending, the host re-runs the command every poll and the sandbox times out with rc 125.
 
 ### What We Found
-- `git ls-files | grep -i prodwatch` is empty, and no `prod_watch` reference exists in the repo. The module is absent.
-- Pattern to copy: bin/lean/issuewatch.mjs:1-12 (pure functions, injected `io`, no LLM, SPDX header) and :39 `parseWatches`, which hand-parses forge.yaml because parseForgeYaml reads one nested level. Flow maps such as `{ list: "...", close: "..." }` are handled by `scalar` at :27-33 (not exported; it splits on commas, so quoted commands with commas would break). `parseSources(cfg)` takes an already-parsed object, so it avoids this.
-- The #4768 config example has `list`/`read`/`close` with `{id}`/`{issue}`/`{reason}` placeholders and `run` + `queries`. Commands contain shell quoting (ssh '...'), so substituted values need strict validation.
-- The enumerating tests named in the brief (telemetry-seam, batch, checks, conformance, context, drift, execution, fixround) do not reference issuewatch or gatewatch (grep -l empty). Only they list unrelated names, so a new sibling file does not break them.
-- devdocs/index.yaml:130 maps `bin/lean/*` to devdocs/modules/lean.md, and scripts/check-devdocs-freshness.sh needs that dossier touched when a non-test bin/lean file is added. The #4767 precedent (86becc861) edited devdocs/modules/lean.md:2129 and docs/CONFIG.md.
+Verified on origin/staging (e8df65dd, the merge base of this branch):
+- bin/lean/relay.mjs:60 `runRelayed` caps each stream at `maxBytes = 1 << 20` (stdout and stderr separately), so an answer can carry ~2 MiB of text before JSON escaping.
+- bin/lean/relay.mjs:137 builds `{rc, stdout, stderr}` with no size bound; :138 `try { await transport.relayAnswer(...) } catch { /* retried on the next poll */ }` swallows every failure, including non-retryable 4xx.
+- bin/lean/sandbox-remote.mjs:85 `relayAnswer` throws `fail("relay answer", r)` on any non-ok status; `fail` (:62-68) sets `e.status`, `transient` only for 502/503/504, `retryable` for 429/503.
+- bin/pool/router.mjs:315 parses every POST body with `readJson(req)`; bin/pool/http.mjs:5-10 default limit `1 << 20` throws `{status: 413}`; router.mjs:320-322 sends it as `413 body too large`. `relayAnswer` (router.mjs:61-66) is never reached, so the entry stays `!done`.
+- bin/pool/router.mjs:263 lists every `!done` entry on `GET /sandboxes/:id/relay`, so the next status poll (sandbox-remote.mjs:146-148) re-runs the command; router.mjs:47 counts the stuck entry toward `RELAY_MAX_PENDING = 8` (:38), later requests get 429.
+- JSON escaping (`\n` -> 2 bytes, `"` -> 2 bytes, control chars -> 6 bytes) means stdout well under 1 MiB (e.g. ~600 KB of newline/quote-heavy text) already crosses the limit.
+- bin/lean/relay.test.mjs:87-99 covers the answer path only with tiny outputs and a generic throw; no size or 4xx case.
 
 ### Root Cause
-Feature absent. Prod-watch (#4768) has no signal-ingestion layer; siblings #4834-#4838 depend on its normalised shape.
+The host never bounds the serialized answer to what the router accepts, and treats every answer failure as retryable, so a deterministic 413 becomes an infinite re-run loop.
 
 ### Affected Files
-- bin/lean/prodwatch-sources.mjs (NEW)
-- bin/lean/prodwatch-sources.test.mjs (NEW)
-- devdocs/modules/lean.md (one sentence under the issuewatch paragraph, for the freshness check)
-- Enumerating tests: none need a list change (verified by grep above); not touched.
+- bin/lean/relay.mjs (cap the answer, post a small fallback on a non-retryable 4xx)
+- bin/lean/relay.test.mjs (regression tests)
+- bin/tests/relay.e2e.test.mjs (optional: large-output case through the real router)
+- Enumerating tests (bin/lean listed by name): bin/engine/telemetry-seam.test.mjs:24, bin/lean/batch.test.mjs:29, bin/lean/checks.test.mjs:156, bin/lean/conformance.e2e.test.mjs:74, bin/lean/conformance.test.mjs:404, bin/lean/context.test.mjs:138, bin/lean/drift.test.mjs:14, bin/lean/execution.e2e.test.mjs:28, bin/lean/execution.test.mjs:43, bin/lean/fixround.test.mjs:10. No new file is added under bin/lean, so none of their lists change; they are run as a guard (V3).
 
 ### Sibling Sweep
-Same defect class (a command-running adapter must not allow writes): bin/lean/issuewatch.mjs shells out only via injected `io.gh`; bin/lean/gatewatch.mjs is read-only. There is no shared exec-allowlist helper, so the new file defines its own. Placeholder injection into shell commands is the main risk; `{id}` must be restricted to `[A-Za-z0-9._:-]`. No other sibling to fix.
+- Pre-fetch at dispatch (bin/lean/sandbox-remote.mjs:151-165) runs the same commands but already caps its payload at `PREFETCH_MAX_B64` and skips oversized results: not affected.
+- Agent -> router relay request body is capped (bin/pool/agent.mjs:255 `readJson(req, 32 * 1024)`, router.mjs:45 `RELAY_MAX_BYTES`): not affected.
+- Router -> agent -> sandbox answer delivery is a GET response (router.mjs:53-59, agent.mjs:254), not subject to `readJson`: not affected once the answer is bounded.
+- Transient answer failures (502/503/504) still re-run the command on the next poll by design (relay.mjs:126 doc); not this issue's defect, left unchanged.
 
 ### History
-No prior prodwatch code. Builds on #4765 (issuewatch.mjs, 2245e525e) and #4767 (86becc861 release mode, 94e086fca). Parent #4768 was closed not_planned on GitHub while its children remain open; the issue and siblings are still live.
+Introduced by 56c0b93e "feat(execution): read-only capability relay for sandbox lanes (#4778)" (PR #4821); found in the staging review of release PR #4820. No prior fix.
 
 ### Recommendation
-New pure module, ESM, no deps:
-- `normalizeSignal(raw, source)` returns the exact 8 fields plus optional `query`. Severity is coerced to `P0..P3|unknown`, timestamps to ISO or null, body capped at a fixed length.
-- `parseSources(cfg)` accepts `cfg.sources` or `cfg.prod_watch.sources`. It infers kind: `list`+`read` = memo; `run`+`queries` = sql; `kind:` explicit for alertmanager (command returns v2 alerts JSON) and prometheus (`run`, `queries` with `{name, expr, threshold, op}`). It throws on unknown keys, a missing required command, or a non-string command.
-- `runAdapter(source, io)` returns `{signals, errors}`. The only exec calls are `source.list`, `source.read` (id substituted) and `source.run` (query substituted). It never touches `close`. `io.exec` is `(cmd) => {code, stdout}`.
-- Per-kind normalisers: memo (list output = lines of ids; read output text or JSON), alertmanager (labels.severity, annotations, startsAt/endsAt fingerprint id), sql (each row becomes a signal, id = query name + row key), prometheus (vector result; signal only when value crosses threshold; `query` set).
-- `closeSignal(source, signal, {issue, reason, audit}, io)`: refuses without `source.close`, or without an `audit` record `{by, at, reason}` where `audit.append` was injected. It writes the audit entry BEFORE exec and records the result. It is the only function that execs `close`.
-- Read-only enforcement test: an io.exec spy asserts that across all adapters only declared list/read/run strings are exec'd and `close` is never exec'd by runAdapter.
-- Fixtures synthetic, no customer data.
+In bin/lean/relay.mjs: add `export const RELAY_ANSWER_MAX_BYTES = 512 * 1024` and a pure `capAnswer(out, max = RELAY_ANSWER_MAX_BYTES)` that, when `Buffer.byteLength(JSON.stringify(out)) > max`, trims stdout then stderr (UTF-8 safe) until the serialized answer fits, appends `relay: output over N bytes, truncated` to stderr and sets rc 1 (same convention as relay.mjs:66). Apply it at :137. At :138, when the error has a 4xx `status` other than 429 (non-retryable), post a small `{rc: 1, stdout: "", stderr: "relay: answer rejected by the router (HTTP <status>)"}` for the same rid and count it; keep swallowing transient/429 errors and a failed fallback. Keep the router's generic 1 MiB limit (bin/pool/http.mjs:5) unchanged.
 
 ### Related Issues
-Parent #4768; siblings #4834 (triage), #4835 (governor), #4836 (verification loop, uses closeSignal), #4837, #4838 (runner/CLI, consumes parseSources); precedents #4765, #4766, #4767.
+#4778 / PR #4821 (relay introduced), PR #4820 (release review that found it).
