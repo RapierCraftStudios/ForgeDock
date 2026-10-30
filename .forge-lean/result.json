@@ -1,17 +1,19 @@
-{"status":"fixed","summary":"trusted Blocked by edges, configurable blocked label and --add edge report in the batch scheduler","requirements":[
-{"id":"R1","status":"implemented","evidence":"bin/lean/orchestrate.mjs declared; bin/engine-cli.mjs addedEdges"},
-{"id":"R2","status":"implemented","evidence":"bin/engine-cli.mjs addedEdges OPEN-only"},
-{"id":"R3","status":"implemented","evidence":"bin/lean/orchestrate.mjs refreshBlocked/isReady"},
-{"id":"R4","status":"implemented","evidence":"bin/engine-cli.mjs addToBatch edges line"},
-{"id":"R5","status":"implemented","evidence":"bin/lean/orchestrate-blocked.test.mjs:11"},
-{"id":"R6","status":"implemented","evidence":"bin/lean/orchestrate-blocked.test.mjs:21"}],
+{"status":"fixed","summary":"/review-pr Phase 2 exports FORGE_CHANGED_FILES and runs typescript.typecheck_changed, typescript.test_changed and python.test_changed with printed exit codes","requirements":[
+{"id":"R1","status":"implemented","evidence":"commands/review-pr.md:329"},
+{"id":"R2","status":"implemented","evidence":"commands/review-pr.md:324"},
+{"id":"R3","status":"implemented","evidence":"commands/review-pr.md:329"},
+{"id":"R4","status":"implemented","evidence":"commands/review-pr.md:308"},
+{"id":"R5","status":"implemented","evidence":"commands/review-pr.md:324,330-332,342"},
+{"id":"R6","status":"implemented","evidence":"commands/forgedock-init.md (4E decision list)"}],
 "validation":[
-{"id":"V1","command":"node --test bin/lean/orchestrate-blocked.test.mjs bin/tests/orchestrate-add-edges.test.mjs","exit":0},
-{"id":"V2","command":"node --test bin/lean/batch.test.mjs bin/tests/orchestrate-preflight.test.mjs bin/tests/orchestrate-runtime-paths.test.mjs","exit":0}],
-"tests":[{"command":"node --test bin/lean/orchestrate-blocked.test.mjs bin/tests/orchestrate-add-edges.test.mjs","result":"pass","fails_without_fix":true}],
+{"id":"V1","command":"bash scripts/review-pr-changed-verification.test.sh","exit":0},
+{"id":"V2","command":"bash scripts/check-spec-size.test.sh","exit":0},
+{"id":"V3","command":"bash scripts/review-pr-gate2.test.sh","exit":0},
+{"id":"V4","command":"bash scripts/review-prepare.test.sh","exit":0}],
+"tests":[{"command":"bash scripts/review-pr-changed-verification.test.sh","result":"pass: 17 passed","fails_without_fix":true}],
 "self_review":[
-{"question":"1","answer":"yes","evidence":"R1-R6 mapped above; tests pass"},
-{"question":"2","answer":"yes","evidence":"batch.test.mjs updated for readOrchestration shape and passes; forgedock check PASS"},
-{"question":"3","answer":"yes","evidence":"D1-D6 changed; forgedock check PASS"},
-{"question":"4","answer":"yes","evidence":"only deliverables, tests and required dossiers changed; check-devdocs-freshness OK"}],
+{"question":"1","answer":"yes","evidence":"R1-R6 each map to commands/review-pr.md:308-342, docs/CONFIG.md, forge.yaml.example, commands/forgedock-init.md; the test exercises the extracted fence"},
+{"question":"2","answer":"yes","evidence":"gate2 test 19/0, spec-size PASS, classify-finding/verify-phase-trail/lint-dispatch-prompt pass; existing test and SKIPPED paths unchanged"},
+{"question":"3","answer":"yes","evidence":"all deliverables D1-D5 changed; P1-P4 intact (test flaky classifier kept, review-pr-staging untouched, env var only); V4 exits 0 but the script skips itself because yq is not installed on this host"},
+{"question":"4","answer":"yes","evidence":"git diff --stat origin/staging...HEAD touches only the five deliverable paths (plus .forge-lean notes)"}],
 "amendments":[]}

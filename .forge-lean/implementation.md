@@ -1,20 +1,28 @@
 ### Approach
-Scheduler gains issue-level readiness: `trusted(n)` gates `Blocked by`/`Depends on` edges to trusted authors, `getBlocked()` withholds dispatch of labelled issues and polls so removing the label releases them. `--add` reports the edges it creates.
+Phase 2 of `/review-pr` now exports the PR's existing changed files as `$FORGE_CHANGED_FILES` and runs three optional scoped steps (`typescript.typecheck_changed`, `typescript.test_changed`, `python.test_changed`) through the existing `run_step` and test-loop paths. Files reach commands by env var, never spliced into the eval'd string.
+
 ### Changes
-- bin/lean/orchestrate.mjs: `trusted`, `getBlocked`, `declared`, `refreshBlocked`, isReady/wake handling.
-- bin/engine-cli.mjs: readBody fetches author, `getBlocked` wiring, `blocked_label` in readOrchestration, `addedEdges` + edge report in addToBatch.
-- docs/CONFIG.md, commands/orchestrate.md, devdocs/modules/{lean,orchestrate}.md: docs.
-- bin/lean/orchestrate-blocked.test.mjs, bin/tests/orchestrate-add-edges.test.mjs (new), bin/lean/batch.test.mjs (readOrchestration shape).
+- commands/review-pr.md: export of `FORGE_CHANGED_FILES`; `typecheck_changed` after `typecheck`; test loop runs `test` and `test_changed` with `EXIT <lang>.<step>=N`, flaky classifier kept; test SKIPPED only when neither form is set; bullet describing blocking rules.
+- docs/CONFIG.md: row documenting the three keys and the env var.
+- forge.yaml.example: commented examples.
+- commands/forgedock-init.md: suggest the commands when vitest/pytest is detected.
+- scripts/review-pr-changed-verification.test.sh: new test running the extracted Phase 2 fence with a stub yq.
+
 ### Acceptance Criteria Status
-- R1 ✅ orchestrate.mjs declared(); engine-cli.mjs addedEdges
-- R2 ✅ engine-cli.mjs addedEdges (OPEN only), trusted gate
-- R3 ✅ orchestrate.mjs refreshBlocked/isReady
-- R4 ✅ engine-cli.mjs addToBatch edges line
-- R5 ✅ orchestrate-blocked.test.mjs first test
-- R6 ✅ orchestrate-blocked.test.mjs second test
+- R1 ✅ commands/review-pr.md:329-339
+- R2 ✅ commands/review-pr.md:324 (command is user-configured; docs/CONFIG.md and forge.yaml.example show the filtered-tsc recipe)
+- R3 ✅ commands/review-pr.md:329
+- R4 ✅ commands/review-pr.md:308
+- R5 ✅ commands/review-pr.md:324,330-332,342
+- R6 ✅ commands/forgedock-init.md (4E decision list)
+
 ### Verification
-`forgedock check` PASS: V1 (new tests) and V2 (batch/preflight/runtime-paths) exit 0, plus all repo scripts. New tests fail without the fix (seams/edges absent).
+- V1 review-pr-changed-verification.test.sh: 17 passed; with the spec change reverted it fails 10 checks.
+- V2 check-spec-size.test.sh: pass 45; check-spec-size.sh origin/staging: PASS.
+- V3 review-pr-gate2.test.sh: 19 passed.
+- V4 review-prepare.test.sh: skipped by the script (yq not installed on this host).
+- check-devdocs-freshness.sh: no devdocs update required.
+- `forgedock check`: first run timed out on 3 slow tests (300s, host load; each passes alone in about 2 min); second run PASS.
+
 ### Notes
-New forge.yaml key `orchestration.blocked_label` (default `blocked`, empty disables).
-### CI fix
-`bin/lean/lean.test.mjs`: the CLI orchestrate fixtures predate the trust gate. The cross-lane test's issue body now carries `authorAssociation: "OWNER"`, so its `Depends on` line is still an edge. The maintenance test's "no extra `issue list`" assertion now allows the per-tick `--label blocked` read. Production code is unchanged.
+New env var `FORGE_CHANGED_FILES` (newline-separated, existing files only; deleted files are dropped). `typecheck_changed` runs inside the node_modules guard. Unconfigured `typecheck_changed` prints a SKIPPED line like the other steps.
