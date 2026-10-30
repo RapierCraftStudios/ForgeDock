@@ -16,3 +16,5 @@ Scheduler gains issue-level readiness: `trusted(n)` gates `Blocked by`/`Depends 
 `forgedock check` PASS: V1 (new tests) and V2 (batch/preflight/runtime-paths) exit 0, plus all repo scripts. New tests fail without the fix (seams/edges absent).
 ### Notes
 New forge.yaml key `orchestration.blocked_label` (default `blocked`, empty disables).
+### CI fix
+`bin/lean/lean.test.mjs`: the CLI orchestrate fixtures predate the trust gate. The cross-lane test's issue body now carries `authorAssociation: "OWNER"`, so its `Depends on` line is still an edge. The maintenance test's "no extra `issue list`" assertion now allows the per-tick `--label blocked` read. Production code is unchanged.
