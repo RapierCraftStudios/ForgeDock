@@ -1,40 +1,31 @@
-**Verdict**: CONFIRMED
+**Verdict**: ALREADY-FIXED
 **Confidence**: high
-**Severity**: high (remote batches stall silently for hours; lanes give up)
+**Severity**: high (was: remote batches stall silently)
 **Task Type**: bug
 
 ### What Was Claimed
-With every computeshare agent offline, `sandbox.unreachable` lanes burn `max_deferrals` and give up; new launches loop on `sandbox.capacity` 503 forever; nobody is alerted. The addendum says `execution.fallback_local` cannot fire because the computeshare router gives no `online` count.
+With every compute-pool agent offline, `sandbox.unreachable` lanes exhaust `max_deferrals`, the router gives no `online` count so `fallback_local` never fires, and nothing alerts.
 
 ### What We Found
-- bin/lean/orchestrate.mjs:123 `UNCAPPED_DEFERRALS` holds only `host.busy` and `sandbox.capacity`. `sandbox.unreachable` goes through the capped path (:175-179, :600-619) and ends "gave up after N deferrals".
-- bin/lean/execution.mjs:~519 `unreachable()` returns deferred `SANDBOX_UNREACHABLE` with retryInSeconds 60. It is the code that is capped.
-- bin/lean/orchestrate.mjs:481 the fallback needs `cap.online === 0`.
-- bin/lean/sandbox-remote.mjs:80-91 `httpTransport.capacity()` reads only `GET /status` for `{free, online, total}`. A 404 or malformed reply gives null, so `online` is unknown and the fallback never fires.
-- bin/pool/router.mjs:89-94 and :230 the built-in router derives `online` (`ok && !paused`) and serves `/status`. The computeshare router has `/agents` only (`/status` and `/capacity` are 404 there).
-- bin/engine-cli.mjs:1628 samples capacity and `online`, so a transport that returns `online` is enough.
-- Nothing emits a pool-offline event or alert. Grep for notify in orchestrate.mjs and engine-cli.mjs found nothing relevant.
+- bin/lean/orchestrate.mjs:125 `UNCAPPED_DEFERRALS` now includes `sandbox.unreachable`.
+- bin/lean/orchestrate.mjs:487-495 tracks `poolOfflineSince` and emits one `pool-offline` update after `poolOfflineMin` (default 10); it resets when online > 0.
+- bin/lean/sandbox-remote.mjs:88-93 `capacity()` derives `online` and `total` from `GET /agents` (`ok && !paused`) when `/status` has none.
+- bin/lean/batch.test.mjs:982 covers the one-shot event and the reset.
 
 ### Root Cause
-1. `sandbox.unreachable` is capped like an ordinary deferral, although it means the pool is down (a wait, not a failure; see #4528).
-2. The remote transport derives liveness only from `/status`, so against a router without it `online` is undefined and #4547 is dead.
-3. No stall detector or alert.
+Fixed by 9fde433eb (#4788, closed).
 
 ### Affected Files
-bin/lean/orchestrate.mjs, bin/lean/sandbox-remote.mjs, bin/lean/execution.mjs (config key if added), tests: bin/lean/batch.test.mjs, bin/lean/sandbox-provider.contract.test.mjs, bin/lean/execution.test.mjs.
+None remaining.
 
 ### Sibling Sweep
-- `SANDBOX_AUTH` (401/403, 300s) is also capped; correct, since it needs a human fix.
-- The `engine-error` relaunch (`TRANSPORT_TEXT` breaker, orchestrate.mjs:~530) is related, but out of scope.
-- No other transport reports liveness, only httpTransport.
+`sandbox.auth` stays capped on purpose (needs a human).
 
 ### History
-#4528 uncapped `sandbox.capacity`. #4547 added `offlineFallback`, gated on `online`. #4672 added unreachable-window retries and the `sandbox.unreachable` code.
+9fde433eb "fix(orchestrate): offline compute pool no longer exhausts max_deferrals; derive online from /agents; report pool stall (#4788)".
 
 ### Recommendation
-1. Add `sandbox.unreachable` to `UNCAPPED_DEFERRALS`. Its retry is already bounded by `unreachable_window_min` plus the 60s delay.
-2. In `httpTransport.capacity()`, when `/status` yields no `online`, query `GET /agents` and compute `online = count(ok && !paused)` and `total`. A failed `/agents` leaves it unknown; keep `free` if present.
-3. In orchestrate `grant`, track the first time `cap.online === 0`. Once it has lasted more than N minutes (default 10, configurable via `execution`), emit ONE `update({outcome:"pool-offline"...})` batch event, plus the status-line report and a notification if an existing mechanism is reachable. Reset when online > 0. With `fallback_local` unset the batch stays in remote mode and reports only; a default host fallback is deferred (it overrides an opt-in and risks host overload).
+Close #4763 as a duplicate of #4788.
 
 ### Related Issues
-#4528, #4547, #4672, #4540; AlterLab lanes #37297, #37313, #37402, #37532.
+#4788, #4528, #4547, #4672
