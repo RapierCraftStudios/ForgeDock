@@ -18,6 +18,12 @@ unit_hardening() {
   printf 'OOMScoreAdjust=%s\nRestart=always\nRestartSec=5\n' "$(unit_oom_score_adj "${1:-user}")"
 }
 
+# unit_priority user|system: [Service] lines giving a scheduler daemon CPU priority over the lanes it launches (#4780).
+# An unprivileged user manager cannot set a negative Nice (needs CAP_SYS_NICE), so only a system unit gets one; the daemon also reniced itself best-effort.
+unit_priority() {
+  if [ "${1:-user}" = system ]; then printf 'Nice=-5\nCPUWeight=500\n'; else printf 'CPUWeight=500\n'; fi
+}
+
 # unit_start_limit: the [Unit] line that disables the start rate limit. systemd honours StartLimitIntervalSec only in [Unit], never in [Service].
 unit_start_limit() {
   printf 'StartLimitIntervalSec=0\n'
