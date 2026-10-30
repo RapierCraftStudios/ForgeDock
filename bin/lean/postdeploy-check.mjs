@@ -9,6 +9,7 @@
  * probe runner's minimal env): all pass -> a FORGE:PROBE record and the follow-up closes; a fail -> the record, and the
  * parent reopens with the output. An item without a runnable check is `awaiting-measurement`: no lane, ever.
  */
+import { createHash } from "node:crypto";
 import { noComments } from "./render.mjs";
 import { MAX_TIMEOUT_S, OUTPUT_TAIL, PROBE_MARKER, probeEnv, probeResultOf, readProbeConfig, runProbe } from "./probe.mjs";
 import { parseMinAge } from "./prefilter.mjs";
@@ -18,6 +19,7 @@ export const CHECK_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const AWAITING_MEASUREMENT_LABEL = "awaiting-measurement";
 export const MONITORING_LABEL = "post-deploy-monitoring";
 export const OWNER_ASK_MARKER = "FORGE:OWNER_ASK"; // #4689
+export const ROLLOUT_ASK_MARKER = "FORGE:ROLLOUT_ASK"; // #4769: distinct, so it never silences the no-runnable-check ask
 export const DEFAULT_EVERY_MS = 6 * 3600e3;
 const ITEM_RE = /^\s*[-*]\s+\[[ xX]\]\s+(.*)$/;
 const CHECK_TOKEN_RE = /^`[^`]*`\s+(?:\*\*known-flaw\*\*\s+)?[—-]+\s*post-deploy:\s*\[check:\s*([^\]\s]*)\s*\]/;
@@ -130,6 +132,27 @@ async function postOwnerAsk({ iss, repo, io, dryRun, isTrusted, ids, missing, de
   try { await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", `<!-- ${OWNER_ASK_MARKER} -->\n## Owner ask\nNo lane was started and none will be. Needed from the owner: ${what}, or measure the item by hand.`]); } catch { /* the label still shows it */ }
 }
 
+/** #4769: a check output `BLOCKED: ... <flag> = off ...` means the rollout is off, not that the change is broken: {flag, evidence} or null. */
+export function blockedRollout(output) {
+  const m = /^BLOCKED:\s*(?:.*?\s)?([A-Za-z0-9_.:*-]+)\s*=\s*off\b.*$/m.exec(String(output ?? ""));
+  return m ? { flag: m[1], evidence: String(output).trim().slice(-OUTPUT_TAIL) } : null;
+}
+const evidenceHash = (text) => createHash("sha1").update(String(text).replace(/\d{4}-\d{2}-\d{2}[T ][\d:.]+Z?/g, "").trim()).digest("hex").slice(0, 12);
+const ASK_RE = /FORGE:ROLLOUT_ASK rollout:(\S+) evidence:([0-9a-f]+)/g;
+/** #4769: one typed owner ask per blocked flag, re-posted only when its evidence hash changes. Returns the flags newly raised. */
+async function postRolloutAsks({ iss, repo, io, isTrusted, blocked, def }) {
+  const prior = new Map();
+  for (const c of iss.comments ?? []) if (isTrusted(c)) for (const m of String(c?.body ?? "").matchAll(ASK_RE)) prior.set(m[1], m[2]);
+  const raised = [];
+  for (const b of blocked) {
+    const hash = evidenceHash(b.evidence);
+    if (prior.get(b.flag) === hash) continue;
+    const body = `<!-- ${ROLLOUT_ASK_MARKER} rollout:${b.flag} evidence:${hash} -->\n## Owner ask: promote \`${b.flag}\`\nThe post-deploy check on \`${def}\` is blocked because \`${b.flag}\` is off. No lane was started and none will be. Decide: promote it (first cohort, guard metrics, shadow evidence below) or record a keep-off decision.\n\n${fenced(b.evidence)}`;
+    try { await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", body]); raised.push(b.flag); } catch { /* retried next pass */ }
+  }
+  return raised;
+}
+
 /** #4689: one engineering issue per failing check (never a lane): the output, the fix and the follow-up. Best effort. */
 async function fileFailureIssues({ bad, iss, repo, io, parent, def, fix }) {
   for (const r of bad) {
@@ -155,8 +178,11 @@ async function measureItems({ iss, repo, def, shas, checks, cwd, io, dryRun, isT
   if (dryRun) return { state: "dry-run", detail: `checks ${[...new Set(ids)].join(", ") || "none"} not run (dry run)` };
   if (missing.length) await postOwnerAsk({ iss, repo, io, dryRun, isTrusted, ids: todo.map((t) => t.id), missing, def });
   const rows = ids.length ? await runNamedChecks({ ids, checks, cwd, config, env, spawn }) : [];
-  const good = rows.filter((r) => r.result === "pass"), bad = rows.filter((r) => r.result === "fail");
-  if (rows.length) {
+  const blockedRows = rows.filter((r) => r.result === "fail" && blockedRollout(r.output)); // #4769
+  const good = rows.filter((r) => r.result === "pass"), bad = rows.filter((r) => r.result === "fail" && !blockedRows.includes(r));
+  const blocked = [...new Map(blockedRows.map((r) => [blockedRollout(r.output).flag, blockedRollout(r.output)])).values()];
+  if (blocked.length) await postRolloutAsks({ iss, repo, io, isTrusted, blocked, def });
+  if (good.length || bad.length) {
     let defaultSha = null;
     try { defaultSha = String(await io.git(["rev-parse", `origin/${def}`], { cwd })).trim() || null; } catch { /* recorded as null */ }
     const body = [
@@ -172,6 +198,7 @@ async function measureItems({ iss, repo, def, shas, checks, cwd, io, dryRun, isT
   }
   const left = todo.filter((t) => !(t.id && good.some((r) => r.id === t.id)));
   if (!left.length) { await io.gh(["issue", "close", String(iss.number), "-R", repo, "--reason", "completed"]); return { state: "pass", detail: `checks ${[...new Set(good.map((r) => r.id))].join(", ")} passed` }; }
+  if (blocked.length && !bad.length && !failed.size && !missing.length) return { state: "awaiting-measurement", blocked: blocked.map((b) => b.flag), detail: `${good.length} item(s) ticked; blocked on rollout ${blocked.map((b) => b.flag).join(", ")} (owner ask)` };
   if (missing.length) return { state: "awaiting-measurement", detail: `${good.length} item(s) ticked; no runnable check on ${def} for ${missing.map((m) => m ?? "an item without a check id").join(", ")} (${CHECKS_FILE})` };
   return { state: bad.length ? "fail" : "recorded-fail", detail: `${good.length} item(s) ticked; failing: ${[...new Set([...bad.map((r) => r.id), ...failed])].join(", ")}` };
 }

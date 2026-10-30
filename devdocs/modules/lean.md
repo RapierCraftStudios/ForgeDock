@@ -58,6 +58,10 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    is saved to `refs/forge/salvage/<N>/<ms>` (`WORKTREE_SALVAGED`) and the
    implement prompt names the ref. This covers runs that died hard (no
    teardown); a run that exits normally checkpoints its work in teardown (#4179).
+   #4786: a PR-less remote/local lane branch whose diff vs the base is only tool state (`.forge-lean/`, `isToolState`)
+   holds no work: it is not resumed (no stale contract). The worktree is still built from the branch (pushes stay
+   fast-forward), the scratch is removed in a normal commit, and `SCRATCH_BRANCH_DROPPED` is emitted. Any real change
+   or an open PR resumes as before; `changedFiles()` ignores tool-state paths.
    **Sparse worktree** (#4221, `worktree.mjs` `addLaneWorktree`): tracked blobs
    >= forge.yaml `env.sparse_max_kb` (default 1024; 0 = off) stay out of the
    checkout (non-cone patterns in the worktree's own `info/sparse-checkout`;
@@ -459,6 +463,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    number, and the directory must hold a series on the base — a `_journal.json` /
    `meta/_journal.json`, or ≥2 distinct numbers of the file's width filling at least
    half of their range (sparse issue-numbered docs are not a series).
+
+   Runner CLI usage errors (#4761): `validateContract` rejects vitest `-q`/`--quiet`; a failed validate rerun whose output is a usage error (`cliUsageError`: vitest `Unknown option`, jest `Unrecognized CLI Parameter`) is first rerun once with `normalizeRunnerCommand` (`-q` → `--reporter=dot`), and if still rejected fails `contract.invalid_command` (an `ENV_CODES` state, no builder resume; recoverable and mechanical).
 
 ## Host parallelism (#4182)
 
@@ -1038,7 +1044,7 @@ narrows them. Rationale: `devdocs/decisions/4199-incremental-not-restructure.md`
 
 `outcome-codes.mjs` `classifyNeedsHuman(row)` sorts a lane row into `recoverable`
 (needs-human `ci.red` / `base.conflict` / `builder.block_untyped`, `contract.invalid`
-with `issueEdited`, `ci-pending` on a conflicting PR → `base.conflict`), `human`
+with `issueEdited` or `quoteMismatch` (#4789: every contract problem was an unmatched quote), `ci-pending` on a conflicting PR → `base.conflict`), `human`
 (`builder.blocked`: credentials, spend, promotion, customer, product-decision) or
 `terminal`. `orchestrate()` option `recovery: {maxAttempts}` (forge.yaml
 `orchestration.recovery.max_attempts`, default 1, 0 = off; absent = old behaviour;
@@ -2062,6 +2068,30 @@ restarts it (a new daemon resumes hosted batches). Priority: `unit_priority` in 
 schedd unit `CPUWeight=500` (system units also `Nice=-5`; a user manager cannot set a negative Nice), and the daemon reniced
 itself best-effort at start. Not done: async state saves. `gh` calls were already async and the atomic fsync saves
 (`writeAtomic`) are the durability guarantee, so the heartbeat and watchdog bound a stall instead.
+
+## Entry 2026-10-30 — Quote check normalizes unicode and markup (#4789)
+
+`conformance.mjs` `norm` now folds curly quotes, dashes, ellipsis, zero-width
+characters, markdown links, `~`, `#` and backslash escapes on both sides of the
+verbatim check, so retyped quotes match. A miss appends `nearestSpan` (the issue line
+sharing most words) to the problem, which the correction prompt shows. A contract still
+invalid with only quote problems ends `contract.invalid` with `quoteMismatch`, which
+`classifyNeedsHuman` treats as recoverable (relaunch with a fresh plan).
+
+## Entry 2026-10-30 — Activation rows, rollout owner asks, dormancy report (#4769)
+
+`activation.mjs`: `readRollouts` (forge.yaml `rollouts.files`), `detectNewOffKeys` (new off/false/0 keys in the PR diff of those files, wired in `lean.mjs` `newOffKeysOf` into `precheck`'s `newOffKeys`), `activationFailures` (`activation_missing`, `mode_unreachable` for shadow/cohort/treated ACs) and `dormancyReport` (injected read-only `flagState`, keep-off decisions silence). `postdeploy-check.mjs` `measureItems`: a check printing `BLOCKED: <flag> = off` posts one `FORGE:ROLLOUT_ASK` per flag (re-posted only when the evidence hash changes) and parks `awaiting-measurement` instead of filing a failure.
+Cite: #4769.
+
+## Entry 2026-10-30 — Batch plan.json never holds secrets (#4787)
+
+`batch.mjs` `writePlan` drops secret-named `plan.env` keys (`SECRET_ENV`, now defined in `batch.mjs`, imported by `schedd.mjs` (not re-exported), also matching a bare `*_KEY`) and records only their names in `plan.envSecrets`; state files stay 0600. On `--resume` the lanes re-read the value from the daemon/client environment (`mergeEnv`) or the keychain (`execution.token_env`). `batch.scrubPlan()` rewrites a pre-fix plan.json (secrets removed, chmod 0600); it runs on every `--resume` and for each batch at schedd start. `--set-env` refuses secret-named keys.
+Cite: #4787.
+
+## Entry 2026-10-30 — Transient lane-resolution failures retry; `lane-refused` is requeueable (#4791)
+
+`resolveLane` marks a failed `gh`/`git` command (milestone read, default-branch read, `git ls-remote`) `lane.unresolved` with `transient: true` (additive; no new outcome code). Genuine refusals (`lane.branch_missing`, `lane.default_branch`, `lane.mismatch`, bad slug/pattern) stay terminal `lane-refused`. In `orchestrate` `start()`, a transient refused lane is re-resolved: still transient → `deferred` / `lane.unresolved`, requeued with backoff `DEFER_BACKOFF_S` doubling to `DEFER_BACKOFF_MAX_S` from a separate `laneRetries` counter, uncapped and never counted in `deferrals`/`maxDeferrals` (`UNCAPPED_DEFERRALS`). A thrown `resolveLane` is transient. `batch.mjs` `REQUEUABLE` accepts `lane-refused`, and `--add` requeues a `lane-refused` row (like `skipped`) instead of "already in batch".
+Cite: #4791.
 
 ## Entry 2026-10-30 — North-star decision engine (#4766)
 

@@ -7,7 +7,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, write
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { openBatch, isLaneAlive, listBatches } from "./batch.mjs";
+import { openBatch, isLaneAlive, listBatches, SECRET_ENV } from "./batch.mjs";
 import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
@@ -529,6 +529,12 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     assert.deepEqual(env, { NODE_OPTIONS: "x", ANTHROPIC_API_KEY: "daemon-key", PATH: "/", CLAUDE_CONFIG_DIR: "/acct-b", FORGEDOCK_SCHED_DIR: "/s", LC_CTYPE: "C" });
   });
 
+  it("#4787: a plan without the token resumes with the daemon's token; SECRET_ENV covers *_KEY", () => {
+    assert.ok(SECRET_ENV.test("AWS_ACCESS_KEY") && SECRET_ENV.test("COMPUTESHARE_TOKEN") && !SECRET_ENV.test("KEYBOARD"));
+    const env = mergeEnv({ COMPUTESHARE_TOKEN: "daemon-tok", PATH: "/d" }, { PATH: "/" });
+    assert.equal(env.COMPUTESHARE_TOKEN, "daemon-tok");
+  });
+
   it("#4734: the pin keeps non-secret provider selectors, drops secrets and session ids, and droppedEnv names what was left out", () => {
     const client = { PATH: "/", GH_TOKEN: "fresh", CLAUDE_CODE_USE_BEDROCK: "1", ANTHROPIC_BASE_URL: "http://proxy", ANTHROPIC_MODEL: "m", ANTHROPIC_API_KEY: "k",
       FORGEDOCK_POOL_TOKEN: "p", CLAUDE_CONFIG_DIR: "/acct", CLAUDE_CODE_SESSION_ID: "s", CLAUDE_PID: "1" };
@@ -580,10 +586,10 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
       for (const bad of ["msg-token", "sess", "CLAUDE_CODE_", session, wrapper]) assert.equal(raw.includes(bad), false, `${bad} not pinned`);
       await withRoot(h, async () => {
         await capture(() => orchestrateFromCli(["--set-env", id, "MY_VAR=1"], h.client));
-        await capture(() => orchestrateFromCli(["--set-env", id, "GH_TOKEN=abc"], h.client));
+        await assert.rejects(() => orchestrateFromCli(["--set-env", id, "GH_TOKEN=abc"], h.client), /never stored in batch state/); // #4787
         assert.equal(openBatch(h.root, id).readPlan().env.MY_VAR, "1");
         const { lines } = await capture(() => orchestrateFromCli(["--show-env", id], h.client));
-        assert.match(lines.join("\n"), /^GH_TOKEN=<redacted>$/m);
+        assert.equal(/GH_TOKEN/.test(lines.join("\n")), false);
         assert.match(lines.join("\n"), /^MY_VAR=1$/m);
         assert.equal(lines.join("\n").includes("abc"), false);
         await capture(() => orchestrateFromCli(["--unset-env", id, "MY_VAR"], h.client));

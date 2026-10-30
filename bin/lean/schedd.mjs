@@ -38,8 +38,8 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schedDir, pidAlive } from "./sched.mjs";
-import { batchRoot, listBatches, openBatch } from "./batch.mjs";
 import { HEARTBEAT_MS, writeHeartbeat, clearHeartbeat } from "./schedd-health.mjs";
+import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
 
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
@@ -58,7 +58,6 @@ const ENV_KEEP = /^(PATH|HOME|USER|SHELL|LANG|LC_.*|TMPDIR|CLAUDE_CONFIG_DIR|CLA
 const LEGACY_PIN = /^(CLAUDE_.*|ANTHROPIC_.*|GH_.*|GITHUB_.*|FORGEDOCK_.*)$/;
 const SESSION_SCOPED = /^(CLAUDE_PID|CLAUDE_CODE_(SESSION|MESSAGING|ENTRYPOINT|EXECPATH|SSE).*)$/;
 // A secret never rides the allowlist: it resolves at lane start (env, keychain) unless the operator names it as a passthrough.
-export const SECRET_ENV = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY)/i;
 const SESSION_DIR = /(^|\/)(arg0|claude[^/]*)(\/|$)/;
 
 /** A forge.yaml glob (`*` within a segment, `**` across segments, `?`) as an anchored RegExp. */
@@ -264,7 +263,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   await new Promise((res, rej) => { server.once("error", rej); server.listen(p.sock, () => { server.off("error", rej); res(); }); });
   log(`schedd: pid ${pid} listening on ${p.sock}`);
   // #4780: a heartbeat from the event loop itself; a starved or wedged loop stops it and the watchdog restarts the daemon.
-  const beat = () => { lastTick = Date.now(); try { writeHeartbeat({ dir, pid }); } catch { /* a full disk must not stop the daemon */ } };
+  const beat = () => { lastTick = Date.now(); try { writeHeartbeat({ dir, pid, now: () => lastTick }); } catch { /* a full disk must not stop the daemon */ } };
   beat();
   const beatTimer = setInterval(beat, HEARTBEAT_MS);
   beatTimer.unref?.();
@@ -314,6 +313,9 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     try { await due(); } catch (e) { log(`schedd: due run failed: ${e?.message ?? e}`); } finally { dueRunning = false; }
   }, dueMs) : null;
   dueTimer?.unref?.();
+
+  // #4787: plans written before secrets were dropped still hold token values; scrub them on start.
+  for (const id of listBatches(root)) { try { const n = openBatch(root, id).scrubPlan(); if (n.length) log(`schedd: scrubbed ${n.join(", ")} from batch ${id}`); } catch { /* advisory */ } }
 
   // Daemon restart: resume every daemon-hosted batch that never wrote its report; live lanes are re-adopted.
   if (resumeOnStart) {
