@@ -2095,3 +2095,12 @@ Cite: #4766.
 
 `bin/lean/issuewatch.mjs` is `forgedock issue-watch`: named watches from forge.yaml `issue_watch.watches` (parsed by its own `parseWatches`, since `parseForgeYaml` reads one nested level), each with a per-(repo, name) lock and `status.json` under `~/.forge/watch/`, and a repo-wide `claims.json` (mkdir-locked) so an issue has one claim across watches. Pure selectors/lane/caps; gh, clock and launching are injected. `mode: batch` calls batch.mjs `addIssues` and starts a new batch once `report.json` exists. See docs/ISSUE-WATCH.md.
 Cite: #4765.
+
+## Entry 2026-10-30 — schedd listens on a named pipe on Windows (#4762)
+
+Windows `net` servers refuse a filesystem path (`listen EACCES`), so `scheddPaths(dir, platform)` returns
+`\\.\pipe\forgedock-schedd-<sha1(resolve(dir))[0..12]>` as `sock` on win32 (stable per sched dir, distinct across dirs);
+POSIX keeps `<dir>/schedd.sock`. A pipe is not a file and vanishes with its server, so on win32 the stale-socket unlink
+(startup and close) and the `lost socket` watchdog are skipped (the `schedd.lock` check still covers takeover) and
+`scheddExists` tests the lock file. `defaultSpawn` resolves the `forgedock.mjs` script with `fileURLToPath` (`SCHEDD_SCRIPT`),
+not `URL.pathname`, which gave `/C:/...` on Windows.
