@@ -2126,7 +2126,7 @@ the lane locally once.
 
 ## Entry 2026-10-30 — Named issue watches (#4765)
 
-`bin/lean/issuewatch.mjs` is `forgedock issue-watch`: named watches from forge.yaml `issue_watch.watches` (parsed by its own `parseWatches`, since `parseForgeYaml` reads one nested level), each with a per-(repo, name) lock and `status.json` under `~/.forge/watch/`, and a repo-wide `claims.json` (mkdir-locked) so an issue has one claim across watches. Pure selectors/lane/caps; gh, clock and launching are injected. `mode: batch` calls batch.mjs `addIssues` and starts a new batch once `report.json` exists. See docs/ISSUE-WATCH.md.
+`bin/lean/issuewatch.mjs` is `forgedock issue-watch`: named watches from forge.yaml `issue_watch.watches` (parsed by its own `parseWatches`, since `parseForgeYaml` reads one nested level), each with a per-(repo, name) lock and `status.json` under `~/.forge/watch/`, and a repo-wide `claims.json` (mkdir-locked) so an issue has one claim across watches. Pure selectors/lane/caps; gh, clock and launching are injected. `mode: batch` calls batch.mjs `addIssues` and starts a new batch once `report.json` exists. See docs/ISSUE-WATCH.md. `mode: release` (#4767) lives in `issuewatch-release.mjs`: pure pool score, triggers (`min_issues`, `min_score`, `max_age_days`, `immediate`), `theme_map` classification (one counted `io.classify` call for unclassified issues), `Depends on` closure under `max_release_issues`; `releaseTick` posts `FORGE:RELEASE_PLAN`, tags (milestone `release/<theme>-<date>` or label `release:<theme>-<date>`), starts one batch, then opens the deploy PR once and never merges it. `issue-watch run --dry-run` prints the would-cut set.
 Cite: #4765.
 
 ## Entry 2026-10-30 — schedd listens on a named pipe on Windows (#4762)
