@@ -2069,6 +2069,10 @@ schedd unit `CPUWeight=500` (system units also `Nice=-5`; a user manager cannot 
 itself best-effort at start. Not done: async state saves. `gh` calls were already async and the atomic fsync saves
 (`writeAtomic`) are the durability guarantee, so the heartbeat and watchdog bound a stall instead.
 
+### Issue-level readiness in the scheduler (#4773)
+
+`bin/lean/orchestrate.mjs`: `trusted(n)` gates `Blocked by`/`Depends on` edges to a trusted body author (`declared`); `getBlocked()` (the `orchestration.blocked_label` issues, default `blocked`) keeps an issue admitted but not ready in `isReady`, with `blocked`/`unblocked` rows and a poll while only blocked issues wait. `engine-cli.mjs` wires both and `addToBatch` reports the edges it created (see modules/orchestrate.md).
+
 ## Entry 2026-10-30 — Quote check normalizes unicode and markup (#4789)
 
 `conformance.mjs` `norm` now folds curly quotes, dashes, ellipsis, zero-width
