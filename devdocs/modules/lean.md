@@ -464,6 +464,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `meta/_journal.json`, or ≥2 distinct numbers of the file's width filling at least
    half of their range (sparse issue-numbered docs are not a series).
 
+   Runner CLI usage errors (#4761): `validateContract` rejects vitest `-q`/`--quiet`; a failed validate rerun whose output is a usage error (`cliUsageError`: vitest `Unknown option`, jest `Unrecognized CLI Parameter`) is first rerun once with `normalizeRunnerCommand` (`-q` → `--reporter=dot`), and if still rejected fails `contract.invalid_command` (an `ENV_CODES` state, no builder resume; recoverable and mechanical).
+
 ## Host parallelism (#4182)
 
 Every runner call gets `FORGE_HOST_PARALLELISM` in its env, next to the
