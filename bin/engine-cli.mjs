@@ -1141,6 +1141,7 @@ async function envBatch({ argv, root, print = (l) => console.log(l) }) {
   const i = argv.indexOf(op), id = argv[i + 1], arg = argv[i + 2];
   if (!id || id.startsWith("--") || (op !== "--show-env" && !arg)) throw new Error(ORCH_USAGE);
   const batchMod = await import("./lean/batch.mjs"), { redactEnv } = await import("./lean/schedd.mjs");
+  if (op === "--set-env" && batchMod.SECRET_ENV.test(arg.split("=")[0])) throw new Error(`--set-env: ${arg.split("=")[0]} looks like a secret and is never stored in batch state; set it in the daemon's environment (or keychain) instead`);
   const b = batchMod.openBatch(root, id);
   const plan = b.readPlan();
   if (!plan) throw new Error(`no batch ${id} in ${root}`);
@@ -1469,6 +1470,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   let batch, plan = null;
   if (resumeId) {
     batch = batchMod.openBatch(root, resumeId);
+    batch.scrubPlan(); // #4787: a pre-fix plan.json keeps no secret; the lanes re-read it from the environment
     plan = batch.readPlan();
     if (!plan) throw new Error(`no batch ${resumeId} in ${root}`);
     argv = plan.argv;

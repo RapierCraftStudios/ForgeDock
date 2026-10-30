@@ -1030,3 +1030,24 @@ describe("#4751: batch state is private", () => {
     } finally { process.umask(old); }
   });
 });
+
+describe("batch plan secrets (#4787)", () => {
+  it("writePlan never writes secret env values and keeps the plan 0600", () => {
+    const b = openBatch(join(tmpDir("batch-sec-"), "batches"), "b20260101-000000-1");
+    b.writePlan({ v: 1, env: { PATH: "/bin", COMPUTESHARE_TOKEN: "tok-123", AWS_ACCESS_KEY: "k-456" } });
+    const raw = readFileSync(join(b.dir, "plan.json"), "utf8");
+    assert.ok(!raw.includes("tok-123") && !raw.includes("k-456"));
+    assert.deepEqual(b.readPlan().env, { PATH: "/bin" });
+    assert.deepEqual(b.readPlan().envSecrets, ["AWS_ACCESS_KEY", "COMPUTESHARE_TOKEN"]);
+    assert.equal(statSync(join(b.dir, "plan.json")).mode & 0o777, 0o600);
+  });
+  it("scrubPlan rewrites a pre-fix 0644 plan and is a no-op otherwise", () => {
+    const b = openBatch(join(tmpDir("batch-sec-"), "batches"), "b20260101-000000-2");
+    mkdirSync(b.dir, { recursive: true });
+    writeFileSync(join(b.dir, "plan.json"), JSON.stringify({ v: 1, env: { PATH: "/bin", COMPUTESHARE_TOKEN: "tok-123" } }), { mode: 0o644 });
+    assert.deepEqual(b.scrubPlan(), ["COMPUTESHARE_TOKEN"]);
+    assert.ok(!readFileSync(join(b.dir, "plan.json"), "utf8").includes("tok-123"));
+    assert.equal(statSync(join(b.dir, "plan.json")).mode & 0o777, 0o600);
+    assert.deepEqual(b.scrubPlan(), []);
+  });
+});
