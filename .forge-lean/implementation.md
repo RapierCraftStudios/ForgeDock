@@ -23,3 +23,5 @@ No env vars. POSIX behaviour unchanged. No formatter is configured in the repo.
 
 ## Docs freshness fix
 Added entry "schedd listens on a named pipe on Windows (#4762)" to devdocs/modules/lean.md (dossier for bin/lean/*). V1 re-run: 89 pass, 0 fail.
+
+- Amendment: add-deliverable devdocs/modules/lean.md (dossier entry for the schedd named-pipe change, commit 3e5bdc08d).

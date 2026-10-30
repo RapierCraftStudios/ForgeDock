@@ -1,16 +1,86 @@
-{"status":"fixed","summary":"schedd uses a per-dir named pipe on win32 and fileURLToPath for the spawn script","requirements":[
-{"id":"R1","status":"implemented","evidence":"bin/lean/schedd.mjs:49"},
-{"id":"R2","status":"implemented","evidence":"bin/lean/schedd.mjs:351"},
-{"id":"R3","status":"implemented","evidence":"bin/lean/schedd.test.mjs (#4762 win32 socket path)"},
-{"id":"R4","status":"implemented","evidence":"bin/lean/schedd.mjs:49"},
-{"id":"R6","status":"implemented","evidence":"bin/lean/schedd.mjs SCHEDD_SCRIPT"},
-{"id":"R7","status":"implemented","evidence":"bin/lean/schedd.mjs:139,281,296"}],
-"validation":[{"id":"V1","command":"node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/schedd.test.mjs bin/lean/batch.test.mjs","exit":0}],
-"tests":[{"command":"node --test bin/lean/schedd.test.mjs","result":"pass","fails_without_fix":true}],
-"self_review":[
-{"question":"1","answer":"yes","evidence":"R1-R4,R6,R7 delivered in schedd.mjs; R5 is post-deploy in contract"},
-{"question":"2","answer":"yes","evidence":"89 schedd/batch tests pass; POSIX branches unchanged"},
-{"question":"3","answer":"yes","evidence":"D1, D2 changed; P1/P2 intact; V1 exit 0"},
-{"question":"4","answer":"yes","evidence":"git show --stat HEAD: only schedd.mjs and schedd.test.mjs"}],
-"not_members":[{"symbol":"SCHEDD_SCRIPT","test":"bin/lean/batch.test.mjs","why":"it is a schedd.mjs constant, not a member of the sibling-file lists"}],
-"amendments":[{"id":"docs","change":"devdocs/modules/lean.md entry for #4762"}]}
+{
+ "status": "fixed",
+ "summary": "schedd uses a per-dir named pipe on win32 and fileURLToPath for the spawn script",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/lean/schedd.mjs:49"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/schedd.mjs:351"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/lean/schedd.test.mjs (#4762 win32 socket path)"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/lean/schedd.mjs:49"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "bin/lean/schedd.mjs SCHEDD_SCRIPT"
+  },
+  {
+   "id": "R7",
+   "status": "implemented",
+   "evidence": "bin/lean/schedd.mjs:139,281,296"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/schedd.test.mjs bin/lean/batch.test.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/lean/schedd.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R1-R4,R6,R7 delivered in schedd.mjs; R5 is post-deploy in contract"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "89 schedd/batch tests pass; POSIX branches unchanged"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "D1, D2 changed; P1/P2 intact; V1 exit 0"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "git show --stat HEAD: only schedd.mjs and schedd.test.mjs"
+  }
+ ],
+ "not_members": [
+  {
+   "symbol": "SCHEDD_SCRIPT",
+   "test": "bin/lean/batch.test.mjs",
+   "why": "it is a schedd.mjs constant, not a member of the sibling-file lists"
+  }
+ ],
+ "amendments": [
+  {
+   "kind": "add-deliverable",
+   "path": "devdocs/modules/lean.md",
+   "why": "bin/lean/schedd.mjs behaviour changed (win32 named pipe, fileURLToPath); the lean dossier entry for #4762 keeps devdocs freshness in step with it"
+  }
+ ]
+}
