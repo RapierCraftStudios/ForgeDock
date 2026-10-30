@@ -4251,6 +4251,24 @@ describe("large diffs never reach argv (#4129)", () => {
     assert.equal(seen[1].args[1], "go"); assert.equal(seen[1].input, undefined);
   });
 
+  it("#4763 promptGoesViaStdin is platform-aware and counts the other argv", async () => {
+    const { promptGoesViaStdin, runCliBackend } = await import("../runner.mjs");
+    assert.equal(promptGoesViaStdin("x".repeat(40 * 1024), [], "win32"), true);
+    assert.equal(promptGoesViaStdin("x".repeat(10 * 1024), ["--print"], "win32"), false);
+    assert.equal(promptGoesViaStdin("x".repeat(16 * 1024 - 10), ["--a".repeat(10)], "win32"), true);
+    assert.equal(promptGoesViaStdin("x".repeat(40 * 1024), [], "linux"), false);
+    assert.equal(promptGoesViaStdin("x".repeat(65 * 1024), [], "linux"), true);
+    const prev = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const seen = [];
+      runCliBackend({ spec: { name: "t" }, userMessage: "y".repeat(40 * 1024), systemPrompt: "sys", args: ["1"], cwd: tmpDir("core-4763-"), logger: { log() {} },
+        spawnFn: (_b, args, o2) => { seen.push({ args, input: o2.input }); return { status: 0, stdout: "{}", stderr: "" }; } });
+      assert.equal(seen[0].input.length, 40 * 1024);
+      assert.ok(!seen[0].args.some((x) => x.length > 1000));
+    } finally { Object.defineProperty(process, "platform", prev); }
+  });
+
   it("runCliBackendAsync pipes a 300 KiB prompt to a real child (no E2BIG)", async () => {
     const { writeFileSync, chmodSync } = await import("node:fs");
     const { runCliBackendAsync } = await import("../runner.mjs");
