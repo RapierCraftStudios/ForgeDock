@@ -31,7 +31,10 @@
 #   - Checkpoint = newest full 40/64-hex `Reviewed-SHA:` on a trusted, complete-shape FORGE:REVIEW-AGENT body that
 #     also has a post-panel-guard proof (a synthesized body naming the SHA, or a `# PR Review Summary` whose
 #     **Reviewed commit** is the SHA and whose **Agents** count equals the distinct domains that posted). The
-#     FORGE:REVIEW_ROUTE sha= value is 7 chars and is never a checkpoint. A trusted review-panel-integrity gate
+#     A head whose panel never reached Phase 7 (no synthesized body or summary, e.g. a fix commit pushed mid-review) is
+#     also proven when the nearest trusted FORGE:REVIEW_TIER comment before its first agent body lists a roster
+#     (`Roster: a b c.`) and every listed domain posted a complete-shape agent body at that SHA (forge#4771).
+#     The FORGE:REVIEW_ROUTE sha= value is 7 chars and is never a checkpoint. A trusted review-panel-integrity gate
 #     failure / REVIEW_DEGRADED / REVIEW_BLOCKED marker posted after a SHA's first agent body disqualifies it.
 #   - FULL also when forge.yaml, the review specs, this script, the trust script, the phase-trail gate, the review
 #     protocol doc or the finding classifier changed in reviewed..head.
@@ -93,7 +96,7 @@ fi
 case ",${LABELS}," in *,review-degraded,*) full ;; esac
 
 # ---- checkpoint: newest SHA with a trusted, complete, proven panel ---------------------------------------------
-RE='^(?=[\s\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->|^<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->|# PR Review Summary|<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity|<!-- FORGE:REVIEW_DEGRADED|<!-- FORGE:REVIEW_BLOCKED'
+RE='^(?=[\s\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->|^<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->|# PR Review Summary|<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity|<!-- FORGE:REVIEW_DEGRADED|<!-- FORGE:REVIEW_BLOCKED|^<!-- FORGE:REVIEW_TIER '
 BODIES=$(bash "$TRUSTED" bodies "$RE" 2>/dev/null <<< "$COMMENTS_JSON"); rc=$?
 [ "$rc" -eq 0 ] || full
 
@@ -120,12 +123,19 @@ JQ_PROG='
        | one(shas($t; "\\*\\*Agents\\*\\*: ([0-9]+)")) as $n
        | select($s != null and $n != null)
        | {i: $i, sha: $s, n: ($n | tonumber)} ]) as $SU
+  | ([ $E[] | .key as $i | .value as $t
+       | select($t | startswith("<!-- FORGE:REVIEW_TIER "))
+       | ([ $t | scan("Roster: ([a-z0-9][a-z0-9 -]*)\\.") | .[0] ] | last) as $r
+       | select($r != null)
+       | {i: $i, roster: ($r | split(" ") | map(select(length > 0)) | unique)} ]) as $TI
   | ([ $AG | group_by(.sha)[]
-       | {sha: .[0].sha, first: (map(.i) | min), domains: (map(.d) | unique | length)}
+       | {sha: .[0].sha, first: (map(.i) | min), domains: (map(.d) | unique | length), ds: (map(.d) | unique)}
        | . as $g
        | select(
            (($SY | map(select(.sha == $g.sha)) | length) > 0
-            or ($SU | map(select(.sha == $g.sha and .n == $g.domains)) | length) > 0)
+            or ($SU | map(select(.sha == $g.sha and .n == $g.domains)) | length) > 0
+            or (($TI | map(select(.i < $g.first)) | last) as $t
+                | $t != null and ($t.roster | length) > 0 and (($t.roster - $g.ds) | length) == 0))
            and (($DEG | map(select(. > $g.first)) | length) == 0))
        | . + {last: ([ ($AG[] | select(.sha == $g.sha) | .i), ($SY[] | select(.sha == $g.sha) | .i),
                        ($SU[] | select(.sha == $g.sha) | .i) ] | max)} ]) as $OK
