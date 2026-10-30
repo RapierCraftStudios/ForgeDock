@@ -2109,6 +2109,7 @@ Cite: #4766.
 
 `bin/lean/issuewatch.mjs` is `forgedock issue-watch`: named watches from forge.yaml `issue_watch.watches` (parsed by its own `parseWatches`, since `parseForgeYaml` reads one nested level), each with a per-(repo, name) lock and `status.json` under `~/.forge/watch/`, and a repo-wide `claims.json` (mkdir-locked) so an issue has one claim across watches. Pure selectors/lane/caps; gh, clock and launching are injected. `mode: batch` calls batch.mjs `addIssues` and starts a new batch once `report.json` exists. See docs/ISSUE-WATCH.md.
 Bot authorship (`isBot`) comes from the issue author only: a `[bot]`/`app/` login, `is_bot`, or the ForgeDock App's bare login (`APP_SLUG`, #4467). A `FORGE:DEFERRED` marker in the body never makes an outsider's `follow-up:` issue a bot follow-up (release #4820 AUTH-1).
+`claimIssue` is idempotent for the watch that holds the claim: the registry is written before the watch saves `status.json` or launches, so after a crash or a throwing `batch.start` the same watch re-claims and launches the issue on its next pass; another watch is still refused (release #4820 BUG-1).
 Cite: #4765.
 
 ## Entry 2026-10-30 — schedd listens on a named pipe on Windows (#4762)

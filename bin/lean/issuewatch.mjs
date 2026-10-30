@@ -160,7 +160,11 @@ export function acquireLock(dir, { pid = process.pid, host = hostname(), alive =
   return () => { const now = readJson(f); if (now?.pid === pid) { try { writeAtomic(f, "{}\n"); } catch { /* best effort */ } } };
 }
 
-/** Claim `issue` for `name` in the repo-wide registry; false when another watch (or this one) already has it. Serialised across processes by a mkdir lock. */
+/**
+ * Claim `issue` for `name` in the repo-wide registry; false when another watch already has it. Serialised across processes by a
+ * mkdir lock. Idempotent for the holder: the registry is written before the watch saves its own state or launches, so after a
+ * crash or a throwing launch the same watch re-claims its issue on the next pass instead of losing it (release #4820 BUG-1).
+ */
 export function claimIssue(rdir, issue, name) {
   const lock = join(rdir, "claims.lock");
   mkdirSync(rdir, { recursive: true });
@@ -170,7 +174,7 @@ export function claimIssue(rdir, issue, name) {
   try {
     const f = join(rdir, "claims.json");
     const claims = readJson(f) ?? {};
-    if (claims[issue]) return false;
+    if (claims[issue]) return claims[issue] === name;
     claims[issue] = name;
     writeAtomic(f, JSON.stringify(claims) + "\n");
     return true;

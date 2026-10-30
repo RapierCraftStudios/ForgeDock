@@ -147,6 +147,21 @@ test("two named watches on one repo never double-claim", async () => {
   assert.equal(claimIssue(repoDir("o/r", { FORGEDOCK_WATCH_DIR: dir }), 1, "c"), false);
 });
 
+test("release #4820 BUG-1: a throwing batch.start loses no claim; the same watch re-claims on the next pass", async () => {
+  const dir = tmp();
+  const mk = () => ({ claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" });
+  const watch = validateWatch("w", { mode: "batch", max_inflight: "3" });
+  const io = fakeIo(dir, [iss(1), iss(2)]);
+  const start = io.batch.start;
+  io.batch.start = async () => { throw new Error("schedd unreachable"); };
+  await assert.rejects(tick({ watch, repo: "o/r", io, state: mk() }), /schedd unreachable/); // status.json never saved
+  io.batch.start = start;
+  const state = await tick({ watch, repo: "o/r", io, state: mk() }); // restart from the last saved (empty) state
+  assert.deepEqual([...state.claimed].sort(), [1, 2]);
+  assert.deepEqual(io.batchOps, [["start", [1, 2], watch.parallel, "staging"]]);
+  assert.equal(claimIssue(repoDir("o/r", { FORGEDOCK_WATCH_DIR: dir }), 1, "other"), false, "another watch still cannot take it");
+});
+
 test("max_issues stops claiming at N, drains, then finishes", async () => {
   const dir = tmp();
   const io = fakeIo(dir, [1, 2, 3, 4, 5].map((n) => iss(n)), { exit: () => 0 });
