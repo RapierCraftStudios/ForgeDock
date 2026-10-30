@@ -465,6 +465,19 @@ orchestration:
 
 ---
 
+## `decisions` (OPTIONAL)
+
+Decision engine (#4766, see [DECISIONS.md](DECISIONS.md)). The parser has one nesting level and no arrays, so lists are comma-separated.
+
+| Key | Type | Description |
+|---|---|---|
+| `policy` | string | The repo's north-star file. Default `NORTHSTAR.md`, falling back to `CLAUDE.md`, then `AGENTS.md`. |
+| `mode` | string | `shadow` (default: post `FORGE:DECISION (shadow)`, keep the label) or `live` (clear `needs-human`, requeue). |
+| `human_only` | list | Authority-matrix classes that always stay human. Default `spend,credentials,external-publish,customer-send,prod-write,promotion,legal`. |
+| `hint_<class>` | list | Match words for a class; replaces the built-in hints, and is required for a class that is not built in. |
+| `veto_hours` | number | Owner veto window after a live decision (default 24). |
+| `reversal_max` | number | Reversal rate (0-1) above which live falls back to shadow (default 0.2, minimum sample 5). |
+
 ## `hygiene` (OPTIONAL)
 
 Automatic reclaim of what ForgeDock leaves behind (#4183), using the `forgedock gc` reaper. Only resources ForgeDock provably owns are reclaimed: entries of a stale lane ledger, Docker containers and volumes labelled `forgedock.owner=1`, `lean-*`/`agent-*` dirs under `.claude/worktrees`, `feat/issue-<n>-lean` branches of closed issues, and ForgeDock scratch under `~/.forge/tmp`. Everything else is reported, never touched, and so are unpushed or uncommitted work, live lanes, protected branches and branches with an open PR. Block form only.

@@ -7,9 +7,9 @@ import { writeFileSync, readFileSync, mkdirSync, chmodSync, existsSync } from "n
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { guardChain, isPassThroughWrapper, SHIM_LOOP_MAX, classifyStep, heavyConfig, openHeavy, acquireHeavy, writeHeavyShims, heavyShimScript, sumWaits, runWrapped, HEAVY_BINS, isHeavyProcess } from "./heavy.mjs";
-import { checkAdmission, ADMISSION_DEFAULTS } from "./admission.mjs";
+import { checkAdmission, ADMISSION_DEFAULTS, localLaneCap } from "./admission.mjs";
 import { formatAlertLines, formatWaitSummary } from "./orchestrate.mjs";
-import { readHeavy } from "../engine-cli.mjs";
+import { readHeavy, liveLaneCap } from "../engine-cli.mjs";
 
 // Injected pids, clock and host: `live` is the set of pids the registry sees as alive; `mem` the MemAvailable in MB.
 const world = ({ mem = 12000, cores = 4, swapFree = 0 } = {}) => {
@@ -306,5 +306,34 @@ describe("shim re-entry through a pass-through wrapper (#4680)", () => {
     assert.deepEqual(await writeHeavyShims(bin, { path: `${bin}:${wrap}`, warn: (m) => warnings.push(m) }), []);
     assert.equal(warnings.length, 1); assert.match(warnings[0], /docker .*wrapper/);
     assert.ok(!existsSync(join(bin, "docker")));
+  });
+});
+
+describe("validation steps and the local lane cap (#4777)", () => {
+  it("python project managers, promtool, pip, make and python -m <test runner> are heavy; metadata and plain scripts are llm", () => {
+    const heavy = [["poetry", ["run", "pytest", "-q"]], ["poetry", ["run", "python", "-m", "pytest"]], ["uv", ["run", "--", "pytest"]], ["poetry", ["install"]], ["uv", ["sync"]],
+      ["promtool", ["test", "rules", "r.yml"]], ["promtool", ["check", "config", "p.yml"]], ["pip", ["install", "x"]], ["python3", ["-m", "pytest"]], ["ruff", ["check", "."]], ["make", ["test"]]];
+    for (const [n, a] of heavy) assert.equal(classifyStep(n, a), "heavy", `${n} ${a.join(" ")}`);
+    const llm = [["poetry", ["--version"]], ["poetry", ["run", "python", "x.py"]], ["poetry", ["show"]], ["promtool", ["query", "instant", "u", "q"]], ["python", ["x.py"]], ["python3", ["-c", "print(1)"]], ["make", ["--version"]]];
+    for (const [n, a] of llm) assert.equal(classifyStep(n, a), "llm", `${n} ${a.join(" ")}`);
+    for (const n of ["poetry", "uv", "promtool", "pip", "python3", "make"]) assert.ok(HEAVY_BINS.includes(n), n);
+  });
+
+  it("localLaneCap follows cores and free memory, keeps at least one lane, and is off when admission is disabled or probes are unknown", () => {
+    assert.equal(localLaneCap({ cores: 4, memAvailableMb: 64000 }), 4);
+    assert.equal(localLaneCap({ cores: 4, memAvailableMb: 64000, cfg: { lane_cpu_reservation: 2 } }), 2);
+    assert.equal(localLaneCap({ cores: 16, memAvailableMb: 2048 + 3 * 2048 + 10 }), 3, "memory binds: (free - min_free_mem_mb) / lane_mem_mb");
+    assert.equal(localLaneCap({ cores: 4, memAvailableMb: 100 }), 1);
+    assert.equal(localLaneCap({ cores: 4, memAvailableMb: 64000, cfg: { enabled: false } }), null);
+    assert.equal(localLaneCap({}), null);
+    assert.equal(localLaneCap({ cores: 8 }), 8);
+  });
+
+  it("liveLaneCap re-probes at each call and honours global_parallel", () => {
+    const h = { c: 4, m: 64000 };
+    const cap = liveLaneCap(null, { cfg: {}, host: { cores: () => h.c, memAvailableMb: () => h.m } });
+    assert.equal(cap(), 4); h.c = 2; assert.equal(cap(), 2);
+    assert.equal(liveLaneCap(1, { cfg: {}, host: { cores: () => 8, memAvailableMb: () => 64000 } })(), 1);
+    assert.equal(liveLaneCap(3, { cfg: { enabled: false }, host: { cores: () => 8, memAvailableMb: () => 64000 } })(), 3);
   });
 });
