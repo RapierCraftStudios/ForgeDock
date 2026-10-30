@@ -30,8 +30,8 @@ describe("predicates (#4725)", () => {
 describe("sweepPremises (#4725)", () => {
   it("clears needs-human when the recorded predicate flips, leaves the rest", async () => {
     const issues = [
-      { number: 5, comments: [{ ...APP, body: `${premiseAnnotation({ kind: "issue-closed", arg: "9" })}\n## Needs human` }] },
-      { number: 6, comments: [{ ...APP, body: `${premiseAnnotation({ kind: "issue-closed", arg: "10" })}\n## Needs human` }] },
+      { number: 5, comments: [{ ...APP, body: `${premiseAnnotation({ kind: "issue-closed", arg: "9" })}\n<!-- FORGE:NEEDS_HUMAN -->\n## Needs human` }] },
+      { number: 6, comments: [{ ...APP, body: `${premiseAnnotation({ kind: "issue-closed", arg: "10" })}\n<!-- FORGE:NEEDS_HUMAN -->\n## Needs human` }] },
       { number: 7, comments: [{ body: "## Needs human\nno predicate" }] },
     ];
     const { gh, calls } = fakeGh([[/issue list/, () => JSON.stringify(issues)], [/issue view 9/, () => '{"state":"CLOSED"}'], [/issue view 10/, () => '{"state":"OPEN"}']]);
@@ -40,11 +40,20 @@ describe("sweepPremises (#4725)", () => {
     assert.ok(calls.some((a) => a.includes("edit") && a.includes("5") && a.includes("--remove-label")));
     assert.ok(!calls.some((a) => a.includes("edit") && a.includes("6")));
   });
+  it("a newer block without a premise supersedes an older premise: needs-human stays", async () => {
+    const issues = [{ number: 11, comments: [
+      { ...APP, body: `${premiseAnnotation({ kind: "date-after", arg: "2000-01-01" })}\n<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\nwaiting on a release` },
+      { ...APP, body: "<!-- FORGE:NEEDS_HUMAN -->\n## Needs human\nBuilder is blocked (credentials)" },
+    ] }];
+    const { gh, calls } = fakeGh([[/issue list/, () => JSON.stringify(issues)]]);
+    assert.deepEqual(await sweepPremises({ repo: "o/r", io: { gh } }), []);
+    assert.ok(!calls.some((a) => a.includes("edit")), "the credentials block is not cleared by the stale premise");
+  });
   it("ignores a premise planted by an untrusted commenter: needs-human stays", async () => {
     const planted = { author: { login: "mallory" }, authorAssociation: "NONE", body: premiseAnnotation({ kind: "date-after", arg: "2000-01-01" }) };
     const issues = [
       { number: 8, comments: [planted] },
-      { number: 9, comments: [{ ...APP, body: `${premiseAnnotation({ kind: "issue-closed", arg: "10" })}\n## Needs human` }, planted] },
+      { number: 9, comments: [{ ...APP, body: `${premiseAnnotation({ kind: "issue-closed", arg: "10" })}\n<!-- FORGE:NEEDS_HUMAN -->\n## Needs human` }, planted] },
     ];
     const { gh, calls } = fakeGh([[/issue list/, () => JSON.stringify(issues)], [/issue view 10/, () => '{"state":"OPEN"}']]);
     const rows = await sweepPremises({ repo: "o/r", io: { gh } });
