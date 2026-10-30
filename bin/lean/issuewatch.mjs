@@ -265,6 +265,9 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
   return state;
 }
 
+/** True when the registry leaves issue `n` to watch `name`: unclaimed, or already this watch's own claim (crash-safe re-claim, #4825). */
+export const unclaimedOrOwn = (registry, n, name) => !registry?.[n] || registry[n] === name;
+
 /** `mode: release` pass: wires the pure selectors, claim registry and lane rule into releaseTick (bin/lean/issuewatch-release.mjs). */
 async function releaseStep({ watch, repo, io, state, dir, branches = {}, defaults = [], dryRun = false, cwd = process.cwd() }) {
   const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,body,labels,milestone,author,authorAssociation,createdAt"];
@@ -275,7 +278,7 @@ async function releaseStep({ watch, repo, io, state, dir, branches = {}, default
     if (!dryRun) for (const i of all) if (matchesSelectors(i, watch) && classifyIssue(i, watch) === "fold") await fold({ issue: i, watch, repo, io, state });
     return all;
   };
-  const eligible = (i) => matchesSelectors(i, watch) && classifyIssue(i, watch) === "claim" && !state.claimed.includes(i.number) && !registry()[i.number];
+  const eligible = (i) => matchesSelectors(i, watch) && classifyIssue(i, watch) === "claim" && !state.claimed.includes(i.number) && unclaimedOrOwn(registry(), i.number, watch.name); // release #4820 CONC-1: own claims stay eligible
   const p = loadPolicy({ io: { readFile: (f) => readFileSync(f, "utf8") }, cwd });
   return releaseTick({ watch, repo, io, state, defaults, listOpen, eligible, claim: (n) => claimIssue(repoDir(repo, io.env), n, watch.name), laneFor: (i) => laneFor(i, watch, { branches, defaults }), dagOrder,
     policy: { path: p.policyPath, text: p.policyText }, dryRun });
