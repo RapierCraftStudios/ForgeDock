@@ -2038,3 +2038,7 @@ Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now
 
 Placement needs (`needsOf` in engine-cli `readBody`) now come from `placementText({body, comments})` (`execution.mjs`): the issue body, every `<!-- FORGE:DECISION` comment and the validate commands of the last parseable FORGE:CONTRACT comment, fetched in the same single `gh issue view` call. A rerun of an issue whose frozen contract runs `promtool` (declared in `execution.host_capabilities`), or whose decision says `ssh ovh-monitor obs-psql`, is placed local. On a first remote run, `runCore` checks the frozen contract right after the freeze: when `contractHostNeeds` finds a declared capability in a validate command and the lane is remote and not a recovery, it ends `env.capability_remote` before any implementation turn, and the host resumes it with the frozen contract. `orchestrate` `placeOf` now also relaunches `env.tool_missing` recoveries local (reason `host capability: recovering env.tool_missing`), so a sandbox that lacked the tool is not chosen again.
 Cite: #4785.
+
+### Issue-level readiness in the scheduler (#4773)
+
+`bin/lean/orchestrate.mjs`: `trusted(n)` gates `Blocked by`/`Depends on` edges to a trusted body author (`declared`); `getBlocked()` (the `orchestration.blocked_label` issues, default `blocked`) keeps an issue admitted but not ready in `isReady`, with `blocked`/`unblocked` rows and a poll while only blocked issues wait. `engine-cli.mjs` wires both and `addToBatch` reports the edges it created (see modules/orchestrate.md).
