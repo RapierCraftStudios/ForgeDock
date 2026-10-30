@@ -18,3 +18,5 @@ Add `verify.guard_command` (extension -> command template). `commandFor` consult
 No behaviour change without the key. No new env vars.
 - `forgedock check` ran the scoped shell checks in parallel: 3 (classify-finding, verify-phase-trail, lint-dispatch-prompt) hit their 300s timeout under host load; none touches a changed file (no scripts/ change in the diff). lint-dispatch-prompt.test.sh rerun alone: pass=132 fail=0 in 101s. The other two were not rerun.
 - verify-phase-trail.test.sh rerun alone: passed=160 failed=0 in 119s (exit 0); the earlier exit 124 was the 300s timeout under host load, unrelated to this diff. No code change needed.
+
+Docs freshness: added a devdocs/modules/lean.md entry describing verify.guard_command (#4792).
