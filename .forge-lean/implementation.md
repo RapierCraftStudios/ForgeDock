@@ -1,40 +1,35 @@
 ### Approach
-One new module, `bin/lean/issuewatch.mjs`, with pure selectors/lane/cap logic and injected io (gh, clock, launch, batch), as in `lane.mjs`/`lifecycle.mjs`. forge.yaml `issue_watch.watches` is parsed by the module's own `parseWatches` because `parseForgeYaml` (bin/forge-utils.mjs:48) reads only one nested level, so no amendment to forge-utils was needed. The base watcher did not exist on origin, so it is created here with the issue's names and CLI shape.
+This is a pull-based read-only relay (K1/K2). A sandbox runs `cs-relay <cmd>`, or a shim the entrypoint writes for each allowlisted name. The request goes to the pool agent, which checks the per-sandbox CS_CRED_TOKEN and forwards it to the router. The router only queues it. On its existing per-lane status poll, the dispatching host lists the pending requests and gates each against `execution.relay_commands`. It runs allowed commands with execFile (no shell, 120s timeout, 1 MB cap, output redacted), refuses all others with rc 126, and posts the answers back. Before launch, the host also runs the frozen contract's simple read-only validate and repro commands and ships their output in CS_RELAY_PREFETCH_B64. No LLM calls. The key and the wrapper stay on the host. This rerun found the earlier commits complete against the frozen contract, so it made no code changes. It re-ran every check.
 
 ### Changes
-- bin/lean/issuewatch.mjs: config parse/validate, selectors (milestone/none, labels, exclude_labels, search, title_regex, since, version), lane rule, per-(repo,name) lock and status.json, repo-wide claims registry, caps (`max_issues`, `until`, `max_inflight`) with drain, per-issue and batch modes, `Depends on` ordering, defer-only follow-ups, post-deploy rollup, status, CLI.
-- bin/lean/issuewatch.test.mjs: 17 tests.
-- bin/forgedock.mjs: `issue-watch` command, KNOWN_COMMANDS entry, help row.
-- docs/ISSUE-WATCH.md (new), docs/CONFIG.md (`issue_watch` section).
-- devdocs/modules/lean.md: dossier entry (required by scripts/check-devdocs-freshness.sh; amendment add-deliverable).
+- bin/lean/relay.mjs (new): parseRelayCommands, relayGate, runRelayed, simpleArgv, relayPrefetchCommands, servicePending.
+- bin/lean/sandbox-remote.mjs: httpTransport relayPending/relayAnswer; remoteProvider `relays`, CS_RELAY_COMMANDS/CS_RELAY_CAPS/CS_RELAY_PREFETCH_B64 at start, relay servicing in status() (in the background, never throws).
+- bin/lean/execution.mjs: parseExecution reads `relay_commands` into `relay` (key only when non-empty); providerByName passes `prefetch`; header comment updated.
+- bin/engine-cli.mjs: per-issue `prefetchOf` filled in readBody; `prefetch` passed to providerByName; readRelayCaps (CS_RELAY_CAPS) passed to runCore.
+- bin/lean/lean.mjs: the #4785 pre-build gate skips relayed capabilities; hostCapabilityBlock unchanged; JSDoc for o.relayCaps.
+- bin/pool/router.mjs: in-memory per-sandbox relay queue with owner check, limits and drop on delete.
+- bin/pool/agent.mjs: CS_RELAY_BASE; sandbox relay routes authenticated by credToken and forwarded to the router.
+- pool/image/cs-relay (new), pool/image/entrypoint.sh (shims), pool/image/Dockerfile (COPY/chmod).
+- docs/CONFIG.md, devdocs/modules/lean.md, pool/README.md: documentation.
+- Tests: bin/lean/relay.test.mjs, bin/tests/relay.e2e.test.mjs, bin/lean/lean.test.mjs (#4778 case).
 
 ### Acceptance Criteria Status
-- R1 ✅ issuewatch.mjs `watchDir`, `issueWatchFromCli`; R2 ✅ `acquireLock`, `claimIssue`; R3-R9 ✅ `matchesSelectors`, `issueVersion`; R10 ✅ `laneFor`
-- R11 ✅ `tick` drain; R12 ✅ `max_inflight`; R13 ✅ `until`; R14 ✅ no-cap path
-- R15 ✅ `tick` batch branch + `realIo.batch`; R16, R17 ✅ `classify`, `fold`; R18 ✅ `formatStatus`
-- R19-R23 ✅ issuewatch.test.mjs (one test per criterion); R24 ✅ docs/ISSUE-WATCH.md, docs/CONFIG.md
-- R25 ❌ deferred (the owner's uncommitted branch is not on origin); it was a `defer` in the contract.
+- R1 ✅ bin/lean/sandbox-remote.mjs:143 (`relays`), bin/lean/execution.mjs:118
+- R2 ✅ bin/lean/relay.mjs:44 (gate), bin/lean/relay.mjs:128 (servicePending), bin/pool/router.mjs:36, bin/pool/agent.mjs:247
+- R3 ✅ bin/lean/relay.mjs:60 (runs on the host, redacted); bin/lean/sandbox-remote.mjs:187 (the spec carries only command names, capabilities and redacted output)
+- R4 ✅ bin/lean/relay.mjs:102, bin/lean/sandbox-remote.mjs:165, pool/image/cs-relay:15
+- R5 ✅ bin/tests/relay.e2e.test.mjs:45 (allowlisted command runs, non-allowlisted refused with rc 126), bin/lean/relay.test.mjs
 
 ### Verification
-- V1 `node --test bin/lean/issuewatch.test.mjs`: 17 pass. Fails without the change (the module does not exist): true.
-- V2 batch.test.mjs + lane.test.mjs: 66 pass. router.test.mjs: only `help|unknown command` run (12 pass); the full file exceeded the 10-minute host limit and was killed.
-- V3 `node --check` on both files: ok.
-- V4 `check-devdocs-freshness.sh origin/staging`: OK.
-- `forgedock check`: exit 0. checks.mjs widened to the full suite (fan-out); not run per host rules.
+- V1 relay.test + relay.e2e: exit 0 (13/13 pass)
+- V2 computeshare + sandbox-provider.contract + execution tests: exit 0 (118/118)
+- V3 lean.test + engine-outcome-codes, filtered to capabilit|relay: exit 0 (3/3)
+- V4 bash -n on cs-relay and entrypoint.sh: exit 0
+- V5 enumerating sibling tests: exit 0 (326 pass, 0 fail)
+- scripts/check-devdocs-freshness.sh origin/staging: OK. `forgedock check`: PASS.
+- The new tests fail without the fix: relay.mjs and the router/agent relay routes do not exist on origin/staging.
 
 ### Notes
-- New env var: `FORGEDOCK_WATCH_DIR` (default `~/.forge/watch`).
-- Real batch start spawns `orchestrate` and finds the new batch id by diffing the batch root; `mode: batch` settles issues by their closed state. Neither was exercised against a live orchestrate.
-- No formatter is configured in the repo.
-
-## Sibling-list follow-up
-Checked the 10 flagged tests: none enumerates bin/lean modules; recorded issuewatch under not_members in result.json (no code change).
-
-## Export collision
-Renamed issuewatch.mjs export `classify` to `classifyIssue` (decision-engine.mjs already exports `classify`); updated the test and result.json. issuewatch tests pass (17/17).
-
-## CI unit-test fix (run 41100351102)
-Log unavailable. The `classify` collision was already fixed in 15796c8. Could not reproduce a failure: `node --test "bin/lean/**/*.test.mjs"` via with-run-tmpdir passes (1626/0). Fixed a real defect found meanwhile: the #4765 dossier entry had been inserted mid-entry in devdocs/modules/lean.md, splitting the #4785/#4788 entry; moved it to the end.
-
-## CI follow-up (Unit tests, node --test)
-The CI log was not available. Re-ran the `npm test` globs locally at reduced concurrency: bin/lean + packages/protocol 1780 pass, 1 fail (lean.test.mjs #4690, an idle-kill timing test that passes alone: 6/6); bin/tests + bin/engine + bin/stats 2841 pass, 3 fail, all in bin/tests/journey.test.mjs (WSL platform rows, root-user copyFile, platform detection), a file this branch does not touch. No failure traceable to #4765 was found, so no code change; the earlier classify export collision was already fixed in 15796c8dc.
+- New forge.yaml key `execution.relay_commands` (`capability:command`, with a `name*` prefix glob). Without it, nothing changes (P6).
+- New lane env: CS_RELAY_COMMANDS, CS_RELAY_CAPS, CS_RELAY_PREFETCH_B64 (contain no secrets), CS_RELAY_BASE (set by the agent), CS_RELAY_TIMEOUT_S (cs-relay, default 300).
+- An old router or agent means no relay (cs-relay exits 125). The lane then blocks on credentials and is recovered locally once, as before.

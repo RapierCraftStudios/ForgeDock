@@ -1809,7 +1809,7 @@ The derived contract's deliverables are the issue-named files (`predictedFiles`)
 
 ## Entry 2026-10-24 — Host-only capabilities in placement (#4542)
 
-`placeLane` takes `needs` (host-only capabilities: `sops`, `prod_monitor`, `ops_credentials`, or names declared in `execution.host_capabilities`) and `relays` (what the provider relays; computeshare relays none). A lane needing something not relayed is placed `local` with reason `host capability: <names>` in both `remote` and `hybrid` modes; lanes with no needs are unchanged. `detectNeeds(text, exec)` is zero-LLM: built-in text signals plus declared names and `host_capability_patterns` (`name:regex`, flat key). `engine-cli` fills a per-issue `needsOf` map in `readBody`, and `remote.place` now exists in remote mode too.
+`placeLane` takes `needs` (host-only capabilities: `sops`, `prod_monitor`, `ops_credentials`, or names declared in `execution.host_capabilities`) and `relays` (what the provider relays: a remote/pool provider relays the capabilities of `execution.relay_commands`, #4778; otherwise none). A lane needing something not relayed is placed `local` with reason `host capability: <names>` in both `remote` and `hybrid` modes; lanes with no needs are unchanged. `detectNeeds(text, exec)` is zero-LLM: built-in text signals plus declared names and `host_capability_patterns` (`name:regex`, flat key). `engine-cli` fills a per-issue `needsOf` map in `readBody`, and `remote.place` now exists in remote mode too.
 If a remote lane still blocks on credentials and its summary names only a declared host capability (`hostCapabilityBlock`), `endBlocked` in lean.mjs ends it `env.capability_remote` (recoverable, `RECOVER_HOW`); `orchestrate` `placeOf` relaunches it local once. A mixed or unknown need stays `builder.blocked`. `BLOCK_RULES` tells a remote builder to name the missing capability.
 Cite: #4542.
 
@@ -2104,6 +2104,25 @@ Cite: #4791.
 
 `decision-engine.mjs`: `loadPolicy` (forge.yaml `decisions:`, policy file NORTHSTAR.md > CLAUDE.md > AGENTS.md, authority matrix `human_only`), `splitEscalation` (deterministic: recovery | evidence | post-deploy | external | decision | mixed), `settle` (one injected `judge` call per decision part; one-way, low-confidence or clause-less answers escalate; shadow posts `FORGE:DECISION (shadow)`, live records via `recordDecisions`, clears needs-human and requeues; idempotent on the escalation id), `isVetoed`/`revertVeto`, `effectiveMode` (reversal rate above `reversal_max` forces shadow). Nothing calls it yet: the issue-watch stage (#4765) will. Telemetry `decision_engine`; the batch report lists rows with `decided` (orchestrate.mjs `formatOutcomeLists`). Docs: `docs/DECISIONS.md`.
 Cite: #4766.
+
+## Read-only capability relay (#4778)
+
+`bin/lean/relay.mjs` (0 LLM) lets a sandbox lane use a host-only capability through an allowlisted read-only wrapper.
+forge.yaml `execution.relay_commands` (`capability:command`, exact name or trailing-`*` prefix glob) is parsed by
+`parseExecution` into `relay`; `remoteProvider` exposes `relays` (the capabilities with a command, only when the transport
+has `relayPending`), so `placeLane` places those lanes remote. Flow: the builder runs `obs-psql ...` unchanged; the
+entrypoint's shim (from `CS_RELAY_COMMANDS`) calls `pool/image/cs-relay`, which POSTs `{argv}` to the pool agent
+(`CS_RELAY_BASE`, per-sandbox `CS_CRED_TOKEN`); the agent forwards it to the router's in-memory queue
+(`/agent/relay/:id`, owner-checked, 8 pending, 64 args, 16 KB). The dispatcher's per-lane `status()` poll lists
+`GET /sandboxes/:id/relay`, `servicePending` gates each request (`relayGate`), runs the allowed ones with `runRelayed`
+(execFile, no shell, 120 s, 1 MB, redacted) or refuses them (rc 126), and posts `{rc, stdout, stderr}` back; cs-relay
+polls for it. The router and agent never execute or gate; the key and the wrapper stay on the dispatching host.
+Pre-fetch: `relayPrefetchCommands` takes the frozen contract's simple validate / repro_test commands that pass the gate
+(engine-cli `readBody`, `prefetchOf`); the provider runs them at dispatch and ships `CS_RELAY_PREFETCH_B64` (96 KB cap),
+which cs-relay serves on an identical argv. Lane gate: the provider sets `CS_RELAY_CAPS`; engine-cli `readRelayCaps`
+passes it as `o.relayCaps`, and runCore's #4785 pre-build `contractHostNeeds` end ignores relayed capabilities. The
+`hostCapabilityBlock` recovery is unchanged: an unreachable relay (cs-relay exit 125, old router/agent) still recovers
+the lane locally once.
 
 ## Entry 2026-10-30 — Named issue watches (#4765)
 

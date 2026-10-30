@@ -202,6 +202,7 @@ export function isProtectedLaneBranch(b, { issue, lane = null, branches = {}, de
  * @param {string} [o.laneInstructions] forge.yaml engine.lane_instructions (#4395): repo-relative file appended to fresh sessions instead of CLAUDE.md
  * @param {number} [o.sparseMaxKb]   forge.yaml env.sparse_max_kb: tracked blobs >= this many KB stay out of the lane checkout (default 1024; 0 = off, #4221)
  * @param {object} [o.hostCaps]      {hostCapabilities, hostCapabilityPatterns}: forge.yaml execution.host_capabilities (#4542); a remote credentials block naming one is env.capability_remote
+ * @param {string[]} [o.relayCaps]   capabilities the dispatching host relays to this sandbox (#4778, env CS_RELAY_CAPS): no env.capability_remote end before building for them
  * @param {object} [o.placement]     {where: local|remote, reason, mode}: the dispatcher's lane placement (#4256), kept in FORGE:STATE
  * @param {object} [o.explore]       {mode: on|off, model}: forge.yaml lean.explore / lean.explore_model (#4391, default off): the explorer subagent
  * @param {object} [o.contextPack]   {mode: shadow|on|off, sources, bytes, days}: forge.yaml engine.context_pack* (#4275, default shadow)
@@ -1618,7 +1619,8 @@ export async function runCore(o) {
         T.validate = lightDone ? "light lane (no plan session)" : "resumed (existing branch)";
       }
       if (o.placement?.where === "remote" && !recover) { // #4785: the frozen validate commands need a tool only the host has
-        const hn = contractHostNeeds(frozen, o.hostCaps);
+        const relayed = new Set(o.relayCaps ?? []); // #4778: a relayed capability is served to the sandbox, so the lane builds there
+        const hn = contractHostNeeds(frozen, o.hostCaps && { ...o.hostCaps, hostCapabilities: (o.hostCaps.hostCapabilities ?? []).filter((c) => !relayed.has(c)) });
         if (hn.caps.length) return await needsHuman(`Remote sandbox lacks host capability ${hn.caps.join(", ")}, which the frozen contract's validate command(s) ${hn.ids.join(", ")} need.\n\nThe dispatching host has it; the lane is recovered locally with the frozen contract.`, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
       }
       T.plan = [`contract ${hash}${lightDone ? " (derived, light lane)" : ""}`, `${frozen.requirements.length} requirement(s)`];

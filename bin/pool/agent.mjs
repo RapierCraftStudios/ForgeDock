@@ -111,7 +111,7 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     const envFile = join(dir, "env");
     const credToken = randomBytes(24).toString("hex");
     const withDocker = Boolean(spec.docker);
-    const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "" };
+    const env = { ...(spec.env ?? {}), ...(withDocker ? { DOCKER_HOST: "tcp://127.0.0.1:2375" } : {}), CS_CRED_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/creds`, CS_RELAY_BASE: `http://host.docker.internal:${cfg.listen.port}/sandboxes/${encodeURIComponent(spec.id)}/relay`, CS_CRED_TOKEN: credToken, CS_SANDBOX_ID: spec.id, CS_REPO_SLUG: spec.repo?.slug ?? "", CS_REPO_URL: spec.repo?.url ?? "", CS_REPO_REF: spec.repo?.ref ?? "", CS_RESULT_FILE: spec.result_file ?? "" };
     writeFileSync(envFile, Object.entries(env).map(([k, v]) => envLine(k, v)).join("\n") + "\n", { mode: 0o600 });
     const rec = { id: spec.id, name, dir, issue: spec.issue ?? null, batch: spec.batch ?? null, cpus, mem_gb, result_file: spec.result_file ?? null, state: "starting", startedAt: now(), finishedAt: null, lease: now(), credToken, docker: withDocker };
     sb()[spec.id] = rec;
@@ -242,6 +242,18 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
       credCache[kind] = { token: x.data.token, at: now() };
     }
     return { status: 200, body: { token: credCache[kind].token } };
+  }
+
+  // #4778: read-only capability relay. The sandbox's request is forwarded to the router queue with the agent token; the
+  // dispatching host runs (or refuses) it. This agent never executes the command.
+  async function sandboxRelay(id, rid, req) {
+    const r = own(id);
+    const m = /^Bearer\s+(\S.*)$/i.exec(req.headers.authorization ?? "");
+    if (!r || r.state === "exited" || !m || !sameSecret(m[1].trim(), r.credToken)) return { status: 401, body: { error: "unauthorized" } };
+    const path = `/agent/relay/${encodeURIComponent(id)}${rid ? `/${encodeURIComponent(rid)}` : ""}`;
+    const x = rid ? await call(cfg.router_url, "GET", path, { token: cfg.token, timeoutMs: 20000 })
+      : await call(cfg.router_url, "POST", path, { token: cfg.token, timeoutMs: 20000, body: { argv: (await readJson(req, 32 * 1024))?.argv } });
+    return { status: x.status, body: x.data };
   }
 
   /** Pull the current bundle from the router, rebuild the lane image if its recipe changed, then restart (systemd). */
@@ -375,6 +387,8 @@ export function createAgent(cfg, { docker, now = () => Date.now(), log = console
     try {
       const cred = req.method === "GET" && /^\/sandboxes\/([^/]+)\/creds\/([a-z]+)$/.exec(url.pathname);
       if (cred) { const r = await sandboxCred(decodeURIComponent(cred[1]), cred[2], req); return send(res, r.status, r.body); }
+      const relay = (req.method === "POST" && /^\/sandboxes\/([^/]+)\/relay$/.exec(url.pathname)) || (req.method === "GET" && /^\/sandboxes\/([^/]+)\/relay\/([^/]+)$/.exec(url.pathname));
+      if (relay) { const r = await sandboxRelay(decodeURIComponent(relay[1]), relay[2] ? decodeURIComponent(relay[2]) : null, req); return send(res, r.status, r.body ?? {}); }
       if (url.pathname !== "/health" && !bearerOk(req, cfg.token)) return send(res, 401, { error: "unauthorized" });
       for (const [match, fn] of routes) {
         const p = match(req, url);

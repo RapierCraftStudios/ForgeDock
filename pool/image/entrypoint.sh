@@ -28,6 +28,16 @@ if [ -n "${CS_CRED_BASE:-}" ]; then
 elif [ -n "${GH_TOKEN:-}" ]; then
   gh auth setup-git >/dev/null 2>&1 || true
 fi
+# #4778: allowlisted read-only host wrappers (e.g. obs-psql) run through cs-relay on the dispatching host, unchanged argv.
+if [ -n "${CS_RELAY_COMMANDS:-}" ]; then
+  mkdir -p /opt/cs/bin
+  IFS=',' read -ra relay_cmds <<<"$CS_RELAY_COMMANDS"
+  for c in "${relay_cmds[@]}"; do
+    [[ "$c" =~ ^[A-Za-z0-9._-]+$ ]] || continue
+    printf '#!/usr/bin/env bash\nexec cs-relay %s "$@"\n' "$c" > "/opt/cs/bin/$c"
+    chmod 0755 "/opt/cs/bin/$c"
+  done
+fi
 git config --global user.name "${GIT_AUTHOR_NAME:-forgedock}"
 git config --global user.email "${GIT_AUTHOR_EMAIL:-forgedock@localhost}"
 
