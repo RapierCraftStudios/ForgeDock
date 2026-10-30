@@ -110,7 +110,7 @@ case "$PR_REF" in
   "") ;;
   *) PR_NUMBER="$PR_REF" ;;
 esac
-AUTO_MERGE=false; THOROUGH=false
+AUTO_MERGE=false; THOROUGH=false; MANUAL_PR=false; OWNER_REQUESTED=false
 MERGE_ISSUE=""; MERGE_BASE=""; MERGE_WORKTREE=""; MERGE_GH_FLAG=""; REPO_FLAG=""; REPO=""
 arg_i=1
 case "$PR_REF" in -*) PR_NUMBER=""; arg_i=0 ;; esac  # leading flag, no PR ref
@@ -119,6 +119,8 @@ while [ "$arg_i" -lt "${#ARG_TOKENS[@]}" ]; do
   case "$arg_t" in
     --auto-merge) AUTO_MERGE=true ;;  # flag parse only, no side effect <!-- allowlist:check-command-side-effects -->
     --thorough) THOROUGH=true ;;
+    --manual-pr) MANUAL_PR=true ;;  # flag parse only, no side effect <!-- allowlist:check-command-side-effects -->
+    --owner-requested) OWNER_REQUESTED=true ;;  # flag parse only <!-- allowlist:check-command-side-effects -->
     --issue|--base|--worktree)
       # A value that is empty or starts with "-" is another flag: treat the value as missing, do not consume it
       arg_v="${ARG_TOKENS[$((arg_i + 1))]:-}"
@@ -172,7 +174,7 @@ fi
 
 **Argument injection hardening** <!-- Added: forge#3466 -->: the loader substitutes `$ARGUMENTS` textually, so the block reads it from a quoted heredoc and rejects any string containing a quote, backtick, dollar sign, backslash, newline or tab (it parses nothing and binds `PR_NUMBER`, `REPO`, `MERGE_*` empty with `AUTO_MERGE=false`; a run with no PR number stops in Phase -1). The executor MUST replace the `NONCE` in the `FORGE_ARGS_EOF_NONCE` placeholder with a fresh random hex string first, so a caller cannot pre-compute the delimiter. Callers pass `--gh-flag -R owner/repo` unquoted.
 
-**`--auto-merge` requires `--issue`** <!-- Added: forge#3102, forge#3124 -->: the Phase 8 phase-trail gate verifies the linked issue. Never infer `MERGE_ISSUE` from the PR (the closing reference and the branch suffix are author-controlled): with `AUTO_MERGE=true` and no `MERGE_ISSUE`, Phase 8 does not merge and returns `REVIEW_RESULT: status: BLOCKED`, blocker "auto-merge requires --issue".
+**`--auto-merge` requires `--issue` (or `--manual-pr`)** <!-- Added: forge#3102, forge#3124 -->: the Phase 8 phase-trail gate verifies the linked issue. Never infer `MERGE_ISSUE` from the PR (the closing reference and the branch suffix are author-controlled): with `AUTO_MERGE=true` and no `MERGE_ISSUE`, Phase 8 does not merge and returns `REVIEW_RESULT: status: BLOCKED`, blocker "auto-merge requires --issue". **`--manual-pr`** <!-- Added: forge#4770 -->, for a hand-built PR the owner asked to merge, skips only the phase-trail preflight (recorded as `FORGE:PHASE_TRAIL_SKIPPED`); every other gate runs. `merge-gate` refuses it when `--issue` is a pipeline issue, or when the PR closes one unless `--owner-requested` (the owner's explicit instruction). `/work-on` and `/orchestrate` never pass either flag.
 
 ### Thoroughness Flag
 
@@ -305,6 +307,7 @@ git worktree add --detach "$REVIEW_WT" "$REVIEW_SHA" 2>/dev/null
 CFG="${FORGE_CONFIG:-$MAIN_ROOT/forge.yaml}"
 vcmd() { yq ".verification.commands.${1}.${2} // \"\"" "$CFG" 2>/dev/null || echo ''; }
 CHANGED=$(jq -r '.full_files[]?' "$CTX" 2>/dev/null); [ -n "$CHANGED" ] || CHANGED=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)   # Phase 1 list survives an API 406 (forge#4154)
+export FORGE_CHANGED_FILES=$(printf '%s\n' "$CHANGED" | while IFS= read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done)   # existing changed files, newline-separated, for *_changed commands (env var, never spliced into the eval'd string)
 [ -d "$MAIN_ROOT/node_modules" ] && [ ! -e node_modules ] && ln -s "$MAIN_ROOT/node_modules" node_modules
 run_step() { # run_step <lang> <step> <tail-lines>: prints the exit code; empty command = SKIPPED
   local c; c=$(vcmd "${1}" "${2}")
@@ -320,24 +323,25 @@ if printf '%s\n' "$CHANGED" | grep -qE '\.(tsx?|jsx?)$'; then
   if [ ! -d node_modules ]; then
     echo "SKIPPED — deps unavailable in per-PR worktree (no node_modules in main checkout); typecheck/build not run, not a type-error finding"
   else
-    run_step typescript lint 30; run_step typescript typecheck 50; TSC_RC=$?
+    run_step typescript lint 30; run_step typescript typecheck 50; TSC_RC=$?; run_step typescript typecheck_changed 50
     if [ "$REQUIRES_FULL_BUILD" = "true" ] || [ "$TSC_RC" -eq 0 ]; then run_step typescript build 30; fi
   fi
 fi
 CLASSIFIER=$(forge_resolve flaky-quarantine.sh)   # install roots only: the PR under review is author-controlled
-for L in python typescript go rust; do
-  TEST_CMD=$(vcmd "$L" test); [ -n "$TEST_CMD" ] || continue
-  echo "=== Running tests (${L}): ${TEST_CMD} ==="; eval "$TEST_CMD" 2>&1 | tail -30; TEST_EXIT=${PIPESTATUS[0]}
+for L in python typescript go rust; do for T in test test_changed; do
+  TEST_CMD=$(vcmd "$L" "$T"); [ -n "$TEST_CMD" ] || continue
+  echo "=== Running tests (${L}.${T}): ${TEST_CMD} ==="; eval "$TEST_CMD" 2>&1 | tail -30; TEST_EXIT=${PIPESTATUS[0]}; echo "EXIT ${L}.${T}=${TEST_EXIT}"
   [ "$TEST_EXIT" -eq 0 ] && continue
   if [ -n "$CLASSIFIER" ]; then
     CL_RESULT=$(bash "$CLASSIFIER" --test "$TEST_CMD" --base "$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null | sed 's|origin/||' || echo main)" --retries 3 2>&1); echo "$CL_RESULT"
     CL=$(printf '%s\n' "$CL_RESULT" | sed -n 's/^CLASSIFICATION:[[:space:]]*\([A-Z_]*\).*/\1/p' | head -n 1)
   else CL=""; fi
-  case "$CL" in PRE_BROKEN|FLAKY) echo "ADVISORY (not blocking): ${L} tests classified ${CL}, quarantined" ;; *) echo "BLOCKING: ${L} tests failed (exit ${TEST_EXIT}), classified REAL" ;; esac
-done
-if [ -z "$(vcmd python test)" ] && [ -z "$(vcmd typescript test)" ]; then echo "SKIPPED — no test commands configured in verification.commands"; fi
+  case "$CL" in PRE_BROKEN|FLAKY) echo "ADVISORY (not blocking): ${L} tests (${T}) classified ${CL}, quarantined" ;; *) echo "BLOCKING: ${L} tests (${T}) failed (exit ${TEST_EXIT}), classified REAL" ;; esac
+done; done
+if [ -z "$(vcmd python test)$(vcmd typescript test)$(vcmd python test_changed)$(vcmd typescript test_changed)" ]; then echo "SKIPPED — no test commands configured in verification.commands"; fi
 ```
 
+- Optional changed-file steps `typescript.typecheck_changed`, `typescript.test_changed`, `python.test_changed` read `$FORGE_CHANGED_FILES` and count as Phase 2 evidence like their full-repo twins (a non-zero `EXIT typescript.typecheck_changed` blocks; `test_changed` follows the REAL/ADVISORY rule below); they keep a large repo from SKIPPED.
 - `EXIT typescript.typecheck` / `EXIT typescript.build` non-zero is **CONFIRMED blocking** (typecheck alone misses SSG/prerender failures, so Phase 1 blocks a full-build lane with no `typescript.build`). `BLOCKING: ... REAL` tests and `EXIT python.format` non-zero on a full-build lane block; `ADVISORY` (pre-broken or flaky per `.forgedock/quarantine.jsonl`) never does; other lint/format output is judged per finding.
 - **2G**: when `pyproject.toml` or `package.json` is in the file list, read the added dependency lines in the PR diff and flag new, unpinned or unexpected ones. **2J** (informational): when `CONTRACT_ISSUE` is set, compare the file list with the Deliverables of its trusted FORGE:CONTRACT (`scripts/check-contract-scope.sh list`); flag 5 or more unexplained uncontracted non-doc files in the summary.
 
@@ -668,7 +672,7 @@ A standalone issue per LOW/POSSIBLE note makes the cascade amplify (each merged 
 - **Review-finding lineage** (`MERGE_ISSUE` carries `review-finding`: this PR fixes a finding): only MEDIUM findings that are CONFIRMED, or LIKELY and safety-exempt, become issues; the rest are NOTEs. A MEDIUM tagged `**Fix efficacy**: fails|regresses` (the linked issue is not fixed) is never damped.
 - **Cross-head re-flag** (`NOTE reflag-*`): a finding an earlier head's trusted review or `FORGE:NOTE_DISPOSITION` already covered is not filed again; never for HIGH/CRITICAL or rows whose linked issue is closed.
 - **Per-review cap**: at most `review.max_filed_findings` ISSUEs (default 2; 1 under lineage; `0` valid), ranked by severity, confidence, safety domain; the overflow is `NOTE capped` (listed, never filed or dropped). HIGH/CRITICAL are never capped and still block via §7B.
-- **Contract scope**: a finding under a verified `deferred → #N` item (verified = open non-PR issue by a trusted author with the `FORGE:DEFERRED_FROM` marker and an exact checklist line `- [ ] \`path\`` for that path, never a body substring) of the trusted FORGE:CONTRACT (`scripts/check-contract-scope.sh list`) is `NOTE contract-deferred #N` (commented there, not filed; counted only after #N is still OPEN and the comment succeeded, otherwise the finding takes the disposition it would have had absent the contract, normally filed, a LOW/POSSIBLE one stays a NOTE), under `accepted-risk` it is `NOTE contract-accepted-risk`; never for HIGH/CRITICAL, `not-affected`, safety-exempt or this PR's own files, nor on missing, untrusted or closed contract input.
+- **Contract scope** (re-read the trusted FORGE:CONTRACT): a finding under a verified `deferred → #N` item (verified = open non-PR issue by a trusted author with the `FORGE:DEFERRED_FROM` marker and an exact checklist line `- [ ] \`path\`` for that path, never a body substring) of the trusted FORGE:CONTRACT (`scripts/check-contract-scope.sh list`) is `NOTE contract-deferred #N` (commented there, not filed; counted only after #N is still OPEN and the comment succeeded, otherwise the finding takes the disposition it would have had absent the contract, normally filed, a LOW/POSSIBLE one stays a NOTE), under `accepted-risk` it is `NOTE contract-accepted-risk`; never for HIGH/CRITICAL, `not-affected`, safety-exempt or this PR's own files, nor on missing, untrusted or closed contract input.
 
 Each NOTE gets one disposition: (1) **fix in this PR**, only comment, documentation or test-only changes as a follow-up commit (any executable change is filed or re-reviewed in full; never push unreviewed code under `--auto-merge`); (2) **list in the PR body** under `## Non-blocking notes` (edit, never replace; `mktemp` file named for the PR number, read back to confirm); (3) **drop** duplicates, stale-comment nits and speculation. NOTES never reach the filing call. The 6A dry run printed the NOTE list: decide the fixed and dropped counts (`NOTES_FIXED`, `NOTES_DROPPED`, default 0; other plain NOTEs count as listed), then the 6C fence runs `classify` for real.
 
@@ -837,7 +841,7 @@ bash "$RF" calibrate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --o
 **One script owns every Phase 8 gate (MANDATORY; a gate is never skipped, reordered or hand-run).** `review-finalize.sh merge-gate` runs, in order, and stops at the first refusal: the note-disposition preflight (a trusted `FORGE:NOTE_DISPOSITION` must exist), the in-PR fix gate (an unanswered trusted `FORGE:INPR_FIX` at the current head blocks), the phase-trail preflight (`scripts/verify-phase-trail.sh` on the linked issue; `--issue` is mandatory and never inferred; an infrastructure failure is `BLOCKED` plus `needs-human`) <!-- Added: forge#3061 -->, the degraded-gate review (`degraded-gate-unreviewed` unless a `### Degraded Paths Reviewed` section covers each degraded check), the guard-state flags below (`VERDICT` is `APPROVED` or `CHANGES REQUESTED`, the others `true`/`false`; an empty or unsubstituted value aborts with `needs-human`; `--other-blocking true` when 7B criterion 1, 2, 3 or 5 fired), routing (a base conflict as the ONLY blocker routes to the base-sync path, `blocker: base-conflict`; any other hold adds `needs-human`), the pre-merge mergeability guard on fresh state, the previously-escalated guard (parks at `workflow:awaiting-merge`, never merges), the CI gate (`scripts/wait-ci-green.sh`) with the reviewed-head guard (only the commit the `FORGE:REVIEW_ROUTE` sha approved; a docs-only delta is allowed), and finally the merge with `--match-head-commit`. Every gate fails closed.
 
 ```bash
-PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; MANUAL_PR="{MANUAL_PR}"; OWNER_REQUESTED="{OWNER_REQUESTED}"
 MERGE_ISSUE="{MERGE_ISSUE}"; MERGE_BASE="{MERGE_BASE}"; IS_MILESTONE_TO_STAGING="{IS_MILESTONE_TO_STAGING}"
 VERDICT="{VERDICT}"; HAS_PURPOSE_REGRESSION="{HAS_PURPOSE_REGRESSION}"; CALIBRATION_NEEDS_HUMAN="{CALIBRATION_NEEDS_HUMAN}"; CTX="{CONTEXT_FILE}"
 TRUST_NEEDS_HUMAN="{TRUST_NEEDS_HUMAN}"; BASE_CONFLICT="{BASE_CONFLICT}"; OTHER_BLOCKING="{OTHER_BLOCKING}"; TABLE_CELL_KEY="{TABLE_CELL_KEY}"
@@ -846,7 +850,7 @@ RF=$(forge_resolve review-finalize.sh)   # install roots only, never the PR chec
 [ -n "$RF" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-finalize.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"; exit 1; }   # STOP
 # The calibration note derives from issue text: `calibrate` (Phase 7B.5) wrote it to this file; it is passed by path, never substituted into a shell word.
 OUT_DIR="$(dirname "$CTX")/review-finalize-${PR_NUMBER}"
-GATE_OUT=$(bash "$RF" merge-gate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --base "$MERGE_BASE" \
+GATE_OUT=$(bash "$RF" merge-gate --pr "$PR_NUMBER" --repo "$REPO" ${MERGE_ISSUE:+--issue "$MERGE_ISSUE"} --base "$MERGE_BASE" $([ "$MANUAL_PR" = "true" ] && echo --manual-pr) $([ "$OWNER_REQUESTED" = "true" ] && echo --owner-requested) \
   --verdict "$VERDICT" --has-purpose-regression "$HAS_PURPOSE_REGRESSION" --calibration-needs-human "$CALIBRATION_NEEDS_HUMAN" --calibration-note-file "$OUT_DIR/calibration-note.txt" \
   --trust-needs-human "$TRUST_NEEDS_HUMAN" --base-conflict "$BASE_CONFLICT" --other-blocking "$OTHER_BLOCKING" --table-cell-key "$TABLE_CELL_KEY" --out-dir "$OUT_DIR"); GATE_RC=$?
 printf '%s\n' "$GATE_OUT"
@@ -859,7 +863,7 @@ exit "$GATE_RC"
 
 **Outcome mapping.** Report the script's output; never re-run its gates by hand and never `gh pr merge` yourself.
 - Exit 0, `MERGE_OUTCOME=merged` (`MERGE_STATE=MERGED`): merged. `merge-failed`: the merge did not land (the script commented on the issue). `parked-awaiting-merge`: parked per the previously-escalated guard; the script performs the transition itself (`transition-label.sh ... awaiting-merge`, prose fallback `gh issue edit --add-label "workflow:awaiting-merge"`).
-- Exit 3: print the `REVIEW_RESULT: status: BLOCKED, blocker: ...` line and stop; `MERGE_OUTCOME=` names the case (`base-conflict`, `needs-human`, `protection-blocked`, `stale-review`, `ci-not-green`). A `base-conflict` blocker carries no label (the autonomous base sync is pipeline work, not a human decision), so every caller of `--auto-merge` MUST map it explicitly: `work-on:review` R4, the router's Phase 0A.1 re-review fallback and `orchestrate` re-review Step 3 each set `workflow:remediating` (falling back to `needs-human`), and a standalone caller runs `/work-on <issue> --remediate`. A caller never leaves the issue unlabelled at `workflow:in-review`. A CI gate TIMEOUT prints `CI_GATE_TIMEOUT`: re-run the same fence up to 3 more times. A phase-trail blocker with no MISSING lines (`phase trail unreadable (rc=N)`, `auto-merge requires --issue`) is an infrastructure or usage failure: callers neither re-run phases nor merge manually.
+- Exit 3: print the `REVIEW_RESULT: status: BLOCKED, blocker: ...` line and stop; `MERGE_OUTCOME=` names the case (`base-conflict`, `needs-human`, `protection-blocked`, `stale-review`, `ci-not-green`). A `base-conflict` blocker carries no label (the autonomous base sync is pipeline work, not a human decision), so every caller of `--auto-merge` MUST map it explicitly: `work-on:review` R4, the router's Phase 0A.1 re-review fallback and `orchestrate` re-review Step 3 each set `workflow:remediating` (falling back to `needs-human`), and a standalone caller runs `/work-on <issue> --remediate`. A caller never leaves the issue unlabelled at `workflow:in-review`. A CI gate TIMEOUT prints `CI_GATE_TIMEOUT`: re-run the same fence up to 3 more times. A phase-trail blocker with no MISSING lines (`phase trail unreadable (rc=N)`, `auto-merge requires --issue`, `manual-pr refused: ...`) is an infrastructure or usage failure: callers neither re-run phases nor merge manually.
 - Exit 3 with `blocker: degraded-gate-unreviewed` (`needs-human` added): the linked issue's gate is DEGRADED and no trusted review comment for the current head has a `### Degraded Paths Reviewed` section with a `- name: how reviewed` item for every degraded check. Not a code defect: `work-on:review` (R4) re-runs the review once so the section is added. Never merge by hand. <!-- Added: forge#3628 -->
 - Exit 4: `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` plus the `MISSING:` lines. Return that status and stop: this phase never re-runs the missing phases and never escalates to `needs-human`; `work-on:review` (R4) alone owns re-dispatching them (forge#3102).
 

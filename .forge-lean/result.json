@@ -1,1 +1,18 @@
-{"status":"fixed","summary":"Column-1 validation now accepts legal path characters; prose and R<n>: rows still rejected","requirements":[{"id":"R1","status":"implemented","evidence":"scripts/file-deferred-followups.sh:78"},{"id":"R2","status":"implemented","evidence":"scripts/file-deferred-followups.test.sh (68 existing checks pass)"},{"id":"R3","status":"implemented","evidence":"scripts/file-deferred-followups.sh:77-79"}],"validation":[{"id":"V1","command":"bash scripts/file-deferred-followups.test.sh","exit":0}],"tests":[{"command":"bash scripts/file-deferred-followups.test.sh","result":"pass","fails_without_fix":true}],"self_review":[{"question":"1","answer":"yes","evidence":"new test accepts all five issue paths"},{"question":"2","answer":"yes","evidence":"68 existing checks pass"},{"question":"3","answer":"yes","evidence":"D1, D2 changed; V1 passes; P1/P2 intact"},{"question":"4","answer":"yes","evidence":"only the script and its test changed"}],"amendments":[]}
+{"status":"fixed","summary":"Relay answers are capped to 512 KiB on the host and a 4xx answer failure posts a small rc 1 answer instead of re-running the command each poll (#4831)",
+"requirements":[
+{"id":"R1","status":"implemented","evidence":"bin/lean/relay.mjs:130"},
+{"id":"R2","status":"implemented","evidence":"bin/lean/relay.mjs:161"},
+{"id":"R3","status":"implemented","evidence":".forge-lean/investigation.md"},
+{"id":"R4","status":"implemented","evidence":"bin/lean/relay.test.mjs"}],
+"validation":[
+{"id":"V1","command":"node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/relay.test.mjs bin/tests/relay.e2e.test.mjs","exit":0},
+{"id":"V2","command":"node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/sandbox-provider.contract.test.mjs bin/tests/computeshare.test.mjs","exit":0},
+{"id":"V3","command":"node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/conformance.e2e.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/execution.e2e.test.mjs bin/lean/execution.test.mjs bin/lean/fixround.test.mjs","exit":0}],
+"tests":[{"command":"node --test bin/lean/relay.test.mjs","result":"pass","fails_without_fix":true}],
+"self_review":[
+{"question":"1","answer":"yes","evidence":"relay.mjs:130 capAnswer + :161 4xx fallback; relay.test.mjs #4831 tests"},
+{"question":"2","answer":"yes","evidence":"V1-V3 pass; answers that fit are returned unchanged (relay.mjs:132)"},
+{"question":"3","answer":"yes","evidence":"D1, D2 done; D3 was optional and skipped; preserve P1-P4 untouched; V1-V3 exit 0"},
+{"question":"4","answer":"yes","evidence":"diff touches only bin/lean/relay.mjs and bin/lean/relay.test.mjs"}],
+"amendments":[],
+"not_members":[{"symbol":"capAnswer","test":"bin/lean/batch.test.mjs","why":"new exports of relay.mjs; the listed tests enumerate sibling file names, not exports, and no file was added"}]}

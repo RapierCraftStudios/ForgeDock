@@ -2,19 +2,26 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "The failure scenario above no longer reproduces at `scripts/file-deferred-followups.sh:79`, covered by a regression test that fails on the current staging head.",
+   "quote": "fix: Oversized relay answer gets 413 from router, is swallowed, request stays pending and host re-runs the command each poll; sandbox times out rc 125 — `bin/lean/relay.mjs:138`.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "No behaviour change for lanes or repos the finding does not describe.",
+   "quote": "**Fix**: cap the answer to the router limit on the host (truncate stdout/stderr so the serialized answer fits, say 512 KiB) or raise the router limit for this route; on a non-retryable answer failure (4xx) post a small `rc 1` \"output too large\" answer instead of retrying.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "Validation should reject requirement text (`R\u003cn>:` prefixes, prose), not legal path characters.",
+   "quote": "Finding validated: VALIDATED / FALSE_POSITIVE / INCONCLUSIVE",
+   "disposition": "deliver",
+   "evidence": ".forge-lean/investigation.md (VALIDATED: bin/lean/relay.mjs:137-138, bin/pool/http.mjs:5-10, bin/pool/router.mjs:315)",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "If VALIDATED: fix implemented and tested on the correct branch",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -22,38 +29,99 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "scripts/file-deferred-followups.sh",
-   "change": "Replace the character-whitelist grep at the column-1 check with a blacklist: keep the R\u003cn>: rejection; reject control chars; a value with whitespace must contain '/' or end in .\u003cext>, otherwise it is prose and rejected; whitespace-free values pass. Update header comment.",
+   "path": "bin/lean/relay.mjs",
+   "change": "Add exported RELAY_ANSWER_MAX_BYTES = 512 * 1024 and a pure exported capAnswer(out, max) that trims stdout first, then stderr (never splitting a UTF-8 character), until Buffer.byteLength(JSON.stringify(answer)) \u003c= max, appends 'relay: output over \u003cmax> bytes, truncated' to stderr and sets rc 1 when it trimmed; returns the answer unchanged when it already fits. In servicePending apply capAnswer to the redacted answer (line 137) before posting. In the catch at line 138: if the error's status is an integer 400-499 other than 429, post a fallback {rc: 1, stdout: '', stderr: 'relay: answer rejected by the router (HTTP \u003cstatus>), output too large or invalid'} for the same rid and count it as answered; swallow a failure of that fallback and keep swallowing transient/429/statusless errors (retried on the next poll). Update the servicePending doc comment.",
    "requirements": [
     "R1",
-    "R3"
+    "R2",
+    "R4"
    ]
   },
   {
    "id": "D2",
-   "path": "scripts/file-deferred-followups.test.sh",
-   "change": "Add cases: app/(marketing)/page.tsx, 'docs/My Notes.md', src/a=b.ts, src/#x.ts, src/foo:bar.ts are accepted (rc 0, issue created, path listed); existing prose and R\u003cn>: rows stay rejected; a mixed batch with these paths files everything.",
+   "path": "bin/lean/relay.test.mjs",
+   "change": "Regression tests: (a) capAnswer keeps a small answer unchanged; (b) servicePending with a runner returning ~1,000,000 bytes of quote/newline-heavy stdout posts one answer whose JSON byte length is \u003c= RELAY_ANSWER_MAX_BYTES (\u003c 1 \u003c\u003c 20), rc 1 and a truncation notice in stderr, multibyte text not corrupted; (c) a transport whose first relayAnswer throws an Error with status 413 gets a second, small rc 1 answer for the same rid and servicePending returns 1; (d) a 502/statusless throw still posts nothing else and returns 0 (existing case kept).",
    "requirements": [
     "R1",
     "R2",
-    "R3"
+    "R4"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/tests/relay.e2e.test.mjs",
+   "change": "Optional: a case where the host command prints ~1 MB of newline-heavy output through the real router/agent; cs-relay receives an answer (rc 1, truncation notice) instead of timing out, and the command ran exactly once.",
+   "requirements": [
+    "R1",
+    "R4"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "Rejection of `R\u003cn>:` prefixed and prose column-1 values (exit 2, DEFERRED_TSV=INVALID, nothing filed) in scripts/file-deferred-followups.test.sh section 21"
+   "what": "servicePending signature, return value (count of answered requests) and its swallowing of relayPending failures and transient (502/503/504, 429, statusless) answer failures, bin/lean/relay.mjs:128-141; its caller bin/lean/sandbox-remote.mjs:144-149"
   },
   {
    "id": "P2",
-   "what": "Row format, exit codes, stdout markers and gh call behaviour of scripts/file-deferred-followups.sh for already-valid paths; callers in commands/work-on/build.md"
+   "what": "Answers that already fit are posted byte-for-byte unchanged (rc, stdout, stderr), so the existing relay e2e output (bin/tests/relay.e2e.test.mjs) and redaction (relay.mjs:137) are unchanged"
+  },
+  {
+   "id": "P3",
+   "what": "runRelayed behaviour and its 1 MiB per-stream maxBuffer (bin/lean/relay.mjs:60-73), used also by pre-fetch (bin/lean/sandbox-remote.mjs:158)"
+  },
+  {
+   "id": "P4",
+   "what": "Router body limit and relay routes unchanged: bin/pool/http.mjs:5 readJson default 1 MiB, bin/pool/router.mjs:61-66 and :263-264"
+  },
+  {
+   "id": "H1",
+   "what": "feat(pool): read-only capability relay from sandbox to dispatching host, plus dispatch-time pre-fetch (#4778, PR #4821)",
+   "source": "guard"
+  },
+  {
+   "id": "H2",
+   "what": "fix(execution): host-capability placement reads only the issue body; contract validate commands and decision comments are ignored (#4785, PR #4790)",
+   "source": "guard"
+  },
+  {
+   "id": "H3",
+   "what": "perf(execution): pin host capabilities by need, not by mention in the issue body (#4776, PR #4795)",
+   "source": "guard"
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "bash scripts/file-deferred-followups.test.sh"
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/relay.test.mjs bin/tests/relay.e2e.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/sandbox-provider.contract.test.mjs bin/tests/computeshare.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/conformance.e2e.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/execution.e2e.test.mjs bin/lean/execution.test.mjs bin/lean/fixround.test.mjs"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Cap on the host (512 KiB serialized answer) instead of raising the router's body limit for the relay route",
+   "justification": "The router is a generic queue that never interprets relay payloads (bin/pool/router.mjs:21-23) and every route shares readJson's 1 MiB limit (bin/pool/router.mjs:315, bin/pool/http.mjs:5); bounding at the source also bounds the router's in-memory queue (router.mjs:36-37) and the GET delivery to the sandbox. 512 KiB is the reviewer's suggested value and leaves headroom under 1 MiB for the envelope.",
+   "source": "spec"
+  },
+  {
+   "id": "K2",
+   "choice": "A trimmed answer reports rc 1 with a 'relay: output over N bytes, truncated' stderr notice",
+   "justification": "Same convention runRelayed already uses for its own maxBuffer truncation (bin/lean/relay.mjs:66), so the lane sees one consistent truncation signal.",
+   "source": "precedent"
+  },
+  {
+   "id": "K3",
+   "choice": "Only a 4xx other than 429 triggers the small fallback answer; 429, 5xx and statusless errors keep the retry-on-next-poll behaviour",
+   "justification": "httpTransport's fail() marks 502/503/504 transient and 429/503 retryable (bin/lean/sandbox-remote.mjs:62-68); a 4xx is deterministic, so retrying it re-runs the command forever.",
+   "source": "precedent"
   }
  ]
 }

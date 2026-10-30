@@ -8,6 +8,7 @@
  *   RUN_TERMINAL        -> `run_terminal`  (reason, code, wall_ms; lean adds milestone, conformance_mode, shadow_would, the pr and
  *                          builder_tier/class/model/escalated 0|1, forge#4394)
  *   SANDBOX_USAGE       -> `sandbox_usage` (provider, sandbox_id, minutes, cost_usd, batch; one per settled remote lane, forge#4255)
+ *   DECISION_ENGINE     -> `decision_engine` (decided, escalated, vetoed, reversed, mode, needs_human_before/after; forge#4766)
  *   STRUCTURE_DELTA     -> `structure_delta` (edges_added/removed, import_files_added/removed, boundary_changed/loosened 0|1; forge#4159)
  *                          lean's merge-time record (forge#4165) adds milestone, the pr and string lists: deps_added and
  *                          new_edges / removed_edges as "from:to" comma-joined, top_growth "file+N", decisions "K1:lint",
@@ -78,6 +79,10 @@ export function mapRecord(rec, wallMs) {
     return { event: "structure_delta", phase: rec.phase ?? "implement", ...prOf(rec), payload: compact({ edges_added: rec.edges_added, edges_removed: rec.edges_removed,
       import_files_added: rec.import_files_added, import_files_removed: rec.import_files_removed, boundary_changed: bit(rec.boundary_changed), boundary_loosened: bit(rec.boundary_loosened),
       ...structureLists(rec) }) };
+  }
+  if (rec.event === "DECISION_ENGINE") { // #4766
+    return { event: "decision_engine", phase: null, payload: compact({ decided: rec.decided, escalated: rec.escalated, vetoed: rec.vetoed, reversed: rec.reversed, mode: rec.mode,
+      needs_human_before: rec.needs_human_before, needs_human_after: rec.needs_human_after }) };
   }
   if (rec.event === "CI_PENDING_WAIT") {
     return { event: "ci_pending_wait", phase: rec.phase ?? "review", payload: compact({ pr: rec.pr, minutes_waited: rec.minutes_waited, result: rec.result, polls: rec.polls, rate_limit_sleeps: rec.rate_limit_sleeps }) };

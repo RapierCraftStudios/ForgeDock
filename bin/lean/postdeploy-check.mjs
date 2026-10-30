@@ -9,6 +9,7 @@
  * probe runner's minimal env): all pass -> a FORGE:PROBE record and the follow-up closes; a fail -> the record, and the
  * parent reopens with the output. An item without a runnable check is `awaiting-measurement`: no lane, ever.
  */
+import { createHash } from "node:crypto";
 import { noComments } from "./render.mjs";
 import { MAX_TIMEOUT_S, OUTPUT_TAIL, PROBE_MARKER, probeEnv, probeResultOf, readProbeConfig, runProbe } from "./probe.mjs";
 import { parseMinAge } from "./prefilter.mjs";
@@ -18,6 +19,7 @@ export const CHECK_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 export const AWAITING_MEASUREMENT_LABEL = "awaiting-measurement";
 export const MONITORING_LABEL = "post-deploy-monitoring";
 export const OWNER_ASK_MARKER = "FORGE:OWNER_ASK"; // #4689
+export const ROLLOUT_ASK_MARKER = "FORGE:ROLLOUT_ASK"; // #4769: distinct, so it never silences the no-runnable-check ask
 export const DEFAULT_EVERY_MS = 6 * 3600e3;
 const ITEM_RE = /^\s*[-*]\s+\[[ xX]\]\s+(.*)$/;
 const CHECK_TOKEN_RE = /^`[^`]*`\s+(?:\*\*known-flaw\*\*\s+)?[—-]+\s*post-deploy:\s*\[check:\s*([^\]\s]*)\s*\]/;
@@ -98,14 +100,57 @@ export async function addMonitoringLabel({ io, repo, issue }) {
   }
 }
 
-/** #4689: tick every unticked post-deploy checklist item of a follow-up body (the evidence is in the FORGE:PROBE comment). */
-export const tickItems = (body) => String(body ?? "").replace(/^(\s*[-*]\s+)\[ \](\s+`[^`]*`\s+(?:\*\*known-flaw\*\*\s+)?[—-]+\s*post-deploy:)/gm, "$1[x]$2");
+/**
+ * #4689: tick every unticked post-deploy checklist item of a follow-up body (the evidence is in the FORGE:PROBE comment).
+ * #4755: with `ids` (a Set of check ids) only the items naming one of them are ticked.
+ */
+export function tickItems(body, ids = null) {
+  const text = String(body ?? "");
+  const re = /^(\s*[-*]\s+)\[ \](\s+`[^`]*`\s+(?:\*\*known-flaw\*\*\s+)?[—-]+\s*post-deploy:)/;
+  if (!ids) return text.replace(new RegExp(re.source, "gm"), "$1[x]$2");
+  const per = itemCheckIds(text);
+  let i = 0;
+  return text.split("\n").map((l) => (ITEM_RE.test(l) ? (ids.has(per[i++]) ? l.replace(re, "$1[x]$2") : l) : l)).join("\n");
+}
+
+/** #4755: per checklist item `{id, done}`: its check id (null when none) and whether it is already ticked. */
+const itemStates = (body) => {
+  const ids = itemCheckIds(body);
+  return noComments(String(body ?? ""), " ").split("\n").map((l) => ITEM_RE.exec(l)).filter(Boolean).map((m, i) => ({ id: ids[i], done: /^\s*[-*]\s+\[[xX]\]/.test(m[0]) }));
+};
+const ROLLUP_RE = /<!--\s*FORGE:POSTDEPLOY_ROLLUP:/;
+/** #4755: the check ids a FORGE:PROBE record of `fix` reported failing. */
+const failedIdsOf = (body, fix) => {
+  const line = String(body ?? "").split("\n").find((l) => /^\s*`?\{.*"result"/.test(l));
+  try { const j = JSON.parse(line.trim().replace(/^`|`$/g, "")); return j.fix === fix && j.result === "fail" ? (j.checks ?? []).filter((c) => c.result === "fail").map((c) => c.id) : []; } catch { return []; }
+};
 
 /** #4689: one typed `FORGE:OWNER_ASK` comment for the items with no runnable check, posted once; best effort, nothing in a dry run. */
 async function postOwnerAsk({ iss, repo, io, dryRun, isTrusted, ids, missing, def }) {
   if (dryRun || (iss.comments ?? []).some((c) => isTrusted(c) && String(c?.body ?? "").includes(OWNER_ASK_MARKER))) return;
   const what = ids.length ? missing.map((m) => (m ? `add \`${m}\` to ${CHECKS_FILE} on ${def}` : "name an item's check with `[check:<id>]`")).join("; ") : "name each item's check with `[check:<id>]` and add it to the checks file";
   try { await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", `<!-- ${OWNER_ASK_MARKER} -->\n## Owner ask\nNo lane was started and none will be. Needed from the owner: ${what}, or measure the item by hand.`]); } catch { /* the label still shows it */ }
+}
+
+/** #4769: a check output `BLOCKED: ... <flag> = off ...` means the rollout is off, not that the change is broken: {flag, evidence} or null. */
+export function blockedRollout(output) {
+  const m = /^BLOCKED:\s*(?:.*?\s)?([A-Za-z0-9_.:*-]+)\s*=\s*off\b.*$/m.exec(String(output ?? ""));
+  return m ? { flag: m[1], evidence: String(output).trim().slice(-OUTPUT_TAIL) } : null;
+}
+const evidenceHash = (text) => createHash("sha1").update(String(text).replace(/\d{4}-\d{2}-\d{2}[T ][\d:.]+Z?/g, "").trim()).digest("hex").slice(0, 12);
+const ASK_RE = /FORGE:ROLLOUT_ASK rollout:(\S+) evidence:([0-9a-f]+)/g;
+/** #4769: one typed owner ask per blocked flag, re-posted only when its evidence hash changes. Returns the flags newly raised. */
+async function postRolloutAsks({ iss, repo, io, isTrusted, blocked, def }) {
+  const prior = new Map();
+  for (const c of iss.comments ?? []) if (isTrusted(c)) for (const m of String(c?.body ?? "").matchAll(ASK_RE)) prior.set(m[1], m[2]);
+  const raised = [];
+  for (const b of blocked) {
+    const hash = evidenceHash(b.evidence);
+    if (prior.get(b.flag) === hash) continue;
+    const body = `<!-- ${ROLLOUT_ASK_MARKER} rollout:${b.flag} evidence:${hash} -->\n## Owner ask: promote \`${b.flag}\`\nThe post-deploy check on \`${def}\` is blocked because \`${b.flag}\` is off. No lane was started and none will be. Decide: promote it (first cohort, guard metrics, shadow evidence below) or record a keep-off decision.\n\n${fenced(b.evidence)}`;
+    try { await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", body]); raised.push(b.flag); } catch { /* retried next pass */ }
+  }
+  return raised;
 }
 
 /** #4689: one engineering issue per failing check (never a lane): the output, the fix and the follow-up. Best effort. */
@@ -119,6 +164,46 @@ async function fileFailureIssues({ bad, iss, repo, io, parent, def, fix }) {
 }
 
 /**
+ * #4755: a post-deploy rollup is worked per item, so one failing or check-less item never blocks the rest. Runs the unticked
+ * items that have a default-branch check (minus those a FORGE:PROBE record of this fix already failed), ticks the passing ones
+ * (the evidence is the PROBE record), files one issue per failing check, and closes the rollup only when every item is ticked.
+ */
+async function measureItems({ iss, repo, def, shas, checks, cwd, io, dryRun, isTrusted, config, env, spawn, now }) {
+  const fix = [...shas].sort().join(",");
+  const todo = itemStates(iss.body).filter((t) => !t.done);
+  if (!todo.length) { if (!dryRun) await io.gh(["issue", "close", String(iss.number), "-R", repo, "--reason", "completed"]); return { state: "pass", detail: "every item is ticked" }; }
+  const failed = new Set((iss.comments ?? []).filter((c) => isTrusted(c)).flatMap((c) => failedIdsOf(c?.body, fix)));
+  const missing = todo.filter((t) => !t.id || !checks[t.id]).map((t) => t.id);
+  const ids = todo.filter((t) => t.id && checks[t.id] && !failed.has(t.id)).map((t) => t.id);
+  if (dryRun) return { state: "dry-run", detail: `checks ${[...new Set(ids)].join(", ") || "none"} not run (dry run)` };
+  if (missing.length) await postOwnerAsk({ iss, repo, io, dryRun, isTrusted, ids: todo.map((t) => t.id), missing, def });
+  const rows = ids.length ? await runNamedChecks({ ids, checks, cwd, config, env, spawn }) : [];
+  const blockedRows = rows.filter((r) => r.result === "fail" && blockedRollout(r.output)); // #4769
+  const good = rows.filter((r) => r.result === "pass"), bad = rows.filter((r) => r.result === "fail" && !blockedRows.includes(r));
+  const blocked = [...new Map(blockedRows.map((r) => [blockedRollout(r.output).flag, blockedRollout(r.output)])).values()];
+  if (blocked.length) await postRolloutAsks({ iss, repo, io, isTrusted, blocked, def });
+  if (good.length || bad.length) {
+    let defaultSha = null;
+    try { defaultSha = String(await io.git(["rev-parse", `origin/${def}`], { cwd })).trim() || null; } catch { /* recorded as null */ }
+    const body = [
+      `<!-- ${PROBE_MARKER} -->`, `## Post-deploy check: ${bad.length ? "fail" : "pass"}`,
+      JSON.stringify({ fix, default_sha: defaultSha, result: bad.length ? "fail" : "pass", at: new Date(now()).toISOString(), checks: rows.map((r) => ({ id: r.id, result: r.result, exit: r.exit, ms: r.ms })) }), "",
+      `Ran on \`${def}\` per rollup item; commands come from \`${CHECKS_FILE}\` on \`${def}\`. Passing items are ticked; only failing checks get an issue.`,
+      ...bad.flatMap((r) => ["", `**${r.id}** (exit ${r.exit ?? "timeout"})`, fenced(r.output)]),
+    ].join("\n").slice(0, OUTPUT_TAIL * 4);
+    await io.gh(["issue", "comment", String(iss.number), "-R", repo, "--body", body]);
+    const ticked = tickItems(iss.body, new Set(good.map((r) => r.id)));
+    if (ticked !== iss.body) { try { await io.gh(["issue", "edit", String(iss.number), "-R", repo, "--body", ticked]); } catch { /* the PROBE record is the evidence */ } }
+    if (bad.length) await fileFailureIssues({ bad, iss, repo, io, parent: null, def, fix });
+  }
+  const left = todo.filter((t) => !(t.id && good.some((r) => r.id === t.id)));
+  if (!left.length) { await io.gh(["issue", "close", String(iss.number), "-R", repo, "--reason", "completed"]); return { state: "pass", detail: `checks ${[...new Set(good.map((r) => r.id))].join(", ")} passed` }; }
+  if (blocked.length && !bad.length && !failed.size && !missing.length) return { state: "awaiting-measurement", blocked: blocked.map((b) => b.flag), detail: `${good.length} item(s) ticked; blocked on rollout ${blocked.map((b) => b.flag).join(", ")} (owner ask)` };
+  if (missing.length) return { state: "awaiting-measurement", detail: `${good.length} item(s) ticked; no runnable check on ${def} for ${missing.map((m) => m ?? "an item without a check id").join(", ")} (${CHECKS_FILE})` };
+  return { state: bad.length ? "fail" : "recorded-fail", detail: `${good.length} item(s) ticked; failing: ${[...new Set([...bad.map((r) => r.id), ...failed])].join(", ")}` };
+}
+
+/**
  * Measure a ready post-deploy follow-up. Never runs a command that is not in the default branch's checks file.
  * @returns {Promise<{state:"awaiting-measurement"|"pass"|"fail"|"recorded-fail"|"dry-run"|"monitoring", detail:string}>}
  * When every item's check declares a window (#4627) a pass records the release and the window end and the follow-up stays
@@ -127,6 +212,7 @@ async function fileFailureIssues({ bad, iss, repo, io, parent, def, fix }) {
 export async function measureFollowup({ iss, repo, parent, def, shas = [], cwd, io, dryRun = false, isTrusted = () => false, config = readProbeConfig(cwd), env = process.env, spawn, now = () => Date.now() }) {
   const ids = itemCheckIds(iss.body);
   const checks = await checksAt(io.git, [`origin/${def}`], cwd);
+  if (ROLLUP_RE.test(String(iss.body ?? "")) && !ids.some((id) => id && checks[id]?.forMs)) return measureItems({ iss, repo, def, shas, checks, cwd, io, dryRun, isTrusted, config, env, spawn, now }); // #4755
   const missing = ids.filter((id) => !id || !checks[id]);
   if (!ids.length || missing.length) {
     await postOwnerAsk({ iss, repo, io, dryRun, isTrusted, ids, missing, def });

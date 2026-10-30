@@ -43,7 +43,6 @@
     "examples/",
     "packages/protocol/src/",
     "scripts/",
-    "!scripts/refresh-bot-token.sh",
     "templates/",
     "LICENSE",
     "README.md"

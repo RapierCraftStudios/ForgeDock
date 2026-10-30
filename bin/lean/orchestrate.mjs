@@ -20,7 +20,7 @@
  * before scheduling, so a live lane does not hold up the others.
  * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
  * limit holds admissions for that account until its reset, and deferrals other than a busy resource (`host.busy`,
- * `sandbox.capacity`, #4528) stop after `maxDeferrals`.
+ * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788) stop after `maxDeferrals`.
  * Usage-limit holds (#4190) are keyed by backend identity in `limits` (the host store, shared by every batch on the
  * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. While held, the
  * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset. An `engine-error` is
@@ -31,6 +31,8 @@
  * batch decision and one `added` row; while it is set, lanes running with an empty queue still wake every `pollMs`.
  * `getHeld()` (#4592, `--hold`/`--release`) is read on every pass: the issues it returns are never admitted (a running lane is not stopped);
  * when only held issues (and their dependents) remain and nothing runs, the batch ends with them `held` ("held by operator"), and a `--resume <id> <issue...>` naming them (or `--release`) re-admits them.
+ * `getBlocked()` (#4773, the `blocked` label) is read on every pass: the issues it returns are in the batch but not dispatched; removing the label
+ * releases them on the next pass (the batch polls while only blocked issues wait). `trusted(n)` gates `Blocked by`/`Depends on` edges to a trusted body author.
  *
  * Maintenance budget (#4197), off unless `maintenance: {share, whenIdle}` is passed: `classify(issue)` gives each issue
  * `{maintenance, priority}` (persisted as `classes`) and admission follows `pickNext`: P0/P1 features, then a maintenance
@@ -48,7 +50,8 @@
  * starts only when the batch is under its K and the registry grants it a host slot; `priorityOf(issue)` (persisted as
  * `priorities`) ranks it host-wide, and the batch's ready issues are tried in priority order. Ready issues it cannot
  * start yet stay offered in the registry (polled every `pollMs`) and are withdrawn once no longer ready; a settled lane
- * releases its slot, an adopted one re-records it.
+ * releases its slot, an adopted one re-records it. `sched.cap` may be a function, evaluated at each admission attempt
+ * (#4777: the live local lane cap from cores and memory; running lanes are never revoked, over-cap issues stay queued).
  * Per-issue lock (#4481), on with `sched.exclusive` (registry entries ask `exclusive: true`): when another batch holds a live slot for the same repo and issue (`tryAcquire` `conflict`, or
  * `registry.holder` for a lane placed remote), the issue is not started: it is retried after `pollMs` with one `deferred`
  * row naming that batch (no deferral count, no breaker), and admission goes on with the next ready issue.
@@ -78,7 +81,7 @@
  * recoverable (needs-human `ci.red` / `base.conflict` / `builder.block_untyped`, `contract.invalid` after a mid-run issue
  * edit, `ci-pending` whose PR `conflicting(issue, pr)` says conflicts, the non-human `budget-exceeded` turn overrun of #4505,
  * recovered at the next size budget) is not final while its persisted `recoveries` stay
- * under `maxAttempts`: it is requeued as a recovery lane (`ctx.recover = {code, attempt, final}`, `final` when attempt ==
+ * under its class budget (#4725: `maxAttempts`; mechanical/env codes `mechanicalMaxAttempts`, default 2, never below `maxAttempts`): it is requeued as a recovery lane (`ctx.recover = {code, attempt, final}`, `final` when attempt ==
  * `maxAttempts`) under the same admission as any lane, so its dependents stay queued. Only a final lane relabels needs-human
  * itself; a non-final attempt that ends needs-human/ci-pending/budget-exceeded without a successor is relabelled here, once (#4302),
  * as is a first-run budget-exceeded the batch does not recover (#4505: the lane never labels it). A recovery
@@ -101,7 +104,7 @@
  * the queue order except that decomposed sub-issues go first. A settled row carries `est_minutes` (estimated vs. actual).
  */
 import { parseDependsOn } from "../engine/phases.mjs";
-import { classifyNeedsHuman, recoveryCodeOf, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { classifyNeedsHuman, recoveryCodeOf, recoveryClassOf, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { detectGateDeadlock, formatGateDeadlock } from "./gatewatch.mjs";
 import { recoveryEvidence } from "./render.mjs";
 import { renderAlerts } from "../stats/render.mjs";
@@ -120,7 +123,10 @@ export const DEFAULT_MAX_DEFERRALS = 3;
 export const ENGINE_ERROR_RELAUNCHES = 1;
 export const HOST_BUSY_RETRY_S = 60;
 // #4528: a busy host or a full sandbox pool is a wait, not a failure: requeued after its retry-in, never capped.
-const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity"]);
+// A lane that could not be resolved because gh/git failed (network blip) is the same kind of wait (#4791).
+// #4788: an unreachable pool is a wait too (the lane already retried for unreachable_window_min); a stall is reported by poolStall.
+const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity", "sandbox.unreachable", "lane.unresolved"]);
+export const POOL_OFFLINE_ALERT_MIN = 10;
 export const RATE_LIMIT_FALLBACK_S = 15 * 60;
 export const DEFER_BACKOFF_S = 120;
 export const DEFER_BACKOFF_MAX_S = 30 * 60;
@@ -240,7 +246,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, getCancelled = null, getHeld = null, getGates = null, stopLane = null,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
@@ -282,6 +288,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const reg = sched?.registry ?? null;
   const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
   const remoteMax = remote && Number.isInteger(remote.max) && remote.max >= 0 ? remote.max : 0;
+  let poolOfflineSince = null, poolStallNoted = false; // #4788: when sampled online first read 0, and whether the stall was reported
   let capAt, capAdmits = 0; // #4540: provider capacity sample and the remote admissions made since it
   const remoteRun = new Set(); // remote lanes running now (#4253): admitted against remoteMax, never the host cap
   let budgetLocal = false; // the execution budget refused a remote lane under on_budget local: the rest run on the host
@@ -289,7 +296,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const placeOf = (n) => {
     if (!remote) return null;
     // #4542: a lane recovering from a remote capability block runs on the host, which has the capability.
-    if (recovering.get(n)?.code === OUTCOME_CODES.ENV_CAPABILITY_REMOTE) return { where: "local", reason: "host capability: recovering env.capability_remote" };
+    // #4785: a tool-missing recovery too: the sandbox that lacked the tool is not chosen again.
+    if ([OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     if (budgetLocal) return { where: "local", reason: `fallback to local: execution budget: ${budgetHit ?? "cap reached"}` };
     try {
       if (typeof remote.place === "function") {
@@ -305,6 +313,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const remoteCpm = Number(remote?.costPerMinute) > 0 ? Number(remote.costPerMinute) : 0;
   let budgetStop = null, budgetHit = null; // this pass's refusal under on_budget stop; the last refusal reason
   const recoveryMax = Number.isInteger(recovery?.maxAttempts) && recovery.maxAttempts > 0 ? recovery.maxAttempts : 0;
+  // #4725: mechanical/env codes recover on their own budget (>= the conformance one); 0 maxAttempts still turns recovery off.
+  const mechMax = recoveryMax && Number.isInteger(recovery?.mechanicalMaxAttempts) && recovery.mechanicalMaxAttempts > 0 ? Math.max(recovery.mechanicalMaxAttempts, recoveryMax) : recoveryMax;
+  const maxFor = (cls) => (cls === "mechanical" ? mechMax : recoveryMax);
+  const classUsed = toMap(saved?.recoveryClasses); // `${issue}:${class}` -> recovery lanes launched in that class
   const recoveries = toMap(saved?.recoveries); // issue -> recovery lanes launched (#4267)
   const recovering = toMap(saved?.recovering); // issue -> {code, attempt, detail, outcome, ...} of the recovery lane queued or running
   const requeueApplied = new Set(saved?.requeueApplied ?? []); // #4550: `--requeue` entries already applied (batch `requeue` file)
@@ -322,7 +334,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       pending, notBefore: toObj(notBefore), requeues: toObj(requeues), deferrals: toObj(deferrals), engineErrors: toObj(engineErrors),
       prefilter: toObj(checked), errorTimes, breaker: tripped, ...(budget ? { classes: toObj(classes), dispatch: { ...dispatch } } : {}),
       ...(reg ? { priorities: toObj(priorities) } : {}), ...(sandboxUse.size ? { sandbox: toObj(sandboxUse) } : {}),
-      ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering) } : {}),
+      ...(recoveries.size || recovering.size ? { recoveries: toObj(recoveries), recovering: toObj(recovering), recoveryClasses: toObj(classUsed) } : {}),
       ...(requeueApplied.size ? { requeueApplied: [...requeueApplied], requeued: toObj(requeuedInfo) } : {}),
       ...(relabelled.size ? { relabelled: [...relabelled] } : {}), ...(cancelled ? { cancelled } : {}),
       ...(estimate ? { estimates: toObj(estimates), enqueued: toObj(enqueued) } : {}), ...(heads.size ? { heads: [...heads] } : {}) });
@@ -347,15 +359,20 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     try { v = Number(await estimate(n, { body })); } catch { v = null; }
     estimates.set(n, Number.isFinite(v) && v > 0 ? v : EST_DEFAULT_MIN.M);
   };
+  // #4773: a declaration line is an edge only when the body's author is trusted (the engine's admission applies the same rule).
+  const declared = async (n, body) => {
+    if (typeof trusted === "function") { let ok = false; try { ok = (await trusted(n)) === true; } catch { ok = false; } if (!ok) return []; }
+    return parseDeps(body, n);
+  };
   const readDeps = async (n) => {
     let body = "";
     try { body = await readBody(n); } catch { /* unreadable: no ordering info, work-on's own check still applies */ }
     if (drift?.holds) bodies.set(n, body);
-    deps.set(n, parseDeps(body, n));
+    deps.set(n, await declared(n, body));
     await readEstimate(n, body);
     await classifyOne(n);
     await readPriority(n);
-    if (resolveLane) { let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e) }; } lanes.set(n, l); }
+    if (resolveLane) { let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e), transient: true }; } lanes.set(n, l); }
   };
   const edges = (n) => (deps.get(n) ?? []).filter((d) => set.has(d));
   // A milestone issue waiting on a staging fix (or the reverse) never sees that fix on its own base: surface the edge.
@@ -401,6 +418,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // Host registry seams (#4191): `offered` issues are queued for a slot, `slotted` ones hold one.
   const offered = new Set(), slotted = new Set();
   let fellBack = false;
+  // #4777: `sched.cap` may be a function (the host-derived local lane cap), evaluated at every attempt so it stays live.
+  const liveCap = () => { try { return typeof sched.cap === "function" ? sched.cap() : sched.cap; } catch { return null; } };
   const keyOf = (n) => `${sched?.batch ?? batchId ?? "?"}#${n}`;
   const prioOf = (n) => priorities.get(n) ?? 2;
   // #4409: priority, then the head band (decomposed sub-issues; with an estimator also starved issues, oldest first), then
@@ -472,6 +491,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         // #4540: the provider's free slots (`remote.capacity() -> {free, at}`, sync, null = unknown) cap admissions per sample `at`; the issue queues here instead of a 503.
         let cap = null;
         try { cap = remote.capacity?.() ?? null; } catch { cap = null; }
+        // #4788: zero live agents for longer than `remote.poolOfflineMin` (default 10): one loud batch event, none while online > 0.
+        if (cap && cap.online === 0) {
+          poolOfflineSince ??= now();
+          const limitMs = (posNum(remote.poolOfflineMin) ?? POOL_OFFLINE_ALERT_MIN) * 60000;
+          if (!poolStallNoted && now() - poolOfflineSince > limitMs) {
+            poolStallNoted = true;
+            update({ issue: null, outcome: "pool-offline", detail: `STALLED: no compute pool agent online for over ${Math.round(limitMs / 60000)} min; ${remote.offlineFallback ? "lanes fall back to the host" : "remote lanes wait (set execution.fallback_local or use mode local to run on the host)"}` });
+          }
+        } else if (cap && cap.online > 0) { poolOfflineSince = null; poolStallNoted = false; }
         // #4547: opt-in (`execution.fallback_local`): every pool agent offline or asleep (sampled online 0) runs the lane on the host.
         if (remote.offlineFallback && cap && cap.online === 0) {
           p = { where: "local", reason: `fallback to local: no pool agent online (${p.reason})` };
@@ -490,7 +518,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
     }
     if (!reg) { if (p) placed.set(n, p); return true; }
-    const r = reg.tryAcquire(keyOf(n), entryOf(n), sched.cap);
+    const r = reg.tryAcquire(keyOf(n), entryOf(n), liveCap());
     if (!r?.ok && r?.conflict != null) return busy(n, r.conflict, wanted);
     if (!r?.ok) { offered.add(n); wanted.add(n); return false; }
     offered.delete(n); slotted.add(n);
@@ -553,6 +581,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       for (const d of depList) {
         if (["needs-human", "budget-exceeded"].includes(results.get(d)?.outcome)) { parked = d; break; } // #4505: an unrecovered overrun parks too
         if (set.has(d) || typeof issueLabels !== "function") continue;
+        if (typeof issueState === "function") { // #4725: a closed (completed) dependency is satisfied: its stale needs-human label is not a blocker
+          let st = "";
+          try { st = String((await issueState(d)) ?? "").toUpperCase(); } catch { st = ""; }
+          if (st === "CLOSED") continue;
+        }
         let names = [];
         try { names = (await issueLabels(d)) ?? []; } catch { names = []; }
         if (Array.isArray(names) && names.includes("needs-human")) { parked = d; break; }
@@ -641,22 +674,24 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (row.outcome === "ci-pending" && typeof conflicting === "function" && Number.isInteger(row.pr)) {
         try { isConflicting = (await conflicting(n, row.pr)) === true; } catch { isConflicting = false; }
       }
-      const facts = { ...row, issueEdited: r?.issueEdited === true, conflicting: isConflicting };
-      const used = recoveries.get(n) ?? 0;
-      if (classifyNeedsHuman(facts) === "recoverable" && used < recoveryMax) {
+      const facts = { ...row, issueEdited: r?.issueEdited === true, quoteMismatch: r?.quoteMismatch === true, conflicting: isConflicting };
+      if (prior) { const pk = `${n}:${recoveryClassOf({ code: prior.code })}`; classUsed.set(pk, Math.max(classUsed.get(pk) ?? 0, prior.attempt)); } // state saved before #4725 has no class counts
+      const cls = recoveryClassOf(facts), max = maxFor(cls), used = classUsed.get(`${n}:${cls}`) ?? 0;
+      if (classifyNeedsHuman(facts) === "recoverable" && used < max) {
         const code = recoveryCodeOf(facts), attempt = used + 1;
+        classUsed.set(`${n}:${cls}`, attempt);
         // #4315: the full lane detail is kept (never firstLine) for the relabel when the batch stops before this attempt
-        recoveries.set(n, attempt); recovering.set(n, { code, attempt, cost_usd: Number(row.cost_usd) || 0, minutes: Number(row.minutes) || 0,
+        recoveries.set(n, (recoveries.get(n) ?? 0) + 1); recovering.set(n, { code, attempt, max, cost_usd: Number(row.cost_usd) || 0, minutes: Number(row.minutes) || 0,
           detail: String(row.detail ?? ""), outcome: row.outcome, ...(row.code ? { result_code: row.code } : {}), prev_attempt: prior?.attempt ?? 0 });
         requeue(n, 0); done(); save();
-        decided({ issue: n, what: `recovery lane for ${code} (attempt ${attempt}/${recoveryMax}); dependents stay queued`, why: firstLine(row.detail) || code,
+        decided({ issue: n, what: `recovery lane for ${code} (attempt ${attempt}/${max}); dependents stay queued`, why: firstLine(row.detail) || code,
           alternative: "leave needs-human for the operator and skip the dependents" });
-        update({ ...row, outcome: "recovering", detail: `recovering (${code}), attempt ${attempt}/${recoveryMax}: ${firstLine(row.detail)}` });
+        update({ ...row, outcome: "recovering", detail: `recovering (${code}), attempt ${attempt}/${max}: ${firstLine(row.detail)}` });
         return;
       }
     }
     // #4302: a non-final recovery attempt left needs-human/ci-pending unlabelled for its successor; none is launched, so relabel once.
-    if (prior && prior.attempt < recoveryMax && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome) && typeof relabelNeedsHuman === "function") {
+    if (prior && prior.attempt < (prior.max ?? recoveryMax) && ["needs-human", "ci-pending", "budget-exceeded"].includes(row.outcome) && typeof relabelNeedsHuman === "function") {
       try { await relabelNeedsHuman({ issue: n, evidence: evidence() }); } catch { /* best effort */ }
     }
     // #4505: a first-run turn overrun is unlabelled by its lane; no recovery follows (off or cap used), so the runner labels it once.
@@ -684,8 +719,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
 
   const track = (n, p) => { running.set(n, p.catch((e) => settle(n, { terminalReason: "engine-error", detail: e?.message ?? String(e) }, runRecs.get(n), null))); };
+  const laneRetries = new Map(); // #4791: transient lane-resolution failures per issue; never counted in `deferrals`
+  // A transient refusal (gh/git failed) re-resolves; the settled `deferred` frees the slot and requeues with backoff.
+  const retryLane = (n, rec) => track(n, (async () => {
+    let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e), transient: true }; }
+    lanes.set(n, l);
+    if (l.ok || !l.transient) { laneRetries.delete(n); return { terminalReason: "deferred", code: "lane.unresolved", retryInSeconds: 1, cost_usd: 0, detail: l.ok ? "lane resolved" : `${l.code}: ${l.detail}` }; }
+    const k = laneRetries.get(n) ?? 0; laneRetries.set(n, k + 1);
+    return { terminalReason: "deferred", code: "lane.unresolved", retryInSeconds: Math.min(DEFER_BACKOFF_S * 2 ** k, DEFER_BACKOFF_MAX_S), cost_usd: 0, detail: l.detail };
+  })().then((x) => settle(n, x, rec, null)));
   const start = (n) => {
     const ln = lanes.get(n);
+    if (ln && !ln.ok && ln.transient && resolveLane) { retryLane(n, runRecs.get(n) ?? { startedAt: now() }); return; }
     if (ln && !ln.ok) { // settled synchronously: nothing runs, no lease, no comment
       const row = { issue: n, outcome: "lane-refused", pr: null, cost_usd: 0, minutes: 0, detail: `${ln.code}: ${ln.detail}`, code: ln.code };
       results.set(n, row); save(); update(row);
@@ -717,7 +762,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       else if (pf?.parked) r = { terminalReason: pf.kind, cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {
         try {
-          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= recoveryMax } } : {}), onStart: (info) => {
+          r = await runOne(n, lane, { remote: !!rec.remote, ...(rec.placement ? { placement: rec.placement } : {}), ...(recovering.has(n) ? { recover: { code: recovering.get(n).code, attempt: recovering.get(n).attempt, final: recovering.get(n).attempt >= (recovering.get(n).max ?? recoveryMax) } } : {}), onStart: (info) => {
             Object.assign(rec, info ?? {}); save();
             if (cancelled) stop(n, rec); // #4376: launched while the cancel arrived
             if (reg && slotted.has(n) && info?.pid) reg.setLanePid(keyOf(n), info.pid);
@@ -763,7 +808,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   if (saved && resolveLane) {
     for (const n of order) {
       if (results.has(n) || running.has(n)) continue;
-      let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e) }; }
+      let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e), transient: true }; }
       lanes.set(n, l);
     }
     noteCrossLane();
@@ -801,7 +846,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       let body;
       try { body = await readBody(n); } catch { continue; }
       if (drift?.holds) bodies.set(n, body);
-      deps.set(n, [...new Set([...(deps.get(n) ?? []), ...parseDeps(body, n)])]);
+      deps.set(n, [...new Set([...(deps.get(n) ?? []), ...(await declared(n, body))])]);
     }
     await addIssues(fresh);
     save();
@@ -870,6 +915,26 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (freed.length) {
       decided({ issue: null, what: `released ${fmt(freed)} (forgedock orchestrate --release)`, why: "operator request", alternative: "resume the batch" });
       update({ issue: null, outcome: "release", detail: fmt(freed) });
+    }
+  };
+  // #4773: re-read the issues carrying the blocked label; one decision and row per change. A failed read keeps the last set.
+  let blocked = new Set();
+  const blockedHit = new Set(); // blocked issues that were pending this pass
+  const refreshBlocked = async () => {
+    if (!getBlocked) return;
+    let got;
+    try { got = await getBlocked(); } catch { return; }
+    const next = new Set((Array.isArray(got) ? got : [...(got ?? [])]).filter((n) => Number.isSafeInteger(n) && n > 0));
+    const fmt = (ns) => ns.map((n) => `#${n}`).join(", ");
+    const on = [...next].filter((n) => !blocked.has(n) && set.has(n) && !results.has(n)), off = [...blocked].filter((n) => !next.has(n));
+    blocked = next;
+    if (on.length) {
+      decided({ issue: null, what: `blocked ${fmt(on)} (blocked label)`, why: "admitted to the batch, not dispatched while the label is set", alternative: "remove the label" });
+      update({ issue: null, outcome: "blocked", detail: fmt(on) });
+    }
+    if (off.length) {
+      decided({ issue: null, what: `unblocked ${fmt(off)} (blocked label removed)`, why: "the label is gone", alternative: "keep waiting" });
+      update({ issue: null, outcome: "unblocked", detail: fmt(off) });
     }
   };
   // #4656: a gate (hold list, settle, ship pre-flight) waiting on an issue the scheduler will not admit: one decision and row per (gate, issue).
@@ -990,10 +1055,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       driftHeld.clear();
       integHeld.clear();
       opHeldHit.clear();
+      blockedHit.clear();
       refreshHeld();
+      await refreshBlocked();
       checkGates();
       const isReady = (n) => {
         if (opHeld.has(n)) { opHeldHit.add(n); return false; }
+        if (blocked.has(n)) { blockedHit.add(n); return false; } // #4773
         if (!((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome)))) return false;
         if (integration?.holds) {
           let why = null;
@@ -1072,6 +1140,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if ((getParallel || getHeld) && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if ((getAdded || getRequeued) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
+      if (getBlocked && pending.length && blockedHit.size) wake = Math.min(wake ?? pollMs, pollMs); // #4773: a removed label releases on the next tick
       if (getHeld && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4592: a release while only lanes run
       if (syncParked && running.size && parkedPrs().length) wake = Math.min(wake ?? syncEveryMs, Math.max(0, syncEveryMs - (t - (lastParkedSync ?? t)))); // #4525
       if (running.size && watchable()) wake = Math.min(wake ?? WATCH_EVERY_MS, WATCH_EVERY_MS); // #4595: re-check the blockers of skipped rows
@@ -1082,6 +1151,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         else { const ac = new AbortController(); await race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
       } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
       else if (pending.length && offered.size) await nap(wake); // waiting for a host slot
+      else if (pending.length && blockedHit.size) await nap(wake ?? pollMs); // #4773: only blocked issues wait: poll for the label's removal
       else if (pending.length && waits.length) await nap(Math.min(wake, getCancelled ? pollMs : Infinity)); // wake is poll-capped by a hold or a live K; #4454: nap wakes on a stop
       else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
       else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n))) { if (await drainAdds()) continue; break; } // #4592: held by the operator: pending for a --resume
@@ -1149,6 +1219,8 @@ export function formatOutcomeLists(rows) {
   if (rq.length) out.push(`remediation queue (/work-on:remediate): ${rq.map((r) => `#${r.issue} (parked:${r.code}${r.pr ? ` PR #${r.pr}` : ""})`).join(" ")}`);
   const parked = formatParkedLine(rows); // #4389: one line for every parked post-deploy follow-up, never an escalation
   if (parked) out.push(parked);
+  const decided = (rows ?? []).filter((r) => r?.decided); // #4766: settled by the decision engine, listed not hidden
+  if (decided.length) out.push(["decided (north-star engine, veto with the forge:decision-veto label):", ...decided.map((r) => `- #${r.issue}: ${one(r.decided.choice)}${r.decided.shadow ? " (shadow)" : ""}`)].join("\n"));
   if (esc.length) out.push(["escalations (human decisions, asked once):", ...esc.map((r) => `- #${r.issue} (${r.code}): ${one(r.detail)}`)].join("\n"));
   return out;
 }

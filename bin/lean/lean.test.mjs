@@ -391,6 +391,21 @@ describe("core work-on", () => {
     assert.doesNotMatch(p, /complete what is missing/);
   });
 
+  it("#4786: a remote lane branch holding only .forge-lean scratch plans fresh and drops the scratch", async () => {
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", changed: [".forge-lean/contract.json", ".forge-lean/checkpoint.json"] });
+    await run(w);
+    assert.doesNotMatch(builders(w)[0][4], /This is a rerun/);
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "rm" && c.includes(".forge-lean")), "scratch removed from the branch");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && c.join(" ").includes("drop stale .forge-lean scratch")));
+  });
+
+  it("#4786: a remote lane branch with a code change besides scratch still resumes", async () => {
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", changed: [".forge-lean/contract.json", "src/foo.js"] });
+    await run(w);
+    assert.match(builders(w)[0][4], /This is a rerun/);
+    assert.ok(!w.calls.some((c) => c[0] === "git" && c[1] === "rm" && c.includes(".forge-lean")));
+  });
+
   it("a reviewer that returns no JSON twice ends review.no_verdict", async () => {
     const w = world({ reviews: ["no json", "still none"] });
     const r = await run(w);
@@ -418,6 +433,54 @@ describe("core work-on", () => {
     assert.ok(!w.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")), JSON.stringify(w.edits));
     assert.ok(!w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN")));
   };
+
+  // #4730: owner step + agent-doable remainder, and duplicate owner asks
+  const ownerWorld = (block, o = {}, existing = null) => {
+    const w = depWorld({ changed: [], result: { status: "blocked", summary: "sign the contract", block }, ...o }, {});
+    const gh = w.io.gh;
+    w.io.gh = async (a) => {
+      if (a[0] === "issue" && a[1] === "list" && existing && a.some((x) => String(x).includes("FORGE:ASK"))) return JSON.stringify([existing]);
+      if (a[0] === "issue" && a[1] === "list") return JSON.stringify(w.listed ?? []);
+      return gh(a);
+    };
+    return w;
+  };
+  it("#4730 a human block with a remainder re-queues it as its own issue; only the owner step keeps needs-human", async () => {
+    const w = ownerWorld({ kind: "human", why: "credentials", remainder: [{ title: "wire the client", body: "do the code part" }, { title: "", body: "dropped" }] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(w.created.length, 1);
+    const body = w.created[0][w.created[0].indexOf("--body") + 1];
+    assert.match(body, /\*\*Parent\*\*: #7/); assert.match(body, /FORGE:REMAINDER of=#7/);
+    assert.ok(!w.created[0].includes("needs-human"));
+    assert.ok(w.edits.some((e) => e.includes("--add-label") && e.includes("needs-human")));
+    assert.ok(w.comments.some((c) => c.includes("FORGE:NEEDS_HUMAN") && c.includes("re-queued as #201")));
+  });
+  it("#4730 a rerun reuses the remainder issue it already filed", async () => {
+    const w = ownerWorld({ kind: "human", why: "credentials", remainder: [{ title: "wire the client", body: "x" }] });
+    const key = (await import("./needs-human-premise.mjs")).askKey("wire the client");
+    w.listed = [{ number: 150, body: `x\n<!-- FORGE:REMAINDER of=#7 key=${key} -->` }];
+    await run(w);
+    assert.equal(w.created.length, 0);
+    assert.ok(w.comments.some((c) => c.includes("re-queued as #150")));
+  });
+  it("#4730 a human block without a remainder files nothing", async () => {
+    const w = ownerWorld({ kind: "human", why: "credentials" });
+    assert.equal((await run(w)).terminalReason, "needs-human");
+    assert.equal(w.created.length, 0);
+  });
+  it("#4730 an issue whose only content is an existing owner ask is closed as a duplicate; extra content only links", async () => {
+    const { askKey } = await import("./needs-human-premise.mjs");
+    const existing = { number: 40, comments: [{ author: { login: "rapiercraft-forgedock" }, body: `<!-- FORGE:ASK key=${askKey("Builder is blocked (credentials): sign the contract")} -->\n## Owner ask\n{}` }] };
+    const dup = ownerWorld({ kind: "human", why: "credentials" }, { body: "sign the contract" }, existing);
+    const r = await run(dup);
+    assert.equal(r.terminalReason, "invalid");
+    assert.ok(dup.closed.some((c) => c.includes("not planned") && c.join(" ").includes("#40")));
+    noNeedsHuman(dup);
+    const more = ownerWorld({ kind: "human", why: "credentials" }, { body: "sign the contract and then also rework the importer" }, existing);
+    assert.equal((await run(more)).terminalReason, "needs-human");
+    assert.equal(more.closed.length, 0);
+  });
 
   it("#4124 a builder block naming an open issue ends dependency-open with dependencies, not needs-human", async () => {
     const w = depWorld({ changed: [], result: { status: "blocked", summary: "needs #34927 first", block: { kind: "dependency", issues: ["#3", 7] } } },
@@ -659,6 +722,30 @@ describe("core work-on", () => {
     assert.equal(w2.calls.filter((c) => c[1] === "worktree" && c[2] === "add").length, 5);
   });
 
+  it("#4785 a remote lane whose frozen validate commands name a declared host capability ends env.capability_remote before building", async () => {
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
+    const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["promtool"] } };
+    const dir = tmpDir("lean-4785-");
+    const w = world({ contract });
+    const r = await run(w, { dir, ...remote });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, "env.capability_remote");
+    assert.equal(builders(w).length, 1); // the plan session only: no implementation turn
+    assert.match(w.comments.map((c) => c.body ?? c).join("\n"), /promtool[\s\S]*V2/);
+    // local placement, no declared capability, or a recovery run: unchanged
+    assert.equal((await run(world({ contract }), { ...remote, placement: { where: "local", reason: "x" } })).terminalReason, "merged");
+    assert.equal((await run(world({ contract }), { ...remote, hostCaps: { hostCapabilities: ["sops"] } })).terminalReason, "merged");
+  });
+
+  it("#4778 a relayed host capability does not end the remote lane before building; a failed relay still recovers locally", async () => {
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
+    const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["promtool"] } };
+    assert.equal((await run(world({ contract }), { ...remote, relayCaps: ["promtool"] })).terminalReason, "merged");
+    assert.equal((await run(world({ contract }), { ...remote, relayCaps: ["sops"] })).code, "env.capability_remote");
+    const blocked = world({ result: { status: "blocked", summary: "promtool relay unavailable", block: { kind: "human", why: "credentials" } } });
+    assert.equal((await run(blocked, { ...remote, relayCaps: ["promtool"] })).code, "env.capability_remote");
+  });
+
   it("needs-human terminals carry a specific outcome code, never unclassified", async () => {
     const code = async (w, extra) => {
       const dir = tmpDir("lean-code-");
@@ -862,6 +949,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     const r = await run(w);
     assert.equal(r.code, "contract.invalid");
     assert.match(builders(w)[1][4], /R1: quote is not verbatim from the issue/);
+    assert.equal(r.quoteMismatch, true, "#4789: quote-only problems are recoverable");
     assert.equal(builders(w).length, 2, "plan + one correction, no implement call");
     assert.match(nhBody(w), /still invalid after one correction/);
     const w2 = world({ contract: bad1, fixedContract: CONTRACT });
@@ -1660,7 +1748,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule).
-    assert.ok(approxTokens(plan) <= 2050, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(plan) <= 2150, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1650); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
@@ -2096,7 +2184,7 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 1950, `plan prompt is ${approxTokens(plan)} tokens`); // 1950: #4724 (deferred-row bucket rule)
+    assert.ok(approxTokens(plan) <= 2050, `plan prompt is ${approxTokens(plan)} tokens`); // 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
     assert.ok(approxTokens(impl) <= 1650, `implement prompt is ${approxTokens(impl)} tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
@@ -2560,7 +2648,7 @@ describe("orchestrate", () => {
       gh: async (a) => {
         if (a[0] === "repo" && a[1] === "view") return "main\n";
         if (a.includes("milestone")) return JSON.stringify({ milestone: milestones[a[2]] ? { title: milestones[a[2]] } : null });
-        return JSON.stringify({ body: a[2] === "1" ? "**Depends on**: #2" : "" });
+        return JSON.stringify({ body: a[2] === "1" ? "**Depends on**: #2" : "", authorAssociation: "OWNER" });
       },
       git: async (a) => (a[0] === "ls-remote" && ["refs/heads/staging", "refs/heads/milestone/m-one"].includes(a.at(-1)) ? "abc\tref\n" : ""),
     };
@@ -2749,7 +2837,7 @@ describe("orchestrate maintenance budget (#4197)", () => {
       // No maintenance scan without the budget; labels (host priority, #4191) ride on the body call, never a call of their own.
       // #4399: the batch-start acceptance-probe sweep (`forge-probe` search) is not a maintenance scan.
       assert.ok(calls.some((c) => c.startsWith("issue list") && c.includes("forge-probe")), calls.join("\n"));
-      assert.ok(!calls.some((c) => (c.startsWith("issue list") && !c.includes("forge-probe")) || c.endsWith("--json labels")), calls.join("\n"));
+      assert.ok(!calls.some((c) => (c.startsWith("issue list") && !c.includes("forge-probe") && !c.includes("--label blocked")) || c.endsWith("--json labels")), calls.join("\n"));
       ran.length = 0; calls.length = 0;
       const res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...mk(), maintenance: { share: 0.5, whenIdle: true, labels: ["maintenance"] } });
       assert.deepEqual(ran, [1, 9]);
@@ -4171,6 +4259,24 @@ describe("large diffs never reach argv (#4129)", () => {
     assert.equal(seen[0].args[0], "--print"); assert.equal(seen[0].args[1], "--output-format");
     call("go");
     assert.equal(seen[1].args[1], "go"); assert.equal(seen[1].input, undefined);
+  });
+
+  it("#4763 promptGoesViaStdin is platform-aware and counts the other argv", async () => {
+    const { promptGoesViaStdin, runCliBackend } = await import("../runner.mjs");
+    assert.equal(promptGoesViaStdin("x".repeat(40 * 1024), [], "win32"), true);
+    assert.equal(promptGoesViaStdin("x".repeat(10 * 1024), ["--print"], "win32"), false);
+    assert.equal(promptGoesViaStdin("x".repeat(16 * 1024 - 10), ["--a".repeat(10)], "win32"), true);
+    assert.equal(promptGoesViaStdin("x".repeat(40 * 1024), [], "linux"), false);
+    assert.equal(promptGoesViaStdin("x".repeat(65 * 1024), [], "linux"), true);
+    const prev = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const seen = [];
+      runCliBackend({ spec: { name: "t" }, userMessage: "y".repeat(40 * 1024), systemPrompt: "sys", args: ["1"], cwd: tmpDir("core-4763-"), logger: { log() {} },
+        spawnFn: (_b, args, o2) => { seen.push({ args, input: o2.input }); return { status: 0, stdout: "{}", stderr: "" }; } });
+      assert.equal(seen[0].input.length, 40 * 1024);
+      assert.ok(!seen[0].args.some((x) => x.length > 1000));
+    } finally { Object.defineProperty(process, "platform", prev); }
   });
 
   it("runCliBackendAsync pipes a 300 KiB prompt to a real child (no E2BIG)", async () => {
@@ -5619,6 +5725,22 @@ describe("enumerating tests + sequence numbers at hand-off (#4322)", () => {
       assert.match(traj(w).at(-1), /renumbered deterministically \(no builder\): db\/0007_usage\.sql → db\/0008_usage\.sql/);
     });
 
+    it("#4732: a collision plus an unrelated text conflict is base-synced (builder resolves only that file) and then renumbered by the engine; open-lane numbers reach the renumber", async () => {
+      const NON = "non-sequence conflict: .env.example";
+      const w = dworld({ seq: [COLL, []], mergeResults: ["conflict"], conflictFiles: [".env.example"], det: [{ unsupported: NON, nonSequence: [".env.example"] }, { ok: true, moves: MOVES, commit: "d".repeat(40) }], resolve: { remaining: [".env.example"] } });
+      w.io.sequenceOpenNumbers = async (x) => { w.openArgs = x; return [9]; };
+      const r = await run(w);
+      assert.equal(r.terminalReason, "merged");
+      assert.equal(w.renumbers.length, 2, "renumber, sync, renumber again");
+      assert.ok(w.renumbers[1].laneRef, "second renumber reads the pre-merge lane head");
+      assert.deepEqual(await w.renumbers[0].openNumbers({ dir: "db" }), [9]);
+      assert.equal(w.openArgs.dir, "db");
+      assert.equal(builders(w).length, 3, "plan + implement + the conflict resolution; no builder renumber");
+      assert.match(builders(w)[2][4], /conflicts in: \.env\.example[\s\S]*do not renumber/);
+      assert.deepEqual(w.resolveArgs.files, [".env.example"]);
+      assert.equal(w.resolveArgs.partial, true);
+    });
+
     it("#4526: the renumber gets a reserve hook bound to (repo, lane, issue), and the run's reservations are dropped at finish", async () => {
       const w = dworld({ seq: [COLL, []] }), reserved = [], unreserved = [];
       w.io.sequenceLease.reserve = async (x) => { reserved.push(x); return { numbers: [9] }; };
@@ -6510,7 +6632,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1650 && approxTokens(builderPlanPrompt(7)) <= 1950);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1650 && approxTokens(builderPlanPrompt(7)) <= 2050);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {

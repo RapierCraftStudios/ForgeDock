@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, isTransportError, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
+import { renderContract } from "./render.mjs";
+import { parseExecution, SANDBOX_PROVIDERS, detectNeeds, hostCapabilityBlock, placementText, contractHostNeeds, placement, placeLane, validationWeight, hostHeadroom, scopedEnv, providerLanes, isTransportError, containerProvider, providerByName, openExecutionBudget } from "./execution.mjs";
 import { makeLedger, countLiveLanes } from "./ledger.mjs";
 import { openBatch } from "./batch.mjs";
 import { orchestrate, formatTable, formatSandboxSummary } from "./orchestrate.mjs";
@@ -724,6 +725,68 @@ describe("host capabilities in placement (#4542)", () => {
     assert.deepEqual(hostCapabilityBlock("this lane has no sops key", null), []);
     assert.deepEqual(hostCapabilityBlock("no sops key and no ssh ovh-monitor", caps), []);
     assert.deepEqual(hostCapabilityBlock("owner must create an account", caps), []);
+  });
+
+  it("#4785 placementText: body, FORGE:DECISION comments and the last frozen contract's validate commands", () => {
+    const exec = parseExecution({ mode: "remote", max_remote: 2, host_capabilities: "promtool" });
+    const k = (cmd) => "<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n" + renderContract({ requirements: [], deliverables: [], validate: [{ id: "V1", command: cmd }] }, "abcdef123456");
+    const comments = [{ body: "<!-- FORGE:DECISION -->\n## Decision\ngather the data via `ssh ovh-monitor obs-psql`" }, { body: k("node --test a.mjs") },
+      { body: k("promtool test rules x.yml") }, { body: "just chatter about sops" }, "not an object", null];
+    const t = placementText({ body: "add an alert", comments });
+    assert.deepEqual(detectNeeds(t, exec), ["prod_monitor", "promtool"]);
+    assert.doesNotMatch(t, /chatter|node --test a\.mjs/);
+    assert.deepEqual(detectNeeds("add an alert", exec), []); // the body alone: what placement read before #4785
+    assert.equal(placementText({ body: "b", comments: undefined }), "b");
+    assert.equal(placementText(), "");
+  });
+
+  it("#4785 contractHostNeeds: only declared capabilities in validate commands", () => {
+    const caps = { hostCapabilities: ["promtool"] };
+    const c = { validate: [{ id: "V1", command: "node --test a.mjs" }, { id: "V2", command: "promtool check rules r.yml" }, { id: "V3", command: "sops -d x.enc.yaml" }] };
+    assert.deepEqual(contractHostNeeds(c, caps), { caps: ["promtool"], ids: ["V2"] });
+    assert.deepEqual(contractHostNeeds(c, null), { caps: [], ids: [] });
+    assert.deepEqual(contractHostNeeds(null, caps), { caps: [], ids: [] });
+  });
+
+  it("#4776 placementText ignores quoted evidence in the body (AlterLab #37290-#37317 fixture)", () => {
+    const rows = JSON.parse(readFileSync(new URL("../tests/fixtures/alterlab-capability-bodies.json", import.meta.url), "utf8"));
+    assert.equal(rows.length, 6);
+    for (const r of rows) {
+      assert.deepEqual(detectNeeds(placementText({ body: r.body })), r.needs, `#${r.issue}: ${r.note}`);
+      if (!r.needs.length) assert.ok(detectNeeds(r.body).includes("prod_monitor"), `#${r.issue} pinned before #4776`);
+    }
+  });
+
+  it("#4776 placementText: fences, quotes, comments and evidence sections are dropped, prose and decisions stay", () => {
+    const body = "Intro.\n```sh\nssh ovh-monitor obs-psql\n```\n> ssh ovh-monitor\n<!-- FORGE:STATE\n{\"reason\":\"prod_monitor\"}\n-->\n## Logs\nobs-psql here\n### Sub\nobs-psql sub\n## Plan\nneeds sops access\n";
+    assert.deepEqual(detectNeeds(placementText({ body })), ["sops"]);
+    assert.deepEqual(detectNeeds(placementText({ body: "~~~\nobs-psql\n~~~\nrun `obs-psql`" })), []);
+    assert.deepEqual(detectNeeds(placementText({ body: "needs the prod monitor" })), ["prod_monitor"]);
+    assert.deepEqual(detectNeeds(placementText({ body: "x", comments: [{ body: "<!-- FORGE:DECISION -->\nuse `ssh ovh-monitor obs-psql`" }] })), ["prod_monitor"]);
+  });
+
+  it("#4776 repro_test commands count: placementText and contractHostNeeds", () => {
+    const exec = parseExecution({ mode: "remote", max_remote: 2, host_capabilities: "promtool" });
+    const caps = { hostCapabilities: ["promtool"] };
+    const c = { validate: [{ id: "V1", command: "node --test a.mjs" }], repro_test: { command: "promtool test rules x.yml" } };
+    assert.deepEqual(contractHostNeeds(c, caps), { caps: ["promtool"], ids: ["repro_test"] });
+    assert.deepEqual(contractHostNeeds({ validate: [], repro_test: "none" }, caps), { caps: [], ids: [] });
+    const comment = "<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n" + renderContract({ requirements: [], deliverables: [], validate: [{ id: "V1", command: "node --test a.mjs" }], repro_test: { command: "promtool test rules x.yml" } }, "abcdef123456");
+    const t = placementText({ body: "b", comments: [{ body: comment }] });
+    assert.deepEqual(detectNeeds(t, exec), ["promtool"]);
+  });
+
+  it("#4785 orchestrate: a remote lane that ends env.tool_missing is relaunched locally", async () => {
+    const calls = [];
+    const rows = await orchestrate({ issues: [5], parallel: 2, recovery: { maxAttempts: 1 }, readBody: async () => "",
+      remote: { max: 2, isRemote: () => true, place: () => ({ where: "remote", reason: "mode remote" }), admit: () => ({ ok: true }), onBudget: "stop", costPerMinute: 0 },
+      runOne: async (n, _l, ctx = {}) => {
+        calls.push({ placement: ctx.placement?.where, reason: ctx.placement?.reason, recover: ctx.recover?.code ?? null });
+        return ctx.recover ? { terminalReason: "merged", pr: 9 } : { terminalReason: "needs-human", code: "env.tool_missing", detail: "promtool: command not found" };
+      } });
+    assert.deepEqual(calls.map((c) => [c.placement, c.recover]), [["remote", null], ["local", "env.tool_missing"]]);
+    assert.equal(calls[1].reason, "host capability: recovering env.tool_missing");
+    assert.equal(rows.find((r) => r.issue === 5).outcome, "merged");
   });
 
   it("orchestrate: a remote lane that ends env.capability_remote is relaunched locally once", async () => {

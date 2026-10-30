@@ -137,8 +137,7 @@ export function headerOnlyChange(was, now, fromPath, toPath) {
   const split = (t) => { const s = String(t), i = s.indexOf("\n"); return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i)]; };
   const [h1, r1] = split(was), [h2, r2] = split(now);
   if (r1 !== r2) return false;
-  const mapped = h1.replaceAll(stemOf(fromPath), stemOf(toPath)).replace(new RegExp(`(?<!\\d)0*${Number(from)}(?!\\d)`, "g"), (tok) => (tok.length >= to.length ? to : String(Number(to))));
-  return mapped === h2;
+  return swapNum(h1.replaceAll(stemOf(fromPath), stemOf(toPath)), from, to) === h2;
 }
 
 /** Lane-added numbered files with their blobs, recorded before a renumber so verifyRenumber can prove the SQL kept. */
@@ -146,13 +145,23 @@ export const snapshotLane = ({ git, base }) => laneNumbered(git, base).catch(() 
 
 const stemOf = (p) => basename(p).replace(/\.[^.]*$/, "");
 const word = (x) => new RegExp(`(?<![\\w-])${esc(x)}(?![\\w-])`, "g");
-/** Every move's old stem → new stem, and the file's own number token → its new number (#4386). */
-function normalise(text, path, moves) {
+const swapNum = (s, from, to) => s.replace(new RegExp(`(?<!\\d)0*${Number(from)}(?!\\d)`, "g"), (tok) => (tok.length >= to.length ? to : String(Number(to))));
+/**
+ * #4386/#4732: the one substitution a renumber may make: every move's old stem (a moved `<stem>_rollback` file included, as its own move) → new stem,
+ * in any file, and the moved file's own number in its heading (Markdown) or first line (SQL). The engine writes it and
+ * verifyRenumber compares against it, so a migration's own header and rollback pointer follow the new number.
+ */
+export function renumberText(text, path, moves) {
   let t = String(text);
   for (const m of moves) t = t.replace(word(stemOf(m.from)), stemOf(m.to));
   const own = moves.find((m) => m.from === path);
-  return own && /\.mdx?$/i.test(own.to) ? retitle(t, numOf(own.from), numOf(own.to)) : t;
+  if (!own || !numOf(own.from) || !numOf(own.to)) return t;
+  if (/\.mdx?$/i.test(own.to)) return retitle(t, numOf(own.from), numOf(own.to));
+  if (!/\.sql$/i.test(own.to)) return t;
+  const i = t.indexOf("\n");
+  return swapNum(i < 0 ? t : t.slice(0, i), numOf(own.from), numOf(own.to)) + (i < 0 ? "" : t.slice(i));
 }
+const normalise = renumberText;
 /** A numbered document's own number in its first heading (else its first non-empty line): 0017 → 0018, or 17 → 18. */
 function retitle(text, oldNum, newNum) {
   const ls = String(text).split("\n");
@@ -180,7 +189,7 @@ export async function verifyRenumber({ git, base, before = [], moves = null }) {
     const now = await laneNumbered(git, base);
     const rest = (p) => basename(p).slice(numOf(p).length);
     const mv = moves?.length ? moves : before.flatMap((b) => {
-      const to = now.find((f) => dirname(f.path) === dirname(b.path) && f.path !== b.path && rest(f.path) === rest(b.path) && f.blob !== b.blob);
+      const to = now.find((f) => dirname(f.path) === dirname(b.path) && f.path !== b.path && rest(f.path) === rest(b.path));
       return to && !now.some((f) => f.path === b.path) ? [{ from: b.path, to: to.path }] : [];
     });
     for (const b of before.filter((f) => !f.path.endsWith(".json"))) {
@@ -215,10 +224,11 @@ const SUPPORTED_RE = /\.(?:sql|md|mdx)$/i;
  * and an index file beside numbered files (README.md, index.md) keeps both sides (union). Commits the merge.
  * #4465: a numbered file (or snapshot) only counts when renumberLane can restore the lane's side: an add/add conflict
  * (no merge-base stage, so the lane added it) in a directory that holds a series on the base being merged (MERGE_HEAD).
- * Any other conflicted file: {unsupported}, and the merge is left as is for the builder. Never throws.
- * @returns {Promise<{ok:true}|{unsupported:string}>}
+ * Any other conflicted file: {unsupported}, and the merge is left as is for the builder. #4732: `partial`
+ * resolves only the sequence files, leaves the others conflicted and uncommitted, and returns {remaining}. Never throws.
+ * @returns {Promise<{ok:true}|{remaining:string[]}|{unsupported:string}>}
  */
-export async function resolveSequenceConflicts({ git, files = [] }) {
+export async function resolveSequenceConflicts({ git, files = [], partial = false }) {
   try {
     const g = out(git);
     if (!files.length) return { unsupported: "no conflicted files" };
@@ -236,8 +246,9 @@ export async function resolveSequenceConflicts({ git, files = [] }) {
       if (JOURNAL_RE.test(f) || (indexFile(f) && !numOf(f))) continue;
       if (!(numOf(f) && (await laneAdded(f)))) other.push(f);
     }
-    if (other.length) return { unsupported: `non-sequence conflict: ${other.join(", ")}` };
+    if (other.length && !partial) return { unsupported: `non-sequence conflict: ${other.join(", ")}` };
     for (const f of files) {
+      if (other.includes(f)) continue;
       if (indexFile(f) && !numOf(f)) {
         const tmp = mkdtempSync(join(tmpdir(), "seq-union-"));
         try {
@@ -263,6 +274,7 @@ export async function resolveSequenceConflicts({ git, files = [] }) {
         catch { await git(["rm", "-q", "-f", "--", f]); } // the base deleted it
       }
     }
+    if (other.length) return { remaining: other };
     await git(["commit", "--no-edit"]);
     return { ok: true };
   } catch (e) { return { unsupported: `sequence conflict resolution failed: ${String(e?.message ?? e).split("\n")[0]}` }; }
@@ -283,11 +295,13 @@ const writeJson = (p, o) => writeFileSync(p, `${JSON.stringify(o, null, 2)}\n`);
  * 4. per moved SQL with a snapshot: data-only (equal to its lane predecessor but id/prevId) clones the tip snapshot with
  *    a fresh id and prevId = tip id; otherwise `regenerate` runs (none configured: unsupported);
  * 5. every tracked file naming an old stem (links, comments) is rewritten to the new one (SQL bodies stay untouched);
+ * #4732: a lane-added `<stem>_rollback.*` in another directory moves with its migration to the same number, and the
+ * old->new substitution (`renumberText`) is written into every moved or lane-changed file, SQL included.
  * then one commit. Any other migration language, a failed generator or an error: {unsupported}, the branch reset to
  * where it started. Never throws.
- * @returns {Promise<{ok:true, moves:Array<{from,to}>, commit:string|null}|{unsupported:string}>}
+ * @returns {Promise<{ok:true, moves:Array<{from,to}>, commit:string|null}|{unsupported:string, nonSequence?:string[]}>}
  */
-export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerate = null, regenerateCustom = null, run = null, uuid = randomUUID, reserve = null }) {
+export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerate = null, regenerateCustom = null, run = null, uuid = randomUUID, reserve = null, openNumbers = null }) {
   const custom = regenerateCustom ?? (regenerate ? `${regenerate} --custom` : null);
   const g = out(git);
   const start = (await g(["rev-parse", "HEAD"])).trim();
@@ -306,16 +320,32 @@ export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerat
     const odd = collisions.find((c) => !SUPPORTED_RE.test(c.lane));
     if (odd) return { unsupported: `${odd.lane}: no deterministic renumber for .${basename(odd.lane).split(".").pop()} migrations` };
     // #4526: numbers above every other live lane's host reservation, not only above the base (fail-open: base-derived).
-    if (reserve) {
-      for (const dir of [...new Set(collisions.map((c) => c.dir))].sort()) {
-        const cs = collisions.filter((c) => c.dir === dir), width = cs[0].next.length;
-        let got = null;
-        try { got = await reserve({ dir, floor: Number(cs[0].next) - 1, count: cs.length }); } catch { /* fail-open */ }
-        const nums = Array.isArray(got?.numbers) ? got.numbers.map(Number) : [];
-        if (nums.length === cs.length && nums.every(Number.isInteger)) cs.forEach((c, i) => { c.next = String(nums[i]).padStart(width, "0"); });
+    // #4732: and above the numbers other open PRs on the lane already carry (`openNumbers`, fail-open).
+    for (const dir of [...new Set(collisions.map((c) => c.dir))].sort()) {
+      const cs = collisions.filter((c) => c.dir === dir), width = cs[0].next.length;
+      let floor = Number(cs[0].next) - 1;
+      if (openNumbers) {
+        try { floor = Math.max(floor, ...(await openNumbers({ dir })).map(Number).filter(Number.isFinite)); } catch { /* fail-open */ }
+        cs.forEach((c, i) => { c.next = String(floor + 1 + i).padStart(width, "0"); });
       }
+      if (!reserve) continue;
+      let got = null;
+      try { got = await reserve({ dir, floor, count: cs.length }); } catch { /* fail-open */ }
+      const nums = Array.isArray(got?.numbers) ? got.numbers.map(Number) : [];
+      if (nums.length === cs.length && nums.every(Number.isInteger)) cs.forEach((c, i) => { c.next = String(nums[i]).padStart(width, "0"); });
     }
     const moves = collisions.map((c) => ({ from: c.lane, to: posix.join(c.dir, c.next + basename(c.lane).slice(c.number.length)), dir: c.dir, oldNum: c.number, newNum: c.next }));
+    // #4732: a lane-added rollback file in another directory (`rollbacks/0487_x_rollback.sql`) follows its migration's number.
+    const laneAdded = await laneNumbered(git, base, lane);
+    for (const m of [...moves].filter((x) => /\.sql$/i.test(x.from))) {
+      const rb = laneAdded.find((f) => dirname(f.path) !== m.dir && basename(f.path).startsWith(`${stemOf(m.from)}_rollback.`));
+      if (!rb) continue;
+      const num = m.newNum.padStart(numOf(rb.path).length, "0"), to = posix.join(dirname(rb.path), num + basename(rb.path).slice(numOf(rb.path).length));
+      const had = moves.find((x) => x.from === rb.path);
+      if (lines(await g(["-c", "core.quotepath=off", "ls-tree", "--name-only", base, ...inDir(dirname(rb.path))])).some((p) => dirname(p) === dirname(rb.path) && numOf(p) === num)) continue; // the base uses that number there
+      if (had) Object.assign(had, { to, newNum: num });
+      else moves.push({ from: rb.path, to, dir: dirname(rb.path), oldNum: numOf(rb.path), newNum: num });
+    }
     // Plan the journals and snapshots before touching anything, so an unsupported migration leaves the branch as it was.
     const baseList = lines(await g(["-c", "core.quotepath=off", "ls-tree", "-r", "--name-only", base]));
     const plans = [];
@@ -344,15 +374,17 @@ export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerat
       try { await git(["merge", "--no-edit", base]); } catch {
         const files = lines(await g(["-c", "core.quotepath=off", "diff", "--name-only", "--diff-filter=U"]));
         const r = await resolveSequenceConflicts({ git, files });
-        if (!r.ok) return await fail(r.unsupported);
+        if (!r.ok) {
+          const non = /^non-sequence conflict: (.+)$/.exec(r.unsupported ?? "")?.[1]?.split(", ") ?? [];
+          return { ...(await fail(r.unsupported)), ...(non.length ? { nonSequence: non } : {}) };
+        }
       }
     }
     const head = lines(await g(["-c", "core.quotepath=off", "ls-files"]));
     const touched = new Set();
     // 2. the files, highest number first so a lane file never lands on another lane file not yet moved
     for (const m of [...moves].sort((a, b) => Number(b.oldNum) - Number(a.oldNum))) {
-      let text = await g(["cat-file", "blob", `${lane}:${m.from}`]);
-      if (/\.mdx?$/i.test(m.to)) text = retitle(text, m.oldNum, m.newNum);
+      const text = renumberText(await g(["cat-file", "blob", `${lane}:${m.from}`]), m.from, moves);
       mkdirSync(dirname(join(cwd, m.to)), { recursive: true });
       writeFileSync(join(cwd, m.to), text);
       written.push(m.to);
@@ -416,11 +448,12 @@ export async function renumberLane({ git, base, cwd, laneRef = "HEAD", regenerat
         }
       }
     }
-    // 5. references to the old names, repo-wide (moved files included; SQL bodies and the lane dir stay as they are)
+    // 5. references to the old names, repo-wide (moved files included; SQL only the lane's own, never the base's)
+    const laneOwn = new Set(lines(await g(["-c", "core.quotepath=off", "diff", "--name-only", `${base}...${lane}`])));
     await git(["add", "-A", "--", ...touched]);
     for (const [from, to] of stem) {
       for (const f of lines(await g(["-c", "core.quotepath=off", "grep", "-l", "-I", "-F", "-e", from, "--"]))) {
-        if (/\.sql$/i.test(f) || f.startsWith(".forge-lean/") || JOURNAL_RE.test(f)) continue;
+        if ((/\.sql$/i.test(f) && !laneOwn.has(f) && !touched.has(f)) || f.startsWith(".forge-lean/") || JOURNAL_RE.test(f)) continue;
         const p = join(cwd, f), t = readFileSync(p, "utf8"), u = t.replace(word(from), to);
         if (u !== t) { writeFileSync(p, u); touched.add(f); }
       }
