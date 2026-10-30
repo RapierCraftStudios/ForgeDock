@@ -42,6 +42,7 @@ base_advance() { # file content -> new commit on origin/main, fetched
 body_agent() { printf '<!-- FORGE:REVIEW-AGENT:%s -->\nReviewed-SHA: %s\n\n<!-- REVIEW-FINDINGS-START -->\nNo findings.\n<!-- REVIEW-FINDINGS-END -->' "$1" "$2"; }
 body_synth() { printf '<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->\nReviewed-SHA: %s\n\nsynth' "$1"; }
 body_summary() { printf '# PR Review Summary\n\n**Reviewed commit**: `%s` | **Current HEAD**: `%s` | **Status**: CURRENT\n**Domains**: x | **Agents**: %s (x)\n' "$1" "$1" "$2"; }
+body_tier() { printf '<!-- FORGE:REVIEW_TIER tier=standard spec=review-pr.md -->\nReviewer roster tier `standard`: 2 domains. Roster: %s.' "$1"; }
 cm() { jq -n --arg b "$1" --arg t "${2:-Bot}" --arg a "${3:-NONE}" '{"body":$b,"author_association":$a,"user":{"type":$t,"login":"x"}}'; }
 # comments <comment-json>... -> JSON array file path in $CF
 comments() { CF="$TMP/c$CASE.json"; printf '%s\n' "$@" | jq -s '.' > "$CF"; }
@@ -174,6 +175,26 @@ expect "review-degraded label" "FULL" 0 --labels "needs-human,review-degraded"
 # --labels given twice: last wins in the parser, so use a fresh invocation without the fixed --labels
 out=$(cd "$W" && bash "$RD" --pr 1 --head "$HEAD" --base main --trusted-script "$TC" --comments-file "$CF" --labels "bug,docs" 2>&1 | sed -n 1p)
 [ "$out" = "DELTA $R..$HEAD" ] && ok || bad "unrelated labels must not force FULL (got $out)"
+
+# 8b. forge#4771: a complete panel with no Phase 7 artefact (a fix commit pushed mid-review) is proven by the tier roster
+mkrepo; R=$(sha HEAD); commit pr.txt "pr2" "pr2"; HEAD=$(sha HEAD)
+comments "$(cm "$(body_tier "security api")" User MEMBER)" "$(cm "$(body_agent security "$R")" User MEMBER)" "$(cm "$(body_agent api "$R")" User MEMBER)"
+expect "complete roster panel, no synthesis" "DELTA $R..$HEAD" 1
+comments "$(cm "$(body_tier "security api")")" "$(cm "$(body_agent security "$R")")"
+expect "roster domain missing" "FULL" 0
+comments "$(cm "$(body_agent security "$R")")" "$(cm "$(body_agent api "$R")")"
+expect "no tier comment" "FULL" 0
+comments "$(cm "$(body_tier "security api")" User NONE)" "$(cm "$(body_agent security "$R")")" "$(cm "$(body_agent api "$R")")"
+expect "untrusted tier comment" "FULL" 0
+comments "$(cm "$(body_agent security "$R")")" "$(cm "$(body_agent api "$R")")" "$(cm "$(body_tier "security api")")"
+expect "tier comment after the agents" "FULL" 0
+comments "$(cm "<!-- FORGE:REVIEW_TIER tier=standard spec=review-pr.md -->
+Roster: none (carried or full union, see context).")" "$(cm "$(body_agent security "$R")")"
+expect "tier comment without a roster" "FULL" 0
+comments "$(cm "$(body_tier "security api")")" "$(cm "$(body_agent security "$R")")" "$(cm "$(body_agent api "$R")")" "$(cm "<!-- FORGE:REVIEW_DEGRADED -->")"
+expect "degraded marker after roster panel" "FULL" 0
+comments "$(cm "$(body_tier "security api")")" "$(cm "$(body_agent security "$R")")" "$(cm "$(body_agent api "$R")")"
+expect "review-degraded label with roster panel" "FULL" 0 --labels "review-degraded"
 
 # 9. FULL_ROUNDS
 mkrepo; R1=$(sha HEAD); commit pr.txt "pr2" "pr2"; R2=$(sha HEAD); commit pr.txt "pr3" "pr3"; HEAD=$(sha HEAD)

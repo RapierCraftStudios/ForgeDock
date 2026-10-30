@@ -125,7 +125,7 @@ mkrepo; HEAD=$(sha HEAD)
 fence_with 'REVIEW_DELTA_SCRIPT=$(forge_resolve review-delta.sh)' | grep -E '^type forge_resolve >/dev/null|^REVIEW_DELTA_SCRIPT=\$\(forge_resolve ' > "$TMP/rd_resolver.sh"
 [ -s "$TMP/rd_resolver.sh" ] && ok || bad "no canonical REVIEW_DELTA_SCRIPT resolver block in the spec"
 mkdir -p "$W/scripts"; printf '#!/usr/bin/env bash\necho "BASE_SYNC_ONLY %s"\necho FULL_ROUNDS=9\n' "$HEAD" > "$W/scripts/review-delta.sh"
-got=$(cd "$W" && HOME="$TMP/home" FORGE_ROOT="$ROOT" CLAUDE_CONFIG_DIR="" bash -c "$(cat "$TMP/rd_resolver.sh"); printf %s \"\$REVIEW_DELTA_SCRIPT\"")
+got=$(cd "$W" && HOME="$TMP/home" FORGEDOCK_HOME="" FORGE_ROOT="$ROOT" CLAUDE_CONFIG_DIR="" bash -c "$(cat "$TMP/rd_resolver.sh"); printf %s \"\$REVIEW_DELTA_SCRIPT\"")
 [ "$got" = "$ROOT/scripts/review-delta.sh" ] && ok || bad "resolver must pick the FORGE_ROOT script, never the worktree copy (got '$got')"
 got=$(cd "$W" && HOME="$TMP/nohome" FORGE_ROOT="" FORGEDOCK_HOME="" FORGE_HOME="" CLAUDE_CONFIG_DIR="" bash -c "$(cat "$TMP/rd_resolver.sh"); printf %s \"\$REVIEW_DELTA_SCRIPT\"")
 [ -z "$got" ] && ok || bad "with no trusted install the resolver must stay empty, not fall back to the worktree (got '$got')"
