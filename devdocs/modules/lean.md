@@ -2038,3 +2038,8 @@ Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now
 
 Placement needs (`needsOf` in engine-cli `readBody`) now come from `placementText({body, comments})` (`execution.mjs`): the issue body, every `<!-- FORGE:DECISION` comment and the validate commands of the last parseable FORGE:CONTRACT comment, fetched in the same single `gh issue view` call. A rerun of an issue whose frozen contract runs `promtool` (declared in `execution.host_capabilities`), or whose decision says `ssh ovh-monitor obs-psql`, is placed local. On a first remote run, `runCore` checks the frozen contract right after the freeze: when `contractHostNeeds` finds a declared capability in a validate command and the lane is remote and not a recovery, it ends `env.capability_remote` before any implementation turn, and the host resumes it with the frozen contract. `orchestrate` `placeOf` now also relaunches `env.tool_missing` recoveries local (reason `host capability: recovering env.tool_missing`), so a sandbox that lacked the tool is not chosen again.
 Cite: #4785.
+
+## Entry 2026-10-30 — Named issue watches (#4765)
+
+`bin/lean/issuewatch.mjs` is `forgedock issue-watch`: named watches from forge.yaml `issue_watch.watches` (parsed by its own `parseWatches`, since `parseForgeYaml` reads one nested level), each with a per-(repo, name) lock and `status.json` under `~/.forge/watch/`, and a repo-wide `claims.json` (mkdir-locked) so an issue has one claim across watches. Pure selectors/lane/caps; gh, clock and launching are injected. `mode: batch` calls batch.mjs `addIssues` and starts a new batch once `report.json` exists. See docs/ISSUE-WATCH.md.
+Cite: #4765.

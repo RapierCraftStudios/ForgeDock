@@ -610,6 +610,44 @@ engine:
 
 ---
 
+## `issue_watch` (OPTIONAL)
+
+Named, scoped, capped watches for `forgedock issue-watch` (see [ISSUE-WATCH.md](ISSUE-WATCH.md)). Write `issue_watch:`, then `watches:`, then one block per watch name.
+
+```yaml
+issue_watch:
+  watches:
+    nomilestone:
+      milestone: none
+      exclude_labels: [epic, post-deploy]
+      include_followups: defer-only
+      mode: batch
+      parallel: 12
+    release-1-4:
+      version: "1.4"
+      max_issues: 300
+      until: 2026-11-15T00:00:00Z
+```
+
+| Key | Type | Required | Description |
+|---|---|---|---|
+| `milestone` | string | No | Milestone title or slug, or `none`. |
+| `labels`, `exclude_labels` | list | No | Labels that must / must not be present. |
+| `search` | string | No | `gh search` query. |
+| `title_regex` | string | No | Regex tested against the title. |
+| `since` | ISO time | No | Only issues created at or after it. |
+| `version` | `x.y` | No | Target version from the milestone title or a `version:x.y` label. |
+| `lane` | string | No | Pin the lane; never a default branch. Default: the issue's own lane. |
+| `max_issues` | integer | No | Total claims; at N the watch drains and exits. Default: none (forever). |
+| `max_inflight` | integer | No | Claims in flight at once. Default 4. |
+| `until` | ISO time | No | Stop claiming at this time, drain and exit. |
+| `mode` | string | No | `per-issue` (default) or `batch`. |
+| `parallel` | integer | No | K of the batch in `batch` mode. Default 4. |
+| `include_followups` | string | No | `none` (default) or `defer-only`. |
+| `postdeploy_rollup` | issue number | No | Release issue that collects post-deploy-only follow-ups as checklist lines. |
+
+---
+
 ## `followups` (OPTIONAL)
 
 Deferred follow-ups (`scripts/file-deferred-followups.sh`) are filed as one issue per class per parent: `engineering`, `post-deploy`, `external` and `ops`. Each carries the label `followup:<class>` (`external` also `external-prerequisite`, and states the parent it is a prerequisite of) and inherits the parent's milestone. A requirement may set an optional `class` in the contract; otherwise `post-deploy` items are `post-deploy` and the rest `engineering`. A parent milestone that has shipped (closed) is replaced by the next open milestone by due date, else `followups.default_milestone`.

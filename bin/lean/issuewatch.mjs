@@ -1,0 +1,320 @@
+// SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+// SPDX-License-Identifier: AGPL-3.0-or-later
+/**
+ * `forgedock issue-watch` (#4765): named, scoped, capped watches that claim matching open issues and feed them to lanes.
+ * One watch = one (repo, name) with its own dir `~/.forge/watch/<repo>/<name>/` (or `FORGEDOCK_WATCH_DIR`), lock and
+ * `status.json`; `~/.forge/watch/<repo>/claims.json` is the repo-wide registry that gives an issue at most one claim across
+ * watches. Selectors, caps and the lane rule are pure functions; gh, the clock and lane/batch launching are injected (`io`).
+ * `mode: per-issue` runs `forgedock run-issue` per claim; `mode: batch` `--add`s claims into one long-lived orchestrate
+ * batch (batch.mjs `addIssues`, so K, the `Depends on` DAG and the report apply) and starts a new one after it reports.
+ * No LLM calls.
+ */
+import { existsSync, mkdirSync, readFileSync, rmdirSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { homedir, hostname } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { writeAtomic, batchRoot, openBatch, listBatches } from "./batch.mjs";
+import { milestoneSlug, readBranches, isDefaultLane, defaultBranches, DEFAULT_STAGING_BRANCH, DEFAULT_FEATURE_PATTERN } from "./lane.mjs";
+import { postDeployOnly } from "./prefilter.mjs";
+
+const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup"];
+const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const RETRIES = 3;
+const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; } };
+
+// ── config ───────────────────────────────────────────────────────────────────────────────────────────────────
+const scalar = (v) => {
+  const s = String(v ?? "").replace(/\s+#.*$/, "").trim();
+  if (/^\[.*\]$/.test(s)) return s.slice(1, -1).split(",").map((x) => scalar(x)).filter((x) => x !== "");
+  return s.replace(/^(["'])(.*)\1$/, "$2");
+};
+
+/** The `issue_watch.watches.<name>.<key>` block of forge.yaml text (three nesting levels, which parseForgeYaml does not read): `{name: {key: value}}`. */
+export function parseWatches(raw) {
+  const out = {};
+  let inSec = false, inWatches = false, cur = null;
+  for (const line of String(raw ?? "").split(/\r?\n/)) {
+    if (/^\s*(#|$)/.test(line)) continue;
+    const indent = /^\s*/.exec(line)[0].length;
+    const m = /^\s*([A-Za-z_][\w.-]*):\s*(.*)$/.exec(line);
+    if (!m) continue;
+    if (indent === 0) { inSec = m[1] === "issue_watch"; inWatches = false; cur = null; continue; }
+    if (!inSec) continue;
+    if (indent <= 2) { inWatches = m[1] === "watches"; cur = null; continue; }
+    if (!inWatches) continue;
+    if (indent <= 4) { cur = m[1]; out[cur] = {}; continue; }
+    if (cur) out[cur][m[1]] = scalar(m[2]);
+  }
+  return out;
+}
+
+/** Validate one watch and return it with defaults; throws on an unknown key, bad mode, regex, date or number. */
+export function validateWatch(name, cfg = {}) {
+  if (!NAME_RE.test(String(name))) throw new Error(`invalid watch name ${JSON.stringify(name)}`);
+  for (const k of Object.keys(cfg)) if (!WATCH_KEYS.includes(k)) throw new Error(`watch ${name}: unknown key ${k}`);
+  const list = (v) => (Array.isArray(v) ? v : v ? String(v).split(",").map((x) => x.trim()).filter(Boolean) : []);
+  const int = (k, d) => {
+    if (cfg[k] === undefined || cfg[k] === "") return d;
+    const n = Number(cfg[k]);
+    if (!Number.isInteger(n) || n < 1) throw new Error(`watch ${name}: ${k} must be a positive integer`);
+    return n;
+  };
+  const w = { name, milestone: cfg.milestone || null, labels: list(cfg.labels), exclude_labels: list(cfg.exclude_labels), search: cfg.search || null, title_regex: cfg.title_regex || null,
+    since: cfg.since || null, version: cfg.version ? String(cfg.version) : null, lane: cfg.lane || null, max_issues: int("max_issues", null), max_inflight: int("max_inflight", 4),
+    until: cfg.until || null, mode: cfg.mode || "per-issue", parallel: int("parallel", 4), include_followups: cfg.include_followups || "none", postdeploy_rollup: cfg.postdeploy_rollup ? Number(String(cfg.postdeploy_rollup).replace("#", "")) : null };
+  if (!["per-issue", "batch"].includes(w.mode)) throw new Error(`watch ${name}: mode must be per-issue or batch`);
+  if (!["none", "defer-only"].includes(w.include_followups)) throw new Error(`watch ${name}: include_followups must be none or defer-only`);
+  if (w.title_regex) { try { new RegExp(w.title_regex); } catch { throw new Error(`watch ${name}: invalid title_regex`); } }
+  for (const k of ["until", "since"]) if (w[k] && !Number.isFinite(Date.parse(w[k]))) throw new Error(`watch ${name}: ${k} is not an ISO time`);
+  if (w.version && !/^\d+\.\d+$/.test(w.version)) throw new Error(`watch ${name}: version must be x.y`);
+  if (w.postdeploy_rollup != null && !(Number.isInteger(w.postdeploy_rollup) && w.postdeploy_rollup > 0)) throw new Error(`watch ${name}: postdeploy_rollup must be an issue number`);
+  return w;
+}
+
+/** All watches of a forge.yaml text, validated. */
+export const loadWatches = (raw) => Object.fromEntries(Object.entries(parseWatches(raw)).map(([n, c]) => [n, validateWatch(n, c)]));
+
+// ── selectors ────────────────────────────────────────────────────────────────────────────────────────────────
+const labelNames = (i) => (i.labels ?? []).map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean);
+
+/** An issue's target version: x.y from its milestone title, else from a `version:x.y` label; null when none. */
+export function issueVersion(issue) {
+  const m = /(\d+\.\d+)/.exec(issue.milestone?.title ?? "");
+  if (m) return m[1];
+  for (const l of labelNames(issue)) { const v = /^version:(\d+\.\d+)$/i.exec(l); if (v) return v[1]; }
+  return null;
+}
+
+/** AND of every set selector. `search` is applied by gh, not here. */
+export function matchesSelectors(issue, sel) {
+  const names = labelNames(issue);
+  if (sel.milestone === "none" ? issue.milestone : sel.milestone && milestoneSlug(issue.milestone?.title) !== milestoneSlug(sel.milestone)) return false;
+  if ((sel.labels ?? []).some((l) => !names.includes(l))) return false;
+  if ((sel.exclude_labels ?? []).some((l) => names.includes(l))) return false;
+  if (sel.title_regex && !new RegExp(sel.title_regex).test(issue.title ?? "")) return false;
+  if (sel.since && !(Date.parse(issue.createdAt) >= Date.parse(sel.since))) return false;
+  if (sel.version && issueVersion(issue) !== sel.version) return false;
+  return true;
+}
+
+const CHECK_RE = /^\s*[-*]\s+\[ \]\s+(.*)$/;
+/** True when the body has an unchecked `— defer` checklist item. */
+export const hasUnresolvedDefer = (body) => String(body ?? "").replace(/<!--[\s\S]*?-->/g, "").split("\n").some((l) => { const t = CHECK_RE.exec(l)?.[1]; return t != null && /\s[—-]+\s*defer\b/.test(t); });
+
+const isBot = (i) => /\[bot\]$|^app\//i.test(i.author?.login ?? "") || i.author?.is_bot === true || /<!--\s*FORGE:DEFERRED/.test(i.body ?? "");
+const isFollowup = (i) => /^follow-up\b/i.test(i.title ?? "");
+
+/** `claim` (a lane/batch takes it), `fold` (post-deploy-only follow-up for the rollup), or null (not for this watch). */
+export function classify(issue, watch) {
+  if (isBot(issue)) {
+    if (!isFollowup(issue) || watch.include_followups !== "defer-only") return null;
+    if (postDeployOnly(issue.body)) return watch.postdeploy_rollup ? "fold" : null;
+    return hasUnresolvedDefer(issue.body) ? "claim" : null;
+  }
+  return TRUSTED.has(issue.authorAssociation) ? "claim" : null;
+}
+
+/** `milestone/<slug>` (forge.yaml feature pattern) for a milestone issue, else staging; a pinned `lane:` wins but is never a default branch. Throws on a default-branch lane. */
+export function laneFor(issue, watch, { branches = {}, defaults = [] } = {}) {
+  const staging = branches.staging || DEFAULT_STAGING_BRANCH;
+  const slug = issue.milestone?.title ? milestoneSlug(issue.milestone.title) : "";
+  const lane = watch.lane || (slug ? (branches.featurePattern || DEFAULT_FEATURE_PATTERN).replace("{slug}", slug) : staging);
+  if (isDefaultLane(lane, defaults)) throw new Error(`lane ${lane} is a default branch; a watch never targets it`);
+  return lane;
+}
+
+/** Order `issues` so an issue named in another's `Depends on #N` line comes after it (stable otherwise). */
+export function dagOrder(issues) {
+  const nums = new Set(issues.map((i) => i.number));
+  const deps = (i) => [...String(i.body ?? "").matchAll(/^\s*(?:[-*]\s*)?depends on:?\s*(.+)$/gim)].flatMap((m) => [...m[1].matchAll(/#(\d+)/g)].map((x) => +x[1])).filter((n) => nums.has(n) && n !== i.number);
+  const out = [], seen = new Set();
+  const visit = (i, stack = new Set()) => {
+    if (seen.has(i.number) || stack.has(i.number)) return;
+    stack.add(i.number);
+    for (const d of deps(i)) visit(issues.find((x) => x.number === d), stack);
+    seen.add(i.number); out.push(i);
+  };
+  issues.forEach((i) => visit(i));
+  return out;
+}
+
+// ── state: dir, lock, claims ───────────────────────────────────────────────────────────────────────────────────
+export const watchRoot = (env = process.env) => env.FORGEDOCK_WATCH_DIR || join(homedir(), ".forge", "watch");
+export const repoDir = (repo, env = process.env) => join(watchRoot(env), String(repo).replace("/", "__"));
+export const watchDir = (repo, name, env = process.env) => join(repoDir(repo, env), name);
+
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
+
+/** Take the (repo, name) lock; throws when a live watcher on this host holds it. A dead holder is taken over. @returns {() => void} release */
+export function acquireLock(dir, { pid = process.pid, host = hostname(), alive = pidAlive } = {}) {
+  const f = join(dir, "lock");
+  const held = readJson(f);
+  if (held && held.host === host && held.pid !== pid && alive(held.pid)) throw new Error(`watch already running (pid ${held.pid}); lock ${f}`);
+  writeAtomic(f, JSON.stringify({ pid, host }) + "\n");
+  return () => { const now = readJson(f); if (now?.pid === pid) { try { writeAtomic(f, "{}\n"); } catch { /* best effort */ } } };
+}
+
+/** Claim `issue` for `name` in the repo-wide registry; false when another watch (or this one) already has it. Serialised across processes by a mkdir lock. */
+export function claimIssue(rdir, issue, name) {
+  const lock = join(rdir, "claims.lock");
+  mkdirSync(rdir, { recursive: true });
+  for (let i = 0; ; i++) {
+    try { mkdirSync(lock); break; } catch (e) { if (e.code !== "EEXIST" || i > 200) throw e; sleepSync(10); }
+  }
+  try {
+    const f = join(rdir, "claims.json");
+    const claims = readJson(f) ?? {};
+    if (claims[issue]) return false;
+    claims[issue] = name;
+    writeAtomic(f, JSON.stringify(claims) + "\n");
+    return true;
+  } finally { rmdirSync(lock); }
+}
+
+// ── the watch ────────────────────────────────────────────────────────────────────────────────────────────────
+const fresh = (watch, repo) => ({ name: watch.name, repo, phase: "running", started: null, claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, batch: null, laneFor: {} });
+
+/**
+ * One pass. `io`: `gh(args)→string`, `now()→ms`, `launch(issue,lane)→{poll()→null|{code}}` (per-issue), `batch.{add(id,issues),start(issues,parallel,lane)→id,reported(id)→bool}` (batch mode).
+ * Settles inflight issues, applies the caps, claims new ones. Mutates and returns `state`; `state.phase === "done"` when a capped watch has drained.
+ */
+export async function tick({ watch, repo, io, state, dir, branches = {}, defaults = [], handles = new Map() }) {
+  const now = io.now();
+  state.started ??= now;
+  const ghJson = async (args) => JSON.parse(String(await io.gh(args)));
+  const closed = async (n) => (await ghJson(["issue", "view", String(n), "-R", repo, "--json", "state"])).state === "CLOSED";
+  const fail = (n) => { state.inflight = state.inflight.filter((x) => x !== n); state.failed.push(n); };
+  const win = (n) => { state.inflight = state.inflight.filter((x) => x !== n); state.merged.push(n); state.verified.push(n); };
+
+  for (const n of [...state.inflight]) {
+    if (watch.mode === "batch") { if (await closed(n)) win(n); continue; }
+    const h = handles.get(n);
+    if (!h) { handles.set(n, io.launch(n, state.lanes[n])); continue; } // a restarted watch re-launches (run-issue resumes from GitHub)
+    const r = h.poll();
+    if (!r) continue;
+    handles.delete(n);
+    if (r.code === 0) { if (await closed(n)) win(n); else { state.inflight = state.inflight.filter((x) => x !== n); state.merged.push(n); state.pendingVerify = [...(state.pendingVerify ?? []), n]; } }
+    else if (r.code === 75 && (state.retries[n] = (state.retries[n] ?? 0) + 1) <= RETRIES) handles.set(n, io.launch(n, state.lanes[n]));
+    else fail(n);
+  }
+  for (const n of [...(state.pendingVerify ?? [])]) if (await closed(n)) { state.verified.push(n); state.pendingVerify = state.pendingVerify.filter((x) => x !== n); }
+  if (watch.mode === "batch" && state.batch && io.batch.reported(state.batch)) { state.inflight.forEach(fail); state.batch = null; }
+
+  const capped = (watch.max_issues && state.claimed.length >= watch.max_issues) || (watch.until && now >= Date.parse(watch.until));
+  if (capped && state.phase === "running") state.phase = "draining";
+  if (state.phase === "draining") { if (!state.inflight.length) state.phase = "done"; return state; }
+
+  const room = Math.min(watch.max_inflight - state.inflight.length, watch.max_issues ? watch.max_issues - state.claimed.length : Infinity);
+  const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,body,labels,milestone,author,authorAssociation,createdAt"];
+  if (watch.search) args.push("--search", watch.search);
+  const candidates = [];
+  for (const i of await ghJson(args)) {
+    if (!matchesSelectors(i, watch)) continue;
+    const kind = classify(i, watch);
+    if (kind === "fold") { await fold({ issue: i, watch, repo, io, state }); continue; }
+    if (kind === "claim" && !state.claimed.includes(i.number)) candidates.push(i);
+  }
+  const ordered = watch.mode === "batch" ? dagOrder(candidates) : candidates;
+  const taken = [];
+  for (const i of ordered) {
+    if (taken.length >= room) break;
+    const lane = laneFor(i, watch, { branches, defaults });
+    if (!claimIssue(repoDir(repo, io.env), i.number, watch.name)) continue;
+    state.claimed.push(i.number); state.inflight.push(i.number); state.lanes[i.number] = lane; taken.push({ n: i.number, lane });
+  }
+  if (taken.length && watch.mode === "batch") {
+    const nums = taken.map((t) => t.n);
+    if (state.batch) io.batch.add(state.batch, nums); else state.batch = await io.batch.start(nums, watch.parallel, taken[0].lane);
+  } else for (const t of taken) handles.set(t.n, io.launch(t.n, t.lane));
+  return state;
+}
+
+/** Append a post-deploy-only follow-up to the rollup issue's checklist, once per follow-up. */
+async function fold({ issue, watch, repo, io, state }) {
+  if (state.folded.includes(issue.number)) return;
+  const target = String(watch.postdeploy_rollup);
+  const body = JSON.parse(String(await io.gh(["issue", "view", target, "-R", repo, "--json", "body"]))).body ?? "";
+  if (!new RegExp(`#${issue.number}\\b`).test(body)) await io.gh(["issue", "edit", target, "-R", repo, "--body", `${body.replace(/\s*$/, "")}\n- [ ] #${issue.number} ${issue.title} — post-deploy: folded follow-up\n`]);
+  state.folded.push(issue.number);
+}
+
+/** Status text: selector, claims against max_issues, inflight, merged, verified, failed, time remaining. */
+export function formatStatus(s, watch, now = Date.now()) {
+  const sel = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane"].filter((k) => (Array.isArray(watch[k]) ? watch[k].length : watch[k])).map((k) => `${k}=${[].concat(watch[k]).join(",")}`).join(" ") || "(all trusted issues)";
+  const left = watch.until ? `${Math.max(0, Math.round((Date.parse(watch.until) - now) / 60000))}m` : "forever";
+  return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, `  selector: ${sel}`,
+    `  claims: ${s.claimed.length}/${watch.max_issues ?? "∞"}  inflight: ${s.inflight.length}  merged: ${s.merged.length}  verified: ${s.verified.length}  failed: ${s.failed.length}`, `  time remaining: ${left}`].join("\n");
+}
+
+/** Run until done (capped) or `once`; writes status.json each pass. */
+export async function runWatch({ watch, repo, io, dir, branches, defaults, once = false, intervalMs = 300000, release = () => {} }) {
+  const state = readJson(join(dir, "status.json")) ?? fresh(watch, repo);
+  const handles = new Map();
+  try {
+    do {
+      await tick({ watch, repo, io, state, dir, branches, defaults, handles });
+      writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n");
+      if (state.phase === "done" || once) break;
+      await io.sleep(intervalMs);
+    } while (true);
+  } finally { release(); }
+  return state;
+}
+
+// ── real io + CLI ───────────────────────────────────────────────────────────────────────────────────────────
+const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "forgedock.mjs");
+function realIo(repo, env = process.env) {
+  const gh = (args) => execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  const root = batchRoot(env);
+  return { env, gh, now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    launch: (n, lane) => {
+      let res = null;
+      const p = spawn(process.execPath, [CLI, "run-issue", String(n), "--lane", lane], { detached: true, stdio: "ignore", cwd: process.cwd(), env });
+      p.on("close", (code) => { res = { code: code ?? 1 }; }); p.on("error", () => { res = { code: 1 }; });
+      return { poll: () => res };
+    },
+    batch: {
+      add: (id, issues) => openBatch(root, id).addIssues(issues),
+      reported: (id) => existsSync(join(root, id, "report.json")),
+      start: async (issues, parallel, lane) => {
+        const before = new Set(listBatches(root));
+        spawn(process.execPath, [CLI, "orchestrate", ...issues.map(String), "--parallel", String(parallel), "--lane", lane, "--repo", repo], { detached: true, stdio: "ignore", cwd: process.cwd(), env }).unref();
+        for (let i = 0; i < 60; i++) { const id = listBatches(root).find((b) => !before.has(b)); if (id) return id; await new Promise((r) => setTimeout(r, 1000)); }
+        throw new Error("orchestrate did not create a batch within 60s");
+      },
+    } };
+}
+
+const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
+
+/** `forgedock issue-watch run [--name w] [--repo o/r] [--once] [--interval s] | status [--name w] [--repo o/r]`. */
+export async function issueWatchFromCli(argv, deps = {}) {
+  const [op] = argv;
+  const usage = "usage: forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--interval <s>] | status [--name <w>] [--repo owner/repo]";
+  if (!["run", "status"].includes(op)) throw new Error(usage);
+  const cwd = deps.cwd ?? process.cwd(), env = deps.env ?? process.env, print = deps.print ?? ((l) => console.log(l));
+  let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: the default watch */ }
+  const watches = loadWatches(raw);
+  const name = flag(argv, "--name") ?? (Object.keys(watches).length === 1 ? Object.keys(watches)[0] : "default");
+  const watch = watches[name] ?? (name === "default" ? validateWatch("default", {}) : null);
+  if (!watch) throw new Error(`no watch ${name} in forge.yaml issue_watch.watches`);
+  const io = deps.io ?? realIo(null, env);
+  const repo = flag(argv, "--repo") ?? JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
+  const dir = watchDir(repo, name, env);
+  if (op === "status") {
+    const s = readJson(join(dir, "status.json"));
+    print(s ? formatStatus(s, watch, io.now()) : `watch ${name}: no status yet`);
+    return { ok: true };
+  }
+  mkdirSync(dir, { recursive: true });
+  const release = acquireLock(dir);
+  const real = deps.io ?? realIo(repo, env);
+  const branches = readBranches(cwd);
+  const defaults = await defaultBranches({ repo, io: { gh: async (a) => real.gh(a) }, branches });
+  const state = await runWatch({ watch, repo, io: real, dir, branches, defaults, once: argv.includes("--once"), intervalMs: (Number(flag(argv, "--interval")) || 300) * 1000, release });
+  print(formatStatus(state, watch, real.now()));
+  return { ok: true, state };
+}
