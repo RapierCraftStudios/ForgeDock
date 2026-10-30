@@ -107,7 +107,7 @@ const isBot = (i) => /\[bot\]$|^app\//i.test(i.author?.login ?? "") || i.author?
 const isFollowup = (i) => /^follow-up\b/i.test(i.title ?? "");
 
 /** `claim` (a lane/batch takes it), `fold` (post-deploy-only follow-up for the rollup), or null (not for this watch). */
-export function classify(issue, watch) {
+export function classifyIssue(issue, watch) {
   if (isBot(issue)) {
     if (!isFollowup(issue) || watch.include_followups !== "defer-only") return null;
     if (postDeployOnly(issue.body)) return watch.postdeploy_rollup ? "fold" : null;
@@ -213,7 +213,7 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
   const candidates = [];
   for (const i of await ghJson(args)) {
     if (!matchesSelectors(i, watch)) continue;
-    const kind = classify(i, watch);
+    const kind = classifyIssue(i, watch);
     if (kind === "fold") { await fold({ issue: i, watch, repo, io, state }); continue; }
     if (kind === "claim" && !state.claimed.includes(i.number)) candidates.push(i);
   }

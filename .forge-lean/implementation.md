@@ -29,3 +29,6 @@ One new module, `bin/lean/issuewatch.mjs`, with pure selectors/lane/cap logic an
 
 ## Sibling-list follow-up
 Checked the 10 flagged tests: none enumerates bin/lean modules; recorded issuewatch under not_members in result.json (no code change).
+
+## Export collision
+Renamed issuewatch.mjs export `classify` to `classifyIssue` (decision-engine.mjs already exports `classify`); updated the test and result.json. issuewatch tests pass (17/17).

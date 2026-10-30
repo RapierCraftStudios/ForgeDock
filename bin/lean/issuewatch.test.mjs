@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classify, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli } from "./issuewatch.mjs";
+import { parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli } from "./issuewatch.mjs";
 import { openBatch } from "./batch.mjs";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "iw-"));
@@ -103,13 +103,13 @@ test("follow-ups: defer-only claims bot follow-ups with an unchecked defer item;
   assert.ok(hasUnresolvedDefer(defer));
   assert.ok(!hasUnresolvedDefer("- [x] `R1: x` — defer: done\n"));
   assert.ok(!hasUnresolvedDefer(pd));
-  assert.equal(classify(bot(defer), W({ include_followups: "defer-only" })), "claim");
-  assert.equal(classify(bot(defer + pd), W({ include_followups: "defer-only" })), "claim");
-  assert.equal(classify(bot(defer), W()), null);
-  assert.equal(classify(bot(defer, "chore: bot issue"), W({ include_followups: "defer-only" })), null);
-  assert.equal(classify(bot(pd), W({ include_followups: "defer-only" })), null);
-  assert.equal(classify(bot(pd), W({ include_followups: "defer-only", postdeploy_rollup: "50" })), "fold");
-  assert.equal(classify(iss(1, { authorAssociation: "NONE" }), W()), null);
+  assert.equal(classifyIssue(bot(defer), W({ include_followups: "defer-only" })), "claim");
+  assert.equal(classifyIssue(bot(defer + pd), W({ include_followups: "defer-only" })), "claim");
+  assert.equal(classifyIssue(bot(defer), W()), null);
+  assert.equal(classifyIssue(bot(defer, "chore: bot issue"), W({ include_followups: "defer-only" })), null);
+  assert.equal(classifyIssue(bot(pd), W({ include_followups: "defer-only" })), null);
+  assert.equal(classifyIssue(bot(pd), W({ include_followups: "defer-only", postdeploy_rollup: "50" })), "fold");
+  assert.equal(classifyIssue(iss(1, { authorAssociation: "NONE" }), W()), null);
 });
 
 test("postdeploy_rollup folds a post-deploy-only follow-up into the release checklist once", async () => {
