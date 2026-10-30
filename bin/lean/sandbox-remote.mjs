@@ -155,7 +155,8 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
     const list = [];
     let b64 = "";
     for (const { argv } of Array.isArray(cmds) ? cmds : []) {
-      const out = await relayRun(argv, { secrets: [...known] });
+      const raw = await relayRun(argv, { secrets: [...known] });
+      const out = { rc: Number.isInteger(raw?.rc) ? raw.rc : 1, stdout: redact(raw?.stdout, [...known]), stderr: redact(raw?.stderr, [...known]) };
       const next = Buffer.from(JSON.stringify([...list, { argv, ...out }])).toString("base64");
       if (next.length > PREFETCH_MAX_B64) continue;
       list.push({ argv, ...out });

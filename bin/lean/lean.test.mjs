@@ -722,6 +722,15 @@ describe("core work-on", () => {
     assert.equal((await run(world({ contract }), { ...remote, hostCaps: { hostCapabilities: ["sops"] } })).terminalReason, "merged");
   });
 
+  it("#4778 a relayed host capability does not end the remote lane before building; a failed relay still recovers locally", async () => {
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
+    const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["promtool"] } };
+    assert.equal((await run(world({ contract }), { ...remote, relayCaps: ["promtool"] })).terminalReason, "merged");
+    assert.equal((await run(world({ contract }), { ...remote, relayCaps: ["sops"] })).code, "env.capability_remote");
+    const blocked = world({ result: { status: "blocked", summary: "promtool relay unavailable", block: { kind: "human", why: "credentials" } } });
+    assert.equal((await run(blocked, { ...remote, relayCaps: ["promtool"] })).code, "env.capability_remote");
+  });
+
   it("needs-human terminals carry a specific outcome code, never unclassified", async () => {
     const code = async (w, extra) => {
       const dir = tmpDir("lean-code-");

@@ -133,7 +133,8 @@ export async function servicePending({ transport, id, relay, run = runRelayed, s
   for (const req of Array.isArray(list) ? list : []) {
     if (typeof req?.rid !== "string" || !req.rid) continue;
     const g = relayGate(req.argv, relay);
-    const out = g.ok ? await run(req.argv, { secrets }) : { rc: RELAY_REFUSED_RC, stdout: "", stderr: g.reason };
+    const raw = g.ok ? await run(req.argv, { secrets }) : { rc: RELAY_REFUSED_RC, stdout: "", stderr: g.reason };
+    const out = { rc: Number.isInteger(raw?.rc) ? raw.rc : 1, stdout: redact(raw?.stdout, secrets), stderr: redact(raw?.stderr, secrets) }; // a custom runner is redacted too
     try { await transport.relayAnswer(id, req.rid, out); n++; } catch { /* retried on the next poll */ }
   }
   return n;

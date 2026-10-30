@@ -18,6 +18,9 @@ const run = promisify(execFile);
  * DELETE /sandboxes/:id). It places each sandbox on the enrolled agent with the most free reserved CPU, forwards every
  * later call to that agent, renews the agent lease while ForgeDock keeps polling, and destroys sandboxes ForgeDock
  * has abandoned. It also serves the agent installer and enrollment.
+ * Relay (#4778): an in-memory per-sandbox queue of read-only capability requests (agent `POST /agent/relay/:id`,
+ * `GET /agent/relay/:id/:rid`) that the dispatching ForgeDock lists (`GET /sandboxes/:id/relay`) and answers
+ * (`POST /sandboxes/:id/relay/:rid`). The router never runs or gates a command; a restart drops pending requests.
  */
 export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date.now(), log = console } = {}) {
   const store = jsonStore(join(cfg.state_dir, "router-state.json"), { agents: {}, sandboxes: {} });
@@ -30,6 +33,37 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
   // "__proto__" or "constructor" never resolves to an inherited member.
   const own = (map, key) => (typeof key === "string" && Object.hasOwn(map, key) ? map[key] : undefined);
   const codeTtlMs = (cfg.code_ttl_s ?? 1800) * 1000;
+  // #4778: relay queue, sandbox id -> {rid -> {argv, done?, rc, stdout, stderr}}; not persisted.
+  const relayQ = new Map();
+  const RELAY_MAX_PENDING = 8, RELAY_MAX_ARGS = 64, RELAY_MAX_BYTES = 16 * 1024;
+  /** The caller agent's own sandbox (else null), so one agent never reads or queues for another's sandbox. */
+  const ownedBy = (req, id) => { const s = own(sbx(), id), a = agentFor(req); return s && a && s.agent === a ? s : null; };
+  function relayPost(req, { id }, body) {
+    if (!ownedBy(req, id)) return { status: 404, body: { error: "unknown sandbox" } };
+    const argv = body?.argv;
+    if (!Array.isArray(argv) || !argv.length || !argv.every((a) => typeof a === "string")) return { status: 400, body: { error: "argv must be a non-empty string list" } };
+    if (argv.length > RELAY_MAX_ARGS || Buffer.byteLength(JSON.stringify(argv)) > RELAY_MAX_BYTES) return { status: 400, body: { error: "argv too large" } };
+    const q = relayQ.get(id) ?? new Map();
+    if ([...q.values()].filter((r) => !r.done).length >= RELAY_MAX_PENDING) return { status: 429, body: { error: "too many pending relay requests" }, retryAfter: 5 };
+    const rid = randomBytes(12).toString("hex");
+    q.set(rid, { argv });
+    relayQ.set(id, q);
+    return { status: 202, body: { rid } };
+  }
+  function relayPoll(req, { id, rid }) {
+    if (!ownedBy(req, id)) return { status: 404, body: { error: "unknown sandbox" } };
+    const q = relayQ.get(id), r = q?.get(rid);
+    if (!r) return { status: 404, body: { error: "unknown relay request" } };
+    if (!r.done) return { status: 200, body: { state: "pending" } };
+    q.delete(rid);
+    return { status: 200, body: { state: "done", rc: r.rc, stdout: r.stdout, stderr: r.stderr } };
+  }
+  function relayAnswer({ id, rid }, body) {
+    const r = relayQ.get(id)?.get(rid);
+    if (!r || r.done) return { status: 404, body: { error: "unknown relay request" } };
+    Object.assign(r, { done: true, rc: Number.isInteger(body?.rc) ? body.rc : 1, stdout: String(body?.stdout ?? ""), stderr: String(body?.stderr ?? "") });
+    return { status: 200, body: { ok: true } };
+  }
   /** The long-lived enroll token, or an unexpired one-time install code (consumed by a successful enrollment). */
   function enrollOk(token, consume = false) {
     if (sameSecret(token, cfg.enroll_token)) return true;
@@ -140,7 +174,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     s.touched = now(); store.save();
     try {
       const r = await agentCall(a, method, path);
-      if (method === "DELETE" && (r.ok || r.status === 404)) { delete sbx()[id]; store.save(); }
+      if (method === "DELETE" && (r.ok || r.status === 404)) { delete sbx()[id]; relayQ.delete(id); store.save(); }
       return { status: r.status, body: r.data };
     } catch (e) { return { status: 502, body: { error: `agent ${s.agent} unreachable: ${e.message}` } }; }
   }
@@ -154,10 +188,10 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       try {
         if (now() - s.touched > abandonMs) {
           const r = await agentCall(a, "DELETE", `/sandboxes/${encodeURIComponent(id)}`);
-          if (r.ok || r.status === 404) { delete sbx()[id]; log.info?.(`abandoned ${id} destroyed on ${s.agent}`); }
+          if (r.ok || r.status === 404) { delete sbx()[id]; relayQ.delete(id); log.info?.(`abandoned ${id} destroyed on ${s.agent}`); }
         } else {
           const r = await agentCall(a, "POST", `/sandboxes/${encodeURIComponent(id)}/lease`);
-          if (r.status === 404) { delete sbx()[id]; log.info?.(`${id} gone on ${s.agent}`); }
+          if (r.status === 404) { delete sbx()[id]; relayQ.delete(id); log.info?.(`${id} gone on ${s.agent}`); }
         }
       } catch (e) { log.warn?.(`lease ${id} on ${s.agent}: ${e.message}`); }
     }
@@ -226,12 +260,16 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
       const agent = own(sbx(), id)?.agent, r = await forward(id, "GET", `/sandboxes/${encodeURIComponent(id)}/usage`);
       return agent && r.status === 200 && r.body && typeof r.body === "object" ? { ...r, body: { ...r.body, agent } } : r;
     })],
+    [route("GET", "/sandboxes/:id/relay"), fd(async ({ id }) => ({ status: 200, body: { requests: [...(relayQ.get(id) ?? new Map())].filter(([, r]) => !r.done).map(([rid, r]) => ({ rid, argv: r.argv })) } }))],
+    [route("POST", "/sandboxes/:id/relay/:rid"), fd(async (p, body) => relayAnswer(p, body))],
     [route("DELETE", "/sandboxes/:id"), fd(async ({ id }) => forward(id, "DELETE", `/sandboxes/${encodeURIComponent(id)}`))],
     [route("GET", "/status"), fd(async () => ({ status: 200, body: await status() }))],
     [route("GET", "/agents"), fd(async () => ({ status: 200, body: { agents: await capacities(), sandboxes: sbx() } }))],
     [route("POST", "/codes"), fd(async () => ({ status: 200, body: issueCode() }))],
     [route("GET", "/agent/creds/github"), { fn: async () => ({ status: 200, body: { token: await githubToken() } }), auth: "agent" }],
     [route("GET", "/agent/creds/claude"), { fn: async () => ({ status: 200, body: claudeToken() }), auth: "agent" }],
+    [route("POST", "/agent/relay/:id"), { fn: async (p, body, _u, req) => relayPost(req, p, body), auth: "agent" }], // #4778
+    [route("GET", "/agent/relay/:id/:rid"), { fn: async (p, _b, _u, req) => relayPoll(req, p), auth: "agent" }],
     [route("GET", "/agent/bundle"), { fn: async () => ({ bundle: true }), auth: "agent" }],
     [route("GET", "/agent/images/:ref"), { fn: async ({ ref }) => ({ image: ref }), auth: "agent" }],
     [route("POST", "/agents/:name/upgrade"), fd(async ({ name }) => {
@@ -242,7 +280,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
     })],
     [route("DELETE", "/agents/:name"), fd(async ({ name }) => {
       if (!own(agents(), name)) return { status: 404, body: { error: "unknown agent" } };
-      for (const [id, x] of Object.entries(sbx())) if (x.agent === name) delete sbx()[id];
+      for (const [id, x] of Object.entries(sbx())) if (x.agent === name) { delete sbx()[id]; relayQ.delete(id); }
       delete agents()[name]; store.save();
       return { status: 200, body: { ok: true } };
     })],
@@ -275,7 +313,7 @@ export function createRouter(cfg, { fetchFn = globalThis.fetch, now = () => Date
         if (r.auth === "agent" && !agentFor(req)) return send(res, 401, { error: "unauthorized" });
         if (r.auth === "enroll" && !enrollOk(url.searchParams.get("token"))) return send(res, 401, "unauthorized\n");
         const body = req.method === "POST" ? await readJson(req) : null;
-        const out = await r.fn(p, body, url);
+        const out = await r.fn(p, body, url, req);
         if (out.bundle) return sendBundle(res);
         if (out.image) return sendImage(res, out.image);
         return send(res, out.status, out.body, out.retryAfter ? { "retry-after": String(out.retryAfter) } : {});
