@@ -2047,7 +2047,7 @@ export async function decisionsFromCli(argv, deps = {}) {
   const [sub, ...rest] = argv;
   if (sub !== "list") throw new Error(usage);
   const flag = (n) => { const i = rest.indexOf(n); return i >= 0 ? rest[i + 1] : null; };
-  const run = deps.exec ?? (async (cmd, args) => String((await pexec(cmd, args, { maxBuffer: 64 * 1024 * 1024 })).stdout));
+  const run = deps.exec ?? (async (cmd, args) => String((await pexec(cmd, args, { maxBuffer: 64 * 1024 * 1024, timeout: 60000 })).stdout));
   const repo = flag("--repo") ?? String(await run("gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])).trim();
   if (rest.includes("--refresh")) {
     const jq = '.[] | select(.body | startswith("<!-- FORGE:DECISION {")) | {body, user, author_association, issue_url} | tojson';

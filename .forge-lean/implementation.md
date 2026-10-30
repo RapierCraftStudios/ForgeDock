@@ -1,29 +1,27 @@
 ### Approach
-Host-capability placement now reads three sources: the issue body, the FORGE:DECISION comments and the frozen contract's validate commands. A first remote run whose frozen contract needs a declared host tool now stops before building and is recovered on the host. `env.tool_missing` recoveries also run on the host. Everything is pure and deterministic, with no new gh calls and no LLM calls.
+Fix at the deterministic layer: the client consults the systemd unit before spawning, the unit stands by instead of exiting 0 on "already running", one-shot requests get a timeout, status exposes stall data, and admission waits are bounded per request.
 
 ### Changes
-- bin/lean/execution.mjs: adds `placementText({body, comments})` and `contractHostNeeds(contract, caps)`. The header comment names the #4785 inputs. It imports `parseContractComment` from render.mjs.
-- bin/engine-cli.mjs: both `readBody` variants fetch `comments` in the same `gh issue view` call and compute `needsOf` from `placementText`. They still return only the body.
-- bin/lean/lean.mjs: after the contract freeze/resume block, a lane that is placed remote, is not a recovery, and whose validate commands name a declared host capability ends `env.capability_remote` before any implementation turn.
-- bin/lean/orchestrate.mjs: `placeOf` places `env.tool_missing` recoveries local, as it already does for `env.capability_remote`.
-- devdocs/modules/lean.md: adds the #4785 entry.
-- Tests: bin/lean/execution.test.mjs (placementText, contractHostNeeds, orchestrate tool-missing relaunch) and bin/lean/lean.test.mjs (remote early exit, plus the unchanged local, undeclared and recovery cases).
+- bin/lean/schedd.mjs: `unitState`/`startUnit`; `connectDaemon` waits for an active/activating unit, starts an installed stopped unit, spawns only without a unit; `request(..., {timeoutMs})`; status per batch with `lastProgressAt`, `lastProgressAgeSec`, `pendingAdds` (also unhosted batches with pending adds); `hostBounded` (`FORGEDOCK_SCHEDD_ADMIT_MS`, default 120 s) for add/requeue/attach and a stall log for start-up resume; event-loop lag watchdog.
+- bin/engine-cli.mjs: bounded `schedd status` output (age, pending adds, "not responding" with exit code 1); control clients pass `REQUEST_MS`; daemon stands by under systemd (`INVOCATION_ID`) while a live owner holds the lock.
+- bin/lean/batch.mjs: `lastProgressMs()`.
+- bin/lean/schedd.test.mjs: 7 regression tests.
+- devdocs/decisions/4775-schedd-load-restart.md: decision note (required by the devdocs freshness check; amendment add-deliverable).
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/execution.mjs:222 (placementText), bin/engine-cli.mjs:1808-1809 (readBody), bin/lean/lean.mjs:1607 (frozen-contract check)
-- R2 ✅ bin/lean/lean.mjs:1607 (`env.capability_remote` before building), bin/lean/orchestrate.mjs:292 (tool-missing recovery runs local); the existing endBlocked mapping (lean.mjs:867-875) is unchanged
+- R1 ✅ bin/lean/schedd.mjs hostBounded + lag watchdog; gh calls audited: daemon path already has timeouts (effects.mjs:35,280), none added
+- R2 ✅ bin/lean/schedd.mjs connectDaemon; bin/engine-cli.mjs standby in scheddFromCli
+- R3 ✅ bin/engine-cli.mjs schedd status, schedd.mjs request timeoutMs, statusBatches
+- R4 ✅ schedd.mjs statusBatches pendingAdds
 
 ### Verification
-- V1 `node --test bin/lean/execution.test.mjs`: pass
-- V2 `node --test bin/lean/lean.test.mjs`: pass
-- V3 `node --test bin/lean/recovery.test.mjs bin/tests/engine-outcome-codes.test.mjs bin/tests/engine-cli.test.mjs`: pass
-- V4 `node --test --test-name-pattern=4785 bin/lean/execution.test.mjs bin/lean/lean.test.mjs`: pass. Fails without the fix: with lean.mjs and orchestrate.mjs reverted, the early-exit and tool-missing relaunch tests fail, and the placementText/contractHostNeeds tests cannot import functions that don't exist.
-- Extra targeted run: bin/tests/orchestrate-preflight, orchestrate-runtime-paths, bin/lean/precheck, bin/lean/batch: pass.
-- `checks.mjs --base origin/staging` widened to the full suite (921 files reference the change). The host rules forbid running the full suite, so only the targeted commands above were run.
-- No repo formatter is configured.
+- V1 `node --test bin/lean/schedd.test.mjs`: pass (29 tests incl. 7 new). The new tests fail without the fix (they import `unitState` and use the timeout/status fields that do not exist on base).
+- V2 `node --test bin/lean/batch.test.mjs bin/lean/recovery.test.mjs`: pass (126 pass, 0 fail across all three files).
+- scripts/check-devdocs-freshness.sh origin/staging: OK. `forgedock check`: PASS on the second run (the first run hit a 300 s timeout in an unrelated gate-script suite at host load ~125).
+- No formatter is configured in the repo.
 
 ### Notes
-- Behaviour change: a remote lane whose frozen validate commands name a declared `execution.host_capabilities` entry (for example promtool) now ends `env.capability_remote` right after the freeze and is relaunched on the host. A rerun of such an issue is placed local from the start. Undeclared built-in needs (sops etc. not in host_capabilities) do not trigger the early exit; this follows the same rule as hostCapabilityBlock.
-- Comments are not trust-filtered for placement: a detected need can only move a lane local (contract K1).
-- The AlterLab lanes cited in the issue ran engine v1.32.1 in the sandbox, which predates the #4542/#4685 recovery mapping.
-- No new env vars.
+Env: `FORGEDOCK_SCHEDD_ADMIT_MS`. A stalled `schedd status` now exits 1. Standby applies only when `INVOCATION_ID` is set. I did not audit every gh call site beyond the daemon path.
+
+## R1 follow-up
+Audited gh execs on the daemon path: all already have timeouts; added 60s to the untimed `decisions list` gh calls (engine-cli.mjs). Reaping is libuv's job once the loop is responsive (lag watchdog logs starvation). A timed-out host() is not cancelled on purpose (would orphan/duplicate a launched batch); recorded as an amendment in result.json.
