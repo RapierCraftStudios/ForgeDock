@@ -482,3 +482,24 @@ describe("#4481: one lane per repo and issue across batches", () => {
     assert.equal(maxActive.get(5), 1);
   });
 });
+
+describe("live local lane cap (#4777)", () => {
+  it("sched.cap as a function is evaluated at every admission: a lowered cap queues the next lane until it is raised", async () => {
+    const { handle } = world();
+    const registry = handle(7101);
+    const cap = { n: 1 };
+    let running = 0, peak = 0;
+    const gate = { open: false };
+    const runOne = async () => { running++; peak = Math.max(peak, running); await until(() => gate.open, "gate"); running--; return { terminalReason: "merged", cost_usd: 0 }; };
+    const p = orchestrate({ issues: [1, 2], parallel: 5, readBody: async () => "", runOne, pollMs: 2, batchId: "lc", sched: { registry, batch: "lc", repo: "o/r", cap: () => cap.n } });
+    await until(() => running === 1, "first lane");
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(running, 1, "cap 1 keeps the second lane queued");
+    cap.n = 2;
+    await until(() => running === 2, "second lane after the cap rises");
+    gate.open = true;
+    const rows = await p;
+    assert.deepEqual(rows.map((r) => r.outcome), ["merged", "merged"]);
+    assert.equal(peak, 2);
+  });
+});
