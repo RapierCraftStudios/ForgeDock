@@ -85,7 +85,7 @@ export const closedEdgeNote = (closed) => (closed?.length ? `Note: ${closed.map(
 export function normalizeAsk(text) {
   return String(text ?? "").toLowerCase().replace(/#\d+/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
 }
-export const askKey = (text) => createHash("sha1").update(normalizeAsk(text)).digest("hex").slice(0, 12);
+export const askKey = (text) => createHash("sha256").update(normalizeAsk(text)).digest("hex").slice(0, 12);
 
 const askComment = (key, ask, unblocks) => `<!-- ${ASK_MARKER} key=${key} -->\n## Owner ask\n${JSON.stringify({ ask: String(ask).slice(0, 500), unblocks })}`;
 const readAsk = (body) => { try { return JSON.parse(String(body).split("\n").slice(2).join("\n")); } catch { return null; } };

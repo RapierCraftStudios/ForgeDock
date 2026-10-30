@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { renderContract } from "./render.mjs";
-import { parseRelayCommands, relayCommandNames, relayGate, runRelayed, simpleArgv, relayPrefetchCommands, servicePending, RELAY_REFUSED_RC } from "./relay.mjs";
+import { renderContract, contractJson } from "./render.mjs";
+import { contractHash } from "./lean.mjs";
+import { parseRelayCommands, relayCommandNames, relayGate, runRelayed, simpleArgv, relayPrefetchCommands, servicePending, RELAY_REFUSED_RC, RELAY_ANSWER_STREAM_MAX } from "./relay.mjs";
 import { parseExecution, placeLane, providerByName } from "./execution.mjs";
 import { remoteProvider } from "./sandbox-remote.mjs";
 import { readRelayCaps } from "../engine-cli.mjs";
 
 const RELAY = { prod_monitor: ["obs-psql", "obs-*"] };
-const contractComment = (c) => "<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n" + renderContract({ requirements: [], deliverables: [], ...c }, "abcdef123456");
+const contractComment = (c) => { const full = { requirements: [], deliverables: [], ...c }; return "<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n" + renderContract(full, contractHash(contractJson(full))); };
+const APP = { author: { login: "rapiercraft-forgedock" }, authorAssociation: "CONTRIBUTOR" }; // the ForgeDock App, trusted
 
 function fakeTransport({ pending = [] } = {}) {
   const t = {
@@ -74,13 +76,23 @@ describe("#4778 pre-fetch", () => {
 
   it("relayPrefetchCommands: the last contract's simple, allowlisted validate/repro commands", () => {
     const comments = [
-      { body: contractComment({ validate: [{ id: "V1", command: "obs-psql -c old" }] }) },
-      { body: "unrelated" },
-      { body: contractComment({ validate: [{ id: "V1", command: "obs-psql -c 'select 1'" }, { id: "V2", command: "node --test a.mjs" }, { id: "V3", command: "obs-psql -c x | head" }, { id: "V4", command: "obs-psql -c 'select 1'" }], repro_test: { command: "obs-logs api" } }) },
+      { ...APP, body: contractComment({ validate: [{ id: "V1", command: "obs-psql -c old" }] }) },
+      { ...APP, body: "unrelated" },
+      { ...APP, body: contractComment({ validate: [{ id: "V1", command: "obs-psql -c 'select 1'" }, { id: "V2", command: "node --test a.mjs" }, { id: "V3", command: "obs-psql -c x | head" }, { id: "V4", command: "obs-psql -c 'select 1'" }], repro_test: { command: "obs-logs api" } }) },
     ];
     assert.deepEqual(relayPrefetchCommands({ comments }, RELAY), [{ argv: ["obs-psql", "-c", "select 1"] }, { argv: ["obs-logs", "api"] }]);
     assert.deepEqual(relayPrefetchCommands({ comments }, {}), []);
     assert.deepEqual(relayPrefetchCommands({ comments: [] }, RELAY), []);
+  });
+
+  it("release #4820 API-1: an outsider's or tampered contract never chooses what the host runs", () => {
+    const real = { ...APP, body: contractComment({ validate: [{ id: "V1", command: "obs-psql -c 'select 1'" }] }) };
+    const planted = { author: { login: "mallory" }, authorAssociation: "NONE", body: contractComment({ validate: [{ id: "V1", command: "obs-psql -c 'select * from users'" }] }) };
+    assert.deepEqual(relayPrefetchCommands({ comments: [real, planted] }, RELAY), [{ argv: ["obs-psql", "-c", "select 1"] }], "the newer untrusted contract is ignored");
+    assert.deepEqual(relayPrefetchCommands({ comments: [planted] }, RELAY), []);
+    const tampered = { ...APP, body: real.body.replaceAll("select 1", "select 2") }; // the hashed JSON too, not only the rendered table
+    assert.deepEqual(relayPrefetchCommands({ comments: [tampered] }, RELAY), [], "a contract whose hash does not verify is ignored");
+    assert.deepEqual(relayPrefetchCommands({ comments: [real.body] }, RELAY), [], "a bare string has no author");
   });
 });
 
@@ -96,6 +108,22 @@ describe("#4778 servicePending", () => {
     assert.equal(await servicePending({ transport: {}, id: "s1", relay: RELAY }), 0);
     const bad = { relayPending: async () => [{ rid: "r", argv: ["obs-psql"] }], relayAnswer: async () => { throw new Error("502"); } };
     assert.equal(await servicePending({ transport: bad, id: "s1", relay: RELAY, run: async () => ({ rc: 0, stdout: "", stderr: "" }) }), 0);
+  });
+
+  it("release #4820 INFRA-1: streams are capped, and a rejected answer becomes an rc 125 error, never a re-run", async () => {
+    const answers = [], ran = [];
+    let first = true;
+    const t = { relayPending: async () => [{ rid: "r1", argv: ["obs-psql", "-c", "big"] }],
+      relayAnswer: async (id, rid, out) => { if (first) { first = false; throw new Error("HTTP 413"); } answers.push(out); } };
+    const n = await servicePending({ transport: t, id: "s1", relay: RELAY, run: async (argv) => { ran.push(argv); return { rc: 0, stdout: "x".repeat(RELAY_ANSWER_STREAM_MAX * 3), stderr: "" }; } });
+    assert.equal(n, 1);
+    assert.equal(ran.length, 1);
+    assert.equal(answers[0].rc, 125);
+    assert.match(answers[0].stderr, /relay answer rejected: HTTP 413/);
+    const capped = []; const t2 = { relayPending: async () => [{ rid: "r2", argv: ["obs-psql"] }], relayAnswer: async (id, rid, out) => { capped.push(out); } };
+    await servicePending({ transport: t2, id: "s1", relay: RELAY, run: async () => ({ rc: 0, stdout: "y".repeat(RELAY_ANSWER_STREAM_MAX + 10), stderr: "" }) });
+    assert.ok(capped[0].stdout.length < RELAY_ANSWER_STREAM_MAX + 100);
+    assert.match(capped[0].stdout, /output truncated/);
   });
 });
 

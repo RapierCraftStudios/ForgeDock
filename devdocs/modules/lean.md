@@ -2139,3 +2139,7 @@ POSIX keeps `<dir>/schedd.sock`. A pipe is not a file and vanishes with its serv
 (startup and close) and the `lost socket` watchdog are skipped (the `schedd.lock` check still covers takeover) and
 `scheddExists` tests the lock file. `defaultSpawn` resolves the `forgedock.mjs` script with `fileURLToPath` (`SCHEDD_SCRIPT`),
 not `URL.pathname`, which gave `/C:/...` on Windows.
+
+## Entry 2026-10-31 — Relay pre-fetch trust and answer cap (release #4820)
+
+**Release #4820 hardening.** `relayPrefetchCommands` reads only a trusted `FORGE:CONTRACT` comment whose hash verifies, as `readFrozenContract` does, so an outsider's contract never chooses what the host runs at dispatch (API-1). `servicePending` caps each answer stream at `RELAY_ANSWER_STREAM_MAX` (256 KiB) and replaces an answer the router still rejects with an rc 125 error, so a command is never re-run on every poll (INFRA-1).

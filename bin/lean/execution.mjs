@@ -58,7 +58,7 @@ import { httpTransport, isActionsEndpoint, remoteProvider } from "./sandbox-remo
 import { ADMISSION_DEFAULTS } from "./admission.mjs";
 import { classifyStep, heavyConfig, memAvailableMb } from "./heavy.mjs";
 import { detectPins } from "./toolchain.mjs";
-import { parseContractComment } from "./render.mjs";
+import { parseContractComment, noComments } from "./render.mjs";
 import { parseRelayCommands } from "./relay.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
@@ -229,7 +229,7 @@ const EVIDENCE_HEADING = /^(#{1,6})\s*(?:evidence|logs?|data|observations?|measu
 function proseOf(body) {
   const kept = [];
   let fence = null, skip = 0;
-  for (const line of String(body ?? "").replace(/<!--[\s\S]*?-->/g, "").split("\n")) {
+  for (const line of noComments(body).split("\n")) {
     const f = /^\s*(`{3,}|~{3,})/.exec(line);
     if (fence) { if (f && f[1][0] === fence[0] && f[1].length >= fence.length) fence = null; continue; }
     if (f) { fence = f[1]; continue; }

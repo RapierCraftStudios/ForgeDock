@@ -18,6 +18,7 @@ import { writeAtomic, batchRoot, openBatch, listBatches } from "./batch.mjs";
 import { milestoneSlug, readBranches, isDefaultLane, defaultBranches, DEFAULT_STAGING_BRANCH, DEFAULT_FEATURE_PATTERN } from "./lane.mjs";
 import { postDeployOnly } from "./prefilter.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
+import { noComments } from "./render.mjs";
 
 const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup"];
 const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -102,7 +103,7 @@ export function matchesSelectors(issue, sel) {
 
 const CHECK_RE = /^\s*[-*]\s+\[ \]\s+(.*)$/;
 /** True when the body has an unchecked `— defer` checklist item. */
-export const hasUnresolvedDefer = (body) => String(body ?? "").replace(/<!--[\s\S]*?-->/g, "").split("\n").some((l) => { const t = CHECK_RE.exec(l)?.[1]; return t != null && /\s[—-]+\s*defer\b/.test(t); });
+export const hasUnresolvedDefer = (body) => noComments(body).split("\n").some((l) => { const t = CHECK_RE.exec(l)?.[1]; return t != null && /\s[—-]+\s*defer\b/.test(t); });
 
 // Bot authorship comes from the author only, never the body: a `FORGE:DEFERRED` marker in an outsider's issue is not
 // the App. `gh` reports the ForgeDock App as a bare login with no `[bot]` suffix (#4467), so it is matched by slug.
