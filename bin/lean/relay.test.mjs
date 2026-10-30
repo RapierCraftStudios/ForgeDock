@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { renderContract } from "./render.mjs";
-import { parseRelayCommands, relayCommandNames, relayGate, runRelayed, simpleArgv, relayPrefetchCommands, servicePending, RELAY_REFUSED_RC } from "./relay.mjs";
+import { parseRelayCommands, relayCommandNames, relayGate, runRelayed, simpleArgv, relayPrefetchCommands, servicePending, capAnswer, RELAY_ANSWER_MAX_BYTES, RELAY_REFUSED_RC } from "./relay.mjs";
 import { parseExecution, placeLane, providerByName } from "./execution.mjs";
 import { remoteProvider } from "./sandbox-remote.mjs";
 import { readRelayCaps } from "../engine-cli.mjs";
@@ -152,5 +152,40 @@ describe("#4778 provider and config", () => {
   it("readRelayCaps parses CS_RELAY_CAPS", () => {
     assert.deepEqual(readRelayCaps({ CS_RELAY_CAPS: "prod_monitor, Bad Cap ,prod_monitor,obs" }), { relayCaps: ["prod_monitor", "obs"] });
     assert.deepEqual(readRelayCaps({}), {});
+  });
+});
+
+describe("#4831 oversized relay answers", () => {
+  const jsonBytes = (o) => Buffer.byteLength(JSON.stringify(o));
+  it("capAnswer leaves a small answer unchanged", () => {
+    const a = { rc: 0, stdout: "1\n", stderr: "" };
+    assert.equal(capAnswer(a), a);
+  });
+  it("servicePending caps a ~1 MB quote/newline-heavy answer under the router limit, once, without corrupting multibyte text", async () => {
+    const big = 'é"\n'.repeat(250000);
+    const t = fakeTransport({ pending: [{ rid: "r1", argv: ["obs-psql"] }] });
+    let ran = 0;
+    const n = await servicePending({ transport: t, id: "s1", relay: RELAY, run: async () => { ran++; return { rc: 0, stdout: big, stderr: "" }; } });
+    assert.equal(n, 1);
+    assert.equal(ran, 1);
+    const { id, rid, ...out } = t.answers[0];
+    assert.ok(jsonBytes(out) <= RELAY_ANSWER_MAX_BYTES && jsonBytes(out) < 1 << 20);
+    assert.equal(out.rc, 1);
+    assert.match(out.stderr, /truncated/);
+    assert.ok(out.stdout.length > 0 && !out.stdout.includes("\uFFFD") && big.startsWith(out.stdout));
+  });
+  it("a deterministic 4xx answer failure posts a small rc 1 answer for the same rid; transient ones are retried", async () => {
+    const posts = [];
+    const tr = (status) => ({ relayPending: async () => [{ rid: "r9", argv: ["obs-psql"] }], relayAnswer: async (id, rid, out) => { posts.push({ rid, ...out }); if (posts.length === 1) throw Object.assign(new Error("x"), status ? { status } : {}); return true; } });
+    assert.equal(await servicePending({ transport: tr(413), id: "s1", relay: RELAY, run: async () => ({ rc: 0, stdout: "x", stderr: "" }) }), 1);
+    assert.equal(posts.length, 2);
+    assert.equal(posts[1].rid, "r9");
+    assert.equal(posts[1].rc, 1);
+    assert.match(posts[1].stderr, /HTTP 413/);
+    for (const st of [502, 429, undefined]) {
+      posts.length = 0;
+      assert.equal(await servicePending({ transport: tr(st), id: "s1", relay: RELAY, run: async () => ({ rc: 0, stdout: "x", stderr: "" }) }), 0);
+      assert.equal(posts.length, 1);
+    }
   });
 });

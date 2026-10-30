@@ -17,6 +17,8 @@ const CAP_RE = /^[a-z][a-z0-9_-]*$/;
 const COMMAND_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*\*?$/;
 const NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
 export const RELAY_REFUSED_RC = 126;
+/** The router parses a POST body at 1 MiB (pool/http.mjs readJson); an answer is capped well under it, envelope and escaping included. */
+export const RELAY_ANSWER_MAX_BYTES = 512 * 1024;
 
 /**
  * `capability:command` entries (list or comma string) -> `{capability: [command, ...]}`. A command is an exact name or a
@@ -122,8 +124,29 @@ export function relayPrefetchCommands({ comments = [] } = {}, relay = null) {
 }
 
 /**
- * Service a sandbox's pending relay requests: gate each, run the allowed ones, refuse the rest (rc 126), post every answer.
- * Errors are swallowed (the next poll retries). Returns how many were answered.
+ * An answer whose serialized JSON fits `max` bytes: unchanged when it already does, else stdout (then stderr) is trimmed
+ * (never mid-character), a truncation notice is appended to stderr and rc is 1 (as runRelayed does for its own cap).
+ */
+export function capAnswer(out, max = RELAY_ANSWER_MAX_BYTES) {
+  const size = (o) => Buffer.byteLength(JSON.stringify(o));
+  if (size(out) <= max) return out;
+  const notice = `relay: output over ${max} bytes, truncated`;
+  const trim = (s, n) => Buffer.from(s).subarray(0, Math.max(0, Buffer.byteLength(s) - n)).toString("utf8").replace(/\uFFFD$/, "");
+  const build = (stdout, stderr) => ({ rc: 1, stdout, stderr: stderr ? `${stderr}\n${notice}` : notice });
+  let { stdout, stderr } = out;
+  let res = build(stdout, stderr);
+  while (size(res) > max && (stdout || stderr)) {
+    const excess = size(res) - max;
+    if (stdout) stdout = trim(stdout, excess); else stderr = trim(stderr, excess);
+    res = build(stdout, stderr);
+  }
+  return res;
+}
+
+/**
+ * Service a sandbox's pending relay requests: gate each, run the allowed ones, refuse the rest (rc 126), post every answer
+ * (capped to the router's body limit). A transient failure is swallowed (the next poll retries); a deterministic 4xx
+ * (not 429) is answered with a small rc 1 instead, so the command is not re-run forever. Returns how many were answered.
  */
 export async function servicePending({ transport, id, relay, run = runRelayed, secrets = [] } = {}) {
   if (typeof transport?.relayPending !== "function" || typeof transport.relayAnswer !== "function") return 0;
@@ -134,8 +157,12 @@ export async function servicePending({ transport, id, relay, run = runRelayed, s
     if (typeof req?.rid !== "string" || !req.rid) continue;
     const g = relayGate(req.argv, relay);
     const raw = g.ok ? await run(req.argv, { secrets }) : { rc: RELAY_REFUSED_RC, stdout: "", stderr: g.reason };
-    const out = { rc: Number.isInteger(raw?.rc) ? raw.rc : 1, stdout: redact(raw?.stdout, secrets), stderr: redact(raw?.stderr, secrets) }; // a custom runner is redacted too
-    try { await transport.relayAnswer(id, req.rid, out); n++; } catch { /* retried on the next poll */ }
+    const out = capAnswer({ rc: Number.isInteger(raw?.rc) ? raw.rc : 1, stdout: redact(raw?.stdout, secrets), stderr: redact(raw?.stderr, secrets) }); // a custom runner is redacted too
+    try { await transport.relayAnswer(id, req.rid, out); n++; } catch (e) {
+      const st = e?.status;
+      if (!Number.isInteger(st) || st < 400 || st > 499 || st === 429) continue; // retried on the next poll
+      try { await transport.relayAnswer(id, req.rid, { rc: 1, stdout: "", stderr: `relay: answer rejected by the router (HTTP ${st}), output too large or invalid` }); n++; } catch { /* retried on the next poll */ }
+    }
   }
   return n;
 }
