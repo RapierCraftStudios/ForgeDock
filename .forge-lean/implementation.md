@@ -26,3 +26,6 @@ Updated devdocs/modules/lean.md (relay section: answer cap and 4xx fallback) for
 
 ### Merge note (origin/staging)
 Staging landed its own fix for the same issue (1163f2c5: per-stream cap `capStream`, rc 125 fallback on any rejected answer). Merged: staging's behaviour is kept as the base (rc 125 fallback, no 4xx special-casing), and `capAnswer` is applied on top so the serialized answer is byte-exact under 512 KiB even when two escape-heavy streams pass the char cap. The 4xx-only fallback and its test were dropped as superseded.
+
+## Conformance fix
+servicePending's catch now posts the small rc 1 fallback only for a 4xx other than 429 (status integer); 429/5xx/statusless failures are swallowed and retried next poll. The earlier any-error rc 125 fallback is removed. Tests cover 413 (second rc 1 answer, returns 1) and 502 (nothing else posted, returns 0). Doc comment and dossier now match.

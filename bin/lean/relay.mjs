@@ -155,8 +155,8 @@ export function capAnswer(out, max = RELAY_ANSWER_MAX_BYTES) {
 
 /**
  * Service a sandbox's pending relay requests: gate each, run the allowed ones, refuse the rest (rc 126), post every answer.
- * Each stream is capped (capStream) and the whole answer is then bounded to RELAY_ANSWER_MAX_BYTES (capAnswer) so it fits the router's body limit; an answer the router still rejects is replaced by a small
- * rc 125 error, so the command is never re-run on every poll (release #4820 INFRA-1). Returns how many were answered.
+ * Each stream is capped (capStream) and the whole answer is then bounded to RELAY_ANSWER_MAX_BYTES (capAnswer) so it fits the router's body limit; an answer the router still rejects with a 4xx (not 429) is replaced by a small
+ * rc 1 answer, so the command is never re-run on every poll (release #4820 INFRA-1). Returns how many were answered.
  */
 export const RELAY_ANSWER_STREAM_MAX = 256 * 1024;
 const capStream = (s) => { const t = String(s ?? ""); return t.length > RELAY_ANSWER_STREAM_MAX ? `${t.slice(0, RELAY_ANSWER_STREAM_MAX)}\n[relay: output truncated at ${RELAY_ANSWER_STREAM_MAX} chars]\n` : t; };
@@ -172,7 +172,10 @@ export async function servicePending({ transport, id, relay, run = runRelayed, s
     const out = capAnswer({ rc: Number.isInteger(raw?.rc) ? raw.rc : 1, stdout: capStream(redact(raw?.stdout, secrets)), stderr: capStream(redact(raw?.stderr, secrets)) }); // a custom runner is redacted too
     try { await transport.relayAnswer(id, req.rid, out); n++; }
     catch (e) {
-      try { await transport.relayAnswer(id, req.rid, { rc: 125, stdout: "", stderr: `relay answer rejected: ${String(e?.message ?? e).slice(0, 200)}` }); n++; } catch { /* unreachable router: the next poll retries */ }
+      const st = e?.status;
+      if (Number.isInteger(st) && st >= 400 && st < 500 && st !== 429) { // deterministic rejection: retrying would re-run the command every poll
+        try { await transport.relayAnswer(id, req.rid, { rc: 1, stdout: "", stderr: `relay: answer rejected by the router (HTTP ${st}), output too large or invalid` }); n++; } catch { /* the next poll retries */ }
+      } // transient/429/statusless: the next poll retries
     }
   }
   return n;

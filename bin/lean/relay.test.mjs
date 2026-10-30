@@ -110,16 +110,21 @@ describe("#4778 servicePending", () => {
     assert.equal(await servicePending({ transport: bad, id: "s1", relay: RELAY, run: async () => ({ rc: 0, stdout: "", stderr: "" }) }), 0);
   });
 
-  it("release #4820 INFRA-1: streams are capped, and a rejected answer becomes an rc 125 error, never a re-run", async () => {
+  it("release #4820 INFRA-1: streams are capped, and a 4xx-rejected answer becomes a small rc 1 answer, never a re-run", async () => {
     const answers = [], ran = [];
     let first = true;
     const t = { relayPending: async () => [{ rid: "r1", argv: ["obs-psql", "-c", "big"] }],
-      relayAnswer: async (id, rid, out) => { if (first) { first = false; throw new Error("HTTP 413"); } answers.push(out); } };
+      relayAnswer: async (id, rid, out) => { if (first) { first = false; throw Object.assign(new Error("HTTP 413"), { status: 413 }); } answers.push(out); } };
     const n = await servicePending({ transport: t, id: "s1", relay: RELAY, run: async (argv) => { ran.push(argv); return { rc: 0, stdout: "x".repeat(RELAY_ANSWER_STREAM_MAX * 3), stderr: "" }; } });
     assert.equal(n, 1);
     assert.equal(ran.length, 1);
-    assert.equal(answers[0].rc, 125);
-    assert.match(answers[0].stderr, /relay answer rejected: HTTP 413/);
+    assert.equal(answers.length, 1);
+    assert.equal(answers[0].rc, 1);
+    assert.match(answers[0].stderr, /rejected by the router \(HTTP 413\)/);
+    const posts = [];
+    const t3 = { relayPending: async () => [{ rid: "r3", argv: ["obs-psql"] }], relayAnswer: async (id, rid, out) => { posts.push(out); throw Object.assign(new Error("x"), { status: 502 }); } };
+    assert.equal(await servicePending({ transport: t3, id: "s1", relay: RELAY, run: async () => ({ rc: 0, stdout: "", stderr: "" }) }), 0);
+    assert.equal(posts.length, 1);
     const capped = []; const t2 = { relayPending: async () => [{ rid: "r2", argv: ["obs-psql"] }], relayAnswer: async (id, rid, out) => { capped.push(out); } };
     await servicePending({ transport: t2, id: "s1", relay: RELAY, run: async () => ({ rc: 0, stdout: "y".repeat(RELAY_ANSWER_STREAM_MAX + 10), stderr: "" }) });
     assert.ok(capped[0].stdout.length < RELAY_ANSWER_STREAM_MAX + 100);
