@@ -748,6 +748,34 @@ describe("host capabilities in placement (#4542)", () => {
     assert.deepEqual(contractHostNeeds(null, caps), { caps: [], ids: [] });
   });
 
+  it("#4776 placementText ignores quoted evidence in the body (AlterLab #37290-#37317 fixture)", () => {
+    const rows = JSON.parse(readFileSync(new URL("../tests/fixtures/alterlab-capability-bodies.json", import.meta.url), "utf8"));
+    assert.equal(rows.length, 6);
+    for (const r of rows) {
+      assert.deepEqual(detectNeeds(placementText({ body: r.body })), r.needs, `#${r.issue}: ${r.note}`);
+      if (!r.needs.length) assert.ok(detectNeeds(r.body).includes("prod_monitor"), `#${r.issue} pinned before #4776`);
+    }
+  });
+
+  it("#4776 placementText: fences, quotes, comments and evidence sections are dropped, prose and decisions stay", () => {
+    const body = "Intro.\n```sh\nssh ovh-monitor obs-psql\n```\n> ssh ovh-monitor\n<!-- FORGE:STATE\n{\"reason\":\"prod_monitor\"}\n-->\n## Logs\nobs-psql here\n### Sub\nobs-psql sub\n## Plan\nneeds sops access\n";
+    assert.deepEqual(detectNeeds(placementText({ body })), ["sops"]);
+    assert.deepEqual(detectNeeds(placementText({ body: "~~~\nobs-psql\n~~~\nrun `obs-psql`" })), []);
+    assert.deepEqual(detectNeeds(placementText({ body: "needs the prod monitor" })), ["prod_monitor"]);
+    assert.deepEqual(detectNeeds(placementText({ body: "x", comments: [{ body: "<!-- FORGE:DECISION -->\nuse `ssh ovh-monitor obs-psql`" }] })), ["prod_monitor"]);
+  });
+
+  it("#4776 repro_test commands count: placementText and contractHostNeeds", () => {
+    const exec = parseExecution({ mode: "remote", max_remote: 2, host_capabilities: "promtool" });
+    const caps = { hostCapabilities: ["promtool"] };
+    const c = { validate: [{ id: "V1", command: "node --test a.mjs" }], repro_test: { command: "promtool test rules x.yml" } };
+    assert.deepEqual(contractHostNeeds(c, caps), { caps: ["promtool"], ids: ["repro_test"] });
+    assert.deepEqual(contractHostNeeds({ validate: [], repro_test: "none" }, caps), { caps: [], ids: [] });
+    const comment = "<!-- FORGE:CONTRACT -->\n<!-- FORGE:PLAN -->\n" + renderContract({ requirements: [], deliverables: [], validate: [{ id: "V1", command: "node --test a.mjs" }], repro_test: { command: "promtool test rules x.yml" } }, "abcdef123456");
+    const t = placementText({ body: "b", comments: [{ body: comment }] });
+    assert.deepEqual(detectNeeds(t, exec), ["promtool"]);
+  });
+
   it("#4785 orchestrate: a remote lane that ends env.tool_missing is relaunched locally", async () => {
     const calls = [];
     const rows = await orchestrate({ issues: [5], parallel: 2, recovery: { maxAttempts: 1 }, readBody: async () => "",
