@@ -24,3 +24,7 @@ classify-finding.test.sh and verify-phase-trail.test.sh timed out at 300s under 
 
 ## Docs freshness
 Added a #4788 paragraph to devdocs/modules/lean.md; no code change.
+
+### Follow-up (conformance)
+- `devdocs/modules/lean.md` is now a typed `add-deliverable` amendment (freshness script requires the dossier to move with bin/lean behaviour changes; `check-devdocs-freshness.sh origin/staging` passes).
+- The precheck shell-test timeouts (classify-finding, verify-phase-trail at 300s) are host load, not a contract change: reruns passed (176/0 and 160/0, exit 0) and `forgedock check` passed. This is not an amendment.
