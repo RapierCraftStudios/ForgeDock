@@ -39,7 +39,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schedDir, pidAlive } from "./sched.mjs";
 import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
-export { SECRET_ENV };
 
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;

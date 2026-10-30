@@ -3,7 +3,7 @@ Filter secrets at the single persistence choke point (`writePlan`), scrub pre-ex
 
 ### Changes
 - bin/lean/batch.mjs: `SECRET_ENV` (now also `*_KEY`), `scrubEnv`, `writePlan` drops secret env values and records names in `envSecrets`, new `scrubPlan()` (rewrites 0600, no-op if clean).
-- bin/lean/schedd.mjs: re-exports `SECRET_ENV` from batch.mjs; scrubs every batch plan at daemon start.
+- bin/lean/schedd.mjs: imports `SECRET_ENV` from batch.mjs (single definition, no re-export); scrubs every batch plan at daemon start.
 - bin/engine-cli.mjs: `--set-env` rejects secret names; `--resume` scrubs the plan first.
 - bin/lean/batch.test.mjs, bin/lean/schedd.test.mjs: regression tests; the #4691 test now expects `--set-env GH_TOKEN=...` to be refused.
 

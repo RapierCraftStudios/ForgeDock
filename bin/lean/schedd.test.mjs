@@ -7,8 +7,8 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, write
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { openBatch, isLaneAlive, listBatches } from "./batch.mjs";
-import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals, SECRET_ENV } from "./schedd.mjs";
+import { openBatch, isLaneAlive, listBatches, SECRET_ENV } from "./batch.mjs";
+import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
 import { orchestrateFromCli } from "../engine-cli.mjs";
