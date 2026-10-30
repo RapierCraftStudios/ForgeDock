@@ -1,73 +1,16 @@
-{
- "status": "fixed",
- "summary": "Transient lane-resolution failures are retried with backoff (uncapped); --requeue/--add accept lane-refused",
- "requirements": [
-  {
-   "id": "R1",
-   "status": "implemented",
-   "evidence": "bin/lean/orchestrate.mjs:124,700"
-  },
-  {
-   "id": "R2",
-   "status": "implemented",
-   "evidence": "bin/lean/lane.mjs:50"
-  },
-  {
-   "id": "R3",
-   "status": "implemented",
-   "evidence": "bin/lean/batch.mjs:79"
-  },
-  {
-   "id": "R4",
-   "status": "implemented",
-   "evidence": "bin/lean/batch.mjs:138"
-  }
- ],
- "validation": [
-  {
-   "id": "V1",
-   "command": "node --test bin/lean/lane.test.mjs bin/lean/batch.test.mjs",
-   "exit": 0
-  },
-  {
-   "id": "V2",
-   "command": "node --test bin/lean/lean.test.mjs bin/lean/prefilter.test.mjs bin/tests/engine-outcome-codes.test.mjs",
-   "exit": 0
-  }
- ],
- "tests": [
-  {
-   "command": "node --test bin/lean/lane.test.mjs bin/lean/batch.test.mjs",
-   "result": "pass",
-   "fails_without_fix": true
-  },
-  {
-   "command": "node --test bin/lean/**/*.test.mjs bin/tests/**/*.test.mjs",
-   "result": "fail: 5 unrelated (journey.test.mjs x3 fail the same with the fix reverted; lean.test.mjs #4690/#4405 idle-timing flakes under load)",
-   "fails_without_fix": "unknown"
-  }
- ],
- "self_review": [
-  {
-   "question": "1",
-   "answer": "yes",
-   "evidence": "R1-R4 implemented at the cited lines"
-  },
-  {
-   "question": "2",
-   "answer": "yes",
-   "evidence": "V1/V2 pass; genuine refusals still terminal (batch.test.mjs new test)"
-  },
-  {
-   "question": "3",
-   "answer": "yes",
-   "evidence": "D1-D5 changed, P1-P3 intact, V1/V2 pass"
-  },
-  {
-   "question": "4",
-   "answer": "yes",
-   "evidence": "git diff HEAD~1 --stat lists only bin/lean/{lane,orchestrate,batch}.mjs and two test files"
-  }
- ],
- "amendments": []
-}
+{"status":"fixed","summary":"schedd uses a per-dir named pipe on win32 and fileURLToPath for the spawn script","requirements":[
+{"id":"R1","status":"implemented","evidence":"bin/lean/schedd.mjs:49"},
+{"id":"R2","status":"implemented","evidence":"bin/lean/schedd.mjs:351"},
+{"id":"R3","status":"implemented","evidence":"bin/lean/schedd.test.mjs (#4762 win32 socket path)"},
+{"id":"R4","status":"implemented","evidence":"bin/lean/schedd.mjs:49"},
+{"id":"R6","status":"implemented","evidence":"bin/lean/schedd.mjs SCHEDD_SCRIPT"},
+{"id":"R7","status":"implemented","evidence":"bin/lean/schedd.mjs:139,281,296"}],
+"validation":[{"id":"V1","command":"node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/schedd.test.mjs bin/lean/batch.test.mjs","exit":0}],
+"tests":[{"command":"node --test bin/lean/schedd.test.mjs","result":"pass","fails_without_fix":true}],
+"self_review":[
+{"question":"1","answer":"yes","evidence":"R1-R4,R6,R7 delivered in schedd.mjs; R5 is post-deploy in contract"},
+{"question":"2","answer":"yes","evidence":"89 schedd/batch tests pass; POSIX branches unchanged"},
+{"question":"3","answer":"yes","evidence":"D1, D2 changed; P1/P2 intact; V1 exit 0"},
+{"question":"4","answer":"yes","evidence":"git show --stat HEAD: only schedd.mjs and schedd.test.mjs"}],
+"not_members":[{"symbol":"SCHEDD_SCRIPT","test":"bin/lean/batch.test.mjs","why":"it is a schedd.mjs constant, not a member of the sibling-file lists"}],
+"amendments":[{"id":"docs","change":"devdocs/modules/lean.md entry for #4762"}]}

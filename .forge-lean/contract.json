@@ -2,25 +2,43 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "`sandbox.unreachable` with an offline pool should not count toward `max_deferrals`, the same as `sandbox.capacity` after #4528.",
+   "quote": "`forgedock orchestrate 1 2` on Windows starts schedd and streams rows",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "When the pool has had zero live agents for more than N minutes:\n  - print one loud batch event and notification;",
+   "quote": "`--resume \u003cid>` reattaches over the pipe",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "with `fallback_local` unset, fall back to the host at a host-safe K, or at least report the stall in the status line.",
+   "quote": "schedd tests cover the win32 path selection",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R4",
-   "quote": "**Fix:** derive `online` for the remote provider from `/agents` (`ok && !paused`), as `bin/pool/router.mjs` already does for the built-in pool, or treat a 503 or 502 streak as `online: 0`.",
+   "quote": "On `process.platform === \"win32\"`, derive the socket from the sched dir as a named pipe",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R7",
+   "quote": "for both `listen` and `createConnection`, and skip the stale-socket unlink for pipes.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R5",
+   "quote": "Publish a release containing the `fileURLToPath` fix.",
+   "disposition": "post-deploy",
+   "why": "npm release publishing is a maintainer action outside the lane; the code fix (fileURLToPath in defaultSpawn) is delivered here as part of R6"
+  },
+  {
+   "id": "R6",
+   "quote": "Main uses `fileURLToPath`, which is correct.",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -28,72 +46,55 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/lean/orchestrate.mjs",
-   "change": "Add sandbox.unreachable to UNCAPPED_DEFERRALS (update the comment at :23/:122); in grant() track the first sample with cap.online===0 and, once it exceeds the configured minutes (default 10), emit exactly one pool-offline update() batch event (status-line text names the stall, and a notification through any existing notify mechanism); reset when online>0. Do not force host fallback when fallback_local is unset (report only).",
+   "path": "bin/lean/schedd.mjs",
+   "change": "scheddPaths(dir, platform=process.platform): on win32 sock is \\\\.\\pipe\\forgedock-schedd-\u003csha1(resolve(dir)).slice(0,12)>; skip rmSync(p.sock) (startup and close) and the existsSync(p.sock) lost-socket watchdog on win32; scheddExists on win32 checks the lock file; defaultSpawn script default uses fileURLToPath(new URL(...)).",
    "requirements": [
     "R1",
     "R2",
-    "R3"
+    "R4",
+    "R6",
+    "R7"
    ]
   },
   {
    "id": "D2",
-   "path": "bin/lean/sandbox-remote.mjs",
-   "change": "httpTransport.capacity(): when /status gives no valid online, GET /agents and set online=count(ok&&!paused), total=length; a failed /agents leaves online unknown. Update the doc comment.",
+   "path": "bin/lean/schedd.test.mjs",
+   "change": "Add tests: scheddPaths(dir,'win32') returns a \\\\.\\pipe\\forgedock-schedd- name, stable per dir and distinct across dirs; linux/darwin keep join(dir,'schedd.sock'); defaultSpawn default script is a valid filesystem path (no leading '/C:').",
    "requirements": [
-    "R4"
-   ]
-  },
-  {
-   "id": "D3",
-   "path": "bin/lean/batch.test.mjs",
-   "change": "Regression tests: deferPolicy uncaps sandbox.unreachable; a pool-offline event fires once after N minutes and resets.",
-   "requirements": [
-    "R1",
-    "R2",
-    "R3"
-   ]
-  },
-  {
-   "id": "D4",
-   "path": "bin/lean/sandbox-provider.contract.test.mjs",
-   "change": "Test capacity() derives online from /agents when /status is 404, and stays unknown when /agents fails.",
-   "requirements": [
-    "R4"
+    "R3",
+    "R4",
+    "R6",
+    "R7"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "UNCAPPED_DEFERRALS behaviour for host.busy and sandbox.capacity, and the capped rate_limited/sandbox.auth paths in bin/lean/orchestrate.mjs deferPolicy"
+   "what": "POSIX behaviour: sock stays \u003cdir>/schedd.sock, with stale-socket unlink and lost-socket watchdog (bin/lean/schedd.mjs:139,281,296; tests schedd.test.mjs:72,327,368,457,610)"
   },
   {
    "id": "P2",
-   "what": "httpTransport /status {free,online,total} parsing and the null-when-unknown contract in bin/lean/sandbox-remote.mjs; bin/pool/router.mjs /status unchanged"
-  },
-  {
-   "id": "P3",
-   "what": "execution.fallback_local opt-in semantics (#4547): fallback only when set and online===0"
+   "what": "scheddPaths return shape {dir,sock,lock,log} and connectDaemon/request signatures used by orchestrate (bin/lean/schedd.mjs:48,349,380)"
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test bin/lean/batch.test.mjs bin/lean/sandbox-provider.contract.test.mjs bin/lean/execution.test.mjs"
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/schedd.test.mjs bin/lean/batch.test.mjs"
   }
  ],
  "decisions": [
   {
    "id": "K1",
-   "choice": "Uncap sandbox.unreachable unconditionally rather than gating on sampled online===0",
-   "justification": "The unreachable lane error already waited unreachable_window_min (execution.mjs guard) and retries every 60s; a router that is down gives no online sample, so gating would miss the case that broke AlterLab. Mirrors #4528 (orchestrate.mjs:123).",
+   "choice": "Keep helper inside schedd.mjs with no new module; hash the resolved sched dir so distinct HOME/dirs get distinct pipes",
+   "justification": "Precedent: helpers stay in schedd.mjs next to batchEnv (#4734, PR #4743); tests already use per-test sched dirs (schedd.test.mjs:72)",
    "source": "precedent"
   },
   {
    "id": "K2",
-   "choice": "Stall is reported, not auto-routed to the host, when fallback_local is unset",
-   "justification": "Issue allows 'or at least report'; auto host fallback would override an explicit opt-in (#4547) and NORTHSTAR 'never lose work/host safety'.",
+   "choice": "On win32 skip the existsSync lost-socket watchdog rather than probing the pipe",
+   "justification": "Named pipes are not filesystem entries and vanish with their server; the lock-file watchdog (schedd.mjs:289-295) still covers takeover",
    "source": "spec"
   }
  ]

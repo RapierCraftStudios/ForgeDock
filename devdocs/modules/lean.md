@@ -2076,3 +2076,12 @@ Cite: #4791.
 
 `decision-engine.mjs`: `loadPolicy` (forge.yaml `decisions:`, policy file NORTHSTAR.md > CLAUDE.md > AGENTS.md, authority matrix `human_only`), `splitEscalation` (deterministic: recovery | evidence | post-deploy | external | decision | mixed), `settle` (one injected `judge` call per decision part; one-way, low-confidence or clause-less answers escalate; shadow posts `FORGE:DECISION (shadow)`, live records via `recordDecisions`, clears needs-human and requeues; idempotent on the escalation id), `isVetoed`/`revertVeto`, `effectiveMode` (reversal rate above `reversal_max` forces shadow). Nothing calls it yet: the issue-watch stage (#4765) will. Telemetry `decision_engine`; the batch report lists rows with `decided` (orchestrate.mjs `formatOutcomeLists`). Docs: `docs/DECISIONS.md`.
 Cite: #4766.
+
+## Entry 2026-10-30 — schedd listens on a named pipe on Windows (#4762)
+
+Windows `net` servers refuse a filesystem path (`listen EACCES`), so `scheddPaths(dir, platform)` returns
+`\\.\pipe\forgedock-schedd-<sha1(resolve(dir))[0..12]>` as `sock` on win32 (stable per sched dir, distinct across dirs);
+POSIX keeps `<dir>/schedd.sock`. A pipe is not a file and vanishes with its server, so on win32 the stale-socket unlink
+(startup and close) and the `lost socket` watchdog are skipped (the `schedd.lock` check still covers takeover) and
+`scheddExists` tests the lock file. `defaultSpawn` resolves the `forgedock.mjs` script with `fileURLToPath` (`SCHEDD_SCRIPT`),
+not `URL.pathname`, which gave `/C:/...` on Windows.
