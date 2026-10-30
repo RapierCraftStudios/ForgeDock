@@ -10,6 +10,7 @@ import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches, SECRET_ENV } from "./batch.mjs";
 import { startDaemon, scheddPaths, connectDaemon, request, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
+import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
 import { orchestrateFromCli } from "../engine-cli.mjs";
 
@@ -97,6 +98,20 @@ describe("schedd host scheduler (#4192)", () => {
     process.env.FORGEDOCK_BATCH_DIR = h.root;
     try { return await fn(); } finally { if (prev === undefined) delete process.env.FORGEDOCK_BATCH_DIR; else process.env.FORGEDOCK_BATCH_DIR = prev; }
   };
+
+  it("writes a heartbeat that advances, reports lastTick in status and removes it on a clean close (#4780)", async () => {
+    const h = host();
+    try {
+      const child = await h.daemon();
+      await until(() => readHeartbeat(h.sched) !== null, 30000);
+      const first = readHeartbeat(h.sched);
+      assert.equal(first.pid, child.pid);
+      const st = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" });
+      assert.ok(Number.isFinite(st.lastTick) && st.lastTick >= first.ts);
+      child.kill("SIGTERM");
+      await until(() => readHeartbeat(h.sched) === null && !existsSync(scheddPaths(h.sched).lock), 30000);
+    } finally { await h.cleanup(); }
+  });
 
   it("one daemon hosts every batch: registry slots are the daemon's, its RSS stays ≤ 150 MB, set-parallel goes through it", async () => {
     const h = host();

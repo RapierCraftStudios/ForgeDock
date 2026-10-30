@@ -2009,10 +2009,17 @@ export async function scheddFromCli(argv, deps = {}) {
     let sock;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { console.log("schedd: not running"); return { running: false }; }
     const st = await schedd.request(sock, { op: "status" });
-    console.log(`schedd: pid ${st.pid}, ${st.batches.length} batch(es)${st.batches.length ? ": " + st.batches.map((b) => b.id).join(", ") : ""}`);
+    console.log(`schedd: pid ${st.pid}, ${st.batches.length} batch(es)${st.batches.length ? ": " + st.batches.map((b) => b.id).join(", ") : ""}${Number.isFinite(st.lastTick) ? `, last tick ${Math.round((Date.now() - st.lastTick) / 1000)} s ago` : ""}`);
     return { running: true, ...st };
   }
-  if (argv.length) throw new Error("usage: forgedock schedd [status]");
+  if (argv[0] === "watchdog") { // #4780: run by the schedd watchdog timer; signals a live daemon whose heartbeat went stale
+    const health = await import("./lean/schedd-health.mjs");
+    const i = argv.indexOf("--stall-sec"), sec = i >= 0 ? Number(argv[i + 1]) : NaN;
+    if (i >= 0 && !(sec > 0)) throw new Error("usage: forgedock schedd watchdog [--stall-sec N]");
+    return (deps.watchdog ?? health.watchdog)({ dir, ...(sec > 0 ? { stallMs: sec * 1000 } : {}) });
+  }
+  if (argv.length) throw new Error("usage: forgedock schedd [status | watchdog [--stall-sec N]]");
+  (deps.renice ?? (await import("./lean/schedd-health.mjs")).bestEffortRenice)(); // #4780: lanes must not starve the scheduler
   process.title = "forgedock-schedd"; // distinctive name for OOM-killer avoid lists and ps (#4673)
   const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }) });
   if (!d.running) return d;
@@ -2171,11 +2178,13 @@ export async function checkFromCli(argv, deps = {}) {
 export async function schedFromCli(argv, deps = {}) {
   const schedMod = await import("./lean/sched.mjs");
   const reg = deps.sched ?? schedMod.openSched(schedMod.schedDir());
+  const health = await import("./lean/schedd-health.mjs");
   const usage = "usage: forgedock sched show | forgedock sched cap <N>|--clear | forgedock sched weight <owner/repo> <N>|--clear";
   const [sub, arg, arg2] = argv;
   if (!sub || sub === "show") {
     const st = reg.list();
     const who = (e) => `#${e.issue} ${e.repo ?? "-"} batch ${e.batch ?? "-"} P${e.priority}`;
+    console.log(deps.tick ?? health.tickText(health.stallCheck({ dir: schedMod.schedDir() })));
     console.log(`host cap: ${st.cap ?? "none set here (each batch's orchestration.global_parallel applies)"}; running ${st.slots.length}, queued ${st.queue.length}`);
     const ws = Object.entries(st.weights ?? {});
     console.log(`repo weights: ${ws.length ? ws.map(([r, n]) => `${r}=${n}`).join(", ") : "equal (none set)"}`);

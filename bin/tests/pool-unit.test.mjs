@@ -40,6 +40,17 @@ describe("pool unit hardening (#4673)", () => {
       assert.ok(!sections.Service.some((l) => l.startsWith("StartLimitIntervalSec")), `${f}: present in [Service]`);
     }
   });
+  it("schedd unit gets CPUWeight and a watchdog timer; router and agent units get no priority lines (#4780)", () => {
+    const out = (mode) => spawnSync("bash", ["-c", `. ${root}pool/install/unit-hardening.sh; unit_priority ${mode}`], { encoding: "utf8" }).stdout;
+    assert.match(out("user"), /^CPUWeight=\d+$/m);
+    assert.doesNotMatch(out("user"), /Nice=/);
+    assert.match(out("system"), /^Nice=-5$/m);
+    const sched = read("pool/install/install-schedd.sh");
+    assert.match(sched, /unit_priority user/);
+    assert.match(sched, /schedd watchdog/);
+    assert.match(sched, /OnUnitActiveSec=/);
+    for (const f of ["install-router.sh", "install-agent.sh"]) assert.doesNotMatch(read(`pool/install/${f}`), /unit_priority/);
+  });
   it("restartCheck warns with the last exit reason, passes when quiet, skips absent units", () => {
     const run = (journal) => (cmd) => cmd === "systemctl" ? "NRestarts=8\nLoadState=loaded\n" : journal;
     const bad = restartCheck({ unit: "u", run: run("x: Main process exited, code=killed, status=15/TERM\nx: Scheduled restart job, restart counter is at 1.\n") });

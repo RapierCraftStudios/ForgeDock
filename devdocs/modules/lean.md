@@ -2058,6 +2058,18 @@ Cite: #4785.
 `placementText` (`execution.mjs`) no longer feeds the raw issue body to `detectNeeds`. A private `proseOf` first removes HTML comments (FORGE:STATE included, so a lane no longer re-pins itself from its recorded placement reason), fenced code blocks, evidence-like sections (headings Evidence, Logs, Data, Observations, Measurements, Queries, Samples, Findings, up to the next heading of the same or higher level), blockquote lines and inline code spans. Plain prose that states a need still counts. `FORGE:DECISION` comments stay unstripped, and the last frozen contract's validate commands and `repro_test.command` are read; `contractHostNeeds` checks `repro_test` too (id `repro_test`). The builder's block summary (`hostCapabilityBlock`) is unchanged: a remote lane that truly needs a host capability still ends `env.capability_remote` and is recovered locally once. Fixture: `bin/tests/fixtures/alterlab-capability-bodies.json` (sanitised AlterLab #37290–#37317). Cost: 0 LLM calls.
 Cite: #4776.
 
+## Entry 2026-10-30 — schedd: heartbeat, watchdog, unit priority (#4780)
+
+`bin/lean/schedd-health.mjs` owns schedd liveness. The daemon's event loop writes `heartbeat.json` (`{pid, ts}`, atomic) in
+`schedDir()` every 5 s and removes it on a clean close; `status` replies carry `lastTick`. `forgedock sched show` and
+`forgedock schedd status` print "last tick N s ago". A wedged daemon is alive, so `Restart=always` never fires:
+`forgedock schedd watchdog [--stall-sec N]` (default 60 s; run every 30 s by the `forgedock-schedd-watchdog.timer` that
+`pool/install/install-schedd.sh` installs) sends SIGTERM, then SIGKILL, to a live daemon whose heartbeat is stale, and the unit
+restarts it (a new daemon resumes hosted batches). Priority: `unit_priority` in `pool/install/unit-hardening.sh` gives the
+schedd unit `CPUWeight=500` (system units also `Nice=-5`; a user manager cannot set a negative Nice), and the daemon reniced
+itself best-effort at start. Not done: async state saves. `gh` calls were already async and the atomic fsync saves
+(`writeAtomic`) are the durability guarantee, so the heartbeat and watchdog bound a stall instead.
+
 ### Issue-level readiness in the scheduler (#4773)
 
 `bin/lean/orchestrate.mjs`: `trusted(n)` gates `Blocked by`/`Depends on` edges to a trusted body author (`declared`); `getBlocked()` (the `orchestration.blocked_label` issues, default `blocked`) keeps an issue admitted but not ready in `isReady`, with `blocked`/`unblocked` rows and a poll while only blocked issues wait. `engine-cli.mjs` wires both and `addToBatch` reports the edges it created (see modules/orchestrate.md).
