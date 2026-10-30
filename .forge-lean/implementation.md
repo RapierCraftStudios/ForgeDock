@@ -35,3 +35,6 @@ Renamed issuewatch.mjs export `classify` to `classifyIssue` (decision-engine.mjs
 
 ## CI unit-test fix (run 41100351102)
 Log unavailable. The `classify` collision was already fixed in 15796c8. Could not reproduce a failure: `node --test "bin/lean/**/*.test.mjs"` via with-run-tmpdir passes (1626/0). Fixed a real defect found meanwhile: the #4765 dossier entry had been inserted mid-entry in devdocs/modules/lean.md, splitting the #4785/#4788 entry; moved it to the end.
+
+## CI follow-up (Unit tests, node --test)
+The CI log was not available. Re-ran the `npm test` globs locally at reduced concurrency: bin/lean + packages/protocol 1780 pass, 1 fail (lean.test.mjs #4690, an idle-kill timing test that passes alone: 6/6); bin/tests + bin/engine + bin/stats 2841 pass, 3 fail, all in bin/tests/journey.test.mjs (WSL platform rows, root-user copyFile, platform detection), a file this branch does not touch. No failure traceable to #4765 was found, so no code change; the earlier classify export collision was already fixed in 15796c8dc.
