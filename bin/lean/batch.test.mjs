@@ -787,6 +787,7 @@ describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => 
   it("sandbox.capacity is uncapped and honours retryInSeconds; other codes still cap at maxDeferrals", () => {
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity", retryInSeconds: 30 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 30000, host: true });
+    assert.deepEqual(deferPolicy({ code: "sandbox.unreachable", retryInSeconds: 60 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 60000, host: true }); // #4788
     for (const code of ["merge.transient", "gh.unavailable", "cli.idle", "rate_limited", "sandbox.start_failed"]) {
       assert.deepEqual(deferPolicy({ code, retryInSeconds: 60 }, { now: 0, deferrals: 3, maxDeferrals: 3 }), { capped: true }, code);
     }
@@ -940,6 +941,29 @@ describe("#4547: opt-in local fallback in mode remote when no pool agent is onli
       const { where } = await run({ offlineFallback: true }, online);
       assert.ok([...where.values()].every((w) => w === "remote"), String(online));
     }
+  });
+});
+
+describe("#4788: a pool offline for longer than N minutes is reported once", () => {
+  const run = async (onlineAt) => {
+    const c = { t: 1_000_000 };
+    const sleep = async (ms) => { await new Promise((r) => setImmediate(r)); c.t += ms; };
+    const events = [];
+    let tries = 0;
+    await orchestrate({ issues: [1], parallel: 1, now: () => c.t, sleep, pollMs: 1, readBody: async () => "", onUpdate: (row) => events.push(row),
+      remote: { max: 1, isRemote: () => true, poolOfflineMin: 1, capacity: () => ({ free: null, online: onlineAt(c.t), at: 1 }) },
+      runOne: async () => { tries++; if (tries < 80) { c.t += 5000; return { terminalReason: "deferred", code: "sandbox.unreachable", retryInSeconds: 1, detail: "HTTP 502" }; } return { terminalReason: "merged", pr: 1 }; } });
+    return { events, tries };
+  };
+  it("zero live agents past the limit: one pool-offline event; unreachable never gives up", async () => {
+    const { events, tries } = await run(() => 0);
+    assert.equal(events.filter((e) => e.outcome === "pool-offline").length, 1);
+    assert.equal(tries, 80);
+    assert.equal(events.some((e) => /gave up/.test(e.detail ?? "")), false);
+  });
+  it("an agent online: no event", async () => {
+    const { events } = await run(() => 1);
+    assert.equal(events.some((e) => e.outcome === "pool-offline"), false);
   });
 });
 
