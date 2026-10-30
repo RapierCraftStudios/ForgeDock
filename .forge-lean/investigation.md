@@ -1,40 +1,36 @@
 **Verdict**: CONFIRMED
 **Confidence**: high
-**Severity**: high (remote batches stall silently for hours; lanes give up)
+**Severity**: high (every schedd-backed batch fails on Windows; workaround `--foreground`)
 **Task Type**: bug
 
 ### What Was Claimed
-With every computeshare agent offline, `sandbox.unreachable` lanes burn `max_deferrals` and give up; new launches loop on `sandbox.capacity` 503 forever; nobody is alerted. The addendum says `execution.fallback_local` cannot fire because the computeshare router gives no `online` count.
+On Windows `forgedock schedd` cannot listen on `~/.forge/sched/schedd.sock` (EACCES); Node `net` IPC on win32 requires a named pipe. Secondary: `defaultSpawn` uses `URL.pathname` (`/C:/...`), breaking the script path.
 
 ### What We Found
-- bin/lean/orchestrate.mjs:123 `UNCAPPED_DEFERRALS` holds only `host.busy` and `sandbox.capacity`. `sandbox.unreachable` goes through the capped path (:175-179, :600-619) and ends "gave up after N deferrals".
-- bin/lean/execution.mjs:~519 `unreachable()` returns deferred `SANDBOX_UNREACHABLE` with retryInSeconds 60. It is the code that is capped.
-- bin/lean/orchestrate.mjs:481 the fallback needs `cap.online === 0`.
-- bin/lean/sandbox-remote.mjs:80-91 `httpTransport.capacity()` reads only `GET /status` for `{free, online, total}`. A 404 or malformed reply gives null, so `online` is unknown and the fallback never fires.
-- bin/pool/router.mjs:89-94 and :230 the built-in router derives `online` (`ok && !paused`) and serves `/status`. The computeshare router has `/agents` only (`/status` and `/capacity` are 404 there).
-- bin/engine-cli.mjs:1628 samples capacity and `online`, so a transport that returns `online` is enough.
-- Nothing emits a pool-offline event or alert. Grep for notify in orchestrate.mjs and engine-cli.mjs found nothing relevant.
+- bin/lean/schedd.mjs:48-49 `scheddPaths` returns `sock: join(dir,"schedd.sock")` on every platform.
+- bin/lean/schedd.mjs:261 `server.listen(p.sock)`; :139 and :281 `rmSync(p.sock)`; :296 lost-socket watchdog `existsSync(p.sock)`; :404 `scheddExists` uses `existsSync(sock)`.
+- bin/lean/schedd.mjs:350-352 `connectDaemon` uses `createConnection(sock)` from the same path (orchestrate and `--resume` both go through it).
+- bin/lean/schedd.mjs:366 `defaultSpawn` still uses `new URL("../forgedock.mjs", import.meta.url).pathname` at this base (not yet fixed here, despite the issue saying main has it).
+- bin/lean/schedd.test.mjs:72,327,368,457,462,610 assert `existsSync(...sock)` on POSIX; these stay valid on non-win32.
 
 ### Root Cause
-1. `sandbox.unreachable` is capped like an ordinary deferral, although it means the pool is down (a wait, not a failure; see #4528).
-2. The remote transport derives liveness only from `/status`, so against a router without it `online` is undefined and #4547 is dead.
-3. No stall detector or alert.
+The socket path is a filesystem path on all platforms; win32 only accepts `\\.\pipe\<name>`. The spawn script path is built from a URL pathname rather than `fileURLToPath`.
 
 ### Affected Files
-bin/lean/orchestrate.mjs, bin/lean/sandbox-remote.mjs, bin/lean/execution.mjs (config key if added), tests: bin/lean/batch.test.mjs, bin/lean/sandbox-provider.contract.test.mjs, bin/lean/execution.test.mjs.
+- bin/lean/schedd.mjs (scheddPaths, startDaemon unlink/watchdog, scheddExists, defaultSpawn)
+- bin/lean/schedd.test.mjs (win32 path-selection tests)
+- Enumerating tests: none of the listed bin/lean sibling-name tests enumerate schedd.mjs exports; no new file is added to bin/lean, so none need changes.
 
 ### Sibling Sweep
-- `SANDBOX_AUTH` (401/403, 300s) is also capped; correct, since it needs a human fix.
-- The `engine-error` relaunch (`TRANSPORT_TEXT` breaker, orchestrate.mjs:~530) is related, but out of scope.
-- No other transport reports liveness, only httpTransport.
+- bin/lean/retry.mjs:54 has the same `new URL(...).pathname` defect for a `.sh` script (not Windows-runnable anyway; out of scope, note only).
+- Test files using `.pathname` (bin/tests/*) are test-only; leave.
+- No other module opens the schedd socket (grep of engine-cli, execution, heavy, sched, seqlease, pool/router finds no `.sock` use via scheddPaths).
 
 ### History
-#4528 uncapped `sandbox.capacity`. #4547 added `offlineFallback`, gated on `online`. #4672 added unreachable-window retries and the `sandbox.unreachable` code.
+- schedd introduced in 11b653a28 (#4192) with the `schedd.sock` path; later edits (#4503 watchdog, #4787) kept it. No prior Windows fix.
 
 ### Recommendation
-1. Add `sandbox.unreachable` to `UNCAPPED_DEFERRALS`. Its retry is already bounded by `unreachable_window_min` plus the 60s delay.
-2. In `httpTransport.capacity()`, when `/status` yields no `online`, query `GET /agents` and compute `online = count(ok && !paused)` and `total`. A failed `/agents` leaves it unknown; keep `free` if present.
-3. In orchestrate `grant`, track the first time `cap.online === 0`. Once it has lasted more than N minutes (default 10, configurable via `execution`), emit ONE `update({outcome:"pool-offline"...})` batch event, plus the status-line report and a notification if an existing mechanism is reachable. Reset when online > 0. With `fallback_local` unset the batch stays in remote mode and reports only; a default host fallback is deferred (it overrides an opt-in and risks host overload).
+Give `scheddPaths(dir, platform = process.platform)` a win32 branch: `sock = \\.\pipe\forgedock-schedd-<sha1(resolved dir) first 12 hex>`. Add small `isPipe` handling: skip `rmSync` of sock (lines 139, 281) and skip the `existsSync(p.sock)` watchdog and make `scheddExists` fall back to the lock file on win32 (named pipes vanish with the process). Use `fileURLToPath` in defaultSpawn. Add tests: scheddPaths with platform "win32" yields a stable per-dir pipe name, differs across dirs, and linux keeps `schedd.sock`. Publishing an npm release is out of repo scope (post-deploy). Real Windows listen/connect cannot be exercised in-lane.
 
 ### Related Issues
-#4528, #4547, #4672, #4540; AlterLab lanes #37297, #37313, #37402, #37532.
+None found beyond #4192 (origin) and #4503 (watchdog).
