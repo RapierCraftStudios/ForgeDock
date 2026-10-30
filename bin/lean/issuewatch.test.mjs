@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
 import { parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli } from "./issuewatch.mjs";
 import { openBatch } from "./batch.mjs";
 
-const tmp = () => mkdtempSync(join(tmpdir(), "iw-"));
+const tmp = () => tmpDir("iw-");
 const iss = (n, o = {}) => ({ number: n, title: `t${n}`, body: "", labels: [], milestone: null, authorAssociation: "OWNER", author: { login: "me" }, createdAt: "2026-10-01T00:00:00Z", ...o });
 const lbl = (...n) => n.map((name) => ({ name }));
 const W = (o = {}) => validateWatch("w", o);
