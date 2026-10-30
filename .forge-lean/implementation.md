@@ -1,25 +1,20 @@
 ### Approach
-Filter secrets at the single persistence choke point (`writePlan`), scrub pre-existing plans on daemon start and on `--resume`, and refuse `--set-env` for secret names. The in-memory pin still carries the token for the running batch; resumes re-read it from the daemon env/keychain via `mergeEnv`.
+A remote lane branch with no open PR whose diff against the base holds only tool-state paths (`isToolState`, i.e. `.forge-lean/` scratch) is no longer treated as a resume. The worktree is still created from `origin/<branch>` so later pushes stay fast-forward; the scratch is removed in a normal commit and the run plans fresh.
 
 ### Changes
-- bin/lean/batch.mjs: `SECRET_ENV` (now also `*_KEY`), `scrubEnv`, `writePlan` drops secret env values and records names in `envSecrets`, new `scrubPlan()` (rewrites 0600, no-op if clean).
-- bin/lean/schedd.mjs: imports `SECRET_ENV` from batch.mjs (single definition, no re-export); scrubs every batch plan at daemon start.
-- bin/engine-cli.mjs: `--set-env` rejects secret names; `--resume` scrubs the plan first.
-- bin/lean/batch.test.mjs, bin/lean/schedd.test.mjs: regression tests; the #4691 test now expects `--set-env GH_TOKEN=...` to be refused.
+- bin/lean/lean.mjs: `toolOnly` check and `scratchOnly` detection before worktree creation; scratch removal commit, `resumed=null`, `SCRATCH_BRANCH_DROPPED` event and decision line; `keepLocal` skips a scratch-only local branch; `changedFiles()` ignores tool-state paths; import `isToolState`.
+- bin/lean/lean.test.mjs: two regression tests (scratch-only plans fresh; scratch plus code still resumes).
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/batch.mjs (writePlan/scrubEnv)
-- R2 ✅ bin/lean/batch.mjs (envSecrets names), bin/engine-cli.mjs resume uses mergeEnv (schedd.mjs mergeEnv)
-- R3 ✅ bin/lean/batch.mjs put (private) + test asserts 0600
-- R4 ✅ bin/lean/batch.mjs scrubPlan, called from schedd.mjs start and engine-cli.mjs resume
+- R1 ✅ bin/lean/lean.mjs:1084-1088, 1112-1119
+- R2 ✅ not-applicable (contract recovery already re-validated, lean.mjs ~1490)
+- R3 ✅ bin/lean/lean.mjs:1084-1088
 
 ### Verification
-- V1 `node --test bin/lean/batch.test.mjs bin/lean/schedd.test.mjs`: 83 pass, 0 fail. The new batch tests call `scrubPlan` and assert the token is absent, so they fail without the fix.
-- checks.mjs widened to the full suite (fan-out cap); not run per host rules.
-- scripts/check-devdocs-freshness.sh: OK, no dossier required.
+- V1 `node --test bin/lean/lean.test.mjs`: pass (515 pass). One earlier run had a failure in the unrelated #4690 scope-limit test; it passed on three reruns (timing flake).
+- V2 `node --test bin/lean/toolstate.test.mjs`: pass (8).
+- The new scratch-only test fails without the fix (the rerun note appears and no `git rm` happens); not run separately against the reverted code.
+- checks.mjs widened to the full suite (fan-out); not run, per host rules. No formatter configured in package.json. Devdocs: devdocs/modules/lean.md updated (flow step 4).
 
 ### Notes
-- `--set-env` with a secret-named key now errors instead of storing it.
-- plan.json gains `envSecrets` (names only).
-- SECRET_ENV now also matches names ending in `_KEY`, so `--show-env` redacts those too.
-- Docs: devdocs/modules/lean.md entry for #4787 (fixes the devdocs freshness check).
+No env vars. A scratch-only branch is kept as a ref; the scratch is deleted by a commit, no force-push.

@@ -1,8 +1,13 @@
-{"status":"fixed","summary":"batch plan.json never persists secret-named env values (names only in envSecrets), stays 0600, and existing plans are scrubbed on --resume and schedd start; dossier updated","requirements":[
-{"id":"R1","status":"implemented","evidence":"bin/lean/batch.mjs writePlan/scrubEnv"},
-{"id":"R2","status":"implemented","evidence":"bin/lean/batch.mjs envSecrets; resume uses mergeEnv/keychain"},
-{"id":"R3","status":"implemented","evidence":"bin/lean/batch.mjs put 0600; bin/lean/batch.test.mjs #4787"},
-{"id":"R4","status":"implemented","evidence":"bin/lean/batch.mjs scrubPlan; schedd.mjs start; engine-cli.mjs resume"}],
-"validation":[{"id":"V1","command":"node --test bin/lean/batch.test.mjs bin/lean/schedd.test.mjs","exit":0}],
-"tests":[{"command":"node --test bin/lean/batch.test.mjs bin/lean/schedd.test.mjs","result":"pass","fails_without_fix":true}],
-"amendments":[],"facts":{"rejected":[],"hotspots":[]}}
+{"status":"fixed","summary":"a PR-less lane branch holding only .forge-lean scratch is planned fresh (scratch removed in a normal commit) instead of resuming its stale contract","requirements":[
+{"id":"R1","status":"implemented","evidence":"bin/lean/lean.mjs:1084-1088,1105-1112"},
+{"id":"R3","status":"implemented","evidence":"bin/lean/lean.mjs:1084-1088"}],
+"validation":[
+{"id":"V1","command":"node --test --test-concurrency=1 bin/lean/lean.test.mjs","exit":0},
+{"id":"V2","command":"node --test --test-concurrency=1 bin/lean/toolstate.test.mjs","exit":0}],
+"tests":[{"command":"node --test --test-concurrency=1 bin/lean/lean.test.mjs","result":"pass","fails_without_fix":true}],
+"self_review":[
+{"question":"1","answer":"yes","evidence":"lean.mjs:1084-1112 drops scratch-only branches; lean.test.mjs:394"},
+{"question":"2","answer":"yes","evidence":"code-change branch still resumes: lean.test.mjs:402; V1 515 pass"},
+{"question":"3","answer":"yes","evidence":"D1, D2 changed; V1/V2 exit 0; toolstate.mjs untouched"},
+{"question":"4","answer":"yes","evidence":"git diff touches lean.mjs, lean.test.mjs and .forge-lean only"}],
+"amendments":[]}
