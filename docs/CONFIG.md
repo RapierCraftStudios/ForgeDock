@@ -626,7 +626,7 @@ engine:
 
 ## `issue_watch` (OPTIONAL)
 
-Named, scoped, capped watches for `forgedock issue-watch` (see [ISSUE-WATCH.md](ISSUE-WATCH.md)). Write `issue_watch:`, then `watches:`, then one block per watch name.
+Named, scoped, capped watches for `forgedock issue-watch` (see [ISSUE-WATCH.md](ISSUE-WATCH.md)). Write `issue_watch:`, then `watches:`, then one block per watch name. The release keys need `mode: release` and at least a `threshold` or `immediate`.
 
 ```yaml
 issue_watch:
@@ -655,10 +655,15 @@ issue_watch:
 | `max_issues` | integer | No | Total claims; at N the watch drains and exits. Default: none (forever). |
 | `max_inflight` | integer | No | Claims in flight at once. Default 4. |
 | `until` | ISO time | No | Stop claiming at this time, drain and exit. |
-| `mode` | string | No | `per-issue` (default) or `batch`. |
+| `mode` | string | No | `per-issue` (default), `batch` or `release` (pool, then cut themed releases). |
 | `parallel` | integer | No | K of the batch in `batch` mode. Default 4. |
 | `include_followups` | string | No | `none` (default) or `defer-only`. |
 | `postdeploy_rollup` | issue number | No | Release issue that collects post-deploy-only follow-ups as checklist lines. |
+| `threshold` | map | release | `{ min_issues, min_score, max_age_days }`; any one fires a release. |
+| `immediate` | list | release | `label:<name>` or `priority:P0..P3` entries that cut a release now with only their theme. |
+| `max_release_issues` | integer | release | Cap on a release set, closure included. Default 40. |
+| `theme_map` | block | release | `<theme>: [label:<x>, scope:<x>, path:<glob>]` rules, one theme per line. |
+| `tracker` | issue number | release | Issue that gets the `FORGE:RELEASE_PLAN` comment. Default: the first issue of the release. |
 
 ---
 

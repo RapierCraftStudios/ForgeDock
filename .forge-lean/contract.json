@@ -2,31 +2,61 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "No provider sets `relays` (bin/lean/sandbox-remote.mjs), so `placeLane` (bin/lean/execution.mjs:226-229) pins every capability lane local.",
+   "quote": "Each trigger type fires correctly, including an immediate security trigger below threshold (tests).",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "Add a provider `relays` entry with a host-side gate: the sandbox calls back through the computeshare router (bin/pool/router.mjs) to the dispatching host, which runs only an allowlisted read-only command (e.g. the `obs-psql`/`obs-*` wrappers) and returns the output.",
+   "quote": "Deterministic theme classification from labels, scope and paths; the LLM fallback only for unclassified issues, and counted.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "The key never leaves the host.",
+   "quote": "The release set includes its `Depends on` closure and respects the cap; the remainder rolls over with age kept.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R4",
-   "quote": "Pre-fetch: for contract steps that name a read-only query, the host runs it at dispatch and ships the output with the lane.",
+   "quote": "`FORGE:RELEASE_PLAN` record plus a milestone or label tag; one batch per release; a deploy PR is opened and never merged by the watch.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R5",
-   "quote": "Acceptance: the read-only relay works end to end with an allowlist test (non-allowlisted commands refused).",
+   "quote": "Dry run shows the theme scores and the would-cut set.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R6",
+   "quote": "Let a watch (#4765) **accumulate** eligible issues for a target (a milestone branch or the no-milestone/staging group) until a configurable threshold is crossed.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R7",
+   "quote": "A watch with `mode: release` claims nothing immediately.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R8",
+   "quote": "Score each theme from its issue priorities, age and the target repo's `NORTHSTAR.md` priorities and tie-break order (#4766).",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R9",
+   "quote": "**Promotion stays human-only.** The watch never merges to the default branch.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R10",
+   "quote": "`issue-watch --dry-run` prints `would cut: stealth (14 issues, score 46; security pool 1 \u003c threshold)` along with the per-issue theme classification.",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -34,222 +64,127 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/lean/relay.mjs",
-   "change": "New pure/deterministic module (0 LLM). (a) `parseRelayCommands(list)`: `capability:command` entries (same idiom as host_capability_patterns) -> `{capability: [command...]}`. A command is an exact name, or a prefix glob ending in a single trailing `*` (e.g. `obs-*`). Names may not contain `/`, whitespace or other glob chars. Invalid entries are ignored. (b) `relayGate(argv, relay)` -> `{ok:true, capability}` only when argv is a non-empty string array, argv[0] contains no `/` and matches an entry exactly or by prefix glob; otherwise `{ok:false, reason}`. (c) `runRelayed(argv, {timeoutMs=120000, maxBytes=1048576, secrets, execFileFn})` runs the gated argv via execFile with `shell:false`, the host env, timeout and output cap. It returns `{rc, stdout, stderr, truncated?}` with every known secret redacted (reuse sandbox-remote `redact`). A refused argv never spawns and returns `{rc:126, stderr:'relay: \u003ccmd> not allowlisted'}`. (d) `relayPrefetchCommands({comments}, relay)`: from the last parseable `\u003c!-- FORGE:CONTRACT -->` comment (parseContractComment from render.mjs), take each validate `command` and `repro_test.command` that is a single simple command (no `| ; & \u003c > $ backtick` or newline outside quotes, tokenised with a minimal single/double-quote splitter) whose argv passes relayGate. Return `[{argv}]`. (e) `servicePending({transport, id, relay, run})`: list the sandbox's pending requests, then gate+run each (or refuse) and post the answer. All errors are swallowed (the next poll retries).",
+   "path": "bin/lean/issuewatch-release.mjs",
+   "change": "New module: priority score (P0=8,P1=4,P2=2,P3=1; labels P0 or priority:P0), triggers (min_issues, min_score, max_age_days, immediate classes label:/priority:), theme classification from theme_map rules (label:, path: globs matched against paths named in the body, title conventional-commit scope as theme name), injected LLM fallback for unclassified with counter, theme scoring with NORTHSTAR tie-break order, Depends-on closure (cross-theme deps pulled in and marked) trimmed to max_release_issues, FORGE:RELEASE_PLAN comment text, releaseTick (pool, decide, claim via claimIssue, tag via milestone/label, start one batch, on report open deploy PR once, never merge), dryRun report.",
    "requirements": [
+    "R1",
     "R2",
     "R3",
     "R4",
-    "R5"
+    "R5",
+    "R6",
+    "R7",
+    "R8",
+    "R9",
+    "R10"
    ]
   },
   {
    "id": "D2",
-   "path": "bin/lean/sandbox-remote.mjs",
-   "change": "httpTransport: add `relayPending(id)` (GET /sandboxes/:id/relay -> `{requests:[{rid, argv}]}`; a 404/405 or malformed reply gives [], so an old router is unsupported, not an error) and `relayAnswer(id, rid, {rc, stdout, stderr})` (POST /sandboxes/:id/relay/:rid). Update the protocol doc comment. remoteProvider: expose `relays` = sorted capabilities that have at least one relay command, and only when `transport.relayPending` exists (otherwise []). In `start()`, add `CS_RELAY_COMMANDS` (comma list of the exact, non-glob command names, used for shims), `CS_RELAY_CAPS` (comma list of relayed capabilities) and, when `settings.prefetch?.(issue)` returns commands, run each via relay.mjs runRelayed on the host before launch and ship `CS_RELAY_PREFETCH_B64` (base64 JSON `[{argv, rc, stdout, stderr}]`; entries that would push the total past 96 KB are dropped). Remember every value in the redaction set. In `status(h)`, after pullLogs, call relay.mjs servicePending with the provider's known secrets (errors swallowed, never changes the returned status). No host secret, key or credential value is ever put in the spec; the only output that leaves is the redacted output of an allowlisted command.",
+   "path": "bin/lean/issuewatch.mjs",
+   "change": "Add keys threshold, immediate, max_release_issues, theme_map (and optional tracker) to WATCH_KEYS; accept mode release with validation; extend parseWatches for flow maps and a nested theme_map block; dispatch release mode to releaseTick in runWatch/CLI; add --dry-run flag; extend status for pool/release.",
    "requirements": [
-    "R1",
-    "R2",
-    "R3",
-    "R4"
+    "R4",
+    "R5",
+    "R7",
+    "R10"
    ]
   },
   {
    "id": "D3",
-   "path": "bin/lean/execution.mjs",
-   "change": "parseExecution: read `relay_commands` (list or comma string of `capability:command`) via relay.mjs parseRelayCommands. Keep only capabilities matching CAPABILITY_RE. Return `relay` only when non-empty (spread like hostCapabilities). providerByName: pass `settings.relay` through and accept `opts.prefetch` (issue -> commands) into the remote/pool provider settings. Update the #4542 header comment (`a sandbox relays none` -> relayed via execution.relay_commands, #4778). placeLane itself is unchanged: it already places a need that is in `relays` by the normal rules.",
+   "path": "bin/lean/issuewatch-release.test.mjs",
+   "change": "Tests for each trigger incl. immediate security below threshold, theme classification and counted LLM fallback, closure + cap + rollover age, plan/tag/batch/deploy-PR once and no merge call, dry-run output, nothing claimed before a trigger.",
    "requirements": [
     "R1",
-    "R2"
+    "R2",
+    "R3",
+    "R4",
+    "R5",
+    "R7",
+    "R9"
    ]
   },
   {
    "id": "D4",
-   "path": "bin/engine-cli.mjs",
-   "change": "In readBody (:1820-1821), also fill a per-issue `prefetchOf` map with relay.mjs relayPrefetchCommands(v, exec.relay) when exec.relay is set. Pass `prefetch: (n) => prefetchOf.get(n) ?? []` to execMod.providerByName (:~1604). For the lane side, wherever readHostCaps feeds `o.hostCaps` for runCore, also pass `relayCaps` parsed from env `CS_RELAY_CAPS` (comma list; empty/unset = []).",
+   "path": "bin/lean/issuewatch.test.mjs",
+   "change": "Add parse/validate cases for mode release, flow-map threshold, theme_map block, bad values.",
    "requirements": [
-    "R1",
-    "R4"
+    "R6"
    ]
   },
   {
    "id": "D5",
-   "path": "bin/lean/lean.mjs",
-   "change": "At the #4785 gate (:1607-1610), drop capabilities in `o.relayCaps` from `contractHostNeeds(frozen, o.hostCaps).caps` (and their ids) before deciding to end env.capability_remote, so a remote lane whose validate command uses a relayed capability builds in the sandbox. Leave `hostCapabilityBlock` at :869 unchanged (a failed relay still recovers locally once). Document the new `o.relayCaps` option in the runCore JSDoc next to `o.hostCaps` (:202).",
+   "path": "bin/forgedock.mjs",
+   "change": "Update the issue-watch usage line (~:3362) with --dry-run and mode release.",
    "requirements": [
-    "R1",
-    "R2"
-   ]
-  },
-  {
-   "id": "D6",
-   "path": "bin/pool/router.mjs",
-   "change": "In-memory per-sandbox relay queue (not persisted; a router restart drops pending requests and the sandbox's cs-relay times out). Routes: agent auth `POST /agent/relay/:id` {argv} -> 202 {rid}. It is accepted only when the sandbox is known and placed on the calling agent (agentFor(req) === sbx[id].agent; else 404). It rejects with 400 a non-array argv, more than 64 args, or more than 16 KB JSON, and with 429 when 8 requests are already pending for that sandbox. Agent auth `GET /agent/relay/:id/:rid` -> {state:'pending'} or {state:'done', rc, stdout, stderr} (removed once read), with the same ownership check. ForgeDock auth `GET /sandboxes/:id/relay` -> {requests:[{rid, argv}]} of unanswered requests. ForgeDock auth `POST /sandboxes/:id/relay/:rid` {rc, stdout, stderr} -> 200 and marks the request done (404 for an unknown rid). Drop a sandbox's queue when the sandbox is deleted. The router never executes or gates commands. Use `own()` lookups for all caller-supplied keys. rid is from randomBytes.",
-   "requirements": [
-    "R2",
-    "R3",
     "R5"
    ]
   },
   {
+   "id": "D6",
+   "path": "docs/ISSUE-WATCH.md",
+   "change": "Document release mode: triggers, themes, closure, plan, tag, deploy PR, rollover, dry run.",
+   "requirements": [
+    "R6"
+   ]
+  },
+  {
    "id": "D7",
-   "path": "bin/pool/agent.mjs",
-   "change": "Give each sandbox `CS_RELAY_BASE` = `http://host.docker.internal:\u003cport>/sandboxes/\u003cid>/relay` next to CS_CRED_BASE (:114). In `handle` (:373-378), before the agent-token check, accept sandbox-credToken-authenticated `POST /sandboxes/:id/relay` and `GET /sandboxes/:id/relay/:rid` (same check as sandboxCred: known, not exited, sameSecret credToken; else 401). Forward them to the router `/agent/relay/:id[/:rid]` with the agent token and return the router's status/body. The agent never executes the command.",
-   "requirements": [
-    "R2",
-    "R3"
-   ]
-  },
-  {
-   "id": "D8",
-   "path": "pool/image/cs-relay",
-   "change": "New bash script (SPDX header like cs-cred). `cs-relay \u003ccmd> [args...]`: build argv JSON with `jq -n '$ARGS.positional' --args -- \"$@\"`. If CS_RELAY_PREFETCH_B64 has an entry with an identical argv, print its stdout/stderr and exit with its rc. Otherwise POST {argv} to $CS_RELAY_BASE with `authorization: Bearer $CS_CRED_TOKEN`, then poll `$CS_RELAY_BASE/\u003crid>` every 2s up to CS_RELAY_TIMEOUT_S (default 300). On done, print stdout to stdout and stderr to stderr and exit rc. On no relay, HTTP error or timeout, print `relay unavailable: ...` to stderr and exit 125.",
-   "requirements": [
-    "R2",
-    "R4"
-   ]
-  },
-  {
-   "id": "D9",
-   "path": "pool/image/entrypoint.sh",
-   "change": "For each name in CS_RELAY_COMMANDS (comma list; only names matching ^[A-Za-z0-9._-]+$), write /opt/cs/bin/\u003cname> = `#!/usr/bin/env bash\\nexec cs-relay \u003cname> \"$@\"` (chmod 0755), so the builder runs `obs-psql ...` unchanged.",
-   "requirements": [
-    "R2"
-   ]
-  },
-  {
-   "id": "D10",
-   "path": "pool/image/Dockerfile",
-   "change": "COPY cs-relay /usr/local/bin/cs-relay and add it to the chmod 0755 line (:40-44).",
-   "requirements": [
-    "R2"
-   ]
-  },
-  {
-   "id": "D11",
    "path": "docs/CONFIG.md",
-   "change": "Add an `execution.relay_commands` row next to host_capabilities (:899-900) covering: format `capability:command`, `name*` prefix glob, list only read-only wrappers (never sops/ops_credentials), the host runs them with no shell and a 120s timeout and 1 MB output cap with redaction, a refused command gets rc 126, pre-fetch of simple frozen validate commands, and that an old router/agent falls back to local recovery. Fix the host_capabilities row's 'relay none of them' wording.",
+   "change": "Add threshold, immediate, max_release_issues, theme_map keys and mode release to the issue_watch table.",
    "requirements": [
-    "R2",
-    "R4"
-   ]
-  },
-  {
-   "id": "D12",
-   "path": "devdocs/modules/lean.md",
-   "change": "Append a #4778 section (relay flow sandbox -> agent -> router queue \u003c- dispatcher poll, gate, pre-fetch, CS_RELAY_CAPS lane gate, 0 LLM cost) and fix the 'computeshare relays none' sentence at :1806.",
-   "requirements": [
-    "R2",
-    "R4"
-   ]
-  },
-  {
-   "id": "D13",
-   "path": "pool/README.md",
-   "change": "Mention `cs-relay` (read-only capability relay, allowlisted and executed on the dispatching host) next to cs-cred at :6.",
-   "requirements": [
-    "R2"
+    "R6"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "placeLane (bin/lean/execution.mjs:290) signature and results for every input without relays: a need not in `relays` stays local with reason `host capability: \u003cnames>`."
+   "what": "per-issue and batch modes, claimIssue cross-watch single-claim, laneFor default-branch refusal in bin/lean/issuewatch.mjs; all existing exports and bin/lean/issuewatch.test.mjs cases"
   },
   {
    "id": "P2",
-   "what": "httpTransport existing methods and capacity() (#4540/#4547/#4788) behaviour, and remoteProvider.status return values (running|gone|exited) and transport-error propagation used by providerLanes' unreachable window (#4672). Relay servicing must never throw out of status()."
+   "what": "Existing flat forge.yaml watch parsing (scalars, [a,b] lists) from parseWatches"
   },
   {
    "id": "P3",
-   "what": "Router auth model (bin/pool/router.mjs handle): forgedock routes require forgedock_token, agent routes require an enrolled agent token. Sandboxes never receive the router, agent or forgedock token (bin/tests/computeshare.test.mjs:183 'sandbox gets a per-sandbox credential relay, never the router or agent token')."
-  },
-  {
-   "id": "P4",
-   "what": "Agent credential relay GET /sandboxes/:id/creds/:kind (bin/pool/agent.mjs:233-245, :375-376) unchanged."
-  },
-  {
-   "id": "P5",
-   "what": "lean.mjs endBlocked hostCapabilityBlock recovery (:869): a remote credentials block naming a declared capability still ends env.capability_remote, relayed or not."
-  },
-  {
-   "id": "P6",
-   "what": "parseExecution output for configs without relay_commands is deep-equal to today's (no new key emitted)."
-  },
-  {
-   "id": "P7",
-   "what": "Lane spec env stays scopedEnv-only plus the existing CS_* and GIT_* keys; the new CS_RELAY_* values contain no host secret."
-  },
-  {
-   "id": "H1",
-   "what": "fix(execution): host-capability placement reads only the issue body; contract validate commands and decision comments are ignored (#4785, PR #4790)",
-   "source": "guard"
-  },
-  {
-   "id": "H2",
-   "what": "perf(execution): pin host capabilities by need, not by mention in the issue body (#4776, PR #4795)",
-   "source": "guard"
+   "what": "bin/lean/decision-engine.mjs API (loadPolicy/settle) is read, not modified"
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/relay.test.mjs bin/tests/relay.e2e.test.mjs"
+   "command": "node --test bin/lean/issuewatch.test.mjs bin/lean/issuewatch-release.test.mjs"
   },
   {
    "id": "V2",
-   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/tests/computeshare.test.mjs bin/lean/sandbox-provider.contract.test.mjs bin/lean/execution.test.mjs"
-  },
-  {
-   "id": "V3",
-   "command": "node --test --test-name-pattern='capabilit|relay' bin/lean/lean.test.mjs bin/tests/engine-outcome-codes.test.mjs"
-  },
-  {
-   "id": "V4",
-   "command": "bash -n pool/image/cs-relay && bash -n pool/image/entrypoint.sh"
-  },
-  {
-   "id": "V5",
-   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/fixround.test.mjs bin/lean/execution.e2e.test.mjs bin/lean/conformance.e2e.test.mjs bin/tests/router.test.mjs"
+   "command": "node --test bin/lean/decision-engine.test.mjs bin/lean/gatewatch.test.mjs"
   }
  ],
  "decisions": [
   {
    "id": "K1",
-   "choice": "Pull-based relay: the router only queues requests, and the dispatcher picks them up on its existing per-lane status poll and posts answers back. The dispatching host opens no inbound port and the router never executes anything.",
-   "justification": "The dispatcher already polls the router for every live sandbox (bin/lean/execution.mjs providerLanes wait -> remoteProvider.status, bin/lean/sandbox-remote.mjs:164-169, which already pulls logs there). The router is the only party both sides reach (bin/pool/router.mjs:219-265). The key and the wrapper stay on the host, which satisfies 'the key never leaves the host'.",
+   "choice": "New file bin/lean/issuewatch-release.mjs instead of growing issuewatch.mjs",
+   "justification": "issuewatch.mjs is a 320-line wiring file whose header states pure-function split; precedent decision-engine.mjs/gatewatch.mjs as sibling modules (NORTHSTAR: specs/files stay small)",
    "source": "precedent"
   },
   {
    "id": "K2",
-   "choice": "Sandbox -> agent -> router hop authenticated with the existing per-sandbox CS_CRED_TOKEN, mirroring the credential relay.",
-   "justification": "bin/pool/agent.mjs:114 and :233-245 already authenticate sandbox callbacks this way and forward to the router with the agent token. pool/image/cs-cred is the curl+jq precedent for the in-sandbox script.",
-   "source": "precedent"
+   "choice": "LLM fallback and all gh/clock/batch side effects go through injected io (io.classify), mirroring the existing io seam",
+   "justification": "bin/lean/issuewatch.mjs:181 documents injected io; NORTHSTAR non-negotiable 1 (deterministic first)",
+   "source": "doc"
   },
   {
    "id": "K3",
-   "choice": "Allowlist is opt-in per capability in forge.yaml `execution.relay_commands` as flat `capability:command` entries (exact name or trailing-* prefix glob, no path separators). The gate is host-side, and the command is executed with execFile shell:false, a 120s timeout and a 1 MB cap. Read-only is a property of the operator's wrapper and is documented as such. sops/ops_credentials are never relayed unless explicitly listed.",
-   "justification": "Same flat `name:value` idiom as `host_capability_patterns` (bin/lean/execution.mjs:113-115, docs/CONFIG.md:900). A shell-free argv gate makes metacharacter injection inert. The NORTHSTAR non-negotiable 'Deterministic first' means 0 LLM calls.",
-   "source": "precedent"
-  },
-  {
-   "id": "K4",
-   "choice": "A new module bin/lean/relay.mjs instead of growing execution.mjs or sandbox-remote.mjs.",
-   "justification": "execution.mjs is 634 lines with many concerns. relay.mjs holds the gate, runner and pre-fetch so they can be unit tested in isolation. sandbox-remote.mjs imports from execution.mjs already (:21), so relay.mjs imports only redact from sandbox-remote.mjs and parseContractComment from render.mjs, with no import cycle into execution.mjs.",
-   "source": "precedent"
-  },
-  {
-   "id": "K5",
-   "choice": "Pre-fetch only simple single commands from the frozen contract (validate + repro_test) whose argv passes the same gate, shipped in env CS_RELAY_PREFETCH_B64 capped at 96 KB. Anything else is served live by the relay.",
-   "justification": "The contract commands come from the same FORGE:CONTRACT read placementText uses (bin/lean/execution.mjs:255-264, bin/engine-cli.mjs:1820-1821; no extra gh call). The 96 KB cap stays under Linux MAX_ARG_STRLEN (128 KB) for one env string written via the agent's --env-file (bin/pool/agent.mjs:111-115).",
+   "choice": "Deploy PR is opened with gh pr create only (base = default branch, head = release lane), recorded in state.deployPr; no merge call exists in the module and a test asserts it",
+   "justification": "Issue: promotion stays human-only; laneFor refuses default lanes at bin/lean/issuewatch.mjs:124",
    "source": "spec"
   },
   {
-   "id": "K6",
-   "choice": "A relayed capability skips only the #4785 pre-build end (contractHostNeeds), not the hostCapabilityBlock recovery.",
-   "justification": "If the relay is unreachable (old router/agent: cs-relay exits 125), the builder blocks as credentials and lean.mjs:869 still recovers the lane locally once. Degradation is the same as today.",
-   "source": "precedent"
+   "id": "K4",
+   "choice": "NORTHSTAR priorities read as an optional ordered `Release priorities:` list in the policy text from loadPolicy; absent means score then theme name",
+   "justification": "Issue says #4766 supplies tie-breaks, but decision-engine.mjs:47 exposes only raw policyText",
+   "source": "spec"
   }
  ]
 }

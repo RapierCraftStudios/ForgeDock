@@ -1,35 +1,40 @@
 **Verdict**: CONFIRMED
 **Confidence**: high
-**Severity**: medium (Windows lanes with 32-64 KB prompts fail deterministically with cli.spawn_failed on every rerun)
-**Task Type**: bug
+**Severity**: medium (missing feature; operators hand-group releases today)
+**Task Type**: feature
 
 ### What Was Claimed
-On win32 a prompt between ~32 KB and 64 KB is passed as an argv element (limit `CLI_ARGV_PROMPT_MAX_BYTES = 64 KiB`, chosen for Linux MAX_ARG_STRLEN) and `spawn` fails with ENAMETOOLONG, because CreateProcess caps the whole command line at 32,767 UTF-16 chars (8,191 via cmd.exe shims).
+`issue-watch` needs `mode: release`: pool eligible issues, fire on a threshold (min_issues, weighted score, max age, immediate class), classify the pool into themes deterministically (LLM only for unclassified, counted), pick a theme plus its `Depends on` closure under `max_release_issues`, post `FORGE:RELEASE_PLAN`, tag the set (milestone or label), run it as one batch, open a deploy PR (never merged by the watch), roll the remainder over with age kept, and support `--dry-run`.
 
 ### What We Found
-- bin/runner.mjs:1538 `CLI_ARGV_PROMPT_MAX_BYTES = 64 * 1024`, platform independent.
-- bin/runner.mjs:1597 `promptViaStdin = byteLength(userMessage) > CLI_ARGV_PROMPT_MAX_BYTES`; only the prompt is counted, not the system-prompt path or flags (:1599-1620 build cliArgs).
-- bin/runner.mjs:1653 stdin is delivered via `input:` when promptViaStdin; `claude --print` reads stdin when no prompt arg is given.
-- bin/runner.mjs:1541 ENAMETOOLONG is already in DETERMINISTIC_SPAWN_ERRNOS (so reruns fail identically, matching the report).
-- bin/lean/lean.test.mjs:4238-4251 existing argv/stdin test has no win32 case.
-- The earlier FORGE:INVESTIGATION comment and the prior .forge-lean/result.json ("already-fixed", #4788 offline pool) describe a different issue and do not match this issue's body; the claim here is not fixed on origin/staging (checked: line 1597 unchanged).
+- bin/lean/issuewatch.mjs:21 `WATCH_KEYS` has no `threshold`, `immediate`, `max_release_issues`, `theme_map`; unknown keys throw (:57).
+- bin/lean/issuewatch.mjs:67 `mode` only accepts `per-issue|batch`.
+- bin/lean/issuewatch.mjs:35-50 `parseWatches` reads only `key: scalar` / flat `[a, b]` lists at depth 4+; no flow maps (`threshold: {…}`), no nested `theme_map:` block.
+- bin/lean/issuewatch.mjs:184-243 `tick` claims immediately up to `max_inflight`; no pool, thresholds or themes. Batch plumbing (`io.batch.start/add/reported`, :228-232, :204) and `claimIssue` (:161) are reusable.
+- bin/lean/issuewatch.mjs:129 `dagOrder` parses `Depends on #N`; no closure computation exists.
+- bin/lean/issuewatch.mjs:120 `laneFor` already refuses default-branch lanes; bin/lean/issuewatch.mjs:294 CLI has no `--dry-run`.
+- bin/lean/decision-engine.mjs:20,47 `loadPolicy` reads NORTHSTAR.md (policyText); no priority/tie-break extractor exists. Decision-engine `settle` is a different (escalation) flow.
+- No `FORGE:RELEASE_PLAN` anywhere in bin/ (grep). Existing PR creation lives in bin/lean/lean.mjs / milestonesync.mjs, not in issuewatch.
+- docs/ISSUE-WATCH.md and docs/CONFIG.md:627 document only #4765 keys.
+- The earlier FORGE:INVESTIGATION comment on the issue (Windows argv/stdin, runner.mjs) is about a different issue; ignore it. The stale `.forge-lean/result.json` (#4778) was removed.
 
 ### Root Cause
-The argv/stdin threshold is a single Linux-derived constant, with no win32 awareness and no accounting for the rest of the command line.
+Feature absent: the watch is claim-immediately only, with no pooling or release decision layer.
 
 ### Affected Files
-- bin/runner.mjs (hotspot, 3250 lines: wiring plus a small pure helper, well under +150 lines)
-- bin/lean/lean.test.mjs (existing test at :4238; add win32 case)
-- Enumerating tests: bin/tests/runner.test.mjs:7 lists 22 export names; add no export beyond what is needed, and if a new export is added, join that list. No new file under bin/, so bin/lean/lean.test.mjs:66 file list is unaffected.
+- bin/lean/issuewatch-release.mjs (NEW): pure pool/threshold/theme/closure/plan logic + `releaseTick`.
+- bin/lean/issuewatch.mjs (hotspot, 320 lines: wiring only): keys, validation, nested-config parse, `mode: release` dispatch, `--dry-run`.
+- bin/lean/issuewatch-release.test.mjs (NEW), bin/lean/issuewatch.test.mjs (parse/validate additions).
+- bin/forgedock.mjs:3362 usage line; docs/ISSUE-WATCH.md; docs/CONFIG.md.
 
 ### Sibling Sweep
-`grep CLI_ARGV_PROMPT_MAX_BYTES bin`: only runner.mjs and lean.test.mjs. runCliBackendAsync (runner.mjs) shares the decision, verify it goes through the same helper or the same constant lines (line 1597 is the only decision site found).
+`grep -rn "issuewatch" bin` : only forgedock.mjs:4211 dispatch and docs. Priority weights (P0..P3) have no existing helper; labels may be `P0` or `priority:P0` (accept both). Milestone-title slug via `milestoneSlug` (lane.mjs) for `release/<theme>-<date>`.
 
 ### History
-Introduced by 01e2591d2 "fix(lean): large reviewer prompts go over stdin ... (#4129)", which targeted Linux E2BIG only.
+issuewatch.mjs introduced by 2245e525e (#4765), renamed export in 15796c8dc. Decision engine #4766 landed. No prior release-mode attempt.
 
 ### Recommendation
-Add `export const CLI_ARGV_PROMPT_MAX_BYTES_WIN32 = 16 * 1024` and a pure `promptGoesViaStdin(prompt, otherArgs, platform = process.platform)` in bin/runner.mjs: limit = win32 ? 16 KiB : 64 KiB, and the compared size is prompt bytes plus the byte length of otherArgs (system-prompt path, flags) so the whole command line is counted. Use it at :1597 (build the non-prompt args first). Keep the stdin delivery at :1653. Add unit tests for win32 (40 KB prompt -> stdin, 10 KB -> argv, args counted) and keep the linux case.
+Keep issuewatch.mjs small: add `bin/lean/issuewatch-release.mjs` with pure functions (`score`, `triggers`, `classifyTheme`, `closure`, `pickRelease`, `releasePlanComment`) and `releaseTick` that reuses `claimIssue`, `dagOrder`, `laneFor` and the `io.batch` seam. Extend `parseWatches` for one more nesting level and flow maps. LLM fallback via injected `io.classify` (count stored in state). Theme tie-break/priority from NORTHSTAR text: deterministic parse of an optional `Release priorities:` ordered list in NORTHSTAR.md (via loadPolicy), else score then name. Tag via `gh api` milestone create (milestone targets) or label create+edit (staging). Deploy PR via `gh pr create --base <default> --head <lane>`, once (state.deployPr), never `pr merge`. Dry run is a pure print with no gh writes.
 
 ### Related Issues
-#4129 (original stdin switch), #4690/#4518 (spawn-failure classification, unrelated).
+#4765 (watches, merged), #4766 (decision engine, merged), #4768 (production watcher, downstream).
