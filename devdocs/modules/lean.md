@@ -28,7 +28,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 1. **Host admission** — `admission.mjs` `checkAdmission` (free mem/tmp; load
    average only when `max_load_per_core` is configured, #4169);
    busy host → `deferred` / `host.busy`, before any lease or GitHub call.
-   Heavy steps are gated separately by the host heavy-step semaphore (`heavy.mjs`).
+   Heavy steps are gated separately by the host heavy-step semaphore (`heavy.mjs`); #4777: that covers pytest,
+   promtool check/test, `poetry|uv|pipenv|pdm|hatch run <heavy>` / install / sync / build, pip install, ruff/black/
+   flake8/pylint, make/cmake/ninja and `python -m pytest|mypy|tox|unittest` (python shim).
+   Local lane cap (#4777): `admission.mjs` `localLaneCap` = max(1, min(floor(cores / `lane_cpu_reservation`, default 1),
+   floor((MemAvailable − `min_free_mem_mb`) / `lane_mem_mb`, default 2048))), forge.yaml `engine.lane_cpu_reservation|
+   lane_mem_mb`. `engine-cli.mjs` `liveLaneCap` passes it (min `global_parallel`) as `sched.cap` function, which
+   `orchestrate.mjs` evaluates at every registry admission: over-cap lanes queue, running lanes are never revoked.
 2. **Lane** — `lane.mjs` `resolveLane`: milestone → `branches.feature_pattern`
    (`milestone/{slug}`), else `branches.staging`; never the default branch;
    fail closed with `lane.*` codes → `lane-refused`.
@@ -2043,3 +2049,15 @@ Cite: #4785.
 
 `bin/lean/issuewatch.mjs` is `forgedock issue-watch`: named watches from forge.yaml `issue_watch.watches` (parsed by its own `parseWatches`, since `parseForgeYaml` reads one nested level), each with a per-(repo, name) lock and `status.json` under `~/.forge/watch/`, and a repo-wide `claims.json` (mkdir-locked) so an issue has one claim across watches. Pure selectors/lane/caps; gh, clock and launching are injected. `mode: batch` calls batch.mjs `addIssues` and starts a new batch once `report.json` exists. See docs/ISSUE-WATCH.md.
 Cite: #4765.
+
+`sandbox.unreachable` is uncapped like `host.busy`/`sandbox.capacity` (#4788): `deferPolicy` requeues it after its retry-in, never against `maxDeferrals`. `httpTransport.capacity()` derives `online`/`total` from `GET /agents` (`ok && !paused`) when `/status` carries no valid `online`; a failing `/agents` leaves liveness unknown (null). `grant()` tracks the first sample with `online === 0`; past `remote.poolOfflineMin` (default `POOL_OFFLINE_ALERT_MIN` 10) it emits one `pool-offline` batch update (status-line `STALLED: no compute pool agent online ...`), reset when `online > 0`. Report only: the host fallback stays the `execution.fallback_local` opt-in.
+
+## Entry 2026-10-30 — Host-capability needs ignore quoted evidence in the issue body (#4776)
+
+`placementText` (`execution.mjs`) no longer feeds the raw issue body to `detectNeeds`. A private `proseOf` first removes HTML comments (FORGE:STATE included, so a lane no longer re-pins itself from its recorded placement reason), fenced code blocks, evidence-like sections (headings Evidence, Logs, Data, Observations, Measurements, Queries, Samples, Findings, up to the next heading of the same or higher level), blockquote lines and inline code spans. Plain prose that states a need still counts. `FORGE:DECISION` comments stay unstripped, and the last frozen contract's validate commands and `repro_test.command` are read; `contractHostNeeds` checks `repro_test` too (id `repro_test`). The builder's block summary (`hostCapabilityBlock`) is unchanged: a remote lane that truly needs a host capability still ends `env.capability_remote` and is recovered locally once. Fixture: `bin/tests/fixtures/alterlab-capability-bodies.json` (sanitised AlterLab #37290–#37317). Cost: 0 LLM calls.
+Cite: #4776.
+
+## Entry 2026-10-30 — North-star decision engine (#4766)
+
+`decision-engine.mjs`: `loadPolicy` (forge.yaml `decisions:`, policy file NORTHSTAR.md > CLAUDE.md > AGENTS.md, authority matrix `human_only`), `splitEscalation` (deterministic: recovery | evidence | post-deploy | external | decision | mixed), `settle` (one injected `judge` call per decision part; one-way, low-confidence or clause-less answers escalate; shadow posts `FORGE:DECISION (shadow)`, live records via `recordDecisions`, clears needs-human and requeues; idempotent on the escalation id), `isVetoed`/`revertVeto`, `effectiveMode` (reversal rate above `reversal_max` forces shadow). Nothing calls it yet: the issue-watch stage (#4765) will. Telemetry `decision_engine`; the batch report lists rows with `decided` (orchestrate.mjs `formatOutcomeLists`). Docs: `docs/DECISIONS.md`.
+Cite: #4766.
