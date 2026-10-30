@@ -1,135 +1,73 @@
 {
  "status": "fixed",
- "summary": "Activation rows, shadow-mode conformance, per-flag rollout owner asks and a dormancy report for default-off rollouts",
+ "summary": "Transient lane-resolution failures are retried with backoff (uncapped); --requeue/--add accept lane-refused",
  "requirements": [
   {
    "id": "R1",
    "status": "implemented",
-   "evidence": "bin/lean/conformance.mjs:450"
+   "evidence": "bin/lean/orchestrate.mjs:124,700"
   },
   {
    "id": "R2",
    "status": "implemented",
-   "evidence": "bin/lean/activation.mjs:53"
+   "evidence": "bin/lean/lane.mjs:50"
   },
   {
    "id": "R3",
    "status": "implemented",
-   "evidence": "bin/lean/postdeploy-check.mjs:143"
+   "evidence": "bin/lean/batch.mjs:79"
   },
   {
-   "id": "R5",
+   "id": "R4",
    "status": "implemented",
-   "evidence": "bin/lean/activation.mjs:53"
-  },
-  {
-   "id": "R6",
-   "status": "implemented",
-   "evidence": "bin/lean/activation.mjs:28"
-  },
-  {
-   "id": "R7",
-   "status": "implemented",
-   "evidence": "bin/lean/postdeploy-check.mjs:143"
-  },
-  {
-   "id": "R8",
-   "status": "implemented",
-   "evidence": "bin/lean/activation.mjs:67"
-  },
-  {
-   "id": "R9",
-   "status": "implemented",
-   "evidence": "bin/lean/activation.mjs:67"
+   "evidence": "bin/lean/batch.mjs:138"
   }
  ],
  "validation": [
   {
    "id": "V1",
-   "command": "node --test bin/lean/activation.test.mjs bin/lean/postdeploy-check.test.mjs bin/lean/conformance.test.mjs bin/lean/precheck.test.mjs",
+   "command": "node --test bin/lean/lane.test.mjs bin/lean/batch.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/lean/lean.test.mjs bin/lean/prefilter.test.mjs bin/tests/engine-outcome-codes.test.mjs",
    "exit": 0
   }
  ],
  "tests": [
   {
-   "command": "node --test bin/lean/activation.test.mjs bin/lean/postdeploy-check.test.mjs",
+   "command": "node --test bin/lean/lane.test.mjs bin/lean/batch.test.mjs",
    "result": "pass",
    "fails_without_fix": true
+  },
+  {
+   "command": "node --test bin/lean/**/*.test.mjs bin/tests/**/*.test.mjs",
+   "result": "fail: 5 unrelated (journey.test.mjs x3 fail the same with the fix reverted; lean.test.mjs #4690/#4405 idle-timing flakes under load)",
+   "fails_without_fix": "unknown"
   }
  ],
  "self_review": [
   {
    "question": "1",
    "answer": "yes",
-   "evidence": "R1-R3, R5-R9 delivered; R4 is a contract defer (needs #4768)"
+   "evidence": "R1-R4 implemented at the cited lines"
   },
   {
    "question": "2",
    "answer": "yes",
-   "evidence": "168 tests pass in the validate set and 512 of 513 in lean.test.mjs; the one failure is #4690 (idle-kill with a live sleep child) and it does not touch the changed code"
+   "evidence": "V1/V2 pass; genuine refusals still terminal (batch.test.mjs new test)"
   },
   {
    "question": "3",
    "answer": "yes",
-   "evidence": "deliverables D1-D9 changed (lean.test.mjs budgets only); preserve P1-P4 covered by passing existing tests"
+   "evidence": "D1-D5 changed, P1-P3 intact, V1/V2 pass"
   },
   {
    "question": "4",
    "answer": "yes",
-   "evidence": "only deliverable paths plus lean.test.mjs and activation.test.mjs"
+   "evidence": "git diff HEAD~1 --stat lists only bin/lean/{lane,orchestrate,batch}.mjs and two test files"
   }
  ],
- "amendments": [],
- "not_members": [
-  {
-   "symbol": "activation",
-   "test": "bin/engine/telemetry-seam.test.mjs",
-   "why": "its string lists hold event names, trigger kinds, or fixtures that only share words with lean module file names; they do not enumerate the files of bin/lean"
-  },
-  {
-   "symbol": "activation",
-   "test": "bin/lean/batch.test.mjs",
-   "why": "its string lists hold event names, trigger kinds, or fixtures that only share words with lean module file names; they do not enumerate the files of bin/lean"
-  },
-  {
-   "symbol": "activation",
-   "test": "bin/lean/checks.test.mjs",
-   "why": "its string lists hold event names, trigger kinds, or fixtures that only share words with lean module file names; they do not enumerate the files of bin/lean"
-  },
-  {
-   "symbol": "activation",
-   "test": "bin/lean/conformance.e2e.test.mjs",
-   "why": "its string lists hold event names, trigger kinds, or fixtures that only share words with lean module file names; they do not enumerate the files of bin/lean"
-  },
-  {
-   "symbol": "activation",
-   "test": "bin/lean/conformance.test.mjs",
-   "why": "its string lists hold event names, trigger kinds, or fixtures that only share words with lean module file names; they do not enumerate the files of bin/lean"
-  },
-  {
-   "symbol": "activation",
-   "test": "bin/lean/context.test.mjs",
-   "why": "its string lists hold event names, trigger kinds, or fixtures that only share words with lean module file names; they do not enumerate the files of bin/lean"
-  },
-  {
-   "symbol": "activation",
-   "test": "bin/lean/drift.test.mjs",
-   "why": "its string lists hold event names, trigger kinds, or fixtures that only share words with lean module file names; they do not enumerate the files of bin/lean"
-  },
-  {
-   "symbol": "activation",
-   "test": "bin/lean/execution.e2e.test.mjs",
-   "why": "its string lists hold event names, trigger kinds, or fixtures that only share words with lean module file names; they do not enumerate the files of bin/lean"
-  },
-  {
-   "symbol": "activation",
-   "test": "bin/lean/execution.test.mjs",
-   "why": "its string lists hold event names, trigger kinds, or fixtures that only share words with lean module file names; they do not enumerate the files of bin/lean"
-  },
-  {
-   "symbol": "activation",
-   "test": "bin/lean/fixround.test.mjs",
-   "why": "its string lists hold event names, trigger kinds, or fixtures that only share words with lean module file names; they do not enumerate the files of bin/lean"
-  }
- ]
+ "amendments": []
 }

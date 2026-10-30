@@ -121,8 +121,9 @@ export const DEFAULT_MAX_DEFERRALS = 3;
 export const ENGINE_ERROR_RELAUNCHES = 1;
 export const HOST_BUSY_RETRY_S = 60;
 // #4528: a busy host or a full sandbox pool is a wait, not a failure: requeued after its retry-in, never capped.
+// A lane that could not be resolved because gh/git failed (network blip) is the same kind of wait (#4791).
 // #4788: an unreachable pool is a wait too (the lane already retried for unreachable_window_min); a stall is reported by poolStall.
-const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity", "sandbox.unreachable"]);
+const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity", "sandbox.unreachable", "lane.unresolved"]);
 export const POOL_OFFLINE_ALERT_MIN = 10;
 export const RATE_LIMIT_FALLBACK_S = 15 * 60;
 export const DEFER_BACKOFF_S = 120;
@@ -364,7 +365,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     await readEstimate(n, body);
     await classifyOne(n);
     await readPriority(n);
-    if (resolveLane) { let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e) }; } lanes.set(n, l); }
+    if (resolveLane) { let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e), transient: true }; } lanes.set(n, l); }
   };
   const edges = (n) => (deps.get(n) ?? []).filter((d) => set.has(d));
   // A milestone issue waiting on a staging fix (or the reverse) never sees that fix on its own base: surface the edge.
@@ -711,8 +712,18 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   };
 
   const track = (n, p) => { running.set(n, p.catch((e) => settle(n, { terminalReason: "engine-error", detail: e?.message ?? String(e) }, runRecs.get(n), null))); };
+  const laneRetries = new Map(); // #4791: transient lane-resolution failures per issue; never counted in `deferrals`
+  // A transient refusal (gh/git failed) re-resolves; the settled `deferred` frees the slot and requeues with backoff.
+  const retryLane = (n, rec) => track(n, (async () => {
+    let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e), transient: true }; }
+    lanes.set(n, l);
+    if (l.ok || !l.transient) { laneRetries.delete(n); return { terminalReason: "deferred", code: "lane.unresolved", retryInSeconds: 1, cost_usd: 0, detail: l.ok ? "lane resolved" : `${l.code}: ${l.detail}` }; }
+    const k = laneRetries.get(n) ?? 0; laneRetries.set(n, k + 1);
+    return { terminalReason: "deferred", code: "lane.unresolved", retryInSeconds: Math.min(DEFER_BACKOFF_S * 2 ** k, DEFER_BACKOFF_MAX_S), cost_usd: 0, detail: l.detail };
+  })().then((x) => settle(n, x, rec, null)));
   const start = (n) => {
     const ln = lanes.get(n);
+    if (ln && !ln.ok && ln.transient && resolveLane) { retryLane(n, runRecs.get(n) ?? { startedAt: now() }); return; }
     if (ln && !ln.ok) { // settled synchronously: nothing runs, no lease, no comment
       const row = { issue: n, outcome: "lane-refused", pr: null, cost_usd: 0, minutes: 0, detail: `${ln.code}: ${ln.detail}`, code: ln.code };
       results.set(n, row); save(); update(row);
@@ -790,7 +801,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   if (saved && resolveLane) {
     for (const n of order) {
       if (results.has(n) || running.has(n)) continue;
-      let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e) }; }
+      let l; try { l = await resolveLane(n); } catch (e) { l = { ok: false, code: "lane.unresolved", detail: e?.message ?? String(e), transient: true }; }
       lanes.set(n, l);
     }
     noteCrossLane();

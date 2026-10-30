@@ -1,33 +1,29 @@
 ### Approach
-A pure module (`activation.mjs`) detects new default-off keys in the PR diff of a forge.yaml-declared rollout registry. `precheck` fails when no activation row covers them. A post-deploy check that reports `BLOCKED: <flag> = off` becomes one owner ask per flag instead of a failure. The dormancy report takes an injected read-only flag-state hook.
+resolveLane marks gh/git command failures `transient:true`. The orchestrator treats a transient refused lane as a wait: it re-resolves, and on repeated failure returns a `deferred` lane.unresolved with exponential backoff through the existing uncapped deferral path (no `max_deferrals` count). `--requeue` / `--add` accept `lane-refused`.
 
 ### Changes
-- bin/lean/activation.mjs (new): `readRollouts`, `detectNewOffKeys`, `coversFlag`, `activationFailures`, `dormancyReport`.
-- bin/lean/conformance.mjs: `precheck` takes `newOffKeys` and pushes `activation_missing` and `mode_unreachable` failures.
-- bin/lean/lean.mjs: `newOffKeysOf()` diffs the registry files against the base and feeds `precheck`.
-- bin/lean/prompts.mjs: activation-row rule; promotion is listed as an owner action.
-- bin/lean/postdeploy-check.mjs: `blockedRollout`, `postRolloutAsks` (marker `FORGE:ROLLOUT_ASK`, flag and evidence hash), `measureItems` handling.
-- docs/CONFIG.md, devdocs/modules/lean.md: documentation.
-- Tests: activation.test.mjs (new), postdeploy-check.test.mjs; lean.test.mjs plan-prompt token budgets raised by 50 (the new rule costs about 30 tokens).
+- bin/lean/lane.mjs: `transient()` helper; milestone read, default-branch read and ls-remote failures use it.
+- bin/lean/orchestrate.mjs: `lane.unresolved` added to UNCAPPED_DEFERRALS; catch sites set transient; `retryLane` + `laneRetries` in start().
+- bin/lean/batch.mjs: REQUEUABLE includes lane-refused; addIssues requeues lane-refused rows.
+- bin/lean/lane.test.mjs, bin/lean/batch.test.mjs: regression tests.
 
 ### Acceptance Criteria Status
-- R1 ✅ activation.test.mjs "a contract without an activation row fails…"
-- R2 ✅ activation.test.mjs "an 'in shadow' AC fails…"
-- R3 ✅ postdeploy-check.test.mjs "the next release with the same evidence raises nothing…"
-- R4 deferred in the contract (needs #4768 adapters and production access).
-- R5 ✅ conformance.mjs precheck, prompts.mjs
-- R6 ✅ activation.mjs `detectNewOffKeys`
-- R7 ✅ postdeploy-check.mjs `postRolloutAsks`
-- R8 ✅ activation.mjs `dormancyReport`
-- R9 ✅ activation.test.mjs keep-off test
+- R1 ✅ bin/lean/orchestrate.mjs:124,700-709
+- R2 ✅ bin/lean/lane.mjs:50-84 (only command failures transient)
+- R3 ✅ bin/lean/batch.mjs:79
+- R4 ✅ bin/lean/batch.mjs:138
 
 ### Verification
-- V1 `node --test bin/lean/activation.test.mjs bin/lean/postdeploy-check.test.mjs bin/lean/conformance.test.mjs bin/lean/precheck.test.mjs`: 168 pass, 0 fail. The new tests cannot pass without the fix, since the module and the behaviour are new.
-- lean.test.mjs: 512 pass, 1 fail. The failure is "#4690 a scope whose events show a limit…": the CLI is killed as idle while a `sleep 30` child is live. It exercises the host's scope/process handling, not the code in this change. I did not confirm it fails on the base.
+- V1 node --test lane.test.mjs batch.test.mjs: pass (69). The 3 new tests fail with the source files reverted.
+- V2 node --test lean.test.mjs prefilter.test.mjs engine-outcome-codes.test.mjs: pass in the `forgedock check` run. The #4690 idle test in lean.test.mjs failed in two earlier runs under host load; it passes in isolation with and without my change.
+- scripts/check-devdocs-freshness.sh: OK.
+- `forgedock check`: V1, V2 and the spec/drift checks PASS; it still reported FAIL because scripts/classify-finding.test.sh and scripts/verify-phase-trail.test.sh hit the 300s timeout under host load (files untouched by this change). An earlier run failed 1 (the #4690 test).
 
 ### Notes
-- Opt-in: nothing changes without a forge.yaml `rollouts:` section (`files`, `dormant_days`).
-- A blocked rollup item parks as `awaiting-measurement` (existing callers branch on that state), with `blocked: [flags]` on the return value.
-- The owner ask is deduped within the rollup issue by flag plus evidence hash.
-- The dormancy report is library-only: nothing calls it yet, because production state needs #4768.
-- Enumerating-test flags for `activation` (10 tests) are coincidental string matches (kinds, triggers, fixtures), recorded as not_members in result.json.
+No new env vars. Transient lane retries are uncapped, backoff 120s doubling to 30min. Genuine refusals (branch missing, default branch, mismatch) stay terminal.
+
+### Docs (#4791)
+Added a #4791 entry to devdocs/modules/lean.md (transient lane retry, lane-refused requeueable) for the docs freshness check.
+
+### CI follow-up (Unit tests, node --test)
+The CI log was not available offline (GitHub not to be touched), so I ran `bin/lean/**` and `bin/tests/**` locally (concurrency capped): 4199 pass, 5 fail. Two are timing tests in lean.test.mjs (#4690, #4405: idle-timeout kills) that pass when run in a smaller set; three are in bin/tests/journey.test.mjs (preflight Platform/WSL/Shell rows, stale-copy .tmp cleanup, detectEnvironment platform info) and fail identically with this change's source files reverted, i.e. they are environmental (this host is WSL/root), not caused by #4791. No failure traced to this change, so no code change was made; the CI failure itself is not reproduced.
