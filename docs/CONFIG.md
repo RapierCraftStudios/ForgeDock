@@ -148,7 +148,7 @@ agents:
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `default_model` | string | No | `"sonnet"` | Short alias — `"sonnet"`, `"opus"`, or `"haiku"` — the same values the Agent/Task tool's `model` parameter accepts. This is the only form that works for interactive command-spec sub-agent spawning. |
-| `subagent_model` | string | No | `default_model`, else `"sonnet"` | Short alias, same accepted values as `default_model`. Overrides the model used for child agents spawned internally by a top-level command (see above). Omit to inherit `default_model`. |
+| `subagent_model` | string | No | `default_model`, else `"sonnet"` | Short alias, same accepted values as `default_model`. Overrides the model used for child agents spawned internally by a top-level command (see above). Omit to inherit `default_model`. In engine lanes (core work-on), it is the default model of subagents that have no model of their own. ForgeDock-defined agents, such as the explorer, keep theirs, and an ambient `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` in the operator's settings is turned off for those sessions (#4843). |
 
 **Resolution order** (highest precedence first):
 1. `--model <id>` — CLI flag, `npx forgedock run` only (headless; main agent only).

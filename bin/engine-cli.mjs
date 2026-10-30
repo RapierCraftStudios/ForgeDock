@@ -288,6 +288,13 @@ export async function readPostDeployMinAge(cwd = process.cwd()) {
 export function readMilestoneCloseOn(cwd = process.cwd()) {
   try { return String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.milestones?.close_on ?? "").trim().toLowerCase() === "staging" ? "staging" : "default"; } catch { return "default"; }
 }
+/** forge.yaml `agents.subagent_model` (#4843): the default model of subagents in sessions ForgeDock launches; null when unset or invalid. */
+export function readSubagentModel(cwd = process.cwd()) {
+  try {
+    const v = String(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.agents?.subagent_model ?? "").trim();
+    return /^[A-Za-z0-9._:[\]-]+$/.test(v) ? v : null;
+  } catch { return null; }
+}
 /** forge.yaml `lean.explore` (on|off) and `lean.explore_model` (#4391): the builder's explorer subagent; undefined when neither is set or valid. */
 export function readExplore(cwd = process.cwd()) {
   try {
