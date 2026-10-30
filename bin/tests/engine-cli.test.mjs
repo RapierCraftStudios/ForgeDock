@@ -993,6 +993,18 @@ describe("readVerify invariants (#4585)", () => {
   });
 });
 
+describe("readVerify guard_command (#4792)", () => {
+  it("reads the nested per-extension map; absent stays empty", () => {
+    const d = tmpDir("guard-command-yaml-");
+    writeFileSync(join(d, "forge.yaml"), ["verify:", "  mode: ci", "  guard_command:", '    ".py": "scripts/pytest {path}"  # uv env', "    mjs: node --test", "  max_rounds: 1", ""].join("\n"));
+    const v = readVerify(d);
+    assert.deepEqual(v.guardCommand, { ".py": "scripts/pytest {path}", ".mjs": "node --test" });
+    assert.equal(v.mode, "ci"); assert.equal(v.maxRounds, 1);
+    writeFileSync(join(d, "forge.yaml"), "verify:\n  mode: ci\n");
+    assert.deepEqual(readVerify(d).guardCommand, {});
+  });
+});
+
 describe("readVerify flaky (#4614)", () => {
   it("reads verify.flaky as a block list, a flow list or a comma string", () => {
     const d = tmpDir("flaky-yaml-");
