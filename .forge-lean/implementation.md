@@ -1,33 +1,30 @@
 ### Approach
-A standalone, io-injected module (`bin/lean/decision-engine.mjs`) with deterministic policy loading and escalation splitting, one injected `judge` seam, shadow/live settling, veto and a reversal-rate gate. The issue-watch stage (#4765) is not in the repo, so the watcher wiring is deferred (contract R7-R12).
+Treat an unreachable pool as a wait (like #4528), derive pool liveness from `/agents` when `/status` lacks it (so #4547 fallback works), and report a sustained zero-agent pool once.
 
 ### Changes
-- bin/lean/decision-engine.mjs: loadPolicy, splitEscalation, admissible, settle, classify, isVetoed, revertVeto, effectiveMode, tally.
-- bin/lean/decision-engine.test.mjs: regression tests, including the six AlterLab fixtures.
-- bin/engine/telemetry-seam.mjs: `DECISION_ENGINE` mapped to the `decision_engine` event.
-- bin/lean/orchestrate.mjs: batch report lists rows with `decided`.
-- docs/DECISIONS.md, docs/NORTHSTAR-TEMPLATE.md, docs/CONFIG.md, docs/TELEMETRY.md, devdocs/modules/lean.md.
+- bin/lean/orchestrate.mjs: `sandbox.unreachable` added to UNCAPPED_DEFERRALS; grant() tracks `online===0` and emits one `pool-offline` event after `remote.poolOfflineMin` (default 10) min, reset when online > 0.
+- bin/lean/sandbox-remote.mjs: `httpTransport.capacity()` falls back to `GET /agents` (online = ok && !paused, total).
+- bin/lean/batch.test.mjs, bin/lean/sandbox-provider.contract.test.mjs: regression tests.
 
 ### Acceptance Criteria Status
-- R1 ✅ decision-engine.mjs loadPolicy
-- R2 ✅ decision-engine.mjs splitEscalation; test "six AlterLab fixtures"
-- R3 ✅ settle (shadow/live), isVetoed/revertVeto
-- R4 ✅ settle calls recordDecisions
-- R5 ✅ telemetry-seam.mjs, orchestrate.mjs formatOutcomeLists
-- R6 ✅ docs/DECISIONS.md, docs/NORTHSTAR-TEMPLATE.md
-- R7-R12 deferred per contract (#4765 watcher, monitor execution, release checklist)
-- R13 ✅ admissible/settle escalate
-- R14 ✅ isVetoed/revertVeto
-- R15 ✅ formatOutcomeLists `decided` section
-- R16 ✅ effectiveMode
+- R1 ✅ bin/lean/orchestrate.mjs:124
+- R2 ✅ bin/lean/orchestrate.mjs:~484-491 (one batch event; no separate notification channel exists)
+- R3 ✅ report-only when fallback_local unset (same block)
+- R4 ✅ bin/lean/sandbox-remote.mjs:80-98
 
 ### Verification
-- V1 `node --test bin/lean/decision-engine.test.mjs`: pass; the test fails without the fix (the module does not exist on the base).
-- V2 `node --test bin/lean/decisions.test.mjs bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs`: pass (88 tests with V1).
-- `forgedock check`: PASS. checks.mjs widened to the full suite (fan-out), which the host rules forbid, so only the targeted tests were run. The devdocs freshness script reports OK.
+- V1 `node --test bin/lean/batch.test.mjs bin/lean/sandbox-provider.contract.test.mjs bin/lean/execution.test.mjs`: 145 pass, 0 fail. The new tests fail without the source change (3 failures).
+- checks.mjs widened to the full suite (748 referencing files); not run, per host rules.
 
 ### Notes
-Nothing calls the engine by default, so there is no behaviour change until #4765 wires it. New forge.yaml `decisions:` keys are documented in docs/CONFIG.md. The reversal-rate gate needs at least 5 decisions.
+`remote.poolOfflineMin` is not yet wired to config (execution.mjs/engine-cli.mjs are not deliverables); the default 10 applies. Documented in devdocs/modules/lean.md (freshness fix). No formatter is configured in the repo.
 
-## Stale-list follow-up
-Checked the 10 tests flagged as enumerating siblings of decision-engine: none holds a list of lean modules or files, so each is recorded in result.json not_members.
+## Precheck rerun
+classify-finding.test.sh and verify-phase-trail.test.sh timed out at 300s under host load; neither touches changed files. Reran: both pass (exit 0). No code change.
+
+## Docs freshness
+Added a #4788 paragraph to devdocs/modules/lean.md; no code change.
+
+### Follow-up (conformance)
+- `devdocs/modules/lean.md` is now a typed `add-deliverable` amendment (freshness script requires the dossier to move with bin/lean behaviour changes; `check-devdocs-freshness.sh origin/staging` passes).
+- The precheck shell-test timeouts (classify-finding, verify-phase-trail at 300s) are host load, not a contract change: reruns passed (176/0 and 160/0, exit 0) and `forgedock check` passed. This is not an amendment.
