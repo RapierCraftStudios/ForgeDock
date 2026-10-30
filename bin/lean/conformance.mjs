@@ -9,6 +9,7 @@
  */
 import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { noComments } from "./context.mjs";
+import { activationFailures } from "./activation.mjs";
 
 export const DISPOSITIONS = Object.freeze(["deliver", "defer", "not-applicable", "post-deploy"]);
 /** Dispositions the engine files as a tracked follow-up issue before anything merges. */
@@ -257,12 +258,16 @@ export function validateContract(c, issueText, { repro = false } = {}) {
     const ref = movingBaseDiff(v.command);
     if (ref) problems.push(`${v.id}: \`git diff\` against the moving ${ref} tip fails as soon as the base moves on, even when the change is fine; compare against the merge base instead (\`${ref}...HEAD\` or \`$(git merge-base HEAD ${ref})\`)`);
     for (const p of tmpdirInputs(v.command)) problems.push(tmpInputProblem(v.id, p));
+    if (vitestQuietFlag(v.command)) problems.push(`${v.id}: vitest 3 rejects -q/--quiet (usage error before any test runs); use --reporter=dot`);
   }
   if (repro) {
     const t = c.repro_test;
     if (t === "none") { if (blank(c.repro_test_reason)) problems.push(`repro_test "none" needs a one-line repro_test_reason`); }
     else if (!t || typeof t !== "object" || Array.isArray(t) || blank(t.path) || blank(t.command)) problems.push(`this is a bug: repro_test must be {"path","id","command"} (a test that fails on the base and passes after the fix) or "none" with a repro_test_reason`);
-    else for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem("repro_test", p));
+    else {
+      for (const p of tmpdirInputs(t.command)) problems.push(tmpInputProblem("repro_test", p));
+      if (vitestQuietFlag(t.command)) problems.push("repro_test: vitest 3 rejects -q/--quiet; use --reporter=dot");
+    }
   }
   if (JSON.stringify(c).length > MAX_CONTRACT_CHARS) problems.push(`the contract is over ${MAX_CONTRACT_CHARS} characters; keep quotes to the requirement sentence and descriptions short`);
   return { ok: problems.length === 0, problems };
@@ -393,6 +398,21 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
 const PY_MISSING_RE = /ModuleNotFoundError: No module named '([^']+)'|ImportError: No module named '?([\w.]+)'?/;
 const NODE_MISSING_RE = /Cannot find (?:module|package) '([^']+)'/;
 const CMD_NOT_FOUND_RE = /([^\s:'"`]+): command not found/, SH_NOT_FOUND_RE = /([^\s:'"`]+): not found\b/;
+// #4761: a runner rejecting its own flags is a defect of the frozen command, not of the change
+const CLI_USAGE_RE = /\bUnknown option\b|Unrecognized CLI Parameter|error: unrecognized arguments|unknown (?:shorthand )?flag\b|bad option:/i;
+const VITEST_QUIET_RE = /\bvitest\b[^&|;]*\s(?:-q|--quiet)(?=\s|$)/;
+/** #4761: a validate/repro command that passes vitest `-q`/`--quiet`, which vitest 3 rejects; null when fine. */
+export function vitestQuietFlag(command) {
+  return VITEST_QUIET_RE.test(String(command ?? "")) ? "-q" : null;
+}
+/** #4761: `-q`/`--quiet` on a vitest segment becomes `--reporter=dot`; other commands come back unchanged. */
+export function normalizeRunnerCommand(command) {
+  return String(command ?? "").split(/(&&|\|\||;|\|)/).map((seg) => (/\bvitest\b/.test(seg) ? seg.replace(/(\s)(?:-q|--quiet)(?=\s|$)/g, "$1--reporter=dot") : seg)).join("");
+}
+/** #4761: true when a failed command's {rc, output} is a runner CLI usage error (vitest `Unknown option`, jest `Unrecognized CLI Parameter`, pytest `unrecognized arguments`), not a test failure. */
+export function cliUsageError({ rc, output } = {}) {
+  return rc !== 0 && CLI_USAGE_RE.test(String(output ?? ""));
+}
 const KIND_NAME = { command: "command", "python-module": "Python module", "node-module": "Node package" };
 /**
  * forge#4323: the host tool or module a failed command could not find, from its {rc, output}: bash/sh "X: command not found"
@@ -439,12 +459,14 @@ export function repoTracks(paths) {
  * `ciCovered` (#4527): the validate ids accepted only because the head is CI-verified (no local result, or a missing host
  * tool), for the trajectory; always an array.
  */
-export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null }) {
+export function precheck({ contract, result, changedFiles, ignore = [], ciVerified = false, hotspots = null, repro = null, validateRuns = null, repoHas = () => false, frozen = null, checkIds = null, guardFailures = null, newOffKeys = null }) {
   const failures = [], superseded = [], ciCovered = [];
   // #4626: a post-deploy check id must be on the default branch or added by this PR (`checkIds`: ids of both checks files; null = not resolved)
   if (checkIds) for (const r of contract.requirements ?? []) {
     if (r.disposition === "post-deploy" && !(r.check && checkIds.has(r.check))) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, kind: "check_unknown", detail: `${r.id} post-deploy check ${r.check ? `'${r.check}'` : "id"} is neither on the default branch nor added by this PR (.forge/post-deploy-checks.json)` });
   }
+  // #4769: a default-off rollout entry added by the diff needs an activation row
+  if (newOffKeys?.length) for (const f of activationFailures(contract, newOffKeys)) failures.push({ code: C.CONFORMANCE_UNIMPLEMENTED, ...f });
   const outside = (k) => changedFiles.filter((f) => !ignore.some((p) => f.startsWith(p)) && !authorizationOf(k, f));
   const creep = outside(contract);
   const amendedOnly = frozenAmendedFiles(frozen, contract, outside, creep);
@@ -459,6 +481,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
     else if (r.exit !== 0) {
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
+      if (rerun && cliUsageError(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) is a CLI usage error of the runner, a defect of the frozen command rather than of the change` }); continue; }
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
       if (miss && ciVerified) { ciCovered.push(v.id); continue; }
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)` });

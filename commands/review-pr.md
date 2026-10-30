@@ -110,7 +110,7 @@ case "$PR_REF" in
   "") ;;
   *) PR_NUMBER="$PR_REF" ;;
 esac
-AUTO_MERGE=false; THOROUGH=false
+AUTO_MERGE=false; THOROUGH=false; MANUAL_PR=false; OWNER_REQUESTED=false
 MERGE_ISSUE=""; MERGE_BASE=""; MERGE_WORKTREE=""; MERGE_GH_FLAG=""; REPO_FLAG=""; REPO=""
 arg_i=1
 case "$PR_REF" in -*) PR_NUMBER=""; arg_i=0 ;; esac  # leading flag, no PR ref
@@ -119,6 +119,8 @@ while [ "$arg_i" -lt "${#ARG_TOKENS[@]}" ]; do
   case "$arg_t" in
     --auto-merge) AUTO_MERGE=true ;;  # flag parse only, no side effect <!-- allowlist:check-command-side-effects -->
     --thorough) THOROUGH=true ;;
+    --manual-pr) MANUAL_PR=true ;;  # flag parse only, no side effect <!-- allowlist:check-command-side-effects -->
+    --owner-requested) OWNER_REQUESTED=true ;;  # flag parse only <!-- allowlist:check-command-side-effects -->
     --issue|--base|--worktree)
       # A value that is empty or starts with "-" is another flag: treat the value as missing, do not consume it
       arg_v="${ARG_TOKENS[$((arg_i + 1))]:-}"
@@ -172,7 +174,7 @@ fi
 
 **Argument injection hardening** <!-- Added: forge#3466 -->: the loader substitutes `$ARGUMENTS` textually, so the block reads it from a quoted heredoc and rejects any string containing a quote, backtick, dollar sign, backslash, newline or tab (it parses nothing and binds `PR_NUMBER`, `REPO`, `MERGE_*` empty with `AUTO_MERGE=false`; a run with no PR number stops in Phase -1). The executor MUST replace the `NONCE` in the `FORGE_ARGS_EOF_NONCE` placeholder with a fresh random hex string first, so a caller cannot pre-compute the delimiter. Callers pass `--gh-flag -R owner/repo` unquoted.
 
-**`--auto-merge` requires `--issue`** <!-- Added: forge#3102, forge#3124 -->: the Phase 8 phase-trail gate verifies the linked issue. Never infer `MERGE_ISSUE` from the PR (the closing reference and the branch suffix are author-controlled): with `AUTO_MERGE=true` and no `MERGE_ISSUE`, Phase 8 does not merge and returns `REVIEW_RESULT: status: BLOCKED`, blocker "auto-merge requires --issue".
+**`--auto-merge` requires `--issue` (or `--manual-pr`)** <!-- Added: forge#3102, forge#3124 -->: the Phase 8 phase-trail gate verifies the linked issue. Never infer `MERGE_ISSUE` from the PR (the closing reference and the branch suffix are author-controlled): with `AUTO_MERGE=true` and no `MERGE_ISSUE`, Phase 8 does not merge and returns `REVIEW_RESULT: status: BLOCKED`, blocker "auto-merge requires --issue". **`--manual-pr`** <!-- Added: forge#4770 -->, for a hand-built PR the owner asked to merge, skips only the phase-trail preflight (recorded as `FORGE:PHASE_TRAIL_SKIPPED`); every other gate runs. `merge-gate` refuses it when `--issue` is a pipeline issue, or when the PR closes one unless `--owner-requested` (the owner's explicit instruction). `/work-on` and `/orchestrate` never pass either flag.
 
 ### Thoroughness Flag
 
@@ -837,7 +839,7 @@ bash "$RF" calibrate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --o
 **One script owns every Phase 8 gate (MANDATORY; a gate is never skipped, reordered or hand-run).** `review-finalize.sh merge-gate` runs, in order, and stops at the first refusal: the note-disposition preflight (a trusted `FORGE:NOTE_DISPOSITION` must exist), the in-PR fix gate (an unanswered trusted `FORGE:INPR_FIX` at the current head blocks), the phase-trail preflight (`scripts/verify-phase-trail.sh` on the linked issue; `--issue` is mandatory and never inferred; an infrastructure failure is `BLOCKED` plus `needs-human`) <!-- Added: forge#3061 -->, the degraded-gate review (`degraded-gate-unreviewed` unless a `### Degraded Paths Reviewed` section covers each degraded check), the guard-state flags below (`VERDICT` is `APPROVED` or `CHANGES REQUESTED`, the others `true`/`false`; an empty or unsubstituted value aborts with `needs-human`; `--other-blocking true` when 7B criterion 1, 2, 3 or 5 fired), routing (a base conflict as the ONLY blocker routes to the base-sync path, `blocker: base-conflict`; any other hold adds `needs-human`), the pre-merge mergeability guard on fresh state, the previously-escalated guard (parks at `workflow:awaiting-merge`, never merges), the CI gate (`scripts/wait-ci-green.sh`) with the reviewed-head guard (only the commit the `FORGE:REVIEW_ROUTE` sha approved; a docs-only delta is allowed), and finally the merge with `--match-head-commit`. Every gate fails closed.
 
 ```bash
-PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; MANUAL_PR="{MANUAL_PR}"; OWNER_REQUESTED="{OWNER_REQUESTED}"
 MERGE_ISSUE="{MERGE_ISSUE}"; MERGE_BASE="{MERGE_BASE}"; IS_MILESTONE_TO_STAGING="{IS_MILESTONE_TO_STAGING}"
 VERDICT="{VERDICT}"; HAS_PURPOSE_REGRESSION="{HAS_PURPOSE_REGRESSION}"; CALIBRATION_NEEDS_HUMAN="{CALIBRATION_NEEDS_HUMAN}"; CTX="{CONTEXT_FILE}"
 TRUST_NEEDS_HUMAN="{TRUST_NEEDS_HUMAN}"; BASE_CONFLICT="{BASE_CONFLICT}"; OTHER_BLOCKING="{OTHER_BLOCKING}"; TABLE_CELL_KEY="{TABLE_CELL_KEY}"
@@ -846,7 +848,7 @@ RF=$(forge_resolve review-finalize.sh)   # install roots only, never the PR chec
 [ -n "$RF" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-finalize.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"; exit 1; }   # STOP
 # The calibration note derives from issue text: `calibrate` (Phase 7B.5) wrote it to this file; it is passed by path, never substituted into a shell word.
 OUT_DIR="$(dirname "$CTX")/review-finalize-${PR_NUMBER}"
-GATE_OUT=$(bash "$RF" merge-gate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --base "$MERGE_BASE" \
+GATE_OUT=$(bash "$RF" merge-gate --pr "$PR_NUMBER" --repo "$REPO" ${MERGE_ISSUE:+--issue "$MERGE_ISSUE"} --base "$MERGE_BASE" $([ "$MANUAL_PR" = "true" ] && echo --manual-pr) $([ "$OWNER_REQUESTED" = "true" ] && echo --owner-requested) \
   --verdict "$VERDICT" --has-purpose-regression "$HAS_PURPOSE_REGRESSION" --calibration-needs-human "$CALIBRATION_NEEDS_HUMAN" --calibration-note-file "$OUT_DIR/calibration-note.txt" \
   --trust-needs-human "$TRUST_NEEDS_HUMAN" --base-conflict "$BASE_CONFLICT" --other-blocking "$OTHER_BLOCKING" --table-cell-key "$TABLE_CELL_KEY" --out-dir "$OUT_DIR"); GATE_RC=$?
 printf '%s\n' "$GATE_OUT"
@@ -859,7 +861,7 @@ exit "$GATE_RC"
 
 **Outcome mapping.** Report the script's output; never re-run its gates by hand and never `gh pr merge` yourself.
 - Exit 0, `MERGE_OUTCOME=merged` (`MERGE_STATE=MERGED`): merged. `merge-failed`: the merge did not land (the script commented on the issue). `parked-awaiting-merge`: parked per the previously-escalated guard; the script performs the transition itself (`transition-label.sh ... awaiting-merge`, prose fallback `gh issue edit --add-label "workflow:awaiting-merge"`).
-- Exit 3: print the `REVIEW_RESULT: status: BLOCKED, blocker: ...` line and stop; `MERGE_OUTCOME=` names the case (`base-conflict`, `needs-human`, `protection-blocked`, `stale-review`, `ci-not-green`). A `base-conflict` blocker carries no label (the autonomous base sync is pipeline work, not a human decision), so every caller of `--auto-merge` MUST map it explicitly: `work-on:review` R4, the router's Phase 0A.1 re-review fallback and `orchestrate` re-review Step 3 each set `workflow:remediating` (falling back to `needs-human`), and a standalone caller runs `/work-on <issue> --remediate`. A caller never leaves the issue unlabelled at `workflow:in-review`. A CI gate TIMEOUT prints `CI_GATE_TIMEOUT`: re-run the same fence up to 3 more times. A phase-trail blocker with no MISSING lines (`phase trail unreadable (rc=N)`, `auto-merge requires --issue`) is an infrastructure or usage failure: callers neither re-run phases nor merge manually.
+- Exit 3: print the `REVIEW_RESULT: status: BLOCKED, blocker: ...` line and stop; `MERGE_OUTCOME=` names the case (`base-conflict`, `needs-human`, `protection-blocked`, `stale-review`, `ci-not-green`). A `base-conflict` blocker carries no label (the autonomous base sync is pipeline work, not a human decision), so every caller of `--auto-merge` MUST map it explicitly: `work-on:review` R4, the router's Phase 0A.1 re-review fallback and `orchestrate` re-review Step 3 each set `workflow:remediating` (falling back to `needs-human`), and a standalone caller runs `/work-on <issue> --remediate`. A caller never leaves the issue unlabelled at `workflow:in-review`. A CI gate TIMEOUT prints `CI_GATE_TIMEOUT`: re-run the same fence up to 3 more times. A phase-trail blocker with no MISSING lines (`phase trail unreadable (rc=N)`, `auto-merge requires --issue`, `manual-pr refused: ...`) is an infrastructure or usage failure: callers neither re-run phases nor merge manually.
 - Exit 3 with `blocker: degraded-gate-unreviewed` (`needs-human` added): the linked issue's gate is DEGRADED and no trusted review comment for the current head has a `### Degraded Paths Reviewed` section with a `- name: how reviewed` item for every degraded check. Not a code defect: `work-on:review` (R4) re-runs the review once so the section is added. Never merge by hand. <!-- Added: forge#3628 -->
 - Exit 4: `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` plus the `MISSING:` lines. Return that status and stop: this phase never re-runs the missing phases and never escalates to `needs-human`; `work-on:review` (R4) alone owns re-dispatching them (forge#3102).
 
