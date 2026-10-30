@@ -488,6 +488,30 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     assert.deepEqual(plain.map((r) => r.issue), [1]);
   });
 
+  it("#4791 --requeue and --add accept a lane-refused issue", () => {
+    const b = openBatch(tmpDir("batch-lane-refused-"), "b1");
+    b.writePlan({ argv: ["1"], repo: "o/r" });
+    b.store.save({ order: [1, 2], results: { 1: { outcome: "lane-refused", code: "lane.unresolved" }, 2: { outcome: "lane-refused" } } });
+    assert.deepEqual(b.requeue([1]).requeued, [1]);
+    assert.deepEqual(b.addIssues([2]).requeued, [2]);
+  });
+
+  it("#4791 a transient lane-resolution failure is retried with backoff, never capped, and not terminal", async () => {
+    const { now, sleep } = fakeClock();
+    const updates = [];
+    let tries = 0;
+    const launched = [];
+    const rows = await orchestrate({ issues: [1], readBody: async () => "", now, sleep, maxDeferrals: 1, onUpdate: (r) => updates.push(r),
+      resolveLane: async () => (++tries <= 3 ? { ok: false, code: "lane.unresolved", detail: "TLS handshake timeout", transient: true } : { ok: true, lane: "staging" }),
+      runOne: async (n, lane) => { launched.push(lane); return { terminalReason: "merged", pr: 5 }; } });
+    assert.equal(rows[0].outcome, "merged");
+    assert.deepEqual(launched, ["staging"]);
+    assert.ok(updates.some((u) => /requeued in 120s: lane.unresolved/.test(u.detail ?? "")));
+    assert.ok(updates.some((u) => /requeued in 240s: lane.unresolved/.test(u.detail ?? "")));
+    const hard = await orchestrate({ issues: [2], readBody: async () => "", now, sleep, resolveLane: async () => ({ ok: false, code: "lane.branch_missing", detail: "x" }), runOne: async () => { throw new Error("no"); } });
+    assert.equal(hard[0].outcome, "lane-refused");
+  });
+
   it("#4687 --add re-queues an issue that is skipped in the batch; any other ended issue stays 'already in batch'", () => {
     const root = tmpDir("batch-add-skipped-");
     const b = openBatch(root, "b1");

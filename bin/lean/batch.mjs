@@ -76,7 +76,7 @@ const readAdded = (file) => {
 };
 
 /** `outcome`s `--requeue` may move back to pending (#4550). */
-export const REQUEUABLE = (outcome) => ["needs-human", "invalid", "skipped", "ci-pending", "budget-exceeded"].includes(outcome) || /^dependency-/.test(String(outcome));
+export const REQUEUABLE = (outcome) => ["needs-human", "invalid", "skipped", "ci-pending", "budget-exceeded", "lane-refused"].includes(outcome) || /^dependency-/.test(String(outcome));
 /** Key of one requeue entry; the runner records the applied keys in state.json `requeueApplied`. */
 export const requeueKey = (e) => `${e.issue}@${e.at}`;
 
@@ -134,8 +134,8 @@ export function openBatch(root, id) {
       for (const x of Array.isArray(list) ? list : []) {
         const n = typeof x === "number" ? x : typeof x === "string" && /^#?\d+$/.test(x.trim()) ? parseInt(x.trim().replace("#", ""), 10) : NaN;
         if (!Number.isSafeInteger(n) || n < 1) { skipped.push({ issue: x, reason: "not an integer" }); continue; }
-        // #4687: an issue skipped in the batch (a dependency ended) is re-queued, not refused; any other row is "already in batch"
-        if (have.has(n) && st.results?.[n]?.outcome === "skipped" && !requeued.includes(n) && self.requeue([n], { reason: "--add", by: "operator" }).requeued.length) { requeued.push(n); continue; }
+        // #4687/#4791: an issue skipped (a dependency ended) or lane-refused in the batch is re-queued, not refused; any other row is "already in batch"
+        if (have.has(n) && ["skipped", "lane-refused"].includes(st.results?.[n]?.outcome) && !requeued.includes(n) && self.requeue([n], { reason: "--add", by: "operator" }).requeued.length) { requeued.push(n); continue; }
         if (have.has(n)) { skipped.push({ issue: n, reason: "already in batch" }); continue; }
         have.add(n); added.push(n);
       }
