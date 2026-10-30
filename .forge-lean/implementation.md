@@ -2,7 +2,7 @@
 New pure, io-injected module `bin/lean/prodwatch-triage.mjs` on top of prodwatch-sources (#4833). Fingerprint strips every digit-bearing token and timestamps; clusters group by fingerprint and dedup against `FORGE:SIGNAL_REF fp=` markers; rules come from an optional `Alert rules:` list in the loadPolicy text plus defaults; validation goes only through `runAdapter`.
 
 ### Changes
-- bin/lean/prodwatch-triage.mjs: fingerprint, signalRef, cluster, parseAlertRules, classify, validate, tally, CLASSES, DEFAULT_RULES.
+- bin/lean/prodwatch-triage.mjs: fingerprint, signalRef, cluster, parseAlertRules, classifyCluster, validateCluster, tallyClusters, CLASSES, DEFAULT_RULES.
 - bin/lean/prodwatch-triage.test.mjs: 10 tests (new regression suite).
 - bin/lean/fixtures/prodwatch/{memos,expected}.json: synthetic anonymised 70 memos (8 issue clusters, 4 transient, 4 expected-class, pg cluster of 15).
 - devdocs/modules/lean.md: one paragraph sentence.
@@ -28,3 +28,4 @@ No formatter config in the repo; none run. No env vars. Fixture is synthetic (R8
 
 ### Sibling-list check
 The ten flagged tests do not enumerate bin/lean modules at the flagged lines (stub-lane comments, git args, MECHANICAL_KINDS, etc.); recorded as not_members in result.json, no test list changed.
+- Renamed exports classify/validate/tally to classifyCluster/validateCluster/tallyClusters to avoid collisions with decision-engine and bench scripts.

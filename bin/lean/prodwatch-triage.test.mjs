@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fingerprint, signalRef, cluster, parseAlertRules, classify, validate, tally, CLASSES, DEFAULT_RULES } from "./prodwatch-triage.mjs";
+import { fingerprint, signalRef, cluster, parseAlertRules, classifyCluster, validateCluster, tallyClusters, CLASSES, DEFAULT_RULES } from "./prodwatch-triage.mjs";
 import { parseSources, normalizeMemo } from "./prodwatch-sources.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
 
@@ -32,7 +32,7 @@ describe("cluster", () => {
     assert.deepEqual(cs.map((c) => c.count), exp.clusters.map((c) => c.count).sort((x, y) => y - x));
     assert.equal(cs[0].count, 15);
     assert.match(cs[0].signals[0].title, /Postgres/);
-    const classes = cs.map((c) => classify(c, DEFAULT_RULES));
+    const classes = cs.map((c) => classifyCluster(c, DEFAULT_RULES));
     const want = {};
     for (const c of exp.clusters) want[c.class] = (want[c.class] ?? 0) + 1;
     const got = {};
@@ -53,62 +53,62 @@ describe("cluster", () => {
   });
 });
 
-describe("classify and rules", () => {
+describe("classifyCluster and rules", () => {
   const one = (title, body = "", sev = "P2") => cluster([sig(title, body, { severity: sev })])[0];
   it("covers all six classes with the defaults", () => {
     assert.deepEqual(CLASSES, ["incident", "defect", "monitoring-bug", "expected-class", "deploy-fallout", "transient"]);
-    assert.equal(classify(one("Nightly backup completed")), "expected-class");
-    assert.equal(classify(one("Alert is a false positive")), "monitoring-bug");
-    assert.equal(classify(one("Transient timeout")), "transient");
-    assert.equal(classify(one("Errors after the deploy")), "deploy-fallout");
-    assert.equal(classify(one("Service down")), "incident");
-    assert.equal(classify(one("Odd latency")), "defect");
-    assert.equal(classify(one("Odd latency", "", "P0")), "incident");
+    assert.equal(classifyCluster(one("Nightly backup completed")), "expected-class");
+    assert.equal(classifyCluster(one("Alert is a false positive")), "monitoring-bug");
+    assert.equal(classifyCluster(one("Transient timeout")), "transient");
+    assert.equal(classifyCluster(one("Errors after the deploy")), "deploy-fallout");
+    assert.equal(classifyCluster(one("Service down")), "incident");
+    assert.equal(classifyCluster(one("Odd latency")), "defect");
+    assert.equal(classifyCluster(one("Odd latency", "", "P0")), "incident");
   });
   it("reads rules from the policy text loadPolicy returns, repo rules before defaults", () => {
     const text = "# Star\n\nAlert rules:\n- expected-class: /canary/\n- transient: blip, wobble\n- nonsense: x\n- defect: /(/\n\nOther text\n";
     const policy = loadPolicy({ io: { readFile: (p) => { if (p.endsWith("NORTHSTAR.md")) return text; throw new Error("nope"); } } });
     const { rules, warnings } = parseAlertRules(policy.policyText);
     assert.equal(warnings.length, 2);
-    assert.equal(classify(one("Canary check ok"), rules), "expected-class");
-    assert.equal(classify(one("A wobble"), rules), "transient");
-    assert.equal(classify(one("Nightly backup completed"), rules), "expected-class", "defaults still apply");
+    assert.equal(classifyCluster(one("Canary check ok"), rules), "expected-class");
+    assert.equal(classifyCluster(one("A wobble"), rules), "transient");
+    assert.equal(classifyCluster(one("Nightly backup completed"), rules), "expected-class", "defaults still apply");
     assert.equal(parseAlertRules("").rules.length, DEFAULT_RULES.length);
   });
 });
 
-describe("validate", () => {
+describe("validateCluster", () => {
   const sources = parseSources({ sql: { kind: "sql", run: "PSQL {sql}", queries: [{ name: "pool", sql: "select 1" }] } });
   const pg = (extra = {}) => ({ ...cluster([sig("Pool exhausted", "p", { query: "pool" })])[0], ...extra });
   const rows = { code: 0, stdout: JSON.stringify([{ pool: 1 }]) };
   it("attaches reproduced evidence and files only with evidence; runs only declared commands", async () => {
     const io = spy((c) => (c === "PSQL select 1" ? rows : null));
-    const v = await validate(pg(), { sources, ...io });
+    const v = await validateCluster(pg(), { sources, ...io });
     assert.equal(v.fileable, true);
     assert.ok(v.evidence.length >= 1);
     assert.deepEqual(io.calls, ["PSQL select 1"]);
-    const none = await validate(pg({ signals: [sig("Pool exhausted", "p", { query: "other" })] }), { sources, ...spy(() => rows), match: () => false });
+    const none = await validateCluster(pg({ signals: [sig("Pool exhausted", "p", { query: "other" })] }), { sources, ...spy(() => rows), match: () => false });
     assert.equal(none.fileable, false);
     assert.equal(none.reason, "no reproduced evidence");
-    assert.equal((await validate(pg(), { sources: [], exec: async () => rows })).reason, "no read-only queries declared");
+    assert.equal((await validateCluster(pg(), { sources: [], exec: async () => rows })).reason, "no read-only queries declared");
   });
   it("never files expected-class or a duplicate, and does not even query", async () => {
     const io = spy(() => rows);
-    const e = await validate(pg({ class: "expected-class" }), { sources, ...io });
-    const d = await validate(pg({ duplicateOf: 5 }), { sources, ...io });
+    const e = await validateCluster(pg({ class: "expected-class" }), { sources, ...io });
+    const d = await validateCluster(pg({ duplicateOf: 5 }), { sources, ...io });
     assert.deepEqual([e.fileable, d.fileable, io.calls.length], [false, false, 0]);
     assert.match(d.reason, /#5/);
   });
   it("a monitoring-bug is fileable when the queries ran clean and found nothing; a failing query is not", async () => {
-    const clean = await validate(pg({ class: "monitoring-bug", signals: [sig("Alert false positive", "x")] }), { sources, exec: async () => ({ code: 0, stdout: "[]" }) });
+    const clean = await validateCluster(pg({ class: "monitoring-bug", signals: [sig("Alert false positive", "x")] }), { sources, exec: async () => ({ code: 0, stdout: "[]" }) });
     assert.equal(clean.fileable, true);
-    const broken = await validate(pg({ class: "monitoring-bug", signals: [sig("Alert false positive", "x")] }), { sources, exec: async () => ({ code: 2, stdout: "" }) });
+    const broken = await validateCluster(pg({ class: "monitoring-bug", signals: [sig("Alert false positive", "x")] }), { sources, exec: async () => ({ code: 2, stdout: "" }) });
     assert.equal(broken.fileable, false);
     assert.ok(broken.errors.length);
   });
-  it("tally counts expected-class clusters without filing them", async () => {
-    const vs = [await validate(pg(), { sources, exec: async () => rows }), await validate(pg({ class: "expected-class", count: 11 }), { sources })];
-    const t = tally(vs);
+  it("tallyClusters counts expected-class clusters without filing them", async () => {
+    const vs = [await validateCluster(pg(), { sources, exec: async () => rows }), await validateCluster(pg({ class: "expected-class", count: 11 }), { sources })];
+    const t = tallyClusters(vs);
     assert.equal(t.fileable, 1);
     assert.equal(t.byClass["expected-class"], 1);
     assert.equal(t.clusters, 2);

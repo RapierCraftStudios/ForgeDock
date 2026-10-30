@@ -1,4 +1,4 @@
-{"status":"fixed","summary":"Add bin/lean/prodwatch-triage.mjs (fingerprint, cluster, classify, validate, tally) with synthetic 70-memo fixtures and tests","requirements":[
+{"status":"fixed","summary":"Add bin/lean/prodwatch-triage.mjs (fingerprint, cluster, classifyCluster, validateCluster, tallyClusters) with synthetic 70-memo fixtures and tests","requirements":[
 {"id":"R1","status":"implemented","evidence":"bin/lean/prodwatch-triage.mjs:23"},
 {"id":"R2","status":"implemented","evidence":"bin/lean/prodwatch-triage.mjs:41"},
 {"id":"R3","status":"implemented","evidence":"bin/lean/prodwatch-triage.mjs:66"},

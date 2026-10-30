@@ -87,7 +87,7 @@ export function parseAlertRules(policyText) {
 }
 
 /** One of CLASSES: first matching rule over the cluster's text; else a P0 cluster is an incident; else a defect. */
-export function classify(clusterIn, rules = DEFAULT_RULES) {
+export function classifyCluster(clusterIn, rules = DEFAULT_RULES) {
   const text = (clusterIn?.signals ?? []).map((s) => `${s.title ?? ""}\n${s.body ?? ""}`).join("\n");
   for (const r of Array.isArray(rules) ? rules : []) if (CLASSES.includes(r?.class) && r.re instanceof RegExp && new RegExp(r.re.source, r.re.flags.replace(/[gy]/g, "")).test(text)) return r.class;
   return clusterIn?.severity === "P0" ? "incident" : "defect";
@@ -100,8 +100,8 @@ export function classify(clusterIn, rules = DEFAULT_RULES) {
  * `{class, evidence, errors, fileable, reason}`. Not fileable: a duplicate of an open issue, expected-class (counted),
  * or no evidence. A monitoring-bug is fileable once the queries ran clean and found nothing (the alert is what is wrong).
  */
-export async function validate(clusterIn, { sources = [], ...io } = {}) {
-  const cls = clusterIn.class ?? classify(clusterIn);
+export async function validateCluster(clusterIn, { sources = [], ...io } = {}) {
+  const cls = clusterIn.class ?? classifyCluster(clusterIn);
   const out = { ...clusterIn, class: cls, evidence: [], errors: [], fileable: false, reason: "" };
   if (clusterIn.duplicateOf != null) return { ...out, reason: `duplicate of #${clusterIn.duplicateOf}` };
   if (cls === "expected-class") return { ...out, reason: "expected-class: counted, not filed" };
@@ -120,7 +120,7 @@ export async function validate(clusterIn, { sources = [], ...io } = {}) {
 }
 
 /** Counts by class and outcome for validated clusters (`counted` includes the expected-class ones that are never filed). */
-export function tally(validated) {
+export function tallyClusters(validated) {
   const byClass = Object.fromEntries(CLASSES.map((c) => [c, 0]));
   let fileable = 0, signals = 0;
   for (const v of validated ?? []) { byClass[v.class] = (byClass[v.class] ?? 0) + 1; signals += v.count ?? 0; if (v.fileable) fileable++; }
