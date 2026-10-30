@@ -8,7 +8,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches, SECRET_ENV } from "./batch.mjs";
-import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
+import { startDaemon, scheddPaths, connectDaemon, request, SCHEDD_SCRIPT, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
@@ -632,5 +632,20 @@ describe("schedd due timer (#4627)", () => {
   it("without a due callback there is no timer", async () => {
     const d = await boot({ dueMs: 10 });
     await d.close();
+  });
+});
+
+describe("#4762 win32 socket path", () => {
+  it("win32 derives a stable per-dir named pipe; other platforms keep the unix socket file", () => {
+    const a = scheddPaths("/tmp/a", "win32"), b = scheddPaths("/tmp/b", "win32");
+    assert.match(a.sock, /^\\\\\.\\pipe\\forgedock-schedd-[0-9a-f]{12}$/);
+    assert.equal(a.sock, scheddPaths("/tmp/a", "win32").sock);
+    assert.notEqual(a.sock, b.sock);
+    assert.equal(a.lock, scheddPaths("/tmp/a").lock);
+    for (const pl of ["linux", "darwin"]) assert.equal(scheddPaths("/tmp/a", pl).sock, join("/tmp/a", "schedd.sock"));
+  });
+  it("the spawn script is a filesystem path, not a URL pathname", () => {
+    assert.ok(existsSync(SCHEDD_SCRIPT), SCHEDD_SCRIPT);
+    assert.doesNotMatch(SCHEDD_SCRIPT, /^\/[A-Za-z]:/);
   });
 });
