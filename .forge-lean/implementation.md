@@ -24,3 +24,6 @@ No new env vars. Transient lane retries are uncapped, backoff 120s doubling to 3
 
 ### Docs (#4791)
 Added a #4791 entry to devdocs/modules/lean.md (transient lane retry, lane-refused requeueable) for the docs freshness check.
+
+### CI follow-up (Unit tests, node --test)
+The CI log was not available offline (GitHub not to be touched), so I ran `bin/lean/**` and `bin/tests/**` locally (concurrency capped): 4199 pass, 5 fail. Two are timing tests in lean.test.mjs (#4690, #4405: idle-timeout kills) that pass when run in a smaller set; three are in bin/tests/journey.test.mjs (preflight Platform/WSL/Shell rows, stale-copy .tmp cleanup, detectEnvironment platform info) and fail identically with this change's source files reverted, i.e. they are environmental (this host is WSL/root), not caused by #4791. No failure traced to this change, so no code change was made; the CI failure itself is not reproduced.
