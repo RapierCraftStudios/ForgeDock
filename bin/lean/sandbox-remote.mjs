@@ -44,7 +44,7 @@ export function isActionsEndpoint(endpoint) {
  * GET /sandboxes/:id/usage -> {minutes, agent?} (agent: the pool agent that ran it, #4549), DELETE /sandboxes/:id (404 = gone). `Authorization: Bearer <token>`.
  * 429/503 on launch is a retryable capacity error (`Retry-After` seconds). Error text never carries the token.
  * Optional `POST /sandboxes/:id/stop` (#4612) asks the pool to SIGTERM the lane so its teardown checkpoints and it reports `deferred run.interrupted`; 2xx = sent, 404/405 = unsupported or gone (never a DELETE fallback).
- * Optional `GET /status -> {free: N}` is the pool's free slots (#4540); anything else (404, error, malformed) is unknown (null).
+ * Optional `GET /status -> {free: N, online?, total?}` is the pool's free slots (#4540); without `online` the agents of `GET /agents` give it (#4788). Anything else (404, error, malformed) is unknown (null).
  */
 export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fetch }) {
   const root = String(endpoint ?? "").replace(/\/+$/, "");
@@ -79,14 +79,21 @@ export function httpTransport({ endpoint, token = null, fetchFn = globalThis.fet
     async destroy(id) { const r = await call("DELETE", p(id)); if (r.ok || r.status === 404) return true; throw fail("destroy", r); },
     async capacity() {
       // `free` (#4540) and agent liveness `online`/`total` (#4547) are each optional; none valid is unknown.
+      const ok = (v) => Number.isInteger(v) && v >= 0;
+      let out = {};
       try {
         const r = await call("GET", "/status");
-        if (!r.ok) return null;
-        const ok = (v) => Number.isInteger(v) && v >= 0;
-        const { free, online, total } = r.data ?? {};
-        const out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}) };
-        return Object.keys(out).length ? out : null;
-      } catch { return null; }
+        if (r.ok) { const { free, online, total } = r.data ?? {}; out = { ...(ok(free) ? { free } : {}), ...(ok(online) ? { online } : {}), ...(ok(total) ? { total } : {}) }; }
+      } catch { out = {}; }
+      if (out.online === undefined) {
+        // #4788: a router without /status liveness: online = agents answering and not paused, as bin/pool/router.mjs status() does.
+        try {
+          const r = await call("GET", "/agents");
+          const list = r.ok && Array.isArray(r.data?.agents) ? r.data.agents : null;
+          if (list) out = { ...out, online: list.filter((a) => a?.ok === true && !a.paused).length, total: list.length };
+        } catch { /* liveness stays unknown */ }
+      }
+      return Object.keys(out).length ? out : null;
     },
   };
 }

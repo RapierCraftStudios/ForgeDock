@@ -811,6 +811,7 @@ describe("#4528: a full sandbox pool (sandbox.capacity) is never capped", () => 
   it("sandbox.capacity is uncapped and honours retryInSeconds; other codes still cap at maxDeferrals", () => {
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity" }, { now: 0, deferrals: 99 }), { delayMs: 60000, host: true });
     assert.deepEqual(deferPolicy({ code: "sandbox.capacity", retryInSeconds: 30 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 30000, host: true });
+    assert.deepEqual(deferPolicy({ code: "sandbox.unreachable", retryInSeconds: 60 }, { now: 0, deferrals: 99, maxDeferrals: 3 }), { delayMs: 60000, host: true }); // #4788
     for (const code of ["merge.transient", "gh.unavailable", "cli.idle", "rate_limited", "sandbox.start_failed"]) {
       assert.deepEqual(deferPolicy({ code, retryInSeconds: 60 }, { now: 0, deferrals: 3, maxDeferrals: 3 }), { capped: true }, code);
     }
@@ -967,6 +968,29 @@ describe("#4547: opt-in local fallback in mode remote when no pool agent is onli
   });
 });
 
+describe("#4788: a pool offline for longer than N minutes is reported once", () => {
+  const run = async (onlineAt) => {
+    const c = { t: 1_000_000 };
+    const sleep = async (ms) => { await new Promise((r) => setImmediate(r)); c.t += ms; };
+    const events = [];
+    let tries = 0;
+    await orchestrate({ issues: [1], parallel: 1, now: () => c.t, sleep, pollMs: 1, readBody: async () => "", onUpdate: (row) => events.push(row),
+      remote: { max: 1, isRemote: () => true, poolOfflineMin: 1, capacity: () => ({ free: null, online: onlineAt(c.t), at: 1 }) },
+      runOne: async () => { tries++; if (tries < 80) { c.t += 5000; return { terminalReason: "deferred", code: "sandbox.unreachable", retryInSeconds: 1, detail: "HTTP 502" }; } return { terminalReason: "merged", pr: 1 }; } });
+    return { events, tries };
+  };
+  it("zero live agents past the limit: one pool-offline event; unreachable never gives up", async () => {
+    const { events, tries } = await run(() => 0);
+    assert.equal(events.filter((e) => e.outcome === "pool-offline").length, 1);
+    assert.equal(tries, 80);
+    assert.equal(events.some((e) => /gave up/.test(e.detail ?? "")), false);
+  });
+  it("an agent online: no event", async () => {
+    const { events } = await run(() => 1);
+    assert.equal(events.some((e) => e.outcome === "pool-offline"), false);
+  });
+});
+
 describe("#4592: forgedock orchestrate --hold / --release", () => {
   it("the hold file: holdIssues / readHeld / releaseIssues merge sorted unique positive integers; invalid content reads as []", () => {
     const b = openBatch(tmpDir("batch-hold-"), "b1");
@@ -1052,5 +1076,26 @@ describe("#4751: batch state is private", () => {
       writeAtomic(join(root, "plain.json"), "{}");
       assert.equal(mode(join(root, "plain.json")), 0o644);
     } finally { process.umask(old); }
+  });
+});
+
+describe("batch plan secrets (#4787)", () => {
+  it("writePlan never writes secret env values and keeps the plan 0600", () => {
+    const b = openBatch(join(tmpDir("batch-sec-"), "batches"), "b20260101-000000-1");
+    b.writePlan({ v: 1, env: { PATH: "/bin", COMPUTESHARE_TOKEN: "tok-123", AWS_ACCESS_KEY: "k-456" } });
+    const raw = readFileSync(join(b.dir, "plan.json"), "utf8");
+    assert.ok(!raw.includes("tok-123") && !raw.includes("k-456"));
+    assert.deepEqual(b.readPlan().env, { PATH: "/bin" });
+    assert.deepEqual(b.readPlan().envSecrets, ["AWS_ACCESS_KEY", "COMPUTESHARE_TOKEN"]);
+    assert.equal(statSync(join(b.dir, "plan.json")).mode & 0o777, 0o600);
+  });
+  it("scrubPlan rewrites a pre-fix 0644 plan and is a no-op otherwise", () => {
+    const b = openBatch(join(tmpDir("batch-sec-"), "batches"), "b20260101-000000-2");
+    mkdirSync(b.dir, { recursive: true });
+    writeFileSync(join(b.dir, "plan.json"), JSON.stringify({ v: 1, env: { PATH: "/bin", COMPUTESHARE_TOKEN: "tok-123" } }), { mode: 0o644 });
+    assert.deepEqual(b.scrubPlan(), ["COMPUTESHARE_TOKEN"]);
+    assert.ok(!readFileSync(join(b.dir, "plan.json"), "utf8").includes("tok-123"));
+    assert.equal(statSync(join(b.dir, "plan.json")).mode & 0o777, 0o600);
+    assert.deepEqual(b.scrubPlan(), []);
   });
 });

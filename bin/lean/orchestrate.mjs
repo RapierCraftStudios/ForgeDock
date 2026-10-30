@@ -20,7 +20,7 @@
  * before scheduling, so a live lane does not hold up the others.
  * `deferred` is a scheduling fact, not an end: each typed code is requeued with its retry-at (`deferPolicy`), a usage
  * limit holds admissions for that account until its reset, and deferrals other than a busy resource (`host.busy`,
- * `sandbox.capacity`, #4528) stop after `maxDeferrals`.
+ * `sandbox.capacity`, #4528; `sandbox.unreachable`, #4788) stop after `maxDeferrals`.
  * Usage-limit holds (#4190) are keyed by backend identity in `limits` (the host store, shared by every batch on the
  * host; in memory when absent): admission checks the hold of `identity()`, the account the next lane would use. While held, the
  * batch re-reads the store every `pollMs` (#4446), so `forgedock limits clear` admits on the next poll, not at the reset. An `engine-error` is
@@ -122,7 +122,9 @@ export const ENGINE_ERROR_RELAUNCHES = 1;
 export const HOST_BUSY_RETRY_S = 60;
 // #4528: a busy host or a full sandbox pool is a wait, not a failure: requeued after its retry-in, never capped.
 // A lane that could not be resolved because gh/git failed (network blip) is the same kind of wait (#4791).
-const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity", "lane.unresolved"]);
+// #4788: an unreachable pool is a wait too (the lane already retried for unreachable_window_min); a stall is reported by poolStall.
+const UNCAPPED_DEFERRALS = new Set(["host.busy", "sandbox.capacity", "sandbox.unreachable", "lane.unresolved"]);
+export const POOL_OFFLINE_ALERT_MIN = 10;
 export const RATE_LIMIT_FALLBACK_S = 15 * 60;
 export const DEFER_BACKOFF_S = 120;
 export const DEFER_BACKOFF_MAX_S = 30 * 60;
@@ -284,6 +286,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const reg = sched?.registry ?? null;
   const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
   const remoteMax = remote && Number.isInteger(remote.max) && remote.max >= 0 ? remote.max : 0;
+  let poolOfflineSince = null, poolStallNoted = false; // #4788: when sampled online first read 0, and whether the stall was reported
   let capAt, capAdmits = 0; // #4540: provider capacity sample and the remote admissions made since it
   const remoteRun = new Set(); // remote lanes running now (#4253): admitted against remoteMax, never the host cap
   let budgetLocal = false; // the execution budget refused a remote lane under on_budget local: the rest run on the host
@@ -481,6 +484,15 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         // #4540: the provider's free slots (`remote.capacity() -> {free, at}`, sync, null = unknown) cap admissions per sample `at`; the issue queues here instead of a 503.
         let cap = null;
         try { cap = remote.capacity?.() ?? null; } catch { cap = null; }
+        // #4788: zero live agents for longer than `remote.poolOfflineMin` (default 10): one loud batch event, none while online > 0.
+        if (cap && cap.online === 0) {
+          poolOfflineSince ??= now();
+          const limitMs = (posNum(remote.poolOfflineMin) ?? POOL_OFFLINE_ALERT_MIN) * 60000;
+          if (!poolStallNoted && now() - poolOfflineSince > limitMs) {
+            poolStallNoted = true;
+            update({ issue: null, outcome: "pool-offline", detail: `STALLED: no compute pool agent online for over ${Math.round(limitMs / 60000)} min; ${remote.offlineFallback ? "lanes fall back to the host" : "remote lanes wait (set execution.fallback_local or use mode local to run on the host)"}` });
+          }
+        } else if (cap && cap.online > 0) { poolOfflineSince = null; poolStallNoted = false; }
         // #4547: opt-in (`execution.fallback_local`): every pool agent offline or asleep (sampled online 0) runs the lane on the host.
         if (remote.offlineFallback && cap && cap.online === 0) {
           p = { where: "local", reason: `fallback to local: no pool agent online (${p.reason})` };
