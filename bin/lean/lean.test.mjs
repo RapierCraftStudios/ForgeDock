@@ -391,6 +391,21 @@ describe("core work-on", () => {
     assert.doesNotMatch(p, /complete what is missing/);
   });
 
+  it("#4786: a remote lane branch holding only .forge-lean scratch plans fresh and drops the scratch", async () => {
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", changed: [".forge-lean/contract.json", ".forge-lean/checkpoint.json"] });
+    await run(w);
+    assert.doesNotMatch(builders(w)[0][4], /This is a rerun/);
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "rm" && c.includes(".forge-lean")), "scratch removed from the branch");
+    assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && c.join(" ").includes("drop stale .forge-lean scratch")));
+  });
+
+  it("#4786: a remote lane branch with a code change besides scratch still resumes", async () => {
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", changed: [".forge-lean/contract.json", "src/foo.js"] });
+    await run(w);
+    assert.match(builders(w)[0][4], /This is a rerun/);
+    assert.ok(!w.calls.some((c) => c[0] === "git" && c[1] === "rm" && c.includes(".forge-lean")));
+  });
+
   it("a reviewer that returns no JSON twice ends review.no_verdict", async () => {
     const w = world({ reviews: ["no json", "still none"] });
     const r = await run(w);
@@ -934,6 +949,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     const r = await run(w);
     assert.equal(r.code, "contract.invalid");
     assert.match(builders(w)[1][4], /R1: quote is not verbatim from the issue/);
+    assert.equal(r.quoteMismatch, true, "#4789: quote-only problems are recoverable");
     assert.equal(builders(w).length, 2, "plan + one correction, no implement call");
     assert.match(nhBody(w), /still invalid after one correction/);
     const w2 = world({ contract: bad1, fixedContract: CONTRACT });
@@ -1732,7 +1748,7 @@ describe("hotspot prevention (forge#4195): plan facts, build rule, unexempted gr
     assert.equal(hotspotBuildRule(null), ""); assert.equal(hotspotBuildRule(facts([], { enabled: false })), "");
     const plan = builderPlanPrompt(7) + hotspotPlanNote(facts([HOT, { ...HOT, path: "a/b.py" }, { ...HOT, path: "c/d.py" }]));
     // 1850: #4404 (verify out_of_band) and #4396 (split size rule) grew the plan prompt to ~1803 tokens on CI paths; 1900: #4589 (check timeout is not a block, one block-rule line). 2050: #4724 (deferred-row bucket rule).
-    assert.ok(approxTokens(plan) <= 2100, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
+    assert.ok(approxTokens(plan) <= 2150, `plan prompt with hotspots is ${approxTokens(plan)} tokens`);
     assert.ok(approxTokens(builderImplementPrompt() + hotspotBuildRule(facts([]))) <= 1650); // 1600: #4591 (never hand-name migration files) and #4596 (i18n translate rule), one line each; 1650: #4726 (e2e rule)
   });
 
@@ -2168,7 +2184,7 @@ describe("comment templates", () => {
 
   it("plan and implement prompts carry the stage templates and the contract schema within budget", () => {
     const plan = builderPlanPrompt(7), impl = builderImplementPrompt();
-    assert.ok(approxTokens(plan) <= 2000, `plan prompt is ${approxTokens(plan)} tokens`); // 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
+    assert.ok(approxTokens(plan) <= 2050, `plan prompt is ${approxTokens(plan)} tokens`); // 2050: #4769 (activation-row rule); 2000: #4730 (owner-step remainder); 1950: #4724 (deferred-row bucket rule)
     assert.ok(approxTokens(impl) <= 1650, `implement prompt is ${approxTokens(impl)} tokens`); // 1650: #4726 e2e rule; 1550: #4596 i18n translate rule
     for (const h of ["### What Was Claimed", "### What We Found", "### Root Cause", "### Affected Files", "### Sibling Sweep", "### History", "### Recommendation", "### Related Issues",
       "investigation.md", "contract.json", "PLANNING ONLY", '"requirements"', '"deliverables"', '"preserve"', '"validate"', "verbatim", "defer", "post-deploy"]) assert.ok(plan.includes(h), h);
@@ -2632,7 +2648,7 @@ describe("orchestrate", () => {
       gh: async (a) => {
         if (a[0] === "repo" && a[1] === "view") return "main\n";
         if (a.includes("milestone")) return JSON.stringify({ milestone: milestones[a[2]] ? { title: milestones[a[2]] } : null });
-        return JSON.stringify({ body: a[2] === "1" ? "**Depends on**: #2" : "" });
+        return JSON.stringify({ body: a[2] === "1" ? "**Depends on**: #2" : "", authorAssociation: "OWNER" });
       },
       git: async (a) => (a[0] === "ls-remote" && ["refs/heads/staging", "refs/heads/milestone/m-one"].includes(a.at(-1)) ? "abc\tref\n" : ""),
     };
@@ -2821,7 +2837,7 @@ describe("orchestrate maintenance budget (#4197)", () => {
       // No maintenance scan without the budget; labels (host priority, #4191) ride on the body call, never a call of their own.
       // #4399: the batch-start acceptance-probe sweep (`forge-probe` search) is not a maintenance scan.
       assert.ok(calls.some((c) => c.startsWith("issue list") && c.includes("forge-probe")), calls.join("\n"));
-      assert.ok(!calls.some((c) => (c.startsWith("issue list") && !c.includes("forge-probe")) || c.endsWith("--json labels")), calls.join("\n"));
+      assert.ok(!calls.some((c) => (c.startsWith("issue list") && !c.includes("forge-probe") && !c.includes("--label blocked")) || c.endsWith("--json labels")), calls.join("\n"));
       ran.length = 0; calls.length = 0;
       const res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...mk(), maintenance: { share: 0.5, whenIdle: true, labels: ["maintenance"] } });
       assert.deepEqual(ran, [1, 9]);
@@ -4243,6 +4259,24 @@ describe("large diffs never reach argv (#4129)", () => {
     assert.equal(seen[0].args[0], "--print"); assert.equal(seen[0].args[1], "--output-format");
     call("go");
     assert.equal(seen[1].args[1], "go"); assert.equal(seen[1].input, undefined);
+  });
+
+  it("#4763 promptGoesViaStdin is platform-aware and counts the other argv", async () => {
+    const { promptGoesViaStdin, runCliBackend } = await import("../runner.mjs");
+    assert.equal(promptGoesViaStdin("x".repeat(40 * 1024), [], "win32"), true);
+    assert.equal(promptGoesViaStdin("x".repeat(10 * 1024), ["--print"], "win32"), false);
+    assert.equal(promptGoesViaStdin("x".repeat(16 * 1024 - 10), ["--a".repeat(10)], "win32"), true);
+    assert.equal(promptGoesViaStdin("x".repeat(40 * 1024), [], "linux"), false);
+    assert.equal(promptGoesViaStdin("x".repeat(65 * 1024), [], "linux"), true);
+    const prev = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const seen = [];
+      runCliBackend({ spec: { name: "t" }, userMessage: "y".repeat(40 * 1024), systemPrompt: "sys", args: ["1"], cwd: tmpDir("core-4763-"), logger: { log() {} },
+        spawnFn: (_b, args, o2) => { seen.push({ args, input: o2.input }); return { status: 0, stdout: "{}", stderr: "" }; } });
+      assert.equal(seen[0].input.length, 40 * 1024);
+      assert.ok(!seen[0].args.some((x) => x.length > 1000));
+    } finally { Object.defineProperty(process, "platform", prev); }
   });
 
   it("runCliBackendAsync pipes a 300 KiB prompt to a real child (no E2BIG)", async () => {
@@ -6598,7 +6632,7 @@ describe("#4395 lane profile", () => {
       assert.match(p, /Issue independent read-only calls \(reads, greps, git log\/blame, gh\) in the same turn or one shell call\./);
       assert.match(p, /Read each file's ranges once .* and keep notes; don't re-read it\./);
     }
-    assert.ok(approxTokens(builderImplementPrompt()) <= 1650 && approxTokens(builderPlanPrompt(7)) <= 2000);
+    assert.ok(approxTokens(builderImplementPrompt()) <= 1650 && approxTokens(builderPlanPrompt(7)) <= 2050);
   });
 
   it("runCliBackendAsync reports the first stream turn's context as baselineTokens; makeLeanRunner drops it on resume", async () => {

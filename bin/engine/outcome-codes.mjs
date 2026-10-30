@@ -81,6 +81,7 @@ export const OUTCOME_CODES = Object.freeze({
   REVIEW_NO_VERDICT: "review.no_verdict",
   // Core work-on conformance gate (bin/lean/conformance.mjs).
   CONTRACT_INVALID: "contract.invalid",
+  CONTRACT_INVALID_COMMAND: "contract.invalid_command",
   REVIEW_INCOMPLETE: "review.incomplete",
   REVIEW_INCONSISTENT: "review.inconsistent",
   CONFORMANCE_OMISSION: "conformance.omission",
@@ -194,14 +195,14 @@ export function codeForTerminalReason(reason) {
  * Batch recovery classes of a lane result (forge#4267). The batch runner recovers `recoverable` rows once
  * (`orchestration.recovery.max_attempts`) and re-queues them; only `human` rows are escalations.
  */
-export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.BUDGET_EXCEEDED]);
+export const RECOVERABLE_CODES = Object.freeze([OUTCOME_CODES.CI_RED, OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.BUILDER_BLOCK_UNTYPED, OUTCOME_CODES.CONTRACT_INVALID, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.BUDGET_EXCEEDED]);
 /** `builder.blocked` is only reached by a typed human block: credentials, spend, promotion, customer, product-decision. */
 export const HUMAN_CODES = Object.freeze([OUTCOME_CODES.BUILDER_BLOCKED]);
 
 /**
  * `recoverable` | `human` | `terminal` for a lane result row ({outcome|terminalReason, code, issueEdited?, conflicting?}).
  * Recoverable: needs-human `ci.red`, `base.conflict`, `builder.block_untyped`, `env.tool_missing`, `env.repro_unrunnable`, `env.capability_remote`, `budget.exceeded`, `contract.invalid` after a mid-run issue
- * edit (`issueEdited`), `ci-pending` on a conflicting PR (`conflicting`), and the non-human `budget-exceeded` turn-overrun end (forge#4505). Human: `builder.blocked`. Anything else
+ * edit (`issueEdited`) or when every problem was an unmatched quote (`quoteMismatch`), `ci-pending` on a conflicting PR (`conflicting`), and the non-human `budget-exceeded` turn-overrun end (forge#4505). Human: `builder.blocked`. Anything else
  * (another code, or not a needs-human/ci-pending row) is terminal. Pure, never throws.
  */
 export function classifyNeedsHuman(row, { parked = false } = {}) {
@@ -221,12 +222,12 @@ function classifyNeedsHumanBase(row) {
   if (outcome === "budget-exceeded") return "recoverable";
   if (outcome !== "needs-human") return "terminal";
   if (HUMAN_CODES.includes(row.code)) return "human";
-  if (row.code === OUTCOME_CODES.CONTRACT_INVALID) return row.issueEdited === true ? "recoverable" : "terminal";
+  if (row.code === OUTCOME_CODES.CONTRACT_INVALID) return row.issueEdited === true || row.quoteMismatch === true ? "recoverable" : "terminal";
   return RECOVERABLE_CODES.includes(row.code) ? "recoverable" : "terminal";
 }
 
 /** forge#4725: mechanical/environment codes recover on their own budget (`recovery.mechanicalMaxAttempts`), apart from conformance failures. */
-export const MECHANICAL_CODES = Object.freeze([OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]);
+export const MECHANICAL_CODES = Object.freeze([OUTCOME_CODES.BASE_CONFLICT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND, OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_CAPABILITY_REMOTE]);
 
 /** `mechanical` | `conformance`: the recovery budget class of a lane result row (a conflicting `ci-pending` is a base conflict). */
 export function recoveryClassOf(row) {

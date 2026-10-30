@@ -13,10 +13,11 @@ import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mj
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
-import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
+import { TRACKED, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
 import { checksAt } from "./postdeploy-check.mjs";
+import { readRollouts, detectNewOffKeys } from "./activation.mjs";
 import { preflightProbes, preflightProblems, unsetEnvVars, runPreflight, knownToContract } from "./preflight.mjs";
 import { resolveLane, isDefaultLane, isShippedLane, DEFAULT_STAGING_BRANCH } from "./lane.mjs";
 import { splitGate, rationaleLine } from "./decompose.mjs";
@@ -60,7 +61,7 @@ import { isExternalKill } from "./hostkill.mjs";
 import { buildResumeDigest } from "./resume.mjs";
 import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registryPkgVersion, closedEdgeNote, onlyAsk, fileRemainder } from "./needs-human-premise.mjs";
 import { lightEligibility } from "./light.mjs";
-import { untrackToolState, unstageToolState } from "./toolstate.mjs";
+import { untrackToolState, unstageToolState, isToolState } from "./toolstate.mjs";
 import { ensureSignedOff } from "./signoff.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
@@ -72,14 +73,15 @@ export const RECOVER_HOW = Object.freeze({
   [OUTCOME_CODES.CI_RED]: "the PR's required checks failed. Read the failed checks' logs (`gh run view <run-id> --log-failed`, or the repo's declared check commands), fix the causes, re-run those checks locally and push new commits only (never rewrite history)",
   [OUTCOME_CODES.BASE_CONFLICT]: "the PR conflicts with origin/BASE. Merge origin/BASE, resolve every conflict keeping both sides' intent, re-run the validate commands and push new commits only",
   [OUTCOME_CODES.BUILDER_BLOCK_UNTYPED]: "an earlier run escalated an in-scope technical choice. Do not block on it: pick the option most consistent with the issue, the repo's conventions and prior merged decisions, and name the alternative you did not take in your summary",
-  [OUTCOME_CODES.CONTRACT_INVALID]: "the issue was edited while the earlier run planned. Plan against the current issue text",
+  [OUTCOME_CODES.CONTRACT_INVALID]: "the issue was edited while the earlier run planned, or its requirement quotes did not match the issue text. Plan against the current issue text and quote each requirement verbatim from it",
   [OUTCOME_CODES.BUDGET_EXCEEDED]: "an earlier run spent the implement turn budget for this issue's size; its digest is in the earlier run's detail and the branch holds its checkpointed work. Continue from the checkpoint against the frozen contract without starting over; if the remaining work cannot fit the budget, stop with a typed split-required block naming the sub-issues instead of grinding",
+  [OUTCOME_CODES.CONTRACT_INVALID_COMMAND]: "a frozen validate command was rejected by its runner's CLI (vitest 3 rejects -q). The change may already be correct: rerun the validate with the runner's own flags (vitest: --reporter=dot) and amend the command, do not rewrite the deliverables",
   [OUTCOME_CODES.ENV_TOOL_MISSING]: "a validate command could not run because the host lacks the tool or module named in the earlier run's detail; the change may already be correct. Do not edit the deliverables for it and never install anything globally: run the same check through the repo's own toolchain (its virtualenv, lockfile-pinned runner or package scripts), record that exit under the same validate id and name the command you used in your summary",
   [OUTCOME_CODES.ENV_CAPABILITY_REMOTE]: "the earlier run ran in a remote sandbox that lacks a host-only capability (SOPS/age key, ops credentials, read-only prod monitor SSH); this host has it. Do the work that needed it now, with the host's own tools and credentials, and never print or commit a secret in the clear",
   [OUTCOME_CODES.ENV_REPRO_UNRUNNABLE]: "the repro harness could not run the contract's repro_test on head (timeout, missing runner or dependencies); the change may already be correct. Do not edit the deliverables or stub dependencies for it and never install anything globally: run the repro command through the repo's own toolchain and installed dependencies, and when it cannot run in this checkout, fix the repro_test command (not the code) so it does",
 });
 /** #4323/#4334: precheck failure codes that are environment errors (state "environment"), never a builder resume. */
-const ENV_CODES = Object.freeze([OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE]);
+const ENV_CODES = Object.freeze([OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.CONTRACT_INVALID_COMMAND]);
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
 export const CONFORMANCE_MODES = Object.freeze(["shadow", "enforce"]);
@@ -1081,12 +1083,16 @@ export async function runCore(o) {
       }
     };
     if (resumed) { try { await io.git(["fetch", "origin", branch], { cwd }); } catch { /* remote branch may not exist (PR-less resume) */ } }
+    // #4786: an open-PR-less remote branch whose only changes vs the base are tool state (.forge-lean/ scratch) holds no work: plan fresh, never resume its stale contract.
+    const toolOnly = async (ref) => { const n = String(await io.git(["diff", "--name-only", `${base}...${ref}`], { cwd })).split("\n").map((x) => x.trim()).filter(Boolean); return n.every((f) => isToolState(f)); };
+    let scratchOnly = false;
+    if (resumed && !resumed.pr) { try { scratchOnly = await toolOnly(`origin/${branch}`); } catch { /* unreadable: resume as before */ } }
     // #4118: a local lane branch with commits not yet pushed (e.g. a reviewed commit whose push failed) must never be reset.
     // Reuse it when it is ahead of the base and contains everything the remote branch has.
     let keepLocal = false;
     try {
       const ahead = Number(String(await io.git(["rev-list", "--count", `${base}..refs/heads/${branch}`], { cwd })).trim());
-      if (ahead > 0) {
+      if (ahead > 0 && !(await toolOnly(`refs/heads/${branch}`).catch(() => false))) { // #4786: a scratch-only local branch is not reused
         let containsRemote = true;
         if (resumed) { try { await io.git(["merge-base", "--is-ancestor", `origin/${branch}`, `refs/heads/${branch}`], { cwd }); } catch { containsRemote = false; } }
         keepLocal = containsRemote;
@@ -1100,6 +1106,13 @@ export async function runCore(o) {
       ev({ event: "LOCAL_BRANCH_REUSED", branch });
     } else if (resumed) {
       wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, `origin/${branch}`], `origin/${branch}`);
+      if (scratchOnly) { // from origin/<branch> so the later plain push stays fast-forward; the scratch goes out in a normal commit
+        await io.git(["rm", "-r", "-f", "-q", "--ignore-unmatch", "--", LEAN_DIR], { cwd: wt }).catch(() => {});
+        if (String(await io.git(["diff", "--cached", "--name-only"], { cwd: wt }).catch(() => "")).trim()) await io.git(["commit", "--no-verify", "-m", "chore(forge): drop stale .forge-lean scratch from the lane branch"], { cwd: wt }).catch(() => {});
+        resumed = null;
+        ev({ event: "SCRATCH_BRANCH_DROPPED", branch });
+        T.decisions.push(`Lane branch ${branch} held only ${LEAN_DIR}/ scratch: its stale checkpoint was dropped and the issue is planned fresh`);
+      }
     } else {
       wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, base], base);
     }
@@ -1179,7 +1192,7 @@ export async function runCore(o) {
     // #4160: files the branch touched (three-dot) whose content still differs from the base tip (two-dot); a file merged
     // in from the base by a base-sync equals the base and drops out of the scope check.
     const changedFiles = async () => {
-      const touched = names(await git(["diff", "--name-only", `${base}...HEAD`]));
+      const touched = names(await git(["diff", "--name-only", `${base}...HEAD`])).filter((f) => !isToolState(f)); // #4786
       if (!touched.length) return touched;
       const differs = new Set(names(await git(["diff", "--name-only", base, "HEAD"])));
       return touched.filter((f) => differs.has(f));
@@ -1589,7 +1602,7 @@ export async function runCore(o) {
           }
         }
         await flushStages(result ?? { status: "fixed" }, ["investigation"]); // always posted: FORGE:INVESTIGATION/VALIDATE are read downstream
-        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, issueEdited ? { issueEdited: true } : {});
+        if (!vc.ok) return await needsHuman(`The builder's contract is still invalid after one correction:\n${vc.problems.slice(0, 12).map((x) => `- ${x}`).join("\n")}`, OUTCOME_CODES.CONTRACT_INVALID, { ...(issueEdited ? { issueEdited: true } : {}), ...(vc.problems.every((x) => /: quote is not verbatim/.test(x)) ? { quoteMismatch: true } : {}) });
         frozen = historyRows(contract); // #4694 guards
         frozen = withDecisionRows(frozen, readDecisionIndex(repo)); // #4695: anchored decisions on the deliverable paths; one index read
         const hRows = (frozen.preserve ?? []).filter((p) => p.source === "decision");
@@ -2116,6 +2129,13 @@ export async function runCore(o) {
         if (!r || r.exit === undefined || r.exit === 0) continue;
         let x;
         try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: String(v.command), cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+        // #4761: a runner usage error (vitest -q) is the frozen command's defect: try the normalised command once
+        const fixed = cliUsageError(x ?? {}) ? normalizeRunnerCommand(v.command) : null;
+        if (fixed && fixed !== String(v.command)) {
+          try { x = await heavyStep("precheck", async () => (await runWithTimeoutRetry((timeoutMs) => io.runCommand({ command: fixed, cwd: wt, timeoutMs, env }), vcfg.precheckTimeoutSeconds * 1000)).r); } catch (e) { x = { rc: 127, output: String(e?.message ?? e) }; }
+          const note = `Validate ${v.id} hit a runner usage error; reran normalised (\`${fixed}\`): exit ${x?.rc}`;
+          if (!T.decisions.includes(note)) T.decisions.push(note);
+        }
         out[v.id] = { rc: Number.isInteger(x?.rc) ? x.rc : 1, output: String(x?.output ?? "") };
       }
       if (Object.keys(out).length) ev({ event: "VALIDATE_RERUN", runs: Object.entries(out).map(([id, x]) => ({ id, rc: x.rc })) });
@@ -2139,6 +2159,11 @@ export async function runCore(o) {
       return r.failures;
     }
     /** Precheck then review, on the current result and changed files (also the base-sync re-review). */
+    /** #4769: default-off keys the diff adds to the forge.yaml `rollouts` registry; [] when none is declared. */
+    async function newOffKeysOf() {
+      const cfg = readRollouts(wt);
+      return cfg ? detectNewOffKeys(cfg, String(await git(["diff", "-U0", `${base}...HEAD`, "--", ...cfg.files]).catch(() => ""))) : [];
+    }
     async function gate() {
       await refreshIssue("conformance");
       result = (await readResult()) ?? result;
@@ -2164,7 +2189,7 @@ export async function runCore(o) {
       const repoHas = validateRuns && Object.keys(validateRuns).length ? repoTracks(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean)) : undefined;
       // #4626: post-deploy check ids resolve against the lane base's checks file or this PR's
       const checkIds = effective.requirements?.some((r) => r.disposition === "post-deploy") ? new Set(Object.keys(await checksAt(git, [base, "HEAD"], wt))) : null;
-      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures });
+      const pc = precheck({ contract: effective, result, changedFiles: files, ignore: IGNORE, ciVerified, hotspots, repro: await reproOf(effective), validateRuns, repoHas, frozen, checkIds, guardFailures, newOffKeys: await newOffKeysOf() });
       // #4350: a scope-check validate stale only by amended deliverables is judged by the engine's scope gate instead
       if (pc.superseded?.length) {
         ev({ event: "VALIDATE_SUPERSEDED", runs: pc.superseded });
@@ -2243,6 +2268,10 @@ export async function runCore(o) {
       if (failures.every((f) => f.code === OUTCOME_CODES.ENV_REPRO_UNRUNNABLE)) {
         T.anomalies.push("Environment error: the repro harness could not run the repro test on head");
         return await needsHuman(`Environment error (not a conformance failure): the repro harness could not run the repro test on head; no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRun the repro command through the repo's own toolchain and installed dependencies, then rerun.`, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE);
+      }
+      if (failures.every((f) => f.code === OUTCOME_CODES.CONTRACT_INVALID_COMMAND)) {
+        T.anomalies.push("Contract defect: a frozen validate command is a runner CLI usage error");
+        return await needsHuman(`Contract defect (not a conformance failure): a frozen validate command is rejected by its runner's CLI, so no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRecovery re-plans the command (vitest: --reporter=dot, not -q).`, OUTCOME_CODES.CONTRACT_INVALID_COMMAND);
       }
       const tools = [...new Set(failures.filter((f) => f.tool).map((f) => f.tool))].join(", ");
       T.anomalies.push(`Environment error: validate command(s) could not run, the host is missing ${tools}`);

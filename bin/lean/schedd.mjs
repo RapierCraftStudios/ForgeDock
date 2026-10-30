@@ -36,17 +36,21 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, write
 import { createConnection, createServer } from "node:net";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { schedDir, pidAlive } from "./sched.mjs";
-import { batchRoot, listBatches, openBatch } from "./batch.mjs";
+import { batchRoot, listBatches, openBatch, SECRET_ENV } from "./batch.mjs";
 
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
 export const LOCK_CHECK_MS = 5 * 1000;
 export const DUE_MS = 15 * 60 * 1000; // #4627: how often the due callback (windowed post-deploy monitoring) runs while the daemon is up
 
-export function scheddPaths(dir = schedDir()) {
-  return { dir, sock: join(dir, "schedd.sock"), lock: join(dir, "schedd.lock"), log: join(dir, "schedd.log") };
+/** #4762: win32 `net` servers only accept named pipes, so the socket is a per-dir pipe there (it vanishes with its server). */
+export function scheddPaths(dir = schedDir(), platform = process.platform) {
+  const sock = platform === "win32" ? `\\\\.\\pipe\\forgedock-schedd-${createHash("sha1").update(resolve(dir)).digest("hex").slice(0, 12)}` : join(dir, "schedd.sock");
+  return { dir, sock, lock: join(dir, "schedd.lock"), log: join(dir, "schedd.log") };
 }
 
 // Env keys a batch keeps for its lanes (account selectors, tool paths); persisted in plan.json (#4691). Session-scoped
@@ -57,7 +61,6 @@ const ENV_KEEP = /^(PATH|HOME|USER|SHELL|LANG|LC_.*|TMPDIR|CLAUDE_CONFIG_DIR|CLA
 const LEGACY_PIN = /^(CLAUDE_.*|ANTHROPIC_.*|GH_.*|GITHUB_.*|FORGEDOCK_.*)$/;
 const SESSION_SCOPED = /^(CLAUDE_PID|CLAUDE_CODE_(SESSION|MESSAGING|ENTRYPOINT|EXECPATH|SSE).*)$/;
 // A secret never rides the allowlist: it resolves at lane start (env, keychain) unless the operator names it as a passthrough.
-export const SECRET_ENV = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY)/i;
 const SESSION_DIR = /(^|\/)(arg0|claude[^/]*)(\/|$)/;
 
 /** A forge.yaml glob (`*` within a segment, `**` across segments, `?`) as an anchored RegExp. */
@@ -137,7 +140,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     log(`schedd: already running (pid ${owner})`);
     return { running: false, owner };
   }
-  rmSync(p.sock, { force: true });
+  if (process.platform !== "win32") rmSync(p.sock, { force: true });
 
   const hosted = new Map(); // batch id -> {id, dir, subs:Set<fn>}
   const conns = new Set();
@@ -279,7 +282,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     const serverClosed = keepSock ? Promise.resolve(server.unref()) : new Promise((r) => server.close(() => r()));
     closing = Promise.all([serverClosed, stopped]).then(() => {
       try { if (parseInt(readFileSync(p.lock, "utf8"), 10) === pid) rmSync(p.lock, { force: true }); } catch { /* gone */ }
-      if (!keepSock) rmSync(p.sock, { force: true });
+      if (!keepSock && process.platform !== "win32") rmSync(p.sock, { force: true });
       resolveClosed();
     });
     return closing;
@@ -294,7 +297,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     let owner = NaN;
     try { owner = parseInt(readFileSync(p.lock, "utf8"), 10); } catch { /* gone */ }
     if (owner !== pid) { keepSock = true; log(`schedd: lost lock (owner ${Number.isInteger(owner) ? `pid ${owner}` : "none"}), exiting`); close(); }
-    else if (!existsSync(p.sock)) { log(`schedd: lost socket ${p.sock}, exiting`); close(); }
+    else if (process.platform !== "win32" && !existsSync(p.sock)) { log(`schedd: lost socket ${p.sock}, exiting`); close(); }
   }, lockCheckMs);
   lockTimer.unref?.();
   // #4627: windowed post-deploy checks. One run at a time; a failure is logged and never stops the daemon.
@@ -305,6 +308,9 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     try { await due(); } catch (e) { log(`schedd: due run failed: ${e?.message ?? e}`); } finally { dueRunning = false; }
   }, dueMs) : null;
   dueTimer?.unref?.();
+
+  // #4787: plans written before secrets were dropped still hold token values; scrub them on start.
+  for (const id of listBatches(root)) { try { const n = openBatch(root, id).scrubPlan(); if (n.length) log(`schedd: scrubbed ${n.join(", ")} from batch ${id}`); } catch { /* advisory */ } }
 
   // Daemon restart: resume every daemon-hosted batch that never wrote its report; live lanes are re-adopted.
   if (resumeOnStart) {
@@ -360,8 +366,10 @@ export async function connectDaemon({ dir = schedDir(), spawnDaemon = defaultSpa
   }
 }
 
+export const SCHEDD_SCRIPT = fileURLToPath(new URL("../forgedock.mjs", import.meta.url));
+
 /** `forgedock schedd` in its own session, output to `schedd.log`. */
-export function defaultSpawn({ dir = schedDir(), script = new URL("../forgedock.mjs", import.meta.url).pathname, env = process.env } = {}) {
+export function defaultSpawn({ dir = schedDir(), script = SCHEDD_SCRIPT, env = process.env } = {}) {
   mkdirSync(dir, { recursive: true });
   const out = openSync(scheddPaths(dir).log, "a");
   try {
@@ -399,4 +407,4 @@ export function request(sock, msg, onMsg = () => {}) {
   });
 }
 
-export const scheddExists = (dir = schedDir()) => existsSync(scheddPaths(dir).sock);
+export const scheddExists = (dir = schedDir()) => existsSync(process.platform === "win32" ? scheddPaths(dir).lock : scheddPaths(dir).sock);

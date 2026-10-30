@@ -88,4 +88,16 @@ describe("lane resolution (#4125)", () => {
     assert.deepEqual(readBranches(d), { default: "main", staging: "develop", featurePattern: "milestone/{slug}" });
     assert.deepEqual(readBranches(tmpDir("lane-")), { default: null, staging: null, featurePattern: null });
   });
+
+  it("#4791 a failed gh/git command is transient; a genuine refusal is not", async () => {
+    for (const o of [{ ghFails: "issue" }, { ghFails: "repo" }, { gitFails: true }]) {
+      const r = await resolve(o);
+      assert.deepEqual([r.ok, r.code, r.transient], [false, "lane.unresolved", true]);
+    }
+    const missing = await resolve({ onOrigin: ["main"] });
+    assert.equal(missing.ok, false);
+    assert.ok(!missing.transient);
+    const slug = await resolve({ milestone: "🚀" });
+    assert.deepEqual([slug.code, !!slug.transient], ["lane.unresolved", false]);
+  });
 });

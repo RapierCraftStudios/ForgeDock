@@ -1,40 +1,35 @@
 **Verdict**: CONFIRMED
 **Confidence**: high
-**Severity**: high (remote batches stall silently for hours; lanes give up)
+**Severity**: medium (Windows lanes with 32-64 KB prompts fail deterministically with cli.spawn_failed on every rerun)
 **Task Type**: bug
 
 ### What Was Claimed
-With every computeshare agent offline, `sandbox.unreachable` lanes burn `max_deferrals` and give up; new launches loop on `sandbox.capacity` 503 forever; nobody is alerted. The addendum says `execution.fallback_local` cannot fire because the computeshare router gives no `online` count.
+On win32 a prompt between ~32 KB and 64 KB is passed as an argv element (limit `CLI_ARGV_PROMPT_MAX_BYTES = 64 KiB`, chosen for Linux MAX_ARG_STRLEN) and `spawn` fails with ENAMETOOLONG, because CreateProcess caps the whole command line at 32,767 UTF-16 chars (8,191 via cmd.exe shims).
 
 ### What We Found
-- bin/lean/orchestrate.mjs:123 `UNCAPPED_DEFERRALS` holds only `host.busy` and `sandbox.capacity`. `sandbox.unreachable` goes through the capped path (:175-179, :600-619) and ends "gave up after N deferrals".
-- bin/lean/execution.mjs:~519 `unreachable()` returns deferred `SANDBOX_UNREACHABLE` with retryInSeconds 60. It is the code that is capped.
-- bin/lean/orchestrate.mjs:481 the fallback needs `cap.online === 0`.
-- bin/lean/sandbox-remote.mjs:80-91 `httpTransport.capacity()` reads only `GET /status` for `{free, online, total}`. A 404 or malformed reply gives null, so `online` is unknown and the fallback never fires.
-- bin/pool/router.mjs:89-94 and :230 the built-in router derives `online` (`ok && !paused`) and serves `/status`. The computeshare router has `/agents` only (`/status` and `/capacity` are 404 there).
-- bin/engine-cli.mjs:1628 samples capacity and `online`, so a transport that returns `online` is enough.
-- Nothing emits a pool-offline event or alert. Grep for notify in orchestrate.mjs and engine-cli.mjs found nothing relevant.
+- bin/runner.mjs:1538 `CLI_ARGV_PROMPT_MAX_BYTES = 64 * 1024`, platform independent.
+- bin/runner.mjs:1597 `promptViaStdin = byteLength(userMessage) > CLI_ARGV_PROMPT_MAX_BYTES`; only the prompt is counted, not the system-prompt path or flags (:1599-1620 build cliArgs).
+- bin/runner.mjs:1653 stdin is delivered via `input:` when promptViaStdin; `claude --print` reads stdin when no prompt arg is given.
+- bin/runner.mjs:1541 ENAMETOOLONG is already in DETERMINISTIC_SPAWN_ERRNOS (so reruns fail identically, matching the report).
+- bin/lean/lean.test.mjs:4238-4251 existing argv/stdin test has no win32 case.
+- The earlier FORGE:INVESTIGATION comment and the prior .forge-lean/result.json ("already-fixed", #4788 offline pool) describe a different issue and do not match this issue's body; the claim here is not fixed on origin/staging (checked: line 1597 unchanged).
 
 ### Root Cause
-1. `sandbox.unreachable` is capped like an ordinary deferral, although it means the pool is down (a wait, not a failure; see #4528).
-2. The remote transport derives liveness only from `/status`, so against a router without it `online` is undefined and #4547 is dead.
-3. No stall detector or alert.
+The argv/stdin threshold is a single Linux-derived constant, with no win32 awareness and no accounting for the rest of the command line.
 
 ### Affected Files
-bin/lean/orchestrate.mjs, bin/lean/sandbox-remote.mjs, bin/lean/execution.mjs (config key if added), tests: bin/lean/batch.test.mjs, bin/lean/sandbox-provider.contract.test.mjs, bin/lean/execution.test.mjs.
+- bin/runner.mjs (hotspot, 3250 lines: wiring plus a small pure helper, well under +150 lines)
+- bin/lean/lean.test.mjs (existing test at :4238; add win32 case)
+- Enumerating tests: bin/tests/runner.test.mjs:7 lists 22 export names; add no export beyond what is needed, and if a new export is added, join that list. No new file under bin/, so bin/lean/lean.test.mjs:66 file list is unaffected.
 
 ### Sibling Sweep
-- `SANDBOX_AUTH` (401/403, 300s) is also capped; correct, since it needs a human fix.
-- The `engine-error` relaunch (`TRANSPORT_TEXT` breaker, orchestrate.mjs:~530) is related, but out of scope.
-- No other transport reports liveness, only httpTransport.
+`grep CLI_ARGV_PROMPT_MAX_BYTES bin`: only runner.mjs and lean.test.mjs. runCliBackendAsync (runner.mjs) shares the decision, verify it goes through the same helper or the same constant lines (line 1597 is the only decision site found).
 
 ### History
-#4528 uncapped `sandbox.capacity`. #4547 added `offlineFallback`, gated on `online`. #4672 added unreachable-window retries and the `sandbox.unreachable` code.
+Introduced by 01e2591d2 "fix(lean): large reviewer prompts go over stdin ... (#4129)", which targeted Linux E2BIG only.
 
 ### Recommendation
-1. Add `sandbox.unreachable` to `UNCAPPED_DEFERRALS`. Its retry is already bounded by `unreachable_window_min` plus the 60s delay.
-2. In `httpTransport.capacity()`, when `/status` yields no `online`, query `GET /agents` and compute `online = count(ok && !paused)` and `total`. A failed `/agents` leaves it unknown; keep `free` if present.
-3. In orchestrate `grant`, track the first time `cap.online === 0`. Once it has lasted more than N minutes (default 10, configurable via `execution`), emit ONE `update({outcome:"pool-offline"...})` batch event, plus the status-line report and a notification if an existing mechanism is reachable. Reset when online > 0. With `fallback_local` unset the batch stays in remote mode and reports only; a default host fallback is deferred (it overrides an opt-in and risks host overload).
+Add `export const CLI_ARGV_PROMPT_MAX_BYTES_WIN32 = 16 * 1024` and a pure `promptGoesViaStdin(prompt, otherArgs, platform = process.platform)` in bin/runner.mjs: limit = win32 ? 16 KiB : 64 KiB, and the compared size is prompt bytes plus the byte length of otherArgs (system-prompt path, flags) so the whole command line is counted. Use it at :1597 (build the non-prompt args first). Keep the stdin delivery at :1653. Add unit tests for win32 (40 KB prompt -> stdin, 10 KB -> argv, args counted) and keep the linux case.
 
 ### Related Issues
-#4528, #4547, #4672, #4540; AlterLab lanes #37297, #37313, #37402, #37532.
+#4129 (original stdin switch), #4690/#4518 (spawn-failure classification, unrelated).
