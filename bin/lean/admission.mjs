@@ -6,13 +6,29 @@
  */
 // #4169: load average lags by minutes and is phase-blind, so it is off unless configured; heavy steps are gated by
 // the host heavy-step semaphore (heavy.mjs) instead. An explicit `max_load_per_core` is still honoured.
-export const ADMISSION_DEFAULTS = Object.freeze({ enabled: true, min_free_mem_mb: 2048, min_free_tmp_mb: 1024, max_load_per_core: null });
+export const ADMISSION_DEFAULTS = Object.freeze({ enabled: true, min_free_mem_mb: 2048, min_free_tmp_mb: 1024, max_load_per_core: null, lane_cpu_reservation: 1, lane_mem_mb: 2048 });
 export const ADMISSION_RETRY_SECONDS = 60;
 
 /** Workers one verification step may use (#4182): max(1, floor(cores / lanes)); bad inputs count as 1. Heavy shims pass live heavy holders (#4169). */
 export function hostParallelism({ cores, lanes } = {}) {
   const c = Number.isFinite(cores) && cores > 0 ? cores : 1, l = Number.isFinite(lanes) && lanes > 0 ? lanes : 1;
   return Math.max(1, Math.floor(c / l));
+}
+
+/**
+ * Local lane cap (#4777): how many lanes this host can run at once, from cores and free memory:
+ * max(1, min(floor(cores / lane_cpu_reservation), floor((memAvailableMb - min_free_mem_mb) / lane_mem_mb))). Evaluated per
+ * admission attempt, so it follows the host as lanes come and go; an unknown probe leaves that bound off, and with both
+ * unknown (or admission disabled) it is null (no derived cap).
+ */
+export function localLaneCap({ cfg = {}, cores, memAvailableMb } = {}) {
+  const c = { ...ADMISSION_DEFAULTS, ...Object.fromEntries(Object.entries(cfg ?? {}).filter(([, v]) => v !== undefined && v !== null)) };
+  if (c.enabled === false) return null;
+  const pos = (v, d) => (Number.isFinite(v) && v > 0 ? v : d);
+  const bounds = [];
+  if (Number.isFinite(cores) && cores > 0) bounds.push(Math.floor(cores / pos(c.lane_cpu_reservation, 1)));
+  if (Number.isFinite(memAvailableMb)) bounds.push(Math.floor((memAvailableMb - pos(c.min_free_mem_mb, 0)) / pos(c.lane_mem_mb, 2048)));
+  return bounds.length ? Math.max(1, Math.min(...bounds)) : null;
 }
 
 const gb = (mb) => { const g = mb / 1024; return `${Number.isInteger(g) ? g : g.toFixed(1)}G`; };

@@ -48,7 +48,8 @@
  * starts only when the batch is under its K and the registry grants it a host slot; `priorityOf(issue)` (persisted as
  * `priorities`) ranks it host-wide, and the batch's ready issues are tried in priority order. Ready issues it cannot
  * start yet stay offered in the registry (polled every `pollMs`) and are withdrawn once no longer ready; a settled lane
- * releases its slot, an adopted one re-records it.
+ * releases its slot, an adopted one re-records it. `sched.cap` may be a function, evaluated at each admission attempt
+ * (#4777: the live local lane cap from cores and memory; running lanes are never revoked, over-cap issues stay queued).
  * Per-issue lock (#4481), on with `sched.exclusive` (registry entries ask `exclusive: true`): when another batch holds a live slot for the same repo and issue (`tryAcquire` `conflict`, or
  * `registry.holder` for a lane placed remote), the issue is not started: it is retried after `pollMs` with one `deferred`
  * row naming that batch (no deferral count, no breaker), and admission goes on with the next ready issue.
@@ -406,6 +407,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   // Host registry seams (#4191): `offered` issues are queued for a slot, `slotted` ones hold one.
   const offered = new Set(), slotted = new Set();
   let fellBack = false;
+  // #4777: `sched.cap` may be a function (the host-derived local lane cap), evaluated at every attempt so it stays live.
+  const liveCap = () => { try { return typeof sched.cap === "function" ? sched.cap() : sched.cap; } catch { return null; } };
   const keyOf = (n) => `${sched?.batch ?? batchId ?? "?"}#${n}`;
   const prioOf = (n) => priorities.get(n) ?? 2;
   // #4409: priority, then the head band (decomposed sub-issues; with an estimator also starved issues, oldest first), then
@@ -495,7 +498,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       }
     }
     if (!reg) { if (p) placed.set(n, p); return true; }
-    const r = reg.tryAcquire(keyOf(n), entryOf(n), sched.cap);
+    const r = reg.tryAcquire(keyOf(n), entryOf(n), liveCap());
     if (!r?.ok && r?.conflict != null) return busy(n, r.conflict, wanted);
     if (!r?.ok) { offered.add(n); wanted.add(n); return false; }
     offered.delete(n); slotted.add(n);
