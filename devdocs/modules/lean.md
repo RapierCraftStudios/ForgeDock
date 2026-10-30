@@ -2067,6 +2067,11 @@ Cite: #4769.
 `batch.mjs` `writePlan` drops secret-named `plan.env` keys (`SECRET_ENV`, now defined in `batch.mjs`, imported by `schedd.mjs` (not re-exported), also matching a bare `*_KEY`) and records only their names in `plan.envSecrets`; state files stay 0600. On `--resume` the lanes re-read the value from the daemon/client environment (`mergeEnv`) or the keychain (`execution.token_env`). `batch.scrubPlan()` rewrites a pre-fix plan.json (secrets removed, chmod 0600); it runs on every `--resume` and for each batch at schedd start. `--set-env` refuses secret-named keys.
 Cite: #4787.
 
+## Entry 2026-10-30 — Transient lane-resolution failures retry; `lane-refused` is requeueable (#4791)
+
+`resolveLane` marks a failed `gh`/`git` command (milestone read, default-branch read, `git ls-remote`) `lane.unresolved` with `transient: true` (additive; no new outcome code). Genuine refusals (`lane.branch_missing`, `lane.default_branch`, `lane.mismatch`, bad slug/pattern) stay terminal `lane-refused`. In `orchestrate` `start()`, a transient refused lane is re-resolved: still transient → `deferred` / `lane.unresolved`, requeued with backoff `DEFER_BACKOFF_S` doubling to `DEFER_BACKOFF_MAX_S` from a separate `laneRetries` counter, uncapped and never counted in `deferrals`/`maxDeferrals` (`UNCAPPED_DEFERRALS`). A thrown `resolveLane` is transient. `batch.mjs` `REQUEUABLE` accepts `lane-refused`, and `--add` requeues a `lane-refused` row (like `skipped`) instead of "already in batch".
+Cite: #4791.
+
 ## Entry 2026-10-30 — North-star decision engine (#4766)
 
 `decision-engine.mjs`: `loadPolicy` (forge.yaml `decisions:`, policy file NORTHSTAR.md > CLAUDE.md > AGENTS.md, authority matrix `human_only`), `splitEscalation` (deterministic: recovery | evidence | post-deploy | external | decision | mixed), `settle` (one injected `judge` call per decision part; one-way, low-confidence or clause-less answers escalate; shadow posts `FORGE:DECISION (shadow)`, live records via `recordDecisions`, clears needs-human and requeues; idempotent on the escalation id), `isVetoed`/`revertVeto`, `effectiveMode` (reversal rate above `reversal_max` forces shadow). Nothing calls it yet: the issue-watch stage (#4765) will. Telemetry `decision_engine`; the batch report lists rows with `decided` (orchestrate.mjs `formatOutcomeLists`). Docs: `docs/DECISIONS.md`.
