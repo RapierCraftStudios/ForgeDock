@@ -1,31 +1,31 @@
 ### Approach
-Bound the relay answer on the host to what the router accepts, and stop treating a deterministic 4xx answer failure as retryable.
+New pure, io-injected module `bin/lean/prodwatch-triage.mjs` on top of prodwatch-sources (#4833). Fingerprint strips every digit-bearing token and timestamps; clusters group by fingerprint and dedup against `FORGE:SIGNAL_REF fp=` markers; rules come from an optional `Alert rules:` list in the loadPolicy text plus defaults; validation goes only through `runAdapter`.
 
 ### Changes
-- bin/lean/relay.mjs: `RELAY_ANSWER_MAX_BYTES` (512 KiB), pure `capAnswer` (trim stdout then stderr, UTF-8 safe, rc 1 + truncation notice), applied in `servicePending`; a 4xx (not 429) answer failure posts a small rc 1 answer for the same rid.
-- bin/lean/relay.test.mjs: regression tests (small answer unchanged, ~1 MB quote/newline/multibyte answer capped and run once, 413 fallback, 502/429/statusless still retried).
+- bin/lean/prodwatch-triage.mjs: fingerprint, signalRef, cluster, parseAlertRules, classifyCluster, validateCluster, tallyClusters, CLASSES, DEFAULT_RULES.
+- bin/lean/prodwatch-triage.test.mjs: 10 tests (new regression suite).
+- bin/lean/fixtures/prodwatch/{memos,expected}.json: synthetic anonymised 70 memos (8 issue clusters, 4 transient, 4 expected-class, pg cluster of 15).
+- devdocs/modules/lean.md: one paragraph sentence.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/relay.mjs:130,161
-- R2 ✅ bin/lean/relay.mjs:21,130-148,161-165
-- R3 ✅ finding validated (investigation.md)
-- R4 ✅ bin/lean/relay.test.mjs (#4831 describe)
+- R1 ✅ prodwatch-triage.mjs:23
+- R2 ✅ prodwatch-triage.mjs:41-62
+- R3 ✅ prodwatch-triage.mjs:66-92
+- R4 ✅ prodwatch-triage.mjs:101-125
+- R5 ✅ prodwatch-triage.test.mjs:27
+- R6 ✅ prodwatch-triage.mjs:101-125
+- R7 ✅ bin/lean/fixtures/prodwatch/
+- R8 deferred (owner action, in contract)
+- R9 ✅ module header, no fs/LLM, example hosts only
 
 ### Verification
-- V1 relay.test.mjs + relay.e2e.test.mjs + V2 sandbox-provider.contract/computeshare: 73 pass, 0 fail.
-- V3 (10 enumerating bin/lean tests): 327 pass, 0 fail.
-- New tests fail without the fix (2 of 14 fail against the old relay.mjs).
-- forgedock check: PASS. checks.mjs widened to the full suite (fan-out-cap), not run per host rules.
-- No formatter is configured in the repo. D3 (optional e2e case) not done.
+- V1 pass (33 tests). V2 pass (314). V3 pass (check + freshness).
+- Scoped checks.mjs run: 890 pass, 3 fail (preflight platform/WSL rows, writeInstallReceipt copyFile, forge Act II) in bin/tests, unrelated to the changed files (environment/WSL); not in the contract validates.
+- `forgedock check`: PASS. New tests fail without the module (import error).
 
 ### Notes
-No behaviour change for answers that fit; router limit unchanged; no env vars.
+No formatter config in the repo; none run. No env vars. Fixture is synthetic (R8).
 
-### Docs
-Updated devdocs/modules/lean.md (relay section: answer cap and 4xx fallback) for the docs freshness check.
-
-### Merge note (origin/staging)
-Staging landed its own fix for the same issue (1163f2c5: per-stream cap `capStream`, rc 125 fallback on any rejected answer). Merged: staging's behaviour is kept as the base (rc 125 fallback, no 4xx special-casing), and `capAnswer` is applied on top so the serialized answer is byte-exact under 512 KiB even when two escape-heavy streams pass the char cap. The 4xx-only fallback and its test were dropped as superseded.
-
-## Conformance fix
-servicePending's catch now posts the small rc 1 fallback only for a 4xx other than 429 (status integer); 429/5xx/statusless failures are swallowed and retried next poll. The earlier any-error rc 125 fallback is removed. Tests cover 413 (second rc 1 answer, returns 1) and 502 (nothing else posted, returns 0). Doc comment and dossier now match.
+### Sibling-list check
+The ten flagged tests do not enumerate bin/lean modules at the flagged lines (stub-lane comments, git args, MECHANICAL_KINDS, etc.); recorded as not_members in result.json, no test list changed.
+- Renamed exports classify/validate/tally to classifyCluster/validateCluster/tallyClusters to avoid collisions with decision-engine and bench scripts.
