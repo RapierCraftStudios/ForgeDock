@@ -28,7 +28,13 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
 1. **Host admission** — `admission.mjs` `checkAdmission` (free mem/tmp; load
    average only when `max_load_per_core` is configured, #4169);
    busy host → `deferred` / `host.busy`, before any lease or GitHub call.
-   Heavy steps are gated separately by the host heavy-step semaphore (`heavy.mjs`).
+   Heavy steps are gated separately by the host heavy-step semaphore (`heavy.mjs`); #4777: that covers pytest,
+   promtool check/test, `poetry|uv|pipenv|pdm|hatch run <heavy>` / install / sync / build, pip install, ruff/black/
+   flake8/pylint, make/cmake/ninja and `python -m pytest|mypy|tox|unittest` (python shim).
+   Local lane cap (#4777): `admission.mjs` `localLaneCap` = max(1, min(floor(cores / `lane_cpu_reservation`, default 1),
+   floor((MemAvailable − `min_free_mem_mb`) / `lane_mem_mb`, default 2048))), forge.yaml `engine.lane_cpu_reservation|
+   lane_mem_mb`. `engine-cli.mjs` `liveLaneCap` passes it (min `global_parallel`) as `sched.cap` function, which
+   `orchestrate.mjs` evaluates at every registry admission: over-cap lanes queue, running lanes are never revoked.
 2. **Lane** — `lane.mjs` `resolveLane`: milestone → `branches.feature_pattern`
    (`milestone/{slug}`), else `branches.staging`; never the default branch;
    fail closed with `lane.*` codes → `lane-refused`.
@@ -2042,3 +2048,8 @@ Cite: #4785.
 ### Issue-level readiness in the scheduler (#4773)
 
 `bin/lean/orchestrate.mjs`: `trusted(n)` gates `Blocked by`/`Depends on` edges to a trusted body author (`declared`); `getBlocked()` (the `orchestration.blocked_label` issues, default `blocked`) keeps an issue admitted but not ready in `isReady`, with `blocked`/`unblocked` rows and a poll while only blocked issues wait. `engine-cli.mjs` wires both and `addToBatch` reports the edges it created (see modules/orchestrate.md).
+
+## Entry 2026-10-30 — North-star decision engine (#4766)
+
+`decision-engine.mjs`: `loadPolicy` (forge.yaml `decisions:`, policy file NORTHSTAR.md > CLAUDE.md > AGENTS.md, authority matrix `human_only`), `splitEscalation` (deterministic: recovery | evidence | post-deploy | external | decision | mixed), `settle` (one injected `judge` call per decision part; one-way, low-confidence or clause-less answers escalate; shadow posts `FORGE:DECISION (shadow)`, live records via `recordDecisions`, clears needs-human and requeues; idempotent on the escalation id), `isVetoed`/`revertVeto`, `effectiveMode` (reversal rate above `reversal_max` forces shadow). Nothing calls it yet: the issue-watch stage (#4765) will. Telemetry `decision_engine`; the batch report lists rows with `decided` (orchestrate.mjs `formatOutcomeLists`). Docs: `docs/DECISIONS.md`.
+Cite: #4766.
