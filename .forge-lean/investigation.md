@@ -1,35 +1,41 @@
 **Verdict**: CONFIRMED
 **Confidence**: high
-**Severity**: medium (Windows lanes with 32-64 KB prompts fail deterministically with cli.spawn_failed on every rerun)
+**Severity**: medium (a large read-only relay answer is never delivered: the host re-runs the prod query on every lane status poll, the lane gets a misleading rc 125 timeout, and the stuck entry eats one of 8 pending slots)
 **Task Type**: bug
 
 ### What Was Claimed
-On win32 a prompt between ~32 KB and 64 KB is passed as an argv element (limit `CLI_ARGV_PROMPT_MAX_BYTES = 64 KiB`, chosen for Linux MAX_ARG_STRLEN) and `spawn` fails with ENAMETOOLONG, because CreateProcess caps the whole command line at 32,767 UTF-16 chars (8,191 via cmd.exe shims).
+`servicePending` (bin/lean/relay.mjs:138) posts the full relay answer; when its JSON body exceeds the router's 1 MiB body limit the router answers 413, `relayAnswer` throws, the catch swallows it as "retried on the next poll", the request stays pending, the host re-runs the command every poll and the sandbox times out with rc 125.
 
 ### What We Found
-- bin/runner.mjs:1538 `CLI_ARGV_PROMPT_MAX_BYTES = 64 * 1024`, platform independent.
-- bin/runner.mjs:1597 `promptViaStdin = byteLength(userMessage) > CLI_ARGV_PROMPT_MAX_BYTES`; only the prompt is counted, not the system-prompt path or flags (:1599-1620 build cliArgs).
-- bin/runner.mjs:1653 stdin is delivered via `input:` when promptViaStdin; `claude --print` reads stdin when no prompt arg is given.
-- bin/runner.mjs:1541 ENAMETOOLONG is already in DETERMINISTIC_SPAWN_ERRNOS (so reruns fail identically, matching the report).
-- bin/lean/lean.test.mjs:4238-4251 existing argv/stdin test has no win32 case.
-- The earlier FORGE:INVESTIGATION comment and the prior .forge-lean/result.json ("already-fixed", #4788 offline pool) describe a different issue and do not match this issue's body; the claim here is not fixed on origin/staging (checked: line 1597 unchanged).
+Verified on origin/staging (e8df65dd, the merge base of this branch):
+- bin/lean/relay.mjs:60 `runRelayed` caps each stream at `maxBytes = 1 << 20` (stdout and stderr separately), so an answer can carry ~2 MiB of text before JSON escaping.
+- bin/lean/relay.mjs:137 builds `{rc, stdout, stderr}` with no size bound; :138 `try { await transport.relayAnswer(...) } catch { /* retried on the next poll */ }` swallows every failure, including non-retryable 4xx.
+- bin/lean/sandbox-remote.mjs:85 `relayAnswer` throws `fail("relay answer", r)` on any non-ok status; `fail` (:62-68) sets `e.status`, `transient` only for 502/503/504, `retryable` for 429/503.
+- bin/pool/router.mjs:315 parses every POST body with `readJson(req)`; bin/pool/http.mjs:5-10 default limit `1 << 20` throws `{status: 413}`; router.mjs:320-322 sends it as `413 body too large`. `relayAnswer` (router.mjs:61-66) is never reached, so the entry stays `!done`.
+- bin/pool/router.mjs:263 lists every `!done` entry on `GET /sandboxes/:id/relay`, so the next status poll (sandbox-remote.mjs:146-148) re-runs the command; router.mjs:47 counts the stuck entry toward `RELAY_MAX_PENDING = 8` (:38), later requests get 429.
+- JSON escaping (`\n` -> 2 bytes, `"` -> 2 bytes, control chars -> 6 bytes) means stdout well under 1 MiB (e.g. ~600 KB of newline/quote-heavy text) already crosses the limit.
+- bin/lean/relay.test.mjs:87-99 covers the answer path only with tiny outputs and a generic throw; no size or 4xx case.
 
 ### Root Cause
-The argv/stdin threshold is a single Linux-derived constant, with no win32 awareness and no accounting for the rest of the command line.
+The host never bounds the serialized answer to what the router accepts, and treats every answer failure as retryable, so a deterministic 413 becomes an infinite re-run loop.
 
 ### Affected Files
-- bin/runner.mjs (hotspot, 3250 lines: wiring plus a small pure helper, well under +150 lines)
-- bin/lean/lean.test.mjs (existing test at :4238; add win32 case)
-- Enumerating tests: bin/tests/runner.test.mjs:7 lists 22 export names; add no export beyond what is needed, and if a new export is added, join that list. No new file under bin/, so bin/lean/lean.test.mjs:66 file list is unaffected.
+- bin/lean/relay.mjs (cap the answer, post a small fallback on a non-retryable 4xx)
+- bin/lean/relay.test.mjs (regression tests)
+- bin/tests/relay.e2e.test.mjs (optional: large-output case through the real router)
+- Enumerating tests (bin/lean listed by name): bin/engine/telemetry-seam.test.mjs:24, bin/lean/batch.test.mjs:29, bin/lean/checks.test.mjs:156, bin/lean/conformance.e2e.test.mjs:74, bin/lean/conformance.test.mjs:404, bin/lean/context.test.mjs:138, bin/lean/drift.test.mjs:14, bin/lean/execution.e2e.test.mjs:28, bin/lean/execution.test.mjs:43, bin/lean/fixround.test.mjs:10. No new file is added under bin/lean, so none of their lists change; they are run as a guard (V3).
 
 ### Sibling Sweep
-`grep CLI_ARGV_PROMPT_MAX_BYTES bin`: only runner.mjs and lean.test.mjs. runCliBackendAsync (runner.mjs) shares the decision, verify it goes through the same helper or the same constant lines (line 1597 is the only decision site found).
+- Pre-fetch at dispatch (bin/lean/sandbox-remote.mjs:151-165) runs the same commands but already caps its payload at `PREFETCH_MAX_B64` and skips oversized results: not affected.
+- Agent -> router relay request body is capped (bin/pool/agent.mjs:255 `readJson(req, 32 * 1024)`, router.mjs:45 `RELAY_MAX_BYTES`): not affected.
+- Router -> agent -> sandbox answer delivery is a GET response (router.mjs:53-59, agent.mjs:254), not subject to `readJson`: not affected once the answer is bounded.
+- Transient answer failures (502/503/504) still re-run the command on the next poll by design (relay.mjs:126 doc); not this issue's defect, left unchanged.
 
 ### History
-Introduced by 01e2591d2 "fix(lean): large reviewer prompts go over stdin ... (#4129)", which targeted Linux E2BIG only.
+Introduced by 56c0b93e "feat(execution): read-only capability relay for sandbox lanes (#4778)" (PR #4821); found in the staging review of release PR #4820. No prior fix.
 
 ### Recommendation
-Add `export const CLI_ARGV_PROMPT_MAX_BYTES_WIN32 = 16 * 1024` and a pure `promptGoesViaStdin(prompt, otherArgs, platform = process.platform)` in bin/runner.mjs: limit = win32 ? 16 KiB : 64 KiB, and the compared size is prompt bytes plus the byte length of otherArgs (system-prompt path, flags) so the whole command line is counted. Use it at :1597 (build the non-prompt args first). Keep the stdin delivery at :1653. Add unit tests for win32 (40 KB prompt -> stdin, 10 KB -> argv, args counted) and keep the linux case.
+In bin/lean/relay.mjs: add `export const RELAY_ANSWER_MAX_BYTES = 512 * 1024` and a pure `capAnswer(out, max = RELAY_ANSWER_MAX_BYTES)` that, when `Buffer.byteLength(JSON.stringify(out)) > max`, trims stdout then stderr (UTF-8 safe) until the serialized answer fits, appends `relay: output over N bytes, truncated` to stderr and sets rc 1 (same convention as relay.mjs:66). Apply it at :137. At :138, when the error has a 4xx `status` other than 429 (non-retryable), post a small `{rc: 1, stdout: "", stderr: "relay: answer rejected by the router (HTTP <status>)"}` for the same rid and count it; keep swallowing transient/429 errors and a failed fallback. Keep the router's generic 1 MiB limit (bin/pool/http.mjs:5) unchanged.
 
 ### Related Issues
-#4129 (original stdin switch), #4690/#4518 (spawn-failure classification, unrelated).
+#4778 / PR #4821 (relay introduced), PR #4820 (release review that found it).

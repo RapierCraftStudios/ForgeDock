@@ -2123,6 +2123,11 @@ which cs-relay serves on an identical argv. Lane gate: the provider sets `CS_REL
 passes it as `o.relayCaps`, and runCore's #4785 pre-build `contractHostNeeds` end ignores relayed capabilities. The
 `hostCapabilityBlock` recovery is unchanged: an unreachable relay (cs-relay exit 125, old router/agent) still recovers
 the lane locally once.
+Answer cap (#4831): the router parses a POST body at 1 MiB, so `servicePending` runs the redacted answer through
+`capAnswer` (`RELAY_ANSWER_MAX_BYTES` 512 KiB serialized): an answer that fits is posted unchanged; a larger one is trimmed
+(stdout, then stderr, never mid-character), gets a `relay: output over N bytes, truncated` stderr line and rc 1. A 4xx
+(not 429) answer failure is deterministic, so a small rc 1 "answer rejected by the router (HTTP n)" answer is posted for the
+same rid instead of retrying (which re-ran the command every poll); 429, 5xx and statusless failures still retry next poll.
 
 ## Entry 2026-10-30 — Named issue watches (#4765)
 
