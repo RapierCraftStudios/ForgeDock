@@ -1,29 +1,19 @@
 ### Approach
-Host-capability placement now reads three sources: the issue body, the FORGE:DECISION comments and the frozen contract's validate commands. A first remote run whose frozen contract needs a declared host tool now stops before building and is recovered on the host. `env.tool_missing` recoveries also run on the host. Everything is pure and deterministic, with no new gh calls and no LLM calls.
-
+Add `verify.guard_command` (extension -> command template). `commandFor` consults it first; the config reaches it through `parseVerify` -> `vcfg.guardCommand` -> `runGuards`. forge.yaml's one-level parser cannot read the nested map, so `readVerify` loads it with a new block-map reader.
 ### Changes
-- bin/lean/execution.mjs: adds `placementText({body, comments})` and `contractHostNeeds(contract, caps)`. The header comment names the #4785 inputs. It imports `parseContractComment` from render.mjs.
-- bin/engine-cli.mjs: both `readBody` variants fetch `comments` in the same `gh issue view` call and compute `needsOf` from `placementText`. They still return only the body.
-- bin/lean/lean.mjs: after the contract freeze/resume block, a lane that is placed remote, is not a recovery, and whose validate commands name a declared host capability ends `env.capability_remote` before any implementation turn.
-- bin/lean/orchestrate.mjs: `placeOf` places `env.tool_missing` recoveries local, as it already does for `env.capability_remote`.
-- devdocs/modules/lean.md: adds the #4785 entry.
-- Tests: bin/lean/execution.test.mjs (placementText, contractHostNeeds, orchestrate tool-missing relaunch) and bin/lean/lean.test.mjs (remote early exit, plus the unchanged local, undeclared and recovery cases).
-
+- bin/lean/guardgate.mjs: `commandFor(path, contract, guardCommand)` and `runGuards({guardCommand})`; template wins, `{path}` substituted or appended.
+- bin/lean/lean.mjs: passes `vcfg.guardCommand` to `runGuards`.
+- bin/lean/verify.mjs: `parseVerify` returns normalised `guardCommand` (default `{}`).
+- bin/engine-cli.mjs: `readYamlMap` plus the `readVerify` wiring.
+- docs/CONFIG.md: key documented.
+- Tests: guardgate.test.mjs, verify.test.mjs, engine-cli.test.mjs, lean.test.mjs (default-shape deepEqual).
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/execution.mjs:222 (placementText), bin/engine-cli.mjs:1808-1809 (readBody), bin/lean/lean.mjs:1607 (frozen-contract check)
-- R2 ✅ bin/lean/lean.mjs:1607 (`env.capability_remote` before building), bin/lean/orchestrate.mjs:292 (tool-missing recovery runs local); the existing endBlocked mapping (lean.mjs:867-875) is unchanged
-
+- R1 ✅ bin/lean/guardgate.mjs commandFor, verify.mjs parseVerify, engine-cli.mjs readYamlMap
+- R2 ✅ guardgate.mjs runGuards runs the command with `cwd` = worktree and the repo-relative guardbase path (test asserts it)
 ### Verification
-- V1 `node --test bin/lean/execution.test.mjs`: pass
-- V2 `node --test bin/lean/lean.test.mjs`: pass
-- V3 `node --test bin/lean/recovery.test.mjs bin/tests/engine-outcome-codes.test.mjs bin/tests/engine-cli.test.mjs`: pass
-- V4 `node --test --test-name-pattern=4785 bin/lean/execution.test.mjs bin/lean/lean.test.mjs`: pass. Fails without the fix: with lean.mjs and orchestrate.mjs reverted, the early-exit and tool-missing relaunch tests fail, and the placementText/contractHostNeeds tests cannot import functions that don't exist.
-- Extra targeted run: bin/tests/orchestrate-preflight, orchestrate-runtime-paths, bin/lean/precheck, bin/lean/batch: pass.
-- `checks.mjs --base origin/staging` widened to the full suite (921 files reference the change). The host rules forbid running the full suite, so only the targeted commands above were run.
-- No repo formatter is configured.
-
+- V1 guardgate.test.mjs + verify.test.mjs: pass (42). The new guardgate test fails without the guardgate.mjs change.
+- V2 name-filtered engine-cli.test.mjs + lean.test.mjs: pass (47).
+- scripts/check-devdocs-freshness.sh: OK. The repo has no formatter script. checks.mjs widened to the full suite (package.json change), which I did not run per host rules.
 ### Notes
-- Behaviour change: a remote lane whose frozen validate commands name a declared `execution.host_capabilities` entry (for example promtool) now ends `env.capability_remote` right after the freeze and is relaunched on the host. A rerun of such an issue is placed local from the start. Undeclared built-in needs (sops etc. not in host_capabilities) do not trigger the early exit; this follows the same rule as hostCapabilityBlock.
-- Comments are not trust-filtered for placement: a detected need can only move a lane local (contract K1).
-- The AlterLab lanes cited in the issue ran engine v1.32.1 in the sandbox, which predates the #4542/#4685 recovery mapping.
-- No new env vars.
+No behaviour change without the key. No new env vars.
+- `forgedock check` ran the scoped shell checks in parallel: 3 (classify-finding, verify-phase-trail, lint-dispatch-prompt) hit their 300s timeout under host load; none touches a changed file (no scripts/ change in the diff). lint-dispatch-prompt.test.sh rerun alone: pass=132 fail=0 in 101s. The other two were not rerun.
