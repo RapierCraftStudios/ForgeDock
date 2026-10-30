@@ -110,6 +110,13 @@ test("follow-ups: defer-only claims bot follow-ups with an unchecked defer item;
   assert.equal(classifyIssue(bot(pd), W({ include_followups: "defer-only" })), null);
   assert.equal(classifyIssue(bot(pd), W({ include_followups: "defer-only", postdeploy_rollup: "50" })), "fold");
   assert.equal(classifyIssue(iss(1, { authorAssociation: "NONE" }), W()), null);
+  // release #4820 AUTH-1: a FORGE:DEFERRED marker in the body never makes an outsider a bot
+  const spoof = iss(11, { title: "follow-up: 1 deferred item(s)", body: `<!-- FORGE:DEFERRED_FROM: #1 -->\n${defer}`, authorAssociation: "NONE", author: { login: "mallory" } });
+  assert.equal(classifyIssue(spoof, W({ include_followups: "defer-only" })), null);
+  assert.equal(classifyIssue({ ...spoof, body: `<!-- FORGE:DEFERRED_FROM: #1 -->\n${pd}` }, W({ include_followups: "defer-only", postdeploy_rollup: "50" })), null);
+  // the App as gh reports it (bare login, CONTRIBUTOR) still counts as the bot
+  const app = iss(12, { title: "follow-up: 1 deferred item(s)", body: defer, authorAssociation: "CONTRIBUTOR", author: { login: "rapiercraft-forgedock" } });
+  assert.equal(classifyIssue(app, W({ include_followups: "defer-only" })), "claim");
 });
 
 test("postdeploy_rollup folds a post-deploy-only follow-up into the release checklist once", async () => {

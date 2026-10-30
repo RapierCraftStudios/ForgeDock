@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { writeAtomic, batchRoot, openBatch, listBatches } from "./batch.mjs";
 import { milestoneSlug, readBranches, isDefaultLane, defaultBranches, DEFAULT_STAGING_BRANCH, DEFAULT_FEATURE_PATTERN } from "./lane.mjs";
 import { postDeployOnly } from "./prefilter.mjs";
+import { APP_SLUG } from "../init-repo.mjs";
 
 const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup"];
 const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -103,7 +104,9 @@ const CHECK_RE = /^\s*[-*]\s+\[ \]\s+(.*)$/;
 /** True when the body has an unchecked `— defer` checklist item. */
 export const hasUnresolvedDefer = (body) => String(body ?? "").replace(/<!--[\s\S]*?-->/g, "").split("\n").some((l) => { const t = CHECK_RE.exec(l)?.[1]; return t != null && /\s[—-]+\s*defer\b/.test(t); });
 
-const isBot = (i) => /\[bot\]$|^app\//i.test(i.author?.login ?? "") || i.author?.is_bot === true || /<!--\s*FORGE:DEFERRED/.test(i.body ?? "");
+// Bot authorship comes from the author only, never the body: a `FORGE:DEFERRED` marker in an outsider's issue is not
+// the App. `gh` reports the ForgeDock App as a bare login with no `[bot]` suffix (#4467), so it is matched by slug.
+const isBot = (i) => { const l = String(i.author?.login ?? ""); return /\[bot\]$|^app\//i.test(l) || i.author?.is_bot === true || l.toLowerCase().replace(/^app\//, "").replace(/\[bot\]$/, "") === APP_SLUG; };
 const isFollowup = (i) => /^follow-up\b/i.test(i.title ?? "");
 
 /** `claim` (a lane/batch takes it), `fold` (post-deploy-only follow-up for the rollup), or null (not for this watch). */
