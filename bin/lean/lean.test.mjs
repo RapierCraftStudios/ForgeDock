@@ -940,6 +940,7 @@ describe("conformance gate (frozen contract, precheck, structured review)", () =
     const r = await run(w);
     assert.equal(r.code, "contract.invalid");
     assert.match(builders(w)[1][4], /R1: quote is not verbatim from the issue/);
+    assert.equal(r.quoteMismatch, true, "#4789: quote-only problems are recoverable");
     assert.equal(builders(w).length, 2, "plan + one correction, no implement call");
     assert.match(nhBody(w), /still invalid after one correction/);
     const w2 = world({ contract: bad1, fixedContract: CONTRACT });
@@ -2638,7 +2639,7 @@ describe("orchestrate", () => {
       gh: async (a) => {
         if (a[0] === "repo" && a[1] === "view") return "main\n";
         if (a.includes("milestone")) return JSON.stringify({ milestone: milestones[a[2]] ? { title: milestones[a[2]] } : null });
-        return JSON.stringify({ body: a[2] === "1" ? "**Depends on**: #2" : "" });
+        return JSON.stringify({ body: a[2] === "1" ? "**Depends on**: #2" : "", authorAssociation: "OWNER" });
       },
       git: async (a) => (a[0] === "ls-remote" && ["refs/heads/staging", "refs/heads/milestone/m-one"].includes(a.at(-1)) ? "abc\tref\n" : ""),
     };
@@ -2827,7 +2828,7 @@ describe("orchestrate maintenance budget (#4197)", () => {
       // No maintenance scan without the budget; labels (host priority, #4191) ride on the body call, never a call of their own.
       // #4399: the batch-start acceptance-probe sweep (`forge-probe` search) is not a maintenance scan.
       assert.ok(calls.some((c) => c.startsWith("issue list") && c.includes("forge-probe")), calls.join("\n"));
-      assert.ok(!calls.some((c) => (c.startsWith("issue list") && !c.includes("forge-probe")) || c.endsWith("--json labels")), calls.join("\n"));
+      assert.ok(!calls.some((c) => (c.startsWith("issue list") && !c.includes("forge-probe") && !c.includes("--label blocked")) || c.endsWith("--json labels")), calls.join("\n"));
       ran.length = 0; calls.length = 0;
       const res = await orchestrateFromCli(["1", "--repo", "o/r", "--no-prefilter"], { ...mk(), maintenance: { share: 0.5, whenIdle: true, labels: ["maintenance"] } });
       assert.deepEqual(ran, [1, 9]);
