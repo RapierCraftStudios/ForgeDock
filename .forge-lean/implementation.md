@@ -17,7 +17,10 @@ Treat an unreachable pool as a wait (like #4528), derive pool liveness from `/ag
 - checks.mjs widened to the full suite (748 referencing files); not run, per host rules.
 
 ### Notes
-`remote.poolOfflineMin` is not yet wired to config (execution.mjs/engine-cli.mjs are not deliverables); the default 10 applies. No devdocs change required (freshness script OK). No formatter is configured in the repo.
+`remote.poolOfflineMin` is not yet wired to config (execution.mjs/engine-cli.mjs are not deliverables); the default 10 applies. Documented in devdocs/modules/lean.md (freshness fix). No formatter is configured in the repo.
 
 ## Precheck rerun
 classify-finding.test.sh and verify-phase-trail.test.sh timed out at 300s under host load; neither touches changed files. Reran: both pass (exit 0). No code change.
+
+## Docs freshness
+Added a #4788 paragraph to devdocs/modules/lean.md; no code change.
