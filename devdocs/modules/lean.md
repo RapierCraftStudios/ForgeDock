@@ -2055,6 +2055,11 @@ Cite: #4776.
 
 `bin/lean/orchestrate.mjs`: `trusted(n)` gates `Blocked by`/`Depends on` edges to a trusted body author (`declared`); `getBlocked()` (the `orchestration.blocked_label` issues, default `blocked`) keeps an issue admitted but not ready in `isReady`, with `blocked`/`unblocked` rows and a poll while only blocked issues wait. `engine-cli.mjs` wires both and `addToBatch` reports the edges it created (see modules/orchestrate.md).
 
+## Entry 2026-10-30 — Batch plan.json never holds secrets (#4787)
+
+`batch.mjs` `writePlan` drops secret-named `plan.env` keys (`SECRET_ENV`, now defined in `batch.mjs`, imported by `schedd.mjs` (not re-exported), also matching a bare `*_KEY`) and records only their names in `plan.envSecrets`; state files stay 0600. On `--resume` the lanes re-read the value from the daemon/client environment (`mergeEnv`) or the keychain (`execution.token_env`). `batch.scrubPlan()` rewrites a pre-fix plan.json (secrets removed, chmod 0600); it runs on every `--resume` and for each batch at schedd start. `--set-env` refuses secret-named keys.
+Cite: #4787.
+
 ## Entry 2026-10-30 — North-star decision engine (#4766)
 
 `decision-engine.mjs`: `loadPolicy` (forge.yaml `decisions:`, policy file NORTHSTAR.md > CLAUDE.md > AGENTS.md, authority matrix `human_only`), `splitEscalation` (deterministic: recovery | evidence | post-deploy | external | decision | mixed), `settle` (one injected `judge` call per decision part; one-way, low-confidence or clause-less answers escalate; shadow posts `FORGE:DECISION (shadow)`, live records via `recordDecisions`, clears needs-human and requeues; idempotent on the escalation id), `isVetoed`/`revertVeto`, `effectiveMode` (reversal rate above `reversal_max` forces shadow). Nothing calls it yet: the issue-watch stage (#4765) will. Telemetry `decision_engine`; the batch report lists rows with `decided` (orchestrate.mjs `formatOutcomeLists`). Docs: `docs/DECISIONS.md`.
