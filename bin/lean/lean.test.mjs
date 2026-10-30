@@ -4058,6 +4058,14 @@ describe("batch robustness (#4112-#4115)", () => {
       assert.equal(builders(e).length, 1);
     }
   });
+  it("#4783 a scoped frozen contract (what the engine writes) is also invalidated by a later operator decision", async () => {
+    const op = (body) => ({ body, author_association: "OWNER", user: { type: "User", login: "op" } });
+    const c = frozenComment(CONTRACT, (b) => b.replace(/\(sha256 ([0-9a-f]{12})\)/, `(sha256 $1, issue ${scoped()})`));
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [c, op("<!-- FORGE:DECISION -->\nUse the sync API, not the callback one.")] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.match(traj(w)[0], /a FORGE:DECISION was posted after it/);
+    assert.match(builders(w)[0][4], /PLANNING ONLY[\s\S]*Operator decision[\s\S]*Use the sync API/);
+  });
   it("a tampered or untrusted contract comment is ignored: the rerun plans again", async () => {
     for (const c of [frozenComment(CONTRACT, (b) => b.replaceAll("guard null", "guard nothing")), frozenComment(CONTRACT, (b) => b, "NONE")]) {
       const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [c] });
