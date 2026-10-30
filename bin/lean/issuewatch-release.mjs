@@ -7,6 +7,7 @@
  * classifies (counted in `state.llm`). The watch never merges: the deploy PR is only created, promotion stays human-only.
  */
 import { milestoneSlug } from "./lane.mjs";
+import { noComments } from "./render.mjs";
 
 export const PRIORITY_WEIGHT = { P0: 8, P1: 4, P2: 2, P3: 1 };
 export const GENERAL_THEME = "general";
@@ -48,7 +49,7 @@ export function triggers(pool, watch, now) {
 export const titleScope = (title) => /^\w+\(([^)]+)\)!?:/.exec(String(title ?? ""))?.[1].trim().toLowerCase() ?? null;
 const globRe = (g) => new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*\//g, "\u0000").replace(/\*\*/g, "\u0001").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\u0000/g, "(?:.*/)?").replace(/\u0001/g, ".*")}$`);
 /** Paths an issue names: slash-containing tokens of title and body (backticks, quotes and trailing punctuation stripped). */
-export const pathsNamed = (issue) => [...new Set(`${issue.title ?? ""}\n${issue.body ?? ""}`.replace(/<!--[\s\S]*?-->/g, "").split(/[\s`'"()<>,;]+/).map((t) => t.replace(/^\.\//, "").replace(/[.:]+$/, "")).filter((t) => /^[\w.@-][\w.@*-]*(\/[\w.@*-]+)+\/?$/.test(t) && !/^https?:/.test(t)))];
+export const pathsNamed = (issue) => [...new Set(noComments(`${issue.title ?? ""}\n${issue.body ?? ""}`).split(/[\s`'"()<>,;]+/).map((t) => t.replace(/^\.\//, "").replace(/[.:]+$/, "")).filter((t) => /^[\w.@-][\w.@*-]*(\/[\w.@*-]+)+\/?$/.test(t) && !/^https?:/.test(t)))];
 
 /** Theme of an issue from `theme_map` rules (`label:`, `path:` glob, `scope:`; the first theme in config order wins), else a title scope equal to a theme name; null when no rule classifies it. */
 export function classifyTheme(issue, themeMap = {}) {
@@ -218,7 +219,10 @@ export async function releaseTick({ watch, repo, io, state, defaults = [], listO
   if (!decision.release?.set.length) return state;
 
   const taken = [];
-  for (const i of dagOrder(decision.release.set)) { if (watch.max_issues && state.claimed.length + taken.length >= watch.max_issues) break; if (claim(i.number)) taken.push(i); }
+  // Only pool members are claimed: a Depends-on prerequisite that never passed `eligible` (an outsider's issue, an excluded label)
+  // is not launched by this watch; its dependent waits on the edge in the batch (release #4820 SPEC-2).
+  const inPool = new Set(pool.map((i) => i.number));
+  for (const i of dagOrder(decision.release.set)) { if (!inPool.has(i.number)) continue; if (watch.max_issues && state.claimed.length + taken.length >= watch.max_issues) break; if (claim(i.number)) taken.push(i); }
   if (!taken.length) return state;
   const lane = taken.map((i) => laneFor(i))[0], tag = `${milestoneSlug(decision.theme) || decision.theme}-${isoDate(now)}`, nums = taken.map((i) => i.number);
   const plan = releasePlanComment({ theme: decision.theme, tag, decision: { ...decision, release: { ...decision.release, set: taken } }, policy: policy.path, now });
@@ -226,7 +230,8 @@ export async function releaseTick({ watch, repo, io, state, defaults = [], listO
   await gh(["issue", "comment", String(tracker), "-R", repo, "--body", plan]);
   if (watch.milestone && watch.milestone !== "none") {
     const title = `release/${tag}`;
-    await gh(["api", `repos/${repo}/milestones`, "-f", `title=${title}`]);
+    // A second cut of the same theme on the same day reuses the milestone: GitHub answers 422 already_exists (release #4820 CONC-1).
+    try { await gh(["api", `repos/${repo}/milestones`, "-f", `title=${title}`]); } catch (e) { if (!/already_exists|HTTP 422/i.test(String(e?.stderr ?? e?.message ?? e))) throw e; }
     for (const n of nums) await gh(["issue", "edit", String(n), "-R", repo, "--milestone", title]);
   } else {
     const label = `release:${tag}`;

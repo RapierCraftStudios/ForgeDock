@@ -187,6 +187,29 @@ test("a merge-protected default: a milestone target tags with a release/<tag> mi
   assert.equal(io.calls.filter((a) => a[1] === "edit" && a.includes("--milestone")).length, 3);
 });
 
+test("release #4820 CONC-1: an existing release milestone is reused, not a throw that strands the claims", async () => {
+  const io = world([1, 2, 3].map((n) => iss(n, { labels: lbl("security") }))), w = W({ milestone: "v1" }), st = fresh();
+  const gh = io.gh;
+  io.gh = async (a) => { if (a[0] === "api" && String(a[1]).endsWith("/milestones")) { io.calls.push(a); throw Object.assign(new Error("gh: Validation Failed (HTTP 422)"), { stderr: "already_exists" }); } return gh(a); };
+  await step(io, w, st);
+  assert.deepEqual(io.batches[0][0], [1, 2, 3]);
+  assert.deepEqual(st.claimed, [1, 2, 3]);
+  assert.equal(io.calls.filter((a) => a[1] === "edit" && a.includes("--milestone")).length, 3);
+  io.gh = async (a) => { if (a[0] === "api") throw new Error("HTTP 500"); return gh(a); };
+  await assert.rejects(step(io, W({ milestone: "v1" }), fresh()), /HTTP 500/, "any other failure still throws");
+});
+
+test("release #4820 SPEC-2: a Depends-on prerequisite outside the eligible pool is never claimed or launched", async () => {
+  const outsider = iss(9, { labels: lbl("billing"), authorAssociation: "NONE" });
+  const issues = [iss(1, { labels: lbl("billing"), body: "Depends on #9" }), iss(2, { labels: lbl("billing") }), iss(3, { labels: lbl("billing") }), outsider];
+  const io = world(issues), w = W(), st = fresh(), claimed = [];
+  await releaseTick({ watch: w, repo: "o/r", io, state: st, defaults: ["main"], listOpen: async () => JSON.parse(await io.gh(["issue", "list"])),
+    eligible: (i) => i.authorAssociation !== "NONE" && !st.claimed.includes(i.number), claim: (n) => { claimed.push(n); return true; },
+    laneFor: () => "staging", dagOrder: (x) => x, policy: { path: "NORTHSTAR.md", text: "" } });
+  assert.ok(!claimed.includes(9), "the outsider prerequisite is not claimed");
+  assert.ok(!io.batches.flatMap((b) => b[0]).includes(9), "nor launched");
+});
+
 test("claimed elsewhere is not double-claimed; an existing deploy PR is reused; dry run writes nothing", async () => {
   const io = world([1, 2, 3, 4].map((n) => iss(n, { labels: lbl("billing") })), { prs: [{ number: 5 }] }), w = W(), st = fresh(), claims = new Set([2]);
   await step(io, w, st, { claims });
