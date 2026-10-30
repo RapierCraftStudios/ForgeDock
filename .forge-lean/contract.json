@@ -1,0 +1,100 @@
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "`sandbox.unreachable` with an offline pool should not count toward `max_deferrals`, the same as `sandbox.capacity` after #4528.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "When the pool has had zero live agents for more than N minutes:\n  - print one loud batch event and notification;",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R3",
+   "quote": "with `fallback_local` unset, fall back to the host at a host-safe K, or at least report the stall in the status line.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "**Fix:** derive `online` for the remote provider from `/agents` (`ok && !paused`), as `bin/pool/router.mjs` already does for the built-in pool, or treat a 503 or 502 streak as `online: 0`.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/orchestrate.mjs",
+   "change": "Add sandbox.unreachable to UNCAPPED_DEFERRALS (update the comment at :23/:122); in grant() track the first sample with cap.online===0 and, once it exceeds the configured minutes (default 10), emit exactly one pool-offline update() batch event (status-line text names the stall, and a notification through any existing notify mechanism); reset when online>0. Do not force host fallback when fallback_local is unset (report only).",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/sandbox-remote.mjs",
+   "change": "httpTransport.capacity(): when /status gives no valid online, GET /agents and set online=count(ok&&!paused), total=length; a failed /agents leaves online unknown. Update the doc comment.",
+   "requirements": [
+    "R4"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/batch.test.mjs",
+   "change": "Regression tests: deferPolicy uncaps sandbox.unreachable; a pool-offline event fires once after N minutes and resets.",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/lean/sandbox-provider.contract.test.mjs",
+   "change": "Test capacity() derives online from /agents when /status is 404, and stays unknown when /agents fails.",
+   "requirements": [
+    "R4"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "UNCAPPED_DEFERRALS behaviour for host.busy and sandbox.capacity, and the capped rate_limited/sandbox.auth paths in bin/lean/orchestrate.mjs deferPolicy"
+  },
+  {
+   "id": "P2",
+   "what": "httpTransport /status {free,online,total} parsing and the null-when-unknown contract in bin/lean/sandbox-remote.mjs; bin/pool/router.mjs /status unchanged"
+  },
+  {
+   "id": "P3",
+   "what": "execution.fallback_local opt-in semantics (#4547): fallback only when set and online===0"
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/batch.test.mjs bin/lean/sandbox-provider.contract.test.mjs bin/lean/execution.test.mjs"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Uncap sandbox.unreachable unconditionally rather than gating on sampled online===0",
+   "justification": "The unreachable lane error already waited unreachable_window_min (execution.mjs guard) and retries every 60s; a router that is down gives no online sample, so gating would miss the case that broke AlterLab. Mirrors #4528 (orchestrate.mjs:123).",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "Stall is reported, not auto-routed to the host, when fallback_local is unset",
+   "justification": "Issue allows 'or at least report'; auto host fallback would override an explicit opt-in (#4547) and NORTHSTAR 'never lose work/host safety'.",
+   "source": "spec"
+  }
+ ]
+}
