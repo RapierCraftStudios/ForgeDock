@@ -246,3 +246,39 @@ describe("post-deploy rollup is verified per item (#4755)", () => {
     assert.equal(tickItems(b, new Set(["b"])), `${item("R1", "[check:a] x")}\n${item("R2", "[check:b] x")}`.replace("- [ ] `R2", "- [x] `R2"));
   });
 });
+
+describe("rollout-blocked rows raise one owner ask per flag (#4769)", () => {
+  const rollup = (items) => `## Acceptance Criteria\n\n### #40\n<!-- FORGE:DEFERRED_FROM: #40 -->\n${items.join("\n")}\n\n<!-- FORGE:POSTDEPLOY_ROLLUP: default -->\n`;
+  const checks = JSON.stringify({ a: "echo a", b: "echo b", ok: "echo ok" });
+  const blockedOut = (evidence) => ({ code: 1, stdout: `BLOCKED: clearance_exit_routing = off in the rollout controller; owner must promote\n${evidence}`, stderr: "" });
+  const b = rollup([item("R1", "[check:a] x"), item("R2", "[check:b] y"), item("R3", "[check:ok] z")]);
+  const spawn = (evidence) => (o) => (o.run === "echo ok" ? { code: 0, stdout: "ok", stderr: "" } : blockedOut(evidence));
+  const asks = (w) => w.gh.filter((a) => a[1] === "comment").map((a) => a[a.indexOf("--body") + 1]).filter((t) => /FORGE:ROLLOUT_ASK/.test(t));
+
+  it("two blocked items on one flag give one ask, no failure issue and no PROBE fail", async () => {
+    const w = world({ file: checks, spawn: spawn("hits=0") });
+    const r = await run(w, b);
+    assert.equal(r.state, "awaiting-measurement"); assert.deepEqual(r.blocked, ["clearance_exit_routing"]);
+    assert.equal(asks(w).length, 1);
+    assert.ok(!w.gh.some((a) => a[1] === "create"), "no failing-check issue");
+    assert.ok(!w.gh.some((a) => a[1] === "comment" && /Post-deploy check: fail/.test(a[a.indexOf("--body") + 1])));
+  });
+
+  it("the next release with the same evidence raises nothing; changed evidence raises it again", async () => {
+    const w1 = world({ file: checks, spawn: spawn("hits=0") });
+    await run(w1, b);
+    const posted = { body: asks(w1)[0] };
+    const w2 = world({ file: checks, spawn: spawn("hits=0") });
+    await run(w2, b, { iss: { number: 41, body: b, comments: [posted] }, isTrusted: () => true });
+    assert.equal(asks(w2).length, 0, "same evidence: no new ask");
+    const w3 = world({ file: checks, spawn: spawn("hits=7") });
+    await run(w3, b, { iss: { number: 41, body: b, comments: [posted] }, isTrusted: () => true });
+    assert.equal(asks(w3).length, 1, "changed evidence: re-raised");
+  });
+
+  it("a plain failing check is still a failure", async () => {
+    const w = world({ file: checks, spawn: () => ({ code: 1, stdout: "boom", stderr: "" }) });
+    const r = await run(w, rollup([item("R1", "[check:a] x")]));
+    assert.equal(r.state, "fail"); assert.equal(asks(w).length, 0);
+  });
+});
