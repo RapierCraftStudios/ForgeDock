@@ -34,8 +34,9 @@
  * orchestrate runs a remote-placed lane locally when `max_remote` or the execution budget is exhausted.
  *
  * Host capabilities (#4542): a lane that needs something only the dispatching host has (the SOPS/age key, scoped ops
- * credentials, read-only prod monitor SSH) is placed local in `remote` and `hybrid` mode, because a sandbox relays none of
- * them (`detectNeeds`, `placeLane` `needs`). forge.yaml `execution.host_capabilities` declares which the host has; a
+ * credentials, read-only prod monitor SSH) is placed local in `remote` and `hybrid` mode unless the provider relays it
+ * (`detectNeeds`, `placeLane` `needs`/`relays`). #4778: a remote provider relays the capabilities of forge.yaml
+ * `execution.relay_commands` (allowlisted read-only wrappers the host runs for the sandbox, relay.mjs). forge.yaml `execution.host_capabilities` declares which the host has; a
  * remote lane that blocks on one of them ends `env.capability_remote` and is recovered locally (`hostCapabilityBlock`).
  * #4785: needs are read from the body, FORGE:DECISION comments and the frozen contract's validate commands
  * (`placementText`); a remote lane whose frozen validate commands name a declared one ends before building (`contractHostNeeds`).
@@ -58,6 +59,7 @@ import { ADMISSION_DEFAULTS } from "./admission.mjs";
 import { classifyStep, heavyConfig, memAvailableMb } from "./heavy.mjs";
 import { detectPins } from "./toolchain.mjs";
 import { parseContractComment } from "./render.mjs";
+import { parseRelayCommands } from "./relay.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
 export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote", "pool"]);
@@ -113,9 +115,10 @@ export function parseExecution(sec = {}) {
   const patRaw = Array.isArray(s.host_capability_patterns) ? s.host_capability_patterns : str(s.host_capability_patterns) ? str(s.host_capability_patterns).split(",") : [];
   const hostCapabilityPatterns = patRaw.map((x) => { const t = str(x), i = t.indexOf(":"); return { name: t.slice(0, i).trim().toLowerCase(), pattern: t.slice(i + 1).trim() }; })
     .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
+  const relay = Object.fromEntries(Object.entries(parseRelayCommands(s.relay_commands)).filter(([c]) => CAPABILITY_RE.test(c))); // #4778
   const uw = Number(str(s.unreachable_window_min));
   const unreachableWindowMin = str(s.unreachable_window_min) !== "" && Number.isFinite(uw) && uw >= 0 ? uw : null; // unset: providerLanes defaults to 5
-  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
@@ -494,7 +497,7 @@ export function providerByName(name, opts) {
   if (name === "remote") {
     const exec = opts?.exec ?? {};
     const env = opts?.env ?? process.env;
-    return remoteProvider({ batch: opts.batch, repo: opts.repo, settings: exec, env, transport: remoteTransportFor(exec, { transport: opts?.transport, env }), ...(opts?.now ? { now: opts.now } : {}) });
+    return remoteProvider({ batch: opts.batch, repo: opts.repo, settings: { ...exec, ...(typeof opts?.prefetch === "function" ? { prefetch: opts.prefetch } : {}) }, env, transport: remoteTransportFor(exec, { transport: opts?.transport, env }), ...(opts?.now ? { now: opts.now } : {}) });
   }
   if (name === "pool") {
     // #4546: `remote` with the endpoint and token defaulted to the local router, and the repo's forge.yaml sent along.
@@ -508,7 +511,8 @@ export function providerByName(name, opts) {
     const tokenEnv = exec.tokenEnv ?? (router?.token ? "FORGEDOCK_POOL_TOKEN" : undefined);
     // #4685: an empty env/keychain lookup of a configured token_env falls back to the router's token file.
     const credentials = (n) => (n === "FORGEDOCK_POOL_TOKEN" && !exec.tokenEnv ? router?.token ?? null : resolveCredential(n, { env }) ?? router?.token ?? null);
-    const settings = { ...exec, ...(exec.endpoint ? {} : router ? { endpoint: router.endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}) };
+    const settings = { ...exec, ...(exec.endpoint ? {} : router ? { endpoint: router.endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(forgeYaml ? { forgeYaml } : {}),
+      ...(typeof opts?.prefetch === "function" ? { prefetch: opts.prefetch } : {}) }; // #4778: dispatch-time relay pre-fetch
     return remoteProvider({ batch: opts.batch, repo: opts.repo, settings, name: "pool", env, credentials, transport: remoteTransportFor(settings, { transport: opts?.transport, env, credentials }), ...(opts?.now ? { now: opts.now } : {}) });
   }
   const e = new Error(`unknown execution.provider ${JSON.stringify(name)} (known: ${SANDBOX_PROVIDERS.join(", ")})`);
