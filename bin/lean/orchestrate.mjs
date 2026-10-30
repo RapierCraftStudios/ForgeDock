@@ -667,7 +667,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if (row.outcome === "ci-pending" && typeof conflicting === "function" && Number.isInteger(row.pr)) {
         try { isConflicting = (await conflicting(n, row.pr)) === true; } catch { isConflicting = false; }
       }
-      const facts = { ...row, issueEdited: r?.issueEdited === true, conflicting: isConflicting };
+      const facts = { ...row, issueEdited: r?.issueEdited === true, quoteMismatch: r?.quoteMismatch === true, conflicting: isConflicting };
       if (prior) { const pk = `${n}:${recoveryClassOf({ code: prior.code })}`; classUsed.set(pk, Math.max(classUsed.get(pk) ?? 0, prior.attempt)); } // state saved before #4725 has no class counts
       const cls = recoveryClassOf(facts), max = maxFor(cls), used = classUsed.get(`${n}:${cls}`) ?? 0;
       if (classifyNeedsHuman(facts) === "recoverable" && used < max) {

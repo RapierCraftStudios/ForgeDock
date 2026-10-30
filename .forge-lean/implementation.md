@@ -1,29 +1,29 @@
 ### Approach
-resolveLane marks gh/git command failures `transient:true`. The orchestrator treats a transient refused lane as a wait: it re-resolves, and on repeated failure returns a `deferred` lane.unresolved with exponential backoff through the existing uncapped deferral path (no `max_deferrals` count). `--requeue` / `--add` accept `lane-refused`.
+Fix the shared verbatim-quote normalization (`norm`), show the nearest issue line when a quote misses, and let a contract that is still invalid only because of unmatched quotes end `contract.invalid` as recoverable.
 
 ### Changes
-- bin/lean/lane.mjs: `transient()` helper; milestone read, default-branch read and ls-remote failures use it.
-- bin/lean/orchestrate.mjs: `lane.unresolved` added to UNCAPPED_DEFERRALS; catch sites set transient; `retryLane` + `laneRetries` in start().
-- bin/lean/batch.mjs: REQUEUABLE includes lane-refused; addIssues requeues lane-refused rows.
-- bin/lean/lane.test.mjs, bin/lean/batch.test.mjs: regression tests.
+- bin/lean/conformance.mjs: `norm` folds unicode punctuation, zero-width chars, markdown links, `~`, `#`, backslash escapes; new `nearestSpan`; the quote problem carries the nearest issue text.
+- bin/lean/lean.mjs: `contract.invalid` result sets `quoteMismatch` when all problems are quote misses; RECOVER_HOW wording updated.
+- bin/engine/outcome-codes.mjs: `classifyNeedsHuman` treats `contract.invalid` with `quoteMismatch` as recoverable.
+- bin/lean/orchestrate.mjs: passes `quoteMismatch` from the lane result into the recovery facts (not in the contract; amendment added).
+- devdocs/modules/lean.md: entry and classification text.
+- Tests: conformance.test.mjs, engine-outcome-codes.test.mjs, lean.test.mjs.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/orchestrate.mjs:124,700-709
-- R2 ✅ bin/lean/lane.mjs:50-84 (only command failures transient)
-- R3 ✅ bin/lean/batch.mjs:79
-- R4 ✅ bin/lean/batch.mjs:138
+- R1 ✅ bin/lean/conformance.mjs:34
+- R2 ✅ bin/lean/conformance.mjs (nearestSpan, quoteMiss)
+- R3 ✅ bin/engine/outcome-codes.mjs:224, bin/lean/lean.mjs:1591, bin/lean/orchestrate.mjs:654
 
 ### Verification
-- V1 node --test lane.test.mjs batch.test.mjs: pass (69). The 3 new tests fail with the source files reverted.
-- V2 node --test lean.test.mjs prefilter.test.mjs engine-outcome-codes.test.mjs: pass in the `forgedock check` run. The #4690 idle test in lean.test.mjs failed in two earlier runs under host load; it passes in isolation with and without my change.
-- scripts/check-devdocs-freshness.sh: OK.
-- `forgedock check`: V1, V2 and the spec/drift checks PASS; it still reported FAIL because scripts/classify-finding.test.sh and scripts/verify-phase-trail.test.sh hit the 300s timeout under host load (files untouched by this change). An earlier run failed 1 (the #4690 test).
+- V1 `node --test bin/lean/conformance.test.mjs`: pass (106).
+- V2 `node --test bin/tests/engine-outcome-codes.test.mjs bin/lean/recovery.test.mjs`: pass (64).
+- V3 `node --test bin/lean/lean.test.mjs`: 513 pass when run on a quiet moment. Under host load (load average ~117) 1-3 load-governor/timing tests fail (#4690 CLI_LANE_LIMIT, #4115c, batch robustness); they pass when run alone with a name filter (51 pass).
+- Also passing: orchestrate*.test.mjs and engine-cli.test.mjs (78).
+- New tests were not run against the pre-fix code; the norm test cannot pass with the old `norm` (it has no unicode folding).
+- `forgedock check` FAILED: V3 (load flakiness above) and `scripts/verify-phase-trail.test.sh` timed out at 300s; cmd5/cmd8/cmd10 earlier timed out the same way. These are host-load timeouts, not assertions about this change.
 
 ### Notes
-No new env vars. Transient lane retries are uncapped, backoff 120s doubling to 30min. Genuine refusals (branch missing, default branch, mismatch) stay terminal.
+No env vars. Behaviour change: a quote-only invalid contract is now recoverable instead of terminal.
 
-### Docs (#4791)
-Added a #4791 entry to devdocs/modules/lean.md (transient lane retry, lane-refused requeueable) for the docs freshness check.
-
-### CI follow-up (Unit tests, node --test)
-The CI log was not available offline (GitHub not to be touched), so I ran `bin/lean/**` and `bin/tests/**` locally (concurrency capped): 4199 pass, 5 fail. Two are timing tests in lean.test.mjs (#4690, #4405: idle-timeout kills) that pass when run in a smaller set; three are in bin/tests/journey.test.mjs (preflight Platform/WSL/Shell rows, stale-copy .tmp cleanup, detectEnvironment platform info) and fail identically with this change's source files reverted, i.e. they are environmental (this host is WSL/root), not caused by #4791. No failure traced to this change, so no code change was made; the CI failure itself is not reproduced.
+### Follow-up
+`nearestSpan` is not a member of the missingTool test list at conformance.test.mjs:146; recorded in result.json not_members.
