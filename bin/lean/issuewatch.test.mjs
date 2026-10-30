@@ -110,6 +110,13 @@ test("follow-ups: defer-only claims bot follow-ups with an unchecked defer item;
   assert.equal(classifyIssue(bot(pd), W({ include_followups: "defer-only" })), null);
   assert.equal(classifyIssue(bot(pd), W({ include_followups: "defer-only", postdeploy_rollup: "50" })), "fold");
   assert.equal(classifyIssue(iss(1, { authorAssociation: "NONE" }), W()), null);
+  // release #4820 AUTH-1: a FORGE:DEFERRED marker in the body never makes an outsider a bot
+  const spoof = iss(11, { title: "follow-up: 1 deferred item(s)", body: `<!-- FORGE:DEFERRED_FROM: #1 -->\n${defer}`, authorAssociation: "NONE", author: { login: "mallory" } });
+  assert.equal(classifyIssue(spoof, W({ include_followups: "defer-only" })), null);
+  assert.equal(classifyIssue({ ...spoof, body: `<!-- FORGE:DEFERRED_FROM: #1 -->\n${pd}` }, W({ include_followups: "defer-only", postdeploy_rollup: "50" })), null);
+  // the App as gh reports it (bare login, CONTRIBUTOR) still counts as the bot
+  const app = iss(12, { title: "follow-up: 1 deferred item(s)", body: defer, authorAssociation: "CONTRIBUTOR", author: { login: "rapiercraft-forgedock" } });
+  assert.equal(classifyIssue(app, W({ include_followups: "defer-only" })), "claim");
 });
 
 test("postdeploy_rollup folds a post-deploy-only follow-up into the release checklist once", async () => {
@@ -138,6 +145,21 @@ test("two named watches on one repo never double-claim", async () => {
   assert.equal(new Set(all).size, all.length);
   assert.deepEqual([...all].sort(), [1, 2, 3, 4]);
   assert.equal(claimIssue(repoDir("o/r", { FORGEDOCK_WATCH_DIR: dir }), 1, "c"), false);
+});
+
+test("release #4820 BUG-1: a throwing batch.start loses no claim; the same watch re-claims on the next pass", async () => {
+  const dir = tmp();
+  const mk = () => ({ claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" });
+  const watch = validateWatch("w", { mode: "batch", max_inflight: "3" });
+  const io = fakeIo(dir, [iss(1), iss(2)]);
+  const start = io.batch.start;
+  io.batch.start = async () => { throw new Error("schedd unreachable"); };
+  await assert.rejects(tick({ watch, repo: "o/r", io, state: mk() }), /schedd unreachable/); // status.json never saved
+  io.batch.start = start;
+  const state = await tick({ watch, repo: "o/r", io, state: mk() }); // restart from the last saved (empty) state
+  assert.deepEqual([...state.claimed].sort(), [1, 2]);
+  assert.deepEqual(io.batchOps, [["start", [1, 2], watch.parallel, "staging"]]);
+  assert.equal(claimIssue(repoDir("o/r", { FORGEDOCK_WATCH_DIR: dir }), 1, "other"), false, "another watch still cannot take it");
 });
 
 test("max_issues stops claiming at N, drains, then finishes", async () => {
