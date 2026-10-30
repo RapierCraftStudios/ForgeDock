@@ -2038,3 +2038,15 @@ Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now
 
 Placement needs (`needsOf` in engine-cli `readBody`) now come from `placementText({body, comments})` (`execution.mjs`): the issue body, every `<!-- FORGE:DECISION` comment and the validate commands of the last parseable FORGE:CONTRACT comment, fetched in the same single `gh issue view` call. A rerun of an issue whose frozen contract runs `promtool` (declared in `execution.host_capabilities`), or whose decision says `ssh ovh-monitor obs-psql`, is placed local. On a first remote run, `runCore` checks the frozen contract right after the freeze: when `contractHostNeeds` finds a declared capability in a validate command and the lane is remote and not a recovery, it ends `env.capability_remote` before any implementation turn, and the host resumes it with the frozen contract. `orchestrate` `placeOf` now also relaunches `env.tool_missing` recoveries local (reason `host capability: recovering env.tool_missing`), so a sandbox that lacked the tool is not chosen again.
 Cite: #4785.
+
+## Entry 2026-10-30 — schedd: heartbeat, watchdog, unit priority (#4780)
+
+`bin/lean/schedd-health.mjs` owns schedd liveness. The daemon's event loop writes `heartbeat.json` (`{pid, ts}`, atomic) in
+`schedDir()` every 5 s and removes it on a clean close; `status` replies carry `lastTick`. `forgedock sched show` and
+`forgedock schedd status` print "last tick N s ago". A wedged daemon is alive, so `Restart=always` never fires:
+`forgedock schedd watchdog [--stall-sec N]` (default 60 s; run every 30 s by the `forgedock-schedd-watchdog.timer` that
+`pool/install/install-schedd.sh` installs) sends SIGTERM, then SIGKILL, to a live daemon whose heartbeat is stale, and the unit
+restarts it (a new daemon resumes hosted batches). Priority: `unit_priority` in `pool/install/unit-hardening.sh` gives the
+schedd unit `CPUWeight=500` (system units also `Nice=-5`; a user manager cannot set a negative Nice), and the daemon reniced
+itself best-effort at start. Not done: async state saves. `gh` calls were already async and the atomic fsync saves
+(`writeAtomic`) are the durability guarantee, so the heartbeat and watchdog bound a stall instead.

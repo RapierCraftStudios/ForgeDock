@@ -20,7 +20,7 @@
  *                                   {type:"ok", cancelled:false, finished:true}, nothing written
  *   {op:"hold"|"release", id, issues} → {type:"ok", changed, hosted} (#4592): merges into / removes from the batch's `hold` file; a hosted
  *                                   runner admits no held issue from its next pass (running lanes are not stopped)
- *   {op:"status"}                 → {type:"status", pid, batches:[{id, running}]}
+ *   {op:"status"}                 → {type:"status", pid, lastTick, batches:[{id, running}]} (#4780: `lastTick` = epoch ms of the last heartbeat; see schedd-health.mjs)
  * Failures answer {type:"error", message}. A client closing its connection never cancels a batch (only `cancel` stops one), and stopping the daemon
  * never stops a lane (lanes are detached sessions). On start the daemon resumes every daemon-hosted batch without a
  * report, so live lanes are re-adopted through the batch runner's `adopt`. It exits after `idleMs` with no batch and no client.
@@ -39,6 +39,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schedDir, pidAlive } from "./sched.mjs";
 import { batchRoot, listBatches, openBatch } from "./batch.mjs";
+import { HEARTBEAT_MS, writeHeartbeat, clearHeartbeat } from "./schedd-health.mjs";
 
 export const IDLE_MS = 10 * 60 * 1000;
 export const STOP_MS = 10 * 1000;
@@ -146,6 +147,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   let closing = null, resolveClosed, keepSock = false;
   let lastActive = Date.now();
   const touch = () => { lastActive = Date.now(); };
+  let lastTick = Date.now();
 
   /** Run one batch here. Resolves with {id, dir} once the batch exists, rejects when it fails before that. */
   const host = ({ argv, cwd, env, keepBreaker = false }, first = null) => new Promise((resolve, reject) => {
@@ -172,7 +174,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   });
 
   const handle = async (req, send) => {
-    if (req.op === "status") return send({ type: "status", pid, batches: [...hosted.keys()].map((id) => ({ id, running: true })) }, true);
+    if (req.op === "status") return send({ type: "status", pid, lastTick, batches: [...hosted.keys()].map((id) => ({ id, running: true })) }, true);
     if (req.op === "set-parallel") {
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
@@ -261,12 +263,18 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   });
   await new Promise((res, rej) => { server.once("error", rej); server.listen(p.sock, () => { server.off("error", rej); res(); }); });
   log(`schedd: pid ${pid} listening on ${p.sock}`);
+  // #4780: a heartbeat from the event loop itself; a starved or wedged loop stops it and the watchdog restarts the daemon.
+  const beat = () => { lastTick = Date.now(); try { writeHeartbeat({ dir, pid }); } catch { /* a full disk must not stop the daemon */ } };
+  beat();
+  const beatTimer = setInterval(beat, HEARTBEAT_MS);
+  beatTimer.unref?.();
 
   const closed = new Promise((r) => { resolveClosed = r; });
   const close = () => {
     if (closing) return closing;
     clearInterval(idleTimer);
     clearInterval(lockTimer);
+    clearInterval(beatTimer);
     if (dueTimer) clearInterval(dueTimer);
     for (const c of conns) c.destroy();
     const stopping = [...runs.keys()];
@@ -280,6 +288,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     closing = Promise.all([serverClosed, stopped]).then(() => {
       try { if (parseInt(readFileSync(p.lock, "utf8"), 10) === pid) rmSync(p.lock, { force: true }); } catch { /* gone */ }
       if (!keepSock) rmSync(p.sock, { force: true });
+      if (!keepSock) clearHeartbeat(dir);
       resolveClosed();
     });
     return closing;
