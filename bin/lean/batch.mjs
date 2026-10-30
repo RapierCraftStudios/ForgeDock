@@ -76,7 +76,7 @@ const readAdded = (file) => {
 };
 
 /** `outcome`s `--requeue` may move back to pending (#4550). */
-export const REQUEUABLE = (outcome) => ["needs-human", "invalid", "skipped", "ci-pending", "budget-exceeded"].includes(outcome) || /^dependency-/.test(String(outcome));
+export const REQUEUABLE = (outcome) => ["needs-human", "invalid", "skipped", "ci-pending", "budget-exceeded", "deferred"].includes(outcome) || /^dependency-/.test(String(outcome));
 /** Key of one requeue entry; the runner records the applied keys in state.json `requeueApplied`. */
 export const requeueKey = (e) => `${e.issue}@${e.at}`;
 
