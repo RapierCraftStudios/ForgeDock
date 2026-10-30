@@ -471,7 +471,7 @@ describe("core work-on", () => {
   });
   it("#4730 an issue whose only content is an existing owner ask is closed as a duplicate; extra content only links", async () => {
     const { askKey } = await import("./needs-human-premise.mjs");
-    const existing = { number: 40, comments: [{ body: `<!-- FORGE:ASK key=${askKey("Builder is blocked (credentials): sign the contract")} -->\n## Owner ask\n{}` }] };
+    const existing = { number: 40, comments: [{ author: { login: "rapiercraft-forgedock" }, body: `<!-- FORGE:ASK key=${askKey("Builder is blocked (credentials): sign the contract")} -->\n## Owner ask\n{}` }] };
     const dup = ownerWorld({ kind: "human", why: "credentials" }, { body: "sign the contract" }, existing);
     const r = await run(dup);
     assert.equal(r.terminalReason, "invalid");

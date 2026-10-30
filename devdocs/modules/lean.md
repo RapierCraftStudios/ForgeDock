@@ -2025,6 +2025,8 @@ Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now
 - **Closed edges**: the batch parking path asks `dispatchCheck` and ignores a blocker that is closed; the lane lists closed `Depends on` edges in the needs-human comment (`closedEdgeNote`).
 - **Owner asks**: `registerAsk` keys the normalized ask (`FORGE:ASK key=`) on GitHub; an identical ask links to the existing entry. Closing issues whose only content is an ask, and splitting mixed owner/agent issues, are deferred (follow-up).
 
+- **Trust (release #4820 SEC-1/BUG-1)**: `sweepPremises` reads only the newest trusted `FORGE:NEEDS_HUMAN` comment (`isTrustedIssueComment`) and evaluates a premise only when that comment carries it. An untrusted `FORGE:PREMISE` never clears the label, and a newer block without a premise supersedes an older one. `registerAsk` matches only trusted `FORGE:ASK` entries.
+
 ## Entry 2026-10-27 — Mechanical park creates its `parked:<code>` label and only counts a real relabel (#4736)
 `makeRelabelNeedsHuman` (`engine-cli.mjs`) best-effort runs `gh label create parked:<code> --force` before the park edit, since per-code labels are not in `labels.json` (same lazy-create as `prefilter.mjs`); without it the whole edit failed and returned `"failed"`. `orchestrate()` now sets `row.parkedQueued` only when the park relabel returns neither `false`, `"failed"` nor `"skipped"`, so a failed relabel stays in "unrecovered" instead of printing as remediation-queued.
 
