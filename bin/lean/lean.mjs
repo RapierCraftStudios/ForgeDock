@@ -61,7 +61,7 @@ import { isExternalKill } from "./hostkill.mjs";
 import { buildResumeDigest } from "./resume.mjs";
 import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registryPkgVersion, closedEdgeNote, onlyAsk, fileRemainder } from "./needs-human-premise.mjs";
 import { lightEligibility } from "./light.mjs";
-import { untrackToolState, unstageToolState } from "./toolstate.mjs";
+import { untrackToolState, unstageToolState, isToolState } from "./toolstate.mjs";
 import { ensureSignedOff } from "./signoff.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
@@ -1081,12 +1081,16 @@ export async function runCore(o) {
       }
     };
     if (resumed) { try { await io.git(["fetch", "origin", branch], { cwd }); } catch { /* remote branch may not exist (PR-less resume) */ } }
+    // #4786: an open-PR-less remote branch whose only changes vs the base are tool state (.forge-lean/ scratch) holds no work: plan fresh, never resume its stale contract.
+    const toolOnly = async (ref) => { const n = String(await io.git(["diff", "--name-only", `${base}...${ref}`], { cwd })).split("\n").map((x) => x.trim()).filter(Boolean); return n.every((f) => isToolState(f)); };
+    let scratchOnly = false;
+    if (resumed && !resumed.pr) { try { scratchOnly = await toolOnly(`origin/${branch}`); } catch { /* unreadable: resume as before */ } }
     // #4118: a local lane branch with commits not yet pushed (e.g. a reviewed commit whose push failed) must never be reset.
     // Reuse it when it is ahead of the base and contains everything the remote branch has.
     let keepLocal = false;
     try {
       const ahead = Number(String(await io.git(["rev-list", "--count", `${base}..refs/heads/${branch}`], { cwd })).trim());
-      if (ahead > 0) {
+      if (ahead > 0 && !(await toolOnly(`refs/heads/${branch}`).catch(() => false))) { // #4786: a scratch-only local branch is not reused
         let containsRemote = true;
         if (resumed) { try { await io.git(["merge-base", "--is-ancestor", `origin/${branch}`, `refs/heads/${branch}`], { cwd }); } catch { containsRemote = false; } }
         keepLocal = containsRemote;
@@ -1100,6 +1104,13 @@ export async function runCore(o) {
       ev({ event: "LOCAL_BRANCH_REUSED", branch });
     } else if (resumed) {
       wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, `origin/${branch}`], `origin/${branch}`);
+      if (scratchOnly) { // from origin/<branch> so the later plain push stays fast-forward; the scratch goes out in a normal commit
+        await io.git(["rm", "-r", "-f", "-q", "--ignore-unmatch", "--", LEAN_DIR], { cwd: wt }).catch(() => {});
+        if (String(await io.git(["diff", "--cached", "--name-only"], { cwd: wt }).catch(() => "")).trim()) await io.git(["commit", "--no-verify", "-m", "chore(forge): drop stale .forge-lean scratch from the lane branch"], { cwd: wt }).catch(() => {});
+        resumed = null;
+        ev({ event: "SCRATCH_BRANCH_DROPPED", branch });
+        T.decisions.push(`Lane branch ${branch} held only ${LEAN_DIR}/ scratch: its stale checkpoint was dropped and the issue is planned fresh`);
+      }
     } else {
       wtInfo = await addWorktree(["worktree", "add", "-B", branch, wt, base], base);
     }
@@ -1179,7 +1190,7 @@ export async function runCore(o) {
     // #4160: files the branch touched (three-dot) whose content still differs from the base tip (two-dot); a file merged
     // in from the base by a base-sync equals the base and drops out of the scope check.
     const changedFiles = async () => {
-      const touched = names(await git(["diff", "--name-only", `${base}...HEAD`]));
+      const touched = names(await git(["diff", "--name-only", `${base}...HEAD`])).filter((f) => !isToolState(f)); // #4786
       if (!touched.length) return touched;
       const differs = new Set(names(await git(["diff", "--name-only", base, "HEAD"])));
       return touched.filter((f) => differs.has(f));
