@@ -1,17 +1,15 @@
-{"status":"fixed","summary":"host-capability placement reads FORGE:DECISION comments and the frozen contract's validate commands; a remote lane whose frozen validate commands need a declared host tool ends env.capability_remote before building; env.tool_missing recoveries relaunch on the host","requirements":[
-{"id":"R1","status":"implemented","evidence":"bin/lean/execution.mjs:222 placementText; bin/engine-cli.mjs:1808-1809 readBody; bin/lean/lean.mjs:1607 contractHostNeeds check"},
-{"id":"R2","status":"implemented","evidence":"bin/lean/lean.mjs:1607 env.capability_remote before building; bin/lean/orchestrate.mjs:292 env.tool_missing recovery placed local"}],
-"validation":[
-{"id":"V1","command":"node --test bin/lean/execution.test.mjs","exit":0},
-{"id":"V2","command":"node --test bin/lean/lean.test.mjs","exit":0},
-{"id":"V3","command":"node --test bin/lean/recovery.test.mjs bin/tests/engine-outcome-codes.test.mjs bin/tests/engine-cli.test.mjs","exit":0},
-{"id":"V4","command":"node --test --test-name-pattern=4785 bin/lean/execution.test.mjs bin/lean/lean.test.mjs","exit":0}],
-"tests":[{"command":"node --test --test-name-pattern=4785 bin/lean/execution.test.mjs bin/lean/lean.test.mjs","result":"pass","fails_without_fix":true}],
+{"status":"fixed","summary":"merge-gate --manual-pr skips only the phase-trail preflight for hand-built PRs (recorded as FORGE:PHASE_TRAIL_SKIPPED); every other gate still runs and pipeline issues are refused","requirements":[
+{"id":"R1","status":"implemented","evidence":"scripts/review-finalize.sh:1336; commands/review-pr.md:122"},
+{"id":"R2","status":"implemented","evidence":"scripts/review-finalize.sh:1338"},
+{"id":"R3","status":"implemented","evidence":"scripts/review-finalize.test.sh:859-885 (CI, reviewed head, mergeability, verdict still block)"},
+{"id":"R4","status":"implemented","evidence":"scripts/review-finalize.sh:1281 manual_pr_eligibility"},
+{"id":"R5","status":"implemented","evidence":"scripts/review-finalize.test.sh:861"},
+{"id":"R6","status":"implemented","evidence":"scripts/review-finalize.test.sh:886-887"}],
+"validation":[{"id":"V1","command":"bash scripts/review-finalize.test.sh","exit":0},{"id":"V2","command":"bash scripts/review-pr-arguments.test.sh","exit":0},{"id":"V3","command":"bash scripts/check-spec-size.test.sh","exit":0}],
+"tests":[{"command":"bash scripts/review-finalize.test.sh","result":"pass: 655 passed, 0 failed","fails_without_fix":true},{"command":"bash scripts/review-pr-arguments.test.sh","result":"pass: 72 passed","fails_without_fix":true}],
 "self_review":[
-{"question":"1","answer":"yes","evidence":"R1: placementText (execution.mjs:222) feeds needsOf (engine-cli.mjs:1808-1809), and the frozen contract is checked in-lane (lean.mjs:1607). R2: remote capability needs end env.capability_remote, which orchestrate relaunches local; tool_missing is relaunched local too (orchestrate.mjs:292). Tests: execution.test.mjs:730-765, lean.test.mjs:710"},
-{"question":"2","answer":"yes","evidence":"V1-V3 pass, plus orchestrate-preflight/runtime-paths/precheck/batch tests; readBody still returns the body string; forgedock check: PASS"},
-{"question":"3","answer":"yes","evidence":"D1-D5 changed as described; P1 detectNeeds/hostCapabilityBlock unchanged (#4542 tests pass); P2 one gh call returning the body; P3 local/no-caps/recovery paths unchanged (lean.test.mjs:710 asserts merged); P4 existing capability_remote test passes; V1-V4 exit 0"},
-{"question":"4","answer":"yes","evidence":"git diff origin/staging...HEAD --name-only: bin/engine-cli.mjs, bin/lean/execution.mjs, bin/lean/lean.mjs, bin/lean/orchestrate.mjs, devdocs/modules/lean.md (deliverables) + execution.test.mjs, lean.test.mjs (tests)"}],
-"amendments":[],
-"facts":{"rejected":[{"approach":"a host-side backstop that reclassifies builder.blocked (credentials) from old sandbox engine versions","why":"version skew of the sandbox engine is outside this contract; current lane engines already map these blocks (lean.mjs:867-875)"}],
-"hotspots":[{"at":"bin/lean/lean.mjs:1607","why":"single post-freeze point covers fresh, light and resumed contracts"}]}}
+{"question":"1","answer":"yes","evidence":"R1-R6 delivered; scripts/review-finalize.sh:1281-1340, commands/review-pr.md:122,175"},
+{"question":"2","answer":"yes","evidence":"655 existing+new gate tests pass; no-flag path keeps exit 4 and 'auto-merge requires --issue' (review-finalize.test.sh:886, 1236)"},
+{"question":"3","answer":"yes","evidence":"D1-D4 changed; P1-P4 intact; V1-V3 exit 0; forgedock check PASS"},
+{"question":"4","answer":"yes","evidence":"only deliverable paths, tests, and the amended devdocs decision record"}],
+"amendments":[{"kind":"add-deliverable","path":"devdocs/decisions/4770-merge-gate-manual-pr.md","why":"scripts/check-devdocs-freshness.sh requires a dossier or decision record for a behaviour change in scripts/review-finalize.sh"}]}
