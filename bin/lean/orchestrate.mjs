@@ -289,7 +289,8 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const placeOf = (n) => {
     if (!remote) return null;
     // #4542: a lane recovering from a remote capability block runs on the host, which has the capability.
-    if (recovering.get(n)?.code === OUTCOME_CODES.ENV_CAPABILITY_REMOTE) return { where: "local", reason: "host capability: recovering env.capability_remote" };
+    // #4785: a tool-missing recovery too: the sandbox that lacked the tool is not chosen again.
+    if ([OUTCOME_CODES.ENV_CAPABILITY_REMOTE, OUTCOME_CODES.ENV_TOOL_MISSING].includes(recovering.get(n)?.code)) return { where: "local", reason: `host capability: recovering ${recovering.get(n).code}` };
     if (budgetLocal) return { where: "local", reason: `fallback to local: execution budget: ${budgetHit ?? "cap reached"}` };
     try {
       if (typeof remote.place === "function") {
