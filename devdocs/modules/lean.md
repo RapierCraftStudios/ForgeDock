@@ -2025,6 +2025,8 @@ Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now
 - **Closed edges**: the batch parking path asks `dispatchCheck` and ignores a blocker that is closed; the lane lists closed `Depends on` edges in the needs-human comment (`closedEdgeNote`).
 - **Owner asks**: `registerAsk` keys the normalized ask (`FORGE:ASK key=`) on GitHub; an identical ask links to the existing entry. Closing issues whose only content is an ask, and splitting mixed owner/agent issues, are deferred (follow-up).
 
+- **Trust (release #4820 SEC-1/BUG-1)**: `sweepPremises` reads only the newest trusted `FORGE:NEEDS_HUMAN` comment (`isTrustedIssueComment`) and evaluates a premise only when that comment carries it. An untrusted `FORGE:PREMISE` never clears the label, and a newer block without a premise supersedes an older one. `registerAsk` matches only trusted `FORGE:ASK` entries.
+
 ## Entry 2026-10-27 — Mechanical park creates its `parked:<code>` label and only counts a real relabel (#4736)
 `makeRelabelNeedsHuman` (`engine-cli.mjs`) best-effort runs `gh label create parked:<code> --force` before the park edit, since per-code labels are not in `labels.json` (same lazy-create as `prefilter.mjs`); without it the whole edit failed and returned `"failed"`. `orchestrate()` now sets `row.parkedQueued` only when the park relabel returns neither `false`, `"failed"` nor `"skipped"`, so a failed relabel stays in "unrecovered" instead of printing as remediation-queued.
 
@@ -2050,6 +2052,7 @@ Every defer/post-deploy contract row needs one `bucket` (`post-deploy|verify-now
 
 Placement needs (`needsOf` in engine-cli `readBody`) now come from `placementText({body, comments})` (`execution.mjs`): the issue body, every `<!-- FORGE:DECISION` comment and the validate commands of the last parseable FORGE:CONTRACT comment, fetched in the same single `gh issue view` call. A rerun of an issue whose frozen contract runs `promtool` (declared in `execution.host_capabilities`), or whose decision says `ssh ovh-monitor obs-psql`, is placed local. On a first remote run, `runCore` checks the frozen contract right after the freeze: when `contractHostNeeds` finds a declared capability in a validate command and the lane is remote and not a recovery, it ends `env.capability_remote` before any implementation turn, and the host resumes it with the frozen contract. `orchestrate` `placeOf` now also relaunches `env.tool_missing` recoveries local (reason `host capability: recovering env.tool_missing`), so a sandbox that lacked the tool is not chosen again.
 Cite: #4785.
+
 `sandbox.unreachable` is uncapped like `host.busy`/`sandbox.capacity` (#4788): `deferPolicy` requeues it after its retry-in, never against `maxDeferrals`. `httpTransport.capacity()` derives `online`/`total` from `GET /agents` (`ok && !paused`) when `/status` carries no valid `online`; a failing `/agents` leaves liveness unknown (null). `grant()` tracks the first sample with `online === 0`; past `remote.poolOfflineMin` (default `POOL_OFFLINE_ALERT_MIN` 10) it emits one `pool-offline` batch update (status-line `STALLED: no compute pool agent online ...`), reset when `online > 0`. Report only: the host fallback stays the `execution.fallback_local` opt-in.
 
 ## Entry 2026-10-30 — Host-capability needs ignore quoted evidence in the issue body (#4776)
@@ -2120,6 +2123,11 @@ which cs-relay serves on an identical argv. Lane gate: the provider sets `CS_REL
 passes it as `o.relayCaps`, and runCore's #4785 pre-build `contractHostNeeds` end ignores relayed capabilities. The
 `hostCapabilityBlock` recovery is unchanged: an unreachable relay (cs-relay exit 125, old router/agent) still recovers
 the lane locally once.
+
+## Entry 2026-10-30 — Named issue watches (#4765)
+
+`bin/lean/issuewatch.mjs` is `forgedock issue-watch`: named watches from forge.yaml `issue_watch.watches` (parsed by its own `parseWatches`, since `parseForgeYaml` reads one nested level), each with a per-(repo, name) lock and `status.json` under `~/.forge/watch/`, and a repo-wide `claims.json` (mkdir-locked) so an issue has one claim across watches. Pure selectors/lane/caps; gh, clock and launching are injected. `mode: batch` calls batch.mjs `addIssues` and starts a new batch once `report.json` exists. See docs/ISSUE-WATCH.md.
+Cite: #4765.
 
 ## Entry 2026-10-30 — schedd listens on a named pipe on Windows (#4762)
 
