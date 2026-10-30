@@ -39,6 +39,8 @@
  * remote lane that blocks on one of them ends `env.capability_remote` and is recovered locally (`hostCapabilityBlock`).
  * #4785: needs are read from the body, FORGE:DECISION comments and the frozen contract's validate commands
  * (`placementText`); a remote lane whose frozen validate commands name a declared one ends before building (`contractHostNeeds`).
+ * #4776: the body is read without its quoted material (comments, code, quotes, evidence sections) and the frozen
+ * `repro_test` command counts like a validate command, so a quoted evidence query no longer pins a lane to the host.
  */
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -214,29 +216,62 @@ export function hostCapabilityBlock(summary, caps = null) {
   return named.length && named.every((n) => have.has(n)) ? named : [];
 }
 
+const EVIDENCE_HEADING = /^(#{1,6})\s*(?:evidence|logs?|data|observations?|measurements?|quer(?:y|ies)|samples?|findings?)\b/i;
+
 /**
- * The text host-capability placement reads (#4785), pure: the issue body, every `<!-- FORGE:DECISION` comment (prose or
- * JSON) and the validate commands of the last parseable `<!-- FORGE:CONTRACT -->` comment. `comments` are gh comment
- * objects (`{body}`) or strings; anything else is ignored.
+ * An issue body without its quoted material (#4776), pure: HTML comments (FORGE:STATE too), fenced code blocks, evidence-like
+ * sections (heading to the next heading of the same or higher level), blockquote lines and inline code spans. What is left is
+ * prose the author wrote as an instruction, not evidence they pasted.
+ */
+function proseOf(body) {
+  const kept = [];
+  let fence = null, skip = 0;
+  for (const line of String(body ?? "").replace(/<!--[\s\S]*?-->/g, "").split("\n")) {
+    const f = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fence) { if (f && f[1][0] === fence[0] && f[1].length >= fence.length) fence = null; continue; }
+    if (f) { fence = f[1]; continue; }
+    const h = /^(#{1,6})\s/.exec(line);
+    if (h && skip && h[1].length <= skip) skip = 0;
+    if (!skip) { const e = EVIDENCE_HEADING.exec(line); if (e) skip = e[1].length; }
+    if (skip || /^\s*>/.test(line)) continue;
+    kept.push(line.replace(/`[^`\n]*`/g, ""));
+  }
+  return kept.join("\n");
+}
+
+/** The validate and repro_test commands of a frozen contract (#4776). */
+function contractCommands(contract) {
+  const cmds = (Array.isArray(contract?.validate) ? contract.validate : []).map((x) => String(x?.command ?? "")).filter(Boolean);
+  const r = contract?.repro_test;
+  if (r && typeof r === "object" && typeof r.command === "string" && r.command) cmds.push(r.command);
+  return cmds;
+}
+
+/**
+ * The text host-capability placement reads (#4785, #4776), pure: the issue body without quoted material (`proseOf`), every
+ * `<!-- FORGE:DECISION` comment (prose or JSON, unstripped) and the validate and repro_test commands of the last parseable
+ * `<!-- FORGE:CONTRACT -->` comment. `comments` are gh comment objects (`{body}`) or strings; anything else is ignored.
  */
 export function placementText({ body = "", comments = [] } = {}) {
   const bodies = (Array.isArray(comments) ? comments : []).map((c) => String((typeof c === "string" ? c : c?.body) ?? "").trimStart());
   let validate = [];
   for (const b of bodies) {
     if (!b.startsWith("<!-- FORGE:CONTRACT -->")) continue;
-    const v = parseContractComment(b)?.contract?.validate;
-    if (Array.isArray(v)) validate = v.map((x) => String(x?.command ?? "")).filter(Boolean);
+    const c = parseContractComment(b)?.contract;
+    if (c && typeof c === "object") validate = contractCommands(c);
   }
-  return [String(body ?? ""), ...bodies.filter((b) => b.startsWith("<!-- FORGE:DECISION")), ...validate].join("\n");
+  return [proseOf(body), ...bodies.filter((b) => b.startsWith("<!-- FORGE:DECISION")), ...validate].join("\n");
 }
 
-/** Declared host capabilities a contract's validate commands name (#4785): `{caps, ids}`, both empty when none. */
+/** Declared host capabilities a contract's validate and repro_test commands name (#4785, #4776): `{caps, ids}`, both empty when none. */
 export function contractHostNeeds(contract, caps = null) {
   const have = new Set(caps?.hostCapabilities ?? []);
   const ids = [], found = new Set();
-  for (const v of Array.isArray(contract?.validate) ? contract.validate : []) {
-    const named = detectNeeds(v?.command, caps).filter((n) => have.has(n));
-    if (named.length) { ids.push(String(v?.id ?? "")); for (const n of named) found.add(n); }
+  const rows = (Array.isArray(contract?.validate) ? contract.validate : []).map((v) => [String(v?.id ?? ""), v?.command]);
+  if (typeof contract?.repro_test?.command === "string") rows.push(["repro_test", contract.repro_test.command]);
+  for (const [id, command] of rows) {
+    const named = detectNeeds(command, caps).filter((n) => have.has(n));
+    if (named.length) { ids.push(id); for (const n of named) found.add(n); }
   }
   return { caps: [...found].sort(), ids };
 }

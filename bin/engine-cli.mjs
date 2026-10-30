@@ -8,7 +8,9 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { homedir, hostname } from "node:os";
+import { homedir, hostname, cpus } from "node:os";
+import { localLaneCap } from "./lean/admission.mjs";
+import { memAvailableMb } from "./lean/heavy.mjs";
 import { join, resolve as resolvePath } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
@@ -308,14 +310,24 @@ function readLeanSetting(key, cwd = process.cwd()) {
  * forge.yaml `engine.admission` (#4105). The parser flattens one nested level into `engine`, so the keys are read as
  * `engine.enabled|min_free_mem_mb|min_free_tmp_mb|max_load_per_core`, or flat `admission_*` equivalents.
  */
+/** #4777: `sched.cap` as a function: min(global_parallel, the host-derived local lane cap), re-probed at every admission attempt. */
+export function liveLaneCap(globalParallel, { cfg = readAdmission(), host = { cores: () => cpus().length, memAvailableMb } } = {}) {
+  return () => {
+    let derived = null;
+    try { derived = localLaneCap({ cfg, cores: host.cores(), memAvailableMb: host.memAvailableMb() }); } catch { derived = null; }
+    return derived === null ? globalParallel : globalParallel === null ? derived : Math.min(globalParallel, derived);
+  };
+}
 export function readAdmission(cwd = process.cwd()) {
   try {
     const e = parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine ?? {};
     const num = (v) => { const n = Number(v); return v !== undefined && v !== "" && Number.isFinite(n) && n >= 0 ? n : undefined; };
+    const pos = (v) => { const n = num(v); return n > 0 ? n : undefined; };
     const en = String(e.admission_enabled ?? e.enabled ?? "").trim().toLowerCase();
     return { ...(en === "false" ? { enabled: false } : {}),
       min_free_mem_mb: num(e.min_free_mem_mb ?? e.admission_min_free_mem_mb), min_free_tmp_mb: num(e.min_free_tmp_mb ?? e.admission_min_free_tmp_mb),
-      max_load_per_core: num(e.max_load_per_core ?? e.admission_max_load_per_core) };
+      max_load_per_core: num(e.max_load_per_core ?? e.admission_max_load_per_core),
+      lane_cpu_reservation: pos(e.lane_cpu_reservation ?? e.admission_lane_cpu_reservation), lane_mem_mb: pos(e.lane_mem_mb ?? e.admission_lane_mem_mb) };
   } catch { return {}; }
 }
 /**
@@ -1767,7 +1779,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
       beforeAdmit,
       issues, parallel, prefilter, resolveLane: laneOf, store: batch.store, getParallel: batch.readParallel, getAdded: batch.readAdded, getRequeued: batch.readRequeued, getCancelled: batch.readCancel, getHeld: batch.readHeld, getGates: batch.readGates, ...lanes,
       breaker: orch.breaker, maxDeferrals: orch.maxDeferrals, ...(deps.pollMs ? { pollMs: deps.pollMs } : {}), ...budget, limits, identity, batchId: batch.id, drift, lifecycle, integration,
-      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: orch.globalParallel ?? null, exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
+      ...(registry ? { sched: { registry, batch: batch.id, repo, cap: liveLaneCap(orch.globalParallel ?? null), exclusive: true }, priorityOf: async (n) => schedMod.priorityFromLabels(await labelNames(n)) } : {}),
       ...(remote ? { remote } : {}),
       // #4267: mechanical needs-human outcomes are recovered in the batch; every runner decision is a FORGE:DECISION.
       ...(recoveryOn ? { recovery: orch.recovery } : {}),
