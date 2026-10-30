@@ -1,17 +1,19 @@
-{"status":"fixed","summary":"host-capability placement reads FORGE:DECISION comments and the frozen contract's validate commands; a remote lane whose frozen validate commands need a declared host tool ends env.capability_remote before building; env.tool_missing recoveries relaunch on the host","requirements":[
-{"id":"R1","status":"implemented","evidence":"bin/lean/execution.mjs:222 placementText; bin/engine-cli.mjs:1808-1809 readBody; bin/lean/lean.mjs:1607 contractHostNeeds check"},
-{"id":"R2","status":"implemented","evidence":"bin/lean/lean.mjs:1607 env.capability_remote before building; bin/lean/orchestrate.mjs:292 env.tool_missing recovery placed local"}],
+{"status":"fixed","summary":"/review-pr Phase 2 exports FORGE_CHANGED_FILES and runs typescript.typecheck_changed, typescript.test_changed and python.test_changed with printed exit codes","requirements":[
+{"id":"R1","status":"implemented","evidence":"commands/review-pr.md:329"},
+{"id":"R2","status":"implemented","evidence":"commands/review-pr.md:324"},
+{"id":"R3","status":"implemented","evidence":"commands/review-pr.md:329"},
+{"id":"R4","status":"implemented","evidence":"commands/review-pr.md:308"},
+{"id":"R5","status":"implemented","evidence":"commands/review-pr.md:324,330-332,342"},
+{"id":"R6","status":"implemented","evidence":"commands/forgedock-init.md (4E decision list)"}],
 "validation":[
-{"id":"V1","command":"node --test bin/lean/execution.test.mjs","exit":0},
-{"id":"V2","command":"node --test bin/lean/lean.test.mjs","exit":0},
-{"id":"V3","command":"node --test bin/lean/recovery.test.mjs bin/tests/engine-outcome-codes.test.mjs bin/tests/engine-cli.test.mjs","exit":0},
-{"id":"V4","command":"node --test --test-name-pattern=4785 bin/lean/execution.test.mjs bin/lean/lean.test.mjs","exit":0}],
-"tests":[{"command":"node --test --test-name-pattern=4785 bin/lean/execution.test.mjs bin/lean/lean.test.mjs","result":"pass","fails_without_fix":true}],
+{"id":"V1","command":"bash scripts/review-pr-changed-verification.test.sh","exit":0},
+{"id":"V2","command":"bash scripts/check-spec-size.test.sh","exit":0},
+{"id":"V3","command":"bash scripts/review-pr-gate2.test.sh","exit":0},
+{"id":"V4","command":"bash scripts/review-prepare.test.sh","exit":0}],
+"tests":[{"command":"bash scripts/review-pr-changed-verification.test.sh","result":"pass: 17 passed","fails_without_fix":true}],
 "self_review":[
-{"question":"1","answer":"yes","evidence":"R1: placementText (execution.mjs:222) feeds needsOf (engine-cli.mjs:1808-1809), and the frozen contract is checked in-lane (lean.mjs:1607). R2: remote capability needs end env.capability_remote, which orchestrate relaunches local; tool_missing is relaunched local too (orchestrate.mjs:292). Tests: execution.test.mjs:730-765, lean.test.mjs:710"},
-{"question":"2","answer":"yes","evidence":"V1-V3 pass, plus orchestrate-preflight/runtime-paths/precheck/batch tests; readBody still returns the body string; forgedock check: PASS"},
-{"question":"3","answer":"yes","evidence":"D1-D5 changed as described; P1 detectNeeds/hostCapabilityBlock unchanged (#4542 tests pass); P2 one gh call returning the body; P3 local/no-caps/recovery paths unchanged (lean.test.mjs:710 asserts merged); P4 existing capability_remote test passes; V1-V4 exit 0"},
-{"question":"4","answer":"yes","evidence":"git diff origin/staging...HEAD --name-only: bin/engine-cli.mjs, bin/lean/execution.mjs, bin/lean/lean.mjs, bin/lean/orchestrate.mjs, devdocs/modules/lean.md (deliverables) + execution.test.mjs, lean.test.mjs (tests)"}],
-"amendments":[],
-"facts":{"rejected":[{"approach":"a host-side backstop that reclassifies builder.blocked (credentials) from old sandbox engine versions","why":"version skew of the sandbox engine is outside this contract; current lane engines already map these blocks (lean.mjs:867-875)"}],
-"hotspots":[{"at":"bin/lean/lean.mjs:1607","why":"single post-freeze point covers fresh, light and resumed contracts"}]}}
+{"question":"1","answer":"yes","evidence":"R1-R6 each map to commands/review-pr.md:308-342, docs/CONFIG.md, forge.yaml.example, commands/forgedock-init.md; the test exercises the extracted fence"},
+{"question":"2","answer":"yes","evidence":"gate2 test 19/0, spec-size PASS, classify-finding/verify-phase-trail/lint-dispatch-prompt pass; existing test and SKIPPED paths unchanged"},
+{"question":"3","answer":"yes","evidence":"all deliverables D1-D5 changed; P1-P4 intact (test flaky classifier kept, review-pr-staging untouched, env var only); V4 exits 0 but the script skips itself because yq is not installed on this host"},
+{"question":"4","answer":"yes","evidence":"git diff --stat origin/staging...HEAD touches only the five deliverable paths (plus .forge-lean notes)"}],
+"amendments":[]}

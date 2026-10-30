@@ -1,29 +1,28 @@
 ### Approach
-Host-capability placement now reads three sources: the issue body, the FORGE:DECISION comments and the frozen contract's validate commands. A first remote run whose frozen contract needs a declared host tool now stops before building and is recovered on the host. `env.tool_missing` recoveries also run on the host. Everything is pure and deterministic, with no new gh calls and no LLM calls.
+Phase 2 of `/review-pr` now exports the PR's existing changed files as `$FORGE_CHANGED_FILES` and runs three optional scoped steps (`typescript.typecheck_changed`, `typescript.test_changed`, `python.test_changed`) through the existing `run_step` and test-loop paths. Files reach commands by env var, never spliced into the eval'd string.
 
 ### Changes
-- bin/lean/execution.mjs: adds `placementText({body, comments})` and `contractHostNeeds(contract, caps)`. The header comment names the #4785 inputs. It imports `parseContractComment` from render.mjs.
-- bin/engine-cli.mjs: both `readBody` variants fetch `comments` in the same `gh issue view` call and compute `needsOf` from `placementText`. They still return only the body.
-- bin/lean/lean.mjs: after the contract freeze/resume block, a lane that is placed remote, is not a recovery, and whose validate commands name a declared host capability ends `env.capability_remote` before any implementation turn.
-- bin/lean/orchestrate.mjs: `placeOf` places `env.tool_missing` recoveries local, as it already does for `env.capability_remote`.
-- devdocs/modules/lean.md: adds the #4785 entry.
-- Tests: bin/lean/execution.test.mjs (placementText, contractHostNeeds, orchestrate tool-missing relaunch) and bin/lean/lean.test.mjs (remote early exit, plus the unchanged local, undeclared and recovery cases).
+- commands/review-pr.md: export of `FORGE_CHANGED_FILES`; `typecheck_changed` after `typecheck`; test loop runs `test` and `test_changed` with `EXIT <lang>.<step>=N`, flaky classifier kept; test SKIPPED only when neither form is set; bullet describing blocking rules.
+- docs/CONFIG.md: row documenting the three keys and the env var.
+- forge.yaml.example: commented examples.
+- commands/forgedock-init.md: suggest the commands when vitest/pytest is detected.
+- scripts/review-pr-changed-verification.test.sh: new test running the extracted Phase 2 fence with a stub yq.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/execution.mjs:222 (placementText), bin/engine-cli.mjs:1808-1809 (readBody), bin/lean/lean.mjs:1607 (frozen-contract check)
-- R2 ✅ bin/lean/lean.mjs:1607 (`env.capability_remote` before building), bin/lean/orchestrate.mjs:292 (tool-missing recovery runs local); the existing endBlocked mapping (lean.mjs:867-875) is unchanged
+- R1 ✅ commands/review-pr.md:329-339
+- R2 ✅ commands/review-pr.md:324 (command is user-configured; docs/CONFIG.md and forge.yaml.example show the filtered-tsc recipe)
+- R3 ✅ commands/review-pr.md:329
+- R4 ✅ commands/review-pr.md:308
+- R5 ✅ commands/review-pr.md:324,330-332,342
+- R6 ✅ commands/forgedock-init.md (4E decision list)
 
 ### Verification
-- V1 `node --test bin/lean/execution.test.mjs`: pass
-- V2 `node --test bin/lean/lean.test.mjs`: pass
-- V3 `node --test bin/lean/recovery.test.mjs bin/tests/engine-outcome-codes.test.mjs bin/tests/engine-cli.test.mjs`: pass
-- V4 `node --test --test-name-pattern=4785 bin/lean/execution.test.mjs bin/lean/lean.test.mjs`: pass. Fails without the fix: with lean.mjs and orchestrate.mjs reverted, the early-exit and tool-missing relaunch tests fail, and the placementText/contractHostNeeds tests cannot import functions that don't exist.
-- Extra targeted run: bin/tests/orchestrate-preflight, orchestrate-runtime-paths, bin/lean/precheck, bin/lean/batch: pass.
-- `checks.mjs --base origin/staging` widened to the full suite (921 files reference the change). The host rules forbid running the full suite, so only the targeted commands above were run.
-- No repo formatter is configured.
+- V1 review-pr-changed-verification.test.sh: 17 passed; with the spec change reverted it fails 10 checks.
+- V2 check-spec-size.test.sh: pass 45; check-spec-size.sh origin/staging: PASS.
+- V3 review-pr-gate2.test.sh: 19 passed.
+- V4 review-prepare.test.sh: skipped by the script (yq not installed on this host).
+- check-devdocs-freshness.sh: no devdocs update required.
+- `forgedock check`: first run timed out on 3 slow tests (300s, host load; each passes alone in about 2 min); second run PASS.
 
 ### Notes
-- Behaviour change: a remote lane whose frozen validate commands name a declared `execution.host_capabilities` entry (for example promtool) now ends `env.capability_remote` right after the freeze and is relaunched on the host. A rerun of such an issue is placed local from the start. Undeclared built-in needs (sops etc. not in host_capabilities) do not trigger the early exit; this follows the same rule as hostCapabilityBlock.
-- Comments are not trust-filtered for placement: a detected need can only move a lane local (contract K1).
-- The AlterLab lanes cited in the issue ran engine v1.32.1 in the sandbox, which predates the #4542/#4685 recovery mapping.
-- No new env vars.
+New env var `FORGE_CHANGED_FILES` (newline-separated, existing files only; deleted files are dropped). `typecheck_changed` runs inside the node_modules guard. Unconfigured `typecheck_changed` prints a SKIPPED line like the other steps.
