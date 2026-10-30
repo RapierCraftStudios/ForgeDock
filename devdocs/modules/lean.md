@@ -218,8 +218,14 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `cat` / `sed -n` / `head` / `tail` operand (grep is not counted). `makeLeanRunner` returns it as `tools`, and
    `PHASE_ATTEMPT_USAGE` carries `tools` when present. This is a local run-log field only: the telemetry seam does not
    map it.
+   **Owned subagent model** (#4843, #4849): every lean session (builder, reviewer, verifier, grouper, prefilter) gets one
+   `--settings` from `leanSettingsFlags`, passed in `extraArgs` so `FORGEDOCK_FULL_SESSION=1` keeps it. Its `env` sets
+   `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=0`, so a ForgeDock-defined agent's own `model` (the Haiku explorer) beats an operator
+   settings.json force. A child env var can't undo that, because settings env wins over it. `CLAUDE_CODE_SUBAGENT_MODEL` is
+   set only from forge.yaml `agents.subagent_model` (`readSubagentModel`, the `makeLeanIo` default); unset leaves the
+   operator's own default alone.
    **Re-read nudge** (#4456): the builder session (`builderOnce`, full and light lane) runs with `rereadNudge: true`, and
-   `makeLeanRunner` appends `rereadNudgeFlags()`: `--settings` registering `bin/hooks/reread-nudge.mjs` as a PostToolUse
+   `makeLeanRunner` merges `rereadHooks()` into that same `--settings`, registering `bin/hooks/reread-nudge.mjs` as a PostToolUse
    hook on `Read|Bash` (reviewer, verifier and grouper sessions are unchanged). The hook counts reads per path with
    toolstats `readPaths` (resolved against the session cwd) in `<tmpdir>/forgedock-reread/<session_id>.json`, and on
    exactly the `REREAD_MIN` (3rd) read returns an `additionalContext` reminder to use notes or the excerpt already in
