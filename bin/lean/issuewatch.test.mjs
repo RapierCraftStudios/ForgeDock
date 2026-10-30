@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { join } from "node:path";
-import { parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli } from "./issuewatch.mjs";
+import { unclaimedOrOwn, parseWatches, validateWatch, loadWatches, matchesSelectors, issueVersion, hasUnresolvedDefer, classifyIssue, laneFor, dagOrder, claimIssue, acquireLock, tick, runWatch, formatStatus, repoDir, watchDir, issueWatchFromCli } from "./issuewatch.mjs";
 import { openBatch } from "./batch.mjs";
 
 const tmp = () => tmpDir("iw-");
@@ -269,4 +269,12 @@ test("status prints selector, claims, inflight, merged, verified, failed, time r
   assert.match(t, /claims: 1\/5\s+inflight: 0\s+merged: 1\s+verified: 0|claims: 1\/5\s+inflight: 1/);
   assert.match(t, /time remaining: 120m/);
   await assert.rejects(issueWatchFromCli(["bogus"], { cwd, env: { FORGEDOCK_WATCH_DIR: dir }, io }), /usage/);
+});
+
+test("release #4820 CONC-1: release mode keeps this watch's own registry claims eligible; others' stay excluded", () => {
+  const reg = { 1: "r", 2: "other" };
+  assert.equal(unclaimedOrOwn(reg, 1, "r"), true, "own claim left by a crash is re-eligible");
+  assert.equal(unclaimedOrOwn(reg, 2, "r"), false, "another watch's claim is not");
+  assert.equal(unclaimedOrOwn(reg, 3, "r"), true);
+  assert.equal(unclaimedOrOwn(null, 3, "r"), true);
 });
