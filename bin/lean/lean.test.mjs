@@ -4044,6 +4044,20 @@ describe("batch robustness (#4112-#4115)", () => {
     }
     assert.equal(readLog(dir, 7).filter((e) => e.event === "CONTRACT_STALE").length, 2);
   });
+  it("#4783 an operator FORGE:DECISION after the frozen contract re-plans with the decision in the plan prompt; engine and anchored records do not", async () => {
+    const op = (body) => ({ body, author_association: "OWNER", user: { type: "User", login: "op" } });
+    const decision = op("<!-- FORGE:DECISION -->\n## Decision (supersedes conflicting text above)\nUse the sync API, not the callback one.");
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), decision] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.match(traj(w)[0], /a FORGE:DECISION was posted after it/);
+    assert.match(builders(w)[0][4], /PLANNING ONLY[\s\S]*Operator decision[\s\S]*Use the sync API/);
+    for (const body of ["<!-- FORGE:DECISION -->\n## Decision: recovery pass for `x` (attempt 1)\n**What**: y", "<!-- FORGE:DECISION -->\n## Decision (batch b1)\n**What**: relaunch", '<!-- FORGE:DECISION {"id":"D1"} -->\nrecord']) {
+      const e = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", lastSubject: "wip(forge): checkpoint after idle timeout", issueComments: [frozenComment(), op(body)] });
+      assert.equal((await run(e)).terminalReason, "merged");
+      assert.match(traj(e)[0], /frozen contract [0-9a-f]{12} recovered from the issue/);
+      assert.equal(builders(e).length, 1);
+    }
+  });
   it("a tampered or untrusted contract comment is ignored: the rerun plans again", async () => {
     for (const c of [frozenComment(CONTRACT, (b) => b.replaceAll("guard null", "guard nothing")), frozenComment(CONTRACT, (b) => b, "NONE")]) {
       const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [c] });

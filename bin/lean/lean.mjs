@@ -110,6 +110,26 @@ export const CI_NOT_STARTED_GRACE_MS = 10 * 60 * 1000;
 export const contractHash = (text) => createHash("sha256").update(String(text)).digest("hex").slice(0, 12);
 
 /**
+ * #4783: the text of an operator's `<!-- FORGE:DECISION -->` comment, or null. The engine posts the same marker itself
+ * ("## Decision: ..." / "## Decision (batch ...") and #4695 records carry JSON on the marker line: neither is an operator decision.
+ */
+export function operatorDecision(body) {
+  const m = /^\s*<!--\s*FORGE:DECISION\s*-->\s*([\s\S]*)$/.exec(String(body ?? ""));
+  const text = m?.[1].trim();
+  return text && !/^## Decision(:| \(batch)/.test(text) ? text : null;
+}
+/** #4783: operator decisions (oldest first) as a bounded, newest-first prompt note; "" when none. Never part of the quotable issue text. */
+export function decisionsNote(decisions, maxBytes = 2048) {
+  let used = 0; const keep = [];
+  for (const d of [...(decisions ?? [])].reverse()) {
+    const t = Buffer.byteLength(d, "utf8") > maxBytes - used ? d.slice(0, Math.max(0, maxBytes - used)) : d;
+    if (!t) break;
+    keep.push(t); used += Buffer.byteLength(t, "utf8");
+  }
+  return keep.length ? `\n\nOperator decision(s) posted after the last plan (newest first). They supersede conflicting issue text: follow them, do not re-raise the question they settle.\n${keep.map((t) => `---\n${t}`).join("\n")}\n---` : "";
+}
+
+/**
  * #4385: siblings that declare a shared file (a barrel, union type, shared fixture, index doc) would conflict after the
  * first merges; each later sub-issue gets an edge to every earlier one it shares a file with and does not already reach
  * through its dependsOn. Mutates dependsOn; returns the added edges [{from, to, files}]. No `files`: no edge.
@@ -683,8 +703,9 @@ export async function runCore(o) {
   const tcOpts = () => ({ toolchain: toolchain?.summary ?? null, sparse, ...(facts ? { facts } : {}) });
   let hotFacts = null; // forge#4195: scripts/hotspots.sh facts for the files the issue names, read once before the plan call
   let enumList = []; // #4322: tests enumerating the members of the paths the issue names, read once before the plan call
+  let decisionNote = ""; // #4783: operator FORGE:DECISION comments newer than the frozen contract, for the re-plan; "" when none
   let resumeNote = ""; // #4400: the resume digest of the last run (resume.mjs), "" on a first run or with context_pack off
-  const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + CONTINUE_NOTE.replace("BASE", lane) + resumeNote;
+  const implementRestart = () => builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + CONTINUE_NOTE.replace("BASE", lane) + resumeNote + decisionNote;
   /** #4390: builder calls stopped at the context ceiling restart fresh; planning (and its corrections) run uncapped. */
   const UNCEILED = ["plan", "contract_correction", "block_correction"], CONTEXT_RESTARTS_MAX = 3;
   async function builder(n, prompt, resume, live = false, restart = implementRestart, opts = {}) {
@@ -1345,15 +1366,18 @@ export async function runCore(o) {
     async function readFrozenContract() {
       let out = "";
       try { out = String(await ghc(["api", "--paginate", `repos/${repo}/issues/${issue}/comments`, "--jq", ".[] | {body, author_association, user: {type: .user.type, login: .user.login}}"])); } catch { return null; }
-      let found = null;
+      let found = null, decisions = [];
       for (const l of out.split("\n")) {
         let c; try { c = JSON.parse(l); } catch { continue; }
         if (!isTrustedComment(c)) continue;
         const b = String(c?.body ?? "");
+        const dec = operatorDecision(b);
+        if (dec) { decisions.push(dec); if (found) found.decisionAfter = true; continue; } // #4783: counted as a decision, not as a human comment
         if (!b.startsWith("<!-- FORGE:CONTRACT -->")) { if (found && b.trim() && !b.trimStart().startsWith("<!-- FORGE:")) found.humanAfter = true; continue; }
         const fc = parseContractComment(b);
-        if (fc && contractHash(fc.text) === fc.hash) found = { ...fc, humanAfter: false };
+        if (fc && contractHash(fc.text) === fc.hash) { found = { ...fc, humanAfter: false, decisionAfter: false }; decisions = []; }
       }
+      decisionNote = decisionsNote(decisions);
       return found;
     }
 
@@ -1467,11 +1491,11 @@ export async function runCore(o) {
           await refreshIssue("rerun contract check");
           const gone = (Array.isArray(fc.contract?.requirements) ? fc.contract.requirements : []).filter((r) => r?.disposition === "deliver" && !inIssue(r.quote, issueText)).map((r) => r.id);
           const stale = fc.scope ? (fc.scope !== scopeHash ? `issue scope ${fc.scope} -> ${scopeHash}` : null)
-            : fc.humanAfter ? "a human comment was posted after it" : gone.length ? `quote(s) no longer in the issue: ${gone.join(", ")}` : null;
+            : fc.decisionAfter ? "a FORGE:DECISION was posted after it" : fc.humanAfter ? "a human comment was posted after it" : gone.length ? `quote(s) no longer in the issue: ${gone.join(", ")}` : null;
           if (stale) {
             ev({ event: "CONTRACT_STALE", hash: fc.hash, scope: fc.scope, now: scopeHash, reason: stale });
             T.decisions.push(`Rerun: frozen contract ${fc.hash} is stale (${stale}); re-planning`);
-          } else { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
+          } else { frozen = fc.contract; hash = fc.hash; decisionNote = ""; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
         }
       }
       if ((resumed || salvagedRef || recover) && ctxCfg.mode !== "off") {
@@ -1533,7 +1557,7 @@ export async function runCore(o) {
         }
       }
       if (!frozen) {
-        await builder(++attemptN, planPrompt() + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote, null, true, planPrompt, { trigger: "plan" });
+        await builder(++attemptN, planPrompt() + (hasCommits || lightCommits ? PLAN_RERUN_NOTE.replace("BASE", lane) : "") + recoverNote() + resumeNote + decisionNote, null, true, planPrompt, { trigger: "plan" });
         planned = true;
         result = await readResult();
         const evidence = (Array.isArray(result?.evidence) ? result.evidence : []).filter((x) => typeof x === "string" && x.trim());
@@ -1622,7 +1646,7 @@ export async function runCore(o) {
         ev(rec); await emit(rec);
         T.decisions.push(`Builder routed to the ${route.tier} tier (${route.class}; ${route.model ?? "CLI default"})`);
       }
-      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote);
+      const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionNote);
       liveKeys = ["implementation"];
       stage = "implement";
       if (!lightDone) await builder(++attemptN, implementPrompt, planned ? sessionId : null, true, undefined, { trigger: "build" });
