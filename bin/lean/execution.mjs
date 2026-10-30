@@ -37,6 +37,8 @@
  * credentials, read-only prod monitor SSH) is placed local in `remote` and `hybrid` mode, because a sandbox relays none of
  * them (`detectNeeds`, `placeLane` `needs`). forge.yaml `execution.host_capabilities` declares which the host has; a
  * remote lane that blocks on one of them ends `env.capability_remote` and is recovered locally (`hostCapabilityBlock`).
+ * #4785: needs are read from the body, FORGE:DECISION comments and the frozen contract's validate commands
+ * (`placementText`); a remote lane whose frozen validate commands name a declared one ends before building (`contractHostNeeds`).
  */
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -53,6 +55,7 @@ import { httpTransport, isActionsEndpoint, remoteProvider } from "./sandbox-remo
 import { ADMISSION_DEFAULTS } from "./admission.mjs";
 import { classifyStep, heavyConfig, memAvailableMb } from "./heavy.mjs";
 import { detectPins } from "./toolchain.mjs";
+import { parseContractComment } from "./render.mjs";
 
 export const EXECUTION_MODES = Object.freeze(["local", "remote", "hybrid"]);
 export const SANDBOX_PROVIDERS = Object.freeze(["local", "container", "remote", "pool"]);
@@ -209,6 +212,33 @@ export function hostCapabilityBlock(summary, caps = null) {
   const have = new Set(caps?.hostCapabilities ?? []);
   const named = detectNeeds(summary, caps);
   return named.length && named.every((n) => have.has(n)) ? named : [];
+}
+
+/**
+ * The text host-capability placement reads (#4785), pure: the issue body, every `<!-- FORGE:DECISION` comment (prose or
+ * JSON) and the validate commands of the last parseable `<!-- FORGE:CONTRACT -->` comment. `comments` are gh comment
+ * objects (`{body}`) or strings; anything else is ignored.
+ */
+export function placementText({ body = "", comments = [] } = {}) {
+  const bodies = (Array.isArray(comments) ? comments : []).map((c) => String((typeof c === "string" ? c : c?.body) ?? "").trimStart());
+  let validate = [];
+  for (const b of bodies) {
+    if (!b.startsWith("<!-- FORGE:CONTRACT -->")) continue;
+    const v = parseContractComment(b)?.contract?.validate;
+    if (Array.isArray(v)) validate = v.map((x) => String(x?.command ?? "")).filter(Boolean);
+  }
+  return [String(body ?? ""), ...bodies.filter((b) => b.startsWith("<!-- FORGE:DECISION")), ...validate].join("\n");
+}
+
+/** Declared host capabilities a contract's validate commands name (#4785): `{caps, ids}`, both empty when none. */
+export function contractHostNeeds(contract, caps = null) {
+  const have = new Set(caps?.hostCapabilities ?? []);
+  const ids = [], found = new Set();
+  for (const v of Array.isArray(contract?.validate) ? contract.validate : []) {
+    const named = detectNeeds(v?.command, caps).filter((n) => have.has(n));
+    if (named.length) { ids.push(String(v?.id ?? "")); for (const n of named) found.add(n); }
+  }
+  return { caps: [...found].sort(), ids };
 }
 
 const DOCS_LABELS = new Set(["docs", "documentation", "type:docs"]);

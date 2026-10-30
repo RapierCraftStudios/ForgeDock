@@ -20,7 +20,7 @@ import { makeEventEmitter, probeSweepEvents, experimentEvent } from "./engine/ev
 import { readExperiment } from "./experiment.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
-import { parseExecution, detectNeeds } from "./lean/execution.mjs";
+import { parseExecution, detectNeeds, placementText } from "./lean/execution.mjs";
 import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lean/budget.mjs";
 import { writeAtomic as writeResultAtomic } from "./lean/batch.mjs";
 import { parseLightConfig, LIGHT_DEFAULTS } from "./lean/light.mjs";
@@ -1805,8 +1805,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
       },
       readBody: maint || registry || hybrid
-        ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(v.body, execForNeeds)); return v.body; }
-        : async (n) => { const b = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body"])).body; needsOf.set(n, detectNeeds(b, execForNeeds)); return b; },
+        ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels,comments"])); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); return v.body; }
+        : async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,comments"])); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
       onUpdate: (r) => sink.row(r),
     });
   } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); }

@@ -707,6 +707,21 @@ describe("core work-on", () => {
     assert.equal(w2.calls.filter((c) => c[1] === "worktree" && c[2] === "add").length, 5);
   });
 
+  it("#4785 a remote lane whose frozen validate commands name a declared host capability ends env.capability_remote before building", async () => {
+    const contract = { ...CONTRACT, validate: [...CONTRACT.validate, { id: "V2", command: "promtool test rules r.yml" }] };
+    const remote = { placement: { where: "remote", reason: "mode remote" }, hostCaps: { hostCapabilities: ["promtool"] } };
+    const dir = tmpDir("lean-4785-");
+    const w = world({ contract });
+    const r = await run(w, { dir, ...remote });
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, "env.capability_remote");
+    assert.equal(builders(w).length, 1); // the plan session only: no implementation turn
+    assert.match(w.comments.map((c) => c.body ?? c).join("\n"), /promtool[\s\S]*V2/);
+    // local placement, no declared capability, or a recovery run: unchanged
+    assert.equal((await run(world({ contract }), { ...remote, placement: { where: "local", reason: "x" } })).terminalReason, "merged");
+    assert.equal((await run(world({ contract }), { ...remote, hostCaps: { hostCapabilities: ["sops"] } })).terminalReason, "merged");
+  });
+
   it("needs-human terminals carry a specific outcome code, never unclassified", async () => {
     const code = async (w, extra) => {
       const dir = tmpDir("lean-code-");

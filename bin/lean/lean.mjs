@@ -30,7 +30,7 @@ import { retrying, ghCacheRetry, refreshAuthOnce, runRefreshScript, GH_AUTH_RE, 
 import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
-import { hostCapabilityBlock } from "./execution.mjs";
+import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
 
 const MISSING_TOOL_RE = /command not found|not found in PATH|no such file or directory.*\b(?:docker|promtool)\b|\b(?:docker|promtool)\b[^\n]{0,80}(?:not (?:installed|found|available)|no such file|cannot connect|daemon)|cannot connect to the docker daemon|no docker daemon|no module named|ModuleNotFoundError|\bENOENT\b[^\n]{0,60}spawn/i;
 /** #4685: true when a builder's block summary names a missing tool or module (environment), not a credential. */
@@ -1603,6 +1603,10 @@ export async function runCore(o) {
         T.decisions.push(`Contract frozen (${hash}): ${frozen.requirements.length} requirement(s), ${deferredN} deferred pending review`);
       } else {
         T.validate = lightDone ? "light lane (no plan session)" : "resumed (existing branch)";
+      }
+      if (o.placement?.where === "remote" && !recover) { // #4785: the frozen validate commands need a tool only the host has
+        const hn = contractHostNeeds(frozen, o.hostCaps);
+        if (hn.caps.length) return await needsHuman(`Remote sandbox lacks host capability ${hn.caps.join(", ")}, which the frozen contract's validate command(s) ${hn.ids.join(", ")} need.\n\nThe dispatching host has it; the lane is recovered locally with the frozen contract.`, OUTCOME_CODES.ENV_CAPABILITY_REMOTE);
       }
       T.plan = [`contract ${hash}${lightDone ? " (derived, light lane)" : ""}`, `${frozen.requirements.length} requirement(s)`];
       { // #4392, #4505: next size on a budget recovery; #4587: a big L contract and an L recovery get extra turns
