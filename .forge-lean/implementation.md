@@ -1,27 +1,33 @@
 ### Approach
-`merge-gate` gets a boolean `--manual-pr` (plus `--owner-requested`). It skips only the phase-trail preflight and records that on the PR. All other gates run unchanged. Eligibility is decided from facts (issue labels and markers, `closingIssuesReferences`), never from PR prose. With no issue, gate comments and labels go to the PR through two small helpers.
+A pure module (`activation.mjs`) detects new default-off keys in the PR diff of a forge.yaml-declared rollout registry. `precheck` fails when no activation row covers them. A post-deploy check that reports `BLOCKED: <flag> = off` becomes one owner ask per flag instead of a failure. The dormancy report takes an injected read-only flag-state hook.
 
 ### Changes
-- scripts/review-finalize.sh: flag parsing; `gate_comment` / `gate_label` / `is_pipeline_issue` / `manual_pr_eligibility`; trail preflight skipped with `FORGE:PHASE_TRAIL_SKIPPED`; degraded-gate and previously-escalated issue reads skipped when there is no issue; header usage.
-- commands/review-pr.md: parse `--manual-pr` / `--owner-requested`, relaxed `--issue` rule, Phase 8 fence passes the flags, outcome note.
-- scripts/review-finalize.test.sh: stub cases plus 14 manual-mode cases (merge, CI red, stale head, conflict, CHANGES REQUESTED, pipeline --issue, closing ref with/without owner flag, unreadable refs, absent flag keeps exit 4).
-- scripts/review-pr-arguments.test.sh: parse cases.
-- devdocs/decisions/4770-merge-gate-manual-pr.md: decision record required by check-devdocs-freshness (amendment add-deliverable).
+- bin/lean/activation.mjs (new): `readRollouts`, `detectNewOffKeys`, `coversFlag`, `activationFailures`, `dormancyReport`.
+- bin/lean/conformance.mjs: `precheck` takes `newOffKeys` and pushes `activation_missing` and `mode_unreachable` failures.
+- bin/lean/lean.mjs: `newOffKeysOf()` diffs the registry files against the base and feeds `precheck`.
+- bin/lean/prompts.mjs: activation-row rule; promotion is listed as an owner action.
+- bin/lean/postdeploy-check.mjs: `blockedRollout`, `postRolloutAsks` (marker `FORGE:ROLLOUT_ASK`, flag and evidence hash), `measureItems` handling.
+- docs/CONFIG.md, devdocs/modules/lean.md: documentation.
+- Tests: activation.test.mjs (new), postdeploy-check.test.mjs; lean.test.mjs plan-prompt token budgets raised by 50 (the new rule costs about 30 tokens).
 
 ### Acceptance Criteria Status
-- R1 ✅ scripts/review-finalize.sh:1336 (`--manual-pr` mode), commands/review-pr.md:122
-- R2 ✅ scripts/review-finalize.sh:1338 FORGE:PHASE_TRAIL_SKIPPED
-- R3 ✅ only the trail block is bypassed; tests scripts/review-finalize.test.sh:859-885 show CI, reviewed-head, mergeability and verdict gates still block
-- R4 ✅ scripts/review-finalize.sh:1281 manual_pr_eligibility
-- R5 ✅ scripts/review-finalize.test.sh:861 (merges, `--match-head-commit` path)
-- R6 ✅ scripts/review-finalize.test.sh:886-887 (exit 4 without the flag)
+- R1 ✅ activation.test.mjs "a contract without an activation row fails…"
+- R2 ✅ activation.test.mjs "an 'in shadow' AC fails…"
+- R3 ✅ postdeploy-check.test.mjs "the next release with the same evidence raises nothing…"
+- R4 deferred in the contract (needs #4768 adapters and production access).
+- R5 ✅ conformance.mjs precheck, prompts.mjs
+- R6 ✅ activation.mjs `detectNewOffKeys`
+- R7 ✅ postdeploy-check.mjs `postRolloutAsks`
+- R8 ✅ activation.mjs `dormancyReport`
+- R9 ✅ activation.test.mjs keep-off test
 
 ### Verification
-- V1 `bash scripts/review-finalize.test.sh`: 655 passed, 0 failed. The new cases fail without the fix by construction (`--manual-pr` was an unknown argument, exit 2); not re-run against the base because the suite takes about 12 minutes.
-- V2 `bash scripts/review-pr-arguments.test.sh`: 72 passed, 0 failed.
-- V3 `bash scripts/check-spec-size.test.sh`: pass=45 fail=0.
-- `scripts/check-devdocs-freshness.sh origin/staging`: OK.
-- checks.mjs widened to the full node suite (fan-out cap); not run per host rules, and this change touches only shell and markdown.
+- V1 `node --test bin/lean/activation.test.mjs bin/lean/postdeploy-check.test.mjs bin/lean/conformance.test.mjs bin/lean/precheck.test.mjs`: 168 pass, 0 fail. The new tests cannot pass without the fix, since the module and the behaviour are new.
+- lean.test.mjs: 512 pass, 1 fail. The failure is "#4690 a scope whose events show a limit…": the CLI is killed as idle while a `sleep 30` child is live. It exercises the host's scope/process handling, not the code in this change. I did not confirm it fails on the base.
 
 ### Notes
-No env vars. No formatter is configured for shell or markdown in this repo. Behaviour without `--manual-pr` is unchanged.
+- Opt-in: nothing changes without a forge.yaml `rollouts:` section (`files`, `dormant_days`).
+- A blocked rollup item parks as `awaiting-measurement` (existing callers branch on that state), with `blocked: [flags]` on the return value.
+- The owner ask is deduped within the rollup issue by flag plus evidence hash.
+- The dormancy report is library-only: nothing calls it yet, because production state needs #4768.
+- Enumerating-test flags for `activation` (10 tests) are coincidental string matches (kinds, triggers, fixtures), recorded as not_members in result.json.
