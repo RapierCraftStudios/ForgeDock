@@ -30,3 +30,4 @@ A pure module (`activation.mjs`) detects new default-off keys in the PR diff of 
 - A blocked rollup item parks as `awaiting-measurement` (existing callers branch on that state), with `blocked: [flags]` on the return value.
 - The owner ask is deduped within the rollup issue by flag plus evidence hash.
 - The dormancy report is library-only: nothing calls it yet, because production state needs #4768.
+- Enumerating-test flags for `activation` (10 tests) are coincidental string matches (kinds, triggers, fixtures), recorded as not_members in result.json.
