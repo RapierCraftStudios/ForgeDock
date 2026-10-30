@@ -1,6 +1,158 @@
-Class B: Checking changed spec files for unguarded side-effect verbs:
-commands/orchestrate/phase-4-execution.md
-commands/review-pr.md
+ok   - full COMPLEX trail passes
+ok   - full STANDARD trail passes
+ok   - TRIVIAL passes without CONTEXT/ARCHITECT
+ok   - lowercase band is accepted
+ok   - Investigation band passes with only INVESTIGATOR+FAST_PATH
+ok   - docs-only waives QUALITY_GATE
+ok   - self-review comments do not disturb a full trail
+ok   - self-review comments do not stand in for QUALITY_GATE
+ok   - self-review comments do not stand in for CONTEXT
+ok   - missing INVESTIGATOR
+ok   - partial investigation (no COMPLETE) fails
+ok   - missing CONTRACT
+ok   - missing CONTEXT on STANDARD
+ok   - missing ARCHITECT on STANDARD
+ok   - missing FAST_PATH
+ok   - FAST_PATH without band value fails
+ok   - missing QUALITY_GATE
+ok   - QUALITY_GATE FAIL result does not count
+ok   - QUALITY_GATE PASS with a **Degraded**: line still counts (forge#3628)
+ok   - TRIVIAL still needs CONTRACT
+ok   - prose mentions do not satisfy markers
+ok   - quoted markers mid-comment do not count
+ok   - first FAST_PATH wins over a later downgrade
+ok   - INVESTIGATION:INVALID accepted as terminal investigator sentinel
+ok   - missing FAST_PATH names every missing artifact
+ok   - refusal routes to the missing phase
+ok   - large thread with present markers still passes
+ok   - forged early FAST_PATH from untrusted user is ignored
+ok   - untrusted-only markers satisfy nothing
+ok   - untrusted user mixed into a complete trail cannot supply the missing CONTRACT
+ok   - comment with no author metadata is untrusted
+ok   - Bot identity is trusted
+ok   - MEMBER and COLLABORATOR are trusted by default
+ok   - allowlisted login is trusted
+ok   - narrowed associations reject COLLABORATOR
+ok   - empty associations trust no one but Bots/allowlist
+ok   - legacy build (pre-cutoff) waives QUALITY_GATE
+ok   - post-cutoff build still requires QUALITY_GATE
+ok   - grace disabled via empty FORGE_TRAIL_QG_SINCE
+ok   - multi-page: latest build on page 2 is not waived
+ok   - invalid cutoff 'garbage' rejected
+ok   - invalid cutoff '2999-01-01T00:00:00Z' rejected
+ok   - invalid cutoff '2020-13-45T99:99:99Z' rejected
+ok   - invalid cutoff '2026-02-30T00:00:00Z' rejected
+ok   - invalid cutoff '2026-10-01T24:00:00Z' rejected
+ok   - clock behind default cutoff fails closed (exit 2)
+ok   - BSD date -j -f fallback validates a real cutoff
+ok   - no usable date parser fails closed (exit 2)
+ok   - boundary: build at exactly the cutoff is not waived
+ok   - boundary: build one second before the cutoff is waived
+ok   - empty pages interleaved are tolerated
+ok   - all-empty thread fails (not error)
+ok   - 3 pages: latest build on page 3 is not waived
+ok   - mixed array/object pages fail closed (exit 2)
+ok   - page with non-object elements fails closed (exit 2)
+ok   - malformed page fails closed (exit 2)
+ok   - old created_at but post-cutoff updated_at is not waived
+ok   - BUILDER:COMPLETE without updated_at never earns the grace
+ok   - INVESTIGATION band + code diff requires CONTRACT
+ok   - INVESTIGATION band + code diff requires QUALITY_GATE
+ok   - INVESTIGATION band + code diff passes with a full trail
+ok   - ignored band is reported
+ok   - INVESTIGATION band + docs-only (no code diff) still passes
+ok   - TRIVIAL band is unaffected by --code-diff
+ok   - head-tree matches the PASS marker's Tree
+ok   - PASS recorded for an earlier tree does not satisfy the gate
+ok   - PASS without a Tree line does not satisfy a bound gate
+ok   - a later PASS for the head tree wins over an earlier-tree PASS
+ok   - stale pre-merge PASS does not satisfy the merged head
+ok   - post-merge re-gate marker satisfies the merged head
+ok   - pre-merge PASS still satisfies the pre-merge tree
+ok   - a FAIL re-gate on the merged tree is not a PASS
+ok   - no --head-tree keeps the unbound behaviour
+ok   - uppercase head-tree is normalised
+ok   - docs-only still waives the bound gate
+ok   - invalid --head-tree '' fails closed (exit 2)
+ok   - invalid --head-tree 'xyz' fails closed (exit 2)
+ok   - invalid --head-tree '11111111111111111111111111111111111111110' fails closed (exit 2)
+ok   - invalid --head-tree 'abc123' fails closed (exit 2)
+ok   - marker tree longer than (but prefixed by) the head tree is rejected
+ok   - --head-tree without a value exits 2
+ok   - -h prints the full multi-line header
+ok   - CONTRIBUTOR markers ignored with NOTE
+ok   - FORGE_TRAIL_TRUSTED_LOGINS accepts a CONTRIBUTOR login
+ok   - override list widened only: CONTRIBUTOR trail markers still ignored (#3350)
+ok   - marker-only CONTEXT satisfies STANDARD
+ok   - -h stops at the END-HELP sentinel
+ok   - gh outage fails closed
+ok   - -R without value exits 2 (no hang)
+ok   - no args is a usage error
+ok   - no override comment stays blocked
+ok   - valid human override is accepted
+ok   - OVERRIDE line carries approver, head, missing set and reason
+ok   - accepted override emits no MISSING lines
+ok   - admin permission is accepted
+ok   - uppercase head and shuffled/spaced missing list still bind to the same set
+ok   - a later valid override wins over an earlier rejected one
+ok   - rejects: Bot author
+ok   - rejects: null user
+ok   - rejects: missing user.type
+ok   - rejects: edited comment (updated_at != created_at)
+ok   - rejects: missing timestamps
+ok   - rejects: read-only collaborator
+ok   - rejects: author with no permission record
+ok   - rejects: permission API error fails closed (exit 1)
+ok   - rejects: wrong head sha
+ok   - rejects: truncated head sha
+ok   - rejects: override for a different MISSING set
+ok   - rejects: override for a superset of MISSING
+ok   - rejects: posted before BUILDER:COMPLETE
+ok   - rejects: posted exactly at BUILDER:COMPLETE time
+ok   - rejects: empty reason
+ok   - rejects: reason that is only control characters
+ok   - rejects: login with path characters (no API path injection)
+ok   - rejects: configured pipeline login (case-insensitive)
+ok   - rejects: configured pipeline login in a list
+ok   - rejects: derived pipeline identity (author of FORGE:BUILDER/INVESTIGATOR/CONTRACT)
+ok   - rejects: derived pipeline identity matches case-insensitively
+ok   - rejects: author of any trusted FORGE marker (QUALITY_GATE) is pipeline
+ok   - rejects: no --head-sha means the override is never evaluated
+ok   - invalid --head-sha '' fails closed (exit 2)
+ok   - invalid --head-sha 'xyz' fails closed (exit 2)
+ok   - invalid --head-sha 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0' fails closed (exit 2)
+ok   - --head-sha without a value exits 2
+ok   - exit 2 (unreadable trail) is not overridable
+ok   - exit 2 (malformed page) is not overridable
+ok   - exit 2 (bad QG_SINCE) is not overridable
+ok   - rejects: BUILDER:COMPLETE undated (ordering unprovable)
+ok   - passing trail is unaffected by --head-sha
+ok   - reason sanitiser strips ESC, neutralises comment markers and backticks, collapses whitespace
+ok   - reason is capped at 200 characters
+ok   - injected extra lines cannot forge an OVERRIDE line
+ok   - MISSING 'FAST_PATH (no COMPLEXITY_BAND value)' binds by marker name
+ok   - EMU login with underscore is accepted (#3270)
+ok   - 5-candidate cap is not starved by decoys failing local checks (#3268)
+ok   - non-collaborator decoy flood (newer, all-local-checks-passing) does not starve a real override (#3279)
+ok   - one login repeated many times costs a single cap slot (#3279)
+ok   - 7 distinct read-level members newer than a write approver do not starve it (#3306)
+ok   - read-level members only: override rejected (#3306)
+ok   - unreadable lookups stay bounded by the error cap and fail closed (#3306)
+ok   - MEMBER write approver is accepted (#3307)
+ok   - COLLABORATOR write approver is accepted (#3307)
+ok   - CONTRIBUTOR decoy flood does not starve a real override (#3307)
+ok   - CONTRIBUTOR write approver is rejected under the default list (#3307)
+ok   - widened override list accepts a CONTRIBUTOR write approver (#3307, #3350)
+ok   - trail list widened still widens override by default inheritance (#3350)
+ok   - empty override list yields no candidates with default trail list (#3350)
+ok   - narrowed list rejects a MEMBER approver (#3307)
+ok   - empty list yields no override candidates (fail closed) (#3307)
+ok   - case-variant duplicate logins cost a single lookup (#3307)
+ok   - decoys trigger no permission lookups; NOTE carries the count and no logins (#3307)
+ok   - NOTE count equals only eligible association-excluded candidates (#3351)
+ok   - unreadable lookups stop at the 6th login; older approver never queried (#3307)
+ok   - verifier's own login cannot approve an override (#3269)
+ok   - an unrelated self-login does not block a valid override (#3269)
+ok   - reason sanitiser neutralises @mentions and U+2028/2029 (#3274)
 
-HIGH | commands/orchestrate/phase-4-execution.md | line 2272 | Class B: side-effect 'gh issue edit' added in section 'Step 4B: Monitor completions and dispatch newly ready issues' with no DRY_RUN/governor guard in the same code block — add a guard inside this code block or wrap the effect in a DRY_RUN check
-check-command-side-effects: 1 violation(s) found. See stderr for details.
+(timed out after 300s)

@@ -1,29 +1,25 @@
 ### Approach
-Host-capability placement now reads three sources: the issue body, the FORGE:DECISION comments and the frozen contract's validate commands. A first remote run whose frozen contract needs a declared host tool now stops before building and is recovered on the host. `env.tool_missing` recoveries also run on the host. Everything is pure and deterministic, with no new gh calls and no LLM calls.
+`deferPolicy` now handles `rate_limited` before the `maxDeferrals` cap (still returns `hold:true`) and the deferral counter skips hold results. `REQUEUABLE` accepts `deferred`.
 
 ### Changes
-- bin/lean/execution.mjs: adds `placementText({body, comments})` and `contractHostNeeds(contract, caps)`. The header comment names the #4785 inputs. It imports `parseContractComment` from render.mjs.
-- bin/engine-cli.mjs: both `readBody` variants fetch `comments` in the same `gh issue view` call and compute `needsOf` from `placementText`. They still return only the body.
-- bin/lean/lean.mjs: after the contract freeze/resume block, a lane that is placed remote, is not a recovery, and whose validate commands name a declared host capability ends `env.capability_remote` before any implementation turn.
-- bin/lean/orchestrate.mjs: `placeOf` places `env.tool_missing` recoveries local, as it already does for `env.capability_remote`.
-- devdocs/modules/lean.md: adds the #4785 entry.
-- Tests: bin/lean/execution.test.mjs (placementText, contractHostNeeds, orchestrate tool-missing relaunch) and bin/lean/lean.test.mjs (remote early exit, plus the unchanged local, undeclared and recovery cases).
+- bin/lean/orchestrate.mjs: rate_limited never capped; counter not incremented for holds; comments.
+- bin/lean/batch.mjs: REQUEUABLE includes `deferred`.
+- bin/lean/batch.test.mjs: new #4784 test; existing deferral-sequence test and capped-codes list adjusted.
+- commands/orchestrate.md: spec wording.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/execution.mjs:222 (placementText), bin/engine-cli.mjs:1808-1809 (readBody), bin/lean/lean.mjs:1607 (frozen-contract check)
-- R2 ✅ bin/lean/lean.mjs:1607 (`env.capability_remote` before building), bin/lean/orchestrate.mjs:292 (tool-missing recovery runs local); the existing endBlocked mapping (lean.mjs:867-875) is unchanged
+- R1 ✅ bin/lean/orchestrate.mjs deferPolicy (rate_limited branch before the cap)
+- R2 ✅ bin/lean/batch.mjs:79
 
 ### Verification
-- V1 `node --test bin/lean/execution.test.mjs`: pass
-- V2 `node --test bin/lean/lean.test.mjs`: pass
-- V3 `node --test bin/lean/recovery.test.mjs bin/tests/engine-outcome-codes.test.mjs bin/tests/engine-cli.test.mjs`: pass
-- V4 `node --test --test-name-pattern=4785 bin/lean/execution.test.mjs bin/lean/lean.test.mjs`: pass. Fails without the fix: with lean.mjs and orchestrate.mjs reverted, the early-exit and tool-missing relaunch tests fail, and the placementText/contractHostNeeds tests cannot import functions that don't exist.
-- Extra targeted run: bin/tests/orchestrate-preflight, orchestrate-runtime-paths, bin/lean/precheck, bin/lean/batch: pass.
-- `checks.mjs --base origin/staging` widened to the full suite (921 files reference the change). The host rules forbid running the full suite, so only the targeted commands above were run.
-- No repo formatter is configured.
+- node --test bin/lean/batch.test.mjs: 59 pass. The new #4784 test fails without the fix.
+- node --test --test-name-pattern='orchestrate spec' bin/lean/lean.test.mjs: 2 pass.
+- forgedock check: PASS. Devdocs freshness: dossier devdocs/modules/orchestrate.md updated (Entry 2026-10-30).
 
 ### Notes
-- Behaviour change: a remote lane whose frozen validate commands name a declared `execution.host_capabilities` entry (for example promtool) now ends `env.capability_remote` right after the freeze and is relaunched on the host. A rerun of such an issue is placed local from the start. Undeclared built-in needs (sops etc. not in host_capabilities) do not trigger the early exit; this follows the same rule as hostCapabilityBlock.
-- Comments are not trust-filtered for placement: a detected need can only move a lane local (contract K1).
-- The AlterLab lanes cited in the issue ran engine v1.32.1 in the sandbox, which predates the #4542/#4685 recovery mapping.
-- No new env vars.
+A usage-limit deferral no longer counts toward max_deferrals. Earlier `deferred` rows can now be requeued with `--requeue`. No repo formatter is configured.
+
+### Precheck timeout
+scripts/verify-phase-trail.test.sh hit the 300s cap under host load; rerun alone passes (160/0, ~170s). It is unrelated to this diff, so no code change.
+
+- `bash scripts/verify-phase-trail.test.sh` timed out (exit 124) in the precheck at 300s under host load. Rerun: passed=160 failed=0 in 166s. The script and its inputs are untouched by this change, so no code fix applies.
