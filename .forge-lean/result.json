@@ -1,17 +1,181 @@
-{"status":"fixed","summary":"host-capability placement reads FORGE:DECISION comments and the frozen contract's validate commands; a remote lane whose frozen validate commands need a declared host tool ends env.capability_remote before building; env.tool_missing recoveries relaunch on the host","requirements":[
-{"id":"R1","status":"implemented","evidence":"bin/lean/execution.mjs:222 placementText; bin/engine-cli.mjs:1808-1809 readBody; bin/lean/lean.mjs:1607 contractHostNeeds check"},
-{"id":"R2","status":"implemented","evidence":"bin/lean/lean.mjs:1607 env.capability_remote before building; bin/lean/orchestrate.mjs:292 env.tool_missing recovery placed local"}],
-"validation":[
-{"id":"V1","command":"node --test bin/lean/execution.test.mjs","exit":0},
-{"id":"V2","command":"node --test bin/lean/lean.test.mjs","exit":0},
-{"id":"V3","command":"node --test bin/lean/recovery.test.mjs bin/tests/engine-outcome-codes.test.mjs bin/tests/engine-cli.test.mjs","exit":0},
-{"id":"V4","command":"node --test --test-name-pattern=4785 bin/lean/execution.test.mjs bin/lean/lean.test.mjs","exit":0}],
-"tests":[{"command":"node --test --test-name-pattern=4785 bin/lean/execution.test.mjs bin/lean/lean.test.mjs","result":"pass","fails_without_fix":true}],
-"self_review":[
-{"question":"1","answer":"yes","evidence":"R1: placementText (execution.mjs:222) feeds needsOf (engine-cli.mjs:1808-1809), and the frozen contract is checked in-lane (lean.mjs:1607). R2: remote capability needs end env.capability_remote, which orchestrate relaunches local; tool_missing is relaunched local too (orchestrate.mjs:292). Tests: execution.test.mjs:730-765, lean.test.mjs:710"},
-{"question":"2","answer":"yes","evidence":"V1-V3 pass, plus orchestrate-preflight/runtime-paths/precheck/batch tests; readBody still returns the body string; forgedock check: PASS"},
-{"question":"3","answer":"yes","evidence":"D1-D5 changed as described; P1 detectNeeds/hostCapabilityBlock unchanged (#4542 tests pass); P2 one gh call returning the body; P3 local/no-caps/recovery paths unchanged (lean.test.mjs:710 asserts merged); P4 existing capability_remote test passes; V1-V4 exit 0"},
-{"question":"4","answer":"yes","evidence":"git diff origin/staging...HEAD --name-only: bin/engine-cli.mjs, bin/lean/execution.mjs, bin/lean/lean.mjs, bin/lean/orchestrate.mjs, devdocs/modules/lean.md (deliverables) + execution.test.mjs, lean.test.mjs (tests)"}],
-"amendments":[],
-"facts":{"rejected":[{"approach":"a host-side backstop that reclassifies builder.blocked (credentials) from old sandbox engine versions","why":"version skew of the sandbox engine is outside this contract; current lane engines already map these blocks (lean.mjs:867-875)"}],
-"hotspots":[{"at":"bin/lean/lean.mjs:1607","why":"single post-freeze point covers fresh, light and resumed contracts"}]}}
+{
+ "status": "fixed",
+ "summary": "decision engine module with policy loader, deterministic split, shadow/live settle, veto, reversal gate, telemetry, report section, docs; watcher wiring deferred",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "bin/lean/decision-engine.mjs:42"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/decision-engine.mjs:79"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/lean/decision-engine.mjs:150"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/lean/decision-engine.mjs:182"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "bin/engine/telemetry-seam.mjs:81; bin/lean/orchestrate.mjs:1164"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "docs/DECISIONS.md:1"
+  },
+  {
+   "id": "R13",
+   "status": "implemented",
+   "evidence": "bin/lean/decision-engine.mjs:99"
+  },
+  {
+   "id": "R14",
+   "status": "implemented",
+   "evidence": "bin/lean/decision-engine.mjs:108"
+  },
+  {
+   "id": "R15",
+   "status": "implemented",
+   "evidence": "bin/lean/orchestrate.mjs:1164"
+  },
+  {
+   "id": "R16",
+   "status": "implemented",
+   "evidence": "bin/lean/decision-engine.mjs:125"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/decision-engine.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/lean/decisions.test.mjs bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/lean/decision-engine.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R1-R6, R13-R16 delivered; R7-R12 deferred by amendment"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "decisions, telemetry-seam, batch tests pass; the orchestrate report is unchanged without `decided` rows (test asserts [])"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "D1-D9 changed; P1-P4 intact; V1, V2 exit 0"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "git diff origin/staging...HEAD --name-only lists only deliverables and the test file"
+  }
+ ],
+ "amendments": [
+  {
+   "kind": "defer",
+   "requirement": "R7",
+   "why": "issue-watch (#4765) is not in the repo; the engine exposes settle with the escalation-id key"
+  },
+  {
+   "kind": "defer",
+   "requirement": "R8",
+   "why": "sweep_needs_human and --dry-run live in the #4765 watcher; classify() is the dry-run hook"
+  },
+  {
+   "kind": "defer",
+   "requirement": "R9",
+   "why": "caps belong to the #4765 watcher"
+  },
+  {
+   "kind": "defer",
+   "requirement": "R10",
+   "why": "watcher status is #4765; tally() supplies the counts"
+  },
+  {
+   "kind": "defer",
+   "requirement": "R11",
+   "why": "running the declared monitor path needs the watcher launch path; classification ships"
+  },
+  {
+   "kind": "defer",
+   "requirement": "R12",
+   "why": "folding into the release checklist needs #4767; classification ships"
+  }
+ ],
+ "not_members": [
+  {
+   "symbol": "decision-engine",
+   "test": "bin/engine/telemetry-seam.test.mjs",
+   "why": "the test holds no list of lean modules or files (no readdir, no module-name array); it exercises its own subject, so the new module is not a member"
+  },
+  {
+   "symbol": "decision-engine",
+   "test": "bin/lean/batch.test.mjs",
+   "why": "the test holds no list of lean modules or files (no readdir, no module-name array); it exercises its own subject, so the new module is not a member"
+  },
+  {
+   "symbol": "decision-engine",
+   "test": "bin/lean/checks.test.mjs",
+   "why": "the test holds no list of lean modules or files (no readdir, no module-name array); it exercises its own subject, so the new module is not a member"
+  },
+  {
+   "symbol": "decision-engine",
+   "test": "bin/lean/conformance.e2e.test.mjs",
+   "why": "the test holds no list of lean modules or files (no readdir, no module-name array); it exercises its own subject, so the new module is not a member"
+  },
+  {
+   "symbol": "decision-engine",
+   "test": "bin/lean/conformance.test.mjs",
+   "why": "the test holds no list of lean modules or files (no readdir, no module-name array); it exercises its own subject, so the new module is not a member"
+  },
+  {
+   "symbol": "decision-engine",
+   "test": "bin/lean/context.test.mjs",
+   "why": "the test holds no list of lean modules or files (no readdir, no module-name array); it exercises its own subject, so the new module is not a member"
+  },
+  {
+   "symbol": "decision-engine",
+   "test": "bin/lean/drift.test.mjs",
+   "why": "the test holds no list of lean modules or files (no readdir, no module-name array); it exercises its own subject, so the new module is not a member"
+  },
+  {
+   "symbol": "decision-engine",
+   "test": "bin/lean/execution.e2e.test.mjs",
+   "why": "the test holds no list of lean modules or files (no readdir, no module-name array); it exercises its own subject, so the new module is not a member"
+  },
+  {
+   "symbol": "decision-engine",
+   "test": "bin/lean/execution.test.mjs",
+   "why": "the test holds no list of lean modules or files (no readdir, no module-name array); it exercises its own subject, so the new module is not a member"
+  },
+  {
+   "symbol": "decision-engine",
+   "test": "bin/lean/fixround.test.mjs",
+   "why": "the test holds no list of lean modules or files (no readdir, no module-name array); it exercises its own subject, so the new module is not a member"
+  }
+ ]
+}
