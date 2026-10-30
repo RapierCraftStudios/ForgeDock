@@ -1,36 +1,35 @@
 **Verdict**: CONFIRMED
 **Confidence**: high
-**Severity**: high (every schedd-backed batch fails on Windows; workaround `--foreground`)
+**Severity**: medium (Windows lanes with 32-64 KB prompts fail deterministically with cli.spawn_failed on every rerun)
 **Task Type**: bug
 
 ### What Was Claimed
-On Windows `forgedock schedd` cannot listen on `~/.forge/sched/schedd.sock` (EACCES); Node `net` IPC on win32 requires a named pipe. Secondary: `defaultSpawn` uses `URL.pathname` (`/C:/...`), breaking the script path.
+On win32 a prompt between ~32 KB and 64 KB is passed as an argv element (limit `CLI_ARGV_PROMPT_MAX_BYTES = 64 KiB`, chosen for Linux MAX_ARG_STRLEN) and `spawn` fails with ENAMETOOLONG, because CreateProcess caps the whole command line at 32,767 UTF-16 chars (8,191 via cmd.exe shims).
 
 ### What We Found
-- bin/lean/schedd.mjs:48-49 `scheddPaths` returns `sock: join(dir,"schedd.sock")` on every platform.
-- bin/lean/schedd.mjs:261 `server.listen(p.sock)`; :139 and :281 `rmSync(p.sock)`; :296 lost-socket watchdog `existsSync(p.sock)`; :404 `scheddExists` uses `existsSync(sock)`.
-- bin/lean/schedd.mjs:350-352 `connectDaemon` uses `createConnection(sock)` from the same path (orchestrate and `--resume` both go through it).
-- bin/lean/schedd.mjs:366 `defaultSpawn` still uses `new URL("../forgedock.mjs", import.meta.url).pathname` at this base (not yet fixed here, despite the issue saying main has it).
-- bin/lean/schedd.test.mjs:72,327,368,457,462,610 assert `existsSync(...sock)` on POSIX; these stay valid on non-win32.
+- bin/runner.mjs:1538 `CLI_ARGV_PROMPT_MAX_BYTES = 64 * 1024`, platform independent.
+- bin/runner.mjs:1597 `promptViaStdin = byteLength(userMessage) > CLI_ARGV_PROMPT_MAX_BYTES`; only the prompt is counted, not the system-prompt path or flags (:1599-1620 build cliArgs).
+- bin/runner.mjs:1653 stdin is delivered via `input:` when promptViaStdin; `claude --print` reads stdin when no prompt arg is given.
+- bin/runner.mjs:1541 ENAMETOOLONG is already in DETERMINISTIC_SPAWN_ERRNOS (so reruns fail identically, matching the report).
+- bin/lean/lean.test.mjs:4238-4251 existing argv/stdin test has no win32 case.
+- The earlier FORGE:INVESTIGATION comment and the prior .forge-lean/result.json ("already-fixed", #4788 offline pool) describe a different issue and do not match this issue's body; the claim here is not fixed on origin/staging (checked: line 1597 unchanged).
 
 ### Root Cause
-The socket path is a filesystem path on all platforms; win32 only accepts `\\.\pipe\<name>`. The spawn script path is built from a URL pathname rather than `fileURLToPath`.
+The argv/stdin threshold is a single Linux-derived constant, with no win32 awareness and no accounting for the rest of the command line.
 
 ### Affected Files
-- bin/lean/schedd.mjs (scheddPaths, startDaemon unlink/watchdog, scheddExists, defaultSpawn)
-- bin/lean/schedd.test.mjs (win32 path-selection tests)
-- Enumerating tests: none of the listed bin/lean sibling-name tests enumerate schedd.mjs exports; no new file is added to bin/lean, so none need changes.
+- bin/runner.mjs (hotspot, 3250 lines: wiring plus a small pure helper, well under +150 lines)
+- bin/lean/lean.test.mjs (existing test at :4238; add win32 case)
+- Enumerating tests: bin/tests/runner.test.mjs:7 lists 22 export names; add no export beyond what is needed, and if a new export is added, join that list. No new file under bin/, so bin/lean/lean.test.mjs:66 file list is unaffected.
 
 ### Sibling Sweep
-- bin/lean/retry.mjs:54 has the same `new URL(...).pathname` defect for a `.sh` script (not Windows-runnable anyway; out of scope, note only).
-- Test files using `.pathname` (bin/tests/*) are test-only; leave.
-- No other module opens the schedd socket (grep of engine-cli, execution, heavy, sched, seqlease, pool/router finds no `.sock` use via scheddPaths).
+`grep CLI_ARGV_PROMPT_MAX_BYTES bin`: only runner.mjs and lean.test.mjs. runCliBackendAsync (runner.mjs) shares the decision, verify it goes through the same helper or the same constant lines (line 1597 is the only decision site found).
 
 ### History
-- schedd introduced in 11b653a28 (#4192) with the `schedd.sock` path; later edits (#4503 watchdog, #4787) kept it. No prior Windows fix.
+Introduced by 01e2591d2 "fix(lean): large reviewer prompts go over stdin ... (#4129)", which targeted Linux E2BIG only.
 
 ### Recommendation
-Give `scheddPaths(dir, platform = process.platform)` a win32 branch: `sock = \\.\pipe\forgedock-schedd-<sha1(resolved dir) first 12 hex>`. Add small `isPipe` handling: skip `rmSync` of sock (lines 139, 281) and skip the `existsSync(p.sock)` watchdog and make `scheddExists` fall back to the lock file on win32 (named pipes vanish with the process). Use `fileURLToPath` in defaultSpawn. Add tests: scheddPaths with platform "win32" yields a stable per-dir pipe name, differs across dirs, and linux keeps `schedd.sock`. Publishing an npm release is out of repo scope (post-deploy). Real Windows listen/connect cannot be exercised in-lane.
+Add `export const CLI_ARGV_PROMPT_MAX_BYTES_WIN32 = 16 * 1024` and a pure `promptGoesViaStdin(prompt, otherArgs, platform = process.platform)` in bin/runner.mjs: limit = win32 ? 16 KiB : 64 KiB, and the compared size is prompt bytes plus the byte length of otherArgs (system-prompt path, flags) so the whole command line is counted. Use it at :1597 (build the non-prompt args first). Keep the stdin delivery at :1653. Add unit tests for win32 (40 KB prompt -> stdin, 10 KB -> argv, args counted) and keep the linux case.
 
 ### Related Issues
-None found beyond #4192 (origin) and #4503 (watchdog).
+#4129 (original stdin switch), #4690/#4518 (spawn-failure classification, unrelated).
