@@ -1,13 +1,15 @@
-{"status":"fixed","summary":"a PR-less lane branch holding only .forge-lean scratch is planned fresh (scratch removed in a normal commit) instead of resuming its stale contract","requirements":[
-{"id":"R1","status":"implemented","evidence":"bin/lean/lean.mjs:1084-1088,1105-1112"},
-{"id":"R3","status":"implemented","evidence":"bin/lean/lean.mjs:1084-1088"}],
-"validation":[
-{"id":"V1","command":"node --test --test-concurrency=1 bin/lean/lean.test.mjs","exit":0},
-{"id":"V2","command":"node --test --test-concurrency=1 bin/lean/toolstate.test.mjs","exit":0}],
-"tests":[{"command":"node --test --test-concurrency=1 bin/lean/lean.test.mjs","result":"pass","fails_without_fix":true}],
+{"status":"fixed","summary":"merge-gate --manual-pr skips only the phase-trail preflight for hand-built PRs (recorded as FORGE:PHASE_TRAIL_SKIPPED); every other gate still runs and pipeline issues are refused","requirements":[
+{"id":"R1","status":"implemented","evidence":"scripts/review-finalize.sh:1336; commands/review-pr.md:122"},
+{"id":"R2","status":"implemented","evidence":"scripts/review-finalize.sh:1338"},
+{"id":"R3","status":"implemented","evidence":"scripts/review-finalize.test.sh:859-885 (CI, reviewed head, mergeability, verdict still block)"},
+{"id":"R4","status":"implemented","evidence":"scripts/review-finalize.sh:1281 manual_pr_eligibility"},
+{"id":"R5","status":"implemented","evidence":"scripts/review-finalize.test.sh:861"},
+{"id":"R6","status":"implemented","evidence":"scripts/review-finalize.test.sh:886-887"}],
+"validation":[{"id":"V1","command":"bash scripts/review-finalize.test.sh","exit":0},{"id":"V2","command":"bash scripts/review-pr-arguments.test.sh","exit":0},{"id":"V3","command":"bash scripts/check-spec-size.test.sh","exit":0}],
+"tests":[{"command":"bash scripts/review-finalize.test.sh","result":"pass: 655 passed, 0 failed","fails_without_fix":true},{"command":"bash scripts/review-pr-arguments.test.sh","result":"pass: 72 passed","fails_without_fix":true}],
 "self_review":[
-{"question":"1","answer":"yes","evidence":"lean.mjs:1084-1112 drops scratch-only branches; lean.test.mjs:394"},
-{"question":"2","answer":"yes","evidence":"code-change branch still resumes: lean.test.mjs:402; V1 515 pass"},
-{"question":"3","answer":"yes","evidence":"D1, D2 changed; V1/V2 exit 0; toolstate.mjs untouched"},
-{"question":"4","answer":"yes","evidence":"git diff touches lean.mjs, lean.test.mjs and .forge-lean only"}],
-"amendments":[]}
+{"question":"1","answer":"yes","evidence":"R1-R6 delivered; scripts/review-finalize.sh:1281-1340, commands/review-pr.md:122,175"},
+{"question":"2","answer":"yes","evidence":"655 existing+new gate tests pass; no-flag path keeps exit 4 and 'auto-merge requires --issue' (review-finalize.test.sh:886, 1236)"},
+{"question":"3","answer":"yes","evidence":"D1-D4 changed; P1-P4 intact; V1-V3 exit 0; forgedock check PASS"},
+{"question":"4","answer":"yes","evidence":"only deliverable paths, tests, and the amended devdocs decision record"}],
+"amendments":[{"kind":"add-deliverable","path":"devdocs/decisions/4770-merge-gate-manual-pr.md","why":"scripts/check-devdocs-freshness.sh requires a dossier or decision record for a behaviour change in scripts/review-finalize.sh"}]}
