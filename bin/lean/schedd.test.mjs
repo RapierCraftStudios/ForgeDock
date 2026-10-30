@@ -8,10 +8,10 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { openBatch, isLaneAlive, listBatches } from "./batch.mjs";
-import { startDaemon, scheddPaths, connectDaemon, request, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
+import { startDaemon, scheddPaths, connectDaemon, request, unitState, mergeEnv, batchEnv, droppedEnv, sanitizePath, redactEnv, exitOnSignals } from "./schedd.mjs";
 import { schedDir } from "./sched.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
-import { orchestrateFromCli } from "../engine-cli.mjs";
+import { orchestrateFromCli, scheddFromCli } from "../engine-cli.mjs";
 
 // #4503: this process, and the env its clients submit for their lanes, never resolve the host's `~/.forge/sched`.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("schedd-home-");
@@ -611,5 +611,95 @@ describe("schedd due timer (#4627)", () => {
   it("without a due callback there is no timer", async () => {
     const d = await boot({ dueMs: 10 });
     await d.close();
+  });
+});
+
+// #4775: a client never races a systemd-managed daemon; a stalled daemon is visible and bounded.
+describe("schedd under load and restart (#4775)", () => {
+  const noSleep = () => Promise.resolve();
+  it("connectDaemon never spawns while the unit is active or activating, and starts an installed stopped unit instead of spawning", async () => {
+    for (const state of ["active", "activating", "reloading"]) {
+      let spawned = 0;
+      await assert.rejects(connectDaemon({ dir: tmpDir("schedd-unit-"), waitMs: 0, sleep: noSleep, spawnDaemon: () => { spawned++; }, unit: () => state, start: () => { spawned++; } }), /did not start/);
+      assert.equal(spawned, 0, `${state}: nothing is started`);
+    }
+    const calls = [];
+    await assert.rejects(connectDaemon({ dir: tmpDir("schedd-unit-"), waitMs: 0, sleep: noSleep, spawnDaemon: () => calls.push("spawn"), unit: () => "inactive", start: () => calls.push("unit") }), /did not start/);
+    assert.deepEqual(calls, ["unit"]);
+  });
+
+  it("connectDaemon spawns the daemon itself only when no unit is installed; spawnDaemon:null starts nothing", async () => {
+    const calls = [];
+    await assert.rejects(connectDaemon({ dir: tmpDir("schedd-unit-"), waitMs: 0, sleep: noSleep, spawnDaemon: () => calls.push("spawn"), unit: () => null, start: () => calls.push("unit") }), /did not start/);
+    assert.deepEqual(calls, ["spawn"]);
+    await assert.rejects(connectDaemon({ dir: tmpDir("schedd-unit-"), spawnDaemon: null, unit: () => { throw new Error("not consulted"); } }), { code: "ENOENT" });
+  });
+
+  it("unitState reads the systemctl state (also from a non-zero exit) and is null without a unit file", () => {
+    assert.equal(unitState({ exists: () => false }), null);
+    assert.equal(unitState({ exists: () => true, run: () => "activating\n" }), "activating");
+    assert.equal(unitState({ exists: () => true, run: () => { throw Object.assign(new Error("exit 3"), { stdout: "inactive\n" }); } }), "inactive");
+    assert.equal(unitState({ exists: () => true, run: () => { throw Object.assign(new Error("none"), { code: "ENOENT" }); } }), null);
+  });
+
+  it("request(timeoutMs) rejects a daemon that never answers instead of hanging", async () => {
+    const dir = tmpDir("schedd-mute-"), sock = scheddPaths(dir).sock;
+    const server = (await import("node:net")).createServer(() => { /* accepts, never answers */ });
+    await new Promise((r) => server.listen(sock, r));
+    try {
+      const c = await connectDaemon({ dir, spawnDaemon: null });
+      await assert.rejects(request(c, { op: "status" }, undefined, { timeoutMs: 80 }), { code: "schedd.timeout" });
+    } finally { server.close(); }
+  });
+
+  it("status reports per-batch last-progress age and pending adds, including an unhosted batch with un-admitted adds", async () => {
+    const root = tmpDir("schedd-st-b-"), dir = tmpDir("schedd-st-");
+    const mk = (id, files) => { mkdirSync(join(root, id), { recursive: true }); writeFileSync(join(root, id, "plan.json"), JSON.stringify({ daemon: true })); for (const [n, t] of Object.entries(files)) writeFileSync(join(root, id, n), t); };
+    mk("b-stuck", { "state.json": JSON.stringify({ order: [1] }), add: "[7,8]" });
+    mk("b-quiet", { "state.json": JSON.stringify({ order: [1] }) });
+    const d = await startDaemon({ dir, root, runBatch: async () => ({}), resumeOnStart: false, log: () => {} });
+    try {
+      const st = await request(await connectDaemon({ dir, spawnDaemon: null }), { op: "status" });
+      assert.equal(st.batches.length, 1, "a quiet unhosted batch is not listed");
+      const [b] = st.batches;
+      assert.equal(b.id, "b-stuck");
+      assert.equal(b.running, false);
+      assert.deepEqual(b.pendingAdds, [7, 8]);
+      assert.ok(b.lastProgressAgeSec >= 0 && b.lastProgressAgeSec < 60);
+    } finally { await d.close(); }
+  });
+
+  it("a batch whose start stalls does not block another batch's request, and the stalled request answers an error", async () => {
+    const root = tmpDir("schedd-stall-b-"), dir = tmpDir("schedd-stall-");
+    for (const id of ["b-hung", "b-ok"]) { mkdirSync(join(root, id), { recursive: true }); writeFileSync(join(root, id, "plan.json"), JSON.stringify({ daemon: true })); writeFileSync(join(root, id, "state.json"), JSON.stringify({ order: [1] })); }
+    const d = await startDaemon({ dir, root, resumeOnStart: false, admitMs: 150, log: () => {},
+      runBatch: ({ argv, sink }) => (argv[1] === "b-hung" ? new Promise(() => {}) : Promise.resolve().then(() => { sink.batch({ id: argv[1], dir: join(root, argv[1]) }); return {}; })) });
+    try {
+      const ask = async (id) => request(await connectDaemon({ dir, spawnDaemon: null }), { op: "attach", id }).catch((e) => e);
+      const hung = ask("b-hung");
+      const ok = await ask("b-ok");
+      assert.notEqual(ok instanceof Error && /did not start/.test(ok.message), true, "the healthy batch is served");
+      const e = await hung;
+      assert.match(e.message, /did not start within 150 ms/);
+    } finally { await d.close(); }
+  });
+
+  it("the unit stands by while another daemon holds the lock instead of exiting 0 (no Restart=always loop)", async () => {
+    const dir = tmpDir("schedd-sb-"), root = tmpDir("schedd-sb-b-");
+    const owner = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    const gone = new Promise((r) => owner.on("exit", r));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(scheddPaths(dir).lock, String(owner.pid)); // a live daemon of another process
+    const slept = [];
+    process.env.FORGEDOCK_SCHEDD_IDLE_MS = "100"; // the successor daemon exits when idle, so the call returns
+    process.env.FORGEDOCK_BATCH_DIR = root;
+    try {
+      const r = await Promise.race([
+        scheddFromCli([], { scheddDir: dir, standby: true, standbyMs: 1, sleep: async () => { slept.push(1); if (slept.length === 3) { owner.kill("SIGKILL"); await gone; } }, processOn: () => {}, exit: () => {}, batchDeps: {}, due: null }),
+        new Promise((res) => setTimeout(() => res("timeout"), 5000)),
+      ]);
+      assert.ok(slept.length >= 3, "waited for the owner before retrying");
+      assert.notEqual(r, "timeout");
+    } finally { delete process.env.FORGEDOCK_SCHEDD_IDLE_MS; delete process.env.FORGEDOCK_BATCH_DIR; owner.kill("SIGKILL"); }
   });
 });

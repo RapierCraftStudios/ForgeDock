@@ -1314,7 +1314,7 @@ async function orchestrateClient(argv, deps = {}) {
     if (!Number.isInteger(k) || k < 1) throw new Error("parallel must be a positive integer");
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    if (sock) await schedd.request(sock, { op: "set-parallel", id, k });
+    if (sock) await schedd.request(sock, { op: "set-parallel", id, k }, undefined, { timeoutMs: schedd.REQUEST_MS });
     else {
       // No daemon: the batch is not running anywhere; the parallel file is all there is to change.
       const batchMod = await import("./lean/batch.mjs");
@@ -1329,17 +1329,17 @@ async function orchestrateClient(argv, deps = {}) {
   const addVia = (id) => async (issues) => {
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    return sock ? schedd.request(sock, { op: "add", id, issues }) : null;
+    return sock ? schedd.request(sock, { op: "add", id, issues }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
   const requeueVia = (id) => async (issues, reason, by) => {
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    return sock ? schedd.request(sock, { op: "requeue", id, issues, reason, by }) : null;
+    return sock ? schedd.request(sock, { op: "requeue", id, issues, reason, by }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
   const holdVia = (id) => async (op, issues) => {
     let sock = null;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-    return sock ? schedd.request(sock, { op, id, issues }) : null;
+    return sock ? schedd.request(sock, { op, id, issues }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
   };
   const batchRootOf = async () => (await import("./lean/batch.mjs")).batchRoot();
   if (["--show-env", "--set-env", "--unset-env"].some((f) => argv.includes(f))) return envBatch({ argv, root: await batchRootOf() });
@@ -1349,7 +1349,7 @@ async function orchestrateClient(argv, deps = {}) {
     return cancelBatch({ id, root: await batchRootOf(), stopRemote: argv.includes("--stop-remote"), viaDaemon: async () => {
       let sock = null;
       try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { sock = null; }
-      return sock ? schedd.request(sock, { op: "cancel", id, stopRemote: argv.includes("--stop-remote") }) : null;
+      return sock ? schedd.request(sock, { op: "cancel", id, stopRemote: argv.includes("--stop-remote") }, undefined, { timeoutMs: schedd.REQUEST_MS }) : null;
     } });
   }
   if (argv.includes("--requeue")) {
@@ -1966,14 +1966,32 @@ export async function scheddFromCli(argv, deps = {}) {
   if (argv[0] === "status") {
     let sock;
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { console.log("schedd: not running"); return { running: false }; }
-    const st = await schedd.request(sock, { op: "status" });
-    console.log(`schedd: pid ${st.pid}, ${st.batches.length} batch(es)${st.batches.length ? ": " + st.batches.map((b) => b.id).join(", ") : ""}`);
+    let st;
+    try { st = await schedd.request(sock, { op: "status" }, undefined, { timeoutMs: deps.statusMs ?? schedd.REQUEST_MS }); }
+    catch (e) {
+      if (e?.code !== "schedd.timeout") throw e;
+      console.log(`schedd: not responding (${e.message}); see ${schedd.scheddPaths(dir).log}`);
+      process.exitCode = 1;
+      return { running: true, responding: false };
+    }
+    console.log(`schedd: pid ${st.pid}, ${st.batches.length} batch(es)`);
+    for (const b of st.batches) {
+      const age = b.lastProgressAgeSec == null ? "no progress yet" : `last progress ${b.lastProgressAgeSec}s ago`;
+      const pend = b.pendingAdds?.length ? `, pending adds: ${b.pendingAdds.map((n) => `#${n}`).join(" ")}` : "";
+      console.log(`  ${b.id}${b.running ? "" : " (not hosted)"}: ${age}${pend}`);
+    }
     return { running: true, ...st };
   }
   if (argv.length) throw new Error("usage: forgedock schedd [status]");
   process.title = "forgedock-schedd"; // distinctive name for OOM-killer avoid lists and ps (#4673)
   const d = await schedd.startDaemon({ dir, runBatch: (a) => runBatch({ ...a, daemon: true, deps: deps.batchDeps ?? {} }), ...(deps.due !== undefined ? { due: deps.due } : { due: scheddDue }) });
-  if (!d.running) return d;
+  if (!d.running) {
+    // #4775: under systemd, exiting here (code 0) makes `Restart=always` loop while another daemon holds the lock: stand by, take over when it dies
+    if (!(deps.standby ?? Boolean(process.env.INVOCATION_ID))) return d;
+    const wait = deps.standbyMs ?? 5000, alive = deps.alive ?? ((await import("./lean/sched.mjs")).pidAlive);
+    do await (deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))(wait); while (alive(d.owner));
+    return scheddFromCli(argv, deps);
+  }
   // #4454: a signal stops the hosted batch loops, then releases the lock and socket, then exits 128+signo
   schedd.exitOnSignals(d, { ...(deps.processOn ? { on: deps.processOn } : {}), ...(deps.exit ? { exit: deps.exit } : {}) });
   await d.closed;
