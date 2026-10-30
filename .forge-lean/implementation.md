@@ -1,30 +1,22 @@
 ### Approach
-Treat an unreachable pool as a wait (like #4528), derive pool liveness from `/agents` when `/status` lacks it (so #4547 fallback works), and report a sustained zero-agent pool once.
+Every `detached: true` spawn gets `windowsHide: true` (a no-op off Windows), and a source-scan test rejects any new one without it. Merged origin/staging (one conflict in devdocs/modules/lean.md, both entries kept).
 
 ### Changes
-- bin/lean/orchestrate.mjs: `sandbox.unreachable` added to UNCAPPED_DEFERRALS; grant() tracks `online===0` and emits one `pool-offline` event after `remote.poolOfflineMin` (default 10) min, reset when online > 0.
-- bin/lean/sandbox-remote.mjs: `httpTransport.capacity()` falls back to `GET /agents` (online = ok && !paused, total).
-- bin/lean/batch.test.mjs, bin/lean/sandbox-provider.contract.test.mjs: regression tests.
+- bin/lean/batch.mjs, bin/runner.mjs, bin/lean/effects.mjs, bin/lean/probe.mjs, bin/lean/schedd.mjs, bin/pool/agent.mjs, scripts/ci-local/run.mjs, bin/journey.mjs: `windowsHide: true` added to detached spawn options.
+- bin/tests/windows-hide.test.mjs: new guard test.
+- bin/lean/batch.test.mjs: launchLane asserts windowsHide.
+- devdocs/modules/lean.md: dossier entry (#4764).
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/orchestrate.mjs:124
-- R2 ✅ bin/lean/orchestrate.mjs:~484-491 (one batch event; no separate notification channel exists)
-- R3 ✅ report-only when fallback_local unset (same block)
-- R4 ✅ bin/lean/sandbox-remote.mjs:80-98
+- R1 ✅ bin/lean/batch.mjs:238, bin/runner.mjs:2078, bin/lean/effects.mjs:239, bin/lean/probe.mjs:182, bin/lean/schedd.mjs:368
+- R2 deferred per contract
+- R3 post-deploy per contract
+- R4 ✅ bin/tests/windows-hide.test.mjs
 
 ### Verification
-- V1 `node --test bin/lean/batch.test.mjs bin/lean/sandbox-provider.contract.test.mjs bin/lean/execution.test.mjs`: 145 pass, 0 fail. The new tests fail without the source change (3 failures).
-- checks.mjs widened to the full suite (748 referencing files); not run, per host rules.
+- V1: pass (100/100) after the merge.
+- V2: exit 1, 953 pass / 4 fail, both before and after merging origin/staging, and identically on the unmodified base. The failures are host-environmental: this host is WSL2 (kernel 6.6.87.2-microsoft-standard-WSL2), and bin/tests/journey.test.mjs:559 and its siblings (preflight, forge Act II, writeInstallReceipt) assume a non-WSL host ('detected' vs 'not detected'); lean.test.mjs "batch robustness" (#4690 idle-kill, #4115c CPU-load on a 2-core host) is load-sensitive. None touch windowsHide behaviour; the fixes would be in non-deliverable test files.
+- New test fails without the fix (removing windowsHide at probe.mjs:182 gives `# fail 1`).
 
 ### Notes
-`remote.poolOfflineMin` is not yet wired to config (execution.mjs/engine-cli.mjs are not deliverables); the default 10 applies. Documented in devdocs/modules/lean.md (freshness fix). No formatter is configured in the repo.
-
-## Precheck rerun
-classify-finding.test.sh and verify-phase-trail.test.sh timed out at 300s under host load; neither touches changed files. Reran: both pass (exit 0). No code change.
-
-## Docs freshness
-Added a #4788 paragraph to devdocs/modules/lean.md; no code change.
-
-### Follow-up (conformance)
-- `devdocs/modules/lean.md` is now a typed `add-deliverable` amendment (freshness script requires the dossier to move with bin/lean behaviour changes; `check-devdocs-freshness.sh origin/staging` passes).
-- The precheck shell-test timeouts (classify-finding, verify-phase-trail at 300s) are host load, not a contract change: reruns passed (176/0 and 160/0, exit 0) and `forgedock check` passed. This is not an amendment.
+No behaviour change off Windows; no env vars.
