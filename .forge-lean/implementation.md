@@ -1,30 +1,25 @@
 ### Approach
-Treat an unreachable pool as a wait (like #4528), derive pool liveness from `/agents` when `/status` lacks it (so #4547 fallback works), and report a sustained zero-agent pool once.
+Filter secrets at the single persistence choke point (`writePlan`), scrub pre-existing plans on daemon start and on `--resume`, and refuse `--set-env` for secret names. The in-memory pin still carries the token for the running batch; resumes re-read it from the daemon env/keychain via `mergeEnv`.
 
 ### Changes
-- bin/lean/orchestrate.mjs: `sandbox.unreachable` added to UNCAPPED_DEFERRALS; grant() tracks `online===0` and emits one `pool-offline` event after `remote.poolOfflineMin` (default 10) min, reset when online > 0.
-- bin/lean/sandbox-remote.mjs: `httpTransport.capacity()` falls back to `GET /agents` (online = ok && !paused, total).
-- bin/lean/batch.test.mjs, bin/lean/sandbox-provider.contract.test.mjs: regression tests.
+- bin/lean/batch.mjs: `SECRET_ENV` (now also `*_KEY`), `scrubEnv`, `writePlan` drops secret env values and records names in `envSecrets`, new `scrubPlan()` (rewrites 0600, no-op if clean).
+- bin/lean/schedd.mjs: imports `SECRET_ENV` from batch.mjs (single definition, no re-export); scrubs every batch plan at daemon start.
+- bin/engine-cli.mjs: `--set-env` rejects secret names; `--resume` scrubs the plan first.
+- bin/lean/batch.test.mjs, bin/lean/schedd.test.mjs: regression tests; the #4691 test now expects `--set-env GH_TOKEN=...` to be refused.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/orchestrate.mjs:124
-- R2 ✅ bin/lean/orchestrate.mjs:~484-491 (one batch event; no separate notification channel exists)
-- R3 ✅ report-only when fallback_local unset (same block)
-- R4 ✅ bin/lean/sandbox-remote.mjs:80-98
+- R1 ✅ bin/lean/batch.mjs (writePlan/scrubEnv)
+- R2 ✅ bin/lean/batch.mjs (envSecrets names), bin/engine-cli.mjs resume uses mergeEnv (schedd.mjs mergeEnv)
+- R3 ✅ bin/lean/batch.mjs put (private) + test asserts 0600
+- R4 ✅ bin/lean/batch.mjs scrubPlan, called from schedd.mjs start and engine-cli.mjs resume
 
 ### Verification
-- V1 `node --test bin/lean/batch.test.mjs bin/lean/sandbox-provider.contract.test.mjs bin/lean/execution.test.mjs`: 145 pass, 0 fail. The new tests fail without the source change (3 failures).
-- checks.mjs widened to the full suite (748 referencing files); not run, per host rules.
+- V1 `node --test bin/lean/batch.test.mjs bin/lean/schedd.test.mjs`: 83 pass, 0 fail. The new batch tests call `scrubPlan` and assert the token is absent, so they fail without the fix.
+- checks.mjs widened to the full suite (fan-out cap); not run per host rules.
+- scripts/check-devdocs-freshness.sh: OK, no dossier required.
 
 ### Notes
-`remote.poolOfflineMin` is not yet wired to config (execution.mjs/engine-cli.mjs are not deliverables); the default 10 applies. Documented in devdocs/modules/lean.md (freshness fix). No formatter is configured in the repo.
-
-## Precheck rerun
-classify-finding.test.sh and verify-phase-trail.test.sh timed out at 300s under host load; neither touches changed files. Reran: both pass (exit 0). No code change.
-
-## Docs freshness
-Added a #4788 paragraph to devdocs/modules/lean.md; no code change.
-
-### Follow-up (conformance)
-- `devdocs/modules/lean.md` is now a typed `add-deliverable` amendment (freshness script requires the dossier to move with bin/lean behaviour changes; `check-devdocs-freshness.sh origin/staging` passes).
-- The precheck shell-test timeouts (classify-finding, verify-phase-trail at 300s) are host load, not a contract change: reruns passed (176/0 and 160/0, exit 0) and `forgedock check` passed. This is not an amendment.
+- `--set-env` with a secret-named key now errors instead of storing it.
+- plan.json gains `envSecrets` (names only).
+- SECRET_ENV now also matches names ending in `_KEY`, so `--show-env` redacts those too.
+- Docs: devdocs/modules/lean.md entry for #4787 (fixes the devdocs freshness check).
