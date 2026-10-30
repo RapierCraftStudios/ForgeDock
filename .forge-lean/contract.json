@@ -2,61 +2,26 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "Each trigger type fires correctly, including an immediate security trigger below threshold (tests).",
+   "quote": "fix: Oversized relay answer gets 413 from router, is swallowed, request stays pending and host re-runs the command each poll; sandbox times out rc 125 — `bin/lean/relay.mjs:138`.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "Deterministic theme classification from labels, scope and paths; the LLM fallback only for unclassified issues, and counted.",
+   "quote": "**Fix**: cap the answer to the router limit on the host (truncate stdout/stderr so the serialized answer fits, say 512 KiB) or raise the router limit for this route; on a non-retryable answer failure (4xx) post a small `rc 1` \"output too large\" answer instead of retrying.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "The release set includes its `Depends on` closure and respects the cap; the remainder rolls over with age kept.",
+   "quote": "Finding validated: VALIDATED / FALSE_POSITIVE / INCONCLUSIVE",
    "disposition": "deliver",
+   "evidence": ".forge-lean/investigation.md (VALIDATED: bin/lean/relay.mjs:137-138, bin/pool/http.mjs:5-10, bin/pool/router.mjs:315)",
    "verify": "in_lane"
   },
   {
    "id": "R4",
-   "quote": "`FORGE:RELEASE_PLAN` record plus a milestone or label tag; one batch per release; a deploy PR is opened and never merged by the watch.",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R5",
-   "quote": "Dry run shows the theme scores and the would-cut set.",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R6",
-   "quote": "Let a watch (#4765) **accumulate** eligible issues for a target (a milestone branch or the no-milestone/staging group) until a configurable threshold is crossed.",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R7",
-   "quote": "A watch with `mode: release` claims nothing immediately.",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R8",
-   "quote": "Score each theme from its issue priorities, age and the target repo's `NORTHSTAR.md` priorities and tie-break order (#4766).",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R9",
-   "quote": "**Promotion stays human-only.** The watch never merges to the default branch.",
-   "disposition": "deliver",
-   "verify": "in_lane"
-  },
-  {
-   "id": "R10",
-   "quote": "`issue-watch --dry-run` prints `would cut: stealth (14 issues, score 46; security pool 1 \u003c threshold)` along with the per-issue theme classification.",
+   "quote": "If VALIDATED: fix implemented and tested on the correct branch",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -64,127 +29,99 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/lean/issuewatch-release.mjs",
-   "change": "New module: priority score (P0=8,P1=4,P2=2,P3=1; labels P0 or priority:P0), triggers (min_issues, min_score, max_age_days, immediate classes label:/priority:), theme classification from theme_map rules (label:, path: globs matched against paths named in the body, title conventional-commit scope as theme name), injected LLM fallback for unclassified with counter, theme scoring with NORTHSTAR tie-break order, Depends-on closure (cross-theme deps pulled in and marked) trimmed to max_release_issues, FORGE:RELEASE_PLAN comment text, releaseTick (pool, decide, claim via claimIssue, tag via milestone/label, start one batch, on report open deploy PR once, never merge), dryRun report.",
+   "path": "bin/lean/relay.mjs",
+   "change": "Add exported RELAY_ANSWER_MAX_BYTES = 512 * 1024 and a pure exported capAnswer(out, max) that trims stdout first, then stderr (never splitting a UTF-8 character), until Buffer.byteLength(JSON.stringify(answer)) \u003c= max, appends 'relay: output over \u003cmax> bytes, truncated' to stderr and sets rc 1 when it trimmed; returns the answer unchanged when it already fits. In servicePending apply capAnswer to the redacted answer (line 137) before posting. In the catch at line 138: if the error's status is an integer 400-499 other than 429, post a fallback {rc: 1, stdout: '', stderr: 'relay: answer rejected by the router (HTTP \u003cstatus>), output too large or invalid'} for the same rid and count it as answered; swallow a failure of that fallback and keep swallowing transient/429/statusless errors (retried on the next poll). Update the servicePending doc comment.",
    "requirements": [
     "R1",
     "R2",
-    "R3",
-    "R4",
-    "R5",
-    "R6",
-    "R7",
-    "R8",
-    "R9",
-    "R10"
+    "R4"
    ]
   },
   {
    "id": "D2",
-   "path": "bin/lean/issuewatch.mjs",
-   "change": "Add keys threshold, immediate, max_release_issues, theme_map (and optional tracker) to WATCH_KEYS; accept mode release with validation; extend parseWatches for flow maps and a nested theme_map block; dispatch release mode to releaseTick in runWatch/CLI; add --dry-run flag; extend status for pool/release.",
+   "path": "bin/lean/relay.test.mjs",
+   "change": "Regression tests: (a) capAnswer keeps a small answer unchanged; (b) servicePending with a runner returning ~1,000,000 bytes of quote/newline-heavy stdout posts one answer whose JSON byte length is \u003c= RELAY_ANSWER_MAX_BYTES (\u003c 1 \u003c\u003c 20), rc 1 and a truncation notice in stderr, multibyte text not corrupted; (c) a transport whose first relayAnswer throws an Error with status 413 gets a second, small rc 1 answer for the same rid and servicePending returns 1; (d) a 502/statusless throw still posts nothing else and returns 0 (existing case kept).",
    "requirements": [
-    "R4",
-    "R5",
-    "R7",
-    "R10"
+    "R1",
+    "R2",
+    "R4"
    ]
   },
   {
    "id": "D3",
-   "path": "bin/lean/issuewatch-release.test.mjs",
-   "change": "Tests for each trigger incl. immediate security below threshold, theme classification and counted LLM fallback, closure + cap + rollover age, plan/tag/batch/deploy-PR once and no merge call, dry-run output, nothing claimed before a trigger.",
+   "path": "bin/tests/relay.e2e.test.mjs",
+   "change": "Optional: a case where the host command prints ~1 MB of newline-heavy output through the real router/agent; cs-relay receives an answer (rc 1, truncation notice) instead of timing out, and the command ran exactly once.",
    "requirements": [
     "R1",
-    "R2",
-    "R3",
-    "R4",
-    "R5",
-    "R7",
-    "R9"
-   ]
-  },
-  {
-   "id": "D4",
-   "path": "bin/lean/issuewatch.test.mjs",
-   "change": "Add parse/validate cases for mode release, flow-map threshold, theme_map block, bad values.",
-   "requirements": [
-    "R6"
-   ]
-  },
-  {
-   "id": "D5",
-   "path": "bin/forgedock.mjs",
-   "change": "Update the issue-watch usage line (~:3362) with --dry-run and mode release.",
-   "requirements": [
-    "R5"
-   ]
-  },
-  {
-   "id": "D6",
-   "path": "docs/ISSUE-WATCH.md",
-   "change": "Document release mode: triggers, themes, closure, plan, tag, deploy PR, rollover, dry run.",
-   "requirements": [
-    "R6"
-   ]
-  },
-  {
-   "id": "D7",
-   "path": "docs/CONFIG.md",
-   "change": "Add threshold, immediate, max_release_issues, theme_map keys and mode release to the issue_watch table.",
-   "requirements": [
-    "R6"
+    "R4"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "per-issue and batch modes, claimIssue cross-watch single-claim, laneFor default-branch refusal in bin/lean/issuewatch.mjs; all existing exports and bin/lean/issuewatch.test.mjs cases"
+   "what": "servicePending signature, return value (count of answered requests) and its swallowing of relayPending failures and transient (502/503/504, 429, statusless) answer failures, bin/lean/relay.mjs:128-141; its caller bin/lean/sandbox-remote.mjs:144-149"
   },
   {
    "id": "P2",
-   "what": "Existing flat forge.yaml watch parsing (scalars, [a,b] lists) from parseWatches"
+   "what": "Answers that already fit are posted byte-for-byte unchanged (rc, stdout, stderr), so the existing relay e2e output (bin/tests/relay.e2e.test.mjs) and redaction (relay.mjs:137) are unchanged"
   },
   {
    "id": "P3",
-   "what": "bin/lean/decision-engine.mjs API (loadPolicy/settle) is read, not modified"
+   "what": "runRelayed behaviour and its 1 MiB per-stream maxBuffer (bin/lean/relay.mjs:60-73), used also by pre-fetch (bin/lean/sandbox-remote.mjs:158)"
+  },
+  {
+   "id": "P4",
+   "what": "Router body limit and relay routes unchanged: bin/pool/http.mjs:5 readJson default 1 MiB, bin/pool/router.mjs:61-66 and :263-264"
+  },
+  {
+   "id": "H1",
+   "what": "feat(pool): read-only capability relay from sandbox to dispatching host, plus dispatch-time pre-fetch (#4778, PR #4821)",
+   "source": "guard"
+  },
+  {
+   "id": "H2",
+   "what": "fix(execution): host-capability placement reads only the issue body; contract validate commands and decision comments are ignored (#4785, PR #4790)",
+   "source": "guard"
+  },
+  {
+   "id": "H3",
+   "what": "perf(execution): pin host capabilities by need, not by mention in the issue body (#4776, PR #4795)",
+   "source": "guard"
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test bin/lean/issuewatch.test.mjs bin/lean/issuewatch-release.test.mjs"
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/relay.test.mjs bin/tests/relay.e2e.test.mjs"
   },
   {
    "id": "V2",
-   "command": "node --test bin/lean/decision-engine.test.mjs bin/lean/gatewatch.test.mjs"
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/sandbox-provider.contract.test.mjs bin/tests/computeshare.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/conformance.e2e.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/execution.e2e.test.mjs bin/lean/execution.test.mjs bin/lean/fixround.test.mjs"
   }
  ],
  "decisions": [
   {
    "id": "K1",
-   "choice": "New file bin/lean/issuewatch-release.mjs instead of growing issuewatch.mjs",
-   "justification": "issuewatch.mjs is a 320-line wiring file whose header states pure-function split; precedent decision-engine.mjs/gatewatch.mjs as sibling modules (NORTHSTAR: specs/files stay small)",
-   "source": "precedent"
+   "choice": "Cap on the host (512 KiB serialized answer) instead of raising the router's body limit for the relay route",
+   "justification": "The router is a generic queue that never interprets relay payloads (bin/pool/router.mjs:21-23) and every route shares readJson's 1 MiB limit (bin/pool/router.mjs:315, bin/pool/http.mjs:5); bounding at the source also bounds the router's in-memory queue (router.mjs:36-37) and the GET delivery to the sandbox. 512 KiB is the reviewer's suggested value and leaves headroom under 1 MiB for the envelope.",
+   "source": "spec"
   },
   {
    "id": "K2",
-   "choice": "LLM fallback and all gh/clock/batch side effects go through injected io (io.classify), mirroring the existing io seam",
-   "justification": "bin/lean/issuewatch.mjs:181 documents injected io; NORTHSTAR non-negotiable 1 (deterministic first)",
-   "source": "doc"
+   "choice": "A trimmed answer reports rc 1 with a 'relay: output over N bytes, truncated' stderr notice",
+   "justification": "Same convention runRelayed already uses for its own maxBuffer truncation (bin/lean/relay.mjs:66), so the lane sees one consistent truncation signal.",
+   "source": "precedent"
   },
   {
    "id": "K3",
-   "choice": "Deploy PR is opened with gh pr create only (base = default branch, head = release lane), recorded in state.deployPr; no merge call exists in the module and a test asserts it",
-   "justification": "Issue: promotion stays human-only; laneFor refuses default lanes at bin/lean/issuewatch.mjs:124",
-   "source": "spec"
-  },
-  {
-   "id": "K4",
-   "choice": "NORTHSTAR priorities read as an optional ordered `Release priorities:` list in the policy text from loadPolicy; absent means score then theme name",
-   "justification": "Issue says #4766 supplies tie-breaks, but decision-engine.mjs:47 exposes only raw policyText",
-   "source": "spec"
+   "choice": "Only a 4xx other than 429 triggers the small fallback answer; 429, 5xx and statusless errors keep the retry-on-next-poll behaviour",
+   "justification": "httpTransport's fail() marks 502/503/504 transient and 429/503 retryable (bin/lean/sandbox-remote.mjs:62-68); a 4xx is deterministic, so retrying it re-runs the command forever.",
+   "source": "precedent"
   }
  ]
 }

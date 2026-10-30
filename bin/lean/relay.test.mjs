@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { renderContract, contractJson } from "./render.mjs";
 import { contractHash } from "./lean.mjs";
-import { parseRelayCommands, relayCommandNames, relayGate, runRelayed, simpleArgv, relayPrefetchCommands, servicePending, RELAY_REFUSED_RC, RELAY_ANSWER_STREAM_MAX } from "./relay.mjs";
+import { parseRelayCommands, relayCommandNames, relayGate, runRelayed, simpleArgv, relayPrefetchCommands, servicePending, capAnswer, RELAY_ANSWER_MAX_BYTES, RELAY_REFUSED_RC, RELAY_ANSWER_STREAM_MAX } from "./relay.mjs";
 import { parseExecution, placeLane, providerByName } from "./execution.mjs";
 import { remoteProvider } from "./sandbox-remote.mjs";
 import { readRelayCaps } from "../engine-cli.mjs";
@@ -110,16 +110,21 @@ describe("#4778 servicePending", () => {
     assert.equal(await servicePending({ transport: bad, id: "s1", relay: RELAY, run: async () => ({ rc: 0, stdout: "", stderr: "" }) }), 0);
   });
 
-  it("release #4820 INFRA-1: streams are capped, and a rejected answer becomes an rc 125 error, never a re-run", async () => {
+  it("release #4820 INFRA-1: streams are capped, and a 4xx-rejected answer becomes a small rc 1 answer, never a re-run", async () => {
     const answers = [], ran = [];
     let first = true;
     const t = { relayPending: async () => [{ rid: "r1", argv: ["obs-psql", "-c", "big"] }],
-      relayAnswer: async (id, rid, out) => { if (first) { first = false; throw new Error("HTTP 413"); } answers.push(out); } };
+      relayAnswer: async (id, rid, out) => { if (first) { first = false; throw Object.assign(new Error("HTTP 413"), { status: 413 }); } answers.push(out); } };
     const n = await servicePending({ transport: t, id: "s1", relay: RELAY, run: async (argv) => { ran.push(argv); return { rc: 0, stdout: "x".repeat(RELAY_ANSWER_STREAM_MAX * 3), stderr: "" }; } });
     assert.equal(n, 1);
     assert.equal(ran.length, 1);
-    assert.equal(answers[0].rc, 125);
-    assert.match(answers[0].stderr, /relay answer rejected: HTTP 413/);
+    assert.equal(answers.length, 1);
+    assert.equal(answers[0].rc, 1);
+    assert.match(answers[0].stderr, /rejected by the router \(HTTP 413\)/);
+    const posts = [];
+    const t3 = { relayPending: async () => [{ rid: "r3", argv: ["obs-psql"] }], relayAnswer: async (id, rid, out) => { posts.push(out); throw Object.assign(new Error("x"), { status: 502 }); } };
+    assert.equal(await servicePending({ transport: t3, id: "s1", relay: RELAY, run: async () => ({ rc: 0, stdout: "", stderr: "" }) }), 0);
+    assert.equal(posts.length, 1);
     const capped = []; const t2 = { relayPending: async () => [{ rid: "r2", argv: ["obs-psql"] }], relayAnswer: async (id, rid, out) => { capped.push(out); } };
     await servicePending({ transport: t2, id: "s1", relay: RELAY, run: async () => ({ rc: 0, stdout: "y".repeat(RELAY_ANSWER_STREAM_MAX + 10), stderr: "" }) });
     assert.ok(capped[0].stdout.length < RELAY_ANSWER_STREAM_MAX + 100);
@@ -180,5 +185,30 @@ describe("#4778 provider and config", () => {
   it("readRelayCaps parses CS_RELAY_CAPS", () => {
     assert.deepEqual(readRelayCaps({ CS_RELAY_CAPS: "prod_monitor, Bad Cap ,prod_monitor,obs" }), { relayCaps: ["prod_monitor", "obs"] });
     assert.deepEqual(readRelayCaps({}), {});
+  });
+});
+
+describe("#4831 oversized relay answers", () => {
+  const jsonBytes = (o) => Buffer.byteLength(JSON.stringify(o));
+  it("capAnswer leaves a small answer unchanged", () => {
+    const a = { rc: 0, stdout: "1\n", stderr: "" };
+    assert.equal(capAnswer(a), a);
+  });
+  it("capAnswer bounds two stream-capped, escape-heavy streams that together exceed the limit", () => {
+    const out = capAnswer({ rc: 0, stdout: "\n".repeat(RELAY_ANSWER_STREAM_MAX), stderr: '"'.repeat(RELAY_ANSWER_STREAM_MAX) });
+    assert.ok(jsonBytes(out) <= RELAY_ANSWER_MAX_BYTES);
+    assert.equal(out.rc, 1);
+  });
+  it("servicePending caps a ~1 MB quote/newline-heavy answer under the router limit, once, without corrupting multibyte text", async () => {
+    const big = 'é"\n'.repeat(250000);
+    const t = fakeTransport({ pending: [{ rid: "r1", argv: ["obs-psql"] }] });
+    let ran = 0;
+    const n = await servicePending({ transport: t, id: "s1", relay: RELAY, run: async () => { ran++; return { rc: 0, stdout: big, stderr: "" }; } });
+    assert.equal(n, 1);
+    assert.equal(ran, 1);
+    const { id, rid, ...out } = t.answers[0];
+    assert.ok(jsonBytes(out) <= RELAY_ANSWER_MAX_BYTES && jsonBytes(out) < 1 << 20);
+    assert.match(out.stdout + out.stderr, /truncated/);
+    assert.ok(out.stdout.length > 0 && !out.stdout.includes("\uFFFD"));
   });
 });
