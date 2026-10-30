@@ -1161,6 +1161,8 @@ export function formatOutcomeLists(rows) {
   if (rq.length) out.push(`remediation queue (/work-on:remediate): ${rq.map((r) => `#${r.issue} (parked:${r.code}${r.pr ? ` PR #${r.pr}` : ""})`).join(" ")}`);
   const parked = formatParkedLine(rows); // #4389: one line for every parked post-deploy follow-up, never an escalation
   if (parked) out.push(parked);
+  const decided = (rows ?? []).filter((r) => r?.decided); // #4766: settled by the decision engine, listed not hidden
+  if (decided.length) out.push(["decided (north-star engine, veto with the forge:decision-veto label):", ...decided.map((r) => `- #${r.issue}: ${one(r.decided.choice)}${r.decided.shadow ? " (shadow)" : ""}`)].join("\n"));
   if (esc.length) out.push(["escalations (human decisions, asked once):", ...esc.map((r) => `- #${r.issue} (${r.code}): ${one(r.detail)}`)].join("\n"));
   return out;
 }
