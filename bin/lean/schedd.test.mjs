@@ -103,13 +103,13 @@ describe("schedd host scheduler (#4192)", () => {
     const h = host();
     try {
       const child = await h.daemon();
-      await until(() => readHeartbeat(h.sched) !== null, "heartbeat", 30000);
+      await until(() => readHeartbeat(h.sched) !== null, 30000);
       const first = readHeartbeat(h.sched);
       assert.equal(first.pid, child.pid);
       const st = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" });
       assert.ok(Number.isFinite(st.lastTick) && st.lastTick >= first.ts);
       child.kill("SIGTERM");
-      await until(() => readHeartbeat(h.sched) === null && !existsSync(scheddPaths(h.sched).lock), "clean close", 30000);
+      await until(() => readHeartbeat(h.sched) === null && !existsSync(scheddPaths(h.sched).lock), 30000);
     } finally { await h.cleanup(); }
   });
 
