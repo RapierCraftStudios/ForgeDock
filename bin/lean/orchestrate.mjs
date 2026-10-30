@@ -31,6 +31,8 @@
  * batch decision and one `added` row; while it is set, lanes running with an empty queue still wake every `pollMs`.
  * `getHeld()` (#4592, `--hold`/`--release`) is read on every pass: the issues it returns are never admitted (a running lane is not stopped);
  * when only held issues (and their dependents) remain and nothing runs, the batch ends with them `held` ("held by operator"), and a `--resume <id> <issue...>` naming them (or `--release`) re-admits them.
+ * `getBlocked()` (#4773, the `blocked` label) is read on every pass: the issues it returns are in the batch but not dispatched; removing the label
+ * releases them on the next pass (the batch polls while only blocked issues wait). `trusted(n)` gates `Blocked by`/`Depends on` edges to a trusted body author.
  *
  * Maintenance budget (#4197), off unless `maintenance: {share, whenIdle}` is passed: `classify(issue)` gives each issue
  * `{maintenance, priority}` (persisted as `classes`) and admission follows `pickNext`: P0/P1 features, then a maintenance
@@ -244,7 +246,7 @@ const toMap = (o) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k),
 export async function orchestrate({ issues, parallel = 3, runOne, readBody, prefilter = null, resolveLane = null, now = () => Date.now(), onUpdate = () => {}, onCrossLane = () => {},
   store = null, adopt = null, getParallel = null, getAdded = null, getRequeued = null, breaker = null, maxDeferrals = DEFAULT_MAX_DEFERRALS, sleep = cancellableSleep, pollMs = 5000,
   classify = null, maintenance = null, limits = null, identity = () => "default", batchId = null, drift = null, integration = null, sched = null, priorityOf = null, remote = null, beforeAdmit = null,
-  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getGates = null, stopLane = null,
+  recovery = null, decide = () => {}, conflicting = null, relabelNeedsHuman = null, onExit = null, issueLabels = null, issueState = null, getCancelled = null, getHeld = null, getBlocked = null, trusted = null, getGates = null, stopLane = null,
   estimate = null, starveMs = DEFAULT_STARVE_MS, signal = null, dispatchCheck = null, syncParked = null, syncEveryMs = DEFAULT_SYNC_EVERY_MS, lifecycle = null }) {
   const saved = store?.load?.() ?? null;
   const order = saved ? [...saved.order] : [];
@@ -357,11 +359,16 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     try { v = Number(await estimate(n, { body })); } catch { v = null; }
     estimates.set(n, Number.isFinite(v) && v > 0 ? v : EST_DEFAULT_MIN.M);
   };
+  // #4773: a declaration line is an edge only when the body's author is trusted (the engine's admission applies the same rule).
+  const declared = async (n, body) => {
+    if (typeof trusted === "function") { let ok = false; try { ok = (await trusted(n)) === true; } catch { ok = false; } if (!ok) return []; }
+    return parseDeps(body, n);
+  };
   const readDeps = async (n) => {
     let body = "";
     try { body = await readBody(n); } catch { /* unreadable: no ordering info, work-on's own check still applies */ }
     if (drift?.holds) bodies.set(n, body);
-    deps.set(n, parseDeps(body, n));
+    deps.set(n, await declared(n, body));
     await readEstimate(n, body);
     await classifyOne(n);
     await readPriority(n);
@@ -839,7 +846,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       let body;
       try { body = await readBody(n); } catch { continue; }
       if (drift?.holds) bodies.set(n, body);
-      deps.set(n, [...new Set([...(deps.get(n) ?? []), ...parseDeps(body, n)])]);
+      deps.set(n, [...new Set([...(deps.get(n) ?? []), ...(await declared(n, body))])]);
     }
     await addIssues(fresh);
     save();
@@ -908,6 +915,26 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (freed.length) {
       decided({ issue: null, what: `released ${fmt(freed)} (forgedock orchestrate --release)`, why: "operator request", alternative: "resume the batch" });
       update({ issue: null, outcome: "release", detail: fmt(freed) });
+    }
+  };
+  // #4773: re-read the issues carrying the blocked label; one decision and row per change. A failed read keeps the last set.
+  let blocked = new Set();
+  const blockedHit = new Set(); // blocked issues that were pending this pass
+  const refreshBlocked = async () => {
+    if (!getBlocked) return;
+    let got;
+    try { got = await getBlocked(); } catch { return; }
+    const next = new Set((Array.isArray(got) ? got : [...(got ?? [])]).filter((n) => Number.isSafeInteger(n) && n > 0));
+    const fmt = (ns) => ns.map((n) => `#${n}`).join(", ");
+    const on = [...next].filter((n) => !blocked.has(n) && set.has(n) && !results.has(n)), off = [...blocked].filter((n) => !next.has(n));
+    blocked = next;
+    if (on.length) {
+      decided({ issue: null, what: `blocked ${fmt(on)} (blocked label)`, why: "admitted to the batch, not dispatched while the label is set", alternative: "remove the label" });
+      update({ issue: null, outcome: "blocked", detail: fmt(on) });
+    }
+    if (off.length) {
+      decided({ issue: null, what: `unblocked ${fmt(off)} (blocked label removed)`, why: "the label is gone", alternative: "keep waiting" });
+      update({ issue: null, outcome: "unblocked", detail: fmt(off) });
     }
   };
   // #4656: a gate (hold list, settle, ship pre-flight) waiting on an issue the scheduler will not admit: one decision and row per (gate, issue).
@@ -1028,10 +1055,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       driftHeld.clear();
       integHeld.clear();
       opHeldHit.clear();
+      blockedHit.clear();
       refreshHeld();
+      await refreshBlocked();
       checkGates();
       const isReady = (n) => {
         if (opHeld.has(n)) { opHeldHit.add(n); return false; }
+        if (blocked.has(n)) { blockedHit.add(n); return false; } // #4773
         if (!((notBefore.get(n) ?? 0) <= t && edges(n).every((d) => results.has(d) && SATISFIED.has(results.get(d).outcome)))) return false;
         if (integration?.holds) {
           let why = null;
@@ -1110,6 +1140,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       if ((getParallel || getHeld) && pending.length) wake = Math.min(wake ?? pollMs, pollMs);
       if (offered.size && pending.length) wake = Math.min(wake ?? pollMs, pollMs); // a slot another batch frees
       if ((getAdded || getRequeued) && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4408/#4550: an add or requeue while only lanes run
+      if (getBlocked && pending.length && blockedHit.size) wake = Math.min(wake ?? pollMs, pollMs); // #4773: a removed label releases on the next tick
       if (getHeld && running.size) wake = Math.min(wake ?? pollMs, pollMs); // #4592: a release while only lanes run
       if (syncParked && running.size && parkedPrs().length) wake = Math.min(wake ?? syncEveryMs, Math.max(0, syncEveryMs - (t - (lastParkedSync ?? t)))); // #4525
       if (running.size && watchable()) wake = Math.min(wake ?? WATCH_EVERY_MS, WATCH_EVERY_MS); // #4595: re-check the blockers of skipped rows
@@ -1120,6 +1151,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         else { const ac = new AbortController(); await race([...running.values(), sleep(wake, ac.signal)]); ac.abort(); }
       } else if (started) continue; // only lane-refused rows settled (synchronously): re-resolve skips first
       else if (pending.length && offered.size) await nap(wake); // waiting for a host slot
+      else if (pending.length && blockedHit.size) await nap(wake ?? pollMs); // #4773: only blocked issues wait: poll for the label's removal
       else if (pending.length && waits.length) await nap(Math.min(wake, getCancelled ? pollMs : Infinity)); // wake is poll-capped by a hold or a live K; #4454: nap wakes on a stop
       else if (pending.length && budgetHeld) { if (await drainAdds()) continue; break; } // maintenance the budget does not admit now: held for a later batch
       else if (pending.length && opHeldHit.size && !pending.some((n) => !opHeldHit.has(n) && isReady(n))) { if (await drainAdds()) continue; break; } // #4592: held by the operator: pending for a --resume
