@@ -23,3 +23,6 @@ No behaviour change for answers that fit; router limit unchanged; no env vars.
 
 ### Docs
 Updated devdocs/modules/lean.md (relay section: answer cap and 4xx fallback) for the docs freshness check.
+
+### Merge note (origin/staging)
+Staging landed its own fix for the same issue (1163f2c5: per-stream cap `capStream`, rc 125 fallback on any rejected answer). Merged: staging's behaviour is kept as the base (rc 125 fallback, no 4xx special-casing), and `capAnswer` is applied on top so the serialized answer is byte-exact under 512 KiB even when two escape-heavy streams pass the char cap. The 4xx-only fallback and its test were dropped as superseded.

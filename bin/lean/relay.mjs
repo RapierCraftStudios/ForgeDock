@@ -10,7 +10,9 @@
  * run by the host at dispatch and shipped with the lane.
  */
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { parseContractComment } from "./render.mjs";
+import { isTrustedIssueComment } from "./prefilter.mjs";
 import { redact } from "./sandbox-remote.mjs";
 
 const CAP_RE = /^[a-z][a-z0-9_-]*$/;
@@ -100,15 +102,23 @@ export function simpleArgv(command) {
   return argv.length ? argv : null;
 }
 
-/** Pre-fetch candidates (#4778): the last parseable FORGE:CONTRACT comment's simple validate/repro_test commands the gate allows, `[{argv}]`. */
+/** lean.mjs `contractHash` (not imported: lean.mjs reaches this module through execution.mjs). */
+const frozenHash = (text) => createHash("sha256").update(String(text)).digest("hex").slice(0, 12);
+
+/**
+ * Pre-fetch candidates (#4778): the simple validate/repro_test commands the gate allows from the last frozen contract,
+ * `[{argv}]`. Only a trusted FORGE:CONTRACT comment whose hash verifies counts, as in lean.mjs readFrozenContract: an
+ * outsider's contract comment never chooses what the host runs (release #4820 API-1).
+ */
 export function relayPrefetchCommands({ comments = [] } = {}, relay = null) {
   if (!relay || !Object.keys(relay).length) return [];
   let contract = null;
   for (const c of Array.isArray(comments) ? comments : []) {
-    const b = String((typeof c === "string" ? c : c?.body) ?? "").trimStart();
+    if (typeof c !== "object" || !isTrustedIssueComment(c)) continue;
+    const b = String(c.body ?? "").trimStart();
     if (!b.startsWith("<!-- FORGE:CONTRACT -->")) continue;
-    const parsed = parseContractComment(b)?.contract;
-    if (parsed && typeof parsed === "object") contract = parsed;
+    const fc = parseContractComment(b);
+    if (fc?.contract && typeof fc.contract === "object" && frozenHash(fc.text) === fc.hash) contract = fc.contract;
   }
   if (!contract) return [];
   const cmds = (Array.isArray(contract.validate) ? contract.validate : []).map((v) => v?.command);
@@ -144,10 +154,12 @@ export function capAnswer(out, max = RELAY_ANSWER_MAX_BYTES) {
 }
 
 /**
- * Service a sandbox's pending relay requests: gate each, run the allowed ones, refuse the rest (rc 126), post every answer
- * (capped to the router's body limit). A transient failure is swallowed (the next poll retries); a deterministic 4xx
- * (not 429) is answered with a small rc 1 instead, so the command is not re-run forever. Returns how many were answered.
+ * Service a sandbox's pending relay requests: gate each, run the allowed ones, refuse the rest (rc 126), post every answer.
+ * Each stream is capped (capStream) and the whole answer is then bounded to RELAY_ANSWER_MAX_BYTES (capAnswer) so it fits the router's body limit; an answer the router still rejects is replaced by a small
+ * rc 125 error, so the command is never re-run on every poll (release #4820 INFRA-1). Returns how many were answered.
  */
+export const RELAY_ANSWER_STREAM_MAX = 256 * 1024;
+const capStream = (s) => { const t = String(s ?? ""); return t.length > RELAY_ANSWER_STREAM_MAX ? `${t.slice(0, RELAY_ANSWER_STREAM_MAX)}\n[relay: output truncated at ${RELAY_ANSWER_STREAM_MAX} chars]\n` : t; };
 export async function servicePending({ transport, id, relay, run = runRelayed, secrets = [] } = {}) {
   if (typeof transport?.relayPending !== "function" || typeof transport.relayAnswer !== "function") return 0;
   let list = [];
@@ -157,11 +169,10 @@ export async function servicePending({ transport, id, relay, run = runRelayed, s
     if (typeof req?.rid !== "string" || !req.rid) continue;
     const g = relayGate(req.argv, relay);
     const raw = g.ok ? await run(req.argv, { secrets }) : { rc: RELAY_REFUSED_RC, stdout: "", stderr: g.reason };
-    const out = capAnswer({ rc: Number.isInteger(raw?.rc) ? raw.rc : 1, stdout: redact(raw?.stdout, secrets), stderr: redact(raw?.stderr, secrets) }); // a custom runner is redacted too
-    try { await transport.relayAnswer(id, req.rid, out); n++; } catch (e) {
-      const st = e?.status;
-      if (!Number.isInteger(st) || st < 400 || st > 499 || st === 429) continue; // retried on the next poll
-      try { await transport.relayAnswer(id, req.rid, { rc: 1, stdout: "", stderr: `relay: answer rejected by the router (HTTP ${st}), output too large or invalid` }); n++; } catch { /* retried on the next poll */ }
+    const out = capAnswer({ rc: Number.isInteger(raw?.rc) ? raw.rc : 1, stdout: capStream(redact(raw?.stdout, secrets)), stderr: capStream(redact(raw?.stderr, secrets)) }); // a custom runner is redacted too
+    try { await transport.relayAnswer(id, req.rid, out); n++; }
+    catch (e) {
+      try { await transport.relayAnswer(id, req.rid, { rc: 125, stdout: "", stderr: `relay answer rejected: ${String(e?.message ?? e).slice(0, 200)}` }); n++; } catch { /* unreachable router: the next poll retries */ }
     }
   }
   return n;

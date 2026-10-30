@@ -2131,7 +2131,7 @@ same rid instead of retrying (which re-ran the command every poll); 429, 5xx and
 
 ## Entry 2026-10-30 — Named issue watches (#4765)
 
-`bin/lean/issuewatch.mjs` is `forgedock issue-watch`: named watches from forge.yaml `issue_watch.watches` (parsed by its own `parseWatches`, since `parseForgeYaml` reads one nested level), each with a per-(repo, name) lock and `status.json` under `~/.forge/watch/`, and a repo-wide `claims.json` (mkdir-locked) so an issue has one claim across watches. Pure selectors/lane/caps; gh, clock and launching are injected. `mode: batch` calls batch.mjs `addIssues` and starts a new batch once `report.json` exists. See docs/ISSUE-WATCH.md.
+`bin/lean/issuewatch.mjs` is `forgedock issue-watch`: named watches from forge.yaml `issue_watch.watches` (parsed by its own `parseWatches`, since `parseForgeYaml` reads one nested level), each with a per-(repo, name) lock and `status.json` under `~/.forge/watch/`, and a repo-wide `claims.json` (mkdir-locked) so an issue has one claim across watches. Pure selectors/lane/caps; gh, clock and launching are injected. `mode: batch` calls batch.mjs `addIssues` and starts a new batch once `report.json` exists. See docs/ISSUE-WATCH.md. `mode: release` (#4767) lives in `issuewatch-release.mjs`: pure pool score, triggers (`min_issues`, `min_score`, `max_age_days`, `immediate`), `theme_map` classification (one counted `io.classify` call for unclassified issues), `Depends on` closure under `max_release_issues`; `releaseTick` posts `FORGE:RELEASE_PLAN`, tags (milestone `release/<theme>-<date>` or label `release:<theme>-<date>`), starts one batch, then opens the deploy PR once and never merges it. `issue-watch run --dry-run` prints the would-cut set.
 Bot authorship (`isBot`) comes from the issue author only: a `[bot]`/`app/` login, `is_bot`, or the ForgeDock App's bare login (`APP_SLUG`, #4467). A `FORGE:DEFERRED` marker in the body never makes an outsider's `follow-up:` issue a bot follow-up (release #4820 AUTH-1).
 `claimIssue` is idempotent for the watch that holds the claim: the registry is written before the watch saves `status.json` or launches, so after a crash or a throwing `batch.start` the same watch re-claims and launches the issue on its next pass; another watch is still refused (release #4820 BUG-1).
 Cite: #4765.
@@ -2144,3 +2144,7 @@ POSIX keeps `<dir>/schedd.sock`. A pipe is not a file and vanishes with its serv
 (startup and close) and the `lost socket` watchdog are skipped (the `schedd.lock` check still covers takeover) and
 `scheddExists` tests the lock file. `defaultSpawn` resolves the `forgedock.mjs` script with `fileURLToPath` (`SCHEDD_SCRIPT`),
 not `URL.pathname`, which gave `/C:/...` on Windows.
+
+## Entry 2026-10-31 — Relay pre-fetch trust and answer cap (release #4820)
+
+**Release #4820 hardening.** `relayPrefetchCommands` reads only a trusted `FORGE:CONTRACT` comment whose hash verifies, as `readFrozenContract` does, so an outsider's contract never chooses what the host runs at dispatch (API-1). `servicePending` caps each answer stream at `RELAY_ANSWER_STREAM_MAX` (256 KiB) and replaces an answer the router still rejects with an rc 125 error, so a command is never re-run on every poll (INFRA-1).

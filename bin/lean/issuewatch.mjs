@@ -17,9 +17,12 @@ import { fileURLToPath } from "node:url";
 import { writeAtomic, batchRoot, openBatch, listBatches } from "./batch.mjs";
 import { milestoneSlug, readBranches, isDefaultLane, defaultBranches, DEFAULT_STAGING_BRANCH, DEFAULT_FEATURE_PATTERN } from "./lane.mjs";
 import { postDeployOnly } from "./prefilter.mjs";
+import { releaseTick, formatDryRun } from "./issuewatch-release.mjs";
+import { loadPolicy } from "./decision-engine.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
+import { noComments } from "./render.mjs";
 
-const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup"];
+const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker"];
 const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const RETRIES = 3;
@@ -28,6 +31,7 @@ const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } ca
 // ── config ───────────────────────────────────────────────────────────────────────────────────────────────────
 const scalar = (v) => {
   const s = String(v ?? "").replace(/\s+#.*$/, "").trim();
+  if (/^\{.*\}$/.test(s)) return Object.fromEntries(s.slice(1, -1).split(",").map((x) => x.split(/:(.*)/s).slice(0, 2).map((y) => scalar(y))).filter(([k]) => k).map(([k, v]) => [k, v !== "" && Number.isFinite(Number(v)) ? Number(v) : v]));
   if (/^\[.*\]$/.test(s)) return s.slice(1, -1).split(",").map((x) => scalar(x)).filter((x) => x !== "");
   return s.replace(/^(["'])(.*)\1$/, "$2");
 };
@@ -35,7 +39,7 @@ const scalar = (v) => {
 /** The `issue_watch.watches.<name>.<key>` block of forge.yaml text (three nesting levels, which parseForgeYaml does not read): `{name: {key: value}}`. */
 export function parseWatches(raw) {
   const out = {};
-  let inSec = false, inWatches = false, cur = null;
+  let inSec = false, inWatches = false, cur = null, sub = null;
   for (const line of String(raw ?? "").split(/\r?\n/)) {
     if (/^\s*(#|$)/.test(line)) continue;
     const indent = /^\s*/.exec(line)[0].length;
@@ -45,7 +49,10 @@ export function parseWatches(raw) {
     if (!inSec) continue;
     if (indent <= 2) { inWatches = m[1] === "watches"; cur = null; continue; }
     if (!inWatches) continue;
-    if (indent <= 4) { cur = m[1]; out[cur] = {}; continue; }
+    if (indent <= 4) { cur = m[1]; out[cur] = {}; sub = null; continue; }
+    if (indent <= 6) sub = null;
+    if (cur && sub) { out[cur][sub][m[1]] = scalar(m[2]); continue; }
+    if (cur && m[1] === "theme_map" && m[2] === "") { out[cur].theme_map = {}; sub = "theme_map"; continue; } // one nested block: theme -> rule list
     if (cur) out[cur][m[1]] = scalar(m[2]);
   }
   return out;
@@ -65,13 +72,32 @@ export function validateWatch(name, cfg = {}) {
   const w = { name, milestone: cfg.milestone || null, labels: list(cfg.labels), exclude_labels: list(cfg.exclude_labels), search: cfg.search || null, title_regex: cfg.title_regex || null,
     since: cfg.since || null, version: cfg.version ? String(cfg.version) : null, lane: cfg.lane || null, max_issues: int("max_issues", null), max_inflight: int("max_inflight", 4),
     until: cfg.until || null, mode: cfg.mode || "per-issue", parallel: int("parallel", 4), include_followups: cfg.include_followups || "none", postdeploy_rollup: cfg.postdeploy_rollup ? Number(String(cfg.postdeploy_rollup).replace("#", "")) : null };
-  if (!["per-issue", "batch"].includes(w.mode)) throw new Error(`watch ${name}: mode must be per-issue or batch`);
+  if (!["per-issue", "batch", "release"].includes(w.mode)) throw new Error(`watch ${name}: mode must be per-issue, batch or release`);
+  if (w.mode === "release") validateRelease(name, cfg, w, int);
+  else for (const k of ["threshold", "immediate", "max_release_issues", "theme_map", "tracker"]) if (cfg[k] !== undefined) throw new Error(`watch ${name}: ${k} needs mode: release`);
   if (!["none", "defer-only"].includes(w.include_followups)) throw new Error(`watch ${name}: include_followups must be none or defer-only`);
   if (w.title_regex) { try { new RegExp(w.title_regex); } catch { throw new Error(`watch ${name}: invalid title_regex`); } }
   for (const k of ["until", "since"]) if (w[k] && !Number.isFinite(Date.parse(w[k]))) throw new Error(`watch ${name}: ${k} is not an ISO time`);
   if (w.version && !/^\d+\.\d+$/.test(w.version)) throw new Error(`watch ${name}: version must be x.y`);
   if (w.postdeploy_rollup != null && !(Number.isInteger(w.postdeploy_rollup) && w.postdeploy_rollup > 0)) throw new Error(`watch ${name}: postdeploy_rollup must be an issue number`);
   return w;
+}
+
+/** `mode: release` keys: threshold {min_issues,min_score,max_age_days}, immediate [label:x|priority:Px], max_release_issues, theme_map {theme: [label:|path:|scope:]}, tracker. */
+function validateRelease(name, cfg, w, int) {
+  const th = cfg.threshold && typeof cfg.threshold === "object" ? cfg.threshold : {};
+  for (const k of Object.keys(th)) if (!["min_issues", "min_score", "max_age_days"].includes(k)) throw new Error(`watch ${name}: unknown threshold key ${k}`);
+  for (const [k, v] of Object.entries(th)) if (!(Number(v) > 0)) throw new Error(`watch ${name}: threshold.${k} must be a positive number`);
+  w.threshold = Object.fromEntries(Object.entries(th).map(([k, v]) => [k, Number(v)]));
+  w.immediate = (Array.isArray(cfg.immediate) ? cfg.immediate : cfg.immediate ? [cfg.immediate] : []).map(String);
+  for (const r of w.immediate) if (!/^(label:.+|priority:P[0-3])$/i.test(r)) throw new Error(`watch ${name}: immediate entry ${r} must be label:<name> or priority:P0..P3`);
+  if (!Object.keys(w.threshold).length && !w.immediate.length) throw new Error(`watch ${name}: mode release needs a threshold or immediate trigger`);
+  w.max_release_issues = int("max_release_issues", 40);
+  const tm = cfg.theme_map && typeof cfg.theme_map === "object" ? cfg.theme_map : {};
+  w.theme_map = Object.fromEntries(Object.entries(tm).map(([t, rules]) => [t, [].concat(rules).map(String)]));
+  for (const [t, rules] of Object.entries(w.theme_map)) for (const r of rules) if (!/^(label|path|scope):.+/.test(r)) throw new Error(`watch ${name}: theme_map.${t} rule ${r} must be label:, path: or scope:`);
+  w.tracker = cfg.tracker ? Number(String(cfg.tracker).replace("#", "")) : null;
+  if (w.tracker != null && !(Number.isInteger(w.tracker) && w.tracker > 0)) throw new Error(`watch ${name}: tracker must be an issue number`);
 }
 
 /** All watches of a forge.yaml text, validated. */
@@ -102,7 +128,7 @@ export function matchesSelectors(issue, sel) {
 
 const CHECK_RE = /^\s*[-*]\s+\[ \]\s+(.*)$/;
 /** True when the body has an unchecked `— defer` checklist item. */
-export const hasUnresolvedDefer = (body) => String(body ?? "").replace(/<!--[\s\S]*?-->/g, "").split("\n").some((l) => { const t = CHECK_RE.exec(l)?.[1]; return t != null && /\s[—-]+\s*defer\b/.test(t); });
+export const hasUnresolvedDefer = (body) => noComments(body).split("\n").some((l) => { const t = CHECK_RE.exec(l)?.[1]; return t != null && /\s[—-]+\s*defer\b/.test(t); });
 
 // Bot authorship comes from the author only, never the body: a `FORGE:DEFERRED` marker in an outsider's issue is not
 // the App. `gh` reports the ForgeDock App as a bare login with no `[bot]` suffix (#4467), so it is matched by slug.
@@ -131,7 +157,7 @@ export function laneFor(issue, watch, { branches = {}, defaults = [] } = {}) {
 /** Order `issues` so an issue named in another's `Depends on #N` line comes after it (stable otherwise). */
 export function dagOrder(issues) {
   const nums = new Set(issues.map((i) => i.number));
-  const deps = (i) => [...String(i.body ?? "").matchAll(/^\s*(?:[-*]\s*)?depends on:?\s*(.+)$/gim)].flatMap((m) => [...m[1].matchAll(/#(\d+)/g)].map((x) => +x[1])).filter((n) => nums.has(n) && n !== i.number);
+  const deps = (i) => [...String(i.body ?? "").matchAll(/^\s*(?:[-*]\s*)?\**depends on\**:?\s*(.+)$/gim)].flatMap((m) => [...m[1].matchAll(/#(\d+)/g)].map((x) => +x[1])).filter((n) => nums.has(n) && n !== i.number);
   const out = [], seen = new Set();
   const visit = (i, stack = new Set()) => {
     if (seen.has(i.number) || stack.has(i.number)) return;
@@ -239,6 +265,22 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
   return state;
 }
 
+/** `mode: release` pass: wires the pure selectors, claim registry and lane rule into releaseTick (bin/lean/issuewatch-release.mjs). */
+async function releaseStep({ watch, repo, io, state, dir, branches = {}, defaults = [], dryRun = false, cwd = process.cwd() }) {
+  const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,body,labels,milestone,author,authorAssociation,createdAt"];
+  if (watch.search) args.push("--search", watch.search);
+  const registry = () => readJson(join(repoDir(repo, io.env), "claims.json")) ?? {};
+  const listOpen = async () => {
+    const all = JSON.parse(String(await io.gh(args)));
+    if (!dryRun) for (const i of all) if (matchesSelectors(i, watch) && classifyIssue(i, watch) === "fold") await fold({ issue: i, watch, repo, io, state });
+    return all;
+  };
+  const eligible = (i) => matchesSelectors(i, watch) && classifyIssue(i, watch) === "claim" && !state.claimed.includes(i.number) && !registry()[i.number];
+  const p = loadPolicy({ io: { readFile: (f) => readFileSync(f, "utf8") }, cwd });
+  return releaseTick({ watch, repo, io, state, defaults, listOpen, eligible, claim: (n) => claimIssue(repoDir(repo, io.env), n, watch.name), laneFor: (i) => laneFor(i, watch, { branches, defaults }), dagOrder,
+    policy: { path: p.policyPath, text: p.policyText }, dryRun });
+}
+
 /** Append a post-deploy-only follow-up to the rollup issue's checklist, once per follow-up. */
 async function fold({ issue, watch, repo, io, state }) {
   if (state.folded.includes(issue.number)) return;
@@ -253,16 +295,17 @@ export function formatStatus(s, watch, now = Date.now()) {
   const sel = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane"].filter((k) => (Array.isArray(watch[k]) ? watch[k].length : watch[k])).map((k) => `${k}=${[].concat(watch[k]).join(",")}`).join(" ") || "(all trusted issues)";
   const left = watch.until ? `${Math.max(0, Math.round((Date.parse(watch.until) - now) / 60000))}m` : "forever";
   return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, `  selector: ${sel}`,
-    `  claims: ${s.claimed.length}/${watch.max_issues ?? "∞"}  inflight: ${s.inflight.length}  merged: ${s.merged.length}  verified: ${s.verified.length}  failed: ${s.failed.length}`, `  time remaining: ${left}`].join("\n");
+    `  claims: ${s.claimed.length}/${watch.max_issues ?? "∞"}  inflight: ${s.inflight.length}  merged: ${s.merged.length}  verified: ${s.verified.length}  failed: ${s.failed.length}`, `  time remaining: ${left}`,
+    ...(watch.mode === "release" ? [`  pool: ${(s.pool ?? []).length}  releases: ${(s.releases ?? []).length + (s.release ? 1 : 0)}${s.release ? `  active: ${s.release.theme} (${s.release.issues.length} issues, batch ${s.release.batch})` : ""}  llm-classified: ${s.llm ?? 0}`] : [])].join("\n");
 }
 
 /** Run until done (capped) or `once`; writes status.json each pass. */
-export async function runWatch({ watch, repo, io, dir, branches, defaults, once = false, intervalMs = 300000, release = () => {} }) {
+export async function runWatch({ watch, repo, io, dir, branches, defaults, once = false, intervalMs = 300000, release = () => {}, cwd }) {
   const state = readJson(join(dir, "status.json")) ?? fresh(watch, repo);
   const handles = new Map();
   try {
     do {
-      await tick({ watch, repo, io, state, dir, branches, defaults, handles });
+      if (watch.mode === "release") await releaseStep({ watch, repo, io, state, dir, branches, defaults, cwd }); else await tick({ watch, repo, io, state, dir, branches, defaults, handles });
       writeAtomic(join(dir, "status.json"), JSON.stringify(state) + "\n");
       if (state.phase === "done" || once) break;
       await io.sleep(intervalMs);
@@ -277,6 +320,10 @@ function realIo(repo, env = process.env) {
   const gh = (args) => execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   const root = batchRoot(env);
   return { env, gh, now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    classify: (issues, themes) => { // the one LLM judgment of release mode: issues no theme_map rule classifies
+      const prompt = `Classify each GitHub issue into exactly one theme of [${themes.join(", ")}], or "general" when none fits. Reply with only a JSON object {"<number>": "<theme>"}.\n\n${issues.map((i) => `#${i.number} ${i.title}\n${String(i.body ?? "").slice(0, 600)}`).join("\n---\n")}`;
+      return JSON.parse(/\{[\s\S]*\}/.exec(execFileSync("claude", ["--print"], { input: prompt, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }))[0]);
+    },
     launch: (n, lane) => {
       let res = null;
       const p = spawn(process.execPath, [CLI, "run-issue", String(n), "--lane", lane], { detached: true, stdio: "ignore", cwd: process.cwd(), env });
@@ -297,10 +344,10 @@ function realIo(repo, env = process.env) {
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };
 
-/** `forgedock issue-watch run [--name w] [--repo o/r] [--once] [--interval s] | status [--name w] [--repo o/r]`. */
+/** `forgedock issue-watch run [--name w] [--repo o/r] [--once] [--interval s] | status [--name w] [--repo o/r]`; `--dry-run` (mode release) prints the would-cut set and writes nothing. */
 export async function issueWatchFromCli(argv, deps = {}) {
   const [op] = argv;
-  const usage = "usage: forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--interval <s>] | status [--name <w>] [--repo owner/repo]";
+  const usage = "usage: forgedock issue-watch run [--name <w>] [--repo owner/repo] [--once] [--interval <s>] [--dry-run] | status [--name <w>] [--repo owner/repo]";
   if (!["run", "status"].includes(op)) throw new Error(usage);
   const cwd = deps.cwd ?? process.cwd(), env = deps.env ?? process.env, print = deps.print ?? ((l) => console.log(l));
   let raw = ""; try { raw = readFileSync(join(cwd, "forge.yaml"), "utf8"); } catch { /* no forge.yaml: the default watch */ }
@@ -316,12 +363,21 @@ export async function issueWatchFromCli(argv, deps = {}) {
     print(s ? formatStatus(s, watch, io.now()) : `watch ${name}: no status yet`);
     return { ok: true };
   }
+  if (argv.includes("--dry-run")) {
+    if (watch.mode !== "release") throw new Error("--dry-run needs a watch with mode: release");
+    const real = deps.io ?? realIo(repo, env), branches = readBranches(cwd);
+    const defaults = await defaultBranches({ repo, io: { gh: async (a) => real.gh(a) }, branches });
+    const state = readJson(join(dir, "status.json")) ?? fresh(watch, repo);
+    const r = await releaseStep({ watch, repo, io: real, state, dir, branches, defaults, dryRun: true, cwd });
+    print(r.decision ? formatDryRun(r.decision, r.pool, r.themes) : "release in flight; nothing to cut");
+    return { ok: true, dryRun: r };
+  }
   mkdirSync(dir, { recursive: true });
   const release = acquireLock(dir);
   const real = deps.io ?? realIo(repo, env);
   const branches = readBranches(cwd);
   const defaults = await defaultBranches({ repo, io: { gh: async (a) => real.gh(a) }, branches });
-  const state = await runWatch({ watch, repo, io: real, dir, branches, defaults, once: argv.includes("--once"), intervalMs: (Number(flag(argv, "--interval")) || 300) * 1000, release });
+  const state = await runWatch({ watch, repo, io: real, dir, branches, defaults, cwd, once: argv.includes("--once"), intervalMs: (Number(flag(argv, "--interval")) || 300) * 1000, release });
   print(formatStatus(state, watch, real.now()));
   return { ok: true, state };
 }
