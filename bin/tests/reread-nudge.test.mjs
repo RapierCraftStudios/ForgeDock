@@ -60,7 +60,7 @@ describe("#4456 re-read nudge hook", () => {
 
   it("makeLeanRunner adds the re-read hooks to its one --settings only for rereadNudge sessions that can use tools", async () => {
     const seen = [];
-    const runCli = async (o) => { seen.push(o.sessionFlags); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
+    const runCli = async (o) => { seen.push(o.extraArgs); return { text: "", usage: null, costUsd: 0, durationMs: 0, turns: 0, sessionId: "s" }; };
     const base = { role: "builder", issue: 1, cwd: process.cwd(), prompt: "p", system: "" };
     await makeLeanRunner({ runCli })({ ...base });
     await makeLeanRunner({ runCli })({ ...base, rereadNudge: true });

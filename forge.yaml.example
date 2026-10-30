@@ -201,7 +201,13 @@ branches:
 #   #   3. Hardcoded default         ("sonnet")
 #   #
 #   # Omit this field to have sub-agents inherit default_model (or "sonnet"
-#   # if that's unset too) — no change from today's behavior.
+#   # if that's unset too) in interactive command specs.
+#   #
+#   # Engine lanes (core work-on, #4843/#4849) read only this field: when set it
+#   # is the default for subagents without a model of their own; when unset the
+#   # operator's own CLAUDE_CODE_SUBAGENT_MODEL stays in effect. ForgeDock's own
+#   # agents (e.g. the explorer) always keep their model: an operator
+#   # CLAUDE_CODE_SUBAGENT_MODEL_FORCE is turned off for lane sessions.
 #   subagent_model: "sonnet"
 
 # =============================================================================
