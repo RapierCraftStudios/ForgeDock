@@ -1117,6 +1117,16 @@ describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness
     assert.match(traj(w).at(-1), /Docs freshness check failed; builder resumed once/);
   });
 
+  it("a doc the docs round edits outside the deliverables is an implied deliverable (no scope_creep); an unrelated extra file still is", async () => {
+    for (const [extra, code] of [[[], null], [["src/billing.js"], "conformance.scope_creep"]]) {
+      const w = dworld([STALE, { ok: true, output: "OK" }], { changed: ["src/foo.js", "test/foo.test.js"] });
+      const inner = w.io.docsFreshness;
+      w.io.docsFreshness = async (x) => { const r = await inner(x); if (r?.ok && !w.changed.includes("devdocs/modules/lean.md")) w.changed = [...w.changed, "devdocs/modules/lean.md", ...extra]; return r; };
+      const r = await run(w);
+      if (code) assert.equal(r.code, code); else assert.equal(r.terminalReason, "merged");
+    }
+  });
+
   it("still stale after the resume: needs-human docs.stale, before any PR or reviewer run", async () => {
     const w = dworld([STALE]);
     const r = await run(w);

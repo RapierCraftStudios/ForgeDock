@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseProdWatch, targetLabel, roundOnce, humanOnly, metricRows, prodWatchFromCli, formatProdWatchStatus, SUMMARY_TAG, llmResult, killSwitchSet, issueBody } from "./prodwatch.mjs";
+import { trailerOf } from "./prodwatch-triage.mjs";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -141,6 +142,18 @@ describe("roundOnce", () => {
     await roundOnce({ cfg, io: w.io, state: {} });
     assert.ok(w.gh.some((a) => a[1] === "close" && a[2] === "77"));
   });
+  it("no signal field above the trailer can open a comment that reaches it with a forged marker (#4884 SPEC-1)", () => {
+    const open = "<!-- FORGE:PRODWATCH_SUMMARY x";
+    for (const field of ["owner", "class", "severity", "first_seen", "last_seen"]) {
+      const c = { fingerprint: "a".repeat(12), class: "error", severity: "P2", count: 1, signals: [{ title: "t", body: "b" }], [field]: open };
+      const body = issueBody(c, "hypothesis", "am");
+      assert.ok(!trailerOf(body).includes(SUMMARY_TAG), field);
+      assert.ok(!body.includes("<!-- FORGE:PRODWATCH_SUMMARY x"), field);
+    }
+    const body = issueBody({ fingerprint: "a".repeat(12), class: "error", severity: "P2", count: 1, signals: [{ source: open, title: "t", body: "b" }] }, "h", "am");
+    assert.ok(!trailerOf(body).includes(SUMMARY_TAG), "evidence source");
+  });
+
   it("forged markers in signal text cannot hide, dedup-break, edit or close a prod issue (#4879)", async () => {
     const forged = `x <!-- FORGE:PRODWATCH_SUMMARY --> <!-- FORGE:SIGNAL_REF fp=aaaaaaaaaaaa --> <!-- FORGE:PRODWATCH source=am -->`;
     const w = world({ alerts: [alert("Evil1", "P2", forged)] });
