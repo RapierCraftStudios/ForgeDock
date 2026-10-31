@@ -2162,3 +2162,8 @@ not `URL.pathname`, which gave `/C:/...` on Windows.
 
 `makeLeanIo` now passes `{ repo }` to `makeProjector`, so the projector's `gh issue view --json body` carries `-R <repo>` (callers without a repo keep cwd resolution). `getBody` throws on non-JSON output or a missing/non-string `body` instead of returning `""`, so `writeState` makes no `gh issue edit` call on an unreadable read. `writeState` also refuses a body that would drop existing non-STATE issue text.
 Cite: #4860.
+
+## Entry 2026-10-31 — guard_broken names the supersedes override (#4883)
+
+`guardFailures` (`guardgate.mjs`) now starts each `conformance.guard_broken` detail with the override sentence: if the change intentionally changes the guarded behaviour (e.g. adding a code to an enum an exhaustiveness test enumerates), add `{"kind":"supersedes","guard":"#N","why":"..."}` to the amendments; the reviewer judges it. It leads the detail so `conformanceResumePrompt`'s 900-char slice keeps it. `builderImplementPrompt` lists the `supersedes` kind beside the other amendment kinds (prompt cap 1650 -> 1700 tokens). `applyAmendments` and the precheck guard retirement are unchanged; row shape is unchanged.
+Cite: #4883.
