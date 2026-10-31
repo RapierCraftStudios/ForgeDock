@@ -4087,6 +4087,18 @@ describe("batch robustness (#4112-#4115)", () => {
     await run(w2, { recover: { code: "ci.red", attempt: 1 } });
     assert.ok(!w2.comments.some((c) => c.includes("FORGE:AMENDMENT-STATE")));
   });
+  it("#4899 recovery lane keeps enforcing a guard that was not superseded", async () => {
+    const mkGuard = (issue) => ({ v: 1, issue, pr: issue * 10, merge_sha: "abc1234", tests: [{ path: "src/foo.js", ids: [] }], hunks: [], why: `guard ${issue}` });
+    const sup = { kind: "supersedes", guard: "#4785", why: "behaviour changed on purpose" };
+    const prior = { body: `<!-- FORGE:AMENDMENT -->\n${renderAmendments([{ kind: "supersedes", target: "#4785", why: sup.why }], {}, { contract: contractHash(contractJson(CONTRACT)), amendments: [sup] })}`, author_association: "OWNER", user: { type: "User", login: "op" } };
+    const dir = tmpDir("guard-recover-");
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), prior], baseFiles: { ":src/foo.js": "old" } });
+    w.io.runCommand = async () => ({ rc: 1, output: "guard test failed" });
+    await run(w, { dir, recover: { code: "ci.red", attempt: 1 }, loadGuards: async () => [mkGuard(4785), mkGuard(9)] });
+    const text = JSON.stringify([w.comments, w.calls.filter((c) => c[0] === "runner").map((c) => c[4])]);
+    assert.match(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#9\\"/, "precheck reports #9 as guard_broken");
+    assert.doesNotMatch(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#4785\\"/, "precheck does not report the superseded #4785");
+  });
   it("#4899 amendment state round-trips; precheck still enforces a guard that was not superseded", () => {
     const am = [{ kind: "supersedes", guard: "#1", why: "w" }];
     assert.deepEqual(parseAmendmentState(renderAmendments([{ kind: "supersedes", target: "#1", why: "w" }], {}, { contract: "abc", amendments: am })), { contract: "abc", amendments: am });
