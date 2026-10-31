@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseProdWatch, targetLabel, roundOnce, humanOnly, metricRows, prodWatchFromCli, formatProdWatchStatus } from "./prodwatch.mjs";
+import { parseProdWatch, targetLabel, roundOnce, humanOnly, metricRows, prodWatchFromCli, formatProdWatchStatus, SUMMARY_TAG, llmResult, killSwitchSet } from "./prodwatch.mjs";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 
 const NOW = Date.parse("2026-10-31T12:00:00Z");
@@ -110,6 +112,41 @@ describe("roundOnce", () => {
     assert.equal(r.filed.length, 1);
     assert.match(r.summary.title, /2 cluster\(s\) deferred/);
     assert.equal(creates(w).length, 2);
+  });
+  it("an LLM call with no reported cost counts as the whole cap when no estimate is set (#4868)", async () => {
+    const c2 = { ...cfg, governor: { max_cost_usd_per_round: 0.01 } };
+    const w = world({ alerts: [alert("A1", "P2", "first"), alert("B2", "P2", "second thing"), alert("C3", "P2", "third one")], llmCost: null });
+    const r = await roundOnce({ cfg: c2, io: w.io, state: {} });
+    assert.equal(r.filed.length, 1);
+    assert.equal(r.deferred.filter((d) => d.why === "max_cost_usd_per_round").length, 2);
+  });
+  it("reads the real cost from claude JSON output (#4868)", () => {
+    assert.deepEqual(llmResult(JSON.stringify({ type: "result", result: "body", total_cost_usd: 0.12 })), { text: "body", cost_usd: 0.12 });
+    assert.deepEqual(llmResult("plain text"), { text: "plain text", cost_usd: null });
+  });
+  it("edits the open storm summary instead of filing another, and does not count it as a prod issue (#4869)", async () => {
+    const c2 = { ...cfg, governor: { max_issues_per_hour: 1, max_open_prod_issues: 1 } };
+    const summary = { number: 77, state: "OPEN", body: `old summary\n\n${SUMMARY_TAG}\n`, createdAt: "2026-10-31T11:00:00Z" };
+    const w = world({ alerts: [alert("A1", "P2", "first"), alert("B2", "P2", "second thing")], issues: [summary] });
+    const r = await roundOnce({ cfg: c2, io: w.io, state: {} });
+    assert.equal(r.filed.length, 1);
+    assert.equal(creates(w).length, 1);
+    const edit = w.gh.find((a) => a[1] === "edit");
+    assert.equal(edit[2], "77");
+    assert.ok(edit[edit.indexOf("--body") + 1].includes(SUMMARY_TAG));
+  });
+  it("closes the open storm summary once nothing is deferred (#4869)", async () => {
+    const summary = { number: 77, state: "OPEN", body: `old\n${SUMMARY_TAG}`, createdAt: "2026-10-31T11:00:00Z" };
+    const w = world({ alerts: [alert("A1", "P2", "first")], issues: [summary] });
+    await roundOnce({ cfg, io: w.io, state: {} });
+    assert.ok(w.gh.some((a) => a[1] === "close" && a[2] === "77"));
+  });
+  it("honors an absolute kill switch path", () => {
+    const d = tmpDir("pw-kill"), f = join(d, "off");
+    assert.equal(killSwitchSet("/nonexistent-cwd", f), false);
+    writeFileSync(f, "");
+    assert.equal(killSwitchSet("/nonexistent-cwd", f), true);
+    assert.equal(killSwitchSet(d, "off"), true);
   });
   it("pages only a P0 incident, once", async () => {
     const w = world({ alerts: [alert("PgDown", "P0", "service down"), alert("Slow", "P1")] });
