@@ -4,7 +4,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
 import { ensureSignedOff, needsSignoff, offendersOf } from "./signoff.mjs";
@@ -98,5 +98,25 @@ describe("ensureSignedOff", () => {
     f.sh("config", "user.email", "forgedock@localhost");
     await assert.rejects(ensureSignedOff({ git: f.git, lane: "staging", branch: "feat/x", env: {} }), (e) => e.noIdentity === true);
     assert.equal(f.sh("rev-parse", "HEAD"), bad);
+  });
+  it("rewrites on a dirty worktree and keeps the dirty tracked and untracked files (#4905)", async () => {
+    const f = fixture();
+    f.commit("b.txt", "unpushed placeholder", "placeholder");
+    writeFileSync(join(f.wt, "base.txt"), "modified\n");
+    writeFileSync(join(f.wt, "new.txt"), "untracked\n");
+    const r = await ensureSignedOff({ git: f.git, lane: "staging", branch: "feat/x", env: {} });
+    assert.equal(r.rewritten, 1);
+    assert.equal(readFileSync(join(f.wt, "base.txt"), "utf8"), "modified\n");
+    assert.equal(readFileSync(join(f.wt, "new.txt"), "utf8"), "untracked\n");
+    assert.match(f.sh("status", "--porcelain"), /M base\.txt/);
+    assert.equal(f.sh("log", "-1", "--format=%ae"), "lane@example.com");
+  });
+  it("restores the dirty file when the rewrite itself fails (#4905)", async () => {
+    const f = fixture();
+    f.commit("b.txt", "unpushed placeholder", "placeholder");
+    writeFileSync(join(f.wt, "base.txt"), "modified\n");
+    const git = async (a, o) => { if (a[0] === "filter-branch") throw Object.assign(new Error("boom"), { stderr: "boom" }); return f.git(a, o); };
+    await assert.rejects(ensureSignedOff({ git, lane: "staging", branch: "feat/x", env: {} }), /could not rewrite 1 unpushed/);
+    assert.equal(readFileSync(join(f.wt, "base.txt"), "utf8"), "modified\n");
   });
 });

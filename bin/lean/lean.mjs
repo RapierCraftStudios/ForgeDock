@@ -630,7 +630,13 @@ export async function runCore(o) {
     } catch (e) { throw Object.assign(e, { laneCode: OUTCOME_CODES.CI_DCO }); }
   };
   const gitPush = async (args) => {
-    if (!args.includes("--delete")) { await untrackToolState({ git, base, ev }); await signOffUnpushed(); } // #4590: never push .forge-lean/ or tool caches this branch added
+    if (!args.includes("--delete")) { await untrackToolState({ git, base, ev });
+      try { await signOffUnpushed(); }
+      catch (e) { // #4905: a failed rewrite must not cost the lane's finished commits: push the branch as-is before reporting ci.dco
+        if (!e?.noIdentity) { try { await git(["push", "-u", "origin", branch]); ev({ event: "DCO_RESCUE_PUSH", branch }); } catch (pe) { ev({ event: "DCO_RESCUE_PUSH_FAILED", error: String(pe?.message ?? pe).slice(0, 200) }); } }
+        throw e;
+      }
+    } // #4590: never push .forge-lean/ or tool caches this branch added
     try { return await retrying(() => git(args), { transient: PUSH_TRANSIENT_RE, permanent: PUSH_PERMANENT_RE, attempts: 4, sleep: sleepFn, random }); }
     catch (e) {
       if (e?.transientExhausted) { e.deferCode = OUTCOME_CODES.PUSH_TRANSIENT; e.deferDetail = `git push kept failing transiently after 4 attempts: ${String(e?.stderr ?? e?.message ?? e).slice(0, 300)}`; }

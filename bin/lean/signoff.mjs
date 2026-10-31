@@ -59,8 +59,22 @@ export async function ensureSignedOff({ git, lane, branch, env = process.env }) 
     throw Object.assign(new Error(`${bad.length} unpushed commit(s) fail DCO (placeholder author or no sign-off: ${bad.slice(0, 5).map((c) => c.sha.slice(0, 8)).join(", ")}) and the worktree has no usable git identity to rewrite them`), { noIdentity: true });
   }
   const fenv = { FD_BAD: bad.map((c) => c.sha).join(" "), FD_NAME: name, FD_EMAIL: email, FILTER_BRANCH_SQUELCH_WARNING: "1" };
+  // filter-branch refuses on any modified or staged tracked file (#4905): park them in a commit object (not the shared stash stack), rewrite, put them back.
+  let parked = "";
+  if (await ok(["status", "--porcelain", "--untracked-files=no"])) {
+    const ident = { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
+    try { parked = String(await git(["stash", "create", "forge: signoff park"], { env: ident })).trim(); } catch { parked = ""; }
+    if (parked) await git(["reset", "--hard", "-q", "HEAD"]);
+  }
+  let failure = null;
   try { await git(["filter-branch", "-f", "--env-filter", ENV_FILTER, "--msg-filter", MSG_FILTER, "--", "HEAD", ...exclude], { env: fenv }); }
-  catch (e) { throw Object.assign(new Error(`could not rewrite ${bad.length} unpushed commit(s) for DCO: ${String(e?.stderr ?? e?.message ?? e).slice(0, 300)}`), { noIdentity: false }); }
+  catch (e) { failure = Object.assign(new Error(`could not rewrite ${bad.length} unpushed commit(s) for DCO: ${String(e?.stderr ?? e?.message ?? e).slice(0, 300)}`), { noIdentity: false }); }
+  let stashRef;
+  if (parked) {
+    try { await git(["stash", "apply", "-q", parked]); }
+    catch { stashRef = "refs/forge/signoff-stash"; await ok(["update-ref", stashRef, parked]); } // keep the work reachable, never lose it
+  }
+  if (failure) throw failure;
   await ok(["for-each-ref", "--format=delete %(refname)", "refs/original/"]).then(async (l) => { for (const r of l.split("\n").map((x) => x.replace(/^delete /, "")).filter(Boolean)) await ok(["update-ref", "-d", r]); });
-  return { rewritten: bad.length };
+  return stashRef ? { rewritten: bad.length, stashRef } : { rewritten: bad.length };
 }
