@@ -2169,7 +2169,7 @@ Cite: #4860.
 Cite: #4872.
 
 ## Entry 2026-10-31 — Docs-freshness edits are implied deliverables (#4887)
-A doc file (`.md`, `.mdx`, `.rst`, `.txt`) newly changed by the step-3c docs round or a CI fix round, while the repo's
+A doc file (`.md`, `.mdx`, `.rst` or `.adoc` under a `docs/`, `doc/`, `devdocs/` or `documentation/` directory; build, dependency and agent-instruction files never qualify, per the staging review of #4884) newly changed by the step-3c docs round or a CI fix round, while the repo's
 freshness script failed before the round and passes after it, gets an engine-synthesized `add-deliverable` amendment (why
 "docs freshness rule", `impliedDocDeliverables` in `conformance.mjs`, merged in `amend()` in `lean.mjs`). The path comes from
 the diff, never a hardcoded dossier path; any other out-of-contract file in the round is still `conformance.scope_creep`.

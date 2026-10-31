@@ -854,6 +854,12 @@ describe("implied docs-freshness deliverable", () => {
     const creep = pc.failures.filter((f) => f.kind === "scope_creep").map((f) => f.detail).join();
     assert.match(creep, /src\/extra\.js/); assert.doesNotMatch(creep, /docs\/guide\.md/);
   });
+  it("only prose files under a docs directory are implied: build, dependency, agent-instruction and spec files stay scope_creep", () => {
+    const bad = ["requirements.txt", "CMakeLists.txt", "CLAUDE.md", "AGENTS.md", "commands/work-on.md", ".claude/agents/x.md", "notes.txt", "docs/run.sh"];
+    const good = ["devdocs/modules/lean.md", "doc/api.rst", "packages/web/docs/setup.mdx"];
+    const am = impliedDocDeliverables({ before: base, after: [...base, ...bad, ...good], contract: C, wasFailing: true, nowOk: true });
+    assert.deepEqual(am.map((a) => a.path), good);
+  });
   it("nothing is implied unless the rule failed before the round and passes after, or when the doc was already changed or covered", () => {
     assert.deepEqual(impliedDocDeliverables({ before: base, after, contract: C, wasFailing: false, nowOk: true }), []);
     assert.deepEqual(impliedDocDeliverables({ before: base, after, contract: C, wasFailing: true, nowOk: false }), []);
