@@ -1,31 +1,25 @@
 ### Approach
-One pure module, `admit`, over validated triage clusters. Candidates are fileable, non-duplicate, non-expected-class clusters sorted incident, defect, then severity, size and fingerprint. A cluster is admitted while the hourly, open-issue and cost allowances all remain. Everything else goes into one summary.
+getBody now fails loudly instead of returning "", reads with -R when the repo is known, and writeState refuses a write that would drop existing non-STATE text.
 
 ### Changes
-- bin/lean/prodwatch-governor.mjs: new `admit`.
-- bin/lean/prodwatch-governor.test.mjs: 9 tests covering each cap, window expiry, ordering, single summary, skips, determinism, and the 70-memo storm.
-- devdocs/modules/lean.md: dossier entry with the key mapping to signal-planner `max_issues_per_run`/`max_cost_usd`.
+- bin/engine/projector.mjs: `makeProjector(io,{repo})`; getBody adds `-R`, throws on non-JSON or non-string body; writeState guard before `gh issue edit`.
+- bin/lean/effects.mjs: passes `{ repo }`.
+- bin/engine-cli.mjs: passes `repo` at the engine tick projector.
+- bin/tests/engine-projector.test.mjs: 3 new tests.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/prodwatch-governor.mjs:31
-- R2 ✅ bin/lean/prodwatch-governor.mjs:31
-- R3 ✅ bin/lean/prodwatch-governor.mjs:40-47
-- R4 ✅ bin/lean/prodwatch-governor.mjs:49-57
-- R5 ✅ bin/lean/prodwatch-governor.mjs:14-19
-- R6 ✅ devdocs/modules/lean.md (prodwatch-governor entry)
-- R7 ✅ pure, no fs/gh/exec, clock injected
+- R1 ✅ bin/engine/projector.mjs:24-27, test engine-projector.test.mjs (non-JSON)
+- R2 ✅ projector.mjs:23, test "-R when the repo is known"
+- R3 ✅ test "writeState leaves the body unchanged when the issue view output is not JSON"
+- R4 ✅ projector.mjs writeState guard
+- R5 ✅ projector.mjs getBody throws; no edit call
 
 ### Verification
-- V1 (governor, triage, sources tests): 31 pass, 0 fail.
-- V2 (sibling-list tests): 314 pass, 0 fail.
-- V3 (node --check + devdocs freshness): pass.
-- The new test file fails without the module (import error).
-- checks.mjs scoped run: 889 pass, 3 fail. All 3 failures are in bin/tests/journey.test.mjs (WSL platform detection, a tmp copyFile case), a file this change does not touch. They look environmental, but I did not run them on the base to confirm.
-- `forgedock check`: PASS.
+- node --test bin/tests/engine-projector.test.mjs: 15 pass; 3 fail with projector.mjs reverted (fails without fix).
+- node --test bin/lean/lean.test.mjs bin/stats/stats.test.mjs: 588 pass.
+- engine-cli and effects tests: 78 pass. forgedock check: PASS.
+- checks.mjs widened to the full suite (fan-out); not run per host rules.
 
 ### Notes
-- No env vars. No sibling-list test needed editing; the new file is not a member of any of them.
-- Cost per cluster is `cluster.cost_usd ?? governor.cost_per_issue_usd ?? 0`.
-
-## Sibling-list check
-Ten flagged tests enumerate unrelated literals (telemetry events, ledgers, kinds, stubs); prodwatch-governor is not a member of any, recorded in result.json not_members.
+Callers without a repo (bin/engine.mjs, hooks/interactive-engine.mjs) keep cwd resolution. A failed body read now makes writeState throw.
+- Docs: added devdocs/modules/lean.md entry for the #4860 projector change (docs freshness).

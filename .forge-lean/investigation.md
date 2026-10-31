@@ -1,36 +1,39 @@
 **Verdict**: CONFIRMED
 **Confidence**: high
-**Severity**: medium (missing feature: without a governor the prod-watch loop can storm the tracker)
-**Task Type**: feature
+**Severity**: high (a failed body read lets writeState overwrite the whole issue body with only FORGE:STATE; the lane then fails its own contract)
+**Task Type**: bug
 
 ### What Was Claimed
-Add `bin/lean/prodwatch-governor.mjs` with `admit(clusters, {governor, state, openProdIssues, now})` returning `{file:[], summary:null|{title, body}}`, enforcing `max_issues_per_hour`, `max_open_prod_issues`, `max_cost_usd_per_round`, filing ONE summary issue on overflow, incidents before defects, and documenting the mapping to signal-planner's `max_issues_per_run`/`max_cost_usd`.
+`getBody` in the projector returns "" on any unparseable `gh` output, has no `-R`, and `writeState` has no guard against dropping existing text. #4859/#4861 (authorAssociation field) is a different defect.
 
 ### What We Found
-- `bin/lean/prodwatch-governor.mjs` does not exist (`ls bin/lean | grep prodwatch` lists only sources and triage files).
-- Cluster shape to consume is produced at `bin/lean/prodwatch-triage.mjs:49-64` (`fingerprint, signals, count, first_seen, last_seen, severity, owner, duplicateOf`); `validateCluster` (:103) adds `class` (incident|defect|...), `fileable`, `reason`; `signalRef(fp)` at :35.
-- signal-planner Phase 0 (`commands/signal-planner.md:18-19, 66-99`) defines `governor.max_issues_per_run` (default 10) and `governor.max_cost_usd` (default 5.00) as hard per-run caps.
-- The enclosing comments on #4835 carry an unrelated investigation (relay answer 413, `bin/lean/relay.mjs`); it does not apply to this issue and is ignored.
-- Dep #4834 is merged (HEAD 5d9dd72ab).
+- bin/engine/projector.mjs:20-23 `getBody`: `gh issue view N --json body`, no `-R`; `catch { return ""; }`. A thrown `gh` error propagates, but non-JSON stdout is swallowed into "".
+- bin/engine/projector.mjs:66-69 `writeState`: `upsertStateBlock(await getBody(issue), index)` then `gh issue edit --body`, no check that the new body keeps the old non-STATE text.
+- bin/engine/state.mjs:52-56 `upsertStateBlock("")` returns just the block, so the issue is wiped.
+- `makeProjector(io)` (bin/engine/projector.mjs:18) has no repo; callers: bin/lean/effects.mjs:301 (`makeLeanIo({repo})` has repo in scope), bin/engine-cli.mjs:741 and :1042 (`repo` in scope at 1042), bin/engine.mjs:465, bin/hooks/interactive-engine.mjs:157.
+- bin/tests/engine-projector.test.mjs:7-24 fakeGh serves `issue view` JSON and handles `issue edit`; the last test (:101) checks writeState keeps reporter text.
 
 ### Root Cause
-Feature not yet built; triage output is unbounded, so a storm of fileable clusters would each become an issue.
+Read failure was modelled as "empty body", and the write path trusts the read unconditionally.
 
 ### Affected Files
-- bin/lean/prodwatch-governor.mjs (new)
-- bin/lean/prodwatch-governor.test.mjs (new)
-- devdocs/modules/lean.md (module dossier entry, freshness check)
-- docs/ (or the lean.md entry) for the key mapping to signal-planner
-- Enumerating tests (literal sibling lists in bin/lean) that must still pass; a new file there is a non-member as with prodwatch-triage (#4834 chore 28d2de202): bin/engine/telemetry-seam.test.mjs, bin/lean/batch.test.mjs, checks.test.mjs, conformance.e2e.test.mjs, conformance.test.mjs, context.test.mjs, drift.test.mjs, execution.e2e.test.mjs, execution.test.mjs, fixround.test.mjs. None needs editing unless one scans the directory; run them to confirm.
+- bin/engine/projector.mjs: `makeProjector(io, { repo } = {})`; `getBody` passes `-R repo` when known, rethrows on non-JSON or non-string body; `writeState` re-reads and refuses to write when the result would lose non-STATE text.
+- bin/lean/effects.mjs:301: pass `{ repo }`. bin/engine-cli.mjs:1042 (and :741 if repo in scope): pass repo.
+- bin/tests/engine-projector.test.mjs: new regression tests.
+- Enumerating tests (bin/engine dir sibling lists): bin/lean/lean.test.mjs:66 and bin/stats/stats.test.mjs:152. No new file is added in bin/engine, so they should stay green; run them only to confirm.
 
 ### Sibling Sweep
-Other prod-watch modules (prodwatch-sources, prodwatch-triage) are pure with injected io; the governor follows the same style. Siblings #4837 (metrics, drop to shadow) and #4838 (runner) will consume `admit`; keep return shape exact.
+- `grep -n '"issue", "view"' bin/engine*.mjs bin/engine/` for other `catch { return "" }` body reads feeding an edit; getTrustedBody (projector.mjs:31) already fails closed and uses `{owner}/{repo}`.
+- Other makeProjector callers without a repo keep the old cwd resolution (repo optional) so no behaviour change there.
 
 ### History
-Triage landed in 47fdba653 / 26d39c77d (#4834); issue-watch caps pattern in issuewatch.mjs (#4765).
+- 7792c906f introduced the projector; dc29b803d (#3569) added getTrustedBody but left getBody. No prior fix. Incident: #4835 body wiped 2026-10-31T00:16:07Z.
 
 ### Recommendation
-One lane, one pure module + test + dossier/doc update. `admit`: drop non-fileable/duplicate clusters; order incident first, then defect, others after (stable by severity then count); walk in order with remaining = min(hourly budget = max_issues_per_hour − filings in state within 60 min of now, max_open_prod_issues − openProdIssues.length, cost budget = floor(max_cost_usd_per_round / per-cluster cost)); admitted go to `file`; the rest go into ONE summary `{title, body}` listing deferred clusters (fingerprint, class, severity, count) with the SIGNAL_REF marker only for... none (summary must not embed fingerprints so deferred clusters stay re-admittable). Summary suppressed if an identical open summary exists (state.summary_open) to avoid a storm of summaries. Overflow with budget 0 still yields one summary.
+1. getBody: `args = ["issue","view",N,"--json","body", ...(repo?["-R",repo]:[])]`; `const b = JSON.parse(out).body; if (typeof b !== "string") throw`; no try/catch swallow.
+2. writeState: `const body = await getBody(issue)`; compute `next = upsertStateBlock(body, index)`; guard: strip STATE block from `body` (BLOCK_RE or compare `next.replace(block,"")`) and refuse (throw) if non-STATE text of the old body is not still contained in `next`. Because upsert preserves text this guard only trips on bugs, but it is cheap. Throw before any `gh issue edit`.
+3. Wire repo from effects.mjs and engine-cli.mjs.
+4. Tests: `-R` present on view call; non-JSON view output -> writeState rejects, no `issue edit` call, body unchanged; JSON without string body -> same.
 
 ### Related Issues
-#4768 (parent, closed), #4833, #4834 (deps, merged), #4837, #4838 (consumers, open), #1347 (repo-agnostic core).
+#4835 (damaged issue), #4859/#4861 (distinct), #3569, #4768.

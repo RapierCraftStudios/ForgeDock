@@ -1039,7 +1039,7 @@ export async function resumeStalledFromCli(argv, deps = {}) {
   await assertRepoMatchesCwd(io, repo, { sleep: deps.sleep });
   await assertLaneNotDefault(io, lane, repo);
   const dispatch = deps.dispatch ?? runFromCli;
-  const projector = makeProjector(io);
+  const projector = makeProjector(io, { repo: repo ?? undefined });
   const now = Date.now();
 
   // Collect candidate issue numbers from all non-terminal workflow labels
