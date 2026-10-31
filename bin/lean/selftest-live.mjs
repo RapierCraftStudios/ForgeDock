@@ -111,7 +111,10 @@ export const STEPS = [
   { name: "remote", run: async (ctx) => {
     const { io } = ctx;
     if (!io.remote) { ctx.notes.push("remote: skipped (pool not configured)"); return; }
-    const r = await io.remote.run(ctx.repo);
+    const c = num(await io.gh(["issue", "create", "-R", ctx.repo, "--title", `${ctx.fx.a.title.replace("A:", "C:")}`, "--body", ctx.fx.a.body]));
+    ctx.created.push(c);
+    const r = await io.remote.run({ repo: ctx.repo, issue: c, timeoutMs: ctx.timeoutMs, pollMs: ctx.pollMs });
+    if (r.where !== "remote") fail("remote", `#${c} ran ${r.where ?? "unknown"}, not in the pool`);
     if (!r.authenticated) fail("remote", "the remote lane did not authenticate");
     const cli = await io.cliVersion();
     if (r.engineVersion !== cli) fail("remote", `sandbox engine ${r.engineVersion} != CLI ${cli}`);
@@ -151,10 +154,11 @@ export async function runSelftestLive({ repo, lang = "node", io, timeoutMs = 45 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "forgedock.mjs");
 
 export function realIo(env = process.env, { pool = false } = {}) {
+  let self;
   const root = batchRoot(env);
   const detached = (args) => { const p = spawn(process.execPath, [CLI, ...args], { detached: true, stdio: "ignore", env }); p.unref(); return { kill: async () => { try { process.kill(-p.pid, "SIGTERM"); } catch { /* gone */ } } }; };
   const waitBatch = async (before) => { for (let i = 0; i < 60; i++) { const id = listBatches(root).find((b) => !before.has(b)); if (id) return id; await new Promise((r) => setTimeout(r, 1000)); } throw new Error("orchestrate did not create a batch within 60s"); };
-  return {
+  return (self = {
     now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     gh: async (args) => { const r = spawnSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }); if (r.status !== 0) throw new Error(r.stderr.trim() || `gh exited ${r.status}`); return r.stdout; },
     cli: async (args) => { const r = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", env }); return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr }; },
@@ -167,9 +171,21 @@ export function realIo(env = process.env, { pool = false } = {}) {
       resume: async (id) => ({ id, ...detached(["orchestrate", "--resume", id]) }),
       state: async (id) => openBatch(root, id).store.load(),
     },
-    // Step 6 needs a lane run through the pool; the lane's result row reports the sandbox engine version and auth.
-    remote: pool ? { run: async (repo) => { throw new Error(`remote step needs the pool runner (${repo})`); } } : null,
-  };
+    // Step 6: one lane through the pool. The issue's FORGE:STATE records the placement and the lane's FORGE:TELEMETRY rows
+    // carry the engine's forge_version (the sandbox's, not the CLI's: the #4818 stale-image defect).
+    remote: pool ? { run: async ({ repo, issue, timeoutMs, pollMs }) => {
+      const run = await self.orchestrate.start(repo, [issue], 1), t0 = Date.now();
+      let row = null;
+      try {
+        while (!row && Date.now() - t0 < timeoutMs) { row = (await self.orchestrate.state(run.id))?.results?.[issue] ?? null; if (!row) await self.sleep(pollMs); }
+      } finally { await run.kill(); }
+      if (!row) throw new Error(`#${issue} produced no result within ${Math.round(timeoutMs / 1000)}s`);
+      const v = JSON.parse(await self.gh(["issue", "view", String(issue), "-R", repo, "--json", "body,comments"]));
+      const text = `${v.body}\n${v.comments.map((c) => c.body).join("\n")}`;
+      const versions = [...text.matchAll(/"forge_version":"([^"]+)"/g)].map((m) => m[1]);
+      return { where: /"placement":\{"where":"(\w+)"/.exec(text)?.[1] ?? null, authenticated: versions.length > 0 && !/^env\./.test(String(row.code ?? row.outcome ?? "")), engineVersion: versions.at(-1) ?? null };
+    } } : null,
+  });
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };

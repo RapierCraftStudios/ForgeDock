@@ -36,7 +36,7 @@ function world(d = {}) {
       resume: async (id) => { w.resumedAt = w.tick ?? 0; if (d.double) w.running[w.a] = { pid: ++w.pid }; return { id, kill: async () => { w.killed++; } }; },
       state: async () => ({ order: w.order, deps: w.deps, running: w.running, results: w.results }),
     },
-    remote: w.pool ? { run: async () => ({ authenticated: !d.noRemoteAuth, engineVersion: d.oldEngine ? "1.37.0" : "1.39.0" }) } : null,
+    remote: w.pool ? { run: async ({ issue }) => { w.remoteIssue = issue; return { where: d.local ? "local" : "remote", authenticated: !d.noRemoteAuth, engineVersion: d.oldEngine ? "1.37.0" : "1.39.0" }; } } : null,
   };
   function finish() {
     if (w.resumedAt !== undefined && !w.finished && (w.tick ?? 0) >= w.resumedAt + 2) {
@@ -82,6 +82,9 @@ describe("selftest --live steps (#4865)", () => {
     assert.equal((await run({ pool: true })).r.ok, true);
     assert.match((await run({ pool: true, oldEngine: true })).r.message, /1\.37\.0 != CLI 1\.39\.0/);
     assert.equal((await run({ pool: true, noRemoteAuth: true })).r.step, "remote");
+    assert.match((await run({ pool: true, local: true })).r.message, /not in the pool/);
+    const ok = await run({ pool: true });
+    assert.equal(ok.w.remoteIssue, 12); assert.deepEqual(ok.w.closed, ["10", "11", "12"]);
   });
   it("unknown fixture language fails at setup", async () => {
     assert.equal((await runSelftestLive({ repo: "o/r", lang: "ruby", io: {} })).step, "setup");
