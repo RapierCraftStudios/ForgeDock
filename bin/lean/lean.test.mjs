@@ -1562,7 +1562,7 @@ describe("conformance shadow mode (the default)", () => {
     const r = await runShadow(w, { dir, reviewTrigger: { mode: "shadow", riskPaths: ["src/**"] } });
     assert.equal(r.terminalReason, "needs-human"); assert.equal(w.merges.length, 0);
     assert.equal(r.code, "conformance.omission"); assert.equal(builders(w).length, 3, "one builder resume, as in enforce");
-    assert.deepEqual(r.conformance, { mode: "enforce", would: null, risk: true, kinds: ["conformance.omission"] });
+    assert.deepEqual(r.conformance, { mode: "enforce", would: null, risk: true });
     const log = readLog(dir, 7);
     assert.deepEqual(log.filter((e) => e.event === "CONFORMANCE_RISK_ENFORCED").map((e) => e.paths), [["src/foo.js"]], "logged once (sticky across the resume)");
     assert.equal(log.find((e) => e.event === "RUN_TERMINAL").conformance_mode, "enforce");
@@ -1577,7 +1577,7 @@ describe("conformance shadow mode (the default)", () => {
     const s = world({ contract: { ...CONTRACT, preserve: [] }, changed: ["src/auth/foo.js", "test/foo.test.js"], reviews: [omission()] });
     const rs = await runShadow(s, { reviewTrigger: { mode: "shadow", riskPaths: ["db/**"] } });
     assert.equal(rs.terminalReason, "merged", "an auth path with no declared glob stays shadow");
-    assert.deepEqual(rs.conformance, { mode: "shadow", would: "nonconforming", risk: false, kinds: ["conformance.scope_creep", "conformance.omission"] });
+    assert.deepEqual(rs.conformance, { mode: "shadow", would: "nonconforming", risk: false });
   });
 
   it("#4398 an investigation whose question is deferred closes partial (not planned), carried forward in the tracking issue", async () => {
