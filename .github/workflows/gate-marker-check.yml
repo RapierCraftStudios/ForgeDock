@@ -12,12 +12,20 @@ name: Deploy Gate Marker Check
 # Gate logic: the gate is the `forge/deploy-gate` commit status on the PR head,
 # not this job's own check run. An issue_comment run reports against the default
 # branch, so only a commit status can follow a marker posted after the PR opened.
-#   - latest trusted marker is FORGE:GATE_PASS    → status success
-#   - latest trusted marker is FORGE:GATE_FAILURE → status failure (a re-run that
+#   - latest counted marker is FORGE:GATE_PASS    → status success
+#   - latest counted marker is FORGE:GATE_FAILURE → status failure (a re-run that
 #     passes posts a newer GATE_PASS, which wins)
-#   - no trusted marker                           → status pending, at any age
-# The job's own result is not the gate: within 30 minutes of the PR opening it
-# exits 0 with no marker, so the staging review's CI read (Phase 1E) is not
+#   - no counted marker                           → status pending, at any age
+# Counted markers are trusted (below) and bound to the PR head:
+#   - a GATE_PASS counts only as the final staging-review verdict
+#     (`FORGE:GATE_PASS:TYPE=staging-review`) whose `**Head**:` line is the
+#     current head SHA. The review's pre-dispatch open-finding gate posts a plain
+#     GATE_PASS before any reviewer ran, and a pass for an earlier head says
+#     nothing about commits pushed since: neither counts.
+#   - a GATE_FAILURE counts unless its `**Head**:` names a different SHA (a
+#     failure without a head line still blocks: fail closed).
+# The job's own result is not the gate: with no counted marker it exits 0 and
+# leaves the status pending, so the staging review's CI read (Phase 1E) is never
 # blocked by the gate it is about to satisfy. Make `forge/deploy-gate` a required
 # status check on main to block the merge (docs/CI.md). Before this status, that
 # early green job was the only signal, and marker comments from the bot
@@ -72,6 +80,11 @@ jobs:
   gate-marker-check:
     name: Check for FORGE gate markers
     runs-on: ubuntu-latest
+    # One run per PR at a time, in event order: each run reads the markers live, so
+    # a later run never has its forge/deploy-gate status overwritten by an older one.
+    concurrency:
+      group: deploy-gate-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
 
     # Only run on PRs targeting main — skip all other PR events.
     # For issue_comment events, additionally require that the commenter has
@@ -187,6 +200,7 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           REPO: ${{ github.repository }}
           TRUSTED_AUTHORS_RAW: ${{ vars.FORGE_TRUSTED_MARKER_AUTHORS }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
           # Fetch PR comments and review comments as {login, body} JSON — author
           # identity MUST travel with the body so a marker can be attributed to
@@ -227,10 +241,12 @@ jobs:
           GATE_PASS=0
           GATE_FAILURE=0
           SPEC_LOADED=0
-          # Items are in time order, so LATEST ends as the newest trusted marker:
+          # Items are in time order, so LATEST ends as the newest counted marker:
           # a GATE_FAILURE after a GATE_PASS blocks, a re-run's GATE_PASS after a
           # GATE_FAILURE clears it. A body carrying both counts as a failure.
+          # Head binding: see "Gate logic" above.
           LATEST=none
+          marker_head() { echo "$1" | sed -nE 's/^\*\*Head\*\*: `([0-9a-f]{40})`.*/\1/p' | head -n 1; }
 
           while IFS= read -r ITEM; do
             if [ -z "$ITEM" ]; then
@@ -241,16 +257,28 @@ jobs:
 
             if echo "$BODY" | grep -q '<!-- FORGE:GATE_PASS'; then
               if is_trusted_author "$LOGIN"; then
-                GATE_PASS=$((GATE_PASS + 1))
-                LATEST=pass
+                MHEAD=$(marker_head "$BODY")
+                if ! echo "$BODY" | grep -q '<!-- FORGE:GATE_PASS:TYPE=staging-review'; then
+                  echo "Not counting a FORGE:GATE_PASS from '$LOGIN' that is not the final staging-review verdict (pre-dispatch gate)."
+                elif [ "$MHEAD" != "$HEAD_SHA" ]; then
+                  echo "Not counting a FORGE:GATE_PASS for head '${MHEAD:-none}': the PR head is $HEAD_SHA."
+                else
+                  GATE_PASS=$((GATE_PASS + 1))
+                  LATEST=pass
+                fi
               else
                 echo "Ignoring FORGE:GATE_PASS marker from untrusted author '$LOGIN' (not in FORGE_TRUSTED_MARKER_AUTHORS)."
               fi
             fi
             if echo "$BODY" | grep -q '<!-- FORGE:GATE_FAILURE'; then
               if is_trusted_author "$LOGIN"; then
-                GATE_FAILURE=$((GATE_FAILURE + 1))
-                LATEST=failure
+                MHEAD=$(marker_head "$BODY")
+                if [ -n "$MHEAD" ] && [ "$MHEAD" != "$HEAD_SHA" ]; then
+                  echo "Not counting a FORGE:GATE_FAILURE for earlier head $MHEAD: the PR head is $HEAD_SHA."
+                else
+                  GATE_FAILURE=$((GATE_FAILURE + 1))
+                  LATEST=failure
+                fi
               else
                 echo "Ignoring FORGE:GATE_FAILURE marker from untrusted author '$LOGIN' (not in FORGE_TRUSTED_MARKER_AUTHORS)."
               fi
@@ -375,7 +403,7 @@ jobs:
             echo ""
             echo "Resolution: Run /review-pr $PR_NUMBER (or /review-pr staging) to complete the review."
             echo "forge/deploy-gate stays pending until a trusted marker is posted."
-            exit 1
+            exit 0
           else
             set_status pending "Waiting for a trusted FORGE gate marker from /review-pr-staging"
             echo "⏳ No gate marker yet — within 30-minute window (${REMAINING}s remaining)."
