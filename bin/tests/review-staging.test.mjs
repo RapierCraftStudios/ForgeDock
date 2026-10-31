@@ -39,6 +39,7 @@ function world(o = {}) {
       if (k === "pr list") return o.openPr ?? "42\n";
       if (k === "pr view") return `${o.head ?? HEAD}\n`;
       if (k === "pr comment") return "";
+      if (a[0] === "api" && a.join(" ").includes("FORGE:SELFTEST")) return o.selftest === undefined ? `${JSON.stringify(`<!-- FORGE:SELFTEST result=pass sha=${o.head ?? HEAD} step=none -->`)}\n` : o.selftest;
       if (a[0] === "api") return o.priorRoutes ?? "0\n";
       if (k === "issue list") return JSON.stringify(a.includes("open") ? [{ number: 7, title: "bug (PR #42)", body: "" }, { number: 8, title: "bug (PR #420)", body: "" }] : []);
       throw new Error(`unexpected gh ${a.join(" ")}`);
@@ -195,6 +196,26 @@ describe("review-staging flow", () => {
     const sec = w.files[`${SD}/review-staging-42/brief-security.md`];
     assert.ok(sec.includes("FORGE:REVIEW-AGENT:") && sec.includes(`Reviewed-SHA: ${HEAD}`));
     assert.ok(!sec.includes("[REVIEW_SHA]") && !sec.includes("[PR_NUMBER]") && !sec.includes("[AGENT_DOMAIN]"));
+  });
+});
+
+describe("review-staging release gate (#4865)", () => {
+  const run = async (o) => { const w = world(o); const r = await reviewStagingFromCli(["42"], w.io); return { w, r }; };
+  it("stops BLOCKED without a FORGE:SELFTEST marker and reviews nothing", async () => {
+    const { w } = await run({ selftest: "" });
+    assert.match([...w.out, ...w.err].join("\n"), /REVIEW_RESULT: status: BLOCKED, blocker: no FORGE:SELFTEST/);
+    assert.equal(w.scripts.length, 0);
+    assert.ok(!w.gh.some((a) => a[0] === "pr" && a[1] === "comment"), "no route marker posted");
+  });
+  it("stops BLOCKED on a failing or stale marker", async () => {
+    const fail = await run({ selftest: JSON.stringify(`<!-- FORGE:SELFTEST result=fail sha=${HEAD} step=add -->`) + "\n" });
+    assert.match([...fail.w.out, ...fail.w.err].join("\n"), /failed at step add/);
+    const stale = await run({ selftest: JSON.stringify(`<!-- FORGE:SELFTEST result=pass sha=${FROM} step=none -->`) + "\n" });
+    assert.match([...stale.w.out, ...stale.w.err].join("\n"), /not the PR head/);
+  });
+  it("proceeds with a passing marker for the head", async () => {
+    const { w } = await run({});
+    assert.ok(w.scripts.length > 0);
   });
 });
 

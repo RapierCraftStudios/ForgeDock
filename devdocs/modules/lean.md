@@ -2162,3 +2162,8 @@ not `URL.pathname`, which gave `/C:/...` on Windows.
 
 `makeLeanIo` now passes `{ repo }` to `makeProjector`, so the projector's `gh issue view --json body` carries `-R <repo>` (callers without a repo keep cwd resolution). `getBody` throws on non-JSON output or a missing/non-string `body` instead of returning `""`, so `writeState` makes no `gh issue edit` call on an unreadable read. `writeState` also refuses a body that would drop existing non-STATE issue text.
 Cite: #4860.
+
+## Entry 2026-10-31 — Live selftest and release gate (#4865)
+
+`selftest-static.mjs` checks every `gh issue|pr view|list --json` field list in `bin/` against the host's `gh <cmd> --help`. `selftest-live.mjs` (`forgedock selftest --live --repo <sandbox>`) drives real gh, git and `orchestrate` through create, add, body, resume, merge, remote and cleanup, stopping at the first failure and naming it; all process access is injected through `io`. `selftest-gate.mjs` builds, parses and posts the `FORGE:SELFTEST` marker; `bin/review-staging.mjs` calls `selftestGate` after resolving the head and stops BLOCKED (fail closed) without a passing marker for that head. Docs: `docs/SELFTEST.md`.
+Cite: #4865.

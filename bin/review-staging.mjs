@@ -26,6 +26,7 @@ import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseForgeYaml } from "./forge-utils.mjs";
+import { selftestGate, readMarkerComments } from "./lean/selftest-gate.mjs";
 
 const INSTALL_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const USAGE = "usage: forgedock review-staging [<PR number|PR URL>] [--thorough | --delta <from-sha>] [--json]\n" +
@@ -223,6 +224,9 @@ async function main(argv, io) {
   const head = await headSha(io, c, pr);
   if (a.delta && a.delta === head) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: --delta ${head} is the current head of PR #${pr}: nothing changed since that pass, nothing to review`]);
   const sha7 = head.slice(0, 7);
+  // #4865: the release needs a passing live selftest for exactly this head (fail closed)
+  const selftest = selftestGate(await readMarkerComments(io.gh, c.ghRepo, pr).catch(() => []), head);
+  if (!selftest.ok) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: ${selftest.reason}; nothing reviewed (fail closed)`]);
   let priorRoutes = 0;
   try {
     const out = await io.gh(["api", "--paginate", `repos/${c.ghRepo}/issues/${pr}/comments`, "--jq", '[.[] | select(.body | test("FORGE:REVIEW_ROUTE"))] | length']);

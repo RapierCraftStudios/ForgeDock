@@ -2,6 +2,10 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Unreleased: live selftest gates the staging->main release review
+
+`forgedock review-staging` now stops with `REVIEW_RESULT: status: BLOCKED` unless the staging->main PR carries a `FORGE:SELFTEST result=pass` comment for its current head commit (a missing, failing, malformed or stale marker refuses). Run `forgedock selftest --live --repo <owner/sandbox> --pr <N>` (sandbox repo or `selftest.sandbox_repo` in forge.yaml, see [CONFIG.md](CONFIG.md#selftest-optional)) after the last push to the release PR; it posts the marker. Details: [SELFTEST.md](SELFTEST.md).
+
 ## v1.30.0: environment failures are recoverable, scoped pre-PR checks, decomposed parents can close
 
 - **New recoverable codes.** A validate command the host cannot run (missing interpreter, module or executable) ends `env.tool_missing`, and a repro test the harness could not run on head ends `env.repro_unrunnable`. Both were terminal `conformance.unimplemented` before. The batch runner recovers them like `ci.red` (see docs/OUTCOME-CODES.md).
