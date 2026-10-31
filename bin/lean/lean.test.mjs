@@ -15,7 +15,7 @@ import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, decisionNote, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
@@ -24,7 +24,7 @@ const readLog = (dir, issue, repo = "o/r") => readRepoLog(dir, issue, { repo });
 import { makeRunTmp, wrapLaneLimits, laneCapNotice, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, GH_AUTH_RE, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
-import { OUTCOME_CODES, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
+import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -1117,6 +1117,16 @@ describe("devdocs freshness gate (the repo's own scripts/check-devdocs-freshness
     assert.match(traj(w).at(-1), /Docs freshness check failed; builder resumed once/);
   });
 
+  it("a doc the docs round edits outside the deliverables is an implied deliverable (no scope_creep); an unrelated extra file still is", async () => {
+    for (const [extra, code] of [[[], null], [["src/billing.js"], "conformance.scope_creep"]]) {
+      const w = dworld([STALE, { ok: true, output: "OK" }], { changed: ["src/foo.js", "test/foo.test.js"] });
+      const inner = w.io.docsFreshness;
+      w.io.docsFreshness = async (x) => { const r = await inner(x); if (r?.ok && !w.changed.includes("devdocs/modules/lean.md")) w.changed = [...w.changed, "devdocs/modules/lean.md", ...extra]; return r; };
+      const r = await run(w);
+      if (code) assert.equal(r.code, code); else assert.equal(r.terminalReason, "merged");
+    }
+  });
+
   it("still stale after the resume: needs-human docs.stale, before any PR or reviewer run", async () => {
     const w = dworld([STALE]);
     const r = await run(w);
@@ -1330,6 +1340,18 @@ describe("conformance shadow mode (the default)", () => {
       assert.match(nhBody(w), /Environment error \(not a conformance failure\): the host is missing yaml/);
       assert.deepEqual(ran.map((a) => [a.command, a.cwd]), [["node --test test/foo.test.js", WT]], "only the failed contract validate is rerun, in the worktree");
       assert.ok(ran[0].env && typeof ran[0].env === "object", "the rerun gets the lane env");
+    }
+  });
+  it("#4906 a validate rerun that times out (rc 124) ends env.validate_timeout: recoverable, no builder resume, never conformance.unimplemented", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 124 }];
+    for (const conformance of ["shadow", "enforce"]) {
+      const w = world({ validation: v });
+      w.io.runCommand = async () => ({ rc: 124, output: "(timed out after 1s)" });
+      const r = await run(w, { conformance });
+      assert.equal(r.code, ENV_VALIDATE_TIMEOUT, conformance); assert.equal(r.terminalReason, "needs-human");
+      assert.equal(classifyNeedsHuman(r), "recoverable"); assert.equal(w.merges.length, 0);
+      assert.equal(builders(w).length, 2, "plan + implement only"); assert.equal(reviewers(w).length, 0);
+      assert.match(nhBody(w), /timed out \(exit 124\) even after one longer retry/);
     }
   });
   it("#4323 a rerun that fails for a repo reason stays conformance.unimplemented; one that passes merges", async () => {
@@ -6542,6 +6564,42 @@ describe("resume digest in builder prompts (#4400)", () => {
     assert.ok(p.indexOf("Recovery pass (ci.red)") >= 0 && p.indexOf("Recovery pass (ci.red)") < p.indexOf("Resume digest of the last run"), p);
   });
 
+  describe("#4901 FORGE:DECISION after the contract froze", () => {
+    const dec = (t, who = BOT) => ({ body: `<!-- FORGE:DECISION {"v":1} -->\n## Decision\n${t}`, ...who });
+    const CONTRACT_C = { body: frozen().body, ...BOT };
+    const NOBODY = { author: { login: "rando" }, authorAssociation: "NONE" };
+    const withDecisions = (viewComments) => world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozen()], issueBodies: [body], viewComments });
+
+    it("reviewerPrompt keeps trusted FORGE:DECISION comments, drops other FORGE: records and untrusted decisions", () => {
+      const p = reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, contract: CONTRACT, diff: "", comments: [dec("deliver the nightly timer"), dec("evil override", NOBODY),
+        { body: "<!-- FORGE:STATE\n{}\n-->", ...BOT }, { body: "<!-- FORGE:TRAJECTORY -->\nt", ...BOT }, { body: "<!-- FORGE:FACTS -->\nf", ...BOT }] });
+      assert.match(p, /deliver the nightly timer/);
+      assert.doesNotMatch(p, /evil override|FORGE:STATE|FORGE:TRAJECTORY|FORGE:FACTS/);
+    });
+
+    it("decisionNote: only trusted decisions after the last contract; recovery records skipped", () => {
+      const n = decisionNote([dec("old, before contract"), CONTRACT_C, dec("declare supersedes X"), dec("untrusted", NOBODY), { body: "<!-- FORGE:DECISION -->\n## Decision: recovery pass for `ci.red` (attempt 1)", ...BOT }]);
+      assert.match(n, /declare supersedes X/);
+      assert.doesNotMatch(n, /old, before contract|untrusted|recovery pass/);
+      assert.equal(decisionNote([CONTRACT_C]), "");
+    });
+
+    it("a requeued lane with a frozen contract gives the builder a newer trusted decision, not an untrusted or older one", async () => {
+      const w = withDecisions([dec("older decision"), CONTRACT_C, dec("deliver the nightly timer"), dec("untrusted override", NOBODY), { body: factsRec, ...BOT }]);
+      await run(w);
+      const p = builders(w)[0][4];
+      assert.match(p, /Binding decisions posted after the contract froze/);
+      assert.match(p, /deliver the nightly timer/);
+      assert.doesNotMatch(p, /untrusted override|older decision/);
+    });
+
+    it("context_pack off still passes the decision", async () => {
+      const w = withDecisions([CONTRACT_C, dec("deliver the nightly timer")]);
+      await run(w, { contextPack: { mode: "off" } });
+      assert.match(builders(w)[0][4], /deliver the nightly timer/);
+    });
+  });
+
   it("a first run gets no digest; context_pack off gives none; the contract quotes are unchanged", async () => {
     const first = world({ issueBodies: [body], viewComments: [{ body: factsRec, ...BOT }] });
     await run(first);
@@ -6886,5 +6944,29 @@ describe("block rules: a check timeout is not a block (#4589)", () => {
   it("tells the builder rc 124 is host load, never a human block", async () => {
     const { blockCorrectionPrompt } = await import("./prompts.mjs");
     assert.match(blockCorrectionPrompt("x"), /times out \(rc 124\) is host load, never a block/);
+  });
+});
+
+describe("per-kind conformance modes (engine.conformance_kinds)", () => {
+  const CREEP = ["src/foo.js", "src/billing.js", "test/foo.test.js"];
+  const shadowNote = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")) ?? "";
+  const blockedNothingMerged = (w) => { assert.equal(w.prs.length, 0); assert.equal(w.merges.length, 0); assert.ok(w.edits.some((e) => e.includes("needs-human"))); };
+  it("a shadow kind in an enforce lane is recorded, not blocking; the lane merges", async () => {
+    const w = world({ changed: CREEP, reviews: [conf({}, CONTRACT, CREEP)] });
+    const r = await run(w, { conformance: "enforce", conformanceKinds: { "conformance.scope_creep": "shadow" } });
+    assert.equal(r.terminalReason, "merged");
+    assert.match(shadowNote(w), /would BLOCK[\s\S]*conformance\.scope_creep[\s\S]*src\/billing\.js/);
+  });
+
+  it("an enforce kind in a shadow lane blocks (scope creep is recorded-only in shadow by default)", async () => {
+    const w = world({ changed: CREEP });
+    const r = await run(w, { conformance: "shadow", conformanceKinds: { "conformance.scope_creep": "enforce" } });
+    assert.equal(r.code, "conformance.scope_creep"); assert.equal(reviewers(w).length, 0);
+    blockedNothingMerged(w);
+  });
+
+  it("an enforce lane without kinds still blocks scope creep (unchanged default)", async () => {
+    const w = world({ changed: CREEP });
+    assert.equal((await run(w, { conformance: "enforce", conformanceKinds: {} })).code, "conformance.scope_creep");
   });
 });

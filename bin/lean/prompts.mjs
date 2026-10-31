@@ -7,6 +7,7 @@ import { reviewSkeleton } from "./conformance.mjs";
 import { seqNumber } from "./sequence.mjs";
 import { capText, FIX_CAPS, FIX_PROMPT_MAX } from "./fixround.mjs";
 import { SPLIT_MIN_FILES, SPLIT_MIN_LINES } from "./decompose.mjs";
+import { isTrustedIssueComment } from "./prefilter.mjs"; // call-time use only: prefilter.mjs imports this module
 
 export const approxTokens = (s) => Math.ceil(String(s).length / 4);
 export const LEAN_DIR = ".forge-lean";
@@ -190,9 +191,10 @@ ${HOST_RULES}${toolchainRule(toolchain)}${sparseRule(sparse)}${factsRule(facts)}
 
 The contract changes only through typed amendments in ${RESULT_FILE}, each with a why:
 - {"kind":"add-deliverable","path":"<file>","why":""}: a file not listed.
-- {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: a missed issue requirement.
-- {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check. Filed as a tracked follow-up. Not "type"; unknown kinds are rejected. One requirement id per row (R2, R3 as two rows).
+- {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: a missed requirement.
+- {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check, filed as a follow-up. Not "type"; unknown kinds are rejected. One requirement id per row.
 - {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded.
+- {"kind":"supersedes","guard":"#N","why":""}: overrides a guard_broken failure (e.g. new enum code).
 - {"kind":"decision","decision":{"choice":"","anchors":["<base path>"],"supersedes":"<id>"},"why":""}: supersedes changes an H-row.
 New keys: translate, never copy English; status entries in place.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
@@ -423,8 +425,26 @@ export function boundDiff(diff, { stat = "", base = "", maxBytes = REVIEW_DIFF_M
     + (list.length ? `\n<omitted_files>\n${list.join("\n")}\n</omitted_files>` : "");
 }
 
+const isDecision = (b) => /^<!-- FORGE:DECISION\b/.test(String(b ?? "").trim());
+const DECISION_NOTE_MAX = 4000;
+/**
+ * #4901: the trusted `FORGE:DECISION` comments posted after the last `FORGE:CONTRACT` comment (issue order), as a binding note for a
+ * lane that resumes a frozen contract without a plan session. The lane's own recovery records are skipped; the newest decisions survive the cap.
+ * "" when there are none.
+ */
+export function decisionNote(comments = []) {
+  const list = Array.isArray(comments) ? comments : [];
+  const at = list.map((c) => String(c?.body ?? "").trimStart().startsWith("<!-- FORGE:CONTRACT")).lastIndexOf(true);
+  const ds = list.slice(at + 1).filter((c) => isTrustedIssueComment(c) && isDecision(c?.body) && !/^##\s*Decision: recovery pass/m.test(String(c.body))).map((c) => String(c.body).trim());
+  let kept = [], n = 0;
+  for (const d of ds.reverse()) { if (n + d.length > DECISION_NOTE_MAX && kept.length) break; kept.unshift(d.length > DECISION_NOTE_MAX ? d.slice(0, DECISION_NOTE_MAX) : d); n += d.length; }
+  return kept.length ? `\n\nBinding decisions posted after the contract froze (trusted; they override the issue text where they conflict, and the frozen contract still applies):\n${kept.join("\n---\n")}` : "";
+}
+
 export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
+  const decisions = comments.filter((c) => isDecision(c?.body) && isTrustedIssueComment(c)).map((c) => String(c.body)); // #4901: operator decisions bind the review; other FORGE: records stay out
+  notes.push(...decisions);
   const sk = JSON.stringify(skeleton ?? reviewSkeleton(contract ?? {}, files, ignore), null, 1);
   return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
 }

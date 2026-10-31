@@ -7,7 +7,7 @@
  * The reviewer supplies per-row judgements; the engine computes the verdict. A review without rows (a generic
  * "PASS") is incomplete, and incomplete never merges.
  */
-import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { noComments } from "./context.mjs";
 import { activationFailures } from "./activation.mjs";
 
@@ -114,6 +114,22 @@ export function authorizationOf(contract, f) {
   if (isTestPath(f)) return "test";
   if (isIncidentalPath(f)) return "incidental";
   return null;
+}
+// A doc a freshness rule can demand: a prose file under a docs directory. Build and dependency files (`requirements.txt`,
+// `CMakeLists.txt`) and agent-instruction or workflow-spec files outside a docs directory (`CLAUDE.md`, `commands/*.md`) never
+// match, so the exemption cannot carry them past scope_creep.
+const DOC_FILE_RE = /(?:^|\/)(?:docs?|devdocs|documentation)\/(?:[^/]+\/)*[^/]+\.(?:md|mdx|rst|adoc)$/i;
+/**
+ * The docs-freshness rule demands a doc edit the frozen contract cannot name: add-deliverable amendments (why "docs freshness
+ * rule") for doc files (`DOC_FILE_RE`) that `after` has and `before` lacked and no deliverable, test or incidental rule authorizes.
+ * Only when the freshness check failed before the round (`wasFailing`) and passes after it (`nowOk`); code files stay scope creep.
+ */
+export function impliedDocDeliverables({ before = [], after = [], contract, wasFailing = false, nowOk = false }) {
+  if (!wasFailing || !nowOk) return [];
+  const had = new Set(before.map(cleanPath));
+  return [...new Set(after.map(cleanPath))]
+    .filter((f) => !had.has(f) && DOC_FILE_RE.test(f) && !authorizationOf(contract ?? {}, f))
+    .map((path) => ({ kind: "add-deliverable", path, why: "docs freshness rule" }));
 }
 const blank = (s) => !String(s ?? "").trim() || /^none$/i.test(String(s).trim());
 
@@ -305,6 +321,8 @@ const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g,
 const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision"];
 const GUARD_ID_RE = /^#?\d+$/;
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
+// #4916: near-synonyms builders emit for the per-guard `supersedes` amendment
+const SUPERSEDES_SYNONYMS = ["supersede-guard", "supersede", "supersedes-guard"];
 
 /** forge#4574: common builder slips: `type` for `kind`, amend-requirement/limitation as defer, an `R#` in `id` as the requirement. */
 function normalizeAmendment(a) {
@@ -313,6 +331,7 @@ function normalizeAmendment(a) {
   if (blank(n.kind) && !blank(n.type)) n.kind = n.type;
   // #4594: amend-requirement with a revised `text` is a real amendment; without one it stays the slip for defer
   if (Object.hasOwn(AMEND_SLIPS, n.kind) && !(n.kind === "amend-requirement" && !blank(n.text))) n.kind = AMEND_SLIPS[n.kind];
+  if (SUPERSEDES_SYNONYMS.includes(n.kind)) n.kind = "supersedes";
   if (TRACKED.includes(n.kind) && blank(n.requirement) && /^R\d+$/.test(String(n.id ?? ""))) n.requirement = n.id;
   return n;
 }
@@ -361,6 +380,13 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
     if (n && (TRACKED.includes(n.kind) || n.kind === "amend-requirement") && typeof n.requirement === "string") {
       const ids = splitRequirementRefs(n.requirement);
       if (ids.length > 1) { for (const id of ids) rows.push({ a: { ...n, requirement: id }, raw }); continue; }
+    }
+    if (n?.kind === "supersedes" && Array.isArray(n.guards) && n.guards.length) {
+      // #4916: one supersedes row per guard id; each still hits the GUARD_ID_RE check below
+      const { guards, ...rest } = n;
+      const ids = blank(rest.guard) ? guards : [rest.guard, ...guards];
+      for (const guard of ids) rows.push({ a: { ...rest, guard }, raw });
+      continue;
     }
     rows.push({ a: n, raw });
   }
@@ -508,6 +534,12 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       const rerun = validateRuns?.[v.id];
       if (rerun?.rc === 0) continue;
       if (rerun && cliUsageError(rerun)) { failures.push({ code: C.CONTRACT_INVALID_COMMAND, kind: "validate_command_invalid", detail: `validate ${v.id} (\`${v.command}\`) is a CLI usage error of the runner, a defect of the frozen command rather than of the change` }); continue; }
+      // #4906: the rerun timed out (even after the longer retry): host load, not a verdict on the change. A CI-verified head covers it; else an environment error.
+      if (rerun?.rc === 124) {
+        if (ciVerified) { ciCovered.push(v.id); continue; }
+        failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `validate ${v.id} (\`${v.command}\`) timed out (exit 124) on the engine's rerun: infrastructure (host load), not a failed check` });
+        continue;
+      }
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
       if (miss && ciVerified) { ciCovered.push(v.id); continue; }
       if (miss) failures.push({ code: C.ENV_TOOL_MISSING, kind: "validate_env", tool: miss.tool, detail: `validate ${v.id} (\`${v.command}\`) could not run: the host is missing ${KIND_NAME[miss.kind]} '${miss.tool}' (environment, not the change)` });
@@ -869,7 +901,10 @@ export function formatShadowSummary(rows) {
   const falseB = sh.filter((c) => UNUSABLE_REVIEW.includes(c.would)).length;
   const pct = (k) => (sh.length ? `${Math.round((k / sh.length) * 100)}%` : "n/a");
   const risk = cs.filter((c) => c.risk === true).length;
-  return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}`;
+  const byKind = {};
+  for (const c of cs) for (const k of new Set(Array.isArray(c.kinds) ? c.kinds : [])) byKind[k] = (byKind[k] ?? 0) + 1;
+  const kinds = Object.entries(byKind).sort(([a], [b]) => a.localeCompare(b)).map(([k, n]) => `${k} ${n}/${cs.length} (${Math.round((n / cs.length) * 100)}%)`);
+  return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}${kinds.length ? `; per kind: ${kinds.join(", ")}` : ""}`;
 }
 
 /** #4664: follow-up classes, one issue each per parent (scripts/file-deferred-followups.sh); post-deploy is one rollup per release lane (#4724). */
@@ -954,4 +989,56 @@ export function structureNote(delta) {
   const config = loosened ? `the repo's boundary config was loosened in this PR (${files})` : "the repo's boundary config allows it";
   const s = grow.length ? `this PR adds ${pairs} (files); ${config}` : `this PR loosens the repo's boundary config (${files})`;
   return `Structure (report only): ${s}; flag only if the contract or the architecture doc says otherwise.`.replace(/[\r\n]+/g, " ");
+}
+
+/** engine.conformance_kinds: a failure code's own gate mode; "enforce" blocks, "shadow" is recorded only. */
+export const KIND_MODES = Object.freeze(["enforce", "shadow"]);
+
+/**
+ * The valid `{code: mode}` entries of a config map, or of forge.yaml's flat form `"code=mode, code=mode"` (the
+ * forge.yaml reader has no third nesting level); anything else is dropped. {} when absent.
+ */
+export function normalizeKindModes(raw) {
+  const out = {};
+  if (typeof raw === "string") raw = Object.fromEntries(raw.split(",").map((x) => x.trim()).filter(Boolean).map((p) => p.split("=").map((x) => x.trim())));
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) for (const [k, v] of Object.entries(raw)) if (String(k).trim() && KIND_MODES.includes(String(v).trim())) out[String(k).trim()] = String(v).trim();
+  return out;
+}
+
+/**
+ * Split gate failures into those that block and those only recorded. A kind with its own mode follows it; every other
+ * kind follows the lane: an enforce lane blocks it, a shadow lane blocks only the codes in `allow` (the previous reviewer's set).
+ * @param {{code?: string}[]} failures
+ * @param {{shadow?: boolean, kinds?: Record<string,string>|null, allow?: string[]}} [o]
+ */
+export function blockingFailures(failures, { shadow = false, kinds = null, allow = [] } = {}) {
+  const block = [], record = [];
+  for (const f of failures ?? []) {
+    const own = kinds?.[f?.code];
+    (own ? own === "enforce" : !shadow || allow.includes(f?.code)) ? block.push(f) : record.push(f);
+  }
+  return { block, record };
+}
+
+/**
+ * Deliver requirements with no executed evidence test: one row per requirement id. Evidence is a test deliverable linked to the
+ * requirement (`deliverables[].requirements`) that a validate command names and that ran green (the engine's rerun, else the
+ * builder's result, else CI). Requirements verified out of band are judged by their instrumentation and skipped.
+ * @returns {{id: string, reason: string}[]}
+ */
+export function unverifiedRequirements(contract, { runs = [], reruns = null, ciCovered = [] } = {}) {
+  const green = (v) => {
+    const rerun = reruns?.[v.id];
+    if (rerun) return rerun.rc === 0;
+    return (Array.isArray(runs) ? runs : []).some((x) => x?.id === v.id && x.exit === 0) || ciCovered.includes(v.id);
+  };
+  const out = [];
+  for (const r of contract?.requirements ?? []) {
+    if (r.disposition !== "deliver" || isOutOfBand(r)) continue;
+    const tests = (contract.deliverables ?? []).filter((d) => (d.requirements ?? []).includes(r.id) && isTestPath(d.path)).map((d) => String(d.path));
+    if (!tests.length) { out.push({ id: r.id, reason: "no test deliverable linked to the requirement" }); continue; }
+    const ran = (contract.validate ?? []).some((v) => tests.some((t) => String(v.command).includes(t) || String(v.command).includes(t.split("/").pop())) && green(v));
+    if (!ran) out.push({ id: r.id, reason: `no executed passing validate runs its test (${tests.join(", ")})` });
+  }
+  return out;
 }

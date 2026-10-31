@@ -15,7 +15,7 @@ import { writeAtomic } from "./batch.mjs";
 import { acquireLock, watchDir, loadWatches } from "./issuewatch.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
 import { parseSources, runAdapter } from "./prodwatch-sources.mjs";
-import { cluster, fingerprint, classifyCluster, validateCluster, tallyClusters, parseAlertRules, signalRef } from "./prodwatch-triage.mjs";
+import { cluster, fingerprint, classifyCluster, validateCluster, tallyClusters, parseAlertRules, signalRef, trailerOf } from "./prodwatch-triage.mjs";
 import { admit } from "./prodwatch-governor.mjs";
 import { computeMetrics, sourceMode, emitMetrics } from "./prodwatch-metrics.mjs";
 
@@ -80,13 +80,15 @@ export function targetLabel(cfg, raw = "") {
 // ── pure helpers ───────────────────────────────────────────────────────────────────────────
 const SOURCE_TAG = /<!--\s*FORGE:PRODWATCH\s+source=(\S+?)\s*-->/;
 const FP_TAG = /FORGE:SIGNAL_REF\s+fp=([0-9a-f]+)/;
+/** Signal text is untrusted: a literal comment opener could forge a FORGE marker, so it is escaped before it reaches a body or prompt. */
+const neutralize = (s) => String(s ?? "").replace(/<!--/g, "&lt;!--");
 const oneLine = (s, n) => String(s ?? "").replace(/\s+/g, " ").trim().slice(0, n);
 
 /** Rows for computeMetrics from the prod-watch issues (open and closed) that carry our markers: GitHub is the register. */
 export function metricRows(issues) {
   const rows = [];
   for (const i of issues ?? []) {
-    const body = String(i.body ?? ""), source = SOURCE_TAG.exec(body)?.[1], fp = FP_TAG.exec(body)?.[1];
+    const body = String(i.body ?? ""), trailer = trailerOf(body), source = SOURCE_TAG.exec(trailer)?.[1], fp = FP_TAG.exec(trailer)?.[1];
     if (!source) continue;
     const done = i.state === "CLOSED", notPlanned = done && /not.?planned/i.test(String(i.stateReason ?? ""));
     rows.push({ source, fp, signalAt: i.createdAt, issueAt: i.createdAt, mergedAt: done && !notPlanned ? i.closedAt : null, invalid: notPlanned });
@@ -100,18 +102,21 @@ export function humanOnly(c, matrix = []) {
   return (matrix ?? []).find((m) => m?.re instanceof RegExp && new RegExp(m.re.source, m.re.flags.replace(/[gy]/g, "")).test(text))?.class ?? null;
 }
 
-const titleOf = (c) => oneLine(c.signals?.[0]?.title ?? c.fingerprint, 100);
+const titleOf = (c) => neutralize(oneLine(c.signals?.[0]?.title ?? c.fingerprint, 100));
 const issueTitle = (c) => `prod-watch: ${c.class} ${c.severity}: ${titleOf(c)}`;
 
 /** Issue body: the LLM's hypothesis text (or a deterministic stub), the evidence, then the markers later rounds dedup on. */
 export function issueBody(c, text, source) {
-  const ev = (c.evidence?.length ? c.evidence : c.signals).slice(0, 5).map((s) => `- ${s.source ?? source}: ${oneLine(s.title, 120)} (${oneLine(s.body, 200)})`).join("\n");
-  return `${text || "Root-cause hypothesis unavailable this round; see the evidence."}\n\n**Class**: ${c.class}  **Severity**: ${c.severity}  **Copies**: ${c.count}  **Seen**: ${c.first_seen ?? "?"} .. ${c.last_seen ?? "?"}\n**Owner**: ${c.owner ?? "unassigned"}\n\n### Evidence\n${ev}\n\n${signalRef(c.fingerprint)}\n<!-- FORGE:PRODWATCH source=${source} -->\n`;
+  // Every field above the trailer comes from signal data: neutralised, so none can open a comment that swallows the evidence or
+  // reaches the trailer with a forged marker.
+  const n = (v, max = 200) => neutralize(oneLine(v, max));
+  const ev = (c.evidence?.length ? c.evidence : c.signals).slice(0, 5).map((s) => `- ${n(s.source ?? source, 80)}: ${n(s.title, 120)} (${n(s.body)})`).join("\n");
+  return `${neutralize(text) || "Root-cause hypothesis unavailable this round; see the evidence."}\n\n**Class**: ${n(c.class, 60)}  **Severity**: ${n(c.severity, 20)}  **Copies**: ${n(c.count, 20)}  **Seen**: ${n(c.first_seen ?? "?", 40)} .. ${n(c.last_seen ?? "?", 40)}\n**Owner**: ${n(c.owner ?? "unassigned", 80)}\n\n### Evidence\n${ev}\n\n${signalRef(c.fingerprint)}\n<!-- FORGE:PRODWATCH source=${source} -->\n`;
 }
 
 /** Marks the one open storm-summary issue: later rounds edit it instead of filing another, and it never counts as a prod issue (#4869). */
 export const SUMMARY_TAG = "<!-- FORGE:PRODWATCH_SUMMARY -->";
-const isSummary = (i) => String(i?.body ?? "").includes(SUMMARY_TAG);
+const isSummary = (i) => trailerOf(i?.body).includes(SUMMARY_TAG);
 
 const issueNumber = (out) => Number(/(\d+)\s*$/.exec(String(out ?? "").trim())?.[1]) || null;
 
@@ -170,7 +175,7 @@ export async function roundOnce({ cfg, io, state = {}, dryRun = false, label = D
     let text = "";
     if (!dryRun) {
       try {
-        const r = await io.llm(`Write the root-cause hypothesis and a short issue body (what is failing, likely cause, how to reproduce, first fix to try) for this production signal cluster. Follow this repo's issue conventions.\n\nClass: ${c.class}\nSeverity: ${c.severity}\nCopies: ${c.count}\n\n${c.signals.slice(0, 3).map((s) => `${s.title}\n${oneLine(s.body, 600)}`).join("\n---\n")}`);
+        const r = await io.llm(`Write the root-cause hypothesis and a short issue body (what is failing, likely cause, how to reproduce, first fix to try) for this production signal cluster. Follow this repo's issue conventions.\n\nClass: ${c.class}\nSeverity: ${c.severity}\nCopies: ${c.count}\n\n${c.signals.slice(0, 3).map((s) => `${neutralize(s.title)}\n${neutralize(oneLine(s.body, 600))}`).join("\n---\n")}`);
         text = String(r?.text ?? r ?? "");
         rep.cost_usd += Number(r?.cost_usd) > 0 ? Number(r.cost_usd) : unknownCost;
       } catch (e) { rep.cost_usd += unknownCost; rep.errors.push(`llm ${c.fingerprint}: ${e.message}`); }
@@ -189,10 +194,10 @@ export async function roundOnce({ cfg, io, state = {}, dryRun = false, label = D
   for (const c of candidates) if (!file.includes(c) && !summary) rep.deferred.push({ fp: c.fingerprint, why: "governor" });
   if (summary) {
     rep.summary = summary;
-    const body = `${summary.body}\n\n${SUMMARY_TAG}\n`;
+    const body = `${neutralize(summary.body)}\n\n${SUMMARY_TAG}\n`;
     if (openSummary) await write("storm summary edit", () => io.gh(["issue", "edit", String(openSummary.number), "--title", summary.title, "--body", body]));
     else await write("storm summary", () => io.gh(["issue", "create", "--title", summary.title, "--body", body, "--label", label]));
-  } else if (openSummary) {
+  } else if (openSummary && !rep.deferred.length) {
     await write("storm summary close", () => io.gh(["issue", "close", String(openSummary.number), "--comment", "prod-watch: the governor admitted every cluster this round; the storm is over."]));
   }
 
@@ -207,26 +212,30 @@ async function digest({ rep, state, io, label, nowMs, write, dryRun }) {
   if (!rep.human.length) return;
   const day = DAY(nowMs), d = state.digest?.date === day ? state.digest : { date: day, issue: null, items: [] };
   const fresh = rep.human.filter((h) => !d.items.some((x) => x.fp === h.fp));
-  rep.digest = { date: day, items: [...d.items, ...fresh] };
+  const items = [...d.items, ...fresh];
+  rep.digest = { date: day, items };
   if (!fresh.length || dryRun) return;
-  d.items = rep.digest.items;
-  const body = `Human-only actions prod-watch will not take (${day}):\n\n${d.items.map((x) => `- ${x.class}: ${x.title} (fp ${x.fp})`).join("\n")}\n`;
+  const body = `Human-only actions prod-watch will not take (${day}):\n\n${items.map((x) => `- ${x.class}: ${neutralize(x.title)} (fp ${x.fp})`).join("\n")}\n`;
   const title = `prod-watch owner digest ${day}`;
-  if (d.issue) await write("digest edit", () => io.gh(["issue", "edit", String(d.issue), "--body", body]));
-  else d.issue = issueNumber(await write("digest create", () => io.gh(["issue", "create", "--title", title, "--body", body, "--label", label])));
-  state.digest = d;
+  // State is persisted only after the gh write succeeds, so a failed write is retried next round.
+  if (d.issue) {
+    if (await write("digest edit", () => io.gh(["issue", "edit", String(d.issue), "--body", body])) !== null) state.digest = { date: day, issue: d.issue, items };
+  } else {
+    const out = await write("digest create", () => io.gh(["issue", "create", "--title", title, "--body", body, "--label", label]));
+    if (out !== null) state.digest = { date: day, issue: issueNumber(out), items };
+  }
 }
 
 /** Closed (fixed) prod-watch issues: once `deployed_probe` exits 0 and the signal is gone, comment FORGE:VERIFIED; if it is still there, count it ineffective. */
 async function verify({ cfg, io, state, issues, signals, rep, nowMs, write }) {
   if (!cfg.deployed_probe) return;
   const live = new Set(signals.map((s) => fingerprint(s)));
-  const todo = issues.filter((i) => i.state === "CLOSED" && !/not.?planned/i.test(String(i.stateReason ?? "")) && FP_TAG.test(i.body ?? "") && !state.verified[FP_TAG.exec(i.body)[1]]);
+  const todo = issues.filter((i) => i.state === "CLOSED" && !/not.?planned/i.test(String(i.stateReason ?? "")) && FP_TAG.test(trailerOf(i.body)) && !state.verified[FP_TAG.exec(trailerOf(i.body))[1]]);
   if (!todo.length) return;
   const probe = await io.exec(cfg.deployed_probe);
   if (probe?.code !== 0) return;
   for (const i of todo) {
-    const fp = FP_TAG.exec(i.body)[1];
+    const fp = FP_TAG.exec(trailerOf(i.body))[1];
     if (live.has(fp)) { rep.errors.push(`#${i.number}: signal ${fp} persists after the fix`); continue; }
     const ok = await write(`verify #${i.number}`, () => io.gh(["issue", "comment", String(i.number), "--body", `<!-- FORGE:VERIFIED fp=${fp} -->\nprod-watch: deployed probe passed and the signal is gone.`]));
     if (ok !== null) { state.verified[fp] = nowMs; rep.verified.push(i.number); }
