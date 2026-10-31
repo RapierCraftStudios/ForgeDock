@@ -2,7 +2,7 @@
 New `bin/lean/prodwatch.mjs` composes the merged prod-watch modules (sources, triage, governor, metrics) into one poll round with an injected `io`; `forgedock.mjs` only gets wiring. State is a rebuildable cache; dedup and metrics rows come from GitHub issues.
 
 ### Changes
-- bin/lean/prodwatch.mjs: `parseProdWatch`, `targetLabel`, `roundOnce`, `prodWatchFromCli`, helpers (`humanOnly`, `metricRows`, `issueBody`, `formatStatus`).
+- bin/lean/prodwatch.mjs: `parseProdWatch`, `targetLabel`, `roundOnce`, `prodWatchFromCli`, helpers (`humanOnly`, `metricRows`, `issueBody`, `formatProdWatchStatus`).
 - bin/lean/prodwatch.test.mjs: 16 tests with fake io.
 - bin/forgedock.mjs: usage line, known-commands entry, `prod-watch` dispatch case (13 lines).
 - docs/PROD-WATCH.md: new doc. docs/CONFIG.md: `prod_watch` section (32 lines).
@@ -32,3 +32,4 @@ New `bin/lean/prodwatch.mjs` composes the merged prod-watch modules (sources, tr
 
 ### Enumerating-test fix
 The ten flagged tests mention bin/lean file stems only as unrelated string literals (fixtures, kinds, paths); none enumerates the bin/lean directory. Recorded `prodwatch` as a non-member for each in result.json `not_members`. No test edits.
+- Fix: renamed export formatStatus -> formatProdWatchStatus (collided with issuewatch.mjs).

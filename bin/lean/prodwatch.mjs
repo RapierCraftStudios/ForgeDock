@@ -212,7 +212,7 @@ async function verify({ cfg, io, state, issues, signals, rep, nowMs, write }) {
 }
 
 // ── CLI ────────────────────────────────────────────────────────────────────────────────────
-export function formatStatus(s, repo) {
+export function formatProdWatchStatus(s, repo) {
   if (!s) return `prod-watch (${repo}): no status yet`;
   return [`prod-watch (${repo}) [${s.phase}] last round ${s.last ?? "never"}`, `  rounds: ${s.rounds ?? 0}  filed (total): ${s.filed ?? 0}  verified: ${s.verified ?? 0}  paged: ${s.paged ?? 0}`,
     `  last: ${s.killed ? "kill switch set, idle" : `clusters ${s.clusters ?? 0}, fileable ${s.fileable ?? 0}, deferred ${s.deferred ?? 0}, human ${s.human ?? 0}`}`, ...(s.errors?.length ? [`  errors: ${s.errors.slice(0, 3).join("; ")}`] : [])].join("\n");
@@ -239,7 +239,7 @@ export async function prodWatchFromCli(argv, deps = {}) {
   const cfg = parseProdWatch(raw);
   const repo = flag(argv, "--repo") ?? JSON.parse(String(await io.gh(["repo", "view", "--json", "nameWithOwner"]))).nameWithOwner;
   const dir = watchDir(repo, "prod-watch", env), statusFile = join(dir, "status.json"), stateFile = join(dir, "state.json");
-  if (op === "status") { print(formatStatus(readJson(statusFile), repo)); return { ok: true }; }
+  if (op === "status") { print(formatProdWatchStatus(readJson(statusFile), repo)); return { ok: true }; }
   const dryRun = argv.includes("--dry-run"), once = argv.includes("--once") || dryRun;
   const policy = loadPolicy({ io: { readFile: (p) => readFileSync(p, "utf8") }, cwd });
   const label = targetLabel(cfg, raw);
@@ -262,7 +262,7 @@ export async function prodWatchFromCli(argv, deps = {}) {
         killed: last.killed, clusters: last.tally?.clusters, fileable: last.tally?.fileable, deferred: last.deferred.length, human: last.human.length, errors: last.errors };
       state.filed = state.filed.slice(-500);
       writeAtomic(stateFile, JSON.stringify(state) + "\n"); writeAtomic(statusFile, JSON.stringify(s) + "\n");
-      if (once) { print(formatStatus(s, repo)); break; }
+      if (once) { print(formatProdWatchStatus(s, repo)); break; }
       await io.sleep(intervalMs);
     }
   } finally { release(); }
