@@ -115,6 +115,23 @@ const isSummary = (i) => String(i?.body ?? "").includes(SUMMARY_TAG);
 
 const issueNumber = (out) => Number(/(\d+)\s*$/.exec(String(out ?? "").trim())?.[1]) || null;
 
+const LIST_FIELDS = "number,state,stateReason,body,createdAt,closedAt", PAGE = 100;
+
+/** Every open issue carrying `label`. `gh issue list` has no cursor, so page by creation time: a full page re-queries `created:<=` its oldest issue until a page adds nothing new. */
+async function listOpen(io, label) {
+  const seen = new Map();
+  let search = null;
+  for (;;) {
+    const args = ["issue", "list", "--label", label, "--state", "open", "--limit", String(PAGE), "--json", LIST_FIELDS, ...(search ? ["--search", search] : [])];
+    const page = JSON.parse(String(await io.gh(args)));
+    const before = seen.size;
+    for (const i of page) seen.set(i.number, i);
+    if (page.length < PAGE || seen.size === before) break;
+    search = `created:<=${page.map((i) => i.createdAt).sort()[0]}`;
+  }
+  return [...seen.values()].filter((i) => i.state === "OPEN");
+}
+
 // ── one round ──────────────────────────────────────────────────────────────────────────────
 /**
  * One poll round. `state` is the cache `{filed:[{at,fp,issue}], verified:{fp:at}, paged:{fp:at}, digest:{date,issue,items}}`; it is mutated
@@ -127,8 +144,10 @@ export async function roundOnce({ cfg, io, state = {}, dryRun = false, label = D
   const write = async (what, fn) => { if (dryRun) return null; try { return await fn(); } catch (e) { rep.errors.push(`${what}: ${e.message}`); return null; } };
 
   let issues;
-  try { issues = JSON.parse(String(await io.gh(["issue", "list", "--label", label, "--state", "all", "--limit", "200", "--json", "number,state,stateReason,body,createdAt,closedAt"]))); }
+  try { issues = await listOpen(io, label); }
   catch (e) { return { ...rep, errors: [`issue list failed, nothing filed: ${e.message}`] }; }
+  try { issues = issues.concat(JSON.parse(String(await io.gh(["issue", "list", "--label", label, "--state", "closed", "--limit", "200", "--json", LIST_FIELDS]))).filter((i) => i.state === "CLOSED")); }
+  catch (e) { rep.errors.push(`closed issue list failed, metrics and verify skip closed issues: ${e.message}`); }
   const openAll = issues.filter((i) => i.state === "OPEN"), openSummary = openAll.find(isSummary) ?? null;
   const open = openAll.filter((i) => !isSummary(i)), rows = metricRows(issues.filter((i) => !isSummary(i)));
   rep.metrics = computeMetrics(rows);
