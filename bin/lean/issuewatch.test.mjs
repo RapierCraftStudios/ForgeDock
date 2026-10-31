@@ -20,13 +20,14 @@ const REVIEW_PASS = { author: { login: "rapiercraft-forgedock" }, authorAssociat
  * issue has a merged `feat/issue-N-lean` PR into staging with a passing review and green CI unless `prs[n]` / `comments[n]` /
  * `checks[sha]` / `compare` say otherwise.
  */
-function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, prs = {}, comments = {}, checks = {}, compare = "behind" } = {}) {
+function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {}, prs = {}, comments = {}, checks = {}, compare = "behind", failGh = () => false } = {}) {
   const calls = [], launched = [], batchOps = [];
   let clock = Date.parse("2026-10-30T00:00:00Z"), nb = 0;
   const io = { env: { FORGEDOCK_WATCH_DIR: env }, calls, launched, batchOps, closed, bodies, prs, comments, checks, tickClock: (ms) => { clock += ms; }, now: () => clock, sleep: async () => {},
     requiredChecks: async () => [],
     gh: async (a) => {
       calls.push(a);
+      if (failGh(a)) throw new Error("gh transient");
       if (a[0] === "api" && /\/compare\//.test(a[1])) return compare;
       if (a[0] === "api" && /\/commits\/([0-9a-f]+)\/check-runs/.test(a.join(" "))) { const sha = /commits\/([0-9a-f]+)/.exec(a.join(" "))[1]; return (checks[sha] ?? []).map(([n, st, c], i) => `${i + 1}\t${n}\t${st}\t${c ?? ""}`).join("\n"); }
       if (a[0] === "api" && /\/commits\/[0-9a-f]+\/status/.test(a[1])) return "";
@@ -376,3 +377,27 @@ test("verify: an issue closed with no merged lane PR is closed-unmerged, never v
   assert.equal(r.reopened || r.escalated, false);
   assert.equal(r.posted.length, 0);
 });
+
+for (const [what, bad] of [["label", (a) => a[1] === "edit" && a.includes("needs-human")], ["comment", (a) => a[1] === "comment"]]) {
+  test(`verify: a failed ${what} call leaves the issue closed and the next tick completes the escalation`, async () => {
+    const block = { ...REVIEW_PASS, body: "<!-- FORGE:REVIEW -->\n**Gate verdict:** would BLOCK (nonconforming)." };
+    let failing = true;
+    const dir = tmp();
+    const io = fakeIo(dir, [iss(1)], { exit: (n) => (io.closed.add(n), 0), comments: { 1: [block] }, failGh: (a) => failing && bad(a) });
+    const state = { claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, phase: "running" };
+    const handles = new Map(), watch = W({ max_issues: "1" });
+    await tick({ watch, repo: "o/r", io, state, handles });
+    await assert.rejects(tick({ watch, repo: "o/r", io, state, handles }), /gh transient/);
+    assert.equal(io.calls.some((a) => a[1] === "reopen"), false); // not reopened while evidence is missing
+    assert.deepEqual(state.unverified ?? [], []);
+    assert.deepEqual(state.pendingVerify, [1]);
+    failing = false;
+    await tick({ watch, repo: "o/r", io, state, handles });
+    const n = (f) => io.calls.filter(f).length;
+    assert.equal(n((a) => a[1] === "comment"), what === "comment" ? 2 : 1); // the failed attempt is recorded too
+    assert.equal(n((a) => a[1] === "edit" && a.includes("needs-human")), what === "label" ? 2 : 1);
+    assert.equal(n((a) => a[1] === "reopen"), 1);
+    assert.deepEqual(state.unverified, [1]);
+    assert.deepEqual(state.pendingVerify, []);
+  });
+}

@@ -220,15 +220,21 @@ async function verifyClosed({ n, repo, io, state, now, lane }) {
     if (now - state.verifyFrom[n] < VERIFY_WAIT_MS) return;
     r = { ...r, status: "failed", evidence: [...r.evidence, `FAIL: still unverified after ${VERIFY_WAIT_MS / 60000} min`] };
   }
-  state.pendingVerify = state.pendingVerify.filter((x) => x !== n);
-  delete state.verifyFrom[n];
-  if (r.status === "unmerged") { state.closed.push(n); return; }
-  state.merged.push(n);
-  if (r.status === "verified") { state.verified.push(n); await io.gh(["issue", "comment", String(n), "-R", repo, "--body", verifyComment(r, now)]); return; }
-  state.unverified.push(n);
+  // Side effects first, state last: a failed gh call throws with the issue still closed and in pendingVerify, so the next tick
+  // resumes (state.escalation records the finished steps). Reopen is last because only closed issues are revisited.
+  const settled = () => { state.pendingVerify = state.pendingVerify.filter((x) => x !== n); delete state.verifyFrom[n]; };
+  if (r.status === "unmerged") { settled(); state.closed.push(n); return; }
+  if (r.status === "verified") {
+    await io.gh(["issue", "comment", String(n), "-R", repo, "--body", verifyComment(r, now)]);
+    settled(); state.merged.push(n); state.verified.push(n); return;
+  }
+  state.escalation = { ...(state.escalation ?? {}) };
+  const done = (state.escalation[n] ??= {});
+  if (!done.comment) { await io.gh(["issue", "comment", String(n), "-R", repo, "--body", verifyComment(r, now)]); done.comment = true; }
+  if (!done.label) { await io.gh(["issue", "edit", String(n), "-R", repo, "--add-label", "needs-human"]); done.label = true; }
   await io.gh(["issue", "reopen", String(n), "-R", repo]);
-  await io.gh(["issue", "edit", String(n), "-R", repo, "--add-label", "needs-human"]);
-  await io.gh(["issue", "comment", String(n), "-R", repo, "--body", verifyComment(r, now)]);
+  delete state.escalation[n];
+  settled(); state.merged.push(n); state.unverified.push(n);
 }
 
 // ── the watch ────────────────────────────────────────────────────────────────────────────────────────────────
