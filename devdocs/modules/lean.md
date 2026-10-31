@@ -2215,3 +2215,13 @@ Cite: #4901.
 
 `phaseledger.mjs` records which engine phase a lane is in (`createLedger`, `enter`, `during`); `lean.mjs` marks the phase boundaries and puts `phases` ({id: {ms, model_ms?, usd?}}) on `RUN_TERMINAL` and the lane result, flattened to `phase_<id>_*` for FORGE:TELEMETRY. `orchestrate.mjs` `phasesOf` adds `queue_wait` to the batch row; the batch report and `forgedock stats` print p50/p90 per phase and the largest phase (`n/a` without data). The efficiency lines list merged issues with no acceptance probe.
 Cite: #4908.
+
+## Entry 2026-10-31 — schedd: a batch with pending issues is not finalised (#4917)
+
+`runBatch` (`bin/engine-cli.mjs`) writes `report.json` only when `state.json` `pending`
+is empty (or the batch was cancelled), so a deferred, requeued or held issue leaves
+the batch resumable instead of dropping it from the schedd. `requeue`/`add` on an
+unhosted batch re-host it (`--resume`) when a requeue or add entry is still
+unapplied, and the CLI prints `re-hosted by the schedd` or `not re-hosted`.
+`schedd status` lists batch dirs with pending issues that are not hosted
+(`unhosted: [{id, pending}]`).
