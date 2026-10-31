@@ -24,3 +24,6 @@ One pure module for loop metrics and the auto-shadow decision, calibrated like d
 
 ### Notes
 Rows are caller-supplied since #4836 does not exist. Defaults: min sample 5, max FP rate 0.5. No env vars.
+
+## Sibling-list follow-up
+The ten flagged tests contain no list enumerating lean modules; prodwatch-metrics is recorded per test in result.json not_members.
