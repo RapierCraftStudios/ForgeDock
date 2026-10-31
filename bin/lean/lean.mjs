@@ -29,7 +29,7 @@ import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, mergeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
 import { runChecks, runWithTimeoutRetry, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, runRefreshScript, GH_AUTH_RE, GH_AUTH_RETRY_SECONDS, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
-import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
+import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, parseAmendmentsComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
 import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
@@ -1379,13 +1379,20 @@ export async function runCore(o) {
       let out = "";
       try { out = String(await ghc(["api", "--paginate", `repos/${repo}/issues/${issue}/comments`, "--jq", ".[] | {body, author_association, user: {type: .user.type, login: .user.login}}"])); } catch { return null; }
       let found = null;
+      const amendLog = []; // #4899: trusted FORGE:AMENDMENT payloads in order, bound to a contract hash
       for (const l of out.split("\n")) {
         let c; try { c = JSON.parse(l); } catch { continue; }
         if (!isTrustedComment(c)) continue;
         const b = String(c?.body ?? "");
+        const am = parseAmendmentsComment(b);
+        if (am) amendLog.push(am);
         if (!b.startsWith("<!-- FORGE:CONTRACT -->")) { if (found && b.trim() && !b.trimStart().startsWith("<!-- FORGE:")) found.humanAfter = true; continue; }
         const fc = parseContractComment(b);
         if (fc && contractHash(fc.text) === fc.hash) found = { ...fc, humanAfter: false };
+      }
+      if (found) {
+        const seen = new Set(); found.amendments = [];
+        for (const st of amendLog) if (st.contract === found.hash) for (const a of st.amendments) { const k = JSON.stringify(a); if (!seen.has(k)) { seen.add(k); found.amendments.push(a); } }
       }
       return found;
     }
@@ -1454,6 +1461,7 @@ export async function runCore(o) {
       const nowOk = (await io.docsFreshness({ cwd: wt, base }).catch(() => null))?.ok === true;
       for (const a of impliedDocDeliverables({ before, after: await changedFiles(), contract: frozen, wasFailing, nowOk })) if (!impliedDocs.some((x) => x.path === a.path)) impliedDocs.push(a);
     }
+    let priorAmendments = []; // #4899: accepted amendments recovered with the frozen contract
     const pendingPits = []; // #4375: rework rounds whose gate has not passed again yet
     async function notePitfall(trigger, text) {
       const pit = io.pitfalls ? pendingPitfall(trigger, text) : null;
@@ -1511,7 +1519,7 @@ export async function runCore(o) {
           if (stale) {
             ev({ event: "CONTRACT_STALE", hash: fc.hash, scope: fc.scope, now: scopeHash, reason: stale });
             T.decisions.push(`Rerun: frozen contract ${fc.hash} is stale (${stale}); re-planning`);
-          } else { frozen = fc.contract; hash = fc.hash; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
+          } else { frozen = fc.contract; hash = fc.hash; priorAmendments = fc.amendments ?? []; T.decisions.push(`Rerun: frozen contract ${hash} recovered from the issue`); }
         }
       }
       if ((resumed || salvagedRef || recover) && ctxCfg.mode !== "off") {
@@ -2072,11 +2080,14 @@ export async function runCore(o) {
       genPaths ??= (hotFacts ? hotFacts.generated_paths : light ? [] : (await hotspotsOf({ paths: [] }))?.generated_paths) ?? [];
       const wantsDecision = (Array.isArray(result?.amendments) ? result.amendments : []).some((x) => x?.kind === "decision");
       baseTree ??= wantsDecision ? String(await git(["ls-tree", "-r", "--name-only", base]).catch(() => "")).split("\n").filter(Boolean) : null;
-      const a = applyAmendments(frozen, [...(Array.isArray(result?.amendments) ? result.amendments : []), ...impliedDocs], issueText, { generatedPaths: genPaths, baseFiles: baseTree?.length ? baseTree : null });
+      const own = [...(Array.isArray(result?.amendments) ? result.amendments : []), ...impliedDocs];
+      const ownKeys = new Set(own.map((x) => JSON.stringify(x)));
+      const all = [...priorAmendments.filter((x) => !ownKeys.has(JSON.stringify(x))), ...own];
+      const a = applyAmendments(frozen, all, issueText, { generatedPaths: genPaths, baseFiles: baseTree?.length ? baseTree : null });
       const sig = JSON.stringify(a.applied);
       if (a.applied.length && sig !== lastAmend) {
         lastAmend = sig;
-        await post("FORGE:AMENDMENT", renderAmendments(a.applied));
+        await post("FORGE:AMENDMENT", renderAmendments(a.applied, {}, { contract: hash, amendments: all }));
         T.decisions.push(`Contract amended: ${a.applied.map((x) => `${x.kind} ${x.target}`).join(", ")}`);
       }
       pendingDecisions = a.decisions; // #4737: persisted only once the PR merges
