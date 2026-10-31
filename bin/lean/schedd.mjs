@@ -130,7 +130,7 @@ function takeLock(lock, pid, alive) {
  */
 export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(process.env.FORGEDOCK_SCHEDD_IDLE_MS) || IDLE_MS,
   root = batchRoot(), log = (m) => console.log(m), pid = process.pid, alive = pidAlive, resumeOnStart = true, stopMs = STOP_MS,
-  lockCheckMs = LOCK_CHECK_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS } = {}) {
+  lockCheckMs = LOCK_CHECK_MS, due = null, dueMs = Number(process.env.FORGEDOCK_SCHEDD_DUE_MS) || DUE_MS, preflight = null } = {}) {
   const p = scheddPaths(dir);
   mkdirSync(dir, { recursive: true });
   const lock = takeLock(p.lock, pid, alive);
@@ -317,6 +317,10 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     try { await due(); } catch (e) { log(`schedd: due run failed: ${e?.message ?? e}`); } finally { dueRunning = false; }
   }, dueMs) : null;
   dueTimer?.unref?.();
+
+  // #4866: lane preflight at daemon start: each failing check is logged once with its typed code (batches re-check on every admission pass).
+  // Not awaited: gh and pool pings are slow, and startup (resume, socket) must not wait on them.
+  if (preflight) Promise.resolve().then(preflight).then((fails) => { for (const f of fails ?? []) log(`schedd: ${f.code}: ${f.detail}`); }).catch(() => { /* advisory */ });
 
   // #4787: plans written before secrets were dropped still hold token values; scrub them on start.
   for (const id of listBatches(root)) { try { const n = openBatch(root, id).scrubPlan(); if (n.length) log(`schedd: scrubbed ${n.join(", ")} from batch ${id}`); } catch { /* advisory */ } }

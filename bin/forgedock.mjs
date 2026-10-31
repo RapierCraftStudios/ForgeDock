@@ -3381,6 +3381,7 @@ function help() {
     ["npx forgedock stats [--since <ver|date>] [--repo owner/repo] [--json] [--refresh]", "Version-over-version cost/time/flow/review/gate report from GitHub telemetry (no model)"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block) and reclaim ForgeDock-owned leftovers (forge.yaml hygiene TTLs)"],
+    ["npx forgedock doctor --lanes", "Lane preflight: pool token, pool agent version, PATH shim loops, gh --json fields; prints every check pass/fail"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock opencode install", "Install token-efficient native OpenCode commands"],
@@ -4354,6 +4355,15 @@ switch (command) {
     await demo();
     break;
   case "doctor":
+    if (restArgs.includes("--lanes")) {
+      // #4866: the lane preflight on demand: every check with pass/fail; exit 1 when any fails
+      const lc = await import("./lean/lanecheck.mjs");
+      const { readExecution } = await import("./engine-cli.mjs");
+      const checks = await lc.runLaneChecks({ exec: readExecution(process.cwd()), io: await lc.hostLaneIo() });
+      console.log(lc.formatLaneChecks(checks));
+      exitCode = checks.every((c) => c.ok) ? 0 : 1;
+      break;
+    }
     exitCode = await doctor(restArgs.includes("--fix"));
     break;
   case "report": {
