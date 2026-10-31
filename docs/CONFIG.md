@@ -624,6 +624,38 @@ engine:
 
 ---
 
+## `prod_watch` (OPTIONAL)
+
+Settings for `forgedock prod-watch` (see [PROD-WATCH.md](PROD-WATCH.md)): read-only production signal sources triaged, rate-limited and filed as issues.
+
+```yaml
+prod_watch:
+  poll_minutes: 10
+  deployed_probe: "curl -fsS https://example.com/health"
+  target_watch: prod
+  alert_channel: "notify-oncall"
+  governor:
+    max_issues_per_hour: 5
+    max_open_prod_issues: 20
+    max_cost_usd_per_round: 1
+  sources:
+    alerts: {kind: alertmanager, run: "curl -fsS http://alertmanager/api/v2/alerts"}
+```
+
+| Key | Type | Required | Description |
+|---|---|---|---|
+| `poll_minutes` | number | No | Minutes between rounds. Default 5. |
+| `sources` | map | Yes | `name: {kind, list, read, run, close, queries}` flow map per source (memo, alertmanager, sql, prometheus). Only `list`/`read`/`run` run in the loop. |
+| `deployed_probe` | command | No | Exits 0 when the fix is deployed; enables the verify step. |
+| `governor` | map | No | `max_issues_per_hour`, `max_open_prod_issues`, `max_cost_usd_per_round`, `cost_per_issue_usd`. Missing = unlimited. |
+| `target_watch` | string | No | An `issue_watch` watch name; filed issues get its first `labels` entry. Otherwise the value is the label. Default label `prod-watch`. |
+| `kill_switch` | path | No | While this file exists, rounds do nothing. Default `.forge/prod-watch.off`. |
+| `alert_channel` | command | No | Receives title and body on stdin for a P0 incident; nothing else pages. |
+
+**Commands that use this section**: `forgedock prod-watch`
+
+---
+
 ## `issue_watch` (OPTIONAL)
 
 Named, scoped, capped watches for `forgedock issue-watch` (see [ISSUE-WATCH.md](ISSUE-WATCH.md)). Write `issue_watch:`, then `watches:`, then one block per watch name. The release keys need `mode: release` and at least a `threshold` or `immediate`.
