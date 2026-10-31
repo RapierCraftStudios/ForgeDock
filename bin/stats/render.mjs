@@ -37,6 +37,8 @@ function sections(g) {
   const t = g.time;
   const phaseRows = Object.entries(t.phases).map(([p, v]) => [p, String(v.n), dur(v.p50), dur(v.p90)]);
   out.push("### Time", ...table(["phase", "n", "p50", "p90"], [...phaseRows, ["wall per issue", String(t.wall.n), dur(t.wall.p50), dur(t.wall.p90)]]), "");
+  const L = t.ledger; // #4908: where lane wall time goes (engine phases)
+  out.push("### Lane wall time by phase", ...(L?.n ? [...table(["phase", "n", "p50", "p90"], Object.entries(L.phases).map(([p, v]) => [p, String(v.n), dur(v.p50), dur(v.p90)])), `Largest: ${L.largest.phase} (${Math.round(L.largest.share * 100)}% of ledger time)`] : [NA]), "");
   const f = g.flow;
   out.push("### Flow", ...table(["metric", "value"], [
     ["merged", pct(f.mergedPct)], ["needs-human", pct(f.needsHumanPct)], ["remediation rate", pct(f.remediationPct)],

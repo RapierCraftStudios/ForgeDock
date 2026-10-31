@@ -833,6 +833,10 @@ stats:
 
 Each alert line names the event, the rate, the sample size (`count/sample` lanes) and one example reason. When no alert fires, nothing is printed. The flat form `stats.alerts_<key>` also works and wins. `forgedock stats --no-local` skips the alerts.
 
+### Phase ledger (#4908)
+
+No configuration. Every lane records start and end of the engine phases it reaches, so a lane's wall time is attributed instead of guessed: `queue_wait`, `sandbox_start` (claim, worktree, toolchain), `deps_install`, `validate`, `plan`, `implement`, `precheck`, `review`, `ci_wait`, `base_sync`, `merge`, each with `model_ms` and `usd` where model calls ran in it. A lane's phases sum to its `wall_ms`; `queue_wait` precedes the lane clock and is added by the batch runner. The ledger is the `phases` object on each `log.jsonl` outcome row and on `RUN_TERMINAL`, and `phase_<id>_ms|_model_ms|_usd` fields in `FORGE:TELEMETRY`. The batch report prints a `phases` line (p50/p90 per phase, largest share of wall time, `n/a` without ledger data) and `forgedock stats` prints a `Lane wall time by phase` table. The efficiency lines also list merged issues with no acceptance probe declared (`unprobed merged issues`).
+
 ## `verify` (OPTIONAL)
 
 Verify-by-CI for the core work-on path (forge#4167). It moves a lane's heavy verification (type-checks, test suites, docker test containers) off the host and onto CI runners, and it catches CI-class failures (lock files, suite wiring, hangs, formatting) before the lane merges into staging. Write it as a block-style section: `parseForgeYaml` does not read inline `{ ... }` maps.
@@ -1004,6 +1008,8 @@ execution:
 | `DELETE /sandboxes/:id` | Teardown; `404` counts as torn down |
 
 **Start failures** (every provider): a sandbox that cannot start ends the lane `needs-human` with code `sandbox.start_failed`, not relaunched and not counted by the engine-error breaker; a capacity error ends it `deferred` (`sandbox.capacity`), requeued after the provider's retry-in (else 60s) and not counted toward `orchestration.max_deferrals`, so a queue deeper than the pool waits instead of being skipped (forge#4528). A pool that serves `GET {endpoint}/status -> {"free": N}` (integer, optional) also caps remote admissions to N per sample, so the extra lanes queue inside the batch instead of bouncing on a 503 (forge#4540); a missing, failing or malformed `/status` is unknown and never blocks admission. See docs/OUTCOME-CODES.md. `forgedock gc --apply --sandboxes` tears a stale remote sandbox down through the same API (the checkout's forge.yaml `execution`).
+
+**Cold start** (forge#4909): the dependency cache (`FORGE_DEPCACHE_ROOT`, default `~/.forge/depcache`, keyed by lockfile hash) is hardlinked into lane worktrees; when it sits on another filesystem than the worktree (EXDEV) files are copied instead, so a second lane with the same lockfile hash still records `deps: hit` rather than reinstalling. A lane refused for capacity (`sandbox.capacity`) on a pool that serves `/status -> {"free": N}` is relaunched only once a slot is free, not on the retry-in timer; the wait is recorded as the lane's queue time (`waits.queue`).
 
 **Hybrid placement** (`mode: hybrid`, forge#4256, `bin/lean/execution.mjs` `placeLane`, no model call). Each lane is placed when it is admitted. The first matching rule wins:
 

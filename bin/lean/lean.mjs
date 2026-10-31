@@ -63,6 +63,7 @@ import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registry
 import { lightEligibility } from "./light.mjs";
 import { untrackToolState, unstageToolState, isToolState, clearLaneScratch } from "./toolstate.mjs";
 import { ensureSignedOff } from "./signoff.mjs";
+import { createLedger, flattenPhases } from "./phaseledger.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
 /**
@@ -234,6 +235,7 @@ export async function runCore(o) {
   const branch = `feat/issue-${issue}-lean`;
   const wt = join(o.worktreeRoot ?? join(cwd, ".claude", "worktrees"), `lean-${issue}`);
   const t0 = now();
+  const phaseLedger = createLedger(now, "sandbox_start", t0); // #4908: where the lane wall time goes
   const usage = { cost_usd: 0, input: 0, output: 0, cache: 0 };
   const sessionCosts = new Map(); // #4407: session id -> last reported cumulative cost
   let sessionId = null;
@@ -262,6 +264,7 @@ export async function runCore(o) {
     if (phase === "implement") { builderTriggers.push({ trigger, restart_of: restartOf }); impl.cost += c.delta ?? 0; if (r?.model && r.model !== "default") impl.models.add(r.model); tb.note(num(r?.turns), stage === "implement"); }
     ev(rec); await emit(rec);
     modelMs += rec.duration_ms; // #4451: model time next to the lane's wall time
+    phaseLedger.addModel(phase === "review" ? "review" : stage === "plan" ? "plan" : "implement", rec.duration_ms, c.delta);
     const u = r?.usage ?? {};
     usage.cost_usd += c.delta ?? 0;
     usage.input += u.input_tokens ?? 0; usage.output += u.output_tokens ?? 0;
@@ -441,8 +444,9 @@ export async function runCore(o) {
       conformance_mode: conformance === "enforce" || riskEnforced ? "enforce" : "shadow", ...(shadowWould ? { shadow_would: shadowWould } : {}),
       context_pack: ctxCfg.mode, ...ctxAb, ...expTag, explore: exploreCfg.mode, wall_ms: now() - t0, ...(guardAddedMs ? { guard_added_ms: guardAddedMs } : {}), model_ms: modelMs, light, ...(ctxLane ? { lane_type: ctxLane } : {}), ...(pitMatched != null ? { pitfalls_matched: pitMatched } : {}), ...(tb.record() ? { turns: tb.record() } : {}),
       ...(route ? { builder_tier: route.tier, builder_class: route.class, builder_escalated: escalated, builder_model: route.model ?? "default" } : {}) }; // forge#4275: the on/off A/B groups runs by these; #4394: per-tier stats
-    ev(term);
-    await emit(term);
+    const phases = phaseLedger.snapshot(); // #4908: run log gets the nested ledger, FORGE:TELEMETRY the flattened scalars
+    ev({ ...term, phases });
+    await emit({ ...term, ...flattenPhases(phases) });
     // #4297: only a final failure the runner never requeues puts needs-human back (needsHuman() relabels on its own path). invalid,
     // decomposed and dependency-* are legitimate non-failure endings; deferred/engine-error may be requeued, so the batch runner
     // (orchestrate settle, relabelNeedsHuman) relabels those once they are final. #4302: a non-final attempt never relabels; the runner
@@ -465,7 +469,7 @@ export async function runCore(o) {
       try { await post(["FORGE:TRAJECTORY", REGISTER_MARKER], renderTrajectory({ ...T, usage: usageLine() })); } catch { /* best effort */ }
     }
     await releaseLease(reason, code, extra.mergedTo ?? null);
-    done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs,
+    done = { terminalReason: reason, detail, branch, worktree: wt, cost_usd: usage.cost_usd, tokens: { input: usage.input, output: usage.output, cache: usage.cache }, wall_ms: now() - t0, model_ms: modelMs, phases: phaseLedger.snapshot(),
       light, ...(lightVerdict ? { light_eligibility: lightVerdict } : {}), ...(lightUpgrade ? { light_upgrade: lightUpgrade } : {}), // #4453
       ...(Object.keys(waits).length ? { waits: { ...waits } } : {}), ...(heavyQueueMax ? { heavyQueueMax } : {}), ...(precheckRan ? { precheckMs, precheckDeferred } : {}),
       ...(firstPassOf(builderTriggers) != null ? { firstPass: firstPassOf(builderTriggers) } : {}), ...(tb.record() ? { turns: tb.record() } : {}), // #4392
@@ -1160,6 +1164,7 @@ export async function runCore(o) {
     // #4220: link node_modules/.venv from the shared cache keyed by lock hash (or install once and publish). Never fails the run.
     // After 2b (#4347): installs run with the toolchain env, so a pm only its shim provides resolves; no env is the host PATH.
     if (io.deps?.prepare) {
+      phaseLedger.enter("deps_install");
       let res;
       try { res = await io.deps.prepare({ wt, repoKey: repoKey(cwd), env: toolchain?.env ?? undefined }); } catch (e) { res = [{ status: "failed", eco: null, key: null, ms: 0, reason: String(e?.message ?? e).slice(0, 300) }]; }
       for (const r of Array.isArray(res) ? res : []) {
@@ -1230,6 +1235,7 @@ export async function runCore(o) {
     };
 
     // ---- 3. builder: plan call -> frozen contract -> implement call in the same session ----
+    phaseLedger.enter("plan");
     let result = null, attemptN = 0, reviewN = 0;
     const lastSubject = resumed ? String(await git(["log", "-1", "--format=%s"]).catch(() => "")).trim() : "";
     const fromCheckpoint = lastSubject.startsWith("wip(forge): checkpoint");
@@ -1526,7 +1532,7 @@ export async function runCore(o) {
       const planPrompt = () => builderPlanPrompt(issue, tcOpts()) + hotspotPlanNote(hotFacts) + enumeratingPlanNote(enumList) + invariantsPlanNote(vcfg.invariants) + reproPlanNote(reproOn()) + explorePlanRule(exploreCfg) + (ctxCfg.mode === "on" ? contextPackNote(ctxPack) : "");
       let lightDone = false, lightCommits = false;
       if (lightTry) {
-        liveKeys = ["implementation"]; stage = "implement";
+        liveKeys = ["implementation"]; stage = "implement"; phaseLedger.enter("implement");
         tb.setSize(recoverySize(laneSize({ labels: (iss?.labels ?? []).map((l) => l?.name ?? l) }), recover)); // #4505
         const lr = await runLightStep({ title: iss.title, issueText, riskPaths, predictedFiles: namedPaths(iss.body ?? ""), cfg: o.light ?? {}, validate: (c) => validateContract(c, issueText, { repro: reproOn() }),
           build: () => builder(++attemptN, lightBuildPrompt(issue, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants), null, true, undefined, { trigger: "build" }),
@@ -1653,7 +1659,7 @@ export async function runCore(o) {
       }
       const implementPrompt = builderImplementPrompt(vcfg.mode, tcOpts()) + hotspotBuildRule(hotFacts) + enumeratingBuildRule(enumList) + invariantsBuildRule(vcfg.invariants) + exploreBuildRule(exploreCfg) + (planned ? "" : (fromCheckpoint ? CONTINUE_NOTE : RERUN_NOTE).replace("BASE", lane)) + (salvagedRef ? SALVAGE_NOTE.replaceAll("REF", salvagedRef) : "") + recoverNote() + (planned ? "" : resumeNote + decisionsNote);
       liveKeys = ["implementation"];
-      stage = "implement";
+      stage = "implement"; phaseLedger.enter("implement");
       if (!lightDone) await builder(++attemptN, implementPrompt, planned ? sessionId : null, true, undefined, { trigger: "build" });
       stage = "fix"; // later builder rounds fix precheck, CI, structure, docs or conformance findings
       result = await readResult();
@@ -1674,6 +1680,7 @@ export async function runCore(o) {
       T.decisions.push(`Builder verdict: ${result?.status ?? "none"}`);
     }
 
+    phaseLedger.enter("precheck");
     // ---- 3a. declared check commands (#4240): the repo's own cheap gates (forge.yaml learned.test_commands), run locally in
     // the worktree before review and PR; no Actions minutes. A failure goes back to the builder in-session (#4149), up to
     // verify.max_rounds; a round with no commit or exhausted rounds is an anomaly, not a stop: CI stays the gate.
@@ -1939,6 +1946,7 @@ export async function runCore(o) {
     }
     const structureLine = structureNote(structure);
 
+    phaseLedger.enter("ci_wait");
     // ---- 3c. verify by CI (#4167): ci|hybrid push the branch and run the repo's CI on GitHub runners, before review ----
     // A red run resumes the builder with the failed jobs' logs (verify.max_rounds), slow CI ends ci-pending, and CI that
     // cannot run falls back once to local validation. A head verified here lets the precheck accept validate ids left to CI.
@@ -2034,6 +2042,7 @@ export async function runCore(o) {
       }
     }
 
+    phaseLedger.enter("precheck");
     // ---- 4. conformance: typed amendments, deterministic precheck, structured review; the engine computes the verdict ----
     // enforce: every failure class blocks (one builder resume, then needs-human). shadow: the verdict is computed and posted,
     // but only what the previous reviewer enforced blocks (a review that finds a requirement not implemented, or a regression),
@@ -2068,7 +2077,8 @@ export async function runCore(o) {
     }
     const IGNORE = [`${LEAN_DIR}/`];
     /** Up to two reviewer runs; a reply without usable rows (unparseable, incomplete, inconsistent) is re-asked, never charged to the builder. */
-    async function reviewOnce() {
+    function reviewOnce() { return phaseLedger.during("review", reviewOnceRaw); }
+    async function reviewOnceRaw() {
       const diff = String(await git(["diff", `${base}...HEAD`]));
       const stat = Buffer.byteLength(diff, "utf-8") > REVIEW_DIFF_MAX_BYTES ? String(await git(["diff", "--stat=200", `${base}...HEAD`]).catch(() => "")) : "";
       const listed = new Set(String(await git(["ls-files"]).catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
@@ -2143,7 +2153,8 @@ export async function runCore(o) {
     }
     const verifierSection = () => { const n = renderVerifierNote(verifierRun); return n ? `\n\n${n}` : ""; };
     /** #4323: rerun once each validate command the builder recorded as failed, with the lane env; {[id]: {rc, output}} or null. */
-    async function rerunFailedValidates(contract) {
+    function rerunFailedValidates(contract) { return phaseLedger.during("validate", () => rerunFailedValidatesRaw(contract)); }
+    async function rerunFailedValidatesRaw(contract) {
       if (!io.runCommand) return null;
       const runs = Array.isArray(result?.validation) ? result.validation : [], out = {};
       const env = laneEnv();
@@ -2389,6 +2400,7 @@ export async function runCore(o) {
     }
     if (degradedReq?.tracked && !closing.tracked.includes(degradedReq.tracked)) closing.tracked.push(degradedReq.tracked);
 
+    phaseLedger.enter("ci_wait");
     // ---- 5. push + PR ----
     files = await changedFiles();
     await gitPush(["push", "-u", "origin", branch]);
@@ -2463,7 +2475,8 @@ export async function runCore(o) {
       || (await gitOut(["diff", "--check"])) !== "" || (await gitOut(["rev-parse", "-q", "--verify", "MERGE_HEAD"])) !== "";
     const syncRow = [];
     /** Returns null to continue with the merge flow, or a terminal result. */
-    async function baseSync(trigger, soft = false) {
+    function baseSync(trigger, soft = false) { return phaseLedger.during("base_sync", () => baseSyncRaw(trigger, soft)); }
+    async function baseSyncRaw(trigger, soft = false) {
       await renew();
       try { await git(["fetch", "origin", lane]); } catch { /* offline: use the local ref */ }
       const baseFull = await gitOut(["rev-parse", base]), baseSha = baseFull.slice(0, 12);
@@ -2777,6 +2790,7 @@ export async function runCore(o) {
       T.merge = [policyText, `merged at ${localHead.slice(0, 12)}`];
       laneGuard(resumed?.base ?? lane, "merge");
       try {
+        phaseLedger.enter("merge");
         await ghc(["pr", "merge", String(pr), "-R", repo, "--merge", "--match-head-commit", localHead]);
         try { seqLease?.release(); } catch { /* fail-open */ }
         seqLease = null;
