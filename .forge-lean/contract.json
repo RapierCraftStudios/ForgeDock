@@ -2,43 +2,55 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "Rate limits and storm summary.",
+   "quote": "Docs: `docs/PROD-WATCH.md`.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "`admit(clusters, {governor, state, openProdIssues, now})` returns `{file:[], summary:null|{title, body}}`.",
+   "quote": "Scope: `bin/lean/prodwatch.mjs` and the CLI `forgedock prod-watch run [--once] [--dry-run] | status`.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "It enforces `max_issues_per_hour`, `max_open_prod_issues` and `max_cost_usd_per_round` (as in signal-planner Phase 0).",
+   "quote": "Parse `forge.yaml` `prod_watch:` (poll_minutes, sources with flow maps, deployed_probe, governor, target_watch).",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R4",
-   "quote": "On overflow it files ONE summary issue that lists the deferred clusters, instead of a storm.",
+   "quote": "Poll loop: sources → triage → governor → file issues with `signal_ref` and the label the `target_watch` (#4765) selects → verify → metrics.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R5",
-   "quote": "Incidents are admitted before defects.",
+   "quote": "One LLM judgment call per new cluster writes the root-cause hypothesis and issue body, using the repo's conventions. The call goes through injected `io.llm` and counts against the cost cap.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R6",
-   "quote": "Document how these keys map to signal-planner's `max_issues_per_run`/`max_cost_usd`.",
+   "quote": "Kill-switch file; `--dry-run` makes no writes.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R7",
-   "quote": "Rules: pure functions with an injected `io` (exec/gh/llm/now) like bin/lean/issuewatch.mjs; read-only by contract; deterministic first; core stays repo-agnostic (#1347). Repo is PUBLIC: no raw customer data in fixtures.",
+   "quote": "Human-only actions are never taken and are collected into one owner digest per day. P0 incidents page through the repo's declared alert channel; nothing else pages.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R8",
+   "quote": "Wire `bin/forgedock.mjs` (usage line near the issue-watch entry, known-commands list, dispatch case).",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R9",
+   "quote": "Write `docs/PROD-WATCH.md` and the `prod_watch` section in `docs/CONFIG.md`.",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -46,78 +58,106 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/lean/prodwatch-governor.mjs",
-   "change": "New pure module exporting admit(clusters,{governor,state,openProdIssues,now}) -> {file,summary}. Only fileable, non-duplicate, non-expected-class clusters are candidates; order incident, then defect, then rest (severity P0..P3, count desc, fingerprint tiebreak). Budget = min(max_issues_per_hour minus state.filed timestamps within 1h of now, max_open_prod_issues minus openProdIssues.length, floor(max_cost_usd_per_round / cost per cluster)); cost per cluster = cluster.cost_usd ?? governor.cost_per_issue_usd ?? 0 (0 means no cost cap). Missing/invalid limit = unlimited for that key. Overflow -> one summary {title, body} listing deferred clusters (class, severity, count, first/last seen, reason deferred); no SIGNAL_REF in summary so deferred clusters stay re-admittable. No fs, no gh, no Date.now (use now).",
+   "path": "bin/lean/prodwatch.mjs",
+   "change": "New module: parseProdWatch (3-level forge.yaml parse reusing parseSources), roundOnce (kill switch, runAdapter, cluster, classifyCluster/parseAlertRules via loadPolicy, validateCluster, admit, one io.llm call per admitted cluster with cost fed to the governor, issue create embedding signalRef + target_watch label, governor summary issue, deployed_probe verify step, computeMetrics/sourceMode/emitMetrics), daily owner digest, P0-incident-only page via io.page, dry-run with zero writes, lock + status.json, prodWatchFromCli(argv, deps) with run [--once] [--dry-run] [--interval] | status. Pure functions, injected io (exec/gh/llm/now/emit/page/fs).",
    "requirements": [
-    "R1",
     "R2",
     "R3",
     "R4",
     "R5",
+    "R6",
     "R7"
    ]
   },
   {
    "id": "D2",
-   "path": "bin/lean/prodwatch-governor.test.mjs",
-   "change": "node:test cases: each of the three caps, hourly window expiry, incidents before defects, one summary only (not per cluster), no summary when nothing overflows, non-fileable/duplicate skipped, determinism, input not mutated; a 70-memo storm via fixtures/prodwatch through cluster+classify yields bounded file list plus one summary.",
+   "path": "bin/lean/prodwatch.test.mjs",
+   "change": "Regression tests with injected io fixtures: config parsing and errors, kill switch no-op, dry-run makes no gh/llm/state writes, signal_ref + label on filed issue, llm cost counted against max_cost_usd_per_round, governor overflow -> one summary, one digest per day, only P0 incident pages, shadow-gated source not filed, status output, CLI arg errors.",
    "requirements": [
-    "R1",
     "R2",
     "R3",
     "R4",
-    "R5"
+    "R5",
+    "R6",
+    "R7"
    ]
   },
   {
    "id": "D3",
-   "path": "devdocs/modules/lean.md",
-   "change": "Add prodwatch-governor entry after the prodwatch-triage entry, with the key mapping: max_issues_per_hour is a rolling-hour rate (signal-planner max_issues_per_run is per run); max_open_prod_issues is a standing cap with no planner equivalent; max_cost_usd_per_round maps to the planner's max_cost_usd applied per poll round; a run's effective issue cap = min of the three.",
+   "path": "bin/forgedock.mjs",
+   "change": "Wiring only: usage line next to the issue-watch entry (:3362), 'prod-watch' in the known-commands list (:3949), `case \"prod-watch\"` dispatching to prodWatchFromCli via dynamic import (like :4210). Under 150 added lines.",
    "requirements": [
-    "R6"
+    "R8",
+    "R2"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "docs/PROD-WATCH.md",
+   "change": "New doc: flow, config, kill-switch file, dry-run, owner digest, paging rule, governor mapping, verify step and its limits.",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "docs/CONFIG.md",
+   "change": "Add a concise `prod_watch` (OPTIONAL) section modelled on the issue_watch section (:627) with a keys table; link PROD-WATCH.md. Keep under 150 added lines.",
+   "requirements": [
+    "R9"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "devdocs/modules/lean.md",
+   "change": "Add a dossier sentence for bin/lean/prodwatch.mjs next to the prodwatch-governor entry (freshness check).",
+   "requirements": [
+    "R2"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "bin/lean/prodwatch-triage.mjs exports (fingerprint, cluster, classifyCluster, validateCluster, tallyClusters, signalRef) and cluster shape unchanged"
+   "what": "Exported APIs and behaviour of bin/lean/prodwatch-sources.mjs, prodwatch-triage.mjs, prodwatch-governor.mjs, prodwatch-metrics.mjs (consumed unchanged); read-only contract: only declared list/read/run commands, close only via closeSignal with audit."
   },
   {
    "id": "P2",
-   "what": "commands/signal-planner.md governor keys and defaults (max_issues_per_run 10, max_cost_usd 5.00) unchanged"
+   "what": "bin/lean/issuewatch.mjs and the `issue-watch` CLI case in bin/forgedock.mjs behave as before; core stays repo-agnostic (#1347)."
   },
   {
    "id": "P3",
-   "what": "Enumerating sibling-list tests in bin/lean and bin/engine/telemetry-seam.test.mjs keep passing without edits"
+   "what": "Enumerating tests keep passing without edits: bin/lean/lean.test.mjs, bin/engine/telemetry-seam.test.mjs, bin/lean/{batch,checks,conformance,context,drift,execution,fixround}.test.mjs."
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test bin/lean/prodwatch-governor.test.mjs bin/lean/prodwatch-triage.test.mjs bin/lean/prodwatch-sources.test.mjs"
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/prodwatch.test.mjs bin/lean/prodwatch-sources.test.mjs bin/lean/prodwatch-triage.test.mjs bin/lean/prodwatch-governor.test.mjs bin/lean/prodwatch-metrics.test.mjs bin/lean/issuewatch.test.mjs"
   },
   {
    "id": "V2",
-   "command": "node --test bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/execution.test.mjs bin/lean/fixround.test.mjs"
-  },
-  {
-   "id": "V3",
-   "command": "node --check bin/lean/prodwatch-governor.mjs && bash scripts/check-devdocs-freshness.sh origin/staging"
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/lean.test.mjs bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/execution.test.mjs bin/lean/fixround.test.mjs"
   }
  ],
  "decisions": [
   {
    "id": "K1",
-   "choice": "Cost per cluster comes from cluster.cost_usd or governor.cost_per_issue_usd, since issue wording is not an LLM call here and the issue gives no cost source",
-   "justification": "signal-planner Phase 0 caps estimated spend (commands/signal-planner.md:19); governor stays pure with no io",
+   "choice": "Parse prod_watch with its own 3-level parser reusing issuewatch's flow-map `scalar` approach instead of parseForgeYaml.",
+   "justification": "parseForgeYaml reads one nested level (bin/lean/issuewatch.mjs:40 comment, parseWatches:41); sources are flow maps under prod_watch.sources.\u003cname>.",
    "source": "precedent"
   },
   {
    "id": "K2",
-   "choice": "Pure module with no fs/gh; hourly history passed in state.filed (ISO timestamps) and now injected",
-   "justification": "same injected-io style as bin/lean/prodwatch-triage.mjs:1-8 and issuewatch.mjs",
-   "source": "precedent"
+   "choice": "Verify step limited to a deterministic deployed_probe check; reopen-on-ineffective not built.",
+   "justification": "#4836 (verification loop) is closed as invalid, so no module exists to reuse; the issue scope lists only 'verify' in the loop.",
+   "source": "spec"
+  },
+  {
+   "id": "K3",
+   "choice": "All logic in new prodwatch.mjs; forgedock.mjs and CONFIG.md get wiring/short section only.",
+   "justification": "Hotspot rule: bin/forgedock.mjs 4488 lines, docs/CONFIG.md 2020 lines.",
+   "source": "doc"
   }
  ]
 }
