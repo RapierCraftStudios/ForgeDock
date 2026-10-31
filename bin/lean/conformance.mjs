@@ -115,10 +115,13 @@ export function authorizationOf(contract, f) {
   if (isIncidentalPath(f)) return "incidental";
   return null;
 }
-const DOC_FILE_RE = /\.(md|mdx|rst|txt)$/i;
+// A doc a freshness rule can demand: a prose file under a docs directory. Build and dependency files (`requirements.txt`,
+// `CMakeLists.txt`) and agent-instruction or workflow-spec files outside a docs directory (`CLAUDE.md`, `commands/*.md`) never
+// match, so the exemption cannot carry them past scope_creep.
+const DOC_FILE_RE = /(?:^|\/)(?:docs?|devdocs|documentation)\/(?:[^/]+\/)*[^/]+\.(?:md|mdx|rst|adoc)$/i;
 /**
  * The docs-freshness rule demands a doc edit the frozen contract cannot name: add-deliverable amendments (why "docs freshness
- * rule") for doc-type files that `after` has and `before` lacked and no deliverable, test or incidental rule authorizes.
+ * rule") for doc files (`DOC_FILE_RE`) that `after` has and `before` lacked and no deliverable, test or incidental rule authorizes.
  * Only when the freshness check failed before the round (`wasFailing`) and passes after it (`nowOk`); code files stay scope creep.
  */
 export function impliedDocDeliverables({ before = [], after = [], contract, wasFailing = false, nowOk = false }) {
