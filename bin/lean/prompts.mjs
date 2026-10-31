@@ -193,6 +193,7 @@ The contract changes only through typed amendments in ${RESULT_FILE}, each with 
 - {"kind":"add-requirement","requirement":{"id":"R9","quote":"<verbatim from the issue>","disposition":"deliver|defer|post-deploy"},"why":""}: a missed issue requirement.
 - {"kind":"defer|post-deploy","requirement":"R#","why":"","check":"<id>"}: separate work or a post-deploy check. Filed as a tracked follow-up. Not "type"; unknown kinds are rejected. One requirement id per row (R2, R3 as two rows).
 - {"kind":"amend-requirement","requirement":"R#","text":"<revised wording>","why":""}: reworded.
+- {"kind":"supersedes","guard":"#N","why":""}: overrides a conformance.guard_broken failure when you intentionally change guarded behaviour (e.g. a new enum code); the reviewer judges it.
 - {"kind":"decision","decision":{"choice":"","anchors":["<base path>"],"supersedes":"<id>"},"why":""}: supersedes changes an H-row.
 New keys: translate, never copy English; status entries in place.
 Never report a deliver requirement as "deferred" or "follow-up" without an amendment.
