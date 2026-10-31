@@ -1,41 +1,46 @@
 **Verdict**: CONFIRMED
 **Confidence**: high
-**Severity**: medium (a large read-only relay answer is never delivered: the host re-runs the prod query on every lane status poll, the lane gets a misleading rc 125 timeout, and the stuck entry eats one of 8 pending slots)
-**Task Type**: bug
+**Severity**: medium (the prod-watch pieces #4833/#4834/#4835/#4837 exist but nothing runs them; no CLI, no docs)
+**Task Type**: feature
 
 ### What Was Claimed
-`servicePending` (bin/lean/relay.mjs:138) posts the full relay answer; when its JSON body exceeds the router's 1 MiB body limit the router answers 413, `relayAnswer` throws, the catch swallows it as "retried on the next poll", the request stays pending, the host re-runs the command every poll and the sandbox times out with rc 125.
+Add `bin/lean/prodwatch.mjs` and the CLI `forgedock prod-watch run [--once] [--dry-run] | status`: parse `forge.yaml` `prod_watch:`, poll loop sources -> triage -> governor -> file issues (with `signal_ref` and the `target_watch` label) -> verify -> metrics; one `io.llm` call per new cluster (counts against the cost cap); kill-switch file; `--dry-run` makes no writes; human-only actions go into a daily owner digest; only P0 incidents page; wire `bin/forgedock.mjs`; write `docs/PROD-WATCH.md` and a `prod_watch` section in `docs/CONFIG.md`.
 
 ### What We Found
-Verified on origin/staging (e8df65dd, the merge base of this branch):
-- bin/lean/relay.mjs:60 `runRelayed` caps each stream at `maxBytes = 1 << 20` (stdout and stderr separately), so an answer can carry ~2 MiB of text before JSON escaping.
-- bin/lean/relay.mjs:137 builds `{rc, stdout, stderr}` with no size bound; :138 `try { await transport.relayAnswer(...) } catch { /* retried on the next poll */ }` swallows every failure, including non-retryable 4xx.
-- bin/lean/sandbox-remote.mjs:85 `relayAnswer` throws `fail("relay answer", r)` on any non-ok status; `fail` (:62-68) sets `e.status`, `transient` only for 502/503/504, `retryable` for 429/503.
-- bin/pool/router.mjs:315 parses every POST body with `readJson(req)`; bin/pool/http.mjs:5-10 default limit `1 << 20` throws `{status: 413}`; router.mjs:320-322 sends it as `413 body too large`. `relayAnswer` (router.mjs:61-66) is never reached, so the entry stays `!done`.
-- bin/pool/router.mjs:263 lists every `!done` entry on `GET /sandboxes/:id/relay`, so the next status poll (sandbox-remote.mjs:146-148) re-runs the command; router.mjs:47 counts the stuck entry toward `RELAY_MAX_PENDING = 8` (:38), later requests get 429.
-- JSON escaping (`\n` -> 2 bytes, `"` -> 2 bytes, control chars -> 6 bytes) means stdout well under 1 MiB (e.g. ~600 KB of newline/quote-heavy text) already crosses the limit.
-- bin/lean/relay.test.mjs:87-99 covers the answer path only with tiny outputs and a generic throw; no size or 4xx case.
+- No `bin/lean/prodwatch.mjs`, no `docs/PROD-WATCH.md`, no `prod_watch` in `docs/CONFIG.md` (`ls bin/lean | grep prodwatch` lists sources, triage, governor, metrics + tests only).
+- Building blocks already merged: `parseSources`/`runAdapter`/`closeSignal` (`bin/lean/prodwatch-sources.mjs:44,114,152`); `cluster`/`classifyCluster`/`validateCluster`/`tallyClusters`/`signalRef`/`parseAlertRules` (`bin/lean/prodwatch-triage.mjs:35,49,72,90,103,123`); `admit` (`bin/lean/prodwatch-governor.mjs:29`, caps `max_issues_per_hour`, `max_open_prod_issues`, `max_cost_usd_per_round`, `cost_per_issue_usd`); `computeMetrics`/`sourceMode`/`emitMetrics` (`bin/lean/prodwatch-metrics.mjs:24,55,63`). #4836 (verification loop) is CLOSED as invalid, so there is no verify module: the verify step must be implemented here (or reduced to a documented gap, see Recommendation).
+- Pattern to copy: `bin/lean/issuewatch.mjs`: `scalar` flow-map parser (:30), 3-level forge.yaml parse (`parseWatches`:41, because `parseForgeYaml` reads one nested level), `acquireLock`:182, `watchDir`:176, `runWatch`:310, `formatStatus`:301, `issueWatchFromCli`:355 (injectable `deps.io/cwd/env/print`), `loadPolicy` import from decision-engine.mjs:47.
+- CLI wiring points in `bin/forgedock.mjs`: usage line :3362, known-commands list :3949, dispatch `case "issue-watch"` :4210 (dynamic import + try/catch).
+- `docs/CONFIG.md` `issue_watch` section at :627 is the template for the new section; file is 2020 lines (hotspot).
+- `target_watch` (#4765) selects the label; `validateWatch` in issuewatch.mjs:63 is the reference for what a watch selects.
 
 ### Root Cause
-The host never bounds the serialized answer to what the router accepts, and treats every answer failure as retryable, so a deterministic 413 becomes an infinite re-run loop.
+Missing feature: the orchestrating module and CLI of #4768 were never written; the four component modules are unwired.
 
 ### Affected Files
-- bin/lean/relay.mjs (cap the answer, post a small fallback on a non-retryable 4xx)
-- bin/lean/relay.test.mjs (regression tests)
-- bin/tests/relay.e2e.test.mjs (optional: large-output case through the real router)
-- Enumerating tests (bin/lean listed by name): bin/engine/telemetry-seam.test.mjs:24, bin/lean/batch.test.mjs:29, bin/lean/checks.test.mjs:156, bin/lean/conformance.e2e.test.mjs:74, bin/lean/conformance.test.mjs:404, bin/lean/context.test.mjs:138, bin/lean/drift.test.mjs:14, bin/lean/execution.e2e.test.mjs:28, bin/lean/execution.test.mjs:43, bin/lean/fixround.test.mjs:10. No new file is added under bin/lean, so none of their lists change; they are run as a guard (V3).
+- bin/lean/prodwatch.mjs (new; all logic)
+- bin/lean/prodwatch.test.mjs (new; injected io fixtures)
+- bin/forgedock.mjs (wiring only: usage line, known-commands entry, dispatch case; hotspot, 4488 lines, keep < 150 added)
+- docs/PROD-WATCH.md (new)
+- docs/CONFIG.md (new `prod_watch` section, keep < 150 added lines; hotspot)
+- devdocs/modules/lean.md (dossier line for prodwatch.mjs)
+- Enumerating tests (literal sibling lists; prodwatch-* files are already non-members, so a new `prodwatch.mjs` is a non-member too): bin/lean/lean.test.mjs:66, bin/engine/telemetry-seam.test.mjs:24, bin/lean/batch.test.mjs, checks.test.mjs, conformance.e2e.test.mjs, conformance.test.mjs, context.test.mjs, drift.test.mjs, execution.e2e.test.mjs, execution.test.mjs, fixround.test.mjs. None should need edits; the validate runs them to confirm.
 
 ### Sibling Sweep
-- Pre-fetch at dispatch (bin/lean/sandbox-remote.mjs:151-165) runs the same commands but already caps its payload at `PREFETCH_MAX_B64` and skips oversized results: not affected.
-- Agent -> router relay request body is capped (bin/pool/agent.mjs:255 `readJson(req, 32 * 1024)`, router.mjs:45 `RELAY_MAX_BYTES`): not affected.
-- Router -> agent -> sandbox answer delivery is a GET response (router.mjs:53-59, agent.mjs:254), not subject to `readJson`: not affected once the answer is bounded.
-- Transient answer failures (502/503/504) still re-run the command on the next poll by design (relay.mjs:126 doc); not this issue's defect, left unchanged.
+Same class (orchestrator + CLI over pure modules): `bin/lean/issuewatch.mjs` + `issuewatch-release.mjs` are the only precedents; all four prodwatch-* modules take injected `io`. Any docs-listing or usage-list tests that scan `bin/forgedock.mjs` usage will be run in validate.
 
 ### History
-Introduced by 56c0b93e "feat(execution): read-only capability relay for sandbox lanes (#4778)" (PR #4821); found in the staging review of release PR #4820. No prior fix.
+Parent #4768; components #4833 (sources), #4834 (triage), #4835 (governor, merged at 5aaaacaea), #4837 (metrics). #4836 closed invalid. Issue-watch precedent #4765/#4767.
 
 ### Recommendation
-In bin/lean/relay.mjs: add `export const RELAY_ANSWER_MAX_BYTES = 512 * 1024` and a pure `capAnswer(out, max = RELAY_ANSWER_MAX_BYTES)` that, when `Buffer.byteLength(JSON.stringify(out)) > max`, trims stdout then stderr (UTF-8 safe) until the serialized answer fits, appends `relay: output over N bytes, truncated` to stderr and sets rc 1 (same convention as relay.mjs:66). Apply it at :137. At :138, when the error has a 4xx `status` other than 429 (non-retryable), post a small `{rc: 1, stdout: "", stderr: "relay: answer rejected by the router (HTTP <status>)"}` for the same rid and count it; keep swallowing transient/429 errors and a failed fallback. Keep the router's generic 1 MiB limit (bin/pool/http.mjs:5) unchanged.
+Implement in a new module with pure functions and injected `io` (exec/gh/llm/now/emit/fs), `forgedock.mjs` getting only wiring.
+- `parseProdWatch(raw)`: 3-level parse of `prod_watch:` (poll_minutes, sources, deployed_probe, governor, target_watch, kill_switch path, alert_channel) reusing `parseSources` for sources; throw on unknown keys.
+- `roundOnce({cfg, io, state, dryRun})`: kill-switch check (file exists -> no-op, report) -> `runAdapter` per source (skip sources `sourceMode` puts in shadow) -> `cluster` vs open prod issues -> `classifyCluster` rules from `loadPolicy` via `parseAlertRules` -> `validateCluster` -> `tallyClusters` -> `admit` -> per admitted cluster ONE `io.llm` call (hypothesis + body), cost added to round cost and fed to governor as `cluster.cost_usd`; body embeds `signalRef(fp)` -> `io.gh` issue create with the `target_watch` label; the governor's summary issue filed once. `--dry-run`: no gh writes, no llm writes, no state writes; prints the would-file set.
+- Human-only actions (cluster `owner` set and class needing a human, or `closeSignal` not permitted) are never executed; collected into one digest issue/comment per day (state keyed by UTC date). Only `severity P0` + `incident` calls `io.page` through `cfg.alert_channel`; nothing else.
+- Verify step: after filing, a minimal deterministic check using `deployed_probe` (read-only command via io.exec) posts a `FORGE:VERIFIED`-style comment when the signal stays gone; reopen-on-ineffective is out of scope (#4836 invalid) and is recorded as a deferral, not silently dropped.
+- Metrics: `computeMetrics` over issue rows, `sourceMode` gating, `emitMetrics` via `io.emit`.
+- `prodWatchFromCli(argv, deps)` mirrors `issueWatchFromCli` (`run [--once] [--dry-run] [--interval]`, `status`), with lock + `status.json` under `watchDir`-style dir; wire it in forgedock.mjs.
+- Docs: `docs/PROD-WATCH.md` (flow, kill-switch, digest, paging, dry-run) and a concise `prod_watch` table in CONFIG.md.
 
 ### Related Issues
-#4778 / PR #4821 (relay introduced), PR #4820 (release review that found it).
+#4768 (parent), #4833, #4834, #4835, #4836 (closed invalid), #4837, #4765, #4767, #1347.

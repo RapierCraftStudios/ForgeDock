@@ -103,4 +103,54 @@ describe("projector", () => {
     await makeProjector({ gh: f.gh }).writeState(42, idx);
     assert.match(f.getBody(), /reporter text/);
   });
+
+  it("body read passes -R when the repo is known", async () => {
+    const f = fakeGh("text");
+    await makeProjector({ gh: f.gh }, { repo: "o/r" }).writeState(42, idx);
+    const view = f.calls.find((c) => c[0] === "issue" && c[1] === "view");
+    assert.deepEqual(view.slice(-2), ["-R", "o/r"]);
+  });
+
+  it("writeState leaves the body unchanged when the issue view output is not JSON", async () => {
+    const f = fakeGh("precious text");
+    const gh = async (args) => (args[0] === "issue" && args[1] === "view" ? (f.calls.push(args), "error: not json") : f.gh(args));
+    await assert.rejects(makeProjector({ gh }).writeState(42, idx), /non-JSON/);
+    assert.equal(f.getBody(), "precious text");
+    assert.equal(f.calls.some((c) => c[0] === "issue" && c[1] === "edit"), false);
+  });
+
+  it("writeState keeps text on both sides of the block (#4871)", async () => {
+    const old = serializeState({ ...idx, phase: "investigate" });
+    const f = fakeGh(`intro text\n\n${old}\n\nnote added below the block`);
+    await makeProjector({ gh: f.gh }).writeState(42, idx);
+    assert.match(f.getBody(), /^intro text/);
+    assert.match(f.getBody(), /note added below the block$/);
+    assert.match(f.getBody(), /"phase":"build"/);
+  });
+
+  it("writeState accepts a CRLF body and a body with two blocks (#4871)", async () => {
+    const old = serializeState({ ...idx, phase: "investigate" });
+    const crlf = fakeGh(`line one\r\nline two\r\n\r\n${old}\r\n\r\ntail\r\n`);
+    await makeProjector({ gh: crlf.gh }).writeState(42, idx);
+    assert.match(crlf.getBody(), /line one\r\nline two/);
+    const two = fakeGh(`head\n\n${old}\n\nmiddle\n\n${old}\n\nend`);
+    await makeProjector({ gh: two.gh }).writeState(42, idx);
+    for (const t of ["head", "middle", "end"]) assert.ok(two.getBody().includes(t), t);
+  });
+
+  it("issue edits pass -R when the repo is known", async () => {
+    const f = fakeGh("text");
+    const p = makeProjector({ gh: f.gh }, { repo: "o/r" });
+    await p.writeState(42, idx);
+    await p.setLabel(42, "x");
+    await p.removeLabel(42, "x");
+    for (const c of f.calls.filter((c) => c[0] === "issue" && c[1] === "edit")) assert.deepEqual(c.slice(-2), ["-R", "o/r"]);
+  });
+
+  it("writeState makes no edit when the view JSON has no body", async () => {
+    const f = fakeGh("precious text");
+    const gh = async (args) => (args[0] === "issue" && args[1] === "view" ? "{}" : f.gh(args));
+    await assert.rejects(makeProjector({ gh }).writeState(42, idx), /no body/);
+    assert.equal(f.calls.some((c) => c[0] === "issue" && c[1] === "edit"), false);
+  });
 });

@@ -233,7 +233,7 @@ test("CLI: --dry-run prints the cut without writing; refuses a non-release watch
   writeFileSync(`${cwd}/forge.yaml`, `issue_watch:\n  watches:\n    sr:\n      mode: release\n      threshold: { min_issues: 2 }\n      theme_map:\n        billing: [label:billing]\n    plain:\n      milestone: none\n`);
   const issues = [1, 2].map((n) => iss(n, { labels: lbl("billing") }));
   const io = world(issues); io.env = { FORGEDOCK_WATCH_DIR: dir }; io.sleep = async () => {};
-  const orig = io.gh; io.gh = async (a) => (a[0] === "repo" ? (a.includes("--jq") ? "main\n" : JSON.stringify({ nameWithOwner: "o/r" })) : orig(a));
+  const orig = io.gh; io.gh = async (a) => (a[0] === "api" ? issues.map((i) => `${i.number}\t${i.authorAssociation}`).join("\n") : a[0] === "repo" ? (a.includes("--jq") ? "main\n" : JSON.stringify({ nameWithOwner: "o/r" })) : orig(a));
   const out = [];
   const r = await issueWatchFromCli(["run", "--name", "sr", "--dry-run"], { cwd, env: io.env, io, print: (l) => out.push(l) });
   assert.match(out.join("\n"), /would cut: billing \(2 issues/);

@@ -21,6 +21,7 @@ import { releaseTick, formatDryRun } from "./issuewatch-release.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
 import { noComments } from "./render.mjs";
+import { listAssociations } from "./gh-assoc.mjs";
 
 const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker"];
 const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -241,10 +242,12 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
   if (state.phase === "draining") { if (!state.inflight.length) state.phase = "done"; return state; }
 
   const room = Math.min(watch.max_inflight - state.inflight.length, watch.max_issues ? watch.max_issues - state.claimed.length : Infinity);
-  const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,body,labels,milestone,author,authorAssociation,createdAt"];
+  const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,body,labels,milestone,author,createdAt"];
   if (watch.search) args.push("--search", watch.search);
   const candidates = [];
-  for (const i of await ghJson(args)) {
+  const assoc = await listAssociations(io.gh, repo); // #4859: not a `gh issue list` field
+  for (const raw of await ghJson(args)) {
+    const i = { ...raw, authorAssociation: assoc.get(raw.number) };
     if (!matchesSelectors(i, watch)) continue;
     const kind = classifyIssue(i, watch);
     if (kind === "fold") { await fold({ issue: i, watch, repo, io, state }); continue; }
@@ -270,11 +273,12 @@ export const unclaimedOrOwn = (registry, n, name) => !registry?.[n] || registry[
 
 /** `mode: release` pass: wires the pure selectors, claim registry and lane rule into releaseTick (bin/lean/issuewatch-release.mjs). */
 async function releaseStep({ watch, repo, io, state, dir, branches = {}, defaults = [], dryRun = false, cwd = process.cwd() }) {
-  const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,body,labels,milestone,author,authorAssociation,createdAt"];
+  const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,body,labels,milestone,author,createdAt"];
   if (watch.search) args.push("--search", watch.search);
   const registry = () => readJson(join(repoDir(repo, io.env), "claims.json")) ?? {};
   const listOpen = async () => {
-    const all = JSON.parse(String(await io.gh(args)));
+    const assoc = await listAssociations(io.gh, repo); // #4859
+    const all = JSON.parse(String(await io.gh(args))).map((i) => ({ ...i, authorAssociation: assoc.get(i.number) }));
     if (!dryRun) for (const i of all) if (matchesSelectors(i, watch) && classifyIssue(i, watch) === "fold") await fold({ issue: i, watch, repo, io, state });
     return all;
   };

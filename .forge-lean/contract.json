@@ -2,26 +2,55 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "fix: Oversized relay answer gets 413 from router, is swallowed, request stays pending and host re-runs the command each poll; sandbox times out rc 125 — `bin/lean/relay.mjs:138`.",
+   "quote": "Docs: `docs/PROD-WATCH.md`.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "**Fix**: cap the answer to the router limit on the host (truncate stdout/stderr so the serialized answer fits, say 512 KiB) or raise the router limit for this route; on a non-retryable answer failure (4xx) post a small `rc 1` \"output too large\" answer instead of retrying.",
+   "quote": "Scope: `bin/lean/prodwatch.mjs` and the CLI `forgedock prod-watch run [--once] [--dry-run] | status`.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "Finding validated: VALIDATED / FALSE_POSITIVE / INCONCLUSIVE",
+   "quote": "Parse `forge.yaml` `prod_watch:` (poll_minutes, sources with flow maps, deployed_probe, governor, target_watch).",
    "disposition": "deliver",
-   "evidence": ".forge-lean/investigation.md (VALIDATED: bin/lean/relay.mjs:137-138, bin/pool/http.mjs:5-10, bin/pool/router.mjs:315)",
    "verify": "in_lane"
   },
   {
    "id": "R4",
-   "quote": "If VALIDATED: fix implemented and tested on the correct branch",
+   "quote": "Poll loop: sources → triage → governor → file issues with `signal_ref` and the label the `target_watch` (#4765) selects → verify → metrics.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R5",
+   "quote": "One LLM judgment call per new cluster writes the root-cause hypothesis and issue body, using the repo's conventions. The call goes through injected `io.llm` and counts against the cost cap.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R6",
+   "quote": "Kill-switch file; `--dry-run` makes no writes.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R7",
+   "quote": "Human-only actions are never taken and are collected into one owner digest per day. P0 incidents page through the repo's declared alert channel; nothing else pages.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R8",
+   "quote": "Wire `bin/forgedock.mjs` (usage line near the issue-watch entry, known-commands list, dispatch case).",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R9",
+   "quote": "Write `docs/PROD-WATCH.md` and the `prod_watch` section in `docs/CONFIG.md`.",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -29,99 +58,106 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/lean/relay.mjs",
-   "change": "Add exported RELAY_ANSWER_MAX_BYTES = 512 * 1024 and a pure exported capAnswer(out, max) that trims stdout first, then stderr (never splitting a UTF-8 character), until Buffer.byteLength(JSON.stringify(answer)) \u003c= max, appends 'relay: output over \u003cmax> bytes, truncated' to stderr and sets rc 1 when it trimmed; returns the answer unchanged when it already fits. In servicePending apply capAnswer to the redacted answer (line 137) before posting. In the catch at line 138: if the error's status is an integer 400-499 other than 429, post a fallback {rc: 1, stdout: '', stderr: 'relay: answer rejected by the router (HTTP \u003cstatus>), output too large or invalid'} for the same rid and count it as answered; swallow a failure of that fallback and keep swallowing transient/429/statusless errors (retried on the next poll). Update the servicePending doc comment.",
+   "path": "bin/lean/prodwatch.mjs",
+   "change": "New module: parseProdWatch (3-level forge.yaml parse reusing parseSources), roundOnce (kill switch, runAdapter, cluster, classifyCluster/parseAlertRules via loadPolicy, validateCluster, admit, one io.llm call per admitted cluster with cost fed to the governor, issue create embedding signalRef + target_watch label, governor summary issue, deployed_probe verify step, computeMetrics/sourceMode/emitMetrics), daily owner digest, P0-incident-only page via io.page, dry-run with zero writes, lock + status.json, prodWatchFromCli(argv, deps) with run [--once] [--dry-run] [--interval] | status. Pure functions, injected io (exec/gh/llm/now/emit/page/fs).",
    "requirements": [
-    "R1",
     "R2",
-    "R4"
+    "R3",
+    "R4",
+    "R5",
+    "R6",
+    "R7"
    ]
   },
   {
    "id": "D2",
-   "path": "bin/lean/relay.test.mjs",
-   "change": "Regression tests: (a) capAnswer keeps a small answer unchanged; (b) servicePending with a runner returning ~1,000,000 bytes of quote/newline-heavy stdout posts one answer whose JSON byte length is \u003c= RELAY_ANSWER_MAX_BYTES (\u003c 1 \u003c\u003c 20), rc 1 and a truncation notice in stderr, multibyte text not corrupted; (c) a transport whose first relayAnswer throws an Error with status 413 gets a second, small rc 1 answer for the same rid and servicePending returns 1; (d) a 502/statusless throw still posts nothing else and returns 0 (existing case kept).",
+   "path": "bin/lean/prodwatch.test.mjs",
+   "change": "Regression tests with injected io fixtures: config parsing and errors, kill switch no-op, dry-run makes no gh/llm/state writes, signal_ref + label on filed issue, llm cost counted against max_cost_usd_per_round, governor overflow -> one summary, one digest per day, only P0 incident pages, shadow-gated source not filed, status output, CLI arg errors.",
    "requirements": [
-    "R1",
     "R2",
-    "R4"
+    "R3",
+    "R4",
+    "R5",
+    "R6",
+    "R7"
    ]
   },
   {
    "id": "D3",
-   "path": "bin/tests/relay.e2e.test.mjs",
-   "change": "Optional: a case where the host command prints ~1 MB of newline-heavy output through the real router/agent; cs-relay receives an answer (rc 1, truncation notice) instead of timing out, and the command ran exactly once.",
+   "path": "bin/forgedock.mjs",
+   "change": "Wiring only: usage line next to the issue-watch entry (:3362), 'prod-watch' in the known-commands list (:3949), `case \"prod-watch\"` dispatching to prodWatchFromCli via dynamic import (like :4210). Under 150 added lines.",
    "requirements": [
-    "R1",
-    "R4"
+    "R8",
+    "R2"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "docs/PROD-WATCH.md",
+   "change": "New doc: flow, config, kill-switch file, dry-run, owner digest, paging rule, governor mapping, verify step and its limits.",
+   "requirements": [
+    "R1"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "docs/CONFIG.md",
+   "change": "Add a concise `prod_watch` (OPTIONAL) section modelled on the issue_watch section (:627) with a keys table; link PROD-WATCH.md. Keep under 150 added lines.",
+   "requirements": [
+    "R9"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "devdocs/modules/lean.md",
+   "change": "Add a dossier sentence for bin/lean/prodwatch.mjs next to the prodwatch-governor entry (freshness check).",
+   "requirements": [
+    "R2"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "servicePending signature, return value (count of answered requests) and its swallowing of relayPending failures and transient (502/503/504, 429, statusless) answer failures, bin/lean/relay.mjs:128-141; its caller bin/lean/sandbox-remote.mjs:144-149"
+   "what": "Exported APIs and behaviour of bin/lean/prodwatch-sources.mjs, prodwatch-triage.mjs, prodwatch-governor.mjs, prodwatch-metrics.mjs (consumed unchanged); read-only contract: only declared list/read/run commands, close only via closeSignal with audit."
   },
   {
    "id": "P2",
-   "what": "Answers that already fit are posted byte-for-byte unchanged (rc, stdout, stderr), so the existing relay e2e output (bin/tests/relay.e2e.test.mjs) and redaction (relay.mjs:137) are unchanged"
+   "what": "bin/lean/issuewatch.mjs and the `issue-watch` CLI case in bin/forgedock.mjs behave as before; core stays repo-agnostic (#1347)."
   },
   {
    "id": "P3",
-   "what": "runRelayed behaviour and its 1 MiB per-stream maxBuffer (bin/lean/relay.mjs:60-73), used also by pre-fetch (bin/lean/sandbox-remote.mjs:158)"
-  },
-  {
-   "id": "P4",
-   "what": "Router body limit and relay routes unchanged: bin/pool/http.mjs:5 readJson default 1 MiB, bin/pool/router.mjs:61-66 and :263-264"
-  },
-  {
-   "id": "H1",
-   "what": "feat(pool): read-only capability relay from sandbox to dispatching host, plus dispatch-time pre-fetch (#4778, PR #4821)",
-   "source": "guard"
-  },
-  {
-   "id": "H2",
-   "what": "fix(execution): host-capability placement reads only the issue body; contract validate commands and decision comments are ignored (#4785, PR #4790)",
-   "source": "guard"
-  },
-  {
-   "id": "H3",
-   "what": "perf(execution): pin host capabilities by need, not by mention in the issue body (#4776, PR #4795)",
-   "source": "guard"
+   "what": "Enumerating tests keep passing without edits: bin/lean/lean.test.mjs, bin/engine/telemetry-seam.test.mjs, bin/lean/{batch,checks,conformance,context,drift,execution,fixround}.test.mjs."
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/relay.test.mjs bin/tests/relay.e2e.test.mjs"
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/prodwatch.test.mjs bin/lean/prodwatch-sources.test.mjs bin/lean/prodwatch-triage.test.mjs bin/lean/prodwatch-governor.test.mjs bin/lean/prodwatch-metrics.test.mjs bin/lean/issuewatch.test.mjs"
   },
   {
    "id": "V2",
-   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/lean/sandbox-provider.contract.test.mjs bin/tests/computeshare.test.mjs"
-  },
-  {
-   "id": "V3",
-   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-2} bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/conformance.e2e.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/execution.e2e.test.mjs bin/lean/execution.test.mjs bin/lean/fixround.test.mjs"
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/lean.test.mjs bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/execution.test.mjs bin/lean/fixround.test.mjs"
   }
  ],
  "decisions": [
   {
    "id": "K1",
-   "choice": "Cap on the host (512 KiB serialized answer) instead of raising the router's body limit for the relay route",
-   "justification": "The router is a generic queue that never interprets relay payloads (bin/pool/router.mjs:21-23) and every route shares readJson's 1 MiB limit (bin/pool/router.mjs:315, bin/pool/http.mjs:5); bounding at the source also bounds the router's in-memory queue (router.mjs:36-37) and the GET delivery to the sandbox. 512 KiB is the reviewer's suggested value and leaves headroom under 1 MiB for the envelope.",
-   "source": "spec"
+   "choice": "Parse prod_watch with its own 3-level parser reusing issuewatch's flow-map `scalar` approach instead of parseForgeYaml.",
+   "justification": "parseForgeYaml reads one nested level (bin/lean/issuewatch.mjs:40 comment, parseWatches:41); sources are flow maps under prod_watch.sources.\u003cname>.",
+   "source": "precedent"
   },
   {
    "id": "K2",
-   "choice": "A trimmed answer reports rc 1 with a 'relay: output over N bytes, truncated' stderr notice",
-   "justification": "Same convention runRelayed already uses for its own maxBuffer truncation (bin/lean/relay.mjs:66), so the lane sees one consistent truncation signal.",
-   "source": "precedent"
+   "choice": "Verify step limited to a deterministic deployed_probe check; reopen-on-ineffective not built.",
+   "justification": "#4836 (verification loop) is closed as invalid, so no module exists to reuse; the issue scope lists only 'verify' in the loop.",
+   "source": "spec"
   },
   {
    "id": "K3",
-   "choice": "Only a 4xx other than 429 triggers the small fallback answer; 429, 5xx and statusless errors keep the retry-on-next-poll behaviour",
-   "justification": "httpTransport's fail() marks 502/503/504 transient and 429/503 retryable (bin/lean/sandbox-remote.mjs:62-68); a 4xx is deterministic, so retrying it re-runs the command forever.",
-   "source": "precedent"
+   "choice": "All logic in new prodwatch.mjs; forgedock.mjs and CONFIG.md get wiring/short section only.",
+   "justification": "Hotspot rule: bin/forgedock.mjs 4488 lines, docs/CONFIG.md 2020 lines.",
+   "source": "doc"
   }
  ]
 }

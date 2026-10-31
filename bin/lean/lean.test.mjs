@@ -2647,6 +2647,7 @@ describe("orchestrate", () => {
     const leanIo = {
       gh: async (a) => {
         if (a[0] === "repo" && a[1] === "view") return "main\n";
+        if (a[0] === "api") return "OWNER\n"; // #4859: the author association is a REST read
         if (a.includes("milestone")) return JSON.stringify({ milestone: milestones[a[2]] ? { title: milestones[a[2]] } : null });
         return JSON.stringify({ body: a[2] === "1" ? "**Depends on**: #2" : "", authorAssociation: "OWNER" });
       },

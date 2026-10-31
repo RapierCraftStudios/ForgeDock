@@ -1,31 +1,44 @@
 ### Approach
-Bound the relay answer on the host to what the router accepts, and stop treating a deterministic 4xx answer failure as retryable.
+New `bin/lean/prodwatch.mjs` composes the merged prod-watch modules (sources, triage, governor, metrics) into one poll round with an injected `io`; `forgedock.mjs` only gets wiring. State is a rebuildable cache; dedup and metrics rows come from GitHub issues.
 
 ### Changes
-- bin/lean/relay.mjs: `RELAY_ANSWER_MAX_BYTES` (512 KiB), pure `capAnswer` (trim stdout then stderr, UTF-8 safe, rc 1 + truncation notice), applied in `servicePending`; a 4xx (not 429) answer failure posts a small rc 1 answer for the same rid.
-- bin/lean/relay.test.mjs: regression tests (small answer unchanged, ~1 MB quote/newline/multibyte answer capped and run once, 413 fallback, 502/429/statusless still retried).
+- bin/lean/prodwatch.mjs: `parseProdWatch`, `targetLabel`, `roundOnce`, `prodWatchFromCli`, helpers (`humanOnly`, `metricRows`, `issueBody`, `formatProdWatchStatus`).
+- bin/lean/prodwatch.test.mjs: 16 tests with fake io.
+- bin/forgedock.mjs: usage line, known-commands entry, `prod-watch` dispatch case (13 lines).
+- docs/PROD-WATCH.md: new doc. docs/CONFIG.md: `prod_watch` section (32 lines).
+- devdocs/modules/lean.md: dossier sentence.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/lean/relay.mjs:130,161
-- R2 ✅ bin/lean/relay.mjs:21,130-148,161-165
-- R3 ✅ finding validated (investigation.md)
-- R4 ✅ bin/lean/relay.test.mjs (#4831 describe)
+- R1 ✅ docs/PROD-WATCH.md:1
+- R2 ✅ bin/lean/prodwatch.mjs (`prodWatchFromCli`), bin/forgedock.mjs `case "prod-watch"`
+- R3 ✅ bin/lean/prodwatch.mjs `parseProdWatch`
+- R4 ✅ bin/lean/prodwatch.mjs `roundOnce`
+- R5 ✅ `roundOnce` llm call, cost counted vs `max_cost_usd_per_round` (test "llm cost counts against...")
+- R6 ✅ kill-switch check at top of `roundOnce`; dry-run tests
+- R7 ✅ `digest()`, P0-incident-only page in `roundOnce`
+- R8 ✅ bin/forgedock.mjs usage, KNOWN_COMMANDS, dispatch
+- R9 ✅ docs/PROD-WATCH.md, docs/CONFIG.md `prod_watch`
 
 ### Verification
-- V1 relay.test.mjs + relay.e2e.test.mjs + V2 sandbox-provider.contract/computeshare: 73 pass, 0 fail.
-- V3 (10 enumerating bin/lean tests): 327 pass, 0 fail.
-- New tests fail without the fix (2 of 14 fail against the old relay.mjs).
-- forgedock check: PASS. checks.mjs widened to the full suite (fan-out-cap), not run per host rules.
-- No formatter is configured in the repo. D3 (optional e2e case) not done.
+- V1 node --test (prodwatch + sources/triage/governor/metrics + issuewatch): 71 pass, 0 fail. The new test file fails without the fix (module does not exist).
+- V2 node --test (lean, telemetry-seam, batch, checks, conformance, context, drift, execution, fixround): 832 pass, 0 fail.
+- Also bin/tests/forge-utils.test.mjs: 31 pass. `forgedock check`: PASS. checks.mjs widened to the full suite (978 referencing files); not run per host rules.
+- No formatter is configured in the repo.
 
 ### Notes
-No behaviour change for answers that fit; router limit unchanged; no env vars.
+- Default kill switch `.forge/prod-watch.off`; default label `prod-watch`; state under `~/.forge/watch/<repo>/prod-watch/` (`FORGEDOCK_WATCH_DIR`).
+- Verify step is the deployed_probe check only; reopen-on-ineffective not built (#4836 invalid, decision K2).
+- Clusters deferred by the LLM cost cap after admission are reported in the round, not in the governor's storm summary.
 
-### Docs
-Updated devdocs/modules/lean.md (relay section: answer cap and 4xx fallback) for the docs freshness check.
+### Enumerating-test fix
+The ten flagged tests mention bin/lean file stems only as unrelated string literals (fixtures, kinds, paths); none enumerates the bin/lean directory. Recorded `prodwatch` as a non-member for each in result.json `not_members`. No test edits.
+- Fix: renamed export formatStatus -> formatProdWatchStatus (collided with issuewatch.mjs).
 
-### Merge note (origin/staging)
-Staging landed its own fix for the same issue (1163f2c5: per-stream cap `capStream`, rc 125 fallback on any rejected answer). Merged: staging's behaviour is kept as the base (rc 125 fallback, no 4xx special-casing), and `capAnswer` is applied on top so the serialized answer is byte-exact under 512 KiB even when two escape-heavy streams pass the char cap. The 4xx-only fallback and its test were dropped as superseded.
+### CI follow-up (Unit tests job)
+The CI log was not available (no GitHub access allowed), so the failure could not be read. Reproduced the job's scope locally at capped concurrency: `bin/lean/**` + `bin/engine/**` (1883 pass, 0 fail), `bin/stats/**` + `packages/protocol/**` (266 pass, 0 fail), `bin/tests/*.test.mjs` (2610 pass, 3 fail). The 3 failures (journey.test.mjs: preflight / forge Act II platform-WSL row; router.test.mjs: writeInstallReceipt copyFile-failure cleanup) are environmental: this host runs as root on WSL2, and the diff touches none of those files. No code change was made.
 
-## Conformance fix
-servicePending's catch now posts the small rc 1 fallback only for a 4xx other than 429 (status integer); 429/5xx/statusless failures are swallowed and retried next poll. The earlier any-error rc 125 fallback is removed. Tests cover 413 (second rc 1 answer, returns 1) and 502 (nothing else posted, returns 0). Doc comment and dossier now match.
+### CI follow-up 2 (Unit tests job, run 41157197021)
+Log unreadable again (no GitHub access). Checked: no commits on origin/staging beyond HEAD; prodwatch tests are stable over 3 repeats and pass under a clean env (`env -i`, no HOME); the 3 local `bin/tests` failures (journey.test.mjs, router.test.mjs) fail identically with `bin/forgedock.mjs` reverted to origin/staging, so they are pre-existing and caused by this root/WSL2 host, not by this change. No code change; needs the failing test names from the CI log to go further.
+
+### CI follow-up 3 (Unit tests job, run 41158849530)
+Cause found by running the job's lint steps locally: `scripts/check-test-tmp-cleanup.sh` flagged `bin/lean/prodwatch.test.mjs` for using `mkdtemp` without `bin/tests/_tmp.mjs`. Fixed by using `tmpDir` from the helper. Both lint scripts now pass (18/18); prodwatch + issuewatch tests 71 pass.

@@ -298,7 +298,7 @@ export function makeLeanIo({ repo, subagentModel = readSubagentModel() }) {
   const run = (bin) => async (args, opts = {}) => (await pexec(bin, args, { cwd: opts.cwd, maxBuffer: 100 * 1024 * 1024, timeout: 120000, ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}) })).stdout;
   return {
     ghCache: (root) => makeGhCache({ root }),
-    gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: makeHeavyIo({ host: makeHostProbe() }), projector: makeProjector({ gh: base.gh }), runner: makeLeanRunner({ subagentModel }), waitCiGreen: base.waitCiGreen,
+    gh: run("gh"), git: run("git"), docker: run("docker"), killGroup: async (pid, marker) => killLedgerPid(pid, marker), ledger: (opts) => makeLedger(opts), runTmp: makeRunTmp(), host: makeHostProbe(), heavy: makeHeavyIo({ host: makeHostProbe() }), projector: makeProjector({ gh: base.gh }, { repo }), runner: makeLeanRunner({ subagentModel }), waitCiGreen: base.waitCiGreen,
     /** Shared dependency cache (#4220): the repo's own package manager, argv only, bounded by the cache's timeout. */
     deps: makeDepCache({ exec: async (cmd, args, { cwd, env, timeoutMs } = {}) => String((await pexec(cmd, args, { cwd, env: { ...process.env, ...(env ?? {}) }, timeout: timeoutMs ?? 0, maxBuffer: 100 * 1024 * 1024 })).stdout) }),
     /** Names of the checks the base branch requires: classic protection plus rulesets (#4158). [] when neither has any. */
