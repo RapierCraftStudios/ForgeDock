@@ -1342,6 +1342,18 @@ describe("conformance shadow mode (the default)", () => {
       assert.ok(ran[0].env && typeof ran[0].env === "object", "the rerun gets the lane env");
     }
   });
+  it("#4906 a validate rerun that times out (rc 124) ends env.validate_timeout: recoverable, no builder resume, never conformance.unimplemented", async () => {
+    const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 124 }];
+    for (const conformance of ["shadow", "enforce"]) {
+      const w = world({ validation: v });
+      w.io.runCommand = async () => ({ rc: 124, output: "(timed out after 1s)" });
+      const r = await run(w, { conformance });
+      assert.equal(r.code, OUTCOME_CODES.ENV_VALIDATE_TIMEOUT, conformance); assert.equal(r.terminalReason, "needs-human");
+      assert.equal(classifyNeedsHuman(r), "recoverable"); assert.equal(w.merges.length, 0);
+      assert.equal(builders(w).length, 2, "plan + implement only"); assert.equal(reviewers(w).length, 0);
+      assert.match(nhBody(w), /timed out \(exit 124\) even after one longer retry/);
+    }
+  });
   it("#4323 a rerun that fails for a repo reason stays conformance.unimplemented; one that passes merges", async () => {
     const v = [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }];
     const w = world({ validation: v, resumeValidation: v });
