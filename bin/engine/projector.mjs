@@ -70,17 +70,19 @@ export function makeProjector(io, { repo } = {}) {
     async writeState(issue, index) {
       const old = await getBody(issue);
       const body = upsertStateBlock(old, index);
-      const kept = old.replace(/<!-- FORGE:STATE\s*[\s\S]*?-->/, "").trim();
-      if (kept && !body.includes(kept)) throw new Error(`issue #${issue}: refusing a state write that drops existing issue text`);
-      await gh(["issue", "edit", String(issue), "--body", body]);
+      // Each run of issue text around a FORGE:STATE block must survive on its own: the block is replaced in place, so text
+      // before and after it stays apart and a joined string would never match (#4871).
+      const dropped = old.split(/<!-- FORGE:STATE\s*[\s\S]*?-->/).map((t) => t.trim()).filter(Boolean).some((t) => !body.includes(t));
+      if (dropped) throw new Error(`issue #${issue}: refusing a state write that drops existing issue text`);
+      await gh(["issue", "edit", String(issue), "--body", body, ...(repo ? ["-R", repo] : [])]);
     },
 
     async setLabel(issue, label) {
-      await gh(["issue", "edit", String(issue), "--add-label", label]);
+      await gh(["issue", "edit", String(issue), "--add-label", label, ...(repo ? ["-R", repo] : [])]);
     },
 
     async removeLabel(issue, label) {
-      await gh(["issue", "edit", String(issue), "--remove-label", label]);
+      await gh(["issue", "edit", String(issue), "--remove-label", label, ...(repo ? ["-R", repo] : [])]);
     },
   };
 }
