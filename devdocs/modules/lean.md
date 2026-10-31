@@ -2215,3 +2215,8 @@ Cite: #4901.
 
 `phaseledger.mjs` records which engine phase a lane is in (`createLedger`, `enter`, `during`); `lean.mjs` marks the phase boundaries and puts `phases` ({id: {ms, model_ms?, usd?}}) on `RUN_TERMINAL` and the lane result, flattened to `phase_<id>_*` for FORGE:TELEMETRY. `orchestrate.mjs` `phasesOf` adds `queue_wait` to the batch row; the batch report and `forgedock stats` print p50/p90 per phase and the largest phase (`n/a` without data). The efficiency lines list merged issues with no acceptance probe.
 Cite: #4908.
+
+## Entry 2026-10-31 — one lane per issue across batches and remote lanes (#4920)
+
+A lane's default lease holder is `core_<host>_<pid>_<nonce>`: a sandbox's pid is 1, so `core_<pid>` made every remote lane the same holder and the lease never refused one. After writing the lease a lane reads it back and defers `lease-held` when another lane's id replaced the one it saw. `lanelock.mjs` (`otherLaneOwner`) reads GitHub, never host-local state: a live FORGE:STATE lease held by another, or an open `feat/issue-N-lean` PR that is not this lane's. `makeDispatchCheck` uses it before every lane start, so `orchestrate` records a `deferred` row (`lease.held`) and launches no sandbox, across batches and daemon restarts. A non-fast-forward push rejection with such an owner ends `deferred` `lease.held`; every other permanent push rejection stays needs-human.
+Cite: #4920.
