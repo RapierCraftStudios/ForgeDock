@@ -1245,6 +1245,13 @@ async function addedEdges({ added, records, io, repo }) {
   return edges;
 }
 
+/** #4917: whether the schedd re-hosted a finished batch after --add/--requeue, already hosts it, or no daemon answered. */
+function rehostLine(id, res) {
+  if (res.reopened === true) return `batch ${id}: re-hosted by the schedd`;
+  if (res.hosted === true) return `batch ${id}: already hosted by the schedd`;
+  return `batch ${id}: not re-hosted (no schedd answered): forgedock orchestrate --resume ${id}`;
+}
+
 /**
  * #4408: add `tokens` to batch `id`. Not a plain integer: skipped; not OPEN on the batch's repo (`gh issue view --json
  * state`): skipped `closed` (`unreadable` when the read fails); the rest go to the batch's `add` file, through the daemon
@@ -1273,6 +1280,7 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
     else if (!skipped.some((x) => x.issue === n)) skipped.push({ issue: n, reason: st ? "closed" : "unreadable" });
   }
   let res = { added: [], skipped: [], requeued: [] };
+  const hadReport = !!b.readReport();
   if (open.length) {
     res = (viaDaemon ? await viaDaemon(open) : null) ?? b.addIssues(open);
     if (res.reopened === undefined && res.requeued?.length && b.readReport()) b.clearReport(); // #4687: no daemon: the next --resume reruns it
@@ -1280,6 +1288,7 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
   const out = { ok: true, batch: id, added: res.added ?? [], requeued: res.requeued ?? [], skipped: [...(res.skipped ?? []), ...skipped] };
   out.edges = await addedEdges({ added: out.added, records, io, repo }); // #4773
   print(`batch ${id}: added ${out.added.map((n) => `#${n}`).join(" ") || (out.requeued.length ? "" : "(none)")}${out.requeued.length ? `${out.added.length ? " " : ""}${out.requeued.map((n) => `requeued #${n}`).join(" ")}` : ""}${out.skipped.length ? `; skipped ${out.skipped.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
+  if (hadReport && open.length) print(rehostLine(id, res)); // #4917
   if (out.edges.length) print(`batch ${id}: edges ${out.edges.map((e) => `#${e.from} blocked by #${e.to}`).join(", ")}`);
   return out;
 }
@@ -1333,12 +1342,14 @@ async function requeueBatch({ id, tokens, reason, root, io, viaDaemon = null, pr
   }
   const why = reason || "operator decision", by = "operator";
   let res = { requeued: [], refused: [] };
+  const hadReport = !!b.readReport();
   if (open.length) {
     res = (viaDaemon ? await viaDaemon(open, why, by) : null) ?? b.requeue(open, { reason: why, by });
     if (res.reopened === undefined && res.requeued?.length && b.readReport()) b.clearReport(); // no daemon: the next --resume reruns it
   }
   const out = { ok: true, batch: id, requeued: res.requeued ?? [], refused: [...(res.refused ?? []), ...refused] };
   print(`batch ${id}: ${out.requeued.map((n) => `requeued #${n}`).join(" ") || "requeued (none)"}${out.refused.length ? `; refused ${out.refused.map((x) => `${/^\d+$/.test(String(x.issue)) ? "#" : ""}${x.issue} (${x.reason})`).join(", ")}` : ""}`);
+  if (hadReport && open.length) print(rehostLine(id, res)); // #4917
   return out;
 }
 
@@ -1923,7 +1934,11 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   } catch { /* alerts never fail a batch */ }
   for (const l of report) sink.line(l);
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
-  try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
+  // #4917: a batch that still holds pending issues (deferred, requeued, held) is not finished: no report, so a resume or the daemon picks it up
+  let unfinished = false;
+  try { unfinished = batch.pendingIssues().length > 0 && !batch.readCancel(); } // a cancel ends the batch for good
+  catch { unfinished = false; }
+  if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
 }
 
@@ -2044,6 +2059,7 @@ export async function scheddFromCli(argv, deps = {}) {
     try { sock = await schedd.connectDaemon({ dir, spawnDaemon: null }); } catch { console.log("schedd: not running"); return { running: false }; }
     const st = await schedd.request(sock, { op: "status" });
     console.log(`schedd: pid ${st.pid}, ${st.batches.length} batch(es)${st.batches.length ? ": " + st.batches.map((b) => b.id).join(", ") : ""}${Number.isFinite(st.lastTick) ? `, last tick ${Math.round((Date.now() - st.lastTick) / 1000)} s ago` : ""}`);
+    for (const u of st.unhosted ?? []) console.log(`schedd: batch ${u.id} is not hosted but has ${u.pending.length} pending: ${u.pending.map((n) => `#${n}`).join(" ")} (forgedock orchestrate --resume ${u.id})`);
     return { running: true, ...st };
   }
   if (argv[0] === "watchdog") { // #4780: run by the schedd watchdog timer; signals a live daemon whose heartbeat went stale

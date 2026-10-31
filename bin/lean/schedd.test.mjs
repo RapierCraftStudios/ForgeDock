@@ -249,6 +249,35 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await h.cleanup(); }
   });
 
+  it("#4917: a batch still holding a held (pending) issue writes no report; status flags it unhosted; --requeue re-hosts it and says so", async () => {
+    const h = host();
+    try {
+      await h.daemon();
+      const client = { ...h.client, io: { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ state: "OPEN", labels: [] }) : "o/r\n") } };
+      await withRoot(h, () => capture(async () => {
+        const run = orchestrateFromCli(["1", "2", "--parallel", "1", "--repo", "o/r", "--no-prefilter"], h.client);
+        await until(() => h.launched().length === 1 && listBatches(h.root).length === 1);
+        const [id] = listBatches(h.root);
+        const b = openBatch(h.root, id);
+        b.holdIssues([2]);
+        writeFileSync(h.release, "");
+        const res = await run;
+        assert.equal(res.rows.find((r) => r.issue === 2).outcome, "held");
+        assert.deepEqual(b.pendingIssues(), [2]);
+        assert.equal(b.readReport(), null, "pending issues: the batch is not finalised");
+        const st = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" });
+        assert.deepEqual(st.unhosted, [{ id, pending: [2] }]);
+        // finalised by an older version: a report plus unapplied requeue entries still reopens, and the CLI says so
+        b.releaseIssues([2]);
+        b.store.save({ ...b.store.load(), results: { ...b.store.load().results, 1: { issue: 1, outcome: "needs-human", pr: null, cost_usd: 0, minutes: 0 } } });
+        b.writeReport({ rows: [{ issue: 1, outcome: "needs-human" }] });
+        const rq = await capture(() => orchestrateFromCli(["--requeue", id, "1"], client));
+        assert.deepEqual(rq.res.requeued, [1]);
+        assert.ok(rq.lines.some((l) => l.includes("re-hosted by the schedd")), rq.lines.join("\n"));
+      }));
+    } finally { await h.cleanup(); }
+  });
+
   it("#4376: --cancel stops one batch (its lane torn down, the rest held, report written); the other batch and the daemon run on", async () => {
     const h = host();
     try {

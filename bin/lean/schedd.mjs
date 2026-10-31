@@ -177,7 +177,15 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
   });
 
   const handle = async (req, send) => {
-    if (req.op === "status") return send({ type: "status", pid, lastTick, batches: [...hosted.keys()].map((id) => ({ id, running: true })) }, true);
+    if (req.op === "status") {
+      // #4917: a batch dir that still holds pending issues but is not hosted (finalised early, or never resumed)
+      const unhosted = [];
+      for (const id of listBatches(root)) {
+        if (hosted.has(id) || starting.has(id)) continue;
+        try { const pending = openBatch(root, id).pendingIssues(); if (pending.length) unhosted.push({ id, pending }); } catch { /* advisory */ }
+      }
+      return send({ type: "status", pid, lastTick, batches: [...hosted.keys()].map((id) => ({ id, running: true })), unhosted }, true);
+    }
     if (req.op === "set-parallel") {
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
@@ -189,7 +197,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       const { added, skipped, requeued = [] } = b.addIssues(req.issues ?? []);
       // #4687: a re-queued skipped issue reopens a finished, unhosted batch like --requeue does
-      const reopen = requeued.length > 0 && !hosted.has(req.id) && !starting.has(req.id);
+      const reopen = (requeued.length > 0 || b.unrunAdds().length > 0 || b.unrunRequeues().length > 0) && !hosted.has(req.id) && !starting.has(req.id); // #4917
       if (reopen) await host({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} });
       return send({ type: "ok", added, skipped, requeued, hosted: hosted.has(req.id), reopened: reopen }, true);
     }
@@ -198,7 +206,8 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
       const b = openBatch(root, req.id);
       if (!b.exists()) throw new Error(`no batch ${req.id} in ${root}`);
       const { requeued, refused } = b.requeue(req.issues ?? [], { reason: req.reason, by: req.by });
-      const reopen = requeued.length > 0 && !hosted.has(req.id) && !starting.has(req.id);
+      // #4917: a refused repeat requeue still reopens when an earlier entry was never applied (the first one hit a stalled daemon)
+      const reopen = (requeued.length > 0 || b.unrunRequeues().length > 0) && !hosted.has(req.id) && !starting.has(req.id);
       if (reopen) await host({ argv: ["--resume", req.id], cwd: process.cwd(), env: {} });
       return send({ type: "ok", requeued, refused, hosted: hosted.has(req.id), reopened: reopen }, true);
     }
