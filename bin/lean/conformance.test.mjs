@@ -81,6 +81,27 @@ describe("#4655 multi-requirement amendment references", () => {
     assert.match(applyAmendments(C, [{ kind: "defer", requirement: "R1/R9", why: "w" }]).problems[0], /unknown requirement R9/);
     assert.match(applyAmendments(C, [{ kind: "scope-note", requirement: "R1", why: "w" }]).problems[0], /unknown kind 'scope-note'; valid kinds are/);
   });
+  it("supersede-guard guards[] expands to per-guard supersedes", () => {
+    const a = applyAmendments(C, [{ kind: "supersede-guard", guards: ["#4879", "#4838"], why: "x" }]);
+    assert.deepEqual(a.problems, []);
+    assert.deepEqual(a.contract.supersedes, [{ guard: "#4879", why: "x" }, { guard: "#4838", why: "x" }]);
+    assert.equal(a.applied.length, 2);
+  });
+  it("synonym kinds and a supersedes amendment with guards[] expand alike; an invalid guard id is reported", () => {
+    for (const kind of ["supersede", "supersedes-guard", "supersedes"]) {
+      const a = applyAmendments(C, [{ kind, guards: ["4879", "#4838"], why: "x" }]);
+      assert.deepEqual(a.problems, [], kind);
+      assert.deepEqual(a.contract.supersedes.map((s) => s.guard), ["#4879", "#4838"], kind);
+    }
+    const bad = applyAmendments(C, [{ kind: "supersedes", guards: ["#4879", "abc"], why: "x" }]);
+    assert.equal(bad.problems.length, 1);
+    assert.match(bad.problems[0], /needs guard/);
+    assert.deepEqual(bad.contract.supersedes.map((s) => s.guard), ["#4879"]);
+    assert.match(applyAmendments(C, [{ kind: "supersede-guard", guards: [], why: "x" }]).problems[0], /needs guard/);
+  });
+  it("an unrelated unknown kind is still rejected with the valid-kinds message", () => {
+    assert.match(applyAmendments(C, [{ kind: "supersede-everything", guards: ["#1"], why: "w" }]).problems[0], /unknown kind 'supersede-everything'; valid kinds are/);
+  });
 });
 
 describe("#4574 amendment slips", () => {

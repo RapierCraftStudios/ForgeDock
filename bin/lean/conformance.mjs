@@ -321,6 +321,8 @@ const shellGlobRe = (g) => new RegExp(`^${String(g).replace(/[.+^${}()|[\]\\]/g,
 const AMEND_KINDS = ["add-deliverable", "add-requirement", ...TRACKED, "amend-requirement", "supersedes", "decision"];
 const GUARD_ID_RE = /^#?\d+$/;
 const AMEND_SLIPS = { "amend-requirement": "defer", limitation: "defer" };
+// #4916: near-synonyms builders emit for the per-guard `supersedes` amendment
+const SUPERSEDES_SYNONYMS = ["supersede-guard", "supersede", "supersedes-guard"];
 
 /** forge#4574: common builder slips: `type` for `kind`, amend-requirement/limitation as defer, an `R#` in `id` as the requirement. */
 function normalizeAmendment(a) {
@@ -329,6 +331,7 @@ function normalizeAmendment(a) {
   if (blank(n.kind) && !blank(n.type)) n.kind = n.type;
   // #4594: amend-requirement with a revised `text` is a real amendment; without one it stays the slip for defer
   if (Object.hasOwn(AMEND_SLIPS, n.kind) && !(n.kind === "amend-requirement" && !blank(n.text))) n.kind = AMEND_SLIPS[n.kind];
+  if (SUPERSEDES_SYNONYMS.includes(n.kind)) n.kind = "supersedes";
   if (TRACKED.includes(n.kind) && blank(n.requirement) && /^R\d+$/.test(String(n.id ?? ""))) n.requirement = n.id;
   return n;
 }
@@ -377,6 +380,13 @@ export function applyAmendments(frozen, amendments, issueText = null, { generate
     if (n && (TRACKED.includes(n.kind) || n.kind === "amend-requirement") && typeof n.requirement === "string") {
       const ids = splitRequirementRefs(n.requirement);
       if (ids.length > 1) { for (const id of ids) rows.push({ a: { ...n, requirement: id }, raw }); continue; }
+    }
+    if (n?.kind === "supersedes" && Array.isArray(n.guards) && n.guards.length) {
+      // #4916: one supersedes row per guard id; each still hits the GUARD_ID_RE check below
+      const { guards, ...rest } = n;
+      const ids = blank(rest.guard) ? guards : [rest.guard, ...guards];
+      for (const guard of ids) rows.push({ a: { ...rest, guard }, raw });
+      continue;
     }
     rows.push({ a: n, raw });
   }
