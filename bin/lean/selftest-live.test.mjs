@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { runLive, stripState, selftestFromCli, STEPS } from "./selftest-live.mjs";
+import { runSelftestLive, stripState, selftestFromCli, STEPS } from "./selftest-live.mjs";
 
 /** A fake sandbox world. `d` toggles a defect: add4859 (--add skips), wipe4860 (body wiped), double (resume relaunches), orderBA, noRemoteAuth. */
 function world(d = {}) {
@@ -48,7 +48,7 @@ function world(d = {}) {
   }
   return { w, io };
 }
-const run = (d, extra = {}) => { const { w, io } = world(d); return runLive({ repo: "o/sandbox", io, pollMs: 1, timeoutMs: 60000, ...extra }).then((r) => ({ w, r })); };
+const run = (d, extra = {}) => { const { w, io } = world(d); return runSelftestLive({ repo: "o/sandbox", io, pollMs: 1, timeoutMs: 60000, ...extra }).then((r) => ({ w, r })); };
 
 describe("selftest --live steps (#4865)", () => {
   it("all steps pass and cleanup runs", async () => {
@@ -84,7 +84,7 @@ describe("selftest --live steps (#4865)", () => {
     assert.equal((await run({ pool: true, noRemoteAuth: true })).r.step, "remote");
   });
   it("unknown fixture language fails at setup", async () => {
-    assert.equal((await runLive({ repo: "o/r", lang: "ruby", io: {} })).step, "setup");
+    assert.equal((await runSelftestLive({ repo: "o/r", lang: "ruby", io: {} })).step, "setup");
   });
   it("stripState drops only the annotation", () => assert.equal(stripState("hi\n<!-- FORGE:STATE\n{}\n-->"), "hi"));
   it("has the seven ordered phases", () => assert.deepEqual(STEPS.map((s) => s.name), ["create", "add", "body", "resume", "merge", "remote"]));

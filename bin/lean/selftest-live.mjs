@@ -122,7 +122,7 @@ export const STEPS = [
  * Run the steps in order; the first failure stops them, cleanup always runs.
  * @returns {{ok:boolean, step:string|null, message:string|null, notes:string[], cleanupErrors:string[]}}
  */
-export async function runLive({ repo, lang = "node", io, timeoutMs = 45 * 60 * 1000, pollMs = 5000 }) {
+export async function runSelftestLive({ repo, lang = "node", io, timeoutMs = 45 * 60 * 1000, pollMs = 5000 }) {
   const fx = FIXTURES[lang];
   if (!fx) return { ok: false, step: "setup", message: `unknown fixture language ${lang} (node|python)`, notes: [], cleanupErrors: [] };
   const ctx = { io, repo, fx, timeoutMs, pollMs, issues: {}, bodies: {}, created: [], notes: [], run: null };
@@ -189,7 +189,7 @@ export async function selftestFromCli(argv, deps = {}) {
     if (!repo) throw new Error(`no sandbox repo: pass --repo owner/sandbox or set selftest.sandbox_repo in forge.yaml\n${usage}`);
     const lang = flag(argv, "--lang") ?? /^\s+fixture:\s*(\w+)/m.exec(raw.split(/^selftest:/m)[1] ?? "")?.[1] ?? "node";
     const io = deps.io ?? realIo(env, { pool: /^\s+mode:\s*(remote|hybrid)/m.test(raw.split(/^execution:/m)[1] ?? "") });
-    const r = await runLive({ repo, lang, io, ...(deps.timing ?? {}) });
+    const r = await runSelftestLive({ repo, lang, io, ...(deps.timing ?? {}) });
     for (const n of r.notes) print(n);
     for (const e of r.cleanupErrors) print(`cleanup: ${e}`);
     if (r.ok) print(`selftest --live: all steps passed on ${repo}`);
