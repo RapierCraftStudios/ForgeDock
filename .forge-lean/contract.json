@@ -2,31 +2,55 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "`getBody` rethrows when `gh` output is not JSON, and `writeState` then makes no `gh issue edit` call [type:unit]",
+   "quote": "Docs: `docs/PROD-WATCH.md`.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "The projector's body read passes the repo explicitly (`-R`) [type:unit]",
+   "quote": "Scope: `bin/lean/prodwatch.mjs` and the CLI `forgedock prod-watch run [--once] [--dry-run] | status`.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "Regression test: a `gh` stub that returns non-JSON for `issue view` leaves the issue body unchanged after `writeState` [type:unit]",
+   "quote": "Parse `forge.yaml` `prod_watch:` (poll_minutes, sources with flow maps, deployed_probe, governor, target_watch).",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R4",
-   "quote": "`writeState` refuses a body that would drop existing non-STATE text, or re-reads before the edit and compares.",
+   "quote": "Poll loop: sources → triage → governor → file issues with `signal_ref` and the label the `target_watch` (#4765) selects → verify → metrics.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R5",
-   "quote": "`getBody` throws on a failed or unparseable read, and `writeState` writes nothing then.",
+   "quote": "One LLM judgment call per new cluster writes the root-cause hypothesis and issue body, using the repo's conventions. The call goes through injected `io.llm` and counts against the cost cap.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R6",
+   "quote": "Kill-switch file; `--dry-run` makes no writes.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R7",
+   "quote": "Human-only actions are never taken and are collected into one owner digest per day. P0 incidents page through the repo's declared alert channel; nothing else pages.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R8",
+   "quote": "Wire `bin/forgedock.mjs` (usage line near the issue-watch entry, known-commands list, dispatch case).",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R9",
+   "quote": "Write `docs/PROD-WATCH.md` and the `prod_watch` section in `docs/CONFIG.md`.",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -34,79 +58,106 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/engine/projector.mjs",
-   "change": "makeProjector(io,{repo}); getBody passes -R when repo known and throws on non-JSON/non-string body; writeState guards against dropping non-STATE text before gh issue edit",
+   "path": "bin/lean/prodwatch.mjs",
+   "change": "New module: parseProdWatch (3-level forge.yaml parse reusing parseSources), roundOnce (kill switch, runAdapter, cluster, classifyCluster/parseAlertRules via loadPolicy, validateCluster, admit, one io.llm call per admitted cluster with cost fed to the governor, issue create embedding signalRef + target_watch label, governor summary issue, deployed_probe verify step, computeMetrics/sourceMode/emitMetrics), daily owner digest, P0-incident-only page via io.page, dry-run with zero writes, lock + status.json, prodWatchFromCli(argv, deps) with run [--once] [--dry-run] [--interval] | status. Pure functions, injected io (exec/gh/llm/now/emit/page/fs).",
    "requirements": [
-    "R1",
     "R2",
+    "R3",
     "R4",
-    "R5"
+    "R5",
+    "R6",
+    "R7"
    ]
   },
   {
    "id": "D2",
-   "path": "bin/lean/effects.mjs",
-   "change": "pass { repo } to makeProjector at the makeLeanIo return",
+   "path": "bin/lean/prodwatch.test.mjs",
+   "change": "Regression tests with injected io fixtures: config parsing and errors, kill switch no-op, dry-run makes no gh/llm/state writes, signal_ref + label on filed issue, llm cost counted against max_cost_usd_per_round, governor overflow -> one summary, one digest per day, only P0 incident pages, shadow-gated source not filed, status output, CLI arg errors.",
    "requirements": [
-    "R2"
+    "R2",
+    "R3",
+    "R4",
+    "R5",
+    "R6",
+    "R7"
    ]
   },
   {
    "id": "D3",
-   "path": "bin/engine-cli.mjs",
-   "change": "pass repo to makeProjector where repo is in scope (~:1042)",
+   "path": "bin/forgedock.mjs",
+   "change": "Wiring only: usage line next to the issue-watch entry (:3362), 'prod-watch' in the known-commands list (:3949), `case \"prod-watch\"` dispatching to prodWatchFromCli via dynamic import (like :4210). Under 150 added lines.",
    "requirements": [
+    "R8",
     "R2"
    ]
   },
   {
    "id": "D4",
-   "path": "bin/tests/engine-projector.test.mjs",
-   "change": "tests: -R on view; non-JSON view -> writeState rejects, no issue edit, body unchanged; missing body field -> same; guard refuses shrinking",
+   "path": "docs/PROD-WATCH.md",
+   "change": "New doc: flow, config, kill-switch file, dry-run, owner digest, paging rule, governor mapping, verify step and its limits.",
    "requirements": [
-    "R1",
-    "R2",
-    "R3",
-    "R4",
-    "R5"
+    "R1"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "docs/CONFIG.md",
+   "change": "Add a concise `prod_watch` (OPTIONAL) section modelled on the issue_watch section (:627) with a keys table; link PROD-WATCH.md. Keep under 150 added lines.",
+   "requirements": [
+    "R9"
+   ]
+  },
+  {
+   "id": "D6",
+   "path": "devdocs/modules/lean.md",
+   "change": "Add a dossier sentence for bin/lean/prodwatch.mjs next to the prodwatch-governor entry (freshness check).",
+   "requirements": [
+    "R2"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "makeProjector(io) with no repo keeps working (callers bin/engine.mjs:465, bin/hooks/interactive-engine.mjs:157): view call without -R"
+   "what": "Exported APIs and behaviour of bin/lean/prodwatch-sources.mjs, prodwatch-triage.mjs, prodwatch-governor.mjs, prodwatch-metrics.mjs (consumed unchanged); read-only contract: only declared list/read/run commands, close only via closeSignal with audit."
   },
   {
    "id": "P2",
-   "what": "getTrustedBody/readState fail-closed behaviour and GraphQL provenance in bin/engine/projector.mjs"
+   "what": "bin/lean/issuewatch.mjs and the `issue-watch` CLI case in bin/forgedock.mjs behave as before; core stays repo-agnostic (#1347)."
   },
   {
    "id": "P3",
-   "what": "writeState still preserves untrusted reporter text (bin/tests/engine-projector.test.mjs last test)"
+   "what": "Enumerating tests keep passing without edits: bin/lean/lean.test.mjs, bin/engine/telemetry-seam.test.mjs, bin/lean/{batch,checks,conformance,context,drift,execution,fixround}.test.mjs."
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test bin/tests/engine-projector.test.mjs"
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/prodwatch.test.mjs bin/lean/prodwatch-sources.test.mjs bin/lean/prodwatch-triage.test.mjs bin/lean/prodwatch-governor.test.mjs bin/lean/prodwatch-metrics.test.mjs bin/lean/issuewatch.test.mjs"
   },
   {
    "id": "V2",
-   "command": "node --test bin/lean/lean.test.mjs bin/stats/stats.test.mjs"
+   "command": "node --test --test-concurrency=${FORGE_HOST_PARALLELISM:-1} bin/lean/lean.test.mjs bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/execution.test.mjs bin/lean/fixround.test.mjs"
   }
  ],
- "repro_test": {
-  "path": "bin/tests/engine-projector.test.mjs",
-  "id": "writeState leaves the body unchanged when the issue view output is not JSON",
-  "command": "node --test --test-name-pattern='writeState leaves the body unchanged when the issue view output is not JSON' bin/tests/engine-projector.test.mjs"
- },
  "decisions": [
   {
    "id": "K1",
-   "choice": "Add an optional { repo } second arg to makeProjector rather than using the {owner}/{repo} placeholder",
-   "justification": "`gh issue view` needs a real -R value; the placeholder only works for `gh api` (projector.mjs:31-47). Optional keeps other callers unchanged.",
+   "choice": "Parse prod_watch with its own 3-level parser reusing issuewatch's flow-map `scalar` approach instead of parseForgeYaml.",
+   "justification": "parseForgeYaml reads one nested level (bin/lean/issuewatch.mjs:40 comment, parseWatches:41); sources are flow maps under prod_watch.sources.\u003cname>.",
    "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "Verify step limited to a deterministic deployed_probe check; reopen-on-ineffective not built.",
+   "justification": "#4836 (verification loop) is closed as invalid, so no module exists to reuse; the issue scope lists only 'verify' in the loop.",
+   "source": "spec"
+  },
+  {
+   "id": "K3",
+   "choice": "All logic in new prodwatch.mjs; forgedock.mjs and CONFIG.md get wiring/short section only.",
+   "justification": "Hotspot rule: bin/forgedock.mjs 4488 lines, docs/CONFIG.md 2020 lines.",
+   "source": "doc"
   }
  ]
 }

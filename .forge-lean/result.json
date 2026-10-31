@@ -1,1 +1,156 @@
-{"status":"fixed","summary":"projector getBody throws on unreadable output, uses -R, and writeState refuses to drop issue text","requirements":[{"id":"R1","status":"implemented","evidence":"bin/engine/projector.mjs:24"},{"id":"R2","status":"implemented","evidence":"bin/engine/projector.mjs:23"},{"id":"R3","status":"implemented","evidence":"bin/tests/engine-projector.test.mjs"},{"id":"R4","status":"implemented","evidence":"bin/engine/projector.mjs writeState"},{"id":"R5","status":"implemented","evidence":"bin/engine/projector.mjs:24-28"}],"validation":[{"id":"V1","command":"node --test bin/tests/engine-projector.test.mjs","exit":0},{"id":"V2","command":"node --test bin/lean/lean.test.mjs bin/stats/stats.test.mjs","exit":0}],"tests":[{"command":"node --test bin/tests/engine-projector.test.mjs","result":"pass","fails_without_fix":true}],"self_review":[{"question":"1","answer":"yes","evidence":"R1-R5 each covered by projector.mjs and new tests"},{"question":"2","answer":"yes","evidence":"engine-cli/effects tests 78 pass; repo optional"},{"question":"3","answer":"yes","evidence":"D1-D4 changed; V1,V2 pass"},{"question":"4","answer":"yes","evidence":"git diff touches only deliverables and a test"}],"amendments":[],"not_members":[]}
+{
+ "status": "fixed",
+ "summary": "Add prodwatch.mjs poll loop and forgedock prod-watch CLI with docs",
+ "requirements": [
+  {
+   "id": "R1",
+   "status": "implemented",
+   "evidence": "docs/PROD-WATCH.md:1"
+  },
+  {
+   "id": "R2",
+   "status": "implemented",
+   "evidence": "bin/lean/prodwatch.mjs:prodWatchFromCli"
+  },
+  {
+   "id": "R3",
+   "status": "implemented",
+   "evidence": "bin/lean/prodwatch.mjs:parseProdWatch"
+  },
+  {
+   "id": "R4",
+   "status": "implemented",
+   "evidence": "bin/lean/prodwatch.mjs:roundOnce"
+  },
+  {
+   "id": "R5",
+   "status": "implemented",
+   "evidence": "bin/lean/prodwatch.mjs:roundOnce llm call"
+  },
+  {
+   "id": "R6",
+   "status": "implemented",
+   "evidence": "bin/lean/prodwatch.mjs:roundOnce kill switch and dryRun"
+  },
+  {
+   "id": "R7",
+   "status": "implemented",
+   "evidence": "bin/lean/prodwatch.mjs:digest and page"
+  },
+  {
+   "id": "R8",
+   "status": "implemented",
+   "evidence": "bin/forgedock.mjs case prod-watch"
+  },
+  {
+   "id": "R9",
+   "status": "implemented",
+   "evidence": "docs/CONFIG.md prod_watch section"
+  }
+ ],
+ "validation": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/prodwatch*.test.mjs bin/lean/issuewatch.test.mjs",
+   "exit": 0
+  },
+  {
+   "id": "V2",
+   "command": "node --test enumerating lean tests",
+   "exit": 0
+  }
+ ],
+ "tests": [
+  {
+   "command": "node --test bin/lean/prodwatch.test.mjs",
+   "result": "pass",
+   "fails_without_fix": true
+  },
+  {
+   "command": "bash scripts/check-test-tmp-cleanup.sh && bash scripts/check-test-tmp-cleanup.test.sh",
+   "result": "pass",
+   "fails_without_fix": true
+  }
+ ],
+ "self_review": [
+  {
+   "question": "1",
+   "answer": "yes",
+   "evidence": "R1-R9 implemented; bin/lean/prodwatch.test.mjs 16 tests"
+  },
+  {
+   "question": "2",
+   "answer": "yes",
+   "evidence": "V1 and V2 pass; issue-watch case untouched"
+  },
+  {
+   "question": "3",
+   "answer": "yes",
+   "evidence": "D1-D6 changed as described; P1-P3 intact; forgedock check PASS"
+  },
+  {
+   "question": "4",
+   "answer": "yes",
+   "evidence": "git diff origin/staging...HEAD touches only the six deliverable paths"
+  }
+ ],
+ "not_members": [
+  {
+   "symbol": "prodwatch",
+   "test": "bin/engine/telemetry-seam.test.mjs",
+   "why": "not an enumeration of bin/lean files: the test only mentions a few bin/lean file stems as unrelated string literals/keys (fixtures, kinds, paths), so the new module is not a member of any list there"
+  },
+  {
+   "symbol": "prodwatch",
+   "test": "bin/lean/batch.test.mjs",
+   "why": "not an enumeration of bin/lean files: the test only mentions a few bin/lean file stems as unrelated string literals/keys (fixtures, kinds, paths), so the new module is not a member of any list there"
+  },
+  {
+   "symbol": "prodwatch",
+   "test": "bin/lean/checks.test.mjs",
+   "why": "not an enumeration of bin/lean files: the test only mentions a few bin/lean file stems as unrelated string literals/keys (fixtures, kinds, paths), so the new module is not a member of any list there"
+  },
+  {
+   "symbol": "prodwatch",
+   "test": "bin/lean/conformance.e2e.test.mjs",
+   "why": "not an enumeration of bin/lean files: the test only mentions a few bin/lean file stems as unrelated string literals/keys (fixtures, kinds, paths), so the new module is not a member of any list there"
+  },
+  {
+   "symbol": "prodwatch",
+   "test": "bin/lean/conformance.test.mjs",
+   "why": "not an enumeration of bin/lean files: the test only mentions a few bin/lean file stems as unrelated string literals/keys (fixtures, kinds, paths), so the new module is not a member of any list there"
+  },
+  {
+   "symbol": "prodwatch",
+   "test": "bin/lean/context.test.mjs",
+   "why": "not an enumeration of bin/lean files: the test only mentions a few bin/lean file stems as unrelated string literals/keys (fixtures, kinds, paths), so the new module is not a member of any list there"
+  },
+  {
+   "symbol": "prodwatch",
+   "test": "bin/lean/drift.test.mjs",
+   "why": "not an enumeration of bin/lean files: the test only mentions a few bin/lean file stems as unrelated string literals/keys (fixtures, kinds, paths), so the new module is not a member of any list there"
+  },
+  {
+   "symbol": "prodwatch",
+   "test": "bin/lean/execution.e2e.test.mjs",
+   "why": "not an enumeration of bin/lean files: the test only mentions a few bin/lean file stems as unrelated string literals/keys (fixtures, kinds, paths), so the new module is not a member of any list there"
+  },
+  {
+   "symbol": "prodwatch",
+   "test": "bin/lean/execution.test.mjs",
+   "why": "not an enumeration of bin/lean files: the test only mentions a few bin/lean file stems as unrelated string literals/keys (fixtures, kinds, paths), so the new module is not a member of any list there"
+  },
+  {
+   "symbol": "prodwatch",
+   "test": "bin/lean/fixround.test.mjs",
+   "why": "not an enumeration of bin/lean files: the test only mentions a few bin/lean file stems as unrelated string literals/keys (fixtures, kinds, paths), so the new module is not a member of any list there"
+  }
+ ],
+ "amendments": [],
+ "facts": {
+  "conventions": [
+   "CI Unit tests failure not reproducible locally: lean/engine/stats/protocol pass; 3 bin/tests failures are root+WSL environmental (journey, router); CI log unreadable offline",
+   "CI run 41157197021: not reproducible; the 3 bin/tests failures reproduce on base forgedock.mjs (pre-existing, root+WSL host)"
+  ]
+ }
+}
