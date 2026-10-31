@@ -14,12 +14,16 @@ export const MAX_LEASE_TTL_MS = 3 * 600_000;
 const PROVENANCE_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){"
   + "issue(number:$number){body authorAssociation author{login __typename} editor{login __typename}}}}";
 
-export function makeProjector(io) {
+export function makeProjector(io, { repo } = {}) {
   const gh = io.gh;
 
+  // Throws on an unreadable body: an empty string would make writeState wipe the issue (#4860).
   async function getBody(issue) {
-    const out = await gh(["issue", "view", String(issue), "--json", "body"]);
-    try { return JSON.parse(out).body ?? ""; } catch { return ""; }
+    const out = await gh(["issue", "view", String(issue), "--json", "body", ...(repo ? ["-R", repo] : [])]);
+    let body;
+    try { body = JSON.parse(out).body; } catch { throw new Error(`issue #${issue}: body read returned non-JSON output`); }
+    if (typeof body !== "string") throw new Error(`issue #${issue}: body read returned no body`);
+    return body;
   }
 
   /**
@@ -64,7 +68,10 @@ export function makeProjector(io) {
     },
 
     async writeState(issue, index) {
-      const body = upsertStateBlock(await getBody(issue), index);
+      const old = await getBody(issue);
+      const body = upsertStateBlock(old, index);
+      const kept = old.replace(/<!-- FORGE:STATE\s*[\s\S]*?-->/, "").trim();
+      if (kept && !body.includes(kept)) throw new Error(`issue #${issue}: refusing a state write that drops existing issue text`);
       await gh(["issue", "edit", String(issue), "--body", body]);
     },
 
