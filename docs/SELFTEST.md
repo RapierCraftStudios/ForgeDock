@@ -29,4 +29,4 @@ The first failing step stops the run.
 
 With `--pr N`, the result is posted on the PR as `<!-- FORGE:SELFTEST result=pass|fail sha=<head> step=<failed step|none> -->`. `forgedock review-staging` reads the newest marker and refuses (`REVIEW_RESULT: status: BLOCKED`, nothing reviewed) unless it is a pass for the PR's current head. A push after the selftest makes the marker stale: re-run it.
 
-Not yet wired: a nightly run through the schedd timer.
+A nightly run through the schedd timer is tracked separately in #4894; until then run `selftest --live` from any scheduler.
