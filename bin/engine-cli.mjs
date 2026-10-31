@@ -1245,6 +1245,15 @@ async function addedEdges({ added, records, io, repo }) {
   return edges;
 }
 
+/**
+ * #4917: true when a pending issue is waiting on time or a retry (its row is not `held`). Deliberate holds (budget, operator,
+ * drift, breaker) come back as `held` rows and keep their report: they wait for a `--resume`, not for the clock.
+ */
+export function hasWaitingPending(rows, pending) {
+  const waiting = new Set(pending ?? []);
+  return (rows ?? []).some((r) => waiting.has(r?.issue) && r.outcome !== "held");
+}
+
 /** #4917: whether the schedd re-hosted a finished batch after --add/--requeue, already hosts it, or no daemon answered. */
 function rehostLine(id, res) {
   if (res.reopened === true) return `batch ${id}: re-hosted by the schedd`;
@@ -1934,10 +1943,9 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   } catch { /* alerts never fail a batch */ }
   for (const l of report) sink.line(l);
   const ok = rows.every((r) => ["merged", "invalid", "decomposed"].includes(r.outcome));
-  // #4917: a batch that still holds pending issues (deferred, requeued, held) is not finished: no report, so a resume or the daemon picks it up
+  // #4917: a batch with a deferred or requeued issue still waiting is not finished: no report, so a resume or the daemon picks it up
   let unfinished = false;
-  try { unfinished = batch.pendingIssues().length > 0 && !batch.readCancel(); } // a cancel ends the batch for good
-  catch { unfinished = false; }
+  try { unfinished = hasWaitingPending(rows, batch.pendingIssues()) && !batch.readCancel(); } catch { unfinished = false; } // a cancel ends the batch for good
   if (!unfinished) try { batch.writeReport({ rows, crossLane, ok, reclaimed, report: report.join("\n") }); } catch { /* the report is a cache of the rows */ }
   return { rows, crossLane, batch: batch.id, reclaimed, ok };
 }

@@ -12,7 +12,7 @@ import { startDaemon, scheddPaths, connectDaemon, request, SCHEDD_SCRIPT, mergeE
 import { schedDir } from "./sched.mjs";
 import { readHeartbeat } from "./schedd-health.mjs";
 import { formatTable, orchestrate } from "./orchestrate.mjs";
-import { orchestrateFromCli } from "../engine-cli.mjs";
+import { orchestrateFromCli, hasWaitingPending } from "../engine-cli.mjs";
 
 // #4503: this process, and the env its clients submit for their lanes, never resolve the host's `~/.forge/sched`.
 process.env.FORGEDOCK_SCHED_DIR = tmpDir("schedd-home-");
@@ -249,7 +249,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
     } finally { await h.cleanup(); }
   });
 
-  it("#4917: a batch still holding a held (pending) issue writes no report; status flags it unhosted; --requeue re-hosts it and says so", async () => {
+  it("#4917: a held (pending) issue is flagged unhosted by status once its report is gone; --requeue re-hosts it and says so", async () => {
     const h = host();
     try {
       await h.daemon();
@@ -264,7 +264,7 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
         const res = await run;
         assert.equal(res.rows.find((r) => r.issue === 2).outcome, "held");
         assert.deepEqual(b.pendingIssues(), [2]);
-        assert.equal(b.readReport(), null, "pending issues: the batch is not finalised");
+        b.clearReport(); // a batch finalised before the fix, or one never resumed
         const st = await request(await connectDaemon({ dir: h.sched, spawnDaemon: null }), { op: "status" });
         assert.deepEqual(st.unhosted, [{ id, pending: [2] }]);
         // finalised by an older version: a report plus unapplied requeue entries still reopens, and the CLI says so
@@ -276,6 +276,12 @@ await orchestrateFromCli(["1", "2", "--parallel", "2", "--repo", "o/r", "--no-pr
         assert.ok(rq.lines.some((l) => l.includes("re-hosted by the schedd")), rq.lines.join("\n"));
       }));
     } finally { await h.cleanup(); }
+  });
+
+  it("#4917: hasWaitingPending: a deferred issue with a future notBefore blocks the report; a deliberate hold does not", () => {
+    assert.equal(hasWaitingPending([{ issue: 1, outcome: "merged" }, { issue: 2, outcome: "deferred" }], [2]), true);
+    assert.equal(hasWaitingPending([{ issue: 2, outcome: "held" }], [2]), false);
+    assert.equal(hasWaitingPending([{ issue: 1, outcome: "merged" }], []), false);
   });
 
   it("#4376: --cancel stops one batch (its lane torn down, the rest held, report written); the other batch and the daemon run on", async () => {
