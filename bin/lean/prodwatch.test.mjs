@@ -35,7 +35,17 @@ function world({ alerts = [], issues = [], probe = 0, killed = false, llmCost = 
     now: () => NOW, exists: () => killed, emit: (r) => w.emits.push(r), page: (p) => { w.pages.push(p); return true; },
     exec: async (cmd) => { w.execs.push(cmd); return cmd === "am-alerts" ? { code: 0, stdout: JSON.stringify(alerts) } : { code: probe, stdout: "" }; },
     llm: async () => { w.llm++; return { text: "Hypothesis: pool exhausted.", cost_usd: llmCost }; },
-    gh: async (a) => { w.gh.push(a); if (a[1] === "list") return JSON.stringify(issues); return `https://github.com/o/r/issues/${100 + w.gh.length}\n`; },
+    gh: async (a) => {
+      w.gh.push(a);
+      if (a[0] === "api") {
+        const open = issues.filter((i) => i.state === "OPEN").sort((x, y) => y.createdAt.localeCompare(x.createdAt))
+          .map((i) => ({ number: i.number, state: "open", state_reason: i.stateReason ?? null, body: i.body, created_at: i.createdAt, closed_at: null }));
+        const pages = []; for (let k = 0; k < open.length; k += 100) pages.push(open.slice(k, k + 100));
+        if (pages.length) pages[0].push({ number: 9999, state: "open", body: "a PR", pull_request: {}, created_at: "2026-10-31T00:00:00Z" });
+        return JSON.stringify(pages.length ? pages : [[]]);
+      }
+      if (a[1] === "list") return JSON.stringify(issues.filter((i) => i.state === "CLOSED").slice(0, Number(a[a.indexOf("--limit") + 1])));
+      return `https://github.com/o/r/issues/${100 + w.gh.length}\n`; },
   };
   return w;
 }
@@ -95,7 +105,7 @@ describe("roundOnce", () => {
     const state = {};
     const r = await roundOnce({ cfg, io: w.io, state, dryRun: true });
     assert.equal(r.would_file.length, 1);
-    assert.equal(w.gh.every((a) => a[1] === "list"), true);
+    assert.equal(w.gh.every((a) => a[1] === "list" || a[0] === "api"), true);
     assert.equal(w.llm, 0); assert.equal(w.pages.length, 0); assert.equal(w.emits.length, 0);
     assert.deepEqual(state.filed, []);
   });
@@ -271,10 +281,29 @@ describe("roundOnce", () => {
   });
   it("files nothing when the issue list fails (no blind duplicates)", async () => {
     const w = world({ alerts: [alert("Slow", "P2")] });
-    const orig = w.io.gh; w.io.gh = async (a) => { if (a[1] === "list") throw new Error("rate limited"); return orig(a); };
+    const orig = w.io.gh; w.io.gh = async (a) => { if (a[0] === "api") throw new Error("rate limited"); return orig(a); };
     const r = await roundOnce({ cfg, io: w.io, state: {} });
     assert.equal(r.filed.length, 0);
     assert.match(r.errors[0], /nothing filed/);
+  });
+  it("still files when only the closed lookup fails", async () => {
+    const w = world({ alerts: [alert("Slow", "P2")] });
+    const orig = w.io.gh; w.io.gh = async (a) => { if (a[1] === "list") throw new Error("boom"); return orig(a); };
+    const r = await roundOnce({ cfg, io: w.io, state: {} });
+    assert.equal(r.filed.length, 1);
+    assert.match(r.errors.join(), /closed issue list failed/);
+  });
+  it("sees an open issue older than 200 newer ones: no duplicate filed", async () => {
+    const filed = world({ alerts: [alert("Slow", "P2")] });
+    await roundOnce({ cfg, io: filed.io, state: {} });
+    const c = creates(filed)[0], oldBody = c[c.indexOf("--body") + 1];
+    const mk = (n) => ({ number: n, state: "OPEN", body: "unrelated", createdAt: `2026-10-31T00:${String(Math.floor((n - 1000) / 60)).padStart(2, "0")}:${String((n - 1000) % 60).padStart(2, "0")}Z` });
+    const issues = [...Array.from({ length: 250 }, (_, k) => mk(1000 + k)), { number: 5, state: "OPEN", body: oldBody, createdAt: "2026-10-01T00:00:00Z" }];
+    const w = world({ alerts: [alert("Slow", "P2")], issues });
+    const r = await roundOnce({ cfg, io: w.io, state: {} });
+    assert.equal(creates(w).length, 0);
+    assert.equal(r.filed.length, 0);
+    assert.ok(w.gh.some((a) => a.includes("--paginate")));
   });
 });
 

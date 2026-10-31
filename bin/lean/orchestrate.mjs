@@ -762,13 +762,13 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
       let gone = null;
       if (dispatchCheck && !cancelled && !pf?.closed && !pf?.parked) {
         try { gone = (await dispatchCheck(n)) ?? null; } catch { gone = null; }
-        if (!["merged", "invalid"].includes(gone?.outcome)) gone = null;
+        if (!["merged", "invalid", "deferred"].includes(gone?.outcome)) gone = null; // #4920: deferred = another lane owns the issue (lease or open PR on GitHub)
       }
       if (halted) return; // #4454: stopped before launch; no pid, so a resume queues it again
       let r;
       if (cancelled) r = { terminalReason: "deferred", code: "run.interrupted", cost_usd: 0, detail: "cancelled before launch" }; // #4376
       else if (pf?.closed) r = { terminalReason: "invalid", cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
-      else if (gone) r = { terminalReason: gone.outcome, pr: Number.isInteger(gone.pr) ? gone.pr : null, cost_usd: 0, detail: `skipped at dispatch: ${gone.detail ?? gone.outcome}` };
+      else if (gone) r = { terminalReason: gone.outcome, ...(gone.outcome === "deferred" && gone.code ? { code: gone.code } : {}), pr: Number.isInteger(gone.pr) ? gone.pr : null, cost_usd: 0, detail: `skipped at dispatch: ${gone.detail ?? gone.outcome}` };
       // #4389: a parked post-deploy follow-up starts no lane; it ends awaiting-promotion|awaiting-precondition, re-checked next batch.
       else if (pf?.parked) r = { terminalReason: pf.kind, cost_usd: 0, detail: `pre-filter: ${pf.detail}` };
       else {

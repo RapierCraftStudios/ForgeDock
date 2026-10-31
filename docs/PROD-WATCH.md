@@ -24,7 +24,7 @@ Config lives in `forge.yaml` under `prod_watch:` (see [CONFIG.md](CONFIG.md#prod
 ## Safety rules
 
 - **Dry run.** `--dry-run` runs one round and prints what it would file. It makes no GitHub write, no LLM call, no page, and no state, lock or metrics write.
-- **No blind filing.** If the issue list cannot be read, nothing is filed.
+- **No blind filing.** If the issue list cannot be read, nothing is filed. Open issues are listed in full (paginated), closed ones only as a recent window for metrics and verify.
 - **Human-only actions** (the classes in the repo's decisions policy, `decisions.human_only`) are never taken or filed. They are collected into one owner digest issue per UTC day, created on the first item and edited as more arrive.
 - **Paging.** Only a P0 incident pages, once per cluster, through `alert_channel` (a command that receives the title and body on stdin). Nothing else pages.
 - **State.** `~/.forge/watch/<repo>/prod-watch/` (or `FORGEDOCK_WATCH_DIR`) holds a lock, `status.json` and a rebuildable `state.json`; GitHub is the register.

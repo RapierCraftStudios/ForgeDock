@@ -25,6 +25,7 @@ import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
 import { normalizeKindModes } from "./lean/conformance.mjs";
 import { viewIssue } from "./lean/gh-assoc.mjs";
+import { otherLaneOwner } from "./lean/lanelock.mjs";
 import { parseExecution, detectNeeds, placementText } from "./lean/execution.mjs";
 import { relayPrefetchCommands } from "./lean/relay.mjs";
 import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lean/budget.mjs";
@@ -1979,6 +1980,9 @@ export function makeDispatchCheck({ gh, repo }) {
     }
     if (pr !== null) return { outcome: "merged", pr, detail: `PR #${pr} already merged` };
     if (state === "CLOSED") return notPlanned ? { outcome: "invalid", detail: "issue closed (not planned)", final: true } : { outcome: "invalid", detail: "issue closed" }; // #4687: final = its dependents stay skipped
+    // #4920: a live lease or an open lane PR from another lane, read from GitHub (any batch, any host, across restarts): no lane, no sandbox
+    const owner = state === "OPEN" ? await otherLaneOwner({ gh, repo, issue: n }).catch(() => null) : null;
+    if (owner) return { outcome: "deferred", code: "lease.held", detail: owner.detail };
     return null;
   };
 }

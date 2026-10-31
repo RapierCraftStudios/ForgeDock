@@ -12,7 +12,8 @@ import { readSelfReview, compareSelfReview } from "./selfreview.mjs";
 import { codeForTerminalReason, OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { otherLaneOwner } from "./lanelock.mjs";
 import { TRACKED, normalizeKindModes, blockingFailures, unverifiedRequirements, isBugIssue, scopeText, explainFailures, inIssue, validateContract, cliUsageError, normalizeRunnerCommand, applyAmendments, precheck, repoTracks, dropScopeValidates, tagOutOfBand, parseReview, decide, mergeReviewRows, evidencePathOnly, closePlan, followupItems, bucketTally, pendingTracking, unnamedEdges, structureNote, impliedDocDeliverables } from "./conformance.mjs";
 import { checkAdmission, hostParallelism, ADMISSION_RETRY_SECONDS } from "./admission.mjs";
 import { namedPaths, isTrustedIssueComment } from "./prefilter.mjs";
@@ -280,8 +281,9 @@ export async function runCore(o) {
   const usageLine = () => `cost $${usage.cost_usd.toFixed(4)}, tokens ${usage.input} in / ${usage.output} out / ${usage.cache} cache, wall ${Math.round((now() - t0) / 60000 * 10) / 10} min`;
 
   // ---- lease (same FORGE:STATE lease the full path uses) ----
-  const agentId = o.agentId ?? `core_${process.pid}`;
   const myHost = o.hostName ?? osHostname();
+  // #4920: unique per lane. A sandbox's pid is 1, so `core_<pid>` made every remote lane the same holder and the lease never refused one.
+  const agentId = o.agentId ?? `core_${sanitizeLeaseHost(myHost)}_${o.pid ?? process.pid}_${randomBytes(3).toString("hex")}`;
   const leaseObj = () => ({ by: agentId, until: now() + leaseTtlMs, host: myHost, pid: o.pid ?? process.pid });
   /** Provably dead: same host and `kill(pid, 0)` throws ESRCH. A different host keeps the TTL behaviour. */
   const holderDead = (l) => {
@@ -984,6 +986,12 @@ export async function runCore(o) {
     leaseState = { ...(st ?? { v: 1, run: `core_${issue}`, issue, lane, committed: [], phase: null, branch: null, pr: null, terminalReason: null }), terminal: false,
       ...(o.placement ? { placement: o.placement } : {}) }; // #4256: the latest placement replaces an earlier run's
     try { await writeLease(leaseObj()); } catch { /* best effort */ }
+    try { // #4920: read it back; a lane that wrote at the same moment and won leaves its id here, so this one defers
+      const back = await io.projector.readState(issue);
+      if (back?.lease && back.lease.until > now() && back.lease.by !== agentId && back.lease.by !== st?.lease?.by) { // a holder this lane just took over (dead) is not a racer
+        return { terminalReason: "deferred", code: "lease-held", detail: `issue ${issue} leased by ${back.lease.by} until ${new Date(back.lease.until).toISOString()}`, branch, worktree: wt };
+      }
+    } catch { /* unreadable: proceed */ }
     leaseTimer = setInterval(() => { writeLease(leaseObj()).catch(() => {}); }, o.leaseRenewMs ?? 120000);
     leaseTimer.unref?.();
   }
@@ -2874,6 +2882,12 @@ export async function runCore(o) {
     if (e?.laneCode) return await needsHuman(e.message, e.laneCode);
     if (e?.code === "CLI_SPAWN_FAILED" || e?.spawnDeterministic === true) { // #4129: certain to fail again, so not engine-error (orchestrate would relaunch it)
       return await needsHuman(`The claude CLI could not be started (${e.spawnErrno ?? "spawn error"}); a rerun fails the same way: ${String(e.message).slice(0, 400)}`, OUTCOME_CODES.CLI_SPAWN_FAILED);
+    }
+    if (e?.pushRejected && /non-fast-forward|fetch first|\[rejected\]/i.test(String(e?.stderr ?? e?.message ?? e))) {
+      // #4920: another live lane owns this branch (its lease, or its open PR): this lane is superseded, nothing for a human to do
+      let owner = null;
+      try { owner = await otherLaneOwner({ gh: (a) => ghc(a), repo, issue, branch, selfId: agentId, ownPr: Number(/#(\d+)/.exec(String(T.pr?.[0] ?? ""))?.[1]) || null }); } catch { /* fail-open */ }
+      if (owner) return finish("deferred", `git push was rejected (non-fast-forward): ${owner.detail}; another lane owns ${branch}`, { code: OUTCOME_CODES.LEASE_HELD, branch }, OUTCOME_CODES.LEASE_HELD);
     }
     if (e?.pushRejected) return await needsHuman(`git push was rejected (no retry): ${String(e?.stderr ?? e?.message ?? e).slice(0, 400)}`);
     return finish("engine-error", e?.message ?? String(e));
