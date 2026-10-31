@@ -141,5 +141,10 @@
    "why": "not an enumeration of bin/lean files: the test only mentions a few bin/lean file stems as unrelated string literals/keys (fixtures, kinds, paths), so the new module is not a member of any list there"
   }
  ],
- "amendments": []
+ "amendments": [],
+ "facts": {
+  "conventions": [
+   "CI Unit tests failure not reproducible locally: lean/engine/stats/protocol pass; 3 bin/tests failures are root+WSL environmental (journey, router); CI log unreadable offline"
+  ]
+ }
 }

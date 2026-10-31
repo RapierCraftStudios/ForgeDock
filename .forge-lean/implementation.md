@@ -33,3 +33,6 @@ New `bin/lean/prodwatch.mjs` composes the merged prod-watch modules (sources, tr
 ### Enumerating-test fix
 The ten flagged tests mention bin/lean file stems only as unrelated string literals (fixtures, kinds, paths); none enumerates the bin/lean directory. Recorded `prodwatch` as a non-member for each in result.json `not_members`. No test edits.
 - Fix: renamed export formatStatus -> formatProdWatchStatus (collided with issuewatch.mjs).
+
+### CI follow-up (Unit tests job)
+The CI log was not available (no GitHub access allowed), so the failure could not be read. Reproduced the job's scope locally at capped concurrency: `bin/lean/**` + `bin/engine/**` (1883 pass, 0 fail), `bin/stats/**` + `packages/protocol/**` (266 pass, 0 fail), `bin/tests/*.test.mjs` (2610 pass, 3 fail). The 3 failures (journey.test.mjs: preflight / forge Act II platform-WSL row; router.test.mjs: writeInstallReceipt copyFile-failure cleanup) are environmental: this host runs as root on WSL2, and the diff touches none of those files. No code change was made.
