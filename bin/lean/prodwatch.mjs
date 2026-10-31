@@ -115,6 +115,12 @@ const isSummary = (i) => String(i?.body ?? "").includes(SUMMARY_TAG);
 
 const issueNumber = (out) => Number(/(\d+)\s*$/.exec(String(out ?? "").trim())?.[1]) || null;
 
+/** Every open issue carrying `label`, all pages (gh issue list has no cursor), in the `gh issue list --json` shape; pull requests are dropped. */
+async function listOpen(io, label) {
+  const pages = JSON.parse(String(await io.gh(["api", "--paginate", "--slurp", `repos/{owner}/{repo}/issues?labels=${encodeURIComponent(label)}&state=open&per_page=100`])));
+  return pages.flat().filter((i) => !i.pull_request).map((i) => ({ number: i.number, state: "OPEN", stateReason: i.state_reason ?? null, body: i.body ?? "", createdAt: i.created_at, closedAt: i.closed_at ?? null }));
+}
+
 // ── one round ──────────────────────────────────────────────────────────────────────────────
 /**
  * One poll round. `state` is the cache `{filed:[{at,fp,issue}], verified:{fp:at}, paged:{fp:at}, digest:{date,issue,items}}`; it is mutated
@@ -127,8 +133,10 @@ export async function roundOnce({ cfg, io, state = {}, dryRun = false, label = D
   const write = async (what, fn) => { if (dryRun) return null; try { return await fn(); } catch (e) { rep.errors.push(`${what}: ${e.message}`); return null; } };
 
   let issues;
-  try { issues = JSON.parse(String(await io.gh(["issue", "list", "--label", label, "--state", "all", "--limit", "200", "--json", "number,state,stateReason,body,createdAt,closedAt"]))); }
+  try { issues = await listOpen(io, label); }
   catch (e) { return { ...rep, errors: [`issue list failed, nothing filed: ${e.message}`] }; }
+  try { issues = issues.concat(JSON.parse(String(await io.gh(["issue", "list", "--label", label, "--state", "closed", "--limit", "200", "--json", "number,state,stateReason,body,createdAt,closedAt"])))); }
+  catch (e) { rep.errors.push(`closed issue list failed, metrics and verify skip closed issues: ${e.message}`); }
   const openAll = issues.filter((i) => i.state === "OPEN"), openSummary = openAll.find(isSummary) ?? null;
   const open = openAll.filter((i) => !isSummary(i)), rows = metricRows(issues.filter((i) => !isSummary(i)));
   rep.metrics = computeMetrics(rows);
