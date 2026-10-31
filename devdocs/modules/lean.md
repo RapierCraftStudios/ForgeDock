@@ -2195,3 +2195,8 @@ Cite: #4883.
 
 A trusted `FORGE:DECISION` comment posted after the last `FORGE:CONTRACT` comment is now a binding note: `decisionNote` (`prompts.mjs`) renders it and `lean.mjs` appends it to the implement and plan-rerun prompts of a resumed, salvaged or recovery lane that holds a frozen contract, independent of `context_pack`. `reviewerPrompt` keeps trusted `FORGE:DECISION` comments and still drops every other `FORGE:` record. Untrusted decisions, decisions before the contract, and the lane's own `recovery pass` records are not passed.
 Cite: #4901.
+
+## Entry 2026-10-31 — per-lane phase ledger (#4908)
+
+`phaseledger.mjs` records which engine phase a lane is in (`createLedger`, `enter`, `during`); `lean.mjs` marks the phase boundaries and puts `phases` ({id: {ms, model_ms?, usd?}}) on `RUN_TERMINAL` and the lane result, flattened to `phase_<id>_*` for FORGE:TELEMETRY. `orchestrate.mjs` `phasesOf` adds `queue_wait` to the batch row; the batch report and `forgedock stats` print p50/p90 per phase and the largest phase (`n/a` without data). The efficiency lines list merged issues with no acceptance probe.
+Cite: #4908.

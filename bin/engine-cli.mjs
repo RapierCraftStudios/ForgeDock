@@ -1576,7 +1576,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   sink.line(`batch: ${batch.id} (${batch.dir}); resume with: forgedock orchestrate --resume ${batch.id}`);
   const dir = deps.dir ?? runDir();
   migrateRunLogs(dir); // #4432: split legacy per-issue logs by repo before any lane runs (best effort, never throws)
-  const { orchestrate, formatTable, formatWaitSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines, estimateLaneMinutes, laneHistory, formatEstimateSummary } = await import("./lean/orchestrate.mjs");
+  const { orchestrate, formatTable, formatWaitSummary, formatPhaseSummary, formatSandboxSummary, formatOutcomeLists, formatAlertLines, estimateLaneMinutes, laneHistory, formatEstimateSummary } = await import("./lean/orchestrate.mjs");
   const { formatPrecheckSummary } = await import("./lean/precheck.mjs");
   const { formatFirstPassSummary } = await import("./lean/fixround.mjs");
   const { formatDecompositionSummary } = await import("./lean/decompose.mjs");
@@ -1884,6 +1884,7 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
   try { heavyStats = deps.heavyStats !== undefined ? deps.heavyStats : (await import("./lean/heavy.mjs")).openHeavy(schedMod.schedDir()).stats(); } catch { heavyStats = null; }
   const waitLine = formatWaitSummary(rows, heavyStats);
   if (waitLine) report.push(waitLine);
+  report.push(formatPhaseSummary(rows)); // #4908: per-phase wall time, n/a without ledger rows
   const precheckLine = formatPrecheckSummary(rows); // #4331
   if (precheckLine) report.push(precheckLine);
   const firstPassLine = formatFirstPassSummary(rows); // #4362

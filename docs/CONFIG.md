@@ -832,6 +832,10 @@ stats:
 
 Each alert line names the event, the rate, the sample size (`count/sample` lanes) and one example reason. When no alert fires, nothing is printed. The flat form `stats.alerts_<key>` also works and wins. `forgedock stats --no-local` skips the alerts.
 
+### Phase ledger (#4908)
+
+No configuration. Every lane records start and end of the engine phases it reaches, so a lane's wall time is attributed instead of guessed: `queue_wait`, `sandbox_start` (claim, worktree, toolchain), `deps_install`, `validate`, `plan`, `implement`, `precheck`, `review`, `ci_wait`, `base_sync`, `merge`, each with `model_ms` and `usd` where model calls ran in it. A lane's phases sum to its `wall_ms`; `queue_wait` precedes the lane clock and is added by the batch runner. The ledger is the `phases` object on each `log.jsonl` outcome row and on `RUN_TERMINAL`, and `phase_<id>_ms|_model_ms|_usd` fields in `FORGE:TELEMETRY`. The batch report prints a `phases` line (p50/p90 per phase, largest share of wall time, `n/a` without ledger data) and `forgedock stats` prints a `Lane wall time by phase` table. The efficiency lines also list merged issues with no acceptance probe declared (`unprobed merged issues`).
+
 ## `verify` (OPTIONAL)
 
 Verify-by-CI for the core work-on path (forge#4167). It moves a lane's heavy verification (type-checks, test suites, docker test containers) off the host and onto CI runners, and it catches CI-class failures (lock files, suite wiring, hangs, formatting) before the lane merges into staging. Write it as a block-style section: `parseForgeYaml` does not read inline `{ ... }` maps.

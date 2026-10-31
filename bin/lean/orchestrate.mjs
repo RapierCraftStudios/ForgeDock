@@ -106,6 +106,8 @@
 import { parseDependsOn } from "../engine/phases.mjs";
 import { classifyNeedsHuman, recoveryCodeOf, recoveryClassOf, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { detectGateDeadlock, formatGateDeadlock } from "./gatewatch.mjs";
+import { formatPhaseSummary } from "./phaseledger.mjs";
+export { formatPhaseSummary };
 import { recoveryEvidence } from "./render.mjs";
 import { renderAlerts } from "../stats/render.mjs";
 import { formatParkedLine, postDeployOnly } from "./prefilter.mjs";
@@ -557,6 +559,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
       ...(r?.waits && typeof r.waits === "object" ? { waits: r.waits } : {}), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
       ...(Number.isFinite(r?.wall_ms) ? { wall_ms: r.wall_ms } : {}), ...(Number.isFinite(r?.model_ms) ? { model_ms: r.model_ms } : {}), // #4451
+      ...(phasesOf(r, rec) ? { phases: phasesOf(r, rec) } : {}), // #4908
       ...(Number.isFinite(r?.precheckMs) ? { precheck_ms: r.precheckMs } : {}), ...(Number.isInteger(r?.precheckDeferred) && r.precheckDeferred > 0 ? { precheck_deferred: r.precheckDeferred } : {}), // #4331
       ...(typeof r?.firstPass === "boolean" ? { first_pass: r.firstPass } : {}), // #4362
       ...(r?.turns && typeof r.turns === "object" ? { turns: r.turns } : {}), // #4392
@@ -741,8 +744,9 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     if (relabelled.delete(n)) save(); // #4315: the recovery lane launches after all; it removes needs-human itself
     const pl = placed.get(n);
     placed.delete(n);
+    const queueMs = Number.isFinite(enqueued.get(n)) ? Math.max(0, now() - enqueued.get(n)) : null; // #4908: queue_wait in the phase ledger
     heads.delete(n); enqueued.delete(n); busyNoted.delete(n);
-    const rec = { startedAt: now(), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
+    const rec = { startedAt: now(), ...(queueMs != null ? { queueMs } : {}), ...(lane ? { lane } : {}), ...(remoteRun.has(n) ? { remote: true } : {}), ...(pl ? { placement: pl } : {}) };
     runRecs.set(n, rec); notBefore.delete(n); save();
     track(n, (async () => {
       // Pre-filter once per issue (a requeued issue is not re-checked); fail-open: an error means a normal lane.
@@ -1256,6 +1260,15 @@ export function formatTable(rows) {
  * #4169 batch-report line: wait time per phase summed over the rows' lane `waits` ({phase: ms}), and the heavy-step
  * semaphore queue: `now` live from `heavyStats.queued`, `max` the longest queue a lane of this batch saw. Null when nothing waited or queued.
  */
+/**
+ * #4908: the lane's phase ledger for its batch row, plus `queue_wait` (the admission wait the batch saw; it precedes the lane
+ * clock, so the other phases still sum to `wall_ms`). Null without a ledger.
+ */
+export function phasesOf(r, rec) {
+  if (!r?.phases || typeof r.phases !== "object" || !Object.keys(r.phases).length) return null;
+  return { ...(Number.isFinite(rec?.queueMs) && rec.queueMs > 0 ? { queue_wait: { ms: Math.round(rec.queueMs) } } : {}), ...r.phases };
+}
+
 export function formatWaitSummary(rows, heavyStats = null) {
   const by = {};
   for (const r of rows ?? []) for (const [p, ms] of Object.entries(r?.waits ?? {})) if (Number.isFinite(ms) && ms >= 0) by[p] = (by[p] ?? 0) + ms;
