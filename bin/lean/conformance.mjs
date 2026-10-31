@@ -891,7 +891,10 @@ export function formatShadowSummary(rows) {
   const falseB = sh.filter((c) => UNUSABLE_REVIEW.includes(c.would)).length;
   const pct = (k) => (sh.length ? `${Math.round((k / sh.length) * 100)}%` : "n/a");
   const risk = cs.filter((c) => c.risk === true).length;
-  return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}`;
+  const byKind = {};
+  for (const c of cs) for (const k of new Set(Array.isArray(c.kinds) ? c.kinds : [])) byKind[k] = (byKind[k] ?? 0) + 1;
+  const kinds = Object.entries(byKind).sort(([a], [b]) => a.localeCompare(b)).map(([k, n]) => `${k} ${n}/${cs.length} (${Math.round((n / cs.length) * 100)}%)`);
+  return `conformance: ${sh.length} shadow lane${sh.length === 1 ? "" : "s"}, would block ${would} (${pct(would)}), false-block ${falseB} (${pct(falseB)}: would-block on an incomplete/inconsistent/unparseable review); risk-path enforced: ${risk}${kinds.length ? `; per kind: ${kinds.join(", ")}` : ""}`;
 }
 
 /** #4664: follow-up classes, one issue each per parent (scripts/file-deferred-followups.sh); post-deploy is one rollup per release lane (#4724). */
@@ -976,4 +979,56 @@ export function structureNote(delta) {
   const config = loosened ? `the repo's boundary config was loosened in this PR (${files})` : "the repo's boundary config allows it";
   const s = grow.length ? `this PR adds ${pairs} (files); ${config}` : `this PR loosens the repo's boundary config (${files})`;
   return `Structure (report only): ${s}; flag only if the contract or the architecture doc says otherwise.`.replace(/[\r\n]+/g, " ");
+}
+
+/** engine.conformance_kinds: a failure code's own gate mode; "enforce" blocks, "shadow" is recorded only. */
+export const KIND_MODES = Object.freeze(["enforce", "shadow"]);
+
+/**
+ * The valid `{code: mode}` entries of a config map, or of forge.yaml's flat form `"code=mode, code=mode"` (the
+ * forge.yaml reader has no third nesting level); anything else is dropped. {} when absent.
+ */
+export function normalizeKindModes(raw) {
+  const out = {};
+  if (typeof raw === "string") raw = Object.fromEntries(raw.split(",").map((x) => x.trim()).filter(Boolean).map((p) => p.split("=").map((x) => x.trim())));
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) for (const [k, v] of Object.entries(raw)) if (String(k).trim() && KIND_MODES.includes(String(v).trim())) out[String(k).trim()] = String(v).trim();
+  return out;
+}
+
+/**
+ * Split gate failures into those that block and those only recorded. A kind with its own mode follows it; every other
+ * kind follows the lane: an enforce lane blocks it, a shadow lane blocks only the codes in `allow` (the previous reviewer's set).
+ * @param {{code?: string}[]} failures
+ * @param {{shadow?: boolean, kinds?: Record<string,string>|null, allow?: string[]}} [o]
+ */
+export function blockingFailures(failures, { shadow = false, kinds = null, allow = [] } = {}) {
+  const block = [], record = [];
+  for (const f of failures ?? []) {
+    const own = kinds?.[f?.code];
+    (own ? own === "enforce" : !shadow || allow.includes(f?.code)) ? block.push(f) : record.push(f);
+  }
+  return { block, record };
+}
+
+/**
+ * Deliver requirements with no executed evidence test: one row per requirement id. Evidence is a test deliverable linked to the
+ * requirement (`deliverables[].requirements`) that a validate command names and that ran green (the engine's rerun, else the
+ * builder's result, else CI). Requirements verified out of band are judged by their instrumentation and skipped.
+ * @returns {{id: string, reason: string}[]}
+ */
+export function unverifiedRequirements(contract, { runs = [], reruns = null, ciCovered = [] } = {}) {
+  const green = (v) => {
+    const rerun = reruns?.[v.id];
+    if (rerun) return rerun.rc === 0;
+    return (Array.isArray(runs) ? runs : []).some((x) => x?.id === v.id && x.exit === 0) || ciCovered.includes(v.id);
+  };
+  const out = [];
+  for (const r of contract?.requirements ?? []) {
+    if (r.disposition !== "deliver" || isOutOfBand(r)) continue;
+    const tests = (contract.deliverables ?? []).filter((d) => (d.requirements ?? []).includes(r.id) && isTestPath(d.path)).map((d) => String(d.path));
+    if (!tests.length) { out.push({ id: r.id, reason: "no test deliverable linked to the requirement" }); continue; }
+    const ran = (contract.validate ?? []).some((v) => tests.some((t) => String(v.command).includes(t) || String(v.command).includes(t.split("/").pop())) && green(v));
+    if (!ran) out.push({ id: r.id, reason: `no executed passing validate runs its test (${tests.join(", ")})` });
+  }
+  return out;
 }

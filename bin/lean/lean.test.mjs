@@ -6946,3 +6946,27 @@ describe("block rules: a check timeout is not a block (#4589)", () => {
     assert.match(blockCorrectionPrompt("x"), /times out \(rc 124\) is host load, never a block/);
   });
 });
+
+describe("per-kind conformance modes (engine.conformance_kinds)", () => {
+  const CREEP = ["src/foo.js", "src/billing.js", "test/foo.test.js"];
+  const shadowNote = (w) => w.comments.find((c) => c.includes("<!-- FORGE:REVIEW -->")) ?? "";
+  const blockedNothingMerged = (w) => { assert.equal(w.prs.length, 0); assert.equal(w.merges.length, 0); assert.ok(w.edits.some((e) => e.includes("needs-human"))); };
+  it("a shadow kind in an enforce lane is recorded, not blocking; the lane merges", async () => {
+    const w = world({ changed: CREEP, reviews: [conf({}, CONTRACT, CREEP)] });
+    const r = await run(w, { conformance: "enforce", conformanceKinds: { "conformance.scope_creep": "shadow" } });
+    assert.equal(r.terminalReason, "merged");
+    assert.match(shadowNote(w), /would BLOCK[\s\S]*conformance\.scope_creep[\s\S]*src\/billing\.js/);
+  });
+
+  it("an enforce kind in a shadow lane blocks (scope creep is recorded-only in shadow by default)", async () => {
+    const w = world({ changed: CREEP });
+    const r = await run(w, { conformance: "shadow", conformanceKinds: { "conformance.scope_creep": "enforce" } });
+    assert.equal(r.code, "conformance.scope_creep"); assert.equal(reviewers(w).length, 0);
+    blockedNothingMerged(w);
+  });
+
+  it("an enforce lane without kinds still blocks scope creep (unchanged default)", async () => {
+    const w = world({ changed: CREEP });
+    assert.equal((await run(w, { conformance: "enforce", conformanceKinds: {} })).code, "conformance.scope_creep");
+  });
+});

@@ -319,6 +319,16 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    precheck `validate_failed` or `requirement_unimplemented`, before any
    reviewer run) or `enforce`. Defer/post-deploy requirements become tracked
    follow-ups (`followupItems`, `pendingTracking`).
+   Per-kind modes (`engine.conformance_kinds`, flat `"code=mode, ..."`,
+   `readConformanceKinds`): `blockingFailures` splits failures into blocking and
+   recorded-only; a listed code follows its own `enforce|shadow` in either lane
+   mode, others follow the lane (shadow: the `SHADOW_BLOCKS` allowlist). A
+   risk-path hit overrides them to enforce. `recording()` in `lean.mjs` keeps the
+   shadow note and `CONFORMANCE_SHADOW` event for a lane with kinds set.
+   `unverifiedRequirements` names deliver requirements without an executed
+   passing evidence validate (report only). `scripts/conformance-calibrate.mjs`
+   scores `docs/eval/conformance-labels-v1.json` (+ `--replay`) per kind; enforce a
+   kind only at ~0 false blocks.
    Follow-up keys are cut to 240 chars and then trimmed, and `fileFollowups` maps
    the script's echoed (trimmed) keys back to the caller's keys via `followupMap`
    (#4388: a key ending on a space looped on `followup.unavailable`).
