@@ -525,6 +525,8 @@ resolves; no pin, no shim or a failed toolchain step means the host PATH); `forg
 
 `depcache.mjs` `linkOrCopy` (#4909) copies a file when the hardlink fails with EXDEV, so a cache on another filesystem is still a `hit`. `capwait.mjs` holds a lane refused for capacity (`sandbox.capacity`) until the pool reports `free > 0` and banks the wait as `waits.queue`.
 
+Warm sandboxes (#4912, default off): `execution.warm_sandboxes` N adds `warm: N` to the remote launch spec, and `sandbox-remote.mjs` tries `transport.claim` (`POST /sandboxes/claim`) before `launch`, falling back cold on none, error or a transport without `claim`. The pool agent side is `bin/pool/warm.mjs` (wired in `agent.mjs`; router `claim` forwards): N prepared sandboxes per repo, a claim file in `/claim` hands over the lane, `pool/image/warm-refresh.sh` fetches the lane's ref incrementally. See `decisions/4912-warm-sandbox-pool.md`.
+
 ## FORGE:STATE lease
 
 Stored in the issue body by `io.projector.writeState`:

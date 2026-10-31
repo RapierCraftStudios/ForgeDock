@@ -373,3 +373,51 @@ describe("remote stop at the checkpoint (#4612)", () => {
     assert.deepEqual(transport.destroyed, []);
   });
 });
+
+describe("remote provider: warm sandboxes (#4912)", () => {
+  const warmFixture = ({ warm, claim } = {}) => {
+    const work = tmpDir("contract-warm-"); const batch = openBatch(join(work, "batches"), "bt");
+    const transport = fakeTransport();
+    const calls = [];
+    if (claim) transport.claim = async (spec) => { calls.push(spec); return claim(spec); };
+    const provider = remoteProvider({ batch, repo: "o/r", settings: { image: "img:1", secrets: ["GH_TOKEN"], ...(warm !== undefined ? { warmSandboxes: warm } : {}) }, transport,
+      env: { GH_TOKEN: SECRET }, credentials: () => null, gitIdentity: () => ({}) });
+    return { provider, transport, calls };
+  };
+  const start = (provider) => provider.start({ issue: 7, args: ["--repo", "o/r", "--lane", "staging"], env: { GH_TOKEN: SECRET }, secrets: ["GH_TOKEN"] });
+
+  it("warm_sandboxes > 0: a ready warm sandbox is claimed and no cold launch happens", async () => {
+    const { provider, transport, calls } = warmFixture({ warm: 2, claim: async () => ({ id: "fdrsbx-bt-7" }) });
+    const h = await start(provider);
+    assert.equal(h.id, "fdrsbx-bt-7");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].warm, 2);
+    assert.equal(transport.specs.length, 0, "no cold launch");
+  });
+  it("warm_sandboxes > 0: none ready (null) or a claim error falls back to the cold launch", async () => {
+    for (const claim of [async () => null, async () => { throw new Error("sandbox claim: HTTP 500"); }]) {
+      const { provider, transport } = warmFixture({ warm: 1, claim });
+      await start(provider);
+      assert.equal(transport.specs.length, 1);
+    }
+  });
+  it("default (0 or unset): claim is never called and the spec carries no warm key", async () => {
+    for (const warm of [undefined, 0]) {
+      const { provider, transport, calls } = warmFixture({ warm, claim: async () => ({}) });
+      await start(provider);
+      assert.equal(calls.length, 0);
+      assert.equal("warm" in transport.specs[0], false);
+    }
+  });
+  it("a transport without claim is a cold start", async () => {
+    const { provider, transport } = warmFixture({ warm: 1 });
+    await start(provider);
+    assert.equal(transport.specs.length, 1);
+  });
+  it("httpTransport.claim: 200 = claimed, 404/204/405 = none, 500 throws", async () => {
+    const mk = (status, data) => httpTransport({ endpoint: "http://p", fetchFn: async () => ({ status, ok: status < 300, text: async () => (data ? JSON.stringify(data) : ""), headers: { get: () => null } }) });
+    assert.deepEqual(await mk(200, { id: "x" }).claim({ id: "x" }), { id: "x" });
+    for (const s of [204, 404, 405]) assert.equal(await mk(s).claim({ id: "x" }), null);
+    await assert.rejects(() => mk(500).claim({ id: "x" }), /HTTP 500/);
+  });
+});
