@@ -107,8 +107,11 @@ const issueTitle = (c) => `prod-watch: ${c.class} ${c.severity}: ${titleOf(c)}`;
 
 /** Issue body: the LLM's hypothesis text (or a deterministic stub), the evidence, then the markers later rounds dedup on. */
 export function issueBody(c, text, source) {
-  const ev = (c.evidence?.length ? c.evidence : c.signals).slice(0, 5).map((s) => `- ${s.source ?? source}: ${neutralize(oneLine(s.title, 120))} (${neutralize(oneLine(s.body, 200))})`).join("\n");
-  return `${neutralize(text) || "Root-cause hypothesis unavailable this round; see the evidence."}\n\n**Class**: ${c.class}  **Severity**: ${c.severity}  **Copies**: ${c.count}  **Seen**: ${c.first_seen ?? "?"} .. ${c.last_seen ?? "?"}\n**Owner**: ${c.owner ?? "unassigned"}\n\n### Evidence\n${ev}\n\n${signalRef(c.fingerprint)}\n<!-- FORGE:PRODWATCH source=${source} -->\n`;
+  // Every field above the trailer comes from signal data: neutralised, so none can open a comment that swallows the evidence or
+  // reaches the trailer with a forged marker.
+  const n = (v, max = 200) => neutralize(oneLine(v, max));
+  const ev = (c.evidence?.length ? c.evidence : c.signals).slice(0, 5).map((s) => `- ${n(s.source ?? source, 80)}: ${n(s.title, 120)} (${n(s.body)})`).join("\n");
+  return `${neutralize(text) || "Root-cause hypothesis unavailable this round; see the evidence."}\n\n**Class**: ${n(c.class, 60)}  **Severity**: ${n(c.severity, 20)}  **Copies**: ${n(c.count, 20)}  **Seen**: ${n(c.first_seen ?? "?", 40)} .. ${n(c.last_seen ?? "?", 40)}\n**Owner**: ${n(c.owner ?? "unassigned", 80)}\n\n### Evidence\n${ev}\n\n${signalRef(c.fingerprint)}\n<!-- FORGE:PRODWATCH source=${source} -->\n`;
 }
 
 /** Marks the one open storm-summary issue: later rounds edit it instead of filing another, and it never counts as a prod issue (#4869). */
