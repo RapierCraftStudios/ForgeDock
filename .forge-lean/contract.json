@@ -1,27 +1,123 @@
-{"requirements":[
-{"id":"R1","quote":"`fingerprint(signal)` is stable across copies (strips ids, timestamps and numbers).","disposition":"deliver","verify":"in_lane"},
-{"id":"R2","quote":"`cluster(signals, openIssues)` dedups against open issues (the fingerprint is embedded in the issue body as `<!-- FORGE:SIGNAL_REF … -->`) and against other signals; 15 copies of one pg memo become one cluster.","disposition":"deliver","verify":"in_lane"},
-{"id":"R3","quote":"`classify(cluster, rules)` returns one of incident|defect|monitoring-bug|expected-class|deploy-fallout|transient. Rules are deterministic and read from the repo's NORTHSTAR alert rules via bin/lean/decision-engine.mjs `loadPolicy`.","disposition":"deliver","verify":"in_lane"},
-{"id":"R4","quote":"`validate(cluster, io)` runs the repo's declared read-only queries and attaches reproduced evidence; a cluster without evidence is not fileable. expected-class is counted, never filed.","disposition":"deliver","verify":"in_lane"},
-{"id":"R5","quote":"De-duplication and fingerprinting, with fixtures from the AlterLab 2026-10-29 memo set (70 memos give the expected clusters).","disposition":"deliver","verify":"in_lane"},
-{"id":"R6","quote":"Classification and validation, with expected-class and monitoring-bug handling.","disposition":"deliver","verify":"in_lane"},
-{"id":"R7","quote":"Fixtures: `bin/lean/fixtures/prodwatch/` holds an ANONYMISED 70-memo set that keeps the 2026-10-29 cluster structure (8 issues, 18 duplicate or transient, and the rest).","disposition":"deliver","verify":"in_lane"},
-{"id":"R8","quote":"Capture it read-only via the host's prod_monitor capability, then scrub hostnames, customer ids and secrets.","disposition":"defer","why":"Needs the host prod_monitor capability and production access; the lane ships a synthetic anonymised set with the same structure, a real capture can replace it later.","bucket":"owner:capture and scrub the real 2026-10-29 memo set via prod_monitor, replace the synthetic fixture"},
-{"id":"R9","quote":"Rules: pure functions with an injected `io` (exec/gh/llm/now) like bin/lean/issuewatch.mjs; read-only by contract; deterministic first; core stays repo-agnostic (#1347). Repo is PUBLIC: no raw customer data in fixtures.","disposition":"deliver","verify":"in_lane"}
-],
-"deliverables":[
-{"id":"D1","path":"bin/lean/prodwatch-triage.mjs","change":"New module exporting fingerprint, signalRef, cluster, parseAlertRules, classify, validate, tally. Pure, io-injected, no LLM/fs; validate calls prodwatch-sources runAdapter only.","requirements":["R1","R2","R3","R4","R6","R9"]},
-{"id":"D2","path":"bin/lean/fixtures/prodwatch/","change":"Anonymised synthetic 70-memo set plus expected.json.","requirements":["R5","R7","R9"]},
-{"id":"D3","path":"bin/lean/prodwatch-triage.test.mjs","change":"Tests for fingerprint, cluster, classify, validate, tally.","requirements":["R1","R2","R3","R4","R5","R6","R7"]},
-{"id":"D4","path":"devdocs/modules/lean.md","change":"One sentence after the prodwatch-sources paragraph describing prodwatch-triage.mjs.","requirements":["R9"]}
-],
-"preserve":[
-{"id":"P1","what":"bin/lean/prodwatch-sources.mjs exports and read-only contract unchanged."},
-{"id":"P2","what":"bin/lean/decision-engine.mjs loadPolicy return shape unchanged."},
-{"id":"P3","what":"Existing bin/lean sibling-file-list tests stay green."}
-],
-"validate":[
-{"id":"V1","command":"node --test bin/lean/prodwatch-triage.test.mjs bin/lean/prodwatch-sources.test.mjs bin/lean/decision-engine.test.mjs"},
-{"id":"V2","command":"node --test bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/fixround.test.mjs bin/lean/execution.test.mjs bin/lean/conformance.test.mjs"},
-{"id":"V3","command":"node --check bin/lean/prodwatch-triage.mjs && bash scripts/check-devdocs-freshness.sh origin/staging"}
-]}
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "Rate limits and storm summary.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "`admit(clusters, {governor, state, openProdIssues, now})` returns `{file:[], summary:null|{title, body}}`.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R3",
+   "quote": "It enforces `max_issues_per_hour`, `max_open_prod_issues` and `max_cost_usd_per_round` (as in signal-planner Phase 0).",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "On overflow it files ONE summary issue that lists the deferred clusters, instead of a storm.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R5",
+   "quote": "Incidents are admitted before defects.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R6",
+   "quote": "Document how these keys map to signal-planner's `max_issues_per_run`/`max_cost_usd`.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R7",
+   "quote": "Rules: pure functions with an injected `io` (exec/gh/llm/now) like bin/lean/issuewatch.mjs; read-only by contract; deterministic first; core stays repo-agnostic (#1347). Repo is PUBLIC: no raw customer data in fixtures.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/prodwatch-governor.mjs",
+   "change": "New pure module exporting admit(clusters,{governor,state,openProdIssues,now}) -> {file,summary}. Only fileable, non-duplicate, non-expected-class clusters are candidates; order incident, then defect, then rest (severity P0..P3, count desc, fingerprint tiebreak). Budget = min(max_issues_per_hour minus state.filed timestamps within 1h of now, max_open_prod_issues minus openProdIssues.length, floor(max_cost_usd_per_round / cost per cluster)); cost per cluster = cluster.cost_usd ?? governor.cost_per_issue_usd ?? 0 (0 means no cost cap). Missing/invalid limit = unlimited for that key. Overflow -> one summary {title, body} listing deferred clusters (class, severity, count, first/last seen, reason deferred); no SIGNAL_REF in summary so deferred clusters stay re-admittable. No fs, no gh, no Date.now (use now).",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3",
+    "R4",
+    "R5",
+    "R7"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/lean/prodwatch-governor.test.mjs",
+   "change": "node:test cases: each of the three caps, hourly window expiry, incidents before defects, one summary only (not per cluster), no summary when nothing overflows, non-fileable/duplicate skipped, determinism, input not mutated; a 70-memo storm via fixtures/prodwatch through cluster+classify yields bounded file list plus one summary.",
+   "requirements": [
+    "R1",
+    "R2",
+    "R3",
+    "R4",
+    "R5"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "devdocs/modules/lean.md",
+   "change": "Add prodwatch-governor entry after the prodwatch-triage entry, with the key mapping: max_issues_per_hour is a rolling-hour rate (signal-planner max_issues_per_run is per run); max_open_prod_issues is a standing cap with no planner equivalent; max_cost_usd_per_round maps to the planner's max_cost_usd applied per poll round; a run's effective issue cap = min of the three.",
+   "requirements": [
+    "R6"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "bin/lean/prodwatch-triage.mjs exports (fingerprint, cluster, classifyCluster, validateCluster, tallyClusters, signalRef) and cluster shape unchanged"
+  },
+  {
+   "id": "P2",
+   "what": "commands/signal-planner.md governor keys and defaults (max_issues_per_run 10, max_cost_usd 5.00) unchanged"
+  },
+  {
+   "id": "P3",
+   "what": "Enumerating sibling-list tests in bin/lean and bin/engine/telemetry-seam.test.mjs keep passing without edits"
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/prodwatch-governor.test.mjs bin/lean/prodwatch-triage.test.mjs bin/lean/prodwatch-sources.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/execution.test.mjs bin/lean/fixround.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "node --check bin/lean/prodwatch-governor.mjs && bash scripts/check-devdocs-freshness.sh origin/staging"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "Cost per cluster comes from cluster.cost_usd or governor.cost_per_issue_usd, since issue wording is not an LLM call here and the issue gives no cost source",
+   "justification": "signal-planner Phase 0 caps estimated spend (commands/signal-planner.md:19); governor stays pure with no io",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "Pure module with no fs/gh; hourly history passed in state.filed (ISO timestamps) and now injected",
+   "justification": "same injected-io style as bin/lean/prodwatch-triage.mjs:1-8 and issuewatch.mjs",
+   "source": "precedent"
+  }
+ ]
+}
