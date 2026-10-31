@@ -75,10 +75,13 @@ export async function checkGhFields({ exec, fields = GH_FIELDS }) {
   const code = C.PREFLIGHT_GH_FIELDS;
   let version = "unknown";
   try { version = /gh version (\S+)/.exec(String((await exec(["--version"]))?.stdout ?? ""))?.[1] ?? "unknown"; } catch { return pass(code, "skipped: gh not runnable", "all"); }
+  const probes = await Promise.all(Object.entries(fields).map(async ([cmd, want]) => {
+    try { return [want, cmd, await exec([...cmd.split(" "), "--json", "forgedock_probe"])]; } catch { return null; }
+  }));
   const missing = [];
-  for (const [cmd, want] of Object.entries(fields)) {
-    let r;
-    try { r = await exec([...cmd.split(" "), "--json", "forgedock_probe"]); } catch { continue; }
+  for (const pr of probes) {
+    if (!pr) continue;
+    const [want, cmd, r] = pr;
     const have = availableFields(`${r?.stderr ?? ""}\n${r?.stdout ?? ""}`);
     if (!have) continue;
     for (const f of want) if (!have.includes(f)) missing.push(`${f} (gh ${cmd} --json)`);
@@ -93,12 +96,12 @@ export async function runLaneChecks({ exec = null, env = process.env, cliVersion
   try { router = io.router?.() ?? null; } catch { router = null; }
   const ping = io.ping ?? null;
   const agentsOf = async () => { try { return (await io.agents?.(exec?.endpoint ?? router?.endpoint, exec?.tokenEnv ? (io.credential?.(exec.tokenEnv) ?? router?.token) : router?.token)) ?? null; } catch { return null; } };
-  return [
-    await safe(C.PREFLIGHT_POOL_AUTH, "remote", () => checkPoolAuth({ exec, router, credential: io.credential, ping })),
-    await safe(C.PREFLIGHT_POOL_VERSION, "remote", async () => checkPoolVersion({ exec, agents: usesPool(exec) ? await agentsOf() : null, cliVersion: cliV })),
-    await safe(C.PREFLIGHT_PATH_LOOP, "all", () => checkPathLoop({ env: { ...env, PATH: env.PATH ?? "" }, ...(io.loops ? { loops: io.loops } : {}) })),
-    await safe(C.PREFLIGHT_GH_FIELDS, "all", () => (io.ghExec ? checkGhFields({ exec: io.ghExec }) : pass(C.PREFLIGHT_GH_FIELDS, "skipped: no gh", "all"))),
-  ];
+  return Promise.all([
+    safe(C.PREFLIGHT_POOL_AUTH, "remote", () => checkPoolAuth({ exec, router, credential: io.credential, ping })),
+    safe(C.PREFLIGHT_POOL_VERSION, "remote", async () => checkPoolVersion({ exec, agents: usesPool(exec) ? await agentsOf() : null, cliVersion: cliV })),
+    safe(C.PREFLIGHT_PATH_LOOP, "all", () => checkPathLoop({ env: { ...env, PATH: env.PATH ?? "" }, ...(io.loops ? { loops: io.loops } : {}) })),
+    safe(C.PREFLIGHT_GH_FIELDS, "all", () => (io.ghExec ? checkGhFields({ exec: io.ghExec }) : pass(C.PREFLIGHT_GH_FIELDS, "skipped: no gh", "all"))),
+  ]);
 }
 
 /** One line per check: `PASS|FAIL code  detail`. */
