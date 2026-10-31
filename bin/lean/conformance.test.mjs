@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified } from "./conformance.mjs";
+import { vitestQuietFlag, normalizeRunnerCommand, cliUsageError, validateContract, applyAmendments, precheck, hotspotGrowth, reproFailures, isBugIssue, parseReview, checkCompleteness, decide, closePlan, isInvestigation, formatShadowSummary, followupItems, inIssue, isTestPath, normalizeEvidencePath, mergeReviewRows, reviewSkeleton, missingIds, resolveEvidencePath, movingBaseDiff, scopeText, evidencePathLine, evidencePathOnly, explainFailures, missingTool, repoTracks, tmpdirInputs, isScopeCheck, isPureScopeCheck, dropScopeValidates, tagOutOfBand, outOfBandRequirements, isOutOfBand, followupMap, VERIFY_MODES, OUT_OF_BAND_RE, FOLLOWUP_CLASSES, followupClass, BUCKETS, bucketKind, bucketProblems, bucketTally, isE2eCommand, e2eVerified, impliedDocDeliverables } from "./conformance.mjs";
 
 const ISSUE = "## Requirements\n1. The scrape route must release the spend reservation on 429.\n2. The search route must release the spend reservation on 429.\n\n- [ ] Billing pricing is unchanged.";
 const Q1 = "The scrape route must release the spend reservation on 429.";
@@ -838,5 +838,31 @@ describe("decision amendments (#4695)", () => {
   });
   it("a decision without choice or anchors is an incomplete amendment", () => {
     assert.match(amend({ choice: "" }).problems[0], /needs decision/);
+  });
+});
+
+describe("implied docs-freshness deliverable", () => {
+  const base = ["src/scrape.js"], after = [...base, "src/search.js", "docs/guide.md", "src/extra.js"];
+  it("a doc path newly added by a freshness fix round becomes an add-deliverable amendment, a code file does not", () => {
+    const am = impliedDocDeliverables({ before: base, after, contract: C, wasFailing: true, nowOk: true });
+    assert.deepEqual(am, [{ kind: "add-deliverable", path: "docs/guide.md", why: "docs freshness rule" }]);
+  });
+  it("applied, the doc passes conformance and an unrelated out-of-contract file in the same round is still scope_creep", () => {
+    const am = impliedDocDeliverables({ before: base, after, contract: C, wasFailing: true, nowOk: true });
+    const { contract } = applyAmendments(C, am, ISSUE);
+    const pc = precheck({ contract, changedFiles: ["src/scrape.js", "src/search.js", "docs/guide.md", "src/extra.js"], result: null });
+    const creep = pc.failures.filter((f) => f.kind === "scope_creep").map((f) => f.detail).join();
+    assert.match(creep, /src\/extra\.js/); assert.doesNotMatch(creep, /docs\/guide\.md/);
+  });
+  it("only prose files under a docs directory are implied: build, dependency, agent-instruction and spec files stay scope_creep", () => {
+    const bad = ["requirements.txt", "CMakeLists.txt", "CLAUDE.md", "AGENTS.md", "commands/work-on.md", ".claude/agents/x.md", "notes.txt", "docs/run.sh"];
+    const good = ["devdocs/modules/lean.md", "doc/api.rst", "packages/web/docs/setup.mdx"];
+    const am = impliedDocDeliverables({ before: base, after: [...base, ...bad, ...good], contract: C, wasFailing: true, nowOk: true });
+    assert.deepEqual(am.map((a) => a.path), good);
+  });
+  it("nothing is implied unless the rule failed before the round and passes after, or when the doc was already changed or covered", () => {
+    assert.deepEqual(impliedDocDeliverables({ before: base, after, contract: C, wasFailing: false, nowOk: true }), []);
+    assert.deepEqual(impliedDocDeliverables({ before: base, after, contract: C, wasFailing: true, nowOk: false }), []);
+    assert.deepEqual(impliedDocDeliverables({ before: [...base, "docs/guide.md"], after, contract: C, wasFailing: true, nowOk: true }), []);
   });
 });

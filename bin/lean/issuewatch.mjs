@@ -22,11 +22,13 @@ import { loadPolicy } from "./decision-engine.mjs";
 import { APP_SLUG } from "../init-repo.mjs";
 import { noComments } from "./render.mjs";
 import { listAssociations } from "./gh-assoc.mjs";
+import { verifyMerge, verifyComment } from "./issuewatch-verify.mjs";
 
 const WATCH_KEYS = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane", "max_issues", "max_inflight", "until", "mode", "parallel", "include_followups", "postdeploy_rollup", "threshold", "immediate", "max_release_issues", "theme_map", "tracker"];
 const TRUSTED = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const RETRIES = 3;
+const VERIFY_WAIT_MS = 60 * 60000; // how long a merge commit's CI may stay pending before verification fails
 const readJson = (f) => { try { return JSON.parse(readFileSync(f, "utf8")); } catch { return null; } };
 
 // ── config ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -208,12 +210,41 @@ export function claimIssue(rdir, issue, name) {
   } finally { rmdirSync(lock); }
 }
 
+/** Verify closed issue `n` (see tick); a pending result waits up to VERIFY_WAIT_MS from the first attempt. */
+async function verifyClosed({ n, repo, io, state, now, lane }) {
+  const comments = JSON.parse(String(await io.gh(["issue", "view", String(n), "-R", repo, "--json", "comments"]))).comments ?? [];
+  let r = await verifyMerge({ gh: io.gh, repo, lane, issue: n, comments, ...(io.requiredChecks ? { requiredChecks: io.requiredChecks } : {}) });
+  state.verifyFrom = { ...(state.verifyFrom ?? {}) };
+  state.verifyFrom[n] ??= now;
+  if (r.status === "pending") {
+    if (now - state.verifyFrom[n] < VERIFY_WAIT_MS) return;
+    r = { ...r, status: "failed", evidence: [...r.evidence, `FAIL: still unverified after ${VERIFY_WAIT_MS / 60000} min`] };
+  }
+  // Side effects first, state last: a failed gh call throws with the issue still closed and in pendingVerify, so the next tick
+  // resumes (state.escalation records the finished steps). Reopen is last because only closed issues are revisited.
+  const settled = () => { state.pendingVerify = state.pendingVerify.filter((x) => x !== n); delete state.verifyFrom[n]; };
+  if (r.status === "unmerged") { settled(); state.closed.push(n); return; }
+  if (r.status === "verified") {
+    await io.gh(["issue", "comment", String(n), "-R", repo, "--body", verifyComment(r, now)]);
+    settled(); state.merged.push(n); state.verified.push(n); return;
+  }
+  state.escalation = { ...(state.escalation ?? {}) };
+  const done = (state.escalation[n] ??= {});
+  if (!done.comment) { await io.gh(["issue", "comment", String(n), "-R", repo, "--body", verifyComment(r, now)]); done.comment = true; }
+  if (!done.label) { await io.gh(["issue", "edit", String(n), "-R", repo, "--add-label", "needs-human"]); done.label = true; }
+  await io.gh(["issue", "reopen", String(n), "-R", repo]);
+  delete state.escalation[n];
+  settled(); state.merged.push(n); state.unverified.push(n);
+}
+
 // ── the watch ────────────────────────────────────────────────────────────────────────────────────────────────
-const fresh = (watch, repo) => ({ name: watch.name, repo, phase: "running", started: null, claimed: [], inflight: [], merged: [], verified: [], failed: [], folded: [], retries: {}, lanes: {}, batch: null, laneFor: {} });
+const fresh = (watch, repo) => ({ name: watch.name, repo, phase: "running", started: null, claimed: [], inflight: [], merged: [], verified: [], unverified: [], closed: [], failed: [], folded: [], retries: {}, lanes: {}, batch: null, laneFor: {} });
 
 /**
  * One pass. `io`: `gh(args)→string`, `now()→ms`, `launch(issue,lane)→{poll()→null|{code}}` (per-issue), `batch.{add(id,issues),start(issues,parallel,lane)→id,reported(id)→bool}` (batch mode).
  * Settles inflight issues, applies the caps, claims new ones. Mutates and returns `state`; `state.phase === "done"` when a capped watch has drained.
+ * A closed issue is verified, not trusted: `verified` only when its merge checks out (issuewatch-verify.mjs), `unverified`
+ * (reopened, `needs-human`) when it does not, `closed` when no lane PR merged. `io.requiredChecks(lane)` overrides the lookup.
  */
 export async function tick({ watch, repo, io, state, dir, branches = {}, defaults = [], handles = new Map() }) {
   const now = io.now();
@@ -221,25 +252,27 @@ export async function tick({ watch, repo, io, state, dir, branches = {}, default
   const ghJson = async (args) => JSON.parse(String(await io.gh(args)));
   const closed = async (n) => (await ghJson(["issue", "view", String(n), "-R", repo, "--json", "state"])).state === "CLOSED";
   const fail = (n) => { state.inflight = state.inflight.filter((x) => x !== n); state.failed.push(n); };
-  const win = (n) => { state.inflight = state.inflight.filter((x) => x !== n); state.merged.push(n); state.verified.push(n); };
+  const settle = (n) => { state.inflight = state.inflight.filter((x) => x !== n); state.pendingVerify = [...(state.pendingVerify ?? []), n]; };
+  for (const k of ["unverified", "closed"]) state[k] ??= [];
+  const verify = (n) => verifyClosed({ n, repo, io, state, now, lane: state.lanes[n] ?? branches.staging ?? DEFAULT_STAGING_BRANCH });
 
   for (const n of [...state.inflight]) {
-    if (watch.mode === "batch") { if (await closed(n)) win(n); continue; }
+    if (watch.mode === "batch") { if (await closed(n)) settle(n); continue; }
     const h = handles.get(n);
     if (!h) { handles.set(n, io.launch(n, state.lanes[n])); continue; } // a restarted watch re-launches (run-issue resumes from GitHub)
     const r = h.poll();
     if (!r) continue;
     handles.delete(n);
-    if (r.code === 0) { if (await closed(n)) win(n); else { state.inflight = state.inflight.filter((x) => x !== n); state.merged.push(n); state.pendingVerify = [...(state.pendingVerify ?? []), n]; } }
+    if (r.code === 0) settle(n);
     else if (r.code === 75 && (state.retries[n] = (state.retries[n] ?? 0) + 1) <= RETRIES) handles.set(n, io.launch(n, state.lanes[n]));
     else fail(n);
   }
-  for (const n of [...(state.pendingVerify ?? [])]) if (await closed(n)) { state.verified.push(n); state.pendingVerify = state.pendingVerify.filter((x) => x !== n); }
+  for (const n of [...(state.pendingVerify ?? [])]) if (await closed(n)) await verify(n);
   if (watch.mode === "batch" && state.batch && io.batch.reported(state.batch)) { state.inflight.forEach(fail); state.batch = null; }
 
   const capped = (watch.max_issues && state.claimed.length >= watch.max_issues) || (watch.until && now >= Date.parse(watch.until));
   if (capped && state.phase === "running") state.phase = "draining";
-  if (state.phase === "draining") { if (!state.inflight.length) state.phase = "done"; return state; }
+  if (state.phase === "draining") { if (!state.inflight.length && !Object.keys(state.verifyFrom ?? {}).length) state.phase = "done"; return state; } // a merge mid-verification holds the drain
 
   const room = Math.min(watch.max_inflight - state.inflight.length, watch.max_issues ? watch.max_issues - state.claimed.length : Infinity);
   const args = ["issue", "list", "-R", repo, "--state", "open", "--limit", "200", "--json", "number,title,body,labels,milestone,author,createdAt"];
@@ -297,12 +330,12 @@ async function fold({ issue, watch, repo, io, state }) {
   state.folded.push(issue.number);
 }
 
-/** Status text: selector, claims against max_issues, inflight, merged, verified, failed, time remaining. */
+/** Status text: selector, claims against max_issues, inflight, merged, verified, unverified, failed, time remaining. */
 export function formatStatus(s, watch, now = Date.now()) {
   const sel = ["milestone", "labels", "exclude_labels", "search", "title_regex", "since", "version", "lane"].filter((k) => (Array.isArray(watch[k]) ? watch[k].length : watch[k])).map((k) => `${k}=${[].concat(watch[k]).join(",")}`).join(" ") || "(all trusted issues)";
   const left = watch.until ? `${Math.max(0, Math.round((Date.parse(watch.until) - now) / 60000))}m` : "forever";
   return [`watch ${s.name} (${s.repo}) [${s.phase}, ${watch.mode}]`, `  selector: ${sel}`,
-    `  claims: ${s.claimed.length}/${watch.max_issues ?? "∞"}  inflight: ${s.inflight.length}  merged: ${s.merged.length}  verified: ${s.verified.length}  failed: ${s.failed.length}`, `  time remaining: ${left}`,
+    `  claims: ${s.claimed.length}/${watch.max_issues ?? "∞"}  inflight: ${s.inflight.length}  merged: ${s.merged.length}  verified: ${s.verified.length}  unverified: ${(s.unverified ?? []).length}  closed unmerged: ${(s.closed ?? []).length}  failed: ${s.failed.length}`, `  time remaining: ${left}`,
     ...(watch.mode === "release" ? [`  pool: ${(s.pool ?? []).length}  releases: ${(s.releases ?? []).length + (s.release ? 1 : 0)}${s.release ? `  active: ${s.release.theme} (${s.release.issues.length} issues, batch ${s.release.batch})` : ""}  llm-classified: ${s.llm ?? 0}`] : [])].join("\n");
 }
 

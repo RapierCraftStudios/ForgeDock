@@ -34,11 +34,14 @@ export function fingerprint(signal) {
 /** The marker an issue body embeds so later rounds dedup against it. */
 export const signalRef = (fp) => `<!-- FORGE:SIGNAL_REF fp=${fp} -->`;
 
-/** fingerprint -> issue number for every open issue carrying a SIGNAL_REF marker (first issue wins). */
+/** The run of FORGE marker comments at the very end of a body: the only place the engine writes markers, so the only place they are trusted. */
+export const trailerOf = (body) => /(?:<!--\s*FORGE:[^>]*?-->\s*)+$/.exec(String(body ?? ""))?.[0] ?? "";
+
+/** fingerprint -> issue number for every open issue carrying a SIGNAL_REF marker in its trailer (first issue wins). */
 function refsOf(openIssues) {
   const map = new Map();
   for (const it of Array.isArray(openIssues) ? openIssues : []) {
-    for (const m of String(it?.body ?? "").matchAll(/<!--\s*FORGE:SIGNAL_REF\b([^>]*?)-->/g)) {
+    for (const m of trailerOf(it?.body).matchAll(/<!--\s*FORGE:SIGNAL_REF\b([^>]*?)-->/g)) {
       for (const f of m[1].matchAll(/\bfp=([0-9a-f]{6,64})/g)) if (!map.has(f[1])) map.set(f[1], it.number ?? null);
     }
   }

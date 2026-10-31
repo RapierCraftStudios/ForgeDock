@@ -456,7 +456,7 @@ const TEST_GATE_NOTE = {
 
 /** Phase 8 verdict from the deterministic inputs (CI, test gate, CONFIRMED CRITICAL/HIGH). */
 export function stagingVerdict({ ciFailing, testGateInvalid, confirmedCritical, confirmedHigh }) {
-  if (ciFailing > 0) return { verdict: "BLOCK DEPLOY", why: `CI failing (${ciFailing} required check(s) red; forgedock/verify excluded)` };
+  if (ciFailing > 0) return { verdict: "BLOCK DEPLOY", why: `CI failing (${ciFailing} required check(s) red; forgedock/verify and forge/deploy-gate excluded)` };
   if (testGateInvalid) return { verdict: "BLOCK DEPLOY", why: "test-gate result missing/invalid (fail closed)" };
   if (confirmedCritical > 0) return { verdict: "BLOCK DEPLOY", why: `${confirmedCritical} CONFIRMED CRITICAL finding(s)` };
   if (confirmedHigh > 0) return { verdict: "NEEDS FIXES FIRST", why: `${confirmedHigh} CONFIRMED HIGH finding(s)` };
@@ -471,9 +471,10 @@ async function summary(a, io) {
   if (st.head !== head) throw new Stop(1, [`REVIEW_RESULT: status: BLOCKED, blocker: head moved since --finalize (${String(st.head).slice(0, 7)} -> ${head.slice(0, 7)}); re-run the staging review`, BLOCK_DEPLOY]);
   const tg = testGateResult(io, sd, pr);
 
-  // Phase 1E read: forgedock/verify is excluded; an unreadable result counts as failing (fail closed)
+  // Phase 1E read: forgedock/verify is excluded; an unreadable result counts as failing (fail closed). forge/deploy-gate
+  // is excluded too: it reports this review's own marker, so an earlier GATE_FAILURE must not block the re-run that clears it.
   let ciFailing = 1;
-  const ci = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket", "--jq", '[.[] | select(.name != "forgedock/verify") | select(.bucket == "fail" or .bucket == "cancel")] | length'], { env, cwd: io.cwd });
+  const ci = await io.run("gh", ["pr", "checks", String(pr), "-R", c.ghRepo, "--json", "name,bucket", "--jq", '[.[] | select(.name != "forgedock/verify" and .name != "forge/deploy-gate") | select(.bucket == "fail" or .bucket == "cancel")] | length'], { env, cwd: io.cwd });
   if (/^\d+$/.test(ci.stdout.trim())) ciFailing = Number(ci.stdout.trim());
 
   const v = stagingVerdict({ ciFailing, testGateInvalid: tg.invalid, confirmedCritical: st.confirmedCritical, confirmedHigh: st.confirmedHigh });
@@ -500,7 +501,7 @@ async function summary(a, io) {
     "### Risk Matrix",
     "| Domain | Result | Notes |",
     "|--------|--------|-------|",
-    `| CI | ${ciFailing > 0 ? "FAIL" : "PASS"} | ${ciFailing} failing required check(s), forgedock/verify excluded |`,
+    `| CI | ${ciFailing > 0 ? "FAIL" : "PASS"} | ${ciFailing} failing required check(s), forgedock/verify and forge/deploy-gate excluded |`,
     `| Findings | ${st.confirmedCritical} CRITICAL / ${st.confirmedHigh} HIGH (CONFIRMED) | per-domain verdicts are in the FORGE:REVIEW-AGENT comments |`,
     `| **Test Gate** | \`${tg.verdict}\` | \`${tg.reason || "Phase 6.5 not run"}\` |`,
     "",

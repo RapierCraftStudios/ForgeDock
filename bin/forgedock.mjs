@@ -66,6 +66,7 @@ import {
   getInstalledCommandsDriftStatus,
 } from "./registry.mjs";
 import { renderMark, ember } from "./cinema.mjs";
+import { guideText, guideWidth, useAnsi } from "./guide.mjs";
 import {
   renderLogo,
   getLogoTagline,
@@ -3342,6 +3343,7 @@ function help() {
   const commands = [
     ["Command", "Description"],
     ["npx forgedock", "Guided setup: install commands + configure repo (default)"],
+    ["npx forgedock guide", "How the workflow fits together: core commands, issue -> staging -> main, where a run ends, how to resume"],
     ["npx forgedock install", "Install commands to ~/.claude/"],
     ["npx forgedock init", "Generate forge.yaml config for your project"],
     ["npx forgedock init --minimal", "Generate a minimal forge.yaml (required sections only)"],
@@ -3397,11 +3399,14 @@ function help() {
     ["--version, -v", "Print the installed version and check for updates"],
   ];
 
+  // Fit the terminal (100 columns when stdout is not a TTY: CI logs, pipes); the box adds 4.
+  const maxWidth = guideWidth(process.stdout) - 4;
+  process.stdout.write("New to ForgeDock? npx forgedock guide explains the workflow in one screen.\n\n");
   process.stdout.write(
-    box(table(commands, { header: true }), { title: "Usage" }) + "\n",
+    box(table(commands, { header: true, maxWidth }), { title: "Usage" }) + "\n",
   );
   process.stdout.write(
-    box(table(flagRows, { header: true }), { title: "Flags" }) + "\n",
+    box(table(flagRows, { header: true, maxWidth }), { title: "Flags" }) + "\n",
   );
 }
 
@@ -3947,7 +3952,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "bootstrap", "run-issue", "orchestrate", "triage", "probe", "gc", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "guards", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "issue-watch", "prod-watch", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "help", "--help", "-h",
+  "run", "bootstrap", "backend-check", "run-issue", "orchestrate", "milestone", "milestone-sync", "guards", "triage", "probe", "review-staging", "gc", "resume-stalled", "demo", "doctor", "watch", "issue-watch", "prod-watch", "labels", "config", "stats", "limits", "decisions", "sched", "schedd", "pool", "check", "guide", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4486,6 +4491,9 @@ switch (command) {
   case "--help":
   case "-h":
     help();
+    break;
+  case "guide":
+    process.stdout.write(guideText({ width: guideWidth(process.stdout), ansi: useAnsi(process.stdout) }) + "\n");
     break;
   default:
     console.log(`${RED}Unknown command: ${command}${RESET}`);
