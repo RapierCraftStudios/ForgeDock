@@ -106,6 +106,8 @@ function world(o = {}) {
         w.lockFails--; const e = new Error("git failed"); e.stderr = "error: could not lock config file .git/config: File exists"; throw e;
       }
       if (a[0] === "worktree" && a[1] === "remove") w.seq.push("worktree-remove");
+      if (a[0] === "ls-files" && a.includes(".forge-lean/")) return Object.keys(w.files).filter((k) => k.startsWith(`${WT}/.forge-lean/`)).map((k) => k.slice(WT.length + 1)).join("\n"); // #4880
+      if (a[0] === "clean" && a.includes(".forge-lean/")) for (const k of Object.keys(w.files)) if (k.startsWith(`${WT}/.forge-lean/`)) delete w.files[k]; // #4880
       if (a[0] === "update-ref") w.seq.push(`update-ref ${a[1]}`);
       if (a[0] === "rev-parse" && a[1] === "--git-path") return "/repo/.git/info/exclude";
       if (a[0] === "status" && a[1] === "--porcelain") return w.dirty ? " M src/foo.js\n" : "";
@@ -179,7 +181,7 @@ function world(o = {}) {
     waitCiGreen: async () => (w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }),
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
     ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
-    fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; }, rmdir: async (p) => { for (const k of Object.keys(w.files)) if (k.startsWith(`${p}/`)) delete w.files[k]; } },
+    fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; }},
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw new Error(o.followupError); return Object.fromEntries(items.map((i) => [i.key, o.followupIssue ?? 900])); },
   };
   return w;
@@ -3239,13 +3241,13 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.deepEqual(removed, ["/wt/lean-7"]);
     // a registered worktree dir is left to `git worktree remove`
     const w2 = world(); const removed2 = [];
-    w2.io.fs.exists = async () => true; w2.io.fs.rmdir = async (p) => { if (!p.endsWith("/.forge-lean")) removed2.push(p); };
+    w2.io.fs.exists = async () => true; w2.io.fs.rmdir = async (p) => { removed2.push(p); };
     const g = w2.io.git; w2.io.git = async (a, o2) => (a[0] === "worktree" && a[1] === "list" ? "worktree /wt/lean-7\nHEAD abc\n" : g(a, o2));
     await run(w2);
     assert.deepEqual(removed2, []);
     // a worktree root that is not the lean root never deletes anything
     const w3 = world(); const removed3 = [];
-    w3.io.fs.exists = async () => true; w3.io.fs.rmdir = async (p) => { if (!p.endsWith("/.forge-lean")) removed3.push(p); };
+    w3.io.fs.exists = async () => true; w3.io.fs.rmdir = async (p) => { removed3.push(p); };
     await run(w3, { worktreeRoot: "/wt" , issue: 7 });
     assert.ok(removed3.every((p) => p === "/wt/lean-7"));
   });

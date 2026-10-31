@@ -83,20 +83,20 @@ describe("gitignoreAdditions (#4590)", () => {
 });
 
 describe("lane scratch is untracked and cleared (#4880)", () => {
-  it("clearLaneScratch drops tracked and on-disk scratch and leaves product files", async () => {
+  it("clearLaneScratch drops tracked and untracked on-disk scratch and leaves product files", async () => {
     const d = repo();
     put(d, ".forge-lean/result.json"); sh(d, "add", "-f", "-A"); sh(d, "commit", "-q", "-m", "tracked scratch");
-    const fs = { exists: async (p) => existsSync(p), rmdir: async (p) => (await import("node:fs")).rmSync(p, { recursive: true, force: true }) };
+    const fs = { exists: async (p) => existsSync(p) };
     assert.equal(await clearLaneScratch({ git: gitIn(d), fs, cwd: d }), true);
     assert.ok(!existsSync(join(d, ".forge-lean")));
     assert.equal(sh(d, "ls-files", ".forge-lean").trim(), "");
     assert.ok(existsSync(join(d, "src/a.js")));
     assert.equal(await clearLaneScratch({ git: gitIn(d), fs, cwd: d }), false, "nothing left to clear");
   });
-  it("clearLaneScratch never throws, with or without fs.rmdir", async () => {
+  it("clearLaneScratch never throws, with or without fs.exists", async () => {
     const boom = async () => { throw new Error("git down"); };
     assert.equal(await clearLaneScratch({ git: boom, fs: {}, cwd: "/nope" }), false);
-    assert.equal(await clearLaneScratch({ git: boom, fs: { rmdir: boom }, cwd: "/nope" }), false);
+    assert.equal(await clearLaneScratch({ git: boom, fs: { exists: boom }, cwd: "/nope" }), false);
   });
   it("a checkpoint after add -A never commits .forge-lean files", async () => {
     const d = repo();
