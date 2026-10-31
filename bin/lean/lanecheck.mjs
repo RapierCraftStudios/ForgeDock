@@ -8,7 +8,6 @@
  * doctor --lanes` prints every check. Pure: all I/O is injected (`io`), so a fixed cause clears on the next call.
  */
 import { readFileSync } from "node:fs";
-import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 import { findShimLoops } from "./heavy.mjs";
 
 /** The running CLI's package version. */
@@ -22,7 +21,12 @@ export const GH_FIELDS = Object.freeze({
 });
 const pass = (code, detail, scope) => ({ code, ok: true, detail, scope });
 const fail = (code, detail, scope) => ({ code, ok: false, detail, scope });
-const C = OUTCOME_CODES;
+/** Preflight codes. Local to this module, not in OUTCOME_CODES: they are admission holds that never reach a run's terminal outcome. */
+export const PREFLIGHT_CODES = Object.freeze({
+  PREFLIGHT_POOL_AUTH: "preflight.pool_auth", PREFLIGHT_POOL_VERSION: "preflight.pool_version",
+  PREFLIGHT_PATH_LOOP: "preflight.path_loop", PREFLIGHT_GH_FIELDS: "preflight.gh_fields",
+});
+const C = PREFLIGHT_CODES;
 
 /** A remote or hybrid execution is configured (the only case the pool checks apply to). */
 export const usesPool = (exec) => Boolean(exec) && (exec.mode === "remote" || exec.mode === "hybrid") && ["pool", "remote"].includes(exec.provider ?? "pool");

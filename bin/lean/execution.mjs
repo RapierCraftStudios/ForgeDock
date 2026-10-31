@@ -83,8 +83,10 @@ const CLONE_RE = /\bclone\b[^\n]*\b(time[ds]?\s?out|timeout|fail\w*|refused|rese
 /** #4866: text of a sandbox clone failure (timeout, transport) as seen in an error or a lane result's detail. */
 export const isCloneFailure = (text) => CLONE_RE.test(String(text ?? ""));
 const CLONE_RETRY_S = 120;
+/** Outcome code of a retryable sandbox clone failure; local (not in OUTCOME_CODES), like the preflight codes in lanecheck.mjs. */
+export const SANDBOX_CLONE_CODE = "sandbox.clone";
 /** #4866: a sandbox clone failure is a retryable `deferred` `sandbox.clone`, never an engine-error (so the breaker never sees it). */
-const cloneDeferred = (id, detail) => ({ terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CLONE, retryInSeconds: CLONE_RETRY_S, detail: `sandbox ${id} could not clone the repo: ${detail}; retry in ${CLONE_RETRY_S}s` });
+const cloneDeferred = (id, detail) => ({ terminalReason: "deferred", code: SANDBOX_CLONE_CODE, retryInSeconds: CLONE_RETRY_S, detail: `sandbox ${id} could not clone the repo: ${detail}; retry in ${CLONE_RETRY_S}s` });
 const errLine = (t) => String(t ?? "").split("\n")[0].slice(0, 300);
 const errText = (e) => String(e?.stderr || e?.message || e).split("\n")[0].slice(0, 300);
 
