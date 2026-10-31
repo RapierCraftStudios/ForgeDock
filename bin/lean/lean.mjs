@@ -61,7 +61,7 @@ import { isExternalKill } from "./hostkill.mjs";
 import { buildResumeDigest } from "./resume.mjs";
 import { parsePredicate, evalPredicate, premiseAnnotation, registerAsk, registryPkgVersion, closedEdgeNote, onlyAsk, fileRemainder } from "./needs-human-premise.mjs";
 import { lightEligibility } from "./light.mjs";
-import { untrackToolState, unstageToolState, isToolState } from "./toolstate.mjs";
+import { untrackToolState, unstageToolState, isToolState, clearLaneScratch } from "./toolstate.mjs";
 import { ensureSignedOff } from "./signoff.mjs";
 import { runLightStep, runLightTests, lightBuildPrompt, upgradeNote, renderLiteReceipt } from "./lightlane.mjs";
 
@@ -1127,6 +1127,7 @@ export async function runCore(o) {
     }
     const excl = String(await git(["rev-parse", "--git-path", "info/exclude"])).trim();
     await io.fs.append(excl.startsWith("/") ? excl : `${wt}/${excl}`, `\n${LEAN_DIR}/\n`);
+    if (!resumed && await clearLaneScratch({ git, fs: io.fs, cwd: wt })) ev({ event: "LANE_SCRATCH_CLEARED" }); // #4880: never read a previous lane's scratch
     // ---- 2a. lane profile (#4395): the repo's lane instruction file replaces CLAUDE.md; a bad one falls back with an anomaly ----
     const lanePath = typeof o.laneInstructions === "string" ? o.laneInstructions.trim() : "";
     if (laneProfile.name !== "full" && lanePath) {

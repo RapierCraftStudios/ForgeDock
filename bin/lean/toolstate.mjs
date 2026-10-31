@@ -70,6 +70,20 @@ export async function untrackToolState({ git, base: ref, ev = () => {} }) {
   }
 }
 
+/**
+ * #4880: a fresh lane starts with no scratch it did not write. Drops .forge-lean/ from the index (a base that still tracks it)
+ * and from disk (`git clean -x`, so no fs delete is needed). Never throws. Returns true when the directory was tracked or present.
+ */
+export async function clearLaneScratch({ git, fs = {}, cwd }) {
+  const dir = `${cwd}/${LEAN_SCRATCH.slice(0, -1)}`;
+  let cleared = false;
+  try { cleared = String((await git(["ls-files", "--", LEAN_SCRATCH])) ?? "").split("\n").some((f) => isToolState(f.trim())); } catch { /* unreadable index: still clean the disk */ }
+  try { if (!cleared && fs.exists) cleared = Boolean(await fs.exists(dir)); } catch { /* best effort */ }
+  try { if (cleared) await git(["rm", "-r", "-f", "-q", "--ignore-unmatch", "--", LEAN_SCRATCH]); } catch { /* best effort */ }
+  try { if (cleared) await git(["clean", "-f", "-d", "-x", "-q", "--", LEAN_SCRATCH]); } catch { /* best effort */ }
+  return cleared;
+}
+
 /** The deny-list lines a repo's .gitignore text lacks (append-only; `next`: also next-env.d.ts, for Next.js repos). */
 export function gitignoreAdditions(text, { next = false } = {}) {
   const have = new Set(String(text ?? "").split(/\r?\n/).map((l) => l.trim().replace(/^\//, "")));
