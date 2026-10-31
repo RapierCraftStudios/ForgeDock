@@ -29,6 +29,7 @@ if [ "$1" = api ]; then
   case "$*" in "api repos/o/r/milestones"*) cat "$T_DIR/milestones.json"; exit 0 ;; esac
   case "$*" in "api repos/o/r/issues/10 --jq"*) cat "$T_DIR/parent.milestone"; exit 0 ;; esac
   case "$*" in *--jq*) cat "$ISSUE_BODY"; exit 0 ;; esac
+  case "$2" in repos/o/r/issues/*/comments*) c="${2#repos/o/r/issues/}"; c="$T_DIR/comments.${c%%/*}.json"; if [ -f "$c" ]; then cat "$c"; else echo '[]'; fi; exit 0 ;; esac
   n="${2##*/}"; [ -f "$T_DIR/issue.$n.json" ] && { cat "$T_DIR/issue.$n.json"; exit 0; }
   echo "HTTP 404: Not Found" >&2; exit 1
 fi
@@ -40,11 +41,11 @@ PASS=0; FAIL=0
 ok() { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
-reset() { : > "$GH_LOG"; rm -f "$ISSUE_BODY.edited" "$T"/issue.*.json "$T/create.n"; unset LOOKUP_FAIL CREATE_FAIL EDIT_FAIL CLAIM_FAIL COMMENT_FAIL REOPEN_FAIL CLOSE_FAIL DRY_RUN FORGE_FOLLOWUP_MILESTONE FORGE_FOLLOWUPS_DEFAULT_MILESTONE FORGE_EXTERNAL_PREREQ
+reset() { : > "$GH_LOG"; rm -f "$ISSUE_BODY.edited" "$T"/issue.*.json "$T"/comments.*.json "$T/create.n"; unset LOOKUP_FAIL CREATE_FAIL EDIT_FAIL CLAIM_FAIL COMMENT_FAIL REOPEN_FAIL CLOSE_FAIL DRY_RUN FORGE_FOLLOWUP_MILESTONE FORGE_FOLLOWUPS_DEFAULT_MILESTONE FORGE_EXTERNAL_PREREQ
   echo '[]' > "$T/milestones.json"; : > "$T/parent.milestone"
   echo '{"items":[]}' > "$SEARCH_JSON"; echo '[]' > "$COMMENTS_JSON"; }
-# issue_json NUMBER STATE ASSOCIATION [PARENT]: REST view of a follow-up carrying the DEFERRED_FROM marker
-issue_json() { printf '{"number":%s,"state":"%s","author_association":"%s","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #%s -->"}\n' "$1" "$2" "$3" "${4:-10}" > "$T/issue.$1.json"; }
+# issue_json NUMBER STATE ASSOCIATION [PARENT] [STATE_REASON]: REST view of a follow-up carrying the DEFERRED_FROM marker
+issue_json() { printf '{"number":%s,"state":"%s","author_association":"%s","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #%s -->"}\n' "$1" "$2" "$3" "${4:-10}" > "$T/issue.$1.json"; if [ -n "${5:-}" ]; then sed -i "s/\"state\":\"$2\"/\"state\":\"$2\",\"state_reason\":\"$5\"/" "$T/issue.$1.json"; fi; }
 # claim_json ASSOCIATION NUMBER...: parent comments carrying claim markers
 claim_json() { local a="$1" out="" n; shift; for n in "$@"; do out="${out:+$out,}{\"author_association\":\"$a\",\"user\":{\"type\":\"User\"},\"body\":\"<!-- FORGE:DEFERRED_ISSUE: #$n -->\"}"; done; echo "[$out]" > "$COMMENTS_JSON"; }
 printf 'a/x.sh\twhy a\t\nb/y.sh\twhy b\tknown-flaw\nc/z.sh\twhy c\t\n' > "$T/items.tsv"
@@ -128,15 +129,34 @@ check "index-lag: search never needed" "! grep -q search/issues '$GH_LOG'"
 
 # 10. e2: closed follow-up (found only by a state-all search) is reused and reopened
 reset
-printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER
+printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 completed
 echo '{"items":[{"number":77,"author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"
 OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/items.tsv"); RC=$?
 check "closed: reused, reopened, no create" "[ $RC -eq 0 ] && grep -q '^issue reopen 77' '$GH_LOG' && ! grep -q '^issue create' '$GH_LOG'"
 check "closed: search query covers all states" "grep -q 'is:issue' '$GH_LOG' && ! grep 'api -X' '$GH_LOG' | grep -q 'is:open'"
 reset; export REOPEN_FAIL=1
-printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER; claim_json OWNER 77
+printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 completed; claim_json OWNER 77
 bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null; RC=$?
 check "closed: reopen failure is rc 4" "[ $RC -eq 4 ]"
+
+# 10b. #4924: closed trackers are reopened only when completed, unresolved by a person, and given new items
+reset
+printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 not_planned; claim_json OWNER 77
+bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null; RC=$?
+check "not planned: stays closed, fresh tracker created" "[ $RC -eq 0 ] && ! grep -q '^issue reopen' '$GH_LOG' && ! grep -q '^issue edit 77' '$GH_LOG' && grep -q '^issue create' '$GH_LOG'"
+reset
+printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 completed; claim_json OWNER 77
+echo '[{"user":{"type":"User"},"body":"folded into #5"}]' > "$T/comments.77.json"
+bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null; RC=$?
+check "folded by a person: stays closed, fresh tracker created" "[ $RC -eq 0 ] && ! grep -q '^issue reopen' '$GH_LOG' && grep -q '^issue create' '$GH_LOG'"
+reset
+printf -- '- [ ] `a/x.sh`\n- [ ] `b/y.sh`\n- [ ] `c/z.sh`\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 completed; claim_json OWNER 77
+bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null; RC=$?
+check "completed, nothing new: stays closed, no create" "[ $RC -eq 0 ] && ! grep -q '^issue reopen' '$GH_LOG' && ! grep -q '^issue create' '$GH_LOG'"
+reset
+printf -- '- [ ] `a/x.sh`\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 completed; claim_json OWNER 77
+FORGE_RUN_ID=core_10 bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null; RC=$?
+check "completed, new items: reopened with a comment naming parent, run and items" "[ $RC -eq 0 ] && grep -q '^issue reopen 77' '$GH_LOG' && grep '^issue comment 77' '$GH_LOG' | grep -q 'FORGE:FOLLOWUP_REOPENED' && grep -q 'Reopened by the run of #10 (run .core_10.)' '$GH_LOG' && grep -q 'b/y.sh' '$GH_LOG'"
 
 # 11. create posts the claim marker on the parent
 reset
@@ -195,7 +215,7 @@ check "multi-claim: lowest valid (80) wins, missing 70 skipped" "[ $RC -eq 0 ] &
 
 # 17. DRY_RUN: no claim, reopen or close
 reset; export DRY_RUN=1
-printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER; claim_json OWNER 77
+printf 'x\n' > "$ISSUE_BODY"; issue_json 77 closed OWNER 10 completed; claim_json OWNER 77
 bash "$S" --parent 10 --repo o/r --items "$T/items.tsv" >/dev/null 2>&1
 check "dry-run: no comment/reopen/close/edit" "! grep -qE '^issue (comment|reopen|close|edit|create)' '$GH_LOG'"
 
