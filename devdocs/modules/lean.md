@@ -129,7 +129,7 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    #4594: `amend-requirement` with `text` + `why` keeps the requirement `deliver` and sets `amendment`; the reviewer judges it against that text, and a failing row reads `amendment not accepted` so the one builder resume is the correction turn (without `text` it is still the `defer` slip).
    contract already lists appends its why to that deliverable's `change`, so it
    can declare a package edge on an already-listed package.json (#4159).
-   #4899: the `FORGE:AMENDMENT` comment also carries a hidden `FORGE:AMENDMENT-STATE` JSON block (raw amendments bound to the frozen contract hash); a recovery or resume lane on the same frozen contract reads it back (`readPriorAmendments`) and re-applies it, so an accepted `supersedes` (or any other amendment) survives a `ci.red` recovery.
+   #4899: the `FORGE:AMENDMENT` comment also carries a hidden `FORGE:AMENDMENT-STATE` JSON block (raw amendments bound to the frozen contract hash); a recovery or resume lane on the same frozen contract reads it back (`readFrozenContract`) and re-applies it, so an accepted `supersedes` (or any other amendment) survives a `ci.red` recovery.
    Builder and reviewer runs get `FORGE_DOCKER_LABELS` (`ledger.mjs`
    `dockerLabels`: `forgedock.owner/batch/lane/issue/expires`, values limited to
    `[A-Za-z0-9_.-]`), and the implement prompt tells the builder to put them on

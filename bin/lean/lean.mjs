@@ -2053,7 +2053,7 @@ export async function runCore(o) {
       genPaths ??= (hotFacts ? hotFacts.generated_paths : light ? [] : (await hotspotsOf({ paths: [] }))?.generated_paths) ?? [];
       const wantsDecision = (Array.isArray(result?.amendments) ? result.amendments : []).some((x) => x?.kind === "decision");
       baseTree ??= wantsDecision ? String(await git(["ls-tree", "-r", "--name-only", base]).catch(() => "")).split("\n").filter(Boolean) : null;
-            const own = [...(Array.isArray(result?.amendments) ? result.amendments : []), ...impliedDocs];
+      const own = [...(Array.isArray(result?.amendments) ? result.amendments : []), ...impliedDocs];
       const ownKeys = new Set(own.map((x) => JSON.stringify(x)));
       const all = [...priorAmendments.filter((x) => !ownKeys.has(JSON.stringify(x))), ...own];
       const a = applyAmendments(frozen, all, issueText, { generatedPaths: genPaths, baseFiles: baseTree?.length ? baseTree : null });
