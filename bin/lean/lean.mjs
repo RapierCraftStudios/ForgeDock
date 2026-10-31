@@ -28,7 +28,7 @@ import { toolStats } from "./toolstats.mjs";
 import { readTestMap, readTestMapAtRef, mergeChecks, factsPath, TEST_MAP_FILE } from "./testmap.mjs";
 import { runChecks, runWithTimeoutRetry, planPrecheck, worktreeFingerprint, selfCheckState, quietFailure, CHECK_PLAN_FILE, SELF_CHECK_FILE, CHECK_LOG_DIR } from "./precheck.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, runRefreshScript, GH_AUTH_RE, GH_AUTH_RETRY_SECONDS, PUSH_TRANSIENT_RE, PUSH_PERMANENT_RE, GH_TRANSIENT_RE, MERGE_TRANSIENT_RE, MERGE_CONFLICT_RE } from "./retry.mjs";
-import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
+import { renderInvestigation, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderContract, renderAmendments, renderShadowReview, parseContractComment, parseAmendmentState, contractJson, capComment, sanitizeMd, MAX_COMMENT_CHARS, recoveryEvidence } from "./render.mjs";
 import { parseVerifierConfig, pickVerifierModel, changedSymbols, callersOf, verifierBudget, verifierPrompt, parseVerifierFindings, findingsToFailures, renderVerifierNote, VERIFIER_SYSTEM } from "./verifier.mjs";
 import { computeTrigger, riskPathHits, TRIGGER_MODES } from "./review-trigger.mjs";
 import { hostCapabilityBlock, contractHostNeeds } from "./execution.mjs";
@@ -1372,6 +1372,20 @@ export async function runCore(o) {
       return found;
     }
 
+    /** #4899: the raw amendments earlier runs posted for the frozen contract `hash`, so a recovery or resume lane keeps them. */
+    async function readPriorAmendments() {
+      let out = "";
+      try { out = String(await ghc(["api", "--paginate", `repos/${repo}/issues/${issue}/comments`, "--jq", ".[] | {body, author_association, user: {type: .user.type, login: .user.login}}"])); } catch { return []; }
+      const seen = new Set(), list = [];
+      for (const l of out.split("\n")) {
+        let c; try { c = JSON.parse(l); } catch { continue; }
+        if (!isTrustedComment(c)) continue;
+        const st = parseAmendmentState(c?.body);
+        if (st?.contract === hash) for (const a of st.amendments) { const k = JSON.stringify(a); if (!seen.has(k)) { seen.add(k); list.push(a); } }
+      }
+      return list;
+    }
+
     const isSplit = (iss.labels ?? []).some((l) => (l?.name ?? l) === SPLIT_LABEL);
     /**
      * #4211: the refactor:split step. One tool-less grouping call over the symbol index (none for a chained plan), the
@@ -2039,17 +2053,22 @@ export async function runCore(o) {
     const TRIGGER_SKIP = "skipped (review.trigger enforce: no risk trigger)";
     const triggerSkipNote = "## Conformance Review\n**Skipped by `review.trigger: enforce`:** no risk path, package edge or hotspot in the diff, and every deterministic gate passed; no reviewer ran (#4273).";
     let pendingDecisions = [];
+    let priorAmendments = null; // #4899
     let baseTree = null; // #4695: the base file list, read once and only when a decision amendment needs it
     let genPaths = null; // forge#4519: maintenance.generated_paths from hotspots.sh (plan facts; one config-only call without them, never on light lanes)
     async function amend() {
       genPaths ??= (hotFacts ? hotFacts.generated_paths : light ? [] : (await hotspotsOf({ paths: [] }))?.generated_paths) ?? [];
       const wantsDecision = (Array.isArray(result?.amendments) ? result.amendments : []).some((x) => x?.kind === "decision");
       baseTree ??= wantsDecision ? String(await git(["ls-tree", "-r", "--name-only", base]).catch(() => "")).split("\n").filter(Boolean) : null;
-      const a = applyAmendments(frozen, [...(Array.isArray(result?.amendments) ? result.amendments : []), ...impliedDocs], issueText, { generatedPaths: genPaths, baseFiles: baseTree?.length ? baseTree : null });
+      priorAmendments ??= await readPriorAmendments();
+      const own = [...(Array.isArray(result?.amendments) ? result.amendments : []), ...impliedDocs];
+      const ownKeys = new Set(own.map((x) => JSON.stringify(x)));
+      const all = [...priorAmendments.filter((x) => !ownKeys.has(JSON.stringify(x))), ...own];
+      const a = applyAmendments(frozen, all, issueText, { generatedPaths: genPaths, baseFiles: baseTree?.length ? baseTree : null });
       const sig = JSON.stringify(a.applied);
       if (a.applied.length && sig !== lastAmend) {
         lastAmend = sig;
-        await post("FORGE:AMENDMENT", renderAmendments(a.applied));
+        await post("FORGE:AMENDMENT", renderAmendments(a.applied, {}, { contract: hash, amendments: all }));
         T.decisions.push(`Contract amended: ${a.applied.map((x) => `${x.kind} ${x.target}`).join(", ")}`);
       }
       pendingDecisions = a.decisions; // #4737: persisted only once the PR merges

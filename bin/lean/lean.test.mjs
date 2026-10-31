@@ -13,7 +13,7 @@ import { makeLedger } from "./ledger.mjs";
 import { writeIndex } from "./guards.mjs";
 import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
-import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
+import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, renderAmendments, parseAmendmentState, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
@@ -4072,6 +4072,29 @@ describe("batch robustness (#4112-#4115)", () => {
     assert.equal(w.files[`${WT}/.forge-lean/contract.json`].trim(), contractJson(CONTRACT), "the engine writes the frozen contract into the worktree");
     assert.ok(!w.comments.some((c) => c.includes("FORGE:CONTRACT")), "not re-posted");
     assert.match(traj(w)[0], /frozen contract [0-9a-f]{12} recovered from the issue/);
+  });
+  it("#4899 recovery lane keeps accepted supersedes amendment", async () => {
+    const sup = { kind: "supersedes", guard: "#4785", why: "behaviour changed on purpose" };
+    const state = { contract: contractHash(contractJson(CONTRACT)), amendments: [sup] };
+    const mk = (st) => ({ body: `<!-- FORGE:AMENDMENT -->\n${renderAmendments([{ kind: "supersedes", target: "#4785", why: sup.why }], {}, st)}`, author_association: "OWNER", user: { type: "User", login: "op" } });
+    const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), mk(state)] });
+    assert.equal((await run(w, { recover: { code: "ci.red", attempt: 1 } })).terminalReason, "merged");
+    const posted = w.comments.find((c) => c.includes("FORGE:AMENDMENT-STATE"));
+    assert.ok(posted, "the recovery lane re-applies the prior supersedes and posts it");
+    assert.deepEqual(parseAmendmentState(posted).amendments, [sup]);
+    // a state bound to another contract hash is ignored
+    const w2 = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), mk({ ...state, contract: "000000000000" })] });
+    await run(w2, { recover: { code: "ci.red", attempt: 1 } });
+    assert.ok(!w2.comments.some((c) => c.includes("FORGE:AMENDMENT-STATE")));
+  });
+  it("#4899 amendment state round-trips; precheck still enforces a guard that was not superseded", () => {
+    const am = [{ kind: "supersedes", guard: "#1", why: "w" }];
+    assert.deepEqual(parseAmendmentState(renderAmendments([{ kind: "supersedes", target: "#1", why: "w" }], {}, { contract: "abc", amendments: am })), { contract: "abc", amendments: am });
+    assert.equal(parseAmendmentState(renderAmendments([], {})), null);
+    const frozen = { requirements: [], deliverables: [] };
+    const eff = applyAmendments(frozen, am).contract;
+    assert.deepEqual((eff.supersedes ?? []).map((s) => s.guard), ["#1"]);
+    assert.equal(applyAmendments(frozen, []).contract.supersedes, undefined);
   });
   const scoped = (body = ISSUE_BODY) => contractHash(scopeText({ title: "foo breaks", body: `${body}\n\n<!-- FORGE:STATE {"v":1} -->` }, []));
   it("#4265 a rerun recovers a contract frozen from the current issue scope (engine annotations aside)", async () => {
