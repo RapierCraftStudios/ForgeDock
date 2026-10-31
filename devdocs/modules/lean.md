@@ -2183,3 +2183,8 @@ the diff, never a hardcoded dossier path; any other out-of-contract file in the 
 
 `guardFailures` (`guardgate.mjs`) now starts each `conformance.guard_broken` detail with the override sentence: if the change intentionally changes the guarded behaviour (e.g. adding a code to an enum an exhaustiveness test enumerates), add `{"kind":"supersedes","guard":"#N","why":"..."}` to the amendments; the reviewer judges it. It leads the detail so `conformanceResumePrompt`'s 900-char slice keeps it. `builderImplementPrompt` lists the `supersedes` kind beside the other amendment kinds. `applyAmendments` and the precheck guard retirement are unchanged; row shape is unchanged.
 Cite: #4883.
+
+## Entry 2026-10-31 — FORGE:DECISION after the contract froze reaches requeued lanes (#4901)
+
+A trusted `FORGE:DECISION` comment posted after the last `FORGE:CONTRACT` comment is now a binding note: `decisionNote` (`prompts.mjs`) renders it and `lean.mjs` appends it to the implement and plan-rerun prompts of a resumed, salvaged or recovery lane that holds a frozen contract, independent of `context_pack`. `reviewerPrompt` keeps trusted `FORGE:DECISION` comments and still drops every other `FORGE:` record. Untrusted decisions, decisions before the contract, and the lane's own `recovery pass` records are not passed.
+Cite: #4901.
