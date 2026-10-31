@@ -10,7 +10,7 @@
  */
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { writeAtomic } from "./batch.mjs";
 import { acquireLock, watchDir, loadWatches } from "./issuewatch.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
@@ -109,6 +109,10 @@ export function issueBody(c, text, source) {
   return `${text || "Root-cause hypothesis unavailable this round; see the evidence."}\n\n**Class**: ${c.class}  **Severity**: ${c.severity}  **Copies**: ${c.count}  **Seen**: ${c.first_seen ?? "?"} .. ${c.last_seen ?? "?"}\n**Owner**: ${c.owner ?? "unassigned"}\n\n### Evidence\n${ev}\n\n${signalRef(c.fingerprint)}\n<!-- FORGE:PRODWATCH source=${source} -->\n`;
 }
 
+/** Marks the one open storm-summary issue: later rounds edit it instead of filing another, and it never counts as a prod issue (#4869). */
+export const SUMMARY_TAG = "<!-- FORGE:PRODWATCH_SUMMARY -->";
+const isSummary = (i) => String(i?.body ?? "").includes(SUMMARY_TAG);
+
 const issueNumber = (out) => Number(/(\d+)\s*$/.exec(String(out ?? "").trim())?.[1]) || null;
 
 // ── one round ──────────────────────────────────────────────────────────────────────────────
@@ -125,7 +129,8 @@ export async function roundOnce({ cfg, io, state = {}, dryRun = false, label = D
   let issues;
   try { issues = JSON.parse(String(await io.gh(["issue", "list", "--label", label, "--state", "all", "--limit", "200", "--json", "number,state,stateReason,body,createdAt,closedAt"]))); }
   catch (e) { return { ...rep, errors: [`issue list failed, nothing filed: ${e.message}`] }; }
-  const open = issues.filter((i) => i.state === "OPEN"), rows = metricRows(issues);
+  const openAll = issues.filter((i) => i.state === "OPEN"), openSummary = openAll.find(isSummary) ?? null;
+  const open = openAll.filter((i) => !isSummary(i)), rows = metricRows(issues.filter((i) => !isSummary(i)));
   rep.metrics = computeMetrics(rows);
 
   const modes = Object.fromEntries(cfg.sources.map((s) => [s.name, sourceMode(s.name, rep.metrics)]));
@@ -146,6 +151,8 @@ export async function roundOnce({ cfg, io, state = {}, dryRun = false, label = D
   }
 
   const gov = cfg.governor ?? {}, maxCost = gov.max_cost_usd_per_round > 0 ? Number(gov.max_cost_usd_per_round) : Infinity;
+  // A call with no reported cost and no cost_per_issue_usd estimate counts as the whole cap: an unknown spend never passes as free (#4868).
+  const unknownCost = Number(gov.cost_per_issue_usd) > 0 ? Number(gov.cost_per_issue_usd) : Number.isFinite(maxCost) ? maxCost : 0;
   const { file, summary } = admit(candidates, { governor: gov, state, openProdIssues: open, now: nowMs });
   for (const c of file) {
     if (rep.cost_usd >= maxCost) { rep.deferred.push({ fp: c.fingerprint, why: "max_cost_usd_per_round" }); continue; }
@@ -154,8 +161,8 @@ export async function roundOnce({ cfg, io, state = {}, dryRun = false, label = D
       try {
         const r = await io.llm(`Write the root-cause hypothesis and a short issue body (what is failing, likely cause, how to reproduce, first fix to try) for this production signal cluster. Follow this repo's issue conventions.\n\nClass: ${c.class}\nSeverity: ${c.severity}\nCopies: ${c.count}\n\n${c.signals.slice(0, 3).map((s) => `${s.title}\n${oneLine(s.body, 600)}`).join("\n---\n")}`);
         text = String(r?.text ?? r ?? "");
-        rep.cost_usd += Number(r?.cost_usd) > 0 ? Number(r.cost_usd) : Number(gov.cost_per_issue_usd) > 0 ? Number(gov.cost_per_issue_usd) : 0;
-      } catch (e) { rep.errors.push(`llm ${c.fingerprint}: ${e.message}`); }
+        rep.cost_usd += Number(r?.cost_usd) > 0 ? Number(r.cost_usd) : unknownCost;
+      } catch (e) { rep.cost_usd += unknownCost; rep.errors.push(`llm ${c.fingerprint}: ${e.message}`); }
     }
     const entry = { fp: c.fingerprint, title: issueTitle(c), body: issueBody(c, text, c.source) };
     if (dryRun) { rep.would_file.push(entry); continue; }
@@ -171,7 +178,11 @@ export async function roundOnce({ cfg, io, state = {}, dryRun = false, label = D
   for (const c of candidates) if (!file.includes(c) && !summary) rep.deferred.push({ fp: c.fingerprint, why: "governor" });
   if (summary) {
     rep.summary = summary;
-    if (!dryRun) await write("storm summary", () => io.gh(["issue", "create", "--title", summary.title, "--body", summary.body, "--label", label]));
+    const body = `${summary.body}\n\n${SUMMARY_TAG}\n`;
+    if (openSummary) await write("storm summary edit", () => io.gh(["issue", "edit", String(openSummary.number), "--title", summary.title, "--body", body]));
+    else await write("storm summary", () => io.gh(["issue", "create", "--title", summary.title, "--body", body, "--label", label]));
+  } else if (openSummary) {
+    await write("storm summary close", () => io.gh(["issue", "close", String(openSummary.number), "--comment", "prod-watch: the governor admitted every cluster this round; the storm is over."]));
   }
 
   await digest({ rep, state, io, label, nowMs, write, dryRun });
@@ -218,13 +229,22 @@ export function formatProdWatchStatus(s, repo) {
     `  last: ${s.killed ? "kill switch set, idle" : `clusters ${s.clusters ?? 0}, fileable ${s.fileable ?? 0}, deferred ${s.deferred ?? 0}, human ${s.human ?? 0}`}`, ...(s.errors?.length ? [`  errors: ${s.errors.slice(0, 3).join("; ")}`] : [])].join("\n");
 }
 
+/** The kill switch file: an absolute path as given, a relative one under the working directory (#4867 PW-2). */
+export const killSwitchSet = (cwd, f) => existsSync(isAbsolute(f) ? f : join(cwd, f));
+
+/** `claude --print --output-format json` output as {text, cost_usd}; plain text (no JSON) keeps cost unknown (#4868). */
+export function llmResult(out) {
+  try { const j = JSON.parse(String(out)); if (j && typeof j.result === "string") return { text: j.result, cost_usd: Number(j.total_cost_usd) > 0 ? Number(j.total_cost_usd) : null }; } catch { /* plain text */ }
+  return { text: String(out ?? ""), cost_usd: null };
+}
+
 function realIo(env = process.env, cwd = process.cwd()) {
   const sh = (cmd, input) => { const r = spawnSync("sh", ["-c", cmd], { encoding: "utf8", cwd, input, maxBuffer: 64 * 1024 * 1024, env }); return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" }; };
   return { env, now: () => Date.now(), exec: async (cmd) => sh(cmd), sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     gh: (args) => execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }),
-    llm: (prompt) => ({ text: execFileSync("claude", ["--print"], { input: prompt, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }) }),
+    llm: (prompt) => llmResult(execFileSync("claude", ["--print", "--output-format", "json"], { input: prompt, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 })),
     page: ({ channel, title, body }) => { const r = sh(channel, `${title}\n${body}\n`); if (r.code !== 0) throw new Error(`alert channel exit ${r.code}`); return true; },
-    exists: (f) => existsSync(join(cwd, f)), emit: (r) => process.stdout.write(`PRODWATCH_METRICS ${JSON.stringify(r)}\n`) };
+    exists: (f) => killSwitchSet(cwd, f), emit: (r) => process.stdout.write(`PRODWATCH_METRICS ${JSON.stringify(r)}\n`) };
 }
 
 const flag = (argv, f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : null; };

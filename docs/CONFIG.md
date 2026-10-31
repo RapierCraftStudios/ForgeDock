@@ -647,9 +647,9 @@ prod_watch:
 | `poll_minutes` | number | No | Minutes between rounds. Default 5. |
 | `sources` | map | Yes | `name: {kind, list, read, run, close, queries}` flow map per source (memo, alertmanager, sql, prometheus). Only `list`/`read`/`run` run in the loop. |
 | `deployed_probe` | command | No | Exits 0 when the fix is deployed; enables the verify step. |
-| `governor` | map | No | `max_issues_per_hour`, `max_open_prod_issues`, `max_cost_usd_per_round`, `cost_per_issue_usd`. Missing = unlimited. |
+| `governor` | map | No | `max_issues_per_hour`, `max_open_prod_issues`, `max_cost_usd_per_round`, `cost_per_issue_usd`. Missing = unlimited. With a cost cap set, an LLM call that reports no cost is charged `cost_per_issue_usd`, or the whole cap when that is unset. |
 | `target_watch` | string | No | An `issue_watch` watch name; filed issues get its first `labels` entry. Otherwise the value is the label. Default label `prod-watch`. |
-| `kill_switch` | path | No | While this file exists, rounds do nothing. Default `.forge/prod-watch.off`. |
+| `kill_switch` | path | No | While this file exists, rounds do nothing. Default `.forge/prod-watch.off`. Relative paths resolve under the working directory; absolute paths are used as given. |
 | `alert_channel` | command | No | Receives title and body on stdin for a P0 incident; nothing else pages. |
 
 **Commands that use this section**: `forgedock prod-watch`
