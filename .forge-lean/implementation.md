@@ -28,3 +28,7 @@ No new env vars.
 
 ## CI follow-up: sibling lists
 Checked ten tests flagged for not naming lanecheck. None enumerates bin/lean modules (matches were the word "lane" in unrelated code), so all are recorded as not_members in result.json.
+
+### Review follow-up
+- docs/OUTCOME-CODES.md and bin/tests/engine-outcome-codes.test.mjs are recorded as add-deliverable amendments: the test requires the doc and enum to agree and every enum code to be in its coverage map, and D3 adds five enum codes.
+- The base copy of engine-outcome-codes.test.mjs fails against any tree that adds an enum code ("every enum code has a declared coverage entry"), so that guard failure is inherent to D3. The updated test passes.
