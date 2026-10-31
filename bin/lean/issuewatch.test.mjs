@@ -20,7 +20,8 @@ function fakeIo(env, issues, { closed = new Set(), exit = () => 0, bodies = {} }
   const io = { env: { FORGEDOCK_WATCH_DIR: env }, calls, launched, batchOps, closed, bodies, tickClock: (ms) => { clock += ms; }, now: () => clock, sleep: async () => {},
     gh: async (a) => {
       calls.push(a);
-      if (a[1] === "list") return JSON.stringify(issues.filter((i) => !closed.has(i.number)));
+      if (a[0] === "api") return issues.filter((i) => !closed.has(i.number)).map((i) => `${i.number}\t${i.authorAssociation}`).join("\n"); // #4859: REST association list
+      if (a[1] === "list") return JSON.stringify(issues.filter((i) => !closed.has(i.number)).map(({ authorAssociation: _a, ...i }) => i));
       if (a[1] === "view" && a.includes("state")) return JSON.stringify({ state: closed.has(+a[2]) ? "CLOSED" : "OPEN" });
       if (a[1] === "view") return JSON.stringify({ body: bodies[a[2]] ?? "" });
       if (a[1] === "edit") { bodies[a[2]] = a[a.indexOf("--body") + 1]; return ""; }

@@ -27,6 +27,12 @@ describe("engine telemetry seam", () => {
     assert.equal("baseline_tokens" in q, false); assert.equal("lane_profile" in q, false);
   });
 
+  it("forge#4837: PRODWATCH_METRICS maps to prodwatch_metrics, absent values omitted", () => {
+    const m = mapRecord({ event: "PRODWATCH_METRICS", source: "memo", sample: 7, fp_rate: 0.25, signal_to_issue_ms: 1000, signal_to_merge_ms: null }, 0);
+    assert.equal(m.event, "prodwatch_metrics");
+    assert.deepEqual(m.payload, { source: "memo", sample: 7, fp_rate: 0.25, signal_to_issue_ms: 1000 });
+  });
+
   it("forge#4257: phase_attempt carries the backend, omitted when unreported", () => {
     assert.equal(mapRecord({ event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1, backend: "api" }, 0).payload.backend, "api");
     // #4407: the per-attempt cost and the session running total ride along; absent fields are omitted

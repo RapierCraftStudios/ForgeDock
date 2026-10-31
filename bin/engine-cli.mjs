@@ -23,6 +23,7 @@ import { makeEventEmitter, probeSweepEvents, experimentEvent } from "./engine/ev
 import { readExperiment } from "./experiment.mjs";
 import { readBranches, resolveLane, isDefaultLane } from "./lean/lane.mjs";
 import { parseVerify } from "./lean/verify.mjs";
+import { viewIssue } from "./lean/gh-assoc.mjs";
 import { parseExecution, detectNeeds, placementText } from "./lean/execution.mjs";
 import { relayPrefetchCommands } from "./lean/relay.mjs";
 import { parseTurnBudgets, formatTurnSummary, TURN_BUDGET_DEFAULTS } from "./lean/budget.mjs";
@@ -1254,7 +1255,7 @@ async function addToBatch({ id, tokens, root, io, viaDaemon = null, print = (l) 
   for (const n of new Set(ints)) {
     let st = null;
     let v = null;
-    try { v = JSON.parse(await io.gh(["issue", "view", String(n), ...(repo ? ["-R", repo] : []), "--json", "state,body,author,authorAssociation"])); st = v?.state ?? null; } catch { st = null; }
+    try { v = await viewIssue(io.gh, repo, n, "state,body,author"); st = v?.state ?? null; } catch { st = null; }
     state.set(n, st); records.set(n, v);
   }
   const open = [];
@@ -1861,8 +1862,8 @@ export async function runBatch({ argv, cwd: callerCwd = process.cwd(), env: call
         sink.line(`cross-lane: #${e.issue} (${e.lane}) depends on #${e.dependency} (${e.dependencyLane}); its fix will not be on ${e.lane}: re-milestone #${e.dependency} or wait for a milestone sync`);
       },
       readBody: maint || registry || hybrid
-        ? async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,labels,comments,author,authorAssociation"])); trustedOf.set(n, bodyTrusted(v)); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }
-        : async (n) => { const v = JSON.parse(await leanIo.gh(["issue", "view", String(n), "-R", repo, "--json", "body,comments,author,authorAssociation"])); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
+        ? async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,labels,comments,author"); trustedOf.set(n, bodyTrusted(v)); labelsOf.set(n, (v.labels ?? []).map((x) => x.name)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }
+        : async (n) => { const v = await viewIssue(leanIo.gh, repo, n, "body,comments,author"); trustedOf.set(n, bodyTrusted(v)); needsOf.set(n, detectNeeds(placementText(v), execForNeeds)); if (execForNeeds?.relay) prefetchOf.set(n, relayPrefetchCommands(v, execForNeeds.relay)); return v.body; }, // #4785: decisions and the frozen contract's validate commands too
       onUpdate: (r) => sink.row(r),
     });
   } finally { for (const [sig, f] of Object.entries(handlers)) off(sig, f); }
@@ -2226,7 +2227,7 @@ export async function schedFromCli(argv, deps = {}) {
   throw new Error(usage);
 }
 
-/** #4773: is the author of a `gh issue view --json author,authorAssociation` record trusted (the engine admission's `isTrustedActor`)? */
+/** #4773: is the author of a `viewIssue` record (author plus the REST association, #4859) trusted (the engine admission's `isTrustedActor`)? */
 const bodyTrusted = (v) => isTrustedActor({ association: v?.authorAssociation, type: v?.author?.is_bot ? "Bot" : "User", login: v?.author?.login });
 
 /**
