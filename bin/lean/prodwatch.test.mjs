@@ -171,6 +171,38 @@ describe("roundOnce", () => {
     assert.equal(creates(w2).length, 0);
     assert.equal(w2.gh.filter((a) => a[1] === "edit").length, 1);
   });
+  it("retries a failed digest create next round and records the issue once it succeeds", async () => {
+    const matrix = [{ class: "credentials", re: /credential/i }];
+    const state = {}, alerts = [alert("Key", "P2", "rotate credential now")];
+    const w = world({ alerts }), gh = w.io.gh;
+    w.io.gh = async (a) => { if (a[1] === "create") { w.gh.push(a); throw new Error("gh down"); } return gh(a); };
+    const r = await roundOnce({ cfg, io: w.io, state, humanMatrix: matrix });
+    assert.match(r.errors.join(), /digest create/);
+    assert.equal(state.digest, undefined);
+    const w2 = world({ alerts });
+    await roundOnce({ cfg, io: w2.io, state, humanMatrix: matrix });
+    assert.equal(creates(w2).length, 1);
+    assert.equal(state.digest.items.length, 1);
+    assert.ok(state.digest.issue);
+  });
+  it("leaves digest state unchanged on a failed edit and retries it with the new item", async () => {
+    const matrix = [{ class: "credentials", re: /credential/i }];
+    const state = {};
+    await roundOnce({ cfg, io: world({ alerts: [alert("Key", "P2", "rotate credential now")] }).io, state, humanMatrix: matrix });
+    const before = JSON.stringify(state.digest);
+    const alerts = [alert("Key", "P2", "rotate credential now"), alert("Key2", "P2", "credential expired elsewhere")];
+    const w = world({ alerts }), gh = w.io.gh;
+    w.io.gh = async (a) => { if (a[1] === "edit") { w.gh.push(a); throw new Error("gh down"); } return gh(a); };
+    const r = await roundOnce({ cfg, io: w.io, state, humanMatrix: matrix });
+    assert.match(r.errors.join(), /digest edit/);
+    assert.equal(JSON.stringify(state.digest), before);
+    const w2 = world({ alerts });
+    await roundOnce({ cfg, io: w2.io, state, humanMatrix: matrix });
+    const edits = w2.gh.filter((a) => a[1] === "edit");
+    assert.equal(edits.length, 1);
+    assert.match(edits[0][edits[0].indexOf("--body") + 1], /Key2/);
+    assert.equal(state.digest.items.length, 2);
+  });
   it("drops a source whose false-positive rate is over the cap to shadow", async () => {
     const issues = Array.from({ length: 12 }, (_, i) => ({ number: i + 1, state: "CLOSED", stateReason: "NOT_PLANNED", body: `x\n<!-- FORGE:SIGNAL_REF fp=${String(i).padStart(6, "a")} -->\n<!-- FORGE:PRODWATCH source=am -->`, createdAt: "2026-10-30T00:00:00Z", closedAt: "2026-10-30T01:00:00Z" }));
     const w = world({ alerts: [alert("Slow", "P2")], issues });
