@@ -4094,7 +4094,7 @@ describe("batch robustness (#4112-#4115)", () => {
     const dir = tmpDir("guard-recover-");
     const w = world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozenComment(), prior], baseFiles: { ":src/foo.js": "old" } });
     w.io.runCommand = async () => ({ rc: 1, output: "guard test failed" });
-    await run(w, { dir, recover: { code: "ci.red", attempt: 1 }, loadGuards: async () => [mkGuard(4785), mkGuard(9)] });
+    await run(w, { dir, worktreeRoot: dir, recover: { code: "ci.red", attempt: 1 }, loadGuards: async () => [mkGuard(4785), mkGuard(9)] });
     const text = JSON.stringify([w.comments, w.calls.filter((c) => c[0] === "runner").map((c) => c[4])]);
     assert.match(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#9\\"/, "precheck reports #9 as guard_broken");
     assert.doesNotMatch(text, /conformance\.guard_broken.{0,400}?guard\\":\\"#4785\\"/, "precheck does not report the superseded #4785");
