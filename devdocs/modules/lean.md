@@ -2163,6 +2163,11 @@ not `URL.pathname`, which gave `/C:/...` on Windows.
 `makeLeanIo` now passes `{ repo }` to `makeProjector`, so the projector's `gh issue view --json body` carries `-R <repo>` (callers without a repo keep cwd resolution). `getBody` throws on non-JSON output or a missing/non-string `body` instead of returning `""`, so `writeState` makes no `gh issue edit` call on an unreadable read. `writeState` also refuses a body that would drop existing non-STATE issue text.
 Cite: #4860.
 
+## Entry 2026-10-31 — issue-watch escalation is resumable, reopen last (#4891)
+
+`issuewatch.mjs` `verifyClosed` now runs side effects before state. A failed merge verification posts the evidence comment, adds `needs-human`, and only then reopens, because the watch revisits only still-closed issues. Finished steps are recorded in `state.escalation[n]` (`comment`, `label`). A failing `gh` call throws with the issue closed and in `pendingVerify`, so the next tick resumes without repeating done steps. `merged`/`unverified`/`verifyFrom` change only after all steps succeed; the verified branch comments before the state push.
+Cite: #4891.
+
 ## Entry 2026-10-31 — Prod-watch owner digest state persists after the gh write (#4872)
 
 `digest()` in `bin/lean/prodwatch.mjs` builds the merged item list locally and calls `gh issue create`/`edit` through `write()`. `state.digest` (`date`, `issue`, `items`) is assigned only when `write()` returned non-null; an existing `state.digest` is never mutated beforehand. A failed write (error in `rep.errors`) leaves state unchanged, so the next round retries it with the new items. `--dry-run` still makes no writes or state changes.
