@@ -2,37 +2,43 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "No `gh issue view|list --json` call in `bin/` requests `authorAssociation` [type:unit]",
+   "quote": "Rate limits and storm summary.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "A test asserts every `--json` field list passed to `gh issue view|list` in `bin/` is drawn from the fields gh supports (a fixed allowlist of the fields gh 2.97 lists) [type:unit]",
+   "quote": "`admit(clusters, {governor, state, openProdIssues, now})` returns `{file:[], summary:null|{title, body}}`.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "`forgedock orchestrate --add \u003cid> N` adds an open issue on a real gh (regression test with a gh stub that rejects unknown fields the way gh does) [type:unit]",
+   "quote": "It enforces `max_issues_per_hour`, `max_open_prod_issues` and `max_cost_usd_per_round` (as in signal-planner Phase 0).",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R4",
-   "quote": "The body reader and issue-watch list still resolve the author's trust (the association comes from the REST or GraphQL field) [type:unit]",
+   "quote": "On overflow it files ONE summary issue that lists the deferred clusters, instead of a storm.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R5",
-   "quote": "Each call asks only for fields that `gh` supports.",
+   "quote": "Incidents are admitted before defects.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R6",
-   "quote": "`bodyTrusted` / `isTrustedActor` keep their semantics, and a failed read still fails closed for trust.",
+   "quote": "Document how these keys map to signal-planner's `max_issues_per_run`/`max_cost_usd`.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R7",
+   "quote": "Rules: pure functions with an injected `io` (exec/gh/llm/now) like bin/lean/issuewatch.mjs; read-only by contract; deterministic first; core stays repo-agnostic (#1347). Repo is PUBLIC: no raw customer data in fixtures.",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -40,123 +46,78 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/lean/gh-assoc.mjs",
-   "change": "New module: ISSUE_JSON_FIELDS allowlist (gh 2.97 issue fields, no authorAssociation); issueAssociation(gh, repo, n) via `gh api repos/{repo}/issues/N --jq .author_association` (repo null => {owner}/{repo}); listAssociations(gh, repo) via one paginated REST list returning Map number->association. Any failure returns undefined/empty so trust fails closed.",
+   "path": "bin/lean/prodwatch-governor.mjs",
+   "change": "New pure module exporting admit(clusters,{governor,state,openProdIssues,now}) -> {file,summary}. Only fileable, non-duplicate, non-expected-class clusters are candidates; order incident, then defect, then rest (severity P0..P3, count desc, fingerprint tiebreak). Budget = min(max_issues_per_hour minus state.filed timestamps within 1h of now, max_open_prod_issues minus openProdIssues.length, floor(max_cost_usd_per_round / cost per cluster)); cost per cluster = cluster.cost_usd ?? governor.cost_per_issue_usd ?? 0 (0 means no cost cap). Missing/invalid limit = unlimited for that key. Overflow -> one summary {title, body} listing deferred clusters (class, severity, count, first/last seen, reason deferred); no SIGNAL_REF in summary so deferred clusters stay re-admittable. No fs, no gh, no Date.now (use now).",
    "requirements": [
     "R1",
+    "R2",
+    "R3",
     "R4",
     "R5",
-    "R6"
+    "R7"
    ]
   },
   {
    "id": "D2",
-   "path": "bin/engine-cli.mjs",
-   "change": "Wiring only (import + calls; keep growth tiny, hotspot): drop authorAssociation from the --json lists at addToBatch (:1257) and the batch readBody (:1864/:1865); merge association from issueAssociation into the record before bodyTrusted/addedEdges.",
+   "path": "bin/lean/prodwatch-governor.test.mjs",
+   "change": "node:test cases: each of the three caps, hourly window expiry, incidents before defects, one summary only (not per cluster), no summary when nothing overflows, non-fileable/duplicate skipped, determinism, input not mutated; a 70-memo storm via fixtures/prodwatch through cluster+classify yields bounded file list plus one summary.",
    "requirements": [
     "R1",
+    "R2",
     "R3",
-    "R4",
-    "R5",
-    "R6"
-   ]
-  },
-  {
-   "id": "D3",
-   "path": "bin/lean/issuewatch.mjs",
-   "change": "Drop authorAssociation from the two `gh issue list --json` lists (:244, :273); merge listAssociations by number into each issue before classifyIssue.",
-   "requirements": [
-    "R1",
     "R4",
     "R5"
    ]
   },
   {
-   "id": "D4",
-   "path": "bin/lean/gh-assoc.test.mjs",
-   "change": "New tests: scan non-test bin/**/*.mjs for gh issue view|list --json field lists and assert each is within ISSUE_JSON_FIELDS (and none has authorAssociation); helper unit tests incl. fail-closed; strict gh stub rejecting unknown fields drives addToBatch (orchestrate --add adds an open issue) and the readBody trust path; issuewatch tick still claims a trusted-author issue and skips an untrusted one.",
+   "id": "D3",
+   "path": "devdocs/modules/lean.md",
+   "change": "Add prodwatch-governor entry after the prodwatch-triage entry, with the key mapping: max_issues_per_hour is a rolling-hour rate (signal-planner max_issues_per_run is per run); max_open_prod_issues is a standing cap with no planner equivalent; max_cost_usd_per_round maps to the planner's max_cost_usd applied per poll round; a run's effective issue cap = min of the three.",
    "requirements": [
-    "R2",
-    "R3",
-    "R4",
     "R6"
-   ]
-  },
-  {
-   "id": "D5",
-   "path": "bin/tests/orchestrate-add-edges.test.mjs",
-   "change": "Update gh mock to serve the REST association call (api) instead of the authorAssociation JSON key; keep the untrusted-author case.",
-   "requirements": [
-    "R3",
-    "R4"
-   ]
-  },
-  {
-   "id": "D6",
-   "path": "bin/lean/issuewatch.test.mjs",
-   "change": "Update gh mocks for the REST association list call; same trust assertions.",
-   "requirements": [
-    "R4"
-   ]
-  },
-  {
-   "id": "D7",
-   "path": "bin/lean/issuewatch-release.test.mjs",
-   "change": "Update gh mocks for the association call if its io.gh stub handles issue list.",
-   "requirements": [
-    "R4"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "bodyTrusted/isTrustedActor semantics (bin/engine-cli.mjs:2230, bin/engine/phases.mjs:63): untrusted or unreadable association is untrusted."
+   "what": "bin/lean/prodwatch-triage.mjs exports (fingerprint, cluster, classifyCluster, validateCluster, tallyClusters, signalRef) and cluster shape unchanged"
   },
   {
    "id": "P2",
-   "what": "classifyIssue results (bin/lean/issuewatch.mjs:145) for the same issue records, including the bot/spoof cases in bin/lean/issuewatch.test.mjs."
+   "what": "commands/signal-planner.md governor keys and defaults (max_issues_per_run 10, max_cost_usd 5.00) unchanged"
   },
   {
    "id": "P3",
-   "what": "`--json comments` reads of authorAssociation (bin/lean/prefilter.mjs, bin/hooks/pre-tool-use.mjs) are valid and unchanged."
-  },
-  {
-   "id": "P4",
-   "what": "orchestrate --add output format and edge report (bin/engine-cli.mjs addToBatch/addedEdges)."
+   "what": "Enumerating sibling-list tests in bin/lean and bin/engine/telemetry-seam.test.mjs keep passing without edits"
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test bin/lean/gh-assoc.test.mjs bin/tests/orchestrate-add-edges.test.mjs bin/lean/issuewatch.test.mjs bin/lean/issuewatch-release.test.mjs"
+   "command": "node --test bin/lean/prodwatch-governor.test.mjs bin/lean/prodwatch-triage.test.mjs bin/lean/prodwatch-sources.test.mjs"
   },
   {
    "id": "V2",
-   "command": "node --test bin/lean/lean.test.mjs bin/lean/execution.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/batch.test.mjs bin/engine/telemetry-seam.test.mjs bin/lean/checks.test.mjs bin/lean/drift.test.mjs bin/lean/fixround.test.mjs"
+   "command": "node --test bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/execution.test.mjs bin/lean/fixround.test.mjs"
   },
   {
    "id": "V3",
-   "command": "node --check bin/engine-cli.mjs && node --check bin/lean/gh-assoc.mjs && node --check bin/lean/issuewatch.mjs"
+   "command": "node --check bin/lean/prodwatch-governor.mjs && bash scripts/check-devdocs-freshness.sh origin/staging"
   }
  ],
  "decisions": [
   {
    "id": "K1",
-   "choice": "Get the association from REST (`gh api ... author_association`), not GraphQL.",
-   "justification": "Issue's Expected section offers either; REST has precedent at bin/engine-cli.mjs:1922 and needs no query string; one paginated list call serves issue watch.",
+   "choice": "Cost per cluster comes from cluster.cost_usd or governor.cost_per_issue_usd, since issue wording is not an LLM call here and the issue gives no cost source",
+   "justification": "signal-planner Phase 0 caps estimated spend (commands/signal-planner.md:19); governor stays pure with no io",
    "source": "precedent"
   },
   {
    "id": "K2",
-   "choice": "New module bin/lean/gh-assoc.mjs instead of growing engine-cli.mjs.",
-   "justification": "engine-cli.mjs is a 2467-line hotspot; it gets only wiring.",
-   "source": "lint"
+   "choice": "Pure module with no fs/gh; hourly history passed in state.filed (ISO timestamps) and now injected",
+   "justification": "same injected-io style as bin/lean/prodwatch-triage.mjs:1-8 and issuewatch.mjs",
+   "source": "precedent"
   }
- ],
- "repro_test": {
-  "path": "bin/lean/gh-assoc.test.mjs",
-  "id": "gh issue --json field lists stay within the gh allowlist",
-  "command": "node --test --test-name-pattern=\"gh issue --json field lists stay within the gh allowlist\" bin/lean/gh-assoc.test.mjs"
- }
+ ]
 }

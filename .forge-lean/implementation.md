@@ -1,31 +1,31 @@
 ### Approach
-`authorAssociation` is not a `gh issue view|list --json` field. A new module reads `author_association` from REST and merges it into the issue record, failing closed (unset means untrusted).
+One pure module, `admit`, over validated triage clusters. Candidates are fileable, non-duplicate, non-expected-class clusters sorted incident, defect, then severity, size and fingerprint. A cluster is admitted while the hourly, open-issue and cost allowances all remain. Everything else goes into one summary.
 
 ### Changes
-- bin/lean/gh-assoc.mjs (new): `ISSUE_JSON_FIELDS`, `issueAssociation`, `listAssociations`, `viewIssue`.
-- bin/engine-cli.mjs: `addToBatch` and both batch body readers use `viewIssue`; the field is dropped from the `--json` lists.
-- bin/lean/issuewatch.mjs: the two `gh issue list` calls drop the field and merge `listAssociations` by number.
-- bin/lean/gh-assoc.test.mjs (new): allowlist scan, helper tests, strict-gh `--add` regression, issue-watch tick trust.
-- Mock updates (REST call): orchestrate-add-edges, issuewatch, issuewatch-release, batch, lean tests.
-- devdocs/decisions/4859-issue-author-association-rest.md: devdocs freshness (amendment add-deliverable).
+- bin/lean/prodwatch-governor.mjs: new `admit`.
+- bin/lean/prodwatch-governor.test.mjs: 9 tests covering each cap, window expiry, ordering, single summary, skips, determinism, and the 70-memo storm.
+- devdocs/modules/lean.md: dossier entry with the key mapping to signal-planner `max_issues_per_run`/`max_cost_usd`.
 
 ### Acceptance Criteria Status
-- R1 ✅ bin/engine-cli.mjs:1258,1865,1866; bin/lean/issuewatch.mjs:245,277
-- R2 ✅ bin/lean/gh-assoc.test.mjs:36
-- R3 ✅ bin/lean/gh-assoc.test.mjs:60
-- R4 ✅ bin/lean/gh-assoc.test.mjs:75
-- R5 ✅ same as R1/R2
-- R6 ✅ bodyTrusted unchanged (bin/engine-cli.mjs:2231); helper fails closed (gh-assoc.test.mjs:49)
+- R1 ✅ bin/lean/prodwatch-governor.mjs:31
+- R2 ✅ bin/lean/prodwatch-governor.mjs:31
+- R3 ✅ bin/lean/prodwatch-governor.mjs:40-47
+- R4 ✅ bin/lean/prodwatch-governor.mjs:49-57
+- R5 ✅ bin/lean/prodwatch-governor.mjs:14-19
+- R6 ✅ devdocs/modules/lean.md (prodwatch-governor entry)
+- R7 ✅ pure, no fs/gh/exec, clock injected
 
 ### Verification
-- V1 (gh-assoc, orchestrate-add-edges, issuewatch, issuewatch-release): 42 pass, 0 fail. The new gh-assoc tests fail (3 of 4) with engine-cli.mjs and issuewatch.mjs reverted.
-- V2 (enumerating and sibling tests): 832 pass, 0 fail.
-- V3 node --check: ok.
-- Also ran recovery, schedd, plan-validate-live: pass. devdocs freshness: passes after the decision doc. `forgedock check`: PASS.
-- checks.mjs widened to the full suite (fan-out cap); not run, per host rules.
+- V1 (governor, triage, sources tests): 31 pass, 0 fail.
+- V2 (sibling-list tests): 314 pass, 0 fail.
+- V3 (node --check + devdocs freshness): pass.
+- The new test file fails without the module (import error).
+- checks.mjs scoped run: 889 pass, 3 fail. All 3 failures are in bin/tests/journey.test.mjs (WSL platform detection, a tmp copyFile case), a file this change does not touch. They look environmental, but I did not run them on the base to confirm.
+- `forgedock check`: PASS.
 
 ### Notes
-No formatter is configured in package.json. No env vars. One extra REST call per issue read, and one paginated list per issue-watch tick.
+- No env vars. No sibling-list test needed editing; the new file is not a member of any of them.
+- Cost per cluster is `cluster.cost_usd ?? governor.cost_per_issue_usd ?? 0`.
 
-## Sibling-list follow-up
-The ten tests flagged for enumerating gh-assoc siblings hold unrelated lists (telemetry events, outcomes, check kinds, git args), not module names. Recorded each as a not_member in result.json; no test edits.
+## Sibling-list check
+Ten flagged tests enumerate unrelated literals (telemetry events, ledgers, kinds, stubs); prodwatch-governor is not a member of any, recorded in result.json not_members.

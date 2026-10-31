@@ -1,42 +1,36 @@
 **Verdict**: CONFIRMED
 **Confidence**: high
-**Severity**: high (`orchestrate --add/--resume` can never add an issue; the batch body reader drops every trusted dependency edge, placement need and relay prefetch; issue watch sees no issue)
-**Task Type**: bug
+**Severity**: medium (missing feature: without a governor the prod-watch loop can storm the tracker)
+**Task Type**: feature
 
 ### What Was Claimed
-`gh issue view|list --json` has no `authorAssociation` field (gh 2.97: `Unknown JSON field`). Four engine calls request it, so each fails on a real host. Unit tests mock `gh`, so CI never saw it.
+Add `bin/lean/prodwatch-governor.mjs` with `admit(clusters, {governor, state, openProdIssues, now})` returning `{file:[], summary:null|{title, body}}`, enforcing `max_issues_per_hour`, `max_open_prod_issues`, `max_cost_usd_per_round`, filing ONE summary issue on overflow, incidents before defects, and documenting the mapping to signal-planner's `max_issues_per_run`/`max_cost_usd`.
 
 ### What We Found
-- bin/engine-cli.mjs:1257 `addToBatch` asks `state,body,author,authorAssociation`. The throw is swallowed (`st = null`), so every issue is skipped as `unreadable` (:1266).
-- bin/engine-cli.mjs:1864 and :1865 (batch `readBody`) ask `...author,authorAssociation`. The throw is caught fail-open at bin/lean/orchestrate.mjs:369 (`readDeps`), so deps, needs and prefetch are lost, and `trustedOf` stays unset.
-- bin/lean/issuewatch.mjs:244 (`tick`) and :273 (`releaseStep`) ask `...author,authorAssociation,createdAt` through `gh issue list`. `classifyIssue` (:145) reads `issue.authorAssociation` against `TRUSTED`.
-- `bodyTrusted` (bin/engine-cli.mjs:2230) reads `v.authorAssociation` and `v.author`, and feeds `isTrustedActor` (bin/engine/phases.mjs:63).
-- Working REST precedent: bin/engine-cli.mjs:1922 (`gh api repos/${repo}/issues/${n}/events --jq`). GraphQL precedent: bin/engine/projector.mjs:15.
-- Tests mock the `authorAssociation` key on issue records (bin/tests/orchestrate-add-edges.test.mjs:11, bin/lean/issuewatch.test.mjs:12), which is why nothing failed.
-- Other `authorAssociation` hits (prefilter.mjs:196, pre-tool-use.mjs:271) read it from `--json comments`, which gh supports. They are not affected.
+- `bin/lean/prodwatch-governor.mjs` does not exist (`ls bin/lean | grep prodwatch` lists only sources and triage files).
+- Cluster shape to consume is produced at `bin/lean/prodwatch-triage.mjs:49-64` (`fingerprint, signals, count, first_seen, last_seen, severity, owner, duplicateOf`); `validateCluster` (:103) adds `class` (incident|defect|...), `fileable`, `reason`; `signalRef(fp)` at :35.
+- signal-planner Phase 0 (`commands/signal-planner.md:18-19, 66-99`) defines `governor.max_issues_per_run` (default 10) and `governor.max_cost_usd` (default 5.00) as hard per-run caps.
+- The enclosing comments on #4835 carry an unrelated investigation (relay answer 413, `bin/lean/relay.mjs`); it does not apply to this issue and is ignored.
+- Dep #4834 is merged (HEAD 5d9dd72ab).
 
 ### Root Cause
-`authorAssociation` was assumed to be a top-level `gh issue` JSON field. It exists only on comments, in REST (`author_association`) and in GraphQL. No test checks gh's field names.
+Feature not yet built; triage output is unbounded, so a storm of fileable clusters would each become an issue.
 
 ### Affected Files
-- bin/lean/gh-assoc.mjs (new): `ISSUE_JSON_FIELDS` allowlist, `issueAssociation(gh, repo, n)` (REST, `--jq .author_association`), `listAssociations(gh, repo)` (one paginated REST list that returns number to association). A failed read gives `undefined`, which is untrusted (fail closed).
-- bin/engine-cli.mjs (wiring only; the file is a hotspot): the :1257 and :1864/:1865 calls drop the field and merge `authorAssociation` from the helper.
-- bin/lean/issuewatch.mjs: :244 and :273 drop the field and merge the association map into each listed issue.
-- bin/lean/gh-assoc.test.mjs (new): allowlist scan over `bin/**/*.mjs` (non-test), plus helper tests.
-- Existing tests whose gh mocks need an `api` branch or a stub that rejects unknown fields: bin/tests/orchestrate-add-edges.test.mjs, bin/lean/issuewatch.test.mjs, bin/lean/issuewatch-release.test.mjs, bin/tests/engine-cli.test.mjs.
-- Enumerating tests (literal sibling lists): bin/lean/lean.test.mjs:66, bin/lean/execution.test.mjs:43, bin/lean/conformance.test.mjs:404, bin/lean/context.test.mjs:138, bin/lean/batch.test.mjs:29, bin/engine/telemetry-seam.test.mjs:24, bin/lean/checks.test.mjs:156, bin/lean/drift.test.mjs:14, bin/lean/fixround.test.mjs:10, bin/lean/conformance.e2e.test.mjs:74 and bin/lean/execution.e2e.test.mjs:28. A new bin/lean file may have to join some of these lists, so run them and amend if red.
-- devdocs/modules entry for bin/lean if index.yaml maps it (freshness check).
+- bin/lean/prodwatch-governor.mjs (new)
+- bin/lean/prodwatch-governor.test.mjs (new)
+- devdocs/modules/lean.md (module dossier entry, freshness check)
+- docs/ (or the lean.md entry) for the key mapping to signal-planner
+- Enumerating tests (literal sibling lists in bin/lean) that must still pass; a new file there is a non-member as with prodwatch-triage (#4834 chore 28d2de202): bin/engine/telemetry-seam.test.mjs, bin/lean/batch.test.mjs, checks.test.mjs, conformance.e2e.test.mjs, conformance.test.mjs, context.test.mjs, drift.test.mjs, execution.e2e.test.mjs, execution.test.mjs, fixround.test.mjs. None needs editing unless one scans the directory; run them to confirm.
 
 ### Sibling Sweep
-- The four call sites above are the only `gh issue view|list --json authorAssociation` uses in bin/ (grep of non-test code). The allowlist test guards any other `--json` field list passed to `gh issue view|list`.
-- `--json comments` use of `authorAssociation` is valid, so leave it.
+Other prod-watch modules (prodwatch-sources, prodwatch-triage) are pure with injected io; the governor follows the same style. Siblings #4837 (metrics, drop to shadow) and #4838 (runner) will consume `admit`; keep return shape exact.
 
 ### History
-- #4773 (81378f3de) introduced the :1257 and body-reader uses, and #4785 extended the reader. issuewatch was introduced in #4765 (PR #4811).
-- No prior fix.
+Triage landed in 47fdba653 / 26d39c77d (#4834); issue-watch caps pattern in issuewatch.mjs (#4765).
 
 ### Recommendation
-Add one small helper module and call it from the four sites. In `readBody` and `addToBatch`, fetch the view without `authorAssociation` and call `issueAssociation` in parallel. Merge the result so `bodyTrusted` and `addedEdges` are unchanged. For issue watch, fetch `listAssociations` once per tick and merge it by number. REST `gh api repos/{repo}/issues?state=open&per_page=100 --paginate --jq '.[]|"\(.number)\t\(.author_association)"'` is one call, not one per issue. Handle a missing `-R` repo with the `{owner}/{repo}` placeholder. A stub `gh` in the tests rejects unknown `--json` fields the way gh does.
+One lane, one pure module + test + dossier/doc update. `admit`: drop non-fileable/duplicate clusters; order incident first, then defect, others after (stable by severity then count); walk in order with remaining = min(hourly budget = max_issues_per_hour − filings in state within 60 min of now, max_open_prod_issues − openProdIssues.length, cost budget = floor(max_cost_usd_per_round / per-cluster cost)); admitted go to `file`; the rest go into ONE summary `{title, body}` listing deferred clusters (fingerprint, class, severity, count) with the SIGNAL_REF marker only for... none (summary must not embed fingerprints so deferred clusters stay re-admittable). Summary suppressed if an identical open summary exists (state.summary_open) to avoid a storm of summaries. Overflow with budget 0 still yields one summary.
 
 ### Related Issues
-#4773, #4785, #4765, #4835 and #4838 (observed impact).
+#4768 (parent, closed), #4833, #4834 (deps, merged), #4837, #4838 (consumers, open), #1347 (repo-agnostic core).
