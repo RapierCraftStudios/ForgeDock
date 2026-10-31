@@ -212,10 +212,10 @@ gh pr checks "$PR_NUMBER" -R "$GH_REPO" 2>&1
 # forgedock/verify (the lean engine's report-only gate summary) is not a code failure: ignored, as wait-ci-green.sh does.
 # Fail closed: an unreadable result counts as failing.
 CI_FAILING=$(gh pr checks "$PR_NUMBER" -R "$GH_REPO" --json name,bucket \
-  --jq '[.[] | select(.name != "forgedock/verify") | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null || echo "1")
+  --jq '[.[] | select(.name != "forgedock/verify" and .name != "forge/deploy-gate") | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null || echo "1")
 echo "CI_FAILING: $CI_FAILING"
 ```
-`CI_FAILING` > 0 → BLOCK DEPLOY (unless autofixed in Phase 1F). A red `forgedock/verify` alone does not block.
+`CI_FAILING` > 0 → BLOCK DEPLOY (unless autofixed in Phase 1F). A red `forgedock/verify` alone does not block, and neither does `forge/deploy-gate`: it reports this review's own gate marker, so an earlier `GATE_FAILURE` never blocks the re-run that clears it.
 
 ### Phase 1F: CI Autofix
 
@@ -534,6 +534,6 @@ Every completed staging review MUST leave one of the following structured marker
 | `<!-- FORGE:GATE_PASS -->` | Gate ran and passed — deploy may proceed |
 | `<!-- FORGE:GATE_FAILURE -->` | Gate ran and blocked — do NOT deploy |
 
-**Absence of both markers = bypass detected.** The `.github/workflows/gate-marker-check.yml` workflow enforces this: it scans the PR timeline after review completes and fails CI if no gate marker is present within 30 minutes of the PR being opened/updated. A missing marker is treated as a deploy blocker — not a pass.
+**Absence of both markers = bypass detected.** The `.github/workflows/gate-marker-check.yml` workflow enforces this with the `forge/deploy-gate` commit status on the PR head: success only when the newest trusted marker is `FORGE:GATE_PASS`, failure when it is `FORGE:GATE_FAILURE`, and pending while no trusted marker exists. A missing marker is a deploy blocker, not a pass; requiring `forge/deploy-gate` on `main` makes GitHub refuse the merge.
 
 This symmetry closes the silent-bypass gap identified in forge#1387: previously, gate PASS posted nothing, making a clean pass indistinguishable from a skipped spec.

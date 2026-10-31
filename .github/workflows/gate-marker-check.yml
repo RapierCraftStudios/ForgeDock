@@ -9,16 +9,19 @@ name: Deploy Gate Marker Check
 # Trigger: pull_request targeting main (staging→main deploy PRs only).
 # Non-staging→main PRs are skipped immediately (the gate only applies to deploy PRs).
 #
-# Gate logic:
-#   1. On PR open / sync / reopen: schedule a 30-minute pending window.
-#      If no gate marker is found within 30 minutes, post a warning comment and
-#      fail the check.
-#   2. On subsequent syncs and label/comment events: re-evaluate immediately.
-#      If a marker is found, the check passes. If still absent, fail.
-#
-# Note: The 30-minute window is enforced by the `gate-marker-stale` job using
-# a `created_at` comparison against the PR's head commit timestamp. This avoids
-# requiring a scheduled workflow with PR number state.
+# Gate logic: the gate is the `forge/deploy-gate` commit status on the PR head,
+# not this job's own check run. An issue_comment run reports against the default
+# branch, so only a commit status can follow a marker posted after the PR opened.
+#   - latest trusted marker is FORGE:GATE_PASS    → status success
+#   - latest trusted marker is FORGE:GATE_FAILURE → status failure (a re-run that
+#     passes posts a newer GATE_PASS, which wins)
+#   - no trusted marker                           → status pending, at any age
+# The job's own result is not the gate: within 30 minutes of the PR opening it
+# exits 0 with no marker, so the staging review's CI read (Phase 1E) is not
+# blocked by the gate it is about to satisfy. Make `forge/deploy-gate` a required
+# status check on main to block the merge (docs/CI.md). Before this status, that
+# early green job was the only signal, and marker comments from the bot
+# (association CONTRIBUTOR) never re-ran it, so it stood for any PR merged later.
 #
 # Trust model: a gate marker only counts if its author's GitHub login appears in
 # the `FORGE_TRUSTED_MARKER_AUTHORS` repository variable (Settings → Actions →
@@ -75,11 +78,18 @@ jobs:
     # OWNER, MEMBER, or COLLABORATOR association to prevent untrusted external
     # contributors from triggering the workflow (and exercising statuses:write)
     # via arbitrary comments on any PR. <!-- Added: forge#1661 -->
+    # A gate-marker comment from an allowlisted login also runs it: the bot that
+    # posts markers has association CONTRIBUTOR. `contains` on the variable is a
+    # substring test, which only decides whether the job runs; the scan step
+    # trusts a marker on an exact login match.
     if: |
       github.event_name == 'pull_request' ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
-       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+       (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) ||
+        (contains(github.event.comment.body, '<!-- FORGE:GATE_') &&
+         vars.FORGE_TRUSTED_MARKER_AUTHORS != '' &&
+         contains(vars.FORGE_TRUSTED_MARKER_AUTHORS, github.event.comment.user.login))))
 
     steps:
       - name: Resolve PR number
@@ -91,6 +101,7 @@ jobs:
           PR_BASE_CTX: ${{ github.event.pull_request.base.ref }}
           PR_HEAD_CTX: ${{ github.event.pull_request.head.ref }}
           PR_CREATED_CTX: ${{ github.event.pull_request.created_at }}
+          PR_SHA_CTX: ${{ github.event.pull_request.head.sha }}
           ISSUE_NUMBER_CTX: ${{ github.event.issue.number }}
           REPO_CTX: ${{ github.repository }}
         run: |
@@ -107,16 +118,18 @@ jobs:
             echo "base=$(sanitize "$PR_BASE_CTX")" >> "$GITHUB_OUTPUT"
             echo "head=$(sanitize "$PR_HEAD_CTX")" >> "$GITHUB_OUTPUT"
             echo "created_at=$(sanitize "$PR_CREATED_CTX")" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$(sanitize "$PR_SHA_CTX")" >> "$GITHUB_OUTPUT"
           else
             # issue_comment event — fetch PR details via API
             PR_DATA=$(gh pr view "$ISSUE_NUMBER_CTX" \
               --repo "$REPO_CTX" \
-              --json number,baseRefName,headRefName,createdAt \
-              --jq '{number:.number,base:.baseRefName,head:.headRefName,created_at:.createdAt}')
+              --json number,baseRefName,headRefName,createdAt,headRefOid \
+              --jq '{number:.number,base:.baseRefName,head:.headRefName,created_at:.createdAt,head_sha:.headRefOid}')
             echo "number=$(echo "$PR_DATA" | jq -r '.number' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
             echo "base=$(echo "$PR_DATA" | jq -r '.base' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
             echo "head=$(echo "$PR_DATA" | jq -r '.head' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
             echo "created_at=$(echo "$PR_DATA" | jq -r '.created_at' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
+            echo "head_sha=$(echo "$PR_DATA" | jq -r '.head_sha' | tr -d '\n\r')" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Skip non-deploy PRs
@@ -189,9 +202,9 @@ jobs:
           # guaranteed to be exactly one line, regardless of body content.
           ALL_ITEMS=$(
             {
-              echo "$COMMENTS_JSON" | jq -c '.[] | {login: (.author.login // ""), body: (.body // "")}' 2>/dev/null
-              echo "$REVIEWS_JSON"  | jq -c '.[] | {login: (.user.login // ""), body: (.body // "")}' 2>/dev/null
-            } || true
+              echo "$COMMENTS_JSON" | jq -c '.[] | {at: (.createdAt // ""), login: (.author.login // ""), body: (.body // "")}' 2>/dev/null
+              echo "$REVIEWS_JSON"  | jq -c '.[] | {at: (.submitted_at // ""), login: (.user.login // ""), body: (.body // "")}' 2>/dev/null
+            } | jq -sc 'sort_by(.at) | .[]' 2>/dev/null || true
           )
 
           # Normalize the comma-separated allowlist (repo variable) into one
@@ -214,6 +227,10 @@ jobs:
           GATE_PASS=0
           GATE_FAILURE=0
           SPEC_LOADED=0
+          # Items are in time order, so LATEST ends as the newest trusted marker:
+          # a GATE_FAILURE after a GATE_PASS blocks, a re-run's GATE_PASS after a
+          # GATE_FAILURE clears it. A body carrying both counts as a failure.
+          LATEST=none
 
           while IFS= read -r ITEM; do
             if [ -z "$ITEM" ]; then
@@ -225,6 +242,7 @@ jobs:
             if echo "$BODY" | grep -q '<!-- FORGE:GATE_PASS'; then
               if is_trusted_author "$LOGIN"; then
                 GATE_PASS=$((GATE_PASS + 1))
+                LATEST=pass
               else
                 echo "Ignoring FORGE:GATE_PASS marker from untrusted author '$LOGIN' (not in FORGE_TRUSTED_MARKER_AUTHORS)."
               fi
@@ -232,6 +250,7 @@ jobs:
             if echo "$BODY" | grep -q '<!-- FORGE:GATE_FAILURE'; then
               if is_trusted_author "$LOGIN"; then
                 GATE_FAILURE=$((GATE_FAILURE + 1))
+                LATEST=failure
               else
                 echo "Ignoring FORGE:GATE_FAILURE marker from untrusted author '$LOGIN' (not in FORGE_TRUSTED_MARKER_AUTHORS)."
               fi
@@ -249,12 +268,12 @@ jobs:
           echo "gate_failure=$GATE_FAILURE" >> "$GITHUB_OUTPUT"
           echo "spec_loaded=$SPEC_LOADED" >> "$GITHUB_OUTPUT"
 
-          if [ "$GATE_PASS" -gt 0 ]; then
+          if [ "$LATEST" = "pass" ]; then
             echo "marker_found=pass" >> "$GITHUB_OUTPUT"
-            echo "Found trusted FORGE:GATE_PASS marker — gate ran and passed."
-          elif [ "$GATE_FAILURE" -gt 0 ]; then
+            echo "Latest trusted gate marker is FORGE:GATE_PASS ($GATE_PASS pass, $GATE_FAILURE failure in all) — gate ran and passed."
+          elif [ "$LATEST" = "failure" ]; then
             echo "marker_found=failure" >> "$GITHUB_OUTPUT"
-            echo "Found trusted FORGE:GATE_FAILURE marker — gate ran and BLOCKED deploy."
+            echo "Latest trusted gate marker is FORGE:GATE_FAILURE ($GATE_PASS pass, $GATE_FAILURE failure in all) — gate ran and BLOCKED deploy."
           else
             echo "marker_found=none" >> "$GITHUB_OUTPUT"
             echo "No trusted FORGE gate marker found on PR #$PR_NUMBER."
@@ -304,13 +323,32 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           SPEC_LOADED: ${{ steps.scan.outputs.spec_loaded }}
           REMAINING: ${{ steps.window.outputs.remaining_seconds }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # The gate is this commit status on the PR head (see "Gate logic" above).
+          # A missing head SHA or a failed POST fails the job: the status is the gate.
+          set_status() {
+            if ! echo "$HEAD_SHA" | grep -qE '^[0-9a-f]{40}$'; then
+              echo "⛔ PR head SHA unreadable ('$HEAD_SHA') — cannot report forge/deploy-gate."
+              exit 1
+            fi
+            gh api --method POST "repos/$REPO/statuses/$HEAD_SHA" \
+              -f state="$1" -f context="forge/deploy-gate" -f description="$2" -f target_url="$RUN_URL" >/dev/null \
+              || { echo "⛔ Could not post the forge/deploy-gate status on $HEAD_SHA."; exit 1; }
+            echo "forge/deploy-gate → $1 on $HEAD_SHA: $2"
+          }
+
           if [ "$MARKER" = "pass" ]; then
+            set_status success "Latest trusted gate marker: FORGE:GATE_PASS"
             echo "✅ FORGE:GATE_PASS found — deploy gates ran and passed. PR #$PR_NUMBER is cleared for merge."
             exit 0
           fi
 
           if [ "$MARKER" = "failure" ]; then
+            set_status failure "Latest trusted gate marker: FORGE:GATE_FAILURE"
             echo "⛔ FORGE:GATE_FAILURE found — deploy gate BLOCKED this PR."
             echo ""
             echo "The /review-pr-staging command ran and a deploy gate blocked this PR."
@@ -318,8 +356,9 @@ jobs:
             exit 1
           fi
 
-          # No marker found
+          # No marker found: the status stays pending (never success) at any age.
           if [ "$STALE" = "true" ]; then
+            set_status pending "No trusted gate marker after 30 min: run /review-pr-staging"
             echo "⛔ GATE BYPASS DETECTED — No FORGE gate marker found on PR #$PR_NUMBER after 30 minutes."
             echo ""
             echo "A staging→main deploy PR MUST have a FORGE:GATE_PASS or FORGE:GATE_FAILURE comment"
@@ -335,15 +374,18 @@ jobs:
             fi
             echo ""
             echo "Resolution: Run /review-pr $PR_NUMBER (or /review-pr staging) to complete the review."
+            echo "forge/deploy-gate stays pending until a trusted marker is posted."
             exit 1
           else
+            set_status pending "Waiting for a trusted FORGE gate marker from /review-pr-staging"
             echo "⏳ No gate marker yet — within 30-minute window (${REMAINING}s remaining)."
             echo ""
             echo "The /review-pr-staging spec posts gate markers during Phase 0A (open-review-finding gate)"
             echo "and Phase 6.5 (runtime test gate). If the review is still in progress, this check"
-            echo "will pass once a marker is posted."
+            echo "turns green once a marker is posted: forge/deploy-gate stays pending until then."
             echo ""
             echo "If the review has already completed with no marker, re-run it."
-            # Exit 0 during the window — don't block while review may be in progress
+            # Exit 0: a red job would block the staging review's own CI read (Phase 1E).
+            # The pending forge/deploy-gate status, not this job, holds the merge.
             exit 0
           fi

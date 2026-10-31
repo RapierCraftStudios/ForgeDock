@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // #4304: the spec CI gates that read `gh pr checks` themselves ignore forgedock/verify (the lean engine's report-only
-// gate summary) as scripts/wait-ci-green.sh does, query only valid --json fields, and fail closed.
+// gate summary) as scripts/wait-ci-green.sh does, query only valid --json fields, and fail closed. They also ignore
+// forge/deploy-gate (the staging review's own marker status): an earlier GATE_FAILURE must not block the re-run that clears it.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -28,7 +29,7 @@ describe("#4304: spec CI gates ignore forgedock/verify", () => {
     for (const [f, c] of reads) {
       assert.match(c, /--json name,bucket\b/, `${f}: ${c}`);
       assert.doesNotMatch(c, /status|conclusion/, `${f}: invalid gh pr checks fields`);
-      assert.match(c, /select\(\.name != "forgedock\/verify"\)/, `${f}: ${c}`);
+      assert.match(c, /select\(\.name != "forgedock\/verify" and \.name != "forge\/deploy-gate"\)/, `${f}: ${c}`);
       assert.match(c, /\|\| echo "1"\)/, `${f}: an unreadable result must count as failing`);
     }
   });
@@ -41,6 +42,7 @@ describe("#4304: spec CI gates ignore forgedock/verify", () => {
       assert.equal(count(jq, [{ name: "ci", bucket: "pass" }, { name: "forgedock/verify", bucket: "fail" }]), "0", f);
       assert.equal(count(jq, [{ name: "lint", bucket: "fail" }, { name: "forgedock/verify", bucket: "pass" }]), "1", f);
       assert.equal(count(jq, [{ name: "e2e", bucket: "cancel" }]), "1", f);
+      assert.equal(count(jq, [{ name: "ci", bucket: "pass" }, { name: "forge/deploy-gate", bucket: "fail" }]), "0", f);
     }
   });
 });
