@@ -12,6 +12,9 @@ import { openBatch, newBatchId } from "./batch.mjs";
 import { orchestrateFromCli } from "../engine-cli.mjs";
 import { tick, validateWatch } from "./issuewatch.mjs";
 
+// No live schedd: on a host whose daemon runs, `--add` would reach it, and it reads its own batch root, not the test's.
+process.env.FORGEDOCK_SCHED_DIR = tmpDir("assoc-sched-");
+
 const BIN = join(dirname(fileURLToPath(import.meta.url)), "..");
 const sources = (d) => readdirSync(d).flatMap((f) => {
   const p = join(d, f);
