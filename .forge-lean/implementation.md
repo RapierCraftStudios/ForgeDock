@@ -1,31 +1,29 @@
 ### Approach
-New pure, io-injected module `bin/lean/prodwatch-triage.mjs` on top of prodwatch-sources (#4833). Fingerprint strips every digit-bearing token and timestamps; clusters group by fingerprint and dedup against `FORGE:SIGNAL_REF fp=` markers; rules come from an optional `Alert rules:` list in the loadPolicy text plus defaults; validation goes only through `runAdapter`.
+One pure module for loop metrics and the auto-shadow decision, calibrated like decision-engine `effectiveMode`, plus a telemetry-seam mapping for its record.
 
 ### Changes
-- bin/lean/prodwatch-triage.mjs: fingerprint, signalRef, cluster, parseAlertRules, classifyCluster, validateCluster, tallyClusters, CLASSES, DEFAULT_RULES.
-- bin/lean/prodwatch-triage.test.mjs: 10 tests (new regression suite).
-- bin/lean/fixtures/prodwatch/{memos,expected}.json: synthetic anonymised 70 memos (8 issue clusters, 4 transient, 4 expected-class, pg cluster of 15).
-- devdocs/modules/lean.md: one paragraph sentence.
+- bin/lean/prodwatch-metrics.mjs: `computeMetrics`, `sourceMode`, `emitMetrics`.
+- bin/engine/telemetry-seam.mjs: `PRODWATCH_METRICS` -> `prodwatch_metrics`.
+- bin/lean/prodwatch-metrics.test.mjs, bin/engine/telemetry-seam.test.mjs: tests.
+- devdocs/modules/lean.md: module entry.
 
 ### Acceptance Criteria Status
-- R1 ✅ prodwatch-triage.mjs:23
-- R2 ✅ prodwatch-triage.mjs:41-62
-- R3 ✅ prodwatch-triage.mjs:66-92
-- R4 ✅ prodwatch-triage.mjs:101-125
-- R5 ✅ prodwatch-triage.test.mjs:27
-- R6 ✅ prodwatch-triage.mjs:101-125
-- R7 ✅ bin/lean/fixtures/prodwatch/
-- R8 deferred (owner action, in contract)
-- R9 ✅ module header, no fs/LLM, example hosts only
+- R1 ✅ bin/lean/prodwatch-metrics.mjs:27
+- R2 ✅ bin/engine/telemetry-seam.mjs:84, prodwatch-metrics.mjs:73
+- R3 ✅ bin/lean/prodwatch-metrics.mjs:56
+- R4 ✅ bin/lean/prodwatch-metrics.mjs:56 (min sample from REVERSAL_MIN_SAMPLE; test compares with effectiveMode)
+- R5 ✅ same
+- R6 ✅ no gh/fs, injected emit
 
 ### Verification
-- V1 pass (33 tests). V2 pass (314). V3 pass (check + freshness).
-- Scoped checks.mjs run: 890 pass, 3 fail (preflight platform/WSL rows, writeInstallReceipt copyFile, forge Act II) in bin/tests, unrelated to the changed files (environment/WSL); not in the contract validates.
-- `forgedock check`: PASS. New tests fail without the module (import error).
+- V1: 51 pass, 0 fail.
+- V2: 890 pass, 0 fail.
+- forgedock check: PASS; devdocs freshness: OK.
+- The new seam test fails without the telemetry-seam.mjs change (1 fail).
+- No formatter is configured in package.json; none run.
 
 ### Notes
-No formatter config in the repo; none run. No env vars. Fixture is synthetic (R8).
+Rows are caller-supplied since #4836 does not exist. Defaults: min sample 5, max FP rate 0.5. No env vars.
 
-### Sibling-list check
-The ten flagged tests do not enumerate bin/lean modules at the flagged lines (stub-lane comments, git args, MECHANICAL_KINDS, etc.); recorded as not_members in result.json, no test list changed.
-- Renamed exports classify/validate/tally to classifyCluster/validateCluster/tallyClusters to avoid collisions with decision-engine and bench scripts.
+## Sibling-list follow-up
+The ten flagged tests contain no list enumerating lean modules; prodwatch-metrics is recorded per test in result.json not_members.

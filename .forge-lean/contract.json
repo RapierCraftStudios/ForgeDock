@@ -1,27 +1,132 @@
-{"requirements":[
-{"id":"R1","quote":"`fingerprint(signal)` is stable across copies (strips ids, timestamps and numbers).","disposition":"deliver","verify":"in_lane"},
-{"id":"R2","quote":"`cluster(signals, openIssues)` dedups against open issues (the fingerprint is embedded in the issue body as `<!-- FORGE:SIGNAL_REF … -->`) and against other signals; 15 copies of one pg memo become one cluster.","disposition":"deliver","verify":"in_lane"},
-{"id":"R3","quote":"`classify(cluster, rules)` returns one of incident|defect|monitoring-bug|expected-class|deploy-fallout|transient. Rules are deterministic and read from the repo's NORTHSTAR alert rules via bin/lean/decision-engine.mjs `loadPolicy`.","disposition":"deliver","verify":"in_lane"},
-{"id":"R4","quote":"`validate(cluster, io)` runs the repo's declared read-only queries and attaches reproduced evidence; a cluster without evidence is not fileable. expected-class is counted, never filed.","disposition":"deliver","verify":"in_lane"},
-{"id":"R5","quote":"De-duplication and fingerprinting, with fixtures from the AlterLab 2026-10-29 memo set (70 memos give the expected clusters).","disposition":"deliver","verify":"in_lane"},
-{"id":"R6","quote":"Classification and validation, with expected-class and monitoring-bug handling.","disposition":"deliver","verify":"in_lane"},
-{"id":"R7","quote":"Fixtures: `bin/lean/fixtures/prodwatch/` holds an ANONYMISED 70-memo set that keeps the 2026-10-29 cluster structure (8 issues, 18 duplicate or transient, and the rest).","disposition":"deliver","verify":"in_lane"},
-{"id":"R8","quote":"Capture it read-only via the host's prod_monitor capability, then scrub hostnames, customer ids and secrets.","disposition":"defer","why":"Needs the host prod_monitor capability and production access; the lane ships a synthetic anonymised set with the same structure, a real capture can replace it later.","bucket":"owner:capture and scrub the real 2026-10-29 memo set via prod_monitor, replace the synthetic fixture"},
-{"id":"R9","quote":"Rules: pure functions with an injected `io` (exec/gh/llm/now) like bin/lean/issuewatch.mjs; read-only by contract; deterministic first; core stays repo-agnostic (#1347). Repo is PUBLIC: no raw customer data in fixtures.","disposition":"deliver","verify":"in_lane"}
-],
-"deliverables":[
-{"id":"D1","path":"bin/lean/prodwatch-triage.mjs","change":"New module exporting fingerprint, signalRef, cluster, parseAlertRules, classify, validate, tally. Pure, io-injected, no LLM/fs; validate calls prodwatch-sources runAdapter only.","requirements":["R1","R2","R3","R4","R6","R9"]},
-{"id":"D2","path":"bin/lean/fixtures/prodwatch/","change":"Anonymised synthetic 70-memo set plus expected.json.","requirements":["R5","R7","R9"]},
-{"id":"D3","path":"bin/lean/prodwatch-triage.test.mjs","change":"Tests for fingerprint, cluster, classify, validate, tally.","requirements":["R1","R2","R3","R4","R5","R6","R7"]},
-{"id":"D4","path":"devdocs/modules/lean.md","change":"One sentence after the prodwatch-sources paragraph describing prodwatch-triage.mjs.","requirements":["R9"]}
-],
-"preserve":[
-{"id":"P1","what":"bin/lean/prodwatch-sources.mjs exports and read-only contract unchanged."},
-{"id":"P2","what":"bin/lean/decision-engine.mjs loadPolicy return shape unchanged."},
-{"id":"P3","what":"Existing bin/lean sibling-file-list tests stay green."}
-],
-"validate":[
-{"id":"V1","command":"node --test bin/lean/prodwatch-triage.test.mjs bin/lean/prodwatch-sources.test.mjs bin/lean/decision-engine.test.mjs"},
-{"id":"V2","command":"node --test bin/engine/telemetry-seam.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/fixround.test.mjs bin/lean/execution.test.mjs bin/lean/conformance.test.mjs"},
-{"id":"V3","command":"node --check bin/lean/prodwatch-triage.mjs && bash scripts/check-devdocs-freshness.sh origin/staging"}
-]}
+{
+ "requirements": [
+  {
+   "id": "R1",
+   "quote": "Per signal and source: time from signal to issue, to merge and to deployed-verified, plus false-positive rate (issues closed as invalid), fix-ineffective rate (reopened after deploy) and recurrence rate.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R2",
+   "quote": "Emit them through the telemetry seam (bin/engine/telemetry-seam.mjs).",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R3",
+   "quote": "`sourceMode(source, stats)` drops a source to shadow (triage runs, nothing is filed) when its false-positive rate stays above a threshold over a minimum sample.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R4",
+   "quote": "Calibrate like decision-engine `effectiveMode` (bin/lean/decision-engine.mjs:125).",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R5",
+   "quote": "Loop metrics plus an automatic drop to shadow.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  },
+  {
+   "id": "R6",
+   "quote": "Rules: pure functions with an injected `io` (exec/gh/llm/now) like bin/lean/issuewatch.mjs; read-only by contract; deterministic first; core stays repo-agnostic (#1347). Repo is PUBLIC: no raw customer data in fixtures.",
+   "disposition": "deliver",
+   "verify": "in_lane"
+  }
+ ],
+ "deliverables": [
+  {
+   "id": "D1",
+   "path": "bin/lean/prodwatch-metrics.mjs",
+   "change": "New pure module: computeMetrics(rows, now) per source (median signal-to-issue/merge/verified, FP, fix-ineffective, recurrence rates), sourceMode(source, stats, opts) returning {mode, gated, rate} like effectiveMode (min sample 5, threshold 0.5 default), emitMetrics(metrics, io) emitting PRODWATCH_METRICS records. No gh/fs; injected io.",
+   "requirements": [
+    "R1",
+    "R3",
+    "R4",
+    "R5",
+    "R6"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/engine/telemetry-seam.mjs",
+   "change": "mapRecord branch PRODWATCH_METRICS -> prodwatch_metrics (source, counts, rates, medians via compact()); add doc-comment line.",
+   "requirements": [
+    "R2"
+   ]
+  },
+  {
+   "id": "D3",
+   "path": "bin/lean/prodwatch-metrics.test.mjs",
+   "change": "Tests: metrics math, empty/missing timestamps, shadow below/above min sample and threshold, no mutation, emit shape.",
+   "requirements": [
+    "R1",
+    "R3",
+    "R4"
+   ]
+  },
+  {
+   "id": "D4",
+   "path": "bin/engine/telemetry-seam.test.mjs",
+   "change": "Test the new mapping and that absent values are omitted.",
+   "requirements": [
+    "R2"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "devdocs/modules/lean.md",
+   "change": "Add prodwatch-metrics.mjs to the lean module entry (devdocs freshness check).",
+   "requirements": [
+    "R5"
+   ]
+  }
+ ],
+ "preserve": [
+  {
+   "id": "P1",
+   "what": "decision-engine effectiveMode/REVERSAL_MIN_SAMPLE behaviour (bin/lean/decision-engine.mjs:23,125)"
+  },
+  {
+   "id": "P2",
+   "what": "Existing mapRecord mappings and null for unmapped records (bin/engine/telemetry-seam.mjs)"
+  },
+  {
+   "id": "P3",
+   "what": "prodwatch-sources and prodwatch-triage exports unchanged (bin/lean/prodwatch-*.mjs)"
+  }
+ ],
+ "validate": [
+  {
+   "id": "V1",
+   "command": "node --test bin/lean/prodwatch-metrics.test.mjs bin/engine/telemetry-seam.test.mjs bin/lean/prodwatch-triage.test.mjs bin/lean/prodwatch-sources.test.mjs bin/lean/decision-engine.test.mjs"
+  },
+  {
+   "id": "V2",
+   "command": "node --test bin/lean/lean.test.mjs bin/lean/execution.test.mjs bin/lean/conformance.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/fixround.test.mjs bin/stats/stats.test.mjs"
+  }
+ ],
+ "decisions": [
+  {
+   "id": "K1",
+   "choice": "sourceMode returns {mode, gated, rate} and uses min sample 5 / threshold 0.5 defaults, overridable",
+   "justification": "mirrors effectiveMode at bin/lean/decision-engine.mjs:125-129 and REVERSAL_MIN_SAMPLE at :23",
+   "source": "precedent"
+  },
+  {
+   "id": "K2",
+   "choice": "Metrics are computed from caller-supplied issue rows; no gh/fs in the module",
+   "justification": "#4836 verify module does not exist; the injected-io rule is in the issue and bin/lean/issuewatch.mjs",
+   "source": "spec"
+  },
+  {
+   "id": "K3",
+   "choice": "Emit a new PRODWATCH_METRICS record mapped in telemetry-seam rather than overloading decision_engine",
+   "justification": "bin/engine/telemetry-seam.mjs:83-90 maps one event per record type",
+   "source": "precedent"
+  }
+ ]
+}
