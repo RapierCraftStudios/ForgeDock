@@ -3,10 +3,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
-import { isToolState, denied, untrackToolState, unstageToolState, gitignoreAdditions } from "./toolstate.mjs";
+import { isToolState, denied, untrackToolState, unstageToolState, gitignoreAdditions, clearLaneScratch } from "./toolstate.mjs";
 
 const sh = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8" });
 const put = (cwd, f, t = "x\n") => { mkdirSync(dirname(join(cwd, f)), { recursive: true }); writeFileSync(join(cwd, f), t); };
@@ -79,5 +79,36 @@ describe("gitignoreAdditions (#4590)", () => {
     assert.deepEqual(gitignoreAdditions("node_modules\n/.eslintcache\n.forge-lean/\n"), ["*.tsbuildinfo"]);
     assert.deepEqual(gitignoreAdditions(".forge-lean/\n.eslintcache\n*.tsbuildinfo\n"), []);
     assert.deepEqual(gitignoreAdditions(".forge-lean/\n.eslintcache\n*.tsbuildinfo\n", { next: true }), ["next-env.d.ts"]);
+  });
+});
+
+describe("lane scratch is untracked and cleared (#4880)", () => {
+  it("clearLaneScratch drops tracked and on-disk scratch and leaves product files", async () => {
+    const d = repo();
+    put(d, ".forge-lean/result.json"); sh(d, "add", "-f", "-A"); sh(d, "commit", "-q", "-m", "tracked scratch");
+    const fs = { exists: async (p) => existsSync(p), rmdir: async (p) => (await import("node:fs")).rmSync(p, { recursive: true, force: true }) };
+    assert.equal(await clearLaneScratch({ git: gitIn(d), fs, cwd: d }), true);
+    assert.ok(!existsSync(join(d, ".forge-lean")));
+    assert.equal(sh(d, "ls-files", ".forge-lean").trim(), "");
+    assert.ok(existsSync(join(d, "src/a.js")));
+    assert.equal(await clearLaneScratch({ git: gitIn(d), fs, cwd: d }), false, "nothing left to clear");
+  });
+  it("clearLaneScratch never throws, with or without fs.rmdir", async () => {
+    const boom = async () => { throw new Error("git down"); };
+    assert.equal(await clearLaneScratch({ git: boom, fs: {}, cwd: "/nope" }), false);
+    assert.equal(await clearLaneScratch({ git: boom, fs: { rmdir: boom }, cwd: "/nope" }), false);
+  });
+  it("a checkpoint after add -A never commits .forge-lean files", async () => {
+    const d = repo();
+    put(d, ".forge-lean/investigation.md"); put(d, "src/b.js");
+    sh(d, "add", "-f", "-A");
+    assert.equal(await unstageToolState(gitIn(d)), true);
+    sh(d, "commit", "-q", "-m", "checkpoint");
+    assert.equal(sh(d, "ls-tree", "-r", "--name-only", "HEAD").split("\n").filter((f) => f.startsWith(".forge-lean/")).length, 0);
+  });
+  it("this repo ignores .forge-lean/ and no longer tracks it", () => {
+    const root = join(dirname(new URL(import.meta.url).pathname), "..", "..");
+    assert.ok(readFileSync(join(root, ".gitignore"), "utf8").split(/\r?\n/).includes(".forge-lean/"));
+    assert.equal(execFileSync("git", ["ls-files", ".forge-lean"], { cwd: root, encoding: "utf8" }).trim(), "");
   });
 });

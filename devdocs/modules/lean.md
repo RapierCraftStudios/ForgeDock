@@ -62,6 +62,8 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    holds no work: it is not resumed (no stale contract). The worktree is still built from the branch (pushes stay
    fast-forward), the scratch is removed in a normal commit, and `SCRATCH_BRANCH_DROPPED` is emitted. Any real change
    or an open PR resumes as before; `changedFiles()` ignores tool-state paths.
+   #4880: `.forge-lean/` is untracked and in `.gitignore`; after `worktree add` a lane that is not resuming real work
+   clears it (`clearLaneScratch`, `LANE_SCRATCH_CLEARED`), so it never reads or posts another lane's scratch.
    **Sparse worktree** (#4221, `worktree.mjs` `addLaneWorktree`): tracked blobs
    >= forge.yaml `env.sparse_max_kb` (default 1024; 0 = off) stay out of the
    checkout (non-cone patterns in the worktree's own `info/sparse-checkout`;

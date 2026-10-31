@@ -148,6 +148,7 @@ function world(o = {}) {
       w.seq.push(c.role + (c.resume ? "-resume" : ""));
       w.envs.push(c.env ?? null);
       if (c.role === "builder") {
+        w.filesAtFirstBuilder ??= { ...w.files }; // #4880
         const cost = c.resume ? (w.sessCost = Math.round(((w.sessCost ?? 0) + 0.1) * 1e9) / 1e9) : (w.sessCost = 0.1); // #4407: a resumed CLI session reports its running total
         const fix = Boolean(c.resume) || /no earlier session/.test(c.prompt); // #4363: a fresh fix session acts like the old resume
         const r = fix ? (w.resumeResult ?? w.result) : w.result;
@@ -178,7 +179,7 @@ function world(o = {}) {
     waitCiGreen: async () => (w.waits.length ? w.waits.shift() : { rc: 0, text: `CI_GATE_HEAD: ${w.head}` }),
     transitionLabel: async (n, s) => { w.labels.push(s); w.seq.push(`label:${s}`); },
     ...(o.procs ? { proc: { inDir: async () => o.procs, alive: (pid) => w.alive.has(pid), kill: (pid, sig) => { w.kills.push([pid, sig]); w.seq.push(`kill-${sig}`); if (sig === "SIGKILL" || !o.stubborn) w.alive.delete(pid); } } } : {}),
-    fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; } },
+    fs: { ...(o.wtExists ? { exists: async (p) => p.startsWith("/wt/lean-7") } : {}), stat: async (p) => (p in w.files ? { mtimeMs: w.mtimes[p] ?? 1 } : null), read: async (p) => { if (!(p in w.files)) throw new Error("ENOENT"); return w.files[p]; }, append: async (p, t) => { w.files[p] = (w.files[p] ?? "") + t; }, write: async (p, t) => { w.files[p] = t; }, rmdir: async (p) => { for (const k of Object.keys(w.files)) if (k.startsWith(`${p}/`)) delete w.files[k]; } },
     fileFollowups: async ({ parent, items }) => { w.followups.push({ parent, items }); if (o.followupError) throw new Error(o.followupError); return Object.fromEntries(items.map((i) => [i.key, o.followupIssue ?? 900])); },
   };
   return w;
@@ -397,6 +398,16 @@ describe("core work-on", () => {
     assert.doesNotMatch(builders(w)[0][4], /This is a rerun/);
     assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "rm" && c.includes(".forge-lean")), "scratch removed from the branch");
     assert.ok(w.calls.some((c) => c[0] === "git" && c[1] === "commit" && c.join(" ").includes("drop stale .forge-lean scratch")));
+  });
+
+  it("#4880: a stale .forge-lean scratch from another lane is cleared before the plan call", async () => {
+    const w = world({ prList: [] });
+    w.files[`${WT}/.forge-lean/investigation.md`] = "STALE investigation of another issue";
+    w.files[`${WT}/.forge-lean/result.json`] = JSON.stringify({ status: "already-fixed", summary: "stale" });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged", "the stale result.json did not stand in for the builder's");
+    assert.deepEqual(Object.keys(w.filesAtFirstBuilder).filter((f) => f.includes("/.forge-lean/") && /STALE|stale/.test(w.filesAtFirstBuilder[f])), [], "nothing stale at the first builder call");
+    assert.ok(!w.comments.some((c) => c.includes("STALE investigation")), "the stale note is never posted");
   });
 
   it("#4786: a remote lane branch with a code change besides scratch still resumes", async () => {
@@ -3228,13 +3239,13 @@ describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", (
     assert.deepEqual(removed, ["/wt/lean-7"]);
     // a registered worktree dir is left to `git worktree remove`
     const w2 = world(); const removed2 = [];
-    w2.io.fs.exists = async () => true; w2.io.fs.rmdir = async (p) => { removed2.push(p); };
+    w2.io.fs.exists = async () => true; w2.io.fs.rmdir = async (p) => { if (!p.endsWith("/.forge-lean")) removed2.push(p); };
     const g = w2.io.git; w2.io.git = async (a, o2) => (a[0] === "worktree" && a[1] === "list" ? "worktree /wt/lean-7\nHEAD abc\n" : g(a, o2));
     await run(w2);
     assert.deepEqual(removed2, []);
     // a worktree root that is not the lean root never deletes anything
     const w3 = world(); const removed3 = [];
-    w3.io.fs.exists = async () => true; w3.io.fs.rmdir = async (p) => { removed3.push(p); };
+    w3.io.fs.exists = async () => true; w3.io.fs.rmdir = async (p) => { if (!p.endsWith("/.forge-lean")) removed3.push(p); };
     await run(w3, { worktreeRoot: "/wt" , issue: 7 });
     assert.ok(removed3.every((p) => p === "/wt/lean-7"));
   });
@@ -3565,7 +3576,8 @@ describe("batch robustness (#4112-#4115)", () => {
 
   it("#4169 heavy steps: env.setup and precheck take a host slot; builder runs get the shim PATH, phase, issue and priority; the result carries waits", async () => {
     const w = heavyWorld();
-    w.files[`${WT}/.forge-lean/heavy-waits.jsonl`] = '{"phase":"implement","name":"tsc","waitMs":30000,"queued":4}\n';
+    const shims = w.io.writeHeavyShims; // the shims write the waits file after the engine cleared the scratch (#4880)
+    w.io.writeHeavyShims = async (...a) => { w.files[`${WT}/.forge-lean/heavy-waits.jsonl`] = '{"phase":"implement","name":"tsc","waitMs":30000,"queued":4}\n'; return shims(...a); };
     const r = await run(w, { envSetup: "pnpm install", precheck: { commands: ["pnpm lint"] }, heavy: { max: 2 } });
     assert.equal(r.terminalReason, "merged");
     assert.deepEqual(w.acq.map((a) => [a.phase, a.issue, a.priority, a.cfg.max]), [["setup", 7, 0, 2], ["precheck", 7, 0, 2]]);
@@ -4968,11 +4980,12 @@ describe("#4364 in-session forgedock check: plan hand-off and self-check record"
 
   it("a green run on the final tree logs nothing; a record of another tree is stale on SELF_CHECK_MISSING and a failed pre-PR round", async () => {
     const w = world(); const dir = tmpDir("core-");
-    w.files[SELF] = JSON.stringify({ v: 1, fingerprint: await fp(w), ok: true });
+    const seed = (x, rec) => { const r = x.io.runner; x.io.runner = async (c) => { if (c.role === "builder") x.files[SELF] = JSON.stringify(rec); return r(c); }; }; // written by the builder, after the scratch clear (#4880)
+    seed(w, { v: 1, fingerprint: await fp(w), ok: true });
     assert.equal((await run(w, { dir })).terminalReason, "merged");
     assert.equal(readLog(dir, 7).filter((e) => e.event === "SELF_CHECK_MISSING").length, 0);
     const w2 = world(); const dir2 = tmpDir("core-");
-    w2.files[SELF] = JSON.stringify({ v: 1, fingerprint: "other-tree", ok: true });
+    seed(w2, { v: 1, fingerprint: "other-tree", ok: true });
     let rc = 1; w2.io.runCommand = async () => ({ rc, output: "boom" });
     const inner = w2.io.runner; w2.io.runner = async (c) => { if (/declared check commands failed/.test(c.prompt)) rc = 0; return inner(c); };
     assert.equal((await run(w2, { dir: dir2, precheck: { commands: ["make lint"] } })).terminalReason, "merged");
