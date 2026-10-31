@@ -112,7 +112,10 @@ describe("#4402 efficiencyMetrics", () => {
     assert.equal(m.quality.full.n, 1);
     assert.equal(m.quality.none.n, 1);
     assert.equal(m.quality.partial.n, 0);
-    assert.deepEqual(m.acceptance, { pass: 1, fail: 0, pending: 0, unprobed: 1, probed: 1, pass_rate: 1 });
+    assert.deepEqual(m.acceptance, { pass: 1, fail: 0, pending: 0, unprobed: 1, unprobed_issues: [2], probed: 1, pass_rate: 1 });
+  });
+  it("lists merged issues with no acceptance probe declared (#4908)", () => {
+    assert.ok(formatEfficiencyLines(m).includes("unprobed merged issues (no acceptance probe declared): #2"));
   });
   it("renders n/a, never NaN, for an empty cohort", () => {
     const lines = formatEfficiencyLines(efficiencyMetrics({}));

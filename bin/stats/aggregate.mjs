@@ -17,6 +17,7 @@
  */
 
 import { REWORK_TRIGGERS, firstPassOf } from "../lean/fixround.mjs";
+import { summarizePhases } from "../lean/phaseledger.mjs";
 
 export const DEFAULT_MIN_N = 10;
 export const UNKNOWN = "unknown";
@@ -98,7 +99,7 @@ function timeSection(runs) {
     if (ms.length) phases[id] = { n: ms.length, p50: percentile(ms, 50), p90: percentile(ms, 90) };
   }
   const wall = runs.map((r) => r.wallMs).filter((x) => isNum(x) && x >= 0);
-  return { phases, wall: { n: wall.length, p50: percentile(wall, 50), p90: percentile(wall, 90) } };
+  return { phases, wall: { n: wall.length, p50: percentile(wall, 50), p90: percentile(wall, 90) }, ledger: summarizePhases(runs.map((r) => r.ledger)) }; // #4908
 }
 
 function flowSection(runs) {

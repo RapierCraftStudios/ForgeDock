@@ -12,6 +12,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { emptyCache, loadCache, saveCache } from "./cache.mjs";
+import { unflattenPhases } from "../lean/phaseledger.mjs";
 
 export const MARKER_RE = /^<!-- FORGE:TELEMETRY v1( part=(\d+))? -->/;
 const OWNER_REPO_RE = /^[\w.-]+\/[\w.-]+$/;
@@ -82,7 +83,7 @@ export function runsFromRecords(records) {
     if (!run._first || r.ts < run._first) run._first = r.ts;
     if (r.experiment != null && r.arm != null) { run.experiment = String(r.experiment); run.arm = String(r.arm); } // #4629
     if (r.event === "run_terminal") {
-      run.finished = true; run.reason = r.reason ?? null; run.code = r.code ?? null; run.endTs = r.ts ?? null; run.wallMs = num(r.wall_ms);
+      run.finished = true; run.reason = r.reason ?? null; run.code = r.code ?? null; run.endTs = r.ts ?? null; run.wallMs = num(r.wall_ms); run.ledger = unflattenPhases(r); // #4908
       continue;
     }
     const id = r.phase ?? "other";
