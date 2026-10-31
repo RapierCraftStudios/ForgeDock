@@ -1009,6 +1009,8 @@ execution:
 
 **Start failures** (every provider): a sandbox that cannot start ends the lane `needs-human` with code `sandbox.start_failed`, not relaunched and not counted by the engine-error breaker; a capacity error ends it `deferred` (`sandbox.capacity`), requeued after the provider's retry-in (else 60s) and not counted toward `orchestration.max_deferrals`, so a queue deeper than the pool waits instead of being skipped (forge#4528). A pool that serves `GET {endpoint}/status -> {"free": N}` (integer, optional) also caps remote admissions to N per sample, so the extra lanes queue inside the batch instead of bouncing on a 503 (forge#4540); a missing, failing or malformed `/status` is unknown and never blocks admission. See docs/OUTCOME-CODES.md. `forgedock gc --apply --sandboxes` tears a stale remote sandbox down through the same API (the checkout's forge.yaml `execution`).
 
+**Cold start** (forge#4909): the dependency cache (`FORGE_DEPCACHE_ROOT`, default `~/.forge/depcache`, keyed by lockfile hash) is hardlinked into lane worktrees; when it sits on another filesystem than the worktree (EXDEV) files are copied instead, so a second lane with the same lockfile hash still records `deps: hit` rather than reinstalling. A lane refused for capacity (`sandbox.capacity`) on a pool that serves `/status -> {"free": N}` is relaunched only once a slot is free, not on the retry-in timer; the wait is recorded as the lane's queue time (`waits.queue`).
+
 **Hybrid placement** (`mode: hybrid`, forge#4256, `bin/lean/execution.mjs` `placeLane`, no model call). Each lane is placed when it is admitted. The first matching rule wins:
 
 1. `max_remote: 0` → local.

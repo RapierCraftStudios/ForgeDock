@@ -111,6 +111,7 @@ import { renderAlerts } from "../stats/render.mjs";
 import { formatParkedLine, postDeployOnly } from "./prefilter.mjs";
 import { laneSize, SIZES } from "./budget.mjs";
 import { requeueKey, REQUEUABLE } from "./batch.mjs";
+import { makeCapWait } from "./capwait.mjs";
 
 // A dependency that finished like this no longer blocks its dependents.
 const SATISFIED = new Set(["merged", "invalid"]);
@@ -290,6 +291,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
   const priorities = toMap(saved?.priorities); // issue -> priority number; only with the registry
   const remoteMax = remote && Number.isInteger(remote.max) && remote.max >= 0 ? remote.max : 0;
   let poolOfflineSince = null, poolStallNoted = false; // #4788: when sampled online first read 0, and whether the stall was reported
+  const capWait = makeCapWait({ now }); // #4909: a lane refused for capacity waits for a free slot, recorded as queue time
   let capAt, capAdmits = 0; // #4540: provider capacity sample and the remote admissions made since it
   const remoteRun = new Set(); // remote lanes running now (#4253): admitted against remoteMax, never the host cap
   let budgetLocal = false; // the execution budget refused a remote lane under on_budget local: the rest run on the host
@@ -506,9 +508,10 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
           p = { where: "local", reason: `fallback to local: no pool agent online (${p.reason})` };
         } else if (cap && Number.isInteger(cap.free)) {
           if (cap.at !== capAt) { capAt = cap.at; capAdmits = 0; }
+          if (capWait.blocked(n, cap)) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
           if (capAdmits >= cap.free && remoteRun.size < remoteMax) { notBefore.set(n, now() + Math.max(pollMs, 1)); return false; }
         }
-        if (p.where === "remote" && remoteRun.size < remoteMax) { remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
+        if (p.where === "remote" && remoteRun.size < remoteMax) { capWait.admitted(n); remoteRun.add(n); capAdmits++; placed.set(n, p); return true; }
         if (p.where === "remote" && !remote.fallbackLocal) return false;
         if (p.where === "remote") p = { where: "local", reason: `fallback to local: max_remote ${remoteMax} reached (${p.reason})` }; // #4256: hybrid runs it on the host
       } else {
@@ -555,7 +558,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     // #4304: the pre-filter runs once per issue; a recovery pass's row adds the earlier attempt's cost, which already holds it.
     const pfCost = recovering.has(n) ? 0 : (pf?.cost_usd ?? 0);
     const row = { issue: n, outcome: r?.terminalReason ?? "engine-error", pr: r?.pr ?? null, cost_usd: (r?.cost_usd ?? 0) + pfCost, minutes: Math.round((now() - rec.startedAt) / 6000) / 10, detail: r?.detail, ...(r?.code ? { code: r.code } : {}), ...(pf ? { prefilter: pf } : {}),
-      ...(r?.waits && typeof r.waits === "object" ? { waits: r.waits } : {}), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
+      ...(() => { const w = capWait.take(n, r?.waits); return w && typeof w === "object" ? { waits: w } : {}; })(), ...(Number.isInteger(r?.heavyQueueMax) ? { heavyQueueMax: r.heavyQueueMax } : {}),
       ...(Number.isFinite(r?.wall_ms) ? { wall_ms: r.wall_ms } : {}), ...(Number.isFinite(r?.model_ms) ? { model_ms: r.model_ms } : {}), // #4451
       ...(phasesOf(r, rec) ? { phases: phasesOf(r, rec) } : {}), // #4908
       ...(Number.isFinite(r?.precheckMs) ? { precheck_ms: r.precheckMs } : {}), ...(Number.isInteger(r?.precheckDeferred) && r.precheckDeferred > 0 ? { precheck_deferred: r.precheckDeferred } : {}), // #4331
@@ -623,6 +626,11 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
     }
     if (row.outcome === "deferred") {
       const pol = deferPolicy(r, { now: now(), deferrals: deferrals.get(n) ?? 0, maxDeferrals });
+      let capGated = false; // #4909: the pool reports free slots, so the slot (not the retry-in timer) gates the relaunch
+      if (r?.code === "sandbox.capacity") {
+        capWait.refused(n);
+        try { capGated = Number.isInteger(remote?.capacity?.()?.free); } catch { capGated = false; }
+      }
       if (!pol.capped) {
         if (!pol.host) deferrals.set(n, (deferrals.get(n) ?? 0) + 1);
         // A usage limit is held per account; the hold, not a per-issue delay, gates the retry, so a lane on another
@@ -631,7 +639,7 @@ export async function orchestrate({ issues, parallel = 3, runOne, readBody, pref
         if (pol.hold) {
           try { holds.set(r?.backendId ?? identity(), now() + pol.delayMs, `batch ${batchId ?? "?"} #${n}`); delayMs = 0; } catch { /* fail-open */ }
         }
-        requeue(n, delayMs); done(); save();
+        requeue(n, capGated && !pol.hold ? 0 : delayMs); done(); save();
         update({ ...row, detail: `requeued in ${Math.round(pol.delayMs / 1000)}s${pol.hold ? " (admissions held)" : ""}: ${r?.code ?? "deferred"}${r?.detail ? ` ${r.detail}` : ""}` });
         return;
       }
