@@ -3,6 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { parseProdWatch, targetLabel, roundOnce, humanOnly, metricRows, prodWatchFromCli, formatProdWatchStatus } from "./prodwatch.mjs";
+import { tmpDir } from "../tests/_tmp.mjs";
 
 const NOW = Date.parse("2026-10-31T12:00:00Z");
 const YAML = `name: x
@@ -174,17 +175,17 @@ describe("helpers and CLI", () => {
     await assert.rejects(prodWatchFromCli(["nope"]), /usage: forgedock prod-watch/);
     const out = [];
     const io = { gh: async () => JSON.stringify({ nameWithOwner: "o/r" }), now: () => NOW };
-    const { mkdtempSync, writeFileSync } = await import("node:fs");
-    const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
-    const cwd = mkdtempSync(join(tmpdir(), "pw-")); writeFileSync(join(cwd, "forge.yaml"), YAML);
+    const { writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const cwd = tmpDir("pw-"); writeFileSync(join(cwd, "forge.yaml"), YAML);
     await prodWatchFromCli(["status"], { cwd, io, env: { FORGEDOCK_WATCH_DIR: cwd }, print: (l) => out.push(l) });
     assert.match(out[0], /prod-watch \(o\/r\): no status yet/);
     assert.match(formatProdWatchStatus({ phase: "done", rounds: 2, filed: 3 }, "o/r"), /rounds: 2/);
   });
   it("dry-run via the CLI writes no state or lock", async () => {
-    const { mkdtempSync, writeFileSync, existsSync } = await import("node:fs");
-    const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
-    const cwd = mkdtempSync(join(tmpdir(), "pw-")); writeFileSync(join(cwd, "forge.yaml"), YAML);
+    const { writeFileSync, existsSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const cwd = tmpDir("pw-"); writeFileSync(join(cwd, "forge.yaml"), YAML);
     const w = world({ alerts: [alert("Slow", "P2")] }); const out = [];
     const io = { ...w.io, gh: async (a) => (a[0] === "repo" ? JSON.stringify({ nameWithOwner: "o/r" }) : w.io.gh(a)) };
     await prodWatchFromCli(["run", "--dry-run"], { cwd, io, env: { FORGEDOCK_WATCH_DIR: join(cwd, "w") }, print: (l) => out.push(l) });

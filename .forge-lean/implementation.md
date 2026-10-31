@@ -39,3 +39,6 @@ The CI log was not available (no GitHub access allowed), so the failure could no
 
 ### CI follow-up 2 (Unit tests job, run 41157197021)
 Log unreadable again (no GitHub access). Checked: no commits on origin/staging beyond HEAD; prodwatch tests are stable over 3 repeats and pass under a clean env (`env -i`, no HOME); the 3 local `bin/tests` failures (journey.test.mjs, router.test.mjs) fail identically with `bin/forgedock.mjs` reverted to origin/staging, so they are pre-existing and caused by this root/WSL2 host, not by this change. No code change; needs the failing test names from the CI log to go further.
+
+### CI follow-up 3 (Unit tests job, run 41158849530)
+Cause found by running the job's lint steps locally: `scripts/check-test-tmp-cleanup.sh` flagged `bin/lean/prodwatch.test.mjs` for using `mkdtemp` without `bin/tests/_tmp.mjs`. Fixed by using `tmpDir` from the helper. Both lint scripts now pass (18/18); prodwatch + issuewatch tests 71 pass.
