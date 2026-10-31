@@ -49,7 +49,7 @@ export function scoreKinds(cases, { minBlocks = DEFAULT_MIN_BLOCKS, maxFalseRate
 
 const pct = (x) => (x === null ? "n/a" : `${Math.round(x * 1000) / 10}%`);
 
-export function formatReport(rows) {
+export function formatKindReport(rows) {
   const head = ["kind", "blocks", "precision", "recall", "false-block", "mode"];
   const body = rows.map((r) => [r.kind, String(r.blocks), pct(r.precision), pct(r.recall), `${r.fp}/${r.blocks} (${pct(r.falseBlockRate)})`, r.mode]);
   const w = head.map((h, i) => Math.max(h.length, ...body.map((b) => b[i].length)));
@@ -58,7 +58,7 @@ export function formatReport(rows) {
   return [line(head), ...body.map(line), "", enforce.length ? `engine.conformance_kinds: "${enforce.join(", ")}"` : "engine.conformance_kinds: (none earned enforcement)"].join("\n");
 }
 
-export function parseArgs(argv) {
+export function parseCalibrateArgs(argv) {
   const o = { labels: null, replay: null, minBlocks: DEFAULT_MIN_BLOCKS, maxFalseRate: DEFAULT_MAX_FALSE_RATE, json: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -74,10 +74,10 @@ export function parseArgs(argv) {
 }
 
 export function run(argv, read = (p) => JSON.parse(readFileSync(p, "utf8"))) {
-  const o = parseArgs(argv);
+  const o = parseCalibrateArgs(argv);
   const cases = [o.labels, o.replay].filter(Boolean).flatMap((p) => casesOf(read(p)));
   const rows = scoreKinds(cases, o);
-  return o.json ? JSON.stringify({ cases: cases.length, kinds: rows }, null, 2) : `${cases.length} labelled case(s)\n${formatReport(rows)}`;
+  return o.json ? JSON.stringify({ cases: cases.length, kinds: rows }, null, 2) : `${cases.length} labelled case(s)\n${formatKindReport(rows)}`;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

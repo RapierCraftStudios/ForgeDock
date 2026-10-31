@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { labelOf, casesOf, scoreKinds, formatReport, run, parseArgs } from "../../scripts/conformance-calibrate.mjs";
+import { labelOf, casesOf, scoreKinds, formatKindReport, run, parseCalibrateArgs } from "../../scripts/conformance-calibrate.mjs";
 
 const LABELS = "docs/eval/conformance-labels-v1.json";
 const labels = () => JSON.parse(readFileSync(LABELS, "utf8"));
@@ -56,8 +56,8 @@ describe("conformance-calibrate", () => {
   });
 
   it("rejects missing or unknown arguments", () => {
-    assert.throws(() => parseArgs([]), /usage/);
-    assert.throws(() => parseArgs(["--nope"]), /unknown argument/);
-    assert.match(formatReport([]), /none earned/);
+    assert.throws(() => parseCalibrateArgs([]), /usage/);
+    assert.throws(() => parseCalibrateArgs(["--nope"]), /unknown argument/);
+    assert.match(formatKindReport([]), /none earned/);
   });
 });
