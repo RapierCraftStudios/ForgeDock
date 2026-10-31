@@ -1,14 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/** #4909: capacity wait as queue time, warm_sandboxes launch signal. */
+/** #4909: capacity wait as queue time. */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { join } from "node:path";
-import { tmpDir } from "../tests/_tmp.mjs";
 import { makeCapWait } from "./capwait.mjs";
-import { parseExecution } from "./execution.mjs";
-import { remoteProvider } from "./sandbox-remote.mjs";
-import { openBatch } from "./batch.mjs";
 import { orchestrate } from "./orchestrate.mjs";
 
 describe("makeCapWait (#4909)", () => {
@@ -49,26 +44,5 @@ describe("at pool capacity a lane waits for a free slot (#4909)", () => {
     assert.ok(c.t - refusedAt < 60000, "not the blind 60s retry");
     assert.ok(c.t - refusedAt >= 3000, "waited for the slot");
     assert.ok(Number.isFinite(rows[0].waits?.queue) && rows[0].waits.queue >= 0, "wait recorded as queue time");
-  });
-});
-
-describe("warm_sandboxes (#4909)", () => {
-  it("parses a positive integer; 0, absent or junk is off and omitted", () => {
-    assert.equal(parseExecution({ warm_sandboxes: "3" }).warmSandboxes, 3);
-    for (const v of [undefined, "0", "-1", "x", "1.5", ""]) assert.ok(!("warmSandboxes" in parseExecution({ warm_sandboxes: v })), String(v));
-  });
-  const specFor = async (settings) => {
-    const specs = [];
-    const batch = openBatch(join(tmpDir("warm-"), "batches"), "bt");
-    const transport = { launch: async (spec) => { specs.push(spec); return { id: spec.id, warm: false }; } };
-    const p = remoteProvider({ batch, repo: "o/r", settings, transport, env: {}, credentials: () => null, gitIdentity: () => ({}) });
-    const h = await p.start({ issue: 5, args: ["--lane", "staging"], env: {}, secrets: [] });
-    return { spec: specs[0], h };
-  };
-  it("the launch spec asks for a warm sandbox only when N > 0; a cold answer still starts the lane", async () => {
-    const warm = await specFor({ image: "i:1", warmSandboxes: 2 });
-    assert.equal(warm.spec.warm, 2);
-    assert.equal(warm.h.issue, 5, "the agent had none ready: cold start, same handle");
-    assert.ok(!("warm" in (await specFor({ image: "i:1" })).spec), "default 0: spec unchanged");
   });
 });

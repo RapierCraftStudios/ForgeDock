@@ -188,7 +188,6 @@ export function remoteProvider({ batch, repo, settings = {}, name = "remote", tr
       const spec = {
         id, issue, batch: batch.id, image: settings.image ?? null,
         repo: { slug: repo, url: repo ? `https://github.com/${repo}.git` : null, ref: li >= 0 ? args[li + 1] ?? null : null },
-        ...(Number.isInteger(settings.warmSandboxes) && settings.warmSandboxes > 0 ? { warm: settings.warmSandboxes } : {}), // #4909: the pool agent hands over a ready sandbox when it has one, else starts cold
         cache: settings.cacheStore ? { store: settings.cacheStore, key: safeSegment(String(repo ?? "repo")) } : null,
         // The host's git identity: without it the lane image falls back to a placeholder author that fails DCO.
         env: { ...gitIdentityEnv(gitIdentity(), laneEnv ?? {}), ...scopedEnv({ env: resolved, secrets, batchId: batch.id, repo }), ...(settings.forgeYaml ? { CS_FORGE_YAML_B64: Buffer.from(settings.forgeYaml).toString("base64") } : {}), ...relayEnv }, // #4546: the dispatcher's forge.yaml (gitignored in the repo)
