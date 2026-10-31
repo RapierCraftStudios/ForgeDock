@@ -49,10 +49,10 @@ The lane follows the repo rule: a milestone issue goes to `milestone/<slug>` (fo
 
 ## Caps and forever mode
 
-- `max_issues: N`: total claims over the watch's lifetime. At N the watch **drains**: no new claims, retry and verify only. When nothing is inflight it exits with a summary.
+- `max_issues: N`: total claims over the watch's lifetime. At N the watch **drains**: no new claims, retry and verify only. When nothing is inflight and no merge is mid-verification it exits with a summary.
 - `until: <ISO time>`: the same, at that time.
 - `max_inflight` (default 4): claims in flight at once.
-- With neither `max_issues` nor `until` the watch runs forever: it keeps claiming, retrying (a deferred lane, exit 75, is relaunched up to 3 times) and verifying (an issue counts as verified once it is closed).
+- With neither `max_issues` nor `until` the watch runs forever: it keeps claiming, retrying (a deferred lane, exit 75, is relaunched up to 3 times) and verifying merges (see [Merge verification](#merge-verification)).
 
 ## Modes
 
@@ -65,9 +65,22 @@ The lane follows the repo rule: a milestone issue goes to `milestone/<slug>` (fo
 
 `include_followups: defer-only` claims bot-filed `follow-up:` issues that have an unchecked `— defer` item. Post-deploy-only follow-ups are not claimed: with `postdeploy_rollup: <issue>` each is appended once as a checklist line to that release issue. Other bot issues stay excluded.
 
+## Merge verification
+
+A closed issue is not taken on trust. When a claimed issue closes (in `per-issue` and `batch` modes), the watch checks:
+
+1. a PR from `feat/issue-<n>-lean` merged into the issue's lane;
+2. the PR does not carry `review-degraded`;
+3. the issue's latest trusted `FORGE:REVIEW` passed: enforced `CONFORMS`, shadow `would PASS`, or a `review.trigger` skip. A shadow `would BLOCK` fails: shadow mode merges it anyway, and the watch reports that;
+4. every required check of the lane (branch protection and rulesets) is green on the merged head;
+5. the merge commit is on the lane (`compare` reports `behind` or `identical`);
+6. no check on the merge commit failed (report-only `forgedock/verify` is ignored). While those checks run, verification waits up to 60 minutes and then fails.
+
+All pass: the issue counts as **verified**, and a `FORGE:WATCH_VERIFY` comment records the evidence. Any fails: the issue is **unverified**. It is reopened with `needs-human` and a "merge NOT verified" comment that lists the evidence and the failed check. Nothing is reverted; a human decides between a revert, a follow-up fix and accepting the merge. An issue that closed with no merged lane PR (invalid, already fixed, decomposed) counts as **closed unmerged**, never as verified.
+
 ## Status
 
-`status` prints the selector, claims against `max_issues`, inflight, merged, verified, failed and the time remaining.
+`status` prints the selector, claims against `max_issues`, inflight, merged, verified, unverified, closed unmerged, failed and the time remaining.
 
 ## Release mode
 
