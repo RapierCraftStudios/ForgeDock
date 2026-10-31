@@ -36,8 +36,10 @@ function world({ alerts = [], issues = [], probe = 0, killed = false, llmCost = 
     llm: async () => { w.llm++; return { text: "Hypothesis: pool exhausted.", cost_usd: llmCost }; },
     gh: async (a) => {
       w.gh.push(a);
-      if (a[0] === "api") { const rest = issues.filter((i) => i.state === "OPEN").map((i) => ({ number: i.number, state: "open", state_reason: null, body: i.body, created_at: i.createdAt, closed_at: null })); const pages = []; for (let k = 0; k < rest.length || !pages.length; k += 100) pages.push(rest.slice(k, k + 100)); pages[0].push({ number: 1, pull_request: {}, body: "" }); return JSON.stringify(pages); }
-      if (a[1] === "list") return JSON.stringify(issues.filter((i) => i.state === "CLOSED"));
+      if (a[1] === "list") {
+        const arg = (k) => a[a.indexOf(k) + 1], lim = Number(arg("--limit")), st = arg("--state").toUpperCase(), cut = /created:<=(\S+)/.exec(arg("--search") ?? "")?.[1];
+        return JSON.stringify(issues.filter((i) => (st === "ALL" || i.state === st) && (!cut || i.createdAt <= cut)).sort((x, y) => y.createdAt.localeCompare(x.createdAt)).slice(0, lim));
+      }
       return `https://github.com/o/r/issues/${100 + w.gh.length}\n`; },
   };
   return w;
@@ -98,7 +100,7 @@ describe("roundOnce", () => {
     const state = {};
     const r = await roundOnce({ cfg, io: w.io, state, dryRun: true });
     assert.equal(r.would_file.length, 1);
-    assert.equal(w.gh.every((a) => a[1] === "list" || a[0] === "api"), true);
+    assert.equal(w.gh.every((a) => a[1] === "list"), true);
     assert.equal(w.llm, 0); assert.equal(w.pages.length, 0); assert.equal(w.emits.length, 0);
     assert.deepEqual(state.filed, []);
   });
@@ -198,14 +200,14 @@ describe("roundOnce", () => {
   });
   it("files nothing when the issue list fails (no blind duplicates)", async () => {
     const w = world({ alerts: [alert("Slow", "P2")] });
-    const orig = w.io.gh; w.io.gh = async (a) => { if (a[0] === "api") throw new Error("rate limited"); return orig(a); };
+    const orig = w.io.gh; w.io.gh = async (a) => { if (a[1] === "list") throw new Error("rate limited"); return orig(a); };
     const r = await roundOnce({ cfg, io: w.io, state: {} });
     assert.equal(r.filed.length, 0);
     assert.match(r.errors[0], /nothing filed/);
   });
   it("still files when only the closed lookup fails", async () => {
     const w = world({ alerts: [alert("Slow", "P2")] });
-    const orig = w.io.gh; w.io.gh = async (a) => { if (a[1] === "list") throw new Error("boom"); return orig(a); };
+    const orig = w.io.gh; w.io.gh = async (a) => { if (a[1] === "list" && a.includes("closed")) throw new Error("boom"); return orig(a); };
     const r = await roundOnce({ cfg, io: w.io, state: {} });
     assert.equal(r.filed.length, 1);
     assert.match(r.errors.join(), /closed issue list failed/);
@@ -214,13 +216,13 @@ describe("roundOnce", () => {
     const filed = world({ alerts: [alert("Slow", "P2")] });
     await roundOnce({ cfg, io: filed.io, state: {} });
     const c = creates(filed)[0], oldBody = c[c.indexOf("--body") + 1];
-    const mk = (n) => ({ number: n, state: "OPEN", body: "unrelated", createdAt: "2026-10-31T00:00:00Z" });
+    const mk = (n) => ({ number: n, state: "OPEN", body: "unrelated", createdAt: `2026-10-31T00:${String(Math.floor((n - 1000) / 60)).padStart(2, "0")}:${String((n - 1000) % 60).padStart(2, "0")}Z` });
     const issues = [...Array.from({ length: 250 }, (_, k) => mk(1000 + k)), { number: 5, state: "OPEN", body: oldBody, createdAt: "2026-10-01T00:00:00Z" }];
     const w = world({ alerts: [alert("Slow", "P2")], issues });
     const r = await roundOnce({ cfg, io: w.io, state: {} });
     assert.equal(creates(w).length, 0);
     assert.equal(r.filed.length, 0);
-    assert.ok(w.gh.some((a) => a[0] === "api" && a.includes("--paginate")));
+    assert.ok(w.gh.some((a) => a.includes("--search")));
   });
 });
 
