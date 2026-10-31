@@ -2163,6 +2163,11 @@ not `URL.pathname`, which gave `/C:/...` on Windows.
 `makeLeanIo` now passes `{ repo }` to `makeProjector`, so the projector's `gh issue view --json body` carries `-R <repo>` (callers without a repo keep cwd resolution). `getBody` throws on non-JSON output or a missing/non-string `body` instead of returning `""`, so `writeState` makes no `gh issue edit` call on an unreadable read. `writeState` also refuses a body that would drop existing non-STATE issue text.
 Cite: #4860.
 
+## Entry 2026-10-31 — Prod-watch owner digest state persists after the gh write (#4872)
+
+`digest()` in `bin/lean/prodwatch.mjs` builds the merged item list locally and calls `gh issue create`/`edit` through `write()`. `state.digest` (`date`, `issue`, `items`) is assigned only when `write()` returned non-null; an existing `state.digest` is never mutated beforehand. A failed write (error in `rep.errors`) leaves state unchanged, so the next round retries it with the new items. `--dry-run` still makes no writes or state changes.
+Cite: #4872.
+
 ## Entry 2026-10-31 — Docs-freshness edits are implied deliverables (#4887)
 A doc file (`.md`, `.mdx`, `.rst`, `.txt`) newly changed by the step-3c docs round or a CI fix round, while the repo's
 freshness script failed before the round and passes after it, gets an engine-synthesized `add-deliverable` amendment (why

@@ -201,14 +201,18 @@ async function digest({ rep, state, io, label, nowMs, write, dryRun }) {
   if (!rep.human.length) return;
   const day = DAY(nowMs), d = state.digest?.date === day ? state.digest : { date: day, issue: null, items: [] };
   const fresh = rep.human.filter((h) => !d.items.some((x) => x.fp === h.fp));
-  rep.digest = { date: day, items: [...d.items, ...fresh] };
+  const items = [...d.items, ...fresh];
+  rep.digest = { date: day, items };
   if (!fresh.length || dryRun) return;
-  d.items = rep.digest.items;
-  const body = `Human-only actions prod-watch will not take (${day}):\n\n${d.items.map((x) => `- ${x.class}: ${neutralize(x.title)} (fp ${x.fp})`).join("\n")}\n`;
+  const body = `Human-only actions prod-watch will not take (${day}):\n\n${items.map((x) => `- ${x.class}: ${neutralize(x.title)} (fp ${x.fp})`).join("\n")}\n`;
   const title = `prod-watch owner digest ${day}`;
-  if (d.issue) await write("digest edit", () => io.gh(["issue", "edit", String(d.issue), "--body", body]));
-  else d.issue = issueNumber(await write("digest create", () => io.gh(["issue", "create", "--title", title, "--body", body, "--label", label])));
-  state.digest = d;
+  // State is persisted only after the gh write succeeds, so a failed write is retried next round.
+  if (d.issue) {
+    if (await write("digest edit", () => io.gh(["issue", "edit", String(d.issue), "--body", body])) !== null) state.digest = { date: day, issue: d.issue, items };
+  } else {
+    const out = await write("digest create", () => io.gh(["issue", "create", "--title", title, "--body", body, "--label", label]));
+    if (out !== null) state.digest = { date: day, issue: issueNumber(out), items };
+  }
 }
 
 /** Closed (fixed) prod-watch issues: once `deployed_probe` exits 0 and the signal is gone, comment FORGE:VERIFIED; if it is still there, count it ineffective. */
