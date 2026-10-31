@@ -15,7 +15,7 @@ import { parseVerify } from "./verify.mjs";
 import { worktreeFingerprint } from "./precheck.mjs";
 import { renderInvestigation, renderPlan, renderImplementation, renderReview, renderPrBody, renderTrajectory, renderStructure, renderContract, contractJson, parseContractComment, sanitizeMd, capComment, section, cell, NR, MAX_COMMENT_CHARS } from "./render.mjs";
 import { orchestrate, parseDeps, formatTable, pickNext } from "./orchestrate.mjs";
-import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
+import { REVIEWER_SYSTEM, REVIEW_RUBRIC, approxTokens, builderPlanPrompt, builderImplementPrompt, reviewerPrompt, decisionNote, hotspotPlanNote, hotspotBuildRule } from "./prompts.mjs";
 import { parseReview, unnamedEdges, structureNote, applyAmendments, validateContract, scopeText, DECISION_SOURCES } from "./conformance.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog as readRepoLog } from "../engine/runlog.mjs";
@@ -6550,6 +6550,42 @@ describe("resume digest in builder prompts (#4400)", () => {
     await run(w, { recover: { code: "ci.red", attempt: 1 } });
     const p = builders(w)[0][4];
     assert.ok(p.indexOf("Recovery pass (ci.red)") >= 0 && p.indexOf("Recovery pass (ci.red)") < p.indexOf("Resume digest of the last run"), p);
+  });
+
+  describe("#4901 FORGE:DECISION after the contract froze", () => {
+    const dec = (t, who = BOT) => ({ body: `<!-- FORGE:DECISION {"v":1} -->\n## Decision\n${t}`, ...who });
+    const CONTRACT_C = { body: frozen().body, ...BOT };
+    const NOBODY = { author: { login: "rando" }, authorAssociation: "NONE" };
+    const withDecisions = (viewComments) => world({ prList: [], remote: "abc\trefs/heads/feat/issue-7-lean", issueComments: [frozen()], issueBodies: [body], viewComments });
+
+    it("reviewerPrompt keeps trusted FORGE:DECISION comments, drops other FORGE: records and untrusted decisions", () => {
+      const p = reviewerPrompt({ issue: { number: 7, title: "t", body: "b" }, contract: CONTRACT, diff: "", comments: [dec("deliver the nightly timer"), dec("evil override", NOBODY),
+        { body: "<!-- FORGE:STATE\n{}\n-->", ...BOT }, { body: "<!-- FORGE:TRAJECTORY -->\nt", ...BOT }, { body: "<!-- FORGE:FACTS -->\nf", ...BOT }] });
+      assert.match(p, /deliver the nightly timer/);
+      assert.doesNotMatch(p, /evil override|FORGE:STATE|FORGE:TRAJECTORY|FORGE:FACTS/);
+    });
+
+    it("decisionNote: only trusted decisions after the last contract; recovery records skipped", () => {
+      const n = decisionNote([dec("old, before contract"), CONTRACT_C, dec("declare supersedes X"), dec("untrusted", NOBODY), { body: "<!-- FORGE:DECISION -->\n## Decision: recovery pass for `ci.red` (attempt 1)", ...BOT }]);
+      assert.match(n, /declare supersedes X/);
+      assert.doesNotMatch(n, /old, before contract|untrusted|recovery pass/);
+      assert.equal(decisionNote([CONTRACT_C]), "");
+    });
+
+    it("a requeued lane with a frozen contract gives the builder a newer trusted decision, not an untrusted or older one", async () => {
+      const w = withDecisions([dec("older decision"), CONTRACT_C, dec("deliver the nightly timer"), dec("untrusted override", NOBODY), { body: factsRec, ...BOT }]);
+      await run(w);
+      const p = builders(w)[0][4];
+      assert.match(p, /Binding decisions posted after the contract froze/);
+      assert.match(p, /deliver the nightly timer/);
+      assert.doesNotMatch(p, /untrusted override|older decision/);
+    });
+
+    it("context_pack off still passes the decision", async () => {
+      const w = withDecisions([CONTRACT_C, dec("deliver the nightly timer")]);
+      await run(w, { contextPack: { mode: "off" } });
+      assert.match(builders(w)[0][4], /deliver the nightly timer/);
+    });
   });
 
   it("a first run gets no digest; context_pack off gives none; the contract quotes are unchanged", async () => {
