@@ -2162,3 +2162,9 @@ not `URL.pathname`, which gave `/C:/...` on Windows.
 
 `makeLeanIo` now passes `{ repo }` to `makeProjector`, so the projector's `gh issue view --json body` carries `-R <repo>` (callers without a repo keep cwd resolution). `getBody` throws on non-JSON output or a missing/non-string `body` instead of returning `""`, so `writeState` makes no `gh issue edit` call on an unreadable read. `writeState` also refuses a body that would drop existing non-STATE issue text.
 Cite: #4860.
+
+## Entry 2026-10-31 — Docs-freshness edits are implied deliverables (#4887)
+A doc file (`.md`, `.mdx`, `.rst`, `.txt`) newly changed by the step-3c docs round or a CI fix round, while the repo's
+freshness script failed before the round and passes after it, gets an engine-synthesized `add-deliverable` amendment (why
+"docs freshness rule", `impliedDocDeliverables` in `conformance.mjs`, merged in `amend()` in `lean.mjs`). The path comes from
+the diff, never a hardcoded dossier path; any other out-of-contract file in the round is still `conformance.scope_creep`.

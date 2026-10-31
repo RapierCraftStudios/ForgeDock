@@ -115,6 +115,19 @@ export function authorizationOf(contract, f) {
   if (isIncidentalPath(f)) return "incidental";
   return null;
 }
+const DOC_FILE_RE = /\.(md|mdx|rst|txt)$/i;
+/**
+ * The docs-freshness rule demands a doc edit the frozen contract cannot name: add-deliverable amendments (why "docs freshness
+ * rule") for doc-type files that `after` has and `before` lacked and no deliverable, test or incidental rule authorizes.
+ * Only when the freshness check failed before the round (`wasFailing`) and passes after it (`nowOk`); code files stay scope creep.
+ */
+export function impliedDocDeliverables({ before = [], after = [], contract, wasFailing = false, nowOk = false }) {
+  if (!wasFailing || !nowOk) return [];
+  const had = new Set(before.map(cleanPath));
+  return [...new Set(after.map(cleanPath))]
+    .filter((f) => !had.has(f) && DOC_FILE_RE.test(f) && !authorizationOf(contract ?? {}, f))
+    .map((path) => ({ kind: "add-deliverable", path, why: "docs freshness rule" }));
+}
 const blank = (s) => !String(s ?? "").trim() || /^none$/i.test(String(s).trim());
 
 /** forge.yaml lean.repro_test (#4271): "prefer" (default) asks a bug lane for a red-green repro test; "off" is today's contract. */
