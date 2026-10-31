@@ -146,7 +146,7 @@ export function renderAmendments(applied, filed = {}, state = null) {
 }
 
 /** #4899: the raw amendments a FORGE:AMENDMENT comment carries, `{contract, amendments}` (contract = frozen hash), or null. */
-export function parseAmendmentState(body) {
+export function parseAmendmentsComment(body) {
   const m = /<!-- FORGE:AMENDMENT-STATE (.*?) -->/.exec(String(body ?? ""));
   if (!m) return null;
   try { const j = JSON.parse(m[1]); return typeof j?.contract === "string" && Array.isArray(j.amendments) ? j : null; } catch { return null; }
