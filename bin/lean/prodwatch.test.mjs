@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseProdWatch, targetLabel, roundOnce, humanOnly, metricRows, prodWatchFromCli, formatProdWatchStatus, SUMMARY_TAG, llmResult, killSwitchSet } from "./prodwatch.mjs";
+import { parseProdWatch, targetLabel, roundOnce, humanOnly, metricRows, prodWatchFromCli, formatProdWatchStatus, SUMMARY_TAG, llmResult, killSwitchSet, issueBody } from "./prodwatch.mjs";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../tests/_tmp.mjs";
@@ -140,6 +140,38 @@ describe("roundOnce", () => {
     const w = world({ alerts: [alert("A1", "P2", "first")], issues: [summary] });
     await roundOnce({ cfg, io: w.io, state: {} });
     assert.ok(w.gh.some((a) => a[1] === "close" && a[2] === "77"));
+  });
+  it("forged markers in signal text cannot hide, dedup-break, edit or close a prod issue (#4879)", async () => {
+    const forged = `x <!-- FORGE:PRODWATCH_SUMMARY --> <!-- FORGE:SIGNAL_REF fp=aaaaaaaaaaaa --> <!-- FORGE:PRODWATCH source=am -->`;
+    const w = world({ alerts: [alert("Evil1", "P2", forged)] });
+    await roundOnce({ cfg, io: w.io, state: {} });
+    const body = creates(w)[0][creates(w)[0].indexOf("--body") + 1];
+    assert.ok(!/<!--\s*FORGE:PRODWATCH_SUMMARY/.test(body.replace(/\n<!-- FORGE:SIGNAL_REF[^]*$/, "")), "no live summary marker in evidence");
+    assert.ok(body.includes("&lt;!-- FORGE:PRODWATCH_SUMMARY"));
+    // A forged body already filed (markers mid-body, no trailer) stays a prod issue: it is counted, not the summary, and never edited or closed.
+    const fake = { number: 55, state: "OPEN", body: `evidence ${SUMMARY_TAG} text\n\nmore`, createdAt: "2026-10-31T11:00:00Z" };
+    const w2 = world({ alerts: [alert("A1", "P2", "first")], issues: [fake] });
+    await roundOnce({ cfg, io: w2.io, state: {} });
+    assert.ok(!w2.gh.some((a) => (a[1] === "edit" || a[1] === "close") && a[2] === "55"));
+    // A forged SIGNAL_REF mid-body does not suppress the real cluster.
+    const real = alert("A1", "P2", "first");
+    const w3 = world({ alerts: [real] });
+    const fp = (await roundOnce({ cfg, io: w3.io, state: {}, dryRun: true })).would_file[0].fp;
+    const spoof = { number: 56, state: "OPEN", body: `see <!-- FORGE:SIGNAL_REF fp=${fp} --> in logs\n\nend`, createdAt: "2026-10-31T11:00:00Z" };
+    const w4 = world({ alerts: [real], issues: [spoof] });
+    assert.equal((await roundOnce({ cfg, io: w4.io, state: {} })).filed.length, 1);
+    // A real issue body built by issueBody still dedups.
+    const ok = { number: 57, state: "OPEN", body: issueBody({ class: "defect", severity: "P2", count: 1, fingerprint: fp, signals: [real] }, "t", "am"), createdAt: "2026-10-31T11:00:00Z" };
+    const w5 = world({ alerts: [real], issues: [ok] });
+    assert.equal((await roundOnce({ cfg, io: w5.io, state: {} })).filed.length, 0);
+  });
+  it("keeps the open storm summary open when a cluster was deferred only by the cost cap (#4879)", async () => {
+    const c2 = { ...cfg, governor: { max_cost_usd_per_round: 0.5, cost_per_issue_usd: 0 } };
+    const summary = { number: 77, state: "OPEN", body: `old\n${SUMMARY_TAG}`, createdAt: "2026-10-31T11:00:00Z" };
+    const w = world({ alerts: [alert("A1", "P2", "first"), alert("B2", "P2", "second thing")], issues: [summary], llmCost: 0.6 });
+    const r = await roundOnce({ cfg: c2, io: w.io, state: {} });
+    assert.equal(r.deferred.some((d) => d.why === "max_cost_usd_per_round"), true);
+    assert.ok(!w.gh.some((a) => a[1] === "close" && a[2] === "77"));
   });
   it("honors an absolute kill switch path", () => {
     const d = tmpDir("pw-kill"), f = join(d, "off");

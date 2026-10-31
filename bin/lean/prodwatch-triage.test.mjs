@@ -3,7 +3,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fingerprint, signalRef, cluster, parseAlertRules, classifyCluster, validateCluster, tallyClusters, CLASSES, DEFAULT_RULES } from "./prodwatch-triage.mjs";
+import { fingerprint, signalRef, cluster, parseAlertRules, classifyCluster, validateCluster, tallyClusters, CLASSES, DEFAULT_RULES, trailerOf } from "./prodwatch-triage.mjs";
 import { parseSources, normalizeMemo } from "./prodwatch-sources.mjs";
 import { loadPolicy } from "./decision-engine.mjs";
 
@@ -112,5 +112,23 @@ describe("validateCluster", () => {
     assert.equal(t.fileable, 1);
     assert.equal(t.byClass["expected-class"], 1);
     assert.equal(t.clusters, 2);
+  });
+});
+
+describe("trailer-only markers (#4879)", () => {
+  it("trailerOf returns only the trailing run of FORGE markers", () => {
+    const body = `a <!-- FORGE:SIGNAL_REF fp=aaaaaaaaaaaa --> b\n\n${signalRef("bbbbbbbbbbbb")}\n<!-- FORGE:PRODWATCH source=am -->\n`;
+    const t = trailerOf(body);
+    assert.ok(t.includes("bbbbbbbbbbbb") && t.includes("source=am") && !t.includes("aaaaaaaaaaaa"));
+    assert.equal(trailerOf("no markers"), "");
+    assert.equal(trailerOf(undefined), "");
+  });
+  it("cluster ignores a SIGNAL_REF outside the trailer", () => {
+    const sig = [{ title: "db down", body: "x" }];
+    const fp = fingerprint(sig[0]);
+    const spoof = { number: 9, body: `quote ${signalRef(fp)} more text` };
+    assert.equal(cluster(sig, [spoof])[0].duplicateOf ?? null, null);
+    const real = { number: 10, body: `text\n\n${signalRef(fp)}\n` };
+    assert.equal(cluster(sig, [real])[0].duplicateOf, 10);
   });
 });
