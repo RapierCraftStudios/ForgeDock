@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { phasesOf } from "./orchestrate.mjs";
 import { aggregate } from "../stats/aggregate.mjs";
-import { PHASES, createLedger, laneSum, withinWall, flattenPhases, unflattenPhases, summarizePhases, formatPhaseSummary } from "./phaseledger.mjs";
+import { LANE_PHASES, createLedger, laneSum, withinWall, flattenPhases, unflattenPhases, summarizePhases, formatLedgerSummary } from "./phaseledger.mjs";
 
 const clock = () => { let t = 1000; const f = () => t; f.tick = (ms) => { t += ms; }; return f; };
 
@@ -48,12 +48,12 @@ describe("phase ledger (#4908)", () => {
     assert.equal(s.phases.plan.p50, 90000);
     assert.equal(s.phases.implement.p90, 900000);
     assert.equal(s.largest.phase, "implement");
-    const line = formatPhaseSummary(rows);
+    const line = formatLedgerSummary(rows);
     assert.match(line, /implement 10\.0m\/15\.0m/);
     assert.match(line, /largest: implement/);
-    assert.equal(formatPhaseSummary([{ issue: 1 }]), "phases (wall time): n/a");
-    assert.equal(formatPhaseSummary(null), "phases (wall time): n/a");
-    assert.equal(PHASES.length, 11);
+    assert.equal(formatLedgerSummary([{ issue: 1 }]), "phases (wall time): n/a");
+    assert.equal(formatLedgerSummary(null), "phases (wall time): n/a");
+    assert.equal(LANE_PHASES.length, 11);
   });
 
   it("the batch row adds queue_wait to the lane ledger and stays null without one (#4908)", () => {

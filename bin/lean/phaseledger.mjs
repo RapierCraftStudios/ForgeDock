@@ -9,7 +9,7 @@
  * `phase_<id>_ms|_model_ms|_usd` keys for it and `unflattenPhases` reads them back.
  */
 
-export const PHASES = Object.freeze(["queue_wait", "sandbox_start", "deps_install", "validate", "plan", "implement", "precheck", "review", "ci_wait", "base_sync", "merge"]);
+export const LANE_PHASES = Object.freeze(["queue_wait", "sandbox_start", "deps_install", "validate", "plan", "implement", "precheck", "review", "ci_wait", "base_sync", "merge"]);
 const isNum = (x) => typeof x === "number" && Number.isFinite(x);
 
 function pct(values, p) {
@@ -21,11 +21,11 @@ function pct(values, p) {
 
 /** Sequential ledger starting in `first` at `start`. `now` is the lane clock. */
 export function createLedger(now, first = "sandbox_start", start = now()) {
-  let cur = PHASES.includes(first) ? first : null, since = start;
+  let cur = LANE_PHASES.includes(first) ? first : null, since = start;
   const ms = {}, model = {}, usd = {};
   const close = (t) => { if (cur) ms[cur] = (ms[cur] ?? 0) + Math.max(0, t - since); };
   const enter = (phase) => {
-    if (!PHASES.includes(phase) || phase === cur) return;
+    if (!LANE_PHASES.includes(phase) || phase === cur) return;
     const t = now(); close(t); cur = phase; since = t;
   };
   return {
@@ -37,7 +37,7 @@ export function createLedger(now, first = "sandbox_start", start = now()) {
     },
     current: () => cur,
     addModel(phase, modelMs, cost) {
-      const id = PHASES.includes(phase) ? phase : cur;
+      const id = LANE_PHASES.includes(phase) ? phase : cur;
       if (!id) return;
       if (isNum(modelMs) && modelMs > 0) model[id] = (model[id] ?? 0) + modelMs;
       if (isNum(cost) && cost > 0) usd[id] = (usd[id] ?? 0) + cost;
@@ -47,7 +47,7 @@ export function createLedger(now, first = "sandbox_start", start = now()) {
       const t = now(), total = { ...ms };
       if (cur) total[cur] = (total[cur] ?? 0) + Math.max(0, t - since);
       const out = {};
-      for (const id of PHASES) {
+      for (const id of LANE_PHASES) {
         if (!(id in total) && !(id in model) && !(id in usd)) continue;
         out[id] = { ms: Math.round(total[id] ?? 0), ...(model[id] ? { model_ms: Math.round(model[id]) } : {}), ...(usd[id] ? { usd: Math.round(usd[id] * 1e6) / 1e6 } : {}) };
       }
@@ -65,7 +65,7 @@ export const withinWall = (phases, wallMs, tol = 0.05) => isNum(wallMs) && wallM
 export function flattenPhases(phases) {
   const out = {};
   for (const [id, v] of Object.entries(phases ?? {})) {
-    if (!PHASES.includes(id) || !v) continue;
+    if (!LANE_PHASES.includes(id) || !v) continue;
     if (isNum(v.ms)) out[`phase_${id}_ms`] = v.ms;
     if (isNum(v.model_ms)) out[`phase_${id}_model_ms`] = v.model_ms;
     if (isNum(v.usd)) out[`phase_${id}_usd`] = v.usd;
@@ -75,7 +75,7 @@ export function flattenPhases(phases) {
 
 export function unflattenPhases(rec) {
   const out = {};
-  for (const id of PHASES) {
+  for (const id of LANE_PHASES) {
     const ms = rec?.[`phase_${id}_ms`], mm = rec?.[`phase_${id}_model_ms`], usd = rec?.[`phase_${id}_usd`];
     if (!isNum(ms)) continue;
     out[id] = { ms, ...(isNum(mm) ? { model_ms: mm } : {}), ...(isNum(usd) ? { usd } : {}) };
@@ -89,10 +89,10 @@ export function unflattenPhases(rec) {
  */
 export function summarizePhases(list) {
   const by = {}, lanes = (list ?? []).filter((p) => p && typeof p === "object" && Object.keys(p).length);
-  for (const p of lanes) for (const [id, v] of Object.entries(p)) if (PHASES.includes(id) && isNum(v?.ms) && v.ms >= 0) (by[id] ??= []).push(v.ms);
+  for (const p of lanes) for (const [id, v] of Object.entries(p)) if (LANE_PHASES.includes(id) && isNum(v?.ms) && v.ms >= 0) (by[id] ??= []).push(v.ms);
   const phases = {};
   let total = 0;
-  for (const id of PHASES) {
+  for (const id of LANE_PHASES) {
     if (!by[id]) continue;
     const sum = by[id].reduce((a, b) => a + b, 0);
     total += sum;
@@ -106,7 +106,7 @@ export function summarizePhases(list) {
 const min = (ms) => `${(ms / 60000).toFixed(1)}m`;
 
 /** Report line(s) for p50/p90 per phase and the largest phase; `n/a` when no lane carried a ledger. Never throws. */
-export function formatPhaseSummary(rows) {
+export function formatLedgerSummary(rows) {
   try {
     const s = summarizePhases((rows ?? []).map((r) => r?.phases));
     if (!s.n) return "phases (wall time): n/a";
