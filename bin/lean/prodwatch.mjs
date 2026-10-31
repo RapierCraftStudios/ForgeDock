@@ -115,21 +115,13 @@ const isSummary = (i) => String(i?.body ?? "").includes(SUMMARY_TAG);
 
 const issueNumber = (out) => Number(/(\d+)\s*$/.exec(String(out ?? "").trim())?.[1]) || null;
 
-const LIST_FIELDS = "number,state,stateReason,body,createdAt,closedAt", PAGE = 100;
+const LIST_FIELDS = "number,state,stateReason,body,createdAt,closedAt";
 
-/** Every open issue carrying `label`. `gh issue list` has no cursor, so page by creation time: a full page re-queries `created:<=` its oldest issue until a page adds nothing new. */
+/** Every open issue carrying `label`: `gh api --paginate --slurp` walks all pages (`gh issue list` has no cursor); PRs are dropped and items mapped to the `issue list` shape. */
 async function listOpen(io, label) {
-  const seen = new Map();
-  let search = null;
-  for (;;) {
-    const args = ["issue", "list", "--label", label, "--state", "open", "--limit", String(PAGE), "--json", LIST_FIELDS, ...(search ? ["--search", search] : [])];
-    const page = JSON.parse(String(await io.gh(args)));
-    const before = seen.size;
-    for (const i of page) seen.set(i.number, i);
-    if (page.length < PAGE || seen.size === before) break;
-    search = `created:<=${page.map((i) => i.createdAt).sort()[0]}`;
-  }
-  return [...seen.values()].filter((i) => i.state === "OPEN");
+  const pages = JSON.parse(String(await io.gh(["api", "--paginate", "--slurp", `repos/{owner}/{repo}/issues?labels=${encodeURIComponent(label)}&state=open&per_page=100`])));
+  return pages.flat().filter((i) => !i.pull_request)
+    .map((i) => ({ number: i.number, state: "OPEN", stateReason: i.state_reason ?? null, body: i.body ?? "", createdAt: i.created_at, closedAt: i.closed_at ?? null }));
 }
 
 // ── one round ──────────────────────────────────────────────────────────────────────────────
