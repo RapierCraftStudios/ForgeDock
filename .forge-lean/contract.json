@@ -2,37 +2,37 @@
  "requirements": [
   {
    "id": "R1",
-   "quote": "Per signal and source: time from signal to issue, to merge and to deployed-verified, plus false-positive rate (issues closed as invalid), fix-ineffective rate (reopened after deploy) and recurrence rate.",
+   "quote": "No `gh issue view|list --json` call in `bin/` requests `authorAssociation` [type:unit]",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R2",
-   "quote": "Emit them through the telemetry seam (bin/engine/telemetry-seam.mjs).",
+   "quote": "A test asserts every `--json` field list passed to `gh issue view|list` in `bin/` is drawn from the fields gh supports (a fixed allowlist of the fields gh 2.97 lists) [type:unit]",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R3",
-   "quote": "`sourceMode(source, stats)` drops a source to shadow (triage runs, nothing is filed) when its false-positive rate stays above a threshold over a minimum sample.",
+   "quote": "`forgedock orchestrate --add \u003cid> N` adds an open issue on a real gh (regression test with a gh stub that rejects unknown fields the way gh does) [type:unit]",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R4",
-   "quote": "Calibrate like decision-engine `effectiveMode` (bin/lean/decision-engine.mjs:125).",
+   "quote": "The body reader and issue-watch list still resolve the author's trust (the association comes from the REST or GraphQL field) [type:unit]",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R5",
-   "quote": "Loop metrics plus an automatic drop to shadow.",
+   "quote": "Each call asks only for fields that `gh` supports.",
    "disposition": "deliver",
    "verify": "in_lane"
   },
   {
    "id": "R6",
-   "quote": "Rules: pure functions with an injected `io` (exec/gh/llm/now) like bin/lean/issuewatch.mjs; read-only by contract; deterministic first; core stays repo-agnostic (#1347). Repo is PUBLIC: no raw customer data in fixtures.",
+   "quote": "`bodyTrusted` / `isTrustedActor` keep their semantics, and a failed read still fails closed for trust.",
    "disposition": "deliver",
    "verify": "in_lane"
   }
@@ -40,8 +40,19 @@
  "deliverables": [
   {
    "id": "D1",
-   "path": "bin/lean/prodwatch-metrics.mjs",
-   "change": "New pure module: computeMetrics(rows, now) per source (median signal-to-issue/merge/verified, FP, fix-ineffective, recurrence rates), sourceMode(source, stats, opts) returning {mode, gated, rate} like effectiveMode (min sample 5, threshold 0.5 default), emitMetrics(metrics, io) emitting PRODWATCH_METRICS records. No gh/fs; injected io.",
+   "path": "bin/lean/gh-assoc.mjs",
+   "change": "New module: ISSUE_JSON_FIELDS allowlist (gh 2.97 issue fields, no authorAssociation); issueAssociation(gh, repo, n) via `gh api repos/{repo}/issues/N --jq .author_association` (repo null => {owner}/{repo}); listAssociations(gh, repo) via one paginated REST list returning Map number->association. Any failure returns undefined/empty so trust fails closed.",
+   "requirements": [
+    "R1",
+    "R4",
+    "R5",
+    "R6"
+   ]
+  },
+  {
+   "id": "D2",
+   "path": "bin/engine-cli.mjs",
+   "change": "Wiring only (import + calls; keep growth tiny, hotspot): drop authorAssociation from the --json lists at addToBatch (:1257) and the batch readBody (:1864/:1865); merge association from issueAssociation into the record before bodyTrusted/addedEdges.",
    "requirements": [
     "R1",
     "R3",
@@ -51,82 +62,101 @@
    ]
   },
   {
-   "id": "D2",
-   "path": "bin/engine/telemetry-seam.mjs",
-   "change": "mapRecord branch PRODWATCH_METRICS -> prodwatch_metrics (source, counts, rates, medians via compact()); add doc-comment line.",
+   "id": "D3",
+   "path": "bin/lean/issuewatch.mjs",
+   "change": "Drop authorAssociation from the two `gh issue list --json` lists (:244, :273); merge listAssociations by number into each issue before classifyIssue.",
    "requirements": [
-    "R2"
+    "R1",
+    "R4",
+    "R5"
    ]
   },
   {
-   "id": "D3",
-   "path": "bin/lean/prodwatch-metrics.test.mjs",
-   "change": "Tests: metrics math, empty/missing timestamps, shadow below/above min sample and threshold, no mutation, emit shape.",
+   "id": "D4",
+   "path": "bin/lean/gh-assoc.test.mjs",
+   "change": "New tests: scan non-test bin/**/*.mjs for gh issue view|list --json field lists and assert each is within ISSUE_JSON_FIELDS (and none has authorAssociation); helper unit tests incl. fail-closed; strict gh stub rejecting unknown fields drives addToBatch (orchestrate --add adds an open issue) and the readBody trust path; issuewatch tick still claims a trusted-author issue and skips an untrusted one.",
    "requirements": [
-    "R1",
+    "R2",
+    "R3",
+    "R4",
+    "R6"
+   ]
+  },
+  {
+   "id": "D5",
+   "path": "bin/tests/orchestrate-add-edges.test.mjs",
+   "change": "Update gh mock to serve the REST association call (api) instead of the authorAssociation JSON key; keep the untrusted-author case.",
+   "requirements": [
     "R3",
     "R4"
    ]
   },
   {
-   "id": "D4",
-   "path": "bin/engine/telemetry-seam.test.mjs",
-   "change": "Test the new mapping and that absent values are omitted.",
+   "id": "D6",
+   "path": "bin/lean/issuewatch.test.mjs",
+   "change": "Update gh mocks for the REST association list call; same trust assertions.",
    "requirements": [
-    "R2"
+    "R4"
    ]
   },
   {
-   "id": "D5",
-   "path": "devdocs/modules/lean.md",
-   "change": "Add prodwatch-metrics.mjs to the lean module entry (devdocs freshness check).",
+   "id": "D7",
+   "path": "bin/lean/issuewatch-release.test.mjs",
+   "change": "Update gh mocks for the association call if its io.gh stub handles issue list.",
    "requirements": [
-    "R5"
+    "R4"
    ]
   }
  ],
  "preserve": [
   {
    "id": "P1",
-   "what": "decision-engine effectiveMode/REVERSAL_MIN_SAMPLE behaviour (bin/lean/decision-engine.mjs:23,125)"
+   "what": "bodyTrusted/isTrustedActor semantics (bin/engine-cli.mjs:2230, bin/engine/phases.mjs:63): untrusted or unreadable association is untrusted."
   },
   {
    "id": "P2",
-   "what": "Existing mapRecord mappings and null for unmapped records (bin/engine/telemetry-seam.mjs)"
+   "what": "classifyIssue results (bin/lean/issuewatch.mjs:145) for the same issue records, including the bot/spoof cases in bin/lean/issuewatch.test.mjs."
   },
   {
    "id": "P3",
-   "what": "prodwatch-sources and prodwatch-triage exports unchanged (bin/lean/prodwatch-*.mjs)"
+   "what": "`--json comments` reads of authorAssociation (bin/lean/prefilter.mjs, bin/hooks/pre-tool-use.mjs) are valid and unchanged."
+  },
+  {
+   "id": "P4",
+   "what": "orchestrate --add output format and edge report (bin/engine-cli.mjs addToBatch/addedEdges)."
   }
  ],
  "validate": [
   {
    "id": "V1",
-   "command": "node --test bin/lean/prodwatch-metrics.test.mjs bin/engine/telemetry-seam.test.mjs bin/lean/prodwatch-triage.test.mjs bin/lean/prodwatch-sources.test.mjs bin/lean/decision-engine.test.mjs"
+   "command": "node --test bin/lean/gh-assoc.test.mjs bin/tests/orchestrate-add-edges.test.mjs bin/lean/issuewatch.test.mjs bin/lean/issuewatch-release.test.mjs"
   },
   {
    "id": "V2",
-   "command": "node --test bin/lean/lean.test.mjs bin/lean/execution.test.mjs bin/lean/conformance.test.mjs bin/lean/batch.test.mjs bin/lean/checks.test.mjs bin/lean/context.test.mjs bin/lean/drift.test.mjs bin/lean/fixround.test.mjs bin/stats/stats.test.mjs"
+   "command": "node --test bin/lean/lean.test.mjs bin/lean/execution.test.mjs bin/lean/conformance.test.mjs bin/lean/context.test.mjs bin/lean/batch.test.mjs bin/engine/telemetry-seam.test.mjs bin/lean/checks.test.mjs bin/lean/drift.test.mjs bin/lean/fixround.test.mjs"
+  },
+  {
+   "id": "V3",
+   "command": "node --check bin/engine-cli.mjs && node --check bin/lean/gh-assoc.mjs && node --check bin/lean/issuewatch.mjs"
   }
  ],
  "decisions": [
   {
    "id": "K1",
-   "choice": "sourceMode returns {mode, gated, rate} and uses min sample 5 / threshold 0.5 defaults, overridable",
-   "justification": "mirrors effectiveMode at bin/lean/decision-engine.mjs:125-129 and REVERSAL_MIN_SAMPLE at :23",
+   "choice": "Get the association from REST (`gh api ... author_association`), not GraphQL.",
+   "justification": "Issue's Expected section offers either; REST has precedent at bin/engine-cli.mjs:1922 and needs no query string; one paginated list call serves issue watch.",
    "source": "precedent"
   },
   {
    "id": "K2",
-   "choice": "Metrics are computed from caller-supplied issue rows; no gh/fs in the module",
-   "justification": "#4836 verify module does not exist; the injected-io rule is in the issue and bin/lean/issuewatch.mjs",
-   "source": "spec"
-  },
-  {
-   "id": "K3",
-   "choice": "Emit a new PRODWATCH_METRICS record mapped in telemetry-seam rather than overloading decision_engine",
-   "justification": "bin/engine/telemetry-seam.mjs:83-90 maps one event per record type",
-   "source": "precedent"
+   "choice": "New module bin/lean/gh-assoc.mjs instead of growing engine-cli.mjs.",
+   "justification": "engine-cli.mjs is a 2467-line hotspot; it gets only wiring.",
+   "source": "lint"
   }
- ]
+ ],
+ "repro_test": {
+  "path": "bin/lean/gh-assoc.test.mjs",
+  "id": "gh issue --json field lists stay within the gh allowlist",
+  "command": "node --test --test-name-pattern=\"gh issue --json field lists stay within the gh allowlist\" bin/lean/gh-assoc.test.mjs"
+ }
 }

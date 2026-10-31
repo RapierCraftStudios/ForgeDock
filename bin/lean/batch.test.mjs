@@ -538,7 +538,7 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     assert.deepEqual(b.readAdded(), [2, 3, 5]);
     assert.deepEqual(b.unrunAdds(), [2, 3, 5]);
     const views = [];
-    const io = { gh: async (a) => { views.push(a); if (a[2] === "8") throw new Error("gh down"); return JSON.stringify({ state: a[2] === "7" ? "CLOSED" : "OPEN" }); } };
+    const io = { gh: async (a) => { if (a[0] === "api") return "OWNER\n"; views.push(a); if (a[2] === "8") throw new Error("gh down"); return JSON.stringify({ state: a[2] === "7" ? "CLOSED" : "OPEN" }); } };
     const res = await quiet(() => orchestrateFromCli(["--add", "b1", "6", "7", "8", "3", "x"], { batchRoot: root, io }));
     assert.deepEqual(res.added, [6]);
     assert.deepEqual(res.skipped.map((x) => [x.issue, x.reason]).sort(), [[3, "already in batch"], [7, "closed"], [8, "unreadable"], ["x", "not an integer"]]);
@@ -553,7 +553,7 @@ describe("#4408: issues added to a running batch (forgedock orchestrate --add)",
     b.writePlan({ argv: [], repo: "o/r" }); // no issues: the resume stops with the usage error after its adds
     b.store.save({ order: [1] });
     const views = [];
-    const io = { gh: async (a) => { views.push(a[2]); return JSON.stringify({ state: "OPEN" }); } };
+    const io = { gh: async (a) => { if (a[0] === "api") return "OWNER\n"; views.push(a[2]); return JSON.stringify({ state: "OPEN" }); } };
     await assert.rejects(quiet(() => orchestrateFromCli(["--resume", "b1", "--parallel", "5"], { batchRoot: root, io })), /usage/);
     assert.deepEqual(views, [], "no issue read for a flag value");
     assert.deepEqual(b.readAdded(), []);

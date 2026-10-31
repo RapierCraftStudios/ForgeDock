@@ -13,7 +13,7 @@ const issues = {
   7: { state: "CLOSED" }, // closed target: no edge
   9: { state: "OPEN", body: "Blocked by #6", authorAssociation: "NONE", author: { login: "x" } }, // untrusted author: no edge
 };
-const io = { gh: async (a) => { const v = issues[a[a.indexOf("view") + 1]]; if (!v) throw new Error("not found"); return JSON.stringify(v); } };
+const io = { gh: async (a) => { if (a[0] === "api") { const m = /issues\/(\d+)$/.exec(a[1]); const x = m && issues[m[1]]; if (!x) throw new Error("not found"); return `${x.authorAssociation ?? ""}\n`; } const v = issues[a[a.indexOf("view") + 1]]; if (!v) throw new Error("not found"); const { authorAssociation: _a, ...rest } = v; return JSON.stringify(rest); } };
 
 describe("#4773: --add reports the edges it created", () => {
   it("lists trusted Blocked by / Depends on edges to open targets; closed, unresolved and untrusted ones are no-ops", async () => {
