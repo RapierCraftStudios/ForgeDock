@@ -6969,4 +6969,17 @@ describe("per-kind conformance modes (engine.conformance_kinds)", () => {
     const w = world({ changed: CREEP });
     assert.equal((await run(w, { conformance: "enforce", conformanceKinds: {} })).code, "conformance.scope_creep");
   });
+
+  it("P3: with kinds configured an environment failure stays env.tool_missing and an incomplete review stays review.incomplete", async () => {
+    const kinds = { "conformance.scope_creep": "shadow" };
+    for (const conformance of ["shadow", "enforce"]) {
+      const w = world({ validation: [{ id: "V1", command: "node --test test/foo.test.js", exit: 1 }] });
+      w.io.runCommand = async () => ({ rc: 1, output: "ModuleNotFoundError: No module named 'yaml'" });
+      const r = await run(w, { conformance, conformanceKinds: kinds });
+      assert.equal(r.code, OUTCOME_CODES.ENV_TOOL_MISSING, conformance); assert.equal(reviewers(w).length, 0); assert.equal(w.merges.length, 0);
+    }
+    const w2 = world({ reviews: [genericPass(), genericPass()] });
+    const r2 = await run(w2, { conformance: "enforce", conformanceKinds: kinds });
+    assert.equal(r2.code, "review.incomplete"); assert.equal(w2.merges.length, 0);
+  });
 });
