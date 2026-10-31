@@ -144,7 +144,8 @@
  "amendments": [],
  "facts": {
   "conventions": [
-   "CI Unit tests failure not reproducible locally: lean/engine/stats/protocol pass; 3 bin/tests failures are root+WSL environmental (journey, router); CI log unreadable offline"
+   "CI Unit tests failure not reproducible locally: lean/engine/stats/protocol pass; 3 bin/tests failures are root+WSL environmental (journey, router); CI log unreadable offline",
+   "CI run 41157197021: not reproducible; the 3 bin/tests failures reproduce on base forgedock.mjs (pre-existing, root+WSL host)"
   ]
  }
 }

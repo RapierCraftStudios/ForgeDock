@@ -36,3 +36,6 @@ The ten flagged tests mention bin/lean file stems only as unrelated string liter
 
 ### CI follow-up (Unit tests job)
 The CI log was not available (no GitHub access allowed), so the failure could not be read. Reproduced the job's scope locally at capped concurrency: `bin/lean/**` + `bin/engine/**` (1883 pass, 0 fail), `bin/stats/**` + `packages/protocol/**` (266 pass, 0 fail), `bin/tests/*.test.mjs` (2610 pass, 3 fail). The 3 failures (journey.test.mjs: preflight / forge Act II platform-WSL row; router.test.mjs: writeInstallReceipt copyFile-failure cleanup) are environmental: this host runs as root on WSL2, and the diff touches none of those files. No code change was made.
+
+### CI follow-up 2 (Unit tests job, run 41157197021)
+Log unreadable again (no GitHub access). Checked: no commits on origin/staging beyond HEAD; prodwatch tests are stable over 3 repeats and pass under a clean env (`env -i`, no HOME); the 3 local `bin/tests` failures (journey.test.mjs, router.test.mjs) fail identically with `bin/forgedock.mjs` reverted to origin/staging, so they are pre-existing and caused by this root/WSL2 host, not by this change. No code change; needs the failing test names from the CI log to go further.
