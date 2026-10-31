@@ -168,6 +168,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     const run = Promise.resolve().then(() => runBatch({ argv, cwd, env, sink, keepBreaker, signal: ac.signal })).then((result) => {
       const report = ent.dir ? openBatch(root, ent.id).readReport()?.report ?? null : null;
       emit({ type: "done", result, report });
+      if (ent.id) rehostLater(ent.id); // #4917
     }, (e) => {
       const message = e?.message ?? String(e);
       if (e?.code === "batch.stopped") { log(`schedd: batch ${ent.id ?? argv.join(" ")} stopped (lanes keep running; resumed by the next daemon)`); if (!started) reject(new Error(message)); return; }
@@ -175,6 +176,26 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     }).finally(() => { if (ent.id) hosted.delete(ent.id); ent.subs.clear(); runs.delete(run); touch(); });
     runs.set(run, ac);
   });
+
+  // #4917: a batch that ended with a deferred issue still waiting (no report) is re-hosted once its retry-at is near, without a restart
+  const rehostTimers = new Set();
+  const rehostLater = (id) => {
+    if (closing) return;
+    let b, st;
+    try { b = openBatch(root, id); if (b.readReport() || b.readCancel() || !b.pendingIssues().length) return; st = b.store.load(); } catch { return; }
+    const at = Math.min(...b.pendingIssues().map((n) => Number(st?.notBefore?.[n]) || Infinity));
+    if (!Number.isFinite(at)) return; // nothing waits on the clock: a deliberate hold stays for --resume
+    const t = setTimeout(() => {
+      rehostTimers.delete(t);
+      if (closing || hosted.has(id) || starting.has(id)) return;
+      log(`schedd: re-hosting batch ${id} (pending issues waiting on a retry)`);
+      const started = host({ argv: ["--resume", id], cwd: process.cwd(), env: {}, keepBreaker: true });
+      starting.set(id, started);
+      started.catch((e) => log(`schedd: re-host ${id} failed: ${e?.message ?? e}`)).finally(() => starting.delete(id));
+    }, Math.min(60_000, Math.max(1000, at - Date.now())));
+    t.unref?.();
+    rehostTimers.add(t);
+  };
 
   const handle = async (req, send) => {
     if (req.op === "status") {
@@ -287,6 +308,7 @@ export async function startDaemon({ dir = schedDir(), runBatch, idleMs = Number(
     clearInterval(idleTimer);
     clearInterval(lockTimer);
     clearInterval(beatTimer);
+    for (const t of rehostTimers) clearTimeout(t);
     if (dueTimer) clearInterval(dueTimer);
     for (const c of conns) c.destroy();
     const stopping = [...runs.keys()];

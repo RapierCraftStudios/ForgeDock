@@ -2218,14 +2218,14 @@ Cite: #4908.
 
 ## Entry 2026-10-31 — schedd: a batch with pending issues is not finalised (#4917)
 
-`runBatch` (`bin/engine-cli.mjs`) writes no `report.json` while a pending issue is
-still waiting on time or a retry (`hasWaitingPending`: its row is not `held`; a cancel
-still ends the batch), so a deferred or requeued issue leaves the batch resumable
-instead of dropping it from the schedd. Deliberate holds (budget, operator, drift,
-breaker) still write their report. `requeue`/`add` on an
-unhosted batch re-host it (`--resume`) when a requeue or add entry is still
-unapplied, and the CLI prints `re-hosted by the schedd` or `not re-hosted`.
-`schedd status` lists batch dirs with pending issues that are not hosted
+`orchestrate` marks the row of a pending issue whose retry-at (`notBefore`) is still in
+the future with `retry_at`; `runBatch` (`bin/engine-cli.mjs`, `hasWaitingPending`) then
+writes no `report.json` (a cancel still ends the batch), and the running schedd
+re-hosts the batch (`--resume`) once the retry-at is near (`rehostLater`, 1-60 s).
+Deliberate holds (budget, operator, drift, breaker with no retry-at) keep their report:
+a `--resume` frees them. `requeue`/`add` on an unhosted batch re-host it when a
+requeue or add entry is still unapplied, and the CLI prints `re-hosted by the schedd`
+or `not re-hosted`. `schedd status` lists batch dirs with pending issues that are not hosted
 (`unhosted: [{id, pending}]`).
 
 ## Entry 2026-10-31 — one lane per issue across batches and remote lanes (#4920)

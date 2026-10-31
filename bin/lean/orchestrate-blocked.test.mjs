@@ -69,3 +69,19 @@ describe("#4773: Blocked by edges and the blocked label", () => {
     assert.deepEqual(started, [1]);
   });
 });
+
+describe("#4917: a deferred issue still waiting when the last running lane ends", () => {
+  it("is returned with a future retry_at while the batch stops on the breaker, so the caller does not finalise it", async () => {
+    let failLast; const gate = new Promise((r) => { failLast = r; });
+    const rows = await orchestrate({ issues: [1, 2], parallel: 2, pollMs: 5, readBody: async () => "", breaker: { errors: 1, window_min: 30 }, maxDeferrals: 3,
+      runOne: async (n) => {
+        if (n === 1) { setTimeout(failLast, 20); return { terminalReason: "deferred", code: "run.interrupted", retryInSeconds: 3600, cost_usd: 0 }; }
+        await gate; return { terminalReason: "engine-error", detail: "boom" };
+      } });
+    const r1 = rows.find((r) => r.issue === 1);
+    assert.ok(Number(r1.retry_at) > Date.now(), JSON.stringify(r1));
+    const { hasWaitingPending } = await import("../engine-cli.mjs");
+    assert.equal(hasWaitingPending(rows, [1]), true);
+    assert.equal(hasWaitingPending(rows, []), false);
+  });
+});
