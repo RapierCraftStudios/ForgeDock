@@ -7,6 +7,9 @@ import { tmpDir } from "./_tmp.mjs";
 import { openBatch, newBatchId } from "../lean/batch.mjs";
 import { orchestrateFromCli } from "../engine-cli.mjs";
 
+// No live schedd: on a host whose daemon runs, `--add` would reach it, and it reads its own batch root, not the test's.
+process.env.FORGEDOCK_SCHED_DIR = tmpDir("add-edges-sched-");
+
 const issues = {
   5: { state: "OPEN", body: "Blocked by #6\nDepends on #7 and #8", authorAssociation: "OWNER", author: { login: "o" } },
   6: { state: "OPEN", body: "", authorAssociation: "OWNER", author: { login: "o" } },
