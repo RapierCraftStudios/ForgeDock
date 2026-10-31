@@ -869,3 +869,46 @@ describe("implied docs-freshness deliverable", () => {
     assert.deepEqual(impliedDocDeliverables({ before: [...base, "docs/guide.md"], after, contract: C, wasFailing: true, nowOk: true }), []);
   });
 });
+
+import { normalizeKindModes, blockingFailures, unverifiedRequirements, KIND_MODES } from "./conformance.mjs";
+
+describe("per-kind modes and requirement evidence", () => {
+  const f = (code) => ({ code });
+  const ALLOW = ["conformance.unimplemented"];
+  it("normalizeKindModes keeps valid entries from a map or the flat forge.yaml string", () => {
+    assert.deepEqual(KIND_MODES, ["enforce", "shadow"]);
+    assert.deepEqual(normalizeKindModes({ "a.b": "shadow", c: "bogus", d: "enforce" }), { "a.b": "shadow", d: "enforce" });
+    assert.deepEqual(normalizeKindModes("a.b=shadow, c.d = enforce, x=nope"), { "a.b": "shadow", "c.d": "enforce" });
+    assert.deepEqual(normalizeKindModes(null), {});
+  });
+  it("a shadow kind is recorded and an enforce kind blocks, in either lane mode", () => {
+    const kinds = { "k.shadow": "shadow", "k.enforce": "enforce" };
+    for (const shadow of [true, false]) {
+      const r = blockingFailures([f("k.shadow"), f("k.enforce")], { shadow, kinds });
+      assert.deepEqual([r.block.map((x) => x.code), r.record.map((x) => x.code)], [["k.enforce"], ["k.shadow"]]);
+    }
+  });
+  it("kinds without their own mode follow the lane: enforce blocks all, shadow only the allowlist", () => {
+    assert.equal(blockingFailures([f("x"), f("conformance.unimplemented")], { shadow: false }).block.length, 2);
+    const r = blockingFailures([f("x"), f("conformance.unimplemented")], { shadow: true, allow: ALLOW });
+    assert.deepEqual([r.block.map((x) => x.code), r.record.map((x) => x.code)], [["conformance.unimplemented"], ["x"]]);
+    assert.equal(blockingFailures([f("conformance.unimplemented")], { shadow: true, allow: ALLOW, kinds: { "conformance.unimplemented": "shadow" } }).block.length, 0);
+  });
+  it("a deliver requirement with no executed evidence test is unverified, with its id", () => {
+    const c = {
+      requirements: [{ id: "R1", disposition: "deliver" }, { id: "R2", disposition: "deliver" }, { id: "R3", disposition: "deliver" }, { id: "R4", disposition: "defer" }, { id: "R5", disposition: "deliver", verify: "out_of_band" }],
+      deliverables: [{ id: "D1", path: "src/a.js", requirements: ["R1"] }, { id: "D2", path: "test/a.test.js", requirements: ["R1"] }, { id: "D3", path: "test/b.test.js", requirements: ["R2"] }],
+      validate: [{ id: "V1", command: "node --test test/a.test.js" }, { id: "V2", command: "node --test test/b.test.js" }],
+    };
+    const u = (o) => unverifiedRequirements(c, o).map((x) => x.id);
+    assert.deepEqual(u({ runs: [{ id: "V1", exit: 0 }, { id: "V2", exit: 1 }] }), ["R2", "R3"]);
+    assert.deepEqual(u({ runs: [{ id: "V1", exit: 1 }], reruns: { V1: { rc: 0 }, V2: { rc: 0 } } }), ["R3"]);
+    assert.deepEqual(u({ runs: [], ciCovered: ["V1", "V2"] }), ["R3"]);
+    assert.deepEqual(u({ runs: [{ id: "V1", exit: 0 }, { id: "V2", exit: 0 }], reruns: { V2: { rc: 1 } } }), ["R2", "R3"]);
+  });
+  it("formatShadowSummary adds per-kind shares only when rows carry kinds", () => {
+    const rows = [{ conformance: { mode: "shadow", would: "nonconforming", kinds: ["a.b"] } }, { conformance: { mode: "shadow", would: "conforms", kinds: [] } }];
+    assert.match(formatShadowSummary(rows), /; per kind: a\.b 1\/2 \(50%\)$/);
+    assert.doesNotMatch(formatShadowSummary([{ conformance: { mode: "shadow", would: "conforms" } }]), /per kind/);
+  });
+});
