@@ -24,7 +24,7 @@ const readLog = (dir, issue, repo = "o/r") => readRepoLog(dir, issue, { repo });
 import { makeRunTmp, wrapLaneLimits, laneCapNotice, systemdRunAvailable, makeLeanRunner, requiredChecksFor, procsInDir, makeLeanIo, makeGhCache } from "./effects.mjs";
 import { retrying, ghCacheRetry, refreshAuthOnce, GH_AUTH_RE, PUSH_TRANSIENT_RE } from "./retry.mjs";
 import { checkAdmission, hostParallelism } from "./admission.mjs";
-import { OUTCOME_CODES, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
+import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT, classifyNeedsHuman } from "../engine/outcome-codes.mjs";
 import * as refactorMod from "./refactor.mjs";
 import { readAdmission, readConformanceMode, readReviewIncomplete, readEnvConfig, readContextPack } from "../engine-cli.mjs";
 import { prepareToolchain } from "./toolchain.mjs";
@@ -1348,7 +1348,7 @@ describe("conformance shadow mode (the default)", () => {
       const w = world({ validation: v });
       w.io.runCommand = async () => ({ rc: 124, output: "(timed out after 1s)" });
       const r = await run(w, { conformance });
-      assert.equal(r.code, OUTCOME_CODES.ENV_VALIDATE_TIMEOUT, conformance); assert.equal(r.terminalReason, "needs-human");
+      assert.equal(r.code, ENV_VALIDATE_TIMEOUT, conformance); assert.equal(r.terminalReason, "needs-human");
       assert.equal(classifyNeedsHuman(r), "recoverable"); assert.equal(w.merges.length, 0);
       assert.equal(builders(w).length, 2, "plan + implement only"); assert.equal(reviewers(w).length, 0);
       assert.match(nhBody(w), /timed out \(exit 124\) even after one longer retry/);

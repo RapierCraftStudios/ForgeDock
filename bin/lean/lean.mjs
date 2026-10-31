@@ -9,7 +9,7 @@ import { join, dirname, basename, delimiter } from "node:path";
 import { hostname as osHostname } from "node:os";
 import { appendEvent } from "../engine/runlog.mjs";
 import { readSelfReview, compareSelfReview } from "./selfreview.mjs";
-import { codeForTerminalReason, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { codeForTerminalReason, OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { ciPollDelayMs, ENGINE_VERSION, DEFAULT_MAX_SESSION_LIMIT_PAUSES, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, sanitizeLeaseHost } from "../engine.mjs";
 import { openDependency, laneMergedPrs, dependencyOnLane, isTrustedComment, decomposedSubissues, isDecomposedRecord, reopenRevokedDecomposition } from "../engine/phases.mjs";
 import { createHash } from "node:crypto";
@@ -77,12 +77,12 @@ export const RECOVER_HOW = Object.freeze({
   [OUTCOME_CODES.BUDGET_EXCEEDED]: "an earlier run spent the implement turn budget for this issue's size; its digest is in the earlier run's detail and the branch holds its checkpointed work. Continue from the checkpoint against the frozen contract without starting over; if the remaining work cannot fit the budget, stop with a typed split-required block naming the sub-issues instead of grinding",
   [OUTCOME_CODES.CONTRACT_INVALID_COMMAND]: "a frozen validate command was rejected by its runner's CLI (vitest 3 rejects -q). The change may already be correct: rerun the validate with the runner's own flags (vitest: --reporter=dot) and amend the command, do not rewrite the deliverables",
   [OUTCOME_CODES.ENV_TOOL_MISSING]: "a validate command could not run because the host lacks the tool or module named in the earlier run's detail; the change may already be correct. Do not edit the deliverables for it and never install anything globally: run the same check through the repo's own toolchain (its virtualenv, lockfile-pinned runner or package scripts), record that exit under the same validate id and name the command you used in your summary",
-  [OUTCOME_CODES.ENV_VALIDATE_TIMEOUT]: "a validate command timed out (exit 124) on the engine's rerun, even after one longer retry: host load, not a failed check; the change may already be correct. Do not edit the deliverables for it: run the same command narrowed to the changed files (or through the repo's own cached toolchain) with a longer timeout, record that exit under the same validate id and name the command in your summary",
+  [ENV_VALIDATE_TIMEOUT]: "a validate command timed out (exit 124) on the engine's rerun, even after one longer retry: host load, not a failed check; the change may already be correct. Do not edit the deliverables for it: run the same command narrowed to the changed files (or through the repo's own cached toolchain) with a longer timeout, record that exit under the same validate id and name the command in your summary",
   [OUTCOME_CODES.ENV_CAPABILITY_REMOTE]: "the earlier run ran in a remote sandbox that lacks a host-only capability (SOPS/age key, ops credentials, read-only prod monitor SSH); this host has it. Do the work that needed it now, with the host's own tools and credentials, and never print or commit a secret in the clear",
   [OUTCOME_CODES.ENV_REPRO_UNRUNNABLE]: "the repro harness could not run the contract's repro_test on head (timeout, missing runner or dependencies); the change may already be correct. Do not edit the deliverables or stub dependencies for it and never install anything globally: run the repro command through the repo's own toolchain and installed dependencies, and when it cannot run in this checkout, fix the repro_test command (not the code) so it does",
 });
 /** #4323/#4334: precheck failure codes that are environment errors (state "environment"), never a builder resume. */
-const ENV_CODES = Object.freeze([OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, OUTCOME_CODES.ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND]);
+const ENV_CODES = Object.freeze([OUTCOME_CODES.ENV_TOOL_MISSING, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE, ENV_VALIDATE_TIMEOUT, OUTCOME_CODES.CONTRACT_INVALID_COMMAND]);
 export const DEFAULT_REVIEWER_MODEL = "claude-sonnet-5-5";
 /** forge.yaml engine.conformance: "shadow" (default) posts and logs the gate's verdict without enforcing it; "enforce" blocks on it. */
 export const CONFORMANCE_MODES = Object.freeze(["shadow", "enforce"]);
@@ -2286,9 +2286,9 @@ export async function runCore(o) {
         T.anomalies.push("Environment error: the repro harness could not run the repro test on head");
         return await needsHuman(`Environment error (not a conformance failure): the repro harness could not run the repro test on head; no builder resume was spent and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRun the repro command through the repo's own toolchain and installed dependencies, then rerun.`, OUTCOME_CODES.ENV_REPRO_UNRUNNABLE);
       }
-      if (failures.every((f) => f.code === OUTCOME_CODES.ENV_VALIDATE_TIMEOUT)) { // #4906: the teardown below pushes the lane's commits, so CI and recovery still see them
+      if (failures.every((f) => f.code === ENV_VALIDATE_TIMEOUT)) { // #4906: the teardown below pushes the lane's commits, so CI and recovery still see them
         T.anomalies.push("Environment error: a validate command timed out on the engine's rerun (infra, exit 124)");
-        return await needsHuman(`Environment error (not a conformance failure): a validate command timed out (exit 124) even after one longer retry, which is host load rather than a failed check; no builder resume was spent, the branch is pushed and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRecovery reruns the command narrowed to the changed files; CI decides the head.`, OUTCOME_CODES.ENV_VALIDATE_TIMEOUT);
+        return await needsHuman(`Environment error (not a conformance failure): a validate command timed out (exit 124) even after one longer retry, which is host load rather than a failed check; no builder resume was spent, the branch is pushed and nothing merged:\n${failures.map((f) => `- ${f.code}: ${f.detail}`).join("\n")}\n\nRecovery reruns the command narrowed to the changed files; CI decides the head.`, ENV_VALIDATE_TIMEOUT);
       }
       if (failures.every((f) => f.code === OUTCOME_CODES.CONTRACT_INVALID_COMMAND)) {
         T.anomalies.push("Contract defect: a frozen validate command is a runner CLI usage error");

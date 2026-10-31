@@ -7,7 +7,7 @@
  * The reviewer supplies per-row judgements; the engine computes the verdict. A review without rows (a generic
  * "PASS") is incomplete, and incomplete never merges.
  */
-import { OUTCOME_CODES } from "../engine/outcome-codes.mjs";
+import { OUTCOME_CODES, ENV_VALIDATE_TIMEOUT } from "../engine/outcome-codes.mjs";
 import { noComments } from "./context.mjs";
 import { activationFailures } from "./activation.mjs";
 
@@ -527,7 +527,7 @@ export function precheck({ contract, result, changedFiles, ignore = [], ciVerifi
       // #4906: the rerun timed out (even after the longer retry): host load, not a verdict on the change. A CI-verified head covers it; else an environment error.
       if (rerun?.rc === 124) {
         if (ciVerified) { ciCovered.push(v.id); continue; }
-        failures.push({ code: C.ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `validate ${v.id} (\`${v.command}\`) timed out (exit 124) on the engine's rerun: infrastructure (host load), not a failed check` });
+        failures.push({ code: ENV_VALIDATE_TIMEOUT, kind: "validate_timeout", detail: `validate ${v.id} (\`${v.command}\`) timed out (exit 124) on the engine's rerun: infrastructure (host load), not a failed check` });
         continue;
       }
       const miss = rerun ? missingTool(rerun, { repoHas, command: v.command }) : null;
