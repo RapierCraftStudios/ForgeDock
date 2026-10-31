@@ -2167,3 +2167,8 @@ Cite: #4860.
 
 `issuewatch.mjs` `verifyClosed` now runs side effects before state. A failed merge verification posts the evidence comment, adds `needs-human`, and only then reopens, because the watch revisits only still-closed issues. Finished steps are recorded in `state.escalation[n]` (`comment`, `label`). A failing `gh` call throws with the issue closed and in `pendingVerify`, so the next tick resumes without repeating done steps. `merged`/`unverified`/`verifyFrom` change only after all steps succeed; the verified branch comments before the state push.
 Cite: #4891.
+
+## Entry 2026-10-31 — guard_broken names the supersedes override (#4883)
+
+`guardFailures` (`guardgate.mjs`) now starts each `conformance.guard_broken` detail with the override sentence: if the change intentionally changes the guarded behaviour (e.g. adding a code to an enum an exhaustiveness test enumerates), add `{"kind":"supersedes","guard":"#N","why":"..."}` to the amendments; the reviewer judges it. It leads the detail so `conformanceResumePrompt`'s 900-char slice keeps it. `builderImplementPrompt` lists the `supersedes` kind beside the other amendment kinds. `applyAmendments` and the precheck guard retirement are unchanged; row shape is unchanged.
+Cite: #4883.
