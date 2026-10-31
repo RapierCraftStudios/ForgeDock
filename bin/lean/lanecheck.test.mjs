@@ -3,9 +3,9 @@
 // #4866: lane preflight checks, the orchestrate admission hold, sandbox.clone typing and the heavy shim-loop finder.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
+import { tmpDir } from "../tests/_tmp.mjs";
 import { checkPoolAuth, checkPoolVersion, checkPathLoop, checkGhFields, availableFields, runLaneChecks, formatLaneChecks, UPGRADE_COMMAND } from "./lanecheck.mjs";
 import { findShimLoops } from "./heavy.mjs";
 import { orchestrate, deferPolicy } from "./orchestrate.mjs";
@@ -42,7 +42,7 @@ describe("pool_version", () => {
 
 describe("path_loop", () => {
   const wrapper = "#!/bin/sh\nexec \"$(command -v docker)\" \"$@\"\n";
-  const mk = () => { const d = mkdtempSync(join(tmpdir(), "lc-")); const w = join(d, "wrap"); mkdirSync(w); writeFileSync(join(w, "docker"), wrapper); chmodSync(join(w, "docker"), 0o755); return { d, w }; };
+  const mk = () => { const d = tmpDir("lc-"); const w = join(d, "wrap"); mkdirSync(w); writeFileSync(join(w, "docker"), wrapper); chmodSync(join(w, "docker"), 0o755); return { d, w }; };
   it("names the wrapper dir when no real binary sits behind it", () => {
     const { w } = mk();
     const c = checkPathLoop({ env: { PATH: w } });
