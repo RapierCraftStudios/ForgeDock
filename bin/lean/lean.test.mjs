@@ -3812,6 +3812,45 @@ describe("batch robustness (#4112-#4115)", () => {
     }
   });
 
+  const NONFF = "To github.com:o/r.git\n ! [rejected] feat/issue-7-lean -> feat/issue-7-lean (non-fast-forward)\nerror: failed to push some refs";
+  const ownerProbe = (w, { open = [], body = "" } = {}) => { // answers #4920's lane-owner lookups only
+    const g0 = w.io.gh;
+    w.io.gh = async (a, o) => {
+      if (a[0] === "pr" && a[1] === "list" && a[a.indexOf("--limit") + 1] === "5") return JSON.stringify(open);
+      if (a[0] === "issue" && a[1] === "view" && a[a.length - 1] === "body") return JSON.stringify({ body });
+      return g0(a, o);
+    };
+    return w;
+  };
+  it("#4920 non-ff push with another lane's open PR ends deferred (lease held), not needs-human", async () => {
+    const w = ownerProbe(world({ pushErrors: [NONFF] }), { open: [{ number: 4919 }] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "lease.held");
+    assert.match(r.detail, /non-fast-forward.*PR #4919 is open on feat\/issue-7-lean/);
+  });
+  it("#4920 non-ff push while another lane holds a live lease ends deferred", async () => {
+    const lease = { v: 1, issue: 7, lease: { by: "core_sbx_1_ab12", until: Date.now() + 600000, host: "sbx", pid: 1 } };
+    const w = ownerProbe(world({ pushErrors: [NONFF] }), { body: `x\n<!-- FORGE:STATE\n${JSON.stringify(lease)}\n-->` });
+    const r = await run(w);
+    assert.equal([r.terminalReason, r.code].join("/"), "deferred/lease.held");
+  });
+  it("#4920 a non-ff push nobody else owns, and any other permanent rejection, stay needs-human", async () => {
+    assert.equal((await run(ownerProbe(world({ pushErrors: [NONFF] })))).terminalReason, "needs-human");
+    assert.equal((await run(ownerProbe(world({ pushErrors: ["remote: error: GH006: Protected branch update failed"] }), { open: [{ number: 4919 }] }))).terminalReason, "needs-human");
+  });
+  it("#4920 two sandbox lanes (pid 1) get distinct lease holders, and a lease another lane wrote meanwhile defers this lane", async () => {
+    const ids = [];
+    for (let i = 0; i < 2; i++) { const w = world(); w.leaseWrites = []; w.io.projector = { readState: async () => null, writeState: async (_i, st) => { w.leaseWrites.push(st); } }; await run(w, { pid: 1, hostName: "sbx" }); ids.push(w.leaseWrites.find((x) => x.lease)?.lease.by); }
+    assert.ok(ids[0] && ids[1] && ids[0] !== ids[1], `${ids}`);
+    assert.match(ids[0], /^core_sbx_1_[0-9a-f]{6}$/);
+    const w = world(); w.leaseWrites = []; let reads = 0;
+    w.io.projector = { readState: async () => (++reads === 1 ? null : { v: 1, lease: { by: "core_sbx_1_other", until: Date.now() + 600000 } }), writeState: async (_i, st) => { w.leaseWrites.push(st); } };
+    const r = await run(w, { pid: 1, hostName: "sbx" });
+    assert.equal([r.terminalReason, r.code].join("/"), "deferred/lease-held");
+    assert.equal(w.builderCalls?.length ?? 0, 0);
+  });
+
   it("#4118 a rerun reuses a local lane branch with unpushed commits instead of resetting it to the base", async () => {
     const w = world();
     const git0 = w.io.git;
