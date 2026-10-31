@@ -79,6 +79,13 @@ export function isTransportError(e) {
   if (e.name === "AbortError" || e.name === "TimeoutError") return true;
   return /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|network error|timed? ?out/i.test(String(e.message ?? ""));
 }
+const CLONE_RE = /\bclone\b[^\n]*\b(time[ds]?\s?out|timeout|fail\w*|refused|reset|unreachable|early eof|could not)|\b(time[ds]?\s?out|timeout|fail\w*)\b[^\n]*\bclone\b/i;
+/** #4866: text of a sandbox clone failure (timeout, transport) as seen in an error or a lane result's detail. */
+export const isCloneFailure = (text) => CLONE_RE.test(String(text ?? ""));
+const CLONE_RETRY_S = 120;
+/** #4866: a sandbox clone failure is a retryable `deferred` `sandbox.clone`, never an engine-error (so the breaker never sees it). */
+const cloneDeferred = (id, detail) => ({ terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CLONE, retryInSeconds: CLONE_RETRY_S, detail: `sandbox ${id} could not clone the repo: ${detail}; retry in ${CLONE_RETRY_S}s` });
+const errLine = (t) => String(t ?? "").split("\n")[0].slice(0, 300);
 const errText = (e) => String(e?.stderr || e?.message || e).split("\n")[0].slice(0, 300);
 
 /**
@@ -525,7 +532,7 @@ export function providerByName(name, opts) {
  * returns that sandbox's ledger (ledger.mjs `makeLedger`).
  */
 export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env, secrets = [], pollMs = 5000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
-  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000 }) {
+  costPerMinute = 0, now = () => Date.now(), unreachableWindowMs = 300000, logTail = null }) {
   const cpm = nonNeg(Number(costPerMinute)) ?? 0;
   // #4255: the sandbox's usage: the provider's `usage()`, else the billable minutes it put on the handle (#4254), else wall
   // clock since the handle's startedAt; cost is the provider's, else minutes x cost_per_minute.
@@ -560,6 +567,8 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
   };
   const unreachable = (h, e) => ({ terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_UNREACHABLE, retryInSeconds: 60,
     detail: `sandbox ${h.id} ${errText(e)}; kept for adopt on resume` });
+  const tailOf = async (h) => { try { return typeof logTail === "function" ? String(await logTail(h) ?? "") : ""; } catch { return ""; } };
+  const settleClone = (r, id) => (r?.terminalReason === "engine-error" && r.code === undefined && isCloneFailure(r.detail) ? cloneDeferred(id, errLine(r.detail)) : r);
   const wait = async (h, g = guard({ waited: 0, tries: 0 })) => {
     for (;;) {
       const r = await g(() => provider.fetchResult(h));
@@ -567,7 +576,9 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
       const st = await g(() => provider.status(h));
       if (st !== "running") {
         const last = await g(() => provider.fetchResult(h)); // it may have written the result just before exiting
-        return last ?? { terminalReason: "engine-error", detail: `sandbox ${h.id} ${st} without a result` };
+        if (last) return last;
+        const why = `sandbox ${h.id} ${st} without a result`;
+        return isCloneFailure(await tailOf(h)) ? cloneDeferred(h.id, why) : { terminalReason: "engine-error", detail: why };
       }
       await sleep(pollMs);
     }
@@ -578,6 +589,7 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_AUTH, retryInSeconds: 300, detail: `sandbox ${id} could not start (auth): ${errText(e)}; check the pool token (COMPUTESHARE_TOKEN or ~/.config/computeshare/forgedock.token)` }
     : e?.retryable === true
     ? { terminalReason: "deferred", code: OUTCOME_CODES.SANDBOX_CAPACITY, detail: `sandbox ${id} could not start (capacity): ${errText(e)}`, ...(Number(e.retryInSeconds) > 0 ? { retryInSeconds: Number(e.retryInSeconds) } : {}) }
+    : isCloneFailure(errText(e)) ? cloneDeferred(id, errText(e))
     : { terminalReason: "needs-human", code: OUTCOME_CODES.SANDBOX_START_FAILED, detail: `sandbox ${id} failed to start: ${errText(e)}` });
   return {
     // #4612: a graceful stop of a live sandbox (the provider's checkpoint stop); false when it has none.
@@ -600,10 +612,10 @@ export function providerLanes({ provider, laneArgs, ledgerFor, env = process.env
         if (!Number.isFinite(h.startedAt)) h.startedAt = base.startedAt;
         started = true;
         ctx.onStart?.({ ...(Number.isInteger(h.pid) ? { pid: h.pid } : {}), handle: h, remote: true });
-        r = await wait(h);
+        r = settleClone(await wait(h), base.id);
       } catch (e) {
         if (started && e?.unreachable) return withUsage(unreachable(h, e), h); // #4672: no tear, the ledger keeps it
-        r = started ? { terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` } : startFailed(base.id, e);
+        r = started ? settleClone({ terminalReason: "engine-error", detail: `sandbox ${base.id}: ${errText(e)}` }, base.id) : startFailed(base.id, e);
       }
       await tear(led, h); // every path, after the result is in (tear never throws)
       return started ? withUsage(r, h) : r; // a sandbox that never started used nothing

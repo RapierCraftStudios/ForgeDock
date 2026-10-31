@@ -60,6 +60,11 @@ export const OUTCOME_CODES = Object.freeze({
   SANDBOX_CAPACITY: "sandbox.capacity", // forge#4254: the sandbox provider had no capacity; deferred with backoff
   SANDBOX_AUTH: "sandbox.auth", // forge#4685: the sandbox provider refused or lacked the credential (HTTP 401/403, no token); deferred, never needs-human
   SANDBOX_UNREACHABLE: "sandbox.unreachable", // forge#4672: the sandbox provider stayed unreachable past execution.unreachable_window_min; deferred, the sandbox is kept for adopt
+  SANDBOX_CLONE: "sandbox.clone", // forge#4866: the sandbox could not clone the repo (timeout, transport); deferred with retry-in, never an engine-error, so the breaker ignores it
+  PREFLIGHT_POOL_AUTH: "preflight.pool_auth", // forge#4866: lane preflight: the pool token does not resolve or the router answers 401; admission pauses, not the breaker
+  PREFLIGHT_POOL_VERSION: "preflight.pool_version", // forge#4866: a pool agent runs another ForgeDock version than the CLI
+  PREFLIGHT_PATH_LOOP: "preflight.path_loop", // forge#4866: a PATH wrapper dir resolves a heavy-shimmed tool back to the shim
+  PREFLIGHT_GH_FIELDS: "preflight.gh_fields", // forge#4866: the installed gh lacks a --json field the engine uses
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
