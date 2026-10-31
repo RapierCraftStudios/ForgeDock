@@ -43,6 +43,10 @@ const NO_BUDGET = { batchMinutes: null, batchUsd: null, dayMinutes: null, dayUsd
 const ledgerIn = (root, { pid = process.pid, host = HOST } = {}) => (n) => makeLedger({ root, batch: "bt", lane: `sandbox-${n}`, owner: "orch_test", issue: n, host, pid });
 
 describe("execution config (#4253)", () => {
+  it("warm_sandboxes: positive integer kept, default 0 omitted (#4909)", () => {
+    assert.equal(parseExecution({ mode: "remote", warm_sandboxes: "2" }).warmSandboxes, 2);
+    assert.ok(!("warmSandboxes" in parseExecution({ mode: "remote" })));
+  });
   it("pool is a known sandbox provider (#4546)", () => {
     assert.ok(SANDBOX_PROVIDERS.includes("pool"));
     assert.equal(parseExecution({ mode: "hybrid", max_remote: "1", provider: "pool" }).provider, "pool");

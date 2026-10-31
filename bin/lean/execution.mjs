@@ -124,10 +124,12 @@ export function parseExecution(sec = {}) {
   const patRaw = Array.isArray(s.host_capability_patterns) ? s.host_capability_patterns : str(s.host_capability_patterns) ? str(s.host_capability_patterns).split(",") : [];
   const hostCapabilityPatterns = patRaw.map((x) => { const t = str(x), i = t.indexOf(":"); return { name: t.slice(0, i).trim().toLowerCase(), pattern: t.slice(i + 1).trim() }; })
     .filter((x) => CAPABILITY_RE.test(x.name) && x.pattern && safeRegExp(x.pattern));
+  const wsN = Number(str(s.warm_sandboxes));
+  const warmSandboxes = str(s.warm_sandboxes) !== "" && Number.isInteger(wsN) && wsN > 0 ? wsN : 0; // #4909: warm sandboxes the pool agent keeps ready; 0 = off
   const relay = Object.fromEntries(Object.entries(parseRelayCommands(s.relay_commands)).filter(([c]) => CAPABILITY_RE.test(c))); // #4778
   const uw = Number(str(s.unreachable_window_min));
   const unreachableWindowMin = str(s.unreachable_window_min) !== "" && Number.isFinite(uw) && uw >= 0 ? uw : null; // unset: providerLanes defaults to 5
-  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}) };
+  return { mode, maxRemote, provider, image, secrets, budget, ...(hostCapabilities.length ? { hostCapabilities } : {}), ...(hostCapabilityPatterns.length ? { hostCapabilityPatterns } : {}), ...(endpoint ? { endpoint } : {}), ...(tokenEnv ? { tokenEnv } : {}), ...(cacheStore ? { cacheStore } : {}), ...(allowActions ? { allowActions } : {}), ...(fallbackLocal ? { fallbackLocal } : {}), ...(heavy !== null ? { heavy } : {}), ...(unreachableWindowMin !== null ? { unreachableWindowMin } : {}), ...(Object.keys(relay).length ? { relay } : {}), ...(warmSandboxes ? { warmSandboxes } : {}) };
 }
 
 const round1 = (x) => Math.round(x * 10) / 10;
