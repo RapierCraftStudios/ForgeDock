@@ -402,7 +402,11 @@ through `io` (`lean/effects.mjs` `makeLeanIo`) so `runCore` is unit-testable.
    `origin/<lane>` that are authored/committed `*@localhost` or lack a `Signed-off-by` naming their
    author are rewritten (`git filter-branch` over that range only) with the lane identity
    (`GIT_AUTHOR_*`, else `git config`) and a sign-off; pushed commits are never in the range. No usable
-   identity or a failed rewrite ends `ci.dco`. Before `gh pr merge`, a failed check named DCO on the
+   identity or a failed rewrite ends `ci.dco`. Modified/staged tracked files are parked first (`git stash create`
+   commit object, not the shared stash stack; `reset --hard`) because filter-branch refuses a dirty tree, then
+   re-applied; if the re-apply fails they stay reachable at `refs/forge/signoff-stash` (returned as `stashRef`)
+   (#4905). A failed rewrite (not `noIdentity`) makes `gitPush` rescue-push the branch as-is before reporting
+   `ci.dco` (`DCO_RESCUE_PUSH` / `DCO_RESCUE_PUSH_FAILED` events). Before `gh pr merge`, a failed check named DCO on the
    current head (read from `checkStates`, required or not, any `merge_wait`) ends needs-human `ci.dco`
    (not recoverable: a new commit cannot fix history). `DCO_SIGNOFF_REWRITE` event.
    **e2e merge gate** (#4403, `e2e.mjs`, forge.yaml `verify.e2e*`): before `gh pr merge`,
