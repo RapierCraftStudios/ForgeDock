@@ -182,6 +182,15 @@ export const REVIEW_RUBRIC = `1. Fixed: does the diff resolve the issue as writt
 3. Contract: is every deliverable changed as described, every preserve item intact and every validate command passing?
 4. Scope: does the diff change only deliverable paths and tests?`;
 
+/** #4959: reviewer-only (kept out of REVIEW_RUBRIC, which the builder prompt shares and its token budget caps). */
+const VERDICT_RULE = "A criterion asking for a validation or finding verdict (VALIDATED, FALSE_POSITIVE, INCONCLUSIVE) is met by the recorded verdict here (read by the engine from the lane's investigation) together with a regression or repro test in the diff; it needs no prose in the diff. A gap you yourself call minor is not a failing row.";
+
+/** #4959: the verdict word of an investigation note's \`**Verdict**:\` line (uppercased), or null. */
+export function investigationVerdict(md) {
+  const m = /^\*\*Verdict\*\*:\s*([A-Za-z_-]+)/m.exec(String(md ?? ""));
+  return m ? m[1].toUpperCase() : null;
+}
+
 /** Builder call 2, same session: implement the frozen contract. */
 export function builderImplementPrompt(mode = "local", { toolchain = null, sparse = null, facts = null } = {}) {
   const remote = mode === "ci" || mode === "hybrid";
@@ -441,12 +450,12 @@ export function decisionNote(comments = []) {
   return kept.length ? `\n\nBinding decisions posted after the contract froze (trusted; they override the issue text where they conflict, and the frozen contract still applies):\n${kept.join("\n---\n")}` : "";
 }
 
-export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null }) {
+export function reviewerPrompt({ issue, comments = [], contract, result, files = [], diff, stat = "", base = "", structure = "", ignore = [`${LEAN_DIR}/`], skeleton = null, investigationVerdict = null }) {
   const notes = comments.map((c) => String(c?.body ?? "")).filter((b) => !/^<!-- FORGE:/.test(b.trim()));
   const decisions = comments.filter((c) => isDecision(c?.body) && isTrustedIssueComment(c)).map((c) => String(c.body)); // #4901: operator decisions bind the review; other FORGE: records stay out
   notes.push(...decisions);
   const sk = JSON.stringify(skeleton ?? reviewSkeleton(contract ?? {}, files, ignore), null, 1);
-  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
+  return `Issue #${issue.number}: ${issue.title}\n\n<issue_body>\n${cap(issue.body ?? "", 20000)}\n</issue_body>\n\n<issue_comments>\n${cap(notes.join("\n---\n"), 8000)}\n</issue_comments>\n\n<contract>\n${cap(JSON.stringify(contract ?? {}, null, 1), 12000)}\n</contract>\n\n<builder_result>\n${cap(JSON.stringify(result ?? {}, null, 1), 6000)}\n</builder_result>\n\n${investigationVerdict ? `<investigation_verdict>${investigationVerdict}</investigation_verdict>\n${VERDICT_RULE}\n\n` : ""}<changed_files>\n${files.join("\n")}\n</changed_files>\n\n<rubric>\n${REVIEW_RUBRIC}\n</rubric>\n\n<row_skeleton>\n${cap(sk, 30000)}\n</row_skeleton>\n\n<diff>\n${boundDiff(diff, { stat, base })}\n</diff>${structure ? `\n<structure>${String(structure).replace(/[\r\n]+/g, " ")}</structure>` : ""}`;
 }
 
 /**

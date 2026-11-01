@@ -2271,3 +2271,8 @@ Cite: #4865, #4894.
 
 `launchNightly` (`selftest-nightly.mjs`) owns the detached spawn that `scheddDue` used to inline. It attaches an `'error'` listener before `unref()`. Without one, an async spawn failure (EAGAIN, EMFILE, a removed cwd) was an uncaught exception, and `schedd.mjs` stops the daemon on that. Now the failure costs only that night's run. The review-staging skip line now names a malformed `selftest.sandbox_repo` value instead of saying "not set". Found in the delta review of release PR #4946.
 Cite: #4894.
+
+## Entry 2026-11-01 — Reviewer sees the investigation verdict; generated requirements.txt is untracked
+
+`lean.mjs` reads `.forge-lean/investigation.md` at the reviewer call and passes `investigationVerdict(md)` (the `**Verdict**:` word, `prompts.mjs`) to `reviewerPrompt`, which renders an `<investigation_verdict>` block plus `VERDICT_RULE`: a validation/finding-verdict criterion is met by the recorded verdict with a regression or repro test in the diff (no prose needed), and a gap the reviewer calls minor is not a failing row. The prompt is byte-identical without a verdict, and the rule stays out of the shared `REVIEW_RUBRIC` (builder token cap). `untrackToolState` takes `keep` (contract deliverable paths, from `keepPaths()` at both call sites) and also untracks an added `requirements*.txt` when the base is a Poetry/uv project (`strayGenerated`, `toolstate.mjs`), the base tracks none, and the path is not in `keep`. `conformance.mjs` row logic is unchanged.
+Cite: #4959.
